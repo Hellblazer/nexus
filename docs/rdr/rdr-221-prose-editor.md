@@ -214,11 +214,16 @@ copy in Typora. Each finding is a T2 record, `nexus_rdr/221-research-N`.
 
 ### Critical Assumptions
 
-- [ ] **Worth accepting.** At least half of the editor's sentence edits on real
-  work are ones Sam accepts. — **Status**: Unverified — **Method**: Phase 2
-- [ ] **Voice kept.** Sam judges edited essays still in his voice. —
-  **Status**: Unverified — **Method**: Phase 2
-- [ ] **Memory helps.** A rejected edit is not proposed again, and a
+- [x] **Worth accepting.** At least half of the editor's sentence edits on real
+  work are ones Sam accepts. — **Status**: Verified, Phase 2 passed
+  2026-10-25: 10 of 10 edits accepted across four documents (T2
+  `nexus_rdr/221-phase2-results`). Limits: n=10, measured on the editor before
+  Amendment A1, and the existing brief's comparison tied at 100% (14 of 14) with
+  more accepted changes (14 against 6). — **Method**: Phase 2
+- [x] **Voice kept.** Sam judges edited essays still in his voice. —
+  **Status**: Verified, Sam 2026-10-25 judged the edited essay still in his
+  voice (`nexus_rdr/221-phase2-results`). One essay. — **Method**: Phase 2
+- [x] **Memory helps.** A rejected edit is not proposed again, and a
   style-sheet entry is applied on the next document. — **Status**: Measured,
   narrowly (nexus-ger02.16): the same change at the same place is not shown
   again after one rerun in which the author rejected every shown edit: 0 of 57
@@ -236,11 +241,16 @@ copy in Typora. Each finding is a T2 record, `nexus_rdr/221-research-N`.
   Markdown file, and Sam finds the marked-up copy workable. — **Status**:
   Verified — **Method**: Spike (2026-09-28). No longer load-bearing: the
   MarkupEditor review (nexus-scmcs) replaced the marked-up copy and the viewer.
-- [ ] **Unpacking is accepted (Amendment A1).** The editor finds the
+- [waived: Sam closed it unverified on 2026-11-22] **Unpacking is accepted
+  (Amendment A1).** The editor finds the
   compression features in a seeded document without touching the decoys, and
   on Sam's published docs, for each reason prefix, at least half of the
-  lengthening edits shown to him are accepted (Step 1a.4). — **Status**: Unverified —
-  **Method**: Phase 1a acceptance runs, then the post-merge tally
+  lengthening edits shown to him are accepted (Step 1a.4). — **Status**: Closed
+  unverified. The seeded half held (3 runs at 9 of 10 against the bar of 7;
+  `nexus_rdr/221-a1-acceptance-2026-10-24`). The published-docs half was never
+  measured: Sam dropped the post-merge tally (nexus-zhdxx) on 2026-11-22, so
+  acceptance of the unpack feature rests on the seeded fixture alone. — **Method**: Phase 1a acceptance runs; the
+  post-merge tally was dropped
 
 ## Proposed Solution
 
@@ -249,12 +259,15 @@ copy in Typora. Each finding is a T2 record, `nexus_rdr/221-research-N`.
 One editor, invoked by the author on one document at a time. Its brief is
 built from examples and the author's own recorded decisions, not from a rule
 list. It proposes; the author decides; what the author decides is kept in T2
-and used next time. It lives as a project skill and agent in `.claude/`,
-beside `site-page`.
+and used next time. The accepted text planned a project skill and agent in
+`.claude/`, beside `site-page`. It shipped as the opt-in plugin
+`conexus-prose-edit` (first commit `cda821a61a`, 2026-10-27), registered in
+`.claude-plugin/marketplace.json`; `site-page` stays a project skill.
 
 ### Technical Design
 
-**The editor (`.claude/agents/line-editor.md`, `.claude/skills/prose-edit/`).**
+**The editor (`prose-edit/agents/line-editor.md`, `prose-edit/skills/prose-edit/`,
+`prose-edit/skills/prose-cut/`).**
 Its brief for each run:
 
 - the genre's exemplar passages;
@@ -272,8 +285,13 @@ example: "Does this nominalisation hide who acts? Leave it if it names a
 stable concept." Among the questions: does the paragraph open with its claim;
 is the actor the subject; does the sentence end on what matters; would a
 reader new to the project follow this step; is this qualifier justified by a
-real uncertainty. Unjustified qualifiers are proposed for cutting; justified
-ones stay; unclear ones become queries. A construction that matches a device
+real uncertainty. As shipped, only filler words are proposed for cutting
+("really" is one); every other qualifier or intensifier becomes a query to the
+author, justified or not. This is Sam's ruling of 2026-09-30 (bd comment on
+nexus-ger02.3) and replaces the accepted rule that unjustified qualifiers are
+cut and justified ones stay. The brief carries it in section 6
+(`prose-edit/skills/prose-edit/scripts/brief.py`): "Cut only filler words;
+every other qualifier or intensifier is a query." A construction that matches a device
 on the voice card (a refrain, a tricolon, deliberate unexplained density) is
 not a finding.
 
@@ -296,8 +314,8 @@ reading (Discovery 14). Sam approved the design on 2026-10-22 (T2
 `nexus/design-prose-edit-compression.md`): it applies to published documents,
 and it changes the line editor itself, not only the style sheet, with no
 separate parse pass (Alternative 4). How often these features occur in this
-repo's documents has not been measured; the Step 1a.4 tally is the first
-measurement. Three texts change.
+repo's documents has not been measured: the Step 1a.4 tally that was to give
+the first measurement was dropped (Sam, 2026-11-22). Three texts change.
 
 Brief section 6 (`brief.py`), now headed "Prefer cutting", becomes "Cut
 redundancy, unpack compression":
@@ -349,16 +367,17 @@ No other line in the file may forbid adding words. Three rules are added:
 A rejected `optional word:` edit is a pure insertion, and the rejection filter
 matches a pure insertion anywhere in the document (Memory in T2, below), so one
 rejected restored "that" drops every later one in that document. This is
-accepted: the drop stays visible in the marked-up copy, and the Step 1a.4 tally
-counts dropped edits.
+accepted: the drop is listed in the chat with its cause. (The Step 1a.4 tally
+was to count dropped edits; it was dropped.)
 
 Out of scope: prose written at generation time (messages, commits, beads), any
 lint or mechanical check, any sweep of existing documents, and a separate parse
-pass. A prefix that fails the Step 1a.4 tally is demoted to query-only by a
-repo or document style-sheet entry that Sam approves. The `site-page` section 3
-query-only list is not that mechanism: it is keyed on section 3 bullets. The
-entry's mechanism, if the brief cannot carry one for a line-editor row, is
-built under its own bead (nexus-b0b40), not in Phase 1a.
+pass. The accepted text demoted a prefix that failed the Step 1a.4 tally to
+query-only by a repo or document style-sheet entry that Sam approves. The
+tally was dropped on 2026-11-22, so the demotion mechanism (nexus-b0b40,
+deferred) is not active, and no demotion is planned. The
+`site-page` section 3 query-only list was never that mechanism: it is keyed on
+section 3 bullets.
 
 **Review loop.** A path run opens the document in the MarkupEditor app
 (0.9.11 or later, the first release with suggestions) and sends each proposed
@@ -411,7 +430,7 @@ strings) in the document's record. It matches a later proposal by its minimal
 change: the old and new strings with the words they share at the start and at
 the end trimmed at word boundaries. `memory.py` drops a later proposal with the
 same minimal change for that document before the author sees it (the dropped
-edit stays visible in the marked-up copy), and the document's rejections are
+edit is listed in the chat, with its cause), and the document's rejections are
 also put in the editor's brief so it does not propose them. Overlap alone is not
 a match. Two limits are deliberate. The key has no position, so a stored cut of a
 word also drops that cut anywhere else in the document, and an insertion matches
@@ -422,7 +441,7 @@ general "not a defect" entry at user or repo level only when the author says
 so and has read the entry's text, and only after a dry run that showed the author that entry (the real promote
 is refused without a matching dry run, as apply is). Once stored, the entry goes into the editor's brief and the
 filter drops any later edit that makes the same change, by the same key as a rejection, in every document at
-that level; the dropped edit stays visible in the marked-up copy with the cause `not-a-defect`. `/prose-edit rejections <path>` lists a
+that level; the dropped edit is listed in the chat with the cause `not-a-defect`. `/prose-edit rejections <path>` lists a
 document's stored rejections, numbered, and
 `/prose-edit rejections <path> --remove <n>` removes one. The session log keeps
 each session's detail for 90 days; the document record is the authority for
@@ -464,9 +483,10 @@ This design keeps that (Amendment A1 widens the brief to cut redundancy and
 unpack compression, Discovery 14) and adds the part missing today: Sam's corrections
 applied as an edit pass on any draft (Gap 2), with his rejections remembered. It avoids the
 forms that failed: no lint and no sweep (Discovery 5), and no rule the model
-applies without the author deciding each case (Discoveries 5, 7). It starts
-as a project skill because that can be changed the same day Sam reacts to it;
-a plugin can come later if it earns one.
+applies without the author deciding each case (Discoveries 5, 7). It was
+planned as a project skill because that can be changed the same day Sam reacts
+to it, with a plugin to come if it earned one; it shipped as a plugin after
+Phase 2 passed (Alternative 3).
 
 ## Alternatives Considered
 
@@ -519,6 +539,11 @@ it, which a linter cannot know (Discovery 5).
 **Reason for rejection**: deferred until Phase 2 shows the editor is worth
 using; a project skill iterates faster and carries no release work.
 
+**Outcome**: taken after Phase 2. Phase 2 passed on 2026-10-25, and the
+plugin `conexus-prose-edit` landed in `cda821a61a` on 2026-10-27. The records
+read for this amendment do not say who decided the move or on what evidence
+(inferred, not read).
+
 ### Alternative 4: Unpack compression without changing the editor (Amendment A1)
 
 **Description**: carry the compression diagnostics as style-sheet entries
@@ -548,7 +573,8 @@ state his reasons, and the two cons above are inferred.
 - Positive: nothing changes without the author accepting it, or, in
   cut-only mode, the `site-page` gate reviewing it.
 - Negative: editing costs the author's attention on every proposal.
-- Negative: nexus-only until moved to a plugin.
+- Negative: the editor is an opt-in plugin, so another repo gets it only by
+  installing `conexus-prose-edit`, and it needs Nexus (`nx`) for its memory.
 
 ### Risks and Mitigations
 
@@ -563,8 +589,8 @@ state his reasons, and the two cons above are inferred.
 - **Risk**: stored rejections hide proposals the author would now accept.
   **Mitigation**: rejections are per document, listed on demand, and removable;
   only the author generalises one. They match by minimal change, not verbatim,
-  and the brief carries them to the editor. A filter drop stays visible in the
-  marked-up copy; a fix the brief held back does not (see the limits above), and
+  and the brief carries them to the editor. A filter drop is listed in the
+  chat; a fix the brief held back does not (see the limits above), and
   the key's missing position can drop a stored cut of a word where the author
   would have accepted it.
 - **Risk** (Amendment A1): the line editor runs on a model of the kind
@@ -576,7 +602,9 @@ state his reasons, and the two cons above are inferred.
 
 ### Failure Modes
 
-- Wrong genre: visible in the marked-up copy's header; the author overrides.
+- Wrong genre: a path that no genre map reaches makes the run ask which genre
+  it is; `--genre` overrides a mapped one. The marked-up copy header that once
+  showed the genre is gone.
 - Stale, repeated or overlapping exact-match string: the edit is skipped and
   reported, never forced.
 - T2 unavailable: the skill stops and says so.
@@ -585,17 +613,21 @@ state his reasons, and the two cons above are inferred.
 
 ### Phase 1: Build
 
-#### Step 1.1: Marked-up copy format
+#### Step 1.1: Marked-up copy format (replaced)
 
-The format verified with Sam: the editor's note as a blockquote at the top;
-sentence edits inline as `<del>old</del><ins>new</ins>` followed by a
-superscript number; reasons as numbered footnotes; paragraph proposals
-(`[P1]`) and queries (`[Q1]`) as numbered blockquotes where they apply.
+The accepted text specified a marked-up copy verified with Sam: the editor's
+note as a blockquote at the top, sentence edits inline as
+`<del>old</del><ins>new</ins>` with a superscript number, reasons as numbered
+footnotes, paragraph proposals (`[P1]`) and queries (`[Q1]`) as numbered
+blockquotes. The MarkupEditor review (nexus-scmcs, conexus 8.3.0) replaced it:
+no marked-up copy is made. Sentence edits are suggestions in the MarkupEditor
+app with their reasons as notes; the editor's note, paragraph proposals,
+queries and filter drops are shown in the chat (see Review loop).
 
 #### Step 1.2: T2 records
 
 The record shapes above. A small stdlib script,
-`.claude/skills/prose-edit/scripts/memory.py`, reads the layers in order
+`prose-edit/skills/prose-edit/scripts/memory.py`, reads the layers in order
 (user, repo, document) and writes sessions, through the `nx memory` CLI, so
 the merge order is the same every time. It also resolves `<repo>`, drops
 proposals whose minimal change matches a stored rejection for the document, and
@@ -678,17 +710,19 @@ as judged under the bar above (3 of 3 at 9 of 10; T2
 an 18-word split under `dependency:`). Runs after the ruling use the amended
 rule; none of the three is rescored.
 
-#### Step 1a.4: Tally after merge
+#### Step 1a.4: Tally after merge (dropped)
 
-Over Sam's next five `/prose-edit` runs on published docs, count for each
-reason prefix the lengthening edits shown to him (accepted, rejected and held,
-from the session log) and those the filter dropped (the log's `dropped` list).
-A prefix with at least 5 such edits, shown or dropped, and fewer than half of
-them accepted is
-demoted to query-only by a repo or document style-sheet entry Sam approves
-(nexus-b0b40).
+Dropped by Sam on 2026-11-22 (nexus-zhdxx closed; "RDR-221 closes without
+it"). The accepted text counted, over Sam's next five `/prose-edit` runs on
+published docs, the lengthening edits shown for each reason prefix (accepted,
+rejected and held, from the session log) and those the filter dropped, and
+demoted a prefix with at least 5 such edits and fewer than half accepted to
+query-only (nexus-b0b40, deferred, not active). No tally was run. The seeded
+fixture is the only measured evidence for the unpack feature (see Critical
+Assumptions).
 
 **Exit**: Step 1a.3's bar holds in all three runs, and the regression runs pass.
+The tally is not part of the exit.
 
 ### Phase 2: Validate on real work
 
@@ -745,11 +779,16 @@ not apply (Amendment A1).
 
 #### Step 3.2: Remaining genres
 
-Exemplars for `how-to` and `commit-message`.
+Exemplars for `how-to` and `commit-message`. Not done: the T2 project
+`nexus_prose` holds genre records for `rdr`, `reference-doc`, `changelog` and
+`exploration-essay` only (read 2026-11-22). Both names exist in the code's
+genre list (`memory.py`, `GENRES`), and a genre with no exemplars runs on the
+style sheet alone (plugin README).
 
 #### Step 3.3: Plugin decision
 
 Whether to move the editor into a plugin, decided on Phase 2's evidence.
+Done: the editor shipped as `conexus-prose-edit` (Alternative 3, Approach).
 
 ### Day 2 Operations
 
@@ -757,7 +796,7 @@ Whether to move the editor into a plugin, decided on Phase 2's evidence.
 | --- | --- | --- | --- | --- | --- |
 | Style sheets, genres, document notes (T2) | `nx memory list` | `nx memory get` | `nx memory delete` | Phase 1 tests | T2 backup |
 | Session log (T2) | same | same | 90-day TTL | Phase 1 tests | T2 backup |
-| Marked-up copies | N/A | N/A | Temporary directory, cleared after apply | Phase 1 tests | N/A |
+| Run work files (no marked-up copy since conexus 8.3.0) | N/A | N/A | Temporary directory, deleted at the end of the run (`rmtmp`) | Phase 1 tests | N/A |
 
 ### New Dependencies
 
@@ -768,7 +807,7 @@ None.
 - **Scenario**: A document with a quote, a code block, a table and frontmatter. — **Verify**: no proposal inside any of them.
 - **Scenario**: `xanadu-in-nexus.md` and `linda-in-nexus.md`. — **Verify**: no proposal touches the refrains, tricolons or unexplained SQL.
 - **Scenario**: Budget set to N. — **Verify**: at most N sentence edits.
-- **Scenario**: A sentence with one justified and one unjustified qualifier. — **Verify**: only the unjustified one is proposed for cutting.
+- **Scenario**: A sentence with a filler word and a qualifier that is not filler. — **Verify**: only the filler word is proposed for cutting; the other qualifier comes back as a query (Sam, 2026-09-30; the accepted scenario asked for the unjustified qualifier to be cut).
 - **Scenario**: Reject an edit, run again on the same document. — **Verify**: not proposed again.
 - **Scenario**: Add a style-sheet entry at user level, edit a document in another genre. — **Verify**: the entry is applied.
 - **Scenario**: Accept edits after the file changed under one of them. — **Verify**: that edit is skipped and reported; the others apply.
@@ -779,7 +818,7 @@ None.
 - **Scenario**: `<repo>` from the primary, a worktree and a subdirectory. — **Verify**: the same project name each time.
 - **Scenario**: Cut-only mode with a voice card and word budget. — **Verify**: only word-removing proposals, returned without a marked-up copy.
 - **Scenario**: Document path with no genre mapping. — **Verify**: the skill asks.
-- **Scenario**: Marked-up copy location. — **Verify**: outside the repo; `git status` unchanged.
+- **Scenario**: Run work files location (the marked-up copy is gone). — **Verify**: outside the repo; `git status` unchanged.
 - **Scenario** (Amendment A1): `tests/prose_edit/fixtures/compression.md`, run as kind `compression` with `--budget 12`. — **Verify**: at least 7 of the 10 seeded sentences get a lengthening edit whose reason, or a query whose text, starts with that sentence's prefix; no decoy is touched (Step 1a.3).
 
 ## Validation
@@ -814,9 +853,29 @@ Phase 1a tests whether it finds the features anyway.
 Readable in Typora is verified, and no longer load-bearing since the MarkupEditor review. Memory helps is measured in Phase 1 (nexus-ger02.16:
 the rate at which a rejected fix is shown again, against a threshold fixed before the
 runs; the counts are in `tests/prose_edit/acceptance/README.md`); Worth accepting and
-Voice kept in Phase 2. Unpacking is accepted (Amendment A1) is tested by the
-Phase 1a acceptance runs, against a bar fixed before them, and then by the
-post-merge tally (`nexus_rdr/221-research-28` records the source).
+Voice kept were verified in Phase 2 (2026-10-25). Unpacking is accepted
+(Amendment A1) was tested by the Phase 1a acceptance runs, against a bar fixed
+before them; the post-merge tally that was to follow them was dropped by Sam on
+2026-11-22, and the assumption is closed unverified (`nexus_rdr/221-research-28`
+records the source of the tally design).
+
+### Gap disposition (close, 2026-11-22)
+
+Sam's ruling, T2 `nexus/sam-ruling-rdr221-close-2026-11-22`, after the close
+critique `nexus/critique-3616b9868f-none-2026-11-22`.
+
+- **Gap 1, no standing line editor: partly solved.** Genres exist for `rdr`,
+  `reference-doc`, `changelog` and `exploration-essay`; there is no how-to or
+  commit-message genre with exemplars (Step 3.2). The 80-word sentence in
+  `docs/storage-tiers.md` and the long CHANGELOG entries were not exercised: the
+  changelog trial was one short entry, and no stdin or commit-message run was
+  made (the close critique's finding, T2 `nexus/critique-3616b9868f-none-2026-11-22`).
+- **Gap 2, corrections are guidance, never an edit pass: solved.**
+- **Gap 3, review adds and nothing cuts: accepted as reduced** (Sam,
+  2026-11-22). The editor cuts filler words only and turns every other
+  qualifier into a query. The `site-page` voice pass, now `prose-cut`, remains
+  the only automated cutter, and it covers `web/` pages and essays only.
+- **Gap 4, voice has no anchor outside one skill: solved.**
 
 ### Scope Verification
 
@@ -825,9 +884,9 @@ its out-of-scope list is in the Amendment A1 paragraph of the Technical Design.
 
 ### Cross-Cutting Concerns
 
-- **Versioning**: N/A (project skill).
+- **Versioning**: the plugin `conexus-prose-edit` is versioned with conexus (`prose-edit/.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json` both read 8.5.5 on develop `3616b9868f`).
 - **Licensing**: repo licence.
-- **Deployment model**: project skill in this repo.
+- **Deployment model**: opt-in plugin `conexus-prose-edit`, registered in `.claude-plugin/marketplace.json` (agent `prose-edit/agents/line-editor.md`, skills `prose-edit/skills/prose-edit` and `prose-cut`). `site-page` stays a project skill.
 - **Incremental adoption**: one document at a time, only when invoked.
 - **Secret/credential lifecycle**: N/A.
 - **Memory management**: session-log TTL.
@@ -837,8 +896,8 @@ its out-of-scope list is in the Amendment A1 paragraph of the Technical Design.
 
 Sized to one editor, its memory and a review loop. Anything larger waits for
 Phase 2. Amendment A1 changes three texts and adds one fixture and one scorer
-kind; it adds no lint, store or pass. A demotion mechanism, if the tally needs
-one, is a separate bead (nexus-b0b40).
+kind; it adds no lint, store or pass. The demotion mechanism (nexus-b0b40) is
+deferred and not active, since the tally it served was dropped.
 
 ## References
 
@@ -872,3 +931,10 @@ one, is a separate bead (nexus-b0b40).
 - 2026-10-25: Phase 2 PASSED (Sam): 10 of 10 editor edits accepted across the four documents, the essay still in Sam's voice, yes to reaching for it again on all four, comparison accept rates tied at 100% (editor 6/6, brief 14/14). Record: T2 `nexus_rdr/221-phase2-results`. Phase 1a lands on `develop` after this.
 - 2026-11-01: Step 3.1 aligned with cut-only as shipped in conexus 7.91.0 (nexus-ger02.10, amended on Sam's go, nexus-scmcs.5): a second skill, `prose-cut`, in place of a `/prose-edit` mode; the word budget a target, not a cap; the gate fixes first and then applies the cuts with `prose-cut decide`, in place of applying them alongside the other findings. The stale `site-page` line cites are gone from the step. Discovery 12's line cites are left as they read when verified. The review-loop text (marked-up copy, viewer) still matches `develop`; the MarkupEditor review is amended with its branch (nexus-scmcs.4).
 - 2026-11-16: Review loop aligned with the MarkupEditor review as shipped in conexus 8.3.0 (nexus-scmcs, landed at `f2542acfa`; amended under grant 3, nexus-scmcs.2): a path run sends its sentence edits to the MarkupEditor app as suggestions and reads the author's decisions back from it; a stdin run answers in the chat; the Typora viewer, the marked-up copy and the `prose/viewer` record are gone. "Readable in Typora" stays verified and is no longer load-bearing. Step 1.5 and the Technical Environment follow.
+- 2026-11-22: Text amended to match what shipped, before the close (nexus-ger02; Sam's ruling, T2 `nexus/sam-ruling-rdr221-close-2026-11-22`, after the close critique `nexus/critique-3616b9868f-none-2026-11-22`, which found the body describing behaviour that did not ship). Status unchanged; the close waits for a re-critique.
+  - Step 1a.4 tally dropped (nexus-zhdxx closed, Sam); the demotion mechanism (nexus-b0b40) is deferred and not active; "Unpacking is accepted" is closed unverified, resting on the seeded fixture alone.
+  - The qualifier rule and Test Plan scenario 4 follow Sam's 2026-09-30 ruling as shipped (only filler words are cut; every other qualifier is a query); this records the deviation the 2026-10-03 entry deferred to a post-mortem.
+  - Deployment: the editor shipped as the opt-in plugin `conexus-prose-edit` (`prose-edit/`), not a project skill under `.claude/`; Approach, Technical Design, Step 1.2, Step 3.3, Alternative 3, Trade-offs and Cross-Cutting follow.
+  - The marked-up copy and viewer are gone (conexus 8.3.0); Step 1.1, Failure Modes, Day 2, the Test Plan and the Risks mitigation follow. Filter drops are listed in the chat.
+  - Critical Assumptions "Worth accepting" and "Voice kept" ticked on the Phase 2 pass; "Memory helps" ticked on its narrow measurement; all four boxes dispositioned.
+  - A "Gap disposition" block in the Finalization Gate: Gap 2 solved, Gap 4 solved, Gap 3 accepted as reduced, Gap 1 partly solved.
