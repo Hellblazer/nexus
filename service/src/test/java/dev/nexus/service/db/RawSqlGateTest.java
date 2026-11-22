@@ -3172,7 +3172,9 @@ class RawSqlGateTest {
         Map.entry("reindex-index", "named in code only by PgContainerHelperChangesetTextTest, as an input the "
             + "changeset-text extractor must refuse; PgContainerHelper#reindexIndex validates its two names"),
         Map.entry("p225-partition-squatter", "PartitionScratch#createSquatterLeaf runs it after "
-            + "PgContainerHelper.requireTestIdentifier on both names (PartitionScratch is the fixture's own helper)"));
+            + "PgContainerHelper.requireTestIdentifier on both names (PartitionScratch is the fixture's own helper)"),
+        Map.entry("id-index-plan-shapes", "PciIdIndexIntegrationTest runs it with one fixed role literal, "
+            + "PgContainerHelper.SVC_USERNAME, as ${svcRole} in its two GRANT EXECUTE statements (RDR-229 P3.4)"));
 
     private static final Pattern SQL_BODY = Pattern.compile("(?is)<sql\\b[^>]*>(.*?)</sql>");
 
