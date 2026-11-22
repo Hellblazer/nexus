@@ -81,6 +81,15 @@ class PlpgsqlCheckGateTest {
         new Allowed("gc_quarantine_orphans", "warning extra", "unused parameter \"p_quarantined_at\"", "used in the statement over the run-time temp table"),
         new Allowed("gc_quarantine_orphans_bounded", "warning extra", "unused parameter \"p_quarantined_at\"", "used in the statement over the run-time temp table"),
         new Allowed("reaper_quarantine_chunks", "warning extra", "unused parameter \"p_quarantined_at\"", "used in the statement over the run-time temp table"),
+        // RDR-229 P3.5b (vectors-077-49, -56, -87): the registry ids these movers resolve once from the labels they are
+        // passed are read, as static SQL, only in statements that also name the run-time temp table, so the analyser
+        // skips every read and reports the variable as never read. Same cause as p_quarantined_at above; a variable
+        // that is also read in a statement the analyser does see (v_origin_id in the bounded mover and the reaper)
+        // reports nothing.
+        new Allowed("gc_quarantine_orphans", "warning extra", "never read variable \"v_origin_id\"", "read only in statements over the run-time temp table"),
+        new Allowed("gc_quarantine_orphans", "warning extra", "never read variable \"v_quarantine_id\"", "read only in statements over the run-time temp table"),
+        new Allowed("gc_quarantine_orphans_bounded", "warning extra", "never read variable \"v_quar_id\"", "read only in statements over the run-time temp table"),
+        new Allowed("reaper_quarantine_chunks", "warning extra", "never read variable \"v_quar_id\"", "read only in statements over the run-time temp table"),
         // Legacy lines carried verbatim from catalog-043 and its predecessors: a text, integer or bigint
         // assigned from an expression of a near type. A cast would change a body this changeset otherwise leaves as it was.
         new Allowed("gc_restore_rereferenced", "performance", "target type is different type than source type", "legacy line carried verbatim (catalog-043)"),
