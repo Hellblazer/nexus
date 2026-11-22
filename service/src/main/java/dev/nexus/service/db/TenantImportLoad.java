@@ -518,6 +518,13 @@ final class TenantImportLoad {
         }
     }
 
+    /** The marker's relabel list: the first {@code max} entries and, beside them, the whole count. */
+    static void putRelabels(ObjectNode marker, List<TenantImportReport.Relabel> relabelled, int max) {
+        marker.put("collections_relabelled_count", relabelled.size());
+        ArrayNode list = marker.putArray("collections_relabelled");
+        relabelled.stream().limit(max).forEach(r -> list.addObject().put("label", r.label()).put("target_label", r.targetLabel()));
+    }
+
     private static void writeMarker(DSLContext ctx, String tenant, String headerSha256, String sessionId, Instant now,
                                     TenantImportReport report) {
         ObjectNode marker = MAPPER.createObjectNode();
@@ -527,10 +534,7 @@ final class TenantImportLoad {
         ObjectNode counts = marker.putObject("row_counts");
         for (TableResult t : report.tables()) counts.put(t.table(), t.inserted());
         // a restore that relabelled collections says so after the engine forgets the session; bounded, with the true count
-        marker.put("collections_relabelled_count", report.collectionsRelabelled().size());
-        ArrayNode relabelled = marker.putArray("collections_relabelled");
-        report.collectionsRelabelled().stream().limit(MARKER_RELABELS_MAX)
-            .forEach(r -> relabelled.addObject().put("label", r.label()).put("target_label", r.targetLabel()));
+        putRelabels(marker, report.collectionsRelabelled(), MARKER_RELABELS_MAX);
         String json = marker.toString();
         ctx.insertInto(CATALOG_META)
             .set(CATALOG_META.TENANT_ID, tenant)
