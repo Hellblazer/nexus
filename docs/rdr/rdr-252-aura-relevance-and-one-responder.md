@@ -51,6 +51,28 @@ borrowed its aura model from (T3 `agent-orchestration`, "WeakAuras and raid
 coordination models: who an alert is for, who responds", 2026-11-16; called
 "the research" below).
 
+## Post-close amendment (2026-11-22)
+
+**Status.** This RDR was closed early, on 2026-11-21. A post-close audit the next day (T2 `nexus_rdr/252-post-close-audit-2026-11-22`) found three Significant gaps against the Problem Statement, and Sam ruled that the work finishes under this RDR, not a new one (T2 `nexus/sam-ruling-finish-252-no-257-2026-11-22`). Completion is tracked as comments on its epic, nexus-igea9. Under the rule Sam set on 2026-11-22, drafted for CLAUDE.md and not yet in it (T2 `nexus/sam-ruling-nail-252-253-2026-11-22`, item 3: nothing is fixed or done until the check that proves it has run once), each piece below is finished only when its own test or live run has run once; for the every-repository piece that run is a real red on a second repository.
+
+**What was missing at the close.**
+1. The acknowledgement said "seen", not "fixing". An owner who pushed the fix without acking was handed off and nearly escalated, a "not mine" ack counted as an ack, and an acked red had no second timer (audit S1).
+2. Next up was woken on every red, so halcyon was woken on 9 of 14 (S2).
+3. A failed push-record write went to standard error only, and `from` was always `unknown` (S3).
+4. "Hold your pushes" was display only: 24 pushes landed inside red windows.
+5. Seven owner paths (`no_record`, `chain_gap`, `owner_not_live`, `owner_unleased`, `owner_not_member`, `stamper_error`, `escalated`) had never occurred on the real board.
+6. Only nexus could use any of it, though it was never meant to be nexus-only (T2 `nexus/sam-ruling-generalize-252-2026-11-22`).
+
+**What this RDR now covers.**
+- *Client and push script* (lands first): the shared commands `nx ci record-push` and `nx ci check-hold`, with `scripts/git-push-develop.sh` as their first caller. A record failure is reported in the push summary, a failed stamped write is retried as a minimal unstamped record, and `from` is the identity id. The hold refuses a push onto an open red unless the pusher owns the red, pushed a suspect, or gives `--red-fix '<reason>'`; the reason is kept in the push record (Sam's ruling, 2026-11-22). `nx ci ack --not-mine` posts a `disclaim` row, which the engine records only until the engine cut below acts on it. Each of the seven owner paths has a row in the identity journeys, which run a local engine with hand-posted push and CI rows; that proves the stamper's logic end to end, and the first real occurrence on the board is still the live check.
+- *Engine* (next engine cut, Sam's go): the current owner's stamped push, made after the red was reported and chained from a red tip, counts as an ack and moves the timer to the stall deadline; the same push by an earlier owner of the red (one it was handed away from) restarts the current owner's hand-off or escalation deadline from that push; the owner's `disclaim` hands the red on at once; an acked red still open `stall_factor` times the deadline after the last ack or push escalates (a group setting, default 3; the row carries `stalled: true` and `red_since`, plus `stalled_owner` and `stalled_since` when an ack or push came before it), and any red still open at twice that from its start escalates whatever the pushes; one `nudge` row at half the deadline names next up when nobody has acked; and the stamper counts tips that have no push record and tips whose record names no pusher (`unrecorded_tips` and `unattributed_tips` on the group read). The notice change that wakes next up only on a nudge ships with this cut, because without the nudge an absent owner's red would wake nobody else for the full deadline.
+- *Every repository.* The engine needs no change: the stamper takes any `board/ci/<base>`, a group's `serves` lists its bases, and the board package names no repository. No shared command defaults its base to nexus. Each takes the repository from the origin remote's name, lowercased as the adapter does: `nx ci record-push` and `nx ci check-hold` add the branch being pushed; `nx ci ack` uses that repository's one open red; `nx ci wait` uses `develop` if the remote has it, else the remote's default branch. Each refuses, naming its flag (`--base`, `--repo` or `--branch`), when it cannot derive one. The rest:
+  1. *Aura per base.* The aura grammar takes one concrete subspace. One shipped aura gets a placeholder trigger, `board/ci/{serves}--owner`, which the loader expands into one aura per base in `serves` of each group the session belongs to. Its notice text names the branch, so it no longer says "Develop".
+  2. *Group.* One group per repository by default. A group may serve several bases. In a group of one the leader takes every red; with two or more, each pusher owns the reds its push caused and the leader takes only the fallback cases.
+  3. *CI results.* No workflow step is needed. The CI board adapter (a GitHub webhook in the conexus repository) already names the topic from the repository and branch. Adding a repository means adding it to the adapter's `repos`, widening the adapter's read-only token, creating that repository's webhook, and, for a branch other than develop or main, widening the adapter's one branch list, which applies to every repository. All four are cloud or credential steps and Sam's. Every webhook shares one secret, so rotating it means updating every repository's hook. The adapter counts only push-event runs on an allowed branch.
+  4. *Push records and the hold without a push script.* A managed `pre-push` hook calls `nx ci check-hold`. Git has no post-push hook, so the same hook starts a detached job that waits, for at most ten minutes, until the remote branch shows the pushed tip and only then calls `nx ci record-push`; a refused push gets no record. `nx upgrade`'s hook refresh today rewrites only post-commit, post-merge and post-rewrite hooks, and never installs a missing hook, so it gains this hook type and an install step. A push from a machine without nx records nothing; the stamper counts that gap. For a repository that merges pull requests into its integration branch there is no local push to the branch, so until the adapter names the merger, such a red goes to the leader as `no_record`, as the owner rules above say.
+  5. *First repositories.* recording-rig first: it is Sam's own, its one cheap workflow runs on push to main, it already has managed hooks, and it tests a `main` branch and PR merges. ART second: its Java CI runs on every push and it has no managed hooks, so it tests the hook install. conexus and qwen-coprocessor-stack wait: their CI runs only on pull requests, so they would post no results until a push trigger is added, which costs CI minutes and is Sam's call.
+
 ## Problem Statement
 
 ### Enumerated gaps to close
@@ -464,7 +486,7 @@ one push lands on the same tuple. The script releases the push lock before it
 writes the record and stops the write after 20 seconds
 (`NX_PUSH_RECORD_TIMEOUT_S`), so a slow tuple space never holds a push. A record that is skipped (no
 installed `nx`), or that fails, is one line in the push summary on standard output after `PUSH_OK`
-(`PUSH_RECORD_SKIPPED`, `PUSH_RECORD_FAILED`) as well as on standard error. A failed stamped write is
+(`PUSH_RECORD_SKIPPED`, `PUSH_RECORD_FAILED`, or `PUSH_RECORD_UNSTAMPED` for a record written with no session stamp) as well as on standard error. An installed `nx` that predates `nx ci record-push` gets the older direct `nx tuple out` write (`PUSH_RECORD_LEGACY`). A failed stamped write is
 retried once as a minimal unstamped record (`base`, tip, `from`; the session header dropped, the same
 nonce), reported as `PUSH_RECORD_FALLBACK`, so the chain keeps its link; only when that fails too is
 the record missing. The push never fails because of the record.
@@ -473,8 +495,8 @@ The stamper trusts the record's stamp, never `from` (Sam's answer on gate
 finding S4): it maps the stamped session id to an identity through the
 session index (`nexus_rdr/252-research-4` F4). A record with no stamp, or
 whose stamp the index does not map, counts as no record. A push from a plain
-shell with no Claude ancestor writes an unstamped record with `from=unknown`, and so does the fallback
-above, which counts as no record for ownership. On the `--skip-lock` path the script resolves the installed `nx`
+shell with no Claude ancestor writes an unstamped record with `from=unknown`. The fallback
+above is unstamped too, so it counts as no record for ownership; its `from` is the identity id as usual. On the `--skip-lock` path the script resolves the installed `nx`
 for this write, as the lock path does (`nexus_rdr/252-research-5` F8); if
 none resolves, it writes no record and the push still succeeds. It writes a
 record only when the pushed branch is `develop`. An unstamped record still
@@ -648,8 +670,8 @@ script can call it, and its `--base` is given or derived from the remote URL and
 `PUSH_REFUSED_DEVELOP_RED` (exit 13, naming the owner and the red's sha) unless the pusher is the red's owner or
 the pusher of one of its suspects (the identity the suspect's push record's sender-session stamp maps to; `from`
 is never read), or the push carries `--red-fix '<reason>'`, which is recorded in the push summary and in the push
-record body (`red_fix`). A caller with no identity is held like any other. A failed read of the red or of the
-records is one `PUSH_GATE_UNCHECKED` line on standard error and does not refuse. The record itself is written
+record body (`red_fix`). A caller with no identity is held like any other. A failed read of the red, of the
+records or of the caller's identity is one `PUSH_GATE_UNCHECKED` line on standard error and does not refuse. A refusal names any suspect whose record names no pusher. The script recognises an override only by the `PUSH_RED_FIX_APPLIED` line the command prints, and the reason is cleaned of control characters and cut to fit the record body's 1024-byte cap. The record itself is written
 by `nx ci record-push` (the script passes the `--red-fix` reason to it), which owns the stamped write, the
 minimal fallback and `from`.
 
@@ -1041,6 +1063,7 @@ None.
 
 ## Test Plan
 
+- Post-close fixes (2026-11-22; `tests/test_ci_push_gate.py`, `tests/test_ci_record_push.py`, `tests/test_ci_base.py`, `tests/scripts/test_git_push_develop_sh_hold.py`, `tests/test_ci_ack_not_mine.py`, `tests/identity/test_owner_path_journeys.py`, `OwnerDecisionAuditTest`, `OwnerStamperAuditTest`): the hold refuses a stranger and lets the owner, a suspect's pusher and `--red-fix` through, and never refuses on a failed read; the record's fallback, legacy write and unstamped report; base derivation and its refusals; `--not-mine` and its display; one journey row for each of the seven owner paths and one that runs the real `check-hold` and `record-push` against the engine; and, for the engine cut, the implicit ack only after the red verdict, the 2026-11-21 late-push replay (red 7e7840fae9), the disclaim hand-off, the stall and its hard cap, the nudge, and the unrecorded and unattributed counts.
 - Owner, next up and everyone-else states from fixed push records.
 - Inherited red: the owner is the earliest suspect's pusher.
 - A replaced (cancelled) run: the untested tip is a suspect.
@@ -1348,3 +1371,4 @@ directory, now by RDR-253's identity); S4, trust the engine's stamp only.
 - 2026-11-21: known limits and Test Plan matched to the close critique r3 (nexus-igea9, nexus-igea9.4; grant 3): a Known limits clause beside "Unvalidated by design" records the live earliest-suspect misattribution at 9f14aa59a and the next-up fixer who cannot stop the deadline, leaves the suspect-dropping question open and Sam's rule standing; the Day 2 calibration read covers attribution quality as well as ack time; the skipped or neutral workflow assumption says what watches it (nothing) and who decides (the board's maintainers, 2026-12-20), with the path-filtered workflows named; four Test Plan lines (carry-forward and `branch_outcome`, the engine's ack-from stamp, `nx ci ack`, `ignored_acks`).
 - 2026-11-21: release carriers named (close critique r3 and r4, S1, `nexus/critique-rdr252-close-2026-11-21-r4`; nexus-igea9; grant 3): the engine half (the ack `from` stamp and 35-day `--owner` retention, b308e6dc9 and b545859c0; the fail-safe's at-once escalation and owner-stamped-ack hold-off, ed7b34fde and a3b2c1220; carry-forward and `branch_outcome`, 6c1c73de9 and d13cba1b1) is first in engine-service-v0.1.200, serving in the cloud since 2026-11-21 15:29Z (T2 `conexus/deploy-engine-v0.1.200-2026-11-21`); the CI board adapter's `FOLD_BRANCH_OUTCOME` was switched on at 16:23Z (T2 `conexus/deploy-ci-board-adapter-fold-branch-outcome-on-2026-11-21`); `nx ci ack` and the sender-stamp count in `nx group ack-times` (9f14aa59a, f14d51a0d) are first in client v8.5.4 (v8.5.3 has no `nx ci ack`). Earlier reds and acks predate all of it.
 - 2026-11-22: wording matched to the push script's post-close audit fixes (nexus-igea9; grant 3): the push record is written by the shared `nx ci record-push` and the hold checked by the shared `nx ci check-hold` (any repo's push script can call them; `git-push-develop.sh` is the first caller and passes `--base nexus-develop`; the base is an argument or derived as `<repo>-<branch>` from the remote URL and branch, and a base that cannot be derived is refused naming `--base`, never defaulted); the record's `from` is the pusher's identity id, else `unknown`; a skipped or failed record is reported on the script's standard output as well as standard error; a failed stamped write is retried once as a minimal unstamped record (base, tip, from) so the chain keeps its link; the "Hold your pushes" line is enforced (`PUSH_REFUSED_DEVELOP_RED`, exit 13, unless the pusher owns the red or pushed a suspect, or passes `--red-fix '<reason>'`, which is written into the push record body as `red_fix`); a caller with no identity is held like any other; a failed read of the red warns and does not refuse.
+- 2026-11-22: post-close amendment added (Sam authorised this edit to the closed record, T2 `nexus/sam-ruling-finish-252-no-257-2026-11-22`; nexus-igea9): what was missing at the close, what the RDR now covers (the audit fixes, the hold, the seven owner paths, every repository), and the status note.
