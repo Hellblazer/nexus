@@ -139,7 +139,7 @@ public final class VectorHandler implements HttpHandler {
      * RDR-204 Phase 2 fix round 2 (nexus-ft04v.16 fix round 2, S1, coordinator
      * design change): names dropped by {@link PgVectorRepository#registeredSurvivors}
      * from a multi-collection fan-out read, each name percent-encoded as UTF-8
-     * ({@link #encodeSkippedCollections}) and the names joined with a comma. Since
+     * ({@link SkippedCollectionsHeader#encode}) and the names joined with a comma. Since
      * RDR-229 P3.6 a label may hold a space, non-ASCII letters and (should the comma
      * ruling be relaxed) a comma, none of which a raw header value carries safely
      * (nexus-5clu8); a legacy name of letters, digits, {@code _}, {@code -} and
@@ -3003,26 +3003,10 @@ public final class VectorHandler implements HttpHandler {
      */
     private static void emitSkippedCollections(HttpExchange ex, List<String> skipped) {
         if (!skipped.isEmpty()) {
-            ex.getResponseHeaders().set(SKIPPED_COLLECTIONS_HEADER, encodeSkippedCollections(skipped));
+            ex.getResponseHeaders().set(SKIPPED_COLLECTIONS_HEADER, SkippedCollectionsHeader.encode(skipped));
         }
     }
 
-    /**
-     * The {@link #SKIPPED_COLLECTIONS_HEADER} value for {@code skipped}: each name form-encoded as UTF-8
-     * ({@link java.net.URLEncoder}: a space is {@code +}, every byte outside letters, digits and {@code .-*_} is
-     * {@code %XX}, so a comma inside a name is {@code %2C}), the names joined with a comma. The client decodes
-     * each with {@code urllib.parse.unquote_plus} (nexus-5clu8).
-     */
-    public static String encodeSkippedCollections(List<String> skipped) {
-        StringBuilder sb = new StringBuilder();
-        for (String name : skipped) {
-            if (sb.length() > 0) {
-                sb.append(',');
-            }
-            sb.append(java.net.URLEncoder.encode(name, java.nio.charset.StandardCharsets.UTF_8));
-        }
-        return sb.toString();
-    }
 
     // ── Request parsing helpers ───────────────────────────────────────────────
 
