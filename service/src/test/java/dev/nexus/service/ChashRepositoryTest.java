@@ -224,6 +224,21 @@ class ChashRepositoryTest {
 
     // ── rename_collection ────────────────────────────────────────────────────
 
+    /**
+     * The rename target is a label a user supplied, so it is judged by the label rule before any row moves (n3hhc's
+     * class, nexus-n3hhc). The source keeps the row count it had, whichever order the class runs in.
+     */
+    @Test
+    void renameCollection_refusesATargetTheLabelRuleRefusesAndMovesNothing() {
+        int before = repo.countForCollection(TENANT_A, "ren-src");
+        for (String bad : java.util.List.of("c42", "a/b", "a,b", " edge", "a\nb", "a".repeat(256))) {
+            assertThatThrownBy(() -> repo.renameCollection(TENANT_A, "ren-src", bad))
+                .as("target %s", bad.length() > 20 ? bad.substring(0, 20) + "..." : bad)
+                .isInstanceOf(IllegalArgumentException.class);
+        }
+        assertThat(repo.countForCollection(TENANT_A, "ren-src")).isEqualTo(before);
+    }
+
     @Test
     void renameCollection_rehomesEveryRow_andIsIdempotent() {
         int updated = repo.renameCollection(TENANT_A, "ren-src", "ren-dst");

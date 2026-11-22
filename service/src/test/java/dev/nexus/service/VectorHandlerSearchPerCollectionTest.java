@@ -314,6 +314,19 @@ class VectorHandlerSearchPerCollectionTest {
         assertThat(json(r).get("per_collection")).hasSize(2);
     }
 
+    /**
+     * nexus-5clu8: a skipped label that holds a space, '%', ':' and a non-ASCII letter reaches the header form-encoded
+     * (SkippedCollectionsHeader), byte for byte, next to a legacy name that encodes to itself. Reverting the handler's
+     * call site to a raw join turns this red.
+     */
+    @Test
+    void aSkippedLabelThatNeedsEncodingReachesTheHeaderFormEncoded() throws Exception {
+        var r = post(request(List.of(DENSE, "notes 50%: café", GHOST), 5, 100));
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
+        assertThat(r.headers().firstValue("X-Nexus-Skipped-Collections"))
+            .hasValue("notes+50%25%3A+caf%C3%A9," + GHOST);
+    }
+
     @Test
     void rerankRunsOnceOverTheMergedRows_andDegradesLoudWithoutAReranker() throws Exception {
         Map<String, Object> req = ok();
