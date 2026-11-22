@@ -951,7 +951,11 @@ def test_the_p36_label_test_runs_against_the_real_engine_with_a_floor() -> None:
     assert job["runs-on"] == LABEL
     assert "NX_TEST_T2_SUBSTRATE" not in job.get("env", {}), "the label test needs the engine substrate"
     steps = job["steps"]
-    assert any("build-gate-jar.sh" in s.get("run", "") for s in steps), "the substrate needs the gate jar"
+    build = next(s for s in steps if s.get("name") == "Build the gate jar")
+    assert "mvnw.cmd" in build["run"] and "-Pprebuilt-jooq" in build["run"], "the substrate needs the gate jar"
+    # `shell: bash` on win-release is WSL's bash.exe with no distribution (run 45032556189)
+    assert all(s.get("shell") != "bash" for s in steps) and not any("maven-cache" in s.get("uses", "") for s in steps)
+    assert "jooq-codegen" in job["needs"]
     assert any("setup-graalvm" in s.get("uses", "") for s in steps), "the substrate needs java on PATH"
     run = next(s["run"] for s in steps if "pytest" in s.get("run", ""))
     assert target in run and "-m integration" in run and "--junitxml=label-windows-junit.xml" in run
