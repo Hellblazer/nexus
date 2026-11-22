@@ -98,13 +98,14 @@ final class TenantImportLoad {
         RestoreIdFill.refuseOrphans(ctx, loading, stages);
         List<TableResult> results = new ArrayList<>();
         List<SoftResult> softs = new ArrayList<>();
+        List<TenantImportReport.Relabel> relabelled = new ArrayList<>();
         for (ExportTable e : TenantExport.TABLES) {
             TablePlan tp = plan.get(e.name());
             if (tp == null || skipped.containsKey(e.name())) continue;
             status.accept("loading " + e.name());
             Stage st = stages.get(e.name());
             if (st.mapName() != null) fillMap(ctx, e, st);
-            RestoreIdFill.fill(ctx, tenant, e, st, CollectionIdMap.empty());
+            relabelled.addAll(RestoreIdFill.fill(ctx, tenant, e, st, CollectionIdMap.empty()));
             results.add(loadTable(ctx, tenant, tp, stages, staged.getOrDefault(e.name(), 0L), softs));
             RestoreIdFill.afterLoad(ctx, tenant, e);
         }
@@ -116,7 +117,7 @@ final class TenantImportLoad {
                 tp.retiredColumns().forEach(c -> skippedColumns.add(tp.name() + "." + c));
             }
         }
-        TenantImportReport report = new TenantImportReport(results, softs, skipped, skippedColumns);
+        TenantImportReport report = new TenantImportReport(results, softs, skipped, skippedColumns, relabelled);
         writeMarker(ctx, tenant, headerSha256, sessionId, now, report);
         return report;
     }

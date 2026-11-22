@@ -49,7 +49,7 @@ class Rdr229RestoreMintedRelabelTest {
 
     private static final Path LIST = Path.of("src", "main", "resources", "db", "rdr229", "p31-checks.tsv");
     private static final long OLD_BASE = 4812;
-    private static final String MODEL = "voyage-context-3";
+    private static final String MODEL = "bge-base-en-v15-768";   // the restored tenant's embedding profile for knowledge
 
     /** A name column, the id column beside it. */
     record Site(String table, String nameColumn, String idColumn) {
@@ -159,18 +159,38 @@ class Rdr229RestoreMintedRelabelTest {
     }
 
     /**
-     * The fixture with every registry row but the last renamed to {@code c<4812 + i>} wherever the file names it, and the last
-     * row (its label stays as it was) made a tombstone whose {@code superseded_by} names the first row's ORIGINAL label.
+     * The fixture with every registry row but one renamed to {@code c<4812 + i>} wherever the file names it, and that one (its
+     * label stays as it was) made a tombstone whose {@code superseded_by} names the first renamed row's ORIGINAL label.
      */
     private Prepared prepared() throws IOException {
+        return prepared(OLD_BASE);
+    }
+
+    private Prepared prepared(long oldBase) throws IOException {
         ImportTestEnv.BackupFile original = fixture();
         int nameAt = original.columnIndex("catalog_collections", "name");
         List<BinaryCopyTestSupport.Row> registry = rows(original, "catalog_collections");
         assertThat(registry.size()).as("the fixture's registry rows").isGreaterThanOrEqualTo(3);
         List<String> originals = registry.stream().map(r -> text(r, nameAt)).toList();
-        String plain = originals.get(originals.size() - 1);
+        // the row whose label stays is the one with the fewest rows in the file, so the others carry the children
+        int plainAt = 0;
+        long fewest = Long.MAX_VALUE;
+        for (int i = 0; i < originals.size(); i++) {
+            long total = 0;
+            for (Site s : sites()) total += countIn(original, s, originals.get(i));
+            if (total <= fewest) {
+                fewest = total;
+                plainAt = i;
+            }
+        }
+        String plain = originals.get(plainAt);
+        List<BinaryCopyTestSupport.Row> renamedRows = new ArrayList<>();
         Map<String, String> names = new LinkedHashMap<>();
-        for (int i = 0; i < originals.size() - 1; i++) names.put(originals.get(i), "c" + (OLD_BASE + i));
+        for (int i = 0; i < originals.size(); i++) {
+            if (i == plainAt) continue;
+            names.put(originals.get(i), "c" + (oldBase + names.size()));
+            renamedRows.add(registry.get(i));
+        }
         assertThat(names.values()).allMatch(CollectionLabel::isMintedForm);
 
         Map<String, Map<Site, Long>> expected = new LinkedHashMap<>();
@@ -180,16 +200,17 @@ class Rdr229RestoreMintedRelabelTest {
             expected.put(names.get(old), perSite);
         }
         List<Tuple> tuples = new ArrayList<>();
-        for (BinaryCopyTestSupport.Row r : registry.subList(0, registry.size() - 1)) {
+        for (BinaryCopyTestSupport.Row r : renamedRows) {
             tuples.add(new Tuple(text(r, original.columnIndex("catalog_collections", "content_type")),
                 text(r, original.columnIndex("catalog_collections", "owner_id")),
                 text(r, original.columnIndex("catalog_collections", "embedding_model")),
                 text(r, original.columnIndex("catalog_collections", "model_version"))));
         }
+        String firstOriginal = names.keySet().iterator().next();
 
         int supersededAt = original.columnIndex("catalog_collections", "superseded_by");
         ImportTestEnv.BackupFile file = edit(original, "catalog_collections", rows -> rows.stream()
-            .map(r -> plain.equals(text(r, nameAt)) ? with(r, supersededAt, utf8(originals.get(0))) : r).toList());
+            .map(r -> plain.equals(text(r, nameAt)) ? with(r, supersededAt, utf8(firstOriginal)) : r).toList());
         for (Site s : sites()) file = rename(file, s.table(), s.nameColumn(), names);
         file = rename(file, "catalog_collections", "superseded_by", names);
         return new Prepared(file, List.copyOf(names.values()), plain, expected, tuples);
@@ -322,6 +343,39 @@ class Rdr229RestoreMintedRelabelTest {
         JsonNode mint = ImportTestEnv.json(minting);
         assertThat(mint.get("collection_id").asLong()).as("the mint drew the old number's id, no label in its way").isEqualTo(OLD_BASE);
         assertThat(mint.get("name").asText()).isEqualTo("c" + OLD_BASE);
+    }
+
+    /**
+     * A backup from another installation: its minted labels are numbers the target's sequence is about to draw, so a label
+     * the file holds is the new label of ANOTHER row. The relabel is one pass per column; a second pass would rename the
+     * rows it had just renamed.
+     */
+    @Test
+    void aBackupWhoseMintedLabelsAreTheTargetsNewIdsIsRelabelledInOnePass() throws Exception {
+        long base = 7000;
+        Prepared p = prepared(base);
+        String tenant = "t-p311-relabel-overlap";
+        String token = env.newTenant(tenant);
+        env.su(ctx -> ctx.select(DSL.function("setval", Long.class, sequence(), DSL.val(base - 1))).fetchOne());
+        JsonNode end = env.restore(token, p.file());
+        assertThat(end.get("status").asText()).as(end.toString()).isEqualTo("committed");
+
+        Map<String, Restored> byTuple = restoredRows(tenant);
+        List<Map.Entry<String, Map<Site, Long>>> byOld = new ArrayList<>(p.expected().entrySet());
+        long overlapping = 0;
+        for (int i = 0; i < byOld.size(); i++) {
+            Restored row = byTuple.get(p.tuples().get(i).toString());
+            assertThat(row).isNotNull();
+            assertThat(row.label()).as("the row restored from %s", byOld.get(i).getKey()).isEqualTo("c" + row.id());
+            if (p.oldLabels().contains(row.label())) overlapping++;
+            for (Map.Entry<Site, Long> e : byOld.get(i).getValue().entrySet()) {
+                assertThat(rowsNamed(tenant, e.getKey(), row.label())).as("rows of %s naming %s", e.getKey(), row.label())
+                    .isEqualTo(e.getValue());
+                assertThat(rowsNamedOnAnotherId(tenant, e.getKey(), row)).as("rows of %s naming %s on another id", e.getKey(), row.label())
+                    .isZero();
+            }
+        }
+        assertThat(overlapping).as("non-vacuity: a new label equals another row's old one").isPositive();
     }
 
     @Test

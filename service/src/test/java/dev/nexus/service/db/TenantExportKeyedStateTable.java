@@ -59,7 +59,7 @@ final class TenantExportKeyedStateTable {
             "TenantImportPlan.TablePlan.defaultedColumns", "TenantImportPlan.TablePlan.tenantScoped",
             "TenantImportPlan.Plan.refusals", "TenantImportPlan.Plan.tables", "TenantImportPlan.Plan.notes",
             "TenantImportReport.tables", "TenantImportReport.softReferences", "TenantImportReport.skippedTables",
-            "TenantImportReport.skippedColumns", "TenantImportSessions.RefusedException.extra",
+            "TenantImportReport.skippedColumns", "TenantImportReport.collectionsRelabelled", "TenantImportSessions.RefusedException.extra",
             "TenantImportSessions.OpenRequest.sourceTenant", "TenantImportSessions.OpenRequest.tables",
             "TenantImportSessions.OpenRequest.embeddingModels", "TenantImportSessions.Session.stages",
             "TenantImportSessions.Session.tables", "TenantImportSessions.Session.ignored",
