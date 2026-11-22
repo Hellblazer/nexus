@@ -54,7 +54,7 @@ def _publish_t1_session_lease(
     session-keyed; with ``session_id=None`` it is a transient record.
     ``claude_pid`` is stamped into the payload of EITHER kind (nexus-gff3g) for
     the ancestor-pid fallback, which serves both the cold-start window and the
-    common session-id-divergence case (NX_SESSION_ID != current_session).
+    common session-id-divergence case (NX_SESSION_ID != the token file's session).
 
     nexus-yfh5x: publishes through ``ServiceRegistry.publish`` directly --
     the same call the now-deleted ``T1LeasePublisher.publish`` used to make
@@ -702,10 +702,10 @@ class TestT1DatabaseIsolatedLegRetired:
 #
 #     ctor session_id arg
 #         > NX_SESSION_ID env
-#         > read_claude_session_id() (~/.config/nexus/current_session)
+#         > the session in this process's identity token file
 #         > new uuid4()
 #
-# The 4.27.0 ship omitted the ``read_claude_session_id()`` step in every
+# The 4.27.0 ship omitted the on-disk session pointer step in every
 # branch, so two ``T1Database()`` calls in the same Claude session (the
 # MCP server and a Bash-tool sibling) minted distinct UUIDs and could
 # not see each other's entries via the per-entry session_id metadata
@@ -741,8 +741,9 @@ def _setup_path(path_id: str, tmp_path, monkeypatch, fake_chromadb):
     raise ValueError(path_id)
 
 
-def _write_current_session(tmp_path, sid: str) -> None:
-    (tmp_path / "current_session").write_text(sid)
+def _token_file_names(monkeypatch, sid: str) -> None:
+    """The last resolver tier: the session id in this process's token file."""
+    monkeypatch.setattr("nexus.session._token_file_session_id", lambda: sid)
 
 
 @pytest.fixture
@@ -760,9 +761,9 @@ class TestT1DatabaseSessionIdResolution:
     every branch (Path A/B/C + client-injection).
 
     The chain is:
-        ctor arg > NX_SESSION_ID env > read_claude_session_id() > uuid4()
+        ctor arg > NX_SESSION_ID env > the token file's session > "unknown"
 
-    Pre-fix the ``read_claude_session_id()`` step was missing from every
+    Pre-fix the on-disk session pointer step was missing from every
     branch, so two ``T1Database()`` calls in the same Claude session
     minted distinct UUIDs and could not see each other's entries via
     the per-entry session_id metadata filter.
@@ -772,41 +773,41 @@ class TestT1DatabaseSessionIdResolution:
     def test_explicit_arg_wins(self, path_id, tmp_path, monkeypatch, fake_chromadb):
         kwargs, _ = _setup_path(path_id, tmp_path, monkeypatch, fake_chromadb)
         monkeypatch.setenv("NX_SESSION_ID", "from-env")
-        _write_current_session(tmp_path, "from-file")
+        _token_file_names(monkeypatch, "from-file")
 
         from nexus.db.t1 import T1Database
         db = T1Database(session_id="from-arg", **kwargs)
         assert db.session_id == "from-arg"
 
     @pytest.mark.parametrize("path_id", _PATH_IDS)
-    def test_env_wins_over_current_session_file(
+    def test_env_wins_over_token_file(
         self, path_id, tmp_path, monkeypatch, fake_chromadb
     ):
         kwargs, _ = _setup_path(path_id, tmp_path, monkeypatch, fake_chromadb)
         monkeypatch.setenv("NX_SESSION_ID", "from-env")
-        _write_current_session(tmp_path, "from-file")
+        _token_file_names(monkeypatch, "from-file")
 
         from nexus.db.t1 import T1Database
         db = T1Database(**kwargs)
         assert db.session_id == "from-env"
 
     @pytest.mark.parametrize("path_id", _PATH_IDS)
-    def test_current_session_file_wins_over_uuid_fallback(
+    def test_token_file_session_wins_over_unknown_fallback(
         self, path_id, tmp_path, monkeypatch, fake_chromadb
     ):
         """Regression: the missing fallback step.
 
-        With env unset and current_session populated, every branch must
-        resolve to the file's contents -- not mint a fresh UUID. This
+        With env unset and the token file naming a session, every branch
+        must resolve to that session -- not the "unknown" sentinel. This
         is the load-bearing invariant for cross-process T1 visibility:
         the MCP server and a Bash-tool sibling both find the same
-        Claude session via the on-disk pointer and converge on its
-        UUID, so each side's session_id metadata filter sees the
+        Claude session through the identity token file and converge on
+        its UUID, so each side's session_id metadata filter sees the
         other's entries.
         """
         kwargs, _ = _setup_path(path_id, tmp_path, monkeypatch, fake_chromadb)
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
-        _write_current_session(tmp_path, "canonical-claude-uuid")
+        _token_file_names(monkeypatch, "canonical-claude-uuid")
 
         from nexus.db.t1 import T1Database
         db = T1Database(**kwargs)
@@ -820,7 +821,7 @@ class TestT1DatabaseSessionIdResolution:
     def test_unknown_fallback_when_nothing_set(
         self, path_id, tmp_path, monkeypatch, fake_chromadb
     ):
-        """Truly anonymous CLI (no env, no file) attributes its T1
+        """Truly anonymous CLI (no env, no token-file session) attributes its T1
         writes to the canonical ``"unknown"`` sentinel.
 
         Pre-issue-#594 the fallback was ``uuid4()`` -- a per-process
@@ -828,7 +829,7 @@ class TestT1DatabaseSessionIdResolution:
         the audit log when the on-disk pointer was missing, the exact
         failure mode PR #590 was supposed to close. Issue #594 /
         nexus-9e9a unifies the chain through
-        ``nexus.session.resolve_active_session_id`` and uses
+        ``nexus.session.resolve_session_id`` and uses
         ``"unknown"`` as the per-row last-resort sentinel, so the
         T1 chunk store and the tier-write audit log agree on
         attribution: rows under ``"unknown"`` are exactly the rows
@@ -836,7 +837,7 @@ class TestT1DatabaseSessionIdResolution:
         """
         kwargs, _ = _setup_path(path_id, tmp_path, monkeypatch, fake_chromadb)
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
-        # No current_session file written.
+        # No token-file session: the conftest autouse fixture stubs that tier.
 
         from nexus.db.t1 import T1Database
         db = T1Database(**kwargs)

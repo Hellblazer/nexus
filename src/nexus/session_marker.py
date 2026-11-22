@@ -12,8 +12,8 @@ via ``_write_tuple_watch_session_marker``) -- so they did not leave with the
 watcher loop when it was deleted.
 
 **Why here, not ``nexus.session`` or ``nexus.db.t1``:** ``nexus.session``
-already owns CLI/session-id identity (``resolve_active_session_id``,
-``find_immediate_claude_pid``, the ``current_session`` flat file), but has
+already owns CLI/session-id identity (``resolve_session_id``,
+``find_immediate_claude_pid``), but has
 no notion of a per-claude-pid watcher marker or an RDR-208 drain record --
 folding this in would conflate two unrelated "session" concepts and make
 that already-large module another thing the watcher-deletion bead has to

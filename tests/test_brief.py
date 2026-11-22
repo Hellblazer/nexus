@@ -354,7 +354,7 @@ def test_a_call_with_no_session_id_still_records_an_empty_one(tmp_path: Path, mo
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
     for var in ("NX_SESSION_ID", "CLAUDE_CODE_SESSION_ID"):
         monkeypatch.delenv(var, raising=False)
-    monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda arg=None: None)
+    monkeypatch.setattr("nexus.session.resolve_session_id", lambda arg=None: None)
     brief.render("caps")
     [line] = _usage_lines(tmp_path)
     assert line["session_id"] == ""

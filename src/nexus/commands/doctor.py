@@ -1696,11 +1696,11 @@ def _run_check_tier_discipline() -> None:
     Heuristic only — does NOT exit non-zero. Visibility, not
     enforcement.
     """
-    from nexus.session import resolve_active_session_id  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.session import resolve_session_id  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     # The order tier_writes rows are keyed by: NX_SESSION_ID, then
-    # CLAUDE_CODE_SESSION_ID, then the machine-wide file (nexus-d8yul).
-    session_id = resolve_active_session_id()
+    # CLAUDE_CODE_SESSION_ID, then the token file (nexus-d8yul).
+    session_id = resolve_session_id()
     if not session_id:
         click.echo("Tier-discipline check:")
         click.echo("  No current session resolvable (skip).")
@@ -4134,8 +4134,8 @@ def _run_check_t1() -> None:
 
     Four outcomes:
 
-    * **No session-id resolves.** Neither ``NX_SESSION_ID`` nor
-      ``~/.config/nexus/current_session`` is set. Informational, exit 0
+    * **No session-id resolves.** No session env and no identity token
+      file names one. Informational, exit 0
       (T1 is PG-only, nexus-4lkmz -- there is no in-process opt-out to
       fall back to).
     * **Session resolves, no lease file.** A bare ``nx`` shell legitimately
@@ -4159,19 +4159,20 @@ def _run_check_t1() -> None:
     )
     from nexus.session import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         _nexus_config_dir_at_import,
-        resolve_active_session_id,
+        resolve_session_id,
     )
 
-    session_id = resolve_active_session_id()
+    session_id = resolve_session_id()
 
     if not session_id:
         click.echo("[ ] T1: no session-id resolves for this process")
         click.echo(
             "    This is informational. ``nx scratch`` from this shell "
             "will fail-loud (T1 is PG-only; no in-process opt-out) unless "
-            "the SessionStart hook has written "
-            "~/.config/nexus/current_session, or the storage service is "
-            "reachable for a bare-CLI mint (`nx daemon service start`)."
+            "it runs inside a Claude session (CLAUDE_CODE_SESSION_ID, or "
+            "its identity's token file), NX_SESSION_ID names one, or the "
+            "storage service is reachable for a bare-CLI mint "
+            "(`nx daemon service start`)."
         )
         return
 

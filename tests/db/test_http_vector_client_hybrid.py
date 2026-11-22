@@ -53,7 +53,7 @@ def _patch_post(monkeypatch, response, captured):
 
 
 ROWS = [
-    {"id": "a", "content": "resolve_active_session_id", "distance": 0.31,
+    {"id": "a", "content": "resolve_session_id", "distance": 0.31,
      "collection": "code__nexus-1-1", "metadata": {}, "retention": "full"},
 ]
 
@@ -62,13 +62,13 @@ def test_posts_to_the_hybrid_route_and_returns_rows_verbatim(client, monkeypatch
     captured: list[dict] = []
     _patch_post(monkeypatch, ROWS, captured)
 
-    rows = client.hybrid_search("resolve_active_session_id",
+    rows = client.hybrid_search("resolve_session_id",
                                 ["code__nexus-1-1"], n_results=5, sensitivity="include")
 
     assert captured[0]["path"] == "/v1/vectors/hybrid-search"
     assert captured[0]["tenant"] == "t"
     assert captured[0]["body"] == {
-        "query": "resolve_active_session_id",
+        "query": "resolve_session_id",
         "collections": ["code__nexus-1-1"],
         "n_results": 5,
     }

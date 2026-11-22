@@ -34,13 +34,12 @@ def _no_ambient_session_id(monkeypatch: pytest.MonkeyPatch) -> None:
     tool call) and attempt real work against the developer's actual
     ``~/.config/nexus/`` -- exactly the ambient-state contamination the
     project's dev-session hygiene rules exist to prevent. Force
-    resolution to ``None`` for every test here, unless a test
-    explicitly overrides.
+    resolution to ``None`` for every test here (the conftest autouse
+    fixture stubs the token-file tier), unless a test explicitly
+    overrides.
     """
     monkeypatch.delenv("NX_SESSION_ID", raising=False)
     monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
-    import nexus.session
-    monkeypatch.setattr(nexus.session, "read_claude_session_id", lambda: None)
 
 
 def test_module_does_not_import_nexus_submodules_at_top_level() -> None:
@@ -524,7 +523,7 @@ def test_print_service_tier_summary_applies_data_token_override() -> None:
             return "self-minted-data-token"
 
     with (
-        patch("nexus.session.resolve_active_session_id", return_value="sess-123"),
+        patch("nexus.session.resolve_session_id", return_value="sess-123"),
         patch(
             "nexus.db.service_endpoint.resolve_service_endpoint",
             return_value=("http://127.0.0.1:9999", "static-service-token"),
@@ -559,7 +558,7 @@ def test_print_service_tier_summary_unconfigured_uses_static_token() -> None:
             return None
 
     with (
-        patch("nexus.session.resolve_active_session_id", return_value="sess-123"),
+        patch("nexus.session.resolve_session_id", return_value="sess-123"),
         patch(
             "nexus.db.service_endpoint.resolve_service_endpoint",
             return_value=("http://127.0.0.1:9999", "static-service-token"),
@@ -606,7 +605,7 @@ def test_print_service_tier_summary_exception_writes_no_stdout(
     structlog.reset_defaults()
 
     with (
-        patch("nexus.session.resolve_active_session_id", return_value="sess-abc"),
+        patch("nexus.session.resolve_session_id", return_value="sess-abc"),
         patch(
             "nexus.db.service_endpoint.resolve_service_endpoint",
             side_effect=RuntimeError("no endpoint"),

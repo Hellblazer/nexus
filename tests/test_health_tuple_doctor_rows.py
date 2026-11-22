@@ -1376,14 +1376,14 @@ def _write_status(config_dir: Path, session_id: str, **fields) -> None:
 
 class TestCheckTupleChannelDelivery:
     def test_no_active_session_is_not_applicable(self, monkeypatch) -> None:
-        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: None)
+        monkeypatch.setattr("nexus.session.resolve_session_id", lambda: None)
         r = h._check_tuple_channel_delivery()[0]
         assert r.ok is True
         assert "informational" in r.detail
         assert "no active session" in r.detail
 
     def test_no_status_record_is_not_applicable(self, monkeypatch, tmp_path: Path) -> None:
-        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setattr("nexus.session.resolve_session_id", lambda: "sess-1")
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         r = h._check_tuple_channel_delivery()[0]
         assert r.ok is True
@@ -1394,7 +1394,7 @@ class TestCheckTupleChannelDelivery:
         """RDR-213 deleted the proof gate: there is no "declared but
         unproven" state left -- an alive waiter with a fresh wake is
         simply OK."""
-        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setattr("nexus.session.resolve_session_id", lambda: "sess-1")
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         now = datetime.now(UTC).isoformat()
         _write_status(tmp_path, "sess-1", alive=True, last_wake=now, announced=2, pending=1)
@@ -1424,7 +1424,7 @@ class TestCheckTupleChannelDelivery:
         next prompt -- belongs to the MVV (nexus-gomuo.3 part 2), not a
         unit test: asserting "nothing is pushed" here would either
         re-introduce the gate RDR-213 deletes or pass vacuously."""
-        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setattr("nexus.session.resolve_session_id", lambda: "sess-1")
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         now = datetime.now(UTC).isoformat()
         _write_status(tmp_path, "sess-1", alive=True, last_wake=now, announced=0, pending=0)
@@ -1436,7 +1436,7 @@ class TestCheckTupleChannelDelivery:
         assert "pending=0" in r.detail
 
     def test_pending_oldest_age_stated_when_pending(self, monkeypatch, tmp_path: Path) -> None:
-        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setattr("nexus.session.resolve_session_id", lambda: "sess-1")
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         now = datetime.now(UTC).isoformat()
         _write_status(
@@ -1451,7 +1451,7 @@ class TestCheckTupleChannelDelivery:
     def test_zero_pending_never_states_an_age(self, monkeypatch, tmp_path: Path) -> None:
         """Mutation-check target: rendering an age when `pending` is 0
         (or `oldest_pending_age_s` is `None`) must fail this test."""
-        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setattr("nexus.session.resolve_session_id", lambda: "sess-1")
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         now = datetime.now(UTC).isoformat()
         _write_status(tmp_path, "sess-1", alive=True, last_wake=now, announced=3, pending=0)
@@ -1466,7 +1466,7 @@ class TestCheckTupleChannelDelivery:
         """nexus-w4l00 follow-on: the waiter is alive and ticking, but its
         sends time out on the initialized gate, so no push is delivered. That
         is a failure (not a warning, not OK) with a one-line remedy."""
-        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setattr("nexus.session.resolve_session_id", lambda: "sess-1")
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         now = datetime.now(UTC).isoformat()
         _write_status(
@@ -1481,7 +1481,7 @@ class TestCheckTupleChannelDelivery:
         assert "/mcp" in r.fix_suggestions[0]
 
     def test_gate_stalled_false_leaves_a_healthy_waiter_ok(self, monkeypatch, tmp_path: Path) -> None:
-        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setattr("nexus.session.resolve_session_id", lambda: "sess-1")
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         now = datetime.now(UTC).isoformat()
         _write_status(tmp_path, "sess-1", alive=True, last_wake=now, gate_stalled=False, gate_stalled_since=None)
@@ -1493,7 +1493,7 @@ class TestCheckTupleChannelDelivery:
         with its last wake frozen. Its age is the truer signal: the row must
         say the wake is stale (a warning), not 'running but the client never
         initialized'."""
-        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setattr("nexus.session.resolve_session_id", lambda: "sess-1")
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         old = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
         _write_status(
@@ -1508,7 +1508,7 @@ class TestCheckTupleChannelDelivery:
     def test_not_alive_is_warn(self, monkeypatch, tmp_path: Path) -> None:
         """Mutation-check target: dropping the `not alive` half of the
         WARN condition must fail this test."""
-        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setattr("nexus.session.resolve_session_id", lambda: "sess-1")
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         now = datetime.now(UTC).isoformat()
         _write_status(tmp_path, "sess-1", alive=False, last_wake=now)
@@ -1523,7 +1523,7 @@ class TestCheckTupleChannelDelivery:
         test seam so the comparison is pinned exactly rather than raced
         against wall-clock drift between writing the fixture and reading
         it back."""
-        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setattr("nexus.session.resolve_session_id", lambda: "sess-1")
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         fixed_now = datetime(2026, 1, 1, tzinfo=UTC)
         old = (fixed_now - timedelta(seconds=h._TUPLE_CHANNEL_DELIVERY_STALE_S)).isoformat()
@@ -1532,7 +1532,7 @@ class TestCheckTupleChannelDelivery:
         assert r.ok is True, r.detail
 
     def test_stale_wake_past_bound_is_warn(self, monkeypatch, tmp_path: Path) -> None:
-        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setattr("nexus.session.resolve_session_id", lambda: "sess-1")
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         fixed_now = datetime(2026, 1, 1, tzinfo=UTC)
         old = (fixed_now - timedelta(seconds=h._TUPLE_CHANNEL_DELIVERY_STALE_S + 1)).isoformat()
@@ -1547,7 +1547,7 @@ class TestCheckTupleChannelDelivery:
         `cancel()` teardown never wrote a fresh record) gets the generic
         `/mcp` restart suggestion -- restarting is the only lever when
         there is no more specific cause to name."""
-        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setattr("nexus.session.resolve_session_id", lambda: "sess-1")
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         now = datetime.now(UTC).isoformat()
         _write_status(tmp_path, "sess-1", alive=False, last_wake=now, stopped_reason=None)
@@ -1568,7 +1568,7 @@ class TestCheckTupleChannelDelivery:
         the old text named `nx daemon service install a current engine`,
         which is not a real command -- `nx daemon service install`
         registers the autostart unit and installs no engine at all."""
-        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setattr("nexus.session.resolve_session_id", lambda: "sess-1")
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         now = datetime.now(UTC).isoformat()
         _write_status(tmp_path, "sess-1", alive=False, last_wake=now, stopped_reason="no_announce_support")
@@ -1589,7 +1589,7 @@ class TestCheckTupleChannelDelivery:
         """nexus-6konb.15 (D1): the dev-checkout rebuild advice is shown
         ONLY when this process itself is a dev checkout -- an installed
         user has no `service/` tree to rebuild from."""
-        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setattr("nexus.session.resolve_session_id", lambda: "sess-1")
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         now = datetime.now(UTC).isoformat()
         _write_status(tmp_path, "sess-1", alive=False, last_wake=now, stopped_reason="no_announce_support")
@@ -1607,7 +1607,7 @@ class TestCheckTupleChannelDelivery:
         install, converge, or rebuild -- the managed deployment is
         conexus's to upgrade, never this box's, so none of the local-mode
         verbs belong in a cloud user's fix suggestions."""
-        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setattr("nexus.session.resolve_session_id", lambda: "sess-1")
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         now = datetime.now(UTC).isoformat()
         _write_status(tmp_path, "sess-1", alive=False, last_wake=now, stopped_reason="no_announce_support")
@@ -1627,7 +1627,7 @@ class TestCheckTupleChannelDelivery:
         `subscriber` (v0.1.128), the window between a client upgrade and
         a local engine's convergence. Named, with the live engine fix, and
         with the reassurance that mail still arrives."""
-        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setattr("nexus.session.resolve_session_id", lambda: "sess-1")
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         now = datetime.now(UTC).isoformat()
         _write_status(tmp_path, "sess-1", alive=False, last_wake=now, stopped_reason="no_subscriber_support")
@@ -1649,7 +1649,7 @@ class TestCheckTupleChannelDelivery:
         """Bead nexus-rxuiq: a live waiter only ever sees `superseded` when a
         newer waiter for the same session exists, i.e. two nx-mcp processes
         serve one session. The engine is fine; the duplicate is the cause."""
-        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setattr("nexus.session.resolve_session_id", lambda: "sess-1")
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         now = datetime.now(UTC).isoformat()
         _write_status(tmp_path, "sess-1", alive=False, last_wake=now, stopped_reason="superseded")
@@ -1663,7 +1663,7 @@ class TestCheckTupleChannelDelivery:
     ) -> None:
         """Same class as `no_announce_support` above, for an engine that
         predates `/wait` itself (a bare 404)."""
-        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: "sess-1")
+        monkeypatch.setattr("nexus.session.resolve_session_id", lambda: "sess-1")
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         now = datetime.now(UTC).isoformat()
         _write_status(tmp_path, "sess-1", alive=False, last_wake=now, stopped_reason="no_wait_support")

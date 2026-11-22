@@ -117,23 +117,25 @@ class TestDefaultSession:
         # Ensure no session resolvable.
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
         import nexus.commands.tier_status as ts_mod
-        monkeypatch.setattr(ts_mod, "resolve_active_session_id", lambda: None)
+        monkeypatch.setattr(ts_mod, "resolve_session_id", lambda: None)
 
         result = CliRunner().invoke(tier_status_cmd, [])
         assert result.exit_code == 1
         assert "No current session resolvable" in result.output
 
-    def test_default_session_prefers_claude_code_session_id_over_the_file(
+    def test_default_session_prefers_claude_code_session_id_over_the_token_file(
         self, monkeypatch, tmp_path,
     ):
-        """nexus-d8yul: the default session follows resolve_active_session_id."""
+        """nexus-d8yul: the default session follows resolve_session_id."""
         from nexus.commands.tier_status import _resolve_session
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        (tmp_path / "current_session").write_text("last-claude-session")
+        monkeypatch.setattr("nexus.session._token_file_session_id", lambda: "token-file-session")
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "this-claude-session")
         assert _resolve_session(None) == "this-claude-session"
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID")
+        assert _resolve_session(None) == "token-file-session"
 
 
 class TestExplicitFlags:
@@ -453,20 +455,19 @@ class TestServiceModeReadParity:
         assert "WARNING: zero tier writes" in result.output
         assert "nx tier-status --session sess-A" in result.output
 
-    def test_doctor_tier_discipline_resolves_claude_code_session_id_before_the_file(
+    def test_doctor_tier_discipline_resolves_claude_code_session_id_before_the_token_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """nexus-d8yul: tier_writes rows are keyed by resolve_active_session_id,
-        so the check must ask for the same session. Under concurrent Claude
-        windows the file holds another window's id; the old
-        NX_SESSION_ID-then-file chain queried that one."""
+        """nexus-d8yul: tier_writes rows are keyed by resolve_session_id, so
+        the check must ask for the same session: the env's id answers before
+        the token file's."""
         import click as _click
         from click.testing import CliRunner as _CR
 
         import nexus.commands.doctor as doc
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        (tmp_path / "current_session").write_text("other-window-in-file")
+        monkeypatch.setattr("nexus.session._token_file_session_id", lambda: "other-window-in-token-file")
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "this-windows-session")
         monkeypatch.setenv("NX_STORAGE_BACKEND", "service")

@@ -410,7 +410,7 @@ def test_lifespan_borrower_survives_the_owners_exit_and_owns_its_teardown(owner,
     teardown revokes the token underneath it, the next scratch call recovers,
     and the lifespan's own exit then revokes and clears. The pad is kept."""
     sid, owner_token, cfg = owner
-    monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: sid)
+    monkeypatch.setattr("nexus.session.resolve_session_id", lambda: sid)
     monkeypatch.delenv("NX_T1_SESSION", raising=False)
     monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
     seen: dict = {}
@@ -460,7 +460,7 @@ _MCP_PID = 4300
 
 def _resolve_as(monkeypatch, sid: str) -> None:
     """Make the lifespan see a process that inherited no token and resolves *sid*."""
-    monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: sid)
+    monkeypatch.setattr("nexus.session.resolve_session_id", lambda: sid)
     monkeypatch.delenv("NX_T1_SESSION", raising=False)
     monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
 

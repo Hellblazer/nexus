@@ -22,7 +22,7 @@ from nexus.mailbox_arm import mailbox_arm_instruction
 # spawn block: ``start_t1_server``, ``write_session_record_by_id``,
 # ``find_ancestor_session``, the session.lock acquisition, and the
 # watchdog spawn all moved to nx-mcp's MCPServer lifespan. The hook now
-# does sweep + UUID resolution + (optionally) current_session write.
+# does sweep + UUID resolution (no machine-wide session pointer since RDR-253 Phase 2).
 # These tests pin that minimal contract.
 
 
@@ -30,10 +30,7 @@ from nexus.mailbox_arm import mailbox_arm_instruction
 @patch("nexus.session.generate_session_id", return_value="test-uuid")
 def test_session_start_returns_session_id(_mock_sid, tmp_path: Path) -> None:
     """session_start returns the session ID line."""
-    with (
-        patch("nexus.session.write_claude_session_id"),
-    ):
-        output = session_start()
+    output = session_start()
 
     assert "test-uuid" in output
     assert "Nexus ready" in output
@@ -46,43 +43,20 @@ def test_session_start_returns_session_id(_mock_sid, tmp_path: Path) -> None:
 
 
 @pytest.mark.t2_tenant
-def test_session_start_does_not_overwrite_current_session_when_inherited(
+def test_session_start_writes_no_current_session_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Nested subprocess (NX_SESSION_ID set in env) must NOT stomp the
-    parent's ``current_session`` flat file. Without this guard, every
-    operator ``claude -p`` call would overwrite the parent's UUID with
-    its own transient one, and the parent's shell-side ``nx scratch``
-    would fall back to EphemeralClient for the rest of the conversation.
-    """
+    """Neither a top-level nor a nested (NX_SESSION_ID inherited) session
+    writes the machine-wide ``current_session`` file: RDR-253 Phase 2 retired
+    it, and a process finds its session in its env or its token file."""
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("NX_SESSION_ID", raising=False)
+    session_start(claude_session_id="top-level-uuid")
     monkeypatch.setenv("NX_SESSION_ID", "parent-uuid-keep-me")
-    mock_write = MagicMock()
-
-    with (
-        patch("nexus.session.write_claude_session_id", mock_write),
-    ):
-        output = session_start(claude_session_id="my-own-transient-uuid")
+    output = session_start(claude_session_id="my-own-transient-uuid")
 
     assert "parent-uuid-keep-me" in output
-    mock_write.assert_not_called()
-
-
-@pytest.mark.t2_tenant
-def test_session_start_writes_current_session_when_top_level(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Top-level Claude session (no NX_SESSION_ID inherited) writes
-    ``current_session``, populating the cross-tree pointer that shell
-    tools and subagents rely on."""
-    monkeypatch.delenv("NX_SESSION_ID", raising=False)
-    mock_write = MagicMock()
-
-    with (
-        patch("nexus.session.write_claude_session_id", mock_write),
-    ):
-        session_start(claude_session_id="top-level-uuid")
-
-    mock_write.assert_called_once_with("top-level-uuid")
+    assert not (tmp_path / "current_session").exists()
 
 
 @pytest.mark.t2_tenant
@@ -91,10 +65,7 @@ def test_session_start_uses_inherited_session_id(tmp_path: Path, monkeypatch) ->
     rather than generating a new UUID or honouring the stdin payload.
     Subagents inherit the parent's ID this way."""
     monkeypatch.setenv("NX_SESSION_ID", "inherited-uuid")
-    with (
-        patch("nexus.session.write_claude_session_id"),
-    ):
-        output = session_start(claude_session_id="ignored-stdin-uuid")
+    output = session_start(claude_session_id="ignored-stdin-uuid")
     assert "inherited-uuid" in output
     assert "ignored-stdin-uuid" not in output
 
@@ -106,7 +77,6 @@ def test_session_start_falls_back_to_generated_uuid(tmp_path, monkeypatch) -> No
     from a script) still produce a usable session pointer."""
     monkeypatch.delenv("NX_SESSION_ID", raising=False)
     with (
-        patch("nexus.session.write_claude_session_id"),
         patch("nexus.session.generate_session_id", return_value="fresh-uuid"),
     ):
         output = session_start()
@@ -134,7 +104,6 @@ class TestT1HandoffMarkerWriter:
         # process table holds a stale nx-mcp host (another session's, on a
         # shared box), which failed the no-marker tests on chas (nexus-ys8a4).
         with (
-            patch("nexus.session.write_claude_session_id"),
             patch("nexus.upgrade_finish.detect_stale_processes", return_value=_FakeSkewReport(stale=[])),
             patch("nexus.session.find_immediate_claude_pid", return_value=claude_pid),
             patch("nexus.session.find_mcp_sibling_pids", return_value=list(sibling_pids)) as mock_siblings,
@@ -209,7 +178,6 @@ class TestT1HandoffMarkerWriter:
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
         with (
-            patch("nexus.session.write_claude_session_id"),
             patch("nexus.session.find_immediate_claude_pid", return_value=0),
             patch("nexus.session.find_mcp_sibling_pids") as mock_siblings,
         ):
@@ -247,7 +215,6 @@ class TestT1HandoffMarkerWriter:
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
         with (
-            patch("nexus.session.write_claude_session_id"),
             patch("nexus.session.find_immediate_claude_pid", side_effect=RuntimeError("boom")),
         ):
             output = session_start(claude_session_id="new-sess-id", source="clear")
@@ -270,7 +237,6 @@ class TestTupleWatchSessionMarkerWriter:
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
         with (
-            patch("nexus.session.write_claude_session_id"),
             patch("nexus.session.find_immediate_claude_pid", return_value=claude_pid),
             patch("nexus.session.find_mcp_sibling_pids", return_value=[]),
         ):
@@ -293,7 +259,7 @@ class TestTupleWatchSessionMarkerWriter:
         assert marker.read_text(encoding="utf-8").strip() == "new-sess-id"
 
     @pytest.mark.parametrize("source", ["startup", "compact", None])
-    def test_every_source_writes_the_current_session(
+    def test_every_source_writes_the_session_marker(
         self, tmp_path, monkeypatch, source,
     ) -> None:
         """A marker left by a DEAD process that owned this pid must be
@@ -322,7 +288,6 @@ class TestTupleWatchSessionMarkerWriter:
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
         with (
-            patch("nexus.session.write_claude_session_id"),
             patch("nexus.session.find_immediate_claude_pid", side_effect=RuntimeError("boom")),
         ):
             output = session_start(claude_session_id="new-sess-id", source="clear")
@@ -340,7 +305,6 @@ class TestClearRecordsThePreviousSession:
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
         with (
-            patch("nexus.session.write_claude_session_id"),
             patch("nexus.session.find_immediate_claude_pid", return_value=claude_pid),
             patch("nexus.session.find_mcp_sibling_pids", return_value=[]),
         ):
@@ -403,7 +367,6 @@ class TestClearRecordsThePreviousSession:
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
         with (
-            patch("nexus.session.write_claude_session_id"),
             patch("nexus.session.find_immediate_claude_pid", return_value=4242),
             patch("nexus.session.find_mcp_sibling_pids", return_value=[]),
         ):
@@ -421,7 +384,6 @@ class TestClearRecordsThePreviousSession:
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.setenv("NX_SESSION_ID", "inherited-sess-id")
         with (
-            patch("nexus.session.write_claude_session_id"),
             patch("nexus.session.find_immediate_claude_pid", return_value=4242),
             patch("nexus.session.find_mcp_sibling_pids", return_value=[]),
         ):
@@ -438,7 +400,6 @@ class TestClearRecordsThePreviousSession:
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
         with (
-            patch("nexus.session.write_claude_session_id"),
             patch("nexus.session.find_immediate_claude_pid", return_value=4242),
             patch("nexus.session.find_mcp_sibling_pids", return_value=[]),
             patch(
@@ -572,8 +533,7 @@ def test_session_start_carries_no_migration_notice(monkeypatch):
     stranded-install detector at CLI/MCP startup instead."""
     from unittest.mock import patch as _patch
 
-    with _patch("nexus.session.write_claude_session_id"):
-        output = session_start(claude_session_id="s-0rwwv")
+    output = session_start(claude_session_id="s-0rwwv")
     assert "Nexus ready" in output
     assert "storage migration" not in output
     assert "guided-upgrade" not in output
@@ -617,7 +577,6 @@ class TestStaleMcpHostSessionStartNudge:
         from unittest.mock import patch as _patch
 
         with (
-            _patch("nexus.session.write_claude_session_id"),
             _patch(
                 "nexus.upgrade_finish.detect_stale_processes",
                 return_value=_FakeSkewReport(stale=[]),
@@ -635,7 +594,6 @@ class TestStaleMcpHostSessionStartNudge:
         from unittest.mock import patch as _patch
 
         with (
-            _patch("nexus.session.write_claude_session_id"),
             _patch(
                 "nexus.upgrade_finish.detect_stale_processes",
                 return_value=_FakeSkewReport(stale=[_FakeStaleProcess("aspect-worker")]),
@@ -651,7 +609,6 @@ class TestStaleMcpHostSessionStartNudge:
         from unittest.mock import patch as _patch
 
         with (
-            _patch("nexus.session.write_claude_session_id"),
             _patch(
                 "nexus.upgrade_finish.detect_stale_processes",
                 return_value=_FakeSkewReport(
@@ -671,7 +628,6 @@ class TestStaleMcpHostSessionStartNudge:
         from unittest.mock import patch as _patch
 
         with (
-            _patch("nexus.session.write_claude_session_id"),
             _patch(
                 "nexus.upgrade_finish.detect_stale_processes",
                 return_value=_FakeSkewReport(
@@ -701,7 +657,6 @@ class TestStaleMcpHostSessionStartNudge:
             raise RuntimeError("ps unavailable")
 
         with (
-            _patch("nexus.session.write_claude_session_id"),
             _patch("nexus.upgrade_finish.detect_stale_processes", side_effect=boom),
         ):
             output = session_start(claude_session_id="s-otnvr-probe-fail")
@@ -720,7 +675,6 @@ class TestStaleMcpHostSessionStartNudge:
             raise RuntimeError("ps unavailable")
 
         with (
-            _patch("nexus.session.write_claude_session_id"),
             _patch(
                 "nexus.upgrade_finish.detect_stale_processes",
                 return_value=_FakeSkewReport(stale=[_FakeStaleProcess("mcp-host", pid=111)]),
@@ -747,7 +701,6 @@ class TestGuidanceImperativeIntegration:
         from unittest.mock import patch as _patch
 
         with (
-            _patch("nexus.session.write_claude_session_id"),
             _patch(
                 "nexus.session_start_guidance.guidance_block",
                 return_value="GUIDANCE-MARKER-TEXT",
@@ -761,7 +714,6 @@ class TestGuidanceImperativeIntegration:
         from unittest.mock import patch as _patch
 
         with (
-            _patch("nexus.session.write_claude_session_id"),
             _patch("nexus.session_start_guidance.guidance_block", return_value=""),
         ):
             output = session_start(claude_session_id="s-h33x8-4-suppressed")
@@ -775,7 +727,6 @@ class TestGuidanceImperativeIntegration:
             raise RuntimeError("guidance module import failed")
 
         with (
-            _patch("nexus.session.write_claude_session_id"),
             _patch("nexus.session_start_guidance.guidance_block", side_effect=boom),
         ):
             output = session_start(claude_session_id="s-h33x8-4-boom")
@@ -790,8 +741,7 @@ class TestGuidanceImperativeIntegration:
         from nexus.session_start_guidance import GUIDANCE_IMPERATIVE
 
         monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
-        with _patch("nexus.session.write_claude_session_id"):
-            output = session_start(claude_session_id="s-h33x8-4-e2e")
+        output = session_start(claude_session_id="s-h33x8-4-e2e")
         assert "Nexus ready" in output
         assert GUIDANCE_IMPERATIVE in output
 
@@ -852,9 +802,9 @@ class TestGuidanceByteBudgetIntegration:
     ) -> None:
         """nexus-cnzei.2 item 8: measures the pure, side-effect-free
         :func:`render_session_start` directly. No need to mock
-        ``write_claude_session_id`` any more, since the render never calls
-        it (only ``session_start()``'s write-performing wrapper does, and
-        that wrapper is not under test here)."""
+        anything any more, since the render performs no writes (only
+        ``session_start()``'s write-performing wrapper does, and that
+        wrapper is not under test here)."""
         monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
         with (
             patch(
@@ -966,13 +916,13 @@ class TestRenderSessionStartIsPure:
     def test_session_start_still_performs_the_writes_render_does_not(
         self, tmp_path, monkeypatch
     ) -> None:
-        """The wrapper is not neutered by the split: it still calls
-        ``write_claude_session_id`` exactly as before."""
-        mock_write = MagicMock()
+        """The wrapper is not neutered by the split: it still binds the
+        session to its identity, which the pure render never does."""
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
-        with patch("nexus.session.write_claude_session_id", mock_write):
+        with patch("nexus.hooks._bind_identity") as bind:
             session_start(claude_session_id="wrapper-still-writes")
-        mock_write.assert_called_once_with("wrapper-still-writes")
+        bind.assert_called_once()
+        assert bind.call_args.args[0] == "wrapper-still-writes"
 
 
 # ── nexus-6konb.9 (MM-3.1), superseded by RDR-211 nexus-rplay.14: ───────────
@@ -998,7 +948,6 @@ class TestMailboxArmIntegration:
         from unittest.mock import patch as _patch
 
         with (
-            _patch("nexus.session.write_claude_session_id"),
             _patch(
                 "nexus.mailbox_arm.arm_block", return_value="MAILBOX-ARM-MARKER-TEXT",
             ),
@@ -1011,7 +960,6 @@ class TestMailboxArmIntegration:
         from unittest.mock import patch as _patch
 
         with (
-            _patch("nexus.session.write_claude_session_id"),
             _patch("nexus.mailbox_arm.arm_block", return_value=""),
         ):
             output = session_start(claude_session_id="s-6konb9-absent")
@@ -1025,7 +973,6 @@ class TestMailboxArmIntegration:
             raise RuntimeError("mailbox_arm blew up")
 
         with (
-            _patch("nexus.session.write_claude_session_id"),
             _patch("nexus.mailbox_arm.arm_block", side_effect=boom),
         ):
             output = session_start(claude_session_id="s-6konb9-boom")
@@ -1044,7 +991,6 @@ class TestMailboxArmIntegration:
         from unittest.mock import patch as _patch
 
         with (
-            _patch("nexus.session.write_claude_session_id"),
             _patch(
                 "nexus.mailbox_arm.arm_block", return_value="MAILBOX-ARM-MARKER-TEXT",
             ),
@@ -1072,7 +1018,6 @@ class TestMailboxArmIntegration:
         registry.write_text("nexus-registered-instance\n", encoding="utf-8")
 
         with (
-            _patch("nexus.session.write_claude_session_id"),
             _patch("nexus.config.nexus_config_dir", return_value=tmp_path),
             _patch("nexus.mailbox_arm.tuple_surface_available", return_value=True),
         ):
@@ -1089,7 +1034,6 @@ class TestMailboxArmIntegration:
         from unittest.mock import patch as _patch
 
         with (
-            _patch("nexus.session.write_claude_session_id"),
             _patch("nexus.config.nexus_config_dir", return_value=tmp_path),
             _patch("nexus.mailbox_arm.tuple_surface_available", return_value=True),
         ):
@@ -1106,7 +1050,6 @@ class TestMailboxArmIntegration:
         from unittest.mock import patch as _patch
 
         with (
-            _patch("nexus.session.write_claude_session_id"),
             _patch("nexus.config.nexus_config_dir", return_value=tmp_path),
             _patch("nexus.mailbox_arm._probe_tuple_surface", return_value=False),
         ):
@@ -1135,8 +1078,7 @@ class TestMailboxArmIntegration:
             monkeypatch.delenv(var, raising=False)
 
         start = time.monotonic()
-        with _patch("nexus.session.write_claude_session_id"):
-            output = session_start(claude_session_id="s-6konb9-timing")
+        output = session_start(claude_session_id="s-6konb9-timing")
         elapsed = time.monotonic() - start
 
         assert "Nexus ready" in output

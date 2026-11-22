@@ -180,9 +180,9 @@ def _me(cwd: str) -> str:  # noqa: ARG001
 
 def _session_id() -> str:
     try:
-        from nexus.session import resolve_active_session_id  # noqa: PLC0415 — deferred: only a recorded call pays the import
+        from nexus.session import resolve_session_id  # noqa: PLC0415 — deferred: only a recorded call pays the import
 
-        return resolve_active_session_id() or ""
+        return resolve_session_id() or ""
     except Exception:  # noqa: BLE001 — usage accounting never costs a brief
         return ""
 

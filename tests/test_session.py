@@ -1,11 +1,10 @@
-"""Session-id generator and Claude-session flat-file behaviours.
+"""Session-id generator behaviours.
 
 The legacy getsid-keyed session-file scheme (``_stable_pid``,
 ``session_file_path``, ``write_session_file``, ``read_session_id``)
 was deleted as the RDR-105 P4 follow-up tracked by ``nexus-9nbk``.
-Current callers use ``read_claude_session_id`` /
-``write_claude_session_id`` against the flat
-``~/.config/nexus/current_session`` file.
+The machine-wide ``current_session`` file that followed it was retired in
+RDR-253 Phase 2 (``resolve_session_id``; tests/test_session_resolve_session_id.py).
 """
 import os
 import re

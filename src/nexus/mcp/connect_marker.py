@@ -17,7 +17,7 @@ NEVER published in every one of these cases, all of which still reach
   process**: this process never publishes one of its own; a signal keyed
   on THIS process's own publish would need the earlier one already there,
   in which case it is there anyway (not a new stall) -- see below.
-- **No resolvable session id**: `resolve_active_session_id()` returns
+- **No resolvable session id**: `resolve_session_id()` returns
   `None`; there is nothing to key a lease on.
 - **Deferred mint (nexus-brw1s)**: the storage service is unreachable
   (down, not yet started, cloud auth/network failure) at MCP boot. The

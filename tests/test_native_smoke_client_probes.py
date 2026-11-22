@@ -165,7 +165,7 @@ def test_native_smoke_script_opts_into_the_prod_write_guard() -> None:
 
 
 def test_native_smoke_t1_block_scrubs_ambient_session_identity() -> None:
-    """nexus-xihsm: get_t1_database() -> resolve_active_session_id() consults
+    """nexus-xihsm: get_t1_database() -> resolve_session_id() consults
     NX_SESSION_ID then CLAUDE_CODE_SESSION_ID before any file-based fallback
     (nexus-36q84). This script mints its OWN throwaway T1 session
     ("native-smoke-t1") a few lines above the T1 real-client block, but an

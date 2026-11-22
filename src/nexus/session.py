@@ -17,23 +17,17 @@ import structlog
 
 from nexus._install import winproc_core
 from nexus.bounded_subprocess import run_bounded
-from nexus._winsec import make_user_dir
 from nexus.util.nx_argv import argv_off_cwd
 
 _log = structlog.get_logger()
 
-# Flat file written by SessionStart hook with the Claude session ID.
-# Shared by all Bash subprocesses within one Claude Code conversation.
-# os.getsid(0) is NOT used: Claude Code spawns each Bash(...) call in its own
-# process session, making getsid different per invocation.
 def _nexus_config_dir_at_import() -> Path:
     """Resolve the Nexus config dir honouring ``NEXUS_CONFIG_DIR`` at import time.
 
     ``session.py`` holds module-level path constants that must be redirectable
     under sandbox / test isolation. Callers setting ``NEXUS_CONFIG_DIR`` in
     the shell before invoking ``nx`` see the constants resolved against the
-    sandbox. Tests that need to flip the dir mid-process still monkeypatch
-    the module attribute (``nexus.session.CLAUDE_SESSION_FILE``).
+    sandbox.
     """
     import os as _os  # noqa: PLC0415 - branch-local; deferred to call time
 
@@ -43,203 +37,65 @@ def _nexus_config_dir_at_import() -> Path:
     return Path.home() / ".config" / "nexus"
 
 
-#: Import-time snapshot kept for backward-compatibility with callers
-#: that import the constant directly. New code uses
-#: :func:`claude_session_file` (re-resolved per call so tests and
-#: subprocesses honour mid-process ``NEXUS_CONFIG_DIR`` flips). The
-#: read/write helpers below resolve the path per call so the constant
-#: is no longer load-bearing.
-CLAUDE_SESSION_FILE = _nexus_config_dir_at_import() / "current_session"
-
-
-def claude_session_file() -> Path:
-    """Return the path to ``current_session`` honouring the live
-    ``NEXUS_CONFIG_DIR`` env. Re-resolved per call so a subprocess
-    that inherits a different ``NEXUS_CONFIG_DIR`` (test isolation,
-    sandbox, sub-agent dispatch) sees its own config dir without
-    re-importing the module.
-    """
-    return _nexus_config_dir_at_import() / "current_session"
-
-
 def generate_session_id() -> str:
     """Return a new UUID4 session ID string."""
     return str(uuid4())
-
-
-def write_claude_session_id(session_id: str) -> None:
-    """Write the Claude session ID to the stable flat file (mode 0o600)."""
-    path = claude_session_file()
-    make_user_dir(path.parent)
-    fd = os.open(str(path), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
-    try:
-        os.write(fd, session_id.encode())
-    finally:
-        os.close(fd)
-
-
-def read_claude_session_id() -> str | None:
-    """Read the Claude session ID from the flat file, or None if not set."""
-    try:
-        text = claude_session_file().read_text(encoding="utf-8").strip()
-        return text or None
-    except OSError:
-        return None  # intentional: file not created yet, normal on first run
 
 
 #: Environment variables a process started by Claude Code carries, measured on
 #: live ``nx-mcp`` children of the Claude Code CLI (nexus-xs7fp): the CLI sets
 #: both on every subprocess it spawns, MCP servers included. A server started
 #: by another host (Cursor, Codex, Gemini, Claude Desktop chat) has neither.
-#: ``CLAUDE_CODE_SESSION_ID`` is not listed: it is tier 3 of the chain and
-#: answers before the flat file is asked.
+#: ``CLAUDE_CODE_SESSION_ID`` is not listed: :func:`resolve_session_id` reads it
+#: as a session id, not as a marker.
 _CLAUDE_CODE_ENV_MARKERS = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")
-
-#: True in a process that is an MCP server (``nx-mcp`` / ``nx-mcp-catalog``),
-#: set once from the server's ``main()`` by :func:`mark_mcp_server_process`.
-#: A process-wide fact, like ``sys.argv``: nothing in an MCP call carries it.
-_mcp_server_process: bool = False
-
-
-def mark_mcp_server_process() -> None:
-    """Record that this process is an MCP server (nexus-xs7fp).
-
-    From here :func:`resolve_active_session_id` consults the machine-wide
-    ``current_session`` file only when Claude Code started the process
-    (:func:`started_by_claude_code`). Called from each server's ``main()``;
-    the CLI, the hooks and ``claude -p`` children never call it.
-    """
-    global _mcp_server_process
-    _mcp_server_process = True
-
 
 def started_by_claude_code() -> bool:
     """True when the environment carries a Claude Code marker (non-blank)."""
     return any(os.environ.get(name, "").strip() for name in _CLAUDE_CODE_ENV_MARKERS)
 
 
-def resolve_active_session_id(arg: str | None = None) -> str | None:
-    """Single source of truth for the active Claude session_id.
+def _token_file_session_id() -> str | None:
+    """The session id this process's token file records (RDR-253): the file of its nearest Claude ancestor, or the one
+    a delegated child was given. Per process, never machine-wide, so a second top-level session cannot clobber it the
+    way it clobbered the retired ``current_session`` file. None with no Claude ancestor or no usable token."""
+    try:
+        from nexus.identity import token_header  # noqa: PLC0415 — deferred: leaf import cost, rare tier
 
-    Resolution chain (highest priority first):
-
-    1. Explicit ``arg`` (caller-supplied; non-empty after strip).
-    2. ``NX_SESSION_ID`` env var (non-empty after strip). Nexus's own
-       override — stays the highest env-based priority so nested
-       ``claude -p`` dispatch and tests that force a specific session id
-       are never shadowed by tier 3 below.
-    3. ``CLAUDE_CODE_SESSION_ID`` env var (non-empty after strip).
-       Claude Code sets this natively in every subprocess it spawns
-       (Bash tool calls, and Agent-tool-dispatched subagents inherit the
-       IDENTICAL value from their parent top-level session — verified
-       empirically). It is harness-provided per-process, not file-based,
-       so it does not suffer the flat-file's last-writer-wins clobbering
-       when a second top-level Claude Code session starts on the same
-       machine (nexus-36q84). Harness-provided means correct AT SPAWN:
-       a long-lived process (the MCP server) keeps its spawn-time env
-       across ``/clear``/``/resume`` — the process is NOT respawned,
-       proven from live logs (nexus-ggvi0, 2026-08-22, CC 2.1.238) — so
-       this tier can be STALE there, and the nexus-d76vc handoff layer,
-       not an env re-read, is what moves the MCP T1 scope. See
-       ``docs/architecture.md`` § T1's three scopes.
-    4. ``~/.config/nexus/current_session`` via ``read_claude_session_id``.
-       Machine-wide and unscoped — a second top-level Claude Code session
-       overwrites this file unconditionally on its own SessionStart
-       (``hooks.session_start()``). Now the last-resort fallback for
-       genuinely no-harness contexts (e.g. a bare shell invocation with
-       neither env var set). **Not consulted by an MCP server that Claude
-       Code did not start** (nexus-xs7fp): the file belongs to whichever
-       Claude session wrote it last, and a Cursor, Codex or Gemini host's
-       ``nx-mcp`` has no claim on that session's scratch, which may already
-       have ended. Such a server resolves nothing here, so its T1 scratch
-       is unavailable (the fail-loud branch of ``mcp.core._t1_lifespan``)
-       until the host names a session with ``NX_SESSION_ID``. "Started by
-       Claude Code" is the ``CLAUDECODE`` / ``CLAUDE_CODE_ENTRYPOINT``
-       environment (:func:`started_by_claude_code`); the gate applies only
-       to a process that called :func:`mark_mcp_server_process`, so a bare
-       ``nx`` in a terminal and the hooks keep the file. T2 attribution
-       resolves through this function and so inherits the gate (nexus-d8yul).
-       Operator dispatch still reads the raw file as its last tier, because
-       without an injected id a ``claude -p`` child's SessionStart hook would
-       overwrite it. That read is mostly a label for a child; when the
-       dispatch-level T1 mint fails, the forwarded ``NX_SESSION_ID`` lets
-       the child borrow that session's lease (nexus-ylof9).
-    5. ``None``.
-
-    Returns ``None`` when nothing in the chain resolves. Callers choose
-    their own fallback at the call site:
-
-    * ``T1Database._resolve_session_id`` and ``mcp/core._record_tier_write``
-      substitute ``"unknown"`` so the per-entry / per-row session_id is
-      never empty and the audit log and the T1 chunk store agree on
-      attribution. Pre-PR T1 fell back to ``uuid4()`` while tier-write
-      fell back to ``"unknown"`` -- the divergence that produced the
-      nexus-h8ge bug class even after PR #590 lifted the chain into
-      ``T1Database._resolve_session_id``: each open-coded copy could
-      drift independently.
-    * ``_session_end_launcher._print_tier_status_summary`` short-circuits
-      on ``None`` (no useful per-session summary without a bound session
-      -- querying ``WHERE session_id = "unknown"`` would leak rows from
-      unrelated invocations into the user-facing summary).
-
-    Issue #594 / nexus-9e9a: this helper is the structural fix for the
-    three-site drift class. Any future change to the chain happens here
-    once.
-
-    nexus-36q84: added the ``CLAUDE_CODE_SESSION_ID`` tier (3) between
-    ``NX_SESSION_ID`` and the flat file to close a machine-wide session
-    collision — see tier docs above.
-    """
-    if arg:
-        stripped = arg.strip()
-        if stripped:
-            return stripped
-    env = os.environ.get("NX_SESSION_ID", "").strip()
-    if env:
-        return env
-    claude_code_env = os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
-    if claude_code_env:
-        return claude_code_env
-    # nexus-xs7fp: no host-local id is minted in place of the file's. The
-    # locked nexus-4lkmz decision 2 (mcp/core.py, _t1_lifespan Branch 0) is
-    # "never a shared identity, never a silent private store": an
-    # unresolvable server fails loud ("T1 unavailable this process") and the
-    # host names a scope with NX_SESSION_ID. A host started from inside a
-    # Claude Code shell inherits CLAUDE_CODE_SESSION_ID and is answered by
-    # tier 3 above, before this line; this gate cannot close that case.
-    if _mcp_server_process and not started_by_claude_code():
+        record = token_header.current()
+    except Exception:  # noqa: BLE001 — a label lookup never fails its caller
         return None
-    file_id = read_claude_session_id()
-    if file_id:
-        return file_id
-    return None
+    sid = record.session_id if record is not None else None
+    return (sid.strip() or None) if isinstance(sid, str) else None
+
+
+def resolve_session_id(arg: str | None = None) -> str | None:
+    """The Claude session id this process acts for, or None.
+
+    In order: an explicit *arg*; ``NX_SESSION_ID`` (nexus's own override, which nested ``claude -p`` dispatch and tests
+    set); ``CLAUDE_CODE_SESSION_ID`` (Claude Code sets it in every process it spawns; correct at spawn, so a long-lived
+    MCP server keeps it across ``/clear`` and the T1 handoff layer moves its scope); then the session id in this
+    process's own token file (:func:`_token_file_session_id`). Blank values count as unset.
+
+    RDR-253 Phase 2 retired the fourth tier this used to have, the machine-wide ``~/.config/nexus/current_session``
+    file that the last SessionStart on the box wrote: it could name another session's scratch. With it went the gate
+    that kept an MCP server some other host started from reading it. A process with no Claude ancestor and no env
+    resolves nothing here, and callers keep their own fallback (``"unknown"`` for T1 metadata and tier-write rows; no
+    summary for the session-end launcher).
+    """
+    if arg and arg.strip():
+        return arg.strip()
+    return resolve_explicit_session_id() or _token_file_session_id()
 
 
 def resolve_explicit_session_id() -> str | None:
-    """Return the session id ONLY when the caller explicitly named one.
+    """The session id ONLY when the environment names one: ``NX_SESSION_ID`` or ``CLAUDE_CODE_SESSION_ID``.
 
-    "Explicit" means tiers 2-3 of :func:`resolve_active_session_id`'s chain
-    -- ``NX_SESSION_ID`` or ``CLAUDE_CODE_SESSION_ID`` env vars -- and
-    nothing else. Unlike :func:`resolve_active_session_id`, this does
-    **not** fall through to the machine-wide
-    ``~/.config/nexus/current_session`` file (tier 4): that file has
-    always meant "shared CLI identity, whoever last wrote it", never a
-    caller naming a specific session.
-
-    Why this distinction matters (nexus-f7xyq): a caller that sets
-    ``NX_SESSION_ID=<some-id>`` is asking for THAT session's scope,
-    specifically. If no usable T1 lease exists for it, silently
-    substituting the shared CLI-dedicated identity means the caller reads
-    or writes a DIFFERENT session's data while believing it addressed the
-    one it named -- a session-isolation violation this codebase already
-    treats as security-relevant on the MCP side (see
-    :func:`nexus.db.t1.publish_t1_session_lease` / ``read_t1_session_lease``'s
-    session-id-keyed lease and ``mcp/core.py``'s ``t1_session_unresolved``
-    branch). The bare
-    invocation with nothing set in env -- including when
-    ``current_session`` happens to resolve something -- is not making
-    that claim, so it is exempt and keeps the existing shared-identity
-    fallback (:func:`nexus.db.t1.get_t1_database`'s CLI-dedicated tier).
+    Unlike :func:`resolve_session_id` this never reads the token file. A caller that sets ``NX_SESSION_ID=<id>`` is
+    asking for THAT session's scope (nexus-f7xyq): when no usable T1 lease exists for it, substituting another
+    identity's scope would read or write a different session's data while the caller believes it addressed the one it
+    named, which the MCP side already treats as security-relevant (``mcp/core.py``'s ``t1_session_unresolved``). A bare
+    invocation makes no such claim and keeps :func:`nexus.db.t1.get_t1_database`'s CLI-dedicated tier.
 
     Returns ``None`` when neither env var is set (non-empty after strip).
     """
@@ -584,9 +440,8 @@ def _kill_orphan_tracker_pids(
 # same shell then shared one T1 server; the same conversation accessed from a
 # different shell could not find it. The UUID-keyed scheme fixes both: the
 # Claude session UUID arrives via the SessionStart hook payload, and child
-# processes inherit it through ``NX_SESSION_ID`` (race-free) with the legacy
-# ``current_session`` flat file as a fallback for tools launched outside the
-# Claude process tree.
+# processes inherit it through ``NX_SESSION_ID`` (race-free), and a process
+# with neither finds it in its own token file (RDR-253).
 
 _NX_SESSION_ID_ENV = "NX_SESSION_ID"
 

@@ -26,7 +26,7 @@ from nexus.db.t2 import T2Database
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 from nexus.session import (
-    resolve_active_session_id,
+    resolve_session_id,
 )
 
 _T = TypeVar("_T")
@@ -203,7 +203,7 @@ class T1Database:
     def _resolve_session_id(arg: str | None) -> str:
         """Resolve the session_id used as the per-entry metadata filter.
 
-        Delegates to :func:`nexus.session.resolve_active_session_id` and
+        Delegates to :func:`nexus.session.resolve_session_id` and
         substitutes ``"unknown"`` when the chain returns ``None``.
 
         The per-entry session_id is the metadata filter key on every
@@ -221,7 +221,7 @@ class T1Database:
         fallback so the three drift-prone sites
         (T1 / tier-write / launcher) have one source of truth.
         """
-        return resolve_active_session_id(arg) or "unknown"
+        return resolve_session_id(arg) or "unknown"
 
     def _init_new_discovery(self, session_id: str | None) -> None:
         """Single fail-loud constructor (RDR-155 P4b, retired further at
@@ -740,17 +740,17 @@ class T1Database:
 #      invocation. Safe (never collides) but gives zero cross-invocation
 #      continuity -- every ``nx scratch`` call was its own island.
 #   2. nx_plan_audit flagged this CRITICAL-adjacent and suggested deriving
-#      the session id from resolve_active_session_id() (the same chain the
+#      the session id from resolve_session_id() (the same chain the
 #      MCP server uses). Tested empirically and found ACTIVELY DANGEROUS:
-#      resolve_active_session_id() resolves to the SAME id a live MCP
+#      resolve_session_id() resolves to the SAME id a live MCP
 #      server for that Claude session has already minted a T1 token for.
 #      HttpTokenStore.start_session() is ON CONFLICT DO UPDATE -- it
-#      ROTATES. A bare CLI process deriving from resolve_active_session_id()
+#      ROTATES. A bare CLI process deriving from resolve_session_id()
 #      would rotate the live MCP's token out from under it.
 #   3. FINAL (this module): a CLI-DEDICATED, PERSISTED session id --
 #      generated once, cached to a local file, reused by every subsequent
-#      bare-CLI invocation. NEVER derived from resolve_active_session_id(),
-#      NX_SESSION_ID, or current_session -- a separate, purpose-built
+#      bare-CLI invocation. NEVER derived from resolve_session_id(),
+#      or NX_SESSION_ID -- a separate, purpose-built
 #      identity namespace exclusively for bare-CLI T1 access, so it can
 #      never collide with anything an MCP server would independently
 #      compute. Gives real continuity across separate ``nx scratch`` calls
@@ -765,7 +765,7 @@ class T1Database:
 
 #: Cache-file name for the CLI-dedicated T1 session id. Lives directly under
 #: ``nexus_config_dir()``, alongside the other per-install identity files
-#: (``current_session``, ``t1_addr.<session_id>``). This file is read/written
+#: (``t1_addr.<session_id>``). This file is read/written
 #: ONLY by the no-inherited-session branch of :func:`get_t1_database`; the
 #: inherited-live-MCP-session branch never touches it.
 _CLI_DEDICATED_SESSION_FILENAME = "t1_cli_dedicated_session"
@@ -827,7 +827,7 @@ def _cli_dedicated_session_id(config_dir: Path) -> str:
 # ["NX_T1_SESSION_ID"] mutation (mcp/core.py's _t1_lifespan Branch
 # 0). Before the CLI-dedicated-session work above, this was harmless: T1
 # defaulted to the Chroma-backed T1Database, whose session_id resolved via
-# resolve_active_session_id() -- the SAME on-disk chain any sibling process
+# resolve_session_id() -- the SAME on-disk chain any sibling process
 # (including the hook) could compute, so hook and MCP always agreed on the
 # session partition. Once T1 hard-defaults to SERVICE, a detached process
 # with no inherited env falls into the CLI-dedicated branch below --
@@ -841,7 +841,7 @@ def _cli_dedicated_session_id(config_dir: Path) -> str:
 # t1_addr.<session_id> Chroma-lease pattern) and removes it on teardown.
 # get_t1_database() checks for a live lease BEFORE falling into the
 # CLI-dedicated path -- never by re-deriving/re-minting via
-# resolve_active_session_id() (that chain resolves the SAME id a live MCP
+# resolve_session_id() (that chain resolves the SAME id a live MCP
 # already minted a token for; re-minting ROTATES it via
 # HttpTokenStore.start_session's ON CONFLICT DO UPDATE, the exact hazard
 # the CLI-dedicated design above was built to avoid). This mechanism only
@@ -1243,7 +1243,7 @@ class T1RoutingDecision:
       real id AND a FRESH published lease exists for it. ``session_token``
       is the leased token. Bind to it directly; never mint.
     * ``MINT`` -- no inherited env, no fresh lease. ``session_id`` is
-      whichever id :func:`nexus.session.resolve_active_session_id` resolved
+      whichever id :func:`nexus.session.resolve_session_id` resolved
       (``None`` if nothing resolved) -- callers decide independently what to
       mint for (a specific session id, a generic CLI-dedicated identity, or
       neither). ``session_token`` is always ``None`` for this action.
@@ -1349,7 +1349,7 @@ def resolve_t1_routing_tiers(config_dir: Path) -> T1RoutingDecision:
 
     # Deliberate function-local import, shadowing the module-level binding
     # above: mcp.core's Branch 0 (a caller of this function) has existing
-    # tests that monkeypatch `nexus.session.resolve_active_session_id`
+    # tests that monkeypatch `nexus.session.resolve_session_id`
     # directly (Python attribute patching, not a name-binding patch) --
     # only a fresh per-call `from nexus.session import ...` picks up that
     # patch; a name bound once at THIS module's own import time would not.
@@ -1361,15 +1361,15 @@ def resolve_t1_routing_tiers(config_dir: Path) -> T1RoutingDecision:
     # at the `nexus.db.t1` level specifically (not `nexus.session`) targets
     # THAT call site, not this one -- see tests/test_session_resolver.py
     # (the dual monkeypatch.setattr on both `nexus.session.
-    # resolve_active_session_id` and `nexus.db.t1.resolve_active_session_id`
+    # resolve_session_id` and `nexus.db.t1.resolve_session_id`
     # documents exactly this pre-existing two-import-styles gotcha). Each
     # call site's import style matches which test-patching convention its
     # own callers rely on; this function follows the SAME local-import
     # convention the pre-refactor tier-2 code already used at this exact
     # call site, unchanged by this extraction.
-    from nexus.session import resolve_active_session_id  # noqa: PLC0415 — deliberate: must re-resolve per call for test-patch visibility, see comment above
+    from nexus.session import resolve_session_id  # noqa: PLC0415 — deliberate: must re-resolve per call for test-patch visibility, see comment above
 
-    candidate_id = resolve_active_session_id()
+    candidate_id = resolve_session_id()
     if candidate_id and candidate_id != "unknown":
         leased_token = read_t1_session_lease(candidate_id, config_dir)
         if leased_token:
@@ -1764,7 +1764,7 @@ def get_t1_database(
         - Inherited live MCP session (``NX_T1_SESSION`` / ``NX_T1_SESSION_ID``
           set in env) → :class:`~nexus.db.http_scratch_store.HttpScratchStore`
           directly, unchanged from before.
-        - No inherited session, but ``resolve_active_session_id()`` resolves
+        - No inherited session, but ``resolve_session_id()`` resolves
           a real id AND that live MCP session published a lease (nexus-c8yvj:
           :mod:`nexus.mcp.core`'s ``_t1_lifespan`` Branch 0 writes one
           right after its own mint) → :class:`~nexus.db.http_scratch_store.HttpScratchStore`
@@ -1790,8 +1790,8 @@ def get_t1_database(
           its own call -- the escape hatch is for marker reads/writes,
           never for ``session_end_flush``'s scope-``clear()``).
         - No inherited session, no lease, and no explicit session id (the
-          genuinely-bare case -- including when a session id happens to
-          resolve only via the machine-wide ``current_session`` file) →
+          genuinely-bare case -- including when a session id resolves only
+          through the token file) →
           mints a CLI-dedicated, persisted session id (see
           :func:`_cli_dedicated_session_id`) and returns a
           :class:`_CliDedicatedScratchStore` (self-healing wrapper).
@@ -1861,9 +1861,9 @@ def get_t1_database(
     # to the named session and never erroring -- a session-isolation
     # violation this module's own comments (nexus-c8yvj, above) already
     # treat as security-relevant on the MCP side. The genuinely-bare case
-    # (neither env var set -- including when a session id happens to
-    # resolve via the machine-wide current_session file, tier 4 of
-    # resolve_active_session_id's chain) is UNCHANGED: it is not making an
+    # (neither env var set -- including when a session id resolves through
+    # the token file, the last tier of resolve_session_id's chain) is
+    # UNCHANGED: it is not making an
     # explicit-session claim, so it keeps falling through to the shared
     # CLI-dedicated identity below exactly as before.
     from nexus.session import resolve_explicit_session_id  # noqa: PLC0415 — deliberate: mirrors resolve_t1_routing_tiers's own per-call re-import for test-patch visibility, see that function's comment
@@ -1915,7 +1915,7 @@ def get_t1_database(
     # racing sibling bare-CLI invocation. Deliberately IGNORES
     # decision.session_id here -- the CLI-dedicated identity is a
     # separate, generic, shared-across-bare-invocations identity, never
-    # tied to whatever (if anything) resolve_active_session_id() found;
+    # tied to whatever (if anything) resolve_session_id() found;
     # see resolve_t1_routing_tiers's docstring for why tier 3 stays
     # caller-specific rather than unified too. (The explicit-session-id
     # case above has already been carved out and fails loud instead of

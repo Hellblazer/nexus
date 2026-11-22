@@ -97,8 +97,8 @@ def _real_guidance_emitter_output() -> str:
     """The REAL ``nx hook session-start`` emitter output, via the
     side-effect-free :func:`nexus.hooks.render_session_start`
     (nexus-cnzei.2 item 8: no writer to mock any more, the render never
-    calls ``write_claude_session_id`` or any marker/lease writer, so this
-    no longer needs to patch it). Stale-process probe mocked, matching
+    calls any session, marker or lease writer, so this
+    no longer needs to patch one). Stale-process probe mocked, matching
     ``TestGuidanceByteBudgetIntegration`` in tests/test_hooks.py; the
     mailbox-arm text is supplied directly as the REAL rendered
     instruction (never ``""``) for the same reason

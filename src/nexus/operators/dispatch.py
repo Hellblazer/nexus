@@ -1228,31 +1228,19 @@ class CliBackend:
         # T1 (see ``_build_dispatch_env``'s ephemeral-mode docstring).
         #
         # NX_SESSION_ID=<parent-uuid> tells the subprocess's SessionStart hook
-        # that it is a NESTED session — its own conversation UUID arrives via
-        # the stdin payload, but it should preserve the parent's
-        # ``current_session`` flat-file pointer instead of stomping it. Without
-        # this, the subprocess's hook would write its own UUID into
-        # ``current_session``, the file would point at no on-disk record (skip-
-        # T1 wrote none), and the parent's shell-side ``nx scratch`` would fall
-        # back to EphemeralClient for the rest of the parent conversation.
+        # that it is a NESTED session: its own conversation UUID arrives via
+        # the stdin payload, and the parent's id is the one it labels with.
         # nexus-d8yul: the parent's UUID is the process's own NX_SESSION_ID, then
-        # CLAUDE_CODE_SESSION_ID (the real session; the flat file is whichever
-        # Claude session wrote it last, so concurrent windows would inject each
-        # other's id), then the file. The raw file read stays as the last tier on
-        # purpose and is NOT the gated ``resolve_active_session_id``: a non-Claude
-        # host that got ``None`` here would inject nothing, and the child's
-        # SessionStart hook would then overwrite ``current_session``. A
-        # long-lived Claude-spawned MCP server keeps its spawn-time
-        # CLAUDE_CODE_SESSION_ID across /clear and /resume (nexus-ggvi0), so after
-        # one the injected id is the pre-clear session, where the file was current;
-        # the child only labels with it, and _record_tier_write is stale the same
-        # way.
-        from nexus.session import read_claude_session_id  # noqa: PLC0415 - deferred to avoid circular import at module load
-        parent_session_id = (
-            os.environ.get("NX_SESSION_ID", "").strip()
-            or os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
-            or read_claude_session_id()
-        )
+        # CLAUDE_CODE_SESSION_ID, then the session in its own token file
+        # (:func:`nexus.session.resolve_session_id`; RDR-253 Phase 2 retired the
+        # machine-wide ``current_session`` file this used to fall back to, which
+        # could name another window's session). A long-lived Claude-spawned MCP
+        # server keeps its spawn-time CLAUDE_CODE_SESSION_ID across /clear and
+        # /resume (nexus-ggvi0), so after one the injected id is the pre-clear
+        # session; the child only labels with it, and _record_tier_write is stale
+        # the same way.
+        from nexus.session import resolve_session_id  # noqa: PLC0415 - deferred to avoid circular import at module load
+        parent_session_id = resolve_session_id()
         # RDR-243 Phase 3 (fix r1, critic C1): sensitivity governs nexus reads, not the filesystem, so a child
         # that keeps Read/Grep/Glob is told which source files it may not read. The catalog is listed only when
         # the grant names a file tool. A catalog that cannot be listed takes the three tools away by name: an

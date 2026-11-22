@@ -1719,14 +1719,10 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     # generation still does, and stale files from earlier ones stay on disk.
     # Never written by a unit test (the suite isolates the config dir).
     "mcp_connect_check_state.",
-    # SessionStart hook's session-id flat file -- the actual writer is
-    # `nexus.session.write_claude_session_id()` (call-time-resolved via
-    # `claude_session_file()`, not the retained-for-compat
-    # `CLAUDE_SESSION_FILE` import-time snapshot -- that snapshot has no
-    # live callers outside tests, grepped clean), invoked from
-    # `nexus.hooks:227` on every real SessionStart -- including this
-    # very orchestrating session's own hook. Machine-wide,
-    # last-writer-wins (RDR-105, "T1 has THREE scopes").
+    # The retired SessionStart session-id flat file (RDR-253 Phase 2 removed
+    # its writer and readers). A live session still on a client from before
+    # Phase 2 keeps writing it while this suite runs, so its change is not
+    # this suite's.
     "current_session",
     # T1 CLI-scope lease file format -- `nexus.db.t1._T1_SESSION_LEASE_
     # PREFIX = "t1_session_lease."` (t1.py:848), the CURRENT live lease
@@ -3043,16 +3039,14 @@ def _no_real_resume_pointer_store(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _mcp_server_process_flag_does_not_leak(monkeypatch):
-    """nexus-xs7fp: ``core.main()`` / ``catalog.main()`` call
-    ``session.mark_mcp_server_process()``, and a couple of tests run a
-    ``main()`` in-process. Left set, the flag would make every later test in
-    the worker lose the ``current_session`` fallback whenever the environment
-    carries no Claude Code marker (CI has none), and fail for a reason far from
-    its cause. monkeypatch restores the value after each test."""
+def _session_id_reads_no_real_token_file(monkeypatch):
+    """RDR-253 Phase 2: :func:`nexus.session.resolve_session_id`'s last tier reads this process's token file, and the
+    suite usually runs under a live Claude session, whose token file would name the real session. Every test sees no
+    token-file session; the tests of that tier patch ``nexus.identity.token_header.current`` and restore the real
+    ``_token_file_session_id`` themselves."""
     import nexus.session as session
 
-    monkeypatch.setattr(session, "_mcp_server_process", False)
+    monkeypatch.setattr(session, "_token_file_session_id", lambda: None)
 
 
 @pytest.fixture(autouse=True)
@@ -3449,18 +3443,17 @@ def _isolate_collection_registration_cache() -> None:
 def _isolate_claude_code_session_id(monkeypatch: pytest.MonkeyPatch) -> None:
     """Clear the ambient ``CLAUDE_CODE_SESSION_ID`` for every test.
 
-    nexus-36q84: :func:`nexus.session.resolve_active_session_id` gained a
-    new tier that reads ``CLAUDE_CODE_SESSION_ID`` (the harness-provided
-    per-process env var Claude Code sets natively) between ``NX_SESSION_ID``
-    and the ``current_session`` flat-file fallback. Because the unit suite
+    nexus-36q84: :func:`nexus.session.resolve_session_id` reads
+    ``CLAUDE_CODE_SESSION_ID`` (the harness-provided per-process env var
+    Claude Code sets natively) after ``NX_SESSION_ID``. Because the unit suite
     itself typically runs *inside* a live Claude Code session (via the Bash
     tool), the real conversation's ``CLAUDE_CODE_SESSION_ID`` is present in
     ``os.environ`` for every subprocess/test-process — exactly the ambient
     pollution class this fixture family exists to close (see
     ``_isolate_t1_sessions`` above). Without
-    this, any test exercising the flat-file or ``None`` fallback tiers of
-    ``resolve_active_session_id`` would silently resolve to the real
-    session id instead of the fixture/file value it asserts against.
+    this, any test exercising the token-file or ``None`` tiers of
+    ``resolve_session_id`` would silently resolve to the real session id
+    instead of the value it asserts against.
 
     Tests that want to exercise the new tier explicitly
     ``monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", ...)`` inside the test
@@ -4172,10 +4165,10 @@ def _isolate_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
     layout (``tmp_path/.config/nexus``) so per-test fixtures that
     set ``HOME=tmp_path`` and write into ``tmp_path/.config/nexus/``
     (e.g. ``test_scratch_cmd.fake_home``) land at the same path
-    ``read_claude_session_id`` resolves to via ``NEXUS_CONFIG_DIR``.
+    ``nexus_config_dir()`` resolves to via ``NEXUS_CONFIG_DIR``.
 
     The directory itself is *not* pre-created — write helpers
-    (``write_claude_session_id``, the T1 lease registry, etc.) all do
+    (the T1 lease registry, the CLI-dedicated session cache, etc.) all do
     ``parents=True, exist_ok=True`` themselves, and tests that
     explicitly call ``mkdir(parents=True)`` without ``exist_ok``
     on the same path would otherwise hit ``FileExistsError``.

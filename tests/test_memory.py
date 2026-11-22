@@ -198,7 +198,7 @@ def test_t2_uses_session_module_for_session_id(db: T2Database) -> None:
 
     nexus-aqbrk: this used to patch a module-local alias
     (``memory_store._read_session_id``) and assert its identity against
-    ``nexus.session.read_claude_session_id``. The fallback chain now has ONE
+    ``nexus.session.resolve_session_id``. The fallback chain now has ONE
     owner shared by both the SQLite and service stores
     (``nexus.db.t2._attribution.resolve_attribution``), so that alias no
     longer exists — and patching a name nothing calls is worse than not
@@ -212,7 +212,7 @@ def test_t2_uses_session_module_for_session_id(db: T2Database) -> None:
     object at import time, so patching the source module would NOT have
     propagated).
     """
-    with patch("nexus.session.read_claude_session_id", return_value="test-sid-xyz"):
+    with patch("nexus.session.resolve_session_id", return_value="test-sid-xyz"):
         row_id = db.put(project="p", title="t.md", content="x")
     assert db.get(id=row_id)["session"] == "test-sid-xyz"
 

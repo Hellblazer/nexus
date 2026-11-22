@@ -58,7 +58,6 @@ NON_CREDENTIAL: dict[tuple[str, str], int] = {
     ("src/nexus/commands/console.py", "_write_pid_file"): 1,
     ("src/nexus/commands/daemon.py", "_write_crashloop_atomic"): 1,
     # Session identifiers (a UUID names a scope; the session TOKEN lives in the lease the helper writes).
-    ("src/nexus/session.py", "write_claude_session_id"): 1,
     ("src/nexus/db/t1.py", "_cli_dedicated_session_id"): 2,
     # Handoff markers: a new session id, a pid and a timestamp.
     ("src/nexus/daemon/t1_handoff.py", "write_handoff_marker"): 1,

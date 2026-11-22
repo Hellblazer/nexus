@@ -47,19 +47,9 @@ def isolated_t2(
     monkeypatch.setattr(infra, "default_db_path", lambda: db)
     monkeypatch.delenv("NX_AGENT", raising=False)
     monkeypatch.delenv("NX_SESSION_ID", raising=False)
-    # Default: no claude session file present (prevents the real
-    # ``~/.config/nexus/current_session`` from leaking into the session
-    # resolution).
-    #
-    # nexus-aqbrk: patches the CANONICAL function, not the old
-    # ``memory_store._read_session_id`` alias. The fallback chain now has one
-    # owner shared by the SQLite and service stores
-    # (``nexus.db.t2._attribution.resolve_attribution``), which resolves the
-    # name at CALL time — so the alias is gone and patching it would have
-    # silently stopped intercepting anything, leaving these assertions to
-    # pass only by accident of the isolated config dir having no session file.
-    import nexus.session as _sess
-    monkeypatch.setattr(_sess, "read_claude_session_id", lambda: None)
+    # No session resolves by default: the env is cleared above and the conftest
+    # autouse fixture makes the token-file tier resolve nothing, so the real
+    # session never leaks into attribution.
     return db
 
 

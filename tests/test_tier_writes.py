@@ -85,8 +85,8 @@ class TestRecorder:
     def test_session_id_falls_back_when_env_unset(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """When NX_SESSION_ID is unset and read_claude_session_id returns
-        None, helper writes 'unknown' rather than failing or skipping."""
+        """When NX_SESSION_ID is unset and no token-file session resolves,
+        helper writes 'unknown' rather than failing or skipping."""
         import nexus.mcp_infra as infra
         from nexus.db.t2 import T2Database
         from nexus.mcp.core import _record_tier_write
@@ -94,9 +94,7 @@ class TestRecorder:
         db_path = tmp_path / "t.db"
         monkeypatch.setattr(infra, "t2_ctx", lambda: T2Database(db_path))
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
-        # Simulate no session file.
-        import nexus.session as ses
-        monkeypatch.setattr(ses, "read_claude_session_id", lambda: None)
+        # No token-file session: the conftest autouse fixture stubs that tier.
 
         spied: list[str] = []
         from nexus.db.t2.http_telemetry_store import HttpTelemetryStore

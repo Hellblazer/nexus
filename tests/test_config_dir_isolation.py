@@ -29,9 +29,9 @@ def sandbox_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # Reload modules that resolve their path constants at import time so
     # the new env var takes effect within the test scope.
     # nexus.db.t2.memory_store used to be reloaded here too (it imported
-    # ``read_claude_session_id`` from nexus.session by name); the SQLite
+    # the session reader from nexus.session by name); the SQLite
     # store was deleted in nexus-i711w Stage 2 sub-stage A3, and
-    # HttpMemoryStore resolves the session file at call time, so no
+    # HttpMemoryStore resolves the session at call time, so no
     # store reload is needed anymore.
     import nexus.session
     import nexus.context
@@ -73,8 +73,8 @@ class TestAutouseConfigDirIsolation:
     must redirect ``NEXUS_CONFIG_DIR`` to a tmp dir so child processes
     spawned by integration tests (``claude_dispatch -p``, plan-runner,
     nx_answer equivalence suite) inherit the redirect via
-    ``os.environ`` and write ``current_session`` /
-    ``t1_addr.<claude_pid>`` files under tmp instead of the user's
+    ``os.environ`` and write their config-dir files (``t1_addr.<claude_pid>``
+    and the like) under tmp instead of the user's
     real ``~/.config/nexus/``.
 
     These tests intentionally do NOT delenv ``NEXUS_CONFIG_DIR`` —
@@ -88,7 +88,7 @@ class TestAutouseConfigDirIsolation:
             "fixture in tests/conftest.py is missing or has been disabled. "
             "This is the guardrail that prevents integration-test "
             "subprocesses from rewriting the user's real "
-            "~/.config/nexus/current_session and t1_addr.<pid> files."
+            "~/.config/nexus/t1_addr.<pid> files."
         )
         real_config = Path.home() / ".config" / "nexus"
         assert Path(env_path) != real_config, (
@@ -133,36 +133,6 @@ class TestAutouseConfigDirIsolation:
             "os.environ inheritance."
         )
 
-    def test_user_real_config_untouched_by_leak_pattern(self, tmp_path):
-        """End-to-end: simulate the leak pattern (a child process
-        writing ``current_session``) and verify it lands under tmp,
-        not under the user's home."""
-        import subprocess
-        import sys
-
-        result = subprocess.run(
-            [
-                sys.executable, "-c",
-                "from nexus.session import write_claude_session_id; "
-                "write_claude_session_id('test-leak-uuid'); "
-                "from nexus.session import claude_session_file; "
-                "print(claude_session_file())",
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        written_path = Path(result.stdout.strip())
-        real_session_file = Path.home() / ".config" / "nexus" / "current_session"
-        assert written_path != real_session_file, (
-            f"Child wrote current_session to {written_path!r}, the "
-            "user's real session file. Integration-test isolation is "
-            "broken."
-        )
-        # Confirm the autouse tmp dir actually received the write.
-        assert written_path.exists()
-        assert written_path.read_text().strip() == "test-leak-uuid"
-
 
 class TestT2IsolatedUnderOverride:
     def test_default_db_path_redirects(self, sandbox_dir: Path):
@@ -196,13 +166,6 @@ class TestCatalogIsolatedUnderOverride:
         from nexus.commands.index import _registry_path
 
         assert _registry_path() == sandbox_dir / "repos.json"
-
-
-class TestSessionIsolatedUnderOverride:
-    def test_claude_session_file_redirects(self, sandbox_dir: Path):
-        from nexus.session import CLAUDE_SESSION_FILE
-
-        assert CLAUDE_SESSION_FILE == sandbox_dir / "current_session"
 
 
 class TestCheckpointAndBufferRedirects:

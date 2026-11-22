@@ -26,7 +26,7 @@ marker publish falls: on the causal path to serving, right after
 ``PROBE_START_DELAY`` elapses and before the transport starts accepting
 requests. ``session_id`` comes from ``CLAUDE_CODE_SESSION_ID``, which Claude
 Code sets in every subprocess it spawns (including this one) -- the exact
-env var ``nexus.session.resolve_active_session_id``'s tier 3 reads, and the
+env var ``nexus.session.resolve_session_id``'s second env tier reads, and the
 same value the SessionStart hook payload's own ``session_id`` field carries
 for this same session. A missing session id or config dir is a silent no-op
 (logged, never fatal): the probe still serves either way, since the point of

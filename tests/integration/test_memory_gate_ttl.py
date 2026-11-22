@@ -316,11 +316,10 @@ def test_ttl_a_field_that_does_not_read_back_is_named_with_the_original_row(
 
 def test_ttl_null_attribution_stays_null_where_a_put_would_fill_it(db: T2Database, monkeypatch: pytest.MonkeyPatch) -> None:
     """The control is real: NX_AGENT and a resolvable session are set, and a put under them writes both. Without that a
-    test process resolves neither (conftest drops CLAUDE_CODE_SESSION_ID, the config dir has no session file), a put
+    test process resolves neither (conftest drops CLAUDE_CODE_SESSION_ID, no token-file session), a put
     would also leave them null, and "stays null" would pass whether or not the write used put."""
     monkeypatch.setenv("NX_AGENT", "rollup-test-agent")
     monkeypatch.setenv("NX_SESSION_ID", "rollup-test-session")
-    monkeypatch.setattr(session_mod, "read_claude_session_id", lambda: None)
     db.memory.put(REPO, "null-attribution-control", "scratch", tags="notes", ttl=30)         # no agent, no session given
     control = _rows(db)["null-attribution-control"]
     assert (control["agent"], control["session"]) == ("rollup-test-agent", "rollup-test-session"), (

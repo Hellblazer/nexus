@@ -7,7 +7,7 @@ follow-up to Phase 1A's ``tier_writes`` telemetry table at nexus-kren).
 
 Reads the ``tier_writes`` T2 table populated by ``_record_tier_write``
 in ``src/nexus/mcp/core.py``. By default reports the current session
-(via ``resolve_active_session_id()``); other
+(via ``resolve_session_id()``); other
 modes select by id, last-N, or time window.
 """
 from __future__ import annotations
@@ -19,7 +19,7 @@ from pathlib import Path
 import click
 import structlog
 
-from nexus.session import resolve_active_session_id
+from nexus.session import resolve_session_id
 
 _log = structlog.get_logger(__name__)
 
@@ -41,8 +41,8 @@ def _resolve_session(session_arg: str | None) -> str | None:
     if session_arg:
         return session_arg
     # The same order T1 and T2 attribution use: NX_SESSION_ID, then
-    # CLAUDE_CODE_SESSION_ID, then the machine-wide file (nexus-d8yul).
-    return resolve_active_session_id()
+    # CLAUDE_CODE_SESSION_ID, then this process's token file (nexus-d8yul).
+    return resolve_session_id()
 
 
 def _resolve_target_session_or_exit(
@@ -69,7 +69,7 @@ def _resolve_target_session_or_exit(
             click.echo(
                 "No current session resolvable "
                 "(NX_SESSION_ID and CLAUDE_CODE_SESSION_ID env unset, "
-                "no claude session file). "
+                "and no identity token file names a session). "
                 "Use --session, --last, or --since.",
                 err=True,
             )
@@ -94,7 +94,7 @@ def _summarize(rows: list[tuple]) -> dict[str, int]:
     "--session", "session_arg", default=None,
     help=(
         "Specific session_id (default: current session via NX_SESSION_ID, "
-        "then CLAUDE_CODE_SESSION_ID, then the claude session file)."
+        "then CLAUDE_CODE_SESSION_ID, then the identity's token file)."
     ),
 )
 @click.option(

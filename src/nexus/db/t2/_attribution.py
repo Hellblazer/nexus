@@ -6,7 +6,7 @@
 falling back when the caller leaves them unset — ``agent``: "When empty,
 falls back to ``NX_AGENT`` env, then NULL"; ``session``: "falls back to the
 parent's session_id resolution chain (``NX_SESSION_ID`` env →
-``CLAUDE_CODE_SESSION_ID`` env → claude session file → NULL)". That is the
+``CLAUDE_CODE_SESSION_ID`` env → token file → NULL)". That is the
 whole point of RDR Phase 1B (nexus-9clx): before it, 1012 of 1012 production
 rows had both columns NULL, so ``nx tier-status`` could not slice T2 writes
 by which agent did the persisting.
@@ -43,18 +43,15 @@ def resolve_attribution(
     only ``None`` triggers a fallback, so a caller that deliberately passes a
     value is never overridden by ambient env.
 
-    ``session`` defers to :func:`nexus.session.resolve_active_session_id`,
+    ``session`` defers to :func:`nexus.session.resolve_session_id`,
     which owns the ``NX_SESSION_ID`` env → ``CLAUDE_CODE_SESSION_ID`` env →
-    claude-session-file → ``None`` order (nexus-d8yul). The flat file is the
-    last writer's, so a Claude process's own ``CLAUDE_CODE_SESSION_ID`` must
-    answer before it. Whatever that resolver declines to resolve (it may
-    refuse the file to a host with no claim on it) is not borrowed here: the
-    label is ``None``, stored as NULL.
+    token file → ``None`` order (nexus-d8yul). Whatever that resolver does not
+    resolve is not borrowed here: the label is ``None``, stored as NULL.
     """
-    from nexus.session import resolve_active_session_id  # noqa: PLC0415 — deferred to avoid circular import (session)
+    from nexus.session import resolve_session_id  # noqa: PLC0415 — deferred to avoid circular import (session)
 
     if agent is None:
         agent = os.environ.get("NX_AGENT")
     if session is None:
-        session = resolve_active_session_id()
+        session = resolve_session_id()
     return agent, session

@@ -432,11 +432,11 @@ class TestSubprocessContract:
         )
 
     @pytest.mark.asyncio
-    async def test_sets_nx_session_id_env_from_current_session(self) -> None:
-        """claude_dispatch must read the parent's UUID from current_session
-        and export it as NX_SESSION_ID for the subprocess. Without this, the
-        subprocess's SessionStart hook can't tell it's a nested call and
-        will stomp the parent's current_session pointer.
+    async def test_sets_nx_session_id_env_from_token_file(self) -> None:
+        """claude_dispatch must resolve the parent's UUID (here from the
+        process's token file, the last tier of resolve_session_id) and export
+        it as NX_SESSION_ID for the subprocess, so the child's SessionStart
+        hook knows it is a nested call.
         """
         from nexus.operators.dispatch import claude_dispatch
 
@@ -449,24 +449,22 @@ class TestSubprocessContract:
 
         with (
             patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept),
-            patch("nexus.session.read_claude_session_id", return_value="parent-uuid-from-flat-file"),
+            patch("nexus.session._token_file_session_id", return_value="parent-uuid-from-token-file"),
         ):
             await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 
         env = captured[0].get("env")
         assert env is not None
-        assert env.get("NX_SESSION_ID") == "parent-uuid-from-flat-file", (
+        assert env.get("NX_SESSION_ID") == "parent-uuid-from-token-file", (
             f"NX_SESSION_ID missing or wrong; got {env.get('NX_SESSION_ID')!r}"
         )
 
     @pytest.mark.asyncio
-    async def test_claude_code_session_id_beats_the_flat_file(
+    async def test_claude_code_session_id_beats_the_token_file(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """nexus-d8yul: the flat file is whichever Claude session wrote it
-        last. A parent that carries CLAUDE_CODE_SESSION_ID (its real session)
-        injects that into the child, not the file's value, so concurrent
-        Claude windows do not hand each other's id to their children."""
+        """nexus-d8yul: a parent that carries CLAUDE_CODE_SESSION_ID (its real
+        session) injects that into the child, not the token file's value."""
         from nexus.operators.dispatch import claude_dispatch
 
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
@@ -480,19 +478,19 @@ class TestSubprocessContract:
 
         with (
             patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept),
-            patch("nexus.session.read_claude_session_id", return_value="other-window-in-file"),
+            patch("nexus.session._token_file_session_id", return_value="other-window-in-token-file"),
         ):
             await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 
         assert captured[0]["env"].get("NX_SESSION_ID") == "parent-real-session"
 
     @pytest.mark.asyncio
-    async def test_nx_session_id_beats_claude_code_session_id_and_the_file(
+    async def test_nx_session_id_beats_claude_code_session_id_and_the_token_file(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """nexus-d8yul: NX_SESSION_ID is tier 2 and is never shadowed. With
-        all three sources present the child gets NX_SESSION_ID; swapping it
-        with CLAUDE_CODE_SESSION_ID (or the file) turns this red."""
+        """nexus-d8yul: NX_SESSION_ID is never shadowed. With all three sources
+        present the child gets NX_SESSION_ID; swapping it with
+        CLAUDE_CODE_SESSION_ID (or the token file) turns this red."""
         from nexus.operators.dispatch import claude_dispatch
 
         monkeypatch.setenv("NX_SESSION_ID", "forced-by-nx")
@@ -506,19 +504,18 @@ class TestSubprocessContract:
 
         with (
             patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept),
-            patch("nexus.session.read_claude_session_id", return_value="other-window-in-file"),
+            patch("nexus.session._token_file_session_id", return_value="other-window-in-token-file"),
         ):
             await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 
         assert captured[0]["env"].get("NX_SESSION_ID") == "forced-by-nx"
 
     @pytest.mark.asyncio
-    async def test_file_is_still_injected_when_no_session_env(
+    async def test_token_file_is_injected_when_no_session_env(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The raw file read is load-bearing (nexus-d8yul): with neither env
-        var, the file's id is still injected, so the child's SessionStart
-        hook sees a nested session and leaves ``current_session`` alone."""
+        """With neither env var, the token file's session id is still
+        injected, so the child's SessionStart hook sees a nested session."""
         from nexus.operators.dispatch import claude_dispatch
 
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
@@ -532,7 +529,7 @@ class TestSubprocessContract:
 
         with (
             patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept),
-            patch("nexus.session.read_claude_session_id", return_value="file-uuid"),
+            patch("nexus.session._token_file_session_id", return_value="file-uuid"),
         ):
             await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 
@@ -556,7 +553,7 @@ class TestSubprocessContract:
 
         with (
             patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept),
-            patch("nexus.session.read_claude_session_id", return_value=None),
+            patch("nexus.session._token_file_session_id", return_value=None),
         ):
             await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 

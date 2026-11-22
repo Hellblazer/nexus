@@ -319,7 +319,7 @@ def render_session_start(session_id: str, *, mailbox_arm_text: str = "") -> str:
     check watched for, and it stopped the live watcher on the next poll. Two
     sessions hit this same trap the same day.
 
-    This function performs NO writes: no ``current_session`` file, no T1
+    This function performs NO writes: no T1
     handoff marker, no tuple-watch session marker, no T1 lease. It calls
     only :func:`_stale_mcp_host_warning` (process-table reads via ``ps``)
     and :func:`_guidance_imperative_block` (reads ``hooks.json``), both
@@ -352,12 +352,12 @@ def render_session_start(session_id: str, *, mailbox_arm_text: str = "") -> str:
 def session_start(claude_session_id: str | None = None, source: str | None = None) -> str:
     """Execute the SessionStart hook.
 
-    Resolves the session UUID and persists it to ``current_session``
-    so cross-process tools (shell ``nx scratch``, doctor diagnostics,
-    SessionEnd flush) can look it up. Nested subprocesses (operator
-    ``claude -p`` calls, subagents) inherit ``NX_SESSION_ID`` from
-    their parent's env; their SessionStart must leave the parent's
-    pointer alone so the parent's shell-side tools stay in sync.
+    Resolves the session UUID and binds it to the session's identity.
+    Cross-process tools (shell ``nx scratch``, doctor diagnostics,
+    SessionEnd flush) find it in their env or the identity's token file
+    (:func:`nexus.session.resolve_session_id`). Nested subprocesses
+    (operator ``claude -p`` calls, subagents) inherit ``NX_SESSION_ID``
+    from their parent's env.
 
     Chroma lifecycle is owned by the MCP server's FastMCP lifespan
     (RDR-105 P4) and is no fixture of this hook. Multi-writer record
@@ -376,19 +376,16 @@ def session_start(claude_session_id: str | None = None, source: str | None = Non
     """
     # Resolve session_id with this precedence:
     #   1. ``NX_SESSION_ID`` env: nested subprocess that inherited the
-    #      parent's UUID. Leave ``current_session`` untouched.
+    #      parent's UUID.
     #   2. ``claude_session_id`` from stdin: top-level Claude session.
     #   3. Fresh UUID: fallback for invocations outside Claude Code.
+    # No machine-wide pointer is written (RDR-253 Phase 2 retired the
+    # ``current_session`` file): a process finds its session in its env or
+    # its own token file, which the binding below writes.
     inherited = os.environ.get("NX_SESSION_ID", "").strip() or None
-    from nexus.session import (  # noqa: PLC0415 — deferred; see the comment at module scope
-        generate_session_id,
-        write_claude_session_id,
-    )
+    from nexus.session import generate_session_id  # noqa: PLC0415 — deferred; see the comment at module scope
 
     session_id = inherited or claude_session_id or generate_session_id()
-
-    if not inherited:
-        write_claude_session_id(session_id)
 
     # RDR-253 Step 3: bind this session to its identity (the policy table) before the marker, which carries the result.
     identity = _bind_identity(session_id, source)
@@ -648,7 +645,7 @@ def session_end_flush() -> str:
     actually resolves: the detached SessionEnd grandchild never inherits
     ``NX_T1_SESSION`` from the MCP server's process env, so
     ``USE_INHERITED`` is effectively unreachable for a genuine top-level
-    session's own hook; ``resolve_active_session_id()`` virtually always
+    session's own hook; ``resolve_session_id()`` virtually always
     lands on ``CLAUDE_CODE_SESSION_ID`` (Claude Code sets it on every
     spawned subprocess), and the top-level MCP publishes a lease for its
     OWN session. So when this hook wins the pre-existing stdio-EOF race

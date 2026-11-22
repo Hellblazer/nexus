@@ -2895,9 +2895,9 @@ async def test_mcp_server_round_trip():
     for t1_var in ("NX_T1_SESSION", "NX_T1_SESSION_ID", "NX_T1_HOST", "NX_T1_PORT", "NX_T1_ISOLATED"):
         env.pop(t1_var, None)
     # With the inherited token gone the child takes the MINT branch, which
-    # needs a resolvable session id (NX_SESSION_ID — resolve_active_session_id's
-    # env tier; CLAUDE_CODE_SESSION_ID is not forwarded and the isolated config
-    # dir has no session file). A fresh uuid makes the child mint its own
+    # needs a resolvable session id (NX_SESSION_ID — resolve_session_id's
+    # env tier; CLAUDE_CODE_SESSION_ID is not forwarded and the isolated child
+    # has no token file). A fresh uuid makes the child mint its own
     # session against the endpoint pinned below — the same MINT code path a
     # real MCP spawn executes at session start (production usually resolves
     # the id via CLAUDE_CODE_SESSION_ID instead; the mint itself is identical).

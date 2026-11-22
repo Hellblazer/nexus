@@ -27,26 +27,21 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 # ── AC2: SessionStart — UUID4 session ID ──────────────────────────────────────
 
 @pytest.mark.t2_tenant
-def test_session_start_writes_session_file(runner: CliRunner, fake_home: Path) -> None:
-    """nx hook session-start calls write_claude_session_id with a UUID4 session ID."""
+def test_session_start_prints_uuid4_and_writes_no_session_file(
+    runner: CliRunner, fake_home: Path
+) -> None:
+    """nx hook session-start names a UUID4 session and writes no machine-wide
+    ``current_session`` file (RDR-253 Phase 2 retired it)."""
     import re
-    captured: dict[str, str] = {}
 
-    original_write = __import__("nexus.session", fromlist=["write_claude_session_id"]).write_claude_session_id
-
-    def _capture(session_id: str) -> None:
-        captured["session_id"] = session_id
-        original_write(session_id)
-
-    with patch("nexus.session.write_claude_session_id", side_effect=_capture):
-        result = runner.invoke(main, ["hook", "session-start"])
+    result = runner.invoke(main, ["hook", "session-start"])
 
     assert result.exit_code == 0, result.output
-    assert "session_id" in captured, "write_claude_session_id was not called"
-    assert re.match(
-        r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
-        captured["session_id"],
-    ), f"Not a UUID4: {captured['session_id']!r}"
+    assert re.search(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+        result.output,
+    ), f"No UUID4 session id in: {result.output!r}"
+    assert not list(fake_home.rglob("current_session"))
 
 
 @pytest.mark.t2_tenant
@@ -55,31 +50,6 @@ def test_session_start_prints_ready_message(runner: CliRunner, fake_home: Path) 
     result = runner.invoke(main, ["hook", "session-start"])
     assert "Nexus ready" in result.output
     assert "session" in result.output.lower()
-
-
-# ── Behavior 4: hook and CLI use the same getsid(0) anchor ───────────────────
-
-@pytest.mark.t2_tenant
-def test_hook_and_cli_use_same_getsid_anchor(
-    fake_home: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """session_start() passes a UUID4 to write_claude_session_id."""
-    import re
-    from nexus.hooks import session_start
-
-    written: dict[str, str] = {}
-
-    def _capture(session_id: str) -> None:
-        written["session_id"] = session_id
-
-    with patch("nexus.session.write_claude_session_id", side_effect=_capture):
-        session_start()
-
-    assert "session_id" in written
-    assert re.match(
-        r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
-        written["session_id"],
-    ), f"Recovered session ID is not a UUID4: {written['session_id']!r}"
 
 
 # ── AC3: SessionStart memory summary ─────────────────────────────────────────

@@ -38,14 +38,10 @@ def isolated_t2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(infra, "default_db_path", lambda: db)
     monkeypatch.delenv("NX_AGENT", raising=False)
     monkeypatch.delenv("NX_SESSION_ID", raising=False)
-    # nexus-aqbrk: patches the CANONICAL resolver. The old
-    # ``memory_store._read_session_id`` alias is gone — the agent/session
-    # fallback chain now has one owner shared by the SQLite and service
-    # stores (``nexus.db.t2._attribution.resolve_attribution``), which
-    # resolves the name at call time.
-    import nexus.session as _sess
-
-    monkeypatch.setattr(_sess, "read_claude_session_id", lambda: None)
+    # The session fallback chain has one owner
+    # (``nexus.db.t2._attribution.resolve_attribution`` ->
+    # ``nexus.session.resolve_session_id``); the conftest autouse fixture
+    # already makes its token-file tier resolve nothing.
     return db
 
 

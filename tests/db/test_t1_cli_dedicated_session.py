@@ -7,7 +7,7 @@ inherited live MCP session (``NX_T1_SESSION`` / ``NX_T1_SESSION_ID`` both
 unset) mints its OWN persisted, purpose-built session id — cached under
 ``nexus_config_dir()`` — and uses it to mint a T1 session token via
 ``HttpTokenStore.start_session``. This id is NEVER derived from
-``resolve_active_session_id()`` / ``NX_SESSION_ID`` / ``current_session``:
+``resolve_session_id()`` / ``NX_SESSION_ID`` / the token file:
 that chain resolves a LIVE Claude session's id, and a bare CLI re-minting
 against it would rotate the live MCP server's token out from under it
 (``HttpTokenStore.start_session`` is ``ON CONFLICT DO UPDATE``).
@@ -325,26 +325,24 @@ class TestDedicatedIdCacheFile:
         assert entry is not None
         assert entry["content"] == "shared across bare-CLI invocations"
 
-    def test_independent_of_resolve_active_session_id(
+    def test_independent_of_resolve_session_id(
         self, fake_service, config_dir, monkeypatch
     ) -> None:
-        """The dedicated id must NEVER equal current_session's resolved id
+        """The dedicated id must NEVER equal the token file's resolved id
         -- it is a separate, purpose-built identity namespace.
 
-        nexus-f7xyq: this exercises the genuinely-bare tier-4 (flat-file)
+        nexus-f7xyq: this exercises the genuinely-bare last tier (token file)
         case, NOT an explicit NX_SESSION_ID -- an explicit, unleased
         session id now fails loud instead of reaching the CLI-dedicated
         path at all (see TestExplicitVsBareFailLoudGate), so proving
         independence via NX_SESSION_ID would no longer exercise this
-        branch. The flat file is still the right vehicle for this
-        assertion: it resolves via resolve_active_session_id() (tier 4)
+        branch. The token file is still the right vehicle for this
+        assertion: it resolves via resolve_session_id() (the last tier)
         without making an explicit-session claim.
         """
-        from nexus.session import write_claude_session_id
-
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
         monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
-        write_claude_session_id("impostor-live-mcp-session")
+        monkeypatch.setattr("nexus.session._token_file_session_id", lambda: "impostor-live-mcp-session")
         from nexus.db.t1 import get_t1_database
 
         store = get_t1_database()
@@ -489,7 +487,7 @@ class TestSelfHeal:
 # ── Live-MCP-session lease (nexus-c8yvj finding 1) ─────────────────────────────
 #
 # A detached process (no NX_T1_SESSION/NX_T1_SESSION_ID inherited) that CAN
-# resolve a live session's id via resolve_active_session_id() (e.g.
+# resolve a live session's id via resolve_session_id() (e.g.
 # NX_SESSION_ID env, mirroring the SessionEnd hook grandchild) must reach
 # THAT session's data via a published lease -- never the disjoint
 # CLI-dedicated identity, and never by re-minting (which would rotate the
@@ -546,7 +544,7 @@ class TestLiveSessionLease:
         self, fake_service, config_dir, monkeypatch
     ) -> None:
         """A resolvable session id (NX_SESSION_ID, mirroring the SessionEnd
-        hook's resolve_active_session_id() chain) with a published lease
+        hook's resolve_session_id() chain) with a published lease
         must resolve to THAT session -- not the CLI-dedicated identity --
         and must NOT touch the CLI-dedicated cache file at all."""
         from nexus.db.http_scratch_store import HttpScratchStore
@@ -795,20 +793,18 @@ class TestExplicitVsBareFailLoudGate:
         assert isinstance(result, _CliDedicatedScratchStore)
         assert result.session_id == _cli_dedicated_session_id(config_dir)
 
-    def test_bare_invocation_with_only_current_session_file_is_unchanged(
+    def test_bare_invocation_with_only_a_token_file_session_is_unchanged(
         self, fake_service, config_dir, monkeypatch
     ) -> None:
         """A session id that resolves ONLY via the machine-wide
-        current_session flat file (tier 4 of resolve_active_session_id's
+        token file (the last tier of resolve_session_id's
         chain, not an explicit env var) is NOT "explicit" -- it must keep
         falling through to the shared CLI-dedicated identity, not fail loud.
         This is the case the design explicitly carves out as unchanged."""
         from nexus.db.t1 import _CliDedicatedScratchStore, _cli_dedicated_session_id, get_t1_database
-        from nexus.session import write_claude_session_id
-
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
         monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
-        write_claude_session_id("file-resolved-not-explicit")
+        monkeypatch.setattr("nexus.session._token_file_session_id", lambda: "file-resolved-not-explicit")
 
         result = get_t1_database()
         assert isinstance(result, _CliDedicatedScratchStore)
@@ -1253,7 +1249,7 @@ class TestMintErrorWrapping:
 
         live_session_id = "mcp-branch0-mint-deferral-test"
         monkeypatch.setattr(
-            "nexus.session.resolve_active_session_id", lambda: live_session_id
+            "nexus.session.resolve_session_id", lambda: live_session_id
         )
         monkeypatch.delenv("NX_T1_SESSION", raising=False)
         monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
@@ -1313,7 +1309,7 @@ class TestMintErrorWrapping:
 
         live_session_id = "mcp-branch0-connect-marker-deferral-test"
         monkeypatch.setattr(
-            "nexus.session.resolve_active_session_id", lambda: live_session_id
+            "nexus.session.resolve_session_id", lambda: live_session_id
         )
         monkeypatch.delenv("NX_T1_SESSION", raising=False)
         monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
@@ -1530,7 +1526,7 @@ class TestMcpCoreLeaseWiring:
 
         live_session_id = "mcp-branch0-wiring-test"
         monkeypatch.setattr(
-            "nexus.session.resolve_active_session_id", lambda: live_session_id
+            "nexus.session.resolve_session_id", lambda: live_session_id
         )
 
         lease_path = _t1_session_lease_path(live_session_id, config_dir)
@@ -1597,7 +1593,7 @@ class TestMcpCoreLeaseWiring:
         monkeypatch.setenv("NX_T1_SESSION", parent_token)
         monkeypatch.setenv("NX_T1_SESSION_ID", live_session_id)
         monkeypatch.setattr(
-            "nexus.session.resolve_active_session_id", lambda: live_session_id
+            "nexus.session.resolve_session_id", lambda: live_session_id
         )
 
         async def _run() -> None:
@@ -1656,7 +1652,7 @@ class TestMcpCoreLeaseWiring:
         monkeypatch.delenv("NX_T1_SESSION", raising=False)
         monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
         monkeypatch.setattr(
-            "nexus.session.resolve_active_session_id", lambda: live_session_id
+            "nexus.session.resolve_session_id", lambda: live_session_id
         )
 
         seen: dict[str, str | None] = {"env_token": None}
@@ -1693,7 +1689,7 @@ class TestMcpCoreLeaseWiring:
 
         live_session_id = "mcp-sigterm-branch0-test"
         monkeypatch.setattr(
-            "nexus.session.resolve_active_session_id", lambda: live_session_id
+            "nexus.session.resolve_session_id", lambda: live_session_id
         )
 
         lease_path = _t1_session_lease_path(live_session_id, config_dir)
@@ -1832,7 +1828,7 @@ class TestBranch0RefreshTask:
 
         live_session_id = "mcp-branch0-refresh-e2e-test"
         monkeypatch.setattr(
-            "nexus.session.resolve_active_session_id", lambda: live_session_id
+            "nexus.session.resolve_session_id", lambda: live_session_id
         )
 
         seen: dict[str, Any] = {}
@@ -1902,7 +1898,7 @@ class TestBranch0StaleLeaseRecovery:
 
         live_session_id = "mcp-branch0-stale-recovery-test"
         monkeypatch.setattr(
-            "nexus.session.resolve_active_session_id", lambda: live_session_id
+            "nexus.session.resolve_session_id", lambda: live_session_id
         )
 
         # Simulate an abandoned lease from a since-dead prior owner: published
@@ -1976,12 +1972,12 @@ class TestResolveT1RoutingTiers:
         USE_INHERITED here despite no token existing; the fix narrowed the
         check to the token alone (see resolve_t1_routing_tiers's own
         comment), so this id-alone case now falls through to tier 2/3
-        instead. With no NX_SESSION_ID/CLAUDE_CODE_SESSION_ID/flat-file
+        instead. With no NX_SESSION_ID/CLAUDE_CODE_SESSION_ID/token-file
         session resolvable either, tier 2 (lease lookup) also misses, so
         this lands on MINT with session_id=None -- exactly
         test_unresolvable_session_id_mints_with_none_session_id's case,
         confirming NX_T1_SESSION_ID is not itself part of the resolution
-        chain resolve_active_session_id() walks."""
+        chain resolve_session_id() walks."""
         from nexus.db.t1 import T1RoutingAction, resolve_t1_routing_tiers
 
         monkeypatch.delenv("NX_T1_SESSION", raising=False)
@@ -2055,7 +2051,7 @@ class TestResolveT1RoutingTiers:
     def test_unresolvable_session_id_mints_with_none_session_id(
         self, tmp_path, monkeypatch
     ) -> None:
-        """No resolvable session id at all (no env, no flat file) -- MINT
+        """No resolvable session id at all (no env, no token-file session) -- MINT
         action fires with session_id=None. Callers decide independently
         what that means (Branch 0 forces isolation; get_t1_database()
         falls to the CLI-dedicated identity regardless)."""
@@ -2065,7 +2061,7 @@ class TestResolveT1RoutingTiers:
         monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
         monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
-        # No current_session flat file written either (fresh tmp config dir).
+        # No token-file session either (the conftest autouse fixture stubs that tier).
 
         decision = resolve_t1_routing_tiers(tmp_path)
         assert decision.action == T1RoutingAction.MINT
@@ -2243,7 +2239,7 @@ class TestDeferredMintBoundaries:
         from nexus.mcp import core as mcp_core
 
         monkeypatch.setattr(
-            "nexus.session.resolve_active_session_id",
+            "nexus.session.resolve_session_id",
             lambda: "mcp-deferral-severity-test",
         )
         monkeypatch.delenv("NX_T1_SESSION", raising=False)
@@ -2377,7 +2373,7 @@ class TestMcpCoreUnresolvableSessionFailsLoud:
         from nexus import mcp_infra
         from nexus.mcp import core as mcp_core
 
-        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: None)
+        monkeypatch.setattr("nexus.session.resolve_session_id", lambda: None)
         monkeypatch.delenv("NX_T1_SESSION", raising=False)
         monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
 
@@ -2403,7 +2399,7 @@ class TestMcpCoreUnresolvableSessionFailsLoud:
 
         from nexus.mcp import core as mcp_core
 
-        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: None)
+        monkeypatch.setattr("nexus.session.resolve_session_id", lambda: None)
         monkeypatch.delenv("NX_T1_SESSION", raising=False)
         monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
 
@@ -2435,7 +2431,7 @@ class TestMcpCoreUnresolvableSessionFailsLoud:
         from nexus.mcp import core as mcp_core
         from nexus.mcp.core import scratch
 
-        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: None)
+        monkeypatch.setattr("nexus.session.resolve_session_id", lambda: None)
         monkeypatch.delenv("NX_T1_SESSION", raising=False)
         monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
 
@@ -2458,7 +2454,7 @@ class TestMcpCoreUnresolvableSessionFailsLoud:
         from nexus import mcp_infra
         from nexus.mcp import core as mcp_core
 
-        monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda: None)
+        monkeypatch.setattr("nexus.session.resolve_session_id", lambda: None)
         monkeypatch.setenv("NX_T1_SESSION", "inherited-live-token")
         monkeypatch.setenv("NX_T1_SESSION_ID", "inherited-live-session")
 

@@ -9639,7 +9639,7 @@ def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[Health
     Not applicable (informational, ok=True, never a WARN, never
     allowlisted in the fresh-install MVV -- the nexus-7zhag doctrine) in
     two cases: no session id is resolvable at all
-    (:func:`nexus.session.resolve_active_session_id`), or one is, but no
+    (:func:`nexus.session.resolve_session_id`), or one is, but no
     status record exists for it (a CLI-only invocation, a virgin box, or
     a session whose MCP server predates this feature or has not
     completed its first tick yet).
@@ -9679,9 +9679,9 @@ def _check_tuple_channel_delivery(*, now: datetime | None = None) -> list[Health
     label = _TUPLE_CHANNEL_DELIVERY_LABEL
     now = now if now is not None else datetime.now(UTC)
 
-    from nexus.session import resolve_active_session_id  # noqa: PLC0415 — deferred: CLI startup cost
+    from nexus.session import resolve_session_id  # noqa: PLC0415 — deferred: CLI startup cost
 
-    session_id = resolve_active_session_id()
+    session_id = resolve_session_id()
     if not session_id:
         return [HealthResult(
             label=label, ok=True,

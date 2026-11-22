@@ -777,9 +777,8 @@ def _raise_t1_unavailable_this_process() -> None:
     raise T1UnavailableThisProcessError(
         "T1 unavailable this process: no resolvable session id for this "
         "MCP server instance (neither NX_SESSION_ID nor "
-        "CLAUDE_CODE_SESSION_ID resolved one, and the machine-wide "
-        "current_session file is deliberately skipped for a server Claude "
-        "Code did not start). This affects T1 scratch "
+        "CLAUDE_CODE_SESSION_ID resolved one, and no Claude ancestor's "
+        "identity token file names one). This affects T1 scratch "
         "only — every other nexus tool (search, memory, store, catalog) "
         "is unaffected. A sub-agent that inherited a LIVE minted token "
         "from its parent is unaffected too (checked before this hook "
@@ -2025,12 +2024,12 @@ async def _t1_lifespan_body(_app: Any):
     # the enumerated "connects fine, T1 lease never published" cases this
     # replaces a T1-lease-keyed readiness signal to fix. Resolved via the
     # SAME function every T1-routing branch below uses for its own session
-    # id (`resolve_active_session_id`), so this marker's session id is
+    # id (`resolve_session_id`), so this marker's session id is
     # byte-identical to whatever `_decision.session_id` would be -- and to
     # the SessionStart hook payload's own `session_id` field, which is what
     # `nexus.hooks.mcp_connect_wait` polls for.
-    from nexus.session import resolve_active_session_id  # noqa: PLC0415 — deferred for startup cost; mirrors resolve_t1_routing_tiers's own per-call import below
-    _connect_marker_session_id = resolve_active_session_id() or ""
+    from nexus.session import resolve_session_id  # noqa: PLC0415 — deferred for startup cost; mirrors resolve_t1_routing_tiers's own per-call import below
+    _connect_marker_session_id = resolve_session_id() or ""
     if _connect_marker_session_id == "unknown":
         _connect_marker_session_id = ""
 
@@ -3211,13 +3210,13 @@ def _record_tier_write(
 
     Best-effort: any exception is swallowed. Telemetry must NEVER break
     the hot path of the calling tool. ``session_id`` is resolved by
-    :func:`nexus.session.resolve_active_session_id`; rows from a process
+    :func:`nexus.session.resolve_session_id`; rows from a process
     with no bound Claude session are attributed to ``"unknown"`` so
     operators can grep for the sentinel and rows are never lost.
 
     Phase 1A of the tier-discipline restoration initiative
     (memory: tier-discipline-audit-2026-05-06). Issue #594 / nexus-9e9a
-    routed the resolution chain through ``resolve_active_session_id``
+    routed the resolution chain through ``resolve_session_id``
     so this site agrees with the T1 chunk store and the SessionEnd
     launcher on attribution.
 
@@ -3229,9 +3228,9 @@ def _record_tier_write(
         from datetime import datetime, timezone  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
 
         from nexus.mcp_infra import t2_ctx  # noqa: PLC0415 — circular-dep avoidance (mcp package import deferred)
-        from nexus.session import resolve_active_session_id  # noqa: PLC0415 — circular-dep avoidance (lifecycle module imports mcp at top)
+        from nexus.session import resolve_session_id  # noqa: PLC0415 — circular-dep avoidance (lifecycle module imports mcp at top)
 
-        session_id = resolve_active_session_id() or "unknown"
+        session_id = resolve_session_id() or "unknown"
         ts = datetime.now(timezone.utc).isoformat()
         with t2_ctx() as t2:
             # nexus-pyzk7: route through the telemetry store, which persists
@@ -8043,13 +8042,13 @@ def memory_put(
         if not content:
             return _fail("Error: content is required")
         # Translate empty strings to None so MemoryStore.put's
-        # fall-back chain (NX_AGENT env, resolve_active_session_id) takes
+        # fall-back chain (NX_AGENT env, resolve_session_id) takes
         # over rather than persisting literal empty strings.
         agent_arg = agent if agent else None
         # Resolve session at the MCP layer so NX_SESSION_ID env wins
         # over MemoryStore's fall-back. Subagents carry NX_SESSION_ID set
         # by claude_dispatch (RDR-094). When it is unset the store resolves
-        # the session through ``resolve_active_session_id``: CLAUDE_CODE_
+        # the session through ``resolve_session_id``: CLAUDE_CODE_
         # SESSION_ID, then the machine-wide current_session file, which an
         # MCP server Claude Code did not start never consults (nexus-xs7fp),
         # so such a server's write carries no session (nexus-d8yul).
@@ -17090,12 +17089,6 @@ def main():
     from nexus.mcp._win_stdin import isolate_stdin  # noqa: PLC0415 — entry-point only
 
     _stdin_isolation = isolate_stdin()
-
-    # nexus-xs7fp: this process is an MCP server, so the machine-wide
-    # current_session file is only its session when Claude Code started it.
-    from nexus.session import mark_mcp_server_process  # noqa: PLC0415 — entry-point only
-
-    mark_mcp_server_process()
 
     # nexus-4xgfy (critique 38b7db3d C1): the dominant post-upgrade path is
     # a Claude session spawning THIS process with no bare `nx` invocation in

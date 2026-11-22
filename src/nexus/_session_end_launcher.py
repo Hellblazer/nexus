@@ -377,8 +377,8 @@ def _print_service_tier_summary() -> None:
     the logs; nexus-34f7r's qwentescence live run caught this exact leak).
     """
     try:
-        from nexus.session import resolve_active_session_id  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-        session_id = resolve_active_session_id()
+        from nexus.session import resolve_session_id  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+        session_id = resolve_session_id()
         if not session_id:
             return
         # Round-2 critique: pin BOTH endpoint halves from a single fast

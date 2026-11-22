@@ -250,37 +250,20 @@ source "$_script_dir/lib/installed-nx.sh"
 
 # Claimant identity for the push lock (nexus-agctp): the active Claude
 # session id, plus this host and this process's own pid, so a refusal
-# names something a human can act on. This mirrors two of
-# nexus.session.resolve_active_session_id's tiers (NX_SESSION_ID /
-# CLAUDE_CODE_SESSION_ID, then the ~/.config/nexus/current_session flat
-# file) rather than shelling out to it: this script's cwd is not always
-# the nexus checkout (a detached worktree, or -- in the test suite below
-# -- a throwaway fixture repo), so `uv run python -c "from nexus.session
-# import ..."` would fail to resolve the package there. The two tiers
-# reproduced here are the ones documented as stable in AGENTS.md; a miss
-# falls back to "unknown", the same fallback resolve_active_session_id's
-# own callers already substitute.
-#
-# NX_SESSION_ID / CLAUDE_CODE_SESSION_ID are preferred OVER the flat file
-# and tried first: the file is machine-wide and last-writer-wins, so on a
-# shared box it can name a DIFFERENT session than the one actually
-# running this push (a second top-level Claude Code session overwrites
-# it unconditionally on its own SessionStart). The two env vars are
-# per-process and cannot be clobbered by a sibling session. When
-# resolution still falls through to the file (or finds nothing at all),
-# the claimant string says so -- "(current_session file)" or
-# "(unresolved)" -- so a PUSH_REFUSED_LOCK_HELD naming this claimant
-# tells its reader the identity came from the weaker source, not the
-# session that actually holds the claim.
-_lock_session_source="env"
+# names something a human can act on. The session id is the env half of
+# nexus.session.resolve_session_id (NX_SESSION_ID, then
+# CLAUDE_CODE_SESSION_ID), read here rather than by shelling out to it:
+# this script's cwd is not always the nexus checkout (a detached worktree,
+# or -- in the test suite below -- a throwaway fixture repo), so
+# `uv run python -c "from nexus.session import ..."` would fail to resolve
+# the package there. Every process Claude Code starts carries
+# CLAUDE_CODE_SESSION_ID. RDR-253 Phase 2 retired the machine-wide
+# ~/.config/nexus/current_session file this used to fall back to, which
+# could name another session than the one pushing. A miss is "unknown",
+# and the claimant says "(unresolved)" so a PUSH_REFUSED_LOCK_HELD naming
+# it tells its reader no session was found.
 _lock_session="${NX_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}"
-if [[ -z "$_lock_session" ]]; then
-  _lock_session_source="current_session file"
-  _cfg_dir="${NEXUS_CONFIG_DIR:-$HOME/.config/nexus}"
-  if [[ -r "$_cfg_dir/current_session" ]]; then
-    _lock_session="$(cat "$_cfg_dir/current_session" 2>/dev/null || true)"
-  fi
-fi
+_lock_session_source="env"
 if [[ -z "$_lock_session" ]]; then
   _lock_session="unknown"
   _lock_session_source="unresolved"
