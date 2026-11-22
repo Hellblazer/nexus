@@ -264,6 +264,18 @@ public final class CompletionCheck {
      * the three gates. Writes nothing.
      */
     static Result evaluate(DSLContext ctx, ReadSet readSet, Gate3Source gate3, ViolatorCounter counter) {
+        return evaluate(ctx, readSet, gate3, counter, List.of());
+    }
+
+    /**
+     * As above with {@code gate3Extras}: further conditions gate 3 needs beside P3.4's id-predicate indexes (linda 2026-11-22: the four
+     * runtime-built id UNIQUE indexes, {@code IdUniqueIndexPass.allValid}, wired in by that pass's branch). Each is read only once gate 2
+     * holds and the PCI coverage is complete, on the check's read-only session; one that is false, or throws, keeps gate 3 closed.
+     * Gate 3 implies gate 2 structurally: nothing past the gate-2 test below is read while gate 2 is false.
+     */
+    static Result evaluate(DSLContext ctx, ReadSet readSet, Gate3Source gate3, ViolatorCounter counter,
+                           List<java.util.function.Predicate<DSLContext>> gate3Extras) {
+        Objects.requireNonNull(gate3Extras, "gate3Extras");
         Objects.requireNonNull(readSet, "readSet");
         Objects.requireNonNull(gate3, "gate3");
         Objects.requireNonNull(counter, "counter");
@@ -317,11 +329,29 @@ public final class CompletionCheck {
                 gate3Holds = uncovered.isEmpty();
                 if (!gate3Holds) {
                     why = "collections the planner would index have no VALID id-predicate index (missing or INVALID)";
+                } else if (!extrasHold(ctx, gate3Extras)) {
+                    gate3Holds = false;
+                    why = "a further gate 3 condition does not hold (the runtime-built id unique indexes)";
                 }
             }
         }
         return new Result(gate1, gate2, gate3Holds, List.copyOf(states.values()), List.copyOf(checks), supersededByPresent,
             waiting, List.copyOf(violators), List.copyOf(uncovered), why, danglingTombstones(ctx, tables, null));
+    }
+
+    private static boolean extrasHold(DSLContext ctx, List<java.util.function.Predicate<DSLContext>> extras) {
+        for (var extra : extras) {
+            boolean holds;
+            try {
+                holds = extra.test(ctx);
+            } catch (RuntimeException e) {   // unknown is not "holds"
+                holds = false;
+            }
+            if (!holds) {
+                return false;
+            }
+        }
+        return true;
     }
 
     // ---- one label ---------------------------------------------------------------------------------------------------

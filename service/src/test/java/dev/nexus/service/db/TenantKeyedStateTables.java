@@ -745,6 +745,19 @@ final class TenantKeyedStateTables {
             notKeyed.put(f, WAITER_LOCAL);
         }
         notKeyed.put("PciReconciler.failures", PCI_OFF);
+        // nexus-p2m1x.22 (RDR-229 P3.4): the id-predicate half's memory. The planned keys are replaced whole by each pass that saw
+        // every leaf (and dropped to unknown by one that did not); the gate and the per-pass plan values are not kept.
+        notKeyed.put("PciIdBuilds.planned", PCI_OFF);
+        notKeyed.put("PciIdBuilds.gate2", "the completion check's gate 2 as a supplier, bound once at boot; a callback, no data");
+        notKeyed.put("PciReconciler.Tally.plannedIds", PCI_OFF);
+        notKeyed.put("PciReconciler.Planned.plannedIds", PCI_OFF);
+        notKeyed.put("PciReconcilePlanner.Plan.plannedIdKeys", RESULT);
+        notKeyed.put("PciReconcilePlanner.Plan.actions", RESULT);
+        notKeyed.put("PciReconcilePlanner.IdPlanInputs.nullIdCollections", RESULT);
+        notKeyed.put("PciCatalog.Snapshot.validIds", PCI_OFF);
+        notKeyed.put("PciCatalog.Snapshot.invalidIds", PCI_OFF);
+        notKeyed.put("CompletionBootWork.DbReader.gate3Extras", "the further gate 3 conditions, fixed at construction "
+            + "(IdUniqueIndexPass.allValid once wired); callbacks, no tenant state");
         // nexus-4lnn1.1.1 (RDR-230): the DDL half's last look at each index (its anchor, size and counts) and at
         // each leaf's statistics, kept per engine in memory and lost on restart like the failures map above. The
         // The Reads fields are one counting transaction's result, applied once it commits. They live in
@@ -850,8 +863,9 @@ final class TenantKeyedStateTables {
     private static final String COMPLETION_ENGINE_WIDE = "the RDR-229 boot-time completion check is engine-wide, never a "
         + "tenant's: it reads nexus.data_moves (a global registry with no tenant column), pg_catalog and the registry's "
         + "row counts on the engine's admin connection, and a Result holds labels, table and constraint names and counts "
-        + "summed over every tenant, no tenant id (its one slot that can name a collection, gate3Uncovered, is empty "
-        + "while Gate3Source is NOT_INSTALLED, which is what this engine wires); ";
+        + "summed over every tenant, no tenant id on the wire (its one slot that can name a collection, gate3Uncovered, "
+        + "holds P3.4's id keys, model and tenant and collection id, when the PCI reconciler has planned; it is held in "
+        + "memory only, never rendered on /v1/status, and replaced whole by every sample); ";
 
     /** RDR-229 P3.1 (nexus-p2m1x.17): the completion check, its reporter and the two callbacks that wake it. */
     private static void fillCompletionCheck(Map<String, String> notKeyed) {
@@ -881,15 +895,15 @@ final class TenantKeyedStateTables {
             + "global registry labels, not keyed by tenant");
         notKeyed.put("CompletionCheck.ReadSet.gate2Labels", "the move labels gate 2 reads, fixed at construction; "
             + "global registry labels, not keyed by tenant");
-        notKeyed.put("CompletionCheck.IdIndexCoverage.planned", RESULT + "; it exists only once P3.4 supplies a "
-            + "Gate3Source, and the one this engine wires is NOT_INSTALLED");
+        notKeyed.put("CompletionCheck.IdIndexCoverage.planned", RESULT + "; P3.4's PciReconciler supplies it as id keys "
+            + "(model, tenant, collection id) from its last pass that saw every leaf, and it is dropped with the read");
         notKeyed.put("CompletionCheck.IdIndexCoverage.validIdIndexed", RESULT + "; as planned");
         notKeyed.put("CompletionCheck.IdIndexCoverage.invalidIdIndexed", RESULT + "; as planned");
         notKeyed.put("CompletionCheck.Result.labels", RESULT + "; it holds registry labels and their state, no tenant's");
         notKeyed.put("CompletionCheck.Result.checks", RESULT + "; it holds constraint names and whether each is validated");
         notKeyed.put("CompletionCheck.Result.violators", RESULT + "; it holds table and constraint names and counts");
-        notKeyed.put("CompletionCheck.Result.gate3Uncovered", RESULT + "; empty while Gate3Source is NOT_INSTALLED, and "
-            + "replaced whole by the next sample once P3.4 supplies one");
+        notKeyed.put("CompletionCheck.Result.gate3Uncovered", RESULT + "; the planned id keys with no VALID id index, "
+            + "replaced whole by the next sample, in memory only and never rendered on /v1/status");
         notKeyed.put("CompletionCheck.Dangling.byContentType", RESULT + "; R7's dangling-tombstone count by content type "
             + "(a few fixed labels such as code or knowledge), summed over every tenant's registry rows by one GROUP BY on "
             + "content_type: no tenant id or collection name is kept, and the next sample re-derives it");

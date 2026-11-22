@@ -117,6 +117,15 @@ public final class PciBuilderSession {
             + ") WITH (m = " + BUILD_M + ", ef_construction = " + BUILD_EF_CONSTRUCTION
             + ") WHERE collection = %L";
 
+    /**
+     * RDR-229 P3.4: the same build on the id predicate. {@code %L} renders the id as a quoted literal, which PostgreSQL types to
+     * the column's own type (bigint) and deparses as {@code (collection_id = '<id>'::bigint)} ({@link PciCatalog#parseCollectionId}).
+     */
+    private static final String BUILD_BY_ID_TEMPLATE =
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS %I ON %I.%I USING hnsw (%I " + OPERATOR_CLASS
+            + ") WITH (m = " + BUILD_M + ", ef_construction = " + BUILD_EF_CONSTRUCTION
+            + ") WHERE collection_id = %L";
+
     private static final String DROP_TEMPLATE = "DROP INDEX CONCURRENTLY IF EXISTS %I.%I";
 
     /** RDR-230: the index's anchor is its comment. {@code %L} quotes the JSON text on the server. */
@@ -582,6 +591,20 @@ public final class PciBuilderSession {
          * The name is {@link PciCatalog#indexName} of the leaf's model and tenant and the collection.
          */
         public DdlOutcome build(PciCatalog.Leaf leaf, int dim, String collection) {
+            Objects.requireNonNull(collection, "collection");
+            return buildOne(leaf, dim, collection, null);
+        }
+
+        /**
+         * RDR-229 P3.4: build the index on {@code WHERE collection_id = <collectionId>} for {@code leaf}, named
+         * {@link PciCatalog#indexNameById}. The same one {@code CREATE INDEX CONCURRENTLY}, lock timeouts and failure paths as
+         * {@link #build(PciCatalog.Leaf, int, String)}; the caller holds the gate-2 and null-id conditions (this class does not read them).
+         */
+        public DdlOutcome buildById(PciCatalog.Leaf leaf, int dim, long collectionId) {
+            return buildOne(leaf, dim, null, collectionId);
+        }
+
+        private DdlOutcome buildOne(PciCatalog.Leaf leaf, int dim, String collection, Long collectionId) {
             if (ended != null) {
                 return ended;
             }
@@ -589,12 +612,12 @@ public final class PciBuilderSession {
             String column;
             try {
                 Objects.requireNonNull(leaf, "leaf");
-                Objects.requireNonNull(collection, "collection");
                 if (leaf.model() == null || leaf.tenant() == null || !DimTables.CHUNKS.containsKey(dim)) {
                     log.warn("event=pci_ddl_rejected op=build reason=leaf_or_dim leaf={} dim={}", leaf.name(), dim);
                     return DdlOutcome.REJECTED;
                 }
-                name = PciCatalog.indexName(leaf.model(), leaf.tenant(), collection);
+                name = collectionId == null ? PciCatalog.indexName(leaf.model(), leaf.tenant(), collection)
+                    : PciCatalog.indexNameById(leaf.model(), leaf.tenant(), collectionId);
                 column = DimTables.embeddingColumn(dim);
             } catch (IllegalArgumentException e) {
                 log.warn("event=pci_ddl_rejected op=build reason=name cause=\"{}\"", e.getMessage());
@@ -605,7 +628,9 @@ public final class PciBuilderSession {
                 return DdlOutcome.REJECTED;
             }
             return run("build", BUILD_LOCK_TIMEOUT, owner.buildStatementTimeout, name, leaf, () -> {
-                String sql = render(BUILD_TEMPLATE, name, leaf.schema(), leaf.name(), column, collection);
+                String sql = collectionId == null
+                    ? render(BUILD_TEMPLATE, name, leaf.schema(), leaf.name(), column, collection)
+                    : render(BUILD_BY_ID_TEMPLATE, name, leaf.schema(), leaf.name(), column, Long.toString(collectionId));
                 // nexus-f3yqd (E): CREATE INDEX CONCURRENTLY cannot run in a transaction block, so SET LOCAL has no
                 // transaction to bind to; the setting is the session's, and this session is the builder's alone.
                 owner.buildMemoryMb.ifPresent(mb -> setSession("maintenance_work_mem", mb + "MB"));
@@ -658,7 +683,7 @@ public final class PciBuilderSession {
             }
             Objects.requireNonNull(leaf, "leaf");
             Objects.requireNonNull(index, "index");
-            boolean ours = index.parsed() ? PciCatalog.isBuilderName(index.name())
+            boolean ours = index.parsed() || index.idParsed() ? PciCatalog.isBuilderName(index.name())
                 : index.leftover() ? !index.valid() && PciCatalog.isLeftoverName(index.name())
                 : index.leafLeftover() && !index.valid() && isLeafLeftover(leaf, index);
             if (!ours) {
@@ -872,12 +897,15 @@ public final class PciBuilderSession {
         }
 
         static boolean ownsForComment(PciCatalog.Leaf leaf, PciCatalog.Index index) {
-            if (!index.parsed() || !index.valid() || !PciCatalog.isBuilderName(index.name())
+            if (!(index.parsed() || index.idParsed()) || !index.valid() || !PciCatalog.isBuilderName(index.name())
                 || leaf.model() == null || leaf.tenant() == null) {
                 return false;
             }
             try {
-                return index.name().equals(PciCatalog.indexName(leaf.model(), leaf.tenant(), index.collection()));
+                // RDR-229 P3.4: an id index is the builder's when its name is the id hash of the id its predicate reads.
+                return index.name().equals(index.idParsed()
+                    ? PciCatalog.indexNameById(leaf.model(), leaf.tenant(), index.collectionId())
+                    : PciCatalog.indexName(leaf.model(), leaf.tenant(), index.collection()));
             } catch (IllegalArgumentException e) {
                 return false;
             }

@@ -89,15 +89,32 @@ public final class CompletionBootWork implements AutoCloseable {
      */
     public CompletionBootWork(BootWorkRegistry registry, AdminConnection admin, CompletionCheck.ReadSet readSet,
                               CompletionCheck.Gate3Source gate3) {
-        this(registry, new DbReader(admin, readSet, gate3, Clock.systemUTC()));
+        this(registry, admin, readSet, gate3, java.util.List.of());
+    }
+
+    /** As above with the further conditions gate 3 needs ({@link CompletionCheck#evaluate(DSLContext, CompletionCheck.ReadSet, CompletionCheck.Gate3Source, CompletionCheck.ViolatorCounter, java.util.List)}). */
+    public CompletionBootWork(BootWorkRegistry registry, AdminConnection admin, CompletionCheck.ReadSet readSet,
+                              CompletionCheck.Gate3Source gate3, java.util.List<java.util.function.Predicate<DSLContext>> gate3Extras) {
+        this(registry, new DbReader(admin, readSet, gate3, gate3Extras, Clock.systemUTC()));
     }
 
     /**
-     * The reporter a running engine starts: the boot read set ({@link CompletionCheck.ReadSet#boot()}) and no gate 3 until P3.4 ships one.
+     * The reporter a running engine starts: the boot read set ({@link CompletionCheck.ReadSet#boot()}); gate 3 is not installed unless the caller gives a source (P3.4).
      * {@code Main} builds it only through here, so a test of this factory (and of {@code Main}'s one call to it) pins what boot reads.
      */
     public static CompletionBootWork atBoot(BootWorkRegistry registry, AdminConnection admin) {
-        return new CompletionBootWork(registry, admin, CompletionCheck.ReadSet.boot(), CompletionCheck.Gate3Source.NOT_INSTALLED);
+        return atBoot(registry, admin, CompletionCheck.Gate3Source.NOT_INSTALLED);
+    }
+
+    /** As above with gate 3's source: the PCI reconciler's id-index coverage (RDR-229 P3.4, {@code PciReconciler#gate3Source}). */
+    public static CompletionBootWork atBoot(BootWorkRegistry registry, AdminConnection admin, CompletionCheck.Gate3Source gate3) {
+        return atBoot(registry, admin, gate3, java.util.List.of());
+    }
+
+    /** As above with the further gate 3 conditions: the seam for {@code IdUniqueIndexPass.allValid} (linda 2026-11-22). */
+    public static CompletionBootWork atBoot(BootWorkRegistry registry, AdminConnection admin, CompletionCheck.Gate3Source gate3,
+                                            java.util.List<java.util.function.Predicate<DSLContext>> gate3Extras) {
+        return new CompletionBootWork(registry, admin, CompletionCheck.ReadSet.boot(), gate3, gate3Extras);
     }
 
     /** The read set a database-backed reporter reads, or null for a test's injected reader. */
@@ -339,13 +356,16 @@ public final class CompletionBootWork implements AutoCloseable {
         private final AdminConnection admin;
         private final CompletionCheck.ReadSet readSet;
         private final CompletionCheck.Gate3Source gate3;
+        private final java.util.List<java.util.function.Predicate<DSLContext>> gate3Extras;
         private final CompletionCheck.ViolatorCounter counter;
         private volatile AdminDdlSession session;
 
-        DbReader(AdminConnection admin, CompletionCheck.ReadSet readSet, CompletionCheck.Gate3Source gate3, Clock clock) {
+        DbReader(AdminConnection admin, CompletionCheck.ReadSet readSet, CompletionCheck.Gate3Source gate3,
+                 java.util.List<java.util.function.Predicate<DSLContext>> gate3Extras, Clock clock) {
             this.admin = Objects.requireNonNull(admin, "admin");
             this.readSet = Objects.requireNonNull(readSet, "readSet");
             this.gate3 = Objects.requireNonNull(gate3, "gate3");
+            this.gate3Extras = java.util.List.copyOf(gate3Extras);
             this.counter = new CachedCounter(CompletionCheck.DIRECT, clock, VIOLATOR_TTL);
         }
 
@@ -360,7 +380,7 @@ public final class CompletionBootWork implements AutoCloseable {
                     s.setSession("default_transaction_read_only", "on");
                     session = s;
                 }
-                return CompletionCheck.evaluate(s.ctx(), readSet, gate3, counter);
+                return CompletionCheck.evaluate(s.ctx(), readSet, gate3, counter, gate3Extras);
             } catch (RuntimeException e) {
                 close();   // a failed session is replaced on the next sample
                 throw e;
