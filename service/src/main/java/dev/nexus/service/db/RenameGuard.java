@@ -50,6 +50,23 @@ public final class RenameGuard {
     }
 
     /**
+     * RDR-229 P3.7 (O-5): runs a whole rename, decision and commit, inside {@link RenameReadiness#pinned}, so gate 3 cannot flip to
+     * true between the path the rename chose and its commit. A rename takes {@link #requireRenameAllowed} and {@link #oneRowRename}
+     * inside {@code rename}, never before it.
+     */
+    public <T> T pinned(java.util.function.Supplier<T> rename) {
+        return readiness.pinned(rename);
+    }
+
+    /**
+     * The rename path after {@link #requireRenameAllowed} passed: true when gate 3 holds (then nothing is missing and the rename is the
+     * one-row update that keeps the collection's id), false for the name path. Read inside {@link #pinned}, where gate 3 cannot change.
+     */
+    public boolean oneRowRename() {
+        return gate3.holds();
+    }
+
+    /**
      * Whether a collection's id survives a rename on this install (R6's {@code ids_stable}, the key P3.5a's rename response
      * carries). Always false in this tree: the rename it runs is the name path, which gives the collection a new id, whatever
      * gate 3 says. P3.7's one-row rename keeps the id and is what makes this true (gate 3 holding, the drop move complete, every

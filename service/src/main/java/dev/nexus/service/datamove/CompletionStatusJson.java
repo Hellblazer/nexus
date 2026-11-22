@@ -22,8 +22,12 @@ import dev.nexus.service.http.HttpUtil;
  *  "gate3_latch_pci_off":bool (the latch row says gate 3 latched while NX_SEARCH_PCI was off: no id index was required then),
  *  "labels_total":n,"labels_incomplete":[{"label","table","why"}],
  *  "checks_missing":[{"table","constraint","what"}],
- *  "validate_waits":[{"table","constraints":[names],"what":operator text}]}
+ *  "validate_waits":[{"table","constraints":[names],"what":operator text}],
+ *  "rename_missing":"none"|"name_key_drop_move"|"restart"}
  * </pre>
+ * {@code rename_missing} (RDR-229 P3.7, [additive]) is what a collection rename waits for, spelled as the 409 {@code rename_refused}'s
+ * {@code missing}: {@code none} before gate 3 (the rename is the name path) and once the one-row rename can run, {@code name_key_drop_move}
+ * from gate 3 until that move has {@code completed_at}, then {@code restart} until every P3.5b changeset has applied.
  * {@code labels_total} and {@code gates_holding} count the engine's own moves and gates, not any tenant's data. {@code labels_incomplete}
  * lists each stamp label whose move is not complete (a label the queue allowlist marks not applicable is not listed).
  * {@code validate_waits[].what} is the operator text: it names the {@code nexus.rdr229_restamp} step.
@@ -72,6 +76,8 @@ final class CompletionStatusJson {
             b.append("],\"what\":").append(HttpUtil.jsonString(CompletionBootWork.validateWaits(w))).append('}');
             first = false;
         }
-        return b.append("]}").toString();
+        RenameReadiness.Missing missing = r.renameMissing();
+        return b.append("],\"rename_missing\":").append(HttpUtil.jsonString(missing == RenameReadiness.Missing.NONE ? "none"
+            : dev.nexus.service.db.RenameRefusedException.wireValue(missing))).append('}').toString();
     }
 }
