@@ -998,7 +998,7 @@ _record_report() {
 # too old for the record is too old for `nx ci check-hold` too, so no --red-fix override reaches this path.
 _write_legacy_record() {
   local nxbin="$1" limit="$2" outfile code=0 last
-  outfile="$(mktemp "${TMPDIR:-/tmp}/push-record.XXXXXX")" || { _record_report "PUSH_RECORD_FAILED this nx has no 'nx ci record-push' and no temp file for the legacy write (the push stands)"; return 0; }
+  outfile="$(mktemp "${TMPDIR:-/tmp}/push-record.XXXXXX")" || { _record_report "PUSH_RECORD_FAILED the installed CLI lacks 'nx ci record-push' and no temp file for the legacy write (the push stands)"; return 0; }
   _record_tmp="$outfile"
   _bounded "$limit" "$outfile" "$nxbin" tuple out "board/ci/nexus-$branch--push" --key "topic=nexus-$branch--push" \
     --nonce "push-$tip" --dim "from=unknown" --dim "kind=push" --dim "sha=$tip" \
@@ -1007,11 +1007,11 @@ _write_legacy_record() {
   rm -f "$outfile"
   _record_tmp=""
   if (( code == 124 )); then
-    _record_report "PUSH_RECORD_FAILED this nx has no 'nx ci record-push' and the legacy 'nx tuple out' write ran past ${limit}s and was stopped (the push stands)"
+    _record_report "PUSH_RECORD_FAILED the installed CLI lacks 'nx ci record-push' and the legacy 'nx tuple out' write ran past ${limit}s and was stopped (the push stands)"
   elif (( code != 0 )); then
-    _record_report "PUSH_RECORD_FAILED this nx has no 'nx ci record-push' and the legacy 'nx tuple out' write failed too (exit $code: ${last:0:300}) (the push stands, no record was written)"
+    _record_report "PUSH_RECORD_FAILED the installed CLI lacks 'nx ci record-push' and the legacy 'nx tuple out' write failed too (exit $code: ${last:0:300}) (the push stands, no record was written)"
   else
-    _record_report "PUSH_RECORD_LEGACY this nx has no 'nx ci record-push'; the record was written with 'nx tuple out' (from=unknown, no retry or stamp check): upgrade nx (scripts/reinstall-tool.sh) so the record names its pusher"
+    _record_report "PUSH_RECORD_LEGACY the installed CLI lacks 'nx ci record-push'; the record was written with 'nx tuple out' (from=unknown, no retry or stamp check): upgrade nx (scripts/reinstall-tool.sh) so the record names its pusher"
   fi
 }
 
