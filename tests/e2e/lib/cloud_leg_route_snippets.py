@@ -142,7 +142,9 @@ hook_rows = sum(1 for r in store.list_hook_failures(days=0, limit=max(hooks["tot
 if search_rows or hook_rows:
     raise SystemExit(f"refusing: {search_rows} search and {hook_rows} hook rows are recorded under {source!r}")
 print("no rows under the probe source")
-print(store.rename_collection(old=source, new=source + "-renamed"))
+moved = store.rename_collection(old=source, new=source + "-renamed")
+assert all(v == 0 for v in moved.values()), f"the probe's legal rename moved rows: {moved}"
+print(moved)
 try:
     store.rename_collection(old=source, new="c42")
 except httpx.HTTPStatusError as exc:
