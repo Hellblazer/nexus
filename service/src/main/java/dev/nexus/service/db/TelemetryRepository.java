@@ -636,8 +636,15 @@ public final class TelemetryRepository {
     /**
      * Rename collection in search_telemetry (and hook_failures).
      * Returns a map of {tableName -> rowCount}.
+     *
+     * <p>nexus-n3hhc: the target is a label a user supplied, so it is judged by the label rule the catalog rename
+     * applies to the same target ({@link CollectionLabel#validateUserLabel}); a breach is an
+     * {@link IllegalArgumentException} (the handler's 400) before either table is touched. The target is not
+     * required to be registered: in the T2 rename cascade this route runs after the catalog's own rename, and a
+     * history row may outlive its collection, so the check is the rule, not a lookup.
      */
     public Map<String, Integer> renameCollection(String tenant, String oldName, String newName) {
+        CollectionLabel.validateUserLabel(newName);
         // RDR-210 Phase 6 Step 2 (bead nexus-f98bg): one transaction for the guard and both updates, so a
         // refusal leaves neither table touched. Refused while a re-embed job holds either name.
         return tenantScope.withTenant(tenant, ctx -> {
