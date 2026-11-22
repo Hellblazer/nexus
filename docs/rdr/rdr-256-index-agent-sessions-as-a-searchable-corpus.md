@@ -1164,3 +1164,4 @@ No question for Sam remains open in this RDR.
   sites, and a recovery-bundle gap until P3.9, covered by re-assertion.
   Gap 4 reworded.
 - 2026-11-21: Gate round 1 — BLOCKED (2 Critical, 6 Significant, 2 ship-blocker(s)); blob `7577b9115929`; critique `nexus_rdr/256-gate-critique-2026-11-21-r1`.
+- 2026-11-22: Gate round 2 — PASSED (0 Critical, 3 Significant, 0 ship-blocker(s)); blob `2cd057fe6cfd`; critique `nexus_rdr/256-gate-critique-2026-11-22-r2`.
