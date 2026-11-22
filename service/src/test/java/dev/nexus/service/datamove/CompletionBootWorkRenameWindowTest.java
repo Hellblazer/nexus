@@ -76,7 +76,9 @@ class CompletionBootWorkRenameWindowTest {
         var reader = new Scripted(true, true, false, false, true);
         var work = work(reader);
         work.publish();   // read 1 + the re-read under the lock: latched
-        assertThat(work.gate3Latched().holds()).isTrue();
+        assertThat(work.gate3Latched()).isTrue();
+        Gate3 asGate3 = work::gate3Latched;   // P4.x wiring where a Gate3 is wanted: the method reference adapts the boolean accessor
+        assertThat(asGate3.holds()).isTrue();
 
         // a rename is open: after the latch no sample waits for it (every rename is one-row or refused now)
         ExecutorService pool = Executors.newSingleThreadExecutor();
@@ -99,14 +101,14 @@ class CompletionBootWorkRenameWindowTest {
 
             assertThat(result).as("the sample went through while a rename was open: no flip to wait for").isNotEqualTo(-1);
             assertThat(work.gate3().holds()).as("the live gate 3 dropped").isFalse();
-            assertThat(work.gate3Latched().holds()).as("the latch stays").isTrue();
+            assertThat(work.gate3Latched()).as("the latch stays").isTrue();
             assertThat(work.renameReadiness().gate3Latched()).isTrue();
             release.countDown();
             rename.get(10, TimeUnit.SECONDS);
             work.publish();
             work.publish();
             assertThat(work.gate3().holds()).as("the live gate 3 is back").isTrue();
-            assertThat(work.gate3Latched().holds()).isTrue();
+            assertThat(work.gate3Latched()).isTrue();
         } finally {
             release.countDown();
             pool.shutdownNow();

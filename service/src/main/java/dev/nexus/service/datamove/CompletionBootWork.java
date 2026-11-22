@@ -173,11 +173,9 @@ public final class CompletionBootWork implements AutoCloseable {
      * TODO(P3.4, vectors-080): the table {@code nexus.rdr229_gate_latch} replaces the process-local latch kept here ({@code gate3Latch}) at
      * the rebase; the accessor names stay.
      */
-    public Gate3 gate3Latched() {
-        return () -> {
-            var r = latest();
-            return r != null && r.gate3Latched();
-        };
+    public boolean gate3Latched() {
+        var r = latest();
+        return r != null && r.gate3Latched();
     }
 
     /**
@@ -196,8 +194,7 @@ public final class CompletionBootWork implements AutoCloseable {
 
             @Override
             public boolean gate3Latched() {
-                var r = latest();
-                return r != null && r.gate3Latched();
+                return CompletionBootWork.this.gate3Latched();
             }
 
             @Override
