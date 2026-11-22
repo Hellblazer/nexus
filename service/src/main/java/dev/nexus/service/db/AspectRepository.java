@@ -95,9 +95,16 @@ public final class AspectRepository {
     private static final Field<OffsetDateTime>  EX_HL_INGESTED_AT  = excluded(DOCUMENT_HIGHLIGHTS.INGESTED_AT);
 
     private final TenantScope tenantScope;
+    /** RDR-229 P3.5a: the rename refusal this repository's rename consults first ({@link RenameGuard#open()} never refuses). */
+    private final RenameGuard renameGuard;
 
     public AspectRepository(TenantScope tenantScope) {
+        this(tenantScope, RenameGuard.open());
+    }
+
+    public AspectRepository(TenantScope tenantScope, RenameGuard renameGuard) {
         this.tenantScope = tenantScope;
+        this.renameGuard = renameGuard;
     }
 
     // ── Timestamp helpers ──────────────────────────────────────────────────────
@@ -551,6 +558,7 @@ public final class AspectRepository {
      * {@code /queue/rename_collection}, which was the standalone caller's way of re-homing them).
      */
     public int renameAspectCollection(String tenant, String oldColl, String newColl) {
+        renameGuard.requireRenameAllowed();   // RDR-229 P3.5a: refused from gate 3 until the one-row rename can run
         return tenantScope.withTenant(tenant, ctx -> {
             // RDR-210 Phase 6 Step 2 (bead nexus-f98bg): refused while a re-embed job holds either name.
             CatalogRepository.refuseUnderReembedJob(ctx, tenant, "rename", oldColl, newColl);
@@ -1080,6 +1088,7 @@ public final class AspectRepository {
      * and no collision-defense DELETE is needed — a plain UPDATE suffices.
      */
     public int renameHighlightsCollection(String tenant, String oldColl, String newColl) {
+        renameGuard.requireRenameAllowed();   // RDR-229 P3.5a: refused from gate 3 until the one-row rename can run
         return tenantScope.withTenant(tenant, ctx -> {
             CatalogRepository.refuseUnderReembedJob(ctx, tenant, "rename", oldColl, newColl);
             ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, newColl);

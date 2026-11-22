@@ -365,7 +365,15 @@ public final class CatalogRepository {
      */
     private final AtomicBoolean vacuumInProgress = new AtomicBoolean(false);
 
+    private final RenameGuard renameGuard;
+
     public CatalogRepository(TenantScope tenantScope) {
+        this(tenantScope, RenameGuard.open());
+    }
+
+    /** RDR-229 P3.5a: {@code renameGuard} is the rename refusal every rename of this repository consults first. */
+    public CatalogRepository(TenantScope tenantScope, RenameGuard renameGuard) {
+        this.renameGuard = renameGuard;
         this.tenantScope = tenantScope;
         this.vacuumExecutor = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "purge-trash-vacuum");
@@ -10290,7 +10298,25 @@ public final class CatalogRepository {
      *                       ({@link #retiredPredecessorsOf}), for the same reason: the name comes back.
      */
     public Map<String, Integer> deleteCollection(String tenant, String name, boolean keepQuarantine) {
-        DeleteOutcome outcome = deleteCollectionTxn(tenant, name, keepQuarantine);
+        return deleteCollection(tenant, name, keepQuarantine, null);
+    }
+
+    /**
+     * {@link #deleteCollection(String, String, boolean)} for the collection the route named by {@code collectionId}
+     * (RDR-229 P3.5a): the same purge of what names {@code name}, but the registry row it removes is the one with that id, so a
+     * label held by more than one live row loses only the row the operator named. {@code name} is that row's label.
+     */
+    public Map<String, Integer> deleteCollectionById(String tenant, String name, long collectionId, boolean keepQuarantine) {
+        return deleteCollection(tenant, name, keepQuarantine, collectionId);
+    }
+
+    /** What a delete of {@code label} (or of the id the route boundary resolved to it) would do: see {@link CollectionDeletes}. */
+    public CollectionDeletes.Verdict deleteVerdict(String tenant, String label, Long resolvedId) {
+        return CollectionDeletes.verdict(tenantScope, tenant, label, resolvedId);
+    }
+
+    private Map<String, Integer> deleteCollection(String tenant, String name, boolean keepQuarantine, Long onlyId) {
+        DeleteOutcome outcome = deleteCollectionTxn(tenant, name, keepQuarantine, onlyId);
         Map<String, Integer> counts = outcome.counts();
         // A quarantine sibling this delete emptied and unregistered: same post-commit eviction as the name itself.
         for (String sibling : outcome.unregisteredSiblings()) {
@@ -10343,7 +10369,7 @@ public final class CatalogRepository {
     private record DeleteOutcome(Map<String, Integer> counts, List<String> unregisteredSiblings,
                                  List<String> retiredRemoved) {}
 
-    private DeleteOutcome deleteCollectionTxn(String tenant, String name, boolean keepQuarantine) {
+    private DeleteOutcome deleteCollectionTxn(String tenant, String name, boolean keepQuarantine, Long onlyId) {
         // nexus-wbfpw.66: DELETEs catalog_document_chunks rows (step 1b, and the fk-001 cascade of
         // step 6), which fires vectors-021-3's chunk-locking trigger; whole transaction retried on 40P01.
         // `counts` is built inside the lambda, so each attempt starts from an empty map.
@@ -10497,10 +10523,12 @@ public final class CatalogRepository {
                     CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION)
                 .from(CATALOG_COLLECTIONS)
                 .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(name))
+                .and(onlyId == null ? DSL.trueCondition() : CATALOG_COLLECTIONS.COLLECTION_ID.eq(onlyId))
                 .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.ne("quarantine")).and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(""))
                 .fetchOne();
-            counts.put("catalog_collections",
-                CollectionTombstones.deleteRegistryRows(ctx, tenant, registryRows) - retiredRemoved.size());
+            counts.put("catalog_collections", onlyId != null
+                ? CollectionTombstones.deleteRegistryRowById(ctx, tenant, name, onlyId, retiredRemoved)
+                : CollectionTombstones.deleteRegistryRows(ctx, tenant, registryRows) - retiredRemoved.size());
             if (freed != null) {
                 rederiveOwnersHeldBack(ctx, tenant, freed.value1(), freed.value2(), freed.value3(), freed.value4());
             }
@@ -10855,6 +10883,19 @@ public final class CatalogRepository {
                                                    String expectedTargetSupersededBy,
                                                    String newContentType, String newOwnerId,
                                                    String newNameEmbeddingModel) {
+        return renameCollectionOutcome(tenant, oldName, newName, expectedTargetSupersededBy, newContentType, newOwnerId,
+            newNameEmbeddingModel).counts();
+    }
+
+    /**
+     * {@link #renameCollection(String, String, String, String, String, String, String)}, answering the renamed row too
+     * ({@link RenameOutcome}). The one rename primitive of the catalog: refused first, from gate 3 until the one-row rename can
+     * run, with {@link RenameRefusedException} ({@link RenameGuard}, RDR-229 P3.5a).
+     */
+    public RenameOutcome renameCollectionOutcome(String tenant, String oldName, String newName,
+                                                 String expectedTargetSupersededBy, String newContentType,
+                                                 String newOwnerId, String newNameEmbeddingModel) {
+        renameGuard.requireRenameAllowed();
         // nexus-wbfpw.71: a rename re-homes chunks and registry rows with no audit row, so it is refused on a
         // quarantine collection, as source or as target (the sanctioned verbs are restore and expiry).
         // RDR-229 P2.5: each end is judged by its row (registry cache, else one single-column read); an end with
@@ -10862,9 +10903,11 @@ public final class CatalogRepository {
         QuarantineOrigin.requireNotQuarantine(tenantScope, tenant, "rename", oldName);
         QuarantineOrigin.requireNotQuarantine(tenantScope, tenant, "rename", newName);
         String[] tuple = new String[5];
+        String[] epoch = new String[1];   // baton's CatalogEpoch, read inside the transaction's tenant scope
         Map<String, Integer> counts = CollectionMint.refusingRace(tenantScope, tenant,
             () -> renameCollectionTxn(tenant, oldName, newName, expectedTargetSupersededBy, newContentType, newOwnerId,
-                newNameEmbeddingModel, tuple), CollectionMint.recheckOf(tenant, tuple));
+                newNameEmbeddingModel, tuple, epoch), CollectionMint.recheckOf(tenant, tuple));
+        long renamedId = 0;
         // Post-commit (nexus-h8rf6 wave review): the rename RETIRES the old registry row —
         // evict it so a later same-named collection re-registers.
         //
@@ -10887,9 +10930,9 @@ public final class CatalogRepository {
             // lookup's miss caches it through the guarded fill (nexus-hkh1y); a direct
             // markKnown of the returned row would re-cache a read that a concurrent evict
             // had already invalidated.
-            CollectionRegistry.lookup(tenantScope, tenant, newName);
+            renamedId = CollectionRegistry.lookup(tenantScope, tenant, newName).collectionId();
         }
-        return counts;
+        return new RenameOutcome(counts, renamedId, epoch[0], renameGuard.idsStable());
     }
 
     /**
@@ -11358,7 +11401,8 @@ public final class CatalogRepository {
     private Map<String, Integer> renameCollectionTxn(String tenant, String oldName, String newName,
                                                         String expectedTargetSupersededBy,
                                                         String newContentTypeOrNull, String newOwnerIdOrNull,
-                                                        String newNameEmbeddingModelOrNull, String[] tupleOut) {
+                                                        String newNameEmbeddingModelOrNull, String[] tupleOut,
+                                                        String[] epochOut) {
         // nexus-wbfpw.66: UPDATEs catalog_document_chunks.collection, which fires
         // vectors-021-3's chunk-locking trigger; whole transaction retried on 40P01. `counts` is
         // built inside the lambda, so each attempt starts from an empty map.
@@ -11660,6 +11704,9 @@ public final class CatalogRepository {
             // fires catalog-044's BEFORE trigger (UPDATE OF owner_id) again, and the guard now sees a free tuple
             // unless a third live collection holds it. A tumbler-shaped or knowledge owner is untouched by the trigger.
             rederiveOwner(ctx, tenant, newName);
+            // RDR-229 P3.5a: the epoch is read here, inside the rename's own tenant scope (CatalogEpoch.of is empty outside
+            // it), and carried out with the result; a retried attempt overwrites it.
+            epochOut[0] = CatalogEpoch.of(ctx, tenant).orElse(null);
             return counts;
         });
     }

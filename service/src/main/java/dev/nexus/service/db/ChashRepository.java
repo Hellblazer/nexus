@@ -90,9 +90,16 @@ public final class ChashRepository {
         " WHERE tenant_id = current_setting('nexus.tenant', true) AND chash = ?";
 
     private final TenantScope tenantScope;
+    /** RDR-229 P3.5a: the rename refusal this repository's rename consults first ({@link RenameGuard#open()} never refuses). */
+    private final RenameGuard renameGuard;
 
     public ChashRepository(TenantScope tenantScope) {
+        this(tenantScope, RenameGuard.open());
+    }
+
+    public ChashRepository(TenantScope tenantScope, RenameGuard renameGuard) {
         this.tenantScope = tenantScope;
+        this.renameGuard = renameGuard;
     }
 
     /**
@@ -214,6 +221,7 @@ public final class ChashRepository {
      * way by definition of the chash.
      */
     public int renameCollection(String tenant, String oldCollection, String newCollection) {
+        renameGuard.requireRenameAllowed();   // RDR-229 P3.5a: refused from gate 3 until the one-row rename can run
         if (oldCollection == null || oldCollection.isBlank()
                 || newCollection == null || newCollection.isBlank()) {
             throw new IllegalArgumentException("old and new collection must not be empty");
