@@ -67,6 +67,8 @@ final class CollectionOneRowRename {
                 + " is not a live registered collection (it was retired or removed while this one ran); nothing was renamed");
         }
         long id = own.value1();
+        // The owner a settled collection holds is not replaced by the client's: see ownerTheRenameMayChange.
+        newOwnerId = ownerTheRenameMayChange(own.value3(), newOwnerId);
         String contentType = newContentType != null ? newContentType : own.value2();
         String owner = newOwnerId != null ? newOwnerId : own.value3();
         if (!CollectionMint.tupleIndexExists(ctx)) {
@@ -127,6 +129,28 @@ final class CollectionOneRowRename {
             .and(NoteUri.namesCollection(DOCUMENT_HIGHLIGHTS.SOURCE_URI, oldName)).execute());
         QuarantineOrigin.retagRowsOf(ctx, tenant, oldName, newName);
         return counts;
+    }
+
+    /** The shape of an owner that documents settled: a tumbler segment such as {@code 1-2} ({@code catalog_collection_owner_replaceable}'s test). */
+    private static final java.util.regex.Pattern SETTLED_OWNER = java.util.regex.Pattern.compile("^[0-9]+(-[0-9]+)*$");
+
+    /**
+     * Owner re-derivation in the one-row path (stage-1 review S3). The name path re-homes the documents under the new label and then
+     * re-derives a replaceable owner from them ({@code rederiveOwner}: catalog-044/051's triggers read the documents by
+     * {@code physical_collection = name}), so a code collection whose documents sit under tumbler owner {@code 1-2} ends with that owner
+     * whatever slug the new label carries. The one-row path leaves the documents' name column at the old label, so the same triggers,
+     * keyed on the new label, find no document and would leave the client's slug in place, replacing a settled owner.
+     *
+     * <p>Re-deriving by {@code collection_id} would need a second copy of catalog-044's derivation and 051's tuple guard; P3.5b redefines
+     * those functions to read the id, so this path does not copy them. It keeps the invariant they enforce instead: an owner that is a
+     * tumbler segment is settled and a slug never replaces it. The client's {@code owner_id} is applied only to a row whose owner is a
+     * slug (replaceable); for a settled owner the rename changes the label and leaves the owner as it is, which is what the name path
+     * ends with for a collection whose documents name that owner.
+     *
+     * @return {@code requested}, or null when the row's owner is settled
+     */
+    static String ownerTheRenameMayChange(String currentOwner, String requested) {
+        return requested != null && (currentOwner == null || !SETTLED_OWNER.matcher(currentOwner).matches()) ? requested : null;
     }
 
     /**
