@@ -81,7 +81,8 @@ def _row(
     stalled: bool | None = None,
     stalled_owner: str | None = None,
     stalled_since: str | None = None,
-    red_since: str | None = None,
+    stalled_sign: str | None = None,
+    open_minutes: int | None = None,
     previous_owner: str | None = None,
 ) -> dict:
     """The arguments the aura maps from an owner row (body.owner, body.owner_alias, body.next, body.next_alias,
@@ -98,20 +99,23 @@ def _row(
     if next_alias is not None:
         out["next_alias"] = next_alias
     for name, value in (("stalled", stalled), ("stalled_owner", stalled_owner), ("stalled_since", stalled_since),
-                        ("red_since", red_since), ("previous_owner", previous_owner)):
+                        ("stalled_sign", stalled_sign), ("open_minutes", open_minutes),
+                        ("previous_owner", previous_owner)):
         if value is not None:
             out[name] = value
     return out
 
 
-#: The engine's stall escalation (da1462a038 and its fix): reason escalated, stalled true, the owner that acknowledged and
-#: never fixed it, when the stall was declared, and when the red began: 74 minutes apart.
-RED_SINCE, STALLED_SINCE = "2026-11-22T10:00:00Z", "2026-11-22T11:14:00Z"
-STALL = {"stalled": True, "stalled_owner": OTHER, "stalled_since": STALLED_SINCE, "red_since": RED_SINCE}
+#: The engine's stall escalation: reason escalated, stalled true, open_minutes since the red began, and the last sign of life
+#: (stalled_sign ack or push, with that identity and instant; all three absent when there was none).
+STALLED_SINCE = "2026-11-22T11:14:00Z"
+STALL = {"stalled": True, "stalled_owner": OTHER, "stalled_since": STALLED_SINCE, "stalled_sign": "ack", "open_minutes": 74}
+NO_SIGN = {"stalled_owner": None, "stalled_since": None, "stalled_sign": None}
 
 
 def _stalled(owner: str | None, me: str = ME, **over: object) -> dict:
-    """An escalated row of a red its owner (OTHER) acknowledged and never fixed; *owner* is who it names (the leader)."""
+    """An escalated row of a red open 74 minutes whose last sign was OTHER's ack at 11:14 UTC; *owner* is who it names (the
+    leader)."""
     return _row(owner, reason="escalated", me=me, **{**STALL, **over})
 
 
@@ -128,7 +132,8 @@ def test_the_header_declares_the_owner_row_fields_and_me_and_grants_nothing() ->
         ("stalled", "boolean", True),
         ("stalled_owner", "string", True),
         ("stalled_since", "string", True),
-        ("red_since", "string", True),
+        ("stalled_sign", "string", True),
+        ("open_minutes", "integer", True),
         ("previous_owner", "string", True),
         ("me", "string", False),
     ]
@@ -185,35 +190,55 @@ DISPLAYS = [
     ),
     pytest.param(
         _stalled(ME),
-        f"Develop is red at {SHORT}, acknowledged by {OTHER} but still open after 74 min. Raise an ask to Sam.",
-        id="stalled-the-leader",
+        f"Develop is red at {SHORT}, still open after 74 min; last activity: {OTHER} acknowledged at 11:14 UTC. "
+        "Raise an ask to Sam.",
+        id="stalled-the-leader-last-sign-an-ack",
+    ),
+    pytest.param(
+        _stalled(ME, stalled_sign="push", stalled_since="2026-11-22T09:05:59.5Z"),
+        f"Develop is red at {SHORT}, still open after 74 min; last activity: {OTHER} pushed at 09:05 UTC. "
+        "Raise an ask to Sam.",
+        id="stalled-the-leader-last-sign-a-push",
     ),
     pytest.param(
         _stalled(None),
-        f"Develop is red at {SHORT}, acknowledged by {OTHER} but still open after 74 min. Raise an ask to Sam.",
+        f"Develop is red at {SHORT}, still open after 74 min; last activity: {OTHER} acknowledged at 11:14 UTC. "
+        "Raise an ask to Sam.",
         id="stalled-no-owner-named-a-member",
     ),
     pytest.param(
+        _stalled(ME, **NO_SIGN),
+        f"Develop is red at {SHORT}, still open after 74 min with no acknowledgement or fix push. Raise an ask to Sam.",
+        id="stalled-the-leader-no-sign",
+    ),
+    pytest.param(
         _stalled(THIRD, me=OTHER),
-        f"Develop is red at {SHORT}; you acknowledged it but it is still open after 74 min. "
+        f"Develop is red at {SHORT}, still open after 74 min; your last activity: acknowledged at 11:14 UTC. "
         "The leader is raising it with Sam.",
-        id="stalled-the-owner-who-acknowledged",
+        id="stalled-the-owner-with-the-last-sign-an-ack",
+    ),
+    pytest.param(
+        _stalled(THIRD, me=OTHER, stalled_sign="push"),
+        f"Develop is red at {SHORT}, still open after 74 min; your last activity: pushed at 11:14 UTC. "
+        "The leader is raising it with Sam.",
+        id="stalled-the-owner-with-the-last-sign-a-push",
     ),
     pytest.param(
         _stalled(THIRD),
-        f"Develop is red at {SHORT}; {OTHER} acknowledged it but it is still open after 74 min. "
+        f"Develop is red at {SHORT}, still open after 74 min; last activity: {OTHER} acknowledged at 11:14 UTC. "
         "The leader is raising it with Sam. Hold your pushes.",
         id="stalled-everyone-else",
     ),
     pytest.param(
-        _stalled(ME, stalled_since=None, red_since=None),
-        f"Develop is red at {SHORT}, acknowledged by {OTHER} but still open. Raise an ask to Sam.",
-        id="stalled-times-absent",
+        _stalled(THIRD, **NO_SIGN),
+        f"Develop is red at {SHORT}, still open after 74 min with no acknowledgement or fix push. "
+        "The leader is raising it with Sam. Hold your pushes.",
+        id="stalled-everyone-else-no-sign",
     ),
     pytest.param(
-        _stalled(ME, stalled_since="2026-11-22T11:14:00.123456Z", red_since="2026-11-21T23:59:30Z"),
-        f"Develop is red at {SHORT}, acknowledged by {OTHER} but still open after 674 min. Raise an ask to Sam.",
-        id="stalled-across-midnight-with-fraction",
+        _stalled(ME, open_minutes=None, stalled_since="2026-11-22T23:07:00.123456Z"),
+        f"Develop is red at {SHORT}, still open; last activity: {OTHER} acknowledged at 23:07 UTC. Raise an ask to Sam.",
+        id="stalled-open-minutes-absent",
     ),
 ]
 
@@ -281,20 +306,27 @@ def test_an_escalated_row_that_is_not_marked_stalled_keeps_the_no_one_acknowledg
     """stalled false, or absent with stalled_* fields left over, is the plain escalation: nobody acknowledged."""
     expected = f"Develop is red at {SHORT}; no one acknowledged. Raise an ask to Sam."
     assert _run(**_stalled(ME, stalled=False))["text"] == expected
-    assert _run(**_row(ME, reason="escalated", stalled_owner=OTHER, red_since=RED_SINCE))["text"] == expected
+    assert _run(**_row(ME, reason="escalated", stalled_owner=OTHER, open_minutes=74))["text"] == expected
 
 
-def test_a_stalled_row_with_no_stalled_owner_still_reads() -> None:
+def test_a_sign_with_no_identity_reads_as_no_sign_and_an_unknown_sign_too() -> None:
+    no_sign = f"Develop is red at {SHORT}, still open after 74 min with no acknowledgement or fix push. Raise an ask to Sam."
     args = _stalled(ME)
     del args["stalled_owner"]
-    assert _run(**args)["text"] == (
-        f"Develop is red at {SHORT}, acknowledged by the owner but still open after 74 min. Raise an ask to Sam.")
+    assert _run(**args)["text"] == no_sign
+    assert _run(**_stalled(ME, stalled_sign="review"))["text"] == no_sign
 
 
-@pytest.mark.parametrize("bad", ["yesterday", "2026-13-45T25:61:61Z", "2026-11-22"])
-def test_a_time_that_does_not_parse_is_left_out_not_an_error(bad: str) -> None:
+@pytest.mark.parametrize("bad", ["yesterday", "2026-13-45T25:61:61Z", "2026-11-22", "2026-11-22T24:00:00Z"])
+def test_a_stall_instant_that_does_not_parse_leaves_the_time_out_not_an_error(bad: str) -> None:
     text = _run(**_stalled(ME, stalled_since=bad))["text"]
-    assert text == f"Develop is red at {SHORT}, acknowledged by {OTHER} but still open. Raise an ask to Sam."
+    assert text == f"Develop is red at {SHORT}, still open after 74 min; last activity: {OTHER} acknowledged. Raise an ask to Sam."
+
+
+def test_the_stall_text_no_longer_claims_an_acknowledgement_it_cannot_show() -> None:
+    for args in (_stalled(ME, stalled_sign="push"), _stalled(ME, **NO_SIGN), _stalled(THIRD, me=OTHER, stalled_sign="push")):
+        text = _run(**args)["text"]
+        assert "acknowledged by" not in text and "you acknowledged" not in text, text
 
 
 @pytest.mark.parametrize(("args", "wake"), WAKES)
@@ -459,7 +491,8 @@ def test_the_shipped_aura_maps_the_owner_row_and_the_session_identity() -> None:
         "stalled": ("body", "stalled"),
         "stalled_owner": ("body", "stalled_owner"),
         "stalled_since": ("body", "stalled_since"),
-        "red_since": ("body", "red_since"),
+        "stalled_sign": ("body", "stalled_sign"),
+        "open_minutes": ("body", "open_minutes"),
         "previous_owner": ("body", "previous_owner"),
         "me": ("self", "identity"),
     }
@@ -514,7 +547,7 @@ OWNER_TEMPLATE = {
             for name in (
                 "state", "conclusion", "workflow", "job", "sha", "run", "n", "base", "owner", "owner_alias", "next",
                 "next_alias", "reason", "suspects", "episode_at", "refresh", "handoffs", "runs", "attempt", "url",
-                "stalled", "stalled_owner", "stalled_since", "red_since", "previous_owner",
+                "stalled", "stalled_owner", "stalled_since", "stalled_sign", "open_minutes", "previous_owner",
             )
         }
     },
@@ -537,7 +570,8 @@ def test_the_shipped_aura_is_refused_by_a_template_without_the_owner_fields() ->
     findings, _ = check_dictionary(_shipped(), [{**OWNER_TEMPLATE, "doc": {"body": old_body}}])
     assert {f.key for f in findings} == {
         "args.owner", "args.owner_alias", "args.next", "args.next_alias", "args.refresh", "args.reason",
-        "args.stalled", "args.stalled_owner", "args.stalled_since", "args.red_since", "args.previous_owner"}
+        "args.stalled", "args.stalled_owner", "args.stalled_since", "args.stalled_sign",
+        "args.open_minutes", "args.previous_owner"}
 
 
 # -- who may post the owner row (RDR-252 "The stamper": the engine stamps ``from=engine``; round 1 B3) ----------------

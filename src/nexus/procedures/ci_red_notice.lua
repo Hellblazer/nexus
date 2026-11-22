@@ -1,6 +1,6 @@
 -- procedure: ci_red_notice
 -- summary: The line an aura shows for an owner row of a red develop: who owns it and what this session does.
--- args: sha:string, owner:string?, owner_alias:string?, next:string?, next_alias:string?, refresh:boolean, reason:string, stalled:boolean?, stalled_owner:string?, stalled_since:string?, red_since:string?, previous_owner:string?, me:string
+-- args: sha:string, owner:string?, owner_alias:string?, next:string?, next_alias:string?, refresh:boolean, reason:string, stalled:boolean?, stalled_owner:string?, stalled_since:string?, stalled_sign:string?, open_minutes:integer?, previous_owner:string?, me:string
 -- grants: none
 
 -- RDR-252 Step 4 (nexus-igea9.7), the procedure the shipped ci_develop_red aura wraps. It reads nothing and
@@ -16,10 +16,11 @@
 --   owner, a red the leader takes (any other reason but handoff and escalated): the reason is named
 --   owner, after a hand-off (reason handoff): "handed to you after no acknowledgement"
 --   owner, after a disclaim (reason disclaimed): "handed to you: <previous_owner> said it is not theirs"
---   escalated and stalled (an acknowledged red still open; body.stalled, stalled_owner, stalled_since, red_since):
---     the leader (owner, or no one named): "acknowledged by <owner> but still open after N min. Raise an ask to Sam."
---     the owner that stalled it: "you acknowledged it but it is still open ..." (no hold, no wake)
---     everyone else: "<owner> acknowledged it but it is still open ... Hold your pushes." (no wake)
+--   escalated and stalled (a red still open after the stall window; body.stalled, open_minutes, stalled_sign, stalled_owner,
+--   stalled_since): the leader (owner, or no one named) is told how long it has been open and the last sign of life, "last
+--   activity: <who> <acknowledged|pushed> at hh:mm UTC", or "with no acknowledgement or fix push" when there was none, and
+--   to raise an ask to Sam; the session that gave the last sign gets "your last activity: ..." (no hold, no wake); everyone
+--   else gets the same facts and "Hold your pushes" (no wake)
 --   escalated, naming me or naming no one (a member sees it): raise an ask to Sam
 --   next up: "<owner> owns it. You are next up." No wake: a nudge row wakes it (ci_red_nudge), and a hand-off that
 --     seats it as owner wakes it through the owner display.
@@ -58,43 +59,23 @@ if not string.match(reason, "^[a-z][a-z_]*$") or #reason > 32 then
   error("reason must be 1 to 32 lower-case letters and underscores; got " .. #reason .. " characters", 0)
 end
 
--- A stall escalation (reason escalated, stalled true: a red its owner acknowledged and never fixed) names the owner that
--- stalled it and the two instants the engine stamped, the red's first and the stall's declaration.
+-- A stall escalation (reason escalated, stalled true: a red still open after the stall window) carries open_minutes, the
+-- whole minutes since the red began, and the last sign of life on it: stalled_sign (ack or push), the identity that gave
+-- it (stalled_owner) and when (stalled_since, an ISO-8601 UTC instant). All three are absent when there was no sign.
 local stalled_owner = segment(args.stalled_owner, "stalled_owner")
--- A disclaim hand-off names the owner that said "not mine" (body.previous_owner, from the engine cut that adds it).
+-- A disclaim hand-off names the owner that said "not mine" (body.previous_owner).
 local previous_owner = segment(args.previous_owner, "previous_owner")
 
--- Whole minutes from the instant a to the instant b, both ISO-8601 UTC ("2026-11-22T10:00:00Z", a fraction allowed),
--- or nil when either does not parse or b is earlier. The sandbox has no clock or date library, so the day count is the
--- proleptic Gregorian one (days from civil).
-local function seconds(t)
+-- "hh:mm" of an ISO-8601 UTC instant ("2026-11-22T11:14:00Z", a fraction allowed), or nil when it does not parse.
+local function clock(t)
   if t == nil then
     return nil
   end
-  local y, mo, d, h, mi, s = string.match(t, "^(%d%d%d%d)%-(%d%d)%-(%d%d)T(%d%d):(%d%d):(%d%d)%.?%d*Z$")
-  if y == nil then
+  local h, m = string.match(t, "^%d%d%d%d%-%d%d%-%d%dT(%d%d):(%d%d):%d%d%.?%d*Z$")
+  if h == nil or tonumber(h) > 23 or tonumber(m) > 59 then
     return nil
   end
-  y, mo, d, h, mi, s = tonumber(y), tonumber(mo), tonumber(d), tonumber(h), tonumber(mi), tonumber(s)
-  if mo < 1 or mo > 12 or d < 1 or d > 31 or h > 23 or mi > 59 or s > 60 then
-    return nil
-  end
-  if mo <= 2 then
-    y = y - 1
-  end
-  local era = math.floor(y / 400)
-  local yoe = y - era * 400
-  local doy = math.floor((153 * ((mo + 9) % 12) + 2) / 5) + d - 1
-  local doe = yoe * 365 + math.floor(yoe / 4) - math.floor(yoe / 100) + doy
-  return ((era * 146097 + doe) * 24 + h) * 3600 + mi * 60 + s
-end
-
-local function minutes_between(a, b)
-  local from, to = seconds(a), seconds(b)
-  if from == nil or to == nil or to < from then
-    return nil
-  end
-  return math.floor((to - from) / 60)
+  return h .. ":" .. m
 end
 
 local head = "Develop is red at " .. string.sub(sha, 1, 7)
@@ -108,19 +89,37 @@ local text
 local wake = false
 
 if escalated and args.stalled == true then
-  -- A red its owner acknowledged and never fixed (RDR-252 audit S1): the owner did not miss the deadline, so the red is
-  -- not handed on again; the leader raises it with Sam. The owner that stalled it is not told to hold its own pushes.
-  local minutes = minutes_between(args.red_since, args.stalled_since)
-  local open = minutes ~= nil and (" after " .. minutes .. " min") or ""
-  if stalled_owner ~= nil and stalled_owner == me and owner ~= me then
-    text = head .. "; you acknowledged it but it is still open" .. open .. ". The leader is raising it with Sam."
+  -- A red still open after the stall window (RDR-252 audit S1): it is not handed on again, and the leader raises it with
+  -- Sam. The text says what the engine knows and no more: how long it has been open, and the last sign of life if there
+  -- was one (an ack or a push), never "acknowledged" for someone who only pushed. The session that gave the last sign is
+  -- not told to hold its own pushes.
+  local verb = nil
+  if args.stalled_sign == "ack" then
+    verb = "acknowledged"
+  elseif args.stalled_sign == "push" then
+    verb = "pushed"
+  end
+  local sign = verb ~= nil and stalled_owner ~= nil
+  local lead = head .. ", still open"
+  if args.open_minutes ~= nil and args.open_minutes >= 0 then
+    lead = lead .. " after " .. args.open_minutes .. " min"
+  end
+  local at = clock(args.stalled_since)
+  at = at ~= nil and (" at " .. at .. " UTC") or ""
+  if sign and stalled_owner == me and owner ~= me then
+    text = lead .. "; your last activity: " .. verb .. at .. ". The leader is raising it with Sam."
   elseif owner == me or owner == nil then
-    text = head .. ", acknowledged by " .. (stalled_owner or "the owner") .. " but still open" .. open
-      .. ". Raise an ask to Sam."
+    if sign then
+      text = lead .. "; last activity: " .. stalled_owner .. " " .. verb .. at .. ". Raise an ask to Sam."
+    else
+      text = lead .. " with no acknowledgement or fix push. Raise an ask to Sam."
+    end
     wake = not args.refresh
-  else
-    text = head .. "; " .. (stalled_owner or "the owner") .. " acknowledged it but it is still open" .. open
+  elseif sign then
+    text = lead .. "; last activity: " .. stalled_owner .. " " .. verb .. at
       .. ". The leader is raising it with Sam. Hold your pushes."
+  else
+    text = lead .. " with no acknowledgement or fix push. The leader is raising it with Sam. Hold your pushes."
   end
 elseif owner == me or (escalated and owner == nil) then
   if escalated then
