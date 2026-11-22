@@ -43,13 +43,19 @@ class _Wire:
     def __init__(self) -> None:
         self.sent: list[dict[str, Any]] = []
         self.rows: list[dict[str, Any]] = []
+        #: When set, a read answers only the rows of the subspace it names (a board with none answers nothing).
+        self.by_subspace: dict[str, list[dict[str, Any]]] | None = None
+        self.reads: list[str] = []
         self.store = HttpTupleStore(base_url="http://mock.test")
         self.store._client = httpx.Client(transport=httpx.MockTransport(self._handle))
         self.store._invalidate_and_reresolve = lambda: None  # type: ignore[method-assign]
 
     def _handle(self, request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/rd"):
-            return httpx.Response(200, json={"tuples": self.rows, "order": "desc", "limit": 300})
+            subspace = json.loads(request.content).get("subspace", "")
+            self.reads.append(subspace)
+            rows = self.rows if self.by_subspace is None else self.by_subspace.get(subspace, [])
+            return httpx.Response(200, json={"tuples": rows, "order": "desc", "limit": 300})
         self.sent.append(json.loads(request.content))
         return httpx.Response(200, json={"id": "d" * 64})
 
@@ -69,9 +75,12 @@ def _open_red(wire: _Wire, owner: str | None = ME) -> None:
     wire.rows = [_owner_row(SHA, "2026-11-20T14:10:00Z", owner=owner, owner_alias="tamsin")]
 
 
-def _run(args: list[str], wire: _Wire, monkeypatch: pytest.MonkeyPatch) -> Any:
+def _run(args: list[str], wire: _Wire, monkeypatch: pytest.MonkeyPatch, *, derive: bool = False) -> Any:
+    """Run `nx ci ack ARGS`. The board is named with --base nexus-develop unless the args name one or *derive* is set
+    (the repo is then derived from the origin remote, as a plain `nx ci ack` does)."""
     monkeypatch.setattr(ci_cmd, "_store", lambda: wire.store)
-    return CliRunner().invoke(ci_cmd.ci_group, ["ack", *args])
+    named = derive or "--base" in args or "--topic" in args
+    return CliRunner().invoke(ci_cmd.ci_group, ["ack", *args] if named else ["ack", *args, "--base", "nexus-develop"])
 
 
 def test_not_mine_posts_a_disclaim_row_with_the_full_sha_and_the_callers_identity(
@@ -161,6 +170,138 @@ def test_a_disclaim_on_another_subspace_is_not_restamped(wire: _Wire, identity: 
     identity[:] = []
     wire.store.out("board/ci/nexus-develop--done", TOPIC_KEY, {"kind": "disclaim", "from": "marginalia"}, nonce="n1")
     assert wire.sent[0]["dims"]["from"] == "marginalia"
+
+
+# ── any repo's board: --base names it (Sam, T2 nexus/sam-ruling-generalize-252-2026-11-22) ─────────────────────
+
+
+@pytest.mark.parametrize("flags", [[], ["--not-mine"]], ids=["ack", "not-mine"])
+def test_base_names_any_repos_board(
+    wire: _Wire, identity: list[str], monkeypatch: pytest.MonkeyPatch, flags: list[str],
+) -> None:
+    _open_red(wire)
+    assert _run([*flags, SHA[:7], "--base", "halcyon-main"], wire, monkeypatch).exit_code == 0
+    assert wire.sent[-1]["subspace"] == "board/ci/halcyon-main--owner"
+    assert wire.sent[-1]["keys"] == {"topic": "halcyon-main--owner"}
+
+
+# ── no --base: the repo is derived from the origin remote, and nothing falls back to nexus ──────────────────────
+
+
+@pytest.mark.parametrize(
+    ("url", "repo"),
+    [
+        ("git@github.com:Hellblazer/halcyon.git", "halcyon"),
+        ("https://github.com/Hellblazer/halcyon.git", "halcyon"),
+        ("https://github.com/Hellblazer/halcyon", "halcyon"),
+        ("https://github.com/Hellblazer/halcyon/", "halcyon"),
+        ("ssh://git@github.com/Hellblazer/my.repo-x.git", "my.repo-x"),
+        ("https://user:tok@github.com/Hellblazer/halcyon.git", "halcyon"),
+    ],
+)
+def test_the_repo_is_the_last_segment_of_the_origin_url(url: str, repo: str) -> None:
+    assert ci_cmd._repo_from_origin(url) == repo
+
+
+@pytest.mark.parametrize("url", ["", "   ", "halcyon", "https://github.com/", "/Hellblazer/.git", "git@github.com:a b/c d.git"])
+def test_an_origin_url_with_no_usable_repo_name_gives_none(url: str) -> None:
+    assert ci_cmd._repo_from_origin(url) is None
+
+
+@pytest.mark.parametrize("flags", [[], ["--not-mine"]], ids=["ack", "not-mine"])
+def test_with_no_base_the_one_board_of_the_origin_repo_with_an_open_red_is_used(
+    wire: _Wire, identity: list[str], monkeypatch: pytest.MonkeyPatch, flags: list[str],
+) -> None:
+    monkeypatch.setattr(ci_cmd, "_origin_url", lambda: "git@github.com:Hellblazer/halcyon.git")
+    sub = "board/ci/halcyon-main--owner"
+    wire.by_subspace = {sub: [_owner_row(SHA, "2026-11-20T14:10:00Z")]}
+    result = _run([*flags, SHA[:7]], wire, monkeypatch, derive=True)
+    assert result.exit_code == 0, result.output
+    assert wire.sent[-1]["subspace"] == sub and wire.sent[-1]["keys"] == {"topic": "halcyon-main--owner"}
+    assert sorted(set(wire.reads)) == ["board/ci/halcyon-develop--owner", sub], "both of the repo's push branches were read"
+
+
+def test_two_boards_of_the_origin_repo_with_an_open_red_are_ambiguous_and_the_refusal_names_base(
+    wire: _Wire, identity: list[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ci_cmd, "_origin_url", lambda: "https://github.com/Hellblazer/halcyon.git")
+    row = [_owner_row(SHA, "2026-11-20T14:10:00Z")]
+    wire.by_subspace = {"board/ci/halcyon-develop--owner": row, "board/ci/halcyon-main--owner": row}
+    result = _run([SHA[:7]], wire, monkeypatch, derive=True)
+    assert result.exit_code != 0 and wire.sent == []
+    assert "halcyon-develop" in result.output and "halcyon-main" in result.output and "--base" in result.output
+
+
+def test_no_open_red_on_any_board_of_the_origin_repo_is_refused_naming_base(
+    wire: _Wire, identity: list[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ci_cmd, "_origin_url", lambda: "https://github.com/Hellblazer/halcyon.git")
+    wire.by_subspace = {"board/ci/nexus-develop--owner": [_owner_row(SHA, "2026-11-20T14:10:00Z")]}
+    result = _run([SHA[:7]], wire, monkeypatch, derive=True)
+    assert result.exit_code != 0 and wire.sent == []
+    assert "halcyon" in result.output and "--base" in result.output
+    assert "board/ci/nexus-develop--owner" not in wire.reads, "an open red on nexus is never a fallback"
+
+
+@pytest.mark.parametrize("url", ["", "not a url"])
+def test_an_origin_that_cannot_be_read_is_refused_naming_base_and_nothing_is_read_or_posted(
+    wire: _Wire, identity: list[str], monkeypatch: pytest.MonkeyPatch, url: str,
+) -> None:
+    monkeypatch.setattr(ci_cmd, "_origin_url", lambda: url)
+    _open_red(wire)  # a red on every board: a fallback to nexus-develop would find it
+    result = _run([SHA[:7]], wire, monkeypatch, derive=True)
+    assert result.exit_code != 0 and wire.sent == [] and wire.reads == []
+    assert "origin" in result.output and "--base" in result.output
+
+
+def test_the_real_origin_reader_returns_the_origin_of_the_repository_it_runs_in(tmp_path: Any) -> None:
+    import subprocess  # noqa: PLC0415
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    assert ci_cmd._origin_url(cwd=tmp_path) == "", "a repository with no origin"
+    subprocess.run(["git", "-C", str(tmp_path), "remote", "add", "origin", "git@github.com:Hellblazer/halcyon.git"], check=True)
+    assert ci_cmd._repo_from_origin(ci_cmd._origin_url(cwd=tmp_path)) == "halcyon"
+    assert ci_cmd._origin_url(cwd=tmp_path / "missing") == "", "a directory that is no repository"
+
+
+def test_base_and_topic_together_are_refused_and_a_base_must_be_a_bare_base(
+    wire: _Wire, identity: list[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _open_red(wire)
+    both = _run([SHA[:7], "--base", "halcyon-main", "--topic", "halcyon-main--owner"], wire, monkeypatch)
+    assert both.exit_code != 0 and "--base" in both.output and "--topic" in both.output
+    for bad in ("halcyon-main--owner", "a/b", "", "-x"):
+        result = _run([SHA[:7], "--base", bad], wire, monkeypatch)
+        assert result.exit_code != 0, bad
+    assert wire.sent == []
+
+
+def test_no_repo_is_hardcoded_in_the_ack_the_reds_split_or_the_ack_times_display() -> None:
+    """No board is named in the ack verb, ci_ack, ci_reds or the ack-times code: the board is --base, --topic, or the one
+    the origin remote names (Sam, T2 nexus/sam-ruling-generalize-252-2026-11-22; never a fallback to nexus)."""
+    from pathlib import Path  # noqa: PLC0415
+
+    root = Path(__file__).resolve().parent.parent / "src" / "nexus"
+    for name in ("ci_ack.py", "ci_reds.py"):
+        assert "nexus-develop" not in (root / name).read_text(encoding="utf-8"), name
+    cmd = (root / "commands" / "ci_cmd.py").read_text(encoding="utf-8")
+    ack_part = cmd.split("def _current_red")[1]  # _current_red, the origin helpers and the ack verb: the rest of the file
+    assert "def _repo_from_origin" in ack_part and "def ci_ack_cmd" in ack_part, "non-vacuity: the slice holds what it audits"
+    assert "nexus-develop" not in ack_part and "DEFAULT_BASE" not in cmd
+
+
+def test_a_disclaim_on_another_boards_red_is_split_and_shown_like_any_other() -> None:
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from nexus import ci_reds  # noqa: PLC0415
+
+    def row(kind: str, at: str, who: str, **body: Any) -> Any:
+        return SimpleNamespace(id=f"{kind}{at}", created_at=at, dims={"from": who, "kind": kind, "sha": SHA},
+                               body=json.dumps(body) if kind == "owner" else "mine no more", sender_session=None)
+
+    reds, _ = ci_reds.split([row("owner", "2026-11-20T10:00:00Z", "engine", owner="i5", episode_at=EP),
+                             row("disclaim", "2026-11-20T10:02:00Z", "i5")])
+    assert len(reds) == 1 and [r.body for _, r in reds[0].disclaims] == ["mine no more"]
 
 
 def test_the_help_says_what_it_does_now_and_after_the_engine_cut() -> None:

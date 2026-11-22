@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+import subprocess
 import time
 import uuid
 from typing import Any, NoReturn
@@ -11,6 +12,7 @@ from typing import Any, NoReturn
 import click
 
 from nexus import ci_ack, ci_reds, ci_wait
+from nexus.bounded_subprocess import run_bounded
 
 _SHA = re.compile(r"[0-9a-fA-F]{7,40}")
 _GH_REPO = re.compile(r"[\w.-]+/[\w.-]+")
@@ -49,18 +51,20 @@ def ci_group() -> None:
                    "it, and otherwise wait for the newer attempt's row (GitHub read at most once a minute). A "
                    "green row GitHub could never confirm exits 4. Cannot be combined with --fresh (exit 5). "
                    "Ignored in GitHub-only mode, which reads the latest attempts already.")
-@click.option("--repo", default="nexus", show_default=True, help="Repository part of the board topic.")
+@click.option("--repo", default=None,
+              help="Repository part of the board topic [default: the repository name of the origin remote; "
+                   "the wait refuses when there is none].")
 @click.option("--branch", default="develop", show_default=True,
               help="Branch part of the board topic. Only develop and main have one; any other branch "
                    "(a release or feature branch) is waited on through GitHub's check-runs, not the board.")
 @click.option("--gh-repo", default=None,
               help="owner/name for the GitHub reads (a row with no conclusions, a row capped by the "
                    "board's size limit, the one read at the deadline, and every read in GitHub-only mode) "
-                   "[default: Hellblazer/<repo>].")
+                   "[default: the origin remote's owner/name, when --repo is its repository; otherwise required].")
 @click.option("--park-s", type=click.IntRange(1, ci_wait.PARK_CAP_S), default=ci_wait.PARK_CAP_S,
               hidden=True, help="Seconds per park (tests).")
 def ci_wait_cmd(
-    sha: str, timeout_min: float, fresh: bool, latest_attempt: bool, repo: str, branch: str, gh_repo: str | None,
+    sha: str, timeout_min: float, fresh: bool, latest_attempt: bool, repo: str | None, branch: str, gh_repo: str | None,
     park_s: int,
 ) -> None:
     """Wait for SHA's CI runs to complete and print one line with the result.
@@ -119,7 +123,22 @@ def ci_wait_cmd(
         click.echo(f"{sha} unusable: give a commit sha, 7 to 40 hex digits")
         raise SystemExit(ci_wait.EXIT_UNUSABLE)
     sha = sha.lower()
-    gh = gh_repo or f"Hellblazer/{repo}"
+    # No default repo and no default owner: the origin remote names both, and when it cannot the flag is named.
+    origin = _slug_from_origin(_origin_url())
+    if repo is None:
+        if origin is None:
+            click.echo(f"{sha[:12]} unusable: cannot tell which repo's board to wait on: no origin remote with a repo "
+                       "name here; give --repo")
+            raise SystemExit(ci_wait.EXIT_UNUSABLE)
+        repo = origin[1]
+    if gh_repo is not None:
+        gh = gh_repo
+    elif origin is not None and origin[1] == repo:
+        gh = f"{origin[0]}/{repo}"
+    else:
+        click.echo(f"{sha[:12]} unusable: cannot tell the GitHub owner of {repo}: it is not the origin remote's "
+                   "repository; give --gh-repo OWNER/NAME")
+        raise SystemExit(ci_wait.EXIT_UNUSABLE)
     if not _GH_REPO.fullmatch(gh) or any(set(part) <= {"."} for part in gh.split("/")):
         click.echo(f"{sha[:12]} unusable: the GitHub repository must be OWNER/NAME, got {gh!r}")
         raise SystemExit(ci_wait.EXIT_UNUSABLE)
@@ -247,10 +266,58 @@ def _current_red(store: Any, subspace: str, topic: str) -> ci_reds.Episode | Non
     return reds[-1] if reds and reds[-1].cleared is None else None
 
 
+def _origin_url(cwd: Any = None) -> str:
+    """The URL of the ``origin`` remote of the repository *cwd* (default: the current directory) is in, or "" when there
+    is none, no git, or no repository. A seam: a test replaces it."""
+    try:
+        done = run_bounded(["git", "remote", "get-url", "origin"], cwd=cwd, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return done.stdout.strip() if done.returncode == 0 else ""
+
+
+def _slug_from_origin(url: str) -> tuple[str, str] | None:
+    """The ``(owner, repo)`` an origin URL ends in: its last two path segments, ``.git`` and a trailing slash dropped.
+    None for a URL with no usable pair. Works for ``git@host:owner/repo.git``, ``https://host/owner/repo`` and
+    ``ssh://`` forms."""
+    match = re.search(r"[/:]([^/:@\s]+)/([^/:@\s]+?)(?:\.git)?/?$", url.strip())
+    if match is None or any(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", g) is None for g in match.groups()):
+        return None
+    return match.group(1), match.group(2)
+
+
+def _repo_from_origin(url: str) -> str | None:
+    """The repository name an origin URL ends in, as the board names it (``board/ci/<repo>-<branch>--...``, the repo
+    part of ``nx ci wait --repo``). None for a URL with no usable name."""
+    slug = _slug_from_origin(url)
+    return slug[1] if slug else None
+
+
+def _board_of_origin(store: Any, repo: str) -> str:
+    """The owner post of *repo*'s one board with a red open: ``<repo>-<branch>--owner`` for each branch the CI adapter
+    posts boards for (:data:`nexus.ci_wait.BOARD_BRANCHES`). Refuses when no board or more than one has an open red:
+    an ack has no push branch to tell them apart, and a guess could acknowledge the wrong red."""
+    bases = [f"{repo}-{branch}" for branch in sorted(ci_wait.BOARD_BRANCHES)]
+    open_bases = [b for b in bases if _current_red(store, f"board/ci/{b}--owner", f"{b}--owner") is not None]
+    if len(open_bases) == 1:
+        return f"{open_bases[0]}--owner"
+    checked = ", ".join(bases)
+    if open_bases:
+        raise click.ClickException(f"the origin repo {repo} has an open red on more than one board ({', '.join(open_bases)}); "
+                                   "name the one with --base")
+    raise click.ClickException(f"no open red on a board of the origin repo {repo} ({checked}); if the red is on "
+                               "another board, name it with --base")
+
+
 @ci_group.command(name="ack")
 @click.argument("sha")
-@click.option("--topic", default="nexus-develop--owner", show_default=True,
-              help="The owner post to acknowledge on: board/ci/<TOPIC>. A base topic, a double dash and `owner`.")
+@click.option("--base", default=None,
+              help="The board base whose red this is: the owner post is board/ci/<BASE>--owner, as in "
+                   "<repo>-develop. Without --base or --topic the repo is read from the origin remote and its one "
+                   "board with an open red is used; with none or several the command refuses and asks for --base.")
+@click.option("--topic", default=None,
+              help="The whole owner post, board/ci/<TOPIC>: a base, a double dash and `owner` (the same as --base "
+                   "with `--owner` added; give one of the two).")
 @click.option("--not-mine", "not_mine", is_flag=True,
               help="Say the red is not yours instead of acknowledging it: post a `disclaim` row for SHA. The engine "
                    "does not act on it yet, so it is recorded only; from the engine cut that reads it, a disclaim "
@@ -259,14 +326,13 @@ def _current_red(store: Any, subspace: str, topic: str) -> ci_reds.Episode | Non
 @click.option("--note", default=None,
               help=f"With --not-mine, a line saying why or who has it (at most {_NOTE_MAX} characters, no control "
                    "characters). Shown by `nx group ack-times`.")
-def ci_ack_cmd(sha: str, topic: str, not_mine: bool, note: str | None) -> None:
+def ci_ack_cmd(sha: str, base: str | None, topic: str | None, not_mine: bool, note: str | None) -> None:
     """Acknowledge a red develop: post the owner's ack for SHA, signed with this session's identity id.
 
     With --not-mine the row is a `disclaim` instead: "this red is not mine". It is recorded only until the engine cut
     that reads it; from then on a disclaim from the red's current owner hands the red on at once, without waiting for
     the acknowledgement deadline. It takes the same SHA, the same owner check and the same identity as an ack. An ack
     only says "seen", and a disclaim says "someone else should take it".
-
 
     SHA is the red's sha or a prefix of at least 7 hex digits; it is resolved against the tips of the CURRENT red on
     board/ci/<TOPIC>: the shas its owner rows carry, since its first row (a red that a newer one replaced, or a clear row
@@ -282,20 +348,38 @@ def ci_ack_cmd(sha: str, topic: str, not_mine: bool, note: str | None) -> None:
         raise click.ClickException(f"the note must be a single line of printable characters, at most {_NOTE_MAX} long")
     if not re.fullmatch(r"[0-9a-fA-F]{7,40}", sha):
         raise click.ClickException(f"{sha!r} is not a commit sha: give 7 to 40 hex digits")
-    if not _OWNER_TOPIC.fullmatch(topic):
-        raise click.ClickException(f"{topic!r} is not an owner post: name it <base topic>--owner, as in nexus-develop--owner")
+    if base is not None and topic is not None:
+        raise click.ClickException("give --base or --topic, not both: --topic is the base with `--owner` added")
+    if base is not None:
+        if base.endswith("--owner") or not _OWNER_TOPIC.fullmatch(f"{base}--owner"):
+            raise click.ClickException(f"{base!r} is not a board base: give the bare base, as in <repo>-develop")
+        topic = f"{base}--owner"
+    if topic is not None and not _OWNER_TOPIC.fullmatch(topic):
+        raise click.ClickException(f"{topic!r} is not an owner post: name it <base topic>--owner, as in <repo>-develop--owner")
+    repo = None
+    if topic is None:
+        # No board named: the origin remote names the repo, and never anything else does (no default repo).
+        repo = _repo_from_origin(_origin_url())
+        if repo is None:
+            raise click.ClickException("cannot tell which repo's board this is: no origin remote with a repo name here; "
+                                       "name the board with --base <repo>-<branch>, as in --base <repo>-develop")
     try:
         identity = ci_ack.counted_identity()
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
     if not identity:
         raise click.ClickException(ci_ack.NO_IDENTITY_MESSAGE)
-    subspace = f"board/ci/{topic}"
     try:
         store = _store()
+        if topic is None:
+            assert repo is not None
+            topic = _board_of_origin(store, repo)
+        subspace = f"board/ci/{topic}"
         red = _current_red(store, subspace, topic)
+    except click.ClickException:
+        raise
     except Exception as exc:  # noqa: BLE001 -- CLI boundary: one line and exit 1
-        raise click.ClickException(f"could not read {subspace}: {type(exc).__name__}: {exc}") from exc
+        raise click.ClickException(f"could not read the board: {type(exc).__name__}: {exc}") from exc
     if red is None:
         raise click.ClickException(f"no open red on {subspace}: nothing to {'disclaim' if not_mine else 'acknowledge'}")
     latest = red.rows[-1][2]
