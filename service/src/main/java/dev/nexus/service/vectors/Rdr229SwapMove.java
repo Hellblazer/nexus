@@ -32,7 +32,7 @@ package dev.nexus.service.vectors;
  * <p><b>on_complete</b>, one transaction, no EXCEPTION clause (a 55P03 lock timeout propagates, and the finisher records it as a
  * transient blocked state and retries, RDR-246 fail-fast): (a) refuse when the table has no valid unique key on the id columns
  * (SQLSTATE 55000, permanent); (b) chunks only, add the three child id keys beside their name keys, {@code NOT VALID},
- * {@code ON UPDATE CASCADE}, each with its name key's ON DELETE action and deferrability; (c) chunks only, register the three
+ * {@code ON UPDATE CASCADE}, each with its name key's ON DELETE action (the manifest's is DEFERRABLE INITIALLY DEFERRED, see the comment in {@code chunksOnComplete}); (c) chunks only, register the three
  * validation moves, after their constraints exist in this transaction; (d) chunks only, add the RDR-225 composite on the id, which
  * validates directly because PostgreSQL takes no NOT VALID on a partitioned referencing table. It drops nothing: the name primary
  * keys, the three name child keys and {@code chunks_collection_fk} stay (P3.7 and P4.1). Every step is guarded by what the catalog
@@ -229,9 +229,14 @@ public final class Rdr229SwapMove {
     private static String chunksOnComplete() {
         return "DO $swap$\nBEGIN\n"
             + requireIdKey("chunks", "chash")
-            // the name keys' own ON DELETE actions and deferrability (vectors-030:1017-1050, catalog-029): the manifest's is NO ACTION
-            // and DEFERRABLE INITIALLY IMMEDIATE, the other two CASCADE
-            + childKey("catalog_document_chunks", "fk_catalog_chunks_chunk_id", "collection_id", "", "DEFERRABLE INITIALLY IMMEDIATE")
+            // the name keys' own ON DELETE actions (vectors-030:1017-1050): the manifest's is NO ACTION, the other two CASCADE.
+            // The manifest's id key is DEFERRABLE INITIALLY DEFERRED, NOT its name key's INITIALLY IMMEDIATE (linda, 2026-11-22):
+            // purge_trash and its kin defer only fk_catalog_chunks_chunk by name (the live definition of purge_trash,
+            // vectors-030:3115, and CatalogRepository#deferManifestChunkFk), and delete chunks while manifest rows still exist, so
+            // an immediate id key would raise 23503 there until P3.5b; changing those sites needs changesets against the DDL cap.
+            // PostgreSQL never defers a referential action, so ON UPDATE CASCADE still fires at the statement and only the
+            // orphan check moves to the commit. The name key stays IMMEDIATE until P4.1; nexus-p2m1x.35 decides this key's final mode.
+            + childKey("catalog_document_chunks", "fk_catalog_chunks_chunk_id", "collection_id", "", "DEFERRABLE INITIALLY DEFERRED")
             + childKey("topic_assignments", "topic_assignments_chunk_id_fk", "source_collection_id", "CASCADE", "")
             + childKey("chunk_orphaned_at", "chunk_orphaned_at_chunk_id_fk", "collection_id", "CASCADE", "")
             // the validation moves, registered after the constraints they validate exist in this transaction
