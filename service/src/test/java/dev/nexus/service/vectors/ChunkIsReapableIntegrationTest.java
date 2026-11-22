@@ -747,8 +747,10 @@ class ChunkIsReapableIntegrationTest extends ChunkReapableTestBase {
             assertThat(opts).as("storage parameters").isNotNull();
             assertThat(List.of(opts)).contains("autovacuum_analyze_scale_factor=0.02");
             assertThat(PgCatalogProbes.indexDefs(ctx, "nexus", "chunk_orphaned_at"))
-                .as("the primary key is the probe the predicate uses, and the only index")
-                .hasSize(1).allMatch(d -> d.contains("(tenant_id, collection, chash)"));
+                .as("the primary key, and RDR-229 P3.3c's child index of the chunk id key (vectors-075-1); no other index")
+                .hasSize(2)
+                .anyMatch(d -> d.contains("chunk_orphaned_at_pk") && d.contains("(tenant_id, collection, chash)"))
+                .anyMatch(d -> d.contains(Rdr229SwapMove.CHILD_INDEX) && d.contains("(tenant_id, chash)"));
         });
     }
 

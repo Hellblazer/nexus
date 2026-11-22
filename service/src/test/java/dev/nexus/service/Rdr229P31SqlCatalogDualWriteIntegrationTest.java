@@ -251,10 +251,15 @@ class Rdr229P31SqlCatalogDualWriteIntegrationTest {
         "catalog_collection_tuple_duplicates_unscoped", "collection_id_seq_heal", "collection_id_taken", "rdr229_restamp"));
 
     /**
-     * Functions vectors-069 does not touch whose body a later changeset replaces: collections-003-1 narrows
-     * nexus.collection_tuple_lock_key to 256 stripes. Pure (IMMUTABLE, SQL, reads no table), so it writes nothing.
+     * Functions vectors-069 does not touch whose body a later changeset replaces, each with its changeset:
+     * <ul>
+     *   <li>collection_tuple_lock_key: collections-003-1 narrows it to 256 stripes. Pure (IMMUTABLE, SQL, reads no table), so it writes nothing.</li>
+     *   <li>partition_ensure_leaf: vectors-073-1 (RDR-229 P3.3b, nexus-p2m1x.20) adds the id unique index on a new leaf of nexus.chunks or
+     *       nexus.taxonomy_centroids. Its writes are DDL on the new, empty leaf (CREATE TABLE ... PARTITION OF, CREATE UNIQUE INDEX); it INSERTs or
+     *       UPDATEs no row of a guarded table, and the signature and attributes stay as asserted below.</li>
+     * </ul>
      */
-    private static final Set<String> REDEFINED_AFTER_DUAL_WRITE = new TreeSet<>(Set.of("collection_tuple_lock_key"));
+    private static final Set<String> REDEFINED_AFTER_DUAL_WRITE = new TreeSet<>(Set.of("collection_tuple_lock_key", "partition_ensure_leaf"));
 
     /** catalog_reconcile_commit, one complete walk that reaches all six of its guarded statements, plus the trash of the renamed row. */
     private static Scenario reconcile() {
