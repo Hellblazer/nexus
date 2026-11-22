@@ -132,6 +132,25 @@ public final class CompletionBootWork implements AutoCloseable {
         return latest;
     }
 
+    /**
+     * RDR-229 item 6, "Readers during the stamp": whether gate 3 of the latest sample holds, read per call, never cached. False before
+     * the first sample. {@code Main} hands it to each reader that switches to the id ({@link Gate3}).
+     */
+    public Gate3 gate3() {
+        return () -> {
+            var r = latest();
+            return r != null && r.gate3();
+        };
+    }
+
+    /**
+     * What a rename from gate 3 still waits for, read per call ({@link RenameReadiness}). STUB: always ready; P3.7's code adds the
+     * name-key drop move and the databasechangelog reads (the P3.5b changesets) to the check and answers from them.
+     */
+    public RenameReadiness renameReadiness() {
+        return RenameReadiness.ready();
+    }
+
     /** Reads now, outside the schedule, for a consumer that must not wait for the next sample. */
     public CompletionCheck.Result refresh() {
         publish();
