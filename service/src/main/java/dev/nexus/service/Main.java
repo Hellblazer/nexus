@@ -845,9 +845,10 @@ public final class Main {
     private static dev.nexus.service.datamove.CompletionBootWork startCompletionBootWork(BootWorkRegistry bootWork,
             dev.nexus.service.db.AdminConnection admin, dev.nexus.service.datamove.CompletionCheck.Gate3Source gate3) {
         try {
-            // TODO(linda, 2026-11-22): the extra gate 3 conditions list takes dev.nexus.service.datamove.IdUniqueIndexPass::allValid
-            // (the four runtime-built id UNIQUE indexes) when that pass's branch merges; empty until then.
-            var check = dev.nexus.service.datamove.CompletionBootWork.atBoot(bootWork, admin, gate3, java.util.List.of());
+            // RDR-229 P3.4 (linda, 2026-11-22): gate 3 also requires the eight runtime-built id UNIQUE indexes (IdUniqueIndexPass), the
+            // arbiters the id-keyed upserts need; read only after gate 2 and complete PCI coverage.
+            var check = dev.nexus.service.datamove.CompletionBootWork.atBoot(bootWork, admin, gate3,
+                java.util.List.of(dev.nexus.service.datamove.IdUniqueIndexPass::allValid));
             check.start();
             return check;
         } catch (VirtualMachineError e) {
