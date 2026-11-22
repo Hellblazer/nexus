@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-p2m1x.31 (RDR-229 P3.11): give PUBLIC its stock EXECUTE on the two pg_control functions CatalogEpoch reads back, undoing db.changelog-test-pgcontrol-revoke.xml. The names are fixed (pg_catalog functions); no placeholder, so RawSqlGateTest's
+    parameterised-changelog lists need no entry. Superuser, runAlways. Run through CatalogEpochTest.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="test-pgcontrol-grant-1" author="nexus-p2m1x.31" runAlways="true">
+        <sql splitStatements="false">
+GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_system() TO PUBLIC;
+GRANT EXECUTE ON FUNCTION pg_catalog.pg_control_checkpoint() TO PUBLIC;
+        </sql>
+        <rollback>
+            <!-- Test-only. -->
+        </rollback>
+    </changeSet>
+</databaseChangeLog>
