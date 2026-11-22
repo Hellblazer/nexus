@@ -162,6 +162,9 @@ public final class NexusService {
 
     private final HttpServer server;
     private final TenantScope tenantScope;
+    /** RDR-229 P3.5a (nexus-p2m1x.23): the gate-3 signal and the rename readiness, read per call. STUB: held, not read yet. */
+    private final dev.nexus.service.datamove.Gate3 gate3;
+    private final dev.nexus.service.datamove.RenameReadiness renameReadiness;
     /**
      * RDR-205 Phase 1 Step 5 (bead nexus-em75s.5): the tuple sweep's tenant
      * enumeration reads {@code nexus.tuple_tenants} directly via a plain
@@ -677,6 +680,30 @@ public final class NexusService {
                         java.util.function.BooleanSupplier pciEnabled,
                         ScheduledExecutorService reembedExecutorOverride,
                         dev.nexus.service.reembed.ReembedRunner.Settings reembedSettings) throws IOException {
+        this(port, token, dataSource, docEmbedderRouter, pgVectorRepository, reranker, localEmbedActivitySupplier,
+                tupleTemplateRegistry, sweepSchedulerOverride, env, pciEnabled, reembedExecutorOverride, reembedSettings,
+                dev.nexus.service.datamove.Gate3.never(), dev.nexus.service.datamove.RenameReadiness.ready());
+    }
+
+    /**
+     * RDR-229 P3.5a (nexus-p2m1x.23): the gate-3 signal and what a rename from gate 3 waits for, each read per call. The
+     * constructors above pass {@code Gate3.never()} and {@code RenameReadiness.ready()}. Package-private. STUB: held, unread.
+     */
+    NexusService(int port, String token, DataSource dataSource,
+                        EmbedderRouter docEmbedderRouter,
+                        PgVectorRepository pgVectorRepository,
+                        dev.nexus.service.vectors.Reranker reranker,
+                        java.util.function.Supplier<dev.nexus.service.vectors.EmbedActivitySnapshot> localEmbedActivitySupplier,
+                        TemplateRegistry tupleTemplateRegistry,
+                        ScheduledExecutorService sweepSchedulerOverride,
+                        java.util.function.Function<String, String> env,
+                        java.util.function.BooleanSupplier pciEnabled,
+                        ScheduledExecutorService reembedExecutorOverride,
+                        dev.nexus.service.reembed.ReembedRunner.Settings reembedSettings,
+                        dev.nexus.service.datamove.Gate3 gate3,
+                        dev.nexus.service.datamove.RenameReadiness renameReadiness) throws IOException {
+        this.gate3 = java.util.Objects.requireNonNull(gate3, "gate3");
+        this.renameReadiness = java.util.Objects.requireNonNull(renameReadiness, "renameReadiness");
         // Before anything binds or touches the database: a refused configuration must not half-start.
         verifyTenantResetRouteBind(env);
         final boolean tenantResetRoute = tenantResetRouteEnabled(env);
@@ -1686,67 +1713,6 @@ public final class NexusService {
 
     // ── tuple sweep (RDR-205 Phase 1 Step 5, bead nexus-em75s.5) ────────────────
 
-    /** Testable, pure resolution — {@value #TUPLE_SWEEP_BATCH_SIZE_ENV}. */
-    static int resolveTupleSweepBatchSize() {
-        return resolveTupleSweepBatchSize(System.getenv(TUPLE_SWEEP_BATCH_SIZE_ENV));
-    }
-
-    static int resolveTupleSweepBatchSize(String envValue) {
-        return parsePositiveInt(envValue, DEFAULT_TUPLE_SWEEP_BATCH_SIZE, TUPLE_SWEEP_BATCH_SIZE_ENV);
-    }
-
-    /** Testable, pure resolution — {@value #TUPLE_SWEEP_MAX_BATCHES_PER_TENANT_ENV}. */
-    static int resolveTupleSweepMaxBatchesPerTenant() {
-        return resolveTupleSweepMaxBatchesPerTenant(System.getenv(TUPLE_SWEEP_MAX_BATCHES_PER_TENANT_ENV));
-    }
-
-    static int resolveTupleSweepMaxBatchesPerTenant(String envValue) {
-        return parsePositiveInt(envValue, DEFAULT_TUPLE_SWEEP_MAX_BATCHES_PER_TENANT,
-                TUPLE_SWEEP_MAX_BATCHES_PER_TENANT_ENV);
-    }
-
-    /** Testable, pure resolution — {@value #TUPLE_SWEEP_WALL_CLOCK_BUDGET_SECONDS_ENV}. */
-    static long resolveTupleSweepWallClockBudgetSeconds() {
-        return resolveTupleSweepWallClockBudgetSeconds(System.getenv(TUPLE_SWEEP_WALL_CLOCK_BUDGET_SECONDS_ENV));
-    }
-
-    static long resolveTupleSweepWallClockBudgetSeconds(String envValue) {
-        return parsePositiveLong(envValue, DEFAULT_TUPLE_SWEEP_WALL_CLOCK_BUDGET_SECONDS,
-                TUPLE_SWEEP_WALL_CLOCK_BUDGET_SECONDS_ENV);
-    }
-
-    private static int parsePositiveInt(String envValue, int defaultValue, String envName) {
-        if (envValue == null || envValue.isBlank()) {
-            return defaultValue;
-        }
-        int v;
-        try {
-            v = Integer.parseInt(envValue.trim());
-        } catch (NumberFormatException e) {
-            throw new IllegalArgumentException(envName + " must be a positive integer (got '" + envValue + "')");
-        }
-        if (v <= 0) {
-            throw new IllegalArgumentException(envName + " must be positive (got " + v + ")");
-        }
-        return v;
-    }
-
-    private static long parsePositiveLong(String envValue, long defaultValue, String envName) {
-        if (envValue == null || envValue.isBlank()) {
-            return defaultValue;
-        }
-        long v;
-        try {
-            v = Long.parseLong(envValue.trim());
-        } catch (NumberFormatException e) {
-            throw new IllegalArgumentException(envName + " must be a positive integer (got '" + envValue + "')");
-        }
-        if (v <= 0) {
-            throw new IllegalArgumentException(envName + " must be positive (got " + v + ")");
-        }
-        return v;
-    }
-
     /** One {@code nexus.tuple_tenants} row's sweep-order key. */
     record TupleTenantCursor(String tenantId, OffsetDateTime lastSweptAt) { }
 
@@ -1878,8 +1844,8 @@ public final class NexusService {
      */
     TupleSweepRunResult runScheduledTupleSweep(OffsetDateTime now) {
         return runScheduledTupleSweep(now, SweepBounds.STATEMENT_TIMEOUT,
-                resolveTupleSweepBatchSize(), resolveTupleSweepMaxBatchesPerTenant(),
-                Duration.ofSeconds(resolveTupleSweepWallClockBudgetSeconds()));
+                TupleSweepSettings.batchSize(), TupleSweepSettings.maxBatchesPerTenant(),
+                Duration.ofSeconds(TupleSweepSettings.wallClockBudgetSeconds()));
     }
 
     /**
