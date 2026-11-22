@@ -472,7 +472,7 @@ def _same_file(fd: int, lock_path: Path) -> bool:
 
 
 def _register_run_collections(
-    targets: "tuple[tuple[str | None, str], ...]", *, vectors_on_engine: bool,
+    targets: "tuple[tuple[str | None, str], ...]",
 ) -> None:
     """Register each ``(name, model)`` target of an index run with the engine before the run reads or files under it.
 
@@ -480,13 +480,11 @@ def _register_run_collections(
     *model* is the one the run resolved for the target (the row's, else the name's own token), so the registration
     kwargs agree with what the run stamps by construction. A target of ``None`` is a content type with no files.
 
-    With the engine as the vector backend (*vectors_on_engine*) every failure propagates, as the write path's own
-    registration does. With a client-embedding T3 double only the catalog hook ever files a document, and the hook
-    reports a catalog it cannot write to (``catalog_hook_failed``, per file) instead of raising, so a registration
-    that fails because the registry is unreachable or refuses the name (a profile mismatch) is logged and left to the
-    hook to report. A retired name is a stop in either topology: the upsert would un-retire it (nexus-wwuzp).
+    Every failure propagates in either topology, the engine as the vector backend or a client-embedding test double
+    (linda 2026-11-22: a topology that exists only in tests gets no lenient path in product code, which would hide a
+    test that skipped registration). An unreachable registry, a profile mismatch and a retired name all stop the run;
+    a retired name is refused before the upsert, which would un-retire it (nexus-wwuzp).
     """
-    from nexus.collection_errors import SupersededCollectionWriteError  # noqa: PLC0415  — circular-dep avoidance
     from nexus.corpus import (  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
         collection_registration_kwargs,
         ensure_collection_registered,
@@ -514,16 +512,9 @@ def _register_run_collections(
                 "collection info {successor}` shows where the data lives."
             ),
         )
-        try:
-            kwargs = collection_registration_kwargs(name)
-            kwargs["embedding_model"] = model
-            ensure_collection_registered(name, kwargs=kwargs)
-        except SupersededCollectionWriteError:
-            raise
-        except Exception:  # noqa: BLE001 — a double topology leaves an unreachable or refusing registry to the hook's own report
-            if vectors_on_engine:
-                raise
-            _log.warning("run_collection_registration_failed", collection=name, exc_info=True)
+        kwargs = collection_registration_kwargs(name)
+        kwargs["embedding_model"] = model
+        ensure_collection_registered(name, kwargs=kwargs)
 
 
 def _repo_target_model(db: object, collection_name: str, *, legacy_model: str | None) -> tuple[str, bool]:
@@ -5747,12 +5738,10 @@ def _run_index(
     # ``NX_STORAGE_BACKEND_VECTORS`` opt-out) nothing else registers, so this is
     # the only registration, and it meets the engine's profile check like any
     # other: the double's collection names carry the tenant's profile model (the
-    # test substrate mints them so), never a model the profile would refuse. The
-    # hook builds its writer with ``make_catalog_writer()`` and, when the catalog
-    # cannot be reached, fails per file as ``catalog_hook_failed`` rather than
-    # raising; the double topology's registration answers an unreachable (or
-    # refusing) registry the same way and leaves the hook to report it.
-    from nexus.db.http_vector_client import is_vector_service_mode as _reg_service_mode  # noqa: PLC0415  — circular-dep avoidance (nexus.db.http_vector_client)
+    # test substrate mints them so), never a model the profile would refuse. A
+    # failure stops the run in both topologies (an unreachable registry, a
+    # profile mismatch, a retired name): a test that skipped registration fails
+    # here, at the cause, not as a refused row deep in the reconcile commit.
 
     _register_run_collections(
         (
@@ -5760,7 +5749,6 @@ def _run_index(
             (docs_collection if have_docs_files else None, docs_model),
             (rdr_col_name, rdr_model),
         ),
-        vectors_on_engine=_reg_service_mode(),
     )
 
     # ── Pre-index catalog registration (RDR-101 Phase 3 PR δ Stage B) ───────
