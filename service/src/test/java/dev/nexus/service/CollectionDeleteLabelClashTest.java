@@ -71,6 +71,12 @@ class CollectionDeleteLabelClashTest {
             // DROP INDEX IF EXISTS finds nothing, succeeds silently, and the live-label index keeps refusing the twin.
             // (jOOQ DSL, not a string statement: the raw-SQL gate counts those.)
             ctx.dropIndexIfExists(org.jooq.impl.DSL.name("nexus", "idx_catalog_collections_live_label")).execute();
+            Object stillThere = ctx.select(org.jooq.impl.DSL.function("to_regclass", Object.class,
+                    org.jooq.impl.DSL.inline("nexus.idx_catalog_collections_live_label"))).fetchOne(0);
+            org.assertj.core.api.Assertions.assertThat(stillThere)
+                .as("setup: the live-label index is dropped before the twin insert (rendered: %s)",
+                    ctx.renderInlined(ctx.dropIndexIfExists(org.jooq.impl.DSL.name("nexus", "idx_catalog_collections_live_label"))))
+                .isNull();
             ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
                     CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL,
                     CATALOG_COLLECTIONS.LIFECYCLE_STATE)
