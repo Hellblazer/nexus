@@ -91,6 +91,11 @@ def _server_env(output_root: Path) -> dict[str, str]:
         "MINERU_API_OUTPUT_ROOT": str(output_root),
         "MINERU_API_TASK_RETENTION_SECONDS": "300",
     })
+    # F35 (nexus-7t3w1): point the server at nexus's verified weights (MINERU_MODEL_SOURCE=local plus the
+    # nexus mineru.json) when they are in use. MinerU reads both at import, so they belong in the spawn env.
+    from nexus import mineru_weights  # noqa: PLC0415 — deferred local import — avoids import-time cost
+
+    env.update(mineru_weights.child_env())
     return env
 
 

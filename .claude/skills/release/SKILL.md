@@ -876,6 +876,27 @@ git push
 
 Tradeoff: extra commit on main, but guards against the case where someone could force-push the `vX.Y.Z` tag. For solo / small-team projects the `ref` alone is usually fine; skip if so.
 
+### 8b. Publish the MinerU weights assets (F35, nexus-7t3w1; BEFORE the tag, under the release's go)
+
+A fresh install fetches MinerU's pipeline weights (about 1.2 GB) from the release assets of the immutable tag
+`mineru-pipeline-ed6b654c` (`WEIGHTS_ASSET_TAG` in `src/nexus/mineru_weights.py`), never from Hugging Face. The
+wheel Step 9 publishes needs those assets to exist, so they go up first. Run it from the release commit; the pinned
+files and their digests are `MANIFEST` in that module, the one source the client, the gate and this script share:
+
+```bash
+uv run --extra pdf python scripts/publish-mineru-weights.py --stage-dir "$(mktemp -d)" --upload --dry-run   # stage, verify, print the plan
+uv run --extra pdf python scripts/publish-mineru-weights.py --stage-dir <the same dir> --upload              # only under the release's go
+```
+
+The script stages the 20 files from the local Hugging Face cache (a cold cache downloads them at the pinned
+revision), verifies each against the manifest, writes `LICENSE-AGPL-3.0.txt`, `LICENSE-Apache-2.0.txt`,
+`THIRD-PARTY-NOTICES.md` and `MANIFEST.tsv`, and uploads to the tag only what is absent: it creates the release
+(not marked latest), never overwrites, and refuses with nothing uploaded if an existing asset's sha256 differs
+from the manifest. It is a no-op once the tag carries every asset, so run it at every cut. Staging and the dry run
+need no go; the upload is a release-asset write, so it waits for the releaser's go for this release. A release that
+bumps the pin (new upstream revision) changes `WEIGHTS_REVISION`, `WEIGHTS_ASSET_TAG`, `MANIFEST` and the notice
+text together, and uses a new tag; never re-upload under the old one.
+
 ### 9. Tag and push IMMEDIATELY after merge (triggers Release workflow + PyPI publish via OIDC)
 
 **PAIRED-RELEASE DEPLOY ORDER (nexus-1emxn — measured twice 2026-08-29: the

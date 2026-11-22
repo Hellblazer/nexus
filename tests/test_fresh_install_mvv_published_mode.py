@@ -1300,6 +1300,29 @@ def test_the_formula_pdf_block_runs_in_both_modes_and_proves_the_f34_fetch() -> 
     assert "models--opendatalab--PDF-Extract-Kit-1.0" in block
 
 
+def test_the_local_mode_stages_serves_and_proves_the_f35_asset_fetch() -> None:
+    """F35 (nexus-7t3w1): the candidate has no published tag, so the local mode stages the pinned weights with the
+    release script, serves them on an ephemeral port, passes the URL to the `env -i` nx children, and the verdict
+    requires the 'fetched from nexus asset' line and no huggingface.co. --published fetches the real tag."""
+    text = _text()
+    block = text[text.index("FORMULA_PDF_CHECK_RAN=0"):]
+    block = block[: block.index("generation install path on the virgin HOME")]
+    local = block[block.index('if [ "$PUBLISHED_MODE" = 0 ]; then'):]
+    local = local[: local.index('        if ! _nx index pdf')]
+    assert 'scripts/publish-mineru-weights.py" --stage-dir' in local
+    assert "-u -m http.server 0 --bind 127.0.0.1" in local, "port 0: dynamic allocation, never a hardcoded port"
+    assert 'MINERU_WEIGHTS_BASE_URL="http://127.0.0.1:$MINERU_ASSET_PORT"' in local
+    nx_fn = text[text.index("_nx() {"):]
+    nx_fn = nx_fn[: nx_fn.index("\n}\n")]
+    assert 'NX_MINERU_WEIGHTS_BASE_URL="$MINERU_WEIGHTS_BASE_URL"' in nx_fn, "the children run under env -i"
+    assert 'kill "$MINERU_ASSET_SERVER_PID"' in text[text.index("cleanup() {"):text.index("trap cleanup EXIT")]
+    verdict = text[text.index("_f34_weights_fetch_verdict() {"):]
+    verdict = verdict[: verdict.index("\n}\n")]
+    assert "fetched from nexus asset" in verdict and "huggingface[.]co" in verdict
+    assert '.cache/nexus/mineru' in block, "the virgin-HOME precondition and the .complete check"
+    assert "models--opendatalab--PDF-Extract-Kit-1.0" in block, "the cold-HF-cache precondition stays"
+
+
 # ── the formula-PDF check is default-on; a skip needs a recorded reason (nexus-tr1rj.20) ──
 
 

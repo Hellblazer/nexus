@@ -2070,9 +2070,12 @@ def _mineru_parse_fixture_once(timeout_s: float = _MINERU_DOCTOR_PARSE_TIMEOUT_S
     ``_MineruDoctorParseFailed`` on a non-zero exit naming whatever the
     child's own traceback ended with. Returns ``None`` on success.
     """
+    import os  # noqa: PLC0415 — deferred to keep CLI startup fast
     import subprocess  # noqa: PLC0415 — deferred to keep CLI startup fast
     import sys  # noqa: PLC0415 — deferred to keep CLI startup fast
     import tempfile  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+    from nexus import mineru_weights  # noqa: PLC0415 — deferred to keep CLI startup fast
 
     with tempfile.TemporaryDirectory(prefix="nx-doctor-mineru-") as work_dir:
         # Separate subdirectories for the source PDF and do_parse's own
@@ -2107,6 +2110,8 @@ def _mineru_parse_fixture_once(timeout_s: float = _MINERU_DOCTOR_PARSE_TIMEOUT_S
         with stderr_path.open("w", encoding="utf-8") as stderr_f:
             proc = run_bounded(
                 [sys.executable, "-c", _MINERU_DOCTOR_PARSE_SCRIPT, str(fixture), str(result_dir)],
+                # F35 (nexus-7t3w1): the probe parses with the same weights the server uses.
+                env={**os.environ, **mineru_weights.child_env()},
                 stdout=subprocess.DEVNULL,
                 stderr=stderr_f,
                 text=False,

@@ -33,6 +33,7 @@ import time
 import httpx
 import structlog
 
+from nexus import mineru_weights
 from nexus._vcrt import MINERU_CHILD_PROLOGUE
 from nexus.config import DEFAULT_EXTRACTOR, resolve_extractor
 from nexus.errors import ExtractionQualityError, UnextractableContentError
@@ -3382,6 +3383,8 @@ class PDFExtractor:
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=stderr_file,
+                    # F35 (nexus-7t3w1): nexus's verified weights, read by MinerU at import (child_env is {} when unused).
+                    env={**os.environ, **mineru_weights.child_env()},
                     preexec_fn=preexec_fn,  # Linux-only RLIMIT_AS ceiling (or None)
                     # nexus-x3m8e: not the caller's directory, which may be a
                     # disposable worktree deleted under a long page run (any

@@ -3000,8 +3000,14 @@ def _no_real_mineru_weights_fetch(request, monkeypatch):
         return
     import nexus.mineru_weights as mineru_weights  # noqa: PLC0415 - deferred: keeps conftest import light
 
-    monkeypatch.setattr(mineru_weights, "ensure_pipeline_weights", lambda say, *, download=None, allow_fetch=True: False)
+    monkeypatch.setattr(
+        mineru_weights, "ensure_pipeline_weights", lambda say, *, download=None, allow_fetch=True, fetch=None: False
+    )
     monkeypatch.setenv(mineru_weights.SKIP_ENV, "1")  # an ``nx`` child of the test fetches nothing either
+    # F35: a developer box that holds nexus's real weights must not leak MINERU_MODEL_SOURCE=local into the
+    # env of a MinerU child a test builds. tests/test_f35_mineru_self_host_weights.py drives the real one.
+    monkeypatch.setattr(mineru_weights, "child_env", lambda: {})
+    monkeypatch.setattr(mineru_weights, "nexus_weights_ready", lambda: False)
 
 
 @pytest.fixture(autouse=True)

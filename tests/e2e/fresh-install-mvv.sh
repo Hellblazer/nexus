@@ -196,8 +196,9 @@ _leg_log_is_substantive() {
 # bottom, not a library; `source`ing it here would have run THAT dispatch
 # inside this script's own shell and aborted the journey.
 # F34 (nexus-7t3w1): the first index on a virgin HOME must fetch MinerU's pipeline weights as its own
-# step, before any page budget starts, and finish it. stdin: that index's log -> "OK" or "FAIL|<cause>".
-# The two lines are nx's own (src/nexus/mineru_weights.py); a page that timed out while MinerU
+# step, before any page budget starts, and finish it. F35: from nexus's own release assets, never from
+# Hugging Face. stdin: that index's log -> "OK" or "FAIL|<cause>".
+# The lines are nx's own (src/nexus/mineru_weights.py); a page that timed out while MinerU
 # downloaded (the defect) shows as mineru_server_timeout, which also fails.
 _f34_weights_fetch_verdict() {
     local log
@@ -206,11 +207,21 @@ _f34_weights_fetch_verdict() {
         echo "FAIL|the first MinerU index on a virgin HOME did not fetch the pipeline weights as its own step"
     elif ! grep -q "MinerU pipeline weights are ready." <<<"$log"; then
         echo "FAIL|the MinerU weight fetch began but never reported ready"
+    elif ! grep -q "fetched from nexus asset" <<<"$log"; then
+        echo "FAIL|the MinerU weights were not fetched from the nexus release asset (no 'fetched from nexus asset' line)"
+    elif grep -qi "huggingface[.]co" <<<"$log"; then
+        echo "FAIL|the first MinerU index contacted huggingface.co; the weights must come from the nexus asset only"
     elif grep -q "mineru_server_timeout" <<<"$log"; then
         echo "FAIL|a MinerU page timed out (mineru_server_timeout) after the weight fetch"
     else
         echo "OK"
     fi
+}
+
+# F35 (nexus-7t3w1): `python -u -m http.server 0` prints "Serving HTTP on 127.0.0.1 port N ..." once it is
+# listening. stdin: that output -> the port number, or nothing.
+_http_server_port() {
+    sed -n '/Serving HTTP on/{s/.*port \([0-9][0-9]*\).*/\1/p;q;}'
 }
 
 _mineru_doctor_verdict() {
@@ -353,14 +364,25 @@ _self_test() {
 
     echo "== self-test: _f34_weights_fetch_verdict (F34, nexus-7t3w1) =="
     _f34_fetch="nx: MinerU's pipeline weights are not on this machine yet. Fetching them now, before any page is parsed"
-    out=$(printf '%s\nnx:   pp_doclayout_v2\nnx: MinerU pipeline weights are ready.\nIndexed 12 chunks\n' "$_f34_fetch" | _f34_weights_fetch_verdict)
-    _assert_eq "fetch step ran and finished -> OK" "$out" "OK"
+    _f35_asset="nx:   fetched from nexus asset: Layout__PP-DocLayoutV2__model.safetensors (214.8 MB)"
+    out=$(printf '%s\n%s\nnx: MinerU pipeline weights are ready.\nIndexed 12 chunks\n' "$_f34_fetch" "$_f35_asset" | _f34_weights_fetch_verdict)
+    _assert_eq "fetch step ran from the nexus asset and finished -> OK" "$out" "OK"
     out=$(printf 'Indexed 12 chunks\n' | _f34_weights_fetch_verdict)
     _assert_prefix "RED: no fetch step on a virgin HOME (the F34 fix reverted) -> FAIL" "$out" "FAIL|the first MinerU index on a virgin HOME did not fetch"
-    out=$(printf '%s\nnx:   pp_doclayout_v2\n' "$_f34_fetch" | _f34_weights_fetch_verdict)
+    out=$(printf '%s\n%s\n' "$_f34_fetch" "$_f35_asset" | _f34_weights_fetch_verdict)
     _assert_prefix "RED: fetch began, never ready -> FAIL" "$out" "FAIL|the MinerU weight fetch began but never reported ready"
-    out=$(printf '%s\nnx: MinerU pipeline weights are ready.\nmineru_server_timeout pages=1\n' "$_f34_fetch" | _f34_weights_fetch_verdict)
+    out=$(printf '%s\nnx:   pp_doclayout_v2\nnx: MinerU pipeline weights are ready.\n' "$_f34_fetch" | _f34_weights_fetch_verdict)
+    _assert_prefix "RED: fetched, but not from the nexus asset (the F34 Hugging Face path) -> FAIL" "$out" "FAIL|the MinerU weights were not fetched from the nexus release asset"
+    out=$(printf '%s\n%s\nGET https://huggingface.co/opendatalab/PDF-Extract-Kit-1.0/resolve/main/x\nnx: MinerU pipeline weights are ready.\n' "$_f34_fetch" "$_f35_asset" | _f34_weights_fetch_verdict)
+    _assert_prefix "RED: huggingface.co contacted -> FAIL" "$out" "FAIL|the first MinerU index contacted huggingface.co"
+    out=$(printf '%s\n%s\nnx: MinerU pipeline weights are ready.\nmineru_server_timeout pages=1\n' "$_f34_fetch" "$_f35_asset" | _f34_weights_fetch_verdict)
     _assert_prefix "RED: a page still timed out -> FAIL" "$out" "FAIL|a MinerU page timed out"
+
+    echo "== self-test: _http_server_port (F35, nexus-7t3w1) =="
+    out=$(printf 'Serving HTTP on 127.0.0.1 port 51234 (http://127.0.0.1:51234/) ...\n' | _http_server_port)
+    _assert_eq "the served port is read from http.server's banner" "$out" "51234"
+    out=$(printf 'Traceback (most recent call last):\n' | _http_server_port)
+    _assert_eq "RED: no banner -> no port" "$out" ""
 
     echo "== self-test: _new_chunk_ids + _extractor_identity_verdict (nexus-gqrg0 round 2) =="
     printf '%s\n' "$(printf '0a%.0s' $(seq 32))" > "$t/before-ids"
@@ -535,7 +557,15 @@ fi
 GATE_OK=0
 _fail() { echo "FRESH-INSTALL MVV FAILED: $*" >&2; exit 1; }
 
+# F35 (nexus-7t3w1): the local mode's asset server (the formula-PDF block starts it) and the base URL the nx
+# children fetch the MinerU weights from. Empty in --published mode, where the real release tag is used.
+MINERU_ASSET_SERVER_PID=""
+MINERU_WEIGHTS_BASE_URL=""
+
 cleanup() {
+    if [ -n "$MINERU_ASSET_SERVER_PID" ]; then
+        kill "$MINERU_ASSET_SERVER_PID" >/dev/null 2>&1 || true
+    fi
     # Stop the sandbox service + PG so nothing leaks past the gate.
     if [ -n "$BIN_DIR" ] && [ -x "$BIN_DIR/nx" ]; then
         # The aspect worker an nx call spawned outlives the service by design
@@ -617,6 +647,8 @@ _nx() {
         NX_LOCAL=1 \
         ${HTTPS_PROXY:+HTTPS_PROXY="$HTTPS_PROXY"} \
         ${HTTP_PROXY:+HTTP_PROXY="$HTTP_PROXY"} \
+        ${MINERU_WEIGHTS_BASE_URL:+NX_MINERU_WEIGHTS_BASE_URL="$MINERU_WEIGHTS_BASE_URL"} \
+        ${MINERU_WEIGHTS_BASE_URL:+NO_PROXY="127.0.0.1,localhost"} \
         "$BIN_DIR/nx" "$@"
 }
 
@@ -1407,6 +1439,32 @@ if [ "$FORMULA_PDF_CHECK_ON" = "1" ]; then
         # empty here, and the index below must fetch the weights as its own step before any page.
         [ ! -e "$HOME_DIR/.cache/huggingface/hub/models--opendatalab--PDF-Extract-Kit-1.0" ] \
             || _fail "the virgin HOME already holds MinerU's pipeline weights before the first index, so the F34 weight-fetch step cannot be proven (F34)"
+        # F35 (nexus-7t3w1): the same for nexus's own copy (a seeded $FRESH_MVV_CACHE could carry it).
+        [ ! -e "$HOME_DIR/.cache/nexus/mineru" ] \
+            || _fail "the virgin HOME already holds nexus's MinerU weights ($HOME_DIR/.cache/nexus/mineru) before the first index, so the F35 asset fetch cannot be proven (F35)"
+        if [ "$PUBLISHED_MODE" = 0 ]; then
+            # F35: the candidate has no published tag to fetch from yet. Stage the pinned files with the release
+            # script (from the laptop's or host's Hugging Face cache, else a pinned-revision download) and serve
+            # them on an ephemeral port; the nx children get the URL through NX_MINERU_WEIGHTS_BASE_URL (_nx).
+            # --published mode leaves it unset, so the real release tag is what is fetched.
+            MINERU_ASSET_DIR="$WORK/mineru-assets"
+            "$PROBE_PYTHON" "$REPO_ROOT/scripts/publish-mineru-weights.py" --stage-dir "$MINERU_ASSET_DIR" \
+                >"$LOGS/mineru-stage.log" 2>&1 \
+                || { tail -20 "$LOGS/mineru-stage.log" >&2; _fail "staging MinerU's pinned weights with scripts/publish-mineru-weights.py failed — see $LOGS/mineru-stage.log (F35)"; }
+            "$PROBE_PYTHON" -u -m http.server 0 --bind 127.0.0.1 --directory "$MINERU_ASSET_DIR" \
+                >"$LOGS/mineru-asset-server.log" 2>&1 &
+            MINERU_ASSET_SERVER_PID=$!
+            MINERU_ASSET_PORT=""
+            for _ in $(seq 1 50); do
+                MINERU_ASSET_PORT="$(_http_server_port < "$LOGS/mineru-asset-server.log")"
+                [ -n "$MINERU_ASSET_PORT" ] && break
+                sleep 0.2
+            done
+            [ -n "$MINERU_ASSET_PORT" ] \
+                || _fail "the MinerU asset http server printed no port — see $LOGS/mineru-asset-server.log (F35)"
+            MINERU_WEIGHTS_BASE_URL="http://127.0.0.1:$MINERU_ASSET_PORT"
+            echo "  (MinerU weights staged in $MINERU_ASSET_DIR, served at $MINERU_WEIGHTS_BASE_URL)"
+        fi
         if ! _nx index pdf "$FIXTURE_PDF" --extractor mineru --collection "$FORMULA_COLLECTION" \
                 >"$LOGS/index-formula-pdf.log" 2>&1; then
             tail -20 "$LOGS/index-formula-pdf.log" >&2
@@ -1415,6 +1473,12 @@ if [ "$FORMULA_PDF_CHECK_ON" = "1" ]; then
         F34_VERDICT="$(_f34_weights_fetch_verdict < "$LOGS/index-formula-pdf.log")"
         [ "$F34_VERDICT" = "OK" ] || _fail "${F34_VERDICT#FAIL|} — see $LOGS/index-formula-pdf.log (F34)"
         echo "  [ok] MinerU pipeline weights fetched as their own step before the first page (F34)"
+        # F35: from the nexus asset, into nexus's own root, with Hugging Face never touched on the virgin HOME.
+        compgen -G "$HOME_DIR/.cache/nexus/mineru/pipeline-*/.complete" >/dev/null \
+            || _fail "no nexus MinerU weights root with a .complete marker under $HOME_DIR/.cache/nexus/mineru after the index (F35)"
+        [ ! -e "$HOME_DIR/.cache/huggingface/hub/models--opendatalab--PDF-Extract-Kit-1.0" ] \
+            || _fail "the virgin HOME's Hugging Face cache holds MinerU's weights after the index: they were fetched from Hugging Face, not the nexus asset (F35)"
+        echo "  [ok] weights came from the nexus asset (${MINERU_WEIGHTS_BASE_URL:-the release tag}), not Hugging Face (F35)"
         _nx store list --collection "$FORMULA_COLLECTION" 2>/dev/null \
             | grep -oE '\b[0-9a-f]{64}\b' > "$FORMULA_IDS_DIR/after" || true
         NEW_FORMULA_IDS="$(_new_chunk_ids "$FORMULA_IDS_DIR/before" "$FORMULA_IDS_DIR/after" || true)"
