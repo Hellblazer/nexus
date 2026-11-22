@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """nexus-5clu8, client half: the X-Nexus-Skipped-Collections header decodes to the labels the engine skipped.
 
-The engine form-encodes each name and joins them with a comma (``VectorHandler.encodeSkippedCollections``; its test
+The engine form-encodes each name and joins them with a comma (``SkippedCollectionsHeader.encode``; its test
 ``SkippedCollectionsHeaderTest`` encodes the exact value decoded here). A legacy name encodes to itself, so a header
 from an older engine, which sent names raw, decodes to the same list.
 """
