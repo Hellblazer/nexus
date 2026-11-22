@@ -1007,3 +1007,19 @@ PER_RECORD_SURVIVABLE_EXCEPTIONS: tuple[type[NexusError], ...] = (
     # that one document fails, the batch goes on.
     UploadStalledError,
 )
+
+
+class RecoveryBundleFormatTooNewError(NexusError, ValueError):
+    """A recovery bundle's ``format_version`` is newer than this client reads (RDR-229 P3.9 follow-up, linda's ruling
+    2026-11-22, nexus-p2m1x.38 notes). Raised by ``read_bundle`` before any record is parsed, so nothing is imported;
+    the CLI turns it into one message and exit 1, never a traceback. Also a ``ValueError``, which is what
+    ``read_bundle`` raised for this case before, so an existing ``except ValueError`` still catches it."""
+
+    def __init__(self, path: object, bundle_version: int, max_supported: int) -> None:
+        self.path = path
+        self.bundle_version = bundle_version
+        self.max_supported = max_supported
+        super().__init__(
+            f"{path}: this recovery bundle is format_version {bundle_version}, and this client reads format_version "
+            f"{max_supported} and earlier. Upgrade conexus, then import it again."
+        )
