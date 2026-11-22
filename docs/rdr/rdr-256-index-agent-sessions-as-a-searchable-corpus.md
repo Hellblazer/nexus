@@ -324,8 +324,9 @@ lines back from the transcript. Concretely:
    a caller names it, and the Knowledge Map and automatic taxonomy
    labelling skip it (Sam, Q2).
 3. **Privacy.** detect-secrets, pinned, with four nexus plugins for the
-   shapes it misses, runs in-process over every chunk before it is written
-   and over every expand result before it is returned; a match becomes
+   shapes it misses, runs in-process over every rendered record before it
+   is split into chunks, and over every expand result before it is
+   returned; a match becomes
    `[redacted:<type>]`. A session with any match is also stamped
    `sensitive` (RDR-243). Indexing is off until the install gives a
    one-time acknowledgement that names where the text goes; on Sam's
@@ -360,8 +361,10 @@ on the document.
 
 **Renderer and chunks.** Each record renders to one block, for example
 `[user] ...`, `[assistant] ...`, `[thinking] ...`,
-`[subagent report: <description>] ...`, `[tool Read] src/nexus/corpus.py`,
-`[tool Bash]`.
+`[subagent report] ...`, `[tool Read] src/nexus/corpus.py`,
+`[tool Bash]`. A subagent report's header carries no field of the `Agent`
+call: its `description`, `prompt` and `subagent_type` are tool inputs and
+are never embedded (Sam, 2026-11-22).
 
 *Tool lines.* A tool line carries the tool's name and, for the tools in
 this table, one input field; every tool not in it, Bash, Agent, Task and
@@ -387,14 +390,18 @@ a Voyage collection, whose 32,000-token window a chunk under the byte
 target cannot reach (`embed_window.py:4-13, 29-35`). `MAX_DOCUMENT_BYTES`
 (16,384) is not a ceiling here: it is a storage quota the upsert path
 does not enforce (`db/http_vector_client.py:3881-3896`). Step 2 records
-one target per embedder as a research finding.
+the bge target and Step 5 the `voyage-context-3` target, each as a research
+finding.
 
-*Over-size records.* A record whose rendering exceeds the target is split
+*Over-size records.* Redaction runs on the whole rendered record before
+any split, so a secret that spans lines, such as a private key, is replaced
+whole and never divided between parts (Sam, 2026-11-22). A record whose
+redacted rendering exceeds the target is then split
 deterministically, at line breaks and then at sentence ends, into parts
 with ids `<record_id>:p<n>` (n from 1). Each part is its own chunk, carries
 the record's full line range, and is never packed with another record.
-Expand re-renders the record, splits it the same way and compares part
-n's SHA-256 with the chunk's chash.
+Expand re-renders the record, redacts it, splits it the same way and
+compares part n's SHA-256 with the chunk's chash.
 
 *Title.* The session's title and date are not in the chunk text, so a
 title that arrives late (a `custom-title` record) changes no chash. Search
@@ -636,7 +643,8 @@ do not. The redactor therefore treats a `-----BEGIN ... PRIVATE KEY-----`
 line as the start of a span that runs through the matching `-----END ...
 PRIVATE KEY-----` line, and replaces the whole span, across lines, with one
 `[redacted:private-key]`; a BEGIN with no END redacts to the end of the
-record. Expand output passes through the same redactor, so a key in a tool
+record. The redactor's input is the whole rendered record, before the
+over-size split, so a key is never divided between parts. Expand output passes through the same redactor, so a key in a tool
 result comes back redacted, never verbatim. The choice and its
 trade-offs are argued under Alternatives (Alternative 5).
 
@@ -1028,16 +1036,18 @@ Deterministic rendering and greedy chunking under the two bounds
 split into `:p<n>` parts; a test that appending records changes only the
 tail chunk's chash, and one where the title record arrives after earlier
 chunks were written and their chashes do not change. Measure retrieval at
-two chunk sizes on the validation set and record the chosen target per
-embedder as a research finding: bge first, `voyage-context-3` in the
-announced window.
+two chunk sizes on the validation set on a local bge engine and record the
+bge target as a research finding. The `voyage-context-3` target is
+measured at Step 5, after the scanner and the acknowledgement exist (Sam,
+2026-11-22).
 
 #### Step 3: Scanner
 
 Add `detect-secrets==1.5.0`; the four nexus plugins, each with a test on
 its synthetic shape bare and inside a sentence; the redactor; the
 blocked-socket test; the canary test; the multi-line private-key span,
-with a fixture holding a key across lines, one with no END line, and one
+with a fixture holding a key across lines, one with no END line, one in
+an over-size record whose key would straddle a part boundary, and one
 inside an expand result; flagged-session stamping through the RDR-243
 write path. Re-run the false-positive count of 256-research-17 over the
 narrative of every project's sessions on Sam's machine, not only nexus's,
@@ -1072,7 +1082,11 @@ fence-key origin and the vw594 allowlist entry; `nx sessions expand`
 through `TranscriptSource` with `LocalFileSource`; `forget` with its
 exclusion entry and `--undo`; `list` with `--check`; and `--dry-run`
 printing what would be indexed and the bytes it would send. Run the
-Minimum Viable Validation.
+Minimum Viable Validation: bge first, then, inside an announced window with
+Sam's go, the `voyage-context-3` leg through `nx index sessions` itself,
+with the scanner, the redactor and the acknowledgement in place, which also
+measures and records the Voyage chunk target. No session text reaches
+Voyage before this point.
 
 ### Phase 2: Operational Activation
 
@@ -1130,10 +1144,10 @@ both already locked; 256-research-14). No other.
   expand verifies each part `ok`.
 - **Scenario**: planted tokens in assistant text, thinking, a subagent
   report, a tool result, a Bash command, a tool call's file path, a Grep
-  pattern, a WebFetch query string, an Agent prompt and an MCP tool
-  argument. **Verify**: none appears in any chunk, expand result or
-  outbound request (canary); no rendered Bash, Agent or MCP line carries
-  input text, and no WebFetch line carries a query string; the session is
+  pattern, a WebFetch query string, an Agent call's prompt and its
+  description, and an MCP tool argument. **Verify**: none appears in any
+  chunk, expand result or outbound request (canary); no rendered Bash,
+  Agent, subagent-report header or MCP line carries input text, and no WebFetch line carries a query string; the session is
   stamped sensitive.
 - **Scenario**: a multi-line private key in a tool result and in
   assistant text, and a BEGIN line with no END. **Verify**: each becomes
@@ -1259,10 +1273,11 @@ Step 4 before the steps that rely on them.
 
 ### Scope Verification
 
-The Minimum Viable Validation runs in Phase 1, on a local bge engine, as
-part of Step 5's close: the twelve-question retrieval check, the append
-re-run with its embed count, the bare-search exclusion, and the
-planted-token canary. None of it is deferred.
+The Minimum Viable Validation runs in Phase 1 as part of Step 5's close:
+the twelve-question retrieval check, the append re-run with its embed
+count, the bare-search exclusion, and the planted-token canary, on a local
+bge engine and then on `voyage-context-3` in an announced window with
+Sam's go. Phase 1 does not close until both legs have run.
 
 ### Cross-Cutting Concerns
 
