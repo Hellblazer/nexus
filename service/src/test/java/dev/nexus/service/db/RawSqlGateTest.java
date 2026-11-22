@@ -3118,6 +3118,8 @@ class RawSqlGateTest {
         // batch 11
         "role-application-name-poison", "role-granted-by", "schema-authorization", "table-storage-set",
         "table-storage-reset", "hnsw-index-collection", "hnsw-index-collection-tenant", "hnsw-index",
+        // RDR-229 P3.5b (nexus-p2m1x.24): PgContainerHelper#createLeafHnswIndexOnId validates index, schema, table, column; the id is a long
+        "hnsw-index-collection-id",
         "role-connection-limit", "schema-create-grant", "schema-create-revoke", "nologin-role-password",
         "superuser-login-role", "create-policy", "drop-policy", "table-row-security",
         "hnsw-index-collection-concurrently", "hnsw-index-builder-concurrently", "reindex-index-concurrently",
