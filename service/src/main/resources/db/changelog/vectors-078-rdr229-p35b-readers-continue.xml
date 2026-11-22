@@ -1,0 +1,1023 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-p2m1x.24 (RDR-229 P3.5b, item 6 "Readers during the stamp", SQL readers): every live SQL reader whose body names no
+    chunk-family table reads the id only, behind a CONTINUE precondition, so it is skipped unrecorded and retried at each boot until
+    every stamp move has completed, and applies at the first boot after (RDR-246 lines 937-940). A view's output label comes from
+    nexus.catalog_collections.name joined on the id, so no form A object depends on a name column and P4.1's RESTRICT drop meets
+    none of them. The catalog-044 owner trigger fires on physical_collection_id.
+
+    THE GATE (on every changeset, verbatim): no rdr229-stamp-% move is incomplete with no successor, except a failed move whose
+    driving table is gone (the CompletionCheck rule: a move counts as complete when it or the move that supersedes it, a
+    nexus.rdr229_restamp -rerun-N row, has completed_at); and at least one stamp move exists.
+
+    P3.7's one-row rename waits until every changeset of this file is recorded in databasechangelog: they are listed in
+    db/rdr229/p35b-continue-changesets.txt, and tests/test_rdr229_p35b_continue_list.py keeps the list equal to this file. When every stamp
+    move is complete and one of them is not yet recorded, the completion check asks for a restart. Each is in the
+    _CONTINUE_ALLOWLIST of tests/test_changelog_continue_precondition_chunks_lint.py with its lock argument.
+
+    Built on each object's LAST DEFINER; the rollback restores it verbatim; P3.1's id writes are kept word for word (reads only
+    change). Ids 5, 6 and 12 are unused: document_trash, document_restore and topics_recount_doc_count read a name only to stamp
+    an id on write, so their bodies are unchanged and need no changeset. DATA EFFECT: none (definitions and one trigger).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-078-1" author="nexus-p2m1x.24">
+        <preConditions onFail="CONTINUE" onError="CONTINUE">
+            <sqlCheck expectedResult="0">SELECT (SELECT count(*) FROM nexus.data_moves m WHERE m.label LIKE 'rdr229-stamp-%' AND m.completed_at IS NULL AND NOT EXISTS (SELECT 1 FROM nexus.data_moves s WHERE s.supersedes = m.label) AND NOT (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL)) + (CASE WHEN EXISTS (SELECT 1 FROM nexus.data_moves WHERE label LIKE 'rdr229-stamp-%') THEN 0 ELSE 1 END)</sqlCheck>
+        </preConditions>
+        <comment>RDR-229 P3.5b form A (nexus-p2m1x.24): CONTINUE-gated on every rdr229-stamp-* move having completed_at set (a move superseded by a -rerun-N row defers to it; a failed move whose driving table is gone counts complete; no stamp row at all keeps waiting), so it is skipped unrecorded and retried at every boot until then. nexus.catalog_collection_doc_owner(p_tenant, p_collection) reads the collection's documents by physical_collection_id: the label argument is resolved to its registry row(s) by a join on catalog_collections (name is the label and stays), so no document name column is read. Replaces the definition in catalog-044-collection-owner-from-documents.xml, changeset catalog-044-1 (line 123), the last definer; the signature, attributes and grants are kept. DATA EFFECT: none, a function definition only.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.catalog_collection_doc_owner(p_tenant text, p_collection text)
+    RETURNS text
+    LANGUAGE sql
+    STABLE
+    SECURITY INVOKER
+AS $fn$
+    SELECT o.seg
+      FROM (
+          SELECT split_part(d.tumbler, '.', 1) || '-' || split_part(d.tumbler, '.', 2) AS seg,
+                 count(*) AS n
+            FROM nexus.catalog_documents d
+            JOIN nexus.catalog_collections cc
+              ON cc.tenant_id = d.tenant_id
+             AND cc.collection_id = d.physical_collection_id
+           WHERE d.tenant_id = p_tenant
+             AND cc.name = p_collection
+             AND d.deleted_at IS NULL
+             AND d.tumbler ~ '^[0-9]+\.[0-9]+\.[0-9]+'
+           GROUP BY 1
+      ) o
+     ORDER BY (NOT nexus.catalog_owner_is_curator(p_tenant, o.seg)) DESC, o.n DESC, o.seg
+     LIMIT 1
+$fn$;
+]]></sql>
+        <rollback>
+            <!-- Restores the body of catalog-044-collection-owner-from-documents.xml catalog-044-1 verbatim. -->
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.catalog_collection_doc_owner(p_tenant text, p_collection text)
+    RETURNS text
+    LANGUAGE sql
+    STABLE
+    SECURITY INVOKER
+AS $fn$
+    SELECT o.seg
+      FROM (
+          SELECT split_part(d.tumbler, '.', 1) || '-' || split_part(d.tumbler, '.', 2) AS seg,
+                 count(*) AS n
+            FROM nexus.catalog_documents d
+           WHERE d.tenant_id = p_tenant
+             AND d.physical_collection = p_collection
+             AND d.deleted_at IS NULL
+             AND d.tumbler ~ '^[0-9]+\.[0-9]+\.[0-9]+'
+           GROUP BY 1
+      ) o
+     ORDER BY (NOT nexus.catalog_owner_is_curator(p_tenant, o.seg)) DESC, o.n DESC, o.seg
+     LIMIT 1
+$fn$;
+]]></sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-078-2" author="nexus-p2m1x.24">
+        <preConditions onFail="CONTINUE" onError="CONTINUE">
+            <sqlCheck expectedResult="0">SELECT (SELECT count(*) FROM nexus.data_moves m WHERE m.label LIKE 'rdr229-stamp-%' AND m.completed_at IS NULL AND NOT EXISTS (SELECT 1 FROM nexus.data_moves s WHERE s.supersedes = m.label) AND NOT (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL)) + (CASE WHEN EXISTS (SELECT 1 FROM nexus.data_moves WHERE label LIKE 'rdr229-stamp-%') THEN 0 ELSE 1 END)</sqlCheck>
+        </preConditions>
+        <comment>RDR-229 P3.5b form A (nexus-p2m1x.24): CONTINUE-gated on every rdr229-stamp-* move having completed_at set (a move superseded by a -rerun-N row defers to it; a failed move whose driving table is gone counts complete; no stamp row at all keeps waiting), so it is skipped unrecorded and retried at every boot until then. nexus.catalog_collections_owner_from_docs (the BEFORE INSERT OR UPDATE OF owner_id, content_type trigger function on catalog_collections) reads superseded by NEW.superseded_by_id IS NULL and excludes the row itself from the holder lookup by collection_id; the holder's name is read only as the registry label for the NOTICE and the ORDER BY. Replaces the definition in catalog-051-curator-owner-not-replaceable.xml, changeset catalog-051-2 (line 158), the last definer; the signature, attributes and grants are kept. DATA EFFECT: none, a function definition only.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.catalog_collections_owner_from_docs()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $fn$
+DECLARE
+    v_owner  text;
+    v_holder text;
+BEGIN
+    IF NEW.content_type IN ('code', 'docs', 'rdr')
+       AND nexus.catalog_collection_owner_replaceable(NEW.tenant_id, NEW.owner_id) THEN
+        v_owner := nexus.catalog_collection_doc_owner(NEW.tenant_id, NEW.name);
+        IF v_owner IS NOT NULL AND v_owner IS DISTINCT FROM NEW.owner_id THEN
+            -- catalog-051-2: an unsuperseded, non-quarantine row must not land on a tuple another such row holds. The
+            -- transaction-scoped advisory lock on the tuple makes two writers onto one free tuple take turns, so the
+            -- second one's SELECT sees the first one's committed row instead of racing it into the unique index.
+            -- RDR-229 P3.5b: superseded and the holder's identity are read by id (superseded_by_id, collection_id).
+            IF NEW.lifecycle_state <> 'quarantine' AND NEW.superseded_by_id IS NULL THEN
+                PERFORM pg_advisory_xact_lock(nexus.collection_tuple_lock_key(
+                    NEW.tenant_id, NEW.content_type, v_owner, NEW.embedding_model, NEW.model_version));
+            END IF;
+            SELECT h.name INTO v_holder
+              FROM nexus.catalog_collections h
+             WHERE NEW.lifecycle_state <> 'quarantine' AND NEW.superseded_by_id IS NULL
+               AND h.tenant_id = NEW.tenant_id
+               AND h.content_type = NEW.content_type
+               AND h.owner_id = v_owner
+               AND h.embedding_model = NEW.embedding_model
+               AND h.model_version = NEW.model_version
+               AND h.lifecycle_state <> 'quarantine' AND h.superseded_by_id IS NULL
+               AND h.collection_id IS DISTINCT FROM NEW.collection_id
+             ORDER BY h.name
+             LIMIT 1;
+            IF FOUND THEN
+                RAISE NOTICE 'catalog-051: collection % keeps owner_id % (its documents name %, which collection % already holds for this content type, model and version)',
+                    NEW.name, NEW.owner_id, v_owner, v_holder;
+            ELSE
+                RAISE NOTICE 'catalog-044: collection % owner_id % -> % (from its documents)',
+                    NEW.name, NEW.owner_id, v_owner;
+                NEW.owner_id := v_owner;
+            END IF;
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$fn$;
+]]></sql>
+        <rollback>
+            <!-- Restores the body of catalog-051-curator-owner-not-replaceable.xml catalog-051-2 verbatim (the catalog_collections_owner_from_docs half). -->
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.catalog_collections_owner_from_docs()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $fn$
+DECLARE
+    v_owner  text;
+    v_holder text;
+BEGIN
+    IF NEW.content_type IN ('code', 'docs', 'rdr')
+       AND nexus.catalog_collection_owner_replaceable(NEW.tenant_id, NEW.owner_id) THEN
+        v_owner := nexus.catalog_collection_doc_owner(NEW.tenant_id, NEW.name);
+        IF v_owner IS NOT NULL AND v_owner IS DISTINCT FROM NEW.owner_id THEN
+            -- catalog-051-2: an unsuperseded, non-quarantine row must not land on a tuple another such row holds. The
+            -- transaction-scoped advisory lock on the tuple makes two writers onto one free tuple take turns, so the
+            -- second one's SELECT sees the first one's committed row instead of racing it into the unique index.
+            IF NEW.lifecycle_state <> 'quarantine' AND NEW.superseded_by = '' THEN
+                PERFORM pg_advisory_xact_lock(nexus.collection_tuple_lock_key(
+                    NEW.tenant_id, NEW.content_type, v_owner, NEW.embedding_model, NEW.model_version));
+            END IF;
+            SELECT h.name INTO v_holder
+              FROM nexus.catalog_collections h
+             WHERE NEW.lifecycle_state <> 'quarantine' AND NEW.superseded_by = ''
+               AND h.tenant_id = NEW.tenant_id
+               AND h.content_type = NEW.content_type
+               AND h.owner_id = v_owner
+               AND h.embedding_model = NEW.embedding_model
+               AND h.model_version = NEW.model_version
+               AND h.lifecycle_state <> 'quarantine' AND h.superseded_by = ''
+               AND h.name <> NEW.name
+             ORDER BY h.name
+             LIMIT 1;
+            IF FOUND THEN
+                RAISE NOTICE 'catalog-051: collection % keeps owner_id % (its documents name %, which collection % already holds for this content type, model and version)',
+                    NEW.name, NEW.owner_id, v_owner, v_holder;
+            ELSE
+                RAISE NOTICE 'catalog-044: collection % owner_id % -> % (from its documents)',
+                    NEW.name, NEW.owner_id, v_owner;
+                NEW.owner_id := v_owner;
+            END IF;
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$fn$;
+]]></sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-078-3" author="nexus-p2m1x.24">
+        <preConditions onFail="CONTINUE" onError="CONTINUE">
+            <sqlCheck expectedResult="0">SELECT (SELECT count(*) FROM nexus.data_moves m WHERE m.label LIKE 'rdr229-stamp-%' AND m.completed_at IS NULL AND NOT EXISTS (SELECT 1 FROM nexus.data_moves s WHERE s.supersedes = m.label) AND NOT (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL)) + (CASE WHEN EXISTS (SELECT 1 FROM nexus.data_moves WHERE label LIKE 'rdr229-stamp-%') THEN 0 ELSE 1 END)</sqlCheck>
+        </preConditions>
+        <comment>RDR-229 P3.5b form A (nexus-p2m1x.24): CONTINUE-gated on every rdr229-stamp-* move having completed_at set (a move superseded by a -rerun-N row defers to it; a failed move whose driving table is gone counts complete; no stamp row at all keeps waiting), so it is skipped unrecorded and retried at every boot until then. nexus.catalog_documents_owner_to_collection (the AFTER trigger function on catalog_documents) finds the document's collection by NEW.physical_collection_id (registry row of that id, whatever name the document carries), treats an unset id as no collection, reads superseded by superseded_by_id, and excludes the row itself from the holder lookup by collection_id; every name it prints or hands to catalog_collection_doc_owner is the registry's label of that id. The registry UPDATE keeps setting superseded_by_id exactly as vectors-069-23 does (P3.1's id write is a write and stays). Replaces the definition in vectors-069-collection-id-dual-write-functions.xml, changeset vectors-069-23 (line 7570), the last definer; the signature, attributes and grants are kept. DATA EFFECT: none, a function definition only.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.catalog_documents_owner_to_collection()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $fn$
+DECLARE
+    v_seg    text;
+    v_name   text;
+    v_cur    text;
+    v_ct     text;
+    v_em     text;
+    v_mv     text;
+    v_ls     text;
+    v_sup    boolean;
+    v_new    text;
+    v_holder text;
+BEGIN
+    IF NEW.deleted_at IS NULL
+       AND NEW.physical_collection_id IS NOT NULL
+       AND NEW.tumbler ~ '^[0-9]+\.[0-9]+\.[0-9]+' THEN
+        v_seg := split_part(NEW.tumbler, '.', 1) || '-' || split_part(NEW.tumbler, '.', 2);
+        -- RDR-229 P3.5b: the registry row of the document's collection id, whatever name the document still carries.
+        SELECT c.name, c.owner_id, c.content_type, c.embedding_model, c.model_version, c.lifecycle_state,
+               (c.superseded_by_id IS NOT NULL)
+          INTO v_name, v_cur, v_ct, v_em, v_mv, v_ls, v_sup
+          FROM nexus.catalog_collections c
+         WHERE c.tenant_id = NEW.tenant_id
+           AND c.collection_id = NEW.physical_collection_id
+           AND c.content_type IN ('code', 'docs', 'rdr');
+        -- Cheap probes first: a settled repo collection (a tumbler-shaped owner) or one already
+        -- owned by this very document's owner costs a primary-key read, never the aggregate over
+        -- the collection's documents.
+        IF FOUND
+           AND v_cur IS DISTINCT FROM v_seg
+           AND nexus.catalog_collection_owner_replaceable(NEW.tenant_id, v_cur) THEN
+            v_new := nexus.catalog_collection_doc_owner(NEW.tenant_id, v_name);
+            IF v_new IS NOT NULL AND v_new IS DISTINCT FROM v_cur THEN
+                -- catalog-051-2: an unsuperseded, non-quarantine row must not land on a tuple another such row holds; the
+                -- advisory lock serialises two writers onto one free tuple (see the BEFORE function above).
+                IF v_ls <> 'quarantine' AND NOT v_sup THEN
+                    PERFORM pg_advisory_xact_lock(nexus.collection_tuple_lock_key(
+                        NEW.tenant_id, v_ct, v_new, v_em, v_mv));
+                END IF;
+                SELECT h.name INTO v_holder
+                  FROM nexus.catalog_collections h
+                 WHERE v_ls <> 'quarantine' AND NOT v_sup
+                   AND h.tenant_id = NEW.tenant_id
+                   AND h.content_type = v_ct
+                   AND h.owner_id = v_new
+                   AND h.embedding_model = v_em
+                   AND h.model_version = v_mv
+                   AND h.lifecycle_state <> 'quarantine' AND h.superseded_by_id IS NULL
+                   AND h.collection_id <> NEW.physical_collection_id
+                 ORDER BY h.name
+                 LIMIT 1;
+                IF FOUND THEN
+                    RAISE NOTICE 'catalog-051: collection % keeps owner_id % (its documents name %, which collection % already holds for this content type, model and version)',
+                        v_name, v_cur, v_new, v_holder;
+                ELSE
+                    RAISE NOTICE 'catalog-044: collection % owner_id % -> % (from its documents)',
+                        v_name, v_cur, v_new;
+                    UPDATE nexus.catalog_collections c
+                       SET owner_id = v_new,
+                         superseded_by_id = CASE WHEN c.superseded_by = '' THEN NULL
+                             ELSE COALESCE(c.superseded_by_id,
+                                           (SELECT s.collection_id FROM nexus.catalog_collections s
+                                             WHERE s.tenant_id = c.tenant_id AND s.name = c.superseded_by),
+                                           c.collection_id) END
+                     WHERE c.tenant_id = NEW.tenant_id
+                       AND c.collection_id = NEW.physical_collection_id
+                       AND c.content_type IN ('code', 'docs', 'rdr')
+                       AND c.owner_id IS DISTINCT FROM v_new
+                       -- Re-checked on the row being updated: under READ COMMITTED a concurrent
+                       -- transaction may have committed a repo owner since the SELECT above, and
+                       -- this predicate is re-evaluated against that new row version, so a curator
+                       -- (or slug) derivation cannot overwrite it.
+                       AND nexus.catalog_collection_owner_replaceable(c.tenant_id, c.owner_id);
+                END IF;
+            END IF;
+        END IF;
+    END IF;
+    RETURN NULL;
+END;
+$fn$;
+]]></sql>
+        <rollback>
+            <!-- Restores the body of vectors-069-collection-id-dual-write-functions.xml vectors-069-23 verbatim. -->
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.catalog_documents_owner_to_collection()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $fn$
+DECLARE
+    v_seg    text;
+    v_cur    text;
+    v_ct     text;
+    v_em     text;
+    v_mv     text;
+    v_ls     text;
+    v_sb     text;
+    v_new    text;
+    v_holder text;
+BEGIN
+    IF NEW.deleted_at IS NULL
+       AND NEW.physical_collection <> ''
+       AND NEW.tumbler ~ '^[0-9]+\.[0-9]+\.[0-9]+' THEN
+        v_seg := split_part(NEW.tumbler, '.', 1) || '-' || split_part(NEW.tumbler, '.', 2);
+        SELECT c.owner_id, c.content_type, c.embedding_model, c.model_version, c.lifecycle_state, c.superseded_by
+          INTO v_cur, v_ct, v_em, v_mv, v_ls, v_sb
+          FROM nexus.catalog_collections c
+         WHERE c.tenant_id = NEW.tenant_id
+           AND c.name = NEW.physical_collection
+           AND c.content_type IN ('code', 'docs', 'rdr');
+        -- Cheap probes first: a settled repo collection (a tumbler-shaped owner) or one already
+        -- owned by this very document's owner costs a primary-key read, never the aggregate over
+        -- the collection's documents.
+        IF FOUND
+           AND v_cur IS DISTINCT FROM v_seg
+           AND nexus.catalog_collection_owner_replaceable(NEW.tenant_id, v_cur) THEN
+            v_new := nexus.catalog_collection_doc_owner(NEW.tenant_id, NEW.physical_collection);
+            IF v_new IS NOT NULL AND v_new IS DISTINCT FROM v_cur THEN
+                -- catalog-051-2: an unsuperseded, non-quarantine row must not land on a tuple another such row holds; the
+                -- advisory lock serialises two writers onto one free tuple (see the BEFORE function above).
+                IF v_ls <> 'quarantine' AND v_sb = '' THEN
+                    PERFORM pg_advisory_xact_lock(nexus.collection_tuple_lock_key(
+                        NEW.tenant_id, v_ct, v_new, v_em, v_mv));
+                END IF;
+                SELECT h.name INTO v_holder
+                  FROM nexus.catalog_collections h
+                 WHERE v_ls <> 'quarantine' AND v_sb = ''
+                   AND h.tenant_id = NEW.tenant_id
+                   AND h.content_type = v_ct
+                   AND h.owner_id = v_new
+                   AND h.embedding_model = v_em
+                   AND h.model_version = v_mv
+                   AND h.lifecycle_state <> 'quarantine' AND h.superseded_by = ''
+                   AND h.name <> NEW.physical_collection
+                 ORDER BY h.name
+                 LIMIT 1;
+                IF FOUND THEN
+                    RAISE NOTICE 'catalog-051: collection % keeps owner_id % (its documents name %, which collection % already holds for this content type, model and version)',
+                        NEW.physical_collection, v_cur, v_new, v_holder;
+                ELSE
+                    RAISE NOTICE 'catalog-044: collection % owner_id % -> % (from its documents)',
+                        NEW.physical_collection, v_cur, v_new;
+                    UPDATE nexus.catalog_collections c
+                       SET owner_id = v_new,
+                         superseded_by_id = CASE WHEN c.superseded_by = '' THEN NULL
+                             ELSE COALESCE(c.superseded_by_id,
+                                           (SELECT s.collection_id FROM nexus.catalog_collections s
+                                             WHERE s.tenant_id = c.tenant_id AND s.name = c.superseded_by),
+                                           c.collection_id) END
+                     WHERE c.tenant_id = NEW.tenant_id
+                       AND c.name = NEW.physical_collection
+                       AND c.content_type IN ('code', 'docs', 'rdr')
+                       AND c.owner_id IS DISTINCT FROM v_new
+                       -- Re-checked on the row being updated: under READ COMMITTED a concurrent
+                       -- transaction may have committed a repo owner since the SELECT above, and
+                       -- this predicate is re-evaluated against that new row version, so a curator
+                       -- (or slug) derivation cannot overwrite it.
+                       AND nexus.catalog_collection_owner_replaceable(c.tenant_id, c.owner_id);
+                END IF;
+            END IF;
+        END IF;
+    END IF;
+    RETURN NULL;
+END;
+$fn$;
+]]></sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-078-4" author="nexus-p2m1x.24" failOnError="false">
+        <preConditions onFail="CONTINUE" onError="CONTINUE">
+            <sqlCheck expectedResult="0">SELECT (SELECT count(*) FROM nexus.data_moves m WHERE m.label LIKE 'rdr229-stamp-%' AND m.completed_at IS NULL AND NOT EXISTS (SELECT 1 FROM nexus.data_moves s WHERE s.supersedes = m.label) AND NOT (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL)) + (CASE WHEN EXISTS (SELECT 1 FROM nexus.data_moves WHERE label LIKE 'rdr229-stamp-%') THEN 0 ELSE 1 END)</sqlCheck>
+        </preConditions>
+        <comment>RDR-229 P3.5b form A (nexus-p2m1x.24): CONTINUE-gated on every rdr229-stamp-* move having completed_at set (a move superseded by a -rerun-N row defers to it; a failed move whose driving table is gone counts complete; no stamp row at all keeps waiting), so it is skipped unrecorded and retried at every boot until then. The catalog-044 trigger catalog_documents_owner_to_collection on nexus.catalog_documents fires AFTER INSERT OR UPDATE OF physical_collection_id, deleted_at instead of physical_collection, so a write of the id (the writer the name column no longer drives) derives the owner. DROP TRIGGER takes ACCESS EXCLUSIVE on catalog_documents, so it runs under SET LOCAL lock_timeout = '5s' as catalog-044-2 did, and failOnError="false" makes a lock it cannot get skip the changeset unrecorded for the next boot instead of halting the boot. Replaces the trigger of catalog-044-collection-owner-from-documents.xml, changeset catalog-044-2 (line 234), the last definer. DATA EFFECT: none, a trigger definition only; no row changes.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+SET LOCAL lock_timeout = '5s';
+DROP TRIGGER IF EXISTS catalog_documents_owner_to_collection ON nexus.catalog_documents;
+CREATE TRIGGER catalog_documents_owner_to_collection
+    AFTER INSERT OR UPDATE OF physical_collection_id, deleted_at ON nexus.catalog_documents
+    FOR EACH ROW EXECUTE FUNCTION nexus.catalog_documents_owner_to_collection();
+]]></sql>
+        <rollback>
+            <!-- Restores the trigger of catalog-044-collection-owner-from-documents.xml catalog-044-2 verbatim (the old UPDATE OF physical_collection, deleted_at). -->
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+SET LOCAL lock_timeout = '5s';
+DROP TRIGGER IF EXISTS catalog_documents_owner_to_collection ON nexus.catalog_documents;
+CREATE TRIGGER catalog_documents_owner_to_collection
+    AFTER INSERT OR UPDATE OF physical_collection, deleted_at ON nexus.catalog_documents
+    FOR EACH ROW EXECUTE FUNCTION nexus.catalog_documents_owner_to_collection();
+]]></sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-078-7" author="nexus-p2m1x.24">
+        <preConditions onFail="CONTINUE" onError="CONTINUE">
+            <sqlCheck expectedResult="0">SELECT (SELECT count(*) FROM nexus.data_moves m WHERE m.label LIKE 'rdr229-stamp-%' AND m.completed_at IS NULL AND NOT EXISTS (SELECT 1 FROM nexus.data_moves s WHERE s.supersedes = m.label) AND NOT (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL)) + (CASE WHEN EXISTS (SELECT 1 FROM nexus.data_moves WHERE label LIKE 'rdr229-stamp-%') THEN 0 ELSE 1 END)</sqlCheck>
+        </preConditions>
+        <comment>RDR-229 P3.5b form A (nexus-p2m1x.24): CONTINUE-gated on every rdr229-stamp-* move having completed_at set (a move superseded by a -rerun-N row defers to it; a failed move whose driving table is gone counts complete; no stamp row at all keeps waiting), so it is skipped unrecorded and retried at every boot until then. nexus.catalog_collection_tuple_duplicates_unscoped counts the live tuples over superseded_by_id IS NULL instead of superseded_by = ''. Replaces the definition in collections-001-tuple-unique-index.xml, changeset collections-001-1 (line 91), the last definer; the signature, attributes and the REVOKE ALL FROM PUBLIC are kept. DATA EFFECT: none, a function definition only.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.catalog_collection_tuple_duplicates_unscoped() RETURNS bigint
+LANGUAGE sql STABLE SECURITY INVOKER
+AS $fn$
+    SELECT count(*) FROM (
+        SELECT 1
+          FROM nexus.catalog_collections
+         WHERE superseded_by_id IS NULL AND lifecycle_state <> 'quarantine'
+         GROUP BY tenant_id, content_type, owner_id, embedding_model, model_version
+        HAVING count(*) > 1
+    ) d
+$fn$;
+]]></sql>
+        <rollback>
+            <!-- Restores the body of collections-001-tuple-unique-index.xml collections-001-1 verbatim (its REVOKE is untouched by CREATE OR REPLACE). -->
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.catalog_collection_tuple_duplicates_unscoped() RETURNS bigint
+LANGUAGE sql STABLE SECURITY INVOKER
+AS $fn$
+    SELECT count(*) FROM (
+        SELECT 1
+          FROM nexus.catalog_collections
+         WHERE superseded_by = '' AND lifecycle_state <> 'quarantine'
+         GROUP BY tenant_id, content_type, owner_id, embedding_model, model_version
+        HAVING count(*) > 1
+    ) d
+$fn$;
+]]></sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-078-8" author="nexus-p2m1x.24">
+        <preConditions onFail="CONTINUE" onError="CONTINUE">
+            <sqlCheck expectedResult="0">SELECT (SELECT count(*) FROM nexus.data_moves m WHERE m.label LIKE 'rdr229-stamp-%' AND m.completed_at IS NULL AND NOT EXISTS (SELECT 1 FROM nexus.data_moves s WHERE s.supersedes = m.label) AND NOT (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL)) + (CASE WHEN EXISTS (SELECT 1 FROM nexus.data_moves WHERE label LIKE 'rdr229-stamp-%') THEN 0 ELSE 1 END)</sqlCheck>
+        </preConditions>
+        <comment>RDR-229 P3.5b form A (nexus-p2m1x.24): CONTINUE-gated on every rdr229-stamp-* move having completed_at set (a move superseded by a -rerun-N row defers to it; a failed move whose driving table is gone counts complete; no stamp row at all keeps waiting), so it is skipped unrecorded and retried at every boot until then. nexus.canary_query_ring_upsert reads and trims a collection's ring by collection_id: the label argument is resolved once to (collection_id, name) from the registry; an entry already in the ring (same collection id and digest) has added_at refreshed, otherwise it is inserted with the registry's label in the still-NOT NULL name column, and a concurrent insert of the same entry (the name primary key stays until P4.1) is caught as unique_violation and refreshed, as ON CONFLICT on the name key did. The trim DELETE selects the ring by id. The 23503 refusal of an unregistered name, the per-entry foreign_key_violation skip and the return value are unchanged. Replaces the definition in vectors-069-collection-id-dual-write-functions.xml, changeset vectors-069-24 (line 7738), the last definer; the signature, attributes, search_path pin and grants are kept. DATA EFFECT: none, a function definition only.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.canary_query_ring_upsert(
+    p_tenant      text,
+    p_collections text[],
+    p_models      text[],
+    p_vectors     text[],
+    p_digests     bytea[]
+) RETURNS integer
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+    v_n       integer := coalesce(cardinality(p_digests), 0);
+    v_written integer := 0;
+    v_vec     nexus.vector;
+    v_dims    integer;
+    v_cid     bigint;
+    v_name    text;
+    v_cids    bigint[]  := ARRAY[]::bigint[];
+    v_ring    bigint;
+    i         integer;
+BEGIN
+    IF coalesce(cardinality(p_collections), 0) <> v_n
+       OR coalesce(cardinality(p_models), 0)  <> v_n
+       OR coalesce(cardinality(p_vectors), 0) <> v_n THEN
+        RAISE EXCEPTION 'canary_query_ring_upsert: the four arrays must have the same length'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    FOR i IN 1 .. v_n LOOP
+        CONTINUE WHEN p_collections[i] IS NULL OR p_models[i] IS NULL
+                      OR p_digests[i] IS NULL OR p_vectors[i] IS NULL;
+        v_vec  := p_vectors[i]::nexus.vector;
+        v_dims := nexus.vector_dims(v_vec);
+        CONTINUE WHEN v_dims NOT IN (384, 768, 1024);
+        -- the entry's collection id and its registry label, from the registry in this statement's transaction. A name that does not
+        -- resolve under the caller's row-level security (a cross-tenant name, or one with no registry row, including a collection
+        -- deleted since the entry was enqueued) raises SQLSTATE 23503, the code assign_from_chashes uses for the same refusal; the id
+        -- CHECK would refuse a NULL id anyway, and a silent skip hid the defect (RDR-229 P3.1, linda's ruling). PciQueryRing's writer
+        -- retries a failed batch entry by entry, so one such entry does not drop the others. RDR-229 P3.5b: the ring is read and
+        -- trimmed by collection_id; the name column is written from the registry's label of that id, never read.
+        SELECT cc.collection_id, cc.name INTO v_cid, v_name FROM nexus.catalog_collections cc
+         WHERE cc.tenant_id = p_tenant AND cc.name = p_collections[i]
+         ORDER BY (cc.superseded_by_id IS NULL) DESC, cc.collection_id
+         LIMIT 1;
+        IF v_cid IS NULL THEN
+            RAISE EXCEPTION 'canary_query_ring_upsert: collection % is not registered for tenant % -- register it first via POST /v1/catalog/collections/upsert',
+                p_collections[i], p_tenant
+                USING ERRCODE = 'foreign_key_violation';
+        END IF;
+        BEGIN
+            -- refresh added_at when the digest is already in this collection's ring (by id), else insert
+            UPDATE nexus.canary_query_ring r
+               SET added_at = clock_timestamp(), collection_id = v_cid
+             WHERE r.tenant_id = p_tenant
+               AND r.collection_id = v_cid
+               AND r.vector_digest = p_digests[i];
+            IF NOT FOUND THEN
+                IF v_dims = 384 THEN
+                    INSERT INTO nexus.canary_query_ring
+                        (tenant_id, collection, collection_id, embedding_model, embedding_384, vector_digest, added_at)
+                    VALUES (p_tenant, v_name, v_cid, p_models[i], v_vec, p_digests[i], clock_timestamp());
+                ELSIF v_dims = 768 THEN
+                    INSERT INTO nexus.canary_query_ring
+                        (tenant_id, collection, collection_id, embedding_model, embedding_768, vector_digest, added_at)
+                    VALUES (p_tenant, v_name, v_cid, p_models[i], v_vec, p_digests[i], clock_timestamp());
+                ELSE
+                    INSERT INTO nexus.canary_query_ring
+                        (tenant_id, collection, collection_id, embedding_model, embedding_1024, vector_digest, added_at)
+                    VALUES (p_tenant, v_name, v_cid, p_models[i], v_vec, p_digests[i], clock_timestamp());
+                END IF;
+            END IF;
+            v_written := v_written + 1;
+            v_cids    := v_cids || v_cid;
+        EXCEPTION
+            WHEN foreign_key_violation THEN
+                -- S6: the collection (or its model) is gone since the entry was enqueued. Skip this entry only.
+                NULL;
+            WHEN unique_violation THEN
+                -- a concurrent call inserted the same entry between the UPDATE and the INSERT: refresh it, as ON CONFLICT did.
+                UPDATE nexus.canary_query_ring r
+                   SET added_at = clock_timestamp(), collection_id = v_cid
+                 WHERE r.tenant_id = p_tenant
+                   AND r.collection_id = v_cid
+                   AND r.vector_digest = p_digests[i];
+                v_written := v_written + 1;
+                v_cids    := v_cids || v_cid;
+        END;
+    END LOOP;
+
+    -- Trim each ring this call wrote to, in a fixed order (two concurrent calls take the same row locks in the
+    -- same order): keep the 32 newest by added_at (ties on the digest), and nothing older than 30 days.
+    FOR v_ring IN SELECT u.r FROM unnest(v_cids) AS u(r) GROUP BY u.r ORDER BY u.r LOOP
+        DELETE FROM nexus.canary_query_ring d
+         WHERE d.tenant_id = p_tenant
+           AND d.collection_id = v_ring
+           AND (d.added_at < clock_timestamp() - interval '30 days'
+                OR d.vector_digest NOT IN (
+                       SELECT k.vector_digest
+                         FROM nexus.canary_query_ring k
+                        WHERE k.tenant_id = p_tenant
+                          AND k.collection_id = v_ring
+                        ORDER BY k.added_at DESC, k.vector_digest
+                        LIMIT 32));
+    END LOOP;
+
+    RETURN v_written;
+END;
+$fn$;
+]]></sql>
+        <rollback>
+            <!-- Restores the body of vectors-069-collection-id-dual-write-functions.xml vectors-069-24 verbatim. -->
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.canary_query_ring_upsert(
+    p_tenant      text,
+    p_collections text[],
+    p_models      text[],
+    p_vectors     text[],
+    p_digests     bytea[]
+) RETURNS integer
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+    v_n       integer := coalesce(cardinality(p_digests), 0);
+    v_written integer := 0;
+    v_vec     nexus.vector;
+    v_dims    integer;
+    v_cid     bigint;
+    v_rings   text[]  := ARRAY[]::text[];
+    v_ring    text;
+    i         integer;
+BEGIN
+    IF coalesce(cardinality(p_collections), 0) <> v_n
+       OR coalesce(cardinality(p_models), 0)  <> v_n
+       OR coalesce(cardinality(p_vectors), 0) <> v_n THEN
+        RAISE EXCEPTION 'canary_query_ring_upsert: the four arrays must have the same length'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    FOR i IN 1 .. v_n LOOP
+        CONTINUE WHEN p_collections[i] IS NULL OR p_models[i] IS NULL
+                      OR p_digests[i] IS NULL OR p_vectors[i] IS NULL;
+        v_vec  := p_vectors[i]::nexus.vector;
+        v_dims := nexus.vector_dims(v_vec);
+        CONTINUE WHEN v_dims NOT IN (384, 768, 1024);
+        -- the entry's collection id, from the registry in this statement's transaction. A name that does not resolve under the
+        -- caller's row-level security (a cross-tenant name, or one with no registry row, including a collection deleted since the
+        -- entry was enqueued) raises SQLSTATE 23503, the code assign_from_chashes uses for the same refusal; the id CHECK would
+        -- refuse a NULL id anyway, and a silent skip hid the defect (RDR-229 P3.1, linda's ruling). PciQueryRing's writer retries a
+        -- failed batch entry by entry, so one such entry does not drop the others.
+        SELECT cc.collection_id INTO v_cid FROM nexus.catalog_collections cc
+         WHERE cc.tenant_id = p_tenant AND cc.name = p_collections[i];
+        IF v_cid IS NULL THEN
+            RAISE EXCEPTION 'canary_query_ring_upsert: collection % is not registered for tenant % -- register it first via POST /v1/catalog/collections/upsert',
+                p_collections[i], p_tenant
+                USING ERRCODE = 'foreign_key_violation';
+        END IF;
+        BEGIN
+            IF v_dims = 384 THEN
+                INSERT INTO nexus.canary_query_ring
+                    (tenant_id, collection, collection_id, embedding_model, embedding_384, vector_digest, added_at)
+                VALUES (p_tenant, p_collections[i], v_cid, p_models[i], v_vec, p_digests[i], clock_timestamp())
+                ON CONFLICT (tenant_id, collection, vector_digest)
+                DO UPDATE SET added_at = EXCLUDED.added_at, collection_id = EXCLUDED.collection_id;
+            ELSIF v_dims = 768 THEN
+                INSERT INTO nexus.canary_query_ring
+                    (tenant_id, collection, collection_id, embedding_model, embedding_768, vector_digest, added_at)
+                VALUES (p_tenant, p_collections[i], v_cid, p_models[i], v_vec, p_digests[i], clock_timestamp())
+                ON CONFLICT (tenant_id, collection, vector_digest)
+                DO UPDATE SET added_at = EXCLUDED.added_at, collection_id = EXCLUDED.collection_id;
+            ELSE
+                INSERT INTO nexus.canary_query_ring
+                    (tenant_id, collection, collection_id, embedding_model, embedding_1024, vector_digest, added_at)
+                VALUES (p_tenant, p_collections[i], v_cid, p_models[i], v_vec, p_digests[i], clock_timestamp())
+                ON CONFLICT (tenant_id, collection, vector_digest)
+                DO UPDATE SET added_at = EXCLUDED.added_at, collection_id = EXCLUDED.collection_id;
+            END IF;
+            v_written := v_written + 1;
+            v_rings   := v_rings || p_collections[i];
+        EXCEPTION WHEN foreign_key_violation THEN
+            -- S6: the collection (or its model) is gone since the entry was enqueued. Skip this entry only.
+            NULL;
+        END;
+    END LOOP;
+
+    -- Trim each ring this call wrote to, in a fixed order (two concurrent calls take the same row locks in the
+    -- same order): keep the 32 newest by added_at (ties on the digest), and nothing older than 30 days.
+    FOR v_ring IN SELECT u.r FROM unnest(v_rings) AS u(r) GROUP BY u.r ORDER BY u.r LOOP
+        DELETE FROM nexus.canary_query_ring d
+         WHERE d.tenant_id = p_tenant
+           AND d.collection = v_ring
+           AND (d.added_at < clock_timestamp() - interval '30 days'
+                OR d.vector_digest NOT IN (
+                       SELECT k.vector_digest
+                         FROM nexus.canary_query_ring k
+                        WHERE k.tenant_id = p_tenant
+                          AND k.collection = v_ring
+                        ORDER BY k.added_at DESC, k.vector_digest
+                        LIMIT 32));
+    END LOOP;
+
+    RETURN v_written;
+END;
+$fn$;
+]]></sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-078-9" author="nexus-p2m1x.24">
+        <preConditions onFail="CONTINUE" onError="CONTINUE">
+            <sqlCheck expectedResult="0">SELECT (SELECT count(*) FROM nexus.data_moves m WHERE m.label LIKE 'rdr229-stamp-%' AND m.completed_at IS NULL AND NOT EXISTS (SELECT 1 FROM nexus.data_moves s WHERE s.supersedes = m.label) AND NOT (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL)) + (CASE WHEN EXISTS (SELECT 1 FROM nexus.data_moves WHERE label LIKE 'rdr229-stamp-%') THEN 0 ELSE 1 END)</sqlCheck>
+        </preConditions>
+        <comment>RDR-229 P3.5b form A (nexus-p2m1x.24): CONTINUE-gated on every rdr229-stamp-* move having completed_at set (a move superseded by a -rerun-N row defers to it; a failed move whose driving table is gone counts complete; no stamp row at all keeps waiting), so it is skipped unrecorded and retried at every boot until then. nexus.taxonomy_ann_query_384 matches the centroids by collection_id: the p_collection label is resolved once to its registry id (cross pass: every other collection's centroids, same-collection pass: this one's; an unregistered label keeps the cross pass open to all, as the name compare did), and the superseded-target exclusion joins the registry on collection_id and tests superseded_by_id. Stays LANGUAGE sql with no SET clause so the planner still inlines it (search-path-002). Replaces the definition in vectors-038-cross-pass-skips-superseded.xml, the last definer (line 297); the signature, attributes and grants are kept. DATA EFFECT: none, a function definition only.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.taxonomy_ann_query_384(
+    p_embedding         nexus.vector(384),
+    p_collection        text,
+    p_cross_collection  boolean,
+    p_n                 int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(topic_id bigint, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT topic_id,
+           (embedding_384 OPERATOR(nexus.<=>) p_embedding)::float8 AS distance
+      FROM nexus.taxonomy_centroids
+     WHERE embedding_model = p_embedding_model
+       AND tenant_id = p_tenant
+       AND embedding_384 IS NOT NULL
+       AND collection_id IS NOT NULL
+       AND (CASE WHEN p_cross_collection
+                 THEN collection_id IS DISTINCT FROM
+                      (SELECT rc.collection_id FROM nexus.catalog_collections rc
+                        WHERE rc.tenant_id = p_tenant AND rc.name = p_collection)
+                 ELSE collection_id =
+                      (SELECT rc.collection_id FROM nexus.catalog_collections rc
+                        WHERE rc.tenant_id = p_tenant AND rc.name = p_collection)
+            END)
+       AND NOT EXISTS (
+           SELECT 1 FROM nexus.catalog_collections cc
+            WHERE p_cross_collection
+              AND cc.tenant_id = p_tenant
+              AND cc.embedding_model = p_embedding_model
+              AND cc.collection_id = nexus.taxonomy_centroids.collection_id
+              AND cc.superseded_by_id IS NOT NULL)
+     ORDER BY embedding_384 OPERATOR(nexus.<=>) p_embedding, topic_id ASC
+     LIMIT p_n
+$$;
+]]></sql>
+        <rollback>
+            <!-- Restores the body of vectors-038-cross-pass-skips-superseded.xml (taxonomy_ann_query_384, line 297) verbatim. -->
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.taxonomy_ann_query_384(
+    p_embedding         nexus.vector(384),
+    p_collection        text,
+    p_cross_collection  boolean,
+    p_n                 int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(topic_id bigint, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT topic_id,
+           (embedding_384 OPERATOR(nexus.<=>) p_embedding)::float8 AS distance
+      FROM nexus.taxonomy_centroids
+     WHERE embedding_model = p_embedding_model
+       AND tenant_id = p_tenant
+       AND embedding_384 IS NOT NULL
+       AND (CASE WHEN p_cross_collection THEN collection <> p_collection
+                 ELSE collection = p_collection END)
+       AND NOT EXISTS (
+           SELECT 1 FROM nexus.catalog_collections cc
+            WHERE p_cross_collection
+              AND cc.tenant_id = p_tenant
+              AND cc.embedding_model = p_embedding_model
+              AND cc.name = nexus.taxonomy_centroids.collection
+              AND COALESCE(cc.superseded_by, '') <> '')
+     ORDER BY embedding_384 OPERATOR(nexus.<=>) p_embedding, topic_id ASC
+     LIMIT p_n
+$$;
+]]></sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-078-10" author="nexus-p2m1x.24">
+        <preConditions onFail="CONTINUE" onError="CONTINUE">
+            <sqlCheck expectedResult="0">SELECT (SELECT count(*) FROM nexus.data_moves m WHERE m.label LIKE 'rdr229-stamp-%' AND m.completed_at IS NULL AND NOT EXISTS (SELECT 1 FROM nexus.data_moves s WHERE s.supersedes = m.label) AND NOT (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL)) + (CASE WHEN EXISTS (SELECT 1 FROM nexus.data_moves WHERE label LIKE 'rdr229-stamp-%') THEN 0 ELSE 1 END)</sqlCheck>
+        </preConditions>
+        <comment>RDR-229 P3.5b form A (nexus-p2m1x.24): CONTINUE-gated on every rdr229-stamp-* move having completed_at set (a move superseded by a -rerun-N row defers to it; a failed move whose driving table is gone counts complete; no stamp row at all keeps waiting), so it is skipped unrecorded and retried at every boot until then. nexus.taxonomy_ann_query_768 matches the centroids by collection_id: the p_collection label is resolved once to its registry id (cross pass: every other collection's centroids, same-collection pass: this one's; an unregistered label keeps the cross pass open to all, as the name compare did), and the superseded-target exclusion joins the registry on collection_id and tests superseded_by_id. Stays LANGUAGE sql with no SET clause so the planner still inlines it (search-path-002). Replaces the definition in vectors-038-cross-pass-skips-superseded.xml, the last definer (line 525); the signature, attributes and grants are kept. DATA EFFECT: none, a function definition only.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.taxonomy_ann_query_768(
+    p_embedding         nexus.vector(768),
+    p_collection        text,
+    p_cross_collection  boolean,
+    p_n                 int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(topic_id bigint, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT topic_id,
+           (embedding_768 OPERATOR(nexus.<=>) p_embedding)::float8 AS distance
+      FROM nexus.taxonomy_centroids
+     WHERE embedding_model = p_embedding_model
+       AND tenant_id = p_tenant
+       AND embedding_768 IS NOT NULL
+       AND collection_id IS NOT NULL
+       AND (CASE WHEN p_cross_collection
+                 THEN collection_id IS DISTINCT FROM
+                      (SELECT rc.collection_id FROM nexus.catalog_collections rc
+                        WHERE rc.tenant_id = p_tenant AND rc.name = p_collection)
+                 ELSE collection_id =
+                      (SELECT rc.collection_id FROM nexus.catalog_collections rc
+                        WHERE rc.tenant_id = p_tenant AND rc.name = p_collection)
+            END)
+       AND NOT EXISTS (
+           SELECT 1 FROM nexus.catalog_collections cc
+            WHERE p_cross_collection
+              AND cc.tenant_id = p_tenant
+              AND cc.embedding_model = p_embedding_model
+              AND cc.collection_id = nexus.taxonomy_centroids.collection_id
+              AND cc.superseded_by_id IS NOT NULL)
+     ORDER BY embedding_768 OPERATOR(nexus.<=>) p_embedding, topic_id ASC
+     LIMIT p_n
+$$;
+]]></sql>
+        <rollback>
+            <!-- Restores the body of vectors-038-cross-pass-skips-superseded.xml (taxonomy_ann_query_768, line 525) verbatim. -->
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.taxonomy_ann_query_768(
+    p_embedding         nexus.vector(768),
+    p_collection        text,
+    p_cross_collection  boolean,
+    p_n                 int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(topic_id bigint, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT topic_id,
+           (embedding_768 OPERATOR(nexus.<=>) p_embedding)::float8 AS distance
+      FROM nexus.taxonomy_centroids
+     WHERE embedding_model = p_embedding_model
+       AND tenant_id = p_tenant
+       AND embedding_768 IS NOT NULL
+       AND (CASE WHEN p_cross_collection THEN collection <> p_collection
+                 ELSE collection = p_collection END)
+       AND NOT EXISTS (
+           SELECT 1 FROM nexus.catalog_collections cc
+            WHERE p_cross_collection
+              AND cc.tenant_id = p_tenant
+              AND cc.embedding_model = p_embedding_model
+              AND cc.name = nexus.taxonomy_centroids.collection
+              AND COALESCE(cc.superseded_by, '') <> '')
+     ORDER BY embedding_768 OPERATOR(nexus.<=>) p_embedding, topic_id ASC
+     LIMIT p_n
+$$;
+]]></sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-078-11" author="nexus-p2m1x.24">
+        <preConditions onFail="CONTINUE" onError="CONTINUE">
+            <sqlCheck expectedResult="0">SELECT (SELECT count(*) FROM nexus.data_moves m WHERE m.label LIKE 'rdr229-stamp-%' AND m.completed_at IS NULL AND NOT EXISTS (SELECT 1 FROM nexus.data_moves s WHERE s.supersedes = m.label) AND NOT (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL)) + (CASE WHEN EXISTS (SELECT 1 FROM nexus.data_moves WHERE label LIKE 'rdr229-stamp-%') THEN 0 ELSE 1 END)</sqlCheck>
+        </preConditions>
+        <comment>RDR-229 P3.5b form A (nexus-p2m1x.24): CONTINUE-gated on every rdr229-stamp-* move having completed_at set (a move superseded by a -rerun-N row defers to it; a failed move whose driving table is gone counts complete; no stamp row at all keeps waiting), so it is skipped unrecorded and retried at every boot until then. nexus.taxonomy_ann_query_1024 matches the centroids by collection_id: the p_collection label is resolved once to its registry id (cross pass: every other collection's centroids, same-collection pass: this one's; an unregistered label keeps the cross pass open to all, as the name compare did), and the superseded-target exclusion joins the registry on collection_id and tests superseded_by_id. Stays LANGUAGE sql with no SET clause so the planner still inlines it (search-path-002). Replaces the definition in vectors-038-cross-pass-skips-superseded.xml, the last definer (line 753); the signature, attributes and grants are kept. DATA EFFECT: none, a function definition only.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.taxonomy_ann_query_1024(
+    p_embedding         nexus.vector(1024),
+    p_collection        text,
+    p_cross_collection  boolean,
+    p_n                 int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(topic_id bigint, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT topic_id,
+           (embedding_1024 OPERATOR(nexus.<=>) p_embedding)::float8 AS distance
+      FROM nexus.taxonomy_centroids
+     WHERE embedding_model = p_embedding_model
+       AND tenant_id = p_tenant
+       AND embedding_1024 IS NOT NULL
+       AND collection_id IS NOT NULL
+       AND (CASE WHEN p_cross_collection
+                 THEN collection_id IS DISTINCT FROM
+                      (SELECT rc.collection_id FROM nexus.catalog_collections rc
+                        WHERE rc.tenant_id = p_tenant AND rc.name = p_collection)
+                 ELSE collection_id =
+                      (SELECT rc.collection_id FROM nexus.catalog_collections rc
+                        WHERE rc.tenant_id = p_tenant AND rc.name = p_collection)
+            END)
+       AND NOT EXISTS (
+           SELECT 1 FROM nexus.catalog_collections cc
+            WHERE p_cross_collection
+              AND cc.tenant_id = p_tenant
+              AND cc.embedding_model = p_embedding_model
+              AND cc.collection_id = nexus.taxonomy_centroids.collection_id
+              AND cc.superseded_by_id IS NOT NULL)
+     ORDER BY embedding_1024 OPERATOR(nexus.<=>) p_embedding, topic_id ASC
+     LIMIT p_n
+$$;
+]]></sql>
+        <rollback>
+            <!-- Restores the body of vectors-038-cross-pass-skips-superseded.xml (taxonomy_ann_query_1024, line 753) verbatim. -->
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.taxonomy_ann_query_1024(
+    p_embedding         nexus.vector(1024),
+    p_collection        text,
+    p_cross_collection  boolean,
+    p_n                 int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(topic_id bigint, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT topic_id,
+           (embedding_1024 OPERATOR(nexus.<=>) p_embedding)::float8 AS distance
+      FROM nexus.taxonomy_centroids
+     WHERE embedding_model = p_embedding_model
+       AND tenant_id = p_tenant
+       AND embedding_1024 IS NOT NULL
+       AND (CASE WHEN p_cross_collection THEN collection <> p_collection
+                 ELSE collection = p_collection END)
+       AND NOT EXISTS (
+           SELECT 1 FROM nexus.catalog_collections cc
+            WHERE p_cross_collection
+              AND cc.tenant_id = p_tenant
+              AND cc.embedding_model = p_embedding_model
+              AND cc.name = nexus.taxonomy_centroids.collection
+              AND COALESCE(cc.superseded_by, '') <> '')
+     ORDER BY embedding_1024 OPERATOR(nexus.<=>) p_embedding, topic_id ASC
+     LIMIT p_n
+$$;
+]]></sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-078-13" author="nexus-p2m1x.24">
+        <preConditions onFail="CONTINUE" onError="CONTINUE">
+            <sqlCheck expectedResult="0">SELECT (SELECT count(*) FROM nexus.data_moves m WHERE m.label LIKE 'rdr229-stamp-%' AND m.completed_at IS NULL AND NOT EXISTS (SELECT 1 FROM nexus.data_moves s WHERE s.supersedes = m.label) AND NOT (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL)) + (CASE WHEN EXISTS (SELECT 1 FROM nexus.data_moves WHERE label LIKE 'rdr229-stamp-%') THEN 0 ELSE 1 END)</sqlCheck>
+        </preConditions>
+        <comment>RDR-229 P3.5b form A (nexus-p2m1x.24): CONTINUE-gated on every rdr229-stamp-* move having completed_at set (a move superseded by a -rerun-N row defers to it; a failed move whose driving table is gone counts complete; no stamp row at all keeps waiting), so it is skipped unrecorded and retried at every boot until then. nexus.collection_doc_counts groups the live documents by physical_collection_id and reports the registry's label of that id as physical_collection (a join on catalog_collections, whose name is the label and is not dropped), so the view reads no document name column and survives P4.1's DROP COLUMN ... CASCADE. Same columns, names, types and order (tenant_id text, physical_collection text, doc_count bigint); one row per label as before. A document with no collection id (the old '' name) is no collection and is not counted. Replaces the view of catalog-019-tombstone-aware-read-views.xml, changeset catalog-019-2 (line 110), the last definer; its option and its grant are kept. DATA EFFECT: none, a view definition only.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE VIEW nexus.collection_doc_counts
+    WITH (security_invoker = true)
+AS
+SELECT d.tenant_id,
+       cc.name AS physical_collection,
+       count(*) AS doc_count
+  FROM nexus.catalog_documents d
+  JOIN nexus.catalog_collections cc
+    ON cc.tenant_id = d.tenant_id
+   AND cc.collection_id = d.physical_collection_id
+ WHERE d.deleted_at IS NULL
+ GROUP BY d.tenant_id, cc.name
+]]></sql>
+        <rollback>
+            <!-- Restores the view of catalog-019-tombstone-aware-read-views.xml catalog-019-2 verbatim. -->
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE VIEW nexus.collection_doc_counts
+    WITH (security_invoker = true)
+AS
+SELECT d.tenant_id,
+       d.physical_collection,
+       count(*) AS doc_count
+  FROM nexus.catalog_documents d
+ WHERE d.physical_collection IS NOT NULL
+   AND d.physical_collection <> ''
+   AND d.deleted_at IS NULL
+ GROUP BY d.tenant_id, d.physical_collection
+]]></sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-078-14" author="nexus-p2m1x.24">
+        <preConditions onFail="CONTINUE" onError="CONTINUE">
+            <sqlCheck expectedResult="0">SELECT (SELECT count(*) FROM nexus.data_moves m WHERE m.label LIKE 'rdr229-stamp-%' AND m.completed_at IS NULL AND NOT EXISTS (SELECT 1 FROM nexus.data_moves s WHERE s.supersedes = m.label) AND NOT (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL)) + (CASE WHEN EXISTS (SELECT 1 FROM nexus.data_moves WHERE label LIKE 'rdr229-stamp-%') THEN 0 ELSE 1 END)</sqlCheck>
+        </preConditions>
+        <comment>RDR-229 P3.5b form A (nexus-p2m1x.24): CONTINUE-gated on every rdr229-stamp-* move having completed_at set (a move superseded by a -rerun-N row defers to it; a failed move whose driving table is gone counts complete; no stamp row at all keeps waiting), so it is skipped unrecorded and retried at every boot until then. nexus.collection_health_meta groups the live documents by physical_collection_id and reports the registry's label of that id as collection (a join on catalog_collections), so the view reads no document name column and survives P4.1's DROP COLUMN ... CASCADE. Same columns, names, types and order (tenant_id, collection, last_indexed, orphan_count, stale_source_ratio); one row per label as before. A document with no collection id (the old '' name) is no collection and has no row. Replaces the view of catalog-031-type-hygiene.xml, changeset catalog-031-1-documents-temporal (line 120), the last definer; its option and its grant are kept. DATA EFFECT: none, a view definition only.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE VIEW nexus.collection_health_meta
+    WITH (security_invoker = true)
+AS
+SELECT d.tenant_id,
+       cc.name AS collection,
+       max(d.indexed_at) AS last_indexed,
+       count(*) FILTER (
+           WHERE NOT EXISTS (
+               SELECT 1 FROM nexus.catalog_links l
+                WHERE l.to_tumbler = d.tumbler
+           )
+       ) AS orphan_count,
+       (count(*) FILTER (WHERE d.indexed_at IS NOT NULL AND d.indexed_at < now() - interval '30 days'))::double precision
+       / NULLIF(count(*) FILTER (WHERE d.indexed_at IS NOT NULL), 0)
+       AS stale_source_ratio
+  FROM nexus.catalog_documents d
+  JOIN nexus.catalog_collections cc
+    ON cc.tenant_id = d.tenant_id
+   AND cc.collection_id = d.physical_collection_id
+ WHERE d.deleted_at IS NULL
+ GROUP BY d.tenant_id, cc.name
+]]></sql>
+        <rollback>
+            <!-- Restores the view body of catalog-031-type-hygiene.xml catalog-031-1-documents-temporal verbatim (as CREATE OR REPLACE VIEW: the view exists, and the replacement has the same columns). -->
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE VIEW nexus.collection_health_meta
+    WITH (security_invoker = true)
+AS
+SELECT d.tenant_id,
+       d.physical_collection AS collection,
+       max(d.indexed_at) AS last_indexed,
+       count(*) FILTER (
+           WHERE NOT EXISTS (
+               SELECT 1 FROM nexus.catalog_links l
+                WHERE l.to_tumbler = d.tumbler
+           )
+       ) AS orphan_count,
+       (count(*) FILTER (WHERE d.indexed_at IS NOT NULL AND d.indexed_at < now() - interval '30 days'))::double precision
+       / NULLIF(count(*) FILTER (WHERE d.indexed_at IS NOT NULL), 0)
+       AS stale_source_ratio
+  FROM nexus.catalog_documents d
+ WHERE d.physical_collection IS NOT NULL
+   AND d.deleted_at IS NULL
+ GROUP BY d.tenant_id, d.physical_collection
+]]></sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-078-15" author="nexus-p2m1x.24">
+        <preConditions onFail="CONTINUE" onError="CONTINUE">
+            <sqlCheck expectedResult="0">SELECT (SELECT count(*) FROM nexus.data_moves m WHERE m.label LIKE 'rdr229-stamp-%' AND m.completed_at IS NULL AND NOT EXISTS (SELECT 1 FROM nexus.data_moves s WHERE s.supersedes = m.label) AND NOT (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL)) + (CASE WHEN EXISTS (SELECT 1 FROM nexus.data_moves WHERE label LIKE 'rdr229-stamp-%') THEN 0 ELSE 1 END)</sqlCheck>
+        </preConditions>
+        <comment>RDR-229 P3.5b form A (nexus-p2m1x.24): CONTINUE-gated on every rdr229-stamp-* move having completed_at set (a move superseded by a -rerun-N row defers to it; a failed move whose driving table is gone counts complete; no stamp row at all keeps waiting), so it is skipped unrecorded and retried at every boot until then. nexus.topics_with_counts reports the registry's label of the topic's collection_id as collection (a left join on catalog_collections, '' where the topic has no collection, as its name column read), so the view reads no topics name column and survives P4.1's DROP COLUMN ... CASCADE. Same columns, names, types and order. Replaces the view of catalog-009-read-shape-views.xml, changeset catalog-009-5 (line 138), the last definer; its option and its grant are kept. DATA EFFECT: none, a view definition only.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE VIEW nexus.topics_with_counts
+    WITH (security_invoker = true)
+AS
+SELECT t.tenant_id,
+       t.id,
+       t.label,
+       t.parent_id,
+       COALESCE(cc.name, '') AS collection,
+       t.centroid_hash,
+       t.doc_count,
+       t.created_at,
+       t.review_status,
+       t.terms
+  FROM nexus.topics t
+  LEFT JOIN nexus.catalog_collections cc
+    ON cc.tenant_id = t.tenant_id
+   AND cc.collection_id = t.collection_id
+]]></sql>
+        <rollback>
+            <!-- Restores the view of catalog-009-read-shape-views.xml catalog-009-5 verbatim. -->
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE VIEW nexus.topics_with_counts
+    WITH (security_invoker = true)
+AS
+SELECT t.tenant_id,
+       t.id,
+       t.label,
+       t.parent_id,
+       t.collection,
+       t.centroid_hash,
+       t.doc_count,
+       t.created_at,
+       t.review_status,
+       t.terms
+  FROM nexus.topics t
+]]></sql>
+        </rollback>
+    </changeSet>
+</databaseChangeLog>
