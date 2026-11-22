@@ -110,7 +110,7 @@ _CONTINUE_ALLOWLIST: dict[tuple[str, str], str] = {
     # chunk leaf's build, and nothing on nexus.chunks or a leaf; the wait for older transactions ends at the 30 s lock_timeout and the
     # changeset is skipped (failOnError false), not failed. The one table name in the body is the exempt statement shape
     # (_EXEMPT_INDEX_BUILD). No chunk table, leaf, partition helper or builder object is named (RDR-229 P3.3c, nexus-p2m1x.21).
-    ("vectors-074-chunk-orphaned-at-chash-index.xml", "vectors-074-1"): "child index of the chunk id key",
+    ("vectors-075-chunk-orphaned-at-chash-index.xml", "vectors-075-1"): "child index of the chunk id key",
 }
 
 # The one statement shape exempt from the foreign-key-table rule (see the module docstring), matched on the NORMALISED text.

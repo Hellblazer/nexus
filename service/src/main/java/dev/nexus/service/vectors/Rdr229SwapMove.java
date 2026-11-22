@@ -75,7 +75,7 @@ public final class Rdr229SwapMove {
     static final String VALIDATION_LABEL_PREFIX = "rdr229-fkvalidate-";
     static final String VALIDATION_LABEL_SUFFIX = "-chunk-fk";
 
-    /** The index the chunks swap waits for: the child-side lookup of chunk_orphaned_at's id key (vectors-074-1). */
+    /** The index the chunks swap waits for: the child-side lookup of chunk_orphaned_at's id key (vectors-075-1). */
     public static final String CHILD_INDEX = "idx_chunk_orphaned_at_tenant_chash";
 
     /** The composite on the id from nexus.chunks to the registry. */
@@ -239,7 +239,7 @@ public final class Rdr229SwapMove {
     }
 
     /**
-     * The chunks swap's first statement: it waits until a boot has built {@link #CHILD_INDEX} (vectors-074-1), and a swap that adds the
+     * The chunks swap's first statement: it waits until a boot has built {@link #CHILD_INDEX} (vectors-075-1), and a swap that adds the
      * child id keys before it would make every chunk delete read the whole of chunk_orphaned_at. It RAISES SQLSTATE 55P03
      * ({@code lock_not_available}) with a message naming the index, and that is a choice of class, not of meaning: the framework has no
      * missing-prerequisite path an {@code on_complete} can signal (RDR-246's reason class {@code missing_prerequisite} is a label the
