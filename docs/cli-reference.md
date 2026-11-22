@@ -4363,6 +4363,8 @@ live "Chunk tenant isolation" row, and the operator-side read-only query in that
 server-side check at all: `tuples.dead_tuple_ratio`, `tuples.sweep_freshness` and "Partition leaves". The human
 output ends with a line giving how many rows were not checked on this deployment.
 
+A managed client that has `mint_token` configured presents the minted data token on every route, and the retire-keys sweep route refuses it, so the `Upgrade ladder` row lists `retire-keys-sweep` as not applicable (no warning, not counted as checked; `[ ]` when it is the only rung), and the version-change callout says the same: its sweep is the operator verb `nx t3 retire-keys`, which needs the root token and runs from a host without `mint_token`. The test is `mint_token` configured and nothing more: a managed client with a tenant or root credential, a static data-scope token without `mint_token`, or a local install keeps "not checked" with the warning. Every other rung in the row is unchanged.
+
 After the ownerless-write release, restart every long-lived `nx-mcp` server and hook-spawned `nx`; the steps are under [`nx upgrade`](#nx-upgrade).
 
 ---

@@ -43,6 +43,29 @@ def managed_service() -> bool:
     return not is_local_mode()
 
 
+#: Why the retire-keys-sweep rung is not applicable to a client that holds ``mint_token``: the sweep route takes a tenant
+#: or root credential and answers 403 to the data token such a client presents on every route
+#: (``http_vector_client._request``). One text for every surface that says so (``nx doctor``, the version-change callout,
+#: ``nx upgrade --dry-run``).
+RETIRE_KEYS_OPERATOR_NOTE = (
+    "its sweep is the operator verb `nx t3 retire-keys`, which needs the root token and runs from a host without "
+    "mint_token"
+)
+
+
+def sweep_is_operator_only(managed_fn: Callable[[], bool] = managed_service) -> bool:
+    """True for a managed deployment whose client has ``mint_token`` configured (``mint_armed``, the test the vector
+    client makes before presenting the minted data token): the retire-keys sweep route refuses that credential, so no
+    interactive ``nx upgrade`` from this client runs the sweep. A static data-scope token with no ``mint_token`` is not
+    detected here. An unreadable mode or config answers False, so a surface keeps its "not checked" line."""
+    try:
+        from nexus.db.service_endpoint import mint_armed  # noqa: PLC0415 — deferred: keeps the registry import cheap
+
+        return bool(managed_fn() and mint_armed())
+    except Exception:  # noqa: BLE001 — unknown credential: the rung stays "not checked", as before
+        return False
+
+
 def refuses_unbounded_read(managed_fn: Callable[[], bool] = managed_service) -> bool:
     """For ``converge()`` and ``verify()``: True when this run is unattended (``--auto``,
     ``NX_UPGRADE_UNATTENDED=1``, the version-transition callout) against a managed service. Keyed on the

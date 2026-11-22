@@ -10242,21 +10242,51 @@ def _check_pending_rungs() -> list[HealthResult]:
     # Each with its own reason's first clause: rdr192-manifest-backfill's says whether an older completion still
     # answers the engine's reaper gate or none is recorded and the reaper stays refused.
     # On a local engine the decline is doctor's bounded reads, not the managed rule, so the reason is left out there.
-    from nexus.upgrade_ladder.auto_guard import managed_service  # noqa: PLC0415 — deferred to avoid module-load cost
+    from nexus.upgrade_ladder.auto_guard import (  # noqa: PLC0415 — deferred to avoid module-load cost
+        RETIRE_KEYS_OPERATOR_NOTE,
+        managed_service,
+        sweep_is_operator_only,
+    )
 
     try:
         managed = managed_service()
     except Exception:  # noqa: BLE001 — unknown mode: names only, as before
         managed = False
-    not_checked = [
-        f"{name} ({status.pending_detail.split('; ')[0]})" if managed else name for name, status in statuses
+    declined = [
+        (name, status) for name, status in statuses
         if not status.applicable and INTERACTIVE_REMEDY in (status.pending_detail or "")
     ]
+    # Sam 2026-11-22 (T2 nexus/sam-ruling-doctor-cleanup-2026-11-22, item a): a check this client cannot run is not
+    # applicable, never a warning. retire-keys-sweep's route takes a tenant or root credential and answers 403 to the
+    # data token a client presents whenever `mint_token` is configured, so an interactive `nx upgrade` cannot clear
+    # it either: its sweep is the operator verb. The test is `sweep_is_operator_only()` (managed and `mint_armed()`)
+    # and nothing more: a managed client with a tenant or root credential, or a static data token with no
+    # `mint_token`, keeps "not checked". The rung's own detect() is left alone; the other readers of its status
+    # (`upgrade_finish.pending_data_rung_callout`, `nx upgrade`'s status line) use the same helper. So is every other
+    # declined rung, rdr192-manifest-backfill included.
+    sweep_na = sweep_is_operator_only()
+    na_names = [name for name, _status in declined if sweep_na and name == _ladder_registry.RUNG_RETIRE_KEYS_SWEEP]
+    not_checked = [
+        f"{name} ({status.pending_detail.split('; ')[0]})" if managed else name
+        for name, status in declined if name not in na_names
+    ]
+    na_note = (
+        f"not applicable on a managed deployment with mint_token configured: {', '.join(na_names)} "
+        f"({RETIRE_KEYS_OPERATOR_NOTE})"
+    ) if na_names else ""
     if not pending and not not_checked:
+        checked = len(statuses) - len(na_names)
+        if na_names and checked == 0:
+            # Every registered rung is one this client cannot check: nothing stands behind the row, so it is `[ ]`.
+            return [HealthResult(label="Upgrade ladder", ok=True, skipped=True, detail=na_note)]
         return [HealthResult(
             label="Upgrade ladder",
             ok=True,
-            detail="; ".join(filter(None, [f"no pending rungs ({len(statuses)} registered)", record_note])),
+            detail="; ".join(filter(None, [
+                f"no pending rungs ({checked} checked of {len(statuses)} registered)" if na_names
+                else f"no pending rungs ({len(statuses)} registered)",
+                na_note, record_note,
+            ])),
         )]
     parts: list[str] = []
     fixes: list[str] = []
@@ -10297,7 +10327,9 @@ def _check_pending_rungs() -> list[HealthResult]:
         elif not guarded("deferral_log_probe", lambda: t2_deferral_log().readable(), True):
             parts.append("the upgrade deferral log could not be read, so a rung deferring every run would not show here")
     else:
-        parts.append(f"no pending rungs among those checked ({len(statuses) - len(not_checked)} of {len(statuses)})")
+        parts.append(
+            f"no pending rungs among those checked ({len(statuses) - len(not_checked) - len(na_names)} of {len(statuses)})"
+        )
     if not_checked:
         parts.append(
             f"not checked: {', '.join(not_checked)} (each answers only from a read of every document, which "
@@ -10308,6 +10340,8 @@ def _check_pending_rungs() -> list[HealthResult]:
             "pending and records each rung it verifies, and this row then answers from the record without a read. "
             "`nx upgrade --dry-run` makes the same read to show what is pending but records nothing"
         )
+    if na_note:
+        parts.append(na_note)
     if record_note:
         parts.append(record_note)
     return [HealthResult(
