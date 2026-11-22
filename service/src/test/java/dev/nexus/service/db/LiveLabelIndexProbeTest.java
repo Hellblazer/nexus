@@ -54,8 +54,8 @@ class LiveLabelIndexProbeTest {
 
     private void dropIndex() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            // plain SQL: jOOQ renders a PostgreSQL DROP INDEX without the schema qualifier, and nexus is not on the search_path
-            DSL.using(su, SQLDialect.POSTGRES).execute("DROP INDEX nexus." + INDEX);
+            // the shared helper qualifies the name: jOOQ renders a PostgreSQL DROP INDEX without the schema, and nexus is not on the search_path
+            PgContainerHelper.dropIndex(su, DSL.name("nexus", INDEX));
         }
     }
 

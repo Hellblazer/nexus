@@ -42,8 +42,8 @@ class NexusServiceLiveLabelIndexWiringTest {
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.applyProductSchema(su);
             if (dropIndex) {
-                // plain SQL: jOOQ renders a PostgreSQL DROP INDEX without the schema qualifier
-                DSL.using(su, SQLDialect.POSTGRES).execute("DROP INDEX nexus." + INDEX);
+                // the shared helper qualifies the name: jOOQ renders a PostgreSQL DROP INDEX without the schema
+                PgContainerHelper.dropIndex(su, DSL.name("nexus", INDEX));
             }
         }
         var cfg = new com.zaxxer.hikari.HikariConfig();
