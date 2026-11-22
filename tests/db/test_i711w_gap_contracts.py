@@ -91,10 +91,14 @@ def _slug() -> str:
 
 def _register_docs_collections(cat, *names: str) -> None:
     """RDR-229 P3.1: the engine refuses a document under an unregistered collection, so a test that registers (or moves)
-    a document registers its collections first, under the substrate's bge-768 profile."""
+    a document registers its collections first, under the substrate's bge-768 profile.
+
+    Each name gets its own tuple (RDR-229 P3.8: one live collection per content_type, owner_id, embedding_model and
+    model_version), so its owner_id is the name's own second segment: the source and the target of a move, and two
+    tests' collections in this shared tenant, are never one tuple."""
     for name in names:
         cat.register_collection(
-            name, content_type="docs", owner_id="i711w-gap-contracts",
+            name, content_type="docs", owner_id=f"i711w-{name.split('__')[1].replace('_', '-')}",
             embedding_model="bge-base-en-v15-768", model_version="v1",
         )
 
