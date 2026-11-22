@@ -236,7 +236,7 @@ public final class OwnerDecision {
         int total = body.get("suspects_total") instanceof Number n ? n.intValue() : suspects.size();
         Instant redSince = redStart(owners);
         Map<String, Object> stall = ackAt == null ? null
-            : stallInfo(new Sign(ackAt, owner), redSince == null ? now : redSince);
+            : stallInfo(new Sign(ackAt, owner, "ack", null), redSince == null ? now : redSince, now);
         return new Decision(new Post("owner", cur.sha(),
             body(target, null, REASON_ESCALATED, suspects, total, now, false, ((Number) body.get("handoffs")).intValue() + 1,
                 stall)), null);
@@ -370,7 +370,7 @@ public final class OwnerDecision {
     }
 
     /** A sign of life: who acked or pushed, and when. */
-    private record Sign(Instant at, String identity) {
+    private record Sign(Instant at, String identity, String kind, String sha) {
         static Sign later(Sign a, Sign b) {
             return a == null ? b : b == null ? a : b.at().isAfter(a.at()) ? b : a;
         }
@@ -402,23 +402,27 @@ public final class OwnerDecision {
             }
         }
         Map<String, Object> stall = mode == Mode.STALLED
-            ? stallInfo(due == null ? null : due.sign(), due == null ? in.now() : due.redSince()) : null;
+            ? stallInfo(due == null ? null : due.sign(), due == null ? in.now() : due.redSince(), in.now()) : null;
         return new Decision(new Post("owner", cur.sha(),
             body(target, null, REASON_ESCALATED, shas(suspects), suspects.size(), in.now(), false, handoffs + 1, stall)), null);
     }
 
     /**
-     * The extra fields of a stall escalation: {@code red_since} (the red's first owner row), and when someone had acked
-     * or pushed, {@code stalled_owner} (that identity) and {@code stalled_since} (when). {@code episode_at} keeps its
-     * meaning, the start of the row's own deadline.
+     * The extra fields of a stall or cap escalation: {@code red_since} (the red's first owner row) and
+     * {@code open_minutes} (whole minutes from it to now), and, when someone had acked or pushed, {@code stalled_owner}
+     * and {@code stalled_since} (the identity and instant of the last such sign) and {@code stalled_sign} ({@code ack}
+     * or {@code push}); with no sign the three are absent. {@code episode_at} keeps its meaning, the start of the row's
+     * own deadline.
      */
-    private static Map<String, Object> stallInfo(Sign sign, Instant redSince) {
+    private static Map<String, Object> stallInfo(Sign sign, Instant redSince, Instant now) {
         Map<String, Object> m = new LinkedHashMap<>();
         if (sign != null) {
             m.put("stalled_owner", sign.identity());
             m.put("stalled_since", sign.at().toString());
+            m.put("stalled_sign", sign.kind());
         }
         m.put("red_since", redSince.toString());
+        m.put("open_minutes", (int) Duration.between(redSince, now).toMinutes());
         return m;
     }
 
@@ -451,6 +455,12 @@ public final class OwnerDecision {
             }
         }
         return false;
+    }
+
+    /** When the current owner's ownership began (see {@link #ownershipSince}), or null when no open owner row exists. */
+    static Instant ownershipStart(List<BoardRow> owners) {
+        BoardRow cur = currentRow(owners);
+        return cur == null || !"owner".equals(cur.kind()) ? null : ownershipSince(owners, cur);
     }
 
     /** When the current owner's ownership began: the newest owner row that is not a refresh. */
@@ -520,10 +530,11 @@ public final class OwnerDecision {
      *   <li>the current owner's own ack (an {@code ack} row on a red tip) or push: the red is acknowledged, and the
      *       stall deadline is the later of {@code episode_at} and that sign, plus {@code stall_factor} deadlines;</li>
      *   <li>a push by any other identity that is or was an owner of this red, or by any live member of the serving
-     *       group: it restarts the deadline, so the hand-off or escalation deadline counts from the later of
-     *       {@code episode_at} and that push (S1a as it happened: the original owner's fix landed after the hand-off;
-     *       and a member who owns nothing and pushed no suspect can only push onto a red with a stated fix). It is no
-     *       ack: only the current owner's own push or {@code ack} row moves to the stall window;</li>
+     *       group: a fix in CI. It holds the hand-off or escalation until that pushed tip's own verdict arrives
+     *       (bounded by the hard cap), and once that verdict is red the deadline is the verdict time plus one deadline
+     *       (S1a as it happened: the original owner's fix landed after the hand-off). Any live member's push counts, not
+     *       only a stated fix: the cap is what bounds it. It is no ack: only the current owner's own push or
+     *       {@code ack} row moves to the stall window;</li>
      *   <li>none: the acknowledgement deadline, {@code episode_at} plus the topic's deadline, with a nudge to next up at
      *       half of it while the row names one and none was posted this episode.</li>
      * </ul>
@@ -549,7 +560,7 @@ public final class OwnerDecision {
         Sign ack = null;
         for (BoardRow a : in.owners()) {
             if ("ack".equals(a.kind()) && c.redTips().contains(a.sha()) && owner.equals(in.ids().identityOf(a.senderSession()))) {
-                ack = Sign.later(ack, new Sign(a.createdAt(), owner));
+                ack = Sign.later(ack, new Sign(a.createdAt(), owner, "ack", null));
             }
         }
         Set<String> owners = episodeOwners(in.owners(), owner);
@@ -571,13 +582,19 @@ public final class OwnerDecision {
             at = base.plus(Duration.ofMinutes(minutes * k));
             stalled = true;
         } else {
-            at = base.plus(Duration.ofMinutes(minutes));
+            // A postponing push (a member's or a former owner's) is a fix in CI: hold until that tip's own verdict has
+            // arrived (bounded by the cap), then count one deadline from the verdict. Push-to-verdict ran over a
+            // deadline for about half the live pushes, so counting from the push escalates fixes still building.
+            Instant verdictAt = live == null ? null : c.redAt().get(live.sha());
+            boolean held = live != null && verdictAt == null;
+            Instant from = verdictAt != null && verdictAt.isAfter(episode) ? verdictAt : episode;
+            at = held ? cap : from.plus(Duration.ofMinutes(minutes));
             stalled = false;
-            if (body.get("next") instanceof String && !nudged(in, body)) {
-                nudgeAt = base.plus(Duration.ofSeconds(minutes * 30));
+            if (!held && body.get("next") instanceof String && !nudged(in, body)) {
+                nudgeAt = from.plus(Duration.ofSeconds(minutes * 30));
             }
         }
-        if (at.isAfter(cap)) {
+        if (!at.isBefore(cap)) {
             at = cap;
             stalled = true;
             nudgeAt = null;
@@ -603,7 +620,7 @@ public final class OwnerDecision {
             bound.merge(n.sha(), b, (x, y) -> x.isBefore(y) ? x : y);
             String pusher = pusherOf(n, c.in().ids());
             if (pusher != null && !n.push().createdAt().isBefore(b)) {
-                out.add(new Sign(n.push().createdAt(), pusher));
+                out.add(new Sign(n.push().createdAt(), pusher, "push", n.sha()));
             }
         }
         return out;

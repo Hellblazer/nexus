@@ -117,20 +117,22 @@ doc:
     run: GitHub run id, an integer
     n: kind sha, the number of runs in the fold; kind push, commits pushed
     base: kind push only; develop's sha before the push
-    owner: kind owner only; the owner's identity id or null
-    owner_alias: kind owner only; the owner's live alias at stamp time; absent when it has none
-    next: kind owner only; next-up identity id, or null (none qualifies; handoff, escalated, stamper_error)
-    next_alias: kind owner only; next up's live alias at stamp time; absent when it has none
-    reason: kind owner only; earliest_suspect, owner_unleased, owner_not_live, owner_not_member, no_record, chain_gap, handoff, disclaimed, escalated or stamper_error
-    stalled: kind owner only; true on a stall escalation
-    stalled_owner: kind owner, stalled; the last acker or pusher
-    stalled_since: kind owner, stalled; UTC instant of that ack or push
-    red_since: kind owner, stalled; UTC instant of the red's first owner row
-    previous_owner: kind owner, reason disclaimed; who disclaimed
-    suspects: kind owner only; shas pushed since the last green, at most ten (suspects_total counts them)
-    episode_at: kind owner only; UTC start of the row's deadline
-    refresh: kind owner only; true when the owner is kept
-    handoffs: kind owner only; hand-offs so far
+    owner: owner row; the owner's identity id or null
+    owner_alias: owner row; the owner's live alias at stamp time; absent when it has none
+    next: owner row; next-up identity id, or null (none qualifies; handoff, escalated, stamper_error)
+    next_alias: owner row; next up's live alias at stamp time; absent when it has none
+    reason: owner row; earliest_suspect, owner_unleased, owner_not_live, owner_not_member, no_record, chain_gap, handoff, disclaimed, escalated or stamper_error
+    stalled: owner row; true on a stall escalation
+    stalled_owner: stalled row; identity of the last acker or pusher
+    stalled_since: stalled row; UTC instant of that ack or push
+    stalled_sign: stalled row; ack or push
+    red_since: stalled row; UTC instant of the red's first owner row
+    open_minutes: stalled row; whole minutes from red_since to the row
+    previous_owner: disclaimed row; who disclaimed
+    suspects: owner row; shas pushed since the last green, at most ten (suspects_total counts them)
+    episode_at: owner row; UTC start of the row's deadline
+    refresh: owner row; true when the owner is kept
+    handoffs: owner row; hand-offs so far
     runs: kind sha only; one [run id, attempt, workflow, conclusion] per run, sorted; workflow cut to 64 characters, conclusion GitHub's or null
     carried: kind sha; one [workflow, run id, conclusion, sha] per carried workflow, passing only on success; null if the carry read failed
     carried_n: kind sha; the count before trimming

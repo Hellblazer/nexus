@@ -82,8 +82,13 @@ class OwnerDecisionAuditR1Test {
         OwnerDecision.Decision d = f.onDeadline();
 
         assertThat(d.post()).as("no escalation at t0+40: a former owner of the episode is pushing").isNull();
-        assertThat(d.deadline()).as("the leader's deadline counts from the push").isEqualTo(after(21).plusSeconds(8).plus(Duration.ofMinutes(20)));
-        f.now(after(42));
+        assertThat(d.deadline()).as("held while the fix is in CI, bounded by the hard cap").isEqualTo(after(120));
+        f.at(after(45)).done("Z", "failure");            // the fix's verdict lands red at t0+45
+        f.now(after(45));
+        f.recordNow(f.decide());
+        f.now(after(64));
+        assertThat(f.onDeadline().post()).as("one deadline from the verdict, not from the push").isNull();
+        f.now(after(66));
         assertThat(OwnerFixture.bodyOf(f.onDeadline().post())).containsEntry("reason", "escalated");
     }
 
@@ -198,13 +203,12 @@ class OwnerDecisionAuditR1Test {
         f.now(after(40));
         OwnerDecision.Decision d = f.onDeadline();
         assertThat(d.post()).as("no hand-off or escalation at t0+40: member C is fixing it").isNull();
-        assertThat(d.deadline()).as("restarted from the push, the plain 20 minutes, no stall window")
-            .isEqualTo(after(21).plus(Duration.ofMinutes(20)));
+        assertThat(d.deadline()).as("held while the fix is in CI, bounded by the hard cap").isEqualTo(after(120));
 
-        for (int n = 2; n <= 6; n++) {                 // C keeps pushing, every 19 minutes, and the red stays open
+        for (int n = 2; n <= 6; n++) {                 // C keeps pushing, every 19 minutes, and no verdict arrives
             pushFix(f, "C", n, 21 + 19L * (n - 1));
             f.now(after(21 + 19L * (n - 1) + 1));
-            assertThat(f.onDeadline().post()).as("push " + n + " postpones it again").isNull();
+            assertThat(f.onDeadline().post()).as("push " + n + " is held too").isNull();
         }
         f.now(after(119));
         assertThat(f.onDeadline().post()).as("still inside the hard cap").isNull();
@@ -229,11 +233,14 @@ class OwnerDecisionAuditR1Test {
         f.now(after(30));
         OwnerDecision.Decision d = f.onDeadline();
         assertThat(d.post()).isNull();
-        assertThat(d.deadline()).as("the leader's deadline restarts from A's push: no ack, so no stall window")
-            .isEqualTo(after(21).plus(Duration.ofMinutes(20)));
-        f.now(after(42));
+        assertThat(d.deadline()).as("the leader's deadline is held while A's fix is in CI: no ack, so no stall window")
+            .isEqualTo(after(120));
+        f.at(after(50)).done("Z1", "failure");
+        f.now(after(50));
+        f.recordNow(f.decide());
+        f.now(after(71));
         OwnerDecision.Decision late = f.onDeadline();
-        assertThat(OwnerFixture.bodyOf(late.post())).as("if the red is still open at the restarted deadline it escalates, unstalled")
+        assertThat(OwnerFixture.bodyOf(late.post())).as("if the red is still open one deadline after the verdict it escalates, unstalled")
             .containsEntry("reason", "escalated").doesNotContainKey("stalled");
     }
 
@@ -256,13 +263,17 @@ class OwnerDecisionAuditR1Test {
         f.push("X", "G0", "A").done("X", "failure");
         f.now(EPISODE);
         f.recordNow(f.decide());                       // owner A
-        f.at(after(15)).push("Z", "X", "C");           // a member's push restarts A's deadline from t0+15 ...
+        f.at(after(15)).push("Z", "X", "C");           // a member's push holds A's deadline while it builds ...
+        f.at(after(30)).done("Z", "failure");           // ... and its verdict lands red at t0+30
         f.now(after(30));
+        f.recordNow(f.decide());                       // the row is refreshed to the new tip, A keeps the red
+        f.now(after(49));
 
         OwnerDecision.Post inside = f.onDeadline().post();
-        assertThat(inside == null || "nudge".equals(inside.kind())).as("inside the restarted 20 minutes: no owner row").isTrue();
-        f.now(after(36));
-        assertThat(OwnerFixture.bodyOf(f.onDeadline().post())).as("... and A, who never acked, is still handed on at its end")
+        assertThat(inside == null || "nudge".equals(inside.kind())).as("inside one deadline from the verdict: no owner row").isTrue();
+        f.now(after(51));
+        assertThat(OwnerFixture.bodyOf(f.onDeadline().post())).as("... and A, who never acked, is handed on after it: no stall window")
             .containsEntry("reason", "handoff");
     }
+
 }

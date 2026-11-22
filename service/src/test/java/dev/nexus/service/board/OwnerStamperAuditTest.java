@@ -77,13 +77,13 @@ class OwnerStamperAuditTest {
     }
 
     @Test
-    void aPushByAnotherSeatDoesNotHoldTheHandOffOff() {
+    void aPushFromASessionNoIdentityHoldsDoesNotHoldTheHandOffOff() {
         String[] f = openRed();
-        se.push(f[0], StamperEnv.BASE, "Z", "Y", "sess-carol");   // carol is next up, not the owner
+        se.push(f[0], StamperEnv.BASE, "Z", "Y", "sess-nobody");   // a session the index maps to no identity
 
         deadlineAfter(f, 21);
 
-        assertThat(rows(f[0])).as("control: the same push by another seat leaves the hand-off")
+        assertThat(rows(f[0])).as("control: a push no identity can be named for holds nothing")
             .containsExactly("owner/earliest_suspect", "owner/handoff");
     }
 
@@ -230,6 +230,16 @@ class OwnerStamperAuditTest {
         assertThat(lines).hasSize(2);
         assertThat(lines.get(0)).as("carol is not the owner: dropped without an evaluation").contains("outcome=dropped_not_owner");
         assertThat(lines.get(1)).as("alpha is: evaluated").contains("outcome=evaluated");
+    }
+
+    @Test
+    void aStrangersLaterDisclaimDoesNotMaskTheOwnersEarlierOne() {
+        String[] f = openRed();
+        se.disclaimRowOnly(f[0], StamperEnv.BASE, "Y", "sess-alpha");   // the owner's disclaim, whose evaluation did not run
+        se.disclaim(f[0], StamperEnv.BASE, "Y", "sess-carol");           // a stranger's later one is what the hook sees
+
+        assertThat(rows(f[0])).as("the owner's disclaim is on the topic: the red is handed on")
+            .containsExactly("owner/earliest_suspect", "owner/disclaimed");
     }
 
     @Test

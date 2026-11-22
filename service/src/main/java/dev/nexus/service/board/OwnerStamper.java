@@ -153,9 +153,11 @@ public final class OwnerStamper implements OwnerOutHook {
     }
 
     /**
-     * Whether the newest {@code disclaim} row of the topic was sent by the identity the current owner row names. Read
-     * outside the topic lock, so a client that loops on disclaims it has no right to make costs two reads and never the
-     * lock the {@code --done} writes and the deadline need. The decision still judges the disclaim under the lock.
+     * Whether any {@code disclaim} row posted since the current owner's ownership began was sent by the identity the
+     * current owner row names, so a stranger's later disclaim cannot mask the owner's. Read outside the topic lock, so a
+     * client that loops on disclaims it has no right to make costs reads and never the lock the {@code --done} writes
+     * and the deadline need (each distinct sender session is looked up once). The decision still judges the disclaim
+     * under the lock.
      */
     private boolean disclaimerIsOwner(String tenant, String base) {
         List<BoardRow> owners = scope.withTenant(tenant, ctx -> BoardReads.rows(ctx, tenant, base, "owner"));
@@ -163,10 +165,13 @@ public final class OwnerStamper implements OwnerOutHook {
         if (owner == null) {
             return false;
         }
-        for (int i = owners.size() - 1; i >= 0; i--) {
-            BoardRow r = owners.get(i);
-            if ("disclaim".equals(r.kind())) {
-                return owner.equals(Identities.countedIdentity(identities, tenant, r.senderSession()));
+        Instant since = OwnerDecision.ownershipStart(owners);
+        Map<String, Boolean> byStamp = new java.util.HashMap<>();
+        for (BoardRow r : owners) {
+            if ("disclaim".equals(r.kind()) && (since == null || !r.createdAt().isBefore(since))
+                && byStamp.computeIfAbsent(String.valueOf(r.senderSession()),
+                    k -> owner.equals(Identities.countedIdentity(identities, tenant, r.senderSession())))) {
+                return true;
             }
         }
         return false;
@@ -245,12 +250,13 @@ public final class OwnerStamper implements OwnerOutHook {
     }
 
     /**
-     * The row {@link OwnerDecision#failSafe} names, posted and armed under the topic lock. Who is live, and whose ack
-     * an ack row is, come from the identity read, which is made only when an escalation is owed. If that read fails and
-     * the owner's stamped ack sits on the row's own tip ({@link OwnerDecision#ackOnTip}), the red may be acknowledged and cannot be matched without the read, so this
-     * throws and the timer retries; escalating then would wake every member over an acknowledged red. If no such ack
-     * row exists, nobody acknowledged, so the escalation is posted at once with no one named, the row the RDR gives
-     * for nobody live.
+     * The row {@link OwnerDecision#failSafe} names, posted and armed under the topic lock. The deadline is read from the
+     * owner rows and the group alone ({@link OwnerDecision#failSafeDue}): the acknowledgement deadline, or, for a red
+     * the owner's stamped ack holds, the stall deadline. Who is live comes from the identity read, made only once an
+     * escalation is owed. A failure of that read does not throw: the escalation is posted with no one named (the row the
+     * RDR gives for nobody live), a false wake and never a suppression. What does throw is a fail-safe that cannot run at
+     * all (the owner rows or the group cannot be read, the post fails): {@link #onDeadline} rethrows it with the
+     * evaluation's fault suppressed, and the timer retries after its delay.
      */
     private void failSafe(String tenant, String base) {
         scope.withTenant(tenant, ctx -> {

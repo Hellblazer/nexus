@@ -118,6 +118,13 @@ final class StamperEnv implements AutoCloseable {
             Map.of("from", stamp, "kind", "ack", "sha", sha), "{}", UUID.randomUUID().toString(), null, stamp);
     }
 
+    /** A {@code disclaim} row, as below, with no hook after it (a row whose evaluation a test wants to leave undone). */
+    void disclaimRowOnly(String tenant, String base, String sha, String stamp) {
+        String topic = base + "--owner";
+        tuples.out(tenant, "board/ci/" + topic, Map.of("topic", topic),
+            Map.of("from", stamp, "kind", "disclaim", "sha", sha), "{}", UUID.randomUUID().toString(), null, stamp);
+    }
+
     /** A {@code disclaim} row on the owner subspace, stamped with the session of the disclaiming identity, and the hook after it. */
     void disclaim(String tenant, String base, String sha, String stamp) {
         String topic = base + "--owner";
