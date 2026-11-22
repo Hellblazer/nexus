@@ -151,15 +151,21 @@ class OwnerStamperAuditTest {
         assertThat(view.ackDeadlineMinutes()).isEqualTo(20);
     }
 
+    private static List<ch.qos.logback.classic.spi.ILoggingEvent> unrecordedLines(
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> logs) {
+        return logs.list.stream().filter(e -> e.getFormattedMessage().contains("board_done_tip_unrecorded")).toList();
+    }
+
     @Test
-    void aTipWithNoPushRecordIsLoggedWithItsShaAndCountedInTheGroupRead() {
+    void aRedTipWithNoPushRecordIsLoggedOnceWithItsShaAndEveryUnrecordedTipIsCountedInTheGroupRead() {
         se.env.ids.clock.set(Instant.now());
         String t = se.tenant();
         String l = se.env.seat(t, "lead");
         String a = se.env.seat(t, "alpha");
         se.form(t, l, a);
+        assertThat(se.env.read(t, "push-train").body()).as("no done row yet: nothing to examine")
+            .containsEntry("unrecorded_tips", 0).containsEntry("unattributed_tips", 0);
         se.push(t, StamperEnv.BASE, "X", "G0", "sess-alpha");
-        assertThat(se.env.read(t, "push-train").body()).as("every verdict tip so far has a record").containsEntry("unrecorded_tips", 0);
 
         var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(OwnerStamper.class);
         var logs = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
@@ -167,19 +173,86 @@ class OwnerStamperAuditTest {
         logger.addAppender(logs);
         try {
             se.done(t, StamperEnv.BASE, "X", "success");
-            assertThat(logs.list).as("a recorded tip logs nothing").noneMatch(e -> e.getFormattedMessage().contains("board_done_tip_unrecorded"));
-            se.done(t, StamperEnv.BASE, "NOPUSHRECORD", "success");   // pushed by hand, or the script's record write failed
+            assertThat(se.env.read(t, "push-train").body())
+                .as("a done row for a recorded, attributed tip was examined and counts nothing")
+                .containsEntry("unrecorded_tips", 0).containsEntry("unattributed_tips", 0);
+            assertThat(unrecordedLines(logs)).as("a recorded tip logs nothing").isEmpty();
+
+            se.done(t, StamperEnv.BASE, "NOPUSHRECORD", "success");   // hand push or a failed record write, but it went green
+            assertThat(unrecordedLines(logs)).as("a green adds no line").isEmpty();
+            se.done(t, StamperEnv.BASE, "ALSOMISSING", "failure");
+            se.done(t, StamperEnv.BASE, "ALSOMISSING", "failure");     // a rerun's row
             se.done(t, StamperEnv.BASE, "ALSOMISSING", "failure");
         } finally {
             logger.detachAppender(logs);
         }
 
-        var warned = logs.list.stream().filter(e -> e.getFormattedMessage().contains("board_done_tip_unrecorded")).toList();
-        assertThat(warned).hasSize(2);
-        assertThat(warned).allSatisfy(e -> assertThat(e.getLevel().toString()).isEqualTo("WARN"));
-        assertThat(warned.get(0).getFormattedMessage()).contains("sha=NOPUSHRECORD").contains("unrecorded_tips=1");
-        assertThat(warned.get(1).getFormattedMessage()).contains("sha=ALSOMISSING").contains("unrecorded_tips=2");
-        Map<String, Object> read = se.env.read(t, "push-train").body();
-        assertThat(read).as("S3: the group read carries the running count").containsEntry("unrecorded_tips", 2);
+        var warned = unrecordedLines(logs);
+        assertThat(warned).as("once per sha, on its first row, red only").hasSize(1);
+        assertThat(warned.getFirst().getLevel().toString()).isEqualTo("WARN");
+        assertThat(warned.getFirst().getFormattedMessage()).contains("sha=ALSOMISSING").contains("unrecorded_tips=2");
+        assertThat(se.env.read(t, "push-train").body()).as("S3: the group read counts both unrecorded tips, green and red")
+            .containsEntry("unrecorded_tips", 2);
+    }
+
+    @Test
+    void aTipWhosePushRecordNamesNoPusherIsCountedAsUnattributed() {
+        se.env.ids.clock.set(Instant.now());
+        String t = se.tenant();
+        String l = se.env.seat(t, "lead");
+        String a = se.env.seat(t, "alpha");
+        se.form(t, l, a);
+        se.push(t, StamperEnv.BASE, "OK", "G0", "sess-alpha");
+        se.push(t, StamperEnv.BASE, "NOSESSION", "OK", null);               // the script's minimal fallback record
+        se.push(t, StamperEnv.BASE, "UNMAPPED", "NOSESSION", "sess-nobody");   // a session the index does not map
+        for (String sha : List.of("OK", "NOSESSION", "UNMAPPED")) {
+            se.done(t, StamperEnv.BASE, sha, "success");
+        }
+
+        assertThat(se.env.read(t, "push-train").body()).containsEntry("unrecorded_tips", 0).containsEntry("unattributed_tips", 2);
+    }
+
+    @Test
+    void aDisclaimFromAnIdentityThatIsNotTheOwnerIsDroppedBeforeTheTopicLockIsTaken() {
+        String[] f = openRed();
+        var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(OwnerStamper.class);
+        var logs = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        logs.start();
+        logger.addAppender(logs);
+        try {
+            se.disclaim(f[0], StamperEnv.BASE, "Y", "sess-carol");
+            se.disclaim(f[0], StamperEnv.BASE, "Y", "sess-alpha");
+        } finally {
+            logger.detachAppender(logs);
+        }
+
+        var lines = logs.list.stream().map(e -> e.getFormattedMessage()).filter(m -> m.contains("event=board_owner_disclaim")).toList();
+        assertThat(lines).hasSize(2);
+        assertThat(lines.get(0)).as("carol is not the owner: dropped without an evaluation").contains("outcome=dropped_not_owner");
+        assertThat(lines.get(1)).as("alpha is: evaluated").contains("outcome=evaluated");
+    }
+
+    @Test
+    void anAckedRedWhoseEvaluationKeepsFailingIsStillEscalatedOnceItsStallWindowIsPastAndNotBefore() {
+        String[] f = openRed();
+        se.ackFrom(f[0], StamperEnv.BASE, "Y", f[2], "sess-alpha");   // as the route stores it: from is the owner's id
+        var failing = new OwnerStamper(se.env.ids.scope, se.tuples, se.env.groups, se.env.ids.repo, se.env.ids.clock,
+            (in, trigger) -> { throw new IllegalStateException("evaluation fault"); });
+
+        deadlineWith(failing, f, 30);   // past the acknowledgement deadline, inside the stall window
+        assertThat(rows(f[0])).as("the ack holds the escalation off inside the stall window").containsExactly("owner/earliest_suspect");
+
+        deadlineWith(failing, f, 35);   // 65 minutes after the ack
+        assertThat(rows(f[0])).as("a fault no longer leaves an acknowledged red open for ever")
+            .containsExactly("owner/earliest_suspect", "owner/escalated");
+        assertThat(se.ownerRows(f[0], StamperEnv.BASE).getLast().body()).containsEntry("stalled", true).containsEntry("stalled_owner", f[2]);
+    }
+
+    private void deadlineWith(OwnerStamper stamper, String[] f, long minutes) {
+        se.env.ids.clock.advance(Duration.ofMinutes(minutes));
+        for (int i = 1; i < f.length; i++) {
+            se.env.renew(f[0], f[i]);
+        }
+        stamper.onDeadline(f[0], StamperEnv.BASE);
     }
 }

@@ -97,12 +97,16 @@ public final class OwnerDecision {
     public static Decision decide(Input in, Trigger trigger) {
         Map<String, DoneVerdict.Verdict> verdicts = new LinkedHashMap<>();
         Map<String, Instant> verdictTimes = new LinkedHashMap<>();
+        Map<String, Instant> redAt = new LinkedHashMap<>();   // when each tip's red verdict first came in
         List<BoardRow> dones = new ArrayList<>(in.dones());
         dones.sort(BY_TIME);
         for (BoardRow d : dones) {
             DoneVerdict.of(d).filter(DoneVerdict.Verdict::counts).ifPresent(v -> {
                 verdicts.put(v.sha(), v);   // a later post for the same tip supersedes (a rerun)
                 verdictTimes.put(v.sha(), d.createdAt());
+                if (DoneVerdict.RED.equals(v.outcome())) {
+                    redAt.putIfAbsent(v.sha(), d.createdAt());
+                }
             });
         }
         List<PushChain.Node> chain = PushChain.order(in.pushes(), verdictTimes);
@@ -146,26 +150,27 @@ public final class OwnerDecision {
             }
         }
 
+        Ctx ctx = new Ctx(in, chain, redTips, redAt);
         Map<String, Object> curBody = open ? parse(cur.body()) : null;
         if (!open) {
-            return withSchedule(newEpisode(in, tip, suspects, gap), in, chain, redTips);
+            return withSchedule(newEpisode(in, tip, suspects, gap), ctx);
         }
         if (!tip.sha().equals(cur.sha())) {
             String earliest = suspects.get(0).sha();
             List<?> was = curBody.get("suspects") instanceof List<?> l ? l : List.of();
             if (!was.isEmpty() && earliest.equals(was.get(0))) {
-                return withSchedule(refresh(in, tip, suspects, curBody), in, chain, redTips);
+                return withSchedule(refresh(in, tip, suspects, curBody), ctx);
             }
-            return withSchedule(newEpisode(in, tip, suspects, gap), in, chain, redTips);
+            return withSchedule(newEpisode(in, tip, suspects, gap), ctx);
         }
-        if (disclaimed(in, cur, curBody)) {
+        if (disclaimed(ctx, cur, curBody)) {
             // "Not mine", said by the owner the row names: handed on at once, by the path the deadline takes.
-            return withSchedule(handOn(in, cur, curBody, suspects, Mode.DISCLAIMED), in, chain, redTips);
+            return withSchedule(handOn(in, cur, curBody, suspects, Mode.DISCLAIMED, null), ctx);
         }
-        Schedule due = schedule(in, curBody, chain, redTips);
+        Schedule due = schedule(ctx, curBody);
         if (trigger == Trigger.DEADLINE && due.at() != null && !in.now().isBefore(due.at())) {
-            return withSchedule(handOn(in, cur, curBody, suspects, due.stalled() ? Mode.STALLED : Mode.HANDOFF),
-                in, chain, redTips);
+            boolean stall = due.stalled() || !in.now().isBefore(due.cap());
+            return withSchedule(handOn(in, cur, curBody, suspects, stall ? Mode.STALLED : Mode.HANDOFF, due), ctx);
         }
         if (due.nudgeAt() != null && !in.now().isBefore(due.nudgeAt()) && in.now().isBefore(due.at())) {
             return new Decision(nudge(cur, curBody), due.at(), null);
@@ -197,22 +202,21 @@ public final class OwnerDecision {
      * the liveness facts, with no push chain and no verdicts, so a fault in {@link #decide} cannot defeat it. For an
      * open row that is not {@code escalated}: not yet due, no post and the deadline to arm at; due, an {@code escalated}
      * row naming the leader if live, else the first live member, else no one, with {@code handoffs} one higher, the
-     * suspects carried over and no deadline. An ack from the row's owner on the row's own tip ends it. Nothing for an
-     * escalated or clear row, no row, or no live group.
+     * suspects carried over and no deadline. Nothing for an escalated or clear row, no row, or no live group.
      *
-     * <p>The post-close audit's additions are not read here, by design. A {@code disclaim} never suppresses the
-     * escalation (only {@code ack} rows are looked at, so a disclaiming owner is escalated like a silent one), and it is
-     * not acted on here either: the normal path hands it on at once. The owner's implicit ack, its own push after the red
-     * tip, is not read: the fail-safe has no push rows and no chain by construction, and mapping a push's session to the
-     * owner is the identity read this path is the fallback for. So a push the owner made while the evaluation was
-     * failing does not hold the escalation off, a false wake and never a suppression, the direction the stamped-ack
-     * check already takes. The stall escalation is a normal-path timer and is not armed from here ({@link #rowDeadline}
-     * is the hand-off deadline only); a red whose owner acknowledged (this check) stays unescalated through a fault, as it
-     * did before.
+     * <p>An ack from the row's owner on the row's own tip, read from the ack rows alone, moves the escalation from the
+     * acknowledgement deadline to the stall deadline ({@link #failSafeDue}): the later of {@code episode_at} and the ack,
+     * plus {@code stall_factor} deadlines. So a fault in the evaluation no longer leaves an acknowledged red to stand for
+     * ever, and the row it then posts is a stall escalation ({@code stalled: true}, {@code stalled_owner} the acker,
+     * {@code stalled_since} the ack). The direction stays the safe one, a false wake and never a suppression: a push
+     * the owner made is not read (the fail-safe has no push rows or chain by construction, and mapping a push's session
+     * to the owner is the identity read this path is the fallback for), so an owner whose only sign is pushes is
+     * escalated at its first deadline; a {@code disclaim} is not acted on here (the normal path hands it on at once) and
+     * never suppresses the escalation; the hard cap of the normal path is not read.
      */
     static Decision failSafe(GroupView group, Identities ids, List<BoardRow> owners, String base, Instant now) {
         BoardRow cur = currentRow(owners);
-        Instant due = rowDeadline(group, base, owners);
+        Instant due = failSafeDue(group, ids, base, owners);
         if (cur == null || due == null) {
             return Decision.none();
         }
@@ -221,11 +225,7 @@ public final class OwnerDecision {
         }
         Map<String, Object> body = parse(cur.body());
         String owner = (String) body.get("owner");
-        for (BoardRow a : owners) {
-            if ("ack".equals(a.kind()) && cur.sha().equals(a.sha()) && owner.equals(ids.identityOf(a.senderSession()))) {
-                return Decision.none();
-            }
-        }
+        Instant ackAt = ownerAckAt(owners, ids);
         String target = ids.live(group.leader()) ? group.leader() : null;
         for (String m : group.members()) {
             if (target == null && ids.live(m)) {
@@ -234,8 +234,59 @@ public final class OwnerDecision {
         }
         List<String> suspects = body.get("suspects") instanceof List<?> l ? l.stream().map(String::valueOf).toList() : List.of();
         int total = body.get("suspects_total") instanceof Number n ? n.intValue() : suspects.size();
+        Instant redSince = redStart(owners);
+        Map<String, Object> stall = ackAt == null ? null
+            : stallInfo(new Sign(ackAt, owner), redSince == null ? now : redSince);
         return new Decision(new Post("owner", cur.sha(),
-            body(target, null, REASON_ESCALATED, suspects, total, now, false, ((Number) body.get("handoffs")).intValue() + 1)), null);
+            body(target, null, REASON_ESCALATED, suspects, total, now, false, ((Number) body.get("handoffs")).intValue() + 1,
+                stall)), null);
+    }
+
+    /**
+     * When the fail-safe's escalation falls due, from the owner rows and the group alone: the row's deadline for a red
+     * nobody acknowledged, and for one the owner acknowledged (a stamped {@code ack} on the row's tip, {@link
+     * #ownerAckAt}) the stall deadline, the later of {@code episode_at} and the ack plus {@code stall_factor}
+     * deadlines. {@code ids} may be null when the identity read has not been made (or has failed): then only the ack's
+     * own {@code from} counts, the narrower reading, so a red acknowledged under a typed {@code from} is escalated at
+     * its first deadline, a false wake and never a suppression.
+     */
+    static Instant failSafeDue(GroupView group, Identities ids, String base, List<BoardRow> owners) {
+        Instant due = rowDeadline(group, base, owners);
+        Instant ack = due == null ? null : ownerAckAt(owners, ids);
+        if (ack == null) {
+            return due;
+        }
+        Instant episode = Instant.parse((String) parse(currentRow(owners).body()).get("episode_at"));
+        return (ack.isAfter(episode) ? ack : episode)
+            .plus(Duration.ofMinutes((long) group.deadlineMinutes(base) * Math.max(1, group.stallFactor())));
+    }
+
+    /**
+     * The time of the latest ack of the current owner row's owner on the row's own tip, or null: a stamped ack (a
+     * non-null sender session) whose {@code from} is the owner and that was posted at or after the row, read when
+     * {@code ids} is null or carries no mapping at all (the identity read was not made or failed); with the read in hand,
+     * one whose session the session index maps to the owner instead.
+     */
+    static Instant ownerAckAt(List<BoardRow> owners, Identities ids) {
+        BoardRow cur = currentRow(owners);
+        if (cur == null || cur.sha() == null || !(parse(cur.body()).get("owner") instanceof String ownerId)) {
+            return null;
+        }
+        Instant best = null;
+        for (BoardRow a : owners) {
+            if (!"ack".equals(a.kind()) || !cur.sha().equals(a.sha())) {
+                continue;
+            }
+            // With the identity read in hand its mapping decides (a typed from proves nothing); without it (not made,
+            // or failed, which reads as no mapping at all) only the ack's own from can say.
+            boolean byFrom = !a.createdAt().isBefore(cur.createdAt()) && a.senderSession() != null && ownerId.equals(a.dim("from"));
+            boolean byIndex = ids != null && ownerId.equals(ids.identityOf(a.senderSession()));
+            boolean unread = ids == null || (ids.identityOfStamp().isEmpty() && ids.presence().isEmpty());
+            if ((unread ? byFrom : byIndex) && (best == null || a.createdAt().isAfter(best))) {
+                best = a.createdAt();
+            }
+        }
+        return best;
     }
 
     /**
@@ -254,21 +305,7 @@ public final class OwnerDecision {
      * the fail-safe escalate where the normal path would count it, the safe direction.
      */
     static boolean ackOnTip(List<BoardRow> owners) {
-        BoardRow cur = currentRow(owners);
-        if (cur == null || cur.sha() == null) {
-            return false;
-        }
-        Object owner = parse(cur.body()).get("owner");
-        if (!(owner instanceof String ownerId)) {
-            return false;
-        }
-        for (BoardRow a : owners) {
-            if ("ack".equals(a.kind()) && cur.sha().equals(a.sha()) && !a.createdAt().isBefore(cur.createdAt())
-                && a.senderSession() != null && ownerId.equals(a.dim("from"))) {
-                return true;
-            }
-        }
-        return false;
+        return ownerAckAt(owners, null) != null;
     }
 
     /**
@@ -325,16 +362,27 @@ public final class OwnerDecision {
                 suspects.size(), episode, true, ((Number) cur.get("handoffs")).intValue())), null);
     }
 
-    /** Why a red is handed on: the deadline passed unacknowledged, the owner disclaimed, or an acknowledged red stalled. */
+    /** Why a red is handed on: the deadline passed unacknowledged, the owner disclaimed, or the red stalled. */
     private enum Mode { HANDOFF, DISCLAIMED, STALLED }
+
+    /** What one evaluation knows once and the timers read: the input, the chain, the red tips and when each went red. */
+    private record Ctx(Input in, List<PushChain.Node> chain, Set<String> redTips, Map<String, Instant> redAt) {
+    }
+
+    /** A sign of life: who acked or pushed, and when. */
+    private record Sign(Instant at, String identity) {
+        static Sign later(Sign a, Sign b) {
+            return a == null ? b : b == null ? a : b.at().isAfter(a.at()) ? b : a;
+        }
+    }
 
     /**
      * The red goes to next up, or, with none (or when it has already been handed on once, or stalled), is escalated.
      * A disclaim hands on by the same path as a missed deadline and names its reason {@code disclaimed}; a stall skips
-     * next up and escalates, with {@code stalled: true} in the body, since the owner has already shown itself.
+     * next up and escalates, with {@code stalled: true} in the body and who and since when ({@link #stallInfo}).
      */
     private static Decision handOn(Input in, BoardRow cur, Map<String, Object> curBody, List<PushChain.Node> suspects,
-                                   Mode mode) {
+                                   Mode mode, Schedule due) {
         GroupView g = in.group();
         int handoffs = ((Number) curBody.get("handoffs")).intValue();
         String owner = (String) curBody.get("owner");
@@ -344,7 +392,8 @@ public final class OwnerDecision {
         if (next != null) {
             return new Decision(new Post("owner", cur.sha(),
                 body(next, null, mode == Mode.DISCLAIMED ? REASON_DISCLAIMED : REASON_HANDOFF, shas(suspects),
-                    suspects.size(), in.now(), false, handoffs + 1, false)), null);
+                    suspects.size(), in.now(), false, handoffs + 1, null,
+                    mode == Mode.DISCLAIMED ? Map.of("previous_owner", owner) : null)), null);
         }
         String target = in.ids().live(g.leader()) ? g.leader() : null;
         for (String m : g.members()) {
@@ -352,9 +401,25 @@ public final class OwnerDecision {
                 target = m;
             }
         }
+        Map<String, Object> stall = mode == Mode.STALLED
+            ? stallInfo(due == null ? null : due.sign(), due == null ? in.now() : due.redSince()) : null;
         return new Decision(new Post("owner", cur.sha(),
-            body(target, null, REASON_ESCALATED, shas(suspects), suspects.size(), in.now(), false, handoffs + 1,
-                mode == Mode.STALLED)), null);
+            body(target, null, REASON_ESCALATED, shas(suspects), suspects.size(), in.now(), false, handoffs + 1, stall)), null);
+    }
+
+    /**
+     * The extra fields of a stall escalation: {@code red_since} (the red's first owner row), and when someone had acked
+     * or pushed, {@code stalled_owner} (that identity) and {@code stalled_since} (when). {@code episode_at} keeps its
+     * meaning, the start of the row's own deadline.
+     */
+    private static Map<String, Object> stallInfo(Sign sign, Instant redSince) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        if (sign != null) {
+            m.put("stalled_owner", sign.identity());
+            m.put("stalled_since", sign.at().toString());
+        }
+        m.put("red_since", redSince.toString());
+        return m;
     }
 
     /** The half-deadline nudge: one {@code nudge} row on the tip, naming next up and the owner it stands by for. */
@@ -367,88 +432,179 @@ public final class OwnerDecision {
     }
 
     /**
-     * Whether the owner the open row {@code cur} names has disclaimed it: a {@code disclaim} row on the row's own tip,
-     * posted at or after the row, whose sender session the session index maps to that owner. A disclaim from anyone
-     * else, on another tip, or from before the row (an earlier owner's, or an earlier episode's) is ignored, and so is
-     * one on a row that has no owner or is already {@code escalated}: there is nobody to hand it on to.
+     * Whether the owner the open row {@code cur} names has disclaimed it: a {@code disclaim} row on any red tip of the
+     * episode (the rule an ack follows, so it survives a refresh), posted at or after the row that began this owner's
+     * ownership (the newest owner row that is not a refresh), whose sender session the session index maps to that
+     * owner. A disclaim from anyone else, on another sha, or from before this ownership (an earlier owner's, or an
+     * earlier episode's) is ignored, and so is one on a row that has no owner or is already {@code escalated}.
      */
-    private static boolean disclaimed(Input in, BoardRow cur, Map<String, Object> curBody) {
+    private static boolean disclaimed(Ctx c, BoardRow cur, Map<String, Object> curBody) {
         Object owner = curBody.get("owner");
         if (!(owner instanceof String ownerId) || REASON_ESCALATED.equals(curBody.get("reason"))) {
             return false;
         }
-        for (BoardRow a : in.owners()) {
-            if ("disclaim".equals(a.kind()) && cur.sha().equals(a.sha()) && !a.createdAt().isBefore(cur.createdAt())
-                && ownerId.equals(in.ids().identityOf(a.senderSession()))) {
+        Instant since = ownershipSince(c.in().owners(), cur);
+        for (BoardRow a : c.in().owners()) {
+            if ("disclaim".equals(a.kind()) && c.redTips().contains(a.sha()) && !a.createdAt().isBefore(since)
+                && ownerId.equals(c.in().ids().identityOf(a.senderSession()))) {
                 return true;
             }
         }
         return false;
     }
 
+    /** When the current owner's ownership began: the newest owner row that is not a refresh. */
+    private static Instant ownershipSince(List<BoardRow> owners, BoardRow cur) {
+        Instant since = cur.createdAt();
+        for (BoardRow r : owners.stream().filter(OwnerDecision::isState).sorted(BY_TIME).toList()) {
+            if ("owner".equals(r.kind()) && !Boolean.TRUE.equals(parse(r.body()).get("refresh"))) {
+                since = r.createdAt();
+            }
+        }
+        return since;
+    }
+
+    /** The identity the current open owner row names, or null when the current row is not an open owner row. */
+    static String currentOwner(List<BoardRow> owners) {
+        BoardRow cur = currentRow(owners);
+        return cur != null && "owner".equals(cur.kind()) && parse(cur.body()).get("owner") instanceof String o ? o : null;
+    }
+
+    /** The first owner row of the red now open: the first owner row after the latest clear row; null when none. */
+    static Instant redStart(List<BoardRow> owners) {
+        Instant start = null;
+        for (BoardRow r : owners.stream().filter(OwnerDecision::isState).sorted(BY_TIME).toList()) {
+            if ("clear".equals(r.kind())) {
+                start = null;
+            } else if (start == null) {
+                start = r.createdAt();
+            }
+        }
+        return start;
+    }
+
+    /** The owners the red has had since it began (since the latest clear row), in order, with {@code extra} too. */
+    private static Set<String> episodeOwners(List<BoardRow> owners, String extra) {
+        Set<String> out = new java.util.LinkedHashSet<>();
+        for (BoardRow r : owners.stream().filter(OwnerDecision::isState).sorted(BY_TIME).toList()) {
+            if ("clear".equals(r.kind())) {
+                out.clear();
+            } else if (parse(r.body()).get("owner") instanceof String o) {
+                out.add(o);
+            }
+        }
+        if (extra != null) {
+            out.add(extra);
+        }
+        return out;
+    }
+
     /** Fills in the deadline, and the pending nudge, of the state the posted row makes. */
-    private static Decision withSchedule(Decision d, Input in, List<PushChain.Node> chain, Set<String> redTips) {
-        Schedule due = schedule(in, parse(d.post().bodyJson()), chain, redTips);
+    private static Decision withSchedule(Decision d, Ctx c) {
+        Schedule due = schedule(c, parse(d.post().bodyJson()));
         return new Decision(d.post(), due.at(), due.nudgeAt());
     }
 
-    /** When the open row's deadline falls due ({@code at}; null: none runs), whether it is a stall, and the nudge due. */
-    private record Schedule(Instant at, boolean stalled, Instant nudgeAt) {
+    /**
+     * When the open row's deadline falls due ({@code at}; null: none runs), whether it is a stall, the nudge due, the
+     * hard cap, and the last sign of life that put the deadline where it is ({@code sign}, null when there was none).
+     */
+    private record Schedule(Instant at, boolean stalled, Instant nudgeAt, Instant cap, Sign sign, Instant redSince) {
     }
 
     /**
-     * The timers of the open row {@code body}. None for an {@code escalated} row or one with no owner. Without a
-     * counting ack, the acknowledgement deadline: {@code episode_at} plus the topic's deadline, with a nudge to next up
-     * at half of it while the row names one and none was posted this episode. With one, the stall deadline:
-     * the later of {@code episode_at} and the last counting ack, plus {@code stall_factor} deadlines.
-     *
-     * <p>A counting ack is an {@code ack} row on a red tip since the last green whose stamp maps to the row's owner
-     * (any time), or the owner's own stamped push whose base chains from a red tip (an implicit ack: the owner is
-     * fixing it, S1a). The implicit ack reads the chain from the first red tip on, so it survives the refresh a red
-     * fix causes.
+     * The timers of the open row {@code body}. None for an {@code escalated} row or one with no owner. Three kinds of
+     * sign of life move them, all read from rows the identity read maps to people, and each must be a push (or an ack)
+     * by an identity that is or was an owner of this red, after the red's verdict:
+     * <ul>
+     *   <li>the current owner's own ack (an {@code ack} row on a red tip) or push: the red is acknowledged, and the
+     *       stall deadline is the later of {@code episode_at} and that sign, plus {@code stall_factor} deadlines;</li>
+     *   <li>a push by any other identity that is or was an owner of this red: it postpones the deadline, so the
+     *       acknowledgement deadline counts from the later of {@code episode_at} and that push (S1a as it happened: the
+     *       original owner's fix landed after the hand-off);</li>
+     *   <li>none: the acknowledgement deadline, {@code episode_at} plus the topic's deadline, with a nudge to next up at
+     *       half of it while the row names one and none was posted this episode.</li>
+     * </ul>
+     * A push counts only if its base chains from a red tip and it was made at or after the verdict of the first red tip
+     * it chains from (a follow-up pushed before the red was known is not a response to it). Whatever the signs, the red
+     * escalates once {@code 2 x stall_factor} deadlines have passed since its first owner row (the hard cap).
      */
-    private static Schedule schedule(Input in, Map<String, Object> body, List<PushChain.Node> chain, Set<String> redTips) {
+    private static Schedule schedule(Ctx c, Map<String, Object> body) {
         Object ownerObj = body.get("owner");
         if (REASON_ESCALATED.equals(body.get("reason")) || !(ownerObj instanceof String owner)) {
-            return new Schedule(null, false, null);
+            return new Schedule(null, false, null, null, null, null);
         }
+        Input in = c.in();
         Instant episode = Instant.parse((String) body.get("episode_at"));
         long minutes = in.group().deadlineMinutes(in.base());
-        Instant acked = lastAck(in, owner, chain, redTips);
-        if (acked != null) {
-            Instant from = acked.isAfter(episode) ? acked : episode;
-            return new Schedule(from.plus(Duration.ofMinutes(minutes * Math.max(1, in.group().stallFactor()))), true, null);
+        int k = Math.max(1, in.group().stallFactor());
+        Instant redSince = redStart(in.owners());
+        if (redSince == null) {
+            redSince = in.now();   // the row being posted starts the red
         }
-        Instant nudgeAt = body.get("next") instanceof String && !nudged(in, body)
-            ? episode.plus(Duration.ofSeconds(minutes * 30)) : null;
-        return new Schedule(episode.plus(Duration.ofMinutes(minutes)), false, nudgeAt);
+        Instant cap = redSince.plus(Duration.ofMinutes(2L * k * minutes));
+        List<Sign> pushes = pushSigns(c);
+        Sign ack = null;
+        for (BoardRow a : in.owners()) {
+            if ("ack".equals(a.kind()) && c.redTips().contains(a.sha()) && owner.equals(in.ids().identityOf(a.senderSession()))) {
+                ack = Sign.later(ack, new Sign(a.createdAt(), owner));
+            }
+        }
+        Set<String> owners = episodeOwners(in.owners(), owner);
+        Sign live = null;
+        for (Sign p : pushes) {
+            if (owners.contains(p.identity())) {
+                live = Sign.later(live, p);
+            }
+            if (owner.equals(p.identity())) {
+                ack = Sign.later(ack, p);
+            }
+        }
+        Sign sign = Sign.later(ack, live);
+        Instant base = sign != null && sign.at().isAfter(episode) ? sign.at() : episode;
+        Instant at;
+        boolean stalled;
+        Instant nudgeAt = null;
+        if (ack != null) {
+            at = base.plus(Duration.ofMinutes(minutes * k));
+            stalled = true;
+        } else {
+            at = base.plus(Duration.ofMinutes(minutes));
+            stalled = false;
+            if (body.get("next") instanceof String && !nudged(in, body)) {
+                nudgeAt = base.plus(Duration.ofSeconds(minutes * 30));
+            }
+        }
+        if (at.isAfter(cap)) {
+            at = cap;
+            stalled = true;
+            nudgeAt = null;
+        }
+        return new Schedule(at, stalled, nudgeAt, cap, sign, redSince);
     }
 
-    /** The time of the latest counting ack, explicit or implicit, of {@code owner}, or null when none counts. */
-    private static Instant lastAck(Input in, String owner, List<PushChain.Node> chain, Set<String> redTips) {
-        Instant last = null;
-        for (BoardRow a : in.owners()) {
-            if ("ack".equals(a.kind()) && redTips.contains(a.sha()) && owner.equals(in.ids().identityOf(a.senderSession()))
-                && (last == null || a.createdAt().isAfter(last))) {
-                last = a.createdAt();
-            }
-        }
-        Set<String> reach = new HashSet<>(redTips);
-        boolean pastFirstRed = false;
-        for (PushChain.Node n : chain) {
-            if (!pastFirstRed) {
-                pastFirstRed = redTips.contains(n.sha());
+    /**
+     * The pushes that respond to the red: a stamped push whose base chains from a red tip and that was made at or after
+     * the verdict of the first red tip it chains from, as who the session index says pushed it. Read from the chain, so
+     * it survives the refresh a failed fix causes.
+     */
+    private static List<Sign> pushSigns(Ctx c) {
+        Map<String, Instant> bound = new java.util.HashMap<>();
+        c.redTips().forEach(t -> bound.put(t, c.redAt().getOrDefault(t, Instant.MAX)));
+        List<Sign> out = new ArrayList<>();
+        for (PushChain.Node n : c.chain()) {
+            String base = n.push() == null ? null : PushChain.baseOf(n.push());
+            Instant b = base == null ? null : bound.get(base);
+            if (b == null) {
                 continue;
             }
-            String base = n.push() == null ? null : PushChain.baseOf(n.push());
-            if (base != null && reach.contains(base)) {
-                reach.add(n.sha());
-                if (owner.equals(pusherOf(n, in.ids())) && (last == null || n.push().createdAt().isAfter(last))) {
-                    last = n.push().createdAt();
-                }
+            bound.merge(n.sha(), b, (x, y) -> x.isBefore(y) ? x : y);
+            String pusher = pusherOf(n, c.in().ids());
+            if (pusher != null && !n.push().createdAt().isBefore(b)) {
+                out.add(new Sign(n.push().createdAt(), pusher));
             }
         }
-        return last;
+        return out;
     }
 
     /** Whether the engine already posted a nudge for this episode and this next up. */
@@ -543,12 +699,22 @@ public final class OwnerDecision {
     /** The owner row body; the suspects are cut to ten, and further if the body would pass 1024 bytes. */
     static Map<String, Object> body(String owner, String next, String reason, List<String> suspects, int total,
                                     Instant episodeAt, boolean refresh, int handoffs) {
-        return body(owner, next, reason, suspects, total, episodeAt, refresh, handoffs, false);
+        return body(owner, next, reason, suspects, total, episodeAt, refresh, handoffs, null);
     }
 
-    /** As above; {@code stalled} adds {@code "stalled": true}, which marks an escalation of an acknowledged red. */
+    /**
+     * As above; a non-null {@code stall} marks an escalation of a red that stalled: {@code "stalled": true} and the
+     * fields of {@code stall} ({@link #stallInfo}).
+     */
     static Map<String, Object> body(String owner, String next, String reason, List<String> suspects, int total,
-                                    Instant episodeAt, boolean refresh, int handoffs, boolean stalled) {
+                                    Instant episodeAt, boolean refresh, int handoffs, Map<String, Object> stall) {
+        return body(owner, next, reason, suspects, total, episodeAt, refresh, handoffs, stall, null);
+    }
+
+    /** As above; the fields of {@code extra}, when given, are written last (a disclaim hand-off's {@code previous_owner}). */
+    static Map<String, Object> body(String owner, String next, String reason, List<String> suspects, int total,
+                                    Instant episodeAt, boolean refresh, int handoffs, Map<String, Object> stall,
+                                    Map<String, Object> extra) {
         List<String> listed = new ArrayList<>(suspects.subList(0, Math.min(MAX_SUSPECTS, suspects.size())));
         while (true) {
             Map<String, Object> m = new LinkedHashMap<>();
@@ -560,8 +726,12 @@ public final class OwnerDecision {
             m.put("episode_at", episodeAt.toString());
             m.put("refresh", refresh);
             m.put("handoffs", handoffs);
-            if (stalled) {
+            if (stall != null) {
                 m.put("stalled", true);
+                m.putAll(stall);
+            }
+            if (extra != null) {
+                m.putAll(extra);
             }
             if (json(m).getBytes(java.nio.charset.StandardCharsets.UTF_8).length <= MAX_BODY_BYTES || listed.size() <= 1) {
                 return m;

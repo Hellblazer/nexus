@@ -394,14 +394,26 @@ class OwnerStamperWiringTest {
         se.done(t, StamperEnv.BASE, "Y", "failure");
         assertThat(se.ownerRows(t, StamperEnv.BASE).getFirst().body()).containsEntry("owner", a);
 
-        var disclaim = postAs(client, null, mintSession(client, stamp), "/v1/tuples/out", Map.of(
-            "subspace", "board/ci/nexus-develop--owner", "keys", Map.of("topic", "nexus-develop--owner"),
-            "dims", Map.of("from", "marginalia", "kind", "disclaim", "sha", "Y"), "body", "{}",
-            "nonce", UUID.randomUUID().toString()));
-        assertThat(disclaim.statusCode()).as(disclaim.body()).isEqualTo(200);
-        // The hook runs after the response, on the request's thread: wait for a second row, bounded, else read what is there.
-        eventually(() -> se.ownerRows(t, StamperEnv.BASE), r -> r.size() >= 2);
-        Thread.sleep(200);
+        var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(OwnerStamper.class);
+        var logs = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        logs.start();
+        logger.addAppender(logs);
+        try {
+            var disclaim = postAs(client, null, mintSession(client, stamp), "/v1/tuples/out", Map.of(
+                "subspace", "board/ci/nexus-develop--owner", "keys", Map.of("topic", "nexus-develop--owner"),
+                "dims", Map.of("from", "marginalia", "kind", "disclaim", "sha", "Y"), "body", "{}",
+                "nonce", UUID.randomUUID().toString()));
+            assertThat(disclaim.statusCode()).as(disclaim.body()).isEqualTo(200);
+            // The hook runs after the response, on the request's thread, and logs its outcome when it is done: wait for that
+            // line (the observable), whichever way it went, rather than for a time.
+            var handled = eventually(
+                () -> logs.list.stream().map(e -> e.getFormattedMessage())
+                    .filter(m -> m.contains("event=board_owner_disclaim") && m.contains("tenant=" + t)).toList(),
+                lines -> !lines.isEmpty());
+            assertThat(handled).as("the hook handled the disclaim").hasSize(1);
+        } finally {
+            logger.detachAppender(logs);
+        }
         return se.ownerRows(t, StamperEnv.BASE).stream().map(r -> r.kind() + "/" + r.get("reason")).toList();
     }
 

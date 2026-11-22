@@ -801,7 +801,7 @@ final class TenantKeyedStateTables {
         for (String f : List.of(
             "GroupView.members", "GroupView.deadlineByTopic", "OwnerDecision.Input.pushes", "OwnerDecision.Input.dones",
             "OwnerDecision.Input.owners", "OwnerDecision.Post.body", "BoardRow.dims", "Identities.identityOfStamp",
-            "Identities.presence")) {
+            "Identities.presence", "OwnerDecision.Ctx.chain", "OwnerDecision.Ctx.redTips", "OwnerDecision.Ctx.redAt")) {
             notKeyed.put(f, evaluation);
         }
         notKeyed.put("OwnerStamper.timer", "the stamper's reference to the one AckDeadlineTimer, bound once at boot; "

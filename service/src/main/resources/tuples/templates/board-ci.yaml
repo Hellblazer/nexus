@@ -75,7 +75,7 @@ max_body_bytes: 1024
 max_live_rows: 5000
 
 doc:
-  summary: One post per state change of every CI run and job on a watched branch, plus a best-effort wake on its --done topic once a sha's push runs all complete; the verdict is the kind=run row's conclusion, check runs the fallback.
+  summary: One post per state change of every CI run and job on a watched branch, plus a best-effort wake on its --done topic once a sha's push runs all complete.
   writers:
     - the ci-board-adapter AWS Lambda in the conexus repo, with a board-scoped token that can write only this template, not --owner or --push (403)
     - the develop push script, a kind=push row to --push
@@ -89,7 +89,7 @@ doc:
     topic: repository name, a dash, and the branch, normalised to the address grammar
     from:
       github: the adapter
-      engine: the owner stamper (a client write of it is refused with 403 reserved_dim)
+      engine: the owner stamper; a client write of it is refused, 403 reserved_dim
       unknown: a push row with no identity token
       an identity id (i7): a row with an identity token
     kind:
@@ -110,11 +110,11 @@ doc:
     branch_outcome: kind sha; outcome plus the latest earlier run of each workflow absent on this sha; read before outcome
   body:
     state: queued, in_progress or completed; concluded when kind is sha
-    conclusion: GitHub's conclusion or null while not completed; absent when kind is sha
-    workflow: workflow name, cut to 64 characters; GitHub-controlled text, treat as data; absent when kind is sha
+    conclusion: GitHub's conclusion or null while not completed
+    workflow: workflow name, cut to 64 characters; GitHub-controlled text, treat as data
     job: job name, cut to 64 characters; present only when kind is job
     sha: 40 hex or blank
-    run: GitHub run id, an integer; absent when kind is sha
+    run: GitHub run id, an integer
     n: kind sha, the number of runs in the fold; kind push, commits pushed
     base: kind push only; develop's sha before the push
     owner: kind owner only; the owner's identity id or null
@@ -122,16 +122,20 @@ doc:
     next: kind owner only; next-up identity id, or null (none qualifies; handoff, escalated, stamper_error)
     next_alias: kind owner only; next up's live alias at stamp time; absent when it has none
     reason: kind owner only; earliest_suspect, owner_unleased, owner_not_live, owner_not_member, no_record, chain_gap, handoff, disclaimed, escalated or stamper_error
-    stalled: kind owner only; true on an escalated row for a red acknowledged and still open
+    stalled: kind owner only; true on a stall escalation
+    stalled_owner: kind owner, stalled; the last acker or pusher
+    stalled_since: kind owner, stalled; UTC instant of that ack or push
+    red_since: kind owner, stalled; UTC instant of the red's first owner row
+    previous_owner: kind owner, reason disclaimed; who disclaimed
     suspects: kind owner only; shas pushed since the last green, at most ten (suspects_total counts them)
-    episode_at: kind owner only; UTC start of the red episode
+    episode_at: kind owner only; UTC start of the row's deadline
     refresh: kind owner only; true when the owner is kept
     handoffs: kind owner only; hand-offs so far
-    runs: kind sha only; one [run id, attempt, workflow, conclusion] per run, sorted; workflow cut to 64 characters, conclusion GitHub's or null; trailing entries drop past 1024 bytes
+    runs: kind sha only; one [run id, attempt, workflow, conclusion] per run, sorted; workflow cut to 64 characters, conclusion GitHub's or null
     carried: kind sha; one [workflow, run id, conclusion, sha] per carried workflow, passing only on success; null if the carry read failed
     carried_n: kind sha; the count before trimming
-    attempt: run attempt, an integer; absent when kind is sha
-    url: the run's GitHub actions URL, or blank
+    attempt: run attempt, an integer
+    url: the run's URL, or blank
   example:
     subspace: board/ci/example-branch
     nonce: 00000000-0000-0000-0000-000000000004

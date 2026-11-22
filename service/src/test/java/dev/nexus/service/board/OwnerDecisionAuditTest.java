@@ -252,4 +252,34 @@ class OwnerDecisionAuditTest {
 
         assertThat(f.onDeadline().post()).isNull();
     }
+
+    // ── the fields the client notice reads (nexus-igea9 round 1, notice 5a69eaa086) ──────────────────────────
+
+    @Test
+    void theStallRowCarriesStalledOwnerStalledSinceAndRedSinceAsIsoInstantsTheNoticeSubtracts() {
+        OwnerFixture f = openRed();
+        f.at(after(7)).ack("A", "Y");
+        f.now(after(70));
+
+        Map<String, Object> b = OwnerFixture.bodyOf(f.onDeadline().post());
+
+        assertThat(b).containsEntry("stalled", true).containsEntry("stalled_owner", "A");
+        Instant since = Instant.parse((String) b.get("stalled_since"));
+        Instant red = Instant.parse((String) b.get("red_since"));
+        assertThat(Duration.between(red, since)).as("the notice's 'after N min'").isEqualTo(Duration.ofMinutes(7));
+    }
+
+    @Test
+    void theDisclaimHandOffRowNamesWhoDisclaimedAndAnOrdinaryHandOffDoesNot() {
+        OwnerFixture disclaimed = openRed();
+        disclaimed.at(after(2)).disclaim("A", "Y");
+        disclaimed.now(after(2));
+        assertThat(OwnerFixture.bodyOf(disclaimed.decide().post())).containsEntry("reason", "disclaimed")
+            .containsEntry("previous_owner", "A");
+
+        OwnerFixture missed = openRed();
+        missed.now(after(21));
+        assertThat(OwnerFixture.bodyOf(missed.onDeadline().post())).containsEntry("reason", "handoff")
+            .doesNotContainKey("previous_owner");
+    }
 }

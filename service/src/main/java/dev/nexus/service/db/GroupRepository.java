@@ -72,10 +72,15 @@ public final class GroupRepository {
                 throw unknown(name);
             }
             Map<String, Object> out = view(rec, OffsetDateTime.now(clock));
-            // RDR-252 audit S3: the tips in the served topics' --done rows that no push record names, so a push record
-            // the script failed to write is a number on the read and not only a line on one session's stderr.
-            out.put("unrecorded_tips",
-                dev.nexus.service.board.UnrecordedTips.count(ctx, tenant, GroupInput.servesOf(rec.getServes())));
+            // RDR-252 audit S3: the tips in the served topics' live --done rows that no push record names
+            // (unrecorded_tips) or whose record names no pusher (unattributed_tips), so a push record the script failed to
+            // write is a number on the read and not only a line on one session's stderr. Cost: per served topic two reads of
+            // at most 5000 rows and one session-index read, uncached on purpose (a group read is rare; the aura load gate
+            // reads it once at load).
+            var tips = dev.nexus.service.board.UnrecordedTips.count(ctx, tenant, GroupInput.servesOf(rec.getServes()),
+                clock.instant());
+            out.put("unrecorded_tips", tips.unrecorded());
+            out.put("unattributed_tips", tips.unattributed());
             return out;
         });
     }

@@ -122,7 +122,7 @@ public final class OwnerStamper implements OwnerOutHook {
                 return;
             }
             try {
-                evaluate(tenant, base, OwnerDecision.Trigger.DONE, v.sha());
+                evaluate(tenant, base, OwnerDecision.Trigger.DONE, v);
             } catch (Throwable t) {
                 log.warn("event=board_owner_stamper_failed tenant={} base={} error={}", tenant, base, t.getMessage(), t);
                 if (DoneVerdict.RED.equals(v.outcome())) {
@@ -141,10 +141,35 @@ public final class OwnerStamper implements OwnerOutHook {
      */
     private void onDisclaim(String tenant, String base) {
         try {
+            if (!disclaimerIsOwner(tenant, base)) {
+                log.info("event=board_owner_disclaim tenant={} base={} outcome=dropped_not_owner", tenant, base);
+                return;
+            }
             evaluate(tenant, base, OwnerDecision.Trigger.DONE, null);
+            log.info("event=board_owner_disclaim tenant={} base={} outcome=evaluated", tenant, base);
         } catch (Throwable t) {
-            log.warn("event=board_owner_disclaim_failed tenant={} base={} error={}", tenant, base, t.getMessage(), t);
+            log.warn("event=board_owner_disclaim tenant={} base={} outcome=failed error={}", tenant, base, t.getMessage(), t);
         }
+    }
+
+    /**
+     * Whether the newest {@code disclaim} row of the topic was sent by the identity the current owner row names. Read
+     * outside the topic lock, so a client that loops on disclaims it has no right to make costs two reads and never the
+     * lock the {@code --done} writes and the deadline need. The decision still judges the disclaim under the lock.
+     */
+    private boolean disclaimerIsOwner(String tenant, String base) {
+        List<BoardRow> owners = scope.withTenant(tenant, ctx -> BoardReads.rows(ctx, tenant, base, "owner"));
+        String owner = OwnerDecision.currentOwner(owners);
+        if (owner == null) {
+            return false;
+        }
+        for (int i = owners.size() - 1; i >= 0; i--) {
+            BoardRow r = owners.get(i);
+            if ("disclaim".equals(r.kind())) {
+                return owner.equals(Identities.countedIdentity(identities, tenant, r.senderSession()));
+            }
+        }
+        return false;
     }
 
     /** The base topic of {@code board/ci/<base>--owner}, or null for any other subspace. */
@@ -233,17 +258,16 @@ public final class OwnerStamper implements OwnerOutHook {
             List<BoardRow> owners = BoardReads.rows(ctx, tenant, base, "owner");
             GroupView group = BoardReads.group(groups, identities, tenant, base);
             Instant now = clock.instant();
-            Instant due = OwnerDecision.rowDeadline(group, base, owners);
+            // The deadline from the rows alone: the acknowledgement deadline, or, for a red the owner's stamped ack
+            // holds, the stall deadline. The identity read is made only once it is due.
+            Instant due = OwnerDecision.failSafeDue(group, null, base, owners);
             Identities ids = new Identities(Map.of(), Map.of());
             if (due != null && !now.isBefore(due)) {
                 try {
                     ids = liveness.read(identities, tenant, List.of(), owners, group);
                 } catch (Throwable t) {
-                    if (OwnerDecision.ackOnTip(owners)) {
-                        throw t;
-                    }
-                    log.warn("event=board_owner_failsafe_liveness_failed tenant={} base={} error={}; no ack row on the tip, "
-                        + "escalating with no owner", tenant, base, t.getMessage());
+                    log.warn("event=board_owner_failsafe_liveness_failed tenant={} base={} error={}; escalating with no owner",
+                        tenant, base, t.getMessage());
                 }
             }
             OwnerDecision.Decision d = OwnerDecision.failSafe(group, ids, owners, base, now);
@@ -264,17 +288,21 @@ public final class OwnerStamper implements OwnerOutHook {
         evaluate(tenant, base, trigger, null);
     }
 
-    /** {@code doneSha}: the tip of the {@code --done} write that triggered this evaluation, or null. */
-    private void evaluate(String tenant, String base, OwnerDecision.Trigger trigger, String doneSha) {
+    /** {@code done}: the verdict of the {@code --done} write that triggered this evaluation, or null. */
+    private void evaluate(String tenant, String base, OwnerDecision.Trigger trigger, DoneVerdict.Verdict done) {
         scope.withTenant(tenant, ctx -> {
             BoardTopicLock.lock(ctx, tenant, base);
             List<BoardRow> pushes = BoardReads.rows(ctx, tenant, base, "push");
             List<BoardRow> dones = BoardReads.rows(ctx, tenant, base, "done");
-            if (doneSha != null && pushes.stream().noneMatch(p -> doneSha.equals(p.sha()))) {
-                // RDR-252 audit S3: a tip with no push record has no pusher, so an earliest suspect among them hands the
-                // red to the leader as no_record. The push script's failure is silent; this makes it countable.
-                log.warn("event=board_done_tip_unrecorded tenant={} base={} sha={} unrecorded_tips={}", tenant, base, doneSha,
-                    UnrecordedTips.missing(pushes, dones).size());
+            if (done != null && DoneVerdict.RED.equals(done.outcome()) && pushes.stream().noneMatch(p -> done.sha().equals(p.sha()))
+                && dones.stream().filter(d -> DoneVerdict.of(d).filter(v -> v.counts() && done.sha().equals(v.sha())).isPresent())
+                    .count() == 1) {
+                // RDR-252 audit S3: a red tip with no push record has no pusher, so an earliest suspect among them hands
+                // the red to the leader as no_record. The push script's failure is silent; this line is the durable trace
+                // (the group read's unrecorded_tips only counts what the live rows still hold). Logged once per sha, on
+                // the first --done row it has: a rerun's row, and a tip that went green, add no line.
+                log.warn("event=board_done_tip_unrecorded tenant={} base={} sha={} unrecorded_tips={}", tenant, base, done.sha(),
+                    UnrecordedTips.missing(pushes, dones, clock.instant()).size());
             }
             List<BoardRow> owners = BoardReads.rows(ctx, tenant, base, "owner");
             GroupView group = BoardReads.group(groups, identities, tenant, base);
