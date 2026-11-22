@@ -5,5 +5,154 @@
 #   both           redefined to match by the id where both sides carry one and by the name where either lacks one (form B only); P4.1 removes the name arm
 #   label-kept     keeps reading the registry label on purpose: only for name_column catalog_collections.name, with a one-line reason (linda 2026-11-22)
 #   parse-removed  the name-parsing expression (split_part on '__', a 'quarantine-' prefix) is removed
+#   writer-kept    left on the name only to stamp an id on a write P3.1 made (form A, the object is a SQL writer in p31-writer-census.tsv); P4.1 redefines the writers
 # A NULL id is no collection: an id or both reader never falls back to a '' name (linda 2026-11-20).
 kind	object	name_column	disposition	reason
+function	nexus.assign_from_chashes_1024	catalog_collections.name	both	registry label lookups (guard, INSERT id) are kept; the superseded-centroid set matches by id and by name
+function	nexus.assign_from_chashes_1024	collection	both	L5417: chunks and centroids matched by id (registry id of p_collection) and by name; nearest-foreign test keeps name semantics via CASE
+function	nexus.assign_from_chashes_1024	source_collection	both	L5417: read only as the id-fill fallback behind id-first COALESCE(ta.source_collection_id, ...) (P3.1); unchanged
+function	nexus.assign_from_chashes_1024	superseded_by	both	L5417: tombstone test reads superseded_by_id or superseded_by; centroid exclusion by id array and name array
+function	nexus.assign_from_chashes_384	catalog_collections.name	both	registry label lookups (guard, INSERT id) are kept; the superseded-centroid set matches by id and by name
+function	nexus.assign_from_chashes_384	collection	both	L4828: chunks and centroids matched by id (registry id of p_collection) and by name; nearest-foreign test keeps name semantics via CASE
+function	nexus.assign_from_chashes_384	source_collection	both	L4828: read only as the id-fill fallback behind id-first COALESCE(ta.source_collection_id, ...) (P3.1); unchanged
+function	nexus.assign_from_chashes_384	superseded_by	both	L4828: tombstone test reads superseded_by_id or superseded_by; centroid exclusion by id array and name array
+function	nexus.assign_from_chashes_768	catalog_collections.name	both	registry label lookups (guard, INSERT id) are kept; the superseded-centroid set matches by id and by name
+function	nexus.assign_from_chashes_768	collection	both	L5127: chunks and centroids matched by id (registry id of p_collection) and by name; nearest-foreign test keeps name semantics via CASE
+function	nexus.assign_from_chashes_768	source_collection	both	L5127: read only as the id-fill fallback behind id-first COALESCE(ta.source_collection_id, ...) (P3.1); unchanged
+function	nexus.assign_from_chashes_768	superseded_by	both	L5127: tombstone test reads superseded_by_id or superseded_by; centroid exclusion by id array and name array
+function	nexus.canary_query_ring_upsert	catalog_collections.name	label-kept	resolves the caller's label p_collections[i] to its registry (collection_id, name); the signature keeps the label [vectors-069-collection-id-dual-write-functions.xml:7777]
+function	nexus.canary_query_ring_upsert	collection	id	ring row matched, inserted and trimmed by collection_id; the name column is written from the registry's label of that id and never read [vectors-069-collection-id-dual-write-functions.xml:7784]
+function	nexus.catalog_collection_doc_owner	physical_collection	id	documents read by physical_collection_id via a join on the registry; the p_collection label resolves through catalog_collections.name (label-kept read, same tenant) [catalog-044-collection-owner-from-documents.xml:129]
+function	nexus.catalog_collection_tuple_duplicates_unscoped	superseded_by	id	live set is superseded_by_id IS NULL [collections-001-tuple-unique-index.xml:94]
+function	nexus.catalog_collections_owner_from_docs	catalog_collections.name	id	holder excluded by collection_id; h.name stays only as the registry label for the NOTICE and the ORDER BY [catalog-051-curator-owner-not-replaceable.xml:178]
+function	nexus.catalog_collections_owner_from_docs	superseded_by	id	NEW.superseded_by_id / h.superseded_by_id IS NULL [catalog-051-curator-owner-not-replaceable.xml:174]
+function	nexus.catalog_documents_owner_to_collection	catalog_collections.name	id	registry row and holder found by collection_id; name is read only as the registry label (output, ORDER BY) [vectors-069-collection-id-dual-write-functions.xml:7590]
+function	nexus.catalog_documents_owner_to_collection	physical_collection	id	document's collection is NEW.physical_collection_id; names printed or passed on are the registry's label of that id [vectors-069-collection-id-dual-write-functions.xml:7585]
+function	nexus.catalog_documents_owner_to_collection	superseded_by	writer-kept	P3.1's registry UPDATE keeps setting superseded_by_id from superseded_by word for word (a write; P4.1 redefines the writers)
+function	nexus.catalog_reconcile_commit	catalog_collections.name	label-kept	L6468: registry subselect resolves the staged/document label to its id on write or id-fill (P3.1)
+function	nexus.catalog_reconcile_commit	physical_collection	both	L6178: SELECT-list copy of the staged label; the working set gains the registry id beside it
+function	nexus.chash_conformance_report	catalog_collections.name	both	registry join and NOT EXISTS: id arm, and name arm (non-empty) when the manifest id is NULL
+function	nexus.chash_conformance_report	collection	both	registry join and NOT EXISTS: id arm, and name arm (non-empty) when the manifest id is NULL
+function	nexus.chunk_is_reapable	catalog_collections.name	label-kept	quarantine-state check resolves the caller's label to its registry row (and the label-to-id lookup)
+function	nexus.chunk_is_reapable	collection	both	orphaned_at and manifest rows against the label: id arm via the registry id, name arm when the row id is NULL
+function	nexus.chunk_live_owners	collection	both	manifest row against the label: id arm via the registry id, name arm when the row id is NULL
+function	nexus.chunk_sensitive	collection	both	manifest row against the label: id arm via the registry id, name arm when the row id is NULL
+function	nexus.chunk_sensitive_many	collection	both	manifest row against the label: id arm via the registry id, name arm when the row id is NULL
+function	nexus.clear_orphaned_on_manifest_insert	collection	both	new manifest rows against orphaned_at records by B-join
+function	nexus.cross_preview_1024	catalog_collections.name	both	L715: superseded-centroid set matched by id and by name
+function	nexus.cross_preview_1024	collection	both	L715: chunks and centroids matched by id and by name (as assign_from_chashes)
+function	nexus.cross_preview_1024	superseded_by	both	L715: tombstone test reads superseded_by_id or superseded_by
+function	nexus.cross_preview_384	catalog_collections.name	both	L259: superseded-centroid set matched by id and by name
+function	nexus.cross_preview_384	collection	both	L259: chunks and centroids matched by id and by name (as assign_from_chashes)
+function	nexus.cross_preview_384	superseded_by	both	L259: tombstone test reads superseded_by_id or superseded_by
+function	nexus.cross_preview_768	catalog_collections.name	both	L487: superseded-centroid set matched by id and by name
+function	nexus.cross_preview_768	collection	both	L487: chunks and centroids matched by id and by name (as assign_from_chashes)
+function	nexus.cross_preview_768	superseded_by	both	L487: tombstone test reads superseded_by_id or superseded_by
+function	nexus.document_restore	catalog_collections.name	label-kept	unchanged writer: P3.1's id write is kept word for word (P3.5b changes readers only); the name read left is its fallback stamp resolve (row's id first, else the registry's by name) [vectors-069-collection-id-dual-write-functions.xml:7537]
+function	nexus.document_restore	physical_collection	writer-kept	the name read only resolves the id P3.1's write stamps (row's id first, else the registry's); the body is unchanged and P4.1 redefines the writers
+function	nexus.document_text	collection	both	chunk-to-manifest match by B-join
+function	nexus.document_trash	catalog_collections.name	label-kept	unchanged writer: P3.1's id write is kept word for word (P3.5b changes readers only); the name read left is its fallback stamp resolve (row's id first, else the registry's by name) [vectors-069-collection-id-dual-write-functions.xml:7497]
+function	nexus.document_trash	physical_collection	writer-kept	the name read only resolves the id P3.1's write stamps (row's id first, else the registry's); the body is unchanged and P4.1 redefines the writers
+function	nexus.gc_expire_quarantine	catalog_collections.name	label-kept	L3500: resolves the caller's collection label to its registry row (attribute read, guard, or id for an audit/insert); the signature keeps the label
+function	nexus.gc_expire_quarantine	collection	both	L3442: matched by id (registry id of the label argument) and by name
+function	nexus.gc_expire_quarantine_bounded	catalog_collections.name	label-kept	L3790: resolves the caller's collection label to its registry row (attribute read, guard, or id for an audit/insert); the signature keeps the label
+function	nexus.gc_expire_quarantine_bounded	collection	both	L3693: matched by id (registry id of the label argument) and by name
+function	nexus.gc_quarantine_orphans	catalog_collections.name	label-kept	resolves the caller's origin/quarantine label to its registry row or id
+function	nexus.gc_quarantine_orphans	collection	both	chunk rows against the origin/quarantine label (id arm, name arm when the id is NULL), and the sample's manifest-vs-chunk preference by B-join
+function	nexus.gc_quarantine_orphans	superseded_by	both	derives superseded_by_id from the stored name only when the id is NULL; already reads both, unchanged
+function	nexus.gc_quarantine_orphans_bounded	catalog_collections.name	label-kept	L665: resolves the caller's collection label to its registry row (attribute read, guard, or id for an audit/insert); the signature keeps the label
+function	nexus.gc_quarantine_orphans_bounded	collection	both	L612: matched by id (registry id of the label argument) and by name
+function	nexus.gc_quarantine_orphans_bounded	superseded_by	both	L677: dual-write derivation of superseded_by_id from the row's own label (P3.1); unchanged; ON CONFLICT gains WHERE superseded_by_id IS NULL (G15)
+function	nexus.gc_quarantine_orphans_floored	catalog_collections.name	label-kept	L1109: resolves the caller's collection label to its registry row (attribute read, guard, or id for an audit/insert); the signature keeps the label
+function	nexus.gc_quarantine_orphans_floored	collection	both	L1082: matched by id (registry id of the label argument) and by name
+function	nexus.gc_restore_rereferenced	catalog_collections.name	label-kept	L1865: resolves the caller's collection label to its registry row (attribute read, guard, or id for an audit/insert); the signature keeps the label
+function	nexus.gc_restore_rereferenced	collection	both	L1791: matched by id (registry id of the label argument) and by name
+function	nexus.gc_restore_rereferenced_bounded	catalog_collections.name	label-kept	L2251: resolves the caller's collection label to its registry row (attribute read, guard, or id for an audit/insert); the signature keeps the label
+function	nexus.gc_restore_rereferenced_bounded	collection	both	L2187: matched by id (registry id of the label argument) and by name
+function	nexus.hybrid_search_1024	collection	both	vectors-077-1: chunk and manifest rows against p_collections by id or by name where a row has no id; chunk-to-manifest join by id where both carry one; output column unchanged
+function	nexus.hybrid_search_384	collection	both	vectors-077-2: chunk and manifest rows against p_collections by id or by name where a row has no id; chunk-to-manifest join by id where both carry one; output column unchanged
+function	nexus.hybrid_search_768	collection	both	vectors-077-3: chunk and manifest rows against p_collections by id or by name where a row has no id; chunk-to-manifest join by id where both carry one; output column unchanged
+function	nexus.manifest_admits_chunk	collection	both	manifest row against the label: id arm via the registry id, name arm when the row id is NULL
+function	nexus.manifest_qualifying_hits	collection	both	vectors-077-4: chunk and manifest rows against p_collections by id or by name where a row has no id; chunk-to-manifest join by id where both carry one; output column unchanged
+function	nexus.manifest_search_1024	collection	both	vectors-077-5: chunk and manifest rows against p_collections by id or by name where a row has no id; chunk-to-manifest join by id where both carry one; output column unchanged
+function	nexus.manifest_search_384	collection	both	vectors-077-6: chunk and manifest rows against p_collections by id or by name where a row has no id; chunk-to-manifest join by id where both carry one; output column unchanged
+function	nexus.manifest_search_768	collection	both	vectors-077-7: chunk and manifest rows against p_collections by id or by name where a row has no id; chunk-to-manifest join by id where both carry one; output column unchanged
+function	nexus.manifest_verify	collection	both	chunk-to-manifest match by B-join
+function	nexus.plain_search_1024	collection	both	vectors-077-8: chunk and manifest rows against p_collections by id or by name where a row has no id; chunk-to-manifest join by id where both carry one; output column unchanged
+function	nexus.plain_search_384	collection	both	vectors-077-9: chunk and manifest rows against p_collections by id or by name where a row has no id; chunk-to-manifest join by id where both carry one; output column unchanged
+function	nexus.plain_search_768	collection	both	vectors-077-10: chunk and manifest rows against p_collections by id or by name where a row has no id; chunk-to-manifest join by id where both carry one; output column unchanged
+function	nexus.purge_trash	collection	both	chunk-to-manifest match by B-join
+function	nexus.quarantine_reattach_plan	catalog_collections.name	both	registry join to chunk rows is B-registry; the exclusion of the quarantine label and the label-to-id lookups stay label-kept
+function	nexus.quarantine_reattach_plan	collection	both	rows against the origin/quarantine label: id arm via registry ids, name arm when the row id is NULL
+function	nexus.quarantine_reattach_plan	physical_collection	both	rows against the origin/quarantine label: id arm via registry ids, name arm when the row id is NULL
+function	nexus.quarantine_restore_chunks	catalog_collections.name	label-kept	L2612: resolves the caller's collection label to its registry row (attribute read, guard, or id for an audit/insert); the signature keeps the label
+function	nexus.quarantine_restore_chunks	collection	both	L2634: matched by id (registry id of the label argument) and by name
+function	nexus.reaper_expire_client_quarantine	catalog_collections.name	label-kept	L4273: resolves the caller's collection label to its registry row (attribute read, guard, or id for an audit/insert); the signature keeps the label
+function	nexus.reaper_expire_client_quarantine	collection	both	L4293: matched by id (registry id of the label argument) and by name
+function	nexus.reaper_expire_quarantine	catalog_collections.name	label-kept	L4089: resolves the caller's collection label to its registry row (attribute read, guard, or id for an audit/insert); the signature keeps the label
+function	nexus.reaper_expire_quarantine	collection	both	L4031: matched by id (registry id of the label argument) and by name
+function	nexus.reaper_quarantine_chunks	catalog_collections.name	label-kept	L1460: resolves the caller's collection label to its registry row (attribute read, guard, or id for an audit/insert); the signature keeps the label
+function	nexus.reaper_quarantine_chunks	collection	both	L1373: matched by id (registry id of the label argument) and by name
+function	nexus.reaper_quarantine_chunks	superseded_by	both	L1472: dual-write derivation of superseded_by_id from the row's own label (P3.1); unchanged; ON CONFLICT gains WHERE superseded_by_id IS NULL (G15)
+function	nexus.search_aspect_scoped_1024	collection	both	vectors-077-11: chunk and manifest rows against p_collections by id or by name where a row has no id; chunk-to-manifest join by id where both carry one; output column unchanged
+function	nexus.search_aspect_scoped_384	collection	both	vectors-077-12: chunk and manifest rows against p_collections by id or by name where a row has no id; chunk-to-manifest join by id where both carry one; output column unchanged
+function	nexus.search_aspect_scoped_768	collection	both	vectors-077-13: chunk and manifest rows against p_collections by id or by name where a row has no id; chunk-to-manifest join by id where both carry one; output column unchanged
+function	nexus.search_graph_hop_1024	collection	both	vectors-077-14: chunk and manifest rows against p_collections by id or by name where a row has no id; chunk-to-manifest join by id where both carry one; output column unchanged
+function	nexus.search_graph_hop_384	collection	both	vectors-077-15: chunk and manifest rows against p_collections by id or by name where a row has no id; chunk-to-manifest join by id where both carry one; output column unchanged
+function	nexus.search_graph_hop_768	collection	both	vectors-077-16: chunk and manifest rows against p_collections by id or by name where a row has no id; chunk-to-manifest join by id where both carry one; output column unchanged
+function	nexus.search_metadata_scoped_1024	collection	both	vectors-077-17: chunk and manifest rows against p_collections by id or by name where a row has no id; chunk-to-manifest join by id where both carry one; output column unchanged
+function	nexus.search_metadata_scoped_384	collection	both	vectors-077-18: chunk and manifest rows against p_collections by id or by name where a row has no id; chunk-to-manifest join by id where both carry one; output column unchanged
+function	nexus.search_metadata_scoped_768	collection	both	vectors-077-19: chunk and manifest rows against p_collections by id or by name where a row has no id; chunk-to-manifest join by id where both carry one; output column unchanged
+function	nexus.search_topic_scoped_1024	collection	both	vectors-077-20: chunk, topic and manifest rows against p_collection by id or by name where a row has no id; chunk-to-manifest join by id where both carry one; output c.collection unchanged
+function	nexus.search_topic_scoped_384	collection	both	vectors-077-21: chunk, topic and manifest rows against p_collection by id or by name where a row has no id; chunk-to-manifest join by id where both carry one; output c.collection unchanged
+function	nexus.search_topic_scoped_768	collection	both	vectors-077-22: chunk, topic and manifest rows against p_collection by id or by name where a row has no id; chunk-to-manifest join by id where both carry one; output c.collection unchanged
+function	nexus.search_topic_set_1024	collection	both	L169: chunks, topics and manifest matched by id (registry id of p_collection) and by name; RETURNS collection stays the name
+function	nexus.search_topic_set_384	collection	both	L79: chunks, topics and manifest matched by id (registry id of p_collection) and by name; RETURNS collection stays the name
+function	nexus.search_topic_set_768	collection	both	L124: chunks, topics and manifest matched by id (registry id of p_collection) and by name; RETURNS collection stays the name
+function	nexus.stamp_chunks_on_manifest_delete	catalog_collections.name	label-kept	L4581: id-fill fallback resolves the chunk row's own label to its registry id behind id-first COALESCE(c.collection_id, ...); unchanged
+function	nexus.stamp_chunks_on_manifest_delete	collection	both	L4562: manifest transition keys joined to chunks / chunk_orphaned_at by id and by name; the dropped-key test uses the same identity
+function	nexus.stamp_chunks_on_manifest_update	catalog_collections.name	label-kept	L4679: id-fill fallback resolves the chunk row's own label to its registry id behind id-first COALESCE(c.collection_id, ...); unchanged
+function	nexus.stamp_chunks_on_manifest_update	collection	both	L4648: manifest transition keys joined to chunks / chunk_orphaned_at by id and by name; the dropped-key test uses the same identity
+function	nexus.taxonomy_ann_query_1024	catalog_collections.name	label-kept	p_collection is resolved once to its registry id by cc.name; the per-row name join to the centroid is gone (superseded exclusion joins on collection_id) [vectors-038-cross-pass-skips-superseded.xml:765]
+function	nexus.taxonomy_ann_query_1024	collection	id	centroids matched on collection_id against the resolved id of p_collection [vectors-038-cross-pass-skips-superseded.xml:765]
+function	nexus.taxonomy_ann_query_1024	superseded_by	id	superseded exclusion tests superseded_by_id IS NOT NULL [vectors-038-cross-pass-skips-superseded.xml:765]
+function	nexus.taxonomy_ann_query_384	catalog_collections.name	label-kept	p_collection is resolved once to its registry id by cc.name; the per-row name join to the centroid is gone (superseded exclusion joins on collection_id) [vectors-038-cross-pass-skips-superseded.xml:309]
+function	nexus.taxonomy_ann_query_384	collection	id	centroids matched on collection_id against the resolved id of p_collection [vectors-038-cross-pass-skips-superseded.xml:309]
+function	nexus.taxonomy_ann_query_384	superseded_by	id	superseded exclusion tests superseded_by_id IS NOT NULL [vectors-038-cross-pass-skips-superseded.xml:309]
+function	nexus.taxonomy_ann_query_768	catalog_collections.name	label-kept	p_collection is resolved once to its registry id by cc.name; the per-row name join to the centroid is gone (superseded exclusion joins on collection_id) [vectors-038-cross-pass-skips-superseded.xml:537]
+function	nexus.taxonomy_ann_query_768	collection	id	centroids matched on collection_id against the resolved id of p_collection [vectors-038-cross-pass-skips-superseded.xml:537]
+function	nexus.taxonomy_ann_query_768	superseded_by	id	superseded exclusion tests superseded_by_id IS NOT NULL [vectors-038-cross-pass-skips-superseded.xml:537]
+function	nexus.taxonomy_coverage_counts_1024	collection	both	centroids, chunks, manifest, topics against the label (id arm via the registry id, name arm when the row id is NULL)
+function	nexus.taxonomy_coverage_counts_384	collection	both	centroids, chunks, manifest, topics against the label (id arm via the registry id, name arm when the row id is NULL)
+function	nexus.taxonomy_coverage_counts_768	collection	both	centroids, chunks, manifest, topics against the label (id arm via the registry id, name arm when the row id is NULL)
+function	nexus.taxonomy_unassigned_chashes_1024	collection	both	centroids, chunks, manifest, topics against the label (id arm via the registry id, name arm when the row id is NULL); chunk-vs-manifest by B-join
+function	nexus.taxonomy_unassigned_chashes_384	collection	both	centroids, chunks, manifest, topics against the label (id arm via the registry id, name arm when the row id is NULL); chunk-vs-manifest by B-join
+function	nexus.taxonomy_unassigned_chashes_768	collection	both	centroids, chunks, manifest, topics against the label (id arm via the registry id, name arm when the row id is NULL); chunk-vs-manifest by B-join
+function	nexus.text_gate_probe_1024	collection	both	vectors-077-23: the 'off' statement's chunks match against p_collections by id (live registry ids of the labels) or by name where the chunk has no id; the name arm is guarded against ''
+function	nexus.text_gate_probe_384	collection	both	vectors-077-24: the 'off' statement's chunks match against p_collections by id (live registry ids of the labels) or by name where the chunk has no id; the name arm is guarded against ''
+function	nexus.text_gate_probe_768	collection	both	vectors-077-25: the 'off' statement's chunks match against p_collections by id (live registry ids of the labels) or by name where the chunk has no id; the name arm is guarded against ''
+function	nexus.text_gate_probe_by_collection_1024	collection	both	L583: c.collection = ANY(labels) becomes c.collection_id = ANY(registry ids) OR (NULL id AND name = ANY(labels))
+function	nexus.text_gate_probe_by_collection_384	collection	both	L401: c.collection = ANY(labels) becomes c.collection_id = ANY(registry ids) OR (NULL id AND name = ANY(labels))
+function	nexus.text_gate_probe_by_collection_768	collection	both	L492: c.collection = ANY(labels) becomes c.collection_id = ANY(registry ids) OR (NULL id AND name = ANY(labels))
+function	nexus.text_gated_search_allowed_1024	collection	both	vectors-077-26: chunk and manifest rows against p_collections by id or by name where a row has no id; chunk-to-manifest join by id where both carry one; output column unchanged
+function	nexus.text_gated_search_allowed_384	collection	both	vectors-077-27: chunk and manifest rows against p_collections by id or by name where a row has no id; chunk-to-manifest join by id where both carry one; output column unchanged
+function	nexus.text_gated_search_allowed_768	collection	both	vectors-077-28: chunk and manifest rows against p_collections by id or by name where a row has no id; chunk-to-manifest join by id where both carry one; output column unchanged
+function	nexus.text_gated_search_by_chash_1024	collection	both	vectors-077-29: chunk and manifest rows against p_collections by id or by name where a row has no id; chunk-to-manifest join by id where both carry one; output column unchanged
+function	nexus.text_gated_search_by_chash_384	collection	both	vectors-077-30: chunk and manifest rows against p_collections by id or by name where a row has no id; chunk-to-manifest join by id where both carry one; output column unchanged
+function	nexus.text_gated_search_by_chash_768	collection	both	vectors-077-31: chunk and manifest rows against p_collections by id or by name where a row has no id; chunk-to-manifest join by id where both carry one; output column unchanged
+function	nexus.text_gated_search_hnsw_first_1024	collection	both	vectors-077-32: chunk and manifest rows against p_collections by id or by name where a row has no id; chunk-to-manifest join by id where both carry one; output column unchanged
+function	nexus.text_gated_search_hnsw_first_384	collection	both	vectors-077-33: chunk and manifest rows against p_collections by id or by name where a row has no id; chunk-to-manifest join by id where both carry one; output column unchanged
+function	nexus.text_gated_search_hnsw_first_768	collection	both	vectors-077-34: chunk and manifest rows against p_collections by id or by name where a row has no id; chunk-to-manifest join by id where both carry one; output column unchanged
+function	nexus.topics_doc_count_drift	collection	both	output only; body unchanged
+function	nexus.topics_doc_count_recount_del	catalog_collections.name	label-kept	L5911: id-fill fallback resolves the topic row's own label to its id behind id-first COALESCE (P3.1); body unchanged, no changeset
+function	nexus.topics_doc_count_recount_del	collection	both	L5911: name read only as that id-fill fallback; no match to change; body unchanged, no changeset
+function	nexus.topics_doc_count_recount_ins	catalog_collections.name	label-kept	L5736: id-fill fallback resolves the topic row's own label to its id behind id-first COALESCE (P3.1); body unchanged, no changeset
+function	nexus.topics_doc_count_recount_ins	collection	both	L5736: name read only as that id-fill fallback; no match to change; body unchanged, no changeset
+function	nexus.topics_recount_doc_count	catalog_collections.name	label-kept	unchanged writer: P3.1's id write is kept word for word (P3.5b changes readers only); the name read left is its fallback stamp resolve (row's id first, else the registry's by name) [vectors-069-collection-id-dual-write-functions.xml:6022]
+function	nexus.topics_recount_doc_count	collection	writer-kept	the name read only resolves the id P3.1's write stamps (row's id first, else the registry's); the body is unchanged and P4.1 redefines the writers
+trigger	nexus.catalog_documents.catalog_documents_owner_to_collection	physical_collection	id	document's collection is NEW.physical_collection_id; names printed or passed on are the registry's label of that id [catalog-044-collection-owner-from-documents.xml:234]
+view	nexus.collection_doc_counts	physical_collection	id	grouped by registry label of physical_collection_id (join on catalog_collections) [catalog-019-tombstone-aware-read-views.xml:110]
+view	nexus.collection_health_meta	physical_collection	id	grouped by registry label of physical_collection_id (join on catalog_collections) [catalog-031-type-hygiene.xml:120]
+view	nexus.collection_vector_stats	collection	both	chunk-to-manifest match by B-join (id when both carry one, non-empty name when either lacks one); output column unchanged
+view	nexus.live_chunks	collection	both	chunk-to-manifest match by B-join (id when both carry one, non-empty name when either lacks one); output column unchanged
+view	nexus.topics_with_counts	collection	id	collection column is the registry label of topics.collection_id (left join; '' when unset) [catalog-009-read-shape-views.xml:138]

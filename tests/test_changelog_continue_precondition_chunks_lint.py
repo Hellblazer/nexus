@@ -111,6 +111,30 @@ _CONTINUE_ALLOWLIST: dict[tuple[str, str], str] = {
     # changeset is skipped (failOnError false), not failed. The one table name in the body is the exempt statement shape
     # (_EXEMPT_INDEX_BUILD). No chunk table, leaf, partition helper or builder object is named (RDR-229 P3.3c, nexus-p2m1x.21).
     ("vectors-075-chunk-orphaned-at-chash-index.xml", "vectors-075-1"): "child index of the chunk id key",
+    # CREATE OR REPLACE FUNCTION takes no lock on a table (the function's own pg_proc row only); the LANGUAGE sql body is parsed under ACCESS SHARE on nexus.catalog_documents and nexus.catalog_collections, which no CREATE INDEX CONCURRENTLY on a chunk leaf conflicts with; the body names no chunk table, leaf, partition helper or builder object, and no table with a foreign key into nexus.chunks (RDR-229 P3.5b, nexus-p2m1x.24).
+    ("vectors-078-rdr229-p35b-readers-continue.xml", "vectors-078-1"): "owner derivation by id",
+    # CREATE OR REPLACE FUNCTION of a plpgsql trigger function takes no table lock and its body is not analysed at CREATE; the body names no chunk table, leaf, partition helper or builder object, and no table with a foreign key into nexus.chunks (RDR-229 P3.5b, nexus-p2m1x.24).
+    ("vectors-078-rdr229-p35b-readers-continue.xml", "vectors-078-2"): "owner trigger function (registry) by id",
+    # CREATE OR REPLACE FUNCTION of a plpgsql trigger function takes no table lock and its body is not analysed at CREATE; the body names no chunk table, leaf, partition helper or builder object, and no table with a foreign key into nexus.chunks (RDR-229 P3.5b, nexus-p2m1x.24).
+    ("vectors-078-rdr229-p35b-readers-continue.xml", "vectors-078-3"): "owner trigger function (documents) by id",
+    # SET LOCAL lock_timeout = '5s', then DROP TRIGGER (ACCESS EXCLUSIVE) and CREATE TRIGGER (SHARE ROW EXCLUSIVE) on nexus.catalog_documents only, failOnError="false" so a lock it cannot get skips the changeset unrecorded; catalog_documents is not a chunk table and a CREATE INDEX CONCURRENTLY on a chunk leaf holds no lock on it; the body names no chunk table, leaf, partition helper or builder object, and no table with a foreign key into nexus.chunks (RDR-229 P3.5b, nexus-p2m1x.24).
+    ("vectors-078-rdr229-p35b-readers-continue.xml", "vectors-078-4"): "owner trigger on the document id",
+    # CREATE OR REPLACE FUNCTION takes no lock on a table (the function's own pg_proc row only); the LANGUAGE sql body is parsed under ACCESS SHARE on nexus.catalog_collections; the body names no chunk table, leaf, partition helper or builder object, and no table with a foreign key into nexus.chunks (RDR-229 P3.5b, nexus-p2m1x.24).
+    ("vectors-078-rdr229-p35b-readers-continue.xml", "vectors-078-7"): "live-tuple duplicate counter by id",
+    # CREATE OR REPLACE FUNCTION of a plpgsql function takes no table lock and its body is not analysed at CREATE; the table it writes is nexus.canary_query_ring (no foreign key into nexus.chunks); the body names no chunk table, leaf, partition helper or builder object, and no table with a foreign key into nexus.chunks (RDR-229 P3.5b, nexus-p2m1x.24).
+    ("vectors-078-rdr229-p35b-readers-continue.xml", "vectors-078-8"): "canary ring upsert by id",
+    # CREATE OR REPLACE FUNCTION takes no lock on a table (the function's own pg_proc row only); the LANGUAGE sql body is parsed under ACCESS SHARE on nexus.taxonomy_centroids and nexus.catalog_collections; the body names no chunk table, leaf, partition helper or builder object, and no table with a foreign key into nexus.chunks (RDR-229 P3.5b, nexus-p2m1x.24).
+    ("vectors-078-rdr229-p35b-readers-continue.xml", "vectors-078-9"): "taxonomy_ann_query_384 by id",
+    # CREATE OR REPLACE FUNCTION takes no lock on a table (the function's own pg_proc row only); the LANGUAGE sql body is parsed under ACCESS SHARE on nexus.taxonomy_centroids and nexus.catalog_collections; the body names no chunk table, leaf, partition helper or builder object, and no table with a foreign key into nexus.chunks (RDR-229 P3.5b, nexus-p2m1x.24).
+    ("vectors-078-rdr229-p35b-readers-continue.xml", "vectors-078-10"): "taxonomy_ann_query_768 by id",
+    # CREATE OR REPLACE FUNCTION takes no lock on a table (the function's own pg_proc row only); the LANGUAGE sql body is parsed under ACCESS SHARE on nexus.taxonomy_centroids and nexus.catalog_collections; the body names no chunk table, leaf, partition helper or builder object, and no table with a foreign key into nexus.chunks (RDR-229 P3.5b, nexus-p2m1x.24).
+    ("vectors-078-rdr229-p35b-readers-continue.xml", "vectors-078-11"): "taxonomy_ann_query_1024 by id",
+    # CREATE OR REPLACE VIEW takes ACCESS EXCLUSIVE on that one view and ACCESS SHARE on nexus.catalog_documents and nexus.catalog_collections for the parse; the body names no chunk table, leaf, partition helper or builder object, and no table with a foreign key into nexus.chunks (RDR-229 P3.5b, nexus-p2m1x.24).
+    ("vectors-078-rdr229-p35b-readers-continue.xml", "vectors-078-13"): "collection_doc_counts by id",
+    # CREATE OR REPLACE VIEW takes ACCESS EXCLUSIVE on that one view and ACCESS SHARE on nexus.catalog_documents, nexus.catalog_links and nexus.catalog_collections for the parse; the body names no chunk table, leaf, partition helper or builder object, and no table with a foreign key into nexus.chunks (RDR-229 P3.5b, nexus-p2m1x.24).
+    ("vectors-078-rdr229-p35b-readers-continue.xml", "vectors-078-14"): "collection_health_meta by id",
+    # CREATE OR REPLACE VIEW takes ACCESS EXCLUSIVE on that one view and ACCESS SHARE on nexus.topics and nexus.catalog_collections for the parse; the body names no chunk table, leaf, partition helper or builder object, and no table with a foreign key into nexus.chunks (RDR-229 P3.5b, nexus-p2m1x.24).
+    ("vectors-078-rdr229-p35b-readers-continue.xml", "vectors-078-15"): "topics_with_counts by id",
 }
 
 # The one statement shape exempt from the foreign-key-table rule (see the module docstring), matched on the NORMALISED text.
