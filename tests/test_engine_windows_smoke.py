@@ -298,9 +298,13 @@ class FakeHttp:
 
 
 class FakeRunner(sm.Runner):
-    def __init__(self, *, modules: str = "") -> None:
+    """*journals*: what each psql read of ``public.databasechangelog`` answers, one entry per read (first boot, then
+    the reboot); the last one repeats. The default is every changeset of ``_changelog``'s three."""
+
+    def __init__(self, *, modules: str = "", journals: list[set[str]] | None = None) -> None:
         self.calls: list[list[str]] = []
         self.modules = modules
+        self.journals = journals or [{"0", "1", "2"}]
 
     def to_file(self, argv, *, env, out):  # noqa: ANN001
         self.calls.append(list(argv))
@@ -310,6 +314,9 @@ class FakeRunner(sm.Runner):
         self.calls.append(list(argv))
         if argv and "powershell" in str(argv[0]).lower():
             return 0, self.modules
+        if any("databasechangelog" in str(a) for a in argv):
+            journal = self.journals.pop(0) if len(self.journals) > 1 else self.journals[0]
+            return 0, "\n".join(sorted(journal)) + "\n"
         return 0, ""
 
 
@@ -375,7 +382,8 @@ def _run(tmp_path: Path, *, windows: bool, http: FakeHttp | None = None, launche
         model_root=_model(tmp_path), changelog_dir=_changelog(tmp_path), workdir=tmp_path / "work",
         platform=sm.Platform(windows=windows), runner=runner, launcher=launcher, http=http,
         base_env={"SystemRoot": r"C:\Windows", "TEMP": str(tmp_path), "PATH": r"C:\Program Files\Microsoft Visual Studio\bin"},
-        emit=out.append, sleep=lambda s: None, ports=ports, keep=False, **kw,
+        emit=out.append, sleep=lambda s: None, ports=ports, keep=False,
+        **{"fresh_boot_pending": {}, **kw},  # the synthetic changelog has none of the real allowlist's ids
     )
     return out, launcher, http, runner
 
@@ -408,15 +416,18 @@ def test_the_happy_path_runs_every_stage_in_order(tmp_path: Path, windows: bool)
     assert out[-1] == "SMOKE PASSED"
     exe = ".exe" if windows else ""
     pg_calls = [c for c in runner.calls if "powershell" not in str(c[0]).lower()]
-    assert [Path(c[0]).name for c in pg_calls] == [f"initdb{exe}", f"pg_ctl{exe}", f"createdb{exe}", f"pg_ctl{exe}"]
-    assert pg_calls[1][-1] == "start" and pg_calls[3][-1] == "stop"
+    # the migration journal is read once per boot (a second time after the Windows reboot)
+    journal_reads = [f"psql{exe}"] * (2 if windows else 1)
+    assert [Path(c[0]).name for c in pg_calls] == [f"initdb{exe}", f"pg_ctl{exe}", f"createdb{exe}", *journal_reads, f"pg_ctl{exe}"]
+    assert pg_calls[1][-1] == "start" and pg_calls[-1][-1] == "stop"
+    assert all("public.databasechangelog" in c[-1] for c in pg_calls if Path(c[0]).name == f"psql{exe}")
     kinds = [(m, u.rsplit("/", 1)[-1]) for m, u in http.calls]
     first = [("GET", "health"), ("GET", "version"), ("POST", "embed")]
     reboot = [("GET", "health"), ("GET", "version")]
     assert kinds == (first + reboot if windows else first)
     assert (len([c for c in runner.calls if "powershell" in str(c[0]).lower()]) == 1) is windows
     text = "\n".join(out)
-    assert "changesets 3/3" in text and "768" in text
+    assert "changesets 3/3" in text and "applied 3/3" in text and "768" in text
 
 
 def test_the_engine_port_is_chosen_after_postgres_holds_its_own(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -781,3 +792,70 @@ def test_the_engine_module_check_compares_long_forms_so_an_8_3_temp_is_not_a_fal
     assert "vcruntime140.dll" in es.check_engine_modules(modules, short, long_path=long_form)
     with pytest.raises(es.SmokeError, match="not from the bundle"):
         es.check_engine_modules(modules, short, long_path=lambda p: p)
+
+
+# --------------------------------------------------------------------------- #
+# A fresh boot's designed deferrals (RDR-229 Phase 3 reland, linda's ruling)
+# --------------------------------------------------------------------------- #
+
+
+def test_every_fresh_boot_pending_entry_is_a_changeset_of_the_real_changelog() -> None:
+    """The allowlist names real changesets, and the id set agrees with the count, so the exact-set check is not
+    vacuous: collections-001-2 waits for the re-own move and is applied on a later boot."""
+    ids = es.changeset_ids(CHANGELOG)
+    assert len(ids) == es.changeset_count(CHANGELOG)
+    assert es.FRESH_BOOT_PENDING, "the allowlist is checked, never empty by accident"
+    assert set(es.FRESH_BOOT_PENDING) <= ids
+    assert "collections-001-2" in es.FRESH_BOOT_PENDING
+
+
+def test_check_applied_passes_only_an_allowed_deferral_and_names_it() -> None:
+    declared = {"a", "b", "c"}
+    assert es.check_applied({"a", "b", "c"}, declared, {"c": "why"}) == "applied 3/3"
+    assert es.check_applied({"a", "b"}, declared, {"c": "why"}) == "applied 2/3; pending as designed: c"
+    with pytest.raises(es.SmokeError, match=r"did not apply 1 changeset\(s\): \['b'\]"):
+        es.check_applied({"a"}, declared, {"c": "why"})  # a planted unknown missing id
+    with pytest.raises(es.SmokeError, match=r"does not have: \['gone'\]"):
+        es.check_applied(declared, declared, {"gone": "why"})  # a stale allowlist entry
+    with pytest.raises(es.SmokeError, match=r"does not declare: \['z'\]"):
+        es.check_applied(declared | {"z"}, declared, {})
+
+
+def test_changeset_ids_refuses_a_repeated_or_missing_id(tmp_path: Path) -> None:
+    root = tmp_path / "changelog"
+    _write(root / "db.changelog-master.xml", '<databaseChangeLog><changeSet id="a" author="t"/><changeSet id="a" author="u"/></databaseChangeLog>')
+    with pytest.raises(es.SmokeError, match="repeat"):
+        es.changeset_ids(root)
+    _write(root / "db.changelog-master.xml", '<databaseChangeLog><changeSet id="a" author="t"/><changeSet author="u"/></databaseChangeLog>')
+    with pytest.raises(es.SmokeError, match="carry no id"):
+        es.changeset_ids(root)
+
+
+def test_a_first_boot_may_leave_an_allowed_changeset_pending_and_the_reboot_applies_exactly_it(tmp_path: Path) -> None:
+    launcher = FakeLauncher(FakeProc(), first_boot_new=2, reboot_new=1)
+    runner = _ListingRunner(launcher)
+    runner.journals = [{"0", "1"}, {"0", "1", "2"}]
+    http = FakeHttp(version=json.dumps({"schema_changeset_count": 2, "release_version": None}), embed=GOOD_EMBED)
+    http_reboot_version = json.dumps({"schema_changeset_count": 3, "release_version": None})
+    real_get = http.get
+
+    def get(url, headers):  # noqa: ANN001 — the reboot's /version reports the deferral applied
+        status, text = real_get(url, headers)
+        if url.endswith("/version") and sum(1 for _, u in http.calls if u.endswith("/version")) == 2:
+            return status, http_reboot_version
+        return status, text
+
+    http.get = get  # type: ignore[method-assign]
+    out, *_ = _run(tmp_path, windows=True, http=http, launcher=launcher, runner=runner, fresh_boot_pending={"2": "deferred"})
+    text = "\n".join(out)
+    assert out[-1] == "SMOKE PASSED"
+    assert "applied 2/3; pending as designed: 2" in text
+    assert "second boot applied 1 new changesets (2, deferred by design)" in text
+
+
+def test_a_first_boot_missing_a_changeset_not_deferred_by_design_fails(tmp_path: Path) -> None:
+    launcher = FakeLauncher(FakeProc(), first_boot_new=2, reboot_new=1)
+    runner = _ListingRunner(launcher)
+    runner.journals = [{"0", "1"}, {"0", "1", "2"}]
+    with pytest.raises(es.SmokeError, match=r"did not apply 1 changeset\(s\): \['2'\]"):
+        _run(tmp_path, windows=True, launcher=launcher, runner=runner)
