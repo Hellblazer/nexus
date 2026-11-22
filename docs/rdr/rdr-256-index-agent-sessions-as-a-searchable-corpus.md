@@ -2,12 +2,12 @@
 title: "Index agent sessions as a searchable, expandable corpus"
 id: RDR-256
 type: Feature
-status: draft
+status: accepted
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-11-21
-accepted_date:
+accepted_date: 2026-11-22
 related_issues: []
 related_rdrs: [RDR-103, RDR-131, RDR-171, RDR-204, RDR-207, RDR-223, RDR-229, RDR-240, RDR-243, RDR-246]
 ---
@@ -1045,6 +1045,25 @@ carry them here rather than design them on paper (ask `rdr256-accept-2`,
   index complete.
 - Step 4: clearing the attribute needs an engine route, and the
   re-assertion on every `nx index sessions` run must not undo a clear.
+
+The fix check of the privacy commit (T2 `nexus_rdr/256-fix-check-0e1513dc022a`)
+added three more, carried here at accept (Sam, ask `rdr256-accept-3`,
+2026-11-22):
+
+- Step 5: every re-render for verification is render, redact, then split
+  or compare. Expand's general check and `list --check` re-render a range
+  and compare it with the chash, and the chash is of redacted text, so a
+  re-render that skips redaction reports `changed` for every chunk that
+  held a redaction.
+- Step 5: the combined writer begins the index-run fence itself
+  (`doc_indexer.py` around 2159-2163), so the session indexer does not
+  call a fence begin of its own; the Technical Design lines that say the
+  indexer begins the fence are read as "owns the stamp and the failure
+  bracket".
+- Step 2: the bge measurement indexes real sessions before the scanner,
+  the attribute and the writer exist, so it writes to a throwaway
+  collection on an engine with no Voyage key, refuses a collection whose
+  embedding model is not bge, and is torn down afterwards.
 
 #### Step 1: Decoder and active path
 
