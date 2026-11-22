@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import dev.nexus.service.db.CollectionIds;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgActivityProbe;
@@ -117,10 +118,13 @@ class GcQuarantineReapableIntegrationTest {
             OffsetDateTime then = OffsetDateTime.now().minus(age);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             // RDR-225: the record carries the model of the chunk it refers to (the collection's).
-            ctx.insertInto(CHUNK_ORPHANED_AT, CHUNK_ORPHANED_AT.TENANT_ID, CHUNK_ORPHANED_AT.COLLECTION,
-                   CHUNK_ORPHANED_AT.CHASH, CHUNK_ORPHANED_AT.ORPHANED_AT, CHUNK_ORPHANED_AT.EMBEDDING_MODEL)
-               .values(TENANT, collection, Chash.fromHex(hex).toBytes(), then,
-                   PgContainerHelper.collectionModel(ctx, TENANT, collection))
+            ctx.insertInto(CHUNK_ORPHANED_AT)
+               .set(CHUNK_ORPHANED_AT.TENANT_ID, TENANT)
+               .set(CHUNK_ORPHANED_AT.COLLECTION, collection)
+               .set(CHUNK_ORPHANED_AT.COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
+               .set(CHUNK_ORPHANED_AT.CHASH, Chash.fromHex(hex).toBytes())
+               .set(CHUNK_ORPHANED_AT.ORPHANED_AT, then)
+               .set(CHUNK_ORPHANED_AT.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, TENANT, collection))
                .execute();
         }
     }

@@ -148,6 +148,20 @@ public final class StatusHandler implements HttpHandler {
         return this;
     }
 
+    private volatile Supplier<Boolean> collectionTupleIndex;               // nullable — key omitted
+
+    /**
+     * RDR-229 P3.8 (nexus-p2m1x.28), [additive]: {@code collection_tuple_index_present} (bool): whether the partial
+     * UNIQUE index {@code catalog_collections_live_tuple_uq} on the collection registry exists. The changeset that
+     * builds it waits for the re-own data move and for no duplicate live tuple, so {@code false} means it has not been
+     * built yet, not that something failed. Absent = an engine that predates the field, or a probe that could not
+     * run; a client must not read an absent key as false. One boolean, no tenant, collection or tuple text.
+     */
+    public StatusHandler collectionTupleIndex(Supplier<Boolean> collectionTupleIndex) {
+        this.collectionTupleIndex = collectionTupleIndex;
+        return this;
+    }
+
     private volatile Supplier<java.util.List<dev.nexus.service.BootWorkRegistry.Entry>> bootWork;   // null: always []
 
     /**
@@ -164,6 +178,20 @@ public final class StatusHandler implements HttpHandler {
      */
     public StatusHandler bootWork(Supplier<java.util.List<dev.nexus.service.BootWorkRegistry.Entry>> bootWork) {
         this.bootWork = bootWork;
+        return this;
+    }
+
+    private volatile Supplier<String> rdr229Completion;   // null: key omitted
+
+    /**
+     * RDR-229 P3.1 (fix round A), [additive]: bind the source of {@code rdr229_completion}, the boot-time completion check's
+     * state as one JSON object (gates, missing CHECKs, VALIDATEs that wait, the dangling-tombstone pre-flight; shape in
+     * {@code CompletionStatusJson}). It is its own field and not a {@code boot_work} entry because it is not work in
+     * progress. A supplier answers from memory; null, or a supplier that returns null (not read yet), omits the key, and a
+     * client reads that as "not known".
+     */
+    public StatusHandler rdr229Completion(Supplier<String> rdr229Completion) {
+        this.rdr229Completion = rdr229Completion;
         return this;
     }
 
@@ -632,6 +660,13 @@ public final class StatusHandler implements HttpHandler {
         // nexus-f3yqd.3, [additive]: the heavy work in flight; [] when idle. Always present.
         appendBootWork(body, bootWork == null ? java.util.List.of() : bootWork.get());
 
+        // RDR-229 P3.1 (fix round A), [additive]: the completion check's state; absent until it has read.
+        Supplier<String> completion = rdr229Completion;
+        String completionJson = completion == null ? null : completion.get();
+        if (completionJson != null) {
+            body.append(",\"rdr229_completion\":").append(completionJson);
+        }
+
         // nexus-wbfpw.48, [additive]: false when a permissive policy other than tenant_isolation on
         // nexus.chunks applies to the role this engine serves traffic as (it would read or write every tenant's
         // chunks), or when row security on nexus.chunks is not enabled and forced or tenant_isolation is gone.
@@ -660,6 +695,15 @@ public final class StatusHandler implements HttpHandler {
                     }
                     body.append('}');
                 }
+            }
+        }
+
+        // RDR-229 P3.8 (nexus-p2m1x.28), [additive]: is the live-tuple unique index built? Absent = cannot tell.
+        Supplier<Boolean> tupleIndex = collectionTupleIndex;
+        if (tupleIndex != null) {
+            Boolean present = tupleIndex.get();
+            if (present != null) {
+                body.append(",\"collection_tuple_index_present\":").append(present);
             }
         }
 

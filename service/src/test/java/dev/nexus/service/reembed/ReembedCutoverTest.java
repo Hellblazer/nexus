@@ -2,7 +2,9 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.reembed;
 
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.PgContainerHelper;
+import dev.nexus.service.SupersedeSeeds;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.ReembedJobRepository.Job;
 import dev.nexus.service.db.ReembedJobRepository.Transition;
@@ -345,7 +347,10 @@ class ReembedCutoverTest extends ReembedFixture {
         Fx fx = pair("blocked");
         seedDocs(fx, 2, 3);
         Job started = startJob(fx, null, false);
-        assertThat(catalog.supersedeCollection(fx.tenant(), fx.src(), "somewhere-else", null)).isEqualTo(1);
+        // RDR-229 P3.1: the successor is registered first, under the engine's profile model (SupersedeSeeds would
+        // give it the source's, which the profile refuses for a knowledge name).
+        su(ctx -> { PgContainerHelper.insertCollection(ctx, fx.tenant(), "somewhere-else", MINI); return null; });
+        assertThat(SupersedeSeeds.supersede(catalog, fx.tenant(), fx.src(), "somewhere-else", null)).isEqualTo(1);
         Probe probe = new Probe();
         ReembedRunner runner = runner(fx, ONE_DOC_PER_BATCH);
         runner.setPhaseHookForTests(probe.hook(Set.of()));
@@ -404,16 +409,24 @@ class ReembedCutoverTest extends ReembedFixture {
     /** One satellite row of {@code table} naming {@code collection}, for document {@code doc}. */
     private void seedSatellite(String table, Fx fx, String collection, String doc) {
         su(ctx -> switch (table) {
-            case SAT_ASPECTS -> ctx.insertInto(DOCUMENT_ASPECTS,
-                    DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION, DOCUMENT_ASPECTS.SOURCE_PATH,
-                    DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION, DOCUMENT_ASPECTS.EXTRACTOR_NAME,
-                    DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
-                .values(fx.tenant(), collection, "p/" + doc, OffsetDateTime.now(), "m1", "docling", doc,
-                    "file:///p/" + doc).execute();
-            case SAT_HIGHLIGHTS -> ctx.insertInto(DOCUMENT_HIGHLIGHTS,
-                    DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID, DOCUMENT_HIGHLIGHTS.COLLECTION,
-                    DOCUMENT_HIGHLIGHTS.SOURCE_URI, DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD, DOCUMENT_HIGHLIGHTS.INGESTED_AT)
-                .values(fx.tenant(), doc, collection, "file:///hl/" + doc, "highlight", OffsetDateTime.now())
+            case SAT_ASPECTS -> ctx.insertInto(DOCUMENT_ASPECTS)
+                .set(DOCUMENT_ASPECTS.TENANT_ID, fx.tenant())
+                .set(DOCUMENT_ASPECTS.COLLECTION, collection)
+                .set(DOCUMENT_ASPECTS.COLLECTION_ID, CollectionIds.idOf(fx.tenant(), collection))
+                .set(DOCUMENT_ASPECTS.SOURCE_PATH, "p/" + doc)
+                .set(DOCUMENT_ASPECTS.EXTRACTED_AT, OffsetDateTime.now())
+                .set(DOCUMENT_ASPECTS.MODEL_VERSION, "m1")
+                .set(DOCUMENT_ASPECTS.EXTRACTOR_NAME, "docling")
+                .set(DOCUMENT_ASPECTS.DOC_ID, doc)
+                .set(DOCUMENT_ASPECTS.SOURCE_URI, "file:///p/" + doc).execute();
+            case SAT_HIGHLIGHTS -> ctx.insertInto(DOCUMENT_HIGHLIGHTS)
+                .set(DOCUMENT_HIGHLIGHTS.TENANT_ID, fx.tenant())
+                .set(DOCUMENT_HIGHLIGHTS.DOC_ID, doc)
+                .set(DOCUMENT_HIGHLIGHTS.COLLECTION, collection)
+                .set(DOCUMENT_HIGHLIGHTS.COLLECTION_ID, CollectionIds.idOf(fx.tenant(), collection))
+                .set(DOCUMENT_HIGHLIGHTS.SOURCE_URI, "file:///hl/" + doc)
+                .set(DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD, "highlight")
+                .set(DOCUMENT_HIGHLIGHTS.INGESTED_AT, OffsetDateTime.now())
                 .execute();
             default -> throw new IllegalArgumentException(table);
         });
@@ -756,19 +769,28 @@ class ReembedCutoverTest extends ReembedFixture {
                 List.of(new float[384]), List.of(java.util.Map.of()));
             for (var spec : List.of(new Object[] {topicA, fx.src()}, new Object[] {topicB, fx.src()},
                                     new Object[] {topicElsewhere, fx.tgt()})) {
-                ctx.insertInto(TOPICS, TOPICS.ID, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.DOC_COUNT,
-                        TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS)
-                    .values((Long) spec[0], fx.tenant(), "t" + spec[0], (String) spec[1], 0, OffsetDateTime.now(),
-                        "pending")
+                ctx.insertInto(TOPICS)
+                    .set(TOPICS.ID, (Long) spec[0])
+                    .set(TOPICS.TENANT_ID, fx.tenant())
+                    .set(TOPICS.LABEL, "t" + spec[0])
+                    .set(TOPICS.COLLECTION, (String) spec[1])
+                    .set(TOPICS.COLLECTION_ID, CollectionIds.idOf(fx.tenant(), (String) spec[1]))
+                    .set(TOPICS.DOC_COUNT, 0)
+                    .set(TOPICS.CREATED_AT, OffsetDateTime.now())
+                    .set(TOPICS.REVIEW_STATUS, "pending")
                     .execute();
             }
             // two assignments of ANOTHER collection to the source's topic A, and one to B
             for (long topic : new long[] {topicA, topicB}) {
-                ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
-                        TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
-                        TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
-                    .values(fx.tenant(), Chash.fromHex(ch(otherText)).toBytes(), topic, "projection", fx.tgt(),
-                        OffsetDateTime.now(), MINI)
+                ctx.insertInto(TOPIC_ASSIGNMENTS)
+                    .set(TOPIC_ASSIGNMENTS.TENANT_ID, fx.tenant())
+                    .set(TOPIC_ASSIGNMENTS.DOC_ID, Chash.fromHex(ch(otherText)).toBytes())
+                    .set(TOPIC_ASSIGNMENTS.TOPIC_ID, topic)
+                    .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY, "projection")
+                    .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, fx.tgt())
+                    .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, CollectionIds.idOf(fx.tenant(), fx.tgt()))
+                    .set(TOPIC_ASSIGNMENTS.ASSIGNED_AT, OffsetDateTime.now())
+                    .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, MINI)
                     .execute();
             }
             ctx.insertInto(TOPIC_LINKS, TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID, TOPIC_LINKS.TO_TOPIC_ID)

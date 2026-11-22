@@ -282,13 +282,13 @@ def seeded(cat):
         coll_paper,
         content_type="knowledge",
         owner_id=str(repo_a),
-        embedding_model="bge-base-en-v15-768",
+        embedding_model="bge-base-en-v15-768", model_version="v1",
     )
     cat.register_collection(
         coll_code,
         content_type="code",
         owner_id=str(repo_a),
-        embedding_model="bge-base-en-v15-768",
+        embedding_model="bge-base-en-v15-768", model_version="v1",
     )
 
     # ── Documents ─────────────────────────────────────────────────────────────

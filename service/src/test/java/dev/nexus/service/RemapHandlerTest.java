@@ -1,5 +1,6 @@
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.db.TenantConstants;
@@ -18,6 +19,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.sql.Connection;
+import java.util.List;
 import java.util.Map;
 
 import static dev.nexus.service.jooq.nexus.Tables.CHASH_REMAP;
@@ -101,11 +103,37 @@ class RemapHandlerTest {
         // still-chunkless collection out from under the write (see
         // BridgeAddressFieldsTest's identical fix). Burn the sweep here
         // first, once, for every @Test method uniformly.
-        var warmup = HttpRequest.newBuilder()
-            .uri(URI.create("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list"))
+        var warmup = TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list")
             .header("Authorization", "Bearer " + TOKEN)
             .GET().build();
         http.send(warmup, HttpResponse.BodyHandlers.ofString());
+
+        // RDR-229 P3.1 stage 2b: chash_remap carries both collections' registry ids (a NAME_ID CHECK), so every name a
+        // test records must be registered; a name that is not is refused 422 before the write. After the warmup, so
+        // the ghost sweep above cannot delete these chunkless rows.
+        try (Connection su = pg.createConnection("")) {
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            for (String name : List.of(
+                    "legacy__h1__src", "legacy__h2__src", "legacy__h2b__src", "legacy__h2c__src", "legacy__h3__src",
+                    "legacy__h4__src", "legacy__h5__src", "legacy__h6__src", "legacy__h6b__src", "legacy__h7__src",
+                    "legacy__h7b__src", "legacy__h7c__src", "legacy__h8__srcA", "legacy__h8__srcB", "legacy__h9__src",
+                    "legacy__h10__srcA", "legacy__h10__srcB",
+                    "knowledge__h1__tgt", "knowledge__h2__tgt", "knowledge__h2b__tgtA", "knowledge__h2b__tgtB",
+                    "knowledge__h3__tgt", "knowledge__h4__tgt", "knowledge__h5__tgt", "knowledge__h6__tgt",
+                    "knowledge__h8__tgt", "knowledge__h9__tgt", "knowledge__h10__tgt")) {
+                PgContainerHelper.insertCollection(ctx, TENANT, name);
+            }
+        }
+
+        // OTHER_TENANT records facts over h4's names in the RLS test; burn its own ghost sweep first, then register.
+        http.send(TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list")
+            .header("Authorization", "Bearer " + OTHER_TOKEN)
+            .GET().build(), HttpResponse.BodyHandlers.ofString());
+        try (Connection su = pg.createConnection("")) {
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, OTHER_TENANT, "legacy__h4__src");
+            PgContainerHelper.insertCollection(ctx, OTHER_TENANT, "knowledge__h4__tgt");
+        }
     }
 
     @AfterAll
@@ -601,6 +629,7 @@ class RemapHandlerTest {
                 ctx.insertInto(CHUNKS)
                     .set(CHUNKS.TENANT_ID, TENANT)
                     .set(CHUNKS.COLLECTION, collection)
+                    .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
                     .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chash(seedPrefix + i)))
                     .set(CHUNKS.EMBEDDING_MODEL, model)
                     .set(CHUNKS.CHUNK_TEXT, "text")

@@ -1,5 +1,6 @@
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.CatalogIdentityConflictException;
 import dev.nexus.service.db.TaxonomyRepository;
 import dev.nexus.service.db.TenantScope;
@@ -112,6 +113,7 @@ class TaxonomyRepositoryTest {
             ctx.insertInto(CHUNKS)
                 .set(CHUNKS.TENANT_ID, tenant)
                 .set(CHUNKS.COLLECTION, collection)
+                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
                 .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chashHex))
                 .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
                 .set(CHUNKS.CHUNK_TEXT, "seed")
@@ -1088,6 +1090,7 @@ class TaxonomyRepositoryTest {
                         .set(TOPICS.TENANT_ID, "other-tenant")
                         .set(TOPICS.LABEL, "evil")
                         .set(TOPICS.COLLECTION, "col-x")
+                        .set(TOPICS.COLLECTION_ID, CollectionIds.idOf("other-tenant", "col-x"))
                         .set(TOPICS.DOC_COUNT, 0)
                         .set(TOPICS.CREATED_AT, DSL.currentOffsetDateTime())
                         .set(TOPICS.REVIEW_STATUS, "pending")

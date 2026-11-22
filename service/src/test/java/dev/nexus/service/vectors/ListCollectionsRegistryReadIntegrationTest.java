@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import dev.nexus.service.db.CollectionIds;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
@@ -116,10 +117,21 @@ class ListCollectionsRegistryReadIntegrationTest {
         org.jooq.Table<Record1<Integer>> series = DSL.generateSeries(1, rows).as("s", "g");
         org.jooq.Field<Integer> g = series.field(0, Integer.class);
         org.jooq.Field<Vector> emb = dim == 384 ? CHUNKS.EMBEDDING_384 : CHUNKS.EMBEDDING_1024;
-        dsl.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
-                CHUNKS.CHUNK_TEXT, emb)
-            .select(dsl.select(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, chashOf(coll, g), CHUNKS.EMBEDDING_MODEL,
-                    CHUNKS.CHUNK_TEXT, emb)
+        dsl.insertInto(CHUNKS,
+                CHUNKS.TENANT_ID,
+                CHUNKS.COLLECTION,
+                CHUNKS.COLLECTION_ID,
+                CHUNKS.CHASH,
+                CHUNKS.EMBEDDING_MODEL,
+                CHUNKS.CHUNK_TEXT,
+                emb)
+            .select(dsl.select(CHUNKS.TENANT_ID,
+               CHUNKS.COLLECTION,
+               CollectionIds.idOf(CHUNKS.TENANT_ID, CHUNKS.COLLECTION),
+               chashOf(coll, g),
+               CHUNKS.EMBEDDING_MODEL,
+               CHUNKS.CHUNK_TEXT,
+               emb)
                 .from(CHUNKS, series)
                 .where(CHUNKS.TENANT_ID.eq(tenant)).and(CHUNKS.COLLECTION.eq(coll))
                 .and(CHUNKS.CHASH.eq(Chash.fromHex(seedHex).toBytes())))
@@ -149,23 +161,36 @@ class ListCollectionsRegistryReadIntegrationTest {
             PgContainerHelper.insertCollection(dsl, T2, OTHER_TENANT_ONLY);
             bulk(dsl, T2, OTHER_TENANT_ONLY, "minilm-l6-v2-384", 384, 10);
             // A rename tombstone: still 'live', superseded by the new name.
-            dsl.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, LIVE_384)
-                .where(CATALOG_COLLECTIONS.NAME.eq(TOMBSTONE)).execute();
+            for (String t : List.of(T1, T2)) {
+                dev.nexus.service.CollectionIdSeeds.supersede(dsl, t, TOMBSTONE, LIVE_384);
+            }
             // Own the first 20 chunks of each live collection so the stats view has live counts.
             for (String t : List.of(T1, T2)) {
                 for (String[] c : new String[][] {{LIVE_384, "minilm-l6-v2-384"}, {LIVE_1024, "voyage-code-3"}}) {
                     String doc = "own-" + c[0];
-                    dsl.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
-                            CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
-                        .values(t, doc, "o", c[0]).execute();
+                    dsl.insertInto(CATALOG_DOCUMENTS)
+                        .set(CATALOG_DOCUMENTS.TENANT_ID, t)
+                        .set(CATALOG_DOCUMENTS.TUMBLER, doc)
+                        .set(CATALOG_DOCUMENTS.TITLE, "o")
+                        .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, c[0])
+                        .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(t, c[0])).execute();
                     org.jooq.Table<Record1<Integer>> series = DSL.generateSeries(1, 20).as("s", "g");
                     org.jooq.Field<Integer> g = series.field(0, Integer.class);
-                    dsl.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
-                            CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
-                            CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                    dsl.insertInto(CATALOG_DOCUMENT_CHUNKS,
+                            CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
+                            CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                            CATALOG_DOCUMENT_CHUNKS.POSITION,
+                            CATALOG_DOCUMENT_CHUNKS.CHASH,
+                            CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                            CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID,
                             CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-                        .select(dsl.select(DSL.inline(t), DSL.inline(doc), g, chashOf(c[0], g), DSL.inline(c[0]),
-                                DSL.inline(c[1]))
+                        .select(dsl.select(DSL.inline(t),
+                           DSL.inline(doc),
+                           g,
+                           chashOf(c[0], g),
+                           DSL.inline(c[0]),
+                           CollectionIds.idOf(DSL.inline(t), DSL.inline(c[0])),
+                           DSL.inline(c[1]))
                             .from(series))
                         .execute();
                 }
@@ -216,10 +241,16 @@ class ListCollectionsRegistryReadIntegrationTest {
             su.setAutoCommit(true);
             DSLContext dsl = DSL.using(su, SQLDialect.POSTGRES);
             org.assertj.core.api.Assertions.assertThatThrownBy(() ->
-                dsl.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
-                        CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384)
-                    .values(T1, "knowledge__clr-nope__minilm-l6-v2-384__v1", new byte[32], "minilm-l6-v2-384", "x",
-                        Vector.of(new float[384]))
+                dsl.insertInto(CHUNKS)
+                    .set(CHUNKS.TENANT_ID, T1)
+                    .set(CHUNKS.COLLECTION, "knowledge__clr-nope__minilm-l6-v2-384__v1")
+                    // RDR-229 P3.1: the id CHECK needs an id beside the name, and an unregistered name has none, so the
+                    // row carries one no registry row holds: the registry foreign key is what refuses it.
+                    .set(CHUNKS.COLLECTION_ID, Long.MAX_VALUE)
+                    .set(CHUNKS.CHASH, new byte[32])
+                    .set(CHUNKS.EMBEDDING_MODEL, "minilm-l6-v2-384")
+                    .set(CHUNKS.CHUNK_TEXT, "x")
+                    .set(CHUNKS.EMBEDDING_384, Vector.of(new float[384]))
                     .execute())
                 .hasMessageContaining("chunks_collection_fk");
         }

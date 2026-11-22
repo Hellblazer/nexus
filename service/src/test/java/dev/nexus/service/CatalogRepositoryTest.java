@@ -1,5 +1,6 @@
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.GraphScopeFilter;
 import dev.nexus.service.db.TenantScope;
@@ -111,6 +112,7 @@ class CatalogRepositoryTest {
             ctx.insertInto(CHUNKS)
                 .set(CHUNKS.TENANT_ID, tenant)
                 .set(CHUNKS.COLLECTION, collection)
+                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
                 .set(CHUNKS.CHASH, HexFormat.of().parseHex(chashHex))
                 .set(CHUNKS.EMBEDDING_MODEL, model)
                 .set(CHUNKS.CHUNK_TEXT, "stub")
@@ -120,6 +122,19 @@ class CatalogRepositoryTest {
                 .execute();
             return null;
         });
+    }
+
+    /** RDR-229 P3.1: a document names its collection by registry id, so the engine refuses one under an unregistered collection; a seed registers it first, as a client does (idempotent). */
+    private Map<String, Object> reg(String tenant, Map<String, Object> doc) {
+        if (doc.get("physical_collection") instanceof String c && !c.isEmpty()) {
+            tenantScope.withTenant(tenant, ctx -> { PgContainerHelper.insertCollection(ctx, tenant, c); return null; });
+        }
+        return doc;
+    }
+
+    private List<Map<String, Object>> regAll(String tenant, List<Map<String, Object>> docs) {
+        docs.forEach(d -> reg(tenant, d));
+        return docs;
     }
 
     private void writeManifestSeeded(String tenant, String docId, String collection,
@@ -300,7 +315,7 @@ class CatalogRepositoryTest {
 
     @Test @Order(10)
     void document_upsertAndGet() {
-        repo.upsertDocument(TENANT_A, mapOf(
+        repo.upsertDocument(TENANT_A, reg(TENANT_A, mapOf(
             "tumbler", "1.1",
             "title", "RDR-152 Postgres Storage Service",
             "author", "Hal Hildebrand",
@@ -314,7 +329,7 @@ class CatalogRepositoryTest {
             "indexed_at", "2026-06-01T00:00:00Z",
             "source_mtime", 1.0,
             "source_uri", "file:///Users/hal/git/nexus/docs/rdr/rdr-152.md"
-        ));
+        )));
         var doc = repo.getDocument(TENANT_A, "1.1");
         assertThat(doc).isNotNull();
         assertThat(doc.get("title")).isEqualTo("RDR-152 Postgres Storage Service");
@@ -333,14 +348,14 @@ class CatalogRepositoryTest {
     void document_listDocuments_returnsPaged() {
         // Seed a few more docs
         for (int i = 2; i <= 4; i++) {
-            repo.upsertDocument(TENANT_A, Map.of(
+            repo.upsertDocument(TENANT_A, reg(TENANT_A, Map.of(
                 "tumbler", "1." + i,
                 "title", "Doc " + i,
                 "author", "Author " + i,
                 "content_type", "paper",
                 "corpus", "knowledge",
                 "physical_collection", "knowledge__nexus__v1"
-            ));
+            )));
         }
         var all = repo.listDocuments(TENANT_A, 100, 0);
         assertThat(all.size()).isGreaterThanOrEqualTo(4); // 1.1 + 1.2-1.4
@@ -446,9 +461,9 @@ class CatalogRepositoryTest {
         repo.upsertOwner(TENANT_A, Map.of(
             "tumbler_prefix", "9", "name", "fgxmk-papers", "owner_type", "curator"));
         for (String[] doc : new String[][] {{"9.3", "Paper C"}, {"9.1", "Paper A"}, {"9.2", "Paper B"}}) {
-            repo.upsertDocument(TENANT_A, mapOf(
+            repo.upsertDocument(TENANT_A, reg(TENANT_A, mapOf(
                 "tumbler", doc[0], "title", doc[1], "content_type", "paper", "corpus", "papers",
-                "physical_collection", "knowledge__fgxmk__voyage-context-3__v1", "chunk_count", 1));
+                "physical_collection", "knowledge__fgxmk__voyage-context-3__v1", "chunk_count", 1)));
         }
 
         var hits = repo.searchDocuments(TENANT_A, "Paper A", null, 50);
@@ -473,13 +488,13 @@ class CatalogRepositoryTest {
         // (mirrors the indexer catalog hook's real per-file payload shape:
         // head_hash is repo-wide but physical_collection/meta/source_mtime
         // vary per file).
-        repo.upsertDocument(TENANT_A, Map.of(
+        repo.upsertDocument(TENANT_A, reg(TENANT_A, Map.of(
             "tumbler", "2.20", "title", "Many A", "content_type", "code",
-            "corpus", "code", "physical_collection", "code__nexus__v1"));
-        repo.upsertDocument(TENANT_A, Map.of(
+            "corpus", "code", "physical_collection", "code__nexus__v1")));
+        repo.upsertDocument(TENANT_A, reg(TENANT_A, Map.of(
             "tumbler", "2.21", "title", "Many B", "content_type", "docs",
             "corpus", "docs", "physical_collection", "docs__nexus__v1",
-            "metadata", Map.of("content_hash", "keepme")));
+            "metadata", Map.of("content_hash", "keepme"))));
 
         List<Integer> results = repo.updateDocumentsMany(TENANT_A, List.of(
             Map.of("tumbler", "2.20", "head_hash", "abc123", "source_mtime", 111.0),
@@ -690,13 +705,13 @@ class CatalogRepositoryTest {
 
     @Test @Order(16)
     void document_documentsByCollection() {
-        repo.upsertDocument(TENANT_A, Map.of(
+        repo.upsertDocument(TENANT_A, reg(TENANT_A, Map.of(
             "tumbler", "4.1",
             "title", "In Collection",
             "content_type", "paper",
             "corpus", "knowledge",
             "physical_collection", "knowledge__unit_test_coll"
-        ));
+        )));
         var docs = repo.documentsByCollection(TENANT_A, "knowledge__unit_test_coll", 0, 0);
         assertThat(docs).hasSize(1);
         assertThat(docs.get(0).get("tumbler")).isEqualTo("4.1");
@@ -715,10 +730,10 @@ class CatalogRepositoryTest {
     void documentsByCollection_limitAndOffset_pageWithoutOverlap() {
         final String coll = "knowledge__xoimv_page_coll";
         for (int i = 1; i <= 5; i++) {
-            repo.upsertDocument(TENANT_A, Map.of(
+            repo.upsertDocument(TENANT_A, reg(TENANT_A, Map.of(
                 "tumbler", "4.20." + i, "title", "Page Doc " + i,
                 "content_type", "paper", "corpus", "knowledge",
-                "physical_collection", coll));
+                "physical_collection", coll)));
         }
         // limit <= 0: unbounded.
         assertThat(repo.documentsByCollection(TENANT_A, coll, 0, 0)).hasSize(5);
@@ -788,14 +803,14 @@ class CatalogRepositoryTest {
     @Test @Order(21)
     void fts_simpleTokenExact_corpusMatch() {
         // Insert a doc with a specific corpus that is an identifier (no stemming needed)
-        repo.upsertDocument(TENANT_A, Map.of(
+        repo.upsertDocument(TENANT_A, reg(TENANT_A, Map.of(
             "tumbler", "5.2",
             "title", "Some Paper",
             "author", "Some Author",
             "content_type", "paper",
             "corpus", "assetops-kg",
             "physical_collection", "knowledge__assetops"
-        ));
+        )));
         // Simple tokenizer should find "assetops" exactly in the corpus field
         var results = repo.searchDocuments(TENANT_A, "assetops", null, 50);
         var tumblers = results.stream().map(d -> (String) d.get("tumbler")).toList();
@@ -1281,9 +1296,9 @@ class CatalogRepositoryTest {
     private static final String SF_OUT = "code__sf__voyage-code-3__v1";
 
     private void sfDoc(String tenant, String tumbler, String collection) {
-        repo.upsertDocument(tenant, Map.of("tumbler", tumbler,
+        repo.upsertDocument(tenant, reg(tenant, Map.of("tumbler", tumbler,
             "title", "sf " + tumbler, "content_type", collection.startsWith("rdr") ? "rdr" : "code",
-            "corpus", "x", "physical_collection", collection));
+            "corpus", "x", "physical_collection", collection)));
     }
 
     private void sfLink(String tenant, String from, String to) {
@@ -1446,9 +1461,9 @@ class CatalogRepositoryTest {
     void manifest_writeAndGet() {
         // nexus-7nrvr: real collection — ghost-ness was incidental (write/get
         // round-trip behaviour is the point).
-        repo.upsertDocument(TENANT_A, Map.of("tumbler", "mfst.1", "title", "Manifest Doc",
+        repo.upsertDocument(TENANT_A, reg(TENANT_A, Map.of("tumbler", "mfst.1", "title", "Manifest Doc",
             "content_type", "paper", "corpus", "knowledge",
-            "physical_collection", "knowledge__mfst1__v1"));
+            "physical_collection", "knowledge__mfst1__v1")));
 
         var rows = List.of(
             Map.<String, Object>of("position", 0, "chash", ch("aaaa"), "chunk_index", 0,
@@ -1474,9 +1489,9 @@ class CatalogRepositoryTest {
         // resolvable write (ghost-ness here was incidental — the test is
         // about writeManifest's REPLACE atomicity, not about the ghost/
         // no-collection path).
-        repo.upsertDocument(TENANT_A, Map.of("tumbler", "mfst.2", "title", "Replace Doc",
+        repo.upsertDocument(TENANT_A, reg(TENANT_A, Map.of("tumbler", "mfst.2", "title", "Replace Doc",
             "content_type", "paper", "corpus", "knowledge",
-            "physical_collection", "knowledge__mfst2__v1"));
+            "physical_collection", "knowledge__mfst2__v1")));
         // Write initial
         writeManifestSeeded(TENANT_A, "mfst.2", "knowledge__mfst2__v1", List.of(
             Map.<String, Object>of("position", 0, "chash", ch("old"), "chunk_index", 0)
@@ -1496,9 +1511,9 @@ class CatalogRepositoryTest {
     void manifest_purge_removesAll() {
         // nexus-7nrvr: real collection — ghost-ness was incidental (purge
         // behaviour is the point, not the ghost path).
-        repo.upsertDocument(TENANT_A, Map.of("tumbler", "mfst.3", "title", "Purge Doc",
+        repo.upsertDocument(TENANT_A, reg(TENANT_A, Map.of("tumbler", "mfst.3", "title", "Purge Doc",
             "content_type", "paper", "corpus", "knowledge",
-            "physical_collection", "knowledge__mfst3__v1"));
+            "physical_collection", "knowledge__mfst3__v1")));
         writeManifestSeeded(TENANT_A, "mfst.3", "knowledge__mfst3__v1", List.of(
             Map.<String, Object>of("position", 0, "chash", ch("purge"), "chunk_index", 0)
         ));
@@ -1513,8 +1528,8 @@ class CatalogRepositoryTest {
         // nexus-b6enc F5: purgeManifest used to delete the manifest rows but
         // leave documents.chunk_count stale — a ghost count with no rows
         // behind it. The zero must land in the SAME transaction as the purge.
-        repo.upsertDocument(TENANT_A, Map.of("tumbler", "mfst.purge2", "title", "Purge Count Doc",
-            "content_type", "paper", "corpus", "knowledge", "chunk_count", 2));
+        repo.upsertDocument(TENANT_A, reg(TENANT_A, Map.of("tumbler", "mfst.purge2", "title", "Purge Count Doc",
+            "content_type", "paper", "corpus", "knowledge", "chunk_count", 2)));
         writeManifestSeeded(TENANT_A, "mfst.purge2", "knowledge__mfst-purge2__v1", List.of(
             Map.<String, Object>of("position", 0, "chash", ch("pg0"), "chunk_index", 0),
             Map.<String, Object>of("position", 1, "chash", ch("pg1"), "chunk_index", 1)
@@ -1545,8 +1560,8 @@ class CatalogRepositoryTest {
         // distinction entirely — writeManifest now REQUIRES an explicit
         // caller-supplied collection on every call, stamped verbatim
         // regardless of the document's own physical_collection.
-        repo.upsertDocument(TENANT_A, Map.of("tumbler", "mfst.wcnt", "title", "Write Count Doc",
-            "content_type", "paper", "corpus", "knowledge", "chunk_count", 0));
+        repo.upsertDocument(TENANT_A, reg(TENANT_A, Map.of("tumbler", "mfst.wcnt", "title", "Write Count Doc",
+            "content_type", "paper", "corpus", "knowledge", "chunk_count", 0)));
         writeManifestSeeded(TENANT_A, "mfst.wcnt", "knowledge__mfst-wcnt__voyage-context-3__v1", List.of(
             Map.<String, Object>of("position", 0, "chash", ch("wc0"), "chunk_index", 0),
             Map.<String, Object>of("position", 1, "chash", ch("wc1"), "chunk_index", 1),
@@ -1571,9 +1586,9 @@ class CatalogRepositoryTest {
 
     @Test @Order(53)
     void manifest_chashesForCollection() {
-        repo.upsertDocument(TENANT_A, Map.of("tumbler", "mfst.4", "title", "Chash For Collection",
+        repo.upsertDocument(TENANT_A, reg(TENANT_A, Map.of("tumbler", "mfst.4", "title", "Chash For Collection",
             "content_type", "paper", "corpus", "knowledge",
-            "physical_collection", "knowledge__chash_test"));
+            "physical_collection", "knowledge__chash_test")));
         writeManifestSeeded(TENANT_A, "mfst.4", "knowledge__chash_test", List.of(
             Map.<String, Object>of("position", 0, "chash", ch("cfccc0"), "chunk_index", 0),
             Map.<String, Object>of("position", 1, "chash", ch("cfccc1"), "chunk_index", 1)
@@ -1586,9 +1601,9 @@ class CatalogRepositoryTest {
     void manifest_resyncChunkCount() {
         // nexus-7nrvr: real collection — ghost-ness was incidental (resync
         // repair behaviour is the point).
-        repo.upsertDocument(TENANT_A, Map.of("tumbler", "mfst.5", "title", "Resync Doc",
+        repo.upsertDocument(TENANT_A, reg(TENANT_A, Map.of("tumbler", "mfst.5", "title", "Resync Doc",
             "content_type", "paper", "corpus", "knowledge", "chunk_count", 0,
-            "physical_collection", "knowledge__mfst5__v1"));
+            "physical_collection", "knowledge__mfst5__v1")));
         writeManifestSeeded(TENANT_A, "mfst.5", "knowledge__mfst5__v1", List.of(
             Map.<String, Object>of("position", 0, "chash", ch("rsync0"), "chunk_index", 0),
             Map.<String, Object>of("position", 1, "chash", ch("rsync1"), "chunk_index", 1),
@@ -1596,9 +1611,9 @@ class CatalogRepositoryTest {
         ));
         // De-sync the count deliberately (writeManifest itself now folds it —
         // nexus-b6enc F5 — so force a wrong value to prove resync repairs).
-        repo.upsertDocument(TENANT_A, Map.of("tumbler", "mfst.5", "title", "Resync Doc",
+        repo.upsertDocument(TENANT_A, reg(TENANT_A, Map.of("tumbler", "mfst.5", "title", "Resync Doc",
             "content_type", "paper", "corpus", "knowledge", "chunk_count", 99,
-            "physical_collection", "knowledge__mfst5__v1"));
+            "physical_collection", "knowledge__mfst5__v1")));
         repo.resyncChunkCount(TENANT_A, "mfst.5");
         var doc = repo.getDocument(TENANT_A, "mfst.5");
         assertThat(doc.get("chunk_count")).isEqualTo(3);
@@ -1611,16 +1626,16 @@ class CatalogRepositoryTest {
         // nexus-7nrvr: real collections — ghost-ness was incidental (batch
         // fetch behaviour is the point).
         // Seed two docs each with two chunks
-        repo.upsertDocument(TENANT_A, Map.of("tumbler", "gmm.1", "title", "GMM Doc1",
+        repo.upsertDocument(TENANT_A, reg(TENANT_A, Map.of("tumbler", "gmm.1", "title", "GMM Doc1",
             "content_type", "paper", "corpus", "knowledge",
-            "physical_collection", "knowledge__gmm1__v1"));
+            "physical_collection", "knowledge__gmm1__v1")));
         writeManifestSeeded(TENANT_A, "gmm.1", "knowledge__gmm1__v1", List.of(
             Map.<String, Object>of("position", 0, "chash", ch("gmm1aa"), "chunk_index", 0),
             Map.<String, Object>of("position", 1, "chash", ch("gmm1bb"), "chunk_index", 1)
         ));
-        repo.upsertDocument(TENANT_A, Map.of("tumbler", "gmm.2", "title", "GMM Doc2",
+        repo.upsertDocument(TENANT_A, reg(TENANT_A, Map.of("tumbler", "gmm.2", "title", "GMM Doc2",
             "content_type", "paper", "corpus", "knowledge",
-            "physical_collection", "knowledge__gmm2__v1"));
+            "physical_collection", "knowledge__gmm2__v1")));
         writeManifestSeeded(TENANT_A, "gmm.2", "knowledge__gmm2__v1", List.of(
             Map.<String, Object>of("position", 0, "chash", ch("gmm2cc"), "chunk_index", 0)
         ));
@@ -1645,9 +1660,9 @@ class CatalogRepositoryTest {
         // nexus-kzso5: prove the row's collection is the CALLER-SUPPLIED
         // write-time value, decoupled from the doc's own physical_collection
         // -- the exact RDR-191 contract this wire field exposes.
-        repo.upsertDocument(TENANT_A, Map.of("tumbler", "mfst.kzso5", "title", "Kzso5 Doc",
+        repo.upsertDocument(TENANT_A, reg(TENANT_A, Map.of("tumbler", "mfst.kzso5", "title", "Kzso5 Doc",
             "content_type", "paper", "corpus", "knowledge",
-            "physical_collection", "knowledge__mfst-kzso5-doc__v1"));
+            "physical_collection", "knowledge__mfst-kzso5-doc__v1")));
         writeManifestSeeded(TENANT_A, "mfst.kzso5", "knowledge__mfst-kzso5-explicit__v1", List.of(
             Map.<String, Object>of("position", 0, "chash", ch("kzso5row"), "chunk_index", 0)
         ));
@@ -1670,8 +1685,8 @@ class CatalogRepositoryTest {
         // withTenant + RLS just like resolveMany; assert a TENANT_B manifest
         // never leaks into a TENANT_A batch query (mirrors
         // resolveMany_tenantIsolation @Order 59).
-        repo.upsertDocument(TENANT_B, Map.of("tumbler", "gmmiso.1", "title", "Tenant B Doc",
-            "content_type", "paper", "corpus", "knowledge"));
+        repo.upsertDocument(TENANT_B, reg(TENANT_B, Map.of("tumbler", "gmmiso.1", "title", "Tenant B Doc",
+            "content_type", "paper", "corpus", "knowledge")));
         writeManifestSeeded(TENANT_B, "gmmiso.1", "knowledge__gmmiso1__v1", List.of(
             Map.<String, Object>of("position", 0, "chash", ch("gmmisob"), "chunk_index", 0)
         ));
@@ -1783,7 +1798,7 @@ class CatalogRepositoryTest {
         repo.upsertCollection(TENANT_A, Map.of(
             "name", "code__nexus__voyage-code-3__v1",
             "content_type", "code",
-            "owner_id", "nexus-1-1",
+            "owner_id", "upsertget-p38",
             "embedding_model", "voyage-code-3",
             "model_version", "v1"
         ));
@@ -1830,14 +1845,14 @@ class CatalogRepositoryTest {
     void collection_upsert_onConflict_keepsRegisteredOwnerId() {
         String name = "code__dbgslug-2ad2825c__voyage-code-3__v1";
         repo.upsertCollection(TENANT_A, Map.of(
-            "name", name, "content_type", "code", "owner_id", "1-1",
+            "name", name, "content_type", "code", "owner_id", "keepowner-p38",
             "embedding_model", "voyage-code-3", "model_version", "v1"));
         // What ensure_collection_registered sends on a cache miss: the name's owner segment.
         repo.upsertCollection(TENANT_A, Map.of(
             "name", name, "content_type", "code", "owner_id", "dbgslug-2ad2825c",
             "embedding_model", "voyage-code-3", "model_version", "v1"));
         assertThat(repo.getCollection(TENANT_A, name).get("owner_id"))
-            .as("a re-registration never replaces a registered owner_id").isEqualTo("1-1");
+            .as("a re-registration never replaces a registered owner_id").isEqualTo("keepowner-p38");
     }
 
     /**
@@ -1909,10 +1924,24 @@ class CatalogRepositoryTest {
     }
 
     private void putDoc(String tenant, String tumbler, String contentType, String collection) {
-        repo.upsertDocument(tenant, mapOf(
+        repo.upsertDocument(tenant, reg(tenant, mapOf(
             "tumbler", tumbler, "title", "doc " + tumbler, "content_type", contentType,
             "physical_collection", collection,
-            "source_uri", "file:///own6pbwx/" + tenant + "/" + tumbler));
+            "source_uri", "file:///own6pbwx/" + tenant + "/" + tumbler)));
+    }
+
+    /** RDR-229 P3.1: a document can no longer precede its collection's registration, so the "documents first, then
+     *  register" tests register, put the documents, then put the slug owner back: the state they start from. */
+    private void resetOwnerToSlug(String tenant, String name, String slug) {
+        try (Connection su = pg.createConnection("")) {
+            DSL.using(su, SQLDialect.POSTGRES).update(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+                .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.OWNER_ID, slug)
+                .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+                .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(name))
+                .execute();
+        } catch (java.sql.SQLException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     private String ownerOf(String tenant, String name) {
@@ -1984,6 +2013,7 @@ class CatalogRepositoryTest {
         String name = "code__dead-6pbwx__voyage-code-3__v1";
         putDoc(TENANT_OWN, "1.18.1", "code", name);
         assertThat(repo.deleteDocument(TENANT_OWN, "1.18.1")).isEqualTo(1);
+        resetOwnerToSlug(TENANT_OWN, name, "dead-6pbwx");
         registerColl(TENANT_OWN, name, "code", "dead-6pbwx");
         assertThat(ownerOf(TENANT_OWN, name)).as("a tombstoned document names no owner")
             .isEqualTo("dead-6pbwx");
@@ -2109,15 +2139,19 @@ class CatalogRepositoryTest {
 
     /** nexus-6pbwx: over existing documents, a repo owner outranks a curator with more of them. */
     @Test @Order(60)
-    void collectionOwner_registrationOverMixedDocumentsPrefersTheRepoOwner() {
+    void collectionOwner_registrationOverMixedDocumentsPrefersTheRepoOwner() throws Exception {
         String tenant = "own6pbwx-mixed-tenant";
         putOwner(tenant, "1.22", "knowledge", "curator");
         putOwner(tenant, "1.23", "some-repo", "repo");
         String name = "docs__mixed-6pbwx__voyage-context-3__v1";
-        putDoc(tenant, "1.22.1", "docs", name);
-        putDoc(tenant, "1.22.2", "docs", name);
-        putDoc(tenant, "1.22.3", "docs", name);
-        putDoc(tenant, "1.23.1", "docs", name);
+        // RDR-229 P3.1: the documents exist BEFORE their collection registers, as on an upgraded install (a name, no registry row, no id: the NOT VALID
+        // CHECK refuses it on a new row, and putDoc registers first). Catalog051OwnerGuardTest's helper lifts the CHECK for each insert and puts it back NOT VALID.
+        try (Connection su = pg.createConnection("")) {
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            for (String t : List.of("1.22.1", "1.22.2", "1.22.3", "1.23.1")) Catalog051OwnerGuardTest.insertLegacyDocument(su, ctx, tenant, t, name);
+            assertThat(ctx.fetchCount(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID.isNull())))
+                .as("non-vacuity: four documents in the legacy state").isEqualTo(4);
+        }
         registerColl(tenant, name, "docs", "mixed-6pbwx");
         assertThat(ownerOf(tenant, name)).isEqualTo("1-23");
     }
@@ -2166,6 +2200,7 @@ class CatalogRepositoryTest {
         String name = "code__restore-6pbwx__voyage-code-3__v1";
         putDoc(TENANT_OWN, "1.28.1", "code", name);
         assertThat(repo.deleteDocument(TENANT_OWN, "1.28.1")).isEqualTo(1);
+        resetOwnerToSlug(TENANT_OWN, name, "restore-6pbwx");
         registerColl(TENANT_OWN, name, "code", "restore-6pbwx");
         assertThat(ownerOf(TENANT_OWN, name)).as("guard: no live document yet").isEqualTo("restore-6pbwx");
         assertThat(repo.restoreDocument(TENANT_OWN, "1.28.1")).isEqualTo(1);
@@ -2201,6 +2236,7 @@ class CatalogRepositoryTest {
         String name = "code__tie-6pbwx__voyage-code-3__v1";
         putDoc(TENANT_OWN, "1.26.1", "code", name);
         putDoc(TENANT_OWN, "1.25.1", "code", name);
+        resetOwnerToSlug(TENANT_OWN, name, "tie-6pbwx");
         registerColl(TENANT_OWN, name, "code", "tie-6pbwx");
         assertThat(ownerOf(TENANT_OWN, name)).isEqualTo("1-25");
     }
@@ -2234,12 +2270,16 @@ class CatalogRepositoryTest {
             .as("a higher model_version wins").isEqualTo(slugV2);
     }
 
-    private void registerCollAt(String tenant, String name, String owner, String model, String version,
-                                String createdAt, boolean legacyGrandfathered) {
-        repo.upsertCollection(tenant, Map.of(
-            "name", name, "content_type", "code", "owner_id", owner,
-            "embedding_model", model, "model_version", version,
-            "created_at", createdAt, "legacy_grandfathered", legacyGrandfathered));
+    /** A supersede successor with a model_version of its own: on its source's tuple it is a second live collection, which a named upsert refuses (P3.8). */
+    private void registerSuccessorAt(String name, String owner, String version) {
+        repo.upsertCollection(TENANT_A, Map.of("name", name, "content_type", "code", "owner_id", owner, "embedding_model", "voyage-code-3", "model_version", version));
+    }
+
+    /** Two live rows of one tuple are D4's accepted duplicate, which a named upsert refuses (RDR-229 P3.8): superuser insert. */
+    private void registerCollAt(String tenant, String name, String owner, String model, String version, String createdAt, boolean legacyGrandfathered) {
+        try (Connection su = pg.createConnection("")) {
+            CollectionMintSupport.insertCodeRowAt(DSL.using(su, SQLDialect.POSTGRES), tenant, name, owner, model, version, createdAt, legacyGrandfathered);
+        } catch (java.sql.SQLException e) { throw new IllegalStateException(e); }
     }
 
     /**
@@ -2404,13 +2444,12 @@ class CatalogRepositoryTest {
     }
 
     /**
-     * nexus-p2m1x.4: the order is TOTAL and independent of row order. Two rows with the same created_at
-     * fall to the name whichever was inserted first, and a version above both still wins whatever
-     * the age. (The name is the last key only because it is the one column unique within a tenant until
-     * P3.1.)
+     * nexus-p2m1x.4: the order is TOTAL. Two rows with the same created_at fall to the lower collection_id,
+     * the row inserted first (RDR-229 P3.8; the name decided before), and a version above both still wins
+     * whatever the age. (The name is the last key, for a row with no id.)
      */
     @Test @Order(60)
-    void collectionForTuple_equalRegistrationTimeFallsToTheNameInEitherInsertOrder() {
+    void collectionForTuple_equalRegistrationTimeFallsToTheLowerCollectionIdInEitherInsertOrder() {
         String same = "2026-03-01T00:00:00Z";
         String lower = "code__1-41__voyage-code-3__v1";
         String higher = "code__zslug-p2m1x4__voyage-code-3__v1";
@@ -2421,7 +2460,7 @@ class CatalogRepositoryTest {
         registerCollAt(t2, higher, "1-41", OWN_MODEL, "v1", same, false);
         registerCollAt(t2, lower, "1-41", OWN_MODEL, "v1", same, false);
         assertThat(repo.collectionForTuple(t1, "code", "1-41", OWN_MODEL).get("name")).isEqualTo(lower);
-        assertThat(repo.collectionForTuple(t2, "code", "1-41", OWN_MODEL).get("name")).isEqualTo(lower);
+        assertThat(repo.collectionForTuple(t2, "code", "1-41", OWN_MODEL).get("name")).isEqualTo(higher);
 
         // age never beats version: a NEWER row at a higher version wins
         registerCollAt(t1, "code__1-41__voyage-code-3__v2", "1-41", OWN_MODEL, "v2", "2026-04-01T00:00:00Z", false);
@@ -2449,7 +2488,7 @@ class CatalogRepositoryTest {
             registerCollAt(c[0], c[2], c[1], OWN_MODEL, "v1", c[3], false);
             registerCollAt(c[0], c[4], c[1], OWN_MODEL, "v1", c[5], false);
             String sql = (String) repo.collectionForTuple(c[0], "code", c[1], OWN_MODEL).get("name");
-            var rows = repo.listCollections(c[0]).stream()
+            var rows = repo.listCollections(c[0], null, null).stream()
                 .map(dev.nexus.service.reembed.TargetSelection.CollectionRow::fromMap).toList();
             var picked = dev.nexus.service.reembed.TargetSelection.select(rows, "code", c[1], OWN_MODEL);
             assertThat(picked).as("case " + c[0])
@@ -2473,6 +2512,10 @@ class CatalogRepositoryTest {
         String name = "code__race-6pbwx__voyage-code-3__v1";
         registerColl(tenant, name, "code", "race-6pbwx");
         assertThat(ownerOf(tenant, name)).as("guard: registered with the slug").isEqualTo("race-6pbwx");
+        final Long collectionId;
+        try (Connection su = pg.createConnection("")) {
+            collectionId = CollectionIds.require(DSL.using(su, SQLDialect.POSTGRES), tenant, name);
+        }
 
         try (Connection repoTx = pg.createConnection("");
              Connection curatorTx = pg.createConnection("")) {
@@ -2489,8 +2532,9 @@ class CatalogRepositoryTest {
                 var docs = dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
                 var curatorWrite = pool.submit(() ->
                     DSL.using(curatorTx, SQLDialect.POSTGRES)
-                        .insertInto(docs, docs.TENANT_ID, docs.TUMBLER, docs.TITLE, docs.PHYSICAL_COLLECTION)
-                        .values(tenant, "1.22.1", "curator doc", name)
+                        .insertInto(docs, docs.TENANT_ID, docs.TUMBLER, docs.TITLE, docs.PHYSICAL_COLLECTION,
+                            docs.PHYSICAL_COLLECTION_ID)
+                        .values(tenant, "1.22.1", "curator doc", name, collectionId)
                         .execute());
                 // Wait until the curator's trigger is really parked on the repo transaction's row lock.
                 long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(20);
@@ -2784,7 +2828,7 @@ class CatalogRepositoryTest {
             "embedding_model", "voyage-code-3",
             "model_version", "v0"
         ));
-        int updated = repo.supersedeCollection(TENANT_A, "code__nexus__voyage-code-3__v0",
+        int updated = SupersedeSeeds.supersede(repo, TENANT_A, "code__nexus__voyage-code-3__v0",
             "code__nexus__voyage-code-3__v1", "2026-06-01T00:00:00Z");
         assertThat(updated).isEqualTo(1);
         var coll = repo.getCollection(TENANT_A, "code__nexus__voyage-code-3__v0");
@@ -2806,12 +2850,14 @@ class CatalogRepositoryTest {
             "name", name, "content_type", "code",
             "owner_id", "chainguard", "embedding_model", "voyage-code-3",
             "model_version", "v1"));
-        assertThat(repo.supersedeCollection(TENANT_A, name, "code__chainguard__voyage-code-3__v2", ""))
+        registerSuccessorAt("code__chainguard__voyage-code-3__v2", "chainguard", "v2");
+        registerSuccessorAt("code__chainguard__voyage-code-3__v3", "chainguard", "v3");
+        assertThat(SupersedeSeeds.supersede(repo, TENANT_A, name, "code__chainguard__voyage-code-3__v2", ""))
             .as("guard: the first supersession must land, or the rest proves nothing")
             .isEqualTo(1);
 
         // A DIFFERENT target must match zero rows — this is what the handler reports as 409.
-        assertThat(repo.supersedeCollection(TENANT_A, name, "code__chainguard__voyage-code-3__v3", ""))
+        assertThat(SupersedeSeeds.supersede(repo, TENANT_A, name, "code__chainguard__voyage-code-3__v3", ""))
             .as("chaining to a different target must match no rows")
             .isEqualTo(0);
         assertThat(repo.getCollection(TENANT_A, name).get("superseded_by"))
@@ -2820,7 +2866,7 @@ class CatalogRepositoryTest {
 
         // The SAME target stays idempotent (the .or() disjunct) — re-asserting a supersession
         // must not start failing.
-        assertThat(repo.supersedeCollection(TENANT_A, name, "code__chainguard__voyage-code-3__v2", ""))
+        assertThat(SupersedeSeeds.supersede(repo, TENANT_A, name, "code__chainguard__voyage-code-3__v2", ""))
             .as("re-asserting the same target is idempotent, not a chain")
             .isEqualTo(1);
     }
@@ -2845,13 +2891,14 @@ class CatalogRepositoryTest {
             "name", name, "content_type", "code",
             "owner_id", "samestamp", "embedding_model", "voyage-code-3",
             "model_version", "v1"));
-        assertThat(repo.supersedeCollection(TENANT_A, name, "code__samestamp__voyage-code-3__v2", ""))
+        registerSuccessorAt("code__samestamp__voyage-code-3__v2", "samestamp", "v2");
+        assertThat(SupersedeSeeds.supersede(repo, TENANT_A, name, "code__samestamp__voyage-code-3__v2", ""))
             .as("guard: the first supersession must land, or the rest proves nothing")
             .isEqualTo(1);
         String stamp = (String) repo.getCollection(TENANT_A, name).get("superseded_at");
         assertThat(stamp).as("guard: the first supersede stamped an instant").isNotBlank();
 
-        assertThat(repo.supersedeCollection(TENANT_A, name, "code__samestamp__voyage-code-3__v2", ""))
+        assertThat(SupersedeSeeds.supersede(repo, TENANT_A, name, "code__samestamp__voyage-code-3__v2", ""))
             .as("same-target re-assertion still reports the row as marked")
             .isEqualTo(1);
         assertThat(repo.getCollection(TENANT_A, name).get("superseded_at"))
@@ -2874,9 +2921,11 @@ class CatalogRepositoryTest {
             "owner_id", "concstamp", "embedding_model", "voyage-code-3",
             "model_version", "v1"));
 
+        registerSuccessorAt(target, "concstamp", "v2");
+
         var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
         try {
-            java.util.concurrent.Callable<Integer> task = () -> repo.supersedeCollection(TENANT_A, name, target, "");
+            java.util.concurrent.Callable<Integer> task = () -> SupersedeSeeds.supersede(repo, TENANT_A, name, target, "");
             var f1 = pool.submit(task);
             var f2 = pool.submit(task);
             int r1 = f1.get();
@@ -2892,7 +2941,7 @@ class CatalogRepositoryTest {
             // already equal to the target (not '') and had to take the CASE's ELSE
             // branch, or this third, purely sequential, same-target call would move
             // the stamp — proving the loser's write did NOT re-stamp during the race.
-            assertThat(repo.supersedeCollection(TENANT_A, name, target, "")).isEqualTo(1);
+            assertThat(SupersedeSeeds.supersede(repo, TENANT_A, name, target, "")).isEqualTo(1);
             assertThat(repo.getCollection(TENANT_A, name).get("superseded_at"))
                 .as("the recorded supersession instant must survive both the race and a "
                     + "further same-target re-assertion")
@@ -2917,7 +2966,8 @@ class CatalogRepositoryTest {
             "name", name, "content_type", "code",
             "owner_id", "revive", "embedding_model", "voyage-code-3",
             "model_version", "v1"));
-        assertThat(repo.supersedeCollection(TENANT_A, name, "code__revive__voyage-code-3__v2", ""))
+        registerSuccessorAt("code__revive__voyage-code-3__v2", "revive-successor", "v1"); // another tuple: v1 stays the only live row of its own
+        assertThat(SupersedeSeeds.supersede(repo, TENANT_A, name, "code__revive__voyage-code-3__v2", ""))
             .isEqualTo(1);
         // NON-VACUITY: the row really is tombstoned before the re-registration.
         assertThat(repo.getCollection(TENANT_A, name).get("superseded_by"))
@@ -2945,10 +2995,10 @@ class CatalogRepositoryTest {
      * quarantine sibling shares every discriminator column with its origin, so the only
      * thing keeping it from a tuple is the {@code lifecycle_state != 'quarantine'}
      * predicate, and the tie-break that would otherwise decide has changed before (name
-     * DESC until nexus-6pbwx, name ASC until nexus-p2m1x.4, {@code created_at} ascending now).
-     * Whichever key it runs on, a sibling can sit on the winning side of it. Under {@code
-     * created_at} ascending that means a sibling registered BEFORE its origin, which is what
-     * each case builds and guards by assertion, or the case pins nothing.
+     * DESC until nexus-6pbwx, name ASC until nexus-p2m1x.4, {@code created_at} ascending until
+     * P3.8, now the lowest {@code collection_id}). Whichever key it runs on, a sibling can sit on
+     * the winning side of it: here a sibling registered BEFORE its origin with a LOWER id, which is
+     * what each case builds and guards by assertion, or the case pins nothing.
      *
      * <p>The live incident: hygiene-002-1 (2026-09-08 20:25:14Z) populated
      * content_type/owner_id/embedding_model on 8 quarantine rows, making them eligible
@@ -2959,7 +3009,7 @@ class CatalogRepositoryTest {
      *
      * <p>Falsifiability: with the {@code LIFECYCLE_STATE.ne("quarantine")} predicate
      * removed from {@link CatalogRepository#collectionForTuple}, both cases fail: the sibling
-     * is the older row, so it wins the tie.
+     * is the older row with the lower id, so it wins the tie.
      */
     @Test @Order(62)
     void collectionForTuple_neverResolvesToAQuarantineSibling() {
@@ -2983,12 +3033,13 @@ class CatalogRepositoryTest {
             PgContainerHelper.insertCollection(
                 org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES),
                 TENANT_A, quarantined);
-            // The sibling is the OLDER registration, so the created_at tie-break would pick it
-            // were it a candidate (nexus-p2m1x.4).
+            // The sibling is the OLDER registration with the LOWER collection_id, so the tie-break
+            // would pick it were it a candidate (nexus-p2m1x.4, RDR-229 P3.8: the lowest id wins).
             org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES)
                 .update(org.jooq.impl.DSL.table(org.jooq.impl.DSL.name("nexus", "catalog_collections")))
                 .set(org.jooq.impl.DSL.field("created_at", java.time.OffsetDateTime.class),
                      java.time.OffsetDateTime.parse("2026-01-01T00:00:00Z"))
+                .set(org.jooq.impl.DSL.field("collection_id", Long.class), -(long) contentType.length())
                 .where(org.jooq.impl.DSL.field("name", String.class).eq(quarantined))
                 .execute();
         } catch (Exception e) {
@@ -3128,9 +3179,9 @@ class CatalogRepositoryTest {
         // transaction for any caller, not only by the handler's 409.
         String src = "knowledge__xmrn__minilm-l6-v2-384__v1";
         String tgt = "knowledge__xmrn__bge-base-en-v15-768__v1";
-        repo.upsertDocument(TENANT_A, Map.of("tumbler", "xmrn.1", "title", "Cross-model Rename",
+        repo.upsertDocument(TENANT_A, reg(TENANT_A, Map.of("tumbler", "xmrn.1", "title", "Cross-model Rename",
             "content_type", "knowledge", "corpus", "knowledge",
-            "physical_collection", src));
+            "physical_collection", src)));
         repo.upsertCollection(TENANT_A, Map.of(
             "name", tgt, "content_type", "knowledge", "owner_id", "nexus-1-1",
             "embedding_model", "bge-base-en-v15-768", "model_version", "v1"));
@@ -3264,11 +3315,11 @@ class CatalogRepositoryTest {
         // Seed a parent document (FK target).
         // nexus-7nrvr: real collection — ghost-ness was incidental (convergent
         // re-import behaviour is the point).
-        repo.importDocument(etlTenant, Map.of(
+        repo.importDocument(etlTenant, reg(etlTenant, Map.of(
             "tumbler", docId, "title", "Chunk Conv Doc",
             "content_type", "paper", "corpus", "knowledge",
             "physical_collection", "knowledge__etl-chunk-conv__v1"
-        ));
+        )));
 
         // chash must be the full 64-hex canonical digest (RDR-180: chunks_*/manifest
         // columns are bytea(32) now, CHECK octet_length=32)
@@ -3303,11 +3354,11 @@ class CatalogRepositoryTest {
 
         // nexus-7nrvr: real collection — ghost-ness was incidental (idempotent
         // re-import behaviour is the point).
-        repo.importDocument(etlTenant, Map.of(
+        repo.importDocument(etlTenant, reg(etlTenant, Map.of(
             "tumbler", docId, "title", "Chunk Idem Doc",
             "content_type", "paper", "corpus", "knowledge",
             "physical_collection", "knowledge__etl-chunk-idem__v1"
-        ));
+        )));
 
         String chashStable = ch("chashStable"); // full 64-hex canonical digest
         Map<String, Object> chunk = Map.of(
@@ -3691,21 +3742,21 @@ class CatalogRepositoryTest {
         // Seed 3 documents in a dedicated collection with known indexed_at values.
         String chmTenant = "chm-tenant";
         String chmColl   = "chm__test__voyage__v1";
-        repo.upsertDocument(chmTenant, mapOf(
+        repo.upsertDocument(chmTenant, reg(chmTenant, mapOf(
             "tumbler", "chm.1", "title", "CHM Doc A",
             "content_type", "knowledge", "physical_collection", chmColl,
             "indexed_at", "2026-01-01T08:00:00"
-        ));
-        repo.upsertDocument(chmTenant, mapOf(
+        )));
+        repo.upsertDocument(chmTenant, reg(chmTenant, mapOf(
             "tumbler", "chm.2", "title", "CHM Doc B",
             "content_type", "knowledge", "physical_collection", chmColl,
             "indexed_at", "2026-06-01T12:00:00"
-        ));
-        repo.upsertDocument(chmTenant, mapOf(
+        )));
+        repo.upsertDocument(chmTenant, reg(chmTenant, mapOf(
             "tumbler", "chm.3", "title", "CHM Doc C",
             "content_type", "knowledge", "physical_collection", chmColl,
             "indexed_at", "2026-03-15T00:00:00"
-        ));
+        )));
 
         // Add one link pointing TO chm.2 — makes it a non-orphan.
         repo.upsertLink(chmTenant, Map.of(
@@ -3738,24 +3789,24 @@ class CatalogRepositoryTest {
         String sharedColl = "shared__knowledge__v1";
 
         // TENANT_X: 2 docs, no links (both orphans); indexed_at = "2026-05-01"
-        repo.upsertDocument(tenantX, mapOf(
+        repo.upsertDocument(tenantX, reg(tenantX, mapOf(
             "tumbler", "chmx.1", "title", "X Doc 1",
             "content_type", "knowledge", "physical_collection", sharedColl,
             "indexed_at", "2026-05-01T00:00:00"
-        ));
-        repo.upsertDocument(tenantX, mapOf(
+        )));
+        repo.upsertDocument(tenantX, reg(tenantX, mapOf(
             "tumbler", "chmx.2", "title", "X Doc 2",
             "content_type", "knowledge", "physical_collection", sharedColl,
             "indexed_at", "2026-05-01T00:00:00"
-        ));
+        )));
 
         // TENANT_Y: 1 doc with a later indexed_at; no incoming link, so it is
         // itself an orphan (orphan_count == 1). RLS keeps it invisible to TENANT_X.
-        repo.upsertDocument(tenantY, mapOf(
+        repo.upsertDocument(tenantY, reg(tenantY, mapOf(
             "tumbler", "chmy.1", "title", "Y Doc 1",
             "content_type", "knowledge", "physical_collection", sharedColl,
             "indexed_at", "2026-06-07T10:00:00"
-        ));
+        )));
 
         // TENANT_X must see only its own rows: last_indexed, orphan_count=2
         // (nexus-cefa1.2: micros+offset — see collectionHealthMeta_exactValues comment above.)
@@ -3781,22 +3832,22 @@ class CatalogRepositoryTest {
         String cA = "ddc__knowledge__voyage__v1";
         String cB = "ddc__code__voyage__v1";
 
-        repo.upsertDocument(dTenant, mapOf(
+        repo.upsertDocument(dTenant, reg(dTenant, mapOf(
             "tumbler", "ddc.1", "title", "DDC Doc 1",
             "content_type", "knowledge", "physical_collection", cA
-        ));
-        repo.upsertDocument(dTenant, mapOf(
+        )));
+        repo.upsertDocument(dTenant, reg(dTenant, mapOf(
             "tumbler", "ddc.2", "title", "DDC Doc 2",
             "content_type", "knowledge", "physical_collection", cA
-        ));
-        repo.upsertDocument(dTenant, mapOf(
+        )));
+        repo.upsertDocument(dTenant, reg(dTenant, mapOf(
             "tumbler", "ddc.3", "title", "DDC Doc 3",
             "content_type", "code", "physical_collection", cB
-        ));
+        )));
         // Doc with empty physical_collection — must NOT appear.
-        repo.upsertDocument(dTenant, mapOf(
+        repo.upsertDocument(dTenant, reg(dTenant, mapOf(
             "tumbler", "ddc.4", "title", "DDC Doc 4", "content_type", "paper"
-        ));
+        )));
 
         var result = repo.distinctDocCollections(dTenant);
 
@@ -3814,18 +3865,18 @@ class CatalogRepositoryTest {
         String shared = "shared__ddc__v1";
         String exclusive = "exclusive__ddc-x__v1";
 
-        repo.upsertDocument(tX, mapOf(
+        repo.upsertDocument(tX, reg(tX, mapOf(
             "tumbler", "ddcx.1", "title", "X1",
             "content_type", "knowledge", "physical_collection", shared
-        ));
-        repo.upsertDocument(tX, mapOf(
+        )));
+        repo.upsertDocument(tX, reg(tX, mapOf(
             "tumbler", "ddcx.2", "title", "X2",
             "content_type", "knowledge", "physical_collection", exclusive
-        ));
-        repo.upsertDocument(tY, mapOf(
+        )));
+        repo.upsertDocument(tY, reg(tY, mapOf(
             "tumbler", "ddcy.1", "title", "Y1",
             "content_type", "knowledge", "physical_collection", shared
-        ));
+        )));
 
         var colsX = repo.distinctDocCollections(tX);
         var colsY = repo.distinctDocCollections(tY);
@@ -3973,18 +4024,18 @@ class CatalogRepositoryTest {
     void docsWithAbsolutePaths_exactValues() {
         String absTenant = "abs-tenant";
 
-        repo.upsertDocument(absTenant, mapOf(
+        repo.upsertDocument(absTenant, reg(absTenant, mapOf(
             "tumbler", "abs.1", "title", "ABS Absolute",
             "content_type", "paper",
             "file_path", "/usr/local/data/abs.pdf",
             "physical_collection", "abs__knowledge__v1"
-        ));
-        repo.upsertDocument(absTenant, mapOf(
+        )));
+        repo.upsertDocument(absTenant, reg(absTenant, mapOf(
             "tumbler", "abs.2", "title", "ABS Relative",
             "content_type", "paper",
             "file_path", "relative/path.pdf",
             "physical_collection", "abs__knowledge__v1"
-        ));
+        )));
 
         var result = repo.docsWithAbsolutePaths(absTenant);
 
@@ -4181,22 +4232,22 @@ class CatalogRepositoryTest {
         String coll1    = "an__knowledge__voyage__v1";
         String coll2    = "an__code__voyage__v1";
 
-        repo.upsertDocument(anTenant, mapOf(
+        repo.upsertDocument(anTenant, reg(anTenant, mapOf(
             "tumbler", "an.1", "title", "AN Doc 1",
             "content_type", "knowledge", "physical_collection", coll1
-        ));
-        repo.upsertDocument(anTenant, mapOf(
+        )));
+        repo.upsertDocument(anTenant, reg(anTenant, mapOf(
             "tumbler", "an.2", "title", "AN Doc 2",
             "content_type", "knowledge", "physical_collection", coll1
-        ));
-        repo.upsertDocument(anTenant, mapOf(
+        )));
+        repo.upsertDocument(anTenant, reg(anTenant, mapOf(
             "tumbler", "an.3", "title", "AN Doc 3",
             "content_type", "code", "physical_collection", coll2
-        ));
+        )));
         // One doc with no physical_collection — must NOT appear in counts.
-        repo.upsertDocument(anTenant, mapOf(
+        repo.upsertDocument(anTenant, reg(anTenant, mapOf(
             "tumbler", "an.4", "title", "AN Doc 4", "content_type", "paper"
-        ));
+        )));
 
         var counts = repo.collectionDocCounts(anTenant);
 
@@ -4214,22 +4265,22 @@ class CatalogRepositoryTest {
         String tenantQ = "anq-tenant";
         String shared  = "shared__analytics__v1";
 
-        repo.upsertDocument(tenantP, mapOf(
+        repo.upsertDocument(tenantP, reg(tenantP, mapOf(
             "tumbler", "anp.1", "title", "P1",
             "content_type", "knowledge", "physical_collection", shared
-        ));
-        repo.upsertDocument(tenantP, mapOf(
+        )));
+        repo.upsertDocument(tenantP, reg(tenantP, mapOf(
             "tumbler", "anp.2", "title", "P2",
             "content_type", "knowledge", "physical_collection", shared
-        ));
-        repo.upsertDocument(tenantP, mapOf(
+        )));
+        repo.upsertDocument(tenantP, reg(tenantP, mapOf(
             "tumbler", "anp.3", "title", "P3",
             "content_type", "knowledge", "physical_collection", shared
-        ));
-        repo.upsertDocument(tenantQ, mapOf(
+        )));
+        repo.upsertDocument(tenantQ, reg(tenantQ, mapOf(
             "tumbler", "anq.1", "title", "Q1",
             "content_type", "knowledge", "physical_collection", shared
-        ));
+        )));
 
         var countsP = repo.collectionDocCounts(tenantP);
         var countsQ = repo.collectionDocCounts(tenantQ);
@@ -4246,14 +4297,14 @@ class CatalogRepositoryTest {
         String tenant = "an-idl-tenant";
         String coll   = "an-idl__knowledge__voyage__v1";
 
-        repo.upsertDocument(tenant, mapOf(
+        repo.upsertDocument(tenant, reg(tenant, mapOf(
             "tumbler", "anidl.1", "title", "Live 1",
             "content_type", "knowledge", "physical_collection", coll
-        ));
-        repo.upsertDocument(tenant, mapOf(
+        )));
+        repo.upsertDocument(tenant, reg(tenant, mapOf(
             "tumbler", "anidl.2", "title", "Live 2",
             "content_type", "knowledge", "physical_collection", coll
-        ));
+        )));
 
         var liveOnly = repo.collectionDocCounts(tenant);
         var allRows  = repo.collectionDocCountsIncludingDeleted(tenant);
@@ -4271,10 +4322,10 @@ class CatalogRepositoryTest {
         String tenant = "an-idl2-tenant";
         String coll   = "an-idl2__knowledge__voyage__v1";
 
-        repo.upsertDocument(tenant, mapOf(
+        repo.upsertDocument(tenant, reg(tenant, mapOf(
             "tumbler", "anidl2.1", "title", "Soon Tombstoned",
             "content_type", "knowledge", "physical_collection", coll
-        ));
+        )));
 
         int deleted = repo.deleteDocument(tenant, "anidl2.1");
         assertThat(deleted).isEqualTo(1);
@@ -4292,15 +4343,15 @@ class CatalogRepositoryTest {
         String tenantQ = "anidlq-tenant";
         String shared  = "shared-idl__analytics__v1";
 
-        repo.upsertDocument(tenantP, mapOf(
+        repo.upsertDocument(tenantP, reg(tenantP, mapOf(
             "tumbler", "anidlp.1", "title", "P1",
             "content_type", "knowledge", "physical_collection", shared
-        ));
+        )));
         repo.deleteDocument(tenantP, "anidlp.1");
-        repo.upsertDocument(tenantQ, mapOf(
+        repo.upsertDocument(tenantQ, reg(tenantQ, mapOf(
             "tumbler", "anidlq.1", "title", "Q1",
             "content_type", "knowledge", "physical_collection", shared
-        ));
+        )));
 
         var allRowsP = repo.collectionDocCountsIncludingDeleted(tenantP);
         var allRowsQ = repo.collectionDocCountsIncludingDeleted(tenantQ);
@@ -4549,6 +4600,7 @@ class CatalogRepositoryTest {
             suCtx.insertInto(CHUNKS)
                 .set(CHUNKS.TENANT_ID, SPAN_TENANT)
                 .set(CHUNKS.COLLECTION, SPAN_COLLECTION)
+                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(SPAN_TENANT, SPAN_COLLECTION))
                 .set(CHUNKS.CHASH, HexFormat.of().parseHex(SPAN_CHASH))
                 .set(CHUNKS.EMBEDDING_MODEL, spanModel)
                 .set(CHUNKS.CHUNK_TEXT, "hello span text")
@@ -4579,13 +4631,13 @@ class CatalogRepositoryTest {
     @Test @Order(212)
     void resolveChash_returnsCollectionAndDocId() throws Exception {
         // Seed a catalog_document_chunks row linking SPAN_CHASH → SPAN_DOC_ID.
-        repo.upsertDocument(SPAN_TENANT, Map.of(
+        repo.upsertDocument(SPAN_TENANT, reg(SPAN_TENANT, Map.of(
             "tumbler",      SPAN_DOC_ID,
             "title",        "Span Test Doc",
             "content_type", "knowledge",
             "corpus",       "knowledge",
             "physical_collection", SPAN_COLLECTION
-        ));
+        )));
         writeManifestSeeded(SPAN_TENANT, SPAN_DOC_ID, SPAN_COLLECTION, List.of(
             Map.<String, Object>of("position", 0, "chash", SPAN_CHASH, "chunk_index", 0)
         ));
@@ -4689,13 +4741,13 @@ class CatalogRepositoryTest {
         // This does NOT cover the ETL importChunk/importChunksBatch legs,
         // which do not fold chunk_count — see resolveChunk's javadoc.
         final String tumbler = "9.9.103";
-        repo.upsertDocument(TENANT_A, mapOf(
+        repo.upsertDocument(TENANT_A, reg(TENANT_A, mapOf(
             "tumbler", tumbler,
             "title", "Normal Path Last Chunk Doc",
             "content_type", "code",
             "corpus", "code",
             "physical_collection", "code__nexus__voyage-code-3__v1"
-        ));
+        )));
         writeManifestSeeded(TENANT_A, tumbler, "code__nexus__voyage-code-3__v1", List.of(
             Map.<String, Object>of("position", 0, "chash", ch("np0"), "chunk_index", 0),
             Map.<String, Object>of("position", 1, "chash", ch("np1"), "chunk_index", 1),
@@ -4824,9 +4876,9 @@ class CatalogRepositoryTest {
         String docId  = "bch.1";
         // nexus-7nrvr: real collection — ghost-ness was incidental (intra-
         // batch dedupe/convergent-update behaviour is the point).
-        repo.importDocument(tenant, Map.of("tumbler", docId, "title", "Batch Chunk Doc",
+        repo.importDocument(tenant, reg(tenant, Map.of("tumbler", docId, "title", "Batch Chunk Doc",
             "content_type", "paper", "corpus", "knowledge",
-            "physical_collection", "knowledge__etl-batch-chunk__v1"));
+            "physical_collection", "knowledge__etl-batch-chunk__v1")));
 
         String chashV1 = ch("bchV1");
         String chashV2 = ch("bchV2");
@@ -4961,10 +5013,10 @@ class CatalogRepositoryTest {
         // is ONE value applying to every doc in the call (the caller batches
         // per collection) — no per-doc ghost/collection axis remains.
         String coll = "knowledge__wmm-batch__v1";
-        repo.upsertDocument(TENANT_A, Map.of("tumbler", "wmm.1", "title", "WMM Doc1",
-            "content_type", "paper", "corpus", "knowledge", "chunk_count", 0));
-        repo.upsertDocument(TENANT_A, Map.of("tumbler", "wmm.2", "title", "WMM Doc2",
-            "content_type", "paper", "corpus", "knowledge", "chunk_count", 0));
+        repo.upsertDocument(TENANT_A, reg(TENANT_A, Map.of("tumbler", "wmm.1", "title", "WMM Doc1",
+            "content_type", "paper", "corpus", "knowledge", "chunk_count", 0)));
+        repo.upsertDocument(TENANT_A, reg(TENANT_A, Map.of("tumbler", "wmm.2", "title", "WMM Doc2",
+            "content_type", "paper", "corpus", "knowledge", "chunk_count", 0)));
 
         var result = writeManifestManySeeded(TENANT_A, List.of(
             Map.<String, Object>of("doc_id", "wmm.1", "rows", List.<Map<String, Object>>of(
@@ -4995,8 +5047,8 @@ class CatalogRepositoryTest {
         // is what makes this write resolvable now — the document's own
         // physical_collection is no longer read at all.
         String coll = "knowledge__wmm3__v1";
-        repo.upsertDocument(TENANT_A, Map.of("tumbler", "wmm.3", "title", "WMM Doc3",
-            "content_type", "paper", "corpus", "knowledge", "chunk_count", 0));
+        repo.upsertDocument(TENANT_A, reg(TENANT_A, Map.of("tumbler", "wmm.3", "title", "WMM Doc3",
+            "content_type", "paper", "corpus", "knowledge", "chunk_count", 0)));
         // Seed 5 rows.
         writeManifestManySeeded(TENANT_A, List.of(
             Map.<String, Object>of("doc_id", "wmm.3", "rows", List.<Map<String, Object>>of(
@@ -5031,10 +5083,10 @@ class CatalogRepositoryTest {
         // transaction; wmm.good is unaffected (cross-doc isolation) — the
         // actual subject of this test.
         String coll = "knowledge__wmm-isolation__voyage-context-3__v1";
-        repo.upsertDocument(TENANT_A, Map.of("tumbler", "wmm.good", "title", "WMM Good",
-            "content_type", "paper", "corpus", "knowledge", "chunk_count", 0));
-        repo.upsertDocument(TENANT_A, Map.of("tumbler", "wmm.bad", "title", "WMM Bad",
-            "content_type", "paper", "corpus", "knowledge", "chunk_count", 0));
+        repo.upsertDocument(TENANT_A, reg(TENANT_A, Map.of("tumbler", "wmm.good", "title", "WMM Good",
+            "content_type", "paper", "corpus", "knowledge", "chunk_count", 0)));
+        repo.upsertDocument(TENANT_A, reg(TENANT_A, Map.of("tumbler", "wmm.bad", "title", "WMM Bad",
+            "content_type", "paper", "corpus", "knowledge", "chunk_count", 0)));
 
         // wmm.bad carries a row with a missing chash (NOT NULL violation) -> its own
         // transaction rolls back; wmm.good is unaffected (cross-doc isolation).
@@ -5079,12 +5131,12 @@ class CatalogRepositoryTest {
     @Test @Order(300)
     void registerDocumentMany_contiguousSeqBlock() {
         final String prefix = "rm-block";
-        var tumblers = repo.registerDocumentMany(TENANT_A, prefix, List.of(
-            regDoc("a", "a.py"), regDoc("b", "b.py"), regDoc("c", "c.py")));
+        var tumblers = repo.registerDocumentMany(TENANT_A, prefix, regAll(TENANT_A, List.of(
+            regDoc("a", "a.py"), regDoc("b", "b.py"), regDoc("c", "c.py"))));
         // Contiguous, input-order, starting at seq 1 for a fresh owner.
         assertThat(tumblers).containsExactly(prefix + ".1", prefix + ".2", prefix + ".3");
         // next_seq advanced by exactly 3: a following single register gets .4.
-        String next = repo.registerDocument(TENANT_A, prefix, regDoc("d", "d.py"));
+        String next = repo.registerDocument(TENANT_A, prefix, reg(TENANT_A, regDoc("d", "d.py")));
         assertThat(next).isEqualTo(prefix + ".4");
     }
 
@@ -5104,8 +5156,8 @@ class CatalogRepositoryTest {
         // 32-byte canonical digest (now the passing case) — the two fixtures swap
         // roles, not just their chash literals.
         String prefix = "fhhwf-check";
-        var tumblers = repo.registerDocumentMany(TENANT_A, prefix, List.of(
-            regDoc("ok doc", "ok.py"), regDoc("bad doc", "bad.py")));
+        var tumblers = repo.registerDocumentMany(TENANT_A, prefix, regAll(TENANT_A, List.of(
+            regDoc("ok doc", "ok.py"), regDoc("bad doc", "bad.py"))));
         var result = writeManifestManySeeded(TENANT_A, List.of(
             Map.of("doc_id", tumblers.get(0), "rows", List.of(
                 Map.of("position", 0, "chash", "b".repeat(64)))),
@@ -5142,7 +5194,7 @@ class CatalogRepositoryTest {
                 seed.add(regDoc("seed doc " + n + " with a realistic title string",
                                 "src/pkg" + (n % 40) + "/mod" + n + ".py"));
             }
-            var got = repo.registerDocumentMany(TENANT_A, prefix, seed);
+            var got = repo.registerDocumentMany(TENANT_A, prefix, regAll(TENANT_A, seed));
             assertThat(got).hasSize(1000);
         }
         // The measured page: 1000 fresh docs against 5k existing rows.
@@ -5152,13 +5204,13 @@ class CatalogRepositoryTest {
                                 "src/measured/m" + i + ".py"));
         }
         long t0 = System.nanoTime();
-        var tumblers = repo.registerDocumentMany(TENANT_A, prefix, pageDocs);
+        var tumblers = repo.registerDocumentMany(TENANT_A, prefix, regAll(TENANT_A, pageDocs));
         long ms = (System.nanoTime() - t0) / 1_000_000;
         assertThat(tumblers).hasSize(1000);
         assertThat(tumblers.get(0)).isEqualTo(prefix + ".5001");
         assertThat(tumblers.get(999)).isEqualTo(prefix + ".6000");
         // Idempotent re-send of the same page: no new seq consumed, same tumblers.
-        var again = repo.registerDocumentMany(TENANT_A, prefix, pageDocs);
+        var again = repo.registerDocumentMany(TENANT_A, prefix, regAll(TENANT_A, pageDocs));
         assertThat(again).isEqualTo(tumblers);
         // The measured wall lands in register_many_timing's total_ms log line
         // (structured logging convention); `ms` is asserted only for sanity of
@@ -5170,29 +5222,29 @@ class CatalogRepositoryTest {
     void registerDocumentMany_mixedNewAndExisting_preservesOrderAndSkipsSeqForExisting() {
         final String prefix = "rm-mixed";
         // Pre-register one doc via the single-doc path.
-        String existing = repo.registerDocument(TENANT_A, prefix, regDoc("keep", "keep.py"));
+        String existing = repo.registerDocument(TENANT_A, prefix, reg(TENANT_A, regDoc("keep", "keep.py")));
         assertThat(existing).isEqualTo(prefix + ".1");
         // Batch: [existing (same file_path), new, new] — existing returns its tumbler,
         // only the two new docs consume the block; order preserved.
-        var tumblers = repo.registerDocumentMany(TENANT_A, prefix, List.of(
-            regDoc("keep-again", "keep.py"), regDoc("new1", "n1.py"), regDoc("new2", "n2.py")));
+        var tumblers = repo.registerDocumentMany(TENANT_A, prefix, regAll(TENANT_A, List.of(
+            regDoc("keep-again", "keep.py"), regDoc("new1", "n1.py"), regDoc("new2", "n2.py"))));
         assertThat(tumblers).containsExactly(prefix + ".1", prefix + ".2", prefix + ".3");
         // No seq gap: next single register is .4, not .5.
-        assertThat(repo.registerDocument(TENANT_A, prefix, regDoc("tail", "tail.py")))
+        assertThat(repo.registerDocument(TENANT_A, prefix, reg(TENANT_A, regDoc("tail", "tail.py"))))
             .isEqualTo(prefix + ".4");
     }
 
     @Test @Order(302)
     void registerDocumentMany_idempotentRebatch_returnsSameTumblers_noSeqGap() {
         final String prefix = "rm-idem";
-        var first = repo.registerDocumentMany(TENANT_A, prefix, List.of(
-            regDoc("x", "x.py"), regDoc("y", "y.py")));
+        var first = repo.registerDocumentMany(TENANT_A, prefix, regAll(TENANT_A, List.of(
+            regDoc("x", "x.py"), regDoc("y", "y.py"))));
         assertThat(first).containsExactly(prefix + ".1", prefix + ".2");
         // Re-batch the same file_paths — every doc is already LIVE, so no seq is drawn.
-        var second = repo.registerDocumentMany(TENANT_A, prefix, List.of(
-            regDoc("x-again", "x.py"), regDoc("y-again", "y.py")));
+        var second = repo.registerDocumentMany(TENANT_A, prefix, regAll(TENANT_A, List.of(
+            regDoc("x-again", "x.py"), regDoc("y-again", "y.py"))));
         assertThat(second).containsExactly(prefix + ".1", prefix + ".2");
-        assertThat(repo.registerDocument(TENANT_A, prefix, regDoc("z", "z.py")))
+        assertThat(repo.registerDocument(TENANT_A, prefix, reg(TENANT_A, regDoc("z", "z.py"))))
             .isEqualTo(prefix + ".3");
     }
 
@@ -5200,7 +5252,7 @@ class CatalogRepositoryTest {
     void registerDocumentMany_ownerAbsentBootstrap_createsOwner() {
         final String prefix = "rm-bootstrap";
         // Owner does not exist yet — the batch upserts it, then assigns from seq 1.
-        var tumblers = repo.registerDocumentMany(TENANT_A, prefix, List.of(regDoc("only", "only.py")));
+        var tumblers = repo.registerDocumentMany(TENANT_A, prefix, regAll(TENANT_A, List.of(regDoc("only", "only.py"))));
         assertThat(tumblers).containsExactly(prefix + ".1");
         assertThat(repo.getDocument(TENANT_A, prefix + ".1").get("title")).isEqualTo("only");
     }
@@ -5241,7 +5293,7 @@ class CatalogRepositoryTest {
         final String prefix = "rm-concurrent";
         final int perBatch = 5;
         // Bootstrap the owner first so both threads race only the next_seq FOR UPDATE claim.
-        repo.registerDocumentMany(TENANT_A, prefix, List.of(regDoc("seed", "seed.py")));
+        repo.registerDocumentMany(TENANT_A, prefix, regAll(TENANT_A, List.of(regDoc("seed", "seed.py"))));
 
         var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
         try {
@@ -5251,7 +5303,7 @@ class CatalogRepositoryTest {
                 for (int i = 0; i < perBatch; i++) {
                     docs.add(regDoc("t" + tid + "-" + i, "t" + tid + "-" + i + ".py"));
                 }
-                return repo.registerDocumentMany(TENANT_A, prefix, docs);
+                return repo.registerDocumentMany(TENANT_A, prefix, regAll(TENANT_A, docs));
             };
             var f1 = pool.submit(task);
             var f2 = pool.submit(task);
@@ -5263,7 +5315,7 @@ class CatalogRepositoryTest {
             assertThat(all).hasSize(2 * perBatch);
             assertThat(new java.util.HashSet<>(all)).hasSize(2 * perBatch);
             // Gapless overall: seeds .2, both batches fill .2..(seed+10) with no hole.
-            String next = repo.registerDocument(TENANT_A, prefix, regDoc("after", "after.py"));
+            String next = repo.registerDocument(TENANT_A, prefix, reg(TENANT_A, regDoc("after", "after.py")));
             // seed consumed .1; 10 concurrent docs consumed .2..0.11; next is .12.
             assertThat(next).isEqualTo(prefix + ".12");
         } finally {
@@ -5278,7 +5330,7 @@ class CatalogRepositoryTest {
     @Test @Order(311)
     void registerDocumentWithOutcome_freshInsert_reportsCreatedTrue() {
         final String prefix = "vfef0-fresh";
-        var outcome = repo.registerDocumentWithOutcome(TENANT_A, prefix, regDoc("fresh", "fresh.py"));
+        var outcome = repo.registerDocumentWithOutcome(TENANT_A, prefix, reg(TENANT_A, regDoc("fresh", "fresh.py")));
         assertThat(outcome.tumbler()).isEqualTo(prefix + ".1");
         assertThat(outcome.created()).isTrue();
     }
@@ -5303,11 +5355,11 @@ class CatalogRepositoryTest {
     @Test @Order(313)
     void registerDocumentWithOutcome_filePathIdempotencyHit_reportsCreatedFalse() {
         final String prefix = "vfef0-fpath";
-        var first = repo.registerDocumentWithOutcome(TENANT_A, prefix, regDoc("keep", "keep.py"));
+        var first = repo.registerDocumentWithOutcome(TENANT_A, prefix, reg(TENANT_A, regDoc("keep", "keep.py")));
         assertThat(first.created()).isTrue();
         // Re-registering the same file_path (no source_uri) must hit the
         // file_path idempotency leg, not mint a second row.
-        var second = repo.registerDocumentWithOutcome(TENANT_A, prefix, regDoc("keep-again", "keep.py"));
+        var second = repo.registerDocumentWithOutcome(TENANT_A, prefix, reg(TENANT_A, regDoc("keep-again", "keep.py")));
         assertThat(second.tumbler()).isEqualTo(first.tumbler());
         assertThat(second.created()).isFalse();
     }
@@ -5355,13 +5407,13 @@ class CatalogRepositoryTest {
     void registerDocumentManyWithOutcome_mixedNewAndExisting_perEntryCreatedFlag() {
         final String prefix = "vfef0-batch";
         // Pre-register one doc via the single-doc path.
-        var pre = repo.registerDocumentWithOutcome(TENANT_A, prefix, regDoc("keep", "keep.py"));
+        var pre = repo.registerDocumentWithOutcome(TENANT_A, prefix, reg(TENANT_A, regDoc("keep", "keep.py")));
         assertThat(pre.created()).isTrue();
 
-        var outcomes = repo.registerDocumentManyWithOutcome(TENANT_A, prefix, List.of(
+        var outcomes = repo.registerDocumentManyWithOutcome(TENANT_A, prefix, regAll(TENANT_A, List.of(
             regDoc("keep-again", "keep.py"),   // existing (file_path hit) -> created=false
             regDoc("new1", "n1.py"),            // genuinely new -> created=true
-            regDoc("new2", "n2.py")));          // genuinely new -> created=true
+            regDoc("new2", "n2.py"))));          // genuinely new -> created=true
         assertThat(outcomes).hasSize(3);
         assertThat(outcomes.get(0).tumbler()).isEqualTo(pre.tumbler());
         assertThat(outcomes.get(0).created()).isFalse();
@@ -5391,11 +5443,11 @@ class CatalogRepositoryTest {
         // pre-existing call sites) must remain byte-for-byte unchanged by
         // the addition of the *WithOutcome variants.
         final String prefix = "vfef0-compat";
-        String t1 = repo.registerDocument(TENANT_A, prefix, regDoc("a", "a.py"));
-        String t2 = repo.registerDocument(TENANT_A, prefix, regDoc("a-again", "a.py"));
+        String t1 = repo.registerDocument(TENANT_A, prefix, reg(TENANT_A, regDoc("a", "a.py")));
+        String t2 = repo.registerDocument(TENANT_A, prefix, reg(TENANT_A, regDoc("a-again", "a.py")));
         assertThat(t1).isEqualTo(prefix + ".1");
         assertThat(t2).isEqualTo(t1);
-        var many = repo.registerDocumentMany(TENANT_A, prefix, List.of(regDoc("b", "b.py")));
+        var many = repo.registerDocumentMany(TENANT_A, prefix, regAll(TENANT_A, List.of(regDoc("b", "b.py"))));
         assertThat(many).containsExactly(prefix + ".2");
     }
 
@@ -5454,14 +5506,14 @@ class CatalogRepositoryTest {
         for (String[] d : new String[][] {
                 {live, "Live Doc",  "live.py"},
                 {dead, "Dead Doc",  "dead.py"}}) {
-            repo.upsertDocument(tenant, Map.of(
+            repo.upsertDocument(tenant, reg(tenant, Map.of(
                 "tumbler",             d[0],
                 "title",               d[1],
                 "content_type",        "code",
                 "corpus",              "tombcorpus",
                 "physical_collection", "tombcoll",
                 "file_path",           "/abs/" + d[2],
-                "source_uri",          "file:///abs/" + d[2]));
+                "source_uri",          "file:///abs/" + d[2])));
         }
         repo.upsertLink(tenant, Map.of(
             "from_tumbler", live,
@@ -5946,10 +5998,10 @@ class CatalogRepositoryTest {
     @Test @Order(400)
     void manifestLabels_writeThenReadBack_onGetManifest_andGetManifestMany_andChashPositions() {
         String coll = "knowledge__tko2w-labels__v1";
-        repo.upsertDocument(TENANT_A, Map.of("tumbler", "tko2w.1", "title", "Labels A",
-            "content_type", "paper", "corpus", "knowledge", "physical_collection", coll));
-        repo.upsertDocument(TENANT_A, Map.of("tumbler", "tko2w.2", "title", "Labels B",
-            "content_type", "paper", "corpus", "knowledge", "physical_collection", coll));
+        repo.upsertDocument(TENANT_A, reg(TENANT_A, Map.of("tumbler", "tko2w.1", "title", "Labels A",
+            "content_type", "paper", "corpus", "knowledge", "physical_collection", coll)));
+        repo.upsertDocument(TENANT_A, reg(TENANT_A, Map.of("tumbler", "tko2w.2", "title", "Labels B",
+            "content_type", "paper", "corpus", "knowledge", "physical_collection", coll)));
         String shared = ch("tko2w-shared");
         // The SAME chunk text in two documents, labelled differently: each manifest row keeps its own.
         writeManifestSeeded(TENANT_A, "tko2w.1", coll, List.of(
@@ -5994,8 +6046,8 @@ class CatalogRepositoryTest {
     @Test @Order(404)
     void manifestLabels_anExplicitLabelsWrittenWinsOverTheKeysPresent_soARowReadBackAndRewrittenKeepsItsState() {
         String coll = "knowledge__tko2w-rewrite__v1";
-        repo.upsertDocument(TENANT_A, Map.of("tumbler", "tko2w.6", "title", "Rewrite",
-            "content_type", "paper", "corpus", "knowledge", "physical_collection", coll));
+        repo.upsertDocument(TENANT_A, reg(TENANT_A, Map.of("tumbler", "tko2w.6", "title", "Rewrite",
+            "content_type", "paper", "corpus", "knowledge", "physical_collection", coll)));
         String legacy = ch("tko2w-rewrite-legacy");
         String written = ch("tko2w-rewrite-written");
         writeManifestSeeded(TENANT_A, "tko2w.6", coll, List.of(
@@ -6019,8 +6071,8 @@ class CatalogRepositoryTest {
     @Test @Order(401)
     void manifestLabels_aReplaceWithoutThem_clearsThem_aReplaceWithThem_setsThem() {
         String coll = "knowledge__tko2w-replace__v1";
-        repo.upsertDocument(TENANT_A, Map.of("tumbler", "tko2w.3", "title", "Replace",
-            "content_type", "paper", "corpus", "knowledge", "physical_collection", coll));
+        repo.upsertDocument(TENANT_A, reg(TENANT_A, Map.of("tumbler", "tko2w.3", "title", "Replace",
+            "content_type", "paper", "corpus", "knowledge", "physical_collection", coll)));
         String chash = ch("tko2w-replace-chunk");
         writeManifestSeeded(TENANT_A, "tko2w.3", coll, List.of(labelled(0, chash, "Intro", "body", 1)));
         assertThat(repo.getManifest(TENANT_A, "tko2w.3").get(0).get("section_type")).isEqualTo("body");
@@ -6040,8 +6092,8 @@ class CatalogRepositoryTest {
     @Test @Order(402)
     void manifestLabels_theAppendUpsertMovesTheLabelsWithTheChashAtThePosition() {
         String coll = "knowledge__tko2w-append__v1";
-        repo.upsertDocument(TENANT_A, Map.of("tumbler", "tko2w.4", "title", "Append",
-            "content_type", "paper", "corpus", "knowledge", "physical_collection", coll));
+        repo.upsertDocument(TENANT_A, reg(TENANT_A, Map.of("tumbler", "tko2w.4", "title", "Append",
+            "content_type", "paper", "corpus", "knowledge", "physical_collection", coll)));
         String first = ch("tko2w-append-first");
         String second = ch("tko2w-append-second");
         stubChunk(TENANT_A, coll, first);
@@ -6068,8 +6120,8 @@ class CatalogRepositoryTest {
     @Test @Order(403)
     void manifestLabels_theImportPathKeepsThem() {
         String coll = "knowledge__tko2w-import__v1";
-        repo.upsertDocument(TENANT_A, Map.of("tumbler", "tko2w.5", "title", "Import",
-            "content_type", "paper", "corpus", "knowledge", "physical_collection", coll));
+        repo.upsertDocument(TENANT_A, reg(TENANT_A, Map.of("tumbler", "tko2w.5", "title", "Import",
+            "content_type", "paper", "corpus", "knowledge", "physical_collection", coll)));
         importChunkSeeded(TENANT_A, "tko2w.5", coll, labelled(0, ch("tko2w-import-chunk"), "Abs", "abstract", 1));
 
         var row = repo.getManifest(TENANT_A, "tko2w.5").get(0);

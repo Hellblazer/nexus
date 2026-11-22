@@ -71,6 +71,12 @@ public final class AspectRepository {
     private static final Field<String>          EX_SOURCE_URI             = excluded(DOCUMENT_ASPECTS.SOURCE_URI);
     private static final Field<JSONB>           EX_SALIENT_SENTENCES      = excluded(DOCUMENT_ASPECTS.SALIENT_SENTENCES);
     private static final Field<String>          EX_DOC_ID                 = excluded(DOCUMENT_ASPECTS.DOC_ID);
+    // RDR-229 P3.1 stage 2b: the dual write. EXCLUDED's id is the incoming row's, so the conflict branch re-stamps it;
+    // OWN_ID is the id of the row's own name, for an UPDATE that does not name the collection (the NOT VALID CHECK
+    // looks at every updated row, and a row not stamped yet has a name and no id).
+    private static final Field<Long>            EX_COLLECTION_ID          = excluded(DOCUMENT_ASPECTS.COLLECTION_ID);
+    private static final Field<Long>            ASPECT_OWN_ID             = coalesce(DOCUMENT_ASPECTS.COLLECTION_ID,
+        CollectionIds.idOf(DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION));
 
     // COALESCE(EXCLUDED.x, table.x) fields for importAspect path
     private static final Field<String>          EX_SOURCE_URI_COALESCE =
@@ -83,6 +89,7 @@ public final class AspectRepository {
     // document_highlights EXCLUDED fields
     private static final Field<String>          EX_HL_SOURCE_URI   = excluded(DOCUMENT_HIGHLIGHTS.SOURCE_URI);
     private static final Field<String>          EX_HL_COLLECTION   = excluded(DOCUMENT_HIGHLIGHTS.COLLECTION);
+    private static final Field<Long>            EX_HL_COLLECTION_ID = excluded(DOCUMENT_HIGHLIGHTS.COLLECTION_ID);
     private static final Field<String>          EX_HL_HIGHLIGHTS   = excluded(DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD);
     private static final Field<String>          EX_HL_MENTIONS     = excluded(DOCUMENT_HIGHLIGHTS.MENTIONS_MD);
     private static final Field<OffsetDateTime>  EX_HL_INGESTED_AT  = excluded(DOCUMENT_HIGHLIGHTS.INGESTED_AT);
@@ -311,7 +318,8 @@ public final class AspectRepository {
                 DOCUMENT_ASPECTS.EXTRACTOR_NAME,
                 DOCUMENT_ASPECTS.SOURCE_URI,
                 DOCUMENT_ASPECTS.SALIENT_SENTENCES,
-                DOCUMENT_ASPECTS.DOC_ID)
+                DOCUMENT_ASPECTS.DOC_ID,
+                DOCUMENT_ASPECTS.COLLECTION_ID)
             .values(
                 tenant,
                 collection,
@@ -332,7 +340,8 @@ public final class AspectRepository {
                 // nne()-guarded NOT NULL text columns).
                 NoteUri.canonical(nne((String) body.get("source_uri"))),
                 jsonbOrNull((String) body.get("salient_sentences")),
-                docId)
+                docId,
+                CollectionIds.require(ctx, tenant, collection))   // RDR-229 P3.1: read after the registration above
             .onConflict(
                 DOCUMENT_ASPECTS.TENANT_ID,
                 DOCUMENT_ASPECTS.COLLECTION,
@@ -354,6 +363,7 @@ public final class AspectRepository {
             // attribution a previous write established — same COALESCE the
             // other two writers already use.
             .set(DOCUMENT_ASPECTS.DOC_ID,                 docIdOnConflict)
+            .set(DOCUMENT_ASPECTS.COLLECTION_ID,          EX_COLLECTION_ID)
             .returning(DOCUMENT_ASPECTS.ID)
             .fetch();
         return result.isEmpty() ? -1L : result.get(0).get(DOCUMENT_ASPECTS.ID);
@@ -559,6 +569,7 @@ public final class AspectRepository {
                .execute();
             return ctx.update(DOCUMENT_ASPECTS)
                 .set(DOCUMENT_ASPECTS.COLLECTION, newColl)
+                .set(DOCUMENT_ASPECTS.COLLECTION_ID, CollectionIds.idOf(tenant, newColl))
                 .where(DOCUMENT_ASPECTS.COLLECTION.eq(oldColl))
                 .execute();
         });
@@ -572,6 +583,7 @@ public final class AspectRepository {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.update(DOCUMENT_ASPECTS)
                .set(DOCUMENT_ASPECTS.SALIENT_SENTENCES, jsonbOrNull(sentencesJson))
+               .set(DOCUMENT_ASPECTS.COLLECTION_ID, ASPECT_OWN_ID)
                .where(DOCUMENT_ASPECTS.DOC_ID.eq(docId))
                .execute());
     }
@@ -583,6 +595,7 @@ public final class AspectRepository {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.update(DOCUMENT_ASPECTS)
                .set(DOCUMENT_ASPECTS.SALIENT_SENTENCES, jsonbOrNull(sentencesJson))
+               .set(DOCUMENT_ASPECTS.COLLECTION_ID, ASPECT_OWN_ID)
                .where(DOCUMENT_ASPECTS.COLLECTION.eq(collection)
                    .and(DOCUMENT_ASPECTS.SOURCE_PATH.eq(sourcePath)))
                .execute());
@@ -649,7 +662,11 @@ public final class AspectRepository {
                 String c = (String) body.get("collection");
                 if (c != null) collections.add(c);
             }
-            for (String c : collections) ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, c);
+            var collectionIds = new java.util.HashMap<String, Long>();
+            for (String c : collections) {
+                ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, c);
+                collectionIds.put(c, CollectionIds.require(ctx, tenant, c));   // RDR-229 P3.1: one read a name, not a subselect a row
+            }
 
             // Conflict key: (tenant_id, collection, source_path). tenant constant.
             var unique = new java.util.LinkedHashMap<String, Map<String, Object>>(kept.size());
@@ -658,7 +675,7 @@ public final class AspectRepository {
             }
             List<Map<String, Object>> deduped = List.copyOf(unique.values());
 
-            final int cols = 16;
+            final int cols = 17;
             final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
             for (int start = 0; start < deduped.size(); start += chunkSize) {
                 var batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
@@ -678,7 +695,8 @@ public final class AspectRepository {
                         DOCUMENT_ASPECTS.EXTRACTOR_NAME,
                         DOCUMENT_ASPECTS.SOURCE_URI,
                         DOCUMENT_ASPECTS.SALIENT_SENTENCES,
-                        DOCUMENT_ASPECTS.DOC_ID);
+                        DOCUMENT_ASPECTS.DOC_ID,
+                        DOCUMENT_ASPECTS.COLLECTION_ID);
                 for (var body : batch) {
                     double confidence = ((Number) body.get("confidence")).doubleValue();
                     OffsetDateTime extractedAtTs = parseTs((String) body.get("extracted_at"));
@@ -703,7 +721,8 @@ public final class AspectRepository {
                             // genuine caller error, same as the live upsert path.
                             NoteUri.canonical(nne((String) body.get("source_uri"))),
                             jsonbOrNull((String) body.get("salient_sentences")),
-                            nullIfBlank((String) body.get("doc_id")));
+                            nullIfBlank((String) body.get("doc_id")),
+                            collectionIds.get((String) body.get("collection")));
                 }
                 insert.onConflict(
                         DOCUMENT_ASPECTS.TENANT_ID,
@@ -723,6 +742,7 @@ public final class AspectRepository {
                       .set(DOCUMENT_ASPECTS.SOURCE_URI,             EX_SOURCE_URI_COALESCE)
                       .set(DOCUMENT_ASPECTS.SALIENT_SENTENCES,      EX_SALIENT_COALESCE)
                       .set(DOCUMENT_ASPECTS.DOC_ID,                 EX_DOC_ID_COALESCE)
+                      .set(DOCUMENT_ASPECTS.COLLECTION_ID,          EX_COLLECTION_ID)
                       .execute();
             }
             return kept.size();
@@ -756,7 +776,8 @@ public final class AspectRepository {
                     DOCUMENT_ASPECTS.EXTRACTOR_NAME,
                     DOCUMENT_ASPECTS.SOURCE_URI,
                     DOCUMENT_ASPECTS.SALIENT_SENTENCES,
-                    DOCUMENT_ASPECTS.DOC_ID)
+                    DOCUMENT_ASPECTS.DOC_ID,
+                    DOCUMENT_ASPECTS.COLLECTION_ID)
                 .values(
                     tenant,
                     (String) body.get("collection"),
@@ -775,7 +796,8 @@ public final class AspectRepository {
                     // identical comment for why doc_id stays nullIfBlank).
                     NoteUri.canonical(nne((String) body.get("source_uri"))),
                     jsonbOrNull((String) body.get("salient_sentences")),
-                    nullIfBlank((String) body.get("doc_id")))
+                    nullIfBlank((String) body.get("doc_id")),
+                    CollectionIds.require(ctx, tenant, (String) body.get("collection")))   // RDR-229 P3.1
                 .onConflict(
                     DOCUMENT_ASPECTS.TENANT_ID,
                     DOCUMENT_ASPECTS.COLLECTION,
@@ -794,6 +816,7 @@ public final class AspectRepository {
                 .set(DOCUMENT_ASPECTS.SOURCE_URI,             EX_SOURCE_URI_COALESCE)
                 .set(DOCUMENT_ASPECTS.SALIENT_SENTENCES,      EX_SALIENT_COALESCE)
                 .set(DOCUMENT_ASPECTS.DOC_ID,                 EX_DOC_ID_COALESCE)
+                .set(DOCUMENT_ASPECTS.COLLECTION_ID,          EX_COLLECTION_ID)
                 .execute();
         }
     }
@@ -827,7 +850,8 @@ public final class AspectRepository {
                     DOCUMENT_HIGHLIGHTS.COLLECTION,
                     DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD,
                     DOCUMENT_HIGHLIGHTS.MENTIONS_MD,
-                    DOCUMENT_HIGHLIGHTS.INGESTED_AT)
+                    DOCUMENT_HIGHLIGHTS.INGESTED_AT,
+                    DOCUMENT_HIGHLIGHTS.COLLECTION_ID)
                 .values(
                     tenant,
                     docId,
@@ -837,11 +861,13 @@ public final class AspectRepository {
                     nne((String) body.get("collection")),
                     highlightsMd,
                     mentionsMd,
-                    ingestedAtTs)
+                    ingestedAtTs,
+                    CollectionIds.require(ctx, tenant, nne((String) body.get("collection"))))   // RDR-229 P3.1; '' gives NULL
                 .onConflict(DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID)
                 .doUpdate()
                 .set(DOCUMENT_HIGHLIGHTS.SOURCE_URI,    EX_HL_SOURCE_URI)
                 .set(DOCUMENT_HIGHLIGHTS.COLLECTION,    EX_HL_COLLECTION)
+                .set(DOCUMENT_HIGHLIGHTS.COLLECTION_ID, EX_HL_COLLECTION_ID)
                 .set(DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD, EX_HL_HIGHLIGHTS)
                 .set(DOCUMENT_HIGHLIGHTS.MENTIONS_MD,   EX_HL_MENTIONS)
                 .set(DOCUMENT_HIGHLIGHTS.INGESTED_AT,   EX_HL_INGESTED_AT)
@@ -957,13 +983,17 @@ public final class AspectRepository {
             for (var body : kept) {
                 collections.add(nne((String) body.get("collection")));
             }
-            for (String c : collections) ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, c);
+            var collectionIds = new java.util.HashMap<String, Long>();
+            for (String c : collections) {
+                ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, c);
+                collectionIds.put(c, CollectionIds.require(ctx, tenant, c));   // RDR-229 P3.1; '' gives null
+            }
 
             var unique = new java.util.LinkedHashMap<String, Map<String, Object>>(kept.size());
             for (var body : kept) unique.put((String) body.get("doc_id"), body);
             List<Map<String, Object>> deduped = List.copyOf(unique.values());
 
-            final int cols = 7;
+            final int cols = 8;
             final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
             for (int start = 0; start < deduped.size(); start += chunkSize) {
                 var batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
@@ -974,7 +1004,8 @@ public final class AspectRepository {
                         DOCUMENT_HIGHLIGHTS.COLLECTION,
                         DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD,
                         DOCUMENT_HIGHLIGHTS.MENTIONS_MD,
-                        DOCUMENT_HIGHLIGHTS.INGESTED_AT);
+                        DOCUMENT_HIGHLIGHTS.INGESTED_AT,
+                        DOCUMENT_HIGHLIGHTS.COLLECTION_ID);
                 for (var body : batch) {
                     String ingestedAt = (String) body.get("ingested_at");
                     OffsetDateTime ingestedAtTs = parseTs(ingestedAt);
@@ -985,12 +1016,14 @@ public final class AspectRepository {
                             nne((String) body.get("collection")),
                             (String) body.getOrDefault("highlights_md", ""),
                             (String) body.getOrDefault("mentions_md", ""),
-                            ingestedAtTs);
+                            ingestedAtTs,
+                            collectionIds.get(nne((String) body.get("collection"))));
                 }
                 insert.onConflict(DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID)
                       .doUpdate()
                       .set(DOCUMENT_HIGHLIGHTS.SOURCE_URI,    EX_HL_SOURCE_URI)
                       .set(DOCUMENT_HIGHLIGHTS.COLLECTION,    EX_HL_COLLECTION)
+                .set(DOCUMENT_HIGHLIGHTS.COLLECTION_ID, EX_HL_COLLECTION_ID)
                       .set(DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD, EX_HL_HIGHLIGHTS)
                       .set(DOCUMENT_HIGHLIGHTS.MENTIONS_MD,   EX_HL_MENTIONS)
                       .set(DOCUMENT_HIGHLIGHTS.INGESTED_AT,   EX_HL_INGESTED_AT)
@@ -1017,7 +1050,8 @@ public final class AspectRepository {
                     DOCUMENT_HIGHLIGHTS.COLLECTION,
                     DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD,
                     DOCUMENT_HIGHLIGHTS.MENTIONS_MD,
-                    DOCUMENT_HIGHLIGHTS.INGESTED_AT)
+                    DOCUMENT_HIGHLIGHTS.INGESTED_AT,
+                    DOCUMENT_HIGHLIGHTS.COLLECTION_ID)
                 .values(
                     tenant,
                     docId,
@@ -1025,11 +1059,13 @@ public final class AspectRepository {
                     nne((String) body.get("collection")),
                     (String) body.getOrDefault("highlights_md", ""),
                     (String) body.getOrDefault("mentions_md", ""),
-                    ingestedAtTs)
+                    ingestedAtTs,
+                    CollectionIds.require(ctx, tenant, nne((String) body.get("collection"))))   // RDR-229 P3.1; '' gives NULL
                 .onConflict(DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID)
                 .doUpdate()
                 .set(DOCUMENT_HIGHLIGHTS.SOURCE_URI,    EX_HL_SOURCE_URI)
                 .set(DOCUMENT_HIGHLIGHTS.COLLECTION,    EX_HL_COLLECTION)
+                .set(DOCUMENT_HIGHLIGHTS.COLLECTION_ID, EX_HL_COLLECTION_ID)
                 .set(DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD, EX_HL_HIGHLIGHTS)
                 .set(DOCUMENT_HIGHLIGHTS.MENTIONS_MD,   EX_HL_MENTIONS)
                 .set(DOCUMENT_HIGHLIGHTS.INGESTED_AT,   EX_HL_INGESTED_AT)
@@ -1049,6 +1085,7 @@ public final class AspectRepository {
             ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, newColl);
             return ctx.update(DOCUMENT_HIGHLIGHTS)
                 .set(DOCUMENT_HIGHLIGHTS.COLLECTION, newColl)
+                .set(DOCUMENT_HIGHLIGHTS.COLLECTION_ID, CollectionIds.idOf(tenant, newColl))
                 .where(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(oldColl))
                 .execute();
         });

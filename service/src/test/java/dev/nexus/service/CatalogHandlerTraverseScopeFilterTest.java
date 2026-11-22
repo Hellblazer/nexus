@@ -78,6 +78,7 @@ class CatalogHandlerTraverseScopeFilterTest {
     }
 
     private String registerDoc(String ownerPrefix, String title, String collection, String contentType) throws Exception {
+        CollectionIdSeeds.register(pg, TENANT, collection);
         var resp = post("/v1/catalog/doc/register", mapper.writeValueAsString(Map.of(
             "owner_prefix", ownerPrefix, "title", title, "content_type", contentType,
             "source_uri", "file:///" + ownerPrefix + "/" + title + ".md", "physical_collection", collection)));

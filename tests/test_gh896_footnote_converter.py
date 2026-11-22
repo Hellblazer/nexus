@@ -571,7 +571,9 @@ def _register_real_doc(
     """Register a real catalog document, mirroring
     ``test_gh896_catalog_link_tokens._register_catalog_doc``."""
     from nexus.catalog.http_catalog_client import HttpCatalogClient
+    from tests._catalog_fixture_ops import register_seed_collections
 
+    register_seed_collections("knowledge__footnotes-test")
     with HttpCatalogClient() as cat:
         owner = cat.register_owner(
             owner_name, "repo", repo_hash=f"footnotes-test-{owner_name}",

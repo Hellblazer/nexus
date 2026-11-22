@@ -24,6 +24,7 @@ import java.sql.Connection;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.db.ReembedJobRepository.ABORTED;
 import static dev.nexus.service.db.ReembedJobRepository.CUTOVER;
 import static dev.nexus.service.db.ReembedJobRepository.FAILED;
@@ -108,6 +109,20 @@ class ReembedRenameRefusalTest {
         }
     }
 
+    /**
+     * Starts a job over two names, registering any the registry does not hold yet: a job row carries both ends' registry
+     * ids (RDR-229 P3.1), so {@code start} refuses an unregistered name, and a job can no longer hold one. A name this
+     * test already registered is left as it is ({@code insertCollection} does nothing on a conflict).
+     */
+    private Job startJob(String src, String tgt) {
+        try {
+            register(src, tgt);
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+        return jobs.start(TENANT, src, tgt, null, false, false);
+    }
+
     private HttpResponse<String> post(String path, String json) throws Exception {
         var req = TestHttp.request("http://127.0.0.1:" + service.getPort() + path)
             .header("Authorization", "Bearer " + TOKEN)
@@ -135,9 +150,9 @@ class ReembedRenameRefusalTest {
         "/v1/aspects/highlights/rename_collection");
 
     private void assert409Naming(HttpResponse<String> resp, Job job) throws Exception {
-        assertThat(resp.statusCode()).isEqualTo(409);
+        assertThat(resp.statusCode()).as(resp.body()).isEqualTo(409);
         Map<String, Object> body = mapper.readValue(resp.body(), MAP_T);
-        assertThat(body.get("job_id")).isEqualTo(job.jobId().toString());
+        assertThat(body.get("job_id")).as(resp.body()).isEqualTo(job.jobId().toString());
         assertThat(String.valueOf(body.get("error"))).contains("re-embed job").contains(job.jobId().toString())
             .contains(job.sourceCollection()).contains(job.targetCollection());
     }
@@ -160,7 +175,7 @@ class ReembedRenameRefusalTest {
         String src = name("src");
         String tgt = name("tgt");
         register(tgt);
-        Job job = jobs.start(TENANT, src, tgt, null, false, false);
+        Job job = startJob(src, tgt);
 
         assert409Naming(rename(tgt, name("elsewhere")), job);
     }
@@ -171,7 +186,15 @@ class ReembedRenameRefusalTest {
         String tgt = name("tgt");
         String free = name("free");
         register(free);
-        Job job = jobs.start(TENANT, src, tgt, null, false, false);
+        Job job = startJob(src, tgt);
+        // A job row carries both ends' registry ids, so start registered both names (RDR-229 P3.1). What this test is about
+        // is a name the job holds that the registry does NOT: the two registry rows go away after the start, as a source the
+        // job's own cutover deleted does, and the job still holds both names.
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSL.using(su, SQLDialect.POSTGRES).deleteFrom(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.in(src, tgt)).execute();
+        }
 
         assert409Naming(rename(free, tgt), job);
         assert409Naming(rename(free, src), job);
@@ -184,7 +207,7 @@ class ReembedRenameRefusalTest {
         String free = name("free");
         String renamed = name("renamed");
         register(free);
-        jobs.start(TENANT, src, tgt, null, false, false);
+        startJob(src, tgt);
 
         var resp = rename(free, renamed);
 
@@ -198,7 +221,7 @@ class ReembedRenameRefusalTest {
         String tgt = name("tgt");
         String renamed = name("renamed");
         register(src);
-        Job job = jobs.start(TENANT, src, tgt, null, false, false);
+        Job job = startJob(src, tgt);
         assert409Naming(rename(src, renamed), job);
 
         jobs.applyTransition(TENANT, job.jobId(), PLANNED, null, ABORTED, Transition.NONE).orElseThrow();
@@ -228,7 +251,7 @@ class ReembedRenameRefusalTest {
         String tgt = name("tgt");
         String free = name("free");
         register(tgt, free);
-        Job job = jobs.start(TENANT, src, tgt, null, false, false);
+        Job job = startJob(src, tgt);
 
         // the job's target is the collection being moved ONTO
         assert409Naming(rehome(free, tgt), job);
@@ -241,7 +264,7 @@ class ReembedRenameRefusalTest {
         String a = name("a");
         String b = name("b");
         register(a, b);
-        jobs.start(TENANT, src, tgt, null, false, false);
+        startJob(src, tgt);
 
         var resp = rehome(a, b);
 
@@ -257,7 +280,7 @@ class ReembedRenameRefusalTest {
             String src = name("src");
             String tgt = name("tgt");
             register(src);
-            Job job = jobs.start(TENANT, src, tgt, null, false, false);
+            Job job = startJob(src, tgt);
 
             var resp = post(route, "{\"old\":\"" + src + "\",\"new\":\"" + name("elsewhere") + "\"}");
 
@@ -273,7 +296,7 @@ class ReembedRenameRefusalTest {
             String tgt = name("tgt");
             String free = name("free");
             register(free);
-            Job job = jobs.start(TENANT, src, tgt, null, false, false);
+            Job job = startJob(src, tgt);
 
             assert409Naming(post(route, "{\"old\":\"" + free + "\",\"new\":\"" + tgt + "\"}"), job);
         }
@@ -284,7 +307,7 @@ class ReembedRenameRefusalTest {
         String src = name("src");
         String tgt = name("tgt");
         register(src);
-        Job job = jobs.start(TENANT, src, tgt, null, false, false);
+        Job job = startJob(src, tgt);
         jobs.applyTransition(TENANT, job.jobId(), PLANNED, null, ABORTED, Transition.NONE).orElseThrow();
 
         for (String route : NAME_REWRITING_ROUTES) {
@@ -297,7 +320,7 @@ class ReembedRenameRefusalTest {
     }
 
     private Job inState(String src, String tgt, String state) {
-        Job job = jobs.start(TENANT, src, tgt, null, false, false);
+        Job job = startJob(src, tgt);
         if (state.equals(PLANNED)) {
             return job;
         }

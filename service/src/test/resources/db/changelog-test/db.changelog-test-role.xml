@@ -92,6 +92,22 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA nexus TO ${svcRole};
 -- safe to widen here once instead of per-class.
 GRANT UPDATE ON SEQUENCE nexus.topics_id_seq TO ${svcRole};
 
+-- RDR-229 P3.8: the collection mint heals a collection_id sequence behind the data through the SECURITY DEFINER function
+-- nexus.collection_id_seq_heal, and asks whether any tenant holds an id through nexus.collection_id_taken (both changeset
+-- collections-002); production grants EXECUTE on them to nexus_svc and no UPDATE on the sequence, so a per-class service
+-- role needs the same EXECUTE grants and nothing more. Guarded: this changelog also runs
+-- against schemas migrated before collections-002 existed.
+DO $$
+BEGIN
+    IF to_regprocedure('nexus.collection_id_seq_heal(bigint)') IS NOT NULL THEN
+        EXECUTE 'GRANT EXECUTE ON FUNCTION nexus.collection_id_seq_heal(bigint) TO ${svcRole}';
+    END IF;
+    IF to_regprocedure('nexus.collection_id_taken(bigint)') IS NOT NULL THEN
+        EXECUTE 'GRANT EXECUTE ON FUNCTION nexus.collection_id_taken(bigint) TO ${svcRole}';
+    END IF;
+END
+$$;
+
 -- nexus-cbo4a batch 13 (fts_matches): the Plans/Memory schema tests probe a
 -- table's fts_vector THROUGH TenantScope.withTenant, i.e. as ${svcRole}, and
 -- the probe is the test-lifecycle function nexus_test.fts_matches (the jOOQ

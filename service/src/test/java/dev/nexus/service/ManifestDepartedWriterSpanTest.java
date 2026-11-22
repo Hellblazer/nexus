@@ -6,6 +6,7 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.CombinedWriteService;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.EmbedderRouter;
@@ -211,6 +212,7 @@ class ManifestDepartedWriterSpanTest {
                     .set(CATALOG_DOCUMENTS.TUMBLER, id)
                     .set(CATALOG_DOCUMENTS.TITLE, id)
                     .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, coll)
+                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(tenant, coll))
                     .set(CATALOG_DOCUMENTS.SOURCE_URI, uri(id))
                     .execute();
             } catch (java.sql.SQLException e) {

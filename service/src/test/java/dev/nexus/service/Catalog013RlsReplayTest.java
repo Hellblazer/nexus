@@ -222,6 +222,7 @@ class Catalog013RlsReplayTest {
             .set(CATALOG_DOCUMENTS.CONTENT_TYPE, "paper")
             .set(CATALOG_DOCUMENTS.CORPUS, "research")
             .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
+            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, dev.nexus.service.db.CollectionIds.idOf(tenant, collection))
             .onConflictDoNothing()
             .execute();
         // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
@@ -242,6 +243,7 @@ class Catalog013RlsReplayTest {
             .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
             .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
                 PgContainerHelper.collectionModel(seed, tenant, collection))
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, dev.nexus.service.db.CollectionIds.idOf(tenant, collection))
             .execute();
         PgContainerHelper.readdCatalogChunksFkNotValid(c);
     }

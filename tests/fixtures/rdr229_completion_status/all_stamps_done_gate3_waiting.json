@@ -1,0 +1,16 @@
+{
+  "boot_work" : [ ],
+  "rdr229_completion" : {
+    "gate1" : true,
+    "gate2" : true,
+    "gate3" : false,
+    "gates_holding" : 2,
+    "gates_total" : 3,
+    "summary" : "gate 1 holds; gate 2 holds; gate 3 waits: this release builds no id-predicate index (P3.4), so no collection has a valid one",
+    "gate3_why" : "this release builds no id-predicate index (P3.4), so no collection has a valid one",
+    "labels_total" : 16,
+    "labels_incomplete" : [ ],
+    "checks_missing" : [ ],
+    "validate_waits" : [ ]
+  }
+}

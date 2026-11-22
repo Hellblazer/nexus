@@ -1,0 +1,36 @@
+# RDR-229 P3.1 stage 1 (nexus-p2m1x.17): the one list of the expand's id columns and CHECK constraints.
+# Columns: table, name column ('-' for the NOT NULL guard), id column, constraint name, kind.
+# Kinds: SUPERSEDED  (superseded_by = '') = (superseded_by_id IS NULL), NOT VALID
+#        NAME_ID     (NULLIF(<name>, '') IS NULL) = (<id> IS NULL), NOT VALID ('' means unset, linda 2026-11-20)
+#        NOT_NULL    CHECK (collection_id IS NOT NULL), NOT VALID (nexus.chunks and nexus.taxonomy_centroids)
+#        HISTORY     a nullable id column for joins; no CHECK, no stamp (constraint column is '-')
+# The constraint names are stable on purpose: the R5 operator down-step (DROP CONSTRAINT IF EXISTS on every row) is
+# generated from this file, and vectors-068's <rollback> blocks are tested against it. aspect_extraction_queue is
+# absent on most installs: its changesets are guarded and skip when the table is missing (R3).
+# Row order is the order of the changesets in vectors-068-collection-id-expand.xml, except catalog_collections' CHECK, which is
+# vectors-068-19 (its own changeset, with the 068-2 data precondition; vectors-068-2 adds the column).
+table	name_column	id_column	constraint	kind
+catalog_collections	superseded_by	superseded_by_id	catalog_collections_superseded_by_id_check	SUPERSEDED
+chunks	collection	collection_id	chunks_collection_id_check	NAME_ID
+chunks	-	collection_id	chunks_collection_id_not_null	NOT_NULL
+taxonomy_centroids	collection	collection_id	taxonomy_centroids_collection_id_check	NAME_ID
+taxonomy_centroids	-	collection_id	taxonomy_centroids_collection_id_not_null	NOT_NULL
+catalog_document_chunks	collection	collection_id	catalog_document_chunks_collection_id_check	NAME_ID
+chunk_orphaned_at	collection	collection_id	chunk_orphaned_at_collection_id_check	NAME_ID
+topic_assignments	source_collection	source_collection_id	topic_assignments_source_collection_id_check	NAME_ID
+document_aspects	collection	collection_id	document_aspects_collection_id_check	NAME_ID
+topics	collection	collection_id	topics_collection_id_check	NAME_ID
+taxonomy_meta	collection	collection_id	taxonomy_meta_collection_id_check	NAME_ID
+document_highlights	collection	collection_id	document_highlights_collection_id_check	NAME_ID
+canary_query_ring	collection	collection_id	canary_query_ring_collection_id_check	NAME_ID
+aspect_extraction_queue	collection	collection_id	aspect_extraction_queue_collection_id_check	NAME_ID
+catalog_documents	physical_collection	physical_collection_id	catalog_documents_physical_collection_id_check	NAME_ID
+chash_remap	source_collection	source_collection_id	chash_remap_source_collection_id_check	NAME_ID
+chash_remap	target_collection	target_collection_id	chash_remap_target_collection_id_check	NAME_ID
+pdf_pipeline	collection	collection_id	pdf_pipeline_collection_id_check	NAME_ID
+reembed_jobs	source_collection	source_collection_id	reembed_jobs_source_collection_id_check	NAME_ID
+reembed_jobs	target_collection	target_collection_id	reembed_jobs_target_collection_id_check	NAME_ID
+relevance_log	collection	collection_id	-	HISTORY
+search_telemetry	collection	collection_id	-	HISTORY
+hook_failures	collection	collection_id	-	HISTORY
+gc_audit	collection	collection_id	-	HISTORY

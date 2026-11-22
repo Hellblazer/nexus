@@ -125,13 +125,25 @@ def test_census_names_a_row_left_in_a_plain_table(state: dict[str, Any]) -> None
         drop_test_tenant(state, tenant)
 
 
+#: One chunk row in a partition leaf, under a collection that has a registry row. Since RDR-229 P3.1 (nexus-p2m1x.17)
+#: a chunk carries the registry's ``collection_id`` beside the name (``chunks_collection_id_check``), so the row's
+#: registry row is made first and the id read back from it, in the same statement text.
+_STRAY_CHUNK_SQL = (
+    "SET session_replication_role = replica; "
+    "INSERT INTO nexus.catalog_collections (tenant_id, name, content_type, owner_id, embedding_model, lifecycle_state) "
+    "VALUES (:'tenant', 'c', 'knowledge', 'test-seed', 'bge-base-en-v15-768', 'live'); "
+    "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_768, embedding_model, collection_id) "
+    "VALUES (:'tenant', 'c', decode(repeat('00', 32), 'hex'), 'x', "
+    "array_fill(0.1::real, ARRAY[768])::nexus.vector(768), 'bge-base-en-v15-768', "
+    "(SELECT collection_id FROM nexus.catalog_collections WHERE tenant_id = :'tenant' AND name = 'c'));"
+)
+
+
 def test_census_names_a_row_left_in_a_partition_leaf(state: dict[str, Any]) -> None:
     tenant, _ = mint_test_tenant(state)
     try:
         _tenant_pool.wipe(state, tenant)
-        _sql(state, "SET session_replication_role = replica; "
-                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_768, embedding_model) "
-                    "VALUES (:'tenant', 'c', decode(repeat('00', 32), 'hex'), 'x', array_fill(0.1::real, ARRAY[768])::nexus.vector(768), 'bge-base-en-v15-768');", tenant=tenant)
+        _sql(state, _STRAY_CHUNK_SQL, tenant=tenant)
         with pytest.raises(TenantLeakError, match=r"nexus\.chunks=1"):
             _tenant_pool.census(state, tenant)
         _tenant_pool.wipe(state, tenant)
@@ -1052,10 +1064,7 @@ def test_the_end_of_session_line_reports_the_pool_tenants_leaf_bloat(
     pool = make_pool()
     monkeypatch.setattr(_tenant_pool, "_pool", pool)
     with pool.lease() as (tenant, _t):
-        _sql(state, "SET session_replication_role = replica; "
-                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_768, embedding_model) "
-                    "VALUES (:'tenant', 'c', decode(repeat('00', 32), 'hex'), 'x', "
-                    "array_fill(0.1::real, ARRAY[768])::nexus.vector(768), 'bge-base-en-v15-768');", tenant=tenant)
+        _sql(state, _STRAY_CHUNK_SQL, tenant=tenant)
     dead, live, size = pool.leaf_bloat() or (-1, -1, -1)
     assert dead >= 0 and live >= 0 and size > 0, "the reset left a chunk leaf that once held a row, so it has bytes"
     report = _tenant_pool.worker_report()

@@ -425,7 +425,7 @@ Carries the two things a reinstall cannot regenerate: the **link graph**
 (cross-collection, and tumblers are NOT stable across reindex) and
 **store_put-origin knowledge content** (whose only copy is its indexed
 chunks). One human-inspectable JSONL file: a header line, then
-`knowledge_doc` records, then `link` records.
+`collection` records (format 3), `knowledge_doc` records, then `link` records.
 
 Locked format decisions (design of record: T2
 `nexus/design-xn3fr-recovery-bundle.md`, GH #1419 Issue 9):
@@ -434,6 +434,22 @@ Locked format decisions (design of record: T2
   carry `(collection, title)` so import re-derives the synthesized
   identity under the target install's collection set (works across an
   embedding-mode change).
+- **Format 3 carries each collection's registry row** (RDR-229 P3.9). Every
+  collection that holds a note, when the engine reports its id, gets a `collection` record (`collection_id`,
+  label, `content_type`, `owner_id`, `embedding_model`, `model_version`,
+  `lifecycle_state`), and each note carries its source `collection_id`. Import
+  registers a collection from that row, never from its name, and keeps the
+  label. The source `collection_id` is a key local to the bundle: the target
+  mints or keeps its own id and never adopts the source's. A label already live
+  on the target with another `content_type` or `owner_id` refuses that
+  collection only (the report names both sides and counts its skipped notes,
+  and the command exits 1 once it has printed everything); the same label with
+  the same attributes maps to the existing row, so a re-import creates nothing.
+  A row that is not `live` is skipped, counted and named, never registered
+  live. A label with no row on the target is registered under the target's
+  active embedding model (the notes are re-embedded from text) and the report
+  names each collection whose model changed. A bundle of format 1 or 2 still
+  imports through the name path, for the minor releases RDR-229 sets.
 - **No embeddings.** Import writes each note through the note writer
   (the one `store_put` uses), which re-embeds — the bundle is portable across embedding models. For an
   embedding-preserving per-collection backup use `nx store export COLLECTION`

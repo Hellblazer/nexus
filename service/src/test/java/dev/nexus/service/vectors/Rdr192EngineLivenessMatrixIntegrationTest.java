@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.VectorSeeds;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
@@ -609,6 +610,7 @@ class Rdr192EngineLivenessMatrixIntegrationTest {
             ctx.insertInto(TAXONOMY_CENTROIDS)
                 .set(TAXONOMY_CENTROIDS.TENANT_ID, tenant)
                 .set(TAXONOMY_CENTROIDS.COLLECTION, collection)
+                .set(TAXONOMY_CENTROIDS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
                 .set(TAXONOMY_CENTROIDS.TOPIC_ID, topicId)
                 .set(TAXONOMY_CENTROIDS.LABEL, "seed-centroid-" + label)
                 .set(TAXONOMY_CENTROIDS.EMBEDDING_384, VectorSeeds.vecXY(384, 1f, 0f))

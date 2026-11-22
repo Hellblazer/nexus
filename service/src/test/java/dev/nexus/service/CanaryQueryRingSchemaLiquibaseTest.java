@@ -2,7 +2,9 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.SqlConstraints;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.jooq.nexus.Routines;
 import liquibase.Contexts;
@@ -82,7 +84,8 @@ class CanaryQueryRingSchemaLiquibaseTest {
         Map.entry("embedding_768", "vector YES"),
         Map.entry("embedding_1024", "vector YES"),
         Map.entry("vector_digest", "bytea NO"),
-        Map.entry("added_at", "timestamptz NO")));
+        Map.entry("added_at", "timestamptz NO"),
+        Map.entry("collection_id", "int8 YES"))); // vectors-068 (RDR-229 P3.1): the registry id beside the name
 
     PostgreSQLContainer<?> pg;
     com.zaxxer.hikari.HikariDataSource svcDs;
@@ -190,7 +193,7 @@ class CanaryQueryRingSchemaLiquibaseTest {
                     PgCatalogProbes.ConstraintDefinition::definition));
             assertThat(constraints).containsOnlyKeys(
                 "canary_query_ring_pk", "canary_query_ring_exactly_one_embedding", "canary_query_ring_digest_len",
-                "canary_query_ring_collection_fk");
+                "canary_query_ring_collection_fk", "canary_query_ring_collection_id_check");
             assertThat(constraints.get("canary_query_ring_pk"))
                 .isEqualTo("PRIMARY KEY (tenant_id, collection, vector_digest)");
             assertThat(constraints.get("canary_query_ring_exactly_one_embedding"))
@@ -218,10 +221,22 @@ class CanaryQueryRingSchemaLiquibaseTest {
             assertThat(rls.enabled()).as("RLS ENABLE").isTrue();
             assertThat(rls.forced()).as("RLS FORCE").isTrue();
             List<PgCatalogProbes.Policy> policies = PgCatalogProbes.policies(ctx, "nexus", "canary_query_ring");
-            assertThat(policies).hasSize(1);
-            assertThat(policies.get(0).policyname()).isEqualTo("tenant_isolation");
-            assertThat(policies.get(0).qual()).contains("nexus.tenant");
-            assertThat(policies.get(0).withCheck()).contains("nexus.tenant");
+            // RDR-229 P3.1 (vectors-070): the tenant policy, and the migrating role's owner-read SELECT policy.
+            assertThat(policies).extracting(PgCatalogProbes.Policy::policyname)
+                .containsExactlyInAnyOrder("tenant_isolation", "canary_query_ring_owner_read");
+            PgCatalogProbes.Policy tenant = policies.stream()
+                .filter(p -> p.policyname().equals("tenant_isolation")).findFirst().orElseThrow();
+            assertThat(tenant.qual()).contains("nexus.tenant");
+            assertThat(tenant.withCheck()).contains("nexus.tenant");
+            PgCatalogProbes.Policy ownerRead = policies.stream()
+                .filter(p -> p.policyname().equals("canary_query_ring_owner_read")).findFirst().orElseThrow();
+            assertThat(ownerRead.cmd()).isEqualTo("SELECT");
+            assertThat(ownerRead.qual()).isEqualTo("true");
+            assertThat(ownerRead.withCheck()).isNull();
+            assertThat(PgCatalogProbes.policyRoles(ctx, "nexus", "canary_query_ring").stream()
+                    .filter(p -> p.policyname().equals("canary_query_ring_owner_read"))
+                    .map(PgCatalogProbes.PolicyRoles::toString).toList())
+                .containsExactly("canary_query_ring_owner_read roles={" + PgContainerHelper.USERNAME + "} cmd=SELECT");
         }
     }
 
@@ -253,6 +268,7 @@ class CanaryQueryRingSchemaLiquibaseTest {
 
             assertThatThrownBy(() -> ctx.insertInto(CANARY_QUERY_RING)
                 .set(CANARY_QUERY_RING.TENANT_ID, tenant).set(CANARY_QUERY_RING.COLLECTION, COLL_384)
+                .set(CANARY_QUERY_RING.COLLECTION_ID, CollectionIds.idOf(tenant, COLL_384))
                 .set(CANARY_QUERY_RING.EMBEDDING_MODEL, model)
                 .set(CANARY_QUERY_RING.EMBEDDING_384, vector(768, 1))
                 .set(CANARY_QUERY_RING.VECTOR_DIGEST, digest("wrong-dim")).set(CANARY_QUERY_RING.ADDED_AT, now)
@@ -263,6 +279,7 @@ class CanaryQueryRingSchemaLiquibaseTest {
 
             assertThatThrownBy(() -> ctx.insertInto(CANARY_QUERY_RING)
                 .set(CANARY_QUERY_RING.TENANT_ID, tenant).set(CANARY_QUERY_RING.COLLECTION, COLL_384)
+                .set(CANARY_QUERY_RING.COLLECTION_ID, CollectionIds.idOf(tenant, COLL_384))
                 .set(CANARY_QUERY_RING.EMBEDDING_MODEL, model)
                 .set(CANARY_QUERY_RING.EMBEDDING_384, vector(384, 1))
                 .set(CANARY_QUERY_RING.EMBEDDING_768, vector(768, 1))
@@ -273,6 +290,7 @@ class CanaryQueryRingSchemaLiquibaseTest {
 
             assertThatThrownBy(() -> ctx.insertInto(CANARY_QUERY_RING)
                 .set(CANARY_QUERY_RING.TENANT_ID, tenant).set(CANARY_QUERY_RING.COLLECTION, COLL_384)
+                .set(CANARY_QUERY_RING.COLLECTION_ID, CollectionIds.idOf(tenant, COLL_384))
                 .set(CANARY_QUERY_RING.EMBEDDING_MODEL, model)
                 .set(CANARY_QUERY_RING.VECTOR_DIGEST, digest("none")).set(CANARY_QUERY_RING.ADDED_AT, now)
                 .execute())
@@ -281,6 +299,7 @@ class CanaryQueryRingSchemaLiquibaseTest {
 
             assertThatThrownBy(() -> ctx.insertInto(CANARY_QUERY_RING)
                 .set(CANARY_QUERY_RING.TENANT_ID, tenant).set(CANARY_QUERY_RING.COLLECTION, COLL_384)
+                .set(CANARY_QUERY_RING.COLLECTION_ID, CollectionIds.idOf(tenant, COLL_384))
                 .set(CANARY_QUERY_RING.EMBEDDING_MODEL, model)
                 .set(CANARY_QUERY_RING.EMBEDDING_384, vector(384, 1))
                 .set(CANARY_QUERY_RING.VECTOR_DIGEST, new byte[31]).set(CANARY_QUERY_RING.ADDED_AT, now)
@@ -290,6 +309,8 @@ class CanaryQueryRingSchemaLiquibaseTest {
 
             assertThatThrownBy(() -> ctx.insertInto(CANARY_QUERY_RING)
                 .set(CANARY_QUERY_RING.TENANT_ID, tenant).set(CANARY_QUERY_RING.COLLECTION, COLL_GONE)
+                // an id the name does not resolve to, so the id CHECK passes and the foreign key on the name is what refuses
+                .set(CANARY_QUERY_RING.COLLECTION_ID, CollectionIds.idOf(tenant, COLL_384))
                 .set(CANARY_QUERY_RING.EMBEDDING_MODEL, model)
                 .set(CANARY_QUERY_RING.EMBEDDING_384, vector(384, 1))
                 .set(CANARY_QUERY_RING.VECTOR_DIGEST, digest("orphan")).set(CANARY_QUERY_RING.ADDED_AT, now)
@@ -356,25 +377,25 @@ class CanaryQueryRingSchemaLiquibaseTest {
     }
 
     @Test
-    void upsert_anEntryWhoseCollectionWasDeleted_isSkipped_andTheRestOfTheBatchIsWritten() throws Exception {
-        // Gate S6: the collection was deleted between enqueue and flush. The function skips the entry on its
-        // foreign-key failure (a sub-block per entry), so the batch's other entries, before AND after it, land.
+    void upsert_anEntryWhoseCollectionHasNoRegistryRow_raisesTheForeignKeyCode_andTheWholeCallWritesNothing() throws Exception {
+        // RDR-229 P3.1 (linda's ruling): an entry whose collection does not resolve is no longer skipped (the id CHECK would
+        // refuse a NULL id; a silent skip hid the defect). The function raises SQLSTATE 23503, the code the other registry
+        // guards in SQL (assign_from_chashes) use for the same refusal, and the transaction rolls back: the entries before AND
+        // after it are not written either. PciQueryRing's writer retries a failed batch entry by entry (its own test).
         String tenant = "ring054-s6";
         seedCollection(tenant, COLL_384);
         seedCollection(tenant, COLL_384_OTHER);
 
-        int written = upsert(tenant,
+        assertThatThrownBy(() -> upsert(tenant,
             entry(COLL_384, "s6-before", 384),
             entry(COLL_GONE, "s6-gone", 384),
-            entry(COLL_384_OTHER, "s6-after", 384),
-            entry(COLL_384, "s6-last", 384));
-
-        assertThat(written).as("three of four written: the shortfall is the skipped entry").isEqualTo(3);
-        assertThat(ring(tenant, COLL_384)).extracting(RingRow::digestHex)
-            .containsExactlyInAnyOrder(hex(digest("s6-before")), hex(digest("s6-last")));
-        assertThat(ring(tenant, COLL_384_OTHER)).extracting(RingRow::digestHex)
-            .containsExactly(hex(digest("s6-after")));
-        assertThat(ring(tenant, COLL_GONE)).as("nothing was written for the deleted collection").isEmpty();
+            entry(COLL_384_OTHER, "s6-after", 384)))
+            .as("an unregistered same-tenant name")
+            .satisfies(t -> assertThat(SqlConstraints.isForeignKeyViolation(t)).as("SQLSTATE 23503 in %s", t).isTrue())
+            .hasMessageContaining("is not registered for tenant");
+        assertThat(ring(tenant, COLL_384)).as("rolled back with the call").isEmpty();
+        assertThat(ring(tenant, COLL_384_OTHER)).isEmpty();
+        assertThat(ring(tenant, COLL_GONE)).isEmpty();
     }
 
     @Test
@@ -489,10 +510,26 @@ class CanaryQueryRingSchemaLiquibaseTest {
         assertThat(upsert(a, entry(COLL_384, "iso", 384))).isEqualTo(1);
 
         assertThat(ring(b, COLL_384)).as("tenant B reads none of tenant A's ring").isEmpty();
+        // RDR-229 P3.1 (vectors-069): the routine reads the entry's collection id from the registry under the caller's
+        // RLS. Tenant A's registry row is invisible to a tenant B session, so the name does not resolve and the routine
+        // raises the unregistered refusal (linda's ruling), rather than the ring's WITH CHECK refusing the row.
         assertThatThrownBy(() -> scope.withTenant(b, ctx -> Routines.canaryQueryRingUpsert(ctx.configuration(),
                 a, new String[] {COLL_384}, new String[] {modelOf(a, COLL_384)},
                 new String[] {vector(384, 7).toString()}, new byte[][] {digest("iso-cross")})))
-            .as("a session of tenant B naming tenant A: the WITH CHECK refuses the row")
+            .as("a session of tenant B naming tenant A: the name does not resolve under its row-level security, so it is the"
+                + " unregistered refusal (SQLSTATE 23503), not a policy failure on the insert")
+            .satisfies(t -> assertThat(SqlConstraints.isForeignKeyViolation(t)).as("SQLSTATE 23503 in %s", t).isTrue())
+            .hasMessageContaining("is not registered for tenant");
+        // The table's own WITH CHECK still refuses a direct row of tenant A written from a session of tenant B.
+        Long idOfA = scope.withTenant(a, ctx -> CollectionIds.require(ctx, a, COLL_384));
+        assertThatThrownBy(() -> scope.withTenant(b, ctx -> ctx.insertInto(CANARY_QUERY_RING)
+                .set(CANARY_QUERY_RING.TENANT_ID, a).set(CANARY_QUERY_RING.COLLECTION, COLL_384)
+                .set(CANARY_QUERY_RING.COLLECTION_ID, idOfA)
+                .set(CANARY_QUERY_RING.EMBEDDING_MODEL, modelOf(a, COLL_384))
+                .set(CANARY_QUERY_RING.EMBEDDING_384, vector(384, 7))
+                .set(CANARY_QUERY_RING.VECTOR_DIGEST, digest("iso-cross-direct"))
+                .set(CANARY_QUERY_RING.ADDED_AT, OffsetDateTime.now()).execute()))
+            .as("a direct row of tenant A from a session of tenant B: the table's WITH CHECK refuses it")
             .hasMessageContaining("row-level security");
         assertThat(ring(a, COLL_384)).as("and tenant A's ring is unchanged").hasSize(1);
     }
@@ -578,6 +615,7 @@ class CanaryQueryRingSchemaLiquibaseTest {
                                       OffsetDateTime addedAt) {
         ctx.insertInto(CANARY_QUERY_RING)
             .set(CANARY_QUERY_RING.TENANT_ID, tenant).set(CANARY_QUERY_RING.COLLECTION, collection)
+            .set(CANARY_QUERY_RING.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
             .set(CANARY_QUERY_RING.EMBEDDING_MODEL, model)
             .set(CANARY_QUERY_RING.EMBEDDING_384, vector(384, seed.hashCode() & 0xff))
             .set(CANARY_QUERY_RING.VECTOR_DIGEST, digest(seed)).set(CANARY_QUERY_RING.ADDED_AT, addedAt)

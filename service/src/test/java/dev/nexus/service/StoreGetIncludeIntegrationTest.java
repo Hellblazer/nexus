@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariConfig;
@@ -139,14 +140,23 @@ class StoreGetIncludeIntegrationTest {
 
     /** A catalog document of its own that owns one chunk of {@link #COL_X}, flagged or not. */
     private static void ownAs(DSLContext ctx, String doc, String chash, boolean sensitive) {
-        ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
-                CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.SENSITIVE)
-            .values(TENANT, doc, "Owner " + doc, COL_X, sensitive).execute();
-        ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
-                CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-            .values(TENANT, doc, 0, Chash.fromHex(chash).toBytes(), COL_X,
-                    PgContainerHelper.collectionModel(ctx, TENANT, COL_X)).execute();
+        ctx.insertInto(CATALOG_DOCUMENTS)
+            .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT)
+            .set(CATALOG_DOCUMENTS.TUMBLER, doc)
+            .set(CATALOG_DOCUMENTS.TITLE, "Owner " + doc)
+            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COL_X)
+            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, COL_X))
+            .set(CATALOG_DOCUMENTS.SENSITIVE, sensitive)
+            .execute();
+        ctx.insertInto(CATALOG_DOCUMENT_CHUNKS)
+            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, TENANT)
+            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, doc)
+            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
+            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, Chash.fromHex(chash).toBytes())
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, COL_X)
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, COL_X))
+            .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, TENANT, COL_X))
+            .execute();
     }
 
     @AfterAll

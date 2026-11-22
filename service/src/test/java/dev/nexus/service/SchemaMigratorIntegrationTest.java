@@ -1,5 +1,6 @@
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import org.jooq.Field;
 import org.jooq.Table;
 import org.jooq.impl.DSL;
@@ -13,6 +14,7 @@ import liquibase.Contexts;
 import liquibase.LabelExpression;
 import liquibase.Liquibase;
 import liquibase.changelog.ChangeSet;
+import liquibase.precondition.core.PreconditionContainer;
 import liquibase.database.Database;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
@@ -237,9 +239,14 @@ class SchemaMigratorIntegrationTest {
         assertThat(first.newChangesets())
             .as("fresh walk: new_changesets == every changelog row")
             .isEqualTo(changelogRows);
+        // RDR-229 P3.8 (nexus-p2m1x.28): a changeset that skips itself with onFail="CONTINUE" (collections-001-2,
+        // waiting for a data move that a fresh install has not completed) leaves no row and is counted apart.
         assertThat(first.pendingAtStart())
-            .as("fresh walk: the plan and the landing agree")
-            .isEqualTo(first.newChangesets());
+            .as("fresh walk: the plan and the landing agree, a self-retrying skip counted apart")
+            .isEqualTo(first.newChangesets() + first.skippedRetryingChangesets());
+        assertThat(first.skippedRetryingChangesets())
+            .as("fresh walk: collections-001-2 waits for its data move")
+            .isEqualTo(1);
         assertThat(first.reexecutedChangesets())
             .as("fresh walk re-stamps nothing")
             .isZero();
@@ -1656,13 +1663,18 @@ class SchemaMigratorIntegrationTest {
                     // collection -- no catalog_collections row for (tenant, name).
                     // RDR-225: a chunk carries a model, and the tenant needs its partition leaves.
                     PgContainerHelper.ensureTenantPartitions(dsl(su), tenant);
-                    dsl(su).insertInto(CHUNKS,
-                            CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
-                            CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_1024)
-                        .values(tenant, unregCollection, java.util.HexFormat.of().parseHex(chash),
-                            "voyage-context-3", "neg text",
-                            dev.nexus.service.jooq.binding.Vector.parse(
-                                "[" + "0.1,".repeat(1023) + "0.1]"))
+                    // RDR-229 P3.1: a chunk names its collection's registry id too (a NOT VALID CHECK), and an
+                    // unregistered name has none, so the seed gives it an id no registry row holds: the name-keyed
+                    // FK this test adds is still the thing that refuses the unregistered row.
+                    dsl(su).insertInto(CHUNKS)
+                        .set(CHUNKS.TENANT_ID, tenant)
+                        .set(CHUNKS.COLLECTION, unregCollection)
+                        .set(CHUNKS.COLLECTION_ID, Long.MAX_VALUE)
+                        .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chash))
+                        .set(CHUNKS.EMBEDDING_MODEL, "voyage-context-3")
+                        .set(CHUNKS.CHUNK_TEXT, "neg text")
+                        .set(CHUNKS.EMBEDDING_1024, dev.nexus.service.jooq.binding.Vector.parse(
+                            "[" + "0.1,".repeat(1023) + "0.1]"))
                         .execute();
 
                     // The naive shape: adding the registry FK without fk-004-1-reconcile's
@@ -2054,9 +2066,17 @@ class SchemaMigratorIntegrationTest {
                             database)) {
                         for (ChangeSet cs : liquibase.listUnrunChangeSets(
                                 new Contexts(), new LabelExpression())) {
+                            // RDR-229 P3.8: a self-retrying (onFail="CONTINUE") changeset whose guard has not
+                            // passed is unrun too (RDR-246 "Finishing a move"); it re-executes nothing.
+                            if (!cs.isAlwaysRun()
+                                    && cs.getPreconditions() != null
+                                    && cs.getPreconditions().getOnFail()
+                                        == PreconditionContainer.FailOption.CONTINUE) {
+                                continue;
+                            }
                             assertThat(cs.isAlwaysRun())
                                 .as("on a fully-migrated database, every unrun "
-                                    + "changeset must be runAlways: " + cs.getId())
+                                    + "changeset must be runAlways or self-retrying: " + cs.getId())
                                 .isTrue();
                             runAlwaysIds.add(cs.getId());
                         }
@@ -2161,8 +2181,13 @@ class SchemaMigratorIntegrationTest {
                     .as("nexus-jl08t: listUnrunChangeSets() before the walk counts "
                         + "the 5 genuinely-pending changesets PLUS the full "
                         + "runAlways set (always considered unrun regardless of "
-                        + "prior execution) -- 5 + 13 = 18 on today's changelog (17 on the v0.1.118 walk)")
-                    .isEqualTo(5L + runAlwaysIds.size());
+                        + "prior execution), PLUS a self-retrying (onFail=CONTINUE) changeset still waiting "
+                        + "(collections-001-2, RDR-229 P3.8: never recorded, so unrun at every start) -- "
+                        + "5 + 13 + 1 = 19 on today's changelog (17 on the v0.1.118 walk)")
+                    .isEqualTo(5L + runAlwaysIds.size() + outcome.skippedRetryingChangesets());
+                assertThat(outcome.skippedRetryingChangesets())
+                    .as("the waiting collections-001-2 is the one skipped self-retrying changeset")
+                    .isEqualTo(1L);
 
                 // ── Assert: every runAlways row's dateexecuted actually moved
                 // during this walk (sanity check the seeded duplicates are
@@ -2255,8 +2280,8 @@ class SchemaMigratorIntegrationTest {
                     .as("no precondition-skip changesets are exercised by this walk")
                     .isZero();
                 assertThat(outcome.newChangesets() + outcome.reexecutedChangesets()
-                        + outcome.markRanChangesets())
-                    .as("nexus-jl08t: the three outcome counts must partition "
+                        + outcome.markRanChangesets() + outcome.skippedRetryingChangesets())
+                    .as("nexus-jl08t: the outcome counts (with the waiting self-retrying changeset) must partition "
                         + "pending_at_start exactly, even with duplicate rows "
                         + "present")
                     .isEqualTo((long) outcome.pendingAtStart());

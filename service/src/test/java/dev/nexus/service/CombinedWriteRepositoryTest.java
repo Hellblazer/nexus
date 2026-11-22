@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import org.jooq.DSLContext;
 import org.jooq.impl.DSL;
 import org.jooq.SQLDialect;
@@ -130,7 +131,15 @@ class CombinedWriteRepositoryTest {
         return Chash.ofText(seed).toHex();
     }
 
+    /** RDR-229 P3.1: a document names its collection by registry id, so the collection is registered first (idempotent). */
+    private void registerCollection(String tenant, String collection) {
+        repo.upsertCollection(tenant, Map.of(
+            "name", collection, "content_type", "code", "owner_id", "combined-write-owner",
+            "embedding_model", "minilm-l6-v2-384", "model_version", "v1"));
+    }
+
     private void registerDoc(String tenant, String tumbler, String collection) {
+        registerCollection(tenant, collection);
         repo.upsertDocument(tenant, Map.of(
             "tumbler", tumbler, "title", "combined-write-test-" + tumbler,
             "content_type", "code", "corpus", "code",
@@ -171,15 +180,14 @@ class CombinedWriteRepositoryTest {
     }
 
     private void seedChunk384(String tenant, String collection, String hexChash, String text) throws Exception {
-        repo.upsertCollection(tenant, Map.of(
-            "name", collection, "content_type", "code", "owner_id", "combined-write-owner",
-            "embedding_model", "minilm-l6-v2-384", "model_version", "v1"));
+        registerCollection(tenant, collection);
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             PgContainerHelper.setTenant(su, TenantScope.DEFAULT_TENANT_GUC, tenant, false);
             DSL.using(su, SQLDialect.POSTGRES).insertInto(CHUNKS)
                 .set(CHUNKS.TENANT_ID, tenant)
                 .set(CHUNKS.COLLECTION, collection)
+                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
                 .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(hexChash))
                 .set(CHUNKS.EMBEDDING_MODEL, "minilm-l6-v2-384")
                 .set(CHUNKS.CHUNK_TEXT, text)

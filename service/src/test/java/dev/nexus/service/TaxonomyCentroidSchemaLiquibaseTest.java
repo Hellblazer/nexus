@@ -81,7 +81,8 @@ class TaxonomyCentroidSchemaLiquibaseTest {
                 assertThat(cols).as("columns of nexus." + TABLE).containsExactlyInAnyOrder(
                     "tenant_id", "collection", "topic_id",
                     "embedding_384", "embedding_768", "embedding_1024",
-                    "label", "doc_count", "created_at", "embedding_model");
+                    "label", "doc_count", "created_at", "embedding_model",
+                    "collection_id"); // vectors-068 (RDR-229 P3.1)
 
                 // Primary key is (tenant_id, collection, topic_id, embedding_model) in order:
                 // vectors-030-1 widens it to carry the partition key.

@@ -5,6 +5,10 @@
 # both ways: an unlisted caller fails, a stale row fails. A class whose subject is NOT the walk or a
 # cluster-level fact has no kind here; it takes a clone (PgContainerHelper.start() or startMigratedByOwner()).
 Catalog044OwnerFromDocumentsRepairTest	startEmptyDatabase	WALK	migrates to just before catalog-044-1, seeds the pre-fix owner shape, applies the rest and reads the repair back
+Rdr229P31ExpandIntegrationTest	startEmptyDatabase	WALK	walks to before vectors-068-1 to seed rows and asserts the expand changesets rewrite none of them, then walks fully for the CHECK semantics, the queue guards, the rollback and the walk forward again
+Rdr229P31SupersededByCheckWaitTest	startEmptyDatabase	WALK	walks to before vectors-068-1 to seed a blank-model_version tombstone, then walks fully and asserts the superseded_by CHECK waits (CONTINUE) while the tombstone is unstamped and lands on the next boot once it is filled
+P31SqlDualWriteSupport	startEmptyDatabase	WALK	the shared walk of the Rdr229P31Sql*DualWriteIntegrationTest classes: seeds before vectors-068, refusals with 068 applied and 069 not, then fully for the ids (quarantine, trigger and taxonomy and catalog groups)
+Rdr229P31SqlCatalogDualWriteIntegrationTest	startEmptyDatabase	WALK	holds the catalog and ring group through the shared walk, then rolls back to a tag and walks forward again, and scans the live function bodies on a second full walk
 ServiceTokenScopeBackfillTest	startEmptyDatabase	WALK	builds the pre-003 service_tokens shape by hand, then applies only service-tokens-003 and asserts the backfill
 VectorsUnifyChunksIntegrationTest	startEmptyDatabase	WALK	stages vectors-004 against a seeded per-dimension pre-state and asserts the unify
 VectorsRepointFunctionsIntegrationTest	startEmptyDatabase	WALK	chains vectors-004, taxonomy-007 and vectors-005 over a seeded pre-state and calls every repointed object
@@ -27,6 +31,7 @@ TuplesBaselineSchemaLiquibaseTest	startEmptyDatabase	WALK	rolls the tuples chang
 TuplesRetireLedgerLiquibaseTest	startEmptyDatabase	WALK	walks to before tuples-012-1, seeds ledger rows, look-alikes and delivery and claim-log rows in two tenants, applies it, and asserts the purge as a NOBYPASSRLS owner, FORCE RLS restored, and a second run that deletes only a new ledger row
 AspectQueueRetireLiquibaseTest	startEmptyDatabase	WALK	walks to before aspects-005-2 as a NOBYPASSRLS owner, seeds a queue row as superuser, and asserts the guarded drop on an empty table, a populated table (kept, boot continues, retried) and a throwing guard, plus the rollback shape
 AspectQueueDrainIntegrationTest	startEmptyDatabase	WALK	walks to before aspects-005-2 as a NOBYPASSRLS owner, seeds queue rows of two tenants as superuser, lets the migration keep the table, and asserts the engine-start drain's moves, dead-letters, retained rows and the next boot's drop
+CollectionTupleUniqueIndexLiquibaseTest	startEmptyDatabase	WALK	walks to before collections-001-2 as a NOBYPASSRLS owner, seeds registry rows and a data_moves row as superuser, and asserts the gated index waits (move absent, open, failed, duplicate), is skipped unrecorded, then applies on the boot both conditions hold; and the unscoped duplicate counter under FORCE RLS
 StagingSchemaDropLiquibaseTest	startEmptyDatabase	WALK	walks to before staging-003, sets up one shape per test (aged rows, foreign grants, non-owner), finishes the walk and asserts the drop
 P225MigrationWalkIntegrationTest	startEmptyDatabase	WALK	runs vectors-030-1 as production does over a seeded pre-walk layout and asserts the partitioned result, its failure and resume paths
 P225DropRetiredIntegrationTest	startEmptyDatabase	WALK	walks to before vectors-036-1 over a seeded pre-walk layout, applies the drop alone, rolls it back and compares the retired tables' catalog shape
@@ -45,6 +50,7 @@ DataMovesSchemaLiquibaseTest	startEmptyDatabase	OWNERSHIP	a non-superuser owner 
 GrantsNexusSvcUpgradeIntegrationTest	startEmptyDatabase	WALK	walks the changelog as it stood before nexus.data_moves (a derived old grants-nexus-svc-1 text), then boots the current one on that database and asserts the registry and the absence of a nexus_svc grant
 TextGateProbeSingleRoleGuardIntegrationTest	startEmptyDatabase	OWNERSHIP	walks the schema as each of several migrator roles (nexus_svc, a superuser, a BYPASSRLS login) and asserts vectors-029's precondition
 TextGateProbeSingleRoleGuardIntegrationTest	startDedicated	CLUSTER_STATE	grants role membership edges on nexus_svc, which would leak into every later class on a shared cluster
+Rdr229P31SingleRoleSupersededByCheckTest	startDedicated	CLUSTER_STATE	migrates as nexus_svc itself (the single-role posture: vectors-065 owner-read skip names that role), which the shared cluster already holds from the template migration and cannot drop; role state is cluster-wide
 ServiceIntegrationTest	startEmptyDatabase	SKELETON	a hand-made RLS harness with no product schema; pins that /version reports a missing public.databasechangelog, so the database must be unmigrated
 VersionHandlerSchemaChangesetCountTest	startEmptyDatabase	SKELETON	builds a minimal public.databasechangelog-shaped table itself; a migrated database already has the real one
 SharedClusterEmptyDatabaseTest	startEmptyDatabase	INFRA	tests acquireEmptyDatabase itself: isolation, exclusive roles, cleanup

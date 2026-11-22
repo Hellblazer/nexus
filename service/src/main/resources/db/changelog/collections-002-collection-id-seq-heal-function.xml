@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-229 P3.8 (bead nexus-p2m1x.28): nexus.collection_id_seq_heal(p_floor bigint), the one way the engine role moves the
+    shared collection_id sequence, and nexus.collection_id_taken(p_id bigint), the one way it asks whether ANY tenant holds an id.
+
+    AN ID IS MEANT TO BE UNIQUE ACROSS THE INSTALLATION (RDR item 6; linda's ruling on the review of P3.8), AND IS ONLY WHERE
+    D2's OWNER-READ POLICY EXISTS: without it both functions below read no row of any tenant, the heal's floor and the taken
+    check are the caller's own tenant's, and an id another tenant holds is not seen (the per-tenant check the mint also makes
+    is all there is). The table's own UNIQUE is
+    (tenant_id, collection_id) and nexus_svc, serving every tenant, sees only the rows of the tenant a request carries
+    (nexus.catalog_collections is FORCE ROW LEVEL SECURITY). So both functions are SECURITY DEFINER, owned by the migration
+    role, and read EVERY tenant's collection_id through D2's catalog_collections_owner_read policy (changeset vectors-065;
+    until it exists the migration role reads no row, so the heal's floor is the caller's own and the taken check answers
+    false, which is no weaker than the per-tenant check the engine also makes). Each returns one number or one boolean: no
+    tenant's data crosses. EXECUTE goes to nexus_svc only. The heal's floor is the larger of the caller's and the largest
+    collection_id of any tenant; collection_id_taken is true when any tenant holds the id.
+
+    The engine mints a collection's id from nexus.catalog_collections.collection_id's own sequence (nextval). A restore that
+    wrote explicit ids and left the sequence behind them makes the next draw an id some row already holds; the mint then
+    heals the sequence ONCE and draws again (CollectionMint, MintedLabel; lead ruling T2
+    nexus_rdr/229-lead-ruling-collection-id-by-default-2026-11-21; draw-forward ruling in the notes of
+    the bead nexus-p2m1x.28).
+
+    The sequence is ONE for every tenant, and nexus_svc serves every tenant. UPDATE on it would let any tenant's request
+    set the identity every other tenant draws from to any value. So nexus_svc gets no UPDATE (the grants-nexus-svc-1
+    sequence grants, USAGE and SELECT, stand) and EXECUTE on this SECURITY DEFINER function instead. The function runs as
+    the migration role, which owns the sequence, and does one thing: it draws FORWARD, calling nextval until it has drawn
+    a value at or above p_floor, and answers the last value it drew. It NEVER calls setval, so it cannot move the sequence
+    backwards: a nextval by another session (another tenant's mint, a plain DEFAULT-identity insert) at any instant while
+    it runs is simply drawn past, and no id is ever handed out twice. A floor at or below the sequence's last value, or a
+    NULL or non-positive floor with no larger id in any tenant, draws nothing and answers the last value. The only table it
+    reads is nexus.catalog_collections, for max(collection_id) over every tenant (through the owner-read policy, see above);
+    it writes none, and its search_path is pinned to pg_catalog, pg_temp so nothing a caller creates shadows a name it uses.
+
+    The bound is 100000 draws. A floor more than 100000 above the sequence's last value is refused WITHOUT drawing, with
+    an error (SQLSTATE NX229) that names the floor, the current value, the difference and the remedy: a one-off setval on
+    the sequence run by an operator, as the sequence's owner, with the engine stopped. Explicit ids only come from the
+    expand's registry fill, so a gap that large means something unexpected, and a drawn-out heal would burn that many ids
+    to hide it. The mint maps the error to its 409 (MintedLabel.SequenceBehindDataException) with the message intact.
+    A sequence that wraps while the loop draws (a CYCLE sequence past its maximum) is refused the same way.
+
+    Owner-only and never halting a boot: the migration role creates the function; the grant runs only where nexus_svc
+    exists; a sequence owned by another role is reported with a WARNING and left (the heal then fails loudly at its
+    nextval, naming the sequence). The changeset itself raises nothing; the function raises only the refusals above. Placed after collections-001 and before the grants-nexus-svc.xml runAlways
+    block; it needs the identity column of vectors-068-1.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="collections-002-collection-id-seq-heal-function" author="nexus-p2m1x.28">
+        <comment>nexus.collection_id_seq_heal(bigint): a SECURITY DEFINER function, search_path pinned, that draws the collection_id sequence forward to a floor (the larger of the caller's and the largest collection_id of any tenant, read through D2's owner-read policy) with nextval (never setval, at most 100000 draws); nexus.collection_id_taken(bigint): a SECURITY DEFINER boolean over every tenant's collection_id, the same way; EXECUTE revoked from PUBLIC and granted to nexus_svc, which holds no UPDATE on the sequence (RDR-229 P3.8). DATA EFFECT: none; two function definitions and their privileges, no row written (the functions read when called, not at the changeset).</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.collection_id_seq_heal(p_floor bigint)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+    c_max_draws CONSTANT integer := 100000;
+    v_seq   pg_catalog.regclass;
+    v_max   bigint;
+    v_floor bigint;
+    v_last  bigint;
+    v_prev  bigint;
+    v_drawn bigint;
+    v_draws integer := 0;
+BEGIN
+    v_seq := pg_catalog.pg_get_serial_sequence('nexus.catalog_collections', 'collection_id')::pg_catalog.regclass;
+    IF v_seq IS NULL THEN
+        RAISE EXCEPTION 'nexus.collection_id_seq_heal: nexus.catalog_collections.collection_id has no owned sequence'
+            USING ERRCODE = 'undefined_object';
+    END IF;
+    v_last := pg_catalog.pg_sequence_last_value(v_seq);
+    SELECT pg_catalog.max(c.collection_id) INTO v_max FROM nexus.catalog_collections c;
+    v_floor := GREATEST(COALESCE(p_floor, 0), COALESCE(v_max, 0));
+    IF v_floor < 1 OR (v_last IS NOT NULL AND v_floor <= v_last) THEN
+        RETURN v_last;
+    END IF;
+    IF v_floor - COALESCE(v_last, 0) > c_max_draws THEN
+        RAISE EXCEPTION 'nexus.collection_id_seq_heal: the floor % is % above the current value % of sequence % (difference %, limit % draws); nothing was drawn. Explicit collection_id values only come from the expand''s registry fill, so a gap this large is unexpected: find the row that holds it. To move the sequence anyway, an operator runs one setval on % to the floor, as the sequence''s owner, with the engine stopped.',
+            v_floor, v_floor - COALESCE(v_last, 0), COALESCE(v_last, 0), v_seq, v_floor - COALESCE(v_last, 0), c_max_draws, v_seq
+            USING ERRCODE = 'NX229';
+    END IF;
+    v_prev := v_last;
+    LOOP
+        v_drawn := pg_catalog.nextval(v_seq);
+        v_draws := v_draws + 1;
+        IF v_prev IS NOT NULL AND v_drawn < v_prev THEN
+            RAISE EXCEPTION 'nexus.collection_id_seq_heal: sequence % wrapped from % to % while drawing to the floor % (it cycles); the floor is above the sequence''s maximum. An operator runs one setval on it, as its owner, with the engine stopped.',
+                v_seq, v_prev, v_drawn, v_floor
+                USING ERRCODE = 'NX229';
+        END IF;
+        EXIT WHEN v_drawn >= v_floor;
+        IF v_draws >= c_max_draws THEN
+            RAISE EXCEPTION 'nexus.collection_id_seq_heal: drew % values of sequence % and reached % short of the floor % (other sessions are drawing too). An operator runs one setval on it to the floor, as its owner, with the engine stopped.',
+                v_draws, v_seq, v_drawn, v_floor
+                USING ERRCODE = 'NX229';
+        END IF;
+        v_prev := v_drawn;
+    END LOOP;
+    RETURN v_drawn;
+END
+$fn$;
+
+REVOKE EXECUTE ON FUNCTION nexus.collection_id_seq_heal(bigint) FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION nexus.collection_id_taken(p_id bigint)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $taken$
+    SELECT p_id IS NOT NULL AND EXISTS (SELECT 1 FROM nexus.catalog_collections c WHERE c.collection_id = p_id)
+$taken$;
+
+REVOKE EXECUTE ON FUNCTION nexus.collection_id_taken(bigint) FROM PUBLIC;
+
+DO $grant$
+DECLARE
+    seq       text := pg_catalog.pg_get_serial_sequence('nexus.catalog_collections', 'collection_id');
+    seq_owner text;
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles r WHERE r.rolname = 'nexus_svc') THEN
+        GRANT EXECUTE ON FUNCTION nexus.collection_id_seq_heal(bigint) TO nexus_svc;
+        GRANT EXECUTE ON FUNCTION nexus.collection_id_taken(bigint) TO nexus_svc;
+    ELSE
+        RAISE NOTICE 'collections-002: role nexus_svc does not exist; EXECUTE on nexus.collection_id_seq_heal and nexus.collection_id_taken not granted';
+    END IF;
+    IF seq IS NOT NULL THEN
+        SELECT pg_catalog.pg_get_userbyid(c.relowner) INTO seq_owner FROM pg_catalog.pg_class c WHERE c.oid = seq::pg_catalog.regclass;
+        IF seq_owner IS DISTINCT FROM current_user THEN
+            RAISE WARNING 'collections-002: % is owned by %, not by the migration role %: the definer function runs as the migration role and cannot setval it; a restore that leaves collection_id behind its rows cannot be healed until the migration role owns it', seq, seq_owner, current_user;
+        END IF;
+    END IF;
+END
+$grant$;
+        ]]></sql>
+        <rollback>
+            <sql>DROP FUNCTION IF EXISTS nexus.collection_id_taken(bigint);</sql>
+            <sql>DROP FUNCTION IF EXISTS nexus.collection_id_seq_heal(bigint);</sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

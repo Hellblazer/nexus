@@ -637,6 +637,75 @@ class TestEmbeddingModelValidation:
         assert result["imported_count"] == 2
 
 
+class _RowDb:
+    """*db* seen through a client that holds registry rows (``HttpVectorClient._resolve_collection_row``)."""
+
+    def __init__(self, db: T3Database, rows: dict[str, dict]) -> None:
+        self._db = db
+        self._rows = rows
+
+    def __getattr__(self, name: str):
+        return getattr(self._db, name)
+
+    def _resolve_collection_row(self, collection: str, *, strict: bool = False) -> dict | None:
+        return self._rows.get(collection)
+
+
+class TestEmbeddingModelGateOfAMintedLabel:
+    """RDR-229 P3.8: an import into a new subject targets the label the engine minted (``c9``), whose name carries
+    no model. The model gate reads the target's registry row, not a guess from the name."""
+
+    @staticmethod
+    def _run(db: T3Database, tmp_path: Path, monkeypatch, *, row_model: str, export_model: str) -> None:
+        monkeypatch.setattr("nexus.exporter.is_file_routed_collection", lambda *a, **k: False)
+        monkeypatch.setattr("nexus.db.serving_engine_version.require_note_uri_engine", lambda *a, **k: None)
+        out = tmp_path / "label.nxexp"
+        _write_nxexp_records(out, "knowledge__src__x__v1", [{"id": "a" * 32, "document": "hello", "metadata": {}}],
+                             embedding_model=export_model, dim=768)
+        target = _RowDb(db, {"c9": {"content_type": "knowledge", "owner_id": "wbfpw11-imported",
+                                    "embedding_model": row_model, "lifecycle_state": "live"}})
+        try:
+            import_collection(db=target, input_path=out, target_collection="c9")
+        except EmbeddingModelMismatch:
+            raise
+        except Exception:  # noqa: BLE001 — past the gate the in-memory T3 cannot hold a label; only the gate is under test
+            pass
+
+    def test_an_export_in_the_rows_model_passes_the_gate(self, ephemeral_db, tmp_path, monkeypatch) -> None:
+        class _PastTheGate(BaseException):  # not an Exception: _run's catch-all past the gate must not swallow it
+            pass
+
+        import nexus.exporter as exporter
+
+        real, calls = exporter._owners_apply, []
+
+        def _reached(db):
+            # import_collection asks _owners_apply once before the model gate (the bypass-schema check) and once
+            # after it (the owner import): reaching the second call proves the gate passed the export
+            calls.append(db)
+            if len(calls) >= 2:
+                raise _PastTheGate()
+            return real(db)
+
+        monkeypatch.setattr(exporter, "_owners_apply", _reached)
+        # a model the name guess for ``c9`` never answers, so only the row can pass it
+        assert exporter.index_model_for_collection("c9") != "ext-embedder-x"
+        with pytest.raises(_PastTheGate):
+            self._run(ephemeral_db, tmp_path, monkeypatch,
+                      row_model="ext-embedder-x", export_model="ext-embedder-x")
+
+    def test_an_export_in_another_model_than_the_rows_is_refused_naming_the_rows_model(
+        self, ephemeral_db, tmp_path, monkeypatch,
+    ) -> None:
+        import nexus.exporter as exporter
+
+        # the export is in the model the name guess answers for ``c9``, so only the row's model can refuse it
+        with pytest.raises(EmbeddingModelMismatch) as exc_info:
+            self._run(ephemeral_db, tmp_path, monkeypatch,
+                      row_model="ext-embedder-x", export_model=exporter.index_model_for_collection("c9"))
+        assert "requires 'ext-embedder-x'" in str(exc_info.value) and "'c9'" in str(exc_info.value)
+
+
 # ── Unit: format version validation ──────────────────────────────────────────
 
 

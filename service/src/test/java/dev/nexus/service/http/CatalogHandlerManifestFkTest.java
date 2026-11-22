@@ -9,6 +9,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpPrincipal;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.CatalogRepository;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.TenantScope;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
@@ -69,6 +70,8 @@ class CatalogHandlerManifestFkTest {
         }
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
+            // the manifest writes name this collection, and an unregistered one is refused (P3.1, 422)
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, "knowledge__fk__v1");
         }
 
         var cfg = new com.zaxxer.hikari.HikariConfig();
@@ -319,6 +322,7 @@ class CatalogHandlerManifestFkTest {
             ctx.insertInto(CHUNKS)
                 .set(CHUNKS.TENANT_ID, TENANT)
                 .set(CHUNKS.COLLECTION, collection)
+                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
                 .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chashHex))
                 .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, TENANT, collection))
                 .set(CHUNKS.CHUNK_TEXT, "stub")

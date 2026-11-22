@@ -371,7 +371,8 @@ class CatalogHandlerCollectionUpsertProfileModelTest {
 
         for (String[] c : new String[][] {{withState, ",\"lifecycle_state\":\"live\""}, {without, ""}}) {
             CapturingExchange ex = post("/v1/catalog/collections/upsert",
-                "{\"name\":\"" + c[0] + "\",\"content_type\":\"code\",\"owner_id\":\"" + tenant
+                // each its own owner: a tuple has one live collection (RDR-229 P3.8)
+                "{\"name\":\"" + c[0] + "\",\"content_type\":\"code\",\"owner_id\":\"" + c[0].split("__")[1]
                 + "\",\"model_version\":\"v1\"" + c[1] + "}");
             handleWithTenant(ex, tenant);
             assertThat(ex.status).as(ex.bodyString()).isEqualTo(200);

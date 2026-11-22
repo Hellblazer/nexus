@@ -602,8 +602,31 @@ public final class PciReconciler {
 
     // -- one pass --------------------------------------------------------------------------------------------
 
+    /**
+     * Runs when a pass ends, however it ends (the completion check re-reads then, RDR-229 P3.1). Set once at boot, on the pass's thread; it must
+     * not block, and a throw is logged and goes no further.
+     */
+    private volatile Runnable passEnded = () -> { };
+
+    /** Sets what runs at the end of each pass; see the field. A null clears it. */
+    public void onPassEnded(Runnable listener) {
+        this.passEnded = listener == null ? () -> { } : listener;
+    }
+
     /** Run one pass now, on the calling thread. Returns what it did. */
     PassReport reconcileOnce() {
+        try {
+            return runPass();
+        } finally {
+            try {
+                passEnded.run();
+            } catch (RuntimeException e) {   // a listener is the engine's, never the pass's failure
+                log.warn("event=pci_pass_ended_listener_failed cause=\"{}\"", e.toString());
+            }
+        }
+    }
+
+    private PassReport runPass() {
         passes.incrementAndGet();
         if (!settings.enabled()) {
             holder = false;

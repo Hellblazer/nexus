@@ -133,7 +133,9 @@ def import_cmd(bundle: Path, ack_external_embedder: bool = False) -> None:
     one request with its catalog owner rows. Partial failures are REPORTED
     per note, never silently dropped — and never abort the rest. Exits
     non-zero when any note did not verify (failed, uncertain, or written
-    but not stamped complete).
+    but not stamped complete) or a collection was refused (its label is live
+    here with other attributes, or the engine would not register it); the
+    other collections still import.
     """
     from nexus.catalog.recovery_bundle import import_bundle  # noqa: PLC0415 — command-local import
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
@@ -164,6 +166,24 @@ def import_cmd(bundle: Path, ack_external_embedder: bool = False) -> None:
         click.echo(f"  links refused (malformed dchash span): {len(summary.links_refused_span)}")
         for r in summary.links_refused_span:  # the error names the span
             click.echo(f"    {r['from_uri']} -[{r['link_type']}]-> {r['to_uri']}: {r['error']}")
+    if summary.collections_refused_label_clash:
+        click.echo(f"  COLLECTIONS REFUSED: {len(summary.collections_refused_label_clash)}")
+        for c in summary.collections_refused_label_clash:
+            click.echo(f"    {c['label']!r}: {c['error']} (notes skipped: {c['docs_skipped']})")
+    if summary.collections_skipped_not_live:
+        click.echo(f"  collections skipped (not live): {len(summary.collections_skipped_not_live)}")
+        for c in summary.collections_skipped_not_live:
+            click.echo(f"    {c['label']!r} ({c['lifecycle_state']}; notes skipped: {c['docs_skipped']})")
+    if summary.collections_changed_model:
+        click.echo(
+            f"  collections registered under this install's embedding model: {len(summary.collections_changed_model)}")
+        for c in summary.collections_changed_model:
+            click.echo(f"    {c['label']!r}: {c['from_model']} -> {c['to_model']}")
+    if summary.collections_relabelled:
+        click.echo(
+            f"  collections imported under this install's own minted label: {len(summary.collections_relabelled)}")
+        for c in summary.collections_relabelled:
+            click.echo(f"    {c['label']!r} -> {c['target_label']!r}")
     if summary.docs_failed:
         click.echo(f"  DOC FAILURES: {summary.docs_failed}")
         for f in summary.doc_failures:
@@ -183,10 +203,11 @@ def import_cmd(bundle: Path, ack_external_embedder: bool = False) -> None:
                 f"    {link['from_source_uri']} -[{link['link_type']}]-> "
                 f"{link['to_source_uri']} (missing: {link['missing']})"
             )
-    if summary.docs_unverified:
+    if summary.docs_unverified or summary.collections_refused_label_clash:
         click.echo(
             f"  {summary.docs_unverified} note(s) did not verify; "
-            f"{summary.docs_imported} verified",
+            f"{summary.docs_imported} verified; "
+            f"{len(summary.collections_refused_label_clash)} collection(s) refused",
             err=True,
         )
         raise click.exceptions.Exit(1)

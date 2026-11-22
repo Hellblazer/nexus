@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.IndexRunCensusReads;
 import dev.nexus.service.db.TenantScope;
 import org.jooq.Query;
@@ -141,7 +142,8 @@ class IndexRunCensusPlanTest extends IndexRunCensusTestBase {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSL.using(su, SQLDialect.POSTGRES).insertInto(CHUNKS)
-                .set(CHUNKS.TENANT_ID, TENANT).set(CHUNKS.COLLECTION, C384).set(CHUNKS.CHASH, nextChash())
+                .set(CHUNKS.TENANT_ID, TENANT).set(CHUNKS.COLLECTION, C384)
+                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, C384)).set(CHUNKS.CHASH, nextChash())
                 .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(DSL.using(su, SQLDialect.POSTGRES), TENANT, C384))
                 .set(CHUNKS.CHUNK_TEXT, "t").set(CHUNKS.METADATA, org.jooq.JSONB.valueOf("{}"))
                 .set(CHUNKS.EMBEDDING_384, VectorSeeds.vec(384, 0.1f)).execute();

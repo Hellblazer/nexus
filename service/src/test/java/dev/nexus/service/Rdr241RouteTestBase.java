@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariConfig;
@@ -133,6 +134,7 @@ abstract class Rdr241RouteTestBase {
                     .set(CATALOG_DOCUMENTS.CONTENT_TYPE, r.contentType())
                     .set(CATALOG_DOCUMENTS.FILE_PATH, r.filePath())
                     .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLL)
+                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(r.tenant(), COLL))
                     .set(CATALOG_DOCUMENTS.SOURCE_URI, r.sourceUri())
                     .set(CATALOG_DOCUMENTS.METADATA, JSONB.valueOf(r.metadataJson()))
                     .set(CATALOG_DOCUMENTS.ALIAS_OF, r.aliasOf())

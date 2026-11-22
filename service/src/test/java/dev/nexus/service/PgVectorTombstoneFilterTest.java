@@ -6,6 +6,7 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.PgVectorRepository;
 import org.jooq.DSLContext;
@@ -191,6 +192,7 @@ class PgVectorTombstoneFilterTest {
             .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position)
             .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(chashHex))
             .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
             // RDR-225: the manifest row carries its chunk's model (both fixture collections are minilm).
             .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, MODEL)
             .execute();
@@ -202,6 +204,7 @@ class PgVectorTombstoneFilterTest {
             .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
             .set(CATALOG_DOCUMENTS.TITLE, title)
             .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLLECTION)
+            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, COLLECTION))
             .execute();
     }
 

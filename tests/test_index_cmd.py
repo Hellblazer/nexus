@@ -27,6 +27,13 @@ def _no_subject_row(monkeypatch: pytest.MonkeyPatch) -> None:
     These tests assert the rendered name, so the registry answers "no row" here and the
     real catalog reader is never built."""
     monkeypatch.setattr("nexus.corpus.catalog_subject_finder", lambda: (lambda *_a: None))
+    # RDR-229 P3.8: a write to a subject with no row registers it by attributes and takes the engine's minted
+    # label. These tests assert normalization of a subject registered under its conformant name, so the
+    # engine's answer is that existing row's label (the mint answers the live row a tuple already has).
+    monkeypatch.setattr(
+        "nexus.corpus.mint_knowledge_subject_label",
+        lambda subject, *, registrar=None: f"knowledge__{subject}__voyage-context-3__v1",
+    )
 
 
 @pytest.fixture

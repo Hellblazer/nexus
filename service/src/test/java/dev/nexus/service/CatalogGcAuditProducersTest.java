@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
@@ -119,6 +120,7 @@ class CatalogGcAuditProducersTest {
             .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
             .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(chashHex))
             .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
             .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(seed, tenant, collection))
             .execute();
     }
@@ -141,6 +143,7 @@ class CatalogGcAuditProducersTest {
                 .set(CATALOG_DOCUMENTS.TUMBLER, docId)
                 .set(CATALOG_DOCUMENTS.TITLE, "GC Audit Purge Doc")
                 .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
                 .execute();
         }
         vecRepo.upsertChunks(TENANT, collection, List.of(chash), List.of("gc audit purge text"), List.of(Map.of()));
@@ -698,6 +701,7 @@ class CatalogGcAuditProducersTest {
         ctx.insertInto(CHUNKS)
             .set(CHUNKS.TENANT_ID, TENANT)
             .set(CHUNKS.COLLECTION, collection)
+                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
             .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chashHex))
             .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, TENANT, collection))
             .set(CHUNKS.CHUNK_TEXT, "seed text " + chashHex)

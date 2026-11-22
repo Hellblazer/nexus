@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.db.TaxonomyRepository;
 import dev.nexus.service.db.TenantScope;
@@ -194,6 +195,7 @@ class TaxonomyUnassignedChashesRepositoryTest {
                 .set(TOPIC_ASSIGNMENTS.SIMILARITY, 1.0)
                 .set(TOPIC_ASSIGNMENTS.ASSIGNED_AT, DSL.currentOffsetDateTime())
                 .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, col)
+                .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, CollectionIds.idOf(TENANT_A, col))
                 .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, MODEL)
                 .execute();
         }
@@ -335,11 +337,21 @@ class TaxonomyUnassignedChashesRepositoryTest {
             DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
             var series = DSL.generateSeries(1, total).as("s", "i");
             Field<Integer> i = series.field("i", Integer.class);
-            seed.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
-                    CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_1024)
-                .select(seed.select(DSL.val(TENANT_A, CHUNKS.TENANT_ID), DSL.val(col, CHUNKS.COLLECTION),
-                        indexChash(i), DSL.val(MODEL, CHUNKS.EMBEDDING_MODEL), DSL.inline("text"),
-                        DSL.val(Vector.of(unit(1.0f, 0.0f)), CHUNKS.EMBEDDING_1024)).from(series))
+            seed.insertInto(CHUNKS,
+                    CHUNKS.TENANT_ID,
+                    CHUNKS.COLLECTION,
+                    CHUNKS.COLLECTION_ID,
+                    CHUNKS.CHASH,
+                    CHUNKS.EMBEDDING_MODEL,
+                    CHUNKS.CHUNK_TEXT,
+                    CHUNKS.EMBEDDING_1024)
+                .select(seed.select(DSL.val(TENANT_A, CHUNKS.TENANT_ID),
+                   DSL.val(col, CHUNKS.COLLECTION),
+                   CollectionIds.idOf(DSL.val(TENANT_A, CHUNKS.TENANT_ID), DSL.val(col, CHUNKS.COLLECTION)),
+                   indexChash(i),
+                   DSL.val(MODEL, CHUNKS.EMBEDDING_MODEL),
+                   DSL.inline("text"),
+                   DSL.val(Vector.of(unit(1.0f, 0.0f)), CHUNKS.EMBEDDING_1024)).from(series))
                 .execute();
 
             // One manifest document, 50,000 catalog_document_chunks positions --
@@ -350,24 +362,41 @@ class TaxonomyUnassignedChashesRepositoryTest {
                 .set(CATALOG_DOCUMENTS.TITLE, "unassigned-scale-doc")
                 .onConflictDoNothing()
                 .execute();
-            seed.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
-                    CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                    CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+            seed.insertInto(CATALOG_DOCUMENT_CHUNKS,
+                    CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
+                    CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                    CATALOG_DOCUMENT_CHUNKS.POSITION,
+                    CATALOG_DOCUMENT_CHUNKS.CHASH,
+                    CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID,
                     CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
                 .select(seed.select(DSL.val(TENANT_A, CATALOG_DOCUMENT_CHUNKS.TENANT_ID),
-                        DSL.inline("unassigned-scale-doc"), i, indexChash(i), i,
-                        DSL.val(col, CATALOG_DOCUMENT_CHUNKS.COLLECTION),
-                        DSL.val(MODEL, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)).from(series))
+                   DSL.inline("unassigned-scale-doc"),
+                   i,
+                   indexChash(i),
+                   i,
+                   DSL.val(col, CATALOG_DOCUMENT_CHUNKS.COLLECTION),
+                   CollectionIds.idOf(DSL.val(TENANT_A, CATALOG_DOCUMENT_CHUNKS.TENANT_ID), DSL.val(col, CATALOG_DOCUMENT_CHUNKS.COLLECTION)),
+                   DSL.val(MODEL, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)).from(series))
                 .execute();
 
             // Own-collection assignments for every row EXCEPT the 5 scattered gaps.
-            seed.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
-                    TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+            seed.insertInto(TOPIC_ASSIGNMENTS,
+                    TOPIC_ASSIGNMENTS.TENANT_ID,
+                    TOPIC_ASSIGNMENTS.DOC_ID,
+                    TOPIC_ASSIGNMENTS.TOPIC_ID,
+                    TOPIC_ASSIGNMENTS.ASSIGNED_BY,
+                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID,
                     TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
-                .select(seed.select(DSL.val(TENANT_A, TOPIC_ASSIGNMENTS.TENANT_ID), indexChash(i),
-                        DSL.val(topicId, TOPIC_ASSIGNMENTS.TOPIC_ID),
-                        DSL.inline("centroid"), DSL.val(col, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION),
-                        DSL.val(MODEL, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL))
+                .select(seed.select(DSL.val(TENANT_A, TOPIC_ASSIGNMENTS.TENANT_ID),
+                   indexChash(i),
+                   DSL.val(topicId, TOPIC_ASSIGNMENTS.TOPIC_ID),
+                   DSL.inline("centroid"),
+                   DSL.val(col, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION),
+                   CollectionIds.idOf(DSL.val(TENANT_A, TOPIC_ASSIGNMENTS.TENANT_ID), DSL.val(col, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)),
+                   DSL.val(MODEL, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL))
                     .from(series)
                     .where(i.notIn(java.util.Arrays.stream(unassignedIdx).boxed().toList())))
                 .execute();
@@ -463,6 +492,7 @@ class TaxonomyUnassignedChashesRepositoryTest {
                 .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(hexChashValue))
                 .set(CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, 0)
                 .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
                 .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, MODEL)
                 .execute();
         }
@@ -477,6 +507,7 @@ class TaxonomyUnassignedChashesRepositoryTest {
             DSL.using(su, SQLDialect.POSTGRES).insertInto(CHUNKS)
                 .set(CHUNKS.TENANT_ID, tenant)
                 .set(CHUNKS.COLLECTION, collection)
+                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
                 .set(CHUNKS.CHASH, HexFormat.of().parseHex(hexChashValue))
                 .set(CHUNKS.EMBEDDING_MODEL, MODEL)
                 .set(CHUNKS.CHUNK_TEXT, "seed text " + hexChashValue)
@@ -502,6 +533,7 @@ class TaxonomyUnassignedChashesRepositoryTest {
             DSL.using(su, SQLDialect.POSTGRES).insertInto(TAXONOMY_CENTROIDS)
                 .set(TAXONOMY_CENTROIDS.TENANT_ID, tenant)
                 .set(TAXONOMY_CENTROIDS.COLLECTION, collection)
+                .set(TAXONOMY_CENTROIDS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
                 .set(TAXONOMY_CENTROIDS.TOPIC_ID, topicId)
                 .set(TAXONOMY_CENTROIDS.EMBEDDING_MODEL, MODEL)
                 .set(TAXONOMY_CENTROIDS.LABEL, "seed-centroid-" + label)

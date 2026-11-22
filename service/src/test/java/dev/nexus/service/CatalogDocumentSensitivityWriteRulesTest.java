@@ -72,9 +72,15 @@ class CatalogDocumentSensitivityWriteRulesTest {
         if (pg != null) pg.stop();
     }
 
-    /** A fresh tenant per test, so no test reads another's rows. */
+    /** A fresh tenant per test, so no test reads another's rows; {@code COLL_OLD} is registered for it (the engine refuses an unregistered collection). */
     private String tenant() {
-        return "sensrules-" + (++tenantSeq);
+        String t = "sensrules-" + (++tenantSeq);
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), t, COLL_OLD);
+        } catch (java.sql.SQLException e) {
+            throw new IllegalStateException(e);
+        }
+        return t;
     }
 
     private Map<String, Object> fields(String title, String sourceUri, String filePath, Boolean sensitive) {

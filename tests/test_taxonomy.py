@@ -20,6 +20,7 @@ from nexus.taxonomy import (
     get_topic_tree,
     get_topics,
 )
+from tests._chunk_seed import collection_id_for, collection_id_sql
 from tests._t2_fixture_ops import canonical_chunk_id
 from tests.conftest import make_vector_test_client
 
@@ -129,9 +130,9 @@ def _seed_chunk(topic_id: int, collection: str, chash_hex: str, *, dim: int = 76
         f"SELECT tenant_id, '{collection}', 'knowledge', 'test-seed', '{model_for_dim}', 'live' "
         f"FROM nexus.topics WHERE id = {topic_id} "
         "ON CONFLICT DO NOTHING; "
-        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}, embedding_model) "
+        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}, embedding_model, collection_id) "
         f"SELECT tenant_id, '{collection}', decode('{chash_hex}', 'hex'), 'seed', '{vec}'::nexus.vector, "
-        f"'{model_for_dim}' "
+        f"'{model_for_dim}', {collection_id_for('topics.tenant_id', collection)} "
         f"FROM nexus.topics WHERE id = {topic_id} "
         "ON CONFLICT DO NOTHING;"
     )
@@ -186,14 +187,16 @@ def _seed_chunks(taxonomy: Any, collection: str, chash_hexes: list[str], *, dim:
         f"(tenant_id, '{collection}', decode('{c}', 'hex'), 'seed', '{vec}'::nexus.vector)"
         for c in chash_hexes
     )
+    # RDR-229 P3.1: each row carries the registry's collection_id beside the name, read by the row's tenant.
     sql = (
         "INSERT INTO nexus.catalog_collections "
         "(tenant_id, name, content_type, owner_id, embedding_model, lifecycle_state) "
         f"SELECT tenant_id, '{collection}', 'knowledge', 'test-seed', '{model_for_dim}', 'live' "
         f"FROM nexus.topics WHERE id = {bootstrap_id} "
         "ON CONFLICT DO NOTHING; "
-        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}, embedding_model) "
-        f"SELECT v.*, '{model_for_dim}' FROM (VALUES {values}) AS v(tenant_id, collection, chash, chunk_text, {embed_col}) "
+        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}, embedding_model, collection_id) "
+        f"SELECT v.*, '{model_for_dim}', {collection_id_for('v.tenant_id', collection)} "
+        f"FROM (VALUES {values}) AS v(tenant_id, collection, chash, chunk_text, {embed_col}) "
         "ON CONFLICT DO NOTHING;"
     )
     _run_seed_psql(sql, "_seed_chunks")
@@ -236,8 +239,9 @@ def _seed_chunks_for_tenant(
         "(tenant_id, name, content_type, owner_id, embedding_model, lifecycle_state) "
         f"VALUES ('{tenant}', '{collection}', 'knowledge', 'test-seed', '{model_for_dim}', 'live') "
         "ON CONFLICT DO NOTHING; "
-        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}, embedding_model) "
-        f"SELECT v.*, '{model_for_dim}' FROM (VALUES {values}) AS v ON CONFLICT DO NOTHING;"
+        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}, embedding_model, collection_id) "
+        f"SELECT v.*, '{model_for_dim}', {collection_id_sql(tenant, collection)} FROM (VALUES {values}) AS v "
+        "ON CONFLICT DO NOTHING;"
     )
     psql = Path(state["pg_bin"]) / "psql"
     proc = subprocess.run(
@@ -2566,12 +2570,12 @@ class TestGetAllTopics:
 
     def test_get_all_topics_filters_by_collection(self, db: T2Database) -> None:
         """get_all_topics(collection=...) narrows to one collection."""
-        _seed_topic(db.taxonomy, "a-root", collection="c1", doc_count=10)
-        _seed_topic(db.taxonomy, "b-root", collection="c2", doc_count=5)
+        _seed_topic(db.taxonomy, "a-root", collection="coll-one", doc_count=10)
+        _seed_topic(db.taxonomy, "b-root", collection="coll-two", doc_count=5)
         # Keyword form: the Http twin's get_all_topics takes collection
         # keyword-only.
-        assert {t["label"] for t in db.taxonomy.get_all_topics(collection="c1")} == {"a-root"}
-        assert {t["label"] for t in db.taxonomy.get_all_topics(collection="c2")} == {"b-root"}
+        assert {t["label"] for t in db.taxonomy.get_all_topics(collection="coll-one")} == {"a-root"}
+        assert {t["label"] for t in db.taxonomy.get_all_topics(collection="coll-two")} == {"b-root"}
 
 
 class TestTopicLabelUpdates:
@@ -2702,8 +2706,8 @@ class TestProjectionLinks:
         """Existing link_types (e.g. 'cites') survive the projection refresh."""
         import json as _json
 
-        src_id = _seed_topic(db.taxonomy, "src", collection="c1", doc_count=1)
-        tgt_id = _seed_topic(db.taxonomy, "tgt", collection="c2", doc_count=0)
+        src_id = _seed_topic(db.taxonomy, "src", collection="coll-one", doc_count=1)
+        tgt_id = _seed_topic(db.taxonomy, "tgt", collection="coll-two", doc_count=0)
         from_id = min(src_id, tgt_id)
         to_id = max(src_id, tgt_id)
 
@@ -2714,13 +2718,13 @@ class TestProjectionLinks:
         ])
 
         # Assign a projection pair
-        _seed_chunk(src_id, "c1", canonical_chunk_id("doc-1"))
+        _seed_chunk(src_id, "coll-one", canonical_chunk_id("doc-1"))
         db.taxonomy.assign_topic(
-            canonical_chunk_id("doc-1"), src_id, assigned_by="hdbscan", source_collection="c1",
+            canonical_chunk_id("doc-1"), src_id, assigned_by="hdbscan", source_collection="coll-one",
         )
         db.taxonomy.assign_topic(
             canonical_chunk_id("doc-1"), tgt_id, assigned_by="projection",
-            similarity=0.9, source_collection="c1",
+            similarity=0.9, source_collection="coll-one",
         )
 
         db.taxonomy.refresh_projection_links()

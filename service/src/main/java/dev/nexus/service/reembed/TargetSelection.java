@@ -28,8 +28,11 @@ import java.util.regex.Pattern;
  * {@code collectionForTuple} (RDR-229 P2.8, engine 0.1.200: both dropped the filter together, so the two never
  * disagree on a tuple's winner). A candidate that is not superseded wins; a superseded
  * one is chosen only when no non-superseded candidate exists. Among the pool, the highest numeric
- * {@code model_version} wins, then the first registered ({@code created_at} ascending, compared as instants), then the
- * lexically lower name: {@code collectionForTuple}'s tie order (nexus-p2m1x.4), pinned against it by a parity test.
+ * {@code model_version} wins, then the lowest {@code collection_id} (a row with none sorts after every row with one),
+ * then the first registered ({@code created_at} ascending, compared as instants), then the lexically lower name:
+ * {@code collectionForTuple}'s order (RDR-229 P3.8, lead ruling 2026-11-21; the id replaced {@code created_at} as the
+ * tie-break, nexus-p2m1x.4 having replaced the name), pinned against it by {@code CollectionForTupleTieBreakTest}.
+ * The id comes from {@code CatalogRepository#listCollections}: its rows carry {@code collection_id} (RDR-229 P3.5a).
  *
  * <p><b>Decision</b> ({@link #decide}) turns the selection into one of four outcomes for the job's start:
  * register the target ({@link Register}); use a live row ({@link UseLive}); revive a superseded row
@@ -56,14 +59,14 @@ public final class TargetSelection {
     /** A catalog collection row: the fields of {@code CatalogRepository}'s list-route row that selection reads. */
     public record CollectionRow(String name, String contentType, String ownerId, String embeddingModel,
                                 String modelVersion, boolean legacyGrandfathered, String supersededBy,
-                                String lifecycleState, String createdAt) {
+                                String lifecycleState, String createdAt, Long collectionId) {
 
-        /** A row with no registration stamp: it ties on age with every other, so the name decides. */
+        /** A row with no registration stamp and no id: it ties on age with every other, so the name decides. */
         public CollectionRow(String name, String contentType, String ownerId, String embeddingModel,
                              String modelVersion, boolean legacyGrandfathered, String supersededBy,
                              String lifecycleState) {
             this(name, contentType, ownerId, embeddingModel, modelVersion, legacyGrandfathered, supersededBy,
-                lifecycleState, "");
+                lifecycleState, "", null);
         }
 
         /** The row as {@code CatalogRepository#listCollections} returns it (the keys of its map shape). */
@@ -72,7 +75,8 @@ public final class TargetSelection {
                 str(m.get("name")), str(m.get("content_type")), str(m.get("owner_id")),
                 str(m.get("embedding_model")), str(m.get("model_version")),
                 Boolean.TRUE.equals(m.get("legacy_grandfathered")),
-                str(m.get("superseded_by")), str(m.get("lifecycle_state")), str(m.get("created_at")));
+                str(m.get("superseded_by")), str(m.get("lifecycle_state")), str(m.get("created_at")),
+                m.get("collection_id") instanceof Number n ? n.longValue() : null);
         }
 
         boolean superseded() {
@@ -146,6 +150,7 @@ public final class TargetSelection {
                                 String embeddingModel) {
         Comparator<CollectionRow> order = Comparator
             .comparingInt((CollectionRow r) -> versionNumber(r.modelVersion())).reversed()
+            .thenComparing(CollectionRow::collectionId, Comparator.nullsLast(Comparator.<Long>naturalOrder()))
             .thenComparing((CollectionRow r) -> registeredAt(r.createdAt()))
             .thenComparing(CollectionRow::name);
         List<CollectionRow> candidates = rows.stream()

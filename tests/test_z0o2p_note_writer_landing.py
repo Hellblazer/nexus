@@ -144,6 +144,13 @@ class TestPutNoteClientSideRefusals:
         before any byte left the client: NOT_LANDED (never UNCERTAIN), attributed to the client."""
         refusal = _client_refusals()[name]
 
+        # RDR-229 P3.1: the catalog hook registers the document under a registered collection (the engine
+        # refuses one that is not, 422), so the collection is registered BEFORE the registration is made to
+        # refuse; the write that follows is the one the refusal stops, with the row the hook minted.
+        from tests._catalog_fixture_ops import register_seed_collections
+
+        register_seed_collections(_COLLECTION)
+
         def refuse(*_a, **_k):
             raise refusal
 

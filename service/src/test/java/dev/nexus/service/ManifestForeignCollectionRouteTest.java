@@ -4,6 +4,7 @@ package dev.nexus.service;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.ManifestForeignCollectionReads;
 import dev.nexus.service.db.TenantConstants;
@@ -110,6 +111,7 @@ class ManifestForeignCollectionRouteTest {
     /** A registered document whose physical collection is {@code collection}: its tumbler. */
     private String doc(String token, String tenant, String collection) throws Exception {
         String owner = "gh1611.fc" + (seq++);
+        CollectionIdSeeds.register(pg, tenant, collection);
         var resp = post(token, tenant, "/v1/catalog/doc/register", mapper.writeValueAsString(Map.of(
             "owner_prefix", owner, "title", "doc " + owner, "content_type", "prose",
             "source_uri", "file:///gh1611/" + owner + ".md", "physical_collection", collection)));
@@ -138,6 +140,7 @@ class ManifestForeignCollectionRouteTest {
                     .set(CATALOG_DOCUMENT_CHUNKS.CHASH, dev.nexus.service.db.Chash.fromHex(hex).toBytes())
                     .set(CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, pos)
                     .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+                    .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
                     .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, model)
                     .execute();
             }
@@ -237,6 +240,7 @@ class ManifestForeignCollectionRouteTest {
         try (Connection su = pg.createConnection("")) {
             int n = DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
                 .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, "")
+                .setNull(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID) // '' means unset: the name and its id are both unset (P3.1 CHECK)
                 .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT).and(CATALOG_DOCUMENTS.TUMBLER.eq(ghost))).execute();
             assertThat(n).isEqualTo(1);
         }

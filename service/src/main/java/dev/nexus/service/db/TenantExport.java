@@ -278,6 +278,17 @@ public final class TenantExport {
             return this;
         }
 
+        /**
+         * An id twin (RDR-229 P3.1): a nullable bigint beside a collection name column, or the registry's own
+         * {@code collection_id}. The import never reads it from the file: it computes it from the loaded registry (by name, or
+         * from the registry id's own sequence). So it is declared maintained (a column the load rewrites, which the load's
+         * verification skips) and as an id-shaped column that holds no other row's key.
+         */
+        Entry importComputed(String column) {
+            maintained(column);
+            return notRefs(column);
+        }
+
         Entry ref(Reference r) {
             refs.add(r);
             return this;
@@ -362,6 +373,9 @@ public final class TenantExport {
                 "BEFORE INSERT OR UPDATE OF owner_id, content_type FOR EACH ROW")
             .loadsAfter("catalog_owners")
             .maintained("owner_id")
+            
+            .importComputed("collection_id")
+            .importComputed("superseded_by_id")
             .build(),
         data("embedding_profile").pk("tenant_id text", "content_type text")
             .ref(new Reference(List.of("embedding_model"), "nexus", "embedding_models",
@@ -379,6 +393,8 @@ public final class TenantExport {
                 "AFTER INSERT OR UPDATE OF physical_collection, deleted_at FOR EACH ROW")
             .loadsAfter("catalog_owners", "catalog_collections")
             .notRefs("metadata")
+            
+            .importComputed("physical_collection_id")
             .build(),
         data("catalog_meta").pk("tenant_id text", "key text")
             // AuthFilter writes it on a tenant's first authenticated request (CatalogRepository#ensureGhostSweepRanOnce).
@@ -389,6 +405,8 @@ public final class TenantExport {
         data("chunks").pk("tenant_id text", "collection text", "chash bytea", "embedding_model text")
             .fk(COLLECTION_KEY, "catalog_collections", "tenant_id,name,embedding_model")
             .notRefs("metadata")
+            
+            .importComputed("collection_id")
             .build(),
         data("catalog_document_chunks").pk("tenant_id text", "doc_id text", "position integer")
             .fk("tenant_id,doc_id", "catalog_documents", "tenant_id,tumbler")
@@ -408,9 +426,13 @@ public final class TenantExport {
             .trigger("trg_catalog_chunks_clear_orphan_on_insert",
                 "AFTER INSERT REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT")
             .trigger("trg_catalog_document_chunks_chunk_index_default", "BEFORE INSERT FOR EACH ROW")
+            
+            .importComputed("collection_id")
             .build(),
         derived("chunk_orphaned_at").pk("tenant_id text", "collection text", "chash bytea")
-            .fk(CHUNK_KEY, "chunks", CHUNK_KEY).build(),
+            .fk(CHUNK_KEY, "chunks", CHUNK_KEY)
+            .importComputed("collection_id")
+            .build(),
         data("catalog_links").pk("tenant_id text", "id bigint").reassigned("id")
             .fk("tenant_id,from_tumbler", "catalog_documents", "tenant_id,tumbler")
             .fk("tenant_id,to_tumbler", "catalog_documents", "tenant_id,tumbler")
@@ -422,10 +444,14 @@ public final class TenantExport {
             // BEFORE UPDATE only: a load inserts, so updated_at keeps the exported value.
             .trigger("trg_document_aspects_updated_at", "BEFORE UPDATE FOR EACH ROW")
             .notRefs("extras", "salient_sentences")
+            
+            .importComputed("collection_id")
             .build(),
         data("document_highlights").pk("id bigint").reassigned("id")
             .fk("tenant_id,collection", "catalog_collections", "tenant_id,name")
             .fk("tenant_id,doc_id", "catalog_documents", "tenant_id,tumbler")
+            
+            .importComputed("collection_id")
             .build(),
         // ── T2 ──
         data("memory").pk("id bigint").reassigned("id")
@@ -450,6 +476,8 @@ public final class TenantExport {
             // doc_count is kept by topic_assignments' triggers, and that update restamps updated_at.
             .trigger("trg_topics_updated_at", "BEFORE UPDATE FOR EACH ROW")
             .maintained("updated_at", "doc_count")
+            
+            .importComputed("collection_id")
             .build(),
         data("topic_assignments").pk("tenant_id text", "doc_id bytea", "topic_id bigint")
             .fk("tenant_id,topic_id", "topics", "tenant_id,id")
@@ -459,6 +487,8 @@ public final class TenantExport {
                 "AFTER DELETE REFERENCING OLD TABLE AS old_rows FOR EACH STATEMENT")
             .trigger("trg_topic_assignments_doc_count_ins",
                 "AFTER INSERT REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT")
+            
+            .importComputed("source_collection_id")
             .build(),
         data("topic_links").pk("tenant_id text", "from_topic_id bigint", "to_topic_id bigint")
             .fk("tenant_id,from_topic_id", "topics", "tenant_id,id")
@@ -467,15 +497,23 @@ public final class TenantExport {
             .build(),
         data("taxonomy_meta").pk("tenant_id text", "collection text")
             .fk("tenant_id,collection", "catalog_collections", "tenant_id,name")
+            
+            .importComputed("collection_id")
             .build(),
         derived("taxonomy_centroids")
             .pk("tenant_id text", "collection text", "topic_id bigint", "embedding_model text")
-            .ref(Reference.soft("topic_id", "topics", "id", SoftRule.DROP_ROW)).build(),
+            .ref(Reference.soft("topic_id", "topics", "id", SoftRule.DROP_ROW))
+            .importComputed("collection_id")
+            .build(),
         // ── telemetry and consent ──
         derived("search_telemetry")
             .pk("tenant_id text", "ts timestamp with time zone", "query_hash text", "collection text")
+            
+            .importComputed("collection_id")
             .build(),
         derived("relevance_log").pk("id bigint").reassigned("id")
+            
+            .importComputed("collection_id")
             .build(),
         data("claude_assisted_remediation_consents").pk("id bigint").reassigned("id")
             .build(),
@@ -514,6 +552,8 @@ public final class TenantExport {
         // ── excluded ──
         excluded("pdf_pipeline", IN_FLIGHT).pk("tenant_id text", "pipeline_id bigint")
             .reassigned("pipeline_id")
+            
+            .importComputed("collection_id")
             .build(),
         excluded("pdf_pages", IN_FLIGHT).pk("tenant_id text", "pipeline_id bigint", "page_index integer")
             .fk("tenant_id,pipeline_id", "pdf_pipeline", "tenant_id,pipeline_id")
@@ -522,6 +562,9 @@ public final class TenantExport {
             .fk("tenant_id,pipeline_id", "pdf_pipeline", "tenant_id,pipeline_id")
             .build(),
         excluded("reembed_jobs", IN_FLIGHT).pk("tenant_id text", "job_id uuid")
+            
+            .importComputed("source_collection_id")
+            .importComputed("target_collection_id")
             .build(),
         excluded("reembed_job_moves", IN_FLIGHT).pk("tenant_id text", "job_id uuid", "doc_id text")
             .fk("tenant_id,job_id", "reembed_jobs", "tenant_id,job_id")
@@ -544,6 +587,8 @@ public final class TenantExport {
         excluded("canary_query_ring", OPERATIONAL)
             .pk("tenant_id text", "collection text", "vector_digest bytea")
             .fk(COLLECTION_KEY, "catalog_collections", "tenant_id,name,embedding_model")
+            
+            .importComputed("collection_id")
             .build(),
         excluded("capability_census", OPERATIONAL).pk("tenant_id text", "session_id text")
             .build(),
@@ -554,10 +599,17 @@ public final class TenantExport {
             .build(),
         excluded("chash_remap", OPERATIONAL)
             .pk("tenant_id text", "source_collection text", "old_id text")
+            
+            .importComputed("source_collection_id")
+            .importComputed("target_collection_id")
             .build(),
         excluded("gc_audit", OPERATIONAL).pk("id bigint").reassigned("id")
+            
+            .importComputed("collection_id")
             .build(),
         excluded("hook_failures", OPERATIONAL).pk("id bigint").reassigned("id")
+            
+            .importComputed("collection_id")
             .build(),
         excluded("index_failures", OPERATIONAL).pk("id bigint").reassigned("id")
             .build(),

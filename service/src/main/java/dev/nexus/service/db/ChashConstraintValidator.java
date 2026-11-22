@@ -79,8 +79,10 @@ import java.util.function.Supplier;
  * every search and index write). The pre-check reads a table only where this session already reads every row of it
  * ({@link AdminDdlSession#requireUnrestrictedView}: a superuser, BYPASSRLS, or a permissive SELECT policy with a true qual
  * that applies to the role; the {@code nexus.chunks} leaves copy {@code chunks_gate_probe_owner_read} from the parent, which
- * names the migrating role, the admin role). It then holds an ACCESS SHARE lock only. Where it does not (production's
- * {@code nexus.catalog_document_chunks}: FORCE row-level security, no owner policy) the pre-check is <b>unavailable</b>: the
+ * names the migrating role, the admin role; so does {@code nexus.catalog_document_chunks} since RDR-229 P3.1, which gives it
+ * {@code catalog_document_chunks_owner_read}). It then holds an ACCESS SHARE lock only. Where it does not (a single-role install,
+ * where P3.1's owner-read changesets skip themselves because {@code nexus_svc} inherits the migrating role, so
+ * {@code nexus.catalog_document_chunks} is FORCE row-level security with no owner policy) the pre-check is <b>unavailable</b>: the
  * job runs the VALIDATE, which is atomic and takes SHARE UPDATE EXCLUSIVE, and a {@code check_violation} (23514) is the
  * refusal, with {@code bad_rows} unknown (null) and the constraint left NOT VALID; a dry run reports {@code precheck:
  * unavailable} and does not say the table would validate. The engine holds no {@code nexus_diag} connection (that role's

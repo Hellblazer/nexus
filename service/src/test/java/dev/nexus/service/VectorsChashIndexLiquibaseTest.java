@@ -1,5 +1,6 @@
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import org.testcontainers.containers.PostgreSQLContainer;
 import liquibase.Liquibase;
 import org.junit.jupiter.api.AfterAll;
@@ -160,6 +161,7 @@ class VectorsChashIndexLiquibaseTest {
         ctx.insertInto(CHUNKS)
             .set(CHUNKS.TENANT_ID, TENANT)
             .set(CHUNKS.COLLECTION, collection)
+            .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
             .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chashHex))
             .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, TENANT, collection))
             .set(CHUNKS.CHUNK_TEXT, "chunk " + chashHex.substring(0, 8))

@@ -412,14 +412,14 @@ for _site in LEDGER:
 #:     holdover 4 -> 0 (the class is empty), mint 134 -> 135, primitive_call 184 -> 181.
 #:   owner-is-source (marlowe), +2: two migration-source sites in ``nxexp_owner.py``, the callers of
 #:     ``legacy_names.owner_stem`` (it reads the name of a recovery bundle's collection, MIG_BUNDLE_STEM; the parse is in the
-#:     floor, not a site, since owner_stem moved there): migration-source 20 -> 22, primitive_call 181 -> 183, split 2.
-PARSE_SITE_PIN: int = 217
+#:     floor, not a site, since owner_stem moved there): migration-source 20 -> 22, primitive_call 181 -> 183, split 2. P3.1 (nexus-p2m1x.17): the registrations that must precede a catalog document (the engine refuses one under an unregistered collection: ``note_write`` (put_note), ``exporter`` (the import pre-pass), ``doc_indexer`` (the pre-flight), ``registration_retry`` (the 422 retry)) all go through ONE function, ``registration_retry.register_collection_for_write`` (its single call to ``ensure_collection_registered`` is the one new site; a wrapper's callers are not sites, the scan's documented limit 2), and ``HttpCatalogClient``'s three manifest-write registrations (``append_manifest_chunks``, ``append_manifest_many``, ``write_manifest_many``) call it too, so those three sites become the one. mint 135 -> 133, primitive_call 183 -> 181, total 217 -> 215; the pin does not rise in this step. P3.8's collection_mint replaces that one body. P3.8 (nexus-p2m1x.28), -2: register_collection derives nothing from the name. mint 133 -> 131, primitive_call 181 -> 179, total 215 -> 213. P3.8 fallout (nexus-p2m1x.28), +1: ``entity_keys`` matches a minted label's configured glob against the conformant name its registry row renders, a second label-pattern fnmatch. label-pattern 10 -> 11, fnmatch 14 -> 15, total 211 -> 212.
+PARSE_SITE_PIN: int = 212
 CLASS_PIN: dict[str, int] = {
-    "mint": 135, "diagnostic": 43, "migration-source": 22,
-    "label-pattern": 10, "file-path": 5, "uri-classifier": 2,
+    "mint": 129, "diagnostic": 43, "migration-source": 22,
+    "label-pattern": 11, "file-path": 5, "uri-classifier": 2,
 }
 SHAPE_PIN: dict[str, int] = {
-    "primitive_call": 183, "const_prefix": 5, "fnmatch": 14,
+    "primitive_call": 177, "const_prefix": 5, "fnmatch": 15,
     "strip_prefix": 4, "startswith": 2, "split": 2,
     "fstring_prefix": 2, "regex_prefix": 1, "in": 1,
     "sql_prefix": 1, "concat_prefix": 1, "endswith": 1,
@@ -843,11 +843,11 @@ def test_pin_matches_documented_total() -> None:
     at P2.9, nexus-p2m1x.14, and 228 -- 229 at its reland; then at P2.4,
     nexus-p2m1x.9, when the taxonomy threshold became a row read; then at P2.2,
     nexus-p2m1x.7, when the read-path model reads became row reads and the name
-    parsers moved to ``legacy_names``) is derived
+    parsers moved to ``legacy_names``; 217 -- 221 at P3.1, 221 -- 219 at P3.8, nexus-p2m1x.28, and 211 -- 212 at its fallout round) is derived
     from the same ledger the guards above check against -- this catches a
     hand-edited number drifting from the table it claims to summarize."""
     assert PARSE_SITE_PIN == sum(COLLECTION_NAME_PARSE_CENSUS.values())
-    assert PARSE_SITE_PIN == 217
+    assert PARSE_SITE_PIN == 212
 
 
 # ---------------------------------------------------------------------------
@@ -950,13 +950,13 @@ def _by_class(cls: str) -> list[_scan.Site]:
 
 
 def test_every_fnmatch_is_labelled_by_what_it_matches() -> None:
-    """14 fnmatch sites: 9 match user-configured name patterns (label
+    """15 fnmatch sites: 10 match user-configured name patterns (label
     patterns), 5 match source file paths. None is routing and none is a
     parse class, so the exporter's include/exclude filter never inflates
     the routing count."""
     fn = [s for s in LEDGER if s.shape == "fnmatch"]
-    assert len(fn) == 14
-    assert Counter(s.cls for s in fn) == {"label-pattern": 9, "file-path": 5}
+    assert len(fn) == 15
+    assert Counter(s.cls for s in fn) == {"label-pattern": 10, "file-path": 5}
     paths = {(s.rel, s.anchor[-1]) for s in fn if s.cls == "file-path"}
     assert any(rel == "src/nexus/exporter.py" for rel, _ in paths)
     assert not [s for s in fn if s.cls == "routing"]

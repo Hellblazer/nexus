@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.ChunkReaper.RunResult;
 import dev.nexus.service.ChunkReaper.Settings;
 import dev.nexus.service.db.Chash;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.LadderRepository;
 import dev.nexus.service.db.Rdr192BackfillGate;
 import dev.nexus.service.vectors.ChunkMetadataKeys;
@@ -112,9 +113,9 @@ class GcRestoreChunkKeysOnlyIntegrationTest extends AtomicWriteTestBase {
             PgContainerHelper.dropCatalogChunksFk(su);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
-                    CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                    CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-               .values(tenant, doc, 0, Chash.fromHex(chash).toBytes(), origin,
+                    CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+               .values(tenant, doc, 0, Chash.fromHex(chash).toBytes(), origin, CollectionIds.require(ctx, tenant, origin),
                     PgContainerHelper.collectionModel(ctx, tenant, origin)).execute();
             PgContainerHelper.readdCatalogChunksFkNotValid(su);
         }

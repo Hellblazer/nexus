@@ -1359,11 +1359,19 @@ def get_collection_row(name: str, *, refresh: bool = True, strict: bool = False)
             # (to the name, or to no cap). Only the names readers surface the failure.
             if strict:
                 raise
-            return None
+            return _minted_row(name)
     row = _collections_cache[2].get(name)
     if not row or "content_type" not in row:
-        return None
+        return _minted_row(name)
     return row
+
+
+def _minted_row(name: str) -> dict | None:
+    """RDR-229 P3.8: the engine's listing omits a collection with no chunk yet, so the row this process just
+    registered for *name* (by attributes, its label minted by the engine) answers until the listing names it."""
+    from nexus.collection_mint import minted_row  # noqa: PLC0415 — deferred: collection_mint reaches back into this module
+
+    return minted_row(name)
 
 
 def collections_cache_age() -> float | None:

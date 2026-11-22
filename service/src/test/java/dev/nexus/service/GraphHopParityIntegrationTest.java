@@ -5,6 +5,7 @@ package dev.nexus.service;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.CatalogRepository;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.EmbedderRouter;
 import dev.nexus.service.vectors.OnnxEmbedder;
@@ -185,6 +186,8 @@ class GraphHopParityIntegrationTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            // RDR-229 P3.1: a row naming a collection carries the registry id beside it (the *_collection_id_check CHECKs).
+            Long collId = CollectionIds.require(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLL);
             for (GhDoc c : docs) {
                 var insert = DSL.using(su, SQLDialect.POSTGRES)
                     .insertInto(CATALOG_DOCUMENTS)
@@ -193,7 +196,8 @@ class GraphHopParityIntegrationTest {
                     .set(CATALOG_DOCUMENTS.TITLE, "Doc")
                     .set(CATALOG_DOCUMENTS.AUTHOR, "ada")
                     .set(CATALOG_DOCUMENTS.CONTENT_TYPE, "paper")
-                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLL);
+                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLL)
+                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, collId);
                 if (c.tombstoned()) {
                     insert = insert.set(CATALOG_DOCUMENTS.DELETED_AT, DSL.currentOffsetDateTime());
                 }
@@ -205,9 +209,10 @@ class GraphHopParityIntegrationTest {
                     .insertInto(CATALOG_DOCUMENT_CHUNKS,
                         CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                         CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                        CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                        CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
+                        CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID)
                     .values(TENANT, c.tumbler(), 0, HexFormat.of().parseHex(c.chash()), COLL,
-                        PgContainerHelper.collectionModel(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLL))
+                        PgContainerHelper.collectionModel(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLL), collId)
                     .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                         CATALOG_DOCUMENT_CHUNKS.POSITION)
                     .doNothing()
@@ -271,13 +276,14 @@ class GraphHopParityIntegrationTest {
             texts.stream().map(t -> Map.<String, Object>of()).toList());
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            Long collId2 = CollectionIds.require(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLL2);
             for (int i = 0; i < names.length; i++) {
                 DSL.using(su, SQLDialect.POSTGRES)
                     .insertInto(CATALOG_DOCUMENTS,
                         CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE,
                         CATALOG_DOCUMENTS.AUTHOR, CATALOG_DOCUMENTS.CONTENT_TYPE,
-                        CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
-                    .values(TENANT, names[i], "Doc", "ada", "paper", COLL2)
+                        CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
+                    .values(TENANT, names[i], "Doc", "ada", "paper", COLL2, collId2)
                     .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
                     .doNothing()
                     .execute();
@@ -286,9 +292,10 @@ class GraphHopParityIntegrationTest {
                     .insertInto(CATALOG_DOCUMENT_CHUNKS,
                         CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                         CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                        CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                        CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
+                        CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID)
                     .values(TENANT, names[i], 0, HexFormat.of().parseHex(chashes.get(i)), COLL2,
-                        PgContainerHelper.collectionModel(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLL2))
+                        PgContainerHelper.collectionModel(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLL2), collId2)
                     .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                         CATALOG_DOCUMENT_CHUNKS.POSITION)
                     .doNothing()

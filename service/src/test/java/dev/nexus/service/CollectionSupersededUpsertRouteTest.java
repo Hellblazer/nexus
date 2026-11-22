@@ -106,9 +106,7 @@ class CollectionSupersededUpsertRouteTest {
             PgContainerHelper.insertCollection(dsl, TENANT, DEAD);
             PgContainerHelper.insertCollection(dsl, TENANT, WARM);
             // DEAD is retired by a direct row write: no process cache ever held it live.
-            dsl.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, SUCCESSOR)
-                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(DEAD))
-                .execute();
+            CollectionIdSeeds.supersede(dsl, TENANT, DEAD, SUCCESSOR);
         }
     }
 
@@ -194,7 +192,7 @@ class CollectionSupersededUpsertRouteTest {
         var warm = upsert(WARM, owned, "refreshed text");
         assertThat(warm.statusCode()).as("the live write that warms the cache, body: %s", warm.body()).isEqualTo(200);
 
-        catalog.supersedeCollection(TENANT, WARM, WARM_SUCCESSOR, "");
+        SupersedeSeeds.supersede(catalog, TENANT, WARM, WARM_SUCCESSOR, "");
 
         assertSupersededRefusal(upsert(WARM, owned, "text after the retire"), WARM, WARM_SUCCESSOR);
     }

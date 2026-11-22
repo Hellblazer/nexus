@@ -8,6 +8,9 @@ import dev.nexus.service.db.CatalogDocReads;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.CatalogSensitiveLocatorReads;
 import dev.nexus.service.db.CatalogSensitiveReads;
+import dev.nexus.service.db.CompletionTenantCountReads;
+import dev.nexus.service.datamove.CompletionCheck;
+import dev.nexus.service.datamove.CompletionTenantCounts;
 import dev.nexus.service.db.ManifestFillableCount;
 import dev.nexus.service.db.ManifestForeignCollectionReads;
 import dev.nexus.service.db.UriSegmentCensusReads;
@@ -47,6 +50,7 @@ final class CatalogBoundedReadRoutes {
     private final ManifestFillableCount fillableCount;
     private final ManifestForeignCollectionReads foreignReads;
     private final UriSegmentCensusReads uriSegmentReads;
+    private final CompletionTenantCountReads completionCountReads;
     private final CatalogDocReads docReads;
 
     CatalogBoundedReadRoutes(CatalogRepository repo) {
@@ -55,6 +59,7 @@ final class CatalogBoundedReadRoutes {
         this.fillableCount = new ManifestFillableCount(repo);
         this.foreignReads = new ManifestForeignCollectionReads(repo);
         this.uriSegmentReads = new UriSegmentCensusReads(repo);
+        this.completionCountReads = new CompletionTenantCountReads(repo);
         this.docReads = new CatalogDocReads(repo);
     }
 
@@ -230,6 +235,52 @@ final class CatalogBoundedReadRoutes {
         body.put("limit", page.limit());
         body.put("capped", page.capped());
         body.put("groups", groups);
+        send(exchange, 200, body);
+    }
+
+    /**
+     * GET /v1/catalog/rdr229_completion_counts (RDR-229 P3.1, nexus-p2m1x.17, review N2): the CALLER'S tenant's counts for the doctor,
+     * which the unauthenticated {@code /v1/status} {@code rdr229_completion} field does not carry.
+     * {@code {registry_rows, live_collections, superseded_by_waiting, dangling_tombstones:{total, by_content_type, self_id:{total,
+     * by_content_type}}, tables:[{table, orphans, unstamped}]}}: the tenant's registry rows and live collections, the registry rows that
+     * hold the superseded_by CHECK back, its tombstones that name no successor and those the stamp resolved to their own id (by content
+     * type), and, for each table whose CHECK is NOT VALID, the tenant's orphan and unstamped rows (tables with none are not listed).
+     * Never another tenant's count and never a total ({@link CompletionTenantCounts}). No parameters. A new path, so an old engine
+     * answers 404, which a client reads as "cannot say". A statement timeout answers 503.
+     */
+    void rdr229CompletionCounts(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        CompletionTenantCounts.Counts counts;
+        try {
+            counts = completionCountReads.read(tenant);
+        } catch (RuntimeException e) {
+            if (!CatalogHandler.hasSqlState(e, CatalogRepository.QUERY_CANCELED)) throw e;
+            log.warn("event=catalog_rdr229_completion_counts_timeout tenant={}", tenant);
+            timeout(exchange, "rdr229 completion counts exceeded their time bound");
+            return;
+        }
+        CompletionCheck.Dangling d = counts.dangling();
+        Map<String, Object> dangling = new LinkedHashMap<>();
+        dangling.put("total", d.total());
+        dangling.put("by_content_type", d.byContentType());
+        Map<String, Object> selfId = new LinkedHashMap<>();
+        selfId.put("total", d.selfIdTotal());
+        selfId.put("by_content_type", d.selfIdByContentType());
+        dangling.put("self_id", selfId);
+        List<Map<String, Object>> tables = new ArrayList<>(counts.tables().size());
+        for (var t : counts.tables()) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("table", t.table());
+            m.put("orphans", t.orphans());
+            m.put("unstamped", t.unstamped());
+            tables.add(m);
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("registry_rows", counts.registryRows());
+        body.put("live_collections", counts.liveCollections());
+        body.put("superseded_by_waiting", counts.supersededByWaiting());
+        body.put("dangling_tombstones", dangling);
+        body.put("tables", tables);
         send(exchange, 200, body);
     }
 

@@ -634,6 +634,9 @@ def test_link_audit(cat, monkeypatch) -> None:
 
 @pytest.mark.parametrize("resolve_kw", [dict(tumbler="1.1.1"), dict(owner="1.1")])
 def test_resolve(cat, resolve_kw) -> None:
+    from tests._catalog_fixture_ops import register_seed_collections
+
+    register_seed_collections("code__test")
     catalog_register(title="A", owner="1.1", physical_collection="code__test")
     assert "code__test" in catalog_resolve(**resolve_kw)
 

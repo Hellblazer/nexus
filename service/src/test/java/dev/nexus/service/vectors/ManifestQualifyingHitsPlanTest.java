@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import dev.nexus.service.db.CollectionIds;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
@@ -80,6 +81,7 @@ class ManifestQualifyingHitsPlanTest {
                 .set(CATALOG_DOCUMENTS.TUMBLER, DOC)
                 .set(CATALOG_DOCUMENTS.TITLE, "qual-plan.md")
                 .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLLECTION)
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, COLLECTION))
                 .set(CATALOG_DOCUMENTS.SOURCE_URI, "file:///qual-plan.md")
                 .execute();
             var series = DSL.generateSeries(1, N).as("s", "i");
@@ -88,23 +90,42 @@ class ManifestQualifyingHitsPlanTest {
             Field<byte[]> chash = DSL.function("decode", SQLDataType.BLOB,
                 DSL.concat(DSL.md5(DSL.concat(DSL.inline("qp-a-"), iText)), DSL.md5(DSL.concat(DSL.inline("qp-b-"), iText))),
                 DSL.inline("hex"));
-            seed.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.EMBEDDING_MODEL, CHUNKS.CHASH,
-                    CHUNKS.CHUNK_TEXT, VectorSeeds.chunkEmbedding(384))
-                .select(seed.select(DSL.val(TENANT, CHUNKS.TENANT_ID), DSL.val(COLLECTION, CHUNKS.COLLECTION),
-                        DSL.val(MODEL, CHUNKS.EMBEDDING_MODEL), chash, DSL.concat(DSL.inline("qp chunk "), iText),
-                        DSL.val(VectorSeeds.vecXY(384, 1f, 0f), VectorSeeds.chunkEmbedding(384)))
+            seed.insertInto(CHUNKS,
+                    CHUNKS.TENANT_ID,
+                    CHUNKS.COLLECTION,
+                    CHUNKS.COLLECTION_ID,
+                    CHUNKS.EMBEDDING_MODEL,
+                    CHUNKS.CHASH,
+                    CHUNKS.CHUNK_TEXT,
+                    VectorSeeds.chunkEmbedding(384))
+                .select(seed.select(DSL.val(TENANT, CHUNKS.TENANT_ID),
+                   DSL.val(COLLECTION, CHUNKS.COLLECTION),
+                   CollectionIds.idOf(DSL.val(TENANT, CHUNKS.TENANT_ID), DSL.val(COLLECTION, CHUNKS.COLLECTION)),
+                   DSL.val(MODEL, CHUNKS.EMBEDDING_MODEL),
+                   chash,
+                   DSL.concat(DSL.inline("qp chunk "), iText),
+                   DSL.val(VectorSeeds.vecXY(384, 1f, 0f), VectorSeeds.chunkEmbedding(384)))
                     .from(series))
                 .execute();
-            seed.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
-                    CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
-                    CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE,
+            seed.insertInto(CATALOG_DOCUMENT_CHUNKS,
+                    CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
+                    CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                    CATALOG_DOCUMENT_CHUNKS.POSITION,
+                    CATALOG_DOCUMENT_CHUNKS.CHASH,
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID,
+                    CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
+                    CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE,
                     CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN)
                 .select(seed.select(DSL.val(TENANT, CATALOG_DOCUMENT_CHUNKS.TENANT_ID),
-                        DSL.val(DOC, CATALOG_DOCUMENT_CHUNKS.DOC_ID), i, chash,
-                        DSL.val(COLLECTION, CATALOG_DOCUMENT_CHUNKS.COLLECTION),
-                        DSL.val(MODEL, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL),
-                        DSL.when(i.mod(2000).eq(0), DSL.inline("rare-x")).otherwise(DSL.inline("body")),
-                        DSL.inline(true))
+                   DSL.val(DOC, CATALOG_DOCUMENT_CHUNKS.DOC_ID),
+                   i,
+                   chash,
+                   DSL.val(COLLECTION, CATALOG_DOCUMENT_CHUNKS.COLLECTION),
+                   CollectionIds.idOf(DSL.val(TENANT, CATALOG_DOCUMENT_CHUNKS.TENANT_ID), DSL.val(COLLECTION, CATALOG_DOCUMENT_CHUNKS.COLLECTION)),
+                   DSL.val(MODEL, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL),
+                   DSL.when(i.mod(2000).eq(0), DSL.inline("rare-x")).otherwise(DSL.inline("body")),
+                   DSL.inline(true))
                     .from(series))
                 .execute();
             // Autovacuum off on the three tables, so the unanalyzed phase of the test stays unanalyzed: the naptime is a

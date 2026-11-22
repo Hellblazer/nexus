@@ -213,6 +213,16 @@ class DataMoveFailureClassifierTest {
             .isEqualTo(!expected);
     }
 
+    @ParameterizedTest(name = "the completion re-check raised {0} -> transient={1}")
+    @CsvSource(nullValues = "NULL", value = {"NULL, true", "55P03, true", "57014, true", "08006, true", "57P01, true",
+        "40P01, true", "40001, true", "53200, true", "42501, false", "42883, false", "42P01, false", "22012, false"})
+    void aRecheckInTheCompletionTransaction_isClassifiedAsOnCompleteIs_soALockWaitIsNeverPermanent(String sqlstate,
+                                                                                               boolean expected) {
+        SQLException error = sqlstate == null ? null : raised(sqlstate);
+        assertThat(DataMoveFailureClassifier.classify(Stage.RECHECK, error, List.of(), "the re-check could not run").permanent())
+            .isEqualTo(!expected);
+    }
+
     @Test
     void aCancelledRun_isPermanent() {
         var verdict = DataMoveFailureClassifier.classify(Stage.CANCELLED, null, List.of(), "run r cancelled at 2026-11-17");

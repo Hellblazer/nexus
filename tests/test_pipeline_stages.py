@@ -12,7 +12,10 @@ from unittest.mock import MagicMock, create_autospec, patch
 import pytest
 from structlog.testing import capture_logs
 
-from tests._catalog_fixture_ops import active_reader
+from tests._catalog_fixture_ops import (
+    active_reader,
+    seed_row_when_profile_refuses,  # noqa: F401 — an autouse fixture: the pre-flight's registration meets the substrate's bge profile
+)
 from tests.conftest import fake_credentials
 
 from nexus.catalog.types import ManifestRow

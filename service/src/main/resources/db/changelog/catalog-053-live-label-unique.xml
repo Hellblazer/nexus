@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-p2m1x.26 (RDR-229 P3.6, item 7): a label names exactly one LIVE collection per tenant.
+
+    catalog-053-1  idx_catalog_collections_live_label: a partial UNIQUE index on nexus.catalog_collections
+                   (tenant_id, name) over the rows that are not superseded (superseded_by = ''). The name becomes the
+                   label (item 7), and the one uniqueness rule it keeps is for addressing: two live collections of
+                   one tenant may not answer to the same label, so a label in a command names one collection.
+                   Labels in different tenants are independent.
+
+                   Until P4.1 the name is still the primary key (catalog_collections_pk on (tenant_id, name),
+                   catalog-001-5), so a superseded row, including one a past rename left, keeps its name taken, and
+                   no existing row can break this index: it is built over a set the key already makes unique. The
+                   index starts to matter at P4.1, when the key moves to the id and a tombstone releases its label. P4.1
+                   re-creates this index over superseded_by_id IS NULL in the same changeset as the key swap, because
+                   dropping superseded_by drops an index whose predicate names it (T2 229-research-45).
+
+                   An additive CREATE UNIQUE INDEX over rows the primary key already keeps unique: no row is touched
+                   and none can fail it, so there is no DATA EFFECT line. A plain CREATE INDEX (not CONCURRENTLY),
+                   because Liquibase runs a changeset in a transaction; the table holds one row per collection,
+                   so the build is brief.
+
+                   NO WEDGE (as collections-001-2, the nexus-lgdel.l1 directive). The build takes SHARE on the registry,
+                   which waits behind every open writer, so it runs under SET LOCAL lock_timeout = '5s'; and the
+                   changeset is failOnError="false". A build that cannot get its lock in time, or that the migration role
+                   may not run (it no longer owns the table), fails, is rolled back and logged, writes NO
+                   DATABASECHANGELOG row, and the walk goes on; the next boot retries it. The precondition
+                   (onFail="CONTINUE", the shape tests/test_changelog_continue_precondition_chunks_lint.py requires of a
+                   changeset that can stay unrecorded) skips it, unrecorded, when an index of that name already exists. Skipping it costs nothing
+                   until P4.1, since the primary key keeps the same rows unique (CollectionTupleUniqueIndexLiquibaseTest
+                   holds a writer for a whole walk and moves the table's owner, and requires the walk to finish).
+
+    The label rule itself (non-empty, valid UTF-8, no control character, at most 255 bytes, not the minted form) is
+    the engine's CollectionLabel.validateUserLabel, called on the registration and rename routes, not a constraint
+    here.
+
+    ROLLBACK drops the index.
+
+    Placed after catalog-050-note-uri-residue-owner-read.xml (the tail when this landed) and before the
+    grants-nexus-svc.xml runAlways block (the established late-append convention, D0.1).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="catalog-053-1" author="nexus-p2m1x.26" failOnError="false">
+        <preConditions onFail="CONTINUE" onError="CONTINUE">
+            <sqlCheck expectedResult="0">SELECT CASE WHEN to_regclass('nexus.idx_catalog_collections_live_label') IS NULL THEN 0 ELSE 1 END</sqlCheck>
+        </preConditions>
+        <comment>Creates idx_catalog_collections_live_label, a partial UNIQUE index on nexus.catalog_collections (tenant_id, name) WHERE superseded_by = '' (RDR-229 P3.6: a label names one live collection per tenant). Additive, over rows the (tenant_id, name) primary key already keeps unique, so no existing row can fail it and none is touched.</comment>
+        <sql splitStatements="true" stripComments="false">
+SET LOCAL lock_timeout = '5s';
+CREATE UNIQUE INDEX idx_catalog_collections_live_label
+    ON nexus.catalog_collections (tenant_id, name)
+    WHERE superseded_by = '';
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+                DROP INDEX IF EXISTS nexus.idx_catalog_collections_live_label;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

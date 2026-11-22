@@ -4,6 +4,7 @@ package dev.nexus.service;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.TenantConstants;
 import org.jooq.JSONB;
 import org.jooq.SQLDialect;
@@ -109,6 +110,7 @@ class ManifestSectionLabelFillableTest {
     /** A registered document: its tumbler. */
     private String doc(String tenantToken, String tenant, String title, String filePath, String indexedAt, String meta) throws Exception {
         String owner = "l4hds.owner" + (seq++);
+        CollectionIdSeeds.register(pg, tenant, COLL);
         var resp = post(tenantToken, tenant, "/v1/catalog/doc/register", mapper.writeValueAsString(Map.of(
             "owner_prefix", owner, "title", title, "content_type", "prose",
             "source_uri", "file:///l4hds/" + owner + ".md", "physical_collection", COLL)));
@@ -157,6 +159,7 @@ class ManifestSectionLabelFillableTest {
                 .set(CHUNKS.COLLECTION, COLL)
                 .set(CHUNKS.CHASH, HexFormat.of().parseHex(chash))
                 .set(CHUNKS.EMBEDDING_MODEL, model)
+                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, COLL))
                 .set(CHUNKS.CHUNK_TEXT, "stub")
                 .set(CHUNKS.EMBEDDING_768, VectorSeeds.vec(768, 0.1f))
                 .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()

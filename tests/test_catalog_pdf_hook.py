@@ -36,7 +36,7 @@ def _make_catalog(tmp_path: Path) -> tuple[Path, ActiveCatalog]:
 @pytest.mark.t2_tenant
 class TestPdfCatalogHook:
     def test_registers_pdf(self, tmp_path, monkeypatch):
-        from nexus.pipeline_stages import _catalog_pdf_hook
+        from tests._catalog_fixture_ops import catalog_pdf_hook_seeded as _catalog_pdf_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -56,7 +56,7 @@ class TestPdfCatalogHook:
         assert rows[0] == "Attention Is All You Need"
 
     def test_skipped_when_not_initialized(self, tmp_path, monkeypatch):
-        from nexus.pipeline_stages import _catalog_pdf_hook
+        from tests._catalog_fixture_ops import catalog_pdf_hook_seeded as _catalog_pdf_hook
 
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "no-catalog"))
         # Should not raise
@@ -67,7 +67,7 @@ class TestPdfCatalogHook:
         )
 
     def test_uses_filename_when_no_title(self, tmp_path, monkeypatch):
-        from nexus.pipeline_stages import _catalog_pdf_hook
+        from tests._catalog_fixture_ops import catalog_pdf_hook_seeded as _catalog_pdf_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -81,7 +81,7 @@ class TestPdfCatalogHook:
         assert rows[0] == "my-paper"
 
     def test_update_on_reindex(self, tmp_path, monkeypatch):
-        from nexus.pipeline_stages import _catalog_pdf_hook
+        from tests._catalog_fixture_ops import catalog_pdf_hook_seeded as _catalog_pdf_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -116,7 +116,7 @@ class TestPdfCatalogHookPhysicalCollectionRepointLogging:
     def test_reindex_into_different_collection_logs_repoint(self, tmp_path, monkeypatch):
         from structlog.testing import capture_logs
 
-        from nexus.pipeline_stages import _catalog_pdf_hook
+        from tests._catalog_fixture_ops import catalog_pdf_hook_seeded as _catalog_pdf_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -150,7 +150,7 @@ class TestPdfCatalogHookPhysicalCollectionRepointLogging:
 
         from structlog.testing import capture_logs
 
-        from nexus.pipeline_stages import _catalog_pdf_hook
+        from tests._catalog_fixture_ops import catalog_pdf_hook_seeded as _catalog_pdf_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -193,7 +193,7 @@ class TestPdfCatalogHookPhysicalCollectionRepointLogging:
     def test_reindex_into_same_collection_logs_nothing(self, tmp_path, monkeypatch):
         from structlog.testing import capture_logs
 
-        from nexus.pipeline_stages import _catalog_pdf_hook
+        from tests._catalog_fixture_ops import catalog_pdf_hook_seeded as _catalog_pdf_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -230,7 +230,7 @@ class TestPdfCatalogHookTitleBackfill:
     """
 
     def test_reindex_backfills_stem_placeholder(self, tmp_path, monkeypatch):
-        from nexus.pipeline_stages import _catalog_pdf_hook
+        from tests._catalog_fixture_ops import catalog_pdf_hook_seeded as _catalog_pdf_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -258,7 +258,7 @@ class TestPdfCatalogHookTitleBackfill:
         assert doc.chunk_count == 78
 
     def test_reindex_never_clobbers_curated_title(self, tmp_path, monkeypatch):
-        from nexus.pipeline_stages import _catalog_pdf_hook
+        from tests._catalog_fixture_ops import catalog_pdf_hook_seeded as _catalog_pdf_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -277,7 +277,7 @@ class TestPdfCatalogHookTitleBackfill:
         assert doc.year == 2020
 
     def test_reindex_with_empty_title_keeps_existing(self, tmp_path, monkeypatch):
-        from nexus.pipeline_stages import _catalog_pdf_hook
+        from tests._catalog_fixture_ops import catalog_pdf_hook_seeded as _catalog_pdf_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -296,7 +296,7 @@ class TestPdfCatalogHookTitleBackfill:
         """resolve_pdf_title falls to derive_title's NORMALISED stem when no
         extractor/H1 title exists; that must not be backfilled-then-locked
         (nexus-ov5tc critique S1): a later real title still lands."""
-        from nexus.pipeline_stages import _catalog_pdf_hook
+        from tests._catalog_fixture_ops import catalog_pdf_hook_seeded as _catalog_pdf_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -313,7 +313,7 @@ class TestPdfCatalogHookTitleBackfill:
         """GH #1611 bug 3: a PDF whose real title (its own metadata or first H1) reads exactly like the
         title-cased stem was treated as the stem placeholder and never written. The hook now takes the
         title's source: a title that did not come from the stem fallback is written."""
-        from nexus.pipeline_stages import _catalog_pdf_hook
+        from tests._catalog_fixture_ops import catalog_pdf_hook_seeded as _catalog_pdf_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -326,7 +326,7 @@ class TestPdfCatalogHookTitleBackfill:
         assert only_document().title == "Attention Is All You Need"
 
     def test_a_stem_fallback_title_is_still_a_placeholder(self, tmp_path, monkeypatch):
-        from nexus.pipeline_stages import _catalog_pdf_hook
+        from tests._catalog_fixture_ops import catalog_pdf_hook_seeded as _catalog_pdf_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))

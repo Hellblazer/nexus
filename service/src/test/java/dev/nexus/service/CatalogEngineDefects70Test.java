@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.TenantScope;
 import org.jooq.JSONB;
@@ -109,6 +110,7 @@ class CatalogEngineDefects70Test {
             return ctx.insertInto(CHUNKS)
                 .set(CHUNKS.TENANT_ID, tenant)
                 .set(CHUNKS.COLLECTION, collection)
+                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
                 .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chashHex))
                 .set(CHUNKS.EMBEDDING_MODEL, model)
                 .set(CHUNKS.CHUNK_TEXT, "stub")
@@ -116,6 +118,22 @@ class CatalogEngineDefects70Test {
                 .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
                 .execute();
         });
+    }
+
+    /** RDR-229 P3.1: a document names its collection by registry id, so the engine refuses one under an unregistered collection; a seed registers it first, as a client does (idempotent). */
+    private Map<String, Object> reg(String tenant, Map<String, Object> doc) {
+        if (doc.get("physical_collection") instanceof String c && !c.isEmpty()) {
+            tenantScope.withTenant(tenant, ctx -> {
+                PgContainerHelper.insertCollection(ctx, tenant, c);
+                return null;
+            });
+        }
+        return doc;
+    }
+
+    private List<Map<String, Object>> regAll(String tenant, List<Map<String, Object>> docs) {
+        docs.forEach(d -> reg(tenant, d));
+        return docs;
     }
 
     private void writeManifestSeeded(String tenant, String docId, String collection,
@@ -214,10 +232,10 @@ class CatalogEngineDefects70Test {
     void mqd6t_chashesForCollection_protectsTombstonedDocUntilPurge() {
         String owner = freshOwner();
         String coll = "code__defects70-gc1__voyage-code-3__v1";
-        String t = repo.registerDocument(TENANT, owner, Map.of(
+        String t = repo.registerDocument(TENANT, owner, reg(TENANT, Map.of(
             "title", "gc1", "content_type", "code",
             "physical_collection", coll,
-            "source_uri", "file:///defects70/gc1/doc.md"));
+            "source_uri", "file:///defects70/gc1/doc.md")));
         String h = ch("defects70-gc1-chunk");
         writeManifestSeeded(TENANT, t, coll, List.of(row(0, h)));
 
@@ -245,10 +263,10 @@ class CatalogEngineDefects70Test {
     void mqd6t_docsForChashes_excludesTombstonedDoc() {
         String owner = freshOwner();
         String coll = "code__defects70-gc2__voyage-code-3__v1";
-        String t = repo.registerDocument(TENANT, owner, Map.of(
+        String t = repo.registerDocument(TENANT, owner, reg(TENANT, Map.of(
             "title", "gc2", "content_type", "code",
             "physical_collection", coll,
-            "source_uri", "file:///defects70/gc2/doc.md"));
+            "source_uri", "file:///defects70/gc2/doc.md")));
         String h = ch("defects70-gc2-chunk");
         writeManifestSeeded(TENANT, t, coll, List.of(row(0, h)));
 
@@ -274,10 +292,10 @@ class CatalogEngineDefects70Test {
     void mqd6t_resolveChash_doesNotAttributeToTombstonedDoc() throws Exception {
         String owner = freshOwner();
         String coll = "code__defects70-rchash__voyage-code-3__v1";
-        String t = repo.registerDocument(TENANT, owner, Map.of(
+        String t = repo.registerDocument(TENANT, owner, reg(TENANT, Map.of(
             "title", "rchash", "content_type", "code",
             "physical_collection", coll,
-            "source_uri", "file:///defects70/rchash/doc.md"));
+            "source_uri", "file:///defects70/rchash/doc.md")));
         String h = ch("defects70-rchash-chunk");
         writeManifestSeeded(TENANT, t, coll, List.of(row(0, h)));
         seedChunkRow(coll, h, "resolve-chash body");
@@ -320,10 +338,10 @@ class CatalogEngineDefects70Test {
     @Test
     void mqd6t_getManifest_excludesTombstonedDoc() {
         String owner = freshOwner();
-        String t = repo.registerDocument(TENANT, owner, Map.of(
+        String t = repo.registerDocument(TENANT, owner, reg(TENANT, Map.of(
             "title", "man1", "content_type", "code",
             "physical_collection", "code__defects70-man1__voyage-code-3__v1",
-            "source_uri", "file:///defects70/man1/doc.md"));
+            "source_uri", "file:///defects70/man1/doc.md")));
         appendManifestChunksSeeded(TENANT, t, "code__defects70-man1__voyage-code-3__v1", List.of(
             row(0, ch("defects70-man1-0")),
             row(1, ch("defects70-man1-1")),
@@ -485,7 +503,7 @@ class CatalogEngineDefects70Test {
             .isEmpty();
 
         // The incidental update: a head_hash bump that never mentions chunk_count.
-        repo.updateDocument(TENANT, tumbler, Map.of("head_hash", "routine-bump"));
+        repo.updateDocument(TENANT, tumbler, reg(TENANT, Map.of("head_hash", "routine-bump")));
 
         assertThat(repo.getDocument(TENANT, tumbler).get("chunk_count"))
             .as("the damage signal must survive an update that did not ask to change it")
@@ -499,7 +517,7 @@ class CatalogEngineDefects70Test {
         String coll = "code__defects70-h2explicit__voyage-code-3__v1";
         injectDamagedDoc(tumbler, coll, 7, "{\"content_hash\":\"deadbeef\"}");
 
-        repo.updateDocument(TENANT, tumbler, Map.of("chunk_count", 0));
+        repo.updateDocument(TENANT, tumbler, reg(TENANT, Map.of("chunk_count", 0)));
 
         assertThat(repo.getDocument(TENANT, tumbler).get("chunk_count"))
             .as("caller intent wins — the guard is only about the incidental path")
@@ -793,7 +811,7 @@ class CatalogEngineDefects70Test {
     @Test
     void eldyi_updateDocument_collectionMove_silentZeroOnTombstonedDoc() {
         String t = tombstonedDoc("updatecoll");
-        assertThat(repo.updateDocument(TENANT, t, Map.of("physical_collection", "code__eldyi-newcoll__voyage-code-3__v1")))
+        assertThat(repo.updateDocument(TENANT, t, reg(TENANT, Map.of("physical_collection", "code__eldyi-newcoll__voyage-code-3__v1"))))
             .as("a collection update returns the honest 0 rows-affected — no exception needed")
             .isZero();
     }
@@ -802,7 +820,7 @@ class CatalogEngineDefects70Test {
     void eldyi_updateDocumentsMany_collectionMove_silentZeroOnTombstonedDoc() {
         String t = tombstonedDoc("updatecollbatch");
         assertThat(repo.updateDocumentsMany(TENANT,
-                List.of(Map.of("tumbler", t, "physical_collection", "code__eldyi-newcoll2__voyage-code-3__v1"))))
+                regAll(TENANT, List.of(Map.of("tumbler", t, "physical_collection", "code__eldyi-newcoll2__voyage-code-3__v1")))))
             .containsExactly(0);
     }
 
@@ -1323,12 +1341,15 @@ class CatalogEngineDefects70Test {
                                   String metadataJson) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            // RDR-229 P3.1: the damaged row still names its collection by registry id, so the collection is registered.
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, collection);
             DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENTS)
                 .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT)
                 .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
                 .set(CATALOG_DOCUMENTS.TITLE, "damaged-" + tumbler)
                 .set(CATALOG_DOCUMENTS.CONTENT_TYPE, "code")
                 .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
                 .set(CATALOG_DOCUMENTS.CHUNK_COUNT, chunkCount)
                 .set(CATALOG_DOCUMENTS.METADATA, JSONB.valueOf(metadataJson))
                 .set(CATALOG_DOCUMENTS.FILE_PATH, "")
@@ -1362,6 +1383,7 @@ class CatalogEngineDefects70Test {
             DSL.using(su, SQLDialect.POSTGRES).insertInto(CHUNKS)
                 .set(CHUNKS.TENANT_ID, TENANT)
                 .set(CHUNKS.COLLECTION, collection)
+                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
                 .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chash))
                 .set(CHUNKS.EMBEDDING_MODEL, "voyage-code-3")
                 .set(CHUNKS.CHUNK_TEXT, text)
@@ -1706,10 +1728,10 @@ class CatalogEngineDefects70Test {
         String owner = freshOwner();
         String coll = "knowledge__defects70-h77a2-title__voyage-context-3__v1";
         String absPath = "/Users/somebody/git/nexus-clone/papers/foo.md";
-        String t = repo.registerDocument(TENANT, owner, Map.of(
+        String t = repo.registerDocument(TENANT, owner, reg(TENANT, Map.of(
             "title", absPath, "content_type", "paper",
             "file_path", "papers/foo.md", "physical_collection", coll,
-            "source_uri", "file:///defects70/h77a2/foo.md"));
+            "source_uri", "file:///defects70/h77a2/foo.md")));
 
         // file_path leg still resolves (unchanged).
         assertThat(repo.lookupDocByCollectionAndPath(TENANT, coll, "papers/foo.md")).isEqualTo(t);
@@ -1724,10 +1746,10 @@ class CatalogEngineDefects70Test {
     void h77a2_missesCleanlyWhenNeitherLegMatches() {
         String owner = freshOwner();
         String coll = "knowledge__defects70-h77a2-miss__voyage-context-3__v1";
-        repo.registerDocument(TENANT, owner, Map.of(
+        repo.registerDocument(TENANT, owner, reg(TENANT, Map.of(
             "title", "papers/known.md", "content_type", "paper",
             "file_path", "papers/known.md", "physical_collection", coll,
-            "source_uri", "file:///defects70/h77a2miss/known.md"));
+            "source_uri", "file:///defects70/h77a2miss/known.md")));
 
         assertThat(repo.lookupDocByCollectionAndPath(
             TENANT, coll, "/Users/nobody/git/ghost/papers/stray.md")).isNull();
@@ -1741,14 +1763,14 @@ class CatalogEngineDefects70Test {
         String owner2 = freshOwner();
         String coll = "knowledge__defects70-h77a2-dup__voyage-context-3__v1";
         String samePath = "papers/dup.md";
-        String first = repo.registerDocument(TENANT, owner1, Map.of(
+        String first = repo.registerDocument(TENANT, owner1, reg(TENANT, Map.of(
             "title", "dup-1", "content_type", "paper",
             "file_path", samePath, "physical_collection", coll,
-            "source_uri", "file:///defects70/h77a2dup/dup1.md"));
-        String second = repo.registerDocument(TENANT, owner2, Map.of(
+            "source_uri", "file:///defects70/h77a2dup/dup1.md")));
+        String second = repo.registerDocument(TENANT, owner2, reg(TENANT, Map.of(
             "title", "dup-2", "content_type", "paper",
             "file_path", samePath, "physical_collection", coll,
-            "source_uri", "file:///defects70/h77a2dup/dup2.md"));
+            "source_uri", "file:///defects70/h77a2dup/dup2.md")));
         assertThat(first).isNotEqualTo(second);
 
         String expectedWinner = first.compareTo(second) < 0 ? first : second;

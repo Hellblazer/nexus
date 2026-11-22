@@ -1912,6 +1912,11 @@ def _backfill_per_file_from_t3(
     Returns the number of newly-registered catalog rows. ``dry_run`` skips
     writes and returns the count that *would* register (subject to the
     same dedup logic against existing rows).
+
+    RDR-229 P3.1 (nexus-p2m1x.17): like every ``_backfill_*`` pass, it registers documents under a collection read from
+    T3's own listing, which has its registry row, and does not register the collection first. A collection with chunks
+    and no row meets the engine's typed 422 (``unregistered_collection``) on the first document, which is the right
+    answer for that state. ``nx catalog register`` names no collection at all.
     """
     from nexus.catalog.rows.legacy_names import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 

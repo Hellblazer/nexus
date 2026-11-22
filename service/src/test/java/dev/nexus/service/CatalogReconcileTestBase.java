@@ -291,6 +291,10 @@ abstract class CatalogReconcileTestBase {
         values.put(CATALOG_DOCUMENTS.TITLE, filePath);
         values.put(CATALOG_DOCUMENTS.FILE_PATH, filePath);
         values.putAll(more);
+        // RDR-229 P3.1: a document that names a physical collection carries its registry id beside the name
+        if (values.get(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION) instanceof String pc) {
+            values.put(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, dev.nexus.service.db.CollectionIds.idOf(tenant, pc));
+        }
         scope.withTenant(tenant, ctx -> ctx.insertInto(CATALOG_DOCUMENTS).set(values).execute());
     }
 

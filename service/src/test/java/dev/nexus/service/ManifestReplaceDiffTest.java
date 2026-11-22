@@ -321,7 +321,43 @@ class ManifestReplaceDiffTest extends AtomicWriteTestBase {
 
     // ── the diff writes every payload column ─────────────────────────────────────────────────────
 
-    /** Each payload column, changed alone on one row: the diff must update it. {@code collection} and {@code embedding_model} are the test above. */
+    /**
+     * RDR-229 P3.1: collection_id is a payload column. A replace that keeps every other column of a row whose id the
+     * stamp has not reached (name right, id NULL) still rewrites that row with the registry's id, and leaves a stamped
+     * row alone.
+     */
+    @Test
+    void aReplaceOverAnUnstampedManifestRow_stampsItsId_andLeavesStampedRowsUntouched() throws Exception {
+        Fx f = fixture("unstamped");
+        List<Map<String, Object>> rows = seedDoc(f, 3);
+        Long id = snapshotId(f.docId(), 1);
+        assertThat(id).as("precondition: the seed stamped the id").isNotNull();
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            P31CheckReplay.lift(ctx, P31CheckReplay.MANIFEST);
+            ctx.update(CATALOG_DOCUMENT_CHUNKS).set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, (Long) null)
+                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT)).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(f.docId()))
+                .and(CATALOG_DOCUMENT_CHUNKS.POSITION.eq(1)).execute();
+            P31CheckReplay.restore(ctx, P31CheckReplay.MANIFEST);
+        }
+        assertThat(snapshotId(f.docId(), 1)).as("precondition: row 1 unstamped").isNull();
+        var before = snapshot(f.docId());
+
+        repo.writeManifest(TENANT, f.docId(), f.collection(), rows);
+
+        var after = snapshot(f.docId());
+        assertThat(after.get(1).get("collection_id")).as("the replace stamped the unstamped row").isEqualTo(id);
+        assertThat(after.get(1).get("tuple")).as("by rewriting it").isNotEqualTo(before.get(1).get("tuple"));
+        for (int p : List.of(0, 2)) assertThat(after.get(p)).as("stamped row %d untouched", p).isEqualTo(before.get(p));
+    }
+
+    private Long snapshotId(String docId, int position) throws Exception {
+        Object v = snapshot(docId).get(position).get("collection_id");
+        return v == null ? null : ((Number) v).longValue();
+    }
+
+    /** Each payload column, changed alone on one row: the diff must update it. {@code collection}, {@code embedding_model} and {@code collection_id} are the tests above. */
     @Test
     void everyPayloadColumnIsComparedAndWritten_andTheListMatchesTheTable() throws Exception {
         var columns = new java.util.TreeSet<String>();
@@ -347,9 +383,9 @@ class ManifestReplaceDiffTest extends AtomicWriteTestBase {
         mutations.put("section_type", r -> r.put("section_type", "other type"));
         mutations.put("page_number", r -> r.put("page_number", 77));
         mutations.put("labels_written", r -> r.put("labels_written", false));
-        assertThat(mutations.keySet()).as("every payload column but the two a collection change moves")
+        assertThat(mutations.keySet()).as("every payload column but the three a collection change moves")
             .containsExactlyInAnyOrderElementsOf(columns.stream()
-                .filter(c -> !c.equals("collection") && !c.equals("embedding_model")).toList());
+                .filter(c -> !c.equals("collection") && !c.equals("embedding_model") && !c.equals("collection_id")).toList());
 
         for (var m : mutations.entrySet()) {
             repo.writeManifest(TENANT, f.docId(), f.collection(), rows);              // back to the baseline
@@ -476,7 +512,7 @@ class ManifestReplaceDiffTest extends AtomicWriteTestBase {
     void aSupersededCollection_refusesAReplaceThatKeepsEveryRow() throws Exception {
         Fx f = fixture("sup");
         List<Map<String, Object>> rows = seedDoc(f, 3);
-        assertThat(repo.supersedeCollection(TENANT, f.collection(), f.collection().replace("__v1", "__v2"), "")).isEqualTo(1);
+        assertThat(SupersedeSeeds.supersede(repo, TENANT, f.collection(), f.collection().replace("__v1", "__v2"), "")).isEqualTo(1);
         var before = snapshot(f.docId());
 
         for (boolean decline : List.of(false, true)) {

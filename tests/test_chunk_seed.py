@@ -164,7 +164,7 @@ def _dump(tenant: str, collection: str) -> list[dict]:
     """Every column of every row in *collection* except the ones that name the
     collection or carry a wall-clock stamp, ordered by chash."""
     return _psql_rows(
-        "SELECT to_jsonb(c) - 'collection' - 'created_at' - 'last_written_at' "
+        "SELECT to_jsonb(c) - 'collection' - 'collection_id' - 'created_at' - 'last_written_at' "
         f"FROM nexus.chunks c WHERE tenant_id = '{tenant}' AND collection = '{collection}' "
         "ORDER BY chash"
     )

@@ -500,6 +500,9 @@ public final class PgContainerHelper {
      *   <li>{@code TextGateProbeSingleRoleGuardIntegrationTest} -- asserts role membership
      *       edges on {@code nexus_svc} and the owner ({@code grantRoleMembership}), which would leak
      *       into every later class on a shared cluster.</li>
+     *   <li>{@code Rdr229P31SingleRoleSupersededByCheckTest} -- migrates as {@code nexus_svc} itself (the single-role
+     *       posture the registry's owner-read changeset and vectors-068-19 key on by name); the shared cluster holds
+     *       {@code nexus_svc} from the template migration and it cannot be declared exclusive and dropped.</li>
      *   <li>{@code Rdr192LiveCExplainEvidenceIntegrationTest}, {@code ReadPathLeafPruningIntegrationTest} --
      *       read the plans {@code auto_explain} writes to the CONTAINER's log ({@link #serverLog}); a shared
      *       cluster's log holds every class's output, and {@code ALTER ROLE nexus_svc SET auto_explain...}
@@ -1601,6 +1604,36 @@ public final class PgContainerHelper {
             Map.of("table", renderTableParam(DSL.using(conn, SQLDialect.POSTGRES), table), "policy", policy));
     }
 
+    /**
+     * {@code DROP POLICY IF EXISTS policy ON table} (RDR-229 P3.1): the idempotent form, for a test that gives a role D2's policy itself
+     * and must still pass once the product changelog creates it. Not {@code nexus_test.*}: it runs in databases that carry no such schema.
+     */
+    public static void dropPolicyIfExists(Connection conn, Table<?> table, String policy) throws Exception {
+        requireTestIdentifier(policy);
+        runSuperuserTestChangelog(conn, "db/changelog-test/db.changelog-test-drop-policy-if-exists.xml",
+            "databasechangelog_test_drop_policy_if_exists",
+            Map.of("table", renderTableParam(DSL.using(conn, SQLDialect.POSTGRES), table), "policy", policy));
+    }
+
+    /**
+     * {@code ALTER TABLE table VALIDATE CONSTRAINT constraint} (RDR-229 P3.1) on a superuser connection, in a database without
+     * {@code nexus_test.validate_constraint} (the data-move and empty-database containers).
+     */
+    public static void validateConstraintStandalone(Connection conn, Table<?> table, String constraintName) throws Exception {
+        requireTestIdentifier(constraintName);
+        runSuperuserTestChangelog(conn, "db/changelog-test/db.changelog-test-validate-constraint.xml",
+            "databasechangelog_test_validate_constraint",
+            Map.of("table", renderTableParam(DSL.using(conn, SQLDialect.POSTGRES), table), "constraint", constraintName));
+    }
+
+    /** {@code ALTER TABLE table ALTER COLUMN column DROP IDENTITY} (no typed form in jOOQ 3.20.11), through {@code db.changelog-test-drop-identity.xml}. */
+    public static void dropIdentity(Connection conn, Table<?> table, String column) throws Exception {
+        requireTestIdentifier(column);
+        runSuperuserTestChangelog(conn, "db/changelog-test/db.changelog-test-drop-identity.xml",
+            "databasechangelog_test_drop_identity",
+            Map.of("table", renderTableParam(DSL.using(conn, SQLDialect.POSTGRES), table), "column", column));
+    }
+
     /** The four row-level-security switches of {@code ALTER TABLE}, for {@link #setRowSecurity}. */
     public enum RowSecurityMode {
         ENABLE("ENABLE"), DISABLE("DISABLE"), FORCE("FORCE"), NO_FORCE("NO FORCE");
@@ -2163,11 +2196,7 @@ public final class PgContainerHelper {
      */
     public static void ownChunks(DSLContext ctx, String tenantId, String collection, String... chashHex) {
         String docId = "own-" + collection;
-        ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
-                CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
-            .values(tenantId, docId, "Owner " + docId, collection)
-            .onConflictDoNothing()
-            .execute();
+        CollectionIdSeeds.ownerDocument(ctx, tenantId, docId, collection);
 
         Integer maxPosition = ctx.select(org.jooq.impl.DSL.max(CATALOG_DOCUMENT_CHUNKS.POSITION))
             .from(CATALOG_DOCUMENT_CHUNKS)
@@ -2178,35 +2207,10 @@ public final class PgContainerHelper {
         if (chashHex.length == 0) {
             return;
         }
-
-        // Single multi-row INSERT (one round trip regardless of chashHex.length) —
-        // a fixture owning thousands of chashes (e.g. a dense-gate-scale fixture)
-        // must not pay one round trip per chash.
-        if (!isPartitionedLayout(ctx)) {
-            var old = ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
-                    CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
-                    CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
-                .values(tenantId, docId, nextPosition,
-                        dev.nexus.service.db.Chash.fromHex(chashHex[0]).toBytes(), collection);
-            for (int i = 1; i < chashHex.length; i++) {
-                old = old.values(tenantId, docId, nextPosition + i,
-                        dev.nexus.service.db.Chash.fromHex(chashHex[i]).toBytes(), collection);
-            }
-            old.onConflictDoNothing().execute();
-            return;
-        }
-        String model = collectionModel(ctx, tenantId, collection);
-        var step = ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
-                CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
-                CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
-                CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-            .values(tenantId, docId, nextPosition,
-                    dev.nexus.service.db.Chash.fromHex(chashHex[0]).toBytes(), collection, model);
-        for (int i = 1; i < chashHex.length; i++) {
-            step = step.values(tenantId, docId, nextPosition + i,
-                    dev.nexus.service.db.Chash.fromHex(chashHex[i]).toBytes(), collection, model);
-        }
-        step.onConflictDoNothing().execute();
+        // Single multi-row INSERT (one round trip regardless of chashHex.length) -- a fixture owning thousands of
+        // chashes (e.g. a dense-gate-scale fixture) must not pay one round trip per chash. RDR-229 P3.1: each row
+        // carries the collection's id on an id layout (CollectionIdSeeds).
+        CollectionIdSeeds.manifestRows(ctx, tenantId, docId, collection, nextPosition, chashHex);
     }
 
     /**
@@ -2228,47 +2232,17 @@ public final class PgContainerHelper {
      * @param v          the 384-dim embedding vector
      */
     public static void insertChunk384(DSLContext ctx, String tenant, String collection, byte[] chashBytes, Vector v) {
-        if (!isPartitionedLayout(ctx)) {
-            ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
-                           CHUNKS.EMBEDDING_384)
-               .values(tenant, collection, chashBytes, "text", v)
-               .execute();
-            return;
-        }
-        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
-                       CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384)
-           .values(tenant, collection, chashBytes, collectionModel(ctx, tenant, collection), "text", v)
-           .execute();
+        CollectionIdSeeds.insertChunk(ctx, tenant, collection, chashBytes, CHUNKS.EMBEDDING_384, v);
     }
 
     /** {@code nexus.chunks} seed at dim 768 — see {@link #insertChunk384} for the full contract. */
     public static void insertChunk768(DSLContext ctx, String tenant, String collection, byte[] chashBytes, Vector v) {
-        if (!isPartitionedLayout(ctx)) {
-            ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
-                           CHUNKS.EMBEDDING_768)
-               .values(tenant, collection, chashBytes, "text", v)
-               .execute();
-            return;
-        }
-        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
-                       CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_768)
-           .values(tenant, collection, chashBytes, collectionModel(ctx, tenant, collection), "text", v)
-           .execute();
+        CollectionIdSeeds.insertChunk(ctx, tenant, collection, chashBytes, CHUNKS.EMBEDDING_768, v);
     }
 
     /** {@code nexus.chunks} seed at dim 1024 — see {@link #insertChunk384} for the full contract. */
     public static void insertChunk1024(DSLContext ctx, String tenant, String collection, byte[] chashBytes, Vector v) {
-        if (!isPartitionedLayout(ctx)) {
-            ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
-                           CHUNKS.EMBEDDING_1024)
-               .values(tenant, collection, chashBytes, "text", v)
-               .execute();
-            return;
-        }
-        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
-                       CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_1024)
-           .values(tenant, collection, chashBytes, collectionModel(ctx, tenant, collection), "text", v)
-           .execute();
+        CollectionIdSeeds.insertChunk(ctx, tenant, collection, chashBytes, CHUNKS.EMBEDDING_1024, v);
     }
 
     private static final com.fasterxml.jackson.databind.ObjectMapper CHUNK_METADATA_MAPPER =
@@ -2319,7 +2293,8 @@ public final class PgContainerHelper {
         }
         // RDR-225: every row of the call carries the collection's model; a vector whose width is not
         // that model's dimension is refused by the model partition's CHECK, as the engine's writers are.
-        final String model = isPartitionedLayout(ctx) ? collectionModel(ctx, tenant, collection) : null;
+        // RDR-229 P3.1: and, on an id layout, the collection's id (CollectionIdSeeds.Registered), resolved once.
+        final var reg = CollectionIdSeeds.Registered.of(ctx, tenant, collection);
         for (int i = 0; i < n; i++) {
             byte[] chash = dev.nexus.service.db.Chash.fromHex(chashHex.get(i)).toBytes();
             float[] v = embeddings.get(i);
@@ -2335,19 +2310,7 @@ public final class PgContainerHelper {
                 case 1024 -> CHUNKS.EMBEDDING_1024;
                 default -> throw new IllegalArgumentException("insertChunks: no embedding column of width " + v.length);
             };
-            if (model == null) {
-                ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
-                               col, CHUNKS.METADATA)
-                   .values(tenant, collection, chash, texts.get(i), Vector.of(v), meta)
-                   .onConflictDoNothing()
-                   .execute();
-                continue;
-            }
-            ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
-                           CHUNKS.CHUNK_TEXT, col, CHUNKS.METADATA)
-               .values(tenant, collection, chash, model, texts.get(i), Vector.of(v), meta)
-               .onConflictDoNothing()
-               .execute();
+            CollectionIdSeeds.insertChunkIfAbsent(ctx, reg, tenant, collection, chash, texts.get(i), col, Vector.of(v), meta);
         }
     }
 
@@ -2421,15 +2384,7 @@ public final class PgContainerHelper {
                 "insertReferenceOnlyChunk: no embedding column of width " + embedding.length);
         };
         byte[] chash = dev.nexus.service.db.Chash.fromHex(chashHex).toBytes();
-        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
-                       CHUNKS.CHUNK_TEXT, col, CHUNKS.METADATA, CHUNKS.RETENTION)
-           .values(tenant, collection, chash, collectionModel(ctx, tenant, collection), null,
-                   Vector.of(embedding), meta, "reference-only")
-           .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL)
-           .doUpdate()
-           .set(col, org.jooq.impl.DSL.excluded(col))
-           .set(CHUNKS.METADATA, org.jooq.impl.DSL.excluded(CHUNKS.METADATA))
-           .execute();
+        CollectionIdSeeds.upsertReferenceOnlyChunk(ctx, tenant, collection, chash, col, Vector.of(embedding), meta);
     }
 
     /**

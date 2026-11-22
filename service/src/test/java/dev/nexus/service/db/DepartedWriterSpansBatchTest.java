@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import dev.nexus.service.db.CollectionIds;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
@@ -259,6 +260,7 @@ class DepartedWriterSpansBatchTest {
                 .set(CATALOG_DOCUMENTS.TUMBLER, doc)
                 .set(CATALOG_DOCUMENTS.TITLE, doc)
                 .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, coll)
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, coll))
                 .set(CATALOG_DOCUMENTS.DELETED_AT, OffsetDateTime.now().minusDays(60))
                 .execute();
             String model = PgContainerHelper.collectionModel(d, TENANT, coll);
@@ -266,9 +268,12 @@ class DepartedWriterSpansBatchTest {
                 CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
                 CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
                 CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END,
-                CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END);
+                CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END,
+                CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID);
+            Long collectionId = CollectionIds.require(d, TENANT, coll);
             for (int i = 0; i < hex.size(); i++) {
-                insert = insert.values(TENANT, doc, i, bytes(hex.get(i)), coll, model, 500, 510, 5000, 5100);
+                insert = insert.values(TENANT, doc, i, bytes(hex.get(i)), coll, model, 500, 510, 5000, 5100,
+                    collectionId);
             }
             insert.execute();
         } catch (java.sql.SQLException e) {

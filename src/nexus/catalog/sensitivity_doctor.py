@@ -379,7 +379,8 @@ def check_sensitive_with_aspects(
 def _external_embedder(collection: str) -> str | None:
     """The external model token a collection embeds with, or ``None`` when it embeds locally. A conformant
     name carries its model token; a token outside :data:`nexus.corpus.LOCAL_EMBEDDING_MODELS` is Voyage. A
-    legacy name carries none and counts as Voyage (``voyage_model_for_collection`` is its only dispatch)."""
+    minted label is read from its registry row; a legacy name, or a label with no readable row, counts as Voyage
+    (``voyage_model_for_collection`` is its only dispatch)."""
     from nexus.catalog.collection_name import CollectionName  # noqa: PLC0415 — deferred: leaf value object
     from nexus.corpus import (  # noqa: PLC0415 — deferred, corpus has a heavy import graph
         LOCAL_EMBEDDING_MODELS,
@@ -391,7 +392,16 @@ def _external_embedder(collection: str) -> str | None:
     try:
         token = CollectionName.parse(collection).embedding_model
     except ValueError:
-        return voyage_model_for_collection(collection)
+        # RDR-229 P3.8: a label the engine minted (``c19``) carries no model token; its registry row says which
+        # embedder it uses, as nexus.sensitive_write reads it. No row, or an unreadable one, keeps the conservative
+        # answer: the name's Voyage dispatch, never "local".
+        from nexus.sensitive_write import _registry_row  # noqa: PLC0415 — deferred: sensitive_write imports corpus
+
+        row = _registry_row(collection)
+        model = row.get("embedding_model") if row else None
+        if not isinstance(model, str) or not model:
+            return voyage_model_for_collection(collection)
+        return None if model in LOCAL_EMBEDDING_MODELS else model
     return None if token in LOCAL_EMBEDDING_MODELS else token
 
 

@@ -256,6 +256,11 @@ class TestAcquireGateJourneyDoctorClean:
         col = t3_collection_name("fixture-subject", for_write=True)
         pieces = note_pieces(content, col)
         first, _ = note_manifest_metadata(pieces)
+        # RDR-229 P3.1: the hook registers a document under a registered collection (the engine refuses one
+        # that is not, 422), as put_note arranges first.
+        from tests._catalog_fixture_ops import register_seed_collections
+
+        register_seed_collections(col)
         doc, _minted = catalog_store_hook_tracked(title=title, doc_id=first, collection_name=col)
         assert doc
         write_note(catalog_doc_id=doc, collection=col, pieces=pieces, content_hash=None)

@@ -31,6 +31,7 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.commands.catalog import catalog
+from nexus.corpus import collection_registration_kwargs
 
 pytestmark = pytest.mark.t2_tenant
 
@@ -61,7 +62,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     which is strictly more than it covered before, since audit-membership is
     service-aware and its service path had no coverage at all.
     """
-    from nexus.catalog.factory import make_catalog_writer
+    from tests._catalog_fixture_ops import ActiveCatalog
 
     # nexus-i711w terminal deletion: the local Catalog.init seeding is gone —
     # the service writer needs no local init.
@@ -70,9 +71,10 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     import nexus.config
     monkeypatch.setattr(nexus.config, "catalog_path", lambda: catalog_dir)
 
-    writer = make_catalog_writer()
-    yield writer
-    writer.close()
+    # RDR-229 P3.1 (nexus-p2m1x.17): ActiveCatalog writes through the same ``make_catalog_writer()`` and, before
+    # a ``register``, registers the collection the document names, as production writers do (the engine
+    # refuses a document under an unregistered collection with a typed 422).
+    yield ActiveCatalog()
 
 
 def _docs_in(collection: str):
@@ -300,7 +302,7 @@ class TestEmpty:
         """A collection registered in the catalog's collections projection
         (register_collection) but carrying zero documents is a legitimate
         state — report informationally, exit 0."""
-        env.register_collection("rdr__known-empty")
+        env.register_collection("rdr__known-empty", **collection_registration_kwargs("rdr__known-empty"))
         runner = CliRunner()
         result = runner.invoke(catalog, ["audit-membership", "rdr__known-empty"])
         assert result.exit_code == 0, result.output
@@ -329,7 +331,7 @@ class TestEmpty:
         assert "rdr__nothing-here" in result.output
 
     def test_verify_scoped_known_empty_collection_stays_clean(self, env: Catalog) -> None:
-        env.register_collection("rdr__known-empty")
+        env.register_collection("rdr__known-empty", **collection_registration_kwargs("rdr__known-empty"))
         runner = CliRunner()
         result = runner.invoke(catalog, ["verify", "--collection", "rdr__known-empty"])
         assert result.exit_code == 0, result.output

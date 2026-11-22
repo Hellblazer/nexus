@@ -81,6 +81,7 @@ class CollectionSupersededManifestWriteTest extends AtomicWriteTestBase {
 
     private String retire(Seeded s) {
         String successor = s.fx().collection().replace("__v1", "__v2");
+        registerCollection(successor);   // a retired name points at a registered successor (P3.1: its id is stored)
         assertThat(repo.supersedeCollection(TENANT, s.fx().collection(), successor, "")).isEqualTo(1);
         return successor;
     }
@@ -227,6 +228,9 @@ class CollectionSupersededManifestWriteTest extends AtomicWriteTestBase {
         Seeded s = seed("sup-rev");
         String successor = retire(s);
         assertRefusal(send("/v1/catalog/manifest/append", manifestBody(s, 5)), s, successor);
+        // RDR-229 P3.8: a revive is judged by its tuple, which the live successor holds; retire the successor back onto
+        // the source first, as a rename back does, so the revive below is the only thing that makes the name writable.
+        assertThat(repo.supersedeCollection(TENANT, successor, s.fx().collection(), "")).isEqualTo(1);
 
         repo.upsertCollection(TENANT, Map.of(
             "name", s.fx().collection(), "content_type", "code", "owner_id", TENANT));

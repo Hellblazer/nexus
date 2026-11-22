@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
@@ -189,6 +190,7 @@ abstract class LegacyChashFixture {
     static void document(DSLContext ctx, String tenant, String docId, String collection, String state) {
         ctx.insertInto(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.TENANT_ID, tenant).set(CATALOG_DOCUMENTS.TUMBLER, docId)
             .set(CATALOG_DOCUMENTS.TITLE, "doc " + docId).set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
+            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(tenant, collection))
             .set(CATALOG_DOCUMENTS.INDEX_STATE, state).onConflictDoNothing().execute();
     }
 
@@ -196,6 +198,7 @@ abstract class LegacyChashFixture {
                               JSONB metadata, OffsetDateTime writtenAt) {
         var ins = ctx.insertInto(CHUNKS).set(CHUNKS.TENANT_ID, tenant).set(CHUNKS.COLLECTION, collection).set(CHUNKS.CHASH, chash)
             .set(CHUNKS.EMBEDDING_MODEL, MODEL).set(CHUNKS.CHUNK_TEXT, text).set(CHUNKS.EMBEDDING_768, embedding)
+            .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
             .set(CHUNKS.LAST_WRITTEN_AT, writtenAt);
         if (metadata != null) ins.set(CHUNKS.METADATA, metadata);
         ins.execute();
@@ -204,7 +207,8 @@ abstract class LegacyChashFixture {
     static void manifest(DSLContext ctx, String tenant, String collection, String docId, int position, byte[] chash) {
         ctx.insertInto(CATALOG_DOCUMENT_CHUNKS).set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant).set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, docId)
             .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position).set(CATALOG_DOCUMENT_CHUNKS.CHASH, chash)
-            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection).set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, MODEL).execute();
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection).set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, MODEL)
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection)).execute();
     }
 
     ChunksRecord chunkRow(String tenant, String collection, byte[] chash) throws Exception {
@@ -282,12 +286,14 @@ abstract class LegacyChashFixture {
     static void note(DSLContext ctx, String tenant, String docId, String collection, String stampedDocId) {
         ctx.insertInto(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.TENANT_ID, tenant).set(CATALOG_DOCUMENTS.TUMBLER, docId)
             .set(CATALOG_DOCUMENTS.TITLE, "note " + docId).set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
+            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(tenant, collection))
             .set(CATALOG_DOCUMENTS.METADATA, JSONB.valueOf("{\"doc_id\":\"" + stampedDocId + "\"}")).execute();
     }
 
     static void referenceOnlyChunk(DSLContext ctx, String tenant, String collection, byte[] chash) {
         ctx.insertInto(CHUNKS).set(CHUNKS.TENANT_ID, tenant).set(CHUNKS.COLLECTION, collection).set(CHUNKS.CHASH, chash)
             .set(CHUNKS.EMBEDDING_MODEL, MODEL).set(CHUNKS.EMBEDDING_768, unit(1f)).set(CHUNKS.RETENTION, "reference-only")
+            .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
             .set(CHUNKS.LAST_WRITTEN_AT, OffsetDateTime.now().minusHours(2)).execute();   // no text, by schema
     }
 

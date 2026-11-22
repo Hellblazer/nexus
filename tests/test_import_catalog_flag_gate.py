@@ -40,6 +40,10 @@ def _no_document_is_sensitive():
 
 
 def _flag_in_catalog(uri: str, title: str, collection: str) -> str:
+    from tests._catalog_fixture_ops import register_seed_collections
+
+    # RDR-229 P3.1: a document names a registered collection (the engine refuses one that is not, 422).
+    register_seed_collections(collection)
     writer = make_catalog_writer()
     try:
         owner = writer.register_owner("rfvyy-imp", "curator")

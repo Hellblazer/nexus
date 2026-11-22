@@ -5,6 +5,7 @@ package dev.nexus.service;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.Chash;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.PgVectorRepository;
@@ -107,6 +108,7 @@ class PgVectorManifestRareLabelTest {
                 .set(CATALOG_DOCUMENTS.TUMBLER, DOC)
                 .set(CATALOG_DOCUMENTS.TITLE, "rare.md")
                 .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLLECTION)
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, COLLECTION))
                 .set(CATALOG_DOCUMENTS.SOURCE_URI, "file:///rare.md")
                 .execute();
         }
@@ -132,17 +134,19 @@ class PgVectorManifestRareLabelTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
+            Long collectionId = CollectionIds.require(seed, TENANT, COLLECTION);
             for (int from = 0; from < N; from += 500) {
                 var step = seed.insertInto(CATALOG_DOCUMENT_CHUNKS,
                     CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                     CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                    CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
-                    CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE, CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE,
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID,
+                    CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE, CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE,
                     CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER, CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN);
                 for (int i = from; i < Math.min(N, from + 500); i++) {
                     boolean rare = i >= N - 2;
                     boolean legacy = i == 1500 || i == LEGACY_TEXT_PAGE || i == LEGACY_BAD_PAGE;
-                    step = step.values(TENANT, DOC, i, HexFormat.of().parseHex(chash(i)), COLLECTION, MODEL,
+                    step = step.values(TENANT, DOC, i, HexFormat.of().parseHex(chash(i)), COLLECTION,
+                        collectionId, MODEL,
                         rare ? "Rare" : null,
                         legacy ? null : rare ? "appendix-x" : "body",
                         legacy ? null : rare ? 9000 + (i - (N - 2)) : i,

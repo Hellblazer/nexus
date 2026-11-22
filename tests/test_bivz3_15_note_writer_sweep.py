@@ -68,7 +68,7 @@ _SITES: dict[tuple[str, str, str], tuple[str, int, str]] = {
     ("src/nexus/aspect_uri_repair.py", "uri_for", "call"): (
         ASPECT, 1, "re-derives the URI of an aspect row that has none"),
     ("src/nexus/catalog/recovery_bundle.py", "uri_for", "call"): (
-        TRANSIENT, 3, "the export's link join key, the import's endpoint re-derivation and its catalog-flag probe: lookups"),
+        TRANSIENT, 5, "the export's link join key, the import's endpoint re-derivation, its two remaps of a minted label to the one this install minted (a link endpoint, a note's catalog-flag probe; RDR-229 P3.9) and its catalog-flag probe: lookups"),
     ("src/nexus/commands/enrich.py", "note_uri", "call"): (
         TRANSIENT, 1, "the enrich dry-run's read of a source"),
     ("src/nexus/db/http_vector_client.py", "uri_for", "call"): (

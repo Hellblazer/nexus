@@ -730,4 +730,133 @@ $$;
         <rollback>DROP FUNCTION IF EXISTS nexus_test.cosine_order_blocked(nexus.vector, nexus.vector)</rollback>
     </changeSet>
 
+    <changeSet id="test-objects-9c-insert-chunk-bare-vector-collection-id" author="nexus-p2m1x.17">
+        <comment>RDR-229 P3.1 stage 2a (nexus-p2m1x.17): nexus_test.insert_chunk_bare_vector also supplies collection_id once nexus.chunks has the column (vectors-068), taken from the collection's catalog_collections row, because the NOT VALID CHECKs of that changeset refuse a chunk that names a collection with a NULL id (and nexus.chunks must carry one). The function still runs on the pre-walk containers (no embedding_model, no collection_id) and on a layout walked past vectors-030 but not vectors-068 (the model, no id), so it asks information_schema which of the three shapes it is on at execution time. Same signature, so the generated Routines.insertChunkBareVector is unchanged. SECURITY INVOKER.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus_test.insert_chunk_bare_vector(
+    p_tenant text, p_collection text, p_chash bytea, p_dim int
+) RETURNS void
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+DECLARE
+    v_lit   text;
+    v_model text;
+    v_id    bigint;
+BEGIN
+    SELECT '[' || string_agg('0.1', ',') || ']' INTO v_lit FROM generate_series(1, p_dim);
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'nexus' AND table_name = 'chunks' AND column_name = 'embedding_model') THEN
+        SELECT c.embedding_model INTO v_model
+          FROM nexus.catalog_collections c
+         WHERE c.tenant_id = p_tenant AND c.name = p_collection;
+        IF v_model IS NULL THEN
+            RAISE EXCEPTION 'nexus_test.insert_chunk_bare_vector: collection % is not registered for tenant % (a chunk carries its collection''s model)',
+                p_collection, p_tenant;
+        END IF;
+        IF EXISTS (SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = 'nexus' AND table_name = 'chunks' AND column_name = 'collection_id') THEN
+            SELECT c.collection_id INTO v_id
+              FROM nexus.catalog_collections c
+             WHERE c.tenant_id = p_tenant AND c.name = p_collection;
+            EXECUTE format(
+                'INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, collection_id, chunk_text, %I) VALUES ($1, $2, $3, $4, $5, $6, $7::vector)',
+                'embedding_' || p_dim)
+                USING p_tenant, p_collection, p_chash, v_model, v_id, 'text', v_lit;
+        ELSE
+            EXECUTE format(
+                'INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, %I) VALUES ($1, $2, $3, $4, $5, $6::vector)',
+                'embedding_' || p_dim)
+                USING p_tenant, p_collection, p_chash, v_model, 'text', v_lit;
+        END IF;
+    ELSE
+        EXECUTE format(
+            'INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, %I) VALUES ($1, $2, $3, $4, $5::vector)',
+            'embedding_' || p_dim)
+            USING p_tenant, p_collection, p_chash, 'text', v_lit;
+    END IF;
+END;
+$$;
+        </sql>
+        <rollback>SELECT 1</rollback>
+    </changeSet>
+
+    <changeSet id="test-objects-p225-ts3-delete-and-reinsert-collection-id" author="nexus-p2m1x.17">
+        <comment>RDR-229 P3.1 stage 2a (nexus-p2m1x.17): nexus_test.p225_ts3_delete_and_reinsert re-inserts the deleted row with its collection_id when nexus.chunks has the column (vectors-068); the row it read carries it, and a re-insert that dropped it would fail the NOT NULL CHECK. v_row is a RECORD, so the field is read only on the branch that runs after the column exists. Same signature and behaviour otherwise.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus_test.p225_ts3_delete_and_reinsert(p_tenant text, p_collection text, p_chash bytea) RETURNS integer
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+DECLARE
+    v_row record;
+BEGIN
+    SET CONSTRAINTS nexus.fk_catalog_chunks_chunk DEFERRED;
+    SELECT * INTO v_row FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant AND c.collection = p_collection AND c.chash = p_chash;
+    IF NOT FOUND THEN
+        RETURN 0;
+    END IF;
+    DELETE FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant AND c.collection = p_collection AND c.chash = p_chash;
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'nexus' AND table_name = 'chunks' AND column_name = 'collection_id') THEN
+        INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384, embedding_768, embedding_1024,
+                                  metadata, created_at, retention, last_written_at, embedding_model, collection_id)
+        VALUES (v_row.tenant_id, v_row.collection, v_row.chash, v_row.chunk_text, v_row.embedding_384, v_row.embedding_768,
+                v_row.embedding_1024, v_row.metadata, v_row.created_at, v_row.retention, v_row.last_written_at,
+                v_row.embedding_model, v_row.collection_id);
+    ELSE
+        INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384, embedding_768, embedding_1024,
+                                  metadata, created_at, retention, last_written_at, embedding_model)
+        VALUES (v_row.tenant_id, v_row.collection, v_row.chash, v_row.chunk_text, v_row.embedding_384, v_row.embedding_768,
+                v_row.embedding_1024, v_row.metadata, v_row.created_at, v_row.retention, v_row.last_written_at,
+                v_row.embedding_model);
+    END IF;
+    RETURN 1;
+END;
+$$;
+        </sql>
+        <rollback>SELECT 1</rollback>
+    </changeSet>
+
+    <changeSet id="test-objects-p225-seed-random-chunks-collection-id" author="nexus-p2m1x.17">
+        <comment>RDR-229 P3.1 stage 2a (nexus-p2m1x.17): nexus_test.p225_seed_random_chunks files its chunks under the collection's registry id when nexus.chunks has collection_id (vectors-068), read from the collection's catalog_collections row (the collection must already be registered, as before). Same signature.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus_test.p225_seed_random_chunks(
+    p_tenant text, p_collection text, p_model text, p_dim int, p_n int
+) RETURNS bigint
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+DECLARE
+    v_n bigint;
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'nexus' AND table_name = 'chunks' AND column_name = 'collection_id') THEN
+        EXECUTE format(
+            'INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, %I, embedding_model, collection_id) '
+            'SELECT $1, $2, sha256(convert_to($1 || $2 || g::text, ''UTF8'')), ''seeded'', '
+            '       (SELECT (''['' || string_agg(random()::text, '','') || '']'')::nexus.vector FROM generate_series(1, $3) WHERE g IS NOT NULL), $4, '
+            '       (SELECT c.collection_id FROM nexus.catalog_collections c WHERE c.tenant_id = $1 AND c.name = $2) '
+            '  FROM generate_series(1, $5) AS g',
+            'embedding_' || p_dim)
+            USING p_tenant, p_collection, p_dim, p_model, p_n;
+    ELSE
+        EXECUTE format(
+            'INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, %I, embedding_model) '
+            'SELECT $1, $2, sha256(convert_to($1 || $2 || g::text, ''UTF8'')), ''seeded'', '
+            '       (SELECT (''['' || string_agg(random()::text, '','') || '']'')::nexus.vector FROM generate_series(1, $3) WHERE g IS NOT NULL), $4 '
+            '  FROM generate_series(1, $5) AS g',
+            'embedding_' || p_dim)
+            USING p_tenant, p_collection, p_dim, p_model, p_n;
+    END IF;
+    GET DIAGNOSTICS v_n = ROW_COUNT;
+    RETURN v_n;
+END;
+$$;
+        </sql>
+        <rollback>SELECT 1</rollback>
+    </changeSet>
+
 </databaseChangeLog>

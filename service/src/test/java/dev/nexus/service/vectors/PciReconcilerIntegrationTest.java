@@ -12,6 +12,7 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.Chash;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.PgSession.PciSettings;
 import dev.nexus.service.db.SchemaMigrator;
@@ -255,15 +256,16 @@ class PciReconcilerIntegrationTest {
         int gen = ++generation;
         return asSuperuser(su -> {
             su.deleteFrom(CHUNKS).where(CHUNKS.TENANT_ID.eq(tenant)).and(CHUNKS.COLLECTION.eq(collection)).execute();
+            Long cid = CollectionIds.require(su, tenant, collection);
             List<String> hex = new ArrayList<>();
             for (int from = 0; from < rows; from += 250) {
                 var step = su.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH,
-                    CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.METADATA);
+                    CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.METADATA, CHUNKS.COLLECTION_ID);
                 for (int i = from; i < Math.min(rows, from + 250); i++) {
                     String h = Chash.ofText(tenant + "/" + collection + "/" + gen + "/" + i).toHex();
                     hex.add(h);
                     step = step.values(tenant, collection, Chash.fromHex(h).toBytes(), M384, "row " + i,
-                        vector(i), JSONB.jsonb("{}"));
+                        vector(i), JSONB.jsonb("{}"), cid);
                 }
                 step.onConflictDoNothing().execute();
             }
@@ -314,17 +316,17 @@ class PciReconcilerIntegrationTest {
 
         HeldWrite(String tenant) throws Exception {
             String held = name("held-" + tenant);
-            asSuperuser(su -> {
+            Long heldId = asSuperuser(su -> {
                 PgContainerHelper.insertCollection(su, tenant, held, M384);
-                return null;
+                return CollectionIds.require(su, tenant, held);
             });
             conn = pg.createConnection("");
             conn.setAutoCommit(false);
             DSL.using(conn, SQLDialect.POSTGRES)
                 .insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
-                    CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.METADATA)
+                    CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.METADATA, CHUNKS.COLLECTION_ID)
                 .values(tenant, held, Chash.fromHex(Chash.ofText("held/" + tenant).toHex()).toBytes(), M384, "held",
-                    vector(1), JSONB.jsonb("{}"))
+                    vector(1), JSONB.jsonb("{}"), heldId)
                 .execute();
         }
 
@@ -505,6 +507,8 @@ class PciReconcilerIntegrationTest {
             asSuperuser(su -> su.insertInto(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING)
                 .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.TENANT_ID, tenant)
                 .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.COLLECTION, coll)
+                .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.COLLECTION_ID,
+                    CollectionIds.require(su, tenant, coll))
                 .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.EMBEDDING_MODEL, M384)
                 .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.EMBEDDING_384, Vector.of(v))
                 .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.VECTOR_DIGEST, PciQueryRing.digest(v))
@@ -543,6 +547,8 @@ class PciReconcilerIntegrationTest {
             asSuperuser(su -> su.insertInto(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING)
                 .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.TENANT_ID, tenant)
                 .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.COLLECTION, coll)
+                .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.COLLECTION_ID,
+                    CollectionIds.require(su, tenant, coll))
                 .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.EMBEDDING_MODEL, M384)
                 .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.EMBEDDING_384, Vector.of(v))
                 .set(dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING.VECTOR_DIGEST, PciQueryRing.digest(v))
@@ -678,8 +684,7 @@ class PciReconcilerIntegrationTest {
         });
         // Canonical rename of "sup": the rows are re-homed under the new name and the old one is superseded.
         collection(tenant, name("sup-new"), 300);
-        asSuperuser(su -> su.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, name("sup-new"))
-            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(name("sup"))).execute());
+        asSuperuser(su -> { dev.nexus.service.CollectionIdSeeds.supersede(su, tenant, name("sup"), name("sup-new")); return null; });
         // COPY rename of "copy-src": the old collection stays live with its rows, the copy has its own.
         collection(tenant, name("copy-dst"), 300);
 
@@ -1604,9 +1609,7 @@ class PciReconcilerIntegrationTest {
     void aFailureEntry_isClearedWhenTheCollectionIsSuperseded() throws Exception {
         assertThatAFailureEntryClearsWhen("super", (tenant, collection) -> {
             collection(tenant, name("elsewhere"), 0);
-            asSuperuser(su -> su.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, name("elsewhere"))
-                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(collection))
-                .execute());
+            asSuperuser(su -> { dev.nexus.service.CollectionIdSeeds.supersede(su, tenant, collection, name("elsewhere")); return null; });
         });
     }
 
@@ -2287,12 +2290,13 @@ class PciReconcilerIntegrationTest {
     void addRows(String tenant, String collection, int rows) throws Exception {
         int gen = ++generation;
         asSuperuser(su -> {
+            Long cid = CollectionIds.require(su, tenant, collection);
             var step = su.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH,
-                CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.METADATA);
+                CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.METADATA, CHUNKS.COLLECTION_ID);
             for (int i = 0; i < rows; i++) {
                 step = step.values(tenant, collection,
                     Chash.fromHex(Chash.ofText(tenant + "/" + collection + "/add/" + gen + "/" + i).toHex()).toBytes(),
-                    M384, "added " + i, vector(i), JSONB.jsonb("{}"));
+                    M384, "added " + i, vector(i), JSONB.jsonb("{}"), cid);
             }
             step.onConflictDoNothing().execute();
             return null;

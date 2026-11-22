@@ -72,6 +72,9 @@ def test_the_default_tenant_client_finds_siblings_in_the_cache_and_fetches_nothi
     monkeypatch.setattr(
         HttpVectorClient, "collection_exists", lambda self, n: n in {r["name"] for r in rows},
     )
+    # RDR-229 P2.8: the subject's catalog row is read before the name resolution; this test is about the sibling
+    # scan, so the registry holds no row for the subject (and no catalog is reached).
+    monkeypatch.setattr(HttpVectorClient, "find_collection", lambda self, *a: None)
     assert t3_collection_names_for_read("art", t3=HttpVectorClient()) == [_primary(), ODD]
 
 
@@ -84,6 +87,7 @@ def test_the_cache_carries_superseded_by_so_a_retired_source_is_not_read_twice(m
     assert mcp_infra.get_collection_row(ODD)["superseded_by"] == _primary()
     monkeypatch.setattr(mcp_infra, "_refresh_collections_cache_if_stale", lambda **k: None)
     monkeypatch.setattr(HttpVectorClient, "collection_exists", lambda self, n: True)
+    monkeypatch.setattr(HttpVectorClient, "find_collection", lambda self, *a: None)  # RDR-229 P2.8, as above
     assert t3_collection_names_for_read("art", t3=HttpVectorClient()) == [_primary()]
 
 

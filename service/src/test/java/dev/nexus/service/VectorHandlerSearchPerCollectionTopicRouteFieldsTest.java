@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariConfig;
@@ -261,10 +262,11 @@ class VectorHandlerSearchPerCollectionTopicRouteFieldsTest {
             String model = PgContainerHelper.collectionModel(dsl, TENANT, collection);
             long id = dsl.insertInto(TOPICS)
                 .set(TOPICS.TENANT_ID, TENANT).set(TOPICS.LABEL, label + " of " + collection)
-                .set(TOPICS.COLLECTION, collection).set(TOPICS.CREATED_AT, SEED_TS)
+                .set(TOPICS.COLLECTION, collection)
+                .set(TOPICS.COLLECTION_ID, CollectionIds.idOf(TENANT, collection)).set(TOPICS.CREATED_AT, SEED_TS)
                 .returningResult(TOPICS.ID).fetchOne(TOPICS.ID);
             dsl.insertInto(TAXONOMY_CENTROIDS)
-                .set(TAXONOMY_CENTROIDS.TENANT_ID, TENANT).set(TAXONOMY_CENTROIDS.COLLECTION, collection)
+                .set(TAXONOMY_CENTROIDS.TENANT_ID, TENANT).set(TAXONOMY_CENTROIDS.COLLECTION, collection).set(TAXONOMY_CENTROIDS.COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
                 .set(TAXONOMY_CENTROIDS.TOPIC_ID, id).set(TAXONOMY_CENTROIDS.EMBEDDING_MODEL, model)
                 .set(TAXONOMY_CENTROIDS.LABEL, label)
                 .set(VectorSeeds.centroidEmbedding(384),
@@ -274,7 +276,7 @@ class VectorHandlerSearchPerCollectionTopicRouteFieldsTest {
                 dsl.insertInto(TOPIC_ASSIGNMENTS)
                     .set(TOPIC_ASSIGNMENTS.TENANT_ID, TENANT)
                     .set(TOPIC_ASSIGNMENTS.DOC_ID, HexFormat.of().parseHex(hex))
-                    .set(TOPIC_ASSIGNMENTS.TOPIC_ID, id).set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, collection)
+                    .set(TOPIC_ASSIGNMENTS.TOPIC_ID, id).set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, collection).set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
                     .set(TOPIC_ASSIGNMENTS.ASSIGNED_AT, SEED_TS).set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, model)
                     .execute();
             }
@@ -292,6 +294,7 @@ class VectorHandlerSearchPerCollectionTopicRouteFieldsTest {
                 .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT).set(CATALOG_DOCUMENTS.TUMBLER, doc)
                 .set(CATALOG_DOCUMENTS.TITLE, "Sensitive " + doc).set(CATALOG_DOCUMENTS.CONTENT_TYPE, "paper")
                 .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
                 .set(CATALOG_DOCUMENTS.SENSITIVE, true)
                 .execute();
             dsl.insertInto(CATALOG_DOCUMENT_CHUNKS)
@@ -299,6 +302,7 @@ class VectorHandlerSearchPerCollectionTopicRouteFieldsTest {
                 .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
                 .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(chash(chunkText)))
                 .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
                 .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, model)
                 .execute();
         }

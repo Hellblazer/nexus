@@ -1,0 +1,87 @@
+{
+  "boot_work" : [ {
+    "id" : "data-move:rdr229-stamp-chunks",
+    "what" : "blocked: rdr229-stamp-chunks: pg_background is not installed",
+    "started_at" : "2026-11-21T12:00:00Z",
+    "done" : 0,
+    "total" : null,
+    "unit" : "chunks",
+    "safe_to_stop" : true,
+    "on_stop" : "resumes from the last committed batch",
+    "step" : null,
+    "reason_class" : "missing_prerequisite"
+  } ],
+  "rdr229_completion" : {
+    "gate1" : false,
+    "gate2" : false,
+    "gate3" : false,
+    "gates_holding" : 0,
+    "gates_total" : 3,
+    "summary" : "gate 1 waits (15 of 16 stamp moves incomplete); gate 2 waits on gate 1; gate 3 waits: gate 2 does not hold",
+    "gate3_why" : "gate 2 does not hold",
+    "labels_total" : 16,
+    "labels_incomplete" : [ {
+      "label" : "rdr229-stamp-catalog_collections",
+      "table" : "catalog_collections",
+      "why" : "open"
+    }, {
+      "label" : "rdr229-stamp-chunks",
+      "table" : "chunks",
+      "why" : "open"
+    }, {
+      "label" : "rdr229-stamp-taxonomy_centroids",
+      "table" : "taxonomy_centroids",
+      "why" : "open"
+    }, {
+      "label" : "rdr229-stamp-catalog_document_chunks",
+      "table" : "catalog_document_chunks",
+      "why" : "open"
+    }, {
+      "label" : "rdr229-stamp-chunk_orphaned_at",
+      "table" : "chunk_orphaned_at",
+      "why" : "open"
+    }, {
+      "label" : "rdr229-stamp-topic_assignments",
+      "table" : "topic_assignments",
+      "why" : "open"
+    }, {
+      "label" : "rdr229-stamp-document_aspects",
+      "table" : "document_aspects",
+      "why" : "open"
+    }, {
+      "label" : "rdr229-stamp-topics",
+      "table" : "topics",
+      "why" : "open"
+    }, {
+      "label" : "rdr229-stamp-taxonomy_meta",
+      "table" : "taxonomy_meta",
+      "why" : "open"
+    }, {
+      "label" : "rdr229-stamp-document_highlights",
+      "table" : "document_highlights",
+      "why" : "open"
+    }, {
+      "label" : "rdr229-stamp-canary_query_ring",
+      "table" : "canary_query_ring",
+      "why" : "open"
+    }, {
+      "label" : "rdr229-stamp-catalog_documents",
+      "table" : "catalog_documents",
+      "why" : "open"
+    }, {
+      "label" : "rdr229-stamp-chash_remap",
+      "table" : "chash_remap",
+      "why" : "open"
+    }, {
+      "label" : "rdr229-stamp-pdf_pipeline",
+      "table" : "pdf_pipeline",
+      "why" : "open"
+    }, {
+      "label" : "rdr229-stamp-reembed_jobs",
+      "table" : "reembed_jobs",
+      "why" : "open"
+    } ],
+    "checks_missing" : [ ],
+    "validate_waits" : [ ]
+  }
+}
