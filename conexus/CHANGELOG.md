@@ -1,5 +1,9 @@
 # Changelog
 
+## [8.5.5] - 2026-11-21
+
+Plugin version aligned with conexus 8.5.5. No plugin file changed since 8.5.4.
+
 ## [8.5.4] - 2026-11-21
 
 Plugin version aligned with conexus 8.5.4. No plugin file changed since 8.5.3.
