@@ -2468,6 +2468,25 @@
     <include file="db/changelog/catalog-053-live-label-unique.xml"/>
 
     <!--
+        Bead nexus-p2m1x.24 (RDR-229 P3.5b, item 6 "Readers during the stamp"): the SQL readers that name a chunk-family table
+        (nexus.chunks, a leaf, catalog_document_chunks, topic_assignments, chunk_orphaned_at) are redefined to read both shapes:
+        a row matches by collection_id where both sides carry one and by the name where either does not; P4.1 removes the name arm.
+        Plain changesets (a CONTINUE wait is refused on the chunk family, RDR-246 lines 902-906). Function and view definitions
+        only. DATA EFFECT: none. Last before the grants, because some readers' last definers are included after vectors-074; the
+        number follows vectors-074 and is provisional until the final rebase. See the included file's header.
+    -->
+    <include file="db/changelog/vectors-077-rdr229-p35b-readers-both.xml"/>
+
+    <!--
+        Bead nexus-p2m1x.24 (RDR-229 P3.5b): the SQL readers that name no chunk-family table read the id only, each behind a
+        CONTINUE precondition on every rdr229-stamp-* move's completed_at (RDR-246 lines 937-940), so they wait while any stamp is
+        incomplete and apply at the first boot after the last one completes. P3.7's one-row rename waits until every one is in
+        databasechangelog (db/rdr229/p35b-continue-changesets.txt lists them). Definitions only. DATA EFFECT: none. After
+        vectors-077. See the included file's header.
+    -->
+    <include file="db/changelog/vectors-078-rdr229-p35b-readers-continue.xml"/>
+
+    <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
         Replaces the per-store IF-EXISTS-skip DO-blocks that silently skipped when
