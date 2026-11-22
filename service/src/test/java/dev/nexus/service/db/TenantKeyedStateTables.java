@@ -195,6 +195,7 @@ final class TenantKeyedStateTables {
         notKeyed.put("MoveBootWork.Snapshot.failed", DATA_MOVE_REPORT);
         notKeyed.put("MoveBootWork.Snapshot.progress", DATA_MOVE_REPORT);
         fillCompletionCheck(notKeyed);   // RDR-229 P3.1 (nexus-p2m1x.17): the boot-time completion check is engine-wide
+        fillLeafIndexPass(notKeyed);   // RDR-229 P3.3b (nexus-p2m1x.20): the per-leaf id unique-index pass is engine-wide
         // nexus-f3yqd.2.18: the engine's own database passwords, set once at startup; the engine's, so no tenant's
         notKeyed.put("SecretMask.SECRETS", "the engine's own database passwords (the admin and the application role), added once "
             + "at startup; process-wide credentials of the engine, never a tenant's, and nothing a tenant's reset has to clear");
@@ -822,6 +823,23 @@ final class TenantKeyedStateTables {
         notKeyed.put("BoardOwnerWiring.Pending.tenant", "a component of a census item (a tenant and a topic whose re-arm "
             + "failed), held in the list one scheduled rebuild attempt hands to the next; the list ends with the census "
             + "and keeps no tenant's state: a re-arm of an evicted tenant finds no rows and succeeds");
+    }
+
+    private static final String LEAF_INDEX_PASS_ENGINE_WIDE = "the RDR-229 P3.3b per-leaf unique-index pass is engine-wide, never a "
+        + "tenant's: it reads pg_catalog (partition trees and index states of nexus.chunks and nexus.taxonomy_centroids) and "
+        + "inserts two rows into nexus.data_moves (a global registry with no tenant column) on the engine's admin connection, "
+        + "and holds relation and index names and counts, no tenant id and no row of any tenant; ";
+
+    /** RDR-229 P3.3b: {@code LeafIndexPass}, {@code LeafIndexCatalog}: every collection they hold is per-pass bookkeeping or a catalog snapshot. */
+    private static void fillLeafIndexPass(Map<String, String> notKeyed) {
+        notKeyed.put("LeafIndexPass.Result.registered", LEAF_INDEX_PASS_ENGINE_WIDE + "the labels of the swap moves one pass "
+            + "inserted (rdr229-swap-<table>), returned to the caller and not kept");
+        notKeyed.put("LeafIndexPass.Session.registered", LEAF_INDEX_PASS_ENGINE_WIDE + "the labels this pass has inserted so far; "
+            + "the session lives for one pass and is closed with its connection");
+        notKeyed.put("LeafIndexCatalog.Tree.models", LEAF_INDEX_PASS_ENGINE_WIDE + "a snapshot of one table's model partitions, "
+            + "read per step and dropped with it");
+        notKeyed.put("LeafIndexCatalog.Tree.leaves", LEAF_INDEX_PASS_ENGINE_WIDE + "a snapshot of one table's leaf partitions "
+            + "(relation names; a leaf's tenant is in its bound, which nothing here reads), read per step and dropped with it");
     }
 
     private static final String COMPLETION_ENGINE_WIDE = "the RDR-229 boot-time completion check is engine-wide, never a "
