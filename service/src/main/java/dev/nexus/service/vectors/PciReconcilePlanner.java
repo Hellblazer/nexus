@@ -118,10 +118,17 @@ public final class PciReconcilePlanner {
      * @param name           the collection name
      * @param lifecycleState {@code catalog_collections.lifecycle_state}; nullable column, and only {@code "live"} is live
      * @param supersededBy   {@code catalog_collections.superseded_by}; null and {@code ""} both mean not superseded
+     * @param collectionId   {@code catalog_collections.collection_id} (RDR-229 P3.1), or null when the caller did not read it:
+     *                       the key of the id-predicate indexes ({@link #planWithIds}); a row with none is never built by id
      */
-    public record RegistryRow(String name, String lifecycleState, String supersededBy) {
+    public record RegistryRow(String name, String lifecycleState, String supersededBy, Long collectionId) {
         public RegistryRow {
             Objects.requireNonNull(name, "name");
+        }
+
+        /** A row read without its id: it plans name indexes only. */
+        public RegistryRow(String name, String lifecycleState, String supersededBy) {
+            this(name, lifecycleState, supersededBy, null);
         }
 
         boolean live() {
@@ -153,7 +160,13 @@ public final class PciReconcilePlanner {
          * ({@link Index#leafLeftover()}); dropped through the same path as {@link #REINDEX_LEFTOVER} (RDR-230,
          * nexus-4lnn1.1.10).
          */
-        LEAF_REINDEX_LEFTOVER("leaf_reindex_leftover");
+        LEAF_REINDEX_LEFTOVER("leaf_reindex_leftover"),
+        /** RDR-229 P3.4: the registry has no row with this id (a rename minted a new one, or the row went); {@link #NOT_IN_REGISTRY}'s id counterpart. */
+        ID_NOT_IN_REGISTRY("id_not_in_registry"),
+        /** RDR-229 P3.4: the registry row of this id has {@code superseded_by} set; {@link #SUPERSEDED}'s id counterpart. */
+        ID_SUPERSEDED("id_superseded"),
+        /** RDR-229 P3.4: {@code count * 2 < B} for the collection of this id; {@link #BELOW_HALF_BUILD_THRESHOLD}'s id counterpart. */
+        ID_BELOW_HALF_BUILD_THRESHOLD("id_below_half_build_threshold");
 
         private final String label;
 
@@ -215,8 +228,22 @@ public final class PciReconcilePlanner {
         }
     }
 
-    /** Build {@code name} on the leaf for {@code collection}; {@code name} is {@link PciCatalog#indexName}. */
-    public record Build(String name, String collection) implements Action { }
+    /**
+     * Build {@code name} on the leaf for {@code collection}; {@code name} is {@link PciCatalog#indexName}, or, when
+     * {@code collectionId} is set (RDR-229 P3.4), {@link PciCatalog#indexNameById} and the index is on
+     * {@code WHERE collection_id = <collectionId>}.
+     */
+    public record Build(String name, String collection, Long collectionId) implements Action {
+        /** A build on the name predicate. */
+        public Build(String name, String collection) {
+            this(name, collection, null);
+        }
+
+        /** True for a build on the id predicate. */
+        public boolean byId() {
+            return collectionId != null;
+        }
+    }
 
     /**
      * Drop the existing index {@code name}, which serves (or, for a leftover, was made from) {@code collection};
@@ -229,6 +256,149 @@ public final class PciReconcilePlanner {
      * caller logs {@code event=pci_count_zero_indexed}.
      */
     public record SkipCountSuspect(String collection) implements Action { }
+
+    /**
+     * What the id half of a pass needs beyond the name half (RDR-229 P3.4).
+     *
+     * @param gate2              gate 2 of the completion check holds: both swaps and every validation move are complete, so a
+     *                           chunk-family {@code on_complete} cannot end an id build. Until it does no id build is planned.
+     * @param nullIdCollections  the collections (by name) that still have a row on this leaf, for this tenant and model, whose
+     *                           {@code collection_id} is null: stamp-before-build, so none of them gets an id build yet
+     */
+    public record IdPlanInputs(boolean gate2, Set<String> nullIdCollections) {
+        public IdPlanInputs {
+            nullIdCollections = Set.copyOf(nullIdCollections);
+        }
+
+        /** No id build: gate 2 does not hold. */
+        public static final IdPlanInputs NONE = new IdPlanInputs(false, Set.of());
+    }
+
+    /**
+     * A leaf's plan with its id half.
+     *
+     * @param actions        every {@link Drop} (name, then id), every {@link SkipCountSuspect}, every {@link Build} (name, then id)
+     * @param plannedIdKeys  {@link PciCatalog#idKey} of every collection the planner would hold an id index for on this leaf: those
+     *                       with a valid or in-flight id index, and the ranked candidates within the id budget (live, not
+     *                       superseded, enough rows, not backed off), whether or not an id build is allowed yet. Gate 3 reads this
+     *                       against the VALID id indexes.
+     */
+    public record Plan(List<Action> actions, Set<String> plannedIdKeys) { }
+
+    /** The backoff key of an id build, beside the collection names the name builds use: no name can start with {@code #}-then-{@code id:}. */
+    public static String idBackoffKey(long collectionId) {
+        return "#id:" + collectionId;
+    }
+
+    /**
+     * {@link #plan} for the name half plus, for the id predicate (RDR-229 P3.4, residual S-2): the same rules keyed by
+     * {@code collection_id}. {@link #plan} itself never reads an id index.
+     *
+     * <p><b>Transition.</b> This planner drops no name index to make way for an id one, and builds the id index beside it: a name
+     * index leaves only by its own rules above, and P3.7 and P4.1 retire the family. The readers stay on the name path until gate
+     * 3 holds, so the name index has to serve meanwhile. The id indexes get a budget of their own, the same
+     * {@code NX_SEARCH_PCI_MAX_PER_LEAF}: a leaf at the cap holds the cap's worth of name indexes and the cap's worth of id
+     * indexes until the name family goes (a stated exception to the cap, S-2's second option), with one build in flight at a time
+     * because the builder is serial.
+     *
+     * <p><b>Id rules.</b> Build a collection whose registry row has an id, is live, not superseded, counts at least B, has no
+     * valid or in-flight id index, is not backed off ({@link #idBackoffKey}) and is within the budget (largest first, then name),
+     * only when {@code ids.gate2()} and the collection has no null-id row. A valid id index drops with
+     * {@link DropReason#ID_NOT_IN_REGISTRY}, {@link DropReason#ID_SUPERSEDED} or
+     * {@link DropReason#ID_BELOW_HALF_BUILD_THRESHOLD}; an invalid one that is not in flight, as {@link DropReason#FAILED_BUILD}, with
+     * the rebuild in the same plan. A live indexed collection that counts zero is a {@link SkipCountSuspect} (when it has no name
+     * index to raise it), never a drop.
+     */
+    public static Plan planWithIds(Leaf leaf, Map<String, Integer> counts, Collection<RegistryRow> registry,
+                                   Set<String> backedOff, String inFlightIndex, PciSettings settings, IdPlanInputs ids) {
+        Objects.requireNonNull(ids, "ids");
+        List<Action> names = plan(leaf, counts, registry, backedOff, inFlightIndex, settings);
+        if (!settings.enabled() || leaf.model() == null || leaf.tenant() == null) {
+            return new Plan(names, Set.of());
+        }
+        long b = settings.buildMinRows();
+        Map<Long, RegistryRow> byId = new HashMap<>();
+        for (RegistryRow row : registry) {
+            if (row.collectionId() != null) {
+                byId.put(row.collectionId(), row);
+            }
+        }
+        Set<String> nameIndexed = new HashSet<>();
+        for (Index index : leaf.indexes()) {
+            if (index.parsed()) {
+                nameIndexed.add(index.collection());
+            }
+        }
+        TreeMap<String, Drop> drops = new TreeMap<>();
+        TreeSet<String> suspects = new TreeSet<>();
+        Set<Long> served = new HashSet<>();
+        Set<String> planned = new TreeSet<>();
+        int kept = 0;
+        for (Index index : leaf.indexes()) {
+            if (!index.idParsed()) {
+                continue;
+            }
+            long id = index.collectionId();
+            RegistryRow row = byId.get(id);
+            String collection = row == null ? null : row.name();
+            if (!index.valid()) {
+                if (index.name().equals(inFlightIndex)) {
+                    served.add(id);
+                    planned.add(PciCatalog.idKey(leaf.model(), leaf.tenant(), id));
+                    kept++;
+                } else {
+                    drops.put(index.name(), new Drop(index.name(), collection, DropReason.FAILED_BUILD));
+                }
+                continue;
+            }
+            long count = collection == null ? 0 : counts.getOrDefault(collection, 0);
+            if (row == null) {
+                drops.put(index.name(), new Drop(index.name(), null, DropReason.ID_NOT_IN_REGISTRY));
+                continue;
+            }
+            if (row.superseded()) {
+                drops.put(index.name(), new Drop(index.name(), collection, DropReason.ID_SUPERSEDED));
+                continue;
+            }
+            if (row.live() && count == 0) {
+                if (!nameIndexed.contains(collection)) {
+                    suspects.add(collection);
+                }
+            } else if (count * 2 < b) {
+                drops.put(index.name(), new Drop(index.name(), collection, DropReason.ID_BELOW_HALF_BUILD_THRESHOLD));
+                continue;
+            }
+            served.add(id);
+            planned.add(PciCatalog.idKey(leaf.model(), leaf.tenant(), id));
+            kept++;
+        }
+        List<Build> builds = new ArrayList<>();
+        int slots = settings.maxPerLeaf() - kept;
+        if (slots > 0) {
+            registry.stream()
+                .filter(row -> row.collectionId() != null && row.live() && !row.superseded())
+                .filter(row -> counts.getOrDefault(row.name(), 0) >= b)
+                .filter(row -> !served.contains(row.collectionId()) && !backedOff.contains(idBackoffKey(row.collectionId())))
+                .sorted(Comparator.<RegistryRow>comparingInt(row -> counts.getOrDefault(row.name(), 0)).reversed()
+                    .thenComparing(RegistryRow::name))
+                .limit(slots)
+                .forEach(row -> {
+                    long id = row.collectionId();
+                    planned.add(PciCatalog.idKey(leaf.model(), leaf.tenant(), id));
+                    if (ids.gate2() && !ids.nullIdCollections().contains(row.name())) {
+                        builds.add(new Build(PciCatalog.indexNameById(leaf.model(), leaf.tenant(), id), row.name(), id));
+                    }
+                });
+        }
+        List<Action> merged = new ArrayList<>();
+        names.stream().filter(a -> a instanceof Drop).forEach(merged::add);
+        merged.addAll(drops.values());
+        names.stream().filter(a -> a instanceof SkipCountSuspect).forEach(merged::add);
+        suspects.forEach(c -> merged.add(new SkipCountSuspect(c)));
+        names.stream().filter(a -> a instanceof Build).forEach(merged::add);
+        merged.addAll(builds);
+        return new Plan(List.copyOf(merged), Set.copyOf(planned));
+    }
 
     /** The plan for one leaf; see the class comment for the rules and the inputs. */
     public static List<Action> plan(Leaf leaf, Map<String, Integer> counts, Collection<RegistryRow> registry,

@@ -718,4 +718,238 @@ class PciReconcilePlannerTest {
         assertThat(PciReindexPolicy.RED_REINDEX_MIN_INTERVAL).isEqualTo(Duration.ofHours(24));
         assertThat(PciReindexPolicy.RED_CANARY_MIN_QUERIES).isEqualTo(10);
     }
+
+    // ---- RDR-229 P3.4 (nexus-p2m1x.22): the id predicate beside the name predicate (S-2 transition) ----
+
+    private static String idName(long id) {
+        return PciCatalog.indexNameById(MODEL, TENANT, id);
+    }
+
+    private static Index validId(long id) {
+        return new Index(idName(id), true, null, null, null, null, id);
+    }
+
+    private static Index invalidId(long id) {
+        return new Index(idName(id), false, null, null, null, null, id);
+    }
+
+    private static RegistryRow liveWithId(String collection, long id) {
+        return new RegistryRow(collection, "live", "", id);
+    }
+
+    private static final PciReconcilePlanner.IdPlanInputs GATE2 =
+        new PciReconcilePlanner.IdPlanInputs(true, Set.of());
+
+    private static PciReconcilePlanner.Plan planIds(Leaf leaf, Map<String, Integer> counts, List<RegistryRow> registry,
+                                                    PciReconcilePlanner.IdPlanInputs ids) {
+        return PciReconcilePlanner.planWithIds(leaf, counts, registry, Set.of(), null, DEFAULT, ids);
+    }
+
+    private static Build buildById(String collection, long id) {
+        return new Build(idName(id), collection, id);
+    }
+
+    private static Drop dropId(long id, String collection, DropReason reason) {
+        return new Drop(idName(id), collection, reason);
+    }
+
+    private static String key(long id) {
+        return PciCatalog.idKey(MODEL, TENANT, id);
+    }
+
+    @Test
+    void id_gate2Held_buildsTheIdIndex_andKeepsTheNameIndex() {
+        var plan = planIds(leaf(valid("c")), Map.of("c", B), List.of(liveWithId("c", 7)), GATE2);
+
+        assertThat(plan.actions()).containsExactly(buildById("c", 7));
+        assertThat(plan.plannedIdKeys()).containsExactly(key(7));
+        assertThat(plan.actions()).as("no name index is dropped to make way").noneMatch(a -> a instanceof Drop);
+    }
+
+    @Test
+    void id_beforeGate2_noIdBuildIsPlanned_butTheCollectionIsStillPlanned() {
+        var plan = planIds(leaf(valid("c")), Map.of("c", B), List.of(liveWithId("c", 7)),
+            new PciReconcilePlanner.IdPlanInputs(false, Set.of()));
+
+        assertThat(plan.actions()).isEmpty();
+        assertThat(plan.plannedIdKeys()).containsExactly(key(7));
+        // The old entry point never plans an id build.
+        assertThat(plan(leaf(valid("c")), Map.of("c", B), List.of(liveWithId("c", 7)))).isEmpty();
+    }
+
+    @Test
+    void id_aNullIdRow_getsNoIdBuild_keepsItsNameIndex_andStaysPlannedSoGate3CannotHold() {
+        var plan = planIds(leaf(valid("c"), valid("ok")), Map.of("c", B, "ok", B),
+            List.of(liveWithId("c", 7), liveWithId("ok", 8)),
+            new PciReconcilePlanner.IdPlanInputs(true, Set.of("c")));
+
+        assertThat(plan.actions()).containsExactly(buildById("ok", 8));
+        assertThat(plan.plannedIdKeys()).containsExactlyInAnyOrder(key(7), key(8));
+    }
+
+    @Test
+    void id_aRegistryRowWithNoId_isNeverBuiltByTheId() {
+        var plan = planIds(leaf(valid("c")), Map.of("c", B), List.of(live("c")), GATE2);
+
+        assertThat(plan.actions()).isEmpty();
+        assertThat(plan.plannedIdKeys()).isEmpty();
+    }
+
+    @Test
+    void id_anInFlightBuild_isLeftAlone_nameIndexKept_andNothingIsBuiltTwice() {
+        var plan = PciReconcilePlanner.planWithIds(leaf(valid("c"), invalidId(7)), Map.of("c", B),
+            List.of(liveWithId("c", 7)), Set.of(), idName(7), DEFAULT, GATE2);
+
+        assertThat(plan.actions()).isEmpty();
+        assertThat(plan.plannedIdKeys()).containsExactly(key(7));
+    }
+
+    @Test
+    void id_aKilledBuild_isDroppedAndBuiltAgainInTheSamePlan_nameIndexKept() {
+        var plan = planIds(leaf(valid("c"), invalidId(7)), Map.of("c", B), List.of(liveWithId("c", 7)), GATE2);
+
+        assertThat(plan.actions()).containsExactly(dropId(7, "c", DropReason.FAILED_BUILD), buildById("c", 7));
+        assertThat(plan.actions()).noneMatch(a -> a instanceof Drop d && d.name().equals(name("c")));
+    }
+
+    @Test
+    void id_aKilledBuildBeforeGate2_isDroppedButNotRebuilt() {
+        var plan = planIds(leaf(valid("c"), invalidId(7)), Map.of("c", B), List.of(liveWithId("c", 7)),
+            new PciReconcilePlanner.IdPlanInputs(false, Set.of()));
+
+        assertThat(plan.actions()).containsExactly(dropId(7, "c", DropReason.FAILED_BUILD));
+    }
+
+    @Test
+    void id_aValidIdIndex_isKept_andNeedsNoBuild() {
+        var plan = planIds(leaf(valid("c"), validId(7)), Map.of("c", B), List.of(liveWithId("c", 7)), GATE2);
+
+        assertThat(plan.actions()).isEmpty();
+        assertThat(plan.plannedIdKeys()).containsExactly(key(7));
+    }
+
+    @Test
+    void id_dropRules_haveIdKeyedCounterparts() {
+        // NOT_IN_REGISTRY: a rename minted a new id, so the old id's index has no row and the new id builds (RDR item 6).
+        var renamed = planIds(leaf(valid("c"), validId(7)), Map.of("c", B), List.of(liveWithId("c", 8)), GATE2);
+        assertThat(renamed.actions()).containsExactly(dropId(7, null, DropReason.ID_NOT_IN_REGISTRY), buildById("c", 8));
+
+        var superseded = planIds(leaf(valid("c"), validId(7)), Map.of("c", B),
+            List.of(new RegistryRow("c", "live", "other", 7L)), GATE2);
+        assertThat(superseded.actions()).contains(dropId(7, "c", DropReason.ID_SUPERSEDED));
+        assertThat(superseded.plannedIdKeys()).isEmpty();
+
+        var below = planIds(leaf(valid("c"), validId(7)), Map.of("c", B / 2 - 1), List.of(liveWithId("c", 7)), GATE2);
+        assertThat(below.actions()).contains(dropId(7, "c", DropReason.ID_BELOW_HALF_BUILD_THRESHOLD));
+        assertThat(below.actions()).as("the name index drops by its own rule, not because the id one did")
+            .contains(drop("c", DropReason.BELOW_HALF_BUILD_THRESHOLD));
+
+        // Between B/2 and B the id index stays, as the name index does.
+        var between = planIds(leaf(valid("c"), validId(7)), Map.of("c", B - 1), List.of(liveWithId("c", 7)), GATE2);
+        assertThat(between.actions()).isEmpty();
+    }
+
+    @Test
+    void id_aZeroCountForALiveIndexedCollection_isACountingFailure_neverADrop() {
+        var plan = planIds(leaf(validId(7)), Map.of(), List.of(liveWithId("c", 7)), GATE2);
+
+        assertThat(plan.actions()).containsExactly(new SkipCountSuspect("c"));
+    }
+
+    @Test
+    void id_aBackedOffCollection_isNotBuilt_andIsNotPlanned() {
+        var plan = PciReconcilePlanner.planWithIds(leaf(valid("c")), Map.of("c", B), List.of(liveWithId("c", 7)),
+            Set.of(PciReconcilePlanner.idBackoffKey(7)), null, DEFAULT, GATE2);
+
+        assertThat(plan.actions()).isEmpty();
+        assertThat(plan.plannedIdKeys()).as("RDR item 6: planned excludes a collection that is backed off").isEmpty();
+    }
+
+    @Test
+    void id_nameAndIdIndexesCoexistUnderTheCap_eachWithItsOwnBudget() {
+        // Cap 2: two name indexes and two id indexes on the leaf is within each budget; a third collection builds nothing.
+        var s = settings(2);
+        var l = leaf(valid("a"), valid("b"), validId(1), validId(2));
+        var rows = List.of(liveWithId("a", 1), liveWithId("b", 2), liveWithId("c", 3));
+        var counts = Map.of("a", B, "b", B, "c", B);
+
+        var plan = PciReconcilePlanner.planWithIds(l, counts, rows, Set.of(), null, s, GATE2);
+
+        assertThat(plan.actions()).isEmpty();
+        assertThat(plan.plannedIdKeys()).containsExactlyInAnyOrder(key(1), key(2));
+    }
+
+    @Test
+    void id_aLeafAtTheCapThroughTheTransition_buildsIdIndexesUpToTheCapAndDropsNoNameIndex() {
+        // S-2 (nexus-p2m1x.40): 16 collections at the per-leaf cap, each holding a valid NAME index. The id budget is
+        // the cap's own, so all 16 id indexes are planned (one in flight at a time in the builder), no name index is
+        // dropped, and no 17th collection is built into either family.
+        var indexes = new ArrayList<Index>();
+        var rows = new ArrayList<RegistryRow>();
+        var counts = new HashMap<String, Integer>();
+        for (int i = 1; i <= 17; i++) {
+            String c = "c" + String.format("%02d", i);
+            if (i <= 16) {
+                indexes.add(valid(c));
+            }
+            rows.add(liveWithId(c, i));
+            counts.put(c, B + (17 - i));      // c01 is the largest
+        }
+        var plan = planIds(leaf(indexes.toArray(Index[]::new)), counts, rows, GATE2);
+
+        var builds = plan.actions().stream().filter(a -> a instanceof Build).map(a -> (Build) a).toList();
+        assertThat(builds).hasSize(16).allMatch(Build::byId);
+        assertThat(builds.stream().map(Build::collectionId)).doesNotContain(17L);   // c17 is the smallest: out of the ranking
+        assertThat(plan.actions()).noneMatch(a -> a instanceof Drop);
+        assertThat(plan.plannedIdKeys()).hasSize(16).doesNotContain(key(17));
+        // The name plan for the same leaf: at the cap, so the 17th gets no name index either.
+        assertThat(PciReconcilePlanner.plan(leaf(indexes.toArray(Index[]::new)), counts, rows, Set.of(), null, DEFAULT))
+            .isEmpty();
+    }
+
+    @Test
+    void id_atTheCapWithSomeIdIndexesValidAndOneInFlight_buildsOnlyTheRemainingSlots() {
+        var s = settings(4);
+        var l = leaf(valid("a"), valid("b"), valid("c"), valid("d"), validId(1), validId(2), invalidId(3));
+        var rows = List.of(liveWithId("a", 1), liveWithId("b", 2), liveWithId("c", 3), liveWithId("d", 4));
+        var counts = Map.of("a", B, "b", B, "c", B, "d", B);
+
+        var plan = PciReconcilePlanner.planWithIds(l, counts, rows, Set.of(), idName(3), s, GATE2);
+
+        assertThat(plan.actions()).containsExactly(buildById("d", 4));
+        assertThat(plan.plannedIdKeys()).containsExactlyInAnyOrder(key(1), key(2), key(3), key(4));
+    }
+
+    @Test
+    void id_planWithIdsDoesNotChangeTheNameHalf_andTheOldEntryPointIgnoresIdIndexes() {
+        var l = leaf(valid("c"), validId(7), invalidId(9));
+        var counts = Map.of("c", B, "d", B);
+        var rows = List.of(liveWithId("c", 7), liveWithId("d", 8));
+
+        var nameOnly = PciReconcilePlanner.plan(l, counts, rows, Set.of(), null, DEFAULT);
+
+        assertThat(nameOnly).containsExactly(build("d"));
+        var withIds = planIds(l, counts, rows, GATE2).actions();
+        assertThat(withIds).containsAll(nameOnly);
+        assertThat(withIds).contains(buildById("d", 8), dropId(9, null, DropReason.FAILED_BUILD));
+    }
+
+    @Test
+    void id_dropsComeFirst_thenSuspects_thenBuilds() {
+        var plan = planIds(leaf(valid("c"), validId(5), validId(6)), Map.of("c", B, "z", B),
+            List.of(liveWithId("c", 6), liveWithId("z", 9)), GATE2);
+
+        assertThat(plan.actions().get(0)).isInstanceOf(Drop.class);
+        assertThat(plan.actions().get(plan.actions().size() - 1)).isInstanceOf(Build.class);
+    }
+
+    @Test
+    void id_switchOff_isAnEmptyPlan() {
+        var off = new PciSettings(false, B, 600, 16);
+
+        var plan = PciReconcilePlanner.planWithIds(leaf(validId(7)), Map.of(), List.of(), Set.of(), null, off, GATE2);
+
+        assertThat(plan.actions()).isEmpty();
+        assertThat(plan.plannedIdKeys()).isEmpty();
+    }
 }

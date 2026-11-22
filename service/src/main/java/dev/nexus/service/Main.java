@@ -685,7 +685,7 @@ public final class Main {
         // nexus-p2m1x.17 (RDR-229 P3.1): the boot-time completion check, after the schema walk and on the admin connection.
         // It READS (the session is read-only at the server) and reports where the three gates stand in /v1/status
         // boot_work; no boot-time data migration, the stamp is a visible data move. Never takes the engine down.
-        var completionCheck = startCompletionBootWork(bootWork, adminConnection);
+        var completionCheck = startCompletionBootWork(bootWork, adminConnection, pciReconciler.gate3Source());
         // The check reads again when a worker's move completes and when a reconciler pass ends; its 60 s poll backs those up.
         if (completionCheck != null) {
             if (dataMoveWorker != null) {
@@ -693,6 +693,12 @@ public final class Main {
             }
             pciReconciler.onPassEnded(completionCheck::onReconcilerPassEnded);
         }
+        // nexus-p2m1x.22 (RDR-229 P3.4): the reconciler builds the id-predicate indexes only once gate 2 of that check holds (its
+        // latest read; no check, no id build), so a chunk-family on_complete cannot end one.
+        pciReconciler.idBuildGate(() -> {
+            var latest = completionCheck == null ? null : completionCheck.latest();
+            return latest != null && latest.gate2();
+        });
         // nexus-p2m1x.20 (RDR-229 P3.3b): the per-leaf id unique-index pass, after the engine serves. Not the PCI reconciler's: it runs whether
         // NX_SEARCH_PCI is on or off and starts only when gate 1 of the completion check holds (its latest read; no check, no pass).
         var leafIndexPass = startLeafIndexPass(bootWork, adminConnection, completionCheck);
@@ -834,12 +840,14 @@ public final class Main {
 
     /**
      * RDR-229 P3.1, P3.3a: the completion check's reporter (the boot read set, CompletionCheck.ReadSet.boot()), or null when it cannot start; never throws. Gate 3 reads P3.4's id-index
-     * coverage, which no release builds yet, so it does not hold ({@code Gate3Source.NOT_INSTALLED}).
+     * coverage from the PCI reconciler ({@code PciReconciler#gate3Source}): it holds once every collection the planner would index has a VALID id-predicate index.
      */
     private static dev.nexus.service.datamove.CompletionBootWork startCompletionBootWork(BootWorkRegistry bootWork,
-            dev.nexus.service.db.AdminConnection admin) {
+            dev.nexus.service.db.AdminConnection admin, dev.nexus.service.datamove.CompletionCheck.Gate3Source gate3) {
         try {
-            var check = dev.nexus.service.datamove.CompletionBootWork.atBoot(bootWork, admin);
+            // TODO(linda, 2026-11-22): the extra gate 3 conditions list takes dev.nexus.service.datamove.IdUniqueIndexPass::allValid
+            // (the four runtime-built id UNIQUE indexes) when that pass's branch merges; empty until then.
+            var check = dev.nexus.service.datamove.CompletionBootWork.atBoot(bootWork, admin, gate3, java.util.List.of());
             check.start();
             return check;
         } catch (VirtualMachineError e) {

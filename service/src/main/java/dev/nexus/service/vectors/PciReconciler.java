@@ -608,6 +608,18 @@ public final class PciReconciler {
      */
     private volatile Runnable passEnded = () -> { };
 
+    private final PciIdBuilds idBuilds = new PciIdBuilds();
+
+    /** RDR-229 P3.4: gate 2 of the completion check, read at the start of each pass; until it holds no id build is planned. */
+    public void idBuildGate(java.util.function.BooleanSupplier gate2) {
+        idBuilds.gate(gate2);
+    }
+
+    /** RDR-229 P3.4: gate 3's read of this reconciler's id indexes, for {@code CompletionBootWork}. */
+    public dev.nexus.service.datamove.CompletionCheck.Gate3Source gate3Source() {
+        return ctx -> idBuilds.coverage(catalog);
+    }
+
     /** Sets what runs at the end of each pass; see the field. A null clears it. */
     public void onPassEnded(Runnable listener) {
         this.passEnded = listener == null ? () -> { } : listener;
@@ -670,6 +682,7 @@ public final class PciReconciler {
             }
             pass.useSnapshot(snapshot);   // the only leaves VACUUM may touch
             Tally tally = new Tally();
+            tally.gate2 = idBuilds.gate2Holds();
             tally.lastPlannable = lastPlannable(snapshot.leaves());
             for (Leaf leaf : snapshot.leaves()) {
                 if (!pass.live() || Thread.currentThread().isInterrupted()) {
@@ -681,6 +694,7 @@ public final class PciReconciler {
                 }
             }
             boolean ranToEnd = pass.live() && !Thread.currentThread().isInterrupted();
+            idBuilds.passEnded(ranToEnd && tally.skippedLeaves == 0, tally.plannedIds);
             // A pass whose every leaf was skipped (a count timeout, a failed read) did no reconciling: reporting it
             // as the last completed pass would hide that nothing has been checked.
             if (ranToEnd && tally.processedLeaves > 0) {
@@ -797,6 +811,9 @@ public final class PciReconciler {
 
     static final class Tally {
         int leaves;
+        /** RDR-229 P3.4: gate 2 as read at the start of the pass, and the id keys the pass's plans would index. */
+        boolean gate2;
+        final Set<String> plannedIds = new HashSet<>();
         /**
          * The last leaf of the snapshot that can plan a build (its model and tenant parsed), or null when none can:
          * the {@code boot_work} total is not known before the pass has reached it (nexus-f3yqd.3).
@@ -867,7 +884,7 @@ public final class PciReconciler {
         }
         Planned planned;
         try {
-            planned = pass.transaction(tx -> countAndPlan(tx, leaf));
+            planned = pass.transaction(tx -> countAndPlan(tx, leaf, tally.gate2));
         } catch (DataAccessException e) {
             tally.skippedLeaves++;
             noteLeaf(leaf, tally, 0);
@@ -885,6 +902,7 @@ public final class PciReconciler {
             return true;
         }
         tally.processedLeaves++;
+        tally.plannedIds.addAll(planned.plannedIds());
         tally.sumCountMillis += planned.countMillis();
         tally.maxCountMillis = Math.max(tally.maxCountMillis, planned.countMillis());
         ledger.apply(leaf, planned.anchors());
@@ -897,7 +915,8 @@ public final class PciReconciler {
 
     // -- counting and planning, inside the transaction ---------------------------------------------------------
 
-    private record Planned(List<Action> actions, int dimension, long countMillis, PciAnchorLedger.Reads anchors) { }
+    private record Planned(List<Action> actions, int dimension, long countMillis, PciAnchorLedger.Reads anchors,
+                           Set<String> plannedIds) { }
 
     /**
      * The first statements of every counting transaction: the per-statement timeout, a custom plan, the leaf's tenant,
@@ -923,7 +942,7 @@ public final class PciReconciler {
     }
 
     /** The body of the counting transaction for one leaf; {@code null} means skip the leaf. */
-    private Planned countAndPlan(DSLContext tx, Leaf leaf) {
+    private Planned countAndPlan(DSLContext tx, Leaf leaf, boolean gate2) {
         long startedNanos = System.nanoTime();
         String tenant = leaf.tenant();
         String model = leaf.model();
@@ -940,11 +959,11 @@ public final class PciReconciler {
         // The tenant predicate below is REQUIRED, not belt and braces: a superuser or BYPASSRLS admin role is not filtered
         // by row-level security, and another tenant's live row of the same name would mask this leaf's NOT_IN_REGISTRY drop.
         List<RegistryRow> registry = tx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.LIFECYCLE_STATE,
-                CATALOG_COLLECTIONS.SUPERSEDED_BY)
+                CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.COLLECTION_ID)
             .from(CATALOG_COLLECTIONS)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
             .and(CATALOG_COLLECTIONS.EMBEDDING_MODEL.eq(model))
-            .fetch(r -> new RegistryRow(r.value1(), r.value2(), r.value3()));
+            .fetch(r -> new RegistryRow(r.value1(), r.value2(), r.value3(), r.value4()));
 
         Set<String> buildable = new HashSet<>();
         for (RegistryRow row : registry) {
@@ -952,6 +971,7 @@ public final class PciReconciler {
                 buildable.add(row.name());
             }
         }
+        buildable.addAll(PciIdBuilds.buildableKeys(registry));
         forgetStaleBackoff(leaf, buildable);
 
         Set<String> indexed = new LinkedHashSet<>();
@@ -964,6 +984,7 @@ public final class PciReconciler {
             }
         }
         Set<String> toCount = new LinkedHashSet<>(indexed);
+        toCount.addAll(PciIdBuilds.idIndexedNames(leaf, registry));   // an id index judges its collection by the count too
         for (RegistryRow row : registry) {
             // Only a collection that can build counts for anything; a quarantined one without an index decides nothing.
             if (row.live() && !row.superseded()) {
@@ -1001,14 +1022,18 @@ public final class PciReconciler {
                 counts.put(collection, count(tx, dimension, collection, model, tenant, rankCap));
             }
         }
-        List<Action> actions = PciReconcilePlanner.plan(leaf, counts, registry, backedOff, inFlight, settings);
+        // RDR-229 P3.4: the id half. The null-id read runs only once gate 2 holds, for the collections that could build.
+        var idInputs = new PciReconcilePlanner.IdPlanInputs(gate2,
+            gate2 ? PciIdBuilds.nullIdCollections(tx, leaf, registry, counts, b) : Set.of());
+        var plan = PciReconcilePlanner.planWithIds(leaf, counts, registry, backedOff, inFlight, settings, idInputs);
+        List<Action> actions = plan.actions();
         PciAnchorLedger.Reads anchors = readAnchors(tx, leaf, dimension, actions, now);
         // One reading, logged and carried: the pass line's sum and max are over exactly these figures. The per-leaf
         // line stays DEBUG (one per leaf per pass is a lot of lines at 20,000 collections); the pass line is INFO.
         long tookMs = (System.nanoTime() - startedNanos) / 1_000_000;
         log.debug("event=pci_count_done leaf={} counted={} recounted={} actions={} took_ms={}", leafId(leaf),
             counts.size(), recounted ? candidates.size() : 0, actions.size(), tookMs);
-        return new Planned(actions, dimension, tookMs, anchors);
+        return new Planned(actions, dimension, tookMs, anchors, plan.plannedIdKeys());
     }
 
     /** The anchor reads of {@link PciAnchorLedger#read} for the valid parsed indexes the plan does not drop. */
@@ -1340,13 +1365,15 @@ public final class PciReconciler {
     }
 
     private void build(PciBuilderSession.Pass pass, Leaf leaf, int dim, Build build, Tally tally) {
-        LeafKey key = new LeafKey(leafId(leaf), build.collection());
+        LeafKey key = new LeafKey(leafId(leaf),
+            build.byId() ? PciReconcilePlanner.idBackoffKey(build.collectionId()) : build.collection());
         building.set(build.name());
         PciBootWork work = bootWork;
         PciBootWork.Watch watch = work == null ? null : work.watchBuild();
         DdlOutcome outcome;
         try {
-            outcome = pass.build(leaf, dim, build.collection());
+            outcome = build.byId() ? pass.buildById(leaf, dim, build.collectionId())
+                : pass.build(leaf, dim, build.collection());
         } finally {
             building.set(null);
             if (watch != null) {
@@ -1357,7 +1384,7 @@ public final class PciReconciler {
             case DONE -> {
                 tally.builds++;
                 failures.remove(key);
-                if (canary != null) {
+                if (canary != null && !build.byId()) {   // an id index is not served before P3.5: no canary, no anchor yet
                     canary.built(build.name());
                     tally.builtTargets.add(new PciCanary.Target(leafId(leaf), leaf.tenant(), leaf.model(),
                         build.collection(), build.name()));
@@ -1365,7 +1392,7 @@ public final class PciReconciler {
                 log.info("event=pci_index_built leaf={} index={} collection={}", leafId(leaf), build.name(),
                     build.collection());
                 refreshSweep("build", false);
-                if (pass.live()) {
+                if (pass.live() && !build.byId()) {
                     anchorAfterBuild(pass, leaf, dim, build);
                 }
             }

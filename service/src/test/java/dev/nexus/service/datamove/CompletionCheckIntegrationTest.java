@@ -472,6 +472,54 @@ class CompletionCheckIntegrationTest {
         assertThat(r.gate3Why()).isEqualTo("gate 2 does not hold");
     }
 
+    /** RDR-229 P3.4 (linda 2026-11-22): gate 3 implies gate 2 structurally; a swap or validation label that is open keeps it closed. */
+    @Test
+    void gate3IsFalseWhileOneGate2LabelIsIncomplete_whateverEveryIdIndexSays_andOpensWhenItCompletes() {
+        register("ext-g3-gate1", "chunks", null);
+        complete("ext-g3-gate1");
+        register("ext-g3-swap", "chunks", null);
+        complete("ext-g3-swap");
+        register("ext-g3-validation", "chunks", null);   // the one open label: a child validation move
+        CompletionCheck.ReadSet rs = new CompletionCheck.ReadSet(List.of("ext-g3-gate1"), List.of("ext-g3-swap", "ext-g3-validation"));
+        boolean[] asked = {false};
+        CompletionCheck.Gate3Source valid = c -> {
+            asked[0] = true;
+            return Optional.of(new CompletionCheck.IdIndexCoverage(Set.of("a", "b"), Set.of("a", "b"), Set.of()));
+        };
+
+        CompletionCheck.Result open = CompletionCheck.evaluate(ctx, rs, valid, CompletionCheck.DIRECT);
+
+        assertThat(open.gate1()).as("non-vacuity: gate 1 holds").isTrue();
+        assertThat(open.gate2()).isFalse();
+        assertThat(open.gate3()).as("every id index valid, one gate 2 label open").isFalse();
+        assertThat(asked[0]).as("the PCI coverage is not even read").isFalse();
+        complete("ext-g3-validation");
+        CompletionCheck.Result done = CompletionCheck.evaluate(ctx, rs, valid, CompletionCheck.DIRECT);
+        assertThat(done.gate2()).isTrue();
+        assertThat(done.gate3()).isTrue();
+    }
+
+    /** The seam for IdUniqueIndexPass.allValid: each extra condition must hold, and one that throws holds nothing. */
+    @Test
+    void gate3ExtraConditionsAreRead_afterGate2AndTheCoverage_andEveryOneMustHold() {
+        CompletionCheck.ReadSet rs = new CompletionCheck.ReadSet(List.of(), List.of());
+        java.util.function.Predicate<org.jooq.DSLContext> yes = c -> true;
+        java.util.function.Predicate<org.jooq.DSLContext> no = c -> false;
+        java.util.function.Predicate<org.jooq.DSLContext> boom = c -> { throw new IllegalStateException("catalog unreadable"); };
+
+        assertThat(CompletionCheck.evaluate(ctx, rs, everyIndexValid(), CompletionCheck.DIRECT, List.of(yes, yes)).gate3()).isTrue();
+        assertThat(CompletionCheck.evaluate(ctx, rs, everyIndexValid(), CompletionCheck.DIRECT, List.of()).gate3()).isTrue();
+        var refused = CompletionCheck.evaluate(ctx, rs, everyIndexValid(), CompletionCheck.DIRECT, List.of(yes, no));
+        assertThat(refused.gate3()).isFalse();
+        assertThat(refused.gate3Why()).contains("further gate 3 condition");
+        assertThat(CompletionCheck.evaluate(ctx, rs, everyIndexValid(), CompletionCheck.DIRECT, List.of(boom)).gate3()).as("unknown is not holds").isFalse();
+        // not read while the coverage is incomplete
+        boolean[] read = {false};
+        CompletionCheck.evaluate(ctx, rs, c -> Optional.of(new CompletionCheck.IdIndexCoverage(Set.of("x"), Set.of(), Set.of())),
+            CompletionCheck.DIRECT, List.of(c -> { read[0] = true; return true; }));
+        assertThat(read[0]).isFalse();
+    }
+
     @Test
     void gate2NeedsItsOwnLabelsOnTopOfGate1() {
         register("ext-gate1", "chunks", null);
