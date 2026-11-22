@@ -2403,6 +2403,15 @@
         After vectors-071, before the grants-nexus-svc.xml runAlways block.
     -->
     <include file="db/changelog/vectors-074-reconcile-refuses-unregistered.xml"/>
+        Bead nexus-p2m1x.19 (RDR-229 P3.3a, item 6 "Switch"): the seven id-twin foreign keys from the tables that are not partitioned, each beside its name key and
+        NOT VALID (topic_assignments, document_aspects, topics, taxonomy_meta, document_highlights, canary_query_ring, and the retired aspect_extraction_queue
+        only where that table is kept with its collection_id column), and one registered data move per twin that validates it (rdr229-fkvalidate-<table>). NOT VALID
+        scans no row and each move is one INSERT, so an upgrade boot writes no row of a user-data table. DATA EFFECT: seven twins NOT VALID (six, or seven where
+        the queue is kept) and the same number of rows added to nexus.data_moves; no existing row of any table changes at boot. The number follows vectors-071 and is
+        provisional until the final rebase. After vectors-068 (the registry's id UNIQUE keys the twins reference) and vectors-070 (the stamp moves whose templates
+        the validation moves copy and the owner-read policies they need), before the grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/vectors-072-collection-id-fk-twins.xml"/>
 
     <!--
         Bead nexus-p2m1x.17 (RDR-229 P3.1, review-gate fix round B; P2.10 critique S2): the P2.10 residue repair moves (catalog-049-2) that are not

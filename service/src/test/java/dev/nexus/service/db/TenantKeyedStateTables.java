@@ -843,7 +843,7 @@ final class TenantKeyedStateTables {
             + "sample (at most one safety poll apart) and re-derived from the database, so a tenant a reset removed drops "
             + "out of the counts at the next sample");
         notKeyed.put("CompletionBootWork.DbReader.readSet", "the labels the check reads, fixed at construction "
-            + "(CompletionCheck.ReadSet.p31()); configuration, not keyed by tenant");
+            + "(CompletionCheck.ReadSet.p33a()); configuration, not keyed by tenant");
         notKeyed.put("CompletionBootWork.DbReader.session", DATA_MOVE_REPORT_SESSION_COMPLETION);
         notKeyed.put("CompletionBootWork.CachedCounter.kept", COMPLETION_ENGINE_WIDE + "this cache holds one violating-row "
             + "count per CHECK constraint name for ten minutes; the counts are summed over every tenant and carry no "

@@ -1356,6 +1356,7 @@ class CollectionRegistryFkTest {
             String tenant, String orphanCol, Runnable orphanInsert, Runnable reconcileInsert) throws Exception {
         // FK absent; seed an orphan row while it is absent.
         ctx.alterTable(table).dropConstraintIfExists(fkName).execute();
+        P33aTwinFixtures.dropTwin(ctx, table.getName());   // RDR-229 P3.3a: the id twin enforces the unissued id the orphan row carries
         orphanInsert.run();
         assertThat(ctx.selectCount().from(CATALOG_COLLECTIONS)
                 .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(orphanCol))
