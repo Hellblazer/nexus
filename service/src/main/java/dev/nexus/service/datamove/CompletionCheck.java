@@ -236,6 +236,12 @@ public final class CompletionCheck {
                 gate3Why, dangling, rename, gate3);
         }
 
+        /** This result with gate 3 reported as not holding for {@code why} (the latch is left as it is): a sample published while a rename holds the window. */
+        public Result withoutGate3(String why) {
+            return new Result(gate1, gate2, false, labels, checks, supersededByCheckPresent, supersededByWaiting, violators, gate3Uncovered, why,
+                dangling, rename, gate3Latched);
+        }
+
         /** This result with the latch set to {@code latched}. */
         public Result withGate3Latched(boolean latched) {
             return latched == gate3Latched ? this : new Result(gate1, gate2, gate3, labels, checks, supersededByCheckPresent,
@@ -261,7 +267,9 @@ public final class CompletionCheck {
          * name keys are gone. From the latch a rename is one-row or refused.
          */
         public RenameReadiness.Missing renameMissing() {
-            if (!gate3Latched) {
+            // A completed drop move counts as latched: the process-local latch resets on a restart, and the move (registered only when
+            // gate 3 holds, its completion durable) says the name keys are gone. TODO: revisit once vectors-080's latch is tested across a restart.
+            if (!gate3Latched && !rename.dropMoveComplete()) {
                 return RenameReadiness.Missing.NONE;
             }
             if (!rename.dropMoveComplete()) {

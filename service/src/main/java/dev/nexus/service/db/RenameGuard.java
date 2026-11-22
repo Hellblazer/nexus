@@ -46,11 +46,12 @@ public final class RenameGuard {
 
     /**
      * Whether the one-row regime is in force: gate 3 has been LATCHED ({@link RenameReadiness#gate3Latched()}: it held once and is
-     * remembered), or holds now ({@code gate3}, which the latch contains in the engine, so the second term is for a readiness with no
+     * remembered), or the name-key drop move has completed ({@link RenameReadiness#dropMoveComplete()}, a durable belt for a restart that reset the
+     * process-local latch), or holds now ({@code gate3}, which the latch contains in the engine, so the second term is for a readiness with no
      * latch, a test's lambda). The live gate 3 dropping back (an id index going INVALID) never returns a rename to the name path.
      */
     private boolean oneRowRegime(boolean gate3Holds) {
-        return readiness.gate3Latched() || gate3Holds;
+        return readiness.gate3Latched() || readiness.dropMoveComplete() || gate3Holds;
     }
 
     /**

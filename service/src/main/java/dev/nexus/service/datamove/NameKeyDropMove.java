@@ -101,7 +101,7 @@ public final class NameKeyDropMove {
     }
 
     /**
-     * Register the move if {@code snapshot} says gate 3 holds and no row of {@link #LABEL} exists: ONE INSERT into
+     * Register the move if {@code snapshot} says gate 3 is latched (it held once; the live gate 3 can dip afterwards) and no row of {@link #LABEL} exists: ONE INSERT into
      * {@code nexus.data_moves}, {@code ON CONFLICT (label) DO NOTHING}, so a second call, a second engine and a reboot add nothing. The
      * caller owns the connection: {@code admin} is a context on the admin connection (the migrating role, the only role that writes the
      * registry). It runs one statement and keeps no state.
@@ -109,13 +109,13 @@ public final class NameKeyDropMove {
      * <p>The caller is the engine pass (stage 2) and, until then, the tests' harness. The pass also reports in {@code boot_work} and
      * yields to the migration lock and the walk's termination list; none of that is this method's.
      *
-     * @param snapshot the completion check's latest result; null (not read yet) or gate 3 not holding registers nothing
+     * @param snapshot the completion check's latest result; null (not read yet) or gate 3 not latched registers nothing
      * @param engineVersion the registering engine's version, written into the row's {@code changeset_id} ({@link #changesetId})
      * @return true when this call inserted the row
      */
     public static boolean registerIfAbsent(CompletionCheck.Result snapshot, DSLContext admin, String engineVersion) {
         String changesetId = changesetId(engineVersion);   // refused first: a blank version is a wiring defect, however early the pass runs
-        if (snapshot == null || !snapshot.gate3()) {
+        if (snapshot == null || !snapshot.gate3Latched()) {   // the latch, not the live gate 3: a dip after it must not strand renames at name_key_drop_move
             return false;
         }
         var moves = DSL.table(DSL.name("nexus", "data_moves"));

@@ -63,6 +63,8 @@ public final class CompletionBootWork implements AutoCloseable {
     private static final Duration TICK = Duration.ofSeconds(1);
     /** How long gate 3's flip to true waits for the renames pinned in the rename window ({@link RenameReadiness#pinned}). */
     public static final Duration RENAME_WINDOW_WAIT = Duration.ofSeconds(30);
+    /** How long after a deferred latch the next read is scheduled. */
+    public static final Duration RENAME_WINDOW_RETRY = Duration.ofSeconds(1);
     /** How long a table's violating-row count is kept: the scan is bounded, not free. */
     public static final Duration VIOLATOR_TTL = Duration.ofMinutes(10);
 
@@ -88,6 +90,7 @@ public final class CompletionBootWork implements AutoCloseable {
     private boolean gate3Latch;
     /** How long gate 3's flip waits for the pinned renames before it defers to the next sample. */
     private volatile Duration renameWindowWait = RENAME_WINDOW_WAIT;
+    private volatile Duration renameWindowRetry = RENAME_WINDOW_RETRY;
     private final Clock clock;
     /** Where an event's read runs; null before {@link #start}, when the event only marks that a read is owed. */
     private volatile Executor eventExecutor;
@@ -97,7 +100,7 @@ public final class CompletionBootWork implements AutoCloseable {
     private volatile CompletionCheck.Result latest;
     private volatile boolean closed;
     private String lastError;
-    private ScheduledExecutorService scheduler;
+    private volatile ScheduledExecutorService scheduler;
 
     /**
      * @param gate3 P3.4's id-index coverage ({@link CompletionCheck.Gate3Source#NOT_INSTALLED} until it ships)
@@ -160,6 +163,8 @@ public final class CompletionBootWork implements AutoCloseable {
      * RDR-229 item 6, "Readers during the stamp": whether gate 3 of the latest sample holds, read per call, never cached. False before
      * the first sample. {@code Main} hands it to each reader that switches to the id ({@link Gate3}).
      */
+    // TODO(P3.4 rebase): the readers' Gate3 (held by CatalogRepository, PgVectorRepository and TaxonomyCentroidRepository) stays LIVE in this
+    // tree and moves to the latch ({@link #gate3Latched()}) when P3.4 stacks.
     public Gate3 gate3() {
         return () -> {
             var r = latest();
@@ -198,6 +203,12 @@ public final class CompletionBootWork implements AutoCloseable {
             }
 
             @Override
+            public boolean dropMoveComplete() {
+                var r = latest();
+                return r != null && r.rename().dropMoveComplete();
+            }
+
+            @Override
             public <T> T pinned(java.util.function.Supplier<T> rename) {
                 renameWindow.readLock().lock();
                 try {
@@ -207,6 +218,11 @@ public final class CompletionBootWork implements AutoCloseable {
                 }
             }
         };
+    }
+
+    /** Test seam: how long after a deferred latch the retry is scheduled. */
+    void renameWindowRetry(Duration retry) {
+        this.renameWindowRetry = Objects.requireNonNull(retry, "retry");
     }
 
     /** Test seam: how long the flip waits for a pinned rename. */
@@ -361,10 +377,17 @@ public final class CompletionBootWork implements AutoCloseable {
                     locked = false;
                 }
                 if (!locked) {
+                    // A rename still holds the window: publish this sample (the moves, the CHECKs, the counts are current) but with gate 3
+                    // read as not holding and the latch unset, so the readers keep the name key while that rename can still commit a
+                    // name-path rewrite. Only the latch is deferred: the retry is scheduled (RENAME_WINDOW_RETRY), not left to the next event
+                    // or the 60 s poll.
                     log.warn("event=rdr229_rename_window_busy waited_ms={} cause=\"a pinned rename is still open; the gate 3 latch is deferred to the next sample\"",
                         renameWindowWait.toMillis());
-                    readOwed.set(true);
-                    return -1;
+                    scheduleRetry();
+                    latest = result.withoutGate3("a collection rename is still open: gate 3 is deferred to the next sample");
+                    result = latest;
+                    publishRestartEntry(result);
+                    return countWaiting(result);
                 }
                 try {
                     // the sample is as old as the wait: gate 3 may have dropped again while the rename ran, so read again under the
@@ -388,10 +411,29 @@ public final class CompletionBootWork implements AutoCloseable {
             }
             result = latest;
             publishRestartEntry(result);
-            long holding = (result.gate1() ? 1 : 0) + (result.gate2() ? 1 : 0) + (result.gate3() ? 1 : 0);
-            return (holding < 3 ? 1 : 0) + (int) result.checks().stream().filter(c -> !c.present()).count()
-                + byTable(result.violators()).size();
+            return countWaiting(result);
         }
+    }
+
+    /** Asks for another read after {@link #RENAME_WINDOW_RETRY} on the schedule's thread (nothing before {@link #start}: the first sample reads everything). */
+    private void scheduleRetry() {
+        readOwed.set(true);
+        ScheduledExecutorService s = scheduler;
+        if (s == null || closed) {
+            return;
+        }
+        try {
+            s.schedule(this::requestRead, renameWindowRetry.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (RuntimeException rejected) {
+            // the schedule was shut down by close(): nothing to read for
+        }
+    }
+
+    /** The things the field lists as waiting: the summary while a gate waits, a row per missing CHECK and per table whose CHECK is NOT VALID. */
+    private static int countWaiting(CompletionCheck.Result result) {
+        long holding = (result.gate1() ? 1 : 0) + (result.gate2() ? 1 : 0) + (result.gate3() ? 1 : 0);
+        return (holding < 3 ? 1 : 0) + (int) result.checks().stream().filter(c -> !c.present()).count()
+            + byTable(result.violators()).size();
     }
 
     /**

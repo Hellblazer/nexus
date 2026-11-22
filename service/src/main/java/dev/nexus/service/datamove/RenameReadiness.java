@@ -38,6 +38,16 @@ public interface RenameReadiness {
         return false;
     }
 
+    /**
+     * Whether the name-key drop move has {@code completed_at}. A belt for the process-local latch (it resets on a restart): the move is
+     * registered only when gate 3 holds and its completion is durable and never undone, so a completed move means the name keys are gone
+     * and a rename is one-row or refused whatever the latch and the live gate 3 say. TODO: revisit when vectors-080's latch table is
+     * tested across a restart; it may make this redundant. The default is false.
+     */
+    default boolean dropMoveComplete() {
+        return false;
+    }
+
     /** What a rename from gate 3 (or, once the move completed, from then on) waits for; the wire value is {@code missing} on the 409 {@code rename_refused}. */
     enum Missing {
         /** Nothing: a rename may run. */

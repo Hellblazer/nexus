@@ -126,10 +126,36 @@ class NameKeyDropMoveDefinitionTest {
             .isEqualTo(RenameReadiness.Missing.NAME_KEY_DROP_MOVE);
         assertThat(result(false, RenameState(true, 3, List.of())).withGate3Latched(true).renameMissing())
             .as("applied: NONE, and the guard reads the latch to take the one-row path").isEqualTo(RenameReadiness.Missing.NONE);
-        assertThat(result(false, RenameState(true, 3, List.of("a"))).renameMissing())
-            .as("control: never latched, the live gate 3 false is the name path").isEqualTo(RenameReadiness.Missing.NONE);
+        assertThat(result(false, RenameState(false, 3, List.of("a"))).renameMissing())
+            .as("control: never latched and no completed move, the live gate 3 false is the name path").isEqualTo(RenameReadiness.Missing.NONE);
         assertThat(result(true, RenameState(false, 3, List.of())).gate3Latched())
             .as("a result built by hand carries the live gate 3 as its latch").isTrue();
+    }
+
+    @Test
+    void aCompletedDropMoveCountsAsLatched_theBeltForARestartThatResetTheProcessLocalLatch() {
+        // after a restart: the latch is reset (not latched), the live gate 3 dipped, but the move completed: the name keys are gone
+        assertThat(result(false, RenameState(true, 3, List.of("a"))).renameMissing())
+            .as("not the name path (NONE): the restart is still awaited").isEqualTo(RenameReadiness.Missing.P35B_RESTART);
+        assertThat(result(false, RenameState(true, 3, List.of())).renameMissing())
+            .as("everything applied: NONE, and RenameGuard reads dropMoveComplete to take the one-row path")
+            .isEqualTo(RenameReadiness.Missing.NONE);
+        assertThat(result(false, RenameState(true, 0, List.of())).renameMissing()).isEqualTo(RenameReadiness.Missing.P35B_LIST_MISSING);
+    }
+
+    @Test
+    void registerIfAbsentKeysOnTheLatchedGate3_aLiveDipAfterTheLatchStillRegisters() {
+        // a jOOQ mock whose INSERT affects one row: the registration happens when the statement is reached
+        var provider = (org.jooq.tools.jdbc.MockDataProvider) ctx -> new org.jooq.tools.jdbc.MockResult[] {
+            new org.jooq.tools.jdbc.MockResult(1)};
+        var ctx = DSL.using(new org.jooq.tools.jdbc.MockConnection(provider), SQLDialect.POSTGRES);
+        var dipped = result(false, RenameState(false, 3, List.of())).withGate3Latched(true);
+        assertThat(NameKeyDropMove.registerIfAbsent(dipped, ctx, "1.2.3"))
+            .as("the live gate 3 dipped after it was latched: the move is still registered").isTrue();
+        assertThat(NameKeyDropMove.registerIfAbsent(result(false, RenameState(false, 3, List.of())), ctx, "1.2.3"))
+            .as("control: never latched, nothing is registered").isFalse();
+        assertThat(NameKeyDropMove.registerIfAbsent(result(true, RenameState(false, 3, List.of())), ctx, "1.2.3"))
+            .as("control: a hand-built result with gate 3 holding carries it as the latch").isTrue();
     }
 
     @Test

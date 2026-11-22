@@ -116,6 +116,92 @@ class CompletionBootWorkRenameWindowTest {
     }
 
     @Test
+    void aRenameThatHoldsTheWindowLongerThanTheWaitPublishesTheSampleWithoutGate3_andTheRetryIsScheduled() throws Exception {
+        var reader = new Scripted(true);
+        var registry = new BootWorkRegistry(Clock.systemUTC());
+        var work = new CompletionBootWork(registry, reader);
+        work.renameWindowWait(Duration.ofMillis(150));
+        work.renameWindowRetry(Duration.ofMillis(100));
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        CountDownLatch inside = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        try {
+            Future<?> rename = pool.submit(() -> work.renameReadiness().pinned(() -> {
+                inside.countDown();
+                try {
+                    release.await(30, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                return null;
+            }));
+            assertThat(inside.await(10, TimeUnit.SECONDS)).as("a pinned rename is open").isTrue();
+
+            // the first sample runs on the schedule's thread with the rename open: 150 ms wait, then the sample is published without gate 3
+            work.start(Duration.ofSeconds(60));   // the safety poll is a minute: only the scheduled retry can latch in this test
+            assertThat(Rdr229Await.until(Duration.ofSeconds(10), () -> work.latest() != null))
+                .as("the sample is published although a rename holds the window (the moves, CHECKs and counts are current)").isTrue();
+            assertThat(work.latest().gate1()).as("the rest of the sample is the fresh read").isTrue();
+            assertThat(work.latest().gate3()).as("gate 3 reads as not holding, so the readers keep the name key").isFalse();
+            assertThat(work.gate3Latched()).as("and the latch is deferred").isFalse();
+
+            release.countDown();
+            rename.get(10, TimeUnit.SECONDS);
+            assertThat(Rdr229Await.until(Duration.ofSeconds(10), work::gate3Latched))
+                .as("the retry the check scheduled latches it, with no event and well before the 60 s poll").isTrue();
+            assertThat(work.gate3().holds()).isTrue();
+        } finally {
+            release.countDown();
+            pool.shutdownNow();
+            work.close();
+        }
+    }
+
+    @Test
+    void onceLatched_theLiveGate3CanDropWithoutTheLatchGoing_andNoPinnedRenameBlocksAnotherSample() throws Exception {
+        var reader = new Scripted(true, true, false, false, true);
+        var work = work(reader);
+        work.publish();   // read 1 + the re-read under the lock: latched
+        assertThat(work.gate3Latched()).isTrue();
+        Gate3 asGate3 = work::gate3Latched;   // P4.x wiring where a Gate3 is wanted: the method reference adapts the boolean accessor
+        assertThat(asGate3.holds()).isTrue();
+
+        // a rename is open: after the latch no sample waits for it (every rename is one-row or refused now)
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        CountDownLatch inside = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        try {
+            Future<?> rename = pool.submit(() -> work.renameReadiness().pinned(() -> {
+                inside.countDown();
+                try {
+                    release.await(30, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                return null;
+            }));
+            assertThat(inside.await(10, TimeUnit.SECONDS)).isTrue();
+            work.renameWindowWait(Duration.ofMillis(100));
+
+            int result = work.publish();   // the live gate 3 is now false
+
+            assertThat(result).as("the sample went through while a rename was open: no flip to wait for").isNotEqualTo(-1);
+            assertThat(work.gate3().holds()).as("the live gate 3 dropped").isFalse();
+            assertThat(work.gate3Latched()).as("the latch stays").isTrue();
+            assertThat(work.renameReadiness().gate3Latched()).isTrue();
+            release.countDown();
+            rename.get(10, TimeUnit.SECONDS);
+            work.publish();
+            work.publish();
+            assertThat(work.gate3().holds()).as("the live gate 3 is back").isTrue();
+            assertThat(work.gate3Latched()).isTrue();
+        } finally {
+            release.countDown();
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
     void aRenameThatHoldsTheWindowLongerThanTheWaitDefersTheFlip_insteadOfStallingTheCheck() throws Exception {
         var reader = new Scripted(true);
         var work = work(reader);
@@ -150,6 +236,20 @@ class CompletionBootWorkRenameWindowTest {
         } finally {
             release.countDown();
             pool.shutdownNow();
+        }
+    }
+
+    /** A bounded poll for the schedule's thread. */
+    private static final class Rdr229Await {
+        static boolean until(Duration timeout, java.util.function.BooleanSupplier condition) throws InterruptedException {
+            long deadline = System.nanoTime() + timeout.toNanos();
+            while (!condition.getAsBoolean()) {
+                if (System.nanoTime() >= deadline) {
+                    return false;
+                }
+                Thread.sleep(20);
+            }
+            return true;
         }
     }
 }
