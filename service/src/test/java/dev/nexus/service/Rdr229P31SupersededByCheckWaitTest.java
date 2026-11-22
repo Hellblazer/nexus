@@ -158,7 +158,10 @@ class Rdr229P31SupersededByCheckWaitTest {
                     .where(gate1Moves).execute();
                 var result = dev.nexus.service.datamove.CompletionCheck.evaluate(ctx);
                 assertThat(result.supersededByCheckPresent()).isTrue();
-                assertThat(result.incomplete()).as("every label is complete or not applicable").isEmpty();
+                // Gate 2 (P3.3c's swap and child-validation moves) is registered at run time by the engine, never by the walk, so in this world
+                // exactly those labels are open; every gate-1 label is complete or not applicable.
+                assertThat(result.incomplete()).extracting(l -> l.label()).as("only gate 2's labels are open")
+                    .containsExactlyInAnyOrderElementsOf(dev.nexus.service.datamove.CompletionCheck.ReadSet.boot().gate2Labels());
                 assertThat(result.gate1()).as("gate 1 holds: the CHECKs are present and validated").isTrue();
             }
         } finally {
