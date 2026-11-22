@@ -73,6 +73,10 @@ class ReapableConsumersScanTest {
         // handling and the sweep gate are vectors-030's, untouched.
         SQL_CONSUMERS.put("vectors-069-collection-id-dual-write-functions.xml#nexus.reaper_quarantine_chunks",
             "same as vectors-030's: only the collection_id writes changed; grace is injected by tests only, production passes NULL");
+        // RDR-229 P3.5b (vectors-077) redefines it again so its matches read the id and the name; the grace handling and the
+        // sweep gate are vectors-069's, untouched.
+        SQL_CONSUMERS.put("vectors-077-rdr229-p35b-readers-both.xml#nexus.reaper_quarantine_chunks",
+            "same as vectors-069's: only the collection matches changed; grace is injected by tests only, production passes NULL");
     }
 
     private static final Pattern UNIT_START = Pattern.compile(
