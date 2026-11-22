@@ -726,8 +726,18 @@ class ChunkIsReapableIntegrationTest extends ChunkReapableTestBase {
             assertThat(rls.enabled()).as("RLS ENABLE").isTrue();
             assertThat(rls.forced()).as("RLS FORCE").isTrue();
             List<PgCatalogProbes.Policy> policies = PgCatalogProbes.policies(ctx, "nexus", "chunk_orphaned_at");
-            assertThat(policies).hasSize(1);
-            assertThat(policies.get(0).policyname()).isEqualTo("tenant_isolation");
+            // RDR-229 P3.1 (vectors-070): the tenant policy, and the migrating role's owner-read SELECT policy.
+            assertThat(policies).extracting(PgCatalogProbes.Policy::policyname)
+                .containsExactlyInAnyOrder("tenant_isolation", "chunk_orphaned_at_owner_read");
+            PgCatalogProbes.Policy ownerRead = policies.stream()
+                .filter(p -> p.policyname().equals("chunk_orphaned_at_owner_read")).findFirst().orElseThrow();
+            assertThat(ownerRead.cmd()).isEqualTo("SELECT");
+            assertThat(ownerRead.qual()).isEqualTo("true");
+            assertThat(ownerRead.withCheck()).isNull();
+            assertThat(PgCatalogProbes.policyRoles(ctx, "nexus", "chunk_orphaned_at").stream()
+                    .filter(p -> p.policyname().equals("chunk_orphaned_at_owner_read"))
+                    .map(PgCatalogProbes.PolicyRoles::toString).toList())
+                .containsExactly("chunk_orphaned_at_owner_read roles={" + PgContainerHelper.USERNAME + "} cmd=SELECT");
             PgCatalogProbes.Constraint fk = PgCatalogProbes.foreignKey(ctx, "nexus", "chunk_orphaned_at_chunk_fk");
             assertThat(fk).as("the record must not outlive or misname its chunk").isNotNull();
             assertThat(fk.confdeltype()).as("ON DELETE CASCADE").isEqualTo("c");

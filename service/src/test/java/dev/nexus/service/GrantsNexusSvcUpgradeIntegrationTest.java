@@ -250,6 +250,23 @@ class GrantsNexusSvcUpgradeIntegrationTest {
         // policy follows the registering includes and reads the same unborn state, so it goes with them.
         List<String> stripped = new ArrayList<>(ShippedMoveRegistrations.byInclude().keySet());
         stripped.add("db/changelog/vectors-065-catalog-collections-owner-read.xml");
+        // RDR-229 P3.1 (nexus-p2m1x.17): the stamp family builds on the registry and the policy above, so it is as unborn as they
+        // are: vectors-068 (the collection_id columns and CHECKs the stamp moves fill and validate), vectors-069 (the dual-write
+        // functions) and vectors-070 (the stamp moves and their owner-read policies). vectors-070 and catalog-052 register
+        // moves, so the scan above already holds them; they are named again only to make the list say so, and added only when
+        // the scan did not find them (a second entry would find its include already stripped).
+        for (String p31 : List.of("db/changelog/vectors-068-collection-id-expand.xml",
+                "db/changelog/vectors-069-collection-id-dual-write-functions.xml",
+                "db/changelog/vectors-070-collection-id-stamp-moves.xml")) {
+            if (!stripped.contains(p31)) {
+                stripped.add(p31);
+            }
+        }
+        assertThat(stripped).as("non-vacuity: the P3.1 includes are in the old state's strip list")
+            .contains("db/changelog/vectors-068-collection-id-expand.xml",
+                "db/changelog/vectors-069-collection-id-dual-write-functions.xml",
+                "db/changelog/vectors-070-collection-id-stamp-moves.xml",
+                "db/changelog/catalog-052-residue-moves-supersede.xml");
         for (String registering : stripped) {
             String include = "<include file=\"" + registering + "\"/>";
             assertThat(master).as("the master includes " + registering).contains(include);

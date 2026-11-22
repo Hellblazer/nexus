@@ -129,16 +129,30 @@ class RemapSchemaLiquibaseTest {
 
             List<PgCatalogProbes.Policy> policies = PgCatalogProbes.policies(ctx, "nexus", "chash_remap");
             assertThat(policies).as("a policy must exist on nexus.chash_remap").isNotEmpty();
-            String qual = policies.get(0).qual();
-            String withCheck = policies.get(0).withCheck();
+            // RDR-229 P3.1 (vectors-070): the tenant policy, and the migrating role's owner-read SELECT policy.
+            // The tenant-GUC assertions below read the tenant policy by name, not whichever policy comes first.
+            PgCatalogProbes.Policy tenant = policies.stream()
+                .filter(p -> p.policyname().equals("tenant_isolation")).findFirst().orElseThrow();
+            String qual = tenant.qual();
+            String withCheck = tenant.withCheck();
             assertThat(qual)
                 .as("USING predicate must read the nexus.tenant GUC")
                 .contains("current_setting('" + TenantConstants.GUC_NAME + "'");
             assertThat(withCheck)
                 .as("WITH CHECK predicate must read the nexus.tenant GUC")
                 .contains("current_setting('" + TenantConstants.GUC_NAME + "'");
-            assertThat(policies)
-                .as("exactly one policy expected on nexus.chash_remap").hasSize(1);
+            assertThat(policies).extracting(PgCatalogProbes.Policy::policyname)
+                .as("exactly the tenant policy and the owner-read policy expected on nexus.chash_remap")
+                .containsExactlyInAnyOrder("tenant_isolation", "chash_remap_owner_read");
+            PgCatalogProbes.Policy ownerRead = policies.stream()
+                .filter(p -> p.policyname().equals("chash_remap_owner_read")).findFirst().orElseThrow();
+            assertThat(ownerRead.cmd()).isEqualTo("SELECT");
+            assertThat(ownerRead.qual()).isEqualTo("true");
+            assertThat(ownerRead.withCheck()).isNull();
+            assertThat(PgCatalogProbes.policyRoles(ctx, "nexus", "chash_remap").stream()
+                    .filter(p -> p.policyname().equals("chash_remap_owner_read"))
+                    .map(PgCatalogProbes.PolicyRoles::toString).toList())
+                .containsExactly("chash_remap_owner_read roles={" + PgContainerHelper.USERNAME + "} cmd=SELECT");
         }
     }
 

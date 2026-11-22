@@ -339,11 +339,20 @@ class DataMoveOwnerReadPolicyIntegrationTest extends DataMoveIntegrationBase {
 
             // a policy that reaches the serving role on the centroid tree is the parent's question, asked here
             var centroids = new DrivingTableIsolationCheck.Table("nexus", "taxonomy_centroids");
+            // RDR-229 P3.1 (vectors-070) gave the centroid parent its own owner-read policy for the migrating role,
+            // which the inheriting nexus_svc is subject to: it is the one violation before the probe policy exists.
+            var centroidsOwnerRead = new DrivingTableIsolationCheck.Violation(
+                centroids, "taxonomy_centroids_owner_read", ADMIN);
+            assertThat(DrivingTableIsolationCheck.violations(service, List.of(centroids)))
+                .as("before the probe policy: the migration's own owner-read policy, reached through the membership")
+                .containsExactly(centroidsOwnerRead);
             PgContainerHelper.createPolicyUsingTrue(su, dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS,
                 "or_centroid_probe", PgContainerHelper.PolicyKind.PERMISSIVE, "SELECT", "PUBLIC");
             try {
+                // ordered by policy name: or_centroid_probe, then taxonomy_centroids_owner_read
                 assertThat(DrivingTableIsolationCheck.violations(service, List.of(centroids)))
-                    .containsExactly(new DrivingTableIsolationCheck.Violation(centroids, "or_centroid_probe", "public"));
+                    .containsExactly(new DrivingTableIsolationCheck.Violation(centroids, "or_centroid_probe", "public"),
+                        centroidsOwnerRead);
             } finally {
                 PgContainerHelper.dropPolicy(su, dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS, "or_centroid_probe");
             }
