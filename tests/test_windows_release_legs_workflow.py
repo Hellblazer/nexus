@@ -958,9 +958,11 @@ def test_the_p36_label_test_runs_against_the_real_engine_with_a_floor() -> None:
     assert "jooq-codegen" in job["needs"]
     assert any("setup-graalvm" in s.get("uses", "") for s in steps), "the substrate needs java on PATH"
     run = next(s["run"] for s in steps if "pytest" in s.get("run", ""))
-    assert target in run and "-m integration" in run and "--junitxml=label-windows-junit.xml" in run
+    assert target in run and "tests/test_chunk_seed.py" in run and "--junitxml=label-windows-junit.xml" in run
+    # the label test is integration-marked and the seed tests are not: the selection must keep both
+    assert '-m "not lint and not slow"' in run
     floor = next(s["run"] for s in steps if "check_junit_floor.py" in s.get("run", ""))
-    assert "label-windows-junit.xml" in floor and "--max-skipped 0" in floor
+    assert "label-windows-junit.xml" in floor and "--min-passed 15 " in floor and "--max-skipped 0" in floor
     test_name = re.search(r"--require-passed (\S+)", floor).group(1)
     assert f"def {test_name}(" in (Path(__file__).parent / "integration" / Path(target).name).read_text(encoding="utf-8")
     paths = _triggers(_doc(REHEARSAL))["push"]["paths"]
