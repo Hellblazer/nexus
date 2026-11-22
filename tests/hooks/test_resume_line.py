@@ -257,6 +257,22 @@ class TestRealOpener:
         assert rl.resume_line({"source": "clear"}, now=NOW) is None and minted == []
 
 
+class _FixedClock(datetime):
+    """``datetime`` whose ``now`` is NOW: the verb passes no ``now``, so its age check reads ``datetime.now`` through the
+    module, and pinning it here keeps the pointer's stamp and the check on one fixed clock (the suite's rule; the wall
+    clock made these tests go red once the calendar passed NOW, 2026-11-22)."""
+
+    @classmethod
+    def now(cls, tz=None):  # noqa: ARG003 — the signature datetime.now has
+        return NOW
+
+
+@pytest.fixture
+def fixed_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(rl, "datetime", _FixedClock)
+
+
+@pytest.mark.usefixtures("fixed_clock")
 class TestWiring:
     def _verb(self, source, store):
         with patch("nexus.hooks.session_start", return_value="GUIDANCE"), \
