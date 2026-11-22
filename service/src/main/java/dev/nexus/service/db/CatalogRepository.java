@@ -372,7 +372,15 @@ public final class CatalogRepository {
      */
     private final AtomicBoolean vacuumInProgress = new AtomicBoolean(false);
 
+    private final RenameGuard renameGuard;
+
     public CatalogRepository(TenantScope tenantScope) {
+        this(tenantScope, RenameGuard.open());
+    }
+
+    /** RDR-229 P3.5a: {@code renameGuard} is the rename refusal every rename of this repository consults first. */
+    public CatalogRepository(TenantScope tenantScope, RenameGuard renameGuard) {
+        this.renameGuard = renameGuard;
         this.tenantScope = tenantScope;
         this.vacuumExecutor = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "purge-trash-vacuum");
@@ -10880,6 +10888,18 @@ public final class CatalogRepository {
                                                    String expectedTargetSupersededBy,
                                                    String newContentType, String newOwnerId,
                                                    String newNameEmbeddingModel) {
+        // RDR-229 P3.7: the refusal, the path (name path before gate 3, the one-row update from it) and the commit are one pinned unit
+        // (RenameReadiness#pinned), so gate 3 cannot flip to true between the path this rename chose and its commit (fix check A O-5).
+        return renameGuard.pinned(() -> {
+            renameGuard.requireRenameAllowed();
+            return renameCollectionOnPath(tenant, oldName, newName, expectedTargetSupersededBy, newContentType, newOwnerId,
+                newNameEmbeddingModel, renameGuard.oneRowRename());
+        });
+    }
+
+    private Map<String, Integer> renameCollectionOnPath(String tenant, String oldName, String newName,
+                                                        String expectedTargetSupersededBy, String newContentType,
+                                                        String newOwnerId, String newNameEmbeddingModel, boolean oneRow) {
         // nexus-wbfpw.71: a rename re-homes chunks and registry rows with no audit row, so it is refused on a
         // quarantine collection, as source or as target (the sanctioned verbs are restore and expiry).
         // RDR-229 P2.5: each end is judged by its row (registry cache, else one single-column read); an end with
@@ -10889,7 +10909,7 @@ public final class CatalogRepository {
         String[] tuple = new String[5];
         Map<String, Integer> counts = CollectionMint.refusingRace(tenantScope, tenant,
             () -> renameCollectionTxn(tenant, oldName, newName, expectedTargetSupersededBy, newContentType, newOwnerId,
-                newNameEmbeddingModel, tuple), CollectionMint.recheckOf(tenant, tuple));
+                newNameEmbeddingModel, tuple, oneRow), CollectionMint.recheckOf(tenant, tuple));
         // Post-commit (nexus-h8rf6 wave review): the rename RETIRES the old registry row —
         // evict it so a later same-named collection re-registers.
         //
@@ -10898,7 +10918,7 @@ public final class CatalogRepository {
         // INSERT ... ON CONFLICT DO NOTHING would be a no-op either way, but a caller
         // re-registering the old name must reach upsertCollection rather than be short-
         // circuited by a stale KNOWN entry.
-        if (counts.containsKey("catalog_collections_superseded")) {
+        if (oneRow || counts.containsKey("catalog_collections_superseded")) {
             CollectionRegistry.evict(tenant, oldName);
             // RDR-225 (nexus-3wh8d.13): newName is evicted first. Step 1's upsert can REVIVE a
             // tombstone of newName and, with it, replace the model that tombstone carried (the target
@@ -11383,7 +11403,8 @@ public final class CatalogRepository {
     private Map<String, Integer> renameCollectionTxn(String tenant, String oldName, String newName,
                                                         String expectedTargetSupersededBy,
                                                         String newContentTypeOrNull, String newOwnerIdOrNull,
-                                                        String newNameEmbeddingModelOrNull, String[] tupleOut) {
+                                                        String newNameEmbeddingModelOrNull, String[] tupleOut,
+                                                        boolean oneRow) {
         // nexus-wbfpw.66: UPDATEs catalog_document_chunks.collection, which fires
         // vectors-021-3's chunk-locking trigger; whole transaction retried on 40P01. `counts` is
         // built inside the lambda, so each attempt starts from an empty map.
@@ -11524,6 +11545,10 @@ public final class CatalogRepository {
             // document already holds (the catalog-016 partial unique index would abort the
             // transaction with an opaque 500). Checked here, in this transaction and before
             // anything moves, so the refusal leaves X untouched.
+            if (oneRow) {   // RDR-229 P3.7: from gate 3 the registry row is updated in place (CollectionOneRowRename)
+                return CollectionOneRowRename.apply(ctx, tenant, oldName, newName, newContentTypeOrNull, newOwnerIdOrNull,
+                    targetRowExists, tupleOut);
+            }
             requireCollectionUrisFree(ctx, tenant, oldName, newName, "renaming " + oldName + " to " + newName);
             // nexus-sis0m.3: Y's content_type and owner_id are the client's, derived from Y's
             // name (see the 6-arg renameCollection); absent, they are X's. Copying X's
