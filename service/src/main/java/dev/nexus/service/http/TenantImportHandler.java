@@ -368,6 +368,10 @@ public final class TenantImportHandler implements HttpHandler {
             r.skippedTables().forEach(skipped::put);
             ArrayNode columns = report.putArray("skipped_columns");
             r.skippedColumns().forEach(columns::add);
+            ArrayNode relabelled = report.putArray("collections_relabelled");
+            for (TenantImportReport.Relabel x : r.collectionsRelabelled()) {
+                relabelled.addObject().put("label", x.label()).put("target_label", x.targetLabel());
+            }
             report.put("rows_inserted", r.insertedRows());
             report.put("rows_dropped", r.droppedRows());
         }
