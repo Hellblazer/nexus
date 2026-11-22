@@ -1320,7 +1320,11 @@ public final class PgVectorRepository {
                                 collectionId);
                     }
                     // RDR-225: the four-column primary key (the partition keys are part of it).
-                    insert.onConflict(ch.tenantId(), ch.collection(), ch.chash(), ch.embeddingModel())
+                    // RDR-229 #7 (nexus-p2m1x.20): the name key arbitrates, so a racing insert that trips the leaf's id unique index
+                    // retries once (TwinKeyUpsert).
+                    final var finalInsert = insert;
+                    dev.nexus.service.db.TwinKeyUpsert.run(ctx, "chunks", dev.nexus.service.db.TwinKeyUpsert.Arbiter.NAME_KEY, c ->
+                    finalInsert.onConflict(ch.tenantId(), ch.collection(), ch.chash(), ch.embeddingModel())
                           .doUpdate()
                           .set(ch.chunkText(), DSL.excluded(ch.chunkText()))
                           .set(ch.embedding(), DSL.excluded(ch.embedding()))
@@ -1362,7 +1366,7 @@ public final class PgVectorRepository {
                           // (a typed field comparison, not a raw SQL string, so RawSqlGateTest needs no
                           // SANCTIONED_STATEMENTS entry).
                           .returningResult(ch.chash(), DSL.field(DimTables.insertedByThisStatement(ch)))
-                          .fetch()
+                          .fetch())
                           .forEach(r -> {
                               if (!Boolean.TRUE.equals(r.value2())
                                       && finalOriginalAbsentChashes.contains(r.value1())) {

@@ -6751,7 +6751,10 @@ public final class CatalogRepository {
         Field<JSONB> metadataSet = mergeKeys == null ? DSL.excluded(ch.metadata())
             : dev.nexus.service.vectors.PgVectorRepository.mergeMetadata(
                 ch.metadata(), DSL.excluded(ch.metadata()), mergeKeys);
-        var returned = insert.onConflict(ch.tenantId(), ch.collection(), ch.chash(), ch.embeddingModel())
+        // RDR-229 #7 (nexus-p2m1x.20): the name key arbitrates, so a racing insert that trips the leaf's id unique index
+        // retries once (TwinKeyUpsert).
+        final var finalInsert = insert;
+        var returned = TwinKeyUpsert.run(ctx, "chunks", TwinKeyUpsert.Arbiter.NAME_KEY, c -> finalInsert.onConflict(ch.tenantId(), ch.collection(), ch.chash(), ch.embeddingModel())
               .doUpdate()
               .set(ch.chunkText(), textSet)
               .set(ch.embedding(), embeddingSet)
@@ -6766,7 +6769,7 @@ public final class CatalogRepository {
               // PgVectorRepository#batchUpdateMetadata.
               .set(ch.lastWrittenAt(), DimTables.lastWrittenNow())
               .returningResult(ch.chash(), DSL.field(DimTables.insertedByThisStatement(ch)))
-              .fetch();
+              .fetch());
         for (var r : returned) {
             if (!Boolean.TRUE.equals(r.value2()) && originalAbsentChashes.contains(r.value1())) {
                 raced++;

@@ -160,6 +160,9 @@ public final class TaxonomyCentroidRepository {
                 // CHECKs (the name and id both set or both unset; collection_id NOT NULL), evaluated on every row
                 // version, so a centroid without the id is refused (23514), and so is the conflict update of one
                 // the stamp has not reached.
+                // RDR-229 #7 (nexus-p2m1x.20): the name key arbitrates, so a racing insert that trips the leaf's id unique index
+                // retries once (TwinKeyUpsert).
+                dev.nexus.service.db.TwinKeyUpsert.run(ctx, "taxonomy_centroids", dev.nexus.service.db.TwinKeyUpsert.Arbiter.NAME_KEY, c ->
                 ctx.insertInto(ct.table())
                    .columns(ct.tenantId(), ct.collection(), ct.topicId(), ct.embeddingModel(),
                             ct.embedding(), ct.label(), ct.docCount(), TAXONOMY_CENTROIDS.COLLECTION_ID)
@@ -172,7 +175,7 @@ public final class TaxonomyCentroidRepository {
                    .set(ct.label(),     DSL.excluded(ct.label()))
                    .set(ct.docCount(),  DSL.excluded(ct.docCount()))
                    .set(TAXONOMY_CENTROIDS.COLLECTION_ID, DSL.excluded(TAXONOMY_CENTROIDS.COLLECTION_ID))
-                   .execute();
+                   .execute());
             }
             return null;
         });
