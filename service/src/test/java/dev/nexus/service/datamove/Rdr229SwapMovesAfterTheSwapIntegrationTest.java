@@ -450,11 +450,7 @@ class Rdr229SwapMovesAfterTheSwapIntegrationTest extends Rdr229SwapMovesFixtures
         assertThat(orphaned).as("chunk_orphaned_at: the new (tenant_id, chash) index").contains("idx_chunk_orphaned_at_tenant_chash")
             .doesNotContain("Seq Scan");
         assertThat(manifest).as("catalog_document_chunks").contains("idx_catalog_chunks_chash").doesNotContain("Seq Scan");
-        // Since P3.4 (vectors-076-1) topic_assignments also carries idx_ta_tenant_source_collection_id (tenant_id, source_collection_id), the supporting
-        // index of P3.3a's twin to the registry. This scenario seeds topic_assignments with a row or two, so the planner may take either index for the
-        // lookup; both lead with two columns of the key and tenant_id (IdKeyIndexCensus), and neither is a scan of the table.
-        assertThat(assignments).as("topic_assignments").containsAnyOf("idx_ta_tenant_doc_id", "idx_ta_tenant_source_collection_id")
-            .doesNotContain("Seq Scan");
+        assertThat(assignments).as("topic_assignments").contains("idx_ta_tenant_doc_id").doesNotContain("Seq Scan");
     }
 
     // ── 15: the chunks swap waits for the child index (transient, never a wedge) ────────────────────────────

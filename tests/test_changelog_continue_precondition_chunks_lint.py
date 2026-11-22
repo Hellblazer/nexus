@@ -111,21 +111,6 @@ _CONTINUE_ALLOWLIST: dict[tuple[str, str], str] = {
     # changeset is skipped (failOnError false), not failed. The one table name in the body is the exempt statement shape
     # (_EXEMPT_INDEX_BUILD). No chunk table, leaf, partition helper or builder object is named (RDR-229 P3.3c, nexus-p2m1x.21).
     ("vectors-074-chunk-orphaned-at-chash-index.xml", "vectors-074-1"): "child index of the chunk id key",
-    # The supporting indexes of P3.3a's id twins (RDR-229 P3.4, nexus-p2m1x.22), each shaped like vectors-074-1 but for the heal: a DO block
-    # that drops an INVALID index of the name (plain DROP INDEX, lock_timeout 5 s, found by index name in pg_index, executed only when one
-    # exists), then SET lock_timeout = '30s' and CREATE INDEX CONCURRENTLY IF NOT EXISTS on one table (tenant_id, <id column>):
-    # SHARE UPDATE EXCLUSIVE on that table and nothing on nexus.chunks or a leaf; a lock wait that ends skips the boot's build
-    # (failOnError false). topic_assignments (vectors-076-1) holds a foreign key into nexus.chunks and its build is the exempt
-    # statement shape; the other five tables hold no such key. The precondition reads pg_index by the index's name only.
-    ("vectors-076-collection-id-fk-twin-indexes.xml", "vectors-076-1"): "id-twin index, topic_assignments",
-    ("vectors-076-collection-id-fk-twin-indexes.xml", "vectors-076-2"): "id-twin index, document_aspects",
-    ("vectors-076-collection-id-fk-twin-indexes.xml", "vectors-076-3"): "id-twin index, topics",
-    ("vectors-076-collection-id-fk-twin-indexes.xml", "vectors-076-4"): "id-twin index, taxonomy_meta",
-    ("vectors-076-collection-id-fk-twin-indexes.xml", "vectors-076-5"): "id-twin index, document_highlights",
-    ("vectors-076-collection-id-fk-twin-indexes.xml", "vectors-076-6"): "id-twin index, canary_query_ring",
-    # The retired queue's (vectors-076-7): a DO-guarded plain CREATE INDEX IF NOT EXISTS on nexus.aspect_extraction_queue
-    # (tenant_id, collection_id) under SET LOCAL lock_timeout = '5s', guarded like vectors-072-7; that table holds no key into chunks.
-    ("vectors-076-collection-id-fk-twin-indexes.xml", "vectors-076-7"): "id-twin index, retired aspect_extraction_queue",
 }
 
 # The one statement shape exempt from the foreign-key-table rule (see the module docstring), matched on the NORMALISED text.

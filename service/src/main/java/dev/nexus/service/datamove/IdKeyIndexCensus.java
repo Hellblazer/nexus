@@ -15,7 +15,7 @@ import java.util.List;
  *
  * <p><b>The rule.</b> A key is supported when its referencing table has a VALID, non-partial index whose first two columns are both
  * columns of the key and one of them is {@code tenant_id}. The registry keys pass through (tenant_id, &lt;id column&gt;)
- * (vectors-076). The three keys into chunks pass through (tenant_id, chash) or (tenant_id, doc_id): their second column is not the
+ * (IdUniqueIndexPass's supporting indexes, or an arbiter that leads with those columns). The three keys into chunks pass through (tenant_id, chash) or (tenant_id, doc_id): their second column is not the
  * id, and that is enough because chash (doc_id holds the chash) is near-unique within a tenant, so the lookup a chunk delete or
  * update makes reads a handful of rows (Rdr229SwapMovesAfterTheSwapIntegrationTest shows each lookup on its index). The composite
  * passes through the chunks id unique key, which leads with (tenant_id, collection_id) (vectors-073). A partial index is not

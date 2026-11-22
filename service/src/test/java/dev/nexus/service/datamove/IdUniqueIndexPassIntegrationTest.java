@@ -5,7 +5,11 @@ package dev.nexus.service.datamove;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.nexus.service.BootWorkRegistry;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import dev.nexus.service.PgCatalogProbes;
+import dev.nexus.service.db.SchemaMigrator;
+import org.slf4j.LoggerFactory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -16,7 +20,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * RDR-229 P3.4 (nexus-p2m1x.22): {@link IdUniqueIndexPass}, the eight id-keyed UNIQUE indexes the id-keyed upserts arbitrate on, built at run time
+ * RDR-229 P3.4 (nexus-p2m1x.22): {@link IdUniqueIndexPass}, its id-keyed UNIQUE arbiters and the id twins' plain supporting indexes, built at run time
  * after gate 2. Real PostgreSQL, the production pass on the admin connection.
  */
 class IdUniqueIndexPassIntegrationTest extends DataMoveIntegrationBase {
@@ -43,6 +47,22 @@ class IdUniqueIndexPassIntegrationTest extends DataMoveIntegrationBase {
             st.execute("SET session_replication_role = replica");
             return st.executeUpdate(sql);
         }
+    }
+
+    /** While a schema migration holds its advisory lock the pass builds nothing and leaves its entry for the next tick. */
+    @Test
+    void whileAMigrationHoldsItsLockThePassStandsDown() throws Exception {
+        var registry = new BootWorkRegistry(Clock.systemUTC());
+        try (Connection walk = pg.createConnection(""); Statement st = walk.createStatement()) {
+            st.execute("SELECT pg_advisory_lock(" + SchemaMigrator.MIGRATION_ADVISORY_LOCK_KEY + ")");
+            var r = pass(registry, true).runOnce();
+            assertThat(r.built()).as("nothing built under a migration").isZero();
+            assertThat(registry.snapshot()).as("the work is still reported, not finished")
+                .anyMatch(e -> e.id().equals(IdUniqueIndexPass.BOOT_WORK_ID));
+            st.execute("SELECT pg_advisory_unlock(" + SchemaMigrator.MIGRATION_ADVISORY_LOCK_KEY + ")");
+        }
+        assertThat(pass(registry, true).runOnce().built()).as("after it, the next tick builds").isEqualTo(applicable());
+        assertThat(registry.snapshot()).noneMatch(e -> e.id().equals(IdUniqueIndexPass.BOOT_WORK_ID));
     }
 
     // ── the target-less ON CONFLICT DO NOTHING writers (linda's ruling 2026-11-22) ─────────────────────────────
@@ -81,6 +101,11 @@ class IdUniqueIndexPassIntegrationTest extends DataMoveIntegrationBase {
         assertThat(ctx().fetchCount(ctx().selectFrom("nexus.reembed_jobs").where("tenant_id = ?", TENANT))).isEqualTo(1);
     }
 
+    /** How many of the pass's indexes apply here: the retired queue's does not where its table is gone (a fresh walk). */
+    private int applicable() {
+        return (int) IdUniqueIndexPass.SPECS.stream().filter(s -> !s.optional() || IdUniqueIndexPass.applicable(ctx(), s)).count();
+    }
+
     private IdUniqueIndexPass pass(BootWorkRegistry registry, boolean gate2) {
         return new IdUniqueIndexPass(adminConnection, registry, () -> gate2);
     }
@@ -96,12 +121,12 @@ class IdUniqueIndexPassIntegrationTest extends DataMoveIntegrationBase {
     }
 
     @Test
-    void afterGate2AllEightAreBuiltValidWithTheirExactDefinitions() {
+    void afterGate2EveryApplicableIndexIsBuiltValidWithItsExactDefinition() {
         var registry = new BootWorkRegistry(Clock.systemUTC());
         var r = pass(registry, true).runOnce();
 
         assertThat(r.ran()).isTrue();
-        assertThat(r.built()).isEqualTo(IdUniqueIndexPass.SPECS.size());
+        assertThat(r.built()).isEqualTo(applicable());
         assertThat(r.corrupt()).isEmpty();
         assertThat(IdUniqueIndexPass.allValid(ctx())).as("gate 3's read").isTrue();
         assertThat(PgCatalogProbes.indexDef(ctx(), "nexus", "idx_topics_root_label_id_uq"))
@@ -144,10 +169,22 @@ class IdUniqueIndexPassIntegrationTest extends DataMoveIntegrationBase {
         List<String> sent = new ArrayList<>();
         pass.beforeStatement(sent::add);
 
-        var first = pass.runOnce();
+        var logger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(IdUniqueIndexPass.class);
+        var appender = new ListAppender<ILoggingEvent>();
+        appender.start();
+        logger.addAppender(appender);
+        IdUniqueIndexPass.Result first;
+        try {
+            first = pass.runOnce();
+        } finally {
+            logger.detachAppender(appender);
+        }
+        assertThat(appender.list).map(ILoggingEvent::getFormattedMessage).as("the duplicate keys are in the log, read by the report query")
+            .anyMatch(m -> m.contains("event=id_unique_index_duplicate") && m.contains("table=taxonomy_meta")
+                && m.contains(TENANT + "/990001 x2"));
 
         assertThat(first.corrupt()).containsExactly("taxonomy_meta");
-        assertThat(first.built()).as("the other seven").isEqualTo(IdUniqueIndexPass.SPECS.size() - 1);
+        assertThat(first.built()).as("every other applicable one").isEqualTo(applicable() - 1);
         assertThat(PgCatalogProbes.indexDefs(ctx(), "nexus", "taxonomy_meta")).as("no INVALID leftover stays")
             .noneMatch(d -> d.contains("idx_taxonomy_meta_id_uq"));
         assertThat(IdUniqueIndexPass.allValid(ctx())).as("gate 3 stays false").isFalse();

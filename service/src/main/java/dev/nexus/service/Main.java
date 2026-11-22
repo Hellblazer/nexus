@@ -702,7 +702,7 @@ public final class Main {
         // nexus-p2m1x.20 (RDR-229 P3.3b): the per-leaf id unique-index pass, after the engine serves. Not the PCI reconciler's: it runs whether
         // NX_SEARCH_PCI is on or off and starts only when gate 1 of the completion check holds (its latest read; no check, no pass).
         var leafIndexPass = startLeafIndexPass(bootWork, adminConnection, completionCheck);
-        // nexus-p2m1x.22 (RDR-229 P3.4): the four id-keyed UNIQUE indexes P3.5c's upserts arbitrate on, after the engine serves, once gate 2 of
+        // nexus-p2m1x.22 (RDR-229 P3.4): the id-keyed UNIQUE arbiters the id-keyed upserts need and the id twins' supporting indexes, after the engine serves, once gate 2 of
         // the completion check holds (its latest read; no check, no pass). Gate 3 requires them.
         var idUniqueIndexPass = startIdUniqueIndexPass(bootWork, adminConnection, completionCheck);
 
@@ -845,8 +845,8 @@ public final class Main {
     private static dev.nexus.service.datamove.CompletionBootWork startCompletionBootWork(BootWorkRegistry bootWork,
             dev.nexus.service.db.AdminConnection admin, dev.nexus.service.datamove.CompletionCheck.Gate3Source gate3) {
         try {
-            // RDR-229 P3.4 (linda, 2026-11-22): gate 3 also requires the eight runtime-built id UNIQUE indexes (IdUniqueIndexPass), the
-            // arbiters the id-keyed upserts need; read only after gate 2 and complete PCI coverage.
+            // RDR-229 P3.4 (linda, 2026-11-22): gate 3 also requires IdUniqueIndexPass's runtime-built indexes (the
+            // arbiters the id-keyed upserts need, and the id twins' supporting indexes); read only after gate 2 and complete PCI coverage.
             var check = dev.nexus.service.datamove.CompletionBootWork.atBoot(bootWork, admin, gate3,
                 java.util.List.of(dev.nexus.service.datamove.IdUniqueIndexPass::allValid));
             check.start();

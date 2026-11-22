@@ -72,7 +72,7 @@ class Rdr229ArbiterTwinCensusIntegrationTest extends Rdr229SwapMovesFixtures {
               FROM pg_index i JOIN pg_class t ON t.oid = i.indrelid JOIN pg_namespace n ON n.oid = t.relnamespace
              WHERE n.nspname = 'nexus' AND i.indisunique AND i.indisvalid AND NOT t.relispartition
                AND EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = i.indrelid AND a.attnum = ANY (i.indkey)
-                            AND (a.attname IN ('collection', 'source_collection') OR (t.relname = 'catalog_collections' AND a.attname = 'name')))
+                            AND (a.attname IN ('collection', 'source_collection', 'target_collection', 'physical_collection', 'origin_collection', 'quarantine_collection') OR (t.relname = 'catalog_collections' AND a.attname = 'name')))
             """).forEach(r -> {
                 String pred = r.get("pred", String.class);
                 if (pred != null && pred.startsWith("(") && pred.endsWith(")")) {

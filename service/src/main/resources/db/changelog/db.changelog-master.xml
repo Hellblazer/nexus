@@ -2417,15 +2417,6 @@
     <include file="db/changelog/vectors-074-chunk-orphaned-at-chash-index.xml"/>
 
     <!--
-        Bead nexus-p2m1x.22 (RDR-229 P3.4): vectors-076 builds the supporting index of each of P3.3a's seven id-twin foreign keys, (tenant_id, <id column>) on
-        topic_assignments, document_aspects, topics, taxonomy_meta, document_highlights, canary_query_ring and the retired aspect_extraction_queue. Six
-        self-retrying changesets shaped like vectors-074-1 (a DO block drops an INVALID leftover only when one exists, then a CONCURRENTLY build under lock_timeout 30 s) and the queue's,
-        guarded like vectors-072-7 so an install without the table records it. DATA EFFECT: none. After vectors-074, before the grants-nexus-svc.xml runAlways
-        block. See the included file's header.
-    -->
-    <include file="db/changelog/vectors-076-collection-id-fk-twin-indexes.xml"/>
-
-    <!--
         Bead nexus-p2m1x.17 (RDR-229 P3.1, review-gate fix round B; P2.10 critique S2): the P2.10 residue repair moves (catalog-049-2) that are not
         complete when P3.1 lands are superseded by replacements whose templates set the collection id with source_uri, since P3.1's NOT VALID CHECKs
         refuse any UPDATE of a row with a name and no id (23514, permanent). One changeset per registry state (the documents move open or failed;

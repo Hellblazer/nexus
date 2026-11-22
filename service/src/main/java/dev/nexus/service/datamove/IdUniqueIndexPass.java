@@ -30,16 +30,21 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 /**
- * RDR-229 P3.4 (nexus-p2m1x.22, linda's ruling 2026-11-22, from elsinore's P3.5c mapping and P3.4's arbiter census; linda's rulings 2026-11-22): the eight id-keyed UNIQUE indexes that the
+ * RDR-229 P3.4 (nexus-p2m1x.22, linda's ruling 2026-11-22, from elsinore's P3.5c mapping and P3.4's arbiter census; linda's rulings 2026-11-22): the id-keyed indexes P3.4 builds at run time. Eight UNIQUE arbiters, which that the
  * id-keyed upserts of P3.5c take as their ON CONFLICT arbiters, and without which P3.7's one-row rename could make duplicate rows. They are
  * built at run time, after the engine serves, in the reconciler's pattern ({@code LeafIndexPass}'s, minus the partition route: none of the
- * eight tables is partitioned): one {@code CREATE UNIQUE INDEX CONCURRENTLY} at a time, on its own admin connection, under an advisory lock
+ * tables is partitioned): one {@code CREATE [UNIQUE] INDEX CONCURRENTLY} at a time, on its own admin connection, under an advisory lock
  * of its own ({@link #LOCK_KEY}), with an INVALID leftover of the pass's name dropped before the build. No changeset carries them, so the
  * migration walk's DDL count does not.
  *
  * <p><b>Gate 2.</b> The pass starts only when gate 2 of the completion check holds (every stamp move, every P3.3a move, both P3.3c swaps and
  * their three validation moves complete): before it a row may still lack its id, and a chunk-family {@code on_complete} ends builds in
- * flight ({@code VerifyingFinisher}). Gate 3 requires {@link #allValid} (P3.4 is not complete while one of the eight is missing).
+ * flight ({@code VerifyingFinisher}). Gate 3 requires {@link #allValid} (P3.4 is not complete while one of them is missing).
+ *
+ * <p><b>The supporting indexes.</b> Beside the arbiters, the plain (tenant_id, id) indexes that support P3.3a's id-twin foreign keys where no
+ * arbiter's leading columns already do: out of the boot walk by linda's ruling (2026-11-22), because an upgrade boot may write at most
+ * 64 MiB and the RDR builds no index on a user-data-growing table inside it. The retired queue's applies only where its table exists with
+ * its id column. A unique violation can only come from an arbiter.
  *
  * <p><b>A duplicate is corruption, not data.</b> Before P3.7 each collection name maps to exactly one id and each table's name-keyed unique
  * already forbids the duplicate, so a unique violation (23505) on one of these builds means the table is corrupt. The pass then drops the
@@ -49,7 +54,7 @@ import java.util.function.Consumer;
  * a key value (the status is unauthenticated); the values are in the log.
  *
  * <p>Visible to the migration walk as the PCI builder is: its {@code application_name} is under the builders' prefix, so
- * {@code PciBuilders.terminate} ends it, and it reads the migration advisory lock before every statement.
+ * {@code PciBuilders.terminate} ends it, and it reads the migration advisory lock before each index it builds.
  */
 public final class IdUniqueIndexPass implements AutoCloseable {
 
@@ -58,7 +63,7 @@ public final class IdUniqueIndexPass implements AutoCloseable {
     public static final String APPLICATION_NAME = PciBuilderSession.APPLICATION_NAME_PREFIX + "id-unique-index-pass";
     public static final String BOOT_WORK_ID = "id-unique-index-pass";
     /** ASCII "iduqidxp". */
-    public static final long LOCK_KEY = 0x696475716964787L;
+    public static final long LOCK_KEY = 0x6964757169647870L;
 
     static final String WHAT = "building the unique id indexes the rename's upserts use";
     static final String UNIT = "indexes";
@@ -69,32 +74,51 @@ public final class IdUniqueIndexPass implements AutoCloseable {
     static final Duration BUILD_STATEMENT_TIMEOUT = Duration.ofHours(6);
     static final int DUPLICATES_LOGGED = 5;
 
-    /** One index: its table, name, key columns and partial predicate ({@code null} for none), in the deparsed form pg_get_indexdef shows. */
-    public record Spec(String table, String index, String columns, String predicate) {
+    /**
+     * One index: its table, name, key columns and partial predicate ({@code null} for none) in the form {@code pg_get_expr} deparses it,
+     * whether it is UNIQUE (an arbiter) or plain (a foreign key's supporting index), and whether its table may be absent (the retired queue:
+     * then the index is not applicable and counts as in place).
+     */
+    public record Spec(String table, String index, String columns, String predicate, boolean unique, boolean optional) {
+        static Spec arbiter(String table, String index, String columns, String predicate) {
+            return new Spec(table, index, columns, predicate, true, false);
+        }
+
+        static Spec support(String table, String index, String columns, boolean optional) {
+            return new Spec(table, index, columns, null, false, optional);
+        }
+
         String definition() {
-            return "CREATE UNIQUE INDEX CONCURRENTLY " + index + " ON nexus." + table + " (" + columns + ")"
+            return "CREATE " + (unique ? "UNIQUE " : "") + "INDEX CONCURRENTLY " + index + " ON nexus." + table + " (" + columns + ")"
                 + (predicate == null ? "" : " WHERE " + predicate);
         }
     }
 
     /**
-     * The eight. The topics and reembed_jobs predicates are exact; the topics one is exactly the upsert's ({@code ON CONFLICT (tenant_id, collection_id, label) WHERE parent_id IS NULL}),
+     * The eight arbiters, then the four supporting indexes. The topics and reembed_jobs predicates are exact; the topics one is exactly the upsert's ({@code ON CONFLICT (tenant_id, collection_id, label) WHERE parent_id IS NULL}),
      * or PostgreSQL cannot infer the index as its arbiter.
      */
     public static final List<Spec> SPECS = List.of(
-        new Spec("document_aspects", "idx_doc_aspects_id_source_path_uq", "tenant_id, collection_id, source_path", null),
-        new Spec("chash_remap", "idx_chash_remap_id_old_id_uq", "tenant_id, source_collection_id, old_id", null),
-        new Spec("taxonomy_meta", "idx_taxonomy_meta_id_uq", "tenant_id, collection_id", null),
-        new Spec("topics", "idx_topics_root_label_id_uq", "tenant_id, collection_id, label", "parent_id IS NULL"),
+        Spec.arbiter("document_aspects", "idx_doc_aspects_id_source_path_uq", "tenant_id, collection_id, source_path", null),
+        Spec.arbiter("chash_remap", "idx_chash_remap_id_old_id_uq", "tenant_id, source_collection_id, old_id", null),
+        Spec.arbiter("taxonomy_meta", "idx_taxonomy_meta_id_uq", "tenant_id, collection_id", null),
+        Spec.arbiter("topics", "idx_topics_root_label_id_uq", "tenant_id, collection_id, label", "parent_id IS NULL"),
         // the two SQL arbiters P3.4's census found beside the mapping: stamp_chunks_on_manifest_delete/_update (vectors-069-12/-13) and
         // canary_query_ring_upsert (vectors-069) upsert ON CONFLICT on these tables' name keys
-        new Spec("chunk_orphaned_at", "idx_chunk_orphaned_at_id_chash_uq", "tenant_id, collection_id, chash", null),
-        new Spec("canary_query_ring", "idx_canary_query_ring_id_digest_uq", "tenant_id, collection_id, vector_digest", null),
+        Spec.arbiter("chunk_orphaned_at", "idx_chunk_orphaned_at_id_chash_uq", "tenant_id, collection_id, chash", null),
+        Spec.arbiter("canary_query_ring", "idx_canary_query_ring_id_digest_uq", "tenant_id, collection_id, vector_digest", null),
         // target-less ON CONFLICT DO NOTHING (PipelineRepository, ReembedJobRepository) arbitrates on every unique index, so the twin protects
         // them with no code change once the row carries its id (P3.1's dual write); reembed_jobs keeps reembed_jobs_source_lock's predicate exactly
-        new Spec("pdf_pipeline", "idx_pdf_pipeline_id_uq", "tenant_id, content_hash, collection_id, pdf_path", null),
-        new Spec("reembed_jobs", "idx_reembed_jobs_source_id_lock", "tenant_id, source_collection_id",
-            "state = ANY (ARRAY['planned'::text, 'running'::text, 'paused'::text, 'cutover'::text, 'failed'::text])"));
+        Spec.arbiter("pdf_pipeline", "idx_pdf_pipeline_id_uq", "tenant_id, content_hash, collection_id, pdf_path", null),
+        Spec.arbiter("reembed_jobs", "idx_reembed_jobs_source_id_lock", "tenant_id, source_collection_id",
+            "state = ANY (ARRAY['planned'::text, 'running'::text, 'paused'::text, 'cutover'::text, 'failed'::text])"),
+        // The supporting indexes of P3.3a's id twins (linda 2026-11-22: out of the boot walk, which an upgrade boot's 64 MiB write bound and
+        // the RDR's no-index-builds-at-boot rule forbid) that no arbiter above already covers with its leading (tenant_id, id) columns:
+        // document_aspects, taxonomy_meta and canary_query_ring are covered; topics' arbiter is partial, which IdKeyIndexCensus does not count.
+        Spec.support("topic_assignments", "idx_ta_tenant_source_collection_id", "tenant_id, source_collection_id", false),
+        Spec.support("topics", "idx_topics_tenant_collection_id", "tenant_id, collection_id", false),
+        Spec.support("document_highlights", "idx_doc_highlights_collection_id", "tenant_id, collection_id", false),
+        Spec.support("aspect_extraction_queue", "idx_aspect_queue_collection_id", "tenant_id, collection_id", true));
 
     /** Gate 2 of the completion check; production wires the completion reporter's latest read. */
     @FunctionalInterface
@@ -108,7 +132,7 @@ public final class IdUniqueIndexPass implements AutoCloseable {
     private final AdminConnection admin;
     private final BootWorkRegistry registry;
     private final Gate2 gate2;
-    /** Tables whose build hit a duplicate, with the status text: not built again in this engine's life. Guarded by {@link #passLock}. */
+    /** Indexes whose build hit a duplicate, by index name, with the status text: not built again in this engine's life. Guarded by {@link #passLock}. */
     private final Map<String, String> corrupt = new LinkedHashMap<>();
     private final Object passLock = new Object();
     private volatile Consumer<String> beforeStatement;
@@ -126,30 +150,49 @@ public final class IdUniqueIndexPass implements AutoCloseable {
         this.beforeStatement = hook;
     }
 
-    /** True when all eight exist and are VALID with their definitions: what gate 3 requires. A failed read is false. */
+    /** True when every applicable index exists and is VALID with its definition: what gate 3 requires. A failed read is false. */
     public static boolean allValid(DSLContext ctx) {
-        for (Spec s : SPECS) {
-            if (!valid(ctx, s)) {
-                return false;
+        try {
+            for (Spec s : SPECS) {
+                if (!valid(ctx, s)) {
+                    return false;
+                }
             }
+            return true;
+        } catch (DataAccessException e) {
+            log.warn("event=id_unique_index_valid_unread cause=\"{}\"", oneLine(e));
+            return false;
         }
-        return true;
     }
 
     /** The index of {@code s}'s name is VALID and is {@code s}'s definition (unique, its columns, its predicate). */
     static boolean valid(DSLContext ctx, Spec s) {
+        if (s.optional() && !applicable(ctx, s)) {
+            return true;   // the retired queue table is gone, or has no id column: nothing to support
+        }
+        // catalog fields, not pg_get_indexdef's text, which schema-qualifies by the reader's search_path (review r1, Minor 7)
         var r = ctx.fetchOne("""
-            SELECT i.indisvalid AS valid, pg_catalog.pg_get_indexdef(i.indexrelid) AS def
+            SELECT i.indisvalid AND i.indisunique = ? AND t.relname = ? AS shape,
+                   (SELECT string_agg(a.attname, ', ' ORDER BY k.ord) FROM generate_series(0, i.indnkeyatts - 1) k(ord)
+                      JOIN pg_catalog.pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[k.ord]) AS cols,
+                   pg_catalog.pg_get_expr(i.indpred, i.indrelid) AS pred
               FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class c ON c.oid = i.indexrelid
+              JOIN pg_catalog.pg_class t ON t.oid = i.indrelid
               JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-             WHERE n.nspname = 'nexus' AND c.relname = ?""", s.index());
-        if (r == null || !Boolean.TRUE.equals(r.get("valid", Boolean.class))) {
+             WHERE n.nspname = 'nexus' AND c.relname = ?""", s.unique(), s.table(), s.index());
+        if (r == null || !Boolean.TRUE.equals(r.get("shape", Boolean.class))) {
             return false;
         }
-        String def = r.get("def", String.class);
-        String want = "CREATE UNIQUE INDEX " + s.index() + " ON nexus." + s.table() + " USING btree (" + s.columns() + ")"
-            + (s.predicate() == null ? "" : " WHERE (" + s.predicate() + ")");
-        return want.equals(def);
+        String pred = r.get("pred", String.class);
+        String want = s.predicate() == null ? null : "(" + s.predicate() + ")";
+        return s.columns().equals(r.get("cols", String.class)) && Objects.equals(want, pred);
+    }
+
+    /** The table exists with its id column (the first id-named column of the key). */
+    static boolean applicable(DSLContext ctx, Spec s) {
+        String idColumn = java.util.Arrays.stream(s.columns().split(",\\s*")).filter(c -> c.endsWith("collection_id")).findFirst().orElseThrow();
+        return ctx.fetchExists(DSL.selectOne().from("pg_catalog.pg_attribute a")
+            .where("a.attrelid = to_regclass(?) AND a.attname = ? AND NOT a.attisdropped", "nexus." + s.table(), idColumn));
     }
 
     /** The status text for a table whose build hit a duplicate on the id key. */
@@ -192,7 +235,7 @@ public final class IdUniqueIndexPass implements AutoCloseable {
     public Result runOnce() {
         synchronized (passLock) {
             if (finished) {
-                return new Result(true, 0, 0, List.copyOf(corrupt.keySet()));
+                return new Result(true, 0, 0, corruptTables());
             }
             boolean held;
             try {
@@ -202,16 +245,16 @@ public final class IdUniqueIndexPass implements AutoCloseable {
                 held = false;
             }
             if (!held) {
-                return new Result(false, 0, 0, List.copyOf(corrupt.keySet()));
+                return new Result(false, 0, 0, corruptTables());
             }
             try (Connection conn = open()) {
                 if (conn == null) {
-                    return new Result(false, 0, 0, List.copyOf(corrupt.keySet()));
+                    return new Result(false, 0, 0, corruptTables());
                 }
                 return run(conn);
             } catch (SQLException | DataAccessException e) {
                 log.warn("event=id_unique_index_pass_aborted cause=\"{}\"", oneLine(e));
-                return new Result(false, 0, 0, List.copyOf(corrupt.keySet()));
+                return new Result(false, 0, 0, corruptTables());
             }
         }
     }
@@ -226,20 +269,29 @@ public final class IdUniqueIndexPass implements AutoCloseable {
         props.setProperty("socketTimeout", Long.toString(BUILD_STATEMENT_TIMEOUT.toSeconds() + 5 * 60));
         props.setProperty("tcpKeepAlive", "true");
         Connection conn = DriverManager.getConnection(admin.url(), props);
-        conn.setAutoCommit(true);
-        var ctx = DSL.using(conn, org.jooq.SQLDialect.POSTGRES);
-        if (!Boolean.TRUE.equals(ctx.select(DSL.function("pg_try_advisory_lock", SQLDataType.BOOLEAN, DSL.val(LOCK_KEY))).fetchOne(0, Boolean.class))) {
-            conn.close();
-            return null;
+        try {
+            conn.setAutoCommit(true);
+            var ctx = DSL.using(conn, org.jooq.SQLDialect.POSTGRES);
+            if (!Boolean.TRUE.equals(ctx.select(DSL.function("pg_try_advisory_lock", SQLDataType.BOOLEAN, DSL.val(LOCK_KEY))).fetchOne(0, Boolean.class))) {
+                conn.close();
+                return null;
+            }
+            return conn;
+        } catch (SQLException | RuntimeException e) {
+            try {
+                conn.close();
+            } catch (SQLException suppressed) {
+                e.addSuppressed(suppressed);
+            }
+            throw e;
         }
-        return conn;
     }
 
     private Result run(Connection conn) throws SQLException {
         var ctx = DSL.using(conn, org.jooq.SQLDialect.POSTGRES);
         List<Spec> todo = new ArrayList<>();
         for (Spec s : SPECS) {
-            if (!corrupt.containsKey(s.table()) && !valid(ctx, s)) {
+            if (!corrupt.containsKey(s.index()) && !valid(ctx, s)) {
                 todo.add(s);
             }
         }
@@ -265,7 +317,7 @@ public final class IdUniqueIndexPass implements AutoCloseable {
                     registry.progress(BOOT_WORK_ID, (long) built, (long) todo.size());
                     log.info("event=id_unique_index_built table={} index={}", s.table(), s.index());
                 } catch (SQLException e) {
-                    if ("23505".equals(e.getSQLState())) {
+                    if (s.unique() && "23505".equals(e.getSQLState())) {
                         duplicate(conn, ctx, s);
                     } else {
                         log.warn("event=id_unique_index_build_failed table={} cause=\"{}\" retry=next_tick", s.table(), oneLine(e));
@@ -276,22 +328,31 @@ public final class IdUniqueIndexPass implements AutoCloseable {
                 }
             }
         } finally {
-            exec(conn, "RESET lock_timeout");
-            exec(conn, "RESET statement_timeout");
-            if (corrupt.isEmpty()) {
-                registry.finish(BOOT_WORK_ID);
-            } else {
+            try {
+                exec(conn, "RESET lock_timeout");
+                exec(conn, "RESET statement_timeout");
+            } catch (SQLException e) {   // a dead connection (the walk ended the backend): the session goes with it
+                log.debug("event=id_unique_index_reset_skipped cause=\"{}\"", oneLine(e));
+            }
+            if (!corrupt.isEmpty()) {
                 String text = String.join("; ", corrupt.values());
                 registry.register(BOOT_WORK_ID, text, 0L, (long) corrupt.size(), UNIT, true, ON_STOP);
-            }
+            } else if (built == todo.size()) {
+                registry.finish(BOOT_WORK_ID);
+            }   // otherwise the entry stays, with its count: work is left for the next tick
         }
         finished = corrupt.isEmpty() && allValid(ctx);
-        return new Result(true, built, dropped, List.copyOf(corrupt.keySet()));
+        return new Result(true, built, dropped, corruptTables());
     }
 
     /** A 23505: drop the INVALID leftover, log the duplicate keys, record the table as corrupt. Never retried in this engine's life. */
-    private void duplicate(Connection conn, DSLContext ctx, Spec s) throws SQLException {
-        dropLeftover(conn, ctx, s);
+    private void duplicate(Connection conn, DSLContext ctx, Spec s) {
+        corrupt.put(s.index(), corruptionText(s.table()));   // first: a failed drop below must not leave it to be rebuilt every tick
+        try {
+            dropLeftover(conn, ctx, s);
+        } catch (SQLException | DataAccessException e) {
+            log.warn("event=id_unique_index_drop_failed table={} cause=\"{}\" retry=next_engine_start", s.table(), oneLine(e));
+        }
         List<String> keys = new ArrayList<>();
         try {
             String sql = "SELECT " + s.columns().replace(", ", "::text || '/' || ") + "::text AS k, count(*) AS n FROM nexus." + s.table()
@@ -301,7 +362,6 @@ public final class IdUniqueIndexPass implements AutoCloseable {
         } catch (DataAccessException e) {
             keys.add("(could not read: " + oneLine(e) + ")");
         }
-        corrupt.put(s.table(), corruptionText(s.table()));
         log.error("event=id_unique_index_duplicate table={} index={} columns=\"{}\" duplicates=\"{}\" meaning=corruption retry=next_engine_start",
             s.table(), s.index(), s.columns(), String.join(", ", keys));
     }
@@ -334,6 +394,11 @@ public final class IdUniqueIndexPass implements AutoCloseable {
         try (Statement st = conn.createStatement()) {
             st.execute(sql);
         }
+    }
+
+    /** The tables of the indexes found corrupt, in the order found. */
+    private List<String> corruptTables() {
+        return SPECS.stream().filter(sp -> corrupt.containsKey(sp.index())).map(Spec::table).distinct().toList();
     }
 
     /** The connection is gone ({@code 08xxx}, or {@code 57P01}: the walk's termination ended the backend), as the PCI builder reads it. */
