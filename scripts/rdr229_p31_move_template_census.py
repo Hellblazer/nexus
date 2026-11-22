@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import pathlib
 import re
+
+import changelog_text  # scripts/ is on sys.path when a script here is run or imported by the tests
 from dataclasses import dataclass
 
 CHANGELOG_DIR = "service/src/main/resources/db/changelog"
@@ -60,15 +62,8 @@ def read_guarded(checks: pathlib.Path) -> dict[str, tuple[tuple[str, ...], tuple
 
 # ---------------------------------------------------------------- reading the text
 
-def _blank(m: re.Match) -> str:
-    return re.sub(r"[^\n]", " ", m.group(0))
-
-
-def strip_noise(text: str) -> str:
-    """Blank XML comments, <comment> elements and <rollback> blocks, keeping every offset and newline."""
-    text = re.sub(r"<!--.*?-->", _blank, text, flags=re.S)
-    text = re.sub(r"<comment>.*?</comment>", _blank, text, flags=re.S)
-    return re.sub(r"<rollback>.*?</rollback>", _blank, text, flags=re.S)
+_blank = changelog_text.blank
+strip_noise = changelog_text.strip_noise  # the one stripping order, shared with the other changelog readers
 
 
 _DOLLAR = re.compile(r"\$(\w*)\$")
