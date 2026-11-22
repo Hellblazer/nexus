@@ -1016,6 +1016,36 @@ output, or outbound payload, and that session is stamped sensitive.
 
 ### Phase 1: Code Implementation
 
+Implementation notes. The fix check of the second fix round
+(T2 `nexus_rdr/256-fix-check-4568d3e6f1bf`) found six defects that the
+first test run or the first hour at the keyboard surfaces; Sam chose to
+carry them here rather than design them on paper (ask `rdr256-accept-2`,
+2026-11-22). Each step that meets one settles it and records how:
+
+- Step 2: expand cannot tell part n from the manifest alone, because the
+  parts of a split record share its line range; and the split needs a
+  within-line fallback for a long unbroken line
+  (`chunker.split_text_to_limits` already splits within a line).
+- Step 4: the `llm-surfaces.toml` census raise from 25 to 27 has more pins
+  than the one named: the header comments, the surface domain list, the
+  table test's `range(1, 26)` and `== 25`, its `CENSUS` dict and each new
+  row's `phase`; and the rows' targets exist only after Step 5.
+- Step 4: the positive listing lint must resolve import aliases
+  (`_get_collection_names`) and say how a helper that returns names, not
+  rows, satisfies it; the Knowledge Map reader makes no listing call and is
+  covered by its behavioural test, not by the lint.
+- Step 5: promoting or wrapping the private writer changes the fence-key
+  lint's `_WRITERS` and `_STAMPERS` tables and the vw594 gate's
+  cross-function, owner-write and stamp-last tables, which are keyed by
+  name; the writer itself begins the index-run fence, and the caller keeps
+  the failure bracket `_index_document` has.
+- Step 5: the fence key is the whole transcript file's hash, while a live
+  session indexes only its sealed chunks, so an unchanged file would skip
+  the run that should index its tail; the fence must not mark a partial
+  index complete.
+- Step 4: clearing the attribute needs an engine route, and the
+  re-assertion on every `nx index sessions` run must not undo a clear.
+
 #### Step 1: Decoder and active path
 
 Tests first, on fixtures built from real transcripts with their text
