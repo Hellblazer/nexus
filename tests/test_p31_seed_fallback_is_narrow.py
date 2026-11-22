@@ -18,14 +18,14 @@ def _http_error(status: int, text: str, body: dict | None = None) -> httpx.HTTPS
 
 
 _PROFILE_TEXT = ("the embedding profile for content_type 'docs' is 'bge-base-en-v15-768'; refusing to register "
-                 "'docs__x__voyage-context-3__v1' with embedding_model 'voyage-context-3'")
+                 "'docs__x__minilm-l6-v2-384__v1' with embedding_model 'minilm-l6-v2-384'")
 _PROFILE_422 = _http_error(422, "HTTP 422: " + _PROFILE_TEXT,
                            {"error": _PROFILE_TEXT, "reason": "embedding_profile_mismatch"})
 _PROFILE_422_OLD_ENGINE = _http_error(422, "HTTP 422: " + _PROFILE_TEXT, {"error": _PROFILE_TEXT})
 
 
 @pytest.mark.parametrize("exc", [
-    EmbeddingProfileMismatchError("docs", "voyage-context-3", "bge-base-en-v15-768"),
+    EmbeddingProfileMismatchError("docs", "minilm-l6-v2-384", "bge-base-en-v15-768"),
     _PROFILE_422,
     _PROFILE_422_OLD_ENGINE,
 ], ids=["client-check", "engine-422-reason", "engine-422-no-reason"])
@@ -36,8 +36,8 @@ def test_the_profile_refusal_seeds_the_row(monkeypatch, exc):
     def _refuse(name, *a, **k):
         raise exc
 
-    assert ops.registered_or_seeded(_refuse)("docs__x__voyage-context-3__v1") is None
-    assert seeded == ["docs__x__voyage-context-3__v1"]
+    assert ops.registered_or_seeded(_refuse)("docs__x__minilm-l6-v2-384__v1") is None
+    assert seeded == ["docs__x__minilm-l6-v2-384__v1"]
 
 
 @pytest.mark.parametrize("exc", [
@@ -56,5 +56,5 @@ def test_any_other_failure_raises_and_seeds_nothing(monkeypatch, exc):
         raise exc
 
     with pytest.raises(type(exc)):
-        ops.registered_or_seeded(_fail)("docs__x__voyage-context-3__v1")
+        ops.registered_or_seeded(_fail)("docs__x__minilm-l6-v2-384__v1")
     assert seeded == [], "a non-profile failure must not fall back to a raw registry row"
