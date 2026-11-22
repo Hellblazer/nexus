@@ -1,0 +1,174 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-p2m1x.20 (RDR-229 P3.3b, item 6 "Index builds follow the PCI reconciler's pattern"): nexus.partition_ensure_leaf, the one sink of leaf
+    creation (the service_tokens trigger's create_tenant_partitions and create_model_partition both go through it), gives a leaf made after this cut the id
+    unique index, so a later leaf never lacks one. The id keys are nexus.chunks (tenant_id, collection_id, chash, embedding_model) and
+    nexus.taxonomy_centroids (tenant_id, collection_id, topic_id, embedding_model).
+
+    THE BRANCH (linda's seam ruling, 2026-11-22). The function looks at the PARENT's constraint in pg_constraint (a UNIQUE over the id key, by
+    pg_get_constraintdef), never at an index name. With the constraint present PostgreSQL itself creates the index on a new leaf, under a name of its own and
+    attached, so the function creates none (a second index would be a duplicate). Without it (LeafIndexPass has not finished its route) the function
+    creates a plain CREATE UNIQUE INDEX on the new, empty leaf, named <leaf>_cid_uq, which the pass finds by that name and adopts (ADD CONSTRAINT ... USING
+    INDEX). The leaf is empty, so the plain build holds no lock a writer waits on; CREATE INDEX CONCURRENTLY cannot run inside a function. Only the two
+    tables above are touched: a scratch parent, or the walk's chunks_new, gets no index.
+
+    The body below is vectors-034-1's, plus the one block after the autovacuum call. The rollback restores vectors-034-1's body verbatim. Function
+    definition only: DATA EFFECT none, no row of any table is read or written, and no existing leaf changes (the per-leaf pass builds theirs, in the
+    background, after the engine serves). The number follows vectors-072 and is provisional until the final rebase. After vectors-072, before the
+    grants-nexus-svc.xml runAlways block.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-073-1" author="nexus-p2m1x.20">
+        <comment>nexus-p2m1x.20 (RDR-229 P3.3b): nexus.partition_ensure_leaf (vectors-034-1's body) also creates the id unique index on a new leaf of nexus.chunks or nexus.taxonomy_centroids when the parent does not yet carry the id UNIQUE constraint (CREATE UNIQUE INDEX on the new, empty leaf, named the leaf's name plus _cid_uq); with the constraint PostgreSQL's own index serves and none is made. Function definition only. DATA EFFECT: none. No row of any table is read or written and no existing leaf changes. The rollback restores vectors-034-1's body verbatim; a leaf index made meanwhile stays (harmless).</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.partition_ensure_leaf(p_parent regclass, p_model_part regclass, p_tenant text, p_force boolean)
+RETURNS boolean
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+    v_ns          text;
+    v_parent_name text;
+    v_mp_name     text;
+    v_model       text;
+    v_leaf        text;
+    v_leaf_oid    regclass;
+    v_taken       record;
+    v_cols        text;
+BEGIN
+    SELECT n.nspname::text, c.relname::text INTO v_ns, v_mp_name
+      FROM pg_catalog.pg_class c
+      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+     WHERE c.oid = p_model_part;
+    SELECT c.relname::text INTO v_parent_name FROM pg_catalog.pg_class c WHERE c.oid = p_parent;
+    v_model := nexus.partition_bound_value(p_model_part);
+    IF v_model IS NULL THEN
+        RAISE EXCEPTION 'nexus.partition_ensure_leaf: % has no single-value LIST bound', p_model_part
+            USING ERRCODE = 'wrong_object_type';
+    END IF;
+
+    -- The existence check: by bound, never by name.
+    PERFORM 1
+       FROM pg_catalog.pg_inherits i
+      WHERE i.inhparent = p_model_part
+        AND nexus.partition_bound_value(i.inhrelid) = p_tenant;
+    IF FOUND THEN
+        RETURN false;
+    END IF;
+
+    v_leaf := nexus.partition_name(v_parent_name, v_model, p_tenant);
+    SELECT c.relkind, c.relispartition, pg_catalog.pg_get_expr(c.relpartbound, c.oid) AS bound
+      INTO v_taken
+      FROM pg_catalog.pg_class c
+      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = v_ns AND c.relname = v_leaf;
+    IF FOUND THEN
+        RAISE EXCEPTION 'nexus partition name collision: %.% already exists and is not the leaf of % under %',
+            v_ns, v_leaf, p_tenant, v_mp_name
+            USING ERRCODE = 'duplicate_table',
+                  DETAIL = pg_catalog.format('relkind %s, partition %s, bound %s',
+                                             v_taken.relkind, v_taken.relispartition, COALESCE(v_taken.bound, 'none')),
+                  HINT = 'Two tenants hash to one leaf name, or an unrelated relation holds it. The creation is refused.';
+    END IF;
+
+    EXECUTE pg_catalog.format('CREATE TABLE %I.%I PARTITION OF %I.%I FOR VALUES IN (%L)',
+                              v_ns, v_leaf, v_ns, v_mp_name, p_tenant);
+    v_leaf_oid := (pg_catalog.quote_ident(v_ns) || '.' || pg_catalog.quote_ident(v_leaf))::pg_catalog.regclass;
+    PERFORM nexus.partition_copy_access(p_parent, v_leaf_oid, p_force);
+    IF pg_catalog.regexp_replace(v_parent_name, '_new$', '') = 'chunks' THEN
+        PERFORM nexus.partition_set_leaf_autovacuum(v_leaf_oid);
+    END IF;
+
+    -- RDR-229 P3.3b: the id unique key of nexus.chunks and nexus.taxonomy_centroids. A parent that already carries the id
+    -- UNIQUE constraint gives PostgreSQL's own index to a new leaf (under a name of its own), so none is made here; a parent that
+    -- does not yet carry it (the per-leaf pass of LeafIndexPass has not finished) gets a plain index on the new, empty leaf,
+    -- which the pass adopts by name (the leaf's name plus _cid_uq) when it adds the constraints. The existence check is the constraint in
+    -- pg_constraint, never an index name. Any other parent (a scratch table, the walk's chunks_new) gets no index.
+    IF v_ns = 'nexus' THEN
+        v_cols := CASE v_parent_name
+                      WHEN 'chunks' THEN 'tenant_id, collection_id, chash, embedding_model'
+                      WHEN 'taxonomy_centroids' THEN 'tenant_id, collection_id, topic_id, embedding_model'
+                  END;
+        IF v_cols IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint k
+                            WHERE k.conrelid = p_parent AND k.contype = 'u'
+                              AND pg_catalog.pg_get_constraintdef(k.oid) = 'UNIQUE (' || v_cols || ')') THEN
+            EXECUTE pg_catalog.format('CREATE UNIQUE INDEX %I ON %I.%I (%s)', v_leaf || '_cid_uq', v_ns, v_leaf, v_cols);
+        END IF;
+    END IF;
+    RETURN true;
+END
+$fn$;
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+-- vectors-034-1's partition_ensure_leaf, verbatim.
+CREATE OR REPLACE FUNCTION nexus.partition_ensure_leaf(p_parent regclass, p_model_part regclass, p_tenant text, p_force boolean)
+RETURNS boolean
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+    v_ns          text;
+    v_parent_name text;
+    v_mp_name     text;
+    v_model       text;
+    v_leaf        text;
+    v_leaf_oid    regclass;
+    v_taken       record;
+BEGIN
+    SELECT n.nspname::text, c.relname::text INTO v_ns, v_mp_name
+      FROM pg_catalog.pg_class c
+      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+     WHERE c.oid = p_model_part;
+    SELECT c.relname::text INTO v_parent_name FROM pg_catalog.pg_class c WHERE c.oid = p_parent;
+    v_model := nexus.partition_bound_value(p_model_part);
+    IF v_model IS NULL THEN
+        RAISE EXCEPTION 'nexus.partition_ensure_leaf: % has no single-value LIST bound', p_model_part
+            USING ERRCODE = 'wrong_object_type';
+    END IF;
+
+    -- The existence check: by bound, never by name.
+    PERFORM 1
+       FROM pg_catalog.pg_inherits i
+      WHERE i.inhparent = p_model_part
+        AND nexus.partition_bound_value(i.inhrelid) = p_tenant;
+    IF FOUND THEN
+        RETURN false;
+    END IF;
+
+    v_leaf := nexus.partition_name(v_parent_name, v_model, p_tenant);
+    SELECT c.relkind, c.relispartition, pg_catalog.pg_get_expr(c.relpartbound, c.oid) AS bound
+      INTO v_taken
+      FROM pg_catalog.pg_class c
+      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = v_ns AND c.relname = v_leaf;
+    IF FOUND THEN
+        RAISE EXCEPTION 'nexus partition name collision: %.% already exists and is not the leaf of % under %',
+            v_ns, v_leaf, p_tenant, v_mp_name
+            USING ERRCODE = 'duplicate_table',
+                  DETAIL = pg_catalog.format('relkind %s, partition %s, bound %s',
+                                             v_taken.relkind, v_taken.relispartition, COALESCE(v_taken.bound, 'none')),
+                  HINT = 'Two tenants hash to one leaf name, or an unrelated relation holds it. The creation is refused.';
+    END IF;
+
+    EXECUTE pg_catalog.format('CREATE TABLE %I.%I PARTITION OF %I.%I FOR VALUES IN (%L)',
+                              v_ns, v_leaf, v_ns, v_mp_name, p_tenant);
+    v_leaf_oid := (pg_catalog.quote_ident(v_ns) || '.' || pg_catalog.quote_ident(v_leaf))::pg_catalog.regclass;
+    PERFORM nexus.partition_copy_access(p_parent, v_leaf_oid, p_force);
+    IF pg_catalog.regexp_replace(v_parent_name, '_new$', '') = 'chunks' THEN
+        PERFORM nexus.partition_set_leaf_autovacuum(v_leaf_oid);
+    END IF;
+    RETURN true;
+END
+$fn$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>
