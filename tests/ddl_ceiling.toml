@@ -247,7 +247,9 @@ migration_wal_bytes_per_worker = 12143000
 # 2674 -> 2678 (2026-11-21, nexus-p2m1x.14, RDR-229 owner is the source): catalog-051-1, -1a and -2 CREATE OR REPLACE four functions (catalog_collection_owner_replaceable, collection_tuple_lock_key, catalog_collections_owner_from_docs, catalog_documents_owner_to_collection); vectors-067-1 is the re-own data move, no DDL. MEASURED, not counted: the Phase 2 integration tree (integration/rdr229-phase2 with P2.2 stacked, linda) on a qwent lab-m run (auto host) of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued reads ddl: migration=2678; the 2674 above was counted and is 4 short by exactly marlowe's four functions.
 # 2678 -> 2682 (2026-11-21, nexus-p2m1x.14, RDR-229 owner is the source, P2.R critique S4): vectors-067-2 and -3 add the owner-read policies catalog_owners_owner_read and gc_audit_owner_read for the re-own move's verification, each a DROP POLICY IF EXISTS and a CREATE POLICY (4 statements).
 # Measured: chas lab-m via lab-remote, 2026-11-21, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on d4a969d824 (on integration/rdr229-phase2 eb1e4cd42b): ddl: migration=2682.
-migration_ddl_per_worker = 2682
+# 2838 -> 2839 (2026-11-22, nexus-p2m1x.20, RDR-229 P3.3b leaf helper redefinition, under Sam's 2860 cap): vectors-073-1 is one CREATE OR REPLACE FUNCTION nexus.partition_ensure_leaf (vectors-034-1's body plus the id unique index block); its rollback is not counted. The pass's own run-time DDL (LeafIndexPass) is not Liquibase and does not count. This branch's file still read 2682 (the P3.1, P3.3a, P3.6 and P3.8 increases go to Sam in one ask and are bumped on the integration branch, 2832 on -r12); the value here is the measured count of this tree.
+# Measured: chas lab-m via lab-remote, 2026-11-22, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued: ddl: migration=2838 on 2f455cd718 (P3.3a's tip, before) and migration=2839 with vectors-073 (after).
+migration_ddl_per_worker = 2839
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]

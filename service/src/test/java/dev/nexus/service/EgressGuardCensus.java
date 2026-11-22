@@ -186,6 +186,9 @@ final class EgressGuardCensus {
                 + " (nexus-6pfgb.43 chunk CHECKs, nexus-6pfgb.44 catalog TTL CHECK, nexus-f3yqd chash VALIDATE job), which"
                 + " adds and validates them, and a short-lived second connection that pg_cancel_backend's that session's"
                 + " own backend (pid and backend_start both matched) when a cancel's deadline passes."));
+        m.put("dev/nexus/service/vectors/LeafIndexPass.java", Allow.pinned(JDBC_SITE,
+            "JDBC to the engine's own database (NX_DB_ADMIN_*): the RDR-229 P3.3b per-leaf unique-index pass's dedicated autocommit"
+                + " connection (nexus-p2m1x.20). CREATE UNIQUE INDEX CONCURRENTLY cannot run in a pool's transaction or in a function."));
         m.put("dev/nexus/service/datamove/CallConnection.java", Allow.pinned(JDBC_SITE,
             "JDBC to the engine's own database (NX_DB_ADMIN_*): the data-move worker's dedicated autocommit connection"
                 + " (nexus-f3yqd.2.13), on which one run's CALL of dml_utils' committing entry point runs under a tenant"

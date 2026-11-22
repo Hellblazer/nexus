@@ -2401,6 +2401,14 @@
     <include file="db/changelog/vectors-072-collection-id-fk-twins.xml"/>
 
     <!--
+        Bead nexus-p2m1x.20 (RDR-229 P3.3b, item 6 "Index builds follow the PCI reconciler's pattern"): nexus.partition_ensure_leaf also creates the id unique index on a
+        new leaf of nexus.chunks or nexus.taxonomy_centroids while the parent does not yet carry the id UNIQUE constraint (with it PostgreSQL's own index serves and none
+        is made; the branch is on pg_constraint, not an index name). Function definition only. DATA EFFECT: none. The number follows vectors-072 and is provisional until
+        the final rebase. After vectors-072, before the grants-nexus-svc.xml runAlways block. See the included file's header.
+    -->
+    <include file="db/changelog/vectors-073-leaf-id-unique-index.xml"/>
+
+    <!--
         Bead nexus-p2m1x.17 (RDR-229 P3.1, review-gate fix round B; P2.10 critique S2): the P2.10 residue repair moves (catalog-049-2) that are not
         complete when P3.1 lands are superseded by replacements whose templates set the collection id with source_uri, since P3.1's NOT VALID CHECKs
         refuse any UPDATE of a row with a name and no id (23514, permanent). One changeset per registry state (the documents move open or failed;
