@@ -980,6 +980,123 @@ class PciIdIndexIntegrationTest {
         }
     }
 
+    // -- N1: a name-indexed collection that counts zero still gets an id index, so gate 3 can hold -------------
+
+    @Test
+    void aLiveCollectionEmptiedOfItsRows_keepsItsNameIndex_getsAnIdIndexToo_andGate3Holds() throws Exception {
+        String tenant = newTenant("empty-rows");
+        long id = collection(tenant, name("empty-rows"), 300);
+        PciReconciler r = reconciler(settings(16));
+        r.reconcileOnce();                                    // the name index, at 300 rows
+        assertThat(validNameIndexed(tenant)).containsExactly(name("empty-rows"));
+        deleteRows(tenant, name("empty-rows"), 300);          // every row gone: the zero-count guard keeps the name index
+        gate2 = true;
+
+        r.reconcileOnce();
+
+        assertThat(validNameIndexed(tenant)).as("kept: a live collection that counts zero is a counting failure, never a drop")
+            .containsExactly(name("empty-rows"));
+        assertThat(validIdIndexed(tenant)).as("and it gets its id index, an empty partial index").containsExactly(id);
+        assertThat(uncovered(r, tenant)).isEmpty();
+        asSuperuser(su -> su.deleteFrom(LATCH).execute());
+        var reporter = reporter(r);
+        try {
+            var read = reporter.refresh();
+            assertThat(read.gate3()).as("gate 3 reaches true: %s", read.gate3Why()).isTrue();
+        } finally {
+            reporter.close();
+            asSuperuser(su -> su.deleteFrom(LATCH).execute());
+        }
+    }
+
+    // -- N2: a killed REINDEX of an id index leaves an INVALID leftover that the next pass drops --------------------
+
+    boolean hasIdLeftover(String tenant) {
+        return leaf(tenant).indexes().stream().anyMatch(i -> i.leftover() && i.leftoverOfId() != null);
+    }
+
+    @Test
+    void aKilledReindexOfAnIdIndex_leavesAnInvalidLeftover_gate3StaysLatched_andTheNextPassDropsIt() throws Exception {
+        String tenant = newTenant("idreindex");
+        long id = collection(tenant, name("idreindex"), 300);
+        PciReconciler r = reconciler(reindexSettings());
+        r.reconcileOnce();
+        gate2 = true;
+        r.reconcileOnce();
+        r.reconcileOnce();
+        asSuperuser(su -> su.deleteFrom(LATCH).execute());
+        var reporter = reporter(r);
+        try {
+            assertThat(reporter.refresh().gate3Latched()).as("non-vacuity: gate 3 latched").isTrue();
+            // Retire the name family (latched + readers present), so the REINDEX candidate is the id index.
+            gate3 = true;
+            r.reconcileOnce();
+            assertThat(validNameIndexed(tenant)).isEmpty();
+            assertThat(validIdIndexed(tenant)).containsExactly(id);
+            deleteRows(tenant, name("idreindex"), 80);           // deletes since build: the id index is a REINDEX candidate
+            PciReconciler restarted = reconciler(reindexSettings());
+
+            try (HeldWrite held = new HeldWrite(tenant)) {
+                CompletableFuture<PassReport> pass = CompletableFuture.supplyAsync(restarted::reconcileOnce, async);
+                await(() -> hasIdLeftover(tenant), "the REINDEX's INVALID _ccnew copy");
+                terminateBuilder();
+                held.close();
+                pass.get(60, TimeUnit.SECONDS);
+            }
+
+            assertThat(hasIdLeftover(tenant)).as("the killed REINDEX left an INVALID id-predicate leftover").isTrue();
+            assertThat(validIdIndexed(tenant)).as("the original stays valid").containsExactly(id);
+            var after = reporter.refresh();
+            assertThat(after.idIndexInvalid()).as("id_index_invalid sees the leftover").isTrue();
+            assertThat(after.gate3Latched()).as("the latch outlives it").isTrue();
+            assertThat(reporter.gate3Latched()).isTrue();
+
+            PassReport next = restarted.reconcileOnce();
+
+            assertThat(hasIdLeftover(tenant)).as("the next pass dropped the leftover").isFalse();
+            assertThat(next.drops()).isGreaterThanOrEqualTo(1);
+            assertThat(validIdIndexed(tenant)).containsExactly(id);
+            assertThat(reporter.refresh().idIndexInvalid()).isFalse();
+        } finally {
+            reporter.close();
+            asSuperuser(su -> su.deleteFrom(LATCH).execute());
+        }
+    }
+
+    // -- M1 and M2: the coverage read as a row-secured role, and on an install with no leaf ---------------------------
+
+    @Test
+    void theCoverageReadAsNexusSvc_needsItsTenantBind_toSeeTheRegistry() throws Exception {
+        String tenant = newTenant("svcread");
+        collection(tenant, name("svcread"), 300);
+        PciReconciler r = reconciler(settings(16));
+        r.reconcileOnce();
+        gate2 = true;
+        r.reconcileOnce();
+
+        try (Connection svc = svcDs.getConnection()) {
+            // nexus_svc is subject to the registry's row-level security: without the coverage read's own nexus.tenant bind it sees no registry row,
+            // a leaf with a VALID name index and no visible row is unknown, and the read answers nothing.
+            var coverage = r.gate3Source().read(DSL.using(svc, SQLDialect.POSTGRES));
+            assertThat(coverage).as("non-vacuity: the read answers as the row-secured role").isPresent();
+            assertThat(coverage.get().planned()).as("it saw the registry row").hasSize(1);
+            assertThat(coverage.get().uncovered()).isEmpty();
+            assertThat(DSL.using(svc, SQLDialect.POSTGRES).select(DSL.function("current_setting", SQLDataType.VARCHAR, DSL.val("nexus.tenant"),
+                DSL.inline(true))).fetchOne(0, String.class)).as("the bind is cleared after the read").isIn(null, "");
+        }
+    }
+
+    @Test
+    void aPciOnInstallWithNoLeafAtAll_hasNothingRequired_andNothingToIndex() throws Exception {
+        var empty = new PciGate3Coverage(() -> new PciCatalog.Snapshot(List.of()), settings(16), Clock.systemUTC());
+        try (Connection admin = adminDs.getConnection()) {
+            var coverage = empty.read(DSL.using(admin, SQLDialect.POSTGRES));
+            assertThat(coverage).as("not unknown: a fresh install with no tenant has nothing to index").isPresent();
+            assertThat(coverage.get().nothingToIndex()).isTrue();
+            assertThat(coverage.get().uncovered()).isEmpty();
+        }
+    }
+
     // -- elsinore's _by_id search functions: which query shapes use the id-predicate partial index ----------------
 
     /** The ANN query vector as pgvector text, 384 wide. */

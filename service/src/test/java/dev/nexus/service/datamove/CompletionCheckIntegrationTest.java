@@ -424,7 +424,7 @@ class CompletionCheckIntegrationTest {
         assertThat(r.gate2()).isTrue();
         assertThat(r.gate3()).isFalse();
         assertThat(r.gate3Uncovered()).containsExactly("invalid", "missing");
-        assertThat(r.gate3Why()).contains("collections the planner would index have no VALID id-predicate index").doesNotMatch("(?s).*\\d.*");
+        assertThat(r.gate3Why()).contains("collections that hold a VALID name-predicate index or an id-predicate index have no VALID id-predicate index").doesNotMatch("(?s).*\\d.*");
 
         // the vacuous pass the planner's drop-before-build would give: a collection whose NAME index is gone and whose id
         // index is not built is still planned, and still uncovered
@@ -454,7 +454,7 @@ class CompletionCheckIntegrationTest {
             CompletionCheck.Result r = withGate3(c -> Optional.of(new CompletionCheck.IdIndexCoverage(Set.of(), Set.of(), Set.of())));
             assertThat(r.gate2()).as("non-vacuity: gate 3 was asked").isTrue();
             assertThat(r.gate3()).isFalse();
-            assertThat(r.gate3Why()).contains("plans no collection").contains("live collections are registered").doesNotMatch("(?s).*\\d+ live.*");
+            assertThat(r.gate3Why()).contains("no collection requires an id-predicate index").contains("live collections are registered").doesNotMatch("(?s).*\\d+ live.*");
             // a planned set that is covered still holds: the registry only vetoes the EMPTY plan
             assertThat(withGate3(c -> Optional.of(new CompletionCheck.IdIndexCoverage(Set.of(COLLECTION), Set.of(COLLECTION), Set.of()))).gate3())
                 .isTrue();

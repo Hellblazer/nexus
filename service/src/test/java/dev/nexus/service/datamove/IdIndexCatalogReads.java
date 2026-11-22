@@ -86,4 +86,27 @@ final class IdIndexCatalogReads {
             .where(DSL.field(DSL.name("n", "nspname"), String.class).eq("nexus"))
             .and(DSL.field(DSL.name("c", "relname"), String.class).eq(table)));
     }
+
+    private static final org.jooq.Table<?> DCL = DSL.table(DSL.name("public", "databasechangelog"));
+    private static final Field<String> DCL_ID = DSL.field(DSL.name("id"), String.class);
+
+    /**
+     * Records each changeset {@code ArbiterTwins.WAITS_FOR_CHANGESETS} names as run (a stand-in row in databasechangelog), the state after
+     * P3.5b's form-A boot, so the pass builds every twin. Rows that already exist are left alone; {@link #forgetWaitedChangesets} removes them.
+     */
+    static void recordWaitedChangesets(DSLContext ctx) {
+        for (String id : ArbiterTwins.WAITS_FOR_CHANGESETS.values().stream().flatMap(List::stream).distinct().toList()) {
+            if (!ctx.fetchExists(DSL.selectOne().from(DCL).where(DCL_ID.eq(id)))) {
+                ctx.insertInto(DCL).columns(DCL_ID, DSL.field(DSL.name("author"), String.class), DSL.field(DSL.name("filename"), String.class),
+                        DSL.field(DSL.name("dateexecuted"), java.time.LocalDateTime.class), DSL.field(DSL.name("orderexecuted"), Integer.class),
+                        DSL.field(DSL.name("exectype"), String.class))
+                    .values(id, "p34-test-stand-in", "p34-test-stand-in.xml", java.time.LocalDateTime.now(), 99_999, "EXECUTED").execute();
+            }
+        }
+    }
+
+    /** Removes the stand-in rows {@link #recordWaitedChangesets} wrote (by their author, so a real row is never touched). */
+    static void forgetWaitedChangesets(DSLContext ctx) {
+        ctx.deleteFrom(DCL).where(DSL.field(DSL.name("author"), String.class).eq("p34-test-stand-in")).execute();
+    }
 }

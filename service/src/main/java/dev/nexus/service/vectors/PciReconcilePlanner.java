@@ -152,7 +152,8 @@ public final class PciReconcilePlanner {
         SUPERSEDED("superseded"),
         /**
          * An invalid {@code _ccnew}/{@code _ccold} left by a failed REINDEX CONCURRENTLY of a builder index
-         * ({@link Index#leftover()}); dropped whatever the registry and the counts say (nexus-rn1yd).
+         * ({@link Index#leftover()}), or, RDR-229 P3.4, of an id-predicate index ({@link Index#leftoverOfId()}); dropped whatever the registry
+         * and the counts say (nexus-rn1yd).
          */
         REINDEX_LEFTOVER("reindex_leftover"),
         /**
@@ -332,20 +333,22 @@ public final class PciReconcilePlanner {
      * {@link #plan} for the name half plus, for the id predicate (RDR-229 P3.4, residual S-2): the same rules keyed by
      * {@code collection_id}. {@link #plan} itself never reads an id index.
      *
-     * <p><b>Transition.</b> This planner drops no name index to make way for an id one, and builds the id index beside it: a name
-     * index leaves only by its own rules above, and P3.7 and P4.1 retire the family. The readers stay on the name path until gate
-     * 3 holds, so the name index has to serve meanwhile. The id indexes get a budget of their own, the same
-     * {@code NX_SEARCH_PCI_MAX_PER_LEAF}: a leaf at the cap holds the cap's worth of name indexes and the cap's worth of id
-     * indexes until the name family goes (a stated exception to the cap, S-2's second option), with one build in flight at a time
-     * because the builder is serial.
+     * <p><b>Transition.</b> The id index is built beside the name index and the name index is kept until the family retires. Before
+     * the retire a name index leaves only by its own rules above. The retire ({@code ids.gate3()}, which the reconciler sets only when gate 3
+     * has LATCHED and the engine's id readers are present, {@code IdReaders.PRESENT}) builds no name index and drops each VALID name index
+     * whose live collection's id index is VALID, as {@link DropReason#REPLACED_BY_ID}; one whose id index is missing or INVALID keeps it. The id
+     * indexes get a budget of their own, the same {@code NX_SEARCH_PCI_MAX_PER_LEAF}: until the retire ends it, a leaf at the cap holds the cap's
+     * worth of name indexes and the cap's worth of id indexes (a stated exception to the cap, S-2's second option), with one build in flight at a
+     * time because the builder is serial.
      *
-     * <p><b>Id rules.</b> Build a collection whose registry row has an id, is live, not superseded, counts at least B, has no
-     * valid or in-flight id index, is not backed off ({@link #idBackoffKey}) and is within the budget (largest first, then name),
-     * only when {@code ids.gate2()} and the collection has no null-id row. A valid id index drops with
-     * {@link DropReason#ID_NOT_IN_REGISTRY}, {@link DropReason#ID_SUPERSEDED} or
-     * {@link DropReason#ID_BELOW_HALF_BUILD_THRESHOLD}; an invalid one that is not in flight, as {@link DropReason#FAILED_BUILD}, with
-     * the rebuild in the same plan. A live indexed collection that counts zero is a {@link SkipCountSuspect} (when it has no name
-     * index to raise it), never a drop.
+     * <p><b>Id rules.</b> Build a collection whose registry row has an id, is live, not superseded, has no valid or in-flight id index, is not
+     * backed off ({@link #idBackoffKey}) and is within the budget (largest first, then name), only when {@code ids.gate2()} and the collection has
+     * no null-id row. It qualifies at B rows; or, while it still has a name index that this plan keeps, at any count the name plan keeps that
+     * index for (B/2 and up, and zero, the counting-failure guard): gate 3 requires an id index for every collection with a VALID name index, so
+     * an empty or half-full one must get its own. A valid id index drops with {@link DropReason#ID_NOT_IN_REGISTRY},
+     * {@link DropReason#ID_SUPERSEDED} or {@link DropReason#ID_BELOW_HALF_BUILD_THRESHOLD}; an invalid one that is not in flight, as
+     * {@link DropReason#FAILED_BUILD}, with the rebuild in the same plan. A live indexed collection that counts zero is a
+     * {@link SkipCountSuspect} (when it has no name index to raise it), never a drop.
      */
     public static Plan planWithIds(Leaf leaf, Map<String, Integer> counts, Collection<RegistryRow> registry,
                                    Set<String> backedOff, String inFlightIndex, PciSettings settings, IdPlanInputs ids) {
@@ -434,14 +437,15 @@ public final class PciReconcilePlanner {
         int slots = settings.maxPerLeaf() - kept;
         if (slots > 0) {
             // A candidate is a live, unsuperseded collection with an id, no valid or in-flight id index and no backoff (a backed-off one is held
-            // back from BUILDING only: gate 3 reads the database and still requires its id index). It qualifies at B rows, or, while it still has
-            // a name index, at B/2: the name index is kept in that band, so the id index must be built for gate 3 to be reachable.
+            // back from BUILDING only: gate 3 reads the database and still requires its id index). It qualifies at B rows, or, while it has a name
+            // index the name plan keeps (count at least B/2, or zero: a live collection that counts zero is a counting failure, never a drop), so
+            // that gate 3, which needs an id index for every collection with a VALID name index, is reachable. An empty partial index is a few pages.
             List<RegistryRow> candidates = registry.stream()
                 .filter(row -> row.collectionId() != null && row.live() && !row.superseded())
                 .filter(row -> !served.contains(row.collectionId()) && !backedOff.contains(idBackoffKey(row.collectionId())))
                 .filter(row -> {
                     int n = counts.getOrDefault(row.name(), 0);
-                    return n >= b || (nameIndexed.contains(row.name()) && (long) n * 2 >= b);
+                    return n >= b || (nameIndexed.contains(row.name()) && (n == 0 || (long) n * 2 >= b));
                 })
                 .toList();
             Map<String, Integer> ranked = counts;

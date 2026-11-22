@@ -75,6 +75,7 @@ class Rdr229ArbiterTwinCensusIntegrationTest extends Rdr229SwapMovesFixtures {
         runSwaps(new VerifyingFinisher());
         assertThat(completedAt(CHUNKS_SWAP)).as("precondition: the chunks swap completed").isNotNull();
         assertThat(completedAt(CENTROIDS_SWAP)).as("precondition: the centroids swap completed").isNotNull();
+        IdIndexCatalogReads.recordWaitedChangesets(ctx());   // the state after P3.5b's form-A boot (the canary twin waits for it)
         new IdUniqueIndexPass(adminConnection, new BootWorkRegistry(Clock.systemUTC()), () -> true).runOnce();
 
         TreeSet<String> live = nameHoldingUniques();
