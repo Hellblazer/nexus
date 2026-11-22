@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
-import dev.nexus.service.PgContainerHelper;
+import dev.nexus.service.datamove.BootedSchema;
 import dev.nexus.service.db.TenantExport.Column;
 import dev.nexus.service.db.TenantExport.ExportTable;
 import dev.nexus.service.db.TenantExport.Reference;
@@ -30,7 +30,8 @@ import java.util.TreeSet;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * The tenant export registry against a Liquibase-migrated database (RDR-248, bead nexus-csayy.1).
+ * The tenant export registry against a booted database (RDR-248, bead nexus-csayy.1): the Liquibase walk plus the boot work the engine
+ * runs, driven to completion by {@link BootedSchema} (RDR-229 P3.11), because P3.3c's id keys are made by data-move on_complete statements.
  *
  * <p>Every check reads the live catalog, never a hand count: the RLS parent tables, their primary keys and
  * types, which keys are global serials, their foreign keys, their triggers, and their id-shaped columns.
@@ -69,9 +70,10 @@ class TenantExportRegistryParityTest {
 
     @BeforeAll
     void migrateAndRead() throws Exception {
-        pg = PgContainerHelper.start();
+        // A booted install, not the walk alone: P3.3c's id keys are made by data-move on_complete statements (RDR-229 P3.11).
+        pg = BootedSchema.startContainer();
         try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.applyProductSchema(su);
+            BootedSchema.migrateAndBoot(su);
         }
         try (Connection su = pg.createConnection("")) {
             live = readLiveRlsTables(DSL.using(su, SQLDialect.POSTGRES));
