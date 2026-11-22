@@ -461,13 +461,13 @@ public final class TenantExport {
             .trigger("trg_document_aspects_updated_at", "BEFORE UPDATE FOR EACH ROW")
             .notRefs("extras", "salient_sentences")
             
-            .importComputed("collection_id")
+            .importComputedRef("tenant_id,collection_id", "catalog_collections", "tenant_id,collection_id")
             .build(),
         data("document_highlights").pk("id bigint").reassigned("id")
             .fk("tenant_id,collection", "catalog_collections", "tenant_id,name")
             .fk("tenant_id,doc_id", "catalog_documents", "tenant_id,tumbler")
             
-            .importComputed("collection_id")
+            .importComputedRef("tenant_id,collection_id", "catalog_collections", "tenant_id,collection_id")
             .build(),
         // ── T2 ──
         data("memory").pk("id bigint").reassigned("id")
@@ -493,7 +493,7 @@ public final class TenantExport {
             .trigger("trg_topics_updated_at", "BEFORE UPDATE FOR EACH ROW")
             .maintained("updated_at", "doc_count")
             
-            .importComputed("collection_id")
+            .importComputedRef("tenant_id,collection_id", "catalog_collections", "tenant_id,collection_id")
             .build(),
         data("topic_assignments").pk("tenant_id text", "doc_id bytea", "topic_id bigint")
             .fk("tenant_id,topic_id", "topics", "tenant_id,id")
@@ -504,7 +504,7 @@ public final class TenantExport {
             .trigger("trg_topic_assignments_doc_count_ins",
                 "AFTER INSERT REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT")
             
-            .importComputed("source_collection_id")
+            .importComputedRef("tenant_id,source_collection_id", "catalog_collections", "tenant_id,collection_id")
             .build(),
         data("topic_links").pk("tenant_id text", "from_topic_id bigint", "to_topic_id bigint")
             .fk("tenant_id,from_topic_id", "topics", "tenant_id,id")
@@ -514,7 +514,7 @@ public final class TenantExport {
         data("taxonomy_meta").pk("tenant_id text", "collection text")
             .fk("tenant_id,collection", "catalog_collections", "tenant_id,name")
             
-            .importComputed("collection_id")
+            .importComputedRef("tenant_id,collection_id", "catalog_collections", "tenant_id,collection_id")
             .build(),
         derived("taxonomy_centroids")
             .pk("tenant_id text", "collection text", "topic_id bigint", "embedding_model text")
@@ -604,7 +604,8 @@ public final class TenantExport {
             .pk("tenant_id text", "collection text", "vector_digest bytea")
             .fk(COLLECTION_KEY, "catalog_collections", "tenant_id,name,embedding_model")
             
-            .importComputed("collection_id")
+            .importComputedRef("tenant_id,collection_id,embedding_model", "catalog_collections",
+                "tenant_id,collection_id,embedding_model")
             .build(),
         excluded("capability_census", OPERATIONAL).pk("tenant_id text", "session_id text")
             .build(),
