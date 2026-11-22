@@ -305,7 +305,33 @@ class Rdr229RestoreByIdTest {
         assertThat(onNewHolder).as("non-vacuity: the new collection's own history row is on its id").isEqualTo(1);
     }
 
-    /** The P3.7-state file restores into a database that still keeps every name key: no stale label reaches one. */
+    /**
+     * The P3.7-state file with NO collection on the old label restores into a database that still keeps every name key. This
+     * is the case the name rewrite exists for: the stale label names no registry row, so without the rewrite the insert of
+     * the chunks trips {@code chunks_collection_fk} (shown by the confirmation round's mutation, 2026-11-22).
+     */
+    @Test
+    void t7b_aP37StateFileWhoseOldLabelNoOneHoldsRestoresWhereTheNameKeysAreStillInForce() throws Exception {
+        String src = "t-byid-t7b-src", dst = "t-byid-t7b-dst";
+        ImportTestEnv.BackupFile file = env.export(renamedSource(src));
+        Map<String, Long> srcIds = registryIds(env, src);
+        Map<String, Map<String, Long>> srcRows = rowsByCollection(env, src);
+        Map<String, java.util.Set<String>> srcChunks = ByIdRestoreSupport.chunkHashesByCollection(env, src);
+
+        JsonNode end = keyed.restore(keyed.newTenant(dst), file);
+
+        assertThat(status(end)).as("the stale label must not reach a live name key: " + end).isEqualTo("committed");
+        assertThat(ByIdRestoreSupport.registryIds(keyed, dst).keySet()).isEqualTo(srcIds.keySet());
+        assertThat(without(rowsByCollection(keyed, dst), ByIdRestoreSupport.NO_REGISTRY_ROW))
+            .as("every row is on its collection's restored id").isEqualTo(without(srcRows, ByIdRestoreSupport.NO_REGISTRY_ROW));
+        assertThat(ByIdRestoreSupport.chunkHashesByCollection(keyed, dst)).isEqualTo(srcChunks);
+        assertThat(ByIdRestoreSupport.rowsNamedOtherwiseThanTheirCollection(keyed, dst)).as("every row has the current name").isEmpty();
+    }
+
+    /**
+     * The P3.7-state file where a new collection holds the old label, restored where the name keys are in force: the name
+     * keys are satisfied by the holder either way, so this case is pinned by the current-name assertion, not by the keys.
+     */
     @Test
     void t7_aP37StateFileRestoresWhereTheNameKeysAreStillInForce() throws Exception {
         String src = "t-byid-t7-src", dst = "t-byid-t7-dst";
@@ -323,7 +349,7 @@ class Rdr229RestoreByIdTest {
 
         JsonNode end = keyed.restore(keyed.newTenant(dst), file);
 
-        assertThat(status(end)).as("a stale label would trip the name keys: " + end).isEqualTo("committed");
+        assertThat(status(end)).as("the restore commits: " + end).isEqualTo("committed");
         assertThat(ByIdRestoreSupport.registryIds(keyed, dst).keySet()).isEqualTo(srcIds.keySet());
         assertThat(without(rowsByCollection(keyed, dst), ByIdRestoreSupport.NO_REGISTRY_ROW))
             .as("every row is on its collection's restored id").isEqualTo(without(srcRows, ByIdRestoreSupport.NO_REGISTRY_ROW));
