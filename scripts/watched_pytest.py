@@ -24,7 +24,7 @@ What it adds to the command:
   guessing from a log: ``state`` is running, passed, failed, stalled,
   console_break, timeout or error.
 * The tree the run saw, for a status file used as PROOF of a green run (``scripts/push_check_gate.py``, nexus-igea9):
-  ``tree`` (the sha of ``HEAD^{tree}`` in the run's directory), ``tree_dirty`` (true when a tracked file differs from HEAD
+  ``host`` (where it ran), ``tree`` (the sha of ``HEAD^{tree}`` in the run's directory), ``tree_dirty`` (true when a tracked file differs from HEAD
   or an untracked, unignored file exists, at the start or at the end of the run; this run's own log and status file never
   count) and ``summary`` (pytest's final counts line, ``131 passed, 1 skipped in 12.6s``). Outside a git repository ``tree``
   and ``tree_dirty`` are null, which no proof accepts.
@@ -92,6 +92,7 @@ class Status:
     tree: str | None = None
     tree_dirty: bool | None = None
     summary: str | None = None
+    host: str | None = None
 
 
 class _Watch:
@@ -399,6 +400,7 @@ def run(args: argparse.Namespace, out: IO[str]) -> int:
     status = Status(state="running", command=command, started_at=started, log=str(log_path))
     own_files = tuple(p for p in (log_path, status_path) if p is not None)
     status.tree, status.tree_dirty = tree_state(args.cwd, own_files)
+    status.host = platform.node() or "unknown"
     with log_path.open("w", encoding="utf-8") as log:
         watch = _Watch(log)
         proc = _spawn(command, args.cwd)

@@ -70,9 +70,10 @@
 #                                 neither its owner nor a suspect's pusher; see "Hold your pushes" below)
 #     --proof <file>              A scripts/watched_pytest.py --status file proving a heavy check leg green on this tip's
 #                                 tree (see "Check gate" below). Repeatable; each is checked, none is a skip.
-#     --skip-<check> <reason>     NX_PUSH_SKIP_<CHECK>: override ONE check of the check gate, on the record. <check> is
-#                                 file-size, changelog, wire-ledger, cloud-leg, plugin-ledger, docs-readers, write-seam, or
-#                                 check-gate (the whole gate, for a gate that cannot start).
+#     --skip-<check> <reason>     Override ONE check of the check gate, on the record. <check> is file-size, changelog,
+#                                 context-budget, wire-ledger, cloud-leg, plugin-ledger, docs-readers, write-seam, or
+#                                 check-gate (the whole gate, for a gate that cannot start). Flags only, with no
+#                                 environment twin: an exported variable from an earlier session overrides nothing.
 #   A bad flag exits 64 with PUSH_REFUSED_USAGE before anything is fetched.
 #
 #   A vouched MERGE commit also vouches for everything it merges in (the
@@ -273,8 +274,8 @@
 #                               red's owner nor the pusher of one of its suspects
 #                               (--red-fix '<reason>' pushes past it, on the record)
 #  14  PUSH_REFUSED_<CHECK>    a check the outbound diff selects is red against the tip's tree, or a heavy leg has no
-#                               proof (PUSH_REFUSED_FILE_SIZE, _CHANGELOG, _WIRE_LEDGER, _CLOUD_LEG, _PLUGIN_LEDGER,
-#                               _DOCS_READERS, _WRITE_SEAM), each with the command to reproduce it
+#                               proof (PUSH_REFUSED_FILE_SIZE, _CHANGELOG, PUSH_REFUSED_CONTEXT_BUDGET, _WIRE_LEDGER,
+#                               _CLOUD_LEG, _PLUGIN_LEDGER, _DOCS_READERS, _WRITE_SEAM), each with the command to reproduce it
 #  15  PUSH_REFUSED_CHECK_GATE_ERROR
 #                               the check gate could not run (no usable Python, a temp directory it could not make, a
 #                               worktree it could not add); --skip-check-gate '<reason>' pushes past it, on the record
@@ -416,6 +417,11 @@ _range_digest=""
 _flag_allowed=""
 _flag_allowed_given=0
 _check_proofs=()        # --proof files, in order
+# The check skips are set by their flags and by nothing else (no NX_PUSH_SKIP_<CHECK> twin: Sam's ruling asked for flags), so a
+# same-named variable inherited from the environment is dropped before the flags are read.
+for _skip_key in FILE_SIZE CHANGELOG CONTEXT_BUDGET WIRE_LEDGER CLOUD_LEG PLUGIN_LEDGER DOCS_READERS WRITE_SEAM CHECK_GATE; do
+  unset "_CHECK_SKIP_${_skip_key}"
+done
 while [[ $# -gt 0 ]]; do
   _arg="$1"
   case "$_arg" in
@@ -445,8 +451,8 @@ while [[ $# -gt 0 ]]; do
       ;;
     --source | --remote | --branch | --allowed-paths | --allowed-paths-from \
       | --skip-scope-audit | --skip-lock | --batch-minutes | --tenant-check | --skip-scrub | --red-fix \
-      | --proof | --skip-file-size | --skip-changelog | --skip-wire-ledger | --skip-cloud-leg | --skip-plugin-ledger \
-      | --skip-docs-readers | --skip-write-seam | --skip-check-gate) ;;
+      | --proof | --skip-file-size | --skip-changelog | --skip-context-budget | --skip-wire-ledger | --skip-cloud-leg \
+      | --skip-plugin-ledger | --skip-docs-readers | --skip-write-seam | --skip-check-gate) ;;
     *) _usage_refuse "unknown flag $_name" ;;
     esac
     if (( _has_val )); then
@@ -471,11 +477,11 @@ while [[ $# -gt 0 ]]; do
       _check_proofs+=("$_val")
       _echo_flags+=("$_name" "$_val")
       ;;
-    --skip-file-size | --skip-changelog | --skip-wire-ledger | --skip-cloud-leg | --skip-plugin-ledger \
-      | --skip-docs-readers | --skip-write-seam | --skip-check-gate)
+    --skip-file-size | --skip-changelog | --skip-context-budget | --skip-wire-ledger | --skip-cloud-leg \
+      | --skip-plugin-ledger | --skip-docs-readers | --skip-write-seam | --skip-check-gate)
       _skip_key="${_name#--skip-}"
       _skip_key="$(printf '%s' "${_skip_key//-/_}" | tr '[:lower:]' '[:upper:]')"
-      printf -v "NX_PUSH_SKIP_${_skip_key}" '%s' "$_val"
+      printf -v "_CHECK_SKIP_${_skip_key}" '%s' "$_val"
       ;;
     --batch-minutes) NX_PUSH_BATCH_MINUTES="$_val" ;;
     --tenant-check)
@@ -925,6 +931,7 @@ fi
 # when set (and then it must work, no fallback), else this checkout's .venv, else python3.13/3.12/3.11/python3.
 # stdout carries the refusal and the PUSH_CHECK_SKIPPED lines (this script's summary); the rest is on stderr.
 _check_skip_records=()   # "check=reason" for each check overridden by name; the push record carries them
+_check_proof_records=()  # "leg=tree12,started,seconds,host" for each proof accepted; the push record carries them
 _check_python_ok() {
   "$1" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1
 }
@@ -949,9 +956,9 @@ _check_gate_error() {
 }
 if [[ "$branch" == "develop" ]]; then
   _check_gate_script="$_script_dir/push_check_gate.py"
-  if [[ -n "${NX_PUSH_SKIP_CHECK_GATE:-}" ]]; then
-    echo "PUSH_CHECK_SKIPPED check-gate reason=${NX_PUSH_SKIP_CHECK_GATE}"
-    _check_skip_records+=("check-gate=${NX_PUSH_SKIP_CHECK_GATE}")
+  if [[ -n "${_CHECK_SKIP_CHECK_GATE:-}" ]]; then
+    echo "PUSH_CHECK_SKIPPED check-gate reason=${_CHECK_SKIP_CHECK_GATE}"
+    _check_skip_records+=("check-gate=${_CHECK_SKIP_CHECK_GATE}")
   else
     [[ -f "$_check_gate_script" ]] || _check_gate_error "$_check_gate_script is missing from this checkout"
     _check_py="$(_check_python_find || true)"
@@ -960,10 +967,18 @@ if [[ "$branch" == "develop" ]]; then
     [[ -n "$_check_workdir" && -d "$_check_workdir" ]] || { _check_workdir=""; _check_gate_error "no temp directory for the tip's tree (TMPDIR=${TMPDIR:-/tmp})"; }
     _check_args=(--repo "$_scrub_root" --base "refs/remotes/$remote/$branch" --tip "$tip" --workdir "$_check_workdir" --python "$_check_py")
     for _check_proof in "${_check_proofs[@]+"${_check_proofs[@]}"}"; do _check_args+=(--proof "$_check_proof"); done
-    for _check_name in file-size changelog wire-ledger cloud-leg plugin-ledger docs-readers write-seam; do
-      _check_var="NX_PUSH_SKIP_$(printf '%s' "${_check_name//-/_}" | tr '[:lower:]' '[:upper:]')"
+    for _check_name in file-size changelog context-budget wire-ledger cloud-leg plugin-ledger docs-readers write-seam; do
+      _check_var="_CHECK_SKIP_$(printf '%s' "${_check_name//-/_}" | tr '[:lower:]' '[:upper:]')"
       [[ -z "${!_check_var:-}" ]] || _check_args+=(--skip "$_check_name=${!_check_var}")
     done
+    # The re-push line a refusal for a missing proof prints: this command, with the proofs it lacks added before the shas.
+    _repush_prefix="scripts/git-push-develop.sh ${_echo_flag_text}"
+    if (( _range_allowlist )) && [[ -n "$_range_digest" ]]; then
+      _repush_prefix+="--allowed-paths-from-range=$_range_digest "
+    elif [[ -n "${NX_PUSH_ALLOWED_PATHS:-}" ]]; then
+      _repush_prefix+="--allowed-paths $(printf '%q' "$NX_PUSH_ALLOWED_PATHS") "
+    fi
+    _check_args+=(--repush-prefix "${_repush_prefix% }" --repush-suffix "$_vouch_text")
     _check_out="$_check_workdir/gate.out"
     _check_code=0
     "$_check_py" "$_check_gate_script" "${_check_args[@]}" >"$_check_out" || _check_code=$?
@@ -973,6 +988,12 @@ if [[ "$branch" == "develop" ]]; then
       if [[ "$_check_line" == "PUSH_CHECK_SKIPPED "* ]]; then
         _check_rest="${_check_line#PUSH_CHECK_SKIPPED }"
         _check_skip_records+=("${_check_rest%% reason=*}=${_check_rest#* reason=}")
+      elif [[ "$_check_line" == "PUSH_PROOF_ACCEPTED "* ]]; then
+        # "PUSH_PROOF_ACCEPTED <leg> tree=<12> started_at=<iso> elapsed_s=<n> host=<h> file=<f>": no field holds a space.
+        read -r _ _pp_leg _pp_tree _pp_start _pp_secs _pp_host _ <<<"$_check_line"
+        _pp_secs="${_pp_secs#elapsed_s=}"
+        [[ "$_pp_secs" =~ ^[0-9]+$ ]] || _pp_secs=0
+        _check_proof_records+=("${_pp_leg}=${_pp_tree#tree=},${_pp_start#started_at=},${_pp_secs},${_pp_host#host=}")
       fi
     done < "$_check_out"
     _check_cleanup
@@ -1149,13 +1170,14 @@ _write_push_record() {
   _record_tmp="$outfile"
   local args=(ci record-push --base "nexus-$branch" --from-sha "$_record_base" --to-sha "$tip" --count "${#range[@]}")
   [[ -z "$_red_fix_escape" ]] || args+=(--red-fix "$_red_fix_escape")
-  local skip_args=() skip
-  for skip in "${_check_skip_records[@]+"${_check_skip_records[@]}"}"; do skip_args+=(--skip "$skip"); done
-  _bounded "$limit" "$outfile" "$nxbin" "${args[@]}" "${skip_args[@]+"${skip_args[@]}"}" || code=$?
-  # An installed nx that predates `--skip` answers "No such option" (exit 2): write the record without the overrides rather
-  # than lose it, and say so, since the board then lacks them (the push summary above still names them).
-  if (( code == 2 && ${#skip_args[@]} > 0 )) && grep -q "No such option" "$outfile"; then
-    echo "PUSH_RECORD_NOTE the installed CLI lacks 'nx ci record-push --skip': the record was written without the check overrides (upgrade nx: scripts/reinstall-tool.sh)" >&2
+  local extra_args=() entry
+  for entry in "${_check_skip_records[@]+"${_check_skip_records[@]}"}"; do extra_args+=(--skip "$entry"); done
+  for entry in "${_check_proof_records[@]+"${_check_proof_records[@]}"}"; do extra_args+=(--proof-info "$entry"); done
+  _bounded "$limit" "$outfile" "$nxbin" "${args[@]}" "${extra_args[@]+"${extra_args[@]}"}" || code=$?
+  # An installed nx that predates `--skip` and `--proof-info` answers "No such option" (exit 2): write the record without them
+  # rather than lose it, and say so, since the board then lacks them (the push summary above still names them).
+  if (( code == 2 && ${#extra_args[@]} > 0 )) && grep -q "No such option" "$outfile"; then
+    echo "PUSH_RECORD_NOTE the installed CLI lacks 'nx ci record-push --skip' or '--proof-info': the record was written without the check overrides and proofs (upgrade nx: scripts/reinstall-tool.sh)" >&2
     code=0
     _bounded "$limit" "$outfile" "$nxbin" "${args[@]}" || code=$?
   fi

@@ -2,21 +2,21 @@
 """scripts/git-push-develop.sh's check gate (nexus-igea9, Sam 2026-11-22), end to end on fixture repositories.
 
 Five develop reds in one day came from a check that was not run, or was run on the working tree: a write-seam 422 on the
--r12 cut, the wire ledger on the revert 4402201ede, the cloud-leg routes on de7e88cbf4, the plugin ledger on c88f51e49c and a
-size ceiling. The push now runs the checks its diff selects against the TIP's tree and refuses a red (PUSH_REFUSED_<CHECK>,
+-r12 cut, the wire ledger on the revert 4402201ede, the cloud-leg routes on de7e88cbf4, the plugin ledger on c88f51e49c and the
+context-size ceiling (scripts/context_budgets.py: a skill 6 bytes over its ceiling, on 91715b4733). The push now runs the checks its diff selects against the TIP's tree and refuses a red (PUSH_REFUSED_<CHECK>,
 exit 14), a heavy leg with no proof, and a gate that cannot start (PUSH_REFUSED_CHECK_GATE_ERROR, exit 15).
 
 What the fixtures are, per replay (the real history is not replayed, so a shallow clone runs these too):
 
-* the size ceiling, the wire ledger and the changelog run the REAL scripts, copied into the fixture repository; each red is
-  the condition itself (a 1001-line test file with no exceptions entry; a commit touching the engine tree and an ``http_*``
-  client together with no ledger line);
+* the context budget, the wire ledger, the file-size ratchet and the changelog run the REAL scripts, copied into the fixture
+  repository; each red is the condition itself (the nexus skill at 8810 bytes against its 8804 ceiling; a commit touching the
+  engine tree and an ``http_*`` client together with no ledger line; a 1001-line test file with no exceptions entry);
 * the cloud-leg routes and the plugin ledger are small STAND-IN test files carrying the failing condition of the real tests
   (an unmapped ledger route; a changed plugin file the pending ledger does not name), because the real ones need this
   repository's whole test tree; the gate's part, selecting them, running them against the tip and refusing, is the real code;
 * the write-seam 422 is a behavioural failure no static check sees, so what is pinned is the gate's rule: a diff that reaches
   ci.yml's write-seam path filter is refused without a proof of a green run on the same tree.
-The replays against the real commits (4402201ede, de7e88cbf4, c88f51e49c, 91715b4733) were run by hand and are in the bead.
+The replays against the real commits (4402201ede, de7e88cbf4, c88f51e49c) were run by hand and are in the bead.
 """
 from __future__ import annotations
 
@@ -45,7 +45,9 @@ fake_nx = _rec.fake_nx
 REPO_ROOT = _rec.REPO_ROOT
 _git, _env, _calls, _records, _opt = _rec._git, _rec._env, _rec._calls, _rec._records, _rec._opt
 
-REAL_SCRIPTS = ("file_size_ratchet.py", "changelog_fold.py", "check_wire_contract_pairing.py", "select_docs_reader_tests.py")
+REAL_SCRIPTS = ("file_size_ratchet.py", "changelog_fold.py", "check_wire_contract_pairing.py", "select_docs_reader_tests.py",
+                "context_budgets.py")
+NEXUS_SKILL = "conexus/skills/nexus/SKILL.md"
 SCRIPT = REPO_ROOT / "scripts" / "git-push-develop.sh"
 EMPTY_LEDGER = "## Unshipped\n\n(none)\n\n## Shipped\n"
 UNMAPPED = "/v1/brand-new-route"
@@ -60,9 +62,14 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 MAPPED = {"/v1/a", "/v1/b"}
 
 
-@pytest.mark.parametrize("i", range(45))
+@pytest.mark.parametrize("i", range(85))
 def test_filler(i):
     assert i >= 0
+
+
+@pytest.mark.skip(reason="set NX_CLOUDLEG_REAL_RUN=1 (needs the gate jar, uv and the network): a real local-vs-local --keep run")
+def test_the_real_run():
+    raise AssertionError("opt-in only")
 
 
 def test_every_route_in_the_live_ledger_maps():
@@ -72,6 +79,7 @@ def test_every_route_in_the_live_ledger_maps():
 '''
 
 STUB_PLUGIN_LEDGER = '''\
+import os
 import pathlib
 import subprocess
 
@@ -80,12 +88,16 @@ import pytest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
-@pytest.mark.parametrize("i", range(12))
+@pytest.mark.parametrize("i", range(22))
 def test_filler(i):
     assert i >= 0
 
 
 def test_every_drifted_file_is_declared_in_the_ledger():
+    if not subprocess.run(["git", "tag", "-l"], cwd=ROOT, capture_output=True, text=True, check=True).stdout.strip():
+        if os.environ.get("NX_REQUIRE_PLUGIN_DRIFT_CHECK") == "1":
+            raise AssertionError("NX_REQUIRE_PLUGIN_DRIFT_CHECK=1 but this checkout has NO tags, so drift is UNKNOWN")
+        pytest.skip("no tags in this checkout (shallow clone) -- drift unresolvable")
     drifted = subprocess.run(["git", "diff", "--name-only", "v1.0.0", "HEAD", "--", "conexus/"], cwd=ROOT,
                              capture_output=True, text=True, check=True).stdout.split()
     ledger = (ROOT / "conexus" / "PENDING_RELEASE.md").read_text()
@@ -97,10 +109,16 @@ STUB_ALL_SKIPPED = '''\
 import pytest
 
 
-@pytest.mark.parametrize("i", range(45))
+@pytest.mark.parametrize("i", range(85))
 def test_filler(i):
     pytest.skip("a prerequisite is absent")
 '''
+
+
+STUB_PLUGIN_ALWAYS_SKIPS = STUB_PLUGIN_LEDGER.replace(
+    '        if os.environ.get("NX_REQUIRE_PLUGIN_DRIFT_CHECK") == "1":\n            raise AssertionError("NX_REQUIRE_PLUGIN_DRIFT_CHECK=1 but this checkout has NO tags, so drift is UNKNOWN")\n', "")
+
+CEILINGS = "conexus/skills/catalog/SKILL.md 264\nconexus/skills/nexus/SKILL.md 8804\n"
 
 
 def _commit_paths(work: Path, message: str, files: dict[str, str]) -> str:
@@ -127,6 +145,8 @@ def armed(repos) -> tuple[Path, Path]:
     files["changelog/unreleased/README.md"] = "Fragments: one per bead.\n"
     files["conexus/PENDING_RELEASE.md"] = "# Pending\n"
     files["conexus/skills/catalog/SKILL.md"] = "catalog\n"
+    files[NEXUS_SKILL] = "n" * 8599 + "\n"                         # 8600 bytes, ceiling 8804: the numbers of 91715b4733
+    files["tests/fixtures/context-budgets.txt"] = CEILINGS
     files["tests/scripts/test_cloud_leg.py"] = STUB_CLOUD_LEG
     files["tests/test_plugin_release_drift_ledger.py"] = STUB_PLUGIN_LEDGER
     for i in range(22):
@@ -246,8 +266,9 @@ def test_a_gate_stopped_mid_run_removes_the_tree_and_stops_the_checks(armed, tmp
 
 # ── the five replays of 2026-11-22 ───────────────────────────────────────────
 
-def test_replay_size_ceiling_a_test_file_over_its_cap_is_refused_with_its_reproduction(armed, fake_nx) -> None:
-    """91715b4733's class: a file past its ceiling. The real ratchet runs against the tip."""
+def test_file_size_ratchet_refuses_a_test_file_over_its_cap_with_its_reproduction(armed, fake_nx) -> None:
+    """The file-size ratchet (src, service and test files by line count) on the tip. Not a replay of a red of 2026-11-22: the
+    size red on 91715b4733 was the context budget, replayed by test_replay_context_budget_..."""
     origin, work = armed
     before = _git("rev-parse", "refs/heads/develop", cwd=origin)
     sha = _commit_paths(work, "big", {"tests/test_big.py": "x = 1\n" * 1001})
@@ -280,7 +301,7 @@ def test_replay_wire_ledger_a_declared_pair_pushes_and_a_dirty_tree_declaration_
     refused = _push(work, fake_nx, pair)
     assert refused.returncode == 14 and "PUSH_REFUSED_WIRE_LEDGER" in refused.stdout, refused.stdout + refused.stderr
     declared = _commit_paths(work, "declare it", {"docs/wire-contract-pending.md": entry})
-    docs = _proof_file(work.parent / "docs.json", tree=_tip_tree(work, declared), command=DOCS_COMMAND, summary="700 passed in 99s")
+    docs = _proof_file(work.parent / "docs.json", tree=_tip_tree(work, declared), command=DOCS_COMMAND, summary="1600 passed in 99s")
     ok = _push(work, fake_nx, "--proof", str(docs), pair, declared)
     assert ok.returncode == 0, ok.stdout + ok.stderr
     assert _git("rev-parse", "refs/heads/develop", cwd=origin) == declared
@@ -353,7 +374,7 @@ def test_a_proof_that_does_not_prove_the_tip_is_refused_and_says_why(armed, fake
 def test_a_proof_for_the_wrong_leg_does_not_satisfy_this_one_and_an_unreadable_one_is_named(armed, fake_nx, tmp_path: Path) -> None:
     _origin, work = armed
     sha = _commit_paths(work, "catalog handler", {SEAM_PATH: "class CatalogHandler {}\n"})
-    docs_proof = _proof_file(tmp_path / "docs.json", tree=_tip_tree(work, sha), command=DOCS_COMMAND, summary="700 passed in 9s")
+    docs_proof = _proof_file(tmp_path / "docs.json", tree=_tip_tree(work, sha), command=DOCS_COMMAND, summary="1600 passed in 9s")
     junk = tmp_path / "junk.json"
     junk.write_text("{not json")
     proc = _push(work, fake_nx, "--proof", str(docs_proof), "--proof", str(junk), sha)
@@ -368,7 +389,7 @@ def test_a_docs_change_needs_the_docs_readers_proof_and_runs_the_cloud_leg_check
     assert refused.returncode == 14, refused.stdout + refused.stderr
     assert "PUSH_REFUSED_DOCS_READERS" in proc_text(refused) and "PUSH_REFUSED_CLOUD_LEG" not in refused.stdout, "the cloud-leg stand-in passes"
     assert "tests/test_reader_00.py" in refused.stdout and "--proof docs.json" in refused.stdout
-    proof = _proof_file(tmp_path / "docs.json", tree=_tip_tree(work, sha), command=DOCS_COMMAND, summary="700 passed in 99s")
+    proof = _proof_file(tmp_path / "docs.json", tree=_tip_tree(work, sha), command=DOCS_COMMAND, summary="1600 passed in 99s")
     ok = _push(work, fake_nx, "--proof", str(proof), sha)
     assert ok.returncode == 0, ok.stdout + ok.stderr
     assert "cloud-leg(" in ok.stderr and "docs-readers(proof)" in ok.stderr
@@ -457,11 +478,14 @@ def test_a_blank_or_unknown_skip_flag_is_a_usage_error_before_anything_is_fetche
     assert _push(work, fake_nx, "--proof", "/no/such/file", sha).returncode == 64
 
 
-def test_the_skip_flag_has_an_environment_twin(armed, fake_nx) -> None:
+def test_the_check_skips_have_no_environment_twin(armed, fake_nx) -> None:
+    """Sam's ruling asked for flags. An exported NX_PUSH_SKIP_<CHECK> from an earlier session overrides nothing."""
     _origin, work = armed
     sha = _commit_paths(work, "big", {"tests/test_big.py": "x = 1\n" * 1001})
-    proc = _push(work, fake_nx, sha, env={"NX_PUSH_SKIP_FILE_SIZE": "env twin"})
-    assert proc.returncode == 0 and "PUSH_CHECK_SKIPPED file-size reason=env twin" in proc.stdout
+    for name in ("NX_PUSH_SKIP_FILE_SIZE", "NX_PUSH_SKIP_CHECK_GATE"):
+        proc = _push(work, fake_nx, sha, env={name: "env twin"})
+        assert proc.returncode == 14 and "PUSH_REFUSED_FILE_SIZE" in proc.stdout, (name, proc.stdout + proc.stderr)
+        assert "PUSH_CHECK_SKIPPED" not in proc.stdout
 
 
 # ── a gate that cannot start refuses ─────────────────────────────────────────
@@ -542,6 +566,147 @@ def test_the_light_path_is_fast(armed, fake_nx) -> None:
 
 def test_the_script_documents_the_new_flags_and_exit_codes() -> None:
     text = SCRIPT.read_text()
-    for token in ("--proof", "--skip-<check>", "PUSH_REFUSED_CHECK_GATE_ERROR", "#  14  PUSH_REFUSED_<CHECK>", "#  15  PUSH_REFUSED_CHECK_GATE_ERROR"):
+    for token in ("--proof", "--skip-<check>", "--skip-context-budget", "PUSH_REFUSED_CONTEXT_BUDGET", "PUSH_REFUSED_CHECK_GATE_ERROR", "#  14  PUSH_REFUSED_<CHECK>", "#  15  PUSH_REFUSED_CHECK_GATE_ERROR"):
         assert token in text, token
     assert shutil.which("bash")
+
+
+# ── review round 1 (2026-11-22) ──────────────────────────────────────────────
+
+PENDING_NEXUS = f"# Pending\n- {NEXUS_SKILL}\n"
+PENDING_CATALOG = "# Pending\n- conexus/skills/catalog/SKILL.md\n"
+
+
+def _nexus_skill_over_its_ceiling(work: Path) -> str:
+    """The nexus skill at 8810 bytes against its 8804 ceiling, declared in the pending ledger: only the budget is red."""
+    return _commit_paths(work, "skill grows", {NEXUS_SKILL: "n" * 8809 + "\n", "conexus/PENDING_RELEASE.md": PENDING_NEXUS})
+
+
+def test_replay_context_budget_a_skill_over_its_ceiling_is_refused(armed, fake_nx) -> None:
+    """91715b4733's red, from c88f51e49c: conexus/skills/nexus/SKILL.md at 8810 bytes against 8804 in
+    tests/fixtures/context-budgets.txt. The real scripts/context_budgets.py runs against the tip."""
+    origin, work = armed
+    before = _git("rev-parse", "refs/heads/develop", cwd=origin)
+    sha = _nexus_skill_over_its_ceiling(work)
+    proc = _push(work, fake_nx, sha)
+    assert proc.returncode == 14, proc.stdout + proc.stderr
+    assert "PUSH_REFUSED_CONTEXT_BUDGET" in proc.stdout and "PUSH_REFUSED_PLUGIN_LEDGER" not in proc.stdout
+    assert NEXUS_SKILL in proc.stdout and "8810" in proc.stdout and "8804" in proc.stdout
+    assert "reproduce: uv run python scripts/context_budgets.py check" in proc.stdout
+    assert "--skip-context-budget '<reason>'" in proc.stdout
+    assert _git("rev-parse", "refs/heads/develop", cwd=origin) == before
+
+
+def test_the_context_budget_check_runs_for_the_ceilings_file_and_passes_when_within(armed, fake_nx) -> None:
+    origin, work = armed
+    ok = _push(work, fake_nx, _commit_paths(work, "skill edit", {NEXUS_SKILL: "n" * 8700 + "\n", "conexus/PENDING_RELEASE.md": PENDING_NEXUS}))
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    assert "context-budget(" in ok.stderr
+    lowered = _commit_paths(work, "lower the ceiling", {"tests/fixtures/context-budgets.txt": "conexus/skills/catalog/SKILL.md 264\nconexus/skills/nexus/SKILL.md 100\n"})
+    refused = _push(work, fake_nx, lowered)
+    assert refused.returncode == 14 and "PUSH_REFUSED_CONTEXT_BUDGET" in refused.stdout, "a ceilings-file-only diff selects it"
+
+
+def test_a_context_budget_skip_is_a_flag_recorded_in_the_summary_and_the_record(armed, fake_nx) -> None:
+    _origin, work = armed
+    sha = _nexus_skill_over_its_ceiling(work)
+    proc = _push(work, fake_nx, "--skip-context-budget", "raise approved, nexus-xyz", sha)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "PUSH_CHECK_SKIPPED context-budget reason=raise approved, nexus-xyz" in proc.stdout.splitlines()
+    (record,) = _records(fake_nx[1])
+    assert _opt(record, "--skip") == ["context-budget=raise approved, nexus-xyz"]
+
+
+def test_a_context_budget_script_that_passes_without_examining_files_is_vacuous(armed, fake_nx) -> None:
+    _origin, work = armed
+    stub = ("PLUGINS = ('conexus',)\nKINDS = ('skills',)\nCEILINGS = 'tests/fixtures/context-budgets.txt'\nimport sys\n"
+            "sys.stdout.write('context_budgets: 0 files, 0 bytes, 0 errors\\n')\n")
+    sha = _commit_paths(work, "hollow", {"scripts/context_budgets.py": stub, "conexus/PENDING_RELEASE.md": "# Pending\n"})
+    proc = _push(work, fake_nx, sha)
+    assert proc.returncode == 14 and "PUSH_REFUSED_CONTEXT_BUDGET" in proc.stdout and "vacuous" in proc.stdout
+
+
+def test_a_push_that_deletes_the_arming_script_is_still_refused_because_the_base_arms_the_gate(armed, fake_nx) -> None:
+    """If the gate armed on the tip, deleting scripts/file_size_ratchet.py would disarm it and this would push."""
+    origin, work = armed
+    before = _git("rev-parse", "refs/heads/develop", cwd=origin)
+    _git("rm", "-q", "scripts/file_size_ratchet.py", cwd=work)
+    _git("commit", "-q", "-m", "drop the ratchet", cwd=work)
+    proc = _push(work, fake_nx, _git("rev-parse", "HEAD", cwd=work))
+    assert proc.returncode == 14, proc.stdout + proc.stderr
+    assert "PUSH_REFUSED_FILE_SIZE" in proc.stdout and "scripts/file_size_ratchet.py" in proc.stdout
+    assert "PUSH_CHECKS_SKIPPED" not in proc.stderr
+    assert _git("rev-parse", "refs/heads/develop", cwd=origin) == before
+
+
+def test_a_tagless_tree_is_a_refusal_for_the_plugin_ledger_not_a_skip(armed, fake_nx) -> None:
+    """The real drift test skips 9 tests on a tagless checkout unless NX_REQUIRE_PLUGIN_DRIFT_CHECK=1: the gate sets it."""
+    _origin, work = armed
+    _git("tag", "-d", "v1.0.0", cwd=work)
+    sha = _commit_paths(work, "skill text", {"conexus/skills/catalog/SKILL.md": "catalog, reworded\n", "conexus/PENDING_RELEASE.md": PENDING_CATALOG})
+    proc = _push(work, fake_nx, sha)
+    assert proc.returncode == 14, proc.stdout + proc.stderr
+    assert "PUSH_REFUSED_PLUGIN_LEDGER" in proc.stdout and "NO tags" in proc.stdout
+
+
+def test_a_pytest_check_that_skips_anything_but_the_named_cloud_leg_test_is_refused(armed, fake_nx) -> None:
+    _origin, work = armed
+    ok = _push(work, fake_nx, "--skip-docs-readers", "proof not needed here", _commit_paths(work, "a doc", {"docs/notes.md": "words\n"}))
+    assert ok.returncode == 0, "the stand-in's one NX_CLOUDLEG_REAL_RUN skip is the known legitimate one: " + ok.stdout + ok.stderr
+    other = STUB_CLOUD_LEG.replace("set NX_CLOUDLEG_REAL_RUN=1 (needs the gate jar, uv and the network): a real local-vs-local --keep run", "the jar is absent")
+    sha = _commit_paths(work, "another skip", {"tests/scripts/test_cloud_leg.py": other, "docs/notes.md": "more words\n"})
+    refused = _push(work, fake_nx, "--skip-docs-readers", "proof not needed here", sha)
+    assert refused.returncode == 14 and "PUSH_REFUSED_CLOUD_LEG" in refused.stdout and "skip" in refused.stdout, refused.stdout + refused.stderr
+
+
+def test_a_plugin_ledger_test_that_skips_regardless_of_the_environment_is_refused(armed, fake_nx) -> None:
+    _origin, work = armed
+    sha = _commit_paths(work, "regressed test", {"tests/test_plugin_release_drift_ledger.py": STUB_PLUGIN_ALWAYS_SKIPS,
+                                                  "conexus/skills/catalog/SKILL.md": "c, reworded\n", "conexus/PENDING_RELEASE.md": PENDING_CATALOG})
+    _git("tag", "-d", "v1.0.0", cwd=work)
+    proc = _push(work, fake_nx, sha)
+    assert proc.returncode == 14 and "PUSH_REFUSED_PLUGIN_LEDGER" in proc.stdout and "skip" in proc.stdout, proc.stdout + proc.stderr
+
+
+def test_pytest_environment_variables_cannot_narrow_a_check(armed, fake_nx) -> None:
+    _origin, work = armed
+    sha = _commit_paths(work, "skill text", {"conexus/skills/catalog/SKILL.md": "catalog, reworded\n", "conexus/PENDING_RELEASE.md": PENDING_CATALOG})
+    proc = _push(work, fake_nx, sha, env={"PYTEST_ADDOPTS": "-k no_such_test_name", "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "plugin-ledger(" in proc.stderr
+
+
+def test_a_proof_is_summarised_and_its_particulars_go_into_the_record(armed, fake_nx, tmp_path: Path) -> None:
+    _origin, work = armed
+    sha = _commit_paths(work, "catalog handler", {SEAM_PATH: "class CatalogHandler {}\n"})
+    good = _proof_file(tmp_path / "seam.json", tree=_tip_tree(work, sha), command=SEAM_COMMAND, summary="8 passed in 80.1s",
+                       started_at=1795000000.0, elapsed_s=80.4, host="chas")
+    proc = _push(work, fake_nx, "--proof", str(good), sha)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    tree12 = _tip_tree(work, sha)[:12]
+    line = f"PUSH_PROOF_ACCEPTED write-seam tree={tree12} started_at=2026-11-18T11:06:40Z elapsed_s=80 host=chas file=seam.json"
+    assert line in proc.stdout.splitlines()
+    (record,) = _records(fake_nx[1])
+    assert _opt(record, "--proof-info") == [f"write-seam={tree12},2026-11-18T11:06:40Z,80,chas"]
+
+
+def test_a_missing_proof_refusal_prints_the_whole_repush_line_and_the_jar_build_step(armed, fake_nx) -> None:
+    _origin, work = armed
+    sha = _commit_paths(work, "catalog handler", {SEAM_PATH: "class CatalogHandler {}\n", "docs/notes.md": "words\n"})
+    proc = _push(work, fake_nx, "--source", "HEAD", sha)
+    assert proc.returncode == 14, proc.stdout + proc.stderr
+    assert "scripts/build-gate-jar.sh --lab-run lab-m" in proc.stdout
+    assert "lab-run -c" not in proc.stdout.replace("--lab-run", "")
+    assert f"then re-push: scripts/git-push-develop.sh --source HEAD --proof docs.json --proof seam.json {sha}" in proc.stdout
+
+
+def test_a_timeout_stops_only_the_check_that_ran_past_it(armed, fake_nx) -> None:
+    _origin, work = armed
+    slow = "import time\ntime.sleep(60)\n"
+    sha = _commit_paths(work, "slow changelog check", {"scripts/changelog_fold.py": slow})
+    started = time.monotonic()
+    proc = _push(work, fake_nx, sha, env={"NX_PUSH_CHECK_TIMEOUT_S": "3"})
+    assert proc.returncode == 14 and time.monotonic() - started < 40, proc.stdout + proc.stderr
+    assert "PUSH_REFUSED_CHANGELOG" in proc.stdout and "ran past 3s" in proc.stdout
+    assert "PUSH_REFUSED_FILE_SIZE" not in proc.stdout, "the sibling check was not stopped and is not reported red"
+    assert "ran=file-size(" in proc.stderr

@@ -14,11 +14,16 @@ check           selected by                                                     
 ==============  ====================================================================  ===========================
 file-size       always                                                                scripts/file_size_ratchet.py check
 changelog       always                                                                scripts/changelog_fold.py check
+context-budget  what context_budgets.py covers (.md under <plugin>/skills|agents|        scripts/context_budgets.py check
+                commands|resources of conexus, sn, prose-edit, tool-spill), its
+                ceilings file tests/fixtures/context-budgets.txt, or the script itself
 wire-ledger     what check_wire_contract_pairing.py treats as wire (service/, the    scripts/check_wire_contract_pairing.py
                 client http_* and indexer modules, tests with a raw envelope), or
                 the ledger docs/wire-contract-pending.md itself
 cloud-leg       docs/ (the ledger is under it)                                       tests/scripts/test_cloud_leg.py
 plugin-ledger   conexus/, sn/, tool-spill/, prose-edit/, marketplace.json             tests/test_plugin_release_drift_ledger.py
+                                                                                      (NX_REQUIRE_PLUGIN_DRIFT_CHECK=1: a tagless
+                                                                                      tree fails instead of skipping)
 docs-readers    docs/ (heavy: a PROOF, never a live run)                             proof of scripts/select_docs_reader_tests.py
 write-seam      ci.yml's write-seam-gate path filter (heavy: a PROOF)                 proof of the write-seam pytest
 ==============  ====================================================================  ===========================
@@ -26,11 +31,13 @@ write-seam      ci.yml's write-seam-gate path filter (heavy: a PROOF)           
 A heavy leg needs ``--proof <status file>``: the JSON ``scripts/watched_pytest.py --status`` writes, which now carries the
 tree sha it ran on (``tree``), whether the checkout was clean (``tree_dirty``) and pytest's summary line. A proof counts
 only when its tree is the tip's tree, the run was clean, its command is the leg's command (every selected file, the
-markers CI uses), the state is ``passed`` and the summary shows enough tests passing and none failed, erroring or (for the
-write-seam, whose prerequisite skip is how it goes vacuous) skipped.
+markers CI uses, no option that narrows the run, exactly one ``-m``), the state is ``passed`` and the summary shows enough
+tests passing and none failed, erroring or (for the write-seam, whose prerequisite skip is how it goes vacuous) skipped. An
+accepted proof is printed (tree, start, duration, host) and its particulars go into the push record.
 
 A selected check whose script is missing from the tip, or whose run passes without the marker a real run prints (a
-vacuous pass), is a refusal, never a skip. ``--skip NAME=REASON`` overrides one check, on the record: the reason is
+vacuous pass), or a pytest check that skips any test (except the one named opt-in skip of the cloud-leg file), is a refusal,
+never a skip. ``--skip NAME=REASON`` overrides one check, on the record: the reason is
 printed as ``PUSH_CHECK_SKIPPED NAME reason=...`` (the push script hands those lines to ``nx ci record-push``).
 
 Exit codes: 0 every selected check passed (or was skipped by name), 14 a refusal (``PUSH_REFUSED_<CHECK>`` lines on standard
@@ -56,6 +63,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -100,9 +108,13 @@ WRITE_SEAM_TESTS = (
     "tests/db/test_http_combined_query_integration.py",
 )
 
-PYTEST_BASE = ("-m", "pytest", "-p", "no:cacheprovider", "-q", "-o", "addopts=")
+PYTEST_BASE = ("-m", "pytest", "-p", "no:cacheprovider", "-q", "-rs", "-o", "addopts=")
 FAST_MARKERS = "not integration and not slow"
-CHECK_TIMEOUT_S = 300
+DEFAULT_CHECK_TIMEOUT_S = 300
+#: What scripts/context_budgets.py covers when the tip's copy cannot be read (the script itself is reported missing then).
+CONTEXT_PLUGINS = ("conexus", "sn", "prose-edit", "tool-spill")
+CONTEXT_CEILINGS = "tests/fixtures/context-budgets.txt"
+CONTEXT_SCRIPT = "scripts/context_budgets.py"
 MAX_REPORT_LINES = 40
 MAX_REPORT_CHARS = 3500
 
@@ -119,7 +131,8 @@ class Spec:
     fix: str
     marker: str = ""                # a regex a passing run's output must match (a vacuous pass has none)
     min_passed: int = 0             # pytest checks: at least this many tests must pass
-    why: str = ""                   # filled at selection: the paths that selected it
+    skip_ok: str = ""               # pytest checks: the one skip reason (a substring) that is known and legitimate
+    env: tuple[tuple[str, str], ...] = ()   # extra environment the check runs with
 
 
 SPECS: dict[str, Spec] = {s.name: s for s in (
@@ -132,6 +145,11 @@ SPECS: dict[str, Spec] = {s.name: s for s in (
          "uv run python scripts/changelog_fold.py check",
          "fix the fragment under changelog/unreleased/ the report names (one fragment per bead, never CHANGELOG.md)",
          marker=r"changelog_fold check: ok"),
+    Spec("context-budget", "PUSH_REFUSED_CONTEXT_BUDGET", "run", (CONTEXT_SCRIPT,),
+         "uv run python scripts/context_budgets.py check",
+         "cut the file or move detail into a file loaded on demand, or record a raise in tests/fixtures/context-budgets.txt with "
+         "`scripts/context_budgets.py update-exceptions --allow-raise` (the reason goes in the commit message)",
+         marker=r"context_budgets: [1-9]\d* files, \d+ bytes, 0 errors"),
     Spec("wire-ledger", "PUSH_REFUSED_WIRE_LEDGER", "run", ("scripts/check_wire_contract_pairing.py", LEDGER_PATH),
          "uv run python scripts/check_wire_contract_pairing.py",
          f"declare each flagged commit under `## Unshipped` in {LEDGER_PATH} (or move a shipped entry to `## Shipped`)",
@@ -139,18 +157,22 @@ SPECS: dict[str, Spec] = {s.name: s for s in (
     Spec("cloud-leg", "PUSH_REFUSED_CLOUD_LEG", "run", ("tests/scripts/test_cloud_leg.py",),
          "uv run pytest -o addopts= -m 'not integration and not slow' tests/scripts/test_cloud_leg.py",
          f"map every route of {LEDGER_PATH} in tests/e2e/lib/cloud_leg.py (the failing test names the unmapped one)",
-         min_passed=40),
+         # Collected 2026-11-22: 102 tests, 101 pass and 1 is the opt-in real run (NX_CLOUDLEG_REAL_RUN), the one skip allowed.
+         min_passed=80, skip_ok="NX_CLOUDLEG_REAL_RUN"),
     Spec("plugin-ledger", "PUSH_REFUSED_PLUGIN_LEDGER", "run", ("tests/test_plugin_release_drift_ledger.py",),
          "uv run pytest -o addopts= -m 'not integration and not slow' tests/test_plugin_release_drift_ledger.py",
          "add every changed plugin file to conexus/PENDING_RELEASE.md (one path per bullet), or drop a shipped entry",
-         min_passed=10),
+         # Collected 2026-11-22: 30 tests, all pass, none skips. NX_REQUIRE_PLUGIN_DRIFT_CHECK=1 turns the tagless-checkout skip
+         # (9 tests) into a failure, so a pass cannot be a tagless one.
+         min_passed=20, env=(("NX_REQUIRE_PLUGIN_DRIFT_CHECK", "1"),)),
+    # Collected 2026-11-22: 67 files, 2790 tests (1061 on 2026-10-05, when ci.yml's floor of 600 was set).
     Spec("docs-readers", "PUSH_REFUSED_DOCS_READERS", "proof", ("scripts/select_docs_reader_tests.py",),
-         "", "", min_passed=600),
+         "", "", min_passed=1500),
     Spec("write-seam", "PUSH_REFUSED_WRITE_SEAM", "proof", (), "", "", min_passed=8),
 )}
 GATE_ERROR_TOKEN = "PUSH_REFUSED_CHECK_GATE_ERROR"
 _GATE_ERROR_ESCAPE = "  override, on the record: --skip-check-gate '<reason>'"
-ORDER = ("file-size", "changelog", "wire-ledger", "cloud-leg", "plugin-ledger", "docs-readers", "write-seam")
+ORDER = ("file-size", "changelog", "wire-ledger", "context-budget", "cloud-leg", "plugin-ledger", "docs-readers", "write-seam")
 SKIPPABLE = (*ORDER, "check-gate")
 
 
@@ -164,7 +186,7 @@ def write_seam_path(path: str) -> bool:
     return path in WRITE_SEAM_EXACT or path.startswith(WRITE_SEAM_PREFIXES)
 
 
-def select(paths: set[str], is_wire: Callable[[str], bool]) -> dict[str, str]:
+def select(paths: set[str], is_wire: Callable[[str], bool], is_context: Callable[[str], bool]) -> dict[str, str]:
     """The checks the outbound *paths* reach, each with the path that selected it (or ``always``)."""
     chosen: dict[str, str] = {"file-size": "always", "changelog": "always"}
 
@@ -173,6 +195,8 @@ def select(paths: set[str], is_wire: Callable[[str], bool]) -> dict[str, str]:
 
     if (hit := first(lambda p: p == LEDGER_PATH or is_wire(p))) is not None:
         chosen["wire-ledger"] = hit
+    if (hit := first(is_context)) is not None:
+        chosen["context-budget"] = hit
     if (hit := first(lambda p: p.startswith("docs/"))) is not None:
         chosen["cloud-leg"] = hit
         chosen["docs-readers"] = hit
@@ -185,8 +209,14 @@ def select(paths: set[str], is_wire: Callable[[str], bool]) -> dict[str, str]:
 
 # ── git ─────────────────────────────────────────────────────────────────────
 
+#: Variables that change what git or pytest does and so what a check examines: the tip's tree is what is judged, not a
+#: caller's ambient environment (PYTEST_ADDOPTS=-k nothing would deselect every test and still exit 0 under a floor-less check).
+_SCRUBBED = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_PREFIX", "PYTEST_ADDOPTS", "PYTEST_PLUGINS",
+             "PYTEST_DISABLE_PLUGIN_AUTOLOAD")
+
+
 def _env() -> dict[str, str]:
-    env = {k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_PREFIX")}
+    env = {k: v for k, v in os.environ.items() if k not in _SCRUBBED}
     env.setdefault("PYTHONDONTWRITEBYTECODE", "1")
     return env
 
@@ -289,16 +319,19 @@ def _excerpt(text: str) -> str:
 
 
 def pytest_python(repo: Path, python: str) -> list[str]:
-    """The interpreter command that can import pytest: *python*, else ``uv run --project <repo> python``; a GateError when
-    neither can, naming the remedy."""
-    ok = subprocess.run([python, "-c", "import pytest"], capture_output=True, env=_env(), check=False).returncode == 0
-    if ok:
+    """The interpreter command that can import pytest: *python*, else ``uv run --frozen --no-sync --project <repo> python``
+    (it never touches the lock file or the environment); a GateError when neither can, naming the remedy."""
+    if subprocess.run([python, "-c", "import pytest"], capture_output=True, env=_env(), check=False).returncode == 0:
         return [python]
     uv = shutil.which("uv")
     if uv is None:
         raise GateError(f"{python} has no pytest and uv is not on PATH: run `uv sync` in {repo} (or set NX_PUSH_CHECK_PYTHON "
                         "to an interpreter that has pytest)")
-    return [uv, "run", "--project", str(repo), "python"]
+    via_uv = [uv, "run", "--frozen", "--no-sync", "--project", str(repo), "python"]
+    if subprocess.run([*via_uv, "-c", "import pytest"], capture_output=True, env=_env(), check=False).returncode != 0:
+        raise GateError(f"{python} has no pytest, and neither does {repo}'s environment (uv run --frozen --no-sync): run "
+                        "`uv sync` in it, or set NX_PUSH_CHECK_PYTHON to an interpreter that has pytest")
+    return via_uv
 
 
 def command_for(name: str, python: list[str], pytest_cmd: list[str]) -> list[str]:
@@ -308,6 +341,8 @@ def command_for(name: str, python: list[str], pytest_cmd: list[str]) -> list[str
         return [*python, "scripts/changelog_fold.py", "check"]
     if name == "wire-ledger":
         return [*python, "scripts/check_wire_contract_pairing.py"]
+    if name == "context-budget":
+        return [*python, "scripts/context_budgets.py", "check"]
     if name == "cloud-leg":
         return [*pytest_cmd, *PYTEST_BASE, "-m", FAST_MARKERS, "tests/scripts/test_cloud_leg.py"]
     if name == "plugin-ledger":
@@ -318,30 +353,62 @@ def command_for(name: str, python: list[str], pytest_cmd: list[str]) -> list[str
 _CHILDREN: set[subprocess.Popen] = set()
 
 
+def check_timeout_s() -> int:
+    """How long one check may run: ``NX_PUSH_CHECK_TIMEOUT_S`` (a positive whole number), else 300."""
+    text = os.environ.get("NX_PUSH_CHECK_TIMEOUT_S", "")
+    return int(text) if text.isdigit() and int(text) > 0 else DEFAULT_CHECK_TIMEOUT_S
+
+
 def kill_children() -> None:
-    """Kill every check still running, with whatever it started (each runs in its own session). Never raises."""
+    """Kill every check still running, with whatever it started (each runs in its own session). Never raises. For the gate
+    being stopped; a check that merely ran past its time kills only itself."""
     for child in list(_CHILDREN):
-        try:
-            os.killpg(child.pid, signal.SIGKILL)
-        except OSError:
-            pass
+        _kill_group(child)
 
 
-def _run_child(command: list[str], cwd: Path, env: dict[str, str]) -> tuple[int, str]:
-    """Run *command* in its own session, registered so a TERM to the gate stops it; its (stdout + stderr) and exit code.
-    Raises ``subprocess.TimeoutExpired`` (after killing it) past :data:`CHECK_TIMEOUT_S`."""
+def _kill_group(child: subprocess.Popen) -> None:
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except OSError:
+        pass
+
+
+def _run_child(command: list[str], cwd: Path, env: dict[str, str], timeout: int | None = None) -> tuple[int, str]:
+    """Run *command* in its own session, registered so a TERM to the gate stops it; its exit code and (stdout + stderr).
+    Raises ``subprocess.TimeoutExpired`` past *timeout* (default :func:`check_timeout_s`), after killing THIS command and what
+    it started, and nothing else: a sibling check is not stopped by another's timeout."""
+    limit = timeout or check_timeout_s()
     child = subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                              start_new_session=True)
     _CHILDREN.add(child)
     try:
-        out, _ = child.communicate(timeout=CHECK_TIMEOUT_S)
+        out, _ = child.communicate(timeout=limit)
     except subprocess.TimeoutExpired:
-        kill_children()
+        _kill_group(child)
         child.communicate()
         raise
     finally:
         _CHILDREN.discard(child)
     return child.returncode, out or ""
+
+
+_SKIPPED_LINE = re.compile(r"^SKIPPED \[(\d+)\] (.*)$", re.M)
+
+
+def skip_problem(name: str, out: str) -> str | None:
+    """Why the skips in a pytest check's *out* make a pass vacuous, or None. A skipped test examined nothing, so none is
+    allowed except the check's one named, known opt-in skip (``Spec.skip_ok``, matched on the skip reason)."""
+    spec = SPECS[name]
+    summary = next((ln for ln in reversed(out.splitlines()) if _SUMMARY.search(ln) and " in " in ln), "")
+    skipped = summary_counts(summary).get("skipped", 0)
+    lines = [(int(n), reason) for n, reason in _SKIPPED_LINE.findall(out)]
+    allowed = sum(n for n, reason in lines if spec.skip_ok and spec.skip_ok in reason)
+    other = [reason for n, reason in lines if not (spec.skip_ok and spec.skip_ok in reason)]
+    if skipped == allowed and not other:
+        return None
+    what = f"; the one allowed skip is the {spec.skip_ok} opt-in" if spec.skip_ok else ""
+    return (f"{skipped} test(s) skipped{what}: a skipped test examined nothing, so a pass with skips is vacuous, not green "
+            f"(skip reasons: {'; '.join(other)[:300] or 'not printed'})")
 
 
 def run_check(spec: Spec, tree: Path, python: list[str], pytest_cmd: list[str]) -> Outcome:
@@ -353,10 +420,12 @@ def run_check(spec: Spec, tree: Path, python: list[str], pytest_cmd: list[str]) 
     env = _env()
     env["PYTHONPATH"] = os.pathsep.join(p for p in (str(tree / "src"), env.get("PYTHONPATH", "")) if p)
     env["NX_TEST_T2_SUBSTRATE"] = "none"
+    env.update(dict(spec.env))
     try:
         returncode, out = _run_child(command_for(spec.name, python, pytest_cmd), tree, env)
-    except subprocess.TimeoutExpired:
-        return Outcome(spec.name, False, f"ran past {CHECK_TIMEOUT_S}s and was stopped", time.monotonic() - started)
+    except subprocess.TimeoutExpired as exc:
+        return Outcome(spec.name, False, f"ran past {exc.timeout:.0f}s and was stopped (only this check was stopped)",
+                       time.monotonic() - started)
     except OSError as exc:
         return Outcome(spec.name, False, f"could not start: {exc}", time.monotonic() - started)
     seconds = time.monotonic() - started
@@ -371,6 +440,8 @@ def run_check(spec: Spec, tree: Path, python: list[str], pytest_cmd: list[str]) 
             return Outcome(spec.name, False, f"exit 0 but only {counts.get('passed', 0)} test(s) passed (floor "
                            f"{spec.min_passed}): a run that skipped its corpus is vacuous, not green. Last lines:\n"
                            f"{_excerpt(out)}", seconds)
+        if (problem := skip_problem(spec.name, out)) is not None:
+            return Outcome(spec.name, False, f"exit 0 but {problem}. Last lines:\n{_excerpt(out)}", seconds)
     return Outcome(spec.name, True, "", seconds)
 
 
@@ -392,8 +463,15 @@ def _opt_value(args: list[str], flag: str) -> str | None:
     return None
 
 
-#: pytest options that narrow a run to a subset of the legs's tests, which a proof of the whole leg must not carry.
-_NARROWING = ("-k", "--keyword", "--deselect", "--lf", "--last-failed", "--sw", "--stepwise", "--ff", "--maxfail")
+#: pytest options that narrow, stop early or only list a run, matched as a PREFIX (``-kEXPR``, ``--ignore=x``, ``-xvs``), so
+#: a proof of the whole leg carries none. ``--co`` is matched exactly: ``--color`` is not narrowing.
+_NARROWING_PREFIXES = ("-k", "--keyword", "--ignore", "--ignore-glob", "--deselect", "--lf", "--last-failed", "--sw",
+                       "--stepwise", "--maxfail", "-x", "--exitfirst", "--collect-only")
+_NARROWING_EXACT = ("--co",)
+
+
+def _narrowing(args: list[str]) -> str | None:
+    return next((a for a in args if a.startswith(_NARROWING_PREFIXES) or a in _NARROWING_EXACT), None)
 
 
 def proof_problem(proof: dict, leg: str, tree_sha: str, expected_files: list[str]) -> str | None:
@@ -414,15 +492,18 @@ def proof_problem(proof: dict, leg: str, tree_sha: str, expected_files: list[str
     missing = [f for f in expected_files if f not in command]
     if missing:
         return f"its command does not name {len(missing)} of the {len(expected_files)} files of the leg (first: {missing[0]})"
-    if any(arg in _NARROWING or arg.startswith(("--maxfail", "--deselect")) for arg in args):
-        return "its command narrows the run (-k, --deselect, --lf, --sw, --maxfail)"
-    if "addopts=" not in args:
-        return "its command does not clear addopts (-o addopts=), so the lint- and integration-marked tests were deselected"
+    if (narrowing := _narrowing(args)) is not None:
+        return f"its command narrows or cuts short the run ({narrowing}; -k, --ignore, --deselect, --lf, --sw, --maxfail, -x, --co)"
+    addopts = [a for a in args if a.startswith("addopts=")]
+    if not addopts or any(a != "addopts=" for a in addopts):
+        return "its command does not clear addopts exactly (-o addopts=), so tests were deselected or options were smuggled in"
+    expected = FAST_MARKERS if leg == "docs-readers" else "integration"
+    markers = [a for a in args if a == "-m" or (a.startswith("-m") and not a.startswith("--"))]
+    if len(markers) != 1 or markers[0] != "-m":
+        return f"its command must carry exactly one -m {expected!r}, spaced (found {markers or 'none'})"
     marker = _opt_value(args, "-m")
-    if leg == "docs-readers" and marker != FAST_MARKERS:
-        return f"its marker is {marker!r}, CI runs -m {FAST_MARKERS!r}"
-    if leg == "write-seam" and marker != "integration":
-        return f"its marker is {marker!r}, the write-seam tests are integration-marked and CI runs -m integration"
+    if marker != expected:
+        return f"its marker is {marker!r}, CI runs -m {expected!r}"
     counts = summary_counts(str(proof.get("summary") or ""))
     if not counts:
         return "it carries no pytest summary line (rerun with this checkout's scripts/watched_pytest.py)"
@@ -445,16 +526,53 @@ def docs_reader_files(tree: Path, python: str) -> list[str]:
 
 
 def proof_commands(leg: str, files: list[str], tip: str) -> str:
-    """How to produce the proof of *leg*, one line."""
+    """How to produce the proof of *leg*, in a clean checkout of *tip*."""
     if leg == "docs-readers":
-        return (f"lab-remote --fetch docs.json -- python scripts/watched_pytest.py --status docs.json -- uv run pytest "
-                f"-o addopts= -m '{FAST_MARKERS}' {' '.join(files)}   (on a clean checkout of {tip[:12]}; then --proof docs.json)")
-    return ("lab-remote --fetch seam.json -- sh -c 'scripts/build-gate-jar.sh && NX_REQUIRE_SERVICE_JAR=1 python "
-            "scripts/watched_pytest.py --status seam.json -- uv run pytest -o addopts= -m integration "
-            f"{' '.join(WRITE_SEAM_TESTS)}'   (a clean checkout of {tip[:12]}, Docker available; then --proof seam.json)")
+        return (f"lab-remote --fetch docs.json -- sh -c 'scripts/build-gate-jar.sh && python3 scripts/watched_pytest.py --status "
+                f"docs.json -- uv run pytest -o addopts= -m \"{FAST_MARKERS}\" {' '.join(files)}'   (a clean checkout of "
+                f"{tip[:12]}; the readers need the engine substrate)")
+    return (f"on a pool host, in a clean checkout of {tip[:12]} with Docker, two steps and neither wrapped in lab-run (AGENTS.md "
+            "rule 13): 1) scripts/build-gate-jar.sh --lab-run lab-m   2) NX_REQUIRE_SERVICE_JAR=1 python3 scripts/watched_pytest.py "
+            f"--status seam.json -- uv run pytest -o addopts= -m integration {' '.join(WRITE_SEAM_TESTS)}   (copy seam.json back)")
+
+
+_PROOF_FILES = {"docs-readers": "docs.json", "write-seam": "seam.json"}
+
+
+def repush_line(prefix: str, suffix: str, legs: list[str]) -> str:
+    """The push command again with a ``--proof`` for each leg in *legs*, between the flags (*prefix*) and the shas (*suffix*)."""
+    proofs = " ".join(f"--proof {_PROOF_FILES[leg]}" for leg in legs)
+    return " ".join(part for part in (prefix, proofs, suffix) if part)
+
+
+def proof_line(leg: str, proof: dict, path: Path) -> str:
+    """The summary line of an accepted proof: its tree, when it started, how long it ran and where, which the push record
+    carries too. A field the status file does not have is ``unknown``, never invented."""
+    started, elapsed = proof.get("started_at"), proof.get("elapsed_s")
+    when = (datetime.fromtimestamp(float(started), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if isinstance(started, (int, float)) else "unknown")
+    seconds = str(round(float(elapsed))) if isinstance(elapsed, (int, float)) else "unknown"
+    host = re.sub(r"\s+", "_", str(proof.get("host") or "unknown").strip()) or "unknown"
+    return (f"PUSH_PROOF_ACCEPTED {leg} tree={str(proof.get('tree', ''))[:12]} started_at={when} elapsed_s={seconds} "
+            f"host={host} file={path.name}")
 
 
 # ── the gate ────────────────────────────────────────────────────────────────
+
+def _load_module(script: Path, name: str):  # noqa: ANN202 -- a module object
+    spec = importlib.util.spec_from_file_location(name, script)
+    if spec is None or spec.loader is None:
+        raise GateError(f"cannot load the tip's {script.name}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module          # its dataclasses resolve their field types through sys.modules
+    try:
+        spec.loader.exec_module(module)
+    except (ImportError, SyntaxError) as exc:
+        raise GateError(f"cannot load the tip's {script.name}: {exc}") from exc
+    finally:
+        sys.modules.pop(spec.name, None)
+    return module
+
 
 def _load_wire_predicates(tree: Path, repo: Path, tip: str) -> Callable[[str], bool]:
     """What the TIP's check_wire_contract_pairing.py treats as wire: the engine tree, the client modules, and a test
@@ -464,20 +582,29 @@ def _load_wire_predicates(tree: Path, repo: Path, tip: str) -> Callable[[str], b
         # The wire check itself is reported missing when it is selected; with no script to read the rule from, select on
         # the engine tree, the one part that is the same by definition.
         return lambda p: p.startswith("service/")
-    spec = importlib.util.spec_from_file_location("_push_gate_wire_pairing", script)
-    if spec is None or spec.loader is None:
-        raise GateError("cannot load the tip's scripts/check_wire_contract_pairing.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module          # its dataclasses resolve their field types through sys.modules
+    module = _load_module(script, "_push_gate_wire_pairing")
     try:
-        spec.loader.exec_module(module)
         engine, client, envelope = module._is_engine_path, module._is_client_module_path, module._is_client_test_envelope
-    except (AttributeError, ImportError, SyntaxError) as exc:
+    except AttributeError as exc:
         raise GateError("the tip's scripts/check_wire_contract_pairing.py no longer has the predicates this gate reads "
                         f"(_is_engine_path, _is_client_module_path, _is_client_test_envelope): {exc}") from exc
-    finally:
-        sys.modules.pop(spec.name, None)
     return lambda p: bool(engine(p) or client(p) or envelope(tip, p, repo_root=repo))
+
+
+def _load_context_predicate(tree: Path) -> Callable[[str], bool]:
+    """What the TIP's context_budgets.py covers: a ``.md`` under ``<plugin>/<kind>/``, its ceilings file, and itself. Read from
+    the tip's own copy (PLUGINS, KINDS, CEILINGS); with no copy to read, every path under a plugin selects the check, which
+    is then reported missing."""
+    script = tree / CONTEXT_SCRIPT
+    if not script.exists():
+        return lambda p: p.startswith(tuple(f"{plugin}/" for plugin in CONTEXT_PLUGINS)) or p in (CONTEXT_CEILINGS, CONTEXT_SCRIPT)
+    module = _load_module(script, "_push_gate_context_budgets")
+    try:
+        prefixes = tuple(f"{plugin}/{kind}/" for plugin in module.PLUGINS for kind in module.KINDS)
+        ceilings = module.CEILINGS
+    except AttributeError as exc:
+        raise GateError(f"the tip's {CONTEXT_SCRIPT} no longer has PLUGINS, KINDS and CEILINGS, which this gate reads: {exc}") from exc
+    return lambda p: (p.endswith(".md") and p.startswith(prefixes)) or p in (ceilings, CONTEXT_SCRIPT)
 
 
 def _reproduce_note(tip: str) -> str:
@@ -485,7 +612,7 @@ def _reproduce_note(tip: str) -> str:
 
 
 def run_gate(repo: Path, base: str, tip: str, proofs: list[Path], skips: dict[str, str], workdir: Path, python: str,
-             out=sys.stdout, err=sys.stderr) -> int:
+             out=sys.stdout, err=sys.stderr, repush: tuple[str, str] = ("", "")) -> int:
     if "check-gate" in skips:
         print(f"PUSH_CHECK_SKIPPED check-gate reason={skips['check-gate']}", file=out)
         return EXIT_OK
@@ -498,9 +625,10 @@ def run_gate(repo: Path, base: str, tip: str, proofs: list[Path], skips: dict[st
     refusals: list[str] = []
     skipped: list[str] = []
     ran: list[str] = []
+    missing_proofs: list[str] = []
     with Tree(repo, tip, workdir) as tree:
         paths = outbound_paths(repo, base, tip)
-        selected = select(paths, _load_wire_predicates(tree, repo, tip))
+        selected = select(paths, _load_wire_predicates(tree, repo, tip), _load_context_predicate(tree))
         runnable = [n for n in selected if SPECS[n].kind == "run"]
         proof_legs = [n for n in selected if SPECS[n].kind == "proof"]
         pytest_cmd = [python]
@@ -548,17 +676,19 @@ def run_gate(repo: Path, base: str, tip: str, proofs: list[Path], skips: dict[st
                 continue
             files = docs_reader_files(tree, python) if name == "docs-readers" else list(WRITE_SEAM_TESTS)
             problems: list[str] = []
-            good = False
+            accepted: tuple[Path, dict] | None = None
             for path, proof in loaded_proofs:
                 problem = proof_problem(proof, name, tree_sha, files) if isinstance(proof, dict) else str(proof)
                 if problem is None:
-                    good = True
+                    accepted = (path, proof)
                     break
                 problems.append(f"{path.name}: {problem}")
-            if good:
+            if accepted is not None:
+                print(proof_line(name, accepted[1], accepted[0]), file=out)
                 ran.append(f"{name}(proof)")
                 continue
             refusals.append(name)
+            missing_proofs.append(name)
             print(f"{SPECS[name].token} {name} needs a proof of a green run on this tree and has none: selected by "
                   f"{selected[name]}; tree {tree_sha[:12]}.", file=out)
             for line in problems:
@@ -566,6 +696,8 @@ def run_gate(repo: Path, base: str, tip: str, proofs: list[Path], skips: dict[st
             print(f"  produce it: {proof_commands(name, files, tip)}", file=out)
             print(f"  override, on the record: --skip-{name} '<reason>'", file=out)
     elapsed = time.monotonic() - started
+    if missing_proofs and repush[0]:
+        print(f"then re-push: {repush_line(repush[0], repush[1], missing_proofs)}", file=out)
     if refusals:
         print(f"PUSH_CHECKS_REFUSED refused={','.join(refusals)} ran={','.join(ran) or 'none'} in {elapsed:.1f}s", file=err)
         return EXIT_REFUSED
@@ -598,6 +730,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tip", required=True, help="the commit to push; its tree is what the checks read")
     parser.add_argument("--proof", action="append", default=[], type=Path, help="a watched_pytest.py --status file (repeatable)")
     parser.add_argument("--skip", action="append", default=[], type=parse_skip, help="NAME=REASON (repeatable)")
+    parser.add_argument("--repush-prefix", default="", help="the push command up to its shas, for the re-push line of a refusal")
+    parser.add_argument("--repush-suffix", default="", help="the shas of the push command, for the re-push line of a refusal")
     parser.add_argument("--workdir", type=Path, default=None, help="a directory for the tip's tree (default: a temp dir)")
     parser.add_argument("--python", default=sys.executable, help="the interpreter the checks run under")
     args = parser.parse_args(argv)
@@ -613,7 +747,8 @@ def main(argv: list[str] | None = None) -> int:
         if not workdir.is_dir():
             raise GateError(f"the work directory {workdir} does not exist")
         try:
-            return run_gate(args.repo, args.base, args.tip, args.proof, dict(args.skip), workdir, args.python)
+            return run_gate(args.repo, args.base, args.tip, args.proof, dict(args.skip), workdir, args.python,
+                            repush=(args.repush_prefix, args.repush_suffix))
         finally:
             if own_workdir:
                 shutil.rmtree(workdir, ignore_errors=True)

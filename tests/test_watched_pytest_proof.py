@@ -72,6 +72,13 @@ def test_a_failing_run_has_a_summary_that_says_so_and_is_not_a_pass(repo: Path) 
     assert code == 1 and status["state"] == "failed" and "1 failed" in status["summary"]
 
 
+def test_the_status_names_the_host_it_ran_on(repo: Path) -> None:
+    import platform  # noqa: PLC0415
+
+    _code, status = _watch(repo, repo / "status.json")
+    assert status["host"] == platform.node() and status["started_at"] > 0 and status["elapsed_s"] > 0
+
+
 def test_outside_a_repository_the_stamp_is_absent_not_invented(tmp_path: Path) -> None:
     (tmp_path / "test_case.py").write_text("def test_a():\n    pass\n")
     env_dir = tmp_path / "no-repo"

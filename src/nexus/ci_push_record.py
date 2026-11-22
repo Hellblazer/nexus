@@ -35,7 +35,9 @@ RED_FIX_MAX = 500
 #: The most characters of one ``skips`` reason, and the bytes all the skips may take together before the ``red_fix`` reason
 #: is fitted: the skips are cut first (never a check name), so a push that overrode many checks still leaves room for both.
 SKIP_MAX = 200
-SKIPS_BUDGET_BYTES = 560
+SKIPS_BUDGET_BYTES = 400
+#: The most characters of a proof's ``host`` the body carries.
+HOST_MAX = 40
 
 _CONTROL_RUNS = re.compile(r"[\s\x00-\x1f\x7f-\x9f  ]+")
 
@@ -71,14 +73,25 @@ def _skips_for(fields: dict[str, Any], skips: Mapping[str, str] | None) -> dict[
     return fields  # unreachable: the ladder ends at 0
 
 
-def body(from_sha: str, count: int | None, red_fix: str | None, skips: Mapping[str, str] | None = None) -> str:
+def _proofs_for(fields: dict[str, Any], proofs: Mapping[str, Mapping[str, Any]] | None) -> dict[str, Any]:
+    """*fields* with the ``proofs`` map added: per heavy leg, the tree sha prefix, the start (UTC ISO), the duration in seconds
+    and the host of the run the push relied on. The host is cleaned and cut; the rest is fixed-width."""
+    if not proofs:
+        return fields
+    shown = {leg: {"tree": str(info.get("tree", ""))[:12], "at": str(info.get("at", ""))[:20], "s": int(info.get("s", 0)),
+                   "host": clean_reason(str(info.get("host", "")))[:HOST_MAX]} for leg, info in proofs.items()}
+    return {**fields, "proofs": shown}
+
+
+def body(from_sha: str, count: int | None, red_fix: str | None, skips: Mapping[str, str] | None = None,
+         proofs: Mapping[str, Mapping[str, Any]] | None = None) -> str:
     """The record body as JSON: ``base`` (the tip the push replaced), ``n`` when given, ``skips`` (the push-time checks the
-    push overrode, name to reason) when any, ``red_fix`` when given and not empty after cleaning. The skips are fitted first
+    push overrode, name to reason) and ``proofs`` (the heavy-leg runs it relied on) when any, ``red_fix`` when given and not empty after cleaning. The skips are fitted first
     (:func:`_skips_for`), then the reason is cut to the longest prefix with which the whole body fits :data:`BODY_MAX_BYTES`."""
     fields: dict[str, Any] = {"base": from_sha}
     if count is not None:
         fields["n"] = count
-    fields = _skips_for(fields, skips)
+    fields = _skips_for(_proofs_for(fields, proofs), skips)
     reason = clean_reason(red_fix)[:RED_FIX_MAX]
     if not reason:
         return _dumps(fields)
@@ -120,7 +133,7 @@ def _stamp_state(store: Any) -> tuple[bool, bool, int, int]:
 
 
 def write(store: Any, base: str, from_sha: str, to_sha: str, count: int | None, label: str, red_fix: str | None,
-          skips: Mapping[str, str] | None = None) -> str:
+          skips: Mapping[str, str] | None = None, proofs: Mapping[str, Mapping[str, Any]] | None = None) -> str:
     """Write the push record; the one status line: ``PUSH_RECORD_OK`` (stamped), ``PUSH_RECORD_UNSTAMPED`` (written, with no
     session stamp), ``PUSH_RECORD_FALLBACK`` (the stamped write failed, the minimal unstamped record stands) or
     ``PUSH_RECORD_FAILED`` (neither landed). Never raises."""
@@ -131,7 +144,7 @@ def write(store: Any, base: str, from_sha: str, to_sha: str, count: int | None, 
     nonce = f"push-{to_sha}"
     session, identity, retries, id_drops = _stamp_state(store)
     try:
-        store.out(subspace, {"topic": topic}, dims, body(from_sha, count, red_fix, skips), nonce=nonce)
+        store.out(subspace, {"topic": topic}, dims, body(from_sha, count, red_fix, skips, proofs), nonce=nonce)
     except Exception as first:  # noqa: BLE001 -- the push landed; a record fault is reported, never raised
         why = _why(first)
     else:
@@ -153,7 +166,7 @@ def write(store: Any, base: str, from_sha: str, to_sha: str, count: int | None, 
     _, _, _, drops_before = _stamp_state(store)
     try:
         with without_session_header():
-            store.out(subspace, {"topic": topic}, dims, body(from_sha, None, red_fix, skips), nonce=nonce)
+            store.out(subspace, {"topic": topic}, dims, body(from_sha, None, red_fix, skips, proofs), nonce=nonce)
     except Exception as second:  # noqa: BLE001
         return f"PUSH_RECORD_FAILED {why}; the minimal unstamped retry failed too ({_why(second)}) (the push stands, no record was written)"
     _, _, _, drops_after = _stamp_state(store)
