@@ -3,6 +3,7 @@
 """Fallback-collection migration command for the ``nx catalog`` group (nexus-whh61.4).
 
 Carved out of ``commands.catalog``: ``migrate-fallback`` — re-points documents
+import shlex
 from a legacy fallback collection (e.g. ``docs__default``) onto per-owner
 conformant targets and registers/supersedes the projection rows. Behaviour-
 preserving; ``register`` attaches it to the shared ``catalog`` group so
@@ -303,7 +304,7 @@ def migrate_fallback_cmd(
         f"will return empty for these docs until you run:\n"
         f"  nx index repo .   # re-populate the target with new chunks\n"
         f"After re-index completes, the old chunks become orphans and "
-        f"'nx t3 gc -c {source} --no-dry-run --yes' will sweep them.",
+        f"`nx t3 gc -c {shlex.quote(source)} --no-dry-run --yes` will sweep them.",
         err=True,
     )
 

@@ -28,6 +28,7 @@ There is no MCP tool for clearing, by design (RDR-243 Q5).
 """
 from __future__ import annotations
 
+import shlex
 import fnmatch
 import json
 
@@ -83,7 +84,7 @@ def _targets(cat, tumbler: str | None, collection: str, path: str, owner: str) -
     if not found:
         wanted = " ".join(
             p for p in (
-                f"--collection {collection}" if collection else "",
+                f"--collection {shlex.quote(collection)}" if collection else "",
                 f"--path {path}" if path else "",
                 f"--owner {owner}" if owner else "",
             ) if p
