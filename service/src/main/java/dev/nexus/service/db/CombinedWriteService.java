@@ -20,6 +20,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+
 
 /**
  * nexus-kl2z6 increment 1 — the orchestration seam T2 {@code
@@ -344,10 +346,21 @@ public final class CombinedWriteService {
         }
         CollectionRow from = CollectionRegistry.lookup(tenantScope, tenant, source);
         CollectionRow to = CollectionRegistry.lookup(tenantScope, tenant, target);
+        // nexus-afkjy: the owners are read from the rows, not the cache. owner_id can change behind the cache with no
+        // evict (catalog-044's AFTER trigger on catalog_documents re-owns a code/docs/rdr row when a document lands, and
+        // rederiveOwner re-fires it), and a model move is rare, so one read here costs nothing.
+        Map<String, String> owners = tenantScope.withTenant(tenant, ctx -> ctx
+            .select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.OWNER_ID)
+            .from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+            .and(CATALOG_COLLECTIONS.NAME.in(source, target))
+            .fetchMap(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.OWNER_ID));
+        String fromOwner = owners.get(source);
+        String toOwner = owners.get(target);
         // Null (or blank) content type or owner on either side is no sibling: two nulls are equal to
         // Objects.equals, and a move between collections whose owner nobody knows is not a model move.
-        if (isUnset(from.contentType()) || isUnset(from.ownerId()) || isUnset(to.contentType()) || isUnset(to.ownerId())
-                || !Objects.equals(from.contentType(), to.contentType()) || !Objects.equals(from.ownerId(), to.ownerId())
+        if (isUnset(from.contentType()) || isUnset(fromOwner) || isUnset(to.contentType()) || isUnset(toOwner)
+                || !Objects.equals(from.contentType(), to.contentType()) || !Objects.equals(fromOwner, toOwner)
                 || Objects.equals(from.embeddingModel(), to.embeddingModel())) {
             throw new IllegalArgumentException("a document move goes between model siblings: " + source
                 + " and " + target + " are not the same content type and owner under different models");
