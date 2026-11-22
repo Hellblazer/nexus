@@ -96,6 +96,9 @@ final class Rdr229RenameEngine implements AutoCloseable {
     private Thread registrar;
     private volatile boolean registrarStop;
 
+    /** The version the harness's registrar passes, as the stage-2 pass passes the engine's own: it lands in the drop move's changeset_id. */
+    static final String ENGINE_VERSION = "9.9.9-rename-harness";
+
     /** A database on the pg_background image with the roles and libraries a data-move engine needs; nothing is walked yet. */
     Rdr229RenameEngine() throws Exception {
         this.pg = PgContainerHelper.startDataMove();
@@ -225,7 +228,7 @@ final class Rdr229RenameEngine implements AutoCloseable {
         registrar = new Thread(() -> {
             while (!registrarStop) {
                 try (var ctx = DSL.using(admin.url(), admin.user(), admin.password())) {
-                    NameKeyDropMove.registerIfAbsent(watched.latest(), ctx);
+                    NameKeyDropMove.registerIfAbsent(watched.latest(), ctx, ENGINE_VERSION);
                 } catch (RuntimeException e) {
                     // a tick that cannot reach the database is retried on the next one
                 }

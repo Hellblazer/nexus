@@ -72,8 +72,22 @@ class NameKeyDropMoveDefinitionTest {
     @Test
     void registerIfAbsentRegistersNothingBeforeGate3OrBeforeTheFirstSample() {
         var ctx = DSL.using(SQLDialect.POSTGRES);   // never reached: the guard returns first
-        assertThat(NameKeyDropMove.registerIfAbsent(null, ctx)).isFalse();
-        assertThat(NameKeyDropMove.registerIfAbsent(result(false, RenameState(false, 0, List.of())), ctx)).isFalse();
+        assertThat(NameKeyDropMove.registerIfAbsent(null, ctx, "1.2.3")).isFalse();
+        assertThat(NameKeyDropMove.registerIfAbsent(result(false, RenameState(false, 0, List.of())), ctx, "1.2.3")).isFalse();
+    }
+
+    @Test
+    void theChangesetIdNamesTheRegisteringEngineVersion_S3Rule2_andABlankVersionIsRefused() {
+        assertThat(NameKeyDropMove.changesetId("0.1.200")).isEqualTo("engine:rdr229-name-key-drop:0.1.200");
+        assertThat(NameKeyDropMove.changesetId("0.1.200-SNAPSHOT")).as("an unstamped build's app version is still a version")
+            .isEqualTo("engine:rdr229-name-key-drop:0.1.200-SNAPSHOT");
+        assertThat(NameKeyDropMove.changesetId("1")).doesNotStartWith("engine-pass:");
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> NameKeyDropMove.changesetId(" "))
+            .isInstanceOf(IllegalArgumentException.class);
+        var ctx = DSL.using(SQLDialect.POSTGRES);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> NameKeyDropMove.registerIfAbsent(null, ctx, null))
+            .as("refused before any gate check: a pass wired without a version is a defect, not a quiet no-op")
+            .isInstanceOf(IllegalArgumentException.class);
     }
 
     // ---- the readiness arithmetic ----------------------------------------------------------------------------------------
