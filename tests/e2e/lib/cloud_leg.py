@@ -358,6 +358,9 @@ ROUTE_MAP: dict[str, Step] = {
     "POST /v1/taxonomy/assignments/prune_projection": Step("route-prune-projection", "py", ["-c", _routes.PRUNE_PROJECTION],
                                                            expect_route="/v1/taxonomy/assignments/prune_projection",
                                                            expect_stdout="match=bogus refused 400"),
+    "POST /v1/telemetry/rename_collection": Step("route-telemetry-rename", "py", ["-c", _routes.TELEMETRY_RENAME],
+                                                 expect_route="/v1/telemetry/rename_collection",
+                                                 expect_stdout="minted target refused 400"),
 }
 
 _ROUTE_RE = re.compile(r"`(GET|POST|PUT|PATCH|DELETE) (/v1/[A-Za-z0-9_\-/.{}]+)")
