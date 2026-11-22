@@ -669,6 +669,27 @@ class PciBuilderTerminationIntegrationTest {
     // -- a self-retrying changeset is not schema work (nexus-f3yqd.3) -------------------------------------
 
     static final String RETIRE_CHANGESET = "aspects-005-2";
+
+    /**
+     * The self-retrying (onFail="CONTINUE") changesets a boot of this class's store has pending when it stages {@link #RETIRE_CHANGESET}: that one, and
+     * collections-001-2 (RDR-229 P3.8), which waits for a data move a fresh store has not completed. vectors-074-1 (RDR-229 P3.3c) is a third member
+     * only while it is unrecorded or a valid index of its name stands without its record; this class migrates the store whole first, so it is recorded
+     * and absent here (ChunkOrphanedAtIndexChangesetIntegrationTest holds it pending and names it). Pinned exactly, not by count.
+     */
+    static final java.util.Set<String> SELF_RETRYING = java.util.Set.of("aspects-005-2", "collections-001-2");
+
+    /** The changeset ids the boot named as kept for retrying ({@code pci_build_kept_for_retrying id=<file>::<id>}). */
+    static java.util.Set<String> keptForRetrying(List<String> logs) {
+        var ids = new java.util.TreeSet<String>();
+        var pattern = java.util.regex.Pattern.compile("pci_build_kept_for_retrying id=\\S+::(\\S+)");
+        for (String l : logs) {
+            var m = pattern.matcher(l);
+            if (m.find()) {
+                ids.add(m.group(1));
+            }
+        }
+        return ids;
+    }
     static final String QUEUE_COLLECTION = "pcitrm-queue-coll";
     static final String QUEUE_DOC = "pcitrm.1";
 
@@ -750,9 +771,10 @@ class PciBuilderTerminationIntegrationTest {
 
                     assertThat(logs).noneMatch(l -> l.contains("event=pci_builders_terminated"));
                     assertThat(logs).anyMatch(l -> l.contains("event=pci_builders_kept") && l.contains("count=1")
-                        && l.contains("retrying=1"));
-                    assertThat(logs).as("the keep line is one event, the excluded changeset another")
+                        && l.contains("retrying=" + SELF_RETRYING.size()));
+                    assertThat(logs).as("the keep line is one event, the excluded changesets another")
                         .filteredOn(l -> l.contains("event=pci_builders_kept")).hasSize(1);
+                    assertThat(keptForRetrying(logs)).as("the exact self-retrying set pending at this boot").isEqualTo(SELF_RETRYING);
                     assertThat(logs).anyMatch(l -> l.contains("event=pci_build_kept_for_retrying")
                         && l.contains("aspects-005-retire-aspect-queue-table.xml::aspects-005-2")
                         && l.contains("reason=self_retrying_precondition"));
@@ -801,7 +823,8 @@ class PciBuilderTerminationIntegrationTest {
 
                     assertThat(logs).noneMatch(l -> l.contains("event=pci_builders_terminated"));
                     assertThat(logs).anyMatch(l -> l.contains("event=pci_builders_kept") && l.contains("count=1")
-                        && l.contains("retrying=1"));
+                        && l.contains("retrying=" + SELF_RETRYING.size()));
+                    assertThat(keptForRetrying(logs)).as("the exact self-retrying set pending at this boot").isEqualTo(SELF_RETRYING);
                     assertThat(changesetRecorded(RETIRE_CHANGESET)).as("the body ran and %s is recorded", RETIRE_CHANGESET)
                         .isTrue();
                     boolean tableLeft = asSuperuser(pg, ctx -> PgCatalogProbes.tableExists(ctx, "nexus", "aspect_extraction_queue"));
