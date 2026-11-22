@@ -18,6 +18,7 @@ import json
 import struct
 from pathlib import Path
 
+import click
 import pytest
 from click.testing import CliRunner
 
@@ -656,6 +657,47 @@ def test_the_verb_prints_counts_by_class_skips_negations_drops_and_notes(
     assert "memory_summaries.source_ids: 4 remapped, 1 passed through, 2 negated" in out
     assert "Note: the file's schema_changeset_count is 600" in out
     assert "Kept, not loaded again: 1 row the engine had already written" in out
+
+
+def test_the_verb_prints_each_collection_the_restore_relabelled(
+    cloud_mode: None, monkeypatch: pytest.MonkeyPatch, backup_file: Path,
+) -> None:
+    report = {
+        "tables": [{"table": "memory", "staged": 1, "inserted": 1, "seeded_skipped": 0, "dropped": 0}],
+        "soft_references": [], "skipped_tables": {}, "skipped_columns": [],
+        "collections_relabelled": [{"label": "c4812", "target_label": "c9001"}, {"label": "c7", "target_label": "c9002"}],
+    }
+    with FakeImportEngine(report=report) as engine:
+        _point_at(monkeypatch, engine)
+        result = CliRunner().invoke(main, ["backup", "restore", str(backup_file)])
+    assert result.exit_code == 0, result.output
+    out = _flat(result.output)
+    assert "Collection relabelled: c4812 -> c9001" in out
+    assert "Collection relabelled: c7 -> c9002" in out
+
+
+def test_the_verb_prints_nothing_about_relabels_when_the_engine_reports_none(
+    cloud_mode: None, monkeypatch: pytest.MonkeyPatch, backup_file: Path,
+) -> None:
+    with FakeImportEngine() as engine:
+        _point_at(monkeypatch, engine)
+        result = CliRunner().invoke(main, ["backup", "restore", str(backup_file)])
+    assert result.exit_code == 0, result.output
+    assert "relabelled" not in result.output
+
+
+def test_the_relabels_are_read_from_the_marker_when_the_engines_report_is_gone() -> None:
+    from nexus.commands.backup_cmd import _echo_relabelled
+
+    runner = CliRunner()
+
+    @click.command()
+    def show() -> None:
+        _echo_relabelled([{"label": "c1", "target_label": "c50"}], 1003)
+
+    result = runner.invoke(show)
+    assert "Collection relabelled: c1 -> c50" in result.output
+    assert "... and 1002 more collections relabelled" in result.output
 
 
 def test_the_verb_refuses_a_damaged_file_with_a_nonzero_exit_and_sends_nothing(

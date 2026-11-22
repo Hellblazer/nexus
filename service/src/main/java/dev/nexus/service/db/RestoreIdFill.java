@@ -55,7 +55,8 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
  * new id, keeping {@code label == "c" + collection_id} (the minter's invariant), and {@link #relabelNames} carries the same
  * old-to-new map into every name column the fill joins on and into a chunk's {@code origin_collection} tag, in one pass per
  * column (the maps overlap when the backup comes from another installation, so a second pass would rename twice). A label that is
- * not of the minted form is kept. Each relabel is reported, as the recovery bundle's {@code collections_relabelled} does.
+ * not of the minted form is kept. A note's {@code source_uri} ({@code nx-note://<label>/...}) follows its collection, as
+ * {@link NoteUri#moveTo} does for a rename. Each relabel that changes a label is reported, as the recovery bundle's {@code collections_relabelled} does.
  *
  * <p><b>Refusal.</b> {@link #refuseOrphans} runs before the first real-table insert: a non-empty name with no registry row
  * in the backup is {@code restore_orphan_collection}, naming each table, the count and an example name, and nothing is
@@ -209,7 +210,8 @@ final class RestoreIdFill {
         }
         relabelColumn(ctx, rows, "name");
         relabelColumn(ctx, rows, "superseded_by");
-        return List.copyOf(pairs);
+        // the map keeps every minted-form pair (an identity pair is harmless there), the report only real changes, as the bundle's
+        return pairs.stream().filter(p -> !p.label().equals(p.targetLabel())).toList();
     }
 
     /**
@@ -223,6 +225,37 @@ final class RestoreIdFill {
             relabelColumn(ctx, rows, p.nameColumn());
         }
         if (CHUNKS.equals(table.name())) relabelOriginTag(ctx, rows);
+        if (NOTE_URI_TABLES.contains(table.name())) relabelNoteUris(ctx, rows);
+    }
+
+    /**
+     * The tables that carry a document's {@code source_uri}: {@code catalog_documents} and the two copies the aspects and the
+     * highlights keep (all three are exported, with every live column; a file older than the column is skipped by the stage
+     * check). {@code NoteUri.moveTo} is what a collection rename does to this column, and the restore's relabel is a rename.
+     */
+    private static final Set<String> NOTE_URI_TABLES = Set.of("catalog_documents", "document_aspects", "document_highlights");
+
+    /**
+     * {@code nx-note://<old>/<rest>} becomes {@code nx-note://<new>/<rest>} for each relabelled collection, one pass over the
+     * stage's {@code source_uri}: the form {@link NoteUri#moveTo} writes, so a later re-put of the same title into the relabelled
+     * collection finds the row by its URI. {@code chroma://} and {@code nxexp://} values are left as they are, as {@code moveTo}
+     * leaves them. A minted-form label never opens with a file-routed prefix ({@link NoteUri#FILE_ROUTED_PREFIXES}), so every
+     * such note URI is a note. A label holds no {@code '/'}, so at most one map row names a URI.
+     */
+    private static void relabelNoteUris(DSLContext ctx, Stage rows) {
+        if (!stageHasColumn(ctx, rows, "source_uri")) return;
+        Field<String> uri = DSL.field(DSL.name("s", "source_uri"), SQLDataType.VARCHAR);
+        var m = DSL.table(DSL.name(RELABEL)).as("m");
+        Field<String> oldLabel = DSL.field(DSL.name("m", "old_name"), SQLDataType.VARCHAR);
+        Field<String> newLabel = DSL.field(DSL.name("m", "new_name"), SQLDataType.VARCHAR);
+        Condition names = NoteUri.startsWith(uri, DSL.val(NoteUri.NOTE).concat(oldLabel).concat(DSL.val("/")));
+        Field<String> moved = DSL.field(DSL.select(DSL.val(NoteUri.NOTE).concat(newLabel).concat(DSL.val("/"))
+                .concat(DSL.substring(uri, DSL.charLength(oldLabel).plus(NoteUri.NOTE.length() + 2))))
+            .from(m).where(names));
+        ctx.update(TenantImportStaging.stageTable(rows).as("s"))
+            .set(DSL.field(DSL.name("source_uri"), SQLDataType.VARCHAR), moved)
+            .where(DSL.exists(DSL.selectOne().from(m).where(names)))
+            .execute();
     }
 
     private static Field<String> oldName() {
