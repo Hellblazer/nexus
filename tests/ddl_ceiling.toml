@@ -251,7 +251,9 @@ migration_wal_bytes_per_worker = 12143000
 # Measured: chas lab-m via lab-remote, 2026-11-22, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on integration/rdr229-phase3-r12 bb86932c0b: ddl: migration=2832.
 # 2832 -> 2838 (2026-11-22, nexus-p2m1x.19, RDR-229 P3.3a): vectors-072 adds six id-twin foreign keys, six ALTER TABLE ... ADD CONSTRAINT ... NOT VALID (topic_assignments, document_aspects, topics, taxonomy_meta, document_highlights, canary_query_ring); its seven registering INSERTs into nexus.data_moves are not DDL. +7 where aspect_extraction_queue exists with its collection_id column: its twin (vectors-072-7) is a guarded no-op on the test install, which has no queue table, so the count here is +6.
 # Measured: chas lab-s via lab-run, 2026-11-22, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on feature/nexus-p2m1x.19-fk-id-twins-r12 2f455cd718 (base integration/rdr229-phase3-r12 bb86932c0b; gate jar rebuilt): ddl: migration=2838.
-migration_ddl_per_worker = 2838
+# 2838 -> 2852 (2026-11-22, nexus-p2m1x.27, RDR-229 P3.7): vectors-079-1 creates the child-row name triggers: 4 CREATE OR REPLACE FUNCTION (the three BEFORE row functions and the shared statement log function), 4 REVOKE EXECUTE FROM PUBLIC and 6 CREATE TRIGGER (a BEFORE INSERT OR UPDATE row trigger and an AFTER INSERT OR UPDATE statement trigger on each of catalog_document_chunks, chunk_orphaned_at and topic_assignments) = 14. No table, so no runAlways grant.
+# Counted from the changeset's statements (14); measured on this branch's tree below (a stack's own base moves the total, Sam's cap for the P3.5+P3.7 cut is 2960).
+migration_ddl_per_worker = 2852
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]
