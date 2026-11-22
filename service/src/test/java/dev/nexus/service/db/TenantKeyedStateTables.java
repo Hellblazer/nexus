@@ -866,13 +866,17 @@ final class TenantKeyedStateTables {
             + "sample (at most one safety poll apart) and re-derived from the database, so a tenant a reset removed drops "
             + "out of the counts at the next sample");
         notKeyed.put("CompletionBootWork.DbReader.readSet", "the labels the check reads, fixed at construction "
-            + "(CompletionCheck.ReadSet.p33a()); configuration, not keyed by tenant");
+            + "(CompletionCheck.ReadSet.p33c()); configuration, not keyed by tenant");
         notKeyed.put("CompletionBootWork.DbReader.session", DATA_MOVE_REPORT_SESSION_COMPLETION);
         notKeyed.put("CompletionBootWork.CachedCounter.kept", COMPLETION_ENGINE_WIDE + "this cache holds one violating-row "
             + "count per CHECK constraint name for ten minutes; the counts are summed over every tenant and carry no "
             + "tenant identity, and a reset only makes a count stale until it expires");
         notKeyed.put("FkTwins.Holder.ROWS", "the RDR-229 P3.3a id-twin list (db/rdr229/p33a-fk-twins.tsv), parsed once from the classpath; "
             + "table, constraint and label names, no tenant state");
+        notKeyed.put("CompletionCheck.P33C_CONSTRAINTS", "the RDR-229 P3.3c labels that stand on a constraint, to the table and name of that "
+            + "constraint (Rdr229SwapMove's names), built once at class load; label, table and constraint names, no tenant state");
+        notKeyed.put("Rdr229SwapMove.CHILD_TABLES", "the three child tables of nexus.chunks whose id keys the chunks swap adds "
+            + "(RDR-229 P3.3c), fixed at class load; table names, no tenant state");
         notKeyed.put("CompletionCheck.ReadSet.gate1Labels", "the move labels gate 1 reads, fixed at construction; "
             + "global registry labels, not keyed by tenant");
         notKeyed.put("CompletionCheck.ReadSet.gate2Labels", "the move labels gate 2 reads, fixed at construction; "
