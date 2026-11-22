@@ -67,9 +67,9 @@ final class CollectionOneRowRename {
                 + " is not a live registered collection (it was retired or removed while this one ran); nothing was renamed");
         }
         long id = own.value1();
-        // The owner a settled collection holds is not replaced by the client's: see ownerTheRenameMayChange.
-        newOwnerId = ownerTheRenameMayChange(own.value3(), newOwnerId);
         String contentType = newContentType != null ? newContentType : own.value2();
+        // The owner a settled collection holds is not replaced by a client's slug: see ownerTheRenameMayChange.
+        newOwnerId = ownerTheRenameMayChange(contentType, own.value3(), newOwnerId);
         String owner = newOwnerId != null ? newOwnerId : own.value3();
         if (!CollectionMint.tupleIndexExists(ctx)) {
             // the row's tuple and the new one (the same key when the client names none): sorted and once each, as the name path takes them
@@ -134,6 +134,9 @@ final class CollectionOneRowRename {
     /** The shape of an owner that documents settled: a tumbler segment such as {@code 1-2} ({@code catalog_collection_owner_replaceable}'s test). */
     private static final java.util.regex.Pattern SETTLED_OWNER = java.util.regex.Pattern.compile("^[0-9]+(-[0-9]+)*$");
 
+    /** The content types whose owner is derived from the documents' tumblers ({@code catalog_collections_owner_from_docs}). */
+    private static final java.util.Set<String> DOCUMENT_OWNED = java.util.Set.of("code", "docs", "rdr");
+
     /**
      * Owner re-derivation in the one-row path (stage-1 review S3). The name path re-homes the documents under the new label and then
      * re-derives a replaceable owner from them ({@code rederiveOwner}: catalog-044/051's triggers read the documents by
@@ -142,15 +145,23 @@ final class CollectionOneRowRename {
      * keyed on the new label, find no document and would leave the client's slug in place, replacing a settled owner.
      *
      * <p>Re-deriving by {@code collection_id} would need a second copy of catalog-044's derivation and 051's tuple guard; P3.5b redefines
-     * those functions to read the id, so this path does not copy them. It keeps the invariant they enforce instead: an owner that is a
-     * tumbler segment is settled and a slug never replaces it. The client's {@code owner_id} is applied only to a row whose owner is a
-     * slug (replaceable); for a settled owner the rename changes the label and leaves the owner as it is, which is what the name path
-     * ends with for a collection whose documents name that owner.
+     * those functions to read the id, so this path does not copy them. It keeps the invariant they enforce instead, for the content types
+     * they derive for ({@code code}, {@code docs}, {@code rdr}): an owner that is a tumbler segment is settled and a SLUG never replaces
+     * it. A client's explicit tumbler-shaped owner is applied, as the name path applies it, and so is any owner of a collection that is
+     * not document-owned (a {@code knowledge} collection with an all-digit owner takes the client's). For a settled owner and a requested slug
+     * the rename changes the label and leaves the owner as it is, which is what the name path ends with for a collection whose documents
+     * name that owner.
      *
-     * @return {@code requested}, or null when the row's owner is settled
+     * @param contentType  the collection's content type after the rename
+     * @return {@code requested}, or null when nothing is requested or the row's settled owner must not be replaced by a slug
      */
-    static String ownerTheRenameMayChange(String currentOwner, String requested) {
-        return requested != null && (currentOwner == null || !SETTLED_OWNER.matcher(currentOwner).matches()) ? requested : null;
+    static String ownerTheRenameMayChange(String contentType, String currentOwner, String requested) {
+        if (requested == null) {
+            return null;
+        }
+        boolean settledNow = currentOwner != null && SETTLED_OWNER.matcher(currentOwner).matches();
+        boolean requestedIsSlug = !SETTLED_OWNER.matcher(requested).matches();
+        return DOCUMENT_OWNED.contains(contentType) && settledNow && requestedIsSlug ? null : requested;
     }
 
     /**
