@@ -4,18 +4,27 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.Chash;
 import org.jooq.DSLContext;
+import org.jooq.ExecuteContext;
 import org.jooq.JSONB;
+import org.jooq.Query;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
+import org.jooq.impl.DefaultExecuteListener;
+import org.jooq.impl.DefaultExecuteListenerProvider;
 
+import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.SQLWarning;
-import java.sql.Statement;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNK_ORPHANED_AT;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS;
 import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 
 /**
  * The state the P3.7 child-row name trigger tests (vectors-079) start from: one collection renamed one-row through the route, so its
@@ -133,117 +142,192 @@ final class Rdr229ChildNameWorld {
         return Chash.fromSha256Bytes(chash).toHex();
     }
 
-    private String lit(byte[] chash) {
-        return "decode('" + hex(chash) + "','hex')";
-    }
-
     // ---- child-row statements, as the writers spell them: the NEW label, whatever the chunk is stored under -----------------
 
-    /** A multi-row INSERT into the manifest naming {@code newName}. {@code chashes} go to positions {@code from}, {@code from}+1 ... of {@code doc}. */
-    String manifestInsert(String doc, int from, String label, byte[]... chashes) {
-        StringBuilder b = new StringBuilder("INSERT INTO nexus.catalog_document_chunks "
-            + "(tenant_id, doc_id, position, chash, collection, embedding_model, collection_id) VALUES ");
+    private static final DSLContext DETACHED = DSL.using(SQLDialect.POSTGRES);
+
+    /** A multi-row INSERT into the manifest naming {@code label}. {@code chashes} go to positions {@code from}, {@code from}+1 ... of {@code doc}. */
+    Query manifestInsert(String doc, int from, String label, byte[]... chashes) {
+        var step = DETACHED.insertInto(CATALOG_DOCUMENT_CHUNKS).columns(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+            CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+            CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID);
         for (int i = 0; i < chashes.length; i++) {
-            b.append(i == 0 ? "" : ", ").append("('").append(tenant).append("','").append(doc).append("',").append(from + i).append(',')
-                .append(lit(chashes[i])).append(",'").append(label).append("','").append(model).append("',").append(id).append(')');
+            step = step.values(tenant, doc, from + i, chashes[i], label, model, id);
         }
-        return b.toString();
+        return step;
     }
 
-    /** A multi-row INSERT into chunk_orphaned_at naming {@code label}. */
-    String orphanedInsert(String label, byte[]... chashes) {
-        StringBuilder b = new StringBuilder("INSERT INTO nexus.chunk_orphaned_at "
-            + "(tenant_id, collection, chash, orphaned_at, embedding_model, collection_id) VALUES ");
-        for (int i = 0; i < chashes.length; i++) {
-            b.append(i == 0 ? "" : ", ").append("('").append(tenant).append("','").append(label).append("',").append(lit(chashes[i]))
-                .append(", now(),'").append(model).append("',").append(id).append(')');
+    /** As {@link #manifestInsert} with a last row that repeats the first row's position, so the statement fails the primary key after its rows were looked up. */
+    Query manifestInsertWithDuplicatePosition(String doc, String label, byte[] first, byte[] second) {
+        return DETACHED.insertInto(CATALOG_DOCUMENT_CHUNKS).columns(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID)
+            .values(tenant, doc, 0, first, label, model, id)
+            .values(tenant, doc, 0, second, label, model, id);
+    }
+
+    /** A multi-row INSERT into chunk_orphaned_at naming {@code label}; {@code upsert} adds the writers' ON CONFLICT (tenant_id, collection, chash) DO UPDATE. */
+    Query orphanedInsert(String label, boolean upsert, byte[]... chashes) {
+        var step = DETACHED.insertInto(CHUNK_ORPHANED_AT).columns(CHUNK_ORPHANED_AT.TENANT_ID, CHUNK_ORPHANED_AT.COLLECTION,
+            CHUNK_ORPHANED_AT.CHASH, CHUNK_ORPHANED_AT.ORPHANED_AT, CHUNK_ORPHANED_AT.EMBEDDING_MODEL, CHUNK_ORPHANED_AT.COLLECTION_ID);
+        for (byte[] chash : chashes) {
+            step = step.values(DSL.val(tenant), DSL.val(label), DSL.val(chash), DSL.currentOffsetDateTime(), DSL.val(model), DSL.val(id));
         }
-        return b.toString();
+        return upsert
+            ? step.onConflict(CHUNK_ORPHANED_AT.TENANT_ID, CHUNK_ORPHANED_AT.COLLECTION, CHUNK_ORPHANED_AT.CHASH).doUpdate()
+                .set(CHUNK_ORPHANED_AT.ORPHANED_AT, DSL.excluded(CHUNK_ORPHANED_AT.ORPHANED_AT))
+            : step;
+    }
+
+    Query orphanedInsert(String label, byte[]... chashes) {
+        return orphanedInsert(label, false, chashes);
     }
 
     /** A multi-row INSERT into topic_assignments naming {@code label} as the source collection. */
-    String assignmentInsert(String label, byte[]... chashes) {
-        StringBuilder b = new StringBuilder("INSERT INTO nexus.topic_assignments "
-            + "(tenant_id, doc_id, topic_id, assigned_by, source_collection, embedding_model, source_collection_id) VALUES ");
-        for (int i = 0; i < chashes.length; i++) {
-            b.append(i == 0 ? "" : ", ").append("('").append(tenant).append("',").append(lit(chashes[i])).append(',').append(topic)
-                .append(",'seed','").append(label).append("','").append(model).append("',").append(id).append(')');
+    Query assignmentInsert(String label, byte[]... chashes) {
+        var step = DETACHED.insertInto(TOPIC_ASSIGNMENTS).columns(TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
+            TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+            TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID);
+        for (byte[] chash : chashes) {
+            step = step.values(tenant, chash, topic, "seed", label, model, id);
         }
-        return b.toString();
+        return step;
     }
 
     // ---- running and reading --------------------------------------------------------------------------------------------
 
+    /** Collects the server notices of each statement as it ends (the RAISE LOG lines the row trigger writes, delivered at client_min_messages = log). */
+    private static final class Notices extends DefaultExecuteListener {
+        final List<String> lines = new ArrayList<>();
+
+        @Override
+        public void executeEnd(ExecuteContext ectx) {
+            try {
+                for (SQLWarning w = ectx.statement() == null ? null : ectx.statement().getWarnings(); w != null; w = w.getNextWarning()) {
+                    if (w.getMessage() != null && w.getMessage().contains(LOG_PREFIX)) {
+                        lines.add(w.getMessage());
+                    }
+                }
+            } catch (SQLException e) {
+                throw new IllegalStateException(e);
+            }
+        }
+    }
+
+    /** A context over {@code c} whose statements report their notices to {@code notices}, with {@code client_min_messages = log} set on the connection. */
+    static DSLContext logging(Connection c, Notices notices) {
+        DSLContext d = DSL.using(c, SQLDialect.POSTGRES).configuration().derive(new DefaultExecuteListenerProvider(notices)).dsl();
+        d.set(DSL.name("client_min_messages"), DSL.inline("log")).execute();
+        notices.lines.clear();
+        return d;
+    }
+
     /**
      * Runs the statements one after another, each in its own transaction (autocommit) on one connection with
-     * {@code client_min_messages = log}, and returns the lines vectors-079's statement trigger logged, in order. A statement the database
+     * {@code client_min_messages = log}, and returns the lines vectors-079's row trigger logged, in order. A statement the database
      * refuses throws.
      */
-    List<String> run(String... statements) {
+    List<String> run(Query... statements) {
         return engine.su(ctx -> ctx.connectionResult(c -> {
-            List<String> lines = new ArrayList<>();
-            try (Statement s = c.createStatement()) {
-                s.execute("SET client_min_messages = log");
-                for (String sql : statements) {
-                    s.execute(sql);
-                    lines.addAll(logged(s));
-                }
+            Notices notices = new Notices();
+            DSLContext d = logging(c, notices);
+            for (Query q : statements) {
+                d.execute(q);
             }
-            return lines;
+            return new ArrayList<>(notices.lines);
         }));
     }
 
     /**
-     * As {@link #run}, but all the statements are ONE transaction (committed at the end), on a connection with
-     * {@code client_min_messages = log}. The line is logged once per transaction (vectors-079), so this is the shape that shows it.
+     * As {@link #run}, but all the statements are ONE transaction (committed at the end). The line is logged once per transaction
+     * (vectors-079), so this is the shape that shows it.
      */
-    List<String> runInOneTransaction(String... statements) {
+    List<String> runInOneTransaction(Query... statements) {
         return engine.su(ctx -> ctx.connectionResult(c -> {
-            List<String> lines = new ArrayList<>();
+            Notices notices = new Notices();
+            DSLContext d = logging(c, notices);
             c.setAutoCommit(false);
-            try (Statement s = c.createStatement()) {
-                s.execute("SET client_min_messages = log");
-                for (String sql : statements) {
-                    s.execute(sql);
-                    lines.addAll(logged(s));
+            try {
+                for (Query q : statements) {
+                    d.execute(q);
                 }
                 c.commit();
-            } catch (SQLException e) {
+            } catch (RuntimeException e) {
                 c.rollback();
                 throw e;
             } finally {
                 c.setAutoCommit(true);
             }
-            return lines;
+            return new ArrayList<>(notices.lines);
         }));
     }
 
-    static List<String> logged(Statement s) throws SQLException {
-        List<String> lines = new ArrayList<>();
-        for (SQLWarning w = s.getWarnings(); w != null; w = w.getNextWarning()) {
-            if (w.getMessage() != null && w.getMessage().contains(LOG_PREFIX)) {
-                lines.add(w.getMessage());
+    /**
+     * One transaction in which {@code failing} is expected to fail and be rolled back to a savepoint taken before it, then {@code after}
+     * run one after another. Returns the notices of the statements AFTER the rollback, one list per statement.
+     */
+    List<List<String>> runAfterARolledBackSavepoint(Query failing, Query... after) {
+        return engine.su(ctx -> ctx.connectionResult(c -> {
+            Notices notices = new Notices();
+            DSLContext d = logging(c, notices);
+            c.setAutoCommit(false);
+            try {
+                var sp = c.setSavepoint();
+                try {
+                    d.execute(failing);
+                    throw new AssertionError("non-vacuity: the statement must fail");
+                } catch (org.jooq.exception.DataAccessException expected) {
+                    c.rollback(sp);
+                }
+                notices.lines.clear();
+                List<List<String>> out = new ArrayList<>();
+                for (Query q : after) {
+                    d.execute(q);
+                    out.add(new ArrayList<>(notices.lines));
+                    notices.lines.clear();
+                }
+                c.commit();
+                return out;
+            } finally {
+                c.setAutoCommit(true);
             }
-        }
-        return lines;
-    }
-
-    /** The values of {@code column} of {@code sql}'s rows, as strings, sorted. */
-    List<String> column(String sql) {
-        return engine.su(ctx -> ctx.fetch(sql).getValues(0, String.class).stream().sorted().toList());
+        }));
     }
 
     /** The stored collection name of the manifest rows of {@code doc}, sorted. */
     List<String> manifestNames(String doc) {
-        return column("SELECT collection FROM nexus.catalog_document_chunks WHERE tenant_id = '" + tenant + "' AND doc_id = '" + doc + "'");
+        return engine.su(ctx -> ctx.select(CATALOG_DOCUMENT_CHUNKS.COLLECTION).from(CATALOG_DOCUMENT_CHUNKS)
+            .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(doc))
+            .fetch(CATALOG_DOCUMENT_CHUNKS.COLLECTION).stream().sorted().toList());
     }
 
     List<String> orphanedNames() {
-        return column("SELECT collection FROM nexus.chunk_orphaned_at WHERE tenant_id = '" + tenant + "'");
+        return engine.su(ctx -> ctx.select(CHUNK_ORPHANED_AT.COLLECTION).from(CHUNK_ORPHANED_AT).where(CHUNK_ORPHANED_AT.TENANT_ID.eq(tenant))
+            .fetch(CHUNK_ORPHANED_AT.COLLECTION).stream().sorted().toList());
+    }
+
+    /** The collection ids of the tenant's chunk_orphaned_at rows. */
+    List<Long> orphanedIds() {
+        return engine.su(ctx -> ctx.select(CHUNK_ORPHANED_AT.COLLECTION_ID).from(CHUNK_ORPHANED_AT)
+            .where(CHUNK_ORPHANED_AT.TENANT_ID.eq(tenant)).fetch(CHUNK_ORPHANED_AT.COLLECTION_ID));
     }
 
     List<String> assignmentNames() {
-        return column("SELECT source_collection FROM nexus.topic_assignments WHERE tenant_id = '" + tenant + "'");
+        return engine.su(ctx -> ctx.select(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION).from(TOPIC_ASSIGNMENTS)
+            .where(TOPIC_ASSIGNMENTS.TENANT_ID.eq(tenant)).fetch(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION).stream().sorted().toList());
+    }
+
+    /** The chash (hex) of the tenant's assignments to {@code topicId}, sorted. */
+    List<String> assignedChashes(long topicId) {
+        return engine.su(ctx -> ctx.select(TOPIC_ASSIGNMENTS.DOC_ID).from(TOPIC_ASSIGNMENTS)
+            .where(TOPIC_ASSIGNMENTS.TENANT_ID.eq(tenant)).and(TOPIC_ASSIGNMENTS.TOPIC_ID.eq(topicId))
+            .fetch(TOPIC_ASSIGNMENTS.DOC_ID).stream().map(this::hex).sorted().toList());
+    }
+
+    /** The stored collection names of the tenant's chunk rows with {@code chash}, sorted. */
+    List<String> chunkNames(byte[] chash) {
+        return engine.su(ctx -> ctx.select(CHUNKS.COLLECTION).from(CHUNKS)
+            .where(CHUNKS.TENANT_ID.eq(tenant)).and(CHUNKS.CHASH.eq(chash)).fetch(CHUNKS.COLLECTION).stream().sorted().toList());
     }
 
     /**
@@ -256,26 +340,44 @@ final class Rdr229ChildNameWorld {
 
     /** As {@link #childrenNotOnTheirChunksName()} for any tenant of {@code engine}. */
     static long childrenNotOnTheirChunksName(Rdr229RenameEngine engine, String tenant) {
-        return engine.su(ctx -> ctx.fetchOne(
-            "SELECT (SELECT count(*) FROM nexus.catalog_document_chunks m WHERE m.tenant_id = ? AND NOT EXISTS "
-                + "(SELECT 1 FROM nexus.chunks c WHERE c.tenant_id = m.tenant_id AND c.collection = m.collection AND c.chash = m.chash "
-                + "AND c.embedding_model = m.embedding_model))"
-                + " + (SELECT count(*) FROM nexus.chunk_orphaned_at m WHERE m.tenant_id = ? AND NOT EXISTS "
-                + "(SELECT 1 FROM nexus.chunks c WHERE c.tenant_id = m.tenant_id AND c.collection = m.collection AND c.chash = m.chash "
-                + "AND c.embedding_model = m.embedding_model))"
-                + " + (SELECT count(*) FROM nexus.topic_assignments m WHERE m.tenant_id = ? AND NOT EXISTS "
-                + "(SELECT 1 FROM nexus.chunks c WHERE c.tenant_id = m.tenant_id AND c.collection = m.source_collection AND c.chash = m.doc_id "
-                + "AND c.embedding_model = m.embedding_model))",
-            tenant, tenant, tenant).get(0, Long.class));
+        return engine.su(ctx -> {
+            var m = CATALOG_DOCUMENT_CHUNKS;
+            var o = CHUNK_ORPHANED_AT;
+            var a = TOPIC_ASSIGNMENTS;
+            long manifest = ctx.fetchCount(m, m.TENANT_ID.eq(tenant).andNotExists(ctx.selectOne().from(CHUNKS)
+                .where(CHUNKS.TENANT_ID.eq(m.TENANT_ID)).and(CHUNKS.COLLECTION.eq(m.COLLECTION)).and(CHUNKS.CHASH.eq(m.CHASH))
+                .and(CHUNKS.EMBEDDING_MODEL.eq(m.EMBEDDING_MODEL))));
+            long orphaned = ctx.fetchCount(o, o.TENANT_ID.eq(tenant).andNotExists(ctx.selectOne().from(CHUNKS)
+                .where(CHUNKS.TENANT_ID.eq(o.TENANT_ID)).and(CHUNKS.COLLECTION.eq(o.COLLECTION)).and(CHUNKS.CHASH.eq(o.CHASH))
+                .and(CHUNKS.EMBEDDING_MODEL.eq(o.EMBEDDING_MODEL))));
+            long assigned = ctx.fetchCount(a, a.TENANT_ID.eq(tenant).andNotExists(ctx.selectOne().from(CHUNKS)
+                .where(CHUNKS.TENANT_ID.eq(a.TENANT_ID)).and(CHUNKS.COLLECTION.eq(a.SOURCE_COLLECTION)).and(CHUNKS.CHASH.eq(a.DOC_ID))
+                .and(CHUNKS.EMBEDDING_MODEL.eq(a.EMBEDDING_MODEL))));
+            return manifest + orphaned + assigned;
+        });
     }
 
     /** Runs {@code work} with {@code trigger} of {@code table} disabled (the control: the same statement without vectors-079), re-enabled after. */
     <T> T withoutTrigger(String table, String trigger, java.util.function.Supplier<T> work) {
-        engine.su(ctx -> ctx.execute("ALTER TABLE nexus." + table + " DISABLE TRIGGER " + trigger));
+        engine.su(ctx -> ctx.connectionResult(c -> {
+            try {
+                PgContainerHelper.disableTrigger(c, table, trigger);
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+            return null;
+        }));
         try {
             return work.get();
         } finally {
-            engine.su(ctx -> ctx.execute("ALTER TABLE nexus." + table + " ENABLE TRIGGER " + trigger));
+            engine.su(ctx -> ctx.connectionResult(c -> {
+                try {
+                    PgContainerHelper.enableTrigger(c, table, trigger);
+                } catch (Exception e) {
+                    throw new IllegalStateException(e);
+                }
+                return null;
+            }));
         }
     }
 }

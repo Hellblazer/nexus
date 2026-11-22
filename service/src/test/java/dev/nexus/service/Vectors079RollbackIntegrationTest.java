@@ -4,7 +4,9 @@ package dev.nexus.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import org.jooq.Field;
 import org.jooq.SQLDialect;
+import org.jooq.Table;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -46,17 +48,32 @@ class Vectors079RollbackIntegrationTest {
         }
     }
 
-    private static List<String> present(Connection su, String sql, List<String> names) {
-        var have = DSL.using(su, SQLDialect.POSTGRES).fetch(sql).getValues(0, String.class);
-        return names.stream().filter(have::contains).toList();
-    }
+    private static final Table<?> PG_TRIGGER = DSL.table(DSL.name("pg_catalog", "pg_trigger"));
+    private static final Table<?> PG_PROC = DSL.table(DSL.name("pg_catalog", "pg_proc")).as("p");
+    private static final Table<?> PG_NAMESPACE = DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n");
+    private static final Field<String> TGNAME = DSL.field(DSL.name("tgname"), String.class);
+    private static final Field<Boolean> TGISINTERNAL = DSL.field(DSL.name("tgisinternal"), Boolean.class);
+    private static final Field<String> PRONAME = DSL.field(DSL.name("p", "proname"), String.class);
+    private static final Field<Object> PROOID = DSL.field(DSL.name("p", "oid"), Object.class);
+    private static final Field<Object> PRONAMESPACE = DSL.field(DSL.name("p", "pronamespace"), Object.class);
+    private static final Field<Object> NSPOID = DSL.field(DSL.name("n", "oid"), Object.class);
+    private static final Field<String> NSPNAME = DSL.field(DSL.name("n", "nspname"), String.class);
 
     private static List<String> triggers(Connection su) {
-        return present(su, "SELECT tgname FROM pg_trigger WHERE NOT tgisinternal", TRIGGERS);
+        return DSL.using(su, SQLDialect.POSTGRES).select(TGNAME).from(PG_TRIGGER).where(TGISINTERNAL.eq(false)).and(TGNAME.in(TRIGGERS))
+            .fetch(TGNAME);
     }
 
     private static List<String> functions(Connection su) {
-        return present(su, "SELECT p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'nexus'", FUNCTIONS);
+        return DSL.using(su, SQLDialect.POSTGRES).select(PRONAME).from(PG_PROC).join(PG_NAMESPACE).on(PRONAMESPACE.eq(NSPOID))
+            .where(NSPNAME.eq("nexus")).and(PRONAME.in(FUNCTIONS)).fetch(PRONAME);
+    }
+
+    /** The functions callable by PUBLIC: none after the changeset's REVOKE. */
+    private static List<String> publicExecutable(Connection su) {
+        Field<Boolean> executable = DSL.function("has_function_privilege", Boolean.class, DSL.inline("public"), PROOID, DSL.inline("EXECUTE"));
+        return DSL.using(su, SQLDialect.POSTGRES).select(PRONAME).from(PG_PROC).join(PG_NAMESPACE).on(PRONAMESPACE.eq(NSPOID))
+            .where(NSPNAME.eq("nexus")).and(PRONAME.in(FUNCTIONS)).and(executable).fetch(PRONAME);
     }
 
     @Test
@@ -73,10 +90,7 @@ class Vectors079RollbackIntegrationTest {
             PgContainerHelper.replayChangeset(su, FILE, ID);
             assertThat(triggers(su)).as("replaying the changeset restores every trigger").containsExactlyInAnyOrderElementsOf(TRIGGERS);
             assertThat(functions(su)).containsExactlyInAnyOrderElementsOf(FUNCTIONS);
-            var acl = DSL.using(su, SQLDialect.POSTGRES).fetch(
-                "SELECT p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'nexus' "
-                    + "AND p.proname = ANY(?) AND has_function_privilege('public', p.oid, 'EXECUTE')", (Object) FUNCTIONS.toArray(String[]::new))
-                .getValues(0, String.class);
+            var acl = publicExecutable(su);
             assertThat(acl).as("EXECUTE is revoked from PUBLIC on every function").isEmpty();
         }
     }

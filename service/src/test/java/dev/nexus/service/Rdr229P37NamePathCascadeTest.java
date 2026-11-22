@@ -2,13 +2,20 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNK_ORPHANED_AT;
+import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
+import java.time.OffsetDateTime;
 import java.util.List;
 
 /**
@@ -57,35 +64,70 @@ class Rdr229P37NamePathCascadeTest {
             long id = Rdr229RenameChecks.registryId(ctx, tenant, name);
             String model = PgContainerHelper.collectionModel(ctx, tenant, name);
             Rdr229ChildNameWorld.chunk(ctx, tenant, name, id, model, 384, "seed");
-            ctx.execute("INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_384, metadata, "
-                + "last_written_at, collection_id) SELECT c.tenant_id, c.collection, sha256(c.chash || g::text::bytea), c.embedding_model, "
-                + "c.chunk_text, c.embedding_384, c.metadata, c.last_written_at, c.collection_id "
-                + "FROM nexus.chunks c, generate_series(1, ?) g WHERE c.tenant_id = ? AND c.collection = ?", N, tenant, name);
-            PgContainerHelper.insertCatalogDocument(ctx, tenant, "casc.doc." + name);
-            ctx.execute("INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection, embedding_model, collection_id) "
-                + "SELECT tenant_id, ?, (row_number() OVER (ORDER BY chash)) - 1, chash, collection, embedding_model, collection_id "
-                + "FROM (SELECT * FROM nexus.chunks WHERE tenant_id = ? AND collection = ? ORDER BY chash LIMIT " + N / 2 + ") c", "casc.doc." + name, tenant, name);
-            ctx.execute("INSERT INTO nexus.chunk_orphaned_at (tenant_id, collection, chash, orphaned_at, embedding_model, collection_id) "
-                + "SELECT tenant_id, collection, chash, now(), embedding_model, collection_id FROM nexus.chunks "
-                + "WHERE tenant_id = ? AND collection = ? ORDER BY chash OFFSET ? LIMIT ?", tenant, name, N / 2, N / 2);
-            long topic = ctx.fetchOne("INSERT INTO nexus.topics (tenant_id, label, collection, collection_id, created_at) "
-                + "VALUES (?, 't', ?, ?, now()) RETURNING id", tenant, name, id).get(0, Long.class);
-            ctx.execute("INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by, source_collection, embedding_model, "
-                + "source_collection_id) SELECT tenant_id, chash, ?, 'seed', collection, embedding_model, collection_id FROM nexus.chunks "
-                + "WHERE tenant_id = ? AND collection = ? ORDER BY chash LIMIT ?", topic, tenant, name, N / 2);
+            var c = CHUNKS.as("c");
+            var g = DSL.generateSeries(1, N).as("g", "v");
+            ctx.insertInto(CHUNKS).columns(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT,
+                    CHUNKS.EMBEDDING_384, CHUNKS.METADATA, CHUNKS.LAST_WRITTEN_AT, CHUNKS.COLLECTION_ID)
+                .select(ctx.select(c.TENANT_ID, c.COLLECTION,
+                        DSL.function("sha256", byte[].class, DSL.function("int4send", byte[].class, g.field("v", Integer.class))),
+                        c.EMBEDDING_MODEL, c.CHUNK_TEXT, c.EMBEDDING_384, c.METADATA, c.LAST_WRITTEN_AT, c.COLLECTION_ID)
+                    .from(c).crossJoin(g).where(c.TENANT_ID.eq(tenant)).and(c.COLLECTION.eq(name)))
+                .execute();
+            String doc = "casc.doc." + name;
+            PgContainerHelper.insertCatalogDocument(ctx, tenant, doc);
+            var first = ctx.select().from(CHUNKS).where(CHUNKS.TENANT_ID.eq(tenant)).and(CHUNKS.COLLECTION.eq(name))
+                .orderBy(CHUNKS.CHASH).limit(N / 2).asTable("f");
+            ctx.insertInto(CATALOG_DOCUMENT_CHUNKS).columns(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                    CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                    CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID)
+                .select(ctx.select(first.field(CHUNKS.TENANT_ID), DSL.inline(doc), DSL.rowNumber().over(DSL.orderBy(first.field(CHUNKS.CHASH))).minus(1),
+                        first.field(CHUNKS.CHASH), first.field(CHUNKS.COLLECTION), first.field(CHUNKS.EMBEDDING_MODEL),
+                        first.field(CHUNKS.COLLECTION_ID)).from(first))
+                .execute();
+            var rest = ctx.select().from(CHUNKS).where(CHUNKS.TENANT_ID.eq(tenant)).and(CHUNKS.COLLECTION.eq(name))
+                .orderBy(CHUNKS.CHASH).offset(N / 2).limit(N / 2).asTable("r");
+            ctx.insertInto(CHUNK_ORPHANED_AT).columns(CHUNK_ORPHANED_AT.TENANT_ID, CHUNK_ORPHANED_AT.COLLECTION, CHUNK_ORPHANED_AT.CHASH,
+                    CHUNK_ORPHANED_AT.ORPHANED_AT, CHUNK_ORPHANED_AT.EMBEDDING_MODEL, CHUNK_ORPHANED_AT.COLLECTION_ID)
+                .select(ctx.select(rest.field(CHUNKS.TENANT_ID), rest.field(CHUNKS.COLLECTION), rest.field(CHUNKS.CHASH),
+                        DSL.currentOffsetDateTime(), rest.field(CHUNKS.EMBEDDING_MODEL), rest.field(CHUNKS.COLLECTION_ID)).from(rest))
+                .execute();
+            long topic = ctx.insertInto(TOPICS).set(TOPICS.TENANT_ID, tenant).set(TOPICS.LABEL, "t").set(TOPICS.COLLECTION, name)
+                .set(TOPICS.COLLECTION_ID, id).set(TOPICS.CREATED_AT, OffsetDateTime.now()).returning(TOPICS.ID).fetchOne().getId();
+            ctx.insertInto(TOPIC_ASSIGNMENTS).columns(TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID, TOPIC_ASSIGNMENTS.TOPIC_ID,
+                    TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL,
+                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID)
+                .select(ctx.select(first.field(CHUNKS.TENANT_ID), first.field(CHUNKS.CHASH), DSL.inline(topic), DSL.inline("seed"),
+                        first.field(CHUNKS.COLLECTION), first.field(CHUNKS.EMBEDDING_MODEL), first.field(CHUNKS.COLLECTION_ID)).from(first))
+                .execute();
             return null;
         });
     }
 
-    private long count(String sql, String tenant, String name) {
-        return engine.su(ctx -> ctx.fetchOne(sql, tenant, name).get(0, Long.class));
+    private long[] childCounts(String tenant, String name) {
+        return engine.su(ctx -> new long[] {
+            ctx.fetchCount(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(name))),
+            ctx.fetchCount(CHUNK_ORPHANED_AT, CHUNK_ORPHANED_AT.TENANT_ID.eq(tenant).and(CHUNK_ORPHANED_AT.COLLECTION.eq(name))),
+            ctx.fetchCount(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID.eq(tenant).and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(name)))});
     }
 
-    private long[] childCounts(String tenant, String name) {
-        return new long[] {
-            count("SELECT count(*) FROM nexus.catalog_document_chunks WHERE tenant_id = ? AND collection = ?", tenant, name),
-            count("SELECT count(*) FROM nexus.chunk_orphaned_at WHERE tenant_id = ? AND collection = ?", tenant, name),
-            count("SELECT count(*) FROM nexus.topic_assignments WHERE tenant_id = ? AND source_collection = ?", tenant, name)};
+    /** Disables or enables the three triggers. */
+    private void triggers(boolean enabled) {
+        engine.su(ctx -> ctx.connectionResult(c -> {
+            try {
+                for (String t : TRIGGERS) {
+                    String table = t.split(":")[0];
+                    String trigger = t.split(":")[1];
+                    if (enabled) {
+                        PgContainerHelper.enableTrigger(c, table, trigger);
+                    } else {
+                        PgContainerHelper.disableTrigger(c, table, trigger);
+                    }
+                }
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+            return null;
+        }));
     }
 
     private long renameMillis(String tenant, String token, String oldName, String newName) throws Exception {
@@ -111,16 +153,12 @@ class Rdr229P37NamePathCascadeTest {
         seed(tenant, enabledOld);
 
         // control: the same rename with the three triggers disabled
-        for (String t : TRIGGERS) {
-            engine.su(ctx -> ctx.execute("ALTER TABLE nexus." + t.split(":")[0] + " DISABLE TRIGGER " + t.split(":")[1]));
-        }
+        triggers(false);
         long withoutMs;
         try {
             withoutMs = renameMillis(tenant, token, disabledOld, coll("p37cascb", 2));
         } finally {
-            for (String t : TRIGGERS) {
-                engine.su(ctx -> ctx.execute("ALTER TABLE nexus." + t.split(":")[0] + " ENABLE TRIGGER " + t.split(":")[1]));
-            }
+            triggers(true);
         }
         long withMs = renameMillis(tenant, token, enabledOld, coll("p37casca", 2));
 
@@ -128,27 +166,19 @@ class Rdr229P37NamePathCascadeTest {
         // the cascade runs step 2 for every row. The guard is what keeps the cascade at the cost above.
         String unguardedOld = coll("p37cascc", 1);
         seed(tenant, unguardedOld);
-        List<String> names = List.of(Vectors079Text.MANIFEST, Vectors079Text.ORPHANED, Vectors079Text.ASSIGNMENTS);
-        List<String> originals = new java.util.ArrayList<>();
-        for (String n : names) {
-            originals.add(Vectors079Text.function(n));
-        }
-        long unguardedMs;
-        try {
-            for (String o : originals) {
-                engine.su(ctx -> ctx.execute(Vectors079Text.withoutTombstoneGuard(o)));
+        long[] unguardedMs = new long[1];
+        Vectors079Text.withMutant(engine, "r.superseded_by <> ''", "r.superseded_by = 'never'", () -> {
+            try {
+                unguardedMs[0] = renameMillis(tenant, token, unguardedOld, coll("p37cascc", 2));
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
             }
-            unguardedMs = renameMillis(tenant, token, unguardedOld, coll("p37cascc", 2));
-        } finally {
-            for (String o : originals) {
-                engine.su(ctx -> ctx.execute(o));
-            }
-        }
+        });
 
         System.out.println("TIMING name-path rename of " + (N + 1) + " chunks, " + N / 2 + " manifest, " + N / 2 + " orphaned, " + N / 2
             + " assignment rows: triggers disabled " + withoutMs + " ms, installed " + withMs + " ms, installed without the tombstone guard "
-            + unguardedMs + " ms");
-        assertThat(unguardedMs).as("load-bearing: without the guard the same cascade is slower (guarded " + withMs + " ms)").isGreaterThan(withMs);
+            + unguardedMs[0] + " ms");
+        assertThat(unguardedMs[0]).as("load-bearing: without the guard the same cascade is slower (guarded " + withMs + " ms)").isGreaterThan(withMs);
         assertThat(withMs).as("the cascade costs about what it costs without the triggers (disabled " + withoutMs + " ms): no by-id scan per row")
             .isLessThanOrEqualTo(withoutMs * 3 + 3000);
     }

@@ -2,16 +2,17 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
-import java.sql.SQLException;
-import java.sql.Statement;
 import java.util.List;
 
 /**
@@ -71,7 +72,7 @@ class Rdr229P37ChildNameTriggerTest {
         assertThat(w.orphanedNames()).as("one row stored under each chunk's name").containsExactlyInAnyOrder(w.oldName, w.newName);
         // the writers' own shape: ON CONFLICT (tenant_id, collection, chash) with the new label. The arbiter sees the corrected name,
         // so the existing row is updated and no second row appears.
-        w.run(w.orphanedInsert(w.newName, w.ex[0]) + " ON CONFLICT (tenant_id, collection, chash) DO UPDATE SET orphaned_at = EXCLUDED.orphaned_at");
+        w.run(w.orphanedInsert(w.newName, true, w.ex[0]));
         assertThat(w.orphanedNames()).as("the upsert hit the row of the old name: still two rows").hasSize(2);
         assertThat(w.childrenNotOnTheirChunksName()).isZero();
     }
@@ -150,29 +151,12 @@ class Rdr229P37ChildNameTriggerTest {
     void aRolledBackSavepointUnsetsTheFlag_soTheNextReplacementLogsAgain() throws Exception {
         var w = world("leak");
         // row 1 is replaced (the flag is set, the line is logged), row 2 repeats row 1's position and fails the primary key
-        String failing = w.manifestInsert("cn.leak.d0", 0, w.newName, w.ex[0]) + ", ('" + w.tenant + "','cn.leak.d0',0," + "decode('"
-            + w.hex(w.ex[1]) + "','hex'),'" + w.newName + "','" + w.model + "'," + w.id + ")";
-        List<String> after = engine.su(ctx -> ctx.connectionResult(c -> {
-            c.setAutoCommit(false);
-            try (Statement s = c.createStatement()) {
-                s.execute("SET client_min_messages = log");
-                var sp = c.setSavepoint();
-                try {
-                    s.execute(failing);
-                    throw new AssertionError("non-vacuity: the statement must fail");
-                } catch (SQLException expected) {
-                    c.rollback(sp);
-                }
-                s.execute(w.manifestInsert("cn.leak.d1", 0, w.newName, w.ex[2]));
-                List<String> out = Rdr229ChildNameWorld.logged(s);
-                s.execute(w.manifestInsert("cn.leak.d2", 0, w.newName, w.ex[3]));
-                out.addAll(Rdr229ChildNameWorld.logged(s));
-                c.commit();
-                return out;
-            }
-        }));
-        assertThat(after).as("the rollback un-set the flag, so the statement after it logs; the one after that is silent")
-            .singleElement().asString().contains("supplied " + w.newName);
+        var failing = w.manifestInsertWithDuplicatePosition("cn.leak.d0", w.newName, w.ex[0], w.ex[1]);
+        List<List<String>> after = w.runAfterARolledBackSavepoint(failing,
+            w.manifestInsert("cn.leak.d1", 0, w.newName, w.ex[2]), w.manifestInsert("cn.leak.d2", 0, w.newName, w.ex[3]));
+        assertThat(after.get(0)).as("the rollback un-set the flag, so the statement after it logs").singleElement().asString()
+            .contains("supplied " + w.newName);
+        assertThat(after.get(1)).as("and the one after that is silent").isEmpty();
     }
 
     // ---- updates --------------------------------------------------------------------------------------------------------------
@@ -184,12 +168,15 @@ class Rdr229P37ChildNameTriggerTest {
         assertThat(w.manifestNames("cn.upd.d0")).containsExactly(w.newName);
 
         // the row now points at an existing chunk (stored under the old label); the writer's UPDATE keeps the label it holds
-        List<String> moved = w.run("UPDATE nexus.catalog_document_chunks SET chash = decode('" + w.hex(w.ex[0]) + "','hex') "
-            + "WHERE tenant_id = '" + w.tenant + "' AND doc_id = 'cn.upd.d0' AND position = 0");
+        List<String> moved = w.run(DSL.using(SQLDialect.POSTGRES).update(CATALOG_DOCUMENT_CHUNKS).set(CATALOG_DOCUMENT_CHUNKS.CHASH, w.ex[0])
+            .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(w.tenant)).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("cn.upd.d0"))
+            .and(CATALOG_DOCUMENT_CHUNKS.POSITION.eq(0)));
         assertThat(w.manifestNames("cn.upd.d0")).as("the UPDATE moved the key, so the name follows the chunk").containsExactly(w.oldName);
         assertThat(moved).singleElement().asString().contains("supplied " + w.newName).contains("stored " + w.oldName);
 
-        List<String> stamp = w.run("UPDATE nexus.catalog_document_chunks SET collection_id = collection_id WHERE tenant_id = '" + w.tenant + "'");
+        List<String> stamp = w.run(DSL.using(SQLDialect.POSTGRES).update(CATALOG_DOCUMENT_CHUNKS)
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID)
+            .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(w.tenant)));
         assertThat(stamp).as("an UPDATE that leaves the key alone (the stamp's shape) costs no lookup and logs nothing").isEmpty();
         assertThat(w.childrenNotOnTheirChunksName()).isZero();
     }

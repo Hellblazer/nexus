@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import org.junit.jupiter.api.AfterAll;
@@ -21,18 +22,15 @@ import java.util.List;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class Rdr229P37ChildNameMismatchTest {
 
-    private static final String FUNCTION = Vectors079Text.MANIFEST;
     private static final String STEP2_TENANT = "c.tenant_id = NEW.tenant_id AND c.collection_id = NEW.collection_id";
     private static final String STEP2_MODEL = "AND c.chash = NEW.chash AND c.embedding_model = NEW.embedding_model\n     LIMIT 1";
 
     private Rdr229RenameEngine engine;
-    private String original;
 
     @BeforeAll
     void boot() throws Exception {
         engine = new Rdr229RenameEngine();
         Rdr229RenameRestartPrecondition.reach(engine).reached().require();
-        original = functionSql();
     }
 
     @AfterAll
@@ -42,12 +40,8 @@ class Rdr229P37ChildNameMismatchTest {
         }
     }
 
-    private static String functionSql() throws Exception {
-        return Vectors079Text.function(FUNCTION);
-    }
-
-    private void install(String sql) {
-        engine.su(ctx -> ctx.execute(sql));
+    private void withMutant(String from, String to, Runnable work) {
+        Vectors079Text.withMutant(engine, from, to, work);
     }
 
     // ---- a second tenant -----------------------------------------------------------------------------------------------------
@@ -60,7 +54,8 @@ class Rdr229P37ChildNameMismatchTest {
         String otherName = Rdr229ChildNameWorld.collection("p37b4" + tag, w.model, 1);
         engine.su(ctx -> {
             PgContainerHelper.insertCollection(ctx, other, otherName);
-            ctx.execute("UPDATE nexus.catalog_collections SET collection_id = ? WHERE tenant_id = ? AND name = ?", w.id, other, otherName);
+            ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.COLLECTION_ID, w.id)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(other)).and(CATALOG_COLLECTIONS.NAME.eq(otherName)).execute();
             Rdr229ChildNameWorld.chunk(ctx, other, otherName, w.id, w.model, 384, "twin", w.ex[0]);
             return null;
         });
@@ -77,9 +72,7 @@ class Rdr229P37ChildNameMismatchTest {
     @Test
     void droppingTheTenantPredicateFromStep2TurnsTheSecondTenantTestRed() throws Exception {
         var w = secondTenantWorld("mu");
-        assertThat(original).as("non-vacuity: the text to mutate carries the predicate").contains(STEP2_TENANT);
-        install(original.replace(STEP2_TENANT, "c.collection_id = NEW.collection_id"));
-        try {
+        withMutant(STEP2_TENANT, "c.collection_id = NEW.collection_id", () -> {
             boolean red;
             try {
                 w.run(w.manifestInsert("cn.mu.d1", 0, w.newName, w.ex[0]));
@@ -88,9 +81,7 @@ class Rdr229P37ChildNameMismatchTest {
                 red = true;   // the key refused the other tenant's name
             }
             assertThat(red).as("without the tenant predicate the lookup takes the other tenant's chunk").isTrue();
-        } finally {
-            install(original);
-        }
+        });
     }
 
     // ---- a second embedding model ----------------------------------------------------------------------------------------------
@@ -115,9 +106,7 @@ class Rdr229P37ChildNameMismatchTest {
     @Test
     void droppingTheModelPredicateFromStep2TurnsTheSecondModelTestRed() throws Exception {
         var w = secondModelWorld("mn");
-        assertThat(original).as("non-vacuity: the text to mutate carries the predicate").contains(STEP2_MODEL);
-        install(original.replace(STEP2_MODEL, "AND c.chash = NEW.chash\n     LIMIT 1"));
-        try {
+        withMutant(STEP2_MODEL, "AND c.chash = NEW.chash\n     LIMIT 1", () -> {
             boolean red;
             try {
                 w.run(w.manifestInsert("cn.mn.d0", 0, w.newName, w.ex[0]));
@@ -126,9 +115,7 @@ class Rdr229P37ChildNameMismatchTest {
                 red = true;
             }
             assertThat(red).as("without the model predicate the lookup takes the other model's chunk").isTrue();
-        } finally {
-            install(original);
-        }
+        });
     }
 
     // ---- a re-index that wrote one chash under both labels ----------------------------------------------------------------------
@@ -141,7 +128,7 @@ class Rdr229P37ChildNameMismatchTest {
             Rdr229ChildNameWorld.chunk(ctx, w.tenant, w.newName, w.id, w.model, w.dim, "dup", w.ex[0]);
             return null;
         });
-        assertThat(w.column("SELECT collection FROM nexus.chunks WHERE tenant_id = '" + w.tenant + "' AND chash = decode('" + w.hex(w.ex[0]) + "','hex')"))
+        assertThat(w.chunkNames(w.ex[0]))
             .as("non-vacuity: two chunk rows, one per label").containsExactlyInAnyOrder(w.oldName, w.newName);
 
         // a writer under the new label: the chunk under the name it supplied is the child's own (same id), so the label stays
