@@ -40,8 +40,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class Rdr229P35bIdTwinAttributesTest {
 
-    /** vectors-077-100..139: 40 twins. */
-    private static final int TWINS = 40;
+    /** vectors-077-100..139 (the search functions) and 140 (chunk_live_owners): 41 twins. */
+    private static final int TWINS = 41;
     private static final String SUFFIX = "_by_id";
 
     private static final List<String> COLUMNS = List.of(
@@ -112,7 +112,7 @@ class Rdr229P35bIdTwinAttributesTest {
     void everyTwinHasItsOriginalsPosture() {
         List<String> twins = functions.keySet().stream()
             .filter(k -> k.substring(0, k.indexOf('(')).endsWith(SUFFIX)).sorted().toList();
-        assertThat(twins).as("non-vacuity: vectors-077-100..139 add %d id twins", TWINS).hasSize(TWINS);
+        assertThat(twins).as("non-vacuity: vectors-077-100..140 add %d id twins", TWINS).hasSize(TWINS);
 
         List<String> orphans = new ArrayList<>();
         List<String> differences = new ArrayList<>();
