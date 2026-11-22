@@ -101,6 +101,7 @@ def _catalog_collection_rows() -> tuple[dict[str, dict], str]:
     """The catalog's collection rows keyed by name, and an error text
     ("" on success). The rows are the columns of record (RDR-204); the
     vectors stats join carries four of the five but not ``dimension``."""
+    # Keyed by name until P4.1 moves the registry's key to the id; then this rekeys by id (nexus-p2m1x.35).
     try:
         from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
@@ -119,7 +120,9 @@ def _catalog_collection_rows() -> tuple[dict[str, dict], str]:
 )
 def list_cmd(show_all: bool) -> None:
     """List T3 collections: live and stored chunk counts, and the catalog's
-    columns (content type, owner, embedding model, dimension, lifecycle state).
+    columns (ID, content type, owner, embedding model, dimension, lifecycle
+    state). ID is the registry's ``collection_id`` (RDR-229 P3.12), ``-`` on a
+    row no stamp has given one yet.
 
     RDR-204 Day 2 (nexus-ft04v.32): every column is read from the
     collection's catalog row, never derived from its name, so a row whose

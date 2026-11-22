@@ -11,10 +11,15 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.PostgreSQLContainer;
 
+import javax.sql.DataSource;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.sql.Connection;
+import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -94,5 +99,32 @@ class LiveLabelIndexProbeTest {
         assertThat(supplier.get()).as("inside the TTL the cached answer stands").isTrue();
         now[0] += 1;
         assertThat(supplier.get()).as("past the TTL it is read again").isFalse();
+    }
+
+    /** A pool whose connections fail while {@code failing} is set: a probe that cannot run, then recovers. */
+    private static DataSource flaky(DataSource real, AtomicBoolean failing) {
+        return (DataSource) Proxy.newProxyInstance(DataSource.class.getClassLoader(), new Class<?>[] {DataSource.class},
+            (proxy, method, args) -> {
+                if (method.getName().equals("getConnection") && failing.get()) {
+                    throw new SQLException("the pool is down");
+                }
+                try {
+                    return method.invoke(real, args);
+                } catch (InvocationTargetException e) {
+                    throw e.getCause();
+                }
+            });
+    }
+
+    @Test
+    void aNullAnswer_isNeverServedAfterTheProbeRecovers() {
+        AtomicBoolean failing = new AtomicBoolean(true);
+        // a clock that never moves: only a cached null could answer the second call without reading again
+        Clock frozen = Clock.fixed(Instant.parse("2026-11-22T00:00:00Z"), ZoneOffset.UTC);
+        Supplier<Boolean> supplier = LiveLabelIndexProbe.statusSupplier(flaky(ds, failing), frozen);
+        assertThat(supplier.get()).as("a probe that could not run answers null, so the route omits the key").isNull();
+        assertThat(supplier.get()).as("still down: still null, read again each time").isNull();
+        failing.set(false);
+        assertThat(supplier.get()).as("recovered inside the TTL window: the probe is read again, the null was not cached").isTrue();
     }
 }
