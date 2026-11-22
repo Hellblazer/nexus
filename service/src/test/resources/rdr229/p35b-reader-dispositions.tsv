@@ -39,7 +39,7 @@ function	nexus.chash_conformance_report	catalog_collections.name	both	registry j
 function	nexus.chash_conformance_report	collection	both	registry join and NOT EXISTS: id arm, and name arm (non-empty) when the manifest id is NULL
 function	nexus.chunk_is_reapable	catalog_collections.name	label-kept	quarantine-state check resolves the caller's label to its registry row (and the label-to-id lookup)
 function	nexus.chunk_is_reapable	collection	both	orphaned_at and manifest rows against the label: id arm via the registry id, name arm when the row id is NULL
-function	nexus.chunk_live_owners	collection	both	manifest row against the label: id arm via the registry id, name arm when the row id is NULL
+function	nexus.chunk_live_owners	collection	name-kept	kept until P4.1 (id twin nexus.chunk_live_owners_by_id): the name search functions inline it, so it keeps its body; its chunk-to-manifest match is on both rows' own names, which stay equal until P4.1
 function	nexus.chunk_sensitive	collection	both	manifest row against the label: id arm via the registry id, name arm when the row id is NULL
 function	nexus.chunk_sensitive_many	collection	both	manifest row against the label: id arm via the registry id, name arm when the row id is NULL
 function	nexus.clear_orphaned_on_manifest_insert	collection	both	new manifest rows against orphaned_at records by B-join
