@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-229 P3.5b (nexus-p2m1x.24): CREATE INDEX ${index} ON ${schema}.${table} USING hnsw (${column} nexus.vector_cosine_ops)
+    WHERE collection_id = '${collectionId}'::bigint. The per-collection partial HNSW index keyed on the registry id, the
+    predicate P3.4 rebuilds every per-collection index with, built by hand as a fixture (jOOQ's createIndex has neither an
+    access method nor an operator class). Run through PgContainerHelper#createLeafHnswIndexOnId, which validates ${index},
+    ${schema}, ${table} (plain identifiers), ${column} (an embedding column) and passes ${collectionId} as the decimal text of
+    a long; runAlways, bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="hnsw-index-collection-id" author="nexus-p2m1x.24" runAlways="true">
+        <sql>CREATE INDEX ${index} ON ${schema}.${table} USING hnsw (${column} nexus.vector_cosine_ops) WHERE collection_id = '${collectionId}'::bigint</sql>
+    </changeSet>
+</databaseChangeLog>
