@@ -66,22 +66,37 @@ class CollectionRoutesByIdTest {
 
     enum Mode { LABEL, ID, UNKNOWN, BOTH, NON_INTEGER }
 
+    /** The standard engine, which every row but three runs against. */
     CollectionRouteFixture fx;
+
+    /**
+     * The {@link CollectionRouteCensus.Engine#LOCAL_EMBED} variant: an {@code EmbedderRouter}, {@code NX_ENGINE_LOCAL=1} and a
+     * recording re-embed executor. Only the census rows that name it run here (the embed and re-embed routes answer 503 before
+     * they read a collection on the standard engine); the shared fixture's mode is unchanged.
+     */
+    CollectionRouteFixture fxLocal;
 
     @BeforeAll
     void startAll() throws Exception {
         fx = new CollectionRouteFixture();
+        fxLocal = new CollectionRouteFixture(true);
     }
 
     @AfterAll
     void stopAll() {
         if (fx != null) fx.close();
+        if (fxLocal != null) fxLocal.close();
+    }
+
+    private CollectionRouteFixture fixtureFor(Route route) {
+        return route.engine() == CollectionRouteCensus.Engine.LOCAL_EMBED ? fxLocal : fx;
     }
 
     /** What one route's two sides are: for each slot the label-side and id-side collection, registered. */
     private final class Prepared {
         final Route route;
         final String stem;
+        final CollectionRouteFixture f;
         final List<String> labelSide = new ArrayList<>();
         final List<String> idSide = new ArrayList<>();
         final List<Long> idSideIds = new ArrayList<>();
@@ -89,6 +104,7 @@ class CollectionRoutesByIdTest {
         Prepared(Route route, String stem) {
             this.route = route;
             this.stem = stem;
+            this.f = fixtureFor(route);
             List<String> all = new ArrayList<>();
             for (int k = 0; k < route.slots().size(); k++) {
                 String q = route.slots().get(k).labelField().contains("quarantine") ? "quarantine-" : "";
@@ -97,9 +113,9 @@ class CollectionRoutesByIdTest {
             }
             all.addAll(labelSide);
             all.addAll(idSide);
-            fx.register(all.toArray(String[]::new));
+            f.register(all.toArray(String[]::new));
             for (String l : idSide) {
-                idSideIds.add(fx.idOf(l));
+                idSideIds.add(f.idOf(l));
             }
             assertThat(idSideIds).as("setup: the id-side collections are registered with ids").doesNotContainNull();
         }
@@ -143,11 +159,17 @@ class CollectionRoutesByIdTest {
         String extras = route.extras().replace("{NEW}", p.fresh(mode != Mode.LABEL));
         if (route.where() == Where.QUERY) {
             String sel = new ArrayList<>(selectors(route, mode, p)).stream().collect(Collectors.joining("&"));
-            return fx.send(route.method(), route.path() + "?" + sel + extras, null);
+            return p.f.send(route.method(), route.path() + "?" + sel + extras, null);
         }
         String sel = String.join(",", selectors(route, mode, p));
+        Slot first = route.slots().get(0);
+        if (first.nested()) {
+            // The selector is per record: it and the extras are the one element of the request array.
+            String record = "{" + sel + (extras.isBlank() ? "" : "," + extras) + "}";
+            return p.f.send(route.method(), route.path(), "{\"" + first.nestedIn() + "\":[" + record + "]}");
+        }
         String body = "{" + sel + (extras.isBlank() ? "" : "," + extras) + "}";
-        return fx.send(route.method(), route.path(), body);
+        return p.f.send(route.method(), route.path(), body);
     }
 
     private List<String> selectors(Route route, Mode mode, Prepared p) {
@@ -174,7 +196,7 @@ class CollectionRoutesByIdTest {
                 String stem = "r" + n + (gate3 ? "g1" : "g0");
                 Prepared[] holder = new Prepared[1];
                 java.util.function.Supplier<Prepared> prep = () -> {
-                    fx.gate3.set(gate3);
+                    fixtureFor(route).gate3.set(gate3);
                     if (holder[0] == null) {
                         holder[0] = new Prepared(route, stem);
                     }
@@ -205,17 +227,31 @@ class CollectionRoutesByIdTest {
         assertThat(r.status()).as("%s with a label and an id for one collection: %s", route.label(), r.body()).isEqualTo(400);
     }
 
+    /** Passes today on a route that requires its collection (the 400 is the missing label); it proves id validation only once the id is read. */
     private void nonIntegerId(Route route, Prepared p) {
         Resp r = call(route, Mode.NON_INTEGER, p);
         assertThat(r.status()).as("%s with an id that is not an integer: %s", route.label(), r.body()).isEqualTo(400);
     }
 
-    private void idEqualsLabel(Route route, Prepared p) {
+    private void idEqualsLabel(Route route, Prepared shared) {
+        // Fresh collections for this check. The three checks above share one Prepared, and under today's code a check that
+        // is red because the id is unimplemented still ACTS on the label it carries (bothGiven sends a valid label, so the
+        // route ignores the unknown id field and renames, inserts a topic or opens a pipeline). That would leave the label
+        // side in a state its own request then refuses (a retired rename source, a duplicate root topic), and this check
+        // would fail in setup instead of on the id. A route that is correct refuses bothGiven before acting, so the state
+        // is only ever dirty while the behaviour is missing; a clean pair makes the check independent of that.
+        Prepared p = new Prepared(route, shared.stem + "q");
         Resp byLabel = call(route, Mode.LABEL, p);
         Resp byId = call(route, Mode.ID, p);
         if (route.tier() != Tier.HEAVY) {
             assertThat(byLabel.status()).as("setup: %s by its labels reaches the route: %s", route.label(), byLabel.body())
                 .isIn(route.tier() == Tier.GENERIC ? List.of(200, 404) : List.of(200));
+        }
+        if (route.slots().get(0).nested()) {
+            // A nested-selector route (centroid upsert): the label request must have WRITTEN, or this row proves nothing: a
+            // handler that ignored a record it could not read would answer 200 and pass an equal-answers comparison.
+            assertThat(centroidCount(p, p.labelSide.get(0))).as("%s: the label request wrote a centroid under its label: %s",
+                route.label(), byLabel.body()).isPositive();
         }
         assertThat(byId.reason()).as("%s by id is never the unknown-id refusal: %s", route.label(), byId.body())
             .isNotEqualTo("unknown_collection_id");
@@ -231,6 +267,15 @@ class CollectionRoutesByIdTest {
             assertThat(kb).as("%s: the same response shape by id as by label", route.label())
                 .containsExactlyInAnyOrderElementsOf(ka);
         }
+        if (route.slots().get(0).nested()) {
+            assertThat(centroidCount(p, p.idSide.get(0))).as("%s: the id request wrote a centroid under the id's collection: %s",
+                route.label(), byId.body()).isPositive();
+        }
+    }
+
+    /** The centroids stored under {@code label}. The only nested-selector row is the centroid upsert; this is its read side. */
+    private long centroidCount(Prepared p, String label) {
+        return p.f.get("/v1/taxonomy/centroids/count?collection=" + enc(label)).json().path("count").asLong(0);
     }
 
     // ---- an id reaches its own collection ----------------------------------------------------------------------------
