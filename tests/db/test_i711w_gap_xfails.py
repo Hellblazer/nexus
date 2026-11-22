@@ -292,7 +292,8 @@ class TestSupersedeCollectionSemantics:
             new,
             content_type="code",
             owner_id="i711w-supat",
-            embedding_model="bge-base-en-v15-768", model_version="v1",
+            # RDR-229 P3.8: a tuple has one live collection, so the successor is the next version of it, as its name says.
+            embedding_model="bge-base-en-v15-768", model_version="v2",
         )
 
         cat.supersede_collection(old, new)
