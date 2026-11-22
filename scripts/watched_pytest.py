@@ -25,8 +25,8 @@ What it adds to the command:
   console_break, timeout or error.
 * The tree the run saw, for a status file used as PROOF of a green run (``scripts/push_check_gate.py``, nexus-igea9):
   ``host`` (where it ran), ``tree`` (the sha of ``HEAD^{tree}`` in the run's directory), ``tree_dirty`` (true when a tracked file differs from HEAD
-  or an untracked, unignored file sits where pytest would collect or import it (under tests/ or src/, a conftest.py anywhere, a
-  pytest config file at the root), at the start or at the end of the run; untracked logs and status files never count) and ``summary`` (pytest's final counts line, ``131 passed, 1 skipped in 12.6s``). Outside a git repository ``tree``
+  or any untracked, unignored file exists (at the start or at the end of the run), except a run's own ``*.json`` / ``*.log`` at
+  the root or under output/ and lab-out/) and ``summary`` (pytest's final counts line, ``131 passed, 1 skipped in 12.6s``). Outside a git repository ``tree``
   and ``tree_dirty`` are null, which no proof accepts.
 * A notification of the final status (ntfy, the same channel Beszel alerts
   use, or any JSON webhook) when a URL is configured for the host.
@@ -149,24 +149,26 @@ class _Watch:
                     self.last_result_line, tail[-_TAIL_LINES:])
 
 
-#: Root files pytest reads its configuration from, and the directories whose untracked files pytest collects or imports.
-_PYTEST_CONFIG_FILES = frozenset({"pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini"})
-_PYTEST_TREES = ("tests/", "src/")
+#: Untracked files that are not the tree: the logs and JSON status files of runs, at the root or under ``output/`` or ``lab-out/``
+#: (what a reused lab-remote copy keeps from earlier runs). Every other untracked, unignored file is part of the tree a run saw.
+_RUN_OUTPUT_DIRS = ("output/", "lab-out/")
+_RUN_OUTPUT_SUFFIXES = (".json", ".log")
 
 
-def _could_change_a_run(path: str) -> bool:
-    """Whether an UNTRACKED, unignored file at *path* (relative to the repository root) is somewhere pytest would collect or
-    import it: under ``tests/`` or ``src/``, a ``conftest.py`` anywhere, or a pytest configuration file at the root. A log or a
-    status file (at the root, under ``output/``, anywhere else) is not the tree, so the leftovers of an earlier run in a reused
-    copy do not make a proof dirty."""
-    return path.startswith(_PYTEST_TREES) or path.rsplit("/", 1)[-1] == "conftest.py" or path in _PYTEST_CONFIG_FILES
+def _is_run_output(path: str) -> bool:
+    """Whether an UNTRACKED file at *path* (relative to the repository root) is the output of a run: a ``*.json`` or ``*.log``
+    at the root or anywhere under ``output/`` or ``lab-out/``."""
+    if not path.endswith(_RUN_OUTPUT_SUFFIXES):
+        return False
+    return "/" not in path or path.startswith(_RUN_OUTPUT_DIRS)
 
 
 def tree_state(cwd: str | None, ignore: tuple[Path, ...] = ()) -> tuple[str | None, bool | None]:
     """``(tree sha, dirty)`` of the checkout at *cwd*: ``HEAD^{tree}``, and whether the tree the run saw differs from it. Dirty
-    means a TRACKED file differs from HEAD, or an UNTRACKED, unignored file sits where pytest would collect or import it
-    (:func:`_could_change_a_run`); an untracked log or status file does not count, and neither do the *ignore* paths (this run's own
-    log and status file). ``(None, None)`` when *cwd* is no checkout or the version-control tool cannot say."""
+    means a TRACKED file differs from HEAD, or ANY untracked, unignored file exists, except a run's own output
+    (:func:`_is_run_output`: ``*.json`` and ``*.log`` at the root or under ``output/`` and ``lab-out/``) and the *ignore* paths (this
+    run's own log and status file). A docs-readers proof from a tree carrying an extra uncommitted doc must not count.
+    ``(None, None)`` when *cwd* is no checkout or the version-control tool cannot say."""
     here = cwd or "."
 
     def ask(*args: str) -> subprocess.CompletedProcess[str] | None:
@@ -192,7 +194,7 @@ def tree_state(cwd: str | None, ignore: tuple[Path, ...] = ()) -> tuple[str | No
         path = entry[3:]
         if (root / path).resolve() in skip:
             continue
-        if entry[:2] == "??" and not _could_change_a_run(path):
+        if entry[:2] == "??" and _is_run_output(path):
             continue
         return tree.stdout.strip(), True
     return tree.stdout.strip(), False

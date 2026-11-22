@@ -66,15 +66,18 @@ def _dirty_after_adding(repo: Path, rel: str) -> bool:
     return status["tree_dirty"]
 
 
-@pytest.mark.parametrize("rel", ["tests/test_x.py", "tests/sub/helper.py", "tests/data.json", "src/pkg/mod.py", "conftest.py",
-                                 "pkg/conftest.py", "pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini"])
-def test_an_untracked_file_where_pytest_would_collect_or_import_it_marks_the_run_dirty(repo: Path, rel: str) -> None:
+@pytest.mark.parametrize("rel", ["tests/test_x.py", "tests/sub/helper.py", "tests/data.json", "src/pkg/mod.py", "conftest.py", "pkg/conftest.py",
+                                 "pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini",
+                                 "docs/rdr/x.md", "scripts/helper.py", "conexus/hooks/x.sh", "service/src/A.java", "changelog/unreleased/z.md",
+                                 "notes.txt", "docs/pytest.ini", "docs/data.json", "outputs/run.log", "output/notes.md", "lab-out/x.py"])
+def test_every_untracked_unignored_file_is_dirty_except_the_logs_and_status_files_of_runs(repo: Path, rel: str) -> None:
+    """A docs-readers proof from a tree carrying an extra, uncommitted doc proves a tree nobody pushes: any file counts."""
     assert _dirty_after_adding(repo, rel) is True
 
 
-@pytest.mark.parametrize("rel", ["old-run.log", "targeted.status.json", "docs.json", "output/run.log", "output/deep/status.json", "notes.txt",
-                                 "docs/pytest.ini", "scripts/helper.py"])
-def test_an_untracked_log_status_or_other_file_outside_what_pytest_reads_is_clean(repo: Path, rel: str) -> None:
+@pytest.mark.parametrize("rel", ["old.log", "old-run.log", "targeted.status.json", "docs.json", "output/run.log", "output/deep/status.json",
+                                 "lab-out/status.json", "lab-out/run.log"])
+def test_an_untracked_json_or_log_at_the_root_or_under_output_or_lab_out_is_clean(repo: Path, rel: str) -> None:
     """A reused lab-remote copy keeps the logs and status files of earlier runs; they are not the tree."""
     assert _dirty_after_adding(repo, rel) is False
 

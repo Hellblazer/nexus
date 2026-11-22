@@ -14,9 +14,9 @@ check           selected by                                                     
 ==============  ====================================================================  ===========================
 file-size       always                                                                scripts/file_size_ratchet.py check
 changelog       always                                                                scripts/changelog_fold.py check
-context-budget  what context_budgets.py covers (.md under <plugin>/skills|agents|        scripts/context_budgets.py check
-                commands|resources of conexus, sn, prose-edit, tool-spill), its
-                ceilings file tests/fixtures/context-budgets.txt, or the script itself
+context-budget  always (under a second); a path context_budgets.py covers (.md           scripts/context_budgets.py check
+                under <plugin>/skills|agents|commands|resources of conexus, sn,
+                prose-edit, tool-spill, its ceilings file, the script) is named
 wire-ledger     what check_wire_contract_pairing.py treats as wire (service/, the    scripts/check_wire_contract_pairing.py
                 client http_* and indexer modules, tests with a raw envelope), or
                 the ledger docs/wire-contract-pending.md itself
@@ -193,10 +193,12 @@ def select(paths: set[str], is_wire: Callable[[str], bool], is_context: Callable
     def first(pred: Callable[[str], bool]) -> str | None:
         return next((p for p in sorted(paths) if pred(p)), None)
 
+    # Always on, because it takes under a second: a tree already over a ceiling is caught on any push, not only on one that
+    # touches a plugin file. A path the check covers is still named.
+    chosen["context-budget"] = first(is_context) or "always"
+
     if (hit := first(lambda p: p == LEDGER_PATH or is_wire(p))) is not None:
         chosen["wire-ledger"] = hit
-    if (hit := first(is_context)) is not None:
-        chosen["context-budget"] = hit
     if (hit := first(lambda p: p.startswith("docs/"))) is not None:
         chosen["cloud-leg"] = hit
         chosen["docs-readers"] = hit
@@ -474,6 +476,26 @@ def _narrowing(args: list[str]) -> str | None:
     return next((a for a in args if a.startswith(_NARROWING_PREFIXES) or a in _NARROWING_EXACT), None)
 
 
+def _config_problem(args: list[str]) -> str | None:
+    """Why *args* change the configuration pytest reads, or None. Allowed: ``-o addopts=`` and the ``-o faulthandler_timeout=N``
+    that scripts/watched_pytest.py appends. Refused, spaced or attached: any other ``-o`` / ``--override-ini``, ``-c`` /
+    ``--config-file``, ``--rootdir`` and ``-p`` (they swap the ini file, the root, the cache or the plugins a run loads)."""
+    def short(a: str, letter: str) -> bool:           # -X or -Xvalue, never a --long option
+        return a.startswith(f"-{letter}") and not a.startswith("--")
+
+    for i, a in enumerate(args):
+        if a in ("-o", "--override-ini"):
+            value = args[i + 1] if i + 1 < len(args) else ""
+            if value != "addopts=" and not re.fullmatch(r"faulthandler_timeout=\d+", value):
+                return (f"its command passes {a} {value!r}: only -o addopts= (and watched_pytest's faulthandler_timeout) may change "
+                        "the configuration, so a smuggled option could narrow the run (addopts, cache_dir, ...)")
+        elif short(a, "o") or a.startswith("--override-ini="):
+            return f"its command passes {a!r}: -o must be the spaced -o addopts= (an attached override can change the configuration)"
+        elif a in ("-c", "--config-file", "--rootdir", "-p") or short(a, "c") or short(a, "p") or a.startswith(("--config-file=", "--rootdir=")):
+            return f"its command passes {a!r}, which swaps the configuration, root or plugins a run loads (-c, --config-file, --rootdir, -p)"
+    return None
+
+
 def proof_problem(proof: dict, leg: str, tree_sha: str, expected_files: list[str]) -> str | None:
     """Why *proof* (a parsed status file) does not prove *leg* on the tree *tree_sha*, or None when it does."""
     spec = SPECS[leg]
@@ -497,6 +519,8 @@ def proof_problem(proof: dict, leg: str, tree_sha: str, expected_files: list[str
     addopts = [a for a in args if a.startswith("addopts=")]
     if not addopts or any(a != "addopts=" for a in addopts):
         return "its command does not clear addopts exactly (-o addopts=), so tests were deselected or options were smuggled in"
+    if (config := _config_problem(args)) is not None:
+        return config
     expected = FAST_MARKERS if leg == "docs-readers" else "integration"
     markers = [a for a in args if a == "-m" or (a.startswith("-m") and not a.startswith("--"))]
     if len(markers) != 1 or markers[0] != "-m":
@@ -526,17 +550,21 @@ def docs_reader_files(tree: Path, python: str) -> list[str]:
 
 
 def proof_commands(leg: str, files: list[str], tip: str) -> str:
-    """How to produce the proof of *leg*: the same two steps for both legs, on a pool host, in a clean checkout of *tip*. The
-    jar is its own step (``scripts/build-gate-jar.sh --lab-run <class>``) and pytest a second, neither wrapped in lab-run
-    (AGENTS.md rule 13: an engine build is never inside lab-run, and lab-remote runs its command under lab-run). Both legs need
-    the jar on the host that runs pytest: the write-seam boots it, the docs readers use the engine substrate."""
+    """How to produce the proof of *leg*: the same three steps for both legs (AGENTS.md rule 13: only the engine build runs
+    unwrapped, as ``scripts/build-gate-jar.sh --lab-run <class>``; the Python run goes through lab-remote, under lab-run).
+    (a) warms lab-remote's copy of the clean worktree on chas, (b) builds the jar in that very copy over ssh, (c) runs pytest
+    through lab-remote against the same copy, which keeps the jar. Both legs need the jar: the write-seam boots it, the docs
+    readers use the engine substrate."""
     if leg == "docs-readers":
         status, env, pytest = "docs.json", "", f"-o addopts= -m \"{FAST_MARKERS}\" {' '.join(files)}"
     else:
-        status, env, pytest = "seam.json", "NX_REQUIRE_SERVICE_JAR=1 ", f"-o addopts= -m integration {' '.join(WRITE_SEAM_TESTS)}"
-    return (f"on a pool host, in a clean checkout of {tip[:12]} (with Docker for the jar), two steps and neither wrapped in "
-            f"lab-run (AGENTS.md rule 13): 1) scripts/build-gate-jar.sh --lab-run lab-m   2) {env}python3 scripts/watched_pytest.py "
-            f"--status {status} -- uv run pytest {pytest}   (copy {status} back)")
+        status, env, pytest = "seam.json", "env NX_REQUIRE_SERVICE_JAR=1 ", f"-o addopts= -m integration {' '.join(WRITE_SEAM_TESTS)}"
+    return (f"three steps on chas (AGENTS.md rule 13: only the engine build runs unwrapped; the pytest run goes through lab-remote). "
+            f"(a) from a clean worktree at {tip[:12]}: lab-remote --host chas -c lab-s -- true   (it warms the copy; it prints the "
+            "copy's path as `lab-remote: chas lab-s in <path>`, under nxtest's home)   "
+            "(b) ssh nxtest@chas, cd into that copy (the path (a) printed), then: scripts/build-gate-jar.sh --lab-run lab-m   "
+            f"(c) from the laptop, in the same worktree: lab-remote --host chas -c lab-m --fetch {status} -- {env}python3 "
+            f"scripts/watched_pytest.py --status {status} -- uv run pytest {pytest}")
 
 
 _PROOF_FILES = {"docs-readers": "docs.json", "write-seam": "seam.json"}

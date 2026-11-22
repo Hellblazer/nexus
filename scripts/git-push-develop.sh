@@ -154,13 +154,28 @@
 # Check gate (nexus-igea9, Sam 2026-11-22). Five develop reds in one day came from a check that was not run, or was run on
 # the working tree instead of the pushed tree. A push to develop now runs the checks its diff reaches against the TIP's
 # tree (a detached worktree of the tip, removed on every exit path; scripts/push_check_gate.py holds the logic, and its
-# docstring the table): always scripts/file_size_ratchet.py check and scripts/changelog_fold.py check; the wire-pairing check
-# when the diff touches what that script treats as wire (or the ledger); tests/scripts/test_cloud_leg.py for docs/; the plugin
-# release-drift ledger test for conexus/, sn/, tool-spill/, prose-edit/ and marketplace.json. Two heavy legs are not run here
-# but need a PROOF (--proof <file>: the status file of scripts/watched_pytest.py, stamped with the tree it ran on): the
-# docs-readers selection when docs/ changes, the write-seam behavioural gate when ci.yml's write-seam path filter matches. A red
-# or a missing proof refuses the push (PUSH_REFUSED_<CHECK>, exit 14) with the command to reproduce it; --skip-<check> '<reason>'
-# overrides one, and the reason goes on stdout (PUSH_CHECK_SKIPPED) and into the push record body. A gate that cannot start is
+# docstring the table). ALWAYS: scripts/file_size_ratchet.py check, scripts/changelog_fold.py check and
+# scripts/context_budgets.py check (the context-size ceilings of plugin skills, agents, commands and resources: under a
+# second, so a tree already over a ceiling is caught on any push). When the diff reaches them: the wire-pairing check for what
+# that script treats as wire (or the ledger); tests/scripts/test_cloud_leg.py for docs/; the plugin release-drift ledger test
+# (run with NX_REQUIRE_PLUGIN_DRIFT_CHECK=1, so a tagless tree fails instead of skipping) for conexus/, sn/, tool-spill/,
+# prose-edit/ and marketplace.json. VACUITY: a selected check whose script is missing from the tip, a script that exits 0 without
+# the marker a real run prints, a pytest check with fewer passing tests than its floor, and a pytest check that skips any test
+# (bar the one opt-in NX_CLOUDLEG_REAL_RUN skip of the cloud-leg file) are refusals, never passes or skips. Two heavy legs are not
+# run here but need a PROOF (--proof <file>, repeatable: the status file of scripts/watched_pytest.py): the docs-readers
+# selection when docs/ changes, the write-seam behavioural gate when ci.yml's write-seam path filter matches. A proof counts only
+# for the tip's own tree sha, from a checkout with no tracked change and no untracked file but a run's own *.json / *.log, passed,
+# with the leg's own command (every selected file, exactly one -m with CI's expression, -o addopts= and nothing else that changes
+# the configuration: no -c, --rootdir, -p or other -o, and no -k, --ignore, --deselect, --lf, -x, --co and the like). The refusal
+# prints how to make one: three steps on chas, (a) `lab-remote --host chas -c lab-s -- true` from a clean worktree at the tip
+# (it warms the copy and prints its path), (b) `ssh nxtest@chas`, cd into that copy, `scripts/build-gate-jar.sh --lab-run lab-m`
+# (the engine build, unwrapped: AGENTS.md rule 13), (c) `lab-remote --host chas -c lab-m --fetch <docs|seam>.json -- python3
+# scripts/watched_pytest.py --status <file> -- uv run pytest ...`; and the whole re-push line with --proof. An accepted proof is
+# printed (PUSH_PROOF_ACCEPTED: tree, start, duration, host) and its particulars go into the push record body. A red or a missing
+# proof refuses the push (PUSH_REFUSED_<CHECK>, exit 14) with the command to reproduce it; --skip-<check> '<reason>' (flags only)
+# overrides one, and the reason goes on stdout (PUSH_CHECK_SKIPPED) and into the push record body. THE RELEASE BACK-MERGE into
+# develop carries pyproject.toml, uv.lock, docs and plugin files, so it needs BOTH proofs (docs-readers and write-seam) or
+# --skip-docs-readers and --skip-write-seam with reasons, besides passing the checks above. A gate that cannot start is
 # PUSH_REFUSED_CHECK_GATE_ERROR (exit 15), never a silent pass. The gate is armed by the REMOTE branch (it carries
 # scripts/file_size_ratchet.py), so a push cannot disarm it by deleting the script. It runs after the hold check and BEFORE
 # the lock, so a slow check never holds the lock. Develop only.

@@ -695,7 +695,8 @@ def test_a_missing_proof_refusal_prints_the_whole_repush_line_and_the_jar_build_
     sha = _commit_paths(work, "catalog handler", {SEAM_PATH: "class CatalogHandler {}\n", "docs/notes.md": "words\n"})
     proc = _push(work, fake_nx, "--source", "HEAD", sha)
     assert proc.returncode == 14, proc.stdout + proc.stderr
-    assert "scripts/build-gate-jar.sh --lab-run lab-m" in proc.stdout
+    assert "scripts/build-gate-jar.sh --lab-run lab-m" in proc.stdout and "ssh nxtest@chas" in proc.stdout
+    assert "lab-remote --host chas -c lab-s -- true" in proc.stdout
     assert "lab-run -c" not in proc.stdout.replace("--lab-run", "")
     assert f"then re-push: scripts/git-push-develop.sh --source HEAD --proof docs.json --proof seam.json {sha}" in proc.stdout
 
@@ -710,3 +711,24 @@ def test_a_timeout_stops_only_the_check_that_ran_past_it(armed, fake_nx) -> None
     assert "PUSH_REFUSED_CHANGELOG" in proc.stdout and "ran past 3s" in proc.stdout
     assert "PUSH_REFUSED_FILE_SIZE" not in proc.stdout, "the sibling check was not stopped and is not reported red"
     assert "ran=file-size(" in proc.stderr
+
+
+# ── confirmation round (2026-11-22) ──────────────────────────────────────────
+
+def test_a_tree_already_over_a_ceiling_is_caught_on_a_push_that_touches_nothing_plugin(armed, fake_nx) -> None:
+    """The context budget is always on (under a second): an earlier push that let a skill past its ceiling on a skip does not
+    let every later push through."""
+    _origin, work = armed
+    over = _nexus_skill_over_its_ceiling(work)
+    assert _push(work, fake_nx, "--skip-context-budget", "raise approved", over).returncode == 0
+    proc = _push(work, fake_nx, _commit_paths(work, "readme", {"README.md": "hello\n"}))
+    assert proc.returncode == 14, proc.stdout + proc.stderr
+    assert "PUSH_REFUSED_CONTEXT_BUDGET" in proc.stdout and "selected by always" in proc.stdout and "8810" in proc.stdout
+
+
+def test_a_push_that_deletes_the_context_budget_script_is_refused_as_a_missing_check(armed, fake_nx) -> None:
+    _origin, work = armed
+    _git("rm", "-q", "scripts/context_budgets.py", cwd=work)
+    _git("commit", "-q", "-m", "drop it", cwd=work)
+    proc = _push(work, fake_nx, _git("rev-parse", "HEAD", cwd=work))
+    assert proc.returncode == 14 and "PUSH_REFUSED_CONTEXT_BUDGET" in proc.stdout and "scripts/context_budgets.py" in proc.stdout, proc.stdout

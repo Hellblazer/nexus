@@ -39,11 +39,11 @@ def _ctx(path: str) -> bool:
 # ── selection ───────────────────────────────────────────────────────────────
 
 def test_a_diff_that_touches_nothing_selectable_still_selects_the_always_on_checks() -> None:
-    assert list(gate.select({"README.md", "src/nexus/cli.py"}, _wire, _ctx)) == ["file-size", "changelog"]
+    assert list(gate.select({"README.md", "src/nexus/cli.py"}, _wire, _ctx)) == ["file-size", "changelog", "context-budget"]
 
 
 def test_an_empty_diff_selects_the_always_on_checks_too() -> None:
-    assert list(gate.select(set(), _wire, _ctx)) == ["file-size", "changelog"]
+    assert list(gate.select(set(), _wire, _ctx)) == ["file-size", "changelog", "context-budget"]
 
 
 @pytest.mark.parametrize(("path", "extra"), [
@@ -51,13 +51,13 @@ def test_an_empty_diff_selects_the_always_on_checks_too() -> None:
     ("src/nexus/db/http_thing_client.py", ["wire-ledger"]),
     ("docs/wire-contract-pending.md", ["wire-ledger", "cloud-leg", "docs-readers"]),
     ("docs/catalog.md", ["cloud-leg", "docs-readers"]),
-    ("conexus/skills/x/SKILL.md", ["plugin-ledger", "context-budget"]),
-    ("conexus/agents/a.md", ["plugin-ledger", "context-budget"]),
-    ("sn/commands/c.md", ["plugin-ledger", "context-budget"]),
-    ("tool-spill/resources/r.md", ["plugin-ledger", "context-budget"]),
-    ("prose-edit/skills/b/SKILL.md", ["plugin-ledger", "context-budget"]),
-    ("tests/fixtures/context-budgets.txt", ["context-budget"]),
-    ("scripts/context_budgets.py", ["context-budget"]),
+    ("conexus/skills/x/SKILL.md", ["plugin-ledger"]),
+    ("conexus/agents/a.md", ["plugin-ledger"]),
+    ("sn/commands/c.md", ["plugin-ledger"]),
+    ("tool-spill/resources/r.md", ["plugin-ledger"]),
+    ("prose-edit/skills/b/SKILL.md", ["plugin-ledger"]),
+    ("tests/fixtures/context-budgets.txt", []),
+    ("scripts/context_budgets.py", []),
     ("sn/hooks/y.sh", ["plugin-ledger"]),
     ("tool-spill/a.py", ["plugin-ledger"]),
     ("prose-edit/b.md", ["plugin-ledger"]),
@@ -68,10 +68,17 @@ def test_an_empty_diff_selects_the_always_on_checks_too() -> None:
 ])
 def test_each_path_class_selects_its_checks(path: str, extra: list[str]) -> None:
     chosen = gate.select({path}, _wire, _ctx)
-    assert set(chosen) == {"file-size", "changelog", *extra}, chosen
+    assert set(chosen) == {"file-size", "changelog", "context-budget", *extra}, chosen
     assert chosen["file-size"] == "always"
     for name in extra:
         assert chosen[name] == path, "the selecting path is named"
+
+
+@pytest.mark.parametrize("path", ["conexus/skills/x/SKILL.md", "conexus/agents/a.md", "tests/fixtures/context-budgets.txt", "scripts/context_budgets.py"])
+def test_the_context_budget_is_always_on_and_names_the_path_that_reached_it(path: str) -> None:
+    """Always on (it takes under a second), so a tree already over a ceiling is caught on any push; a covered path is named."""
+    assert gate.select({path}, _wire, _ctx)["context-budget"] == path
+    assert gate.select({"README.md"}, _wire, _ctx)["context-budget"] == "always"
 
 
 def test_selection_follows_the_fixed_order() -> None:
@@ -184,8 +191,21 @@ def test_a_leading_python_dash_m_is_not_taken_for_the_marker_option() -> None:
 
 
 def test_options_that_merely_start_like_a_narrowing_one_are_not_narrowing() -> None:
-    cmd = ["uv", "run", "pytest", "-o", "addopts=", "-m", gate.FAST_MARKERS, *DOCS_FILES, "--color=yes", "-p", "no:cacheprovider", "-rf"]
+    cmd = ["uv", "run", "pytest", "-o", "addopts=", "-m", gate.FAST_MARKERS, *DOCS_FILES, "--color=yes", "-rf", "-v",
+           "-o", "faulthandler_timeout=180"]
     assert gate.proof_problem(_proof("docs-readers", command=cmd), "docs-readers", TREE, DOCS_FILES) is None
+
+
+@pytest.mark.parametrize("extra", [
+    ["-o", "cache_dir=/x"], ["-ocache_dir=x"], ["--override-ini", "cache_dir=x"], ["--override-ini=cache_dir=x"], ["-o", "faulthandler_timeout=abc"],
+    ["-o", "addopts=-k x"], ["-oaddopts="],
+    ["-c", "other.ini"], ["-cother.ini"], ["--config-file", "other.ini"], ["--config-file=other.ini"],
+    ["--rootdir", "/x"], ["--rootdir=/x"], ["-p", "no:cacheprovider"], ["-pxdist"], ["-p", "my_plugin"]])
+def test_options_that_swap_the_configuration_a_run_reads_are_refused(extra: list[str]) -> None:
+    """-o other than addopts= (and watched_pytest's own faulthandler_timeout), -c, --rootdir and -p change what pytest loads."""
+    cmd = ["uv", "run", "pytest", "-o", "addopts=", "-m", gate.FAST_MARKERS, *DOCS_FILES, *extra]
+    problem = gate.proof_problem(_proof("docs-readers", command=cmd), "docs-readers", TREE, DOCS_FILES)
+    assert problem is not None and ("configuration" in problem or "addopts" in problem), problem
 
 
 # ── what a proof says about itself, the re-push line, the floors ─────────────
@@ -207,20 +227,26 @@ def test_the_repush_line_carries_every_missing_proof_between_the_flags_and_the_s
 
 
 @pytest.mark.parametrize("leg", ["docs-readers", "write-seam"])
-def test_both_proof_commands_build_the_jar_as_their_own_step_and_never_wrap_anything_in_lab_run(leg: str) -> None:
-    """AGENTS.md rule 13: an engine build goes through `build-gate-jar.sh --lab-run <class>`, never inside lab-run (and
-    lab-remote runs its command under lab-run), so the jar is step 1 and pytest is step 2, on the pool host itself."""
+def test_both_proof_commands_follow_the_three_step_form_of_rule_13(leg: str) -> None:
+    """AGENTS.md rule 13: only an engine build runs unwrapped (`build-gate-jar.sh --lab-run <class>`); the Python run goes
+    through lab-remote, under lab-run. So: (a) warm the copy, (b) build the jar in it over ssh, (c) run pytest through lab-remote."""
     text = gate.proof_commands(leg, _files(leg), "a" * 40)
-    assert "1) scripts/build-gate-jar.sh --lab-run lab-m" in text and "2) " in text
-    assert text.index("1) scripts/build-gate-jar.sh") < text.index("2) ")
-    assert "lab-run -c" not in text.replace("--lab-run", "") and "lab-remote" not in text and "sh -c" not in text
-    assert "python3 scripts/watched_pytest.py --status" in text and f"--status {'docs' if leg == 'docs-readers' else 'seam'}.json" in text
-    assert "pool host" in text and "clean checkout" in text
+    status = "docs" if leg == "docs-readers" else "seam"
+    a = text.index("(a) ")
+    b = text.index("(b) ")
+    c = text.index("(c) ")
+    assert a < b < c
+    assert "lab-remote --host chas -c lab-s -- true" in text[a:b] and "clean worktree" in text[a:b] and "prints" in text[a:b]
+    assert "ssh nxtest@chas" in text[b:c] and "scripts/build-gate-jar.sh --lab-run lab-m" in text[b:c]
+    assert "lab-remote" not in text[b:c] and "lab-run -c" not in text[b:c].replace("--lab-run", "")
+    assert f"lab-remote --host chas -c lab-m --fetch {status}.json -- " in text[c:]
+    assert f"python3 scripts/watched_pytest.py --status {status}.json -- uv run pytest" in text[c:]
+    assert "sh -c" not in text
 
 
 def test_the_write_seam_proof_runs_integration_tests_with_the_jar_required_and_the_docs_one_with_ci_s_marker() -> None:
     seam = gate.proof_commands("write-seam", list(gate.WRITE_SEAM_TESTS), "a" * 40)
-    assert "NX_REQUIRE_SERVICE_JAR=1" in seam and "-m integration" in seam
+    assert "env NX_REQUIRE_SERVICE_JAR=1 python3 scripts/watched_pytest.py" in seam and "-m integration" in seam
     docs = gate.proof_commands("docs-readers", DOCS_FILES, "a" * 40)
     assert f'-m "{gate.FAST_MARKERS}"' in docs and " ".join(DOCS_FILES) in docs and "NX_REQUIRE_SERVICE_JAR" not in docs
 
