@@ -175,7 +175,6 @@ class IndexRunCensusRouteTest extends IndexRunCensusTestBase {
      */
     @Test
     void aBucketThatOutlastsItsBoundIsTimedOut_andTheOthersStillAnswer() throws Exception {
-        collection(TENANT, C1);
         insert(TENANT, Doc.of("9.11.1").state("indexing").started(ago(8 * 3600)));
         insert(TENANT, Doc.of("9.11.2").state("failed").collection(C1).chunks(1));
         System.setProperty(CatalogRepository.FILLABLE_COUNT_TIMEOUT_PROPERTY, "300");

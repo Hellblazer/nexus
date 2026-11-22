@@ -43,8 +43,6 @@ import java.util.TreeSet;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class TenantImportFixtureTest {
 
-    private static final org.slf4j.Logger LOG = org.slf4j.LoggerFactory.getLogger(TenantImportFixtureTest.class);
-
     static final String RESOURCE = "/fixtures/rdr248-tenant-backup.nxtenant";
     static final String RESOURCE_PATH = "src/test/resources/fixtures/rdr248-tenant-backup.nxtenant";
     /** The property that makes {@link #regenerate} write the file; its value is the reason, printed with the new pins. */
@@ -152,54 +150,6 @@ class TenantImportFixtureTest {
             assertThat(actual).as("rows of " + t).isEqualTo(t.equals("catalog_meta") ? expected + 1 : expected);
         }
         assertThat(end.get("report").get("rows_dropped").asLong()).isZero();
-    }
-
-    // ── RDR-229 P3.11: a backup taken before P3.1 loads with every collection id filled ────────────
-
-    /**
-     * The fixture was written before RDR-229's P3.1, so it carries no {@code collection_id}. The load must still leave none
-     * null: each row takes the id of the restored registry row with the same {@code (tenant_id, name)} (RDR-229 item 10),
-     * because P3.1's CHECK refuses a row with a name and no id. The file is NOT regenerated for this: that it is older than
-     * the column is the whole point, and {@link #theCommittedFileIsTheOneThatWasReviewed} pins it.
-     */
-    @Test
-    void theCommittedFileLoadsWithEveryCollectionIdFilledFromTheRestoredRegistry() throws Exception {
-        ImportTestEnv.BackupFile file = TenantBackupFiles.read(committed());
-        // the precondition that makes this test mean something: the file has no collection id of any kind
-        for (String t : file.tableNames()) {
-            for (JsonNode c : file.table(t).withArray("columns")) {
-                assertThat(c.get("name").asText()).as("column of " + t + " in the committed pre-P3.1 file")
-                    .isNotIn("collection_id", "superseded_by_id", "source_collection_id", "target_collection_id", "physical_collection_id");
-            }
-        }
-        String tenant = "t-fixture-cid";
-
-        JsonNode end = env.restore(env.newTenant(tenant), file);
-
-        assertThat(end.get("status").asText()).as(end.toString()).isEqualTo("committed");
-        var registry = env.su(ctx -> CollectionIdSites.registryAudit(ctx, tenant));
-        assertThat(registry.examined()).as("the fixture's registry rows").isEqualTo(file.rows("catalog_collections")).isPositive();
-        assertThat(registry.nullIds()).as("registry rows with a null collection_id").isZero();
-        assertThat(registry.mismatched()).as("registry rows whose tombstone fields disagree").isZero();
-        List<CollectionIdSites.Finding> found = env.su(ctx -> CollectionIdSites.audit(ctx, tenant, CollectionIdSites.exportedSites()));
-        assertThat(found.stream().filter(f -> f.nullIds() > 0).map(Object::toString).toList())
-            .as("child rows of the load whose collection_id is null although their name names a restored registry row").isEmpty();
-        assertThat(found.stream().filter(f -> f.mismatched() > 0).map(Object::toString).toList())
-            .as("child rows whose collection_id is not that registry row's").isEmpty();
-        // A check that examined nothing proves nothing. The fixture holds rows in every exported table (see regenerate), so every
-        // exported site must examine some; a zero is a setup failure. The tables the backup excludes are not in a backup file, so
-        // the round-trip test audits those, on a source it seeds itself.
-        assertThat(CollectionIdSites.unexamined(found)).as("sites with no row; rows examined per site: " + CollectionIdSites.counts(found)).isEmpty();
-        assertThat(found).as("the fixture audit covered every exported site").hasSize(CollectionIdSites.exportedSites().size());
-        // the strict history audit: the fixture's history rows must be refilled by name too. Its rows name no registry row (the
-        // file cannot be regenerated, and its history names "c" or nothing), so only a wrong id fails here and the counts are printed;
-        // the round-trip tests are the ones that seed history rows naming real collections.
-        List<CollectionIdSites.HistoryFinding> history = env.su(ctx -> CollectionIdSites.auditHistoryStrict(ctx, tenant));
-        LOG.info("history_strict tenant={} found={}", tenant, history);
-        assertThat(CollectionIdSites.historyProblems(history, false)).as("history rows after the load; counts " + history).isEmpty();
-        Integer nullChunkIds = env.su(ctx -> ctx.fetchCount(DSL.table(DSL.name("nexus", "chunks")),
-            DSL.field(DSL.name("tenant_id"), String.class).eq(tenant).and(DSL.field(DSL.name("collection_id")).isNull())));
-        assertThat(nullChunkIds).as("chunks with a null collection_id").isZero();
     }
 
     // ── what a migration does to it ─────────────────────────────────────────────────────────────

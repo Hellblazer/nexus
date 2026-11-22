@@ -47,10 +47,6 @@ def _note(writer, client, owner, collection: str, title: str, content: str) -> t
     chunk, one manifest row. Returns ``(tumbler, source_uri, chash)``."""
     source_uri = uri_for(collection, title)
     assert source_uri is not None
-    # RDR-229 P3.1: a document names a registered collection (the engine refuses one that is not, 422).
-    from tests._catalog_fixture_ops import register_seed_collections
-
-    register_seed_collections(collection)
     tumbler = str(writer.register(
         owner=owner, title=title, content_type="knowledge",
         physical_collection=collection, source_uri=source_uri,

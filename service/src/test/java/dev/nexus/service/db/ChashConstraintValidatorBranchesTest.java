@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
-import dev.nexus.service.db.CollectionIds;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -288,7 +287,6 @@ class ChashConstraintValidatorBranchesTest {
             ctx.alterTable(CATALOG_DOCUMENT_CHUNKS).dropConstraint(MANIFEST_CHECK).execute();
             try {
                 ctx.insertInto(CHUNKS).set(CHUNKS.TENANT_ID, TENANT_A).set(CHUNKS.COLLECTION, COLLECTION)
-                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT_A, COLLECTION))
                     .set(CHUNKS.CHASH, HexFormat.of().parseHex("c".repeat(32))).set(CHUNKS.EMBEDDING_MODEL, MODEL)
                     .set(CHUNKS.CHUNK_TEXT, "bad").set(CHUNKS.EMBEDDING_768, Vector.of(new float[768])).execute();
             } finally {

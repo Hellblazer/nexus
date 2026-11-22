@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.reembed;
 
-import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.ReembedSourceReader.PlanCounts;
@@ -126,49 +125,32 @@ class ReembedPlanCountsTest extends ReembedFixture {
                 List.of(new float[384]), List.of(Map.of()));
             for (var spec : List.of(new Object[] {topicA, fx.src()}, new Object[] {topicB, fx.src()},
                                     new Object[] {topicElsewhere, fx.tgt()})) {
-                ctx.insertInto(TOPICS)
-                    .set(TOPICS.ID, (Long) spec[0])
-                    .set(TOPICS.TENANT_ID, fx.tenant())
-                    .set(TOPICS.LABEL, "t" + spec[0])
-                    .set(TOPICS.COLLECTION, (String) spec[1])
-                    .set(TOPICS.COLLECTION_ID, CollectionIds.idOf(fx.tenant(), (String) spec[1]))
-                    .set(TOPICS.DOC_COUNT, 0)
-                    .set(TOPICS.CREATED_AT, OffsetDateTime.now())
-                    .set(TOPICS.REVIEW_STATUS, "pending")
+                ctx.insertInto(TOPICS, TOPICS.ID, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.DOC_COUNT,
+                        TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS)
+                    .values((Long) spec[0], fx.tenant(), "t" + spec[0], (String) spec[1], 0, OffsetDateTime.now(),
+                        "pending")
                     .execute();
             }
             // an assignment of ANOTHER collection to the source's topic A: counted
-            ctx.insertInto(TOPIC_ASSIGNMENTS)
-                .set(TOPIC_ASSIGNMENTS.TENANT_ID, fx.tenant())
-                .set(TOPIC_ASSIGNMENTS.DOC_ID, Chash.fromHex(ch(otherText)).toBytes())
-                .set(TOPIC_ASSIGNMENTS.TOPIC_ID, topicA)
-                .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY, "projection")
-                .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, fx.tgt())
-                .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, CollectionIds.idOf(fx.tenant(), fx.tgt()))
-                .set(TOPIC_ASSIGNMENTS.ASSIGNED_AT, OffsetDateTime.now())
-                .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, MINI)
+            ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
+                    TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                    TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+                .values(fx.tenant(), Chash.fromHex(ch(otherText)).toBytes(), topicA, "projection", fx.tgt(),
+                    OffsetDateTime.now(), MINI)
                 .execute();
             // the source's OWN assignment to its own topic: rebuilt with the topics, not a cross-collection loss
-            ctx.insertInto(TOPIC_ASSIGNMENTS)
-                .set(TOPIC_ASSIGNMENTS.TENANT_ID, fx.tenant())
-                .set(TOPIC_ASSIGNMENTS.DOC_ID, Chash.fromHex(ch(ownText)).toBytes())
-                .set(TOPIC_ASSIGNMENTS.TOPIC_ID, topicA)
-                .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY, "projection")
-                .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, fx.src())
-                .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, CollectionIds.idOf(fx.tenant(), fx.src()))
-                .set(TOPIC_ASSIGNMENTS.ASSIGNED_AT, OffsetDateTime.now())
-                .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, BGE)
+            ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
+                    TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                    TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+                .values(fx.tenant(), Chash.fromHex(ch(ownText)).toBytes(), topicA, "projection", fx.src(),
+                    OffsetDateTime.now(), BGE)
                 .execute();
             String ownText2 = "doc " + fx.tag() + " d0 chunk 1 lorem ipsum";
-            ctx.insertInto(TOPIC_ASSIGNMENTS)
-                .set(TOPIC_ASSIGNMENTS.TENANT_ID, fx.tenant())
-                .set(TOPIC_ASSIGNMENTS.DOC_ID, Chash.fromHex(ch(ownText2)).toBytes())
-                .set(TOPIC_ASSIGNMENTS.TOPIC_ID, topicA)
-                .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY, "projection")
-                .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, fx.src())
-                .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, CollectionIds.idOf(fx.tenant(), fx.src()))
-                .set(TOPIC_ASSIGNMENTS.ASSIGNED_AT, OffsetDateTime.now())
-                .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, BGE)
+            ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
+                    TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                    TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+                .values(fx.tenant(), Chash.fromHex(ch(ownText2)).toBytes(), topicA, "projection", fx.src(),
+                    OffsetDateTime.now(), BGE)
                 .execute();
             // links: A to B (both the source's), and the elsewhere topic to B: both touch the source's topics.
             // A link between two topics of another collection is not the source's.
@@ -194,43 +176,23 @@ class ReembedPlanCountsTest extends ReembedFixture {
         su(ctx -> {
             OffsetDateTime now = OffsetDateTime.now();
             // rows of the live document: moved with it, not counted
-            ctx.insertInto(DOCUMENT_ASPECTS)
-                .set(DOCUMENT_ASPECTS.TENANT_ID, fx.tenant())
-                .set(DOCUMENT_ASPECTS.COLLECTION, fx.src())
-                .set(DOCUMENT_ASPECTS.COLLECTION_ID, CollectionIds.idOf(fx.tenant(), fx.src()))
-                .set(DOCUMENT_ASPECTS.SOURCE_PATH, "/p/live.md")
-                .set(DOCUMENT_ASPECTS.EXTRACTED_AT, now)
-                .set(DOCUMENT_ASPECTS.MODEL_VERSION, "v1")
-                .set(DOCUMENT_ASPECTS.EXTRACTOR_NAME, "docling")
-                .set(DOCUMENT_ASPECTS.DOC_ID, live)
-                .set(DOCUMENT_ASPECTS.SOURCE_URI, "file:///p/live.md").execute();
-            ctx.insertInto(DOCUMENT_HIGHLIGHTS)
-                .set(DOCUMENT_HIGHLIGHTS.TENANT_ID, fx.tenant())
-                .set(DOCUMENT_HIGHLIGHTS.DOC_ID, live)
-                .set(DOCUMENT_HIGHLIGHTS.COLLECTION, fx.src())
-                .set(DOCUMENT_HIGHLIGHTS.COLLECTION_ID, CollectionIds.idOf(fx.tenant(), fx.src()))
-                .set(DOCUMENT_HIGHLIGHTS.SOURCE_URI, "file:///hl-live")
-                .set(DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD, "hi")
-                .set(DOCUMENT_HIGHLIGHTS.INGESTED_AT, now).execute();
+            ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
+                    DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
+                    DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+                .values(fx.tenant(), fx.src(), "/p/live.md", now, "v1", "docling", live, "file:///p/live.md").execute();
+            ctx.insertInto(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID,
+                    DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.SOURCE_URI, DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD,
+                    DOCUMENT_HIGHLIGHTS.INGESTED_AT)
+                .values(fx.tenant(), live, fx.src(), "file:///hl-live", "hi", now).execute();
             // rows of the tombstoned document: the job never moves it, so these stay naming the source
-            ctx.insertInto(DOCUMENT_ASPECTS)
-                .set(DOCUMENT_ASPECTS.TENANT_ID, fx.tenant())
-                .set(DOCUMENT_ASPECTS.COLLECTION, fx.src())
-                .set(DOCUMENT_ASPECTS.COLLECTION_ID, CollectionIds.idOf(fx.tenant(), fx.src()))
-                .set(DOCUMENT_ASPECTS.SOURCE_PATH, "/p/tomb.md")
-                .set(DOCUMENT_ASPECTS.EXTRACTED_AT, now)
-                .set(DOCUMENT_ASPECTS.MODEL_VERSION, "v1")
-                .set(DOCUMENT_ASPECTS.EXTRACTOR_NAME, "docling")
-                .set(DOCUMENT_ASPECTS.DOC_ID, tomb)
-                .set(DOCUMENT_ASPECTS.SOURCE_URI, "file:///p/tomb.md").execute();
-            ctx.insertInto(DOCUMENT_HIGHLIGHTS)
-                .set(DOCUMENT_HIGHLIGHTS.TENANT_ID, fx.tenant())
-                .set(DOCUMENT_HIGHLIGHTS.DOC_ID, tomb)
-                .set(DOCUMENT_HIGHLIGHTS.COLLECTION, fx.src())
-                .set(DOCUMENT_HIGHLIGHTS.COLLECTION_ID, CollectionIds.idOf(fx.tenant(), fx.src()))
-                .set(DOCUMENT_HIGHLIGHTS.SOURCE_URI, "file:///hl-tomb")
-                .set(DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD, "hi")
-                .set(DOCUMENT_HIGHLIGHTS.INGESTED_AT, now).execute();
+            ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
+                    DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
+                    DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+                .values(fx.tenant(), fx.src(), "/p/tomb.md", now, "v1", "docling", tomb, "file:///p/tomb.md").execute();
+            ctx.insertInto(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID,
+                    DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.SOURCE_URI, DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD,
+                    DOCUMENT_HIGHLIGHTS.INGESTED_AT)
+                .values(fx.tenant(), tomb, fx.src(), "file:///hl-tomb", "hi", now).execute();
             return null;
         });
 
@@ -329,39 +291,25 @@ class ReembedPlanCountsTest extends ReembedFixture {
                 List.of(new float[384]), List.of(Map.of()));
             for (var spec : List.of(new Object[] {topicA, fx.src()}, new Object[] {topicB, fx.src()},
                                     new Object[] {topicElsewhere, fx.tgt()})) {
-                ctx.insertInto(TOPICS)
-                    .set(TOPICS.ID, (Long) spec[0])
-                    .set(TOPICS.TENANT_ID, fx.tenant())
-                    .set(TOPICS.LABEL, "t" + spec[0])
-                    .set(TOPICS.COLLECTION, (String) spec[1])
-                    .set(TOPICS.COLLECTION_ID, CollectionIds.idOf(fx.tenant(), (String) spec[1]))
-                    .set(TOPICS.DOC_COUNT, 0)
-                    .set(TOPICS.CREATED_AT, OffsetDateTime.now())
-                    .set(TOPICS.REVIEW_STATUS, "pending")
+                ctx.insertInto(TOPICS, TOPICS.ID, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.DOC_COUNT,
+                        TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS)
+                    .values((Long) spec[0], fx.tenant(), "t" + spec[0], (String) spec[1], 0, OffsetDateTime.now(),
+                        "pending")
                     .execute();
             }
-            ctx.insertInto(TOPIC_ASSIGNMENTS)
-                .set(TOPIC_ASSIGNMENTS.TENANT_ID, fx.tenant())
-                .set(TOPIC_ASSIGNMENTS.DOC_ID, Chash.fromHex(ch(foreignText)).toBytes())
-                .set(TOPIC_ASSIGNMENTS.TOPIC_ID, topicA)
-                .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY, "projection")
-                .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, fx.tgt())
-                .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, CollectionIds.idOf(fx.tenant(), fx.tgt()))
-                .set(TOPIC_ASSIGNMENTS.ASSIGNED_AT, OffsetDateTime.now())
-                .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, MINI)
+            ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
+                    TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                    TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+                .values(fx.tenant(), Chash.fromHex(ch(foreignText)).toBytes(), topicA, "projection", fx.tgt(),
+                    OffsetDateTime.now(), MINI)
                 .execute();
             ctx.insertInto(TOPIC_LINKS, TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID, TOPIC_LINKS.TO_TOPIC_ID)
                 .values(fx.tenant(), topicA, topicB).execute();
-            ctx.insertInto(DOCUMENT_ASPECTS)
-                .set(DOCUMENT_ASPECTS.TENANT_ID, fx.tenant())
-                .set(DOCUMENT_ASPECTS.COLLECTION, fx.src())
-                .set(DOCUMENT_ASPECTS.COLLECTION_ID, CollectionIds.idOf(fx.tenant(), fx.src()))
-                .set(DOCUMENT_ASPECTS.SOURCE_PATH, "/p/tomb.md")
-                .set(DOCUMENT_ASPECTS.EXTRACTED_AT, OffsetDateTime.now())
-                .set(DOCUMENT_ASPECTS.MODEL_VERSION, "v1")
-                .set(DOCUMENT_ASPECTS.EXTRACTOR_NAME, "docling")
-                .set(DOCUMENT_ASPECTS.DOC_ID, tomb)
-                .set(DOCUMENT_ASPECTS.SOURCE_URI, "file:///p/tomb.md").execute();
+            ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
+                    DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
+                    DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+                .values(fx.tenant(), fx.src(), "/p/tomb.md", OffsetDateTime.now(), "v1", "docling", tomb,
+                    "file:///p/tomb.md").execute();
             return null;
         });
     }

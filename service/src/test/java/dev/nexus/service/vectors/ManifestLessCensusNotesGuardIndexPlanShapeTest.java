@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
-import dev.nexus.service.db.CollectionIds;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgCatalogProbes;
@@ -141,8 +140,6 @@ class ManifestLessCensusNotesGuardIndexPlanShapeTest {
 
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLLECTION);
-            // RDR-229 P3.1: a document names its collection's registry id, so the other collection is registered too.
-            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, OTHER_COLLECTION);
         }
 
         seedNoiseAndTargets();
@@ -180,7 +177,6 @@ class ManifestLessCensusNotesGuardIndexPlanShapeTest {
                     .set(CATALOG_DOCUMENTS.CONTENT_TYPE, "prose")
                     .set(CATALOG_DOCUMENTS.CORPUS, "knowledge")
                     .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLLECTION)
-                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, COLLECTION))
                     .set(CATALOG_DOCUMENTS.METADATA, DSL.jsonbObject(DSL.key("doc_id").value(TARGET_CHASHES.get(i))))
                     .execute();
             }
@@ -200,23 +196,15 @@ class ManifestLessCensusNotesGuardIndexPlanShapeTest {
                                         String collection, String tag) {
         var series = DSL.generateSeries(1, rows).as("s", "i");
         Field<String> i = DSL.cast(series.field("i", Integer.class), SQLDataType.VARCHAR);
-        seed.insertInto(CATALOG_DOCUMENTS,
-                CATALOG_DOCUMENTS.TENANT_ID,
-                CATALOG_DOCUMENTS.TUMBLER,
-                CATALOG_DOCUMENTS.TITLE,
-                CATALOG_DOCUMENTS.CONTENT_TYPE,
-                CATALOG_DOCUMENTS.CORPUS,
-                CATALOG_DOCUMENTS.PHYSICAL_COLLECTION,
-                CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID,
-                CATALOG_DOCUMENTS.METADATA)
+        seed.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.CORPUS,
+                CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.METADATA)
             .select(seed.select(DSL.val(TENANT, CATALOG_DOCUMENTS.TENANT_ID),
-               DSL.concat(DSL.val(tumblerPrefix, CATALOG_DOCUMENTS.TUMBLER), i),
-               DSL.concat(DSL.val(titlePrefix, CATALOG_DOCUMENTS.TITLE), i),
-               DSL.inline("prose"),
-               DSL.inline("knowledge"),
-               DSL.val(collection, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION),
-               CollectionIds.idOf(DSL.val(TENANT, CATALOG_DOCUMENTS.TENANT_ID), DSL.val(collection, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)),
-               DSL.jsonbObject(DSL.key("doc_id").value(DSL.concat(
+                    DSL.concat(DSL.val(tumblerPrefix, CATALOG_DOCUMENTS.TUMBLER), i),
+                    DSL.concat(DSL.val(titlePrefix, CATALOG_DOCUMENTS.TITLE), i), DSL.inline("prose"),
+                    DSL.inline("knowledge"),
+                    DSL.val(collection, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION),
+                    DSL.jsonbObject(DSL.key("doc_id").value(DSL.concat(
                         DSL.md5(DSL.concat(DSL.val(tag + "-a-", CATALOG_DOCUMENTS.TITLE), i)),
                         DSL.md5(DSL.concat(DSL.val(tag + "-b-", CATALOG_DOCUMENTS.TITLE), i))))))
                 .from(series))

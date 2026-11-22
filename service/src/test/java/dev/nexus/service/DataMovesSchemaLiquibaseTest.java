@@ -71,15 +71,13 @@ class DataMovesSchemaLiquibaseTest {
         Map.entry("last_transient_at", "timestamptz YES"),
         Map.entry("last_transient", "text YES"),
         Map.entry("paused_at", "timestamptz YES"),
-        Map.entry("paused_by", "text YES"),
-        Map.entry("verify_statement_timeout_ms", "int4 NO")));
+        Map.entry("paused_by", "text YES")));
 
     private static final List<String> CONSTRAINTS = List.of(
         "data_moves_pk", "data_moves_label_check", "data_moves_label_nonempty_check", "data_moves_chunk_size_check", "data_moves_sleep_ms_check",
         "data_moves_statement_timeout_ms_check", "data_moves_supersedes_unique", "data_moves_supersedes_fk",
         "data_moves_supersedes_self_check", "data_moves_terminal_exclusive_check", "data_moves_failure_pair_check",
-        "data_moves_transient_retries_check", "data_moves_transient_retries_stamp_check", "data_moves_transient_pair_check", "data_moves_paused_by_check",
-        "data_moves_verify_statement_timeout_ms_check");
+        "data_moves_transient_retries_check", "data_moves_transient_retries_stamp_check", "data_moves_transient_pair_check", "data_moves_paused_by_check");
 
     /** Column values only: the registry stores SQL as text and these tests never run it. */
     private static final String TEMPLATE_TEXT = "the template text of a move";
@@ -111,8 +109,6 @@ class DataMovesSchemaLiquibaseTest {
                 .as("registered_at defaults to now()").isEqualTo("now()");
             assertThat(PgCatalogProbes.columnInfo(ctx, "nexus", "data_moves", "transient_retries").columnDefault())
                 .as("transient_retries defaults to 0").isEqualTo("0");
-            assertThat(PgCatalogProbes.columnInfo(ctx, "nexus", "data_moves", "verify_statement_timeout_ms").columnDefault())
-                .as("verify_statement_timeout_ms defaults to 60 s (datamoves-002)").isEqualTo("60000");
 
 
             Map<String, String> constraints = constraints(ctx);
@@ -190,27 +186,6 @@ class DataMovesSchemaLiquibaseTest {
             }
             insert(ctx, "sleep-low", m -> m.set(DATA_MOVES.SLEEP_MS, 0));
             insert(ctx, "sleep-high", m -> m.set(DATA_MOVES.SLEEP_MS, 60_000));
-        }
-    }
-
-    @Test
-    void verifyStatementTimeoutCheck_refusesZeroAndNegative_andAMinimalRowTakesSixtySeconds() throws Exception {
-        try (Connection su = pg.createConnection("")) {
-            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            for (int bad : new int[] {0, -1}) {
-                assertThatThrownBy(() -> insert(ctx, "verify-timeout-bad-" + bad,
-                        m -> m.set(DATA_MOVES.VERIFY_STATEMENT_TIMEOUT_MS, bad)))
-                    .as("verify_statement_timeout_ms " + bad)
-                    .hasMessageContaining("data_moves_verify_statement_timeout_ms_check");
-            }
-            insert(ctx, "verify-timeout-one", m -> m.set(DATA_MOVES.VERIFY_STATEMENT_TIMEOUT_MS, 1));
-            insert(ctx, "verify-timeout-default");
-            assertThat(ctx.select(DATA_MOVES.VERIFY_STATEMENT_TIMEOUT_MS).from(DATA_MOVES)
-                .where(DATA_MOVES.LABEL.eq("verify-timeout-default")).fetchOne(DATA_MOVES.VERIFY_STATEMENT_TIMEOUT_MS))
-                .as("a registering INSERT that names no such column").isEqualTo(60_000);
-            assertThat(ctx.select(DATA_MOVES.STATEMENT_TIMEOUT_MS).from(DATA_MOVES)
-                .where(DATA_MOVES.LABEL.eq("verify-timeout-default")).fetchOne(DATA_MOVES.STATEMENT_TIMEOUT_MS))
-                .as("the completion's bound is its own column, unchanged").isEqualTo(30_000);
         }
     }
 

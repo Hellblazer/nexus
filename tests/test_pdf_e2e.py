@@ -15,9 +15,6 @@ from unittest.mock import patch
 
 import pytest
 
-from tests._catalog_fixture_ops import (
-    seed_row_when_profile_refuses,  # noqa: F401 — an autouse fixture: the pre-flight's registration meets the substrate's bge profile
-)
 from tests.conftest import fake_credentials
 import pytest
 from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction

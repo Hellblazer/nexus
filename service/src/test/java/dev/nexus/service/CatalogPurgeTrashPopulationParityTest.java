@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
-import dev.nexus.service.db.CollectionIds;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.CatalogRepository;
@@ -175,7 +174,6 @@ class CatalogPurgeTrashPopulationParityTest {
             .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
             .set(CATALOG_DOCUMENTS.TITLE, title)
             .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLLECTION)
-                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, COLLECTION))
             .set(CATALOG_DOCUMENTS.DELETED_AT, deletedAt)
             .execute();
     }

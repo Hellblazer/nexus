@@ -11,8 +11,6 @@ import dev.nexus.service.db.ReembedJobRepository.JobLockHeld;
 import dev.nexus.service.db.ReembedJobRepository.LockContention;
 import dev.nexus.service.db.ReembedJobRepository.Skip;
 import dev.nexus.service.db.ReembedJobRepository.Transition;
-import org.jooq.SQLDialect;
-import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -95,19 +93,8 @@ class ReembedJobRepositoryTest {
         if (pg != null) pg.stop();
     }
 
-    /** A fresh tenant with the names this class starts jobs over registered: a job row carries both ends' registry
-     *  ids (RDR-229 P3.1), so {@code start} refuses a name the registry does not hold. */
     private String tenant() {
-        String t = "reembed-repo-" + seq.incrementAndGet();
-        try (Connection su = pg.createConnection("")) {
-            var ctx = DSL.using(su, SQLDialect.POSTGRES);
-            for (String name : List.of(SRC, TGT, MID, OTHER, "docs__owner__x__v1", "other-target", "other-source")) {
-                PgContainerHelper.insertCollection(ctx, t, name);
-            }
-        } catch (java.sql.SQLException e) {
-            throw new IllegalStateException(e);
-        }
-        return t;
+        return "reembed-repo-" + seq.incrementAndGet();
     }
 
     private Job apply(String tenant, Job job, String to) {

@@ -55,9 +55,8 @@ def _seed_ttl_lapsed_note(client, cat, content: str, title: str) -> str:
         catalog_store_hook_tracked,
         single_chunk_manifest_metadata,
     )
-    from tests._catalog_fixture_ops import register_seed_collections, seed_note_manifest
+    from tests._catalog_fixture_ops import seed_note_manifest
 
-    register_seed_collections(_COLLECTION)
     chash, manifest_metadatas = single_chunk_manifest_metadata(content)
     assert chash == hashlib.sha256(content.encode()).hexdigest()
 

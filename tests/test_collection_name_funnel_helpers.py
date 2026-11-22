@@ -38,6 +38,7 @@ from nexus.corpus import (
     collection_registration_kwargs,
     default_projection_threshold,
     t3_collection_name,
+    validate_collection_name,
     voyage_model_for_collection,
 )
 
@@ -183,6 +184,34 @@ def test_legacy_content_type_for_collection_pinned(name: str, expected: str) -> 
     too (``other__x`` -> ``code``), not only a dunder-free name. The
     fix filters explicitly against ("docs", "knowledge", "rdr")."""
     assert _legacy_content_type_for_collection(name) == expected
+
+
+# ── validate_collection_name's overflow hint ────────────────────────────────
+
+@pytest.mark.parametrize(
+    "name, expect_hint_type",
+    [
+        ("x" * 70, None),
+        ("code__" + "y" * 70, "code"),
+        ("docs__" + "y" * 70, "docs"),
+        ("rdr__" + "y" * 70, "rdr"),
+        ("knowledge__" + "y" * 70, "knowledge"),
+        ("weirdo__" + "y" * 70, None),
+        ("quarantine-docs__" + "y" * 70, None),
+    ],
+    ids=[
+        "no_dunder_no_hint", "code_hint", "docs_hint", "rdr_hint",
+        "knowledge_hint", "unrecognized_prefix_no_hint", "quarantine_prefix_no_hint",
+    ],
+)
+def test_validate_collection_name_overflow_hint(name: str, expect_hint_type: str | None) -> None:
+    with pytest.raises(ValueError) as exc_info:
+        validate_collection_name(name)
+    msg = str(exc_info.value)
+    if expect_hint_type is None:
+        assert "--content-type" not in msg
+    else:
+        assert f"--content-type {expect_hint_type}" in msg
 
 
 # ── t3_collection_name: ct/rest branch + placeholder guard + bare-prefix probe ──

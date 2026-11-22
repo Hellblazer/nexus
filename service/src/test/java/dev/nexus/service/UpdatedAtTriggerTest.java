@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
-import dev.nexus.service.db.CollectionIds;
 import org.jooq.impl.DSL;
 import org.jooq.JSONB;
 import org.jooq.SQLDialect;
@@ -106,7 +105,6 @@ class UpdatedAtTriggerTest {
                 .set(TOPICS.TENANT_ID, TENANT)
                 .set(TOPICS.LABEL, "uat-topic")
                 .set(TOPICS.COLLECTION, "c")
-                .set(TOPICS.COLLECTION_ID, CollectionIds.idOf(TENANT, "c"))
                 .set(TOPICS.DOC_COUNT, 0)
                 .set(TOPICS.CREATED_AT, DSL.currentOffsetDateTime())
                 .set(TOPICS.REVIEW_STATUS, "pending")
@@ -142,7 +140,6 @@ class UpdatedAtTriggerTest {
                 .set(CATALOG_DOCUMENTS.TUMBLER, "uat-doc-1")
                 .set(CATALOG_DOCUMENTS.TITLE, "Doc")
                 .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, "c")
-                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, "c"))
                 .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER).doNothing()
                 .execute();
             // nexus-cefa1.4: salient_sentences is jsonb now — bare 'before'/'after'
@@ -150,7 +147,6 @@ class UpdatedAtTriggerTest {
             DSL.using(su, SQLDialect.POSTGRES).insertInto(DOCUMENT_ASPECTS)
                 .set(DOCUMENT_ASPECTS.TENANT_ID, TENANT)
                 .set(DOCUMENT_ASPECTS.COLLECTION, "c")
-                .set(DOCUMENT_ASPECTS.COLLECTION_ID, CollectionIds.idOf(TENANT, "c"))
                 .set(DOCUMENT_ASPECTS.SOURCE_PATH, "p1")
                 .set(DOCUMENT_ASPECTS.EXTRACTED_AT, DSL.currentOffsetDateTime())
                 .set(DOCUMENT_ASPECTS.MODEL_VERSION, "v1")

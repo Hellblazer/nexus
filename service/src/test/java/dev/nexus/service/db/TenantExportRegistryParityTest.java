@@ -286,14 +286,8 @@ class TenantExportRegistryParityTest {
                 if (t.columns().get(c).serial()) serials.add(c);
             }
             String serial = serials.isEmpty() ? null : serials.get(0);
-            // The one exemption (Sam 2026-11-21, T2 nexus/sam-ruling-p31-parity-serial-rule-2026-11-21): a serial
-            // column outside the key whose entry declares it computed on restore (Entry.importComputed: maintained
-            // and not a reference) is the decision this rule asks for, recorded where the rule reads it. A restore
-            // never reads such a column; the target's sequence assigns it (RDR-229 P3.1 catalog_collections.collection_id).
             t.columns().values().forEach(c -> {
-                boolean computedOnRestore = e.triggerMaintained().contains(c.name())
-                    && e.notReferences().contains(c.name());
-                if (c.serial() && !t.primaryKey().contains(c.name()) && !computedOnRestore) {
+                if (c.serial() && !t.primaryKey().contains(c.name())) {
                     wrong.add(name + "." + c.name() + ": a serial column outside the primary key; decide whether "
                         + "a restore reassigns it before classing it");
                 }
@@ -684,32 +678,6 @@ class TenantExportRegistryParityTest {
             plans.triggers()));
         assertThat(reassignedIdMismatches(planted, TenantExport.TABLES))
             .anySatisfy(s -> assertThat(s).startsWith("plans.id: a serial column outside the primary key"));
-    }
-
-    @Test
-    void aSerialColumnOutsideTheKeyNotDeclaredComputedOnRestoreFails() {
-        // The exemption above is earned only by the declaration: catalog_collections.collection_id with its
-        // importComputed declaration dropped is flagged again.
-        List<ExportTable> planted = replacing("catalog_collections", t -> copy(t, t.primaryKey(), t.reassignedId(),
-            t.references(), t.triggers(), without(t.triggerMaintained(), "collection_id"),
-            without(t.notReferences(), "collection_id")));
-        assertThat(reassignedIdMismatches(live, planted)).singleElement().asString()
-            .startsWith("catalog_collections.collection_id: a serial column outside the primary key");
-    }
-
-    @Test
-    void aSerialColumnOutsideTheKeyDeclaredOnlyMaintainedStillFails() {
-        // Half a declaration is not the declaration: maintained without not-a-reference is still flagged.
-        List<ExportTable> planted = replacing("catalog_collections", t -> copy(t, t.primaryKey(), t.reassignedId(),
-            t.references(), t.triggers(), t.triggerMaintained(), without(t.notReferences(), "collection_id")));
-        assertThat(reassignedIdMismatches(live, planted)).singleElement().asString()
-            .startsWith("catalog_collections.collection_id: a serial column outside the primary key");
-    }
-
-    private static Set<String> without(Set<String> s, String drop) {
-        Set<String> out = new TreeSet<>(s);
-        out.remove(drop);
-        return out;
     }
 
     @Test

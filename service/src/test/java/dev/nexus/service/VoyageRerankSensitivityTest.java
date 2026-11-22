@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
-import dev.nexus.service.db.CollectionIds;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
@@ -215,7 +214,6 @@ class VoyageRerankSensitivityTest {
                             .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT).set(CATALOG_DOCUMENTS.TUMBLER, doc)
                             .set(CATALOG_DOCUMENTS.TITLE, doc).set(CATALOG_DOCUMENTS.CONTENT_TYPE, "paper")
                             .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
-                            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
                             .set(CATALOG_DOCUMENTS.SENSITIVE, isSensitive)
                             .execute();
                         any = true;
@@ -225,7 +223,6 @@ class VoyageRerankSensitivityTest {
                         .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position++)
                         .set(CATALOG_DOCUMENT_CHUNKS.CHASH, Chash.ofText(text).toBytes())
                         .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
-                        .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
                         .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, model)
                         .execute();
                 }

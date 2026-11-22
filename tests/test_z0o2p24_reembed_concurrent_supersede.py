@@ -56,9 +56,6 @@ def _put_note(client, *, title: str, content: str) -> tuple[str, str]:
         note_pieces,
     )
 
-    from tests._catalog_fixture_ops import register_seed_collections
-
-    register_seed_collections(_COLLECTION)  # RDR-229 P3.1: put_note registers the collection before it calls the hook
     pieces = note_pieces(content, _COLLECTION)
     doc_id, manifest_metadatas = note_manifest_metadata(pieces)
     tumbler, _created = catalog_store_hook_tracked(

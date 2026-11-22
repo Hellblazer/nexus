@@ -73,24 +73,6 @@ final class MoveTenants {
         return list(admin, boundValues);
     }
 
-    /**
-     * The tenants listed at the start of the pass, then those the catalogs name now that it was not listed with: a tenant that
-     * has a {@code nexus.service_tokens} row since, and on a table partitioned one tenant per leaf a tenant with a leaf since. Both
-     * are catalog-sized reads (no scan of the driving table), so the completion transaction can make them. A tenant that holds rows
-     * of a table listed by the probe, with no token and no leaf, is not found: that needs the scan the probe made.
-     */
-    static List<String> reread(DSLContext tx, String schema, String table, List<String> listed) {
-        TreeSet<String> now = new TreeSet<>(tx.selectDistinct(TENANT_ID).from(DSL.table(DSL.name("nexus", "service_tokens")))
-            .where(TENANT_ID.isNotNull()).fetch(TENANT_ID));
-        if (LeafCatalog.hasTenantLeaves(tx, schema, table)) {
-            LeafCatalog.tenantLeaves(tx, schema, table, null).forEach(l -> now.add(l.tenant()));
-        }
-        now.removeAll(listed);
-        List<String> out = new ArrayList<>(listed);
-        out.addAll(now);
-        return out;
-    }
-
     private static List<String> list(DSLContext admin, Collection<String> found) {
         TreeSet<String> rest = new TreeSet<>(found);
         Table<?> tokens = DSL.table(DSL.name("nexus", "service_tokens"));

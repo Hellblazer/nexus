@@ -3,7 +3,6 @@
 package dev.nexus.service.vectors;
 
 import dev.nexus.service.db.PgSession;
-import dev.nexus.service.db.SqlConstraints;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.jooq.nexus.Routines;
@@ -236,65 +235,31 @@ public final class PciQueryRing {
         }
     }
 
-    /**
-     * @return entries written, or -1 when the call failed (logged, batch dropped). The function raises SQLSTATE 23503 for an
-     * entry whose collection does not resolve (RDR-229 P3.1), which rolls the whole call back; the batch is then retried entry
-     * by entry so the entries that do resolve are still written, and each one that does not is logged as a structured warning
-     * and counted as skipped. A ring failure is never a search failure: this runs on the writer thread, after the response.
-     */
+    /** @return entries written, or -1 when the call failed (logged, batch dropped) */
     private int writeTenant(String tenant, List<Entry> entries) {
         try {
-            return upsert(tenant, entries);
+            int n = entries.size();
+            String[] collections = new String[n];
+            String[] models = new String[n];
+            String[] vectors = new String[n];
+            byte[][] digests = new byte[n][];
+            for (int i = 0; i < n; i++) {
+                Entry e = entries.get(i);
+                collections[i] = e.collection();
+                models[i] = e.model();
+                vectors[i] = Vector.of(e.vector()).toString();
+                digests[i] = digest(e.vector());
+            }
+            Integer written = scope.withTenant(tenant, ctx -> {
+                PgSession.setLocal(ctx, "statement_timeout", Long.toString(writeTimeout.toMillis()));
+                return Routines.canaryQueryRingUpsert(ctx.configuration(), tenant, collections, models, vectors, digests);
+            });
+            return written == null ? 0 : written;
         } catch (RuntimeException e) {
-            if (!SqlConstraints.isForeignKeyViolation(e)) {
-                log.warn("event=pci_ring_write_failed tenant={} entries={} error=\"{}\"", tenant, entries.size(), sanitize(e));
-                return -1;
-            }
-            if (entries.size() == 1) {
-                logUnregistered(tenant, entries.get(0), e);
-                return 0;
-            }
+            log.warn("event=pci_ring_write_failed tenant={} entries={} error=\"{}\"", tenant, entries.size(),
+                sanitize(e));
+            return -1;
         }
-        int written = 0;
-        for (Entry entry : entries) {
-            try {
-                written += upsert(tenant, List.of(entry));
-            } catch (RuntimeException e) {
-                if (SqlConstraints.isForeignKeyViolation(e)) {
-                    logUnregistered(tenant, entry, e);
-                } else {
-                    log.warn("event=pci_ring_write_failed tenant={} entries=1 collection={} error=\"{}\"", tenant,
-                        entry.collection(), sanitize(e));
-                }
-            }
-        }
-        return written;
-    }
-
-    private void logUnregistered(String tenant, Entry entry, RuntimeException e) {
-        log.warn("event=pci_ring_entry_unregistered tenant={} collection={} model={} error=\"{}\"", tenant,
-            entry.collection(), entry.model(), sanitize(e));
-    }
-
-    /** One call of the function for {@code entries} of one tenant; the entries written. */
-    private int upsert(String tenant, List<Entry> entries) {
-        int n = entries.size();
-        String[] collections = new String[n];
-        String[] models = new String[n];
-        String[] vectors = new String[n];
-        byte[][] digests = new byte[n][];
-        for (int i = 0; i < n; i++) {
-            Entry e = entries.get(i);
-            collections[i] = e.collection();
-            models[i] = e.model();
-            vectors[i] = Vector.of(e.vector()).toString();
-            digests[i] = digest(e.vector());
-        }
-        Integer written = scope.withTenant(tenant, ctx -> {
-            PgSession.setLocal(ctx, "statement_timeout", Long.toString(writeTimeout.toMillis()));
-            return Routines.canaryQueryRingUpsert(ctx.configuration(), tenant, collections, models, vectors, digests);
-        });
-        return written == null ? 0 : written;
     }
 
     // -- digest and log text --------------------------------------------------------------------------------------

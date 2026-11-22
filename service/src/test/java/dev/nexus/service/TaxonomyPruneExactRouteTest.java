@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
-import dev.nexus.service.db.CollectionIds;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariConfig;
@@ -128,7 +127,6 @@ class TaxonomyPruneExactRouteTest {
             PgContainerHelper.insertCollection(dsl, TENANT, home);
             topic = dsl.insertInto(TOPICS)
                 .set(TOPICS.TENANT_ID, TENANT).set(TOPICS.LABEL, "prune topic").set(TOPICS.COLLECTION, home)
-                .set(TOPICS.COLLECTION_ID, CollectionIds.idOf(TENANT, home))   // RDR-229 P3.1: the id beside the name
                 .set(TOPICS.CREATED_AT, SEED_TS)
                 .returningResult(TOPICS.ID).fetchOne(TOPICS.ID);
         }
@@ -159,7 +157,6 @@ class TaxonomyPruneExactRouteTest {
         dsl.insertInto(TOPIC_ASSIGNMENTS)
             .set(TOPIC_ASSIGNMENTS.TENANT_ID, TENANT).set(TOPIC_ASSIGNMENTS.DOC_ID, HexFormat.of().parseHex(hex))
             .set(TOPIC_ASSIGNMENTS.TOPIC_ID, topic).set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, name)
-            .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, CollectionIds.idOf(TENANT, name))   // RDR-229 P3.1: the id beside the name
             .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY, "projection").set(TOPIC_ASSIGNMENTS.SIMILARITY, similarity)
             .set(TOPIC_ASSIGNMENTS.ASSIGNED_AT, SEED_TS).set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, model)
             .execute();

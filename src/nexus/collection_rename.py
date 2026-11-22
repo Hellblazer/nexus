@@ -142,13 +142,6 @@ def rename_collection_data_plane(
     new_state = probe_collection_state(t3_db, new)
     if new_state is not CollectionState.ABSENT:
         raise click.ClickException(f"collection already exists: {new!r}")
-    # RDR-229 P3.6: the target is a label this call creates (an existing one was refused just above), so the label
-    # rule judges it here, ahead of the engine, which enforces the same rule and stays the authority.
-    from nexus.corpus import validate_collection_name  # noqa: PLC0415 — deferred: nexus.corpus imports back into this package
-    try:
-        validate_collection_name(new)
-    except ValueError as exc:
-        raise click.ClickException(str(exc)) from exc
 
     counts = {
         "tax_topics": 0,

@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
-import dev.nexus.service.db.CollectionIds;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
@@ -214,7 +213,8 @@ class VectorHandlerQuarantineRestoreRouteTest {
         String o = col();
         String successor = o.replace("__v1", "__v2");
         List<String> hs = quarantined(TENANT_A, o, "2026-09-01T00:00:00Z", "sup");
-        su(ctx -> CollectionIdSeeds.supersede(ctx, TENANT_A, o, successor));
+        su(ctx -> ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, successor)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A)).and(CATALOG_COLLECTIONS.NAME.eq(o)).execute());
 
         var r = post(TOKEN_A, req(o, "chashes", hs, "actor", "route-test"));
 
@@ -391,13 +391,9 @@ class VectorHandlerQuarantineRestoreRouteTest {
                 List.of(new float[384]), List.of(Map.<String, Object>of(
                     "title", seed, "quarantined_at", "2026-09-01T00:00:00Z", "origin_collection", origin,
                     "catalog_doc_id", doc, "chunk_index", 0)));
-            ctx.insertInto(CATALOG_DOCUMENTS)
-               .set(CATALOG_DOCUMENTS.TENANT_ID, tenant)
-               .set(CATALOG_DOCUMENTS.TUMBLER, doc)
-               .set(CATALOG_DOCUMENTS.TITLE, "Title of " + doc)
-               .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, origin)
-               .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(tenant, origin))
-               .set(CATALOG_DOCUMENTS.CHUNK_COUNT, 1).execute();
+            ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                    CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.CHUNK_COUNT)
+               .values(tenant, doc, "Title of " + doc, origin, 1).execute();
         });
         return hex;
     }
@@ -550,15 +546,10 @@ class VectorHandlerQuarantineRestoreRouteTest {
                 List.of(new float[384]), List.of(Map.<String, Object>of("title", "second",
                     "quarantined_at", "2026-09-01T00:00:00Z", "origin_collection", o,
                     "catalog_doc_id", "9.7.1", "chunk_index", 0)));
-            ctx.insertInto(CATALOG_DOCUMENTS)
-               .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT_A)
-               .set(CATALOG_DOCUMENTS.TUMBLER, "9.7.1")
-               .set(CATALOG_DOCUMENTS.TITLE, "Locked")
-               .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, o)
-               .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT_A, o))
-               .set(CATALOG_DOCUMENTS.CHUNK_COUNT, 1)
-               .set(CATALOG_DOCUMENTS.FILE_PATH, "l.md")
-               .set(CATALOG_DOCUMENTS.METADATA, JSONB.jsonb("{}")).execute();
+            ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                    CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.CHUNK_COUNT,
+                    CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.METADATA)
+               .values(TENANT_A, "9.7.1", "Locked", o, 1, "l.md", JSONB.jsonb("{}")).execute();
         });
 
         try (Connection holder = pg.createConnection("")) {

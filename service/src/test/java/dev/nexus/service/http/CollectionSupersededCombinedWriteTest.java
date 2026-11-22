@@ -3,7 +3,6 @@
 package dev.nexus.service.http;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import dev.nexus.service.SupersedeSeeds;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.AtomicWriteTestBase;
 import org.junit.jupiter.api.BeforeAll;
@@ -75,7 +74,7 @@ class CollectionSupersededCombinedWriteTest extends AtomicWriteTestBase {
         Resp warm = send("/v1/catalog/manifest/write_many", writeManyBody(f, "warm-" + f.docId(), Map.of(), Map.of()));
         assertThat(warm.status()).as("the live write that warms the cache: %s", warm.body()).isEqualTo(200);
         String successor = f.collection().replace("__v1", "__v2");
-        assertThat(SupersedeSeeds.supersede(repo, TENANT, f.collection(), successor, "")).isEqualTo(1);
+        assertThat(repo.supersedeCollection(TENANT, f.collection(), successor, "")).isEqualTo(1);
         return successor;
     }
 

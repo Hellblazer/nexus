@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
-import dev.nexus.service.db.CollectionIds;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariConfig;
@@ -394,7 +393,6 @@ class AspectTaskRefsRenameTest {
         String b = coll("b");
         String jobTarget = coll("jobtarget");
         register(tenant, a);
-        register(tenant, jobTarget);   // RDR-229 P3.1: a job row carries both ends' registry ids, so its target is registered first
         Seeded s = seedThree(tenant, a, "1.13");
         new ReembedJobRepository(scope).start(tenant, a, jobTarget, null, false, false);
 
@@ -439,7 +437,8 @@ class AspectTaskRefsRenameTest {
         String retired = coll("retired");
         register(tenant, a);
         register(tenant, retired);
-        su(ctx -> { dev.nexus.service.CollectionIdSeeds.supersede(ctx, tenant, retired, "elsewhere"); return null; });
+        su(ctx -> ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, "elsewhere")
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(retired)).execute());
         outTask(tenant, retired, "1.6.1");
 
         assertThatThrownBy(() -> catalog.renameCollection(tenant, a, retired))
@@ -595,8 +594,8 @@ class AspectTaskRefsRenameTest {
         seedDocument(tenant, a, "1.8.1");
         su(ctx -> ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
                 DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
-                DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI, DOCUMENT_ASPECTS.COLLECTION_ID)
-            .values(tenant, a, "p/1.8.1.md", OffsetDateTime.now(), "v1", "docling", "1.8.1", "file:///p/1.8.1.md", CollectionIds.require(ctx, tenant, a))
+                DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+            .values(tenant, a, "p/1.8.1.md", OffsetDateTime.now(), "v1", "docling", "1.8.1", "file:///p/1.8.1.md")
             .execute());
         outTask(tenant, a, "1.8.1");
         var claimed = tuples.inp(tenant, "aspects", Map.of("queue", "aspects"), WORKER, 600L).orElseThrow();

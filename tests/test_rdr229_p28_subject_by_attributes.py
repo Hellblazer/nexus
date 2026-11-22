@@ -195,28 +195,24 @@ def test_a_row_whose_label_is_the_rendered_name_keeps_the_existing_resolution() 
     assert t3_collection_name("field-notes", t3=t3) == "knowledge__field-notes"
 
 
-def test_the_subjects_row_wins_over_an_existing_conformant_collection() -> None:
-    """RDR-229 P3.8 (nexus-p2m1x.28) flips P2.8's placement: once labels are minted, a subject's
-    registered collection is its row, so the row is read first and answers even when a collection
-    under the conformant name exists (P2.8 read it only after that collection was found empty)."""
+def test_an_existing_conformant_collection_wins_over_a_row_with_another_label() -> None:
+    """The row is consulted only after the conformant collection is found empty:
+    when it exists, the answer stays the conformant name and no catalog read is made."""
     promoted = f"knowledge__field-notes__{_resolve_promoted_model_token('knowledge', for_write=False)}__v1"
     t3 = _T3({promoted, "notes-from-2024"}, _ROWS)
-    assert t3_collection_name("field-notes", t3=t3) == "notes-from-2024"
-    assert t3_collection_name("field-notes", t3=t3, for_write=True) == "notes-from-2024"
+    assert t3_collection_name("field-notes", t3=t3) == promoted
+    assert t3_collection_name("field-notes", t3=t3, for_write=True) == promoted
+    assert t3.calls == []
 
 
-def test_a_write_refuses_an_unreadable_registry_even_with_a_conformant_collection() -> None:
-    """With the row read first, a write that cannot read it refuses rather than guess the
-    conformant name (P2.8's rule for a write); a read still falls back to it."""
+def test_an_existing_conformant_collection_needs_no_readable_registry_to_write() -> None:
     promoted = f"knowledge__field-notes__{_resolve_promoted_model_token('knowledge', for_write=False)}__v1"
 
     class _Broken(_T3):
         def find_collection(self, *a):  # type: ignore[override]
             raise httpx.ConnectError("down")
 
-    with pytest.raises(CollectionRegistryUnreadableError):
-        t3_collection_name("field-notes", t3=_Broken({promoted}), for_write=True)
-    assert t3_collection_name("field-notes", t3=_Broken({promoted})) == promoted
+    assert t3_collection_name("field-notes", t3=_Broken({promoted}), for_write=True) == promoted
 
 
 def test_a_row_is_found_before_the_legacy_two_segment_name() -> None:

@@ -554,13 +554,8 @@ final class DepartedWriterSpans {
             hasAKey = hasAKey.or(clearIt.and(DSL.condition(DSL.function("jsonb_exists", Boolean.class,
                 CHUNKS.METADATA, key))));
         }
-        // RDR-229 P3.1 stage 2b (nexus-p2m1x.17): the update also sets the collection's id, correlated on the
-        // row's own name. chunks carries a NOT VALID CHECK evaluated on every updated row, so an UPDATE that left
-        // the id alone would be refused (23514) on a chunk the stamp has not reached, and this clear is fail-open:
-        // the refusal would leave the spans in place and report nothing.
         return ctx.update(CHUNKS)
             .set(CHUNKS.METADATA, stripped)
-            .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(DSL.val(tenant), CHUNKS.COLLECTION))
             .from(holders.join(writers)
                 .on(writers.field("collection", String.class).eq(collection)
                     .and(writers.field("chash", byte[].class).eq(chash))

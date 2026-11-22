@@ -682,17 +682,6 @@ public final class Main {
         // nexus-f3yqd.2.17: each open or failed move is an entry of /v1/status boot_work, sampled on its own thread
         // because the worker's is in a CALL for hours; nx doctor turns a blocked: or failed: one into a red row.
         var moveBootWork = startMoveBootWork(bootWork, dataMoveWorker, adminConnection);
-        // nexus-p2m1x.17 (RDR-229 P3.1): the boot-time completion check, after the schema walk and on the admin connection.
-        // It READS (the session is read-only at the server) and reports where the three gates stand in /v1/status
-        // boot_work; no boot-time data migration, the stamp is a visible data move. Never takes the engine down.
-        var completionCheck = startCompletionBootWork(bootWork, adminConnection);
-        // The check reads again when a worker's move completes and when a reconciler pass ends; its 60 s poll backs those up.
-        if (completionCheck != null) {
-            if (dataMoveWorker != null) {
-                dataMoveWorker.onMoveCompleted(completionCheck::onMoveCompleted);
-            }
-            pciReconciler.onPassEnded(completionCheck::onReconcilerPassEnded);
-        }
 
         // Parent-death watchdog (nexus-03bcg): exit if the supervisor (our parent
         // process) dies, so an OOM-killed supervisor leaves no orphaned-but-serving
@@ -745,9 +734,6 @@ public final class Main {
             }
             if (moveBootWork != null) {
                 moveBootWork.close();
-            }
-            if (completionCheck != null) {
-                completionCheck.close();
             }
             stopPciReconciler.run();
             // nexus-g17tf: right after the listener stops and the reconciler's stop
@@ -816,26 +802,6 @@ public final class Main {
             throw e;
         } catch (Throwable e) {   // a LinkageError or an initializer failure is the worker's, not the engine's
             log.error("event=data_move_worker_not_started cause=\"{}\"", e.toString(), e);
-            return null;
-        }
-    }
-
-    /**
-     * RDR-229 P3.1: the completion check's reporter, or null when it cannot start; never throws. Gate 3 reads P3.4's id-index
-     * coverage, which no release builds yet, so it does not hold ({@code Gate3Source.NOT_INSTALLED}).
-     */
-    private static dev.nexus.service.datamove.CompletionBootWork startCompletionBootWork(BootWorkRegistry bootWork,
-            dev.nexus.service.db.AdminConnection admin) {
-        try {
-            var check = new dev.nexus.service.datamove.CompletionBootWork(bootWork, admin,
-                dev.nexus.service.datamove.CompletionCheck.ReadSet.p31(),
-                dev.nexus.service.datamove.CompletionCheck.Gate3Source.NOT_INSTALLED);
-            check.start();
-            return check;
-        } catch (VirtualMachineError e) {
-            throw e;
-        } catch (Throwable e) {
-            log.error("event=rdr229_completion_not_started cause=\"{}\"", e.toString(), e);
             return null;
         }
     }

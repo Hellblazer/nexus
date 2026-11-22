@@ -9,7 +9,6 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.EfSearchProbe;
 import dev.nexus.service.PgContainerHelper;
-import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.PgSession.PciSettings;
 import dev.nexus.service.db.TenantScope;
@@ -271,11 +270,10 @@ class PciPlanAndRecallIntegrationTest {
     private void insert(DSLContext ctx, String collection, int n, double rhoLo, double rhoHi, Random rnd,
                         double[] q0, double[][] centres, Map<String, float[]> keep) {
         String[] hex = new String[n];
-        Long cid = CollectionIds.require(ctx, TENANT, collection);
         for (int from = 0; from < n; from += 500) {
             int to = Math.min(n, from + 500);
             var step = ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH,
-                CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.COLLECTION_ID);
+                CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384);
             for (int i = from; i < to; i++) {
                 double rho = rhoLo + (rhoHi - rhoLo) * rnd.nextDouble();
                 double[] m = centres[rnd.nextInt(CLUSTERS)];
@@ -290,7 +288,7 @@ class PciPlanAndRecallIntegrationTest {
                 byte[] chash = sha256(TENANT + "|" + collection + "|" + i);
                 hex[i] = HexFormat.of().formatHex(chash);
                 if (keep != null) keep.put(hex[i], fv);
-                step = step.values(TENANT, collection, chash, MODEL, "t", Vector.of(fv), cid);
+                step = step.values(TENANT, collection, chash, MODEL, "t", Vector.of(fv));
             }
             step.execute();
         }

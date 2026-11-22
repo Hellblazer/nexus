@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
-import dev.nexus.service.db.CollectionIds;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -336,10 +335,9 @@ class TenantExportBatteryTest {
             for (String h : List.of("00", "ff")) {
                 byte[] chash = new byte[32];
                 java.util.Arrays.fill(chash, (byte) Integer.parseInt(h, 16));
-                ctx.insertInto(tbl("chunks"), col("tenant_id"), col("collection"), col("collection_id"), col("chash"),
-                        col("embedding_model"), col("chunk_text"), embedding(768))
-                    .values(C, Seed.collection(C, 768), CollectionIds.require(ctx, C, Seed.collection(C, 768)), chash, BGE,
-                        "written after open", Seed.vector(768, 5)).execute();
+                ctx.insertInto(tbl("chunks"), col("tenant_id"), col("collection"), col("chash"), col("embedding_model"),
+                        col("chunk_text"), embedding(768))
+                    .values(C, Seed.collection(C, 768), chash, BGE, "written after open", Seed.vector(768, 5)).execute();
             }
         } catch (RuntimeException e) {
             throw new IllegalStateException("the battery's mid-export writes failed", e);
@@ -721,17 +719,13 @@ class TenantExportBatteryTest {
                 PgContainerHelper.insertCollection(ctx, t, c768, BGE);
                 PgContainerHelper.insertCollection(ctx, t, c384, MINILM);
                 PgContainerHelper.insertCollection(ctx, t, c1024, VOYAGE);
-                // RDR-229 P3.1: superseded_by and superseded_by_id are set together or not at all, and the fill below
-                // cannot choose a successor for a column (a CHECK ties the pair), so the first row by primary key, the
-                // 1024-wide collection, is retired under the 768-wide one here and both columns are populated.
-                CollectionIdSeeds.supersede(ctx, t, c1024, c768);
             });
             run(failures, "embedding_profile", () -> insert(ctx, "embedding_profile", List.of("tenant_id", "content_type", "embedding_model", "dimension"),
                 new Object[] {t, "knowledge", BGE, 768}, new Object[] {t, "code", VOYAGE, 1024}));
             run(failures, "catalog_documents", () -> {
                 for (int i = 1; i <= 3; i++) {
-                    insert(ctx, "catalog_documents", List.of("tenant_id", "tumbler", "title", "physical_collection", "physical_collection_id"),
-                        new Object[] {t, "1.1." + i, "doc " + i + " of " + t, c768, CollectionIds.require(ctx, t, c768)});
+                    insert(ctx, "catalog_documents", List.of("tenant_id", "tumbler", "title", "physical_collection"),
+                        new Object[] {t, "1.1." + i, "doc " + i + " of " + t, c768});
                 }
             });
             run(failures, "catalog_meta", () -> insert(ctx, "catalog_meta", List.of("tenant_id", "key", "value"),
@@ -742,13 +736,12 @@ class TenantExportBatteryTest {
             run(failures, "chunks", () -> {
                 for (int dim : List.of(768, 384, 1024)) {
                     String coll = collection(t, dim);
-                    Long collId = CollectionIds.require(ctx, t, coll);
                     int n = dim == 768 ? scale * 8 : scale * 3;
-                    List<Field<?>> columns = List.of(col("tenant_id"), col("collection"), col("collection_id"), col("chash"),
-                        col("embedding_model"), col("chunk_text"), VectorSeeds.chunkEmbedding(dim));
+                    List<Field<?>> columns = List.of(col("tenant_id"), col("collection"), col("chash"), col("embedding_model"),
+                        col("chunk_text"), VectorSeeds.chunkEmbedding(dim));
                     for (int i = 0; i < n; i++) {
                         String text = "chunk " + dim + "-" + i + " of " + t + " é中";
-                        insert(ctx, "chunks", columns, new Object[] {t, coll, collId, sha256(t + text), model(dim), text,
+                        insert(ctx, "chunks", columns, new Object[] {t, coll, sha256(t + text), model(dim), text,
                             DSL.val(vector(dim, i), VectorSeeds.chunkEmbedding(dim))});
                     }
                 }
@@ -757,26 +750,24 @@ class TenantExportBatteryTest {
                 List<byte[]> chashes = chashes(ctx, t, c768, false, 4);
                 for (int i = 0; i < chashes.size(); i++) {
                     insert(ctx, "catalog_document_chunks",
-                        List.of("tenant_id", "doc_id", "position", "chash", "chunk_index", "collection", "collection_id", "embedding_model"),
-                        new Object[] {t, "1.1." + (i % 2 + 1), i, chashes.get(i), i, c768, CollectionIds.require(ctx, t, c768), BGE});
+                        List.of("tenant_id", "doc_id", "position", "chash", "chunk_index", "collection", "embedding_model"),
+                        new Object[] {t, "1.1." + (i % 2 + 1), i, chashes.get(i), i, c768, BGE});
                 }
             });
             run(failures, "chunk_orphaned_at", () -> {
                 for (byte[] chash : chashes(ctx, t, c768, true, 2)) {
-                    insert(ctx, "chunk_orphaned_at", List.of("tenant_id", "collection", "collection_id", "chash", "orphaned_at", "embedding_model"),
-                        new Object[] {t, c768, CollectionIds.require(ctx, t, c768), chash, now, BGE});
+                    insert(ctx, "chunk_orphaned_at", List.of("tenant_id", "collection", "chash", "orphaned_at", "embedding_model"),
+                        new Object[] {t, c768, chash, now, BGE});
                 }
             });
             run(failures, "catalog_links", () -> insert(ctx, "catalog_links", List.of("tenant_id", "from_tumbler", "to_tumbler", "link_type", "created_by"),
                 new Object[] {t, "1.1.1", "1.1.2", "cites", "a"}, new Object[] {t, "1.1.2", "1.1.3", "relates", "b"}));
             run(failures, "document_aspects", () -> insert(ctx, "document_aspects",
-                List.of("tenant_id", "collection", "collection_id", "source_path", "extracted_at", "model_version", "extractor_name", "source_uri", "doc_id"),
-                new Object[] {t, c768, CollectionIds.require(ctx, t, c768), "p1", now, "m", "e", "u1", "1.1.1"},
-                new Object[] {t, c768, CollectionIds.require(ctx, t, c768), "p2", now, "m", "e", "u2", "1.1.2"}));
+                List.of("tenant_id", "collection", "source_path", "extracted_at", "model_version", "extractor_name", "source_uri", "doc_id"),
+                new Object[] {t, c768, "p1", now, "m", "e", "u1", "1.1.1"}, new Object[] {t, c768, "p2", now, "m", "e", "u2", "1.1.2"}));
             run(failures, "document_highlights", () -> insert(ctx, "document_highlights",
-                List.of("tenant_id", "doc_id", "source_uri", "collection", "collection_id", "ingested_at"),
-                new Object[] {t, "1.1.1", "u1", c768, CollectionIds.require(ctx, t, c768), now},
-                new Object[] {t, "1.1.2", "u2", c768, CollectionIds.require(ctx, t, c768), now}));
+                List.of("tenant_id", "doc_id", "source_uri", "collection", "ingested_at"),
+                new Object[] {t, "1.1.1", "u1", c768, now}, new Object[] {t, "1.1.2", "u2", c768, now}));
             run(failures, "memory", () -> {
                 for (int i = 0; i < 5; i++) {
                     insert(ctx, "memory", List.of("tenant_id", "project", "title", "content", "timestamp"),
@@ -799,16 +790,14 @@ class TenantExportBatteryTest {
                 insert(ctx, "nx_answer_steps", List.of("run_id", "tenant_id", "step_index", "operator", "source", "elapsed_ms", "ok"),
                     new Object[] {run, t, 0, "extract", "llm", 5, true}, new Object[] {run, t, 1, "rank", "sql", 6, false});
             });
-            run(failures, "topics", () -> insert(ctx, "topics", List.of("tenant_id", "label", "collection", "collection_id", "created_at"),
-                new Object[] {t, "topic 1", c768, CollectionIds.require(ctx, t, c768), now},
-                new Object[] {t, "topic 2", c768, CollectionIds.require(ctx, t, c768), now},
-                new Object[] {t, "topic 3", c768, CollectionIds.require(ctx, t, c768), now}));
+            run(failures, "topics", () -> insert(ctx, "topics", List.of("tenant_id", "label", "collection", "created_at"),
+                new Object[] {t, "topic 1", c768, now}, new Object[] {t, "topic 2", c768, now}, new Object[] {t, "topic 3", c768, now}));
             run(failures, "topic_assignments", () -> {
                 List<Long> topics = ids(ctx, "topics", t);
                 List<byte[]> chashes = chashes(ctx, t, c768, false, 2);
                 for (int i = 0; i < 2; i++) {
-                    insert(ctx, "topic_assignments", List.of("tenant_id", "doc_id", "topic_id", "source_collection", "source_collection_id", "embedding_model"),
-                        new Object[] {t, chashes.get(i), topics.get(i), c768, CollectionIds.require(ctx, t, c768), BGE});
+                    insert(ctx, "topic_assignments", List.of("tenant_id", "doc_id", "topic_id", "source_collection", "embedding_model"),
+                        new Object[] {t, chashes.get(i), topics.get(i), c768, BGE});
                 }
             });
             run(failures, "topic_links", () -> {
@@ -816,16 +805,15 @@ class TenantExportBatteryTest {
                 insert(ctx, "topic_links", List.of("tenant_id", "from_topic_id", "to_topic_id"),
                     new Object[] {t, topics.get(0), topics.get(1)}, new Object[] {t, topics.get(1), topics.get(2)});
             });
-            run(failures, "taxonomy_meta", () -> insert(ctx, "taxonomy_meta", List.of("tenant_id", "collection", "collection_id"),
-                new Object[] {t, c768, CollectionIds.require(ctx, t, c768)}, new Object[] {t, c384, CollectionIds.require(ctx, t, c384)}));
+            run(failures, "taxonomy_meta", () -> insert(ctx, "taxonomy_meta", List.of("tenant_id", "collection"),
+                new Object[] {t, c768}, new Object[] {t, c384}));
             run(failures, "taxonomy_centroids", () -> {
                 List<Long> topics = ids(ctx, "topics", t);
                 int i = 0;
                 for (int dim : List.of(768, 384, 1024)) {
-                    List<Field<?>> columns = List.of(col("tenant_id"), col("collection"), col("collection_id"), col("topic_id"),
-                        col("label"), col("embedding_model"), VectorSeeds.centroidEmbedding(dim));
-                    insert(ctx, "taxonomy_centroids", columns, new Object[] {t, collection(t, dim),
-                        CollectionIds.require(ctx, t, collection(t, dim)), topics.get(i++), "centroid " + dim,
+                    List<Field<?>> columns = List.of(col("tenant_id"), col("collection"), col("topic_id"), col("label"),
+                        col("embedding_model"), VectorSeeds.centroidEmbedding(dim));
+                    insert(ctx, "taxonomy_centroids", columns, new Object[] {t, collection(t, dim), topics.get(i++), "centroid " + dim,
                         model(dim), DSL.val(vector(dim, 3), VectorSeeds.centroidEmbedding(dim))});
                 }
             });

@@ -112,7 +112,6 @@ class AspectUpsertDeadlockRetryTest {
         o.put("name", "pdfs");
         o.put("owner_type", "curator");
         repo.upsertOwner(t, o);
-        db.registerCollection(t, COLL);   // RDR-229 P3.1: a document names its collection by registry id, so the collection is registered first
         Map<String, Object> f = new LinkedHashMap<>();
         f.put("title", "a");
         f.put("file_path", PATH);
@@ -121,6 +120,7 @@ class AspectUpsertDeadlockRetryTest {
         f.put("physical_collection", COLL);
         f.put("source_uri", URI);
         String doc = repo.registerDocument(t, "1.1", f);
+        db.registerCollection(t, COLL);
         upsert(t, doc, "first extraction");
         return new Seeded(t, doc);
     }

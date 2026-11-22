@@ -470,9 +470,6 @@ def test_task_shapes_and_a_retired_collection_on_the_engine(
     b = "nx235n beta paragraph: the middle piece with trailing spaces   \r\n"
     pieces = [a, b, a]  # a repeated paragraph; CRLF and whitespace in the middle piece
     first, _ = note_manifest_metadata(pieces)
-    from tests._catalog_fixture_ops import register_seed_collections
-
-    register_seed_collections(collection)  # RDR-229 P3.1: put_note registers the collection before it calls the hook
     doc, _created = catalog_store_hook_tracked(title="nx235n note", doc_id=first, collection_name=collection)
     write_note(catalog_doc_id=doc, collection=collection, pieces=pieces)
     chash = first

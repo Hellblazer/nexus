@@ -77,15 +77,7 @@ class CatalogOwnerMoveTest {
     // ── fixtures ────────────────────────────────────────────────────────────
 
     private String tenant() {
-        String t = "owner-move-" + (++tenantSeq);
-        // RDR-229 P3.1: a document names its collection by registry id, so both collections are registered per tenant.
-        try {
-            registerCollection(t, COLL_A);
-            registerCollection(t, COLL_B);
-        } catch (Exception e) {
-            throw new IllegalStateException(e);
-        }
-        return t;
+        return "owner-move-" + (++tenantSeq);
     }
 
     private void repoOwner(String t, String prefix, String name, String hash, String root) {

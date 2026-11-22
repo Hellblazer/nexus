@@ -228,8 +228,6 @@ class BridgeAddressFieldsTest {
                 .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.COLLECTION, COL)
                 .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
                      PgContainerHelper.collectionModel(ownCtx, TENANT, COL))
-                .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID,
-                     dev.nexus.service.db.CollectionIds.idOf(TENANT, COL))
                 .onConflictDoNothing()
                 .execute();
         }
@@ -281,7 +279,6 @@ class BridgeAddressFieldsTest {
             .set(CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, 0)
             .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, COL)
             .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, COL))
-            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, dev.nexus.service.db.CollectionIds.idOf(tenant, COL))
             .onConflictDoNothing()
             .execute();
     }

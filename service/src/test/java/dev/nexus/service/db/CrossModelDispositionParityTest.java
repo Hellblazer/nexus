@@ -105,7 +105,7 @@ class CrossModelDispositionParityTest {
         // Plant a registry entry exactly as a developer adding a table to COLLECTION_SCOPED_TABLES would,
         // and run the same check the real registry passes.
         List<CollectionScopedTable> planted = new ArrayList<>(CatalogRepository.COLLECTION_SCOPED_TABLES);
-        planted.add(new CollectionScopedTable("planted_table", CHUNKS, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID));
+        planted.add(new CollectionScopedTable("planted_table", CHUNKS, CHUNKS.COLLECTION));
 
         assertThat(missingDispositions(planted, CatalogRepository.CROSS_MODEL_DISPOSITIONS))
             .containsExactly("planted_table");

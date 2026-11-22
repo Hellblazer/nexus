@@ -5,7 +5,6 @@ import org.jooq.DSLContext;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
-import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -302,13 +301,8 @@ public final class ChashRepository {
             // a chunk to another collection is maintenance: it re-writes no client
             // content, and refreshing the reapable(c) grace window here would keep an
             // unowned chunk alive by moving it.
-            // RDR-229 P3.1: the rows take the target's id with its name. newCollection is registered (checked above),
-            // and the rows the chunk foreign keys carry along (the manifest, topic assignments, chunk_orphaned_at)
-            // get the id from repairCascadedIds below, since the cascade renames them without writing their id.
-            final Long newId = CollectionIds.require(ctx, tenant, newCollection);
             int total = ctx.update(ch.table())
                         .set(ch.collection(), newCollection)
-                        .set(CHUNKS.COLLECTION_ID, newId)
                         .where(ch.tenantId().eq(tenant)
                             .and(ch.collection().eq(oldCollection)))
                         .execute();
@@ -318,18 +312,10 @@ public final class ChashRepository {
             // (tenant, collection, chash, model)); same-model it is the value already there.
             ctx.update(CATALOG_DOCUMENT_CHUNKS)
                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, newCollection)
-               .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, newId)
                .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, newModel)
                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
                    .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(oldCollection)))
                .execute();
-            // The manifest rows the chunk cascade already renamed (the statement above then matched none of them).
-            ctx.update(CATALOG_DOCUMENT_CHUNKS).set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, newId)
-               .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
-                   .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(newCollection))
-                   .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID.isDistinctFrom(newId)))
-               .execute();
-            CatalogIdStamps.repairCascadedIds(ctx, tenant, newCollection, newId);
             // nexus-wbfpw.68: quarantine rows tagged for oldCollection now name a collection that is gone;
             // retag them to newCollection (an audit row per sibling). The chunk count returned stays the
             // origin's own rows. NOT when oldCollection is still a live registered collection: then its

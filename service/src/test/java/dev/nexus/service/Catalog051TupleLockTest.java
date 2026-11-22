@@ -33,41 +33,21 @@ import java.util.concurrent.TimeUnit;
  */
 class Catalog051TupleLockTest {
 
-    /** The high 56 bits every key shares (collections-003-1): md5('18:catalog_tuple_lock'), first 64 bits, low byte cleared. */
-    private static final long STRIPE_NAMESPACE = 7645428408315627776L;
-
-    /**
-     * The length-prefixed encoding's 64-bit hash, computed here in Java, independently of the SQL: md5 of
-     * {@code '13:catalog_tuple' || len(p):p ...}, first 64 bits as a signed long (catalog-051-1a's per-tuple key).
-     */
-    private static long encodingHash(String... parts) {
-        StringBuilder sb = new StringBuilder("13:catalog_tuple");
-        for (String part : parts) {
-            sb.append(part.length()).append(':').append(part);
-        }
-        try {
-            byte[] d = java.security.MessageDigest.getInstance("MD5").digest(sb.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            return java.nio.ByteBuffer.wrap(d, 0, 8).getLong();
-        } catch (java.security.NoSuchAlgorithmException e) {
-            throw new IllegalStateException(e);
-        }
-    }
-
     @Test
-    void theSqlKeyIsTheStripeOfAnInjectiveEncodingOfTheFiveParts() throws Exception {
+    void theSqlKeyIsStableAndDistinctForTuplesThatDifferInAnyOnePart() throws Exception {
         Catalog051OwnerGuardTest.withMigratedDatabase((su, ctx) -> {
             String[] base = {"tenant-a", "docs", "1-70", "voyage-context-3", "v1"};
             long k = key(su, base);
-            // stable, and pinned (an independent Python computation gives the same numbers), so a change of encoding,
-            // hash, namespace or stripe count fails here and no two takers can silently part ways. collections-003-1
-            // (RDR-229 P3.8, linda's ruling (a)) striped the key: the namespace's high 56 bits, the encoding hash's low 8.
+            // stable: the same input gives the same key, and the value is pinned (md5 of a length-prefixed encoding,
+            // first 64 bits; an independent Python computation gives the same number), so a change of encoding or hash
+            // fails here and the Java and SQL sides cannot silently part ways.
             assertThat(key(su, base)).isEqualTo(k);
-            assertThat(key(su, "t", "docs", "1-2", "m", "v1")).isEqualTo(7645428408315627964L);
-            assertThat(k).isEqualTo(7645428408315627995L);
-            assertThat(encodingHash("t", "docs", "1-2", "m", "v1")).as("catalog-051-1a's pinned per-tuple hash").isEqualTo(-7552408002309144644L);
+            assertThat(key(su, "t", "docs", "1-2", "m", "v1")).isEqualTo(-7552408002309144644L);
+            assertThat(k).isEqualTo(-2546757272802461989L);
 
-            String[][] tuples = {
-                base,
+            Set<Long> seen = new HashSet<>();
+            seen.add(k);
+            String[][] variants = {
                 {"tenant-b", "docs", "1-70", "voyage-context-3", "v1"},
                 {"tenant-a", "code", "1-70", "voyage-context-3", "v1"},
                 {"tenant-a", "docs", "1-71", "voyage-context-3", "v1"},
@@ -81,16 +61,13 @@ class Catalog051TupleLockTest {
                 {"tenant-a", "", "docs", "1-70", "voyage-context-3v1"},
                 {"tenant-a1:docs", "1-70", "voyage-context-3", "v1", ""},
                 {"tenant-a", "docs1:1-70", "voyage-context-3", "v1", ""},
-                {"a/b", "c", "x", "y", "z"}, {"a", "b/c", "x", "y", "z"}, {"ab", "c", "x", "y", "z"}, {"a", "bc", "x", "y", "z"},
             };
-            Set<Long> hashes = new HashSet<>();
-            for (String[] t : tuples) {
-                long h = encodingHash(t);
-                // the encoding stays injective (a moved boundary is another hash), so a stripe is shared only by chance
-                assertThat(hashes.add(h)).as("a distinct encoding hash for %s", String.join("|", t)).isTrue();
-                assertThat(key(su, t)).as("the SQL key of %s is its hash's stripe", String.join("|", t))
-                    .isEqualTo(STRIPE_NAMESPACE | (h & 0xFF));
+            for (String[] v : variants) {
+                assertThat(seen.add(key(su, v))).as("a distinct key for %s", String.join("|", v)).isTrue();
             }
+            // the classic separator collision: ('a/b','c') and ('a','b/c') join to one string under '/'
+            assertThat(key(su, "a/b", "c", "x", "y", "z")).isNotEqualTo(key(su, "a", "b/c", "x", "y", "z"));
+            assertThat(key(su, "ab", "c", "x", "y", "z")).isNotEqualTo(key(su, "a", "bc", "x", "y", "z"));
         });
     }
 

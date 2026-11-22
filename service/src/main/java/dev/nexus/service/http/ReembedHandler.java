@@ -225,10 +225,6 @@ public final class ReembedHandler implements HttpHandler {
                 "error", e.getMessage(), "retryable", true)));
         } catch (CatalogRepository.EmbeddingProfileConflictException e) {
             HttpUtil.send(exchange, 422, error(e.getMessage()));
-        } catch (dev.nexus.service.db.CollectionMint.LiveTupleConflict e) {
-            // RDR-229 P3.8: registering or reviving the target would give its tuple a second live collection; the message
-            // names both, and nothing was written.
-            HttpUtil.send(exchange, 409, error(e.getMessage()));
         } catch (Exception e) {
             if (!HttpUtil.sendTypedDbError(exchange, e, log, "reembed_handler", "op=" + op + " tenant=" + tenant)) {
                 log.error("event=reembed_handler_error op={} tenant={} error={}", op, tenant, e.getMessage(), e);
@@ -716,8 +712,6 @@ public final class ReembedHandler implements HttpHandler {
             throw new IllegalArgumentException("no registered collection has " + need
                 + "; send target_collection to register one");
         }
-        // RDR-229 P3.6: a NUL cannot be bound into the lookups below (a database error, not a 400).
-        dev.nexus.service.db.CollectionLabel.requireStorable(requested);
         if (dev.nexus.service.db.CollectionRegistration.versionOfConformantName(requested) == null) {
             // The version of a new row is read off the target's minted name (D1), so a name to register must have one.
             // This applies only when a NEW row would be registered: an existing live target is used as-is.
@@ -742,10 +736,6 @@ public final class ReembedHandler implements HttpHandler {
                     + existing.get("embedding_model") + ", which is not a live collection of " + need,
                 "collection", requested)));
         }
-        // RDR-229 P3.6: the target is a NEW label the engine registers on the user's say-so, so the label rule applies.
-        // After the existing-row lookup: a row that exists keeps its label whatever it is (a live one is used as-is
-        // and never reaches here; a retired one is refused above for what it is).
-        dev.nexus.service.db.CollectionLabel.validateUserLabel(requested);
     }
 
     /**

@@ -441,21 +441,11 @@ class AspectRepositoryTest {
         // superuser (bypasses RLS) so the positive- and negative-control INSERTs
         // below fail (or succeed) on the tenant_id mismatch alone, never on a
         // missing collection registration.
-        // RDR-229 P3.1 stage 2b: the raw INSERTs below carry the registry id too, or the NAME_ID CHECK would refuse them
-        // (23514) before RLS is reached, and the negative control would pass for the wrong reason.
-        final long goodId;
-        final long badId;
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext suCtx = DSL.using(su, SQLDialect.POSTGRES);
             PgContainerHelper.insertCollection(suCtx, TENANT_A, "good-coll");
             PgContainerHelper.insertCollection(suCtx, TENANT_B, "bad-coll");
-            goodId = suCtx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
-                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A)).and(CATALOG_COLLECTIONS.NAME.eq("good-coll"))
-                .fetchOne(CATALOG_COLLECTIONS.COLLECTION_ID);
-            badId = suCtx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
-                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_B)).and(CATALOG_COLLECTIONS.NAME.eq("bad-coll"))
-                .fetchOne(CATALOG_COLLECTIONS.COLLECTION_ID);
         }
 
         // isLocal=true (SET LOCAL) needs an explicit transaction to survive to the
@@ -491,20 +481,18 @@ class AspectRepositoryTest {
                 ctx.insertInto(DOCUMENT_ASPECTS,
                         DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION, DOCUMENT_ASPECTS.SOURCE_PATH,
                         DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
-                        DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI,
-                        DOCUMENT_ASPECTS.COLLECTION_ID)
+                        DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
                     .values(TENANT_A, "good-coll", "good.pdf", OffsetDateTime.now(), "v1", "good",
-                            "1.2.3", "file:///good.pdf", goodId)
+                            "1.2.3", "file:///good.pdf")
                     .execute();
 
                 assertThatThrownBy(() ->
                     ctx.insertInto(DOCUMENT_ASPECTS,
                             DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION, DOCUMENT_ASPECTS.SOURCE_PATH,
                             DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
-                            DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI,
-                            DOCUMENT_ASPECTS.COLLECTION_ID)
+                            DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
                         .values(TENANT_B, "bad-coll", "bad.pdf", OffsetDateTime.now(), "v1", "bad",
-                                "1.2.3", "file:///bad.pdf", badId)
+                                "1.2.3", "file:///bad.pdf")
                         .execute())
                 .as("RLS WITH CHECK must reject aspect INSERT where tenant_id != nexus.tenant GUC")
                 .isInstanceOf(org.jooq.exception.DataAccessException.class);

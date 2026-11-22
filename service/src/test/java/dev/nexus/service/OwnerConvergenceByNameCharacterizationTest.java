@@ -62,16 +62,6 @@ class OwnerConvergenceByNameCharacterizationTest {
         repo = new CatalogRepository(new TenantScope(svcDs));
     }
 
-    /** Registers {@code name} for {@code tenant} (P3.1: a write under an unregistered collection is a typed 422). */
-    private void registerCollection(String tenant, String name) {
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            PgContainerHelper.insertCollection(org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES), tenant, name);
-        } catch (java.sql.SQLException e) {
-            throw new IllegalStateException(e);
-        }
-    }
-
     @AfterAll
     void stopAll() {
         if (svcDs != null) svcDs.close();
@@ -120,7 +110,6 @@ class OwnerConvergenceByNameCharacterizationTest {
     @Test
     void sameBasenameMove_convergesOnOldOwner_overwritesHashAndRoot_leavesDocumentSourceUriStale() {
         final String t = "owner-conv-move";
-        registerCollection(t, "code__x__v1");
         repo.upsertOwner(t, ownerPayload("N", H1, "/a/N"));
         var before = soleOwnerNamed(t, "N");
         assertThat(before.get("tumbler_prefix")).isEqualTo("1.1");
@@ -180,7 +169,6 @@ class OwnerConvergenceByNameCharacterizationTest {
     @Test
     void sameBasenameSecondClone_takesOverFirstClonesOwner_andTheTwoAlternate() {
         final String t = "owner-conv-clone";
-        registerCollection(t, "code__x__v1");
         repo.upsertOwner(t, ownerPayload("N", H1, "/a/N"));
         String a1 = repo.registerDocument(t, "1.1", doc("x", "docs/x.md"));
         String a2 = repo.registerDocument(t, "1.1", doc("only-a", "docs/only-a.md"));
@@ -233,7 +221,6 @@ class OwnerConvergenceByNameCharacterizationTest {
     @Test
     void differentBasenameMove_mintsNewOwner_andLeavesOldOwnerAndDocumentsUntouched() {
         final String t = "owner-conv-rename";
-        registerCollection(t, "code__x__v1");
         repo.upsertOwner(t, ownerPayload("N", H1, "/a/N"));
         String d1 = repo.registerDocument(t, "1.1", doc("x", "docs/x.md"));
         assertThat(sourceUri(t, d1)).isEqualTo("file:///a/N/docs/x.md");
@@ -273,7 +260,6 @@ class OwnerConvergenceByNameCharacterizationTest {
     @Test
     void differentBasenameMove_thenTheMoveCommand_foldsTheNewOwnerIntoTheOldOne() throws Exception {
         final String t = "owner-conv-rename-move";
-        registerCollection(t, "code__x__v1");
         repo.upsertOwner(t, ownerPayload("N", H1, "/a/N"));
         String d1 = repo.registerDocument(t, "1.1", doc("x", "docs/x.md"));
         repo.upsertOwner(t, ownerPayload("M", H2, "/b/M"));

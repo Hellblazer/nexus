@@ -133,13 +133,6 @@ final class DataMoveTestFixtures {
             .execute();
     }
 
-    /** Sets the bound of the finisher's first, READ ONLY verification pass (datamoves-002) on a registered move. */
-    static void setVerifyStatementTimeout(DSLContext ctx, String label, int ms) {
-        ctx.update(DSL.table(DSL.name("nexus", "data_moves")))
-            .set(DSL.field(DSL.name("verify_statement_timeout_ms"), Integer.class), ms)
-            .where(DSL.field(DSL.name("label"), String.class).eq(label)).execute();
-    }
-
     /** Sets or clears an operator's pause on a move, as the SQL an operator runs does. */
     static void pause(DSLContext ctx, String label, boolean paused) {
         ctx.update(DSL.table(DSL.name("nexus", "data_moves")))

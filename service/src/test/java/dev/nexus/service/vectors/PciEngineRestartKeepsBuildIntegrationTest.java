@@ -9,7 +9,6 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.Chash;
-import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.PgSession.PciSettings;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.vectors.PciBuilderSession.BuilderState;
@@ -140,17 +139,16 @@ class PciEngineRestartKeepsBuildIntegrationTest {
     void collection(String collection, int rows) throws Exception {
         asSuperuser(su -> {
             PgContainerHelper.insertCollection(su, tenant, collection, M384);
-            Long cid = CollectionIds.require(su, tenant, collection);
             for (int from = 0; from < rows; from += 250) {
                 var step = su.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH,
-                    CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.METADATA, CHUNKS.COLLECTION_ID);
+                    CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.METADATA);
                 for (int i = from; i < Math.min(rows, from + 250); i++) {
                     float[] v = new float[384];
                     v[i % 384] = 1f;
                     v[(i * 7 + 1) % 384] += 0.5f;
                     step = step.values(tenant, collection,
                         Chash.fromHex(Chash.ofText(tenant + "/" + collection + "/" + i).toHex()).toBytes(), M384,
-                        "row " + i, Vector.of(v), JSONB.jsonb("{}"), cid);
+                        "row " + i, Vector.of(v), JSONB.jsonb("{}"));
                 }
                 step.execute();
             }

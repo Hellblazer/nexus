@@ -19,7 +19,6 @@ from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.cli import main
 from nexus.commands import doctor as doctor_mod
 from tests._catalog_fixture_ops import _run_psql
-from tests._chunk_seed import collection_id_sql
 
 pytestmark = pytest.mark.t2_tenant
 
@@ -30,7 +29,6 @@ DOCS_V2 = "docs__99-1__bge-base-en-v15-768__v2"
 KNOW = "knowledge__e2esub__bge-base-en-v15-768__v1"
 CODE_BAD = "code__99-2__bge-base-en-v15-768__v1"          # its row says content_type docs: a mismatch
 MINTED = "c123"
-MINTED_SEED = "e2e-minted-seed"                           # registered under this name, then renamed to MINTED in SQL
 TIE_LEGACY = "e2e-tie-label"                              # registered FIRST (older), name sorts after TIE_CONF
 TIE_CONF = "docs__99-6__bge-base-en-v15-768__v1"          # same tuple and version, registered after: NAME ASC picks it
 NOVER = "e2e-nover"                                       # a live row with an empty model_version
@@ -47,33 +45,27 @@ def _sql_str(v: str) -> str:
     return "'" + v.replace("'", "''") + "'"
 
 
-def _collection_id(tenant: str, collection: str) -> str:
-    """RDR-229 P3.1: a row naming a collection carries the registry's id beside the name (the CHECKs on
-    document_aspects and document_highlights); the registry row is made by ``register_collection`` above."""
-    return collection_id_sql(tenant, collection)
-
-
 def _seed(tenant: str) -> None:
     with HttpCatalogClient() as cat:
         model = "bge-base-en-v15-768"
-        cat.register_collection(DOCS, content_type="docs", owner_id="99-1", embedding_model=model, model_version="v1")
+        cat.register_collection(DOCS, content_type="docs", owner_id="99-1", embedding_model=model)
         cat.register_collection(DOCS_V2, content_type="docs", owner_id="99-1", embedding_model=model, model_version="v2")
-        cat.register_collection(KNOW, content_type="knowledge", owner_id="e2esub", embedding_model=model, model_version="v1")
-        cat.register_collection(LABEL, content_type="docs", owner_id="99-5", embedding_model=model, model_version="v1")
-        # RDR-229 P3.8: the engine refuses a second live collection on a tuple, so the two D4 pairs (LABEL/LABEL2, TIE_LEGACY/TIE_CONF)
-        # register their second member at v2 and the SQL below sets it to v1, the shape an install that predates the guard carries
-        cat.register_collection(LABEL2, content_type="docs", owner_id="99-5", embedding_model=model, model_version="v2")
-        cat.register_collection(CODE_BAD, content_type="docs", owner_id="99-2", embedding_model=model, model_version="v1")
-        # RDR-229 P3.6: the route refuses a NEW label of the minted form (c followed by digits), which only the engine
-        # may mint, so MINTED registers under a seed name and the SQL below renames it to the form, the shape an install
-        # that predates the rule carries.
-        cat.register_collection(MINTED_SEED, content_type="code", owner_id="99-3", embedding_model=model, model_version="v1")
-        cat.register_collection(TIE_LEGACY, content_type="docs", owner_id="99-6", embedding_model=model, model_version="v1")
-        cat.register_collection(TIE_CONF, content_type="docs", owner_id="99-6", embedding_model=model, model_version="v2")
+        cat.register_collection(KNOW, content_type="knowledge", owner_id="e2esub", embedding_model=model)
+        cat.register_collection(LABEL, content_type="docs", owner_id="99-5", embedding_model=model,
+                                legacy_grandfathered=True)
+        cat.register_collection(LABEL2, content_type="docs", owner_id="99-5", embedding_model=model,
+                                legacy_grandfathered=False)
+        cat.register_collection(CODE_BAD, content_type="docs", owner_id="99-2", embedding_model=model)
+        cat.register_collection(MINTED, content_type="code", owner_id="99-3", embedding_model=model,
+                                legacy_grandfathered=True)
+        cat.register_collection(TIE_LEGACY, content_type="docs", owner_id="99-6", embedding_model=model,
+                                legacy_grandfathered=False)
+        cat.register_collection(TIE_CONF, content_type="docs", owner_id="99-6", embedding_model=model)
         # RDR-229 P2.5 (D1): the route refuses a NEW row with a blank model_version, so NOVER registers at v1
         # and the SQL below blanks it, the shape a legacy row still has on an install until D2 repairs it.
-        cat.register_collection(NOVER, content_type="docs", owner_id="99-7", embedding_model=model, model_version="v1")
-        cat.register_collection(OLD, content_type="docs", owner_id="99-4", embedding_model=model, model_version="v1")
+        cat.register_collection(NOVER, content_type="docs", owner_id="99-7", embedding_model=model, model_version="v1",
+                                legacy_grandfathered=True)
+        cat.register_collection(OLD, content_type="docs", owner_id="99-4", embedding_model=model)
         cat.register_collection(NEW, content_type="docs", owner_id="99-4", embedding_model=model, model_version="v2")
         assert cat.supersede_collection(OLD, NEW) == 1
         owner = cat.register_owner("p12-e2e-owner", owner_type="curator", tumbler_prefix="98.1")
@@ -106,23 +98,11 @@ def _seed(tenant: str) -> None:
     for i in range(3):
         sql.append(
             "INSERT INTO nexus.document_aspects (tenant_id, collection, source_path, extracted_at, model_version, "
-            "extractor_name, source_uri, doc_id, collection_id) "
-            f"VALUES ({_sql_str(tenant)}, {_sql_str(LABEL)}, 'p{i}.md', now(), 'm', "
-            f"'e', {_sql_str(f'chroma://{LABEL}/asp{i}')}, {_sql_str(aspect_docs[i])}, {_collection_id(tenant, LABEL)});")
+            f"extractor_name, source_uri, doc_id) VALUES ({_sql_str(tenant)}, {_sql_str(LABEL)}, 'p{i}.md', now(), 'm', "
+            f"'e', {_sql_str(f'chroma://{LABEL}/asp{i}')}, {_sql_str(aspect_docs[i])});")
     sql.append(
-        "INSERT INTO nexus.document_highlights (tenant_id, doc_id, source_uri, collection, ingested_at, collection_id) VALUES "
-        f"({_sql_str(tenant)}, {_sql_str(asp_hl_tumbler)}, {_sql_str(f'chroma://{LABEL}/hl')}, {_sql_str(LABEL)}, now(), "
-        f"{_collection_id(tenant, LABEL)});")
-    # RDR-229 P3.8 (item 11): the client no longer writes legacy_grandfathered, so the grandfathered rows of the
-    # census are flagged here, the way a pre-RDR-103 install carries them.
-    for second in (LABEL2, TIE_CONF):
-        sql.append(f"UPDATE nexus.catalog_collections SET model_version = 'v1' "
-                   f"WHERE tenant_id = {_sql_str(tenant)} AND name = {_sql_str(second)};")
-    sql.append(f"UPDATE nexus.catalog_collections SET name = {_sql_str(MINTED)} "
-               f"WHERE tenant_id = {_sql_str(tenant)} AND name = {_sql_str(MINTED_SEED)};")
-    for flagged in (LABEL, MINTED, NOVER):
-        sql.append(f"UPDATE nexus.catalog_collections SET legacy_grandfathered = true "
-                   f"WHERE tenant_id = {_sql_str(tenant)} AND name = {_sql_str(flagged)};")
+        "INSERT INTO nexus.document_highlights (tenant_id, doc_id, source_uri, collection, ingested_at) VALUES "
+        f"({_sql_str(tenant)}, {_sql_str(asp_hl_tumbler)}, {_sql_str(f'chroma://{LABEL}/hl')}, {_sql_str(LABEL)}, now());")
     sql.append(f"UPDATE nexus.catalog_collections SET model_version = '' "
                f"WHERE tenant_id = {_sql_str(tenant)} AND name = {_sql_str(NOVER)};")
     # the dangling tombstone: OLD is superseded by NEW, and NEW's row goes away

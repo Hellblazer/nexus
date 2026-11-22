@@ -74,16 +74,6 @@ class CatalogHandlerTrashNullKeyTest {
         handler = new CatalogHandler(repo);
     }
 
-    /** Registers {@code name} for {@code tenant} (P3.1: a write under an unregistered collection is a typed 422). */
-    private void registerCollection(String tenant, String name) {
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            PgContainerHelper.insertCollection(org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES), tenant, name);
-        } catch (java.sql.SQLException e) {
-            throw new IllegalStateException(e);
-        }
-    }
-
     @AfterAll
     void stopAll() {
         if (svcDs != null) svcDs.close();
@@ -109,7 +99,6 @@ class CatalogHandlerTrashNullKeyTest {
     }
 
     private String registerWithoutPathAndTombstone(String owner) {
-        registerCollection(TENANT, "knowledge__trash-null-key__minilm-l6-v2__v1");
         String tumbler = repo.registerDocument(TENANT, owner,
             Map.of("title", "Paper with no file " + owner, "content_type", "paper", "corpus", "knowledge",
                    "physical_collection", "knowledge__trash-null-key__minilm-l6-v2__v1"));

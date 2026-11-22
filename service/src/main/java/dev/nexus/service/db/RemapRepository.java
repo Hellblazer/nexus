@@ -9,7 +9,6 @@ import org.slf4j.LoggerFactory;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -125,29 +124,19 @@ public final class RemapRepository {
 
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
         tenantScope.withTenant(tenant, ctx -> {
-            // RDR-229 P3.1: the id of each name in this write, read in this transaction. An unregistered name is
-            // refused typed (the 422 every collection-scoped writer raises) instead of by the CHECK's 23514.
-            var ids = new HashMap<String, Long>();
-            for (RemapEntry e : deduped) {
-                ids.computeIfAbsent(e.sourceCollection(), n -> CollectionIds.require(ctx, tenant, n));
-                ids.computeIfAbsent(e.targetCollection(), n -> CollectionIds.require(ctx, tenant, n));
-            }
             var insert = ctx.insertInto(CHASH_REMAP,
                     CHASH_REMAP.TENANT_ID, CHASH_REMAP.SOURCE_COLLECTION,
                     CHASH_REMAP.OLD_ID, CHASH_REMAP.NEW_CHASH,
                     CHASH_REMAP.TARGET_COLLECTION, CHASH_REMAP.CREATED_AT,
-                    CHASH_REMAP.PROVENANCE,
-                    CHASH_REMAP.SOURCE_COLLECTION_ID, CHASH_REMAP.TARGET_COLLECTION_ID);
+                    CHASH_REMAP.PROVENANCE);
             var step = insert.values(tenant,
                     deduped.get(0).sourceCollection(), deduped.get(0).oldId(),
                     newChashBytes(deduped.get(0).newChash()), deduped.get(0).targetCollection(),
-                    now, deduped.get(0).provenance(),
-                    ids.get(deduped.get(0).sourceCollection()), ids.get(deduped.get(0).targetCollection()));
+                    now, deduped.get(0).provenance());
             for (int i = 1; i < deduped.size(); i++) {
                 RemapEntry e = deduped.get(i);
                 step = step.values(tenant, e.sourceCollection(), e.oldId(),
-                        newChashBytes(e.newChash()), e.targetCollection(), now, e.provenance(),
-                        ids.get(e.sourceCollection()), ids.get(e.targetCollection()));
+                        newChashBytes(e.newChash()), e.targetCollection(), now, e.provenance());
             }
             step.onConflict(CHASH_REMAP.TENANT_ID, CHASH_REMAP.SOURCE_COLLECTION, CHASH_REMAP.OLD_ID)
                 .doUpdate()
@@ -155,9 +144,6 @@ public final class RemapRepository {
                 .set(CHASH_REMAP.TARGET_COLLECTION, DSL.field("EXCLUDED.target_collection", String.class))
                 .set(CHASH_REMAP.CREATED_AT, DSL.field("EXCLUDED.created_at", OffsetDateTime.class))
                 .set(CHASH_REMAP.PROVENANCE, DSL.field("EXCLUDED.provenance", String.class))
-                // the conflict branch re-stamps both ids: a row not stamped yet has names and no ids
-                .set(CHASH_REMAP.SOURCE_COLLECTION_ID, DSL.field("EXCLUDED.source_collection_id", Long.class))
-                .set(CHASH_REMAP.TARGET_COLLECTION_ID, DSL.field("EXCLUDED.target_collection_id", Long.class))
                 .execute();
             return null;
         });

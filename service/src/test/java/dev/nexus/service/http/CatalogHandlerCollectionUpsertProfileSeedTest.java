@@ -188,36 +188,6 @@ class CatalogHandlerCollectionUpsertProfileSeedTest {
             .isEmpty();
     }
 
-    @Test
-    void aLabelTheRuleRefuses_is400_andSeedsNoProfileRow_andWritesNoRow() throws Exception {
-        // RDR-229 P3.6: validated BEFORE the lazy profile seed, so a refused registration writes nothing at all.
-        String tenant = "cloud-shaped-tenant-http-4";
-        for (String label : new String[] {"bad/label", "c77", "x".repeat(300)}) {
-            CapturingExchange ex = post("/v1/catalog/collections/upsert",
-                "{\"name\":\"" + label + "\",\"content_type\":\"code\",\"owner_id\":\"" + tenant
-                + "\",\"embedding_model\":\"voyage-code-3\",\"model_version\":\"v1\"}");
-            handleWithTenant(ex, tenant);
-            assertThat(ex.status).as(label).isEqualTo(400);
-            assertThat(repo.getCollection(tenant, label)).as("no row for " + label).isNull();
-        }
-        assertThat(profileRows(tenant)).as("a refused label seeds no profile").isEmpty();
-    }
-
-    @Test
-    void anExistingRowThatBreaksTheRule_stillReRegistersAndSeeds() throws Exception {
-        String tenant = "cloud-shaped-tenant-http-5";
-        repo.upsertCollection(tenant, new java.util.LinkedHashMap<>(Map.of("name", "old/slash/label",
-            "content_type", "code", "owner_id", tenant, "embedding_model", "voyage-code-3", "model_version", "v1")));
-        CapturingExchange ex = post("/v1/catalog/collections/upsert",
-            "{\"name\":\"old/slash/label\",\"content_type\":\"code\",\"owner_id\":\"" + tenant
-            + "\",\"embedding_model\":\"voyage-code-3\",\"model_version\":\"v1\"}");
-        handleWithTenant(ex, tenant);
-        assertThat(ex.status).isEqualTo(200);
-        assertThat(profileRows(tenant).keySet())
-            .as("the re-registration of an existing row still seeds the content type's profile")
-            .containsExactly("code");
-    }
-
     // ── helpers ──────────────────────────────────────────────────────────────
 
     private void handleWithTenant(CapturingExchange ex, String tenant) throws Exception {

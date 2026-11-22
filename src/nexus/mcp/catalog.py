@@ -590,10 +590,6 @@ def catalog_register(
                 )
             })
 
-        # RDR-229 P3.1 (nexus-p2m1x.17): ``physical_collection`` is a name the caller typed. The engine refuses a document
-        # under a collection with no registry row (typed 422 ``unregistered_collection``) and this tool does not register
-        # the collection first: a mistyped name must be refused, not minted as a new collection. The error below carries
-        # the engine's message, which names the collection.
         tumbler = writer.register(
             _parse_user_tumbler(owner, "owner"), title,
             content_type=content_type, file_path=fp,

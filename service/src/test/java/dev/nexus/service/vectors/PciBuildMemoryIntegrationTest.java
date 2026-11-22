@@ -9,7 +9,6 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.Chash;
-import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.jooq.binding.Vector;
 import org.jooq.JSONB;
 import org.slf4j.LoggerFactory;
@@ -183,18 +182,17 @@ class PciBuildMemoryIntegrationTest {
             su.setAutoCommit(true);
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), leaf.tenant(), second, M384);
             for (String collection : List.of(first, second)) {
-                Long cid = CollectionIds.require(DSL.using(su, SQLDialect.POSTGRES), leaf.tenant(), collection);
                 for (int from = 0; from < 6000; from += 250) {
                     var step = DSL.using(su, SQLDialect.POSTGRES).insertInto(CHUNKS, CHUNKS.TENANT_ID,
                         CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT,
-                        CHUNKS.EMBEDDING_384, CHUNKS.METADATA, CHUNKS.COLLECTION_ID);
+                        CHUNKS.EMBEDDING_384, CHUNKS.METADATA);
                     for (int i = from; i < from + 250; i++) {
                         float[] v = new float[384];
                         v[i % 384] = 1f;
                         v[(i * 7 + 1) % 384] += 0.5f;
                         step = step.values(leaf.tenant(), collection,
                             Chash.fromHex(Chash.ofText(collection + "/" + i).toHex()).toBytes(), M384,
-                            "row " + i + " " + "x".repeat(200), Vector.of(v), JSONB.jsonb("{}"), cid);
+                            "row " + i + " " + "x".repeat(200), Vector.of(v), JSONB.jsonb("{}"));
                     }
                     step.execute();
                 }

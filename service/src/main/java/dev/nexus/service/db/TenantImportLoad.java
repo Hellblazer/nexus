@@ -34,7 +34,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.Consumer;
 
-import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_META;
 
 /**
@@ -93,9 +92,6 @@ final class TenantImportLoad {
             if (!tp.loads()) skipped.put(tp.name(), tp.skipReason());
         }
         skipDerivedWithRows(ctx, plan, skipped);
-        Map<String, TablePlan> loading = new LinkedHashMap<>(plan);
-        loading.keySet().removeAll(skipped.keySet());
-        RestoreIdFill.refuseOrphans(ctx, loading, stages);
         List<TableResult> results = new ArrayList<>();
         List<SoftResult> softs = new ArrayList<>();
         for (ExportTable e : TenantExport.TABLES) {
@@ -104,9 +100,7 @@ final class TenantImportLoad {
             status.accept("loading " + e.name());
             Stage st = stages.get(e.name());
             if (st.mapName() != null) fillMap(ctx, e, st);
-            RestoreIdFill.fill(ctx, tenant, e, st, CollectionIdMap.empty());
             results.add(loadTable(ctx, tenant, tp, stages, staged.getOrDefault(e.name(), 0L), softs));
-            RestoreIdFill.afterLoad(ctx, tenant, e);
         }
         status.accept("verifying");
         verify(ctx, tenant, plan, stages, skipped, softs);
@@ -184,67 +178,6 @@ final class TenantImportLoad {
 
     // ── one table ───────────────────────────────────────────────────────────────────────────────
 
-    /**
-     * RDR-229 P3.8: the load never creates a second live row on a tuple, with the partial UNIQUE index of the live tuple
-     * present or absent. A file holding two live rows of one tuple, or a live row on a tuple the tenant already holds under
-     * another name (a mint that landed since the tenant was found empty), fails the load naming both collections. Without
-     * the index the file's live tuples are locked first, in one sorted order, under the advisory lock the mint takes
-     * ({@link CollectionMint#lockTuple}), and then re-read; with it, this replaces its bare unique violation.
-     */
-    private static void refuseLiveTupleConflicts(DSLContext ctx, String tenant, TablePlan tp, Stage st) {
-        // A file written by an older engine may lack some of these columns: the check reads the row values it has and the
-        // column's default for the rest (what the load itself writes for a column the file lacks), so a file missing one
-        // is still checked and never skipped.
-        if (!tp.loadColumns().contains("name")) return;
-        Table<?> a = TenantImportStaging.stageTable(st).as("a");
-        Table<?> b = TenantImportStaging.stageTable(st).as("b");
-        List<Field<String>> tupleOfA = new ArrayList<>();
-        Condition sameTuple = DSL.trueCondition();
-        for (String column : List.of("content_type", "owner_id", "embedding_model", "model_version")) {
-            tupleOfA.add(stagedOrDefault(tp, "a", column, ""));
-            sameTuple = sameTuple.and(stagedOrDefault(tp, "a", column, "").eq(stagedOrDefault(tp, "b", column, "")));
-        }
-        Field<String> aName = DSL.field(DSL.name("a", "name"), String.class);
-        Field<String> bName = DSL.field(DSL.name("b", "name"), String.class);
-        Condition bothLive = DSL.trueCondition();
-        for (String alias : List.of("a", "b")) {
-            bothLive = bothLive.and(stagedOrDefault(tp, alias, "superseded_by", "").eq(""))
-                .and(stagedOrDefault(tp, alias, "lifecycle_state", "live").ne("quarantine"));
-        }
-        Condition aLive = stagedOrDefault(tp, "a", "superseded_by", "").eq("")
-            .and(stagedOrDefault(tp, "a", "lifecycle_state", "live").ne("quarantine"));
-        if (!CollectionMint.tupleIndexExists(ctx)) {
-            CollectionTupleLock.lock(ctx, ctx.selectDistinct(tupleOfA).from(a).where(aLive).fetch().stream()
-                .map(r -> new CollectionTupleLock.Tuple(tenant, r.get(0, String.class), r.get(1, String.class),
-                    r.get(2, String.class), r.get(3, String.class)))
-                .toList());
-        }
-        Record twin = ctx.select(aName, bName, tupleOfA.get(0), tupleOfA.get(1), tupleOfA.get(2), tupleOfA.get(3))
-            .from(a).join(b).on(sameTuple.and(aName.lt(bName))).where(bothLive).limit(1).fetchOne();
-        if (twin != null) {
-            throw new LoadFailedException(CollectionMint.conflictInBackup(twin.get(1, String.class), twin.get(0, String.class),
-                twin.get(2, String.class), twin.get(3, String.class), twin.get(4, String.class), twin.get(5, String.class))
-                .getMessage());
-        }
-        var t = CATALOG_COLLECTIONS.as("t");
-        Record held = ctx.select(aName, t.NAME, tupleOfA.get(0), tupleOfA.get(1), tupleOfA.get(2), tupleOfA.get(3))
-            .from(a).join(t).on(t.TENANT_ID.eq(tenant)
-                .and(t.CONTENT_TYPE.eq(tupleOfA.get(0))).and(t.OWNER_ID.eq(tupleOfA.get(1)))
-                .and(t.EMBEDDING_MODEL.eq(tupleOfA.get(2))).and(t.MODEL_VERSION.eq(tupleOfA.get(3)))
-                .and(t.SUPERSEDED_BY.eq("")).and(t.LIFECYCLE_STATE.ne("quarantine")).and(t.NAME.ne(aName)))
-            .where(aLive).limit(1).fetchOne();
-        if (held != null) {
-            throw new LoadFailedException(CollectionMint.conflictInBackup(held.get(0, String.class), held.get(1, String.class),
-                held.get(2, String.class), held.get(3, String.class), held.get(4, String.class), held.get(5, String.class))
-                .getMessage());
-        }
-    }
-
-    /** The staged column of {@code alias}, or, when the file lacks it, the column's default as a constant. */
-    private static Field<String> stagedOrDefault(TablePlan tp, String alias, String column, String fallback) {
-        return tp.loadColumns().contains(column) ? DSL.field(DSL.name(alias, column), String.class) : DSL.val(fallback);
-    }
-
     private static TableResult loadTable(DSLContext ctx, String tenant, TablePlan tp, Map<String, Stage> stages,
                                          long stagedClaimed, List<SoftResult> softs) {
         ExportTable e = tp.entry();
@@ -279,12 +212,8 @@ final class TenantImportLoad {
             }
         }
         checkSeededRowsMatch(ctx, tenant, tp, st);
-        if ("catalog_collections".equals(e.name())) refuseLiveTupleConflicts(ctx, tenant, tp, st);
 
         List<String> columns = new ArrayList<>(tp.loadColumns());
-        for (String filled : RestoreIdFill.filledColumns(ctx, e, st)) {
-            if (!columns.contains(filled)) columns.add(filled);   // RDR-229 P3.1: ids a file older than the column lacks
-        }
         if (tp.tenantScoped() && !columns.contains("tenant_id")) columns.add(0, "tenant_id");
         List<Field<?>> targets = new ArrayList<>();
         List<Field<?>> values = new ArrayList<>();

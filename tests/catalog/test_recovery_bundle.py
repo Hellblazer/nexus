@@ -492,7 +492,7 @@ def test_bundle_is_plain_jsonl(fake_catalog, tmp_path):
     lines = (tmp_path / "b.jsonl").read_text(encoding="utf-8").splitlines()
     parsed = [json.loads(l) for l in lines]      # every line is plain JSON
     assert parsed[0]["format"] == "nexus-recovery-bundle"
-    assert parsed[0]["format_version"] == 3   # RDR-229 P3.9: format 3 carries the collection rows
+    assert parsed[0]["format_version"] == 2
     # docs precede links (import resolves links against just-imported docs)
     kinds = [p.get("record") for p in parsed[1:]]
     assert kinds == sorted(kinds, key=lambda k: 0 if k == "knowledge_doc" else 1)

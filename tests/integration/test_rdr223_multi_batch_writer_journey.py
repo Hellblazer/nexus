@@ -80,11 +80,7 @@ def _chashes(batches) -> list[str]:
 
 def _register(tmp_path: Path, marker: str, collection: str = _COLLECTION) -> str:
     from nexus.doc_indexer import _register_or_lookup_doc_id
-    from tests._catalog_fixture_ops import register_seed_collections
 
-    # RDR-229 P3.1: this seed calls the document register on its own; the engine refuses a document under an
-    # unregistered collection, so register it first.
-    register_seed_collections(collection)
     p = tmp_path / f"doc-{marker}.pdf"
     p.write_bytes(f"%PDF-1.4 z0o2p writer fake content [{marker}]\n".encode())
     doc_id = _register_or_lookup_doc_id(

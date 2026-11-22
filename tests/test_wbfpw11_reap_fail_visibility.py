@@ -33,7 +33,6 @@ from nexus.aspect_readers import uri_for
 from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
 from nexus.cli import main
 from nexus.corpus import t3_collection_name
-from nexus.knowledge_subject import catalog_subject_finder
 from nexus.db.http_vector_client import HttpVectorClient
 from nexus.exporter import export_collection
 from nexus.mcp.core import store_put
@@ -74,7 +73,7 @@ def test_a_stranded_superseded_chunk_is_hidden_from_search_and_counted(
 
     with patch("nexus.mcp.core._get_t3", return_value=client):
         store_put(content=v1, collection=subject, title=title)
-    collection = t3_collection_name(subject, subject_finder=catalog_subject_finder())
+    collection = t3_collection_name(subject, t3=client)
     tumbler, v1_chashes = _manifest_chashes(collection, title)
     assert len(v1_chashes) == 1, v1_chashes
     (v1_chash,) = v1_chashes
@@ -137,14 +136,11 @@ def test_chunks_with_a_live_owner_stay_visible_on_every_write_path(t2_service_en
     text = "wbfpw11 steady note: stored once and never touched again"
     with patch("nexus.mcp.core._get_t3", return_value=client):
         store_put(content=text, collection=subject, title="wbfpw11 steady")
-    collection = t3_collection_name(subject, subject_finder=catalog_subject_finder())
+    collection = t3_collection_name(subject, t3=client)
     _tumbler, chashes = _manifest_chashes(collection, "wbfpw11 steady")
     assert len(chashes) == 1, chashes
     rows["never re-put note"] = (collection, next(iter(chashes)), text)
-    # RDR-229 P3.8: the subject's collection is a minted label, so its model is read from its row, not from its name.
-    from nexus.mcp_infra import get_collection_row
-
-    model_token = get_collection_row(collection)["embedding_model"]
+    model_token = collection.split("__")[2]
 
     # 2. The combined-write path: chunks and manifest in one write_many
     # request with sweep on, as the indexer's ChunkBatcher flush sends it.
@@ -153,10 +149,6 @@ def test_chunks_with_a_live_owner_stay_visible_on_every_write_path(t2_service_en
     collection = f"knowledge__wbfpw11-combined__{model_token}__v1"
     texts = {k: f"wbfpw11 combined write, chunk {k}: landed with its manifest in one request" for k in "ABC"}
     ch = {k: hashlib.sha256(t.encode()).hexdigest() for k, t in texts.items()}
-    from tests._catalog_fixture_ops import register_seed_collections
-
-    # RDR-229 P3.1: a document names a registered collection (the engine refuses one that is not, 422).
-    register_seed_collections(collection)
     doc = str(writer.register(
         owner, "wbfpw11-combined.md", content_type="knowledge",
         file_path="/tmp/wbfpw11/combined.md", physical_collection=collection, chunk_count=2,
@@ -179,7 +171,6 @@ def test_chunks_with_a_live_owner_stay_visible_on_every_write_path(t2_service_en
     title, text = "wbfpw11 imported", "wbfpw11 imported note: exported with its manifest, then imported"
     source_uri = uri_for(src, title)
     assert source_uri is not None
-    register_seed_collections(src)
     src_doc = str(writer.register(
         owner=owner, title=title, content_type="knowledge",
         physical_collection=src, source_uri=source_uri,
@@ -195,14 +186,11 @@ def test_chunks_with_a_live_owner_stay_visible_on_every_write_path(t2_service_en
     writer.write_manifest(src_doc, [{"chash": chash, "position": 0}], collection=src)
     export = tmp_path / "wbfpw11.nxexp"
     export_collection(db=client, collection_name=src, output_path=export)
-    # RDR-229 P3.8: a new subject is minted a c<id> label, which a client built for an explicit tenant cannot read
-    # the row of before it holds a chunk (its import gate then guesses the model from the label). This test imports
-    # into a collection it names, so the target's conformant name is registered first, as an existing one is.
-    target = f"knowledge__wbfpw11-imported__{model_token}__v1"
-    register_seed_collections(target)
+    target_subject = "wbfpw11-imported"
     with patch("nexus.commands.store._t3", return_value=client):
-        imported = runner.invoke(main, ["store", "import", str(export), "-c", target])
+        imported = runner.invoke(main, ["store", "import", str(export), "-c", target_subject])
     assert imported.exit_code == 0, imported.output
+    target = t3_collection_name(target_subject, t3=client)
     reader = make_catalog_reader()
     assert reader is not None
     imported_docs = [

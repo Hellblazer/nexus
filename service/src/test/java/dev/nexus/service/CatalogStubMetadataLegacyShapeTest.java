@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
-import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.PdfStubMetadataReads;
 import dev.nexus.service.db.TenantScope;
 import org.jooq.JSONB;
@@ -62,8 +61,7 @@ class CatalogStubMetadataLegacyShapeTest extends StubMetadataTestBase {
                         .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT).set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
                         .set(CATALOG_DOCUMENTS.TITLE, "paper " + docSeq).set(CATALOG_DOCUMENTS.CONTENT_TYPE, "pdf")
                         .set(CATALOG_DOCUMENTS.FILE_PATH, file).set(CATALOG_DOCUMENTS.SOURCE_URI, "file://" + file)
-                        .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, coll)
-                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, coll)).set(CATALOG_DOCUMENTS.METADATA, JSONB.valueOf("{}")));
+                        .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, coll).set(CATALOG_DOCUMENTS.METADATA, JSONB.valueOf("{}")));
                     int n = stubDoc ? CHUNKS_PER_STUB_DOC : CHUNKS_PER_HEALTHY_DOC;
                     for (int p = 0; p < n; p++) {
                         byte[] chash = new byte[32];
@@ -76,15 +74,13 @@ class CatalogStubMetadataLegacyShapeTest extends StubMetadataTestBase {
                             : "{\"title\":\"paper " + docSeq + ":page-" + p + "\",\"content_hash\":\"" + Long.toHexString(id)
                                 + "\",\"page_number\":" + p + ",\"source_path\":\"" + file + "\",\"chunk_index\":" + p + "}";
                         chunks.add(dsl.insertInto(CHUNKS)
-                            .set(CHUNKS.TENANT_ID, TENANT).set(CHUNKS.COLLECTION, coll)
-                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, coll)).set(CHUNKS.CHASH, chash)
+                            .set(CHUNKS.TENANT_ID, TENANT).set(CHUNKS.COLLECTION, coll).set(CHUNKS.CHASH, chash)
                             .set(CHUNKS.EMBEDDING_MODEL, model).set(CHUNKS.CHUNK_TEXT, "t")
                             .set(CHUNKS.EMBEDDING_768, VectorSeeds.vec(768, 0.1f)).set(CHUNKS.METADATA, JSONB.valueOf(meta)));
                         manifest.add(dsl.insertInto(CATALOG_DOCUMENT_CHUNKS)
                             .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, TENANT).set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, tumbler)
                             .set(CATALOG_DOCUMENT_CHUNKS.POSITION, p).set(CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, p)
                             .set(CATALOG_DOCUMENT_CHUNKS.CHASH, chash).set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, coll)
-                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, coll))
                             .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, model));
                         totalChunks++;
                     }

@@ -38,7 +38,7 @@ def test_dry_run_writes_nothing_and_apply_rewrites_only_the_rewrite_candidate(t2
     live = f"knowledge__repair-live__{_MODEL}__v1"
     left = f"knowledge__repair-left__{_MODEL}__v1"
     for name, subject in ((live, "repair-live"), (left, "repair-left")):
-        writer.register_collection(name, content_type="knowledge", owner_id=subject, embedding_model=_MODEL, model_version="v1")
+        writer.register_collection(name, content_type="knowledge", owner_id=subject, embedding_model=_MODEL)
 
     def note(title: str, uri: str) -> str:
         return str(writer.register(
@@ -96,7 +96,7 @@ def test_merge_pass_chunks_decide_the_twin_by_default_the_stale_row_when_it_hold
     live = f"knowledge__merge-live__{_MODEL}__v1"
     left = f"knowledge__merge-left__{_MODEL}__v1"
     for name, subject in ((live, "merge-live"), (left, "merge-left")):
-        writer.register_collection(name, content_type="knowledge", owner_id=subject, embedding_model=_MODEL, model_version="v1")
+        writer.register_collection(name, content_type="knowledge", owner_id=subject, embedding_model=_MODEL)
 
     def note(title: str, uri: str, chunks: int = 0) -> str:
         return str(writer.register(

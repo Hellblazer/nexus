@@ -2183,14 +2183,6 @@
     <include file="db/changelog/datamoves-001-registry.xml"/>
 
     <!--
-        RDR-246 amendment (Sam, 2026-11-21): nexus.data_moves.verify_statement_timeout_ms, the bound of the finisher's first,
-        READ ONLY verification pass (default 60000 ms), so the completion transaction keeps the short statement and lock bounds of
-        decision C and re-runs the verification warm. One ALTER TABLE: the column with its CHECK. DATA EFFECT: none (a constant
-        default, no rewrite). After datamoves-001, before the grants-nexus-svc.xml runAlways block.
-    -->
-    <include file="db/changelog/datamoves-002-verify-statement-timeout.xml"/>
-
-    <!--
         Bead nexus-7fku2.1.1 (RDR-134 Step 1): nexus.search_topic_set_384/768/1024, the topic-SET variants of
         search_topic_scoped_<dim>: one collection's nearest live chunks that carry ANY of a set of topic ids, each once, with
         the single-topic function's predicates and sensitivity exclusion. No threshold in SQL (the Java merge applies the
@@ -2353,83 +2345,6 @@
         grants-nexus-svc.xml runAlways block.
     -->
     <include file="db/changelog/catalog-050-note-uri-residue-owner-read.xml"/>
-
-    <!--
-        Bead nexus-p2m1x.17 (RDR-229 P3.1 stage 1, the expand): catalog_collections.collection_id (identity, filled here) with its two UNIQUEs,
-        a nullable id column beside every collection name column, and a NOT VALID CHECK with a stable name on each (the constraint
-        names are one list, db/rdr229/p31-checks.tsv). One changeset per table so the lock footprints do not add up, and the retired
-        aspect_extraction_queue's own, guarded for the table's absence (R3). Writes no row of a user-data table: the stamp is a later
-        registered move; the registry's identity fill is the one rewrite, by ruling. The number follows vectors-064 to -067 on other
-        branches and is provisional until the final rebase. After identity-005, before the grants-nexus-svc.xml runAlways block.
-        ORDER: vectors-068-19's precondition reads the FORCE-row-secured registry through D2's vectors-065 policy catalog_collections_owner_read, so this include must come
-        AFTER vectors-065 (the include above).
-    -->
-    <include file="db/changelog/vectors-068-collection-id-expand.xml"/>
-
-    <!--
-        Bead nexus-p2m1x.17 (RDR-229 P3.1 stage 2b, the SQL family of the dual write): 24 live plpgsql functions are redefined (CREATE OR REPLACE, same
-        signatures, attributes and grants) so every INSERT and UPDATE they make on a CHECK-guarded table sets the collection id from
-        nexus.catalog_collections beside the name. One function per changeset, each with the earlier definition it replaces named in its comment
-        and restored by its rollback. Function definitions only, no DATA EFFECT. The number follows vectors-068 and is provisional until the final
-        rebase. After vectors-068 (current tail), before the grants-nexus-svc.xml runAlways block.
-    -->
-    <include file="db/changelog/vectors-069-collection-id-dual-write-functions.xml"/>
-
-    <!--
-        Bead nexus-p2m1x.17 (RDR-229 P3.1 stage 3, the stamp moves): one registered data move per table that carries a NOT VALID collection_id CHECK
-        (rdr229-stamp-<table>, with P3.2's chunk_size, sleep_ms and statement_timeout_ms), each filling the NULL id from nexus.catalog_collections by
-        (tenant_id, name) after the engine serves and validating the table's CHECKs as its on_complete, plus the owner-read policy the worker needs on each
-        driving table that has none and no other changeset's (10; catalog_collections' is vectors-065's, and catalog_documents', document_aspects' and document_highlights' are catalog-050's). One INSERT per move and DDL only; no row of a user-data table is read or written at boot. DATA EFFECT: fifteen rows
-        added to nexus.data_moves, and a sixteenth (the retired aspect_extraction_queue's, vectors-070-30, with its policy vectors-070-31) only on an install that kept that table with its collection_id column. The number follows vectors-069 and is provisional until the final rebase. After vectors-069, before the
-        grants-nexus-svc.xml runAlways block. ORDER: the registry's own policy is D2's vectors-065 and the three above it are catalog-050's (this file creates none of the four), and the registry stamp move reads the registry
-        through it, so this include must come AFTER vectors-065 (the include above).
-    -->
-    <include file="db/changelog/vectors-070-collection-id-stamp-moves.xml"/>
-
-    <!-- Bead nexus-p2m1x.17 (RDR-229 P3.1 fix round A): nexus.rdr229_restamp(table), the way back from an orphan; after the stamp moves it re-registers. -->
-    <include file="db/changelog/vectors-071-collection-id-restamp.xml"/>
-
-    <!--
-        Bead nexus-p2m1x.17 (RDR-229 P3.1, review-gate fix round B; P2.10 critique S2): the P2.10 residue repair moves (catalog-049-2) that are not
-        complete when P3.1 lands are superseded by replacements whose templates set the collection id with source_uri, since P3.1's NOT VALID CHECKs
-        refuse any UPDATE of a row with a name and no id (23514, permanent). One changeset per registry state (the documents move open or failed;
-        a satellite open or failed); a completed move is left alone. One INSERT each, no row of a user-data table touched at boot. DATA EFFECT: on a
-        fresh walk one row added to nexus.data_moves (the replacement documents move, superseding the open one); nothing where P2.10's moves are complete.
-        After vectors-070 (current tail), before the grants-nexus-svc.xml runAlways block. See the included file's header.
-    -->
-    <include file="db/changelog/catalog-052-residue-moves-supersede.xml"/>
-
-    <!--
-        RDR-229 P3.8 (nexus-p2m1x.28): the partial UNIQUE index on the live collection tuple, which waits (preCondition
-        onFail="CONTINUE") for the re-own move to complete and for no duplicate tuple to remain; plus its FORCE-RLS-safe
-        counter. No data effect. After identity-005, before the grants-nexus-svc.xml runAlways block. See the included
-        file's header.
-    -->
-    <include file="db/changelog/collections-001-tuple-unique-index.xml"/>
-
-    <!--
-        RDR-229 P3.8 (nexus-p2m1x.28): nexus.collection_id_seq_heal, the SECURITY DEFINER function through which nexus_svc
-        (which holds no UPDATE on the shared sequence) heals a sequence behind the data once. No data effect. After
-        collections-001 (and vectors-068, which creates the identity column), before the grants-nexus-svc.xml runAlways
-        block.
-    -->
-    <include file="db/changelog/collections-002-collection-id-seq-heal-function.xml"/>
-
-    <!--
-        RDR-229 P3.8 (nexus-p2m1x.28; linda's ruling (a)): nexus.collection_tuple_lock_key answers one of 256 striped keys in
-        one namespace, so a batch that locks many tuples before the live-tuple index exists takes at most 256 advisory locks.
-        Same signature; the catalog-051-2 triggers pick it up as they are. DATA EFFECT: none. Function definition only. After
-        catalog-051 (which first created the function) and collections-002, before the grants-nexus-svc.xml runAlways block.
-    -->
-    <include file="db/changelog/collections-003-tuple-lock-stripes.xml"/>
-
-    <!--
-        Bead nexus-p2m1x.26 (RDR-229 P3.6, item 7): catalog-053-1 adds idx_catalog_collections_live_label, a partial UNIQUE
-        index on nexus.catalog_collections (tenant_id, name) WHERE superseded_by = '' (a label names one live collection per
-        tenant). One CREATE UNIQUE INDEX over rows the primary key already keeps unique: no row is touched and none can fail
-        it. After collections-003, before the grants-nexus-svc.xml runAlways block.
-    -->
-    <include file="db/changelog/catalog-053-live-label-unique.xml"/>
 
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".

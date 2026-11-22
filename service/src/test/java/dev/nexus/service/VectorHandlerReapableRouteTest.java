@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
-import dev.nexus.service.db.CollectionIds;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
@@ -184,26 +183,21 @@ class VectorHandlerReapableRouteTest {
 
     private void doc(String tenant, String tumbler, String collection, boolean tombstoned, String noteChashHex)
             throws Exception {
-        su(ctx -> ctx.insertInto(CATALOG_DOCUMENTS)
-            .set(CATALOG_DOCUMENTS.TENANT_ID, tenant)
-            .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
-            .set(CATALOG_DOCUMENTS.TITLE, "doc " + tumbler)
-            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
-            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(tenant, collection))
-            .set(CATALOG_DOCUMENTS.DELETED_AT, tombstoned ? OffsetDateTime.now().minusDays(1) : null)
-            .set(CATALOG_DOCUMENTS.METADATA, noteChashHex == null ? null : org.jooq.JSONB.jsonb("{\"doc_id\":\"" + noteChashHex + "\"}"))
+        su(ctx -> ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.DELETED_AT,
+                CATALOG_DOCUMENTS.METADATA)
+            .values(tenant, tumbler, "doc " + tumbler, collection,
+                tombstoned ? OffsetDateTime.now().minusDays(1) : null,
+                noteChashHex == null ? null : org.jooq.JSONB.jsonb("{\"doc_id\":\"" + noteChashHex + "\"}"))
             .onConflictDoNothing().execute());
     }
 
     private void manifest(String tenant, String docId, String collection, String hex) throws Exception {
-        su(ctx -> ctx.insertInto(CATALOG_DOCUMENT_CHUNKS)
-            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant)
-            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, docId)
-            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
-            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, bytes(hex))
-            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
-            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
-            .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
+        su(ctx -> ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
+                CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
+                CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+            .values(tenant, docId, 0, bytes(hex), collection,
+                PgContainerHelper.collectionModel(ctx, tenant, collection))
             .onConflictDoNothing().execute());
     }
 
@@ -653,13 +647,9 @@ class VectorHandlerReapableRouteTest {
     /** Writes (or overwrites) the chunk's orphaning record in {@code collection}, {@code age} ago. */
     private void recordOrphaning(String tenant, String collection, String hex, Duration age) throws Exception {
         OffsetDateTime then = OffsetDateTime.now().minus(age);
-        su(ctx -> ctx.insertInto(CHUNK_ORPHANED_AT)
-            .set(CHUNK_ORPHANED_AT.TENANT_ID, tenant)
-            .set(CHUNK_ORPHANED_AT.COLLECTION, collection)
-            .set(CHUNK_ORPHANED_AT.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
-            .set(CHUNK_ORPHANED_AT.CHASH, bytes(hex))
-            .set(CHUNK_ORPHANED_AT.ORPHANED_AT, then)
-            .set(CHUNK_ORPHANED_AT.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
+        su(ctx -> ctx.insertInto(CHUNK_ORPHANED_AT, CHUNK_ORPHANED_AT.TENANT_ID, CHUNK_ORPHANED_AT.COLLECTION,
+                CHUNK_ORPHANED_AT.CHASH, CHUNK_ORPHANED_AT.ORPHANED_AT, CHUNK_ORPHANED_AT.EMBEDDING_MODEL)
+            .values(tenant, collection, bytes(hex), then, PgContainerHelper.collectionModel(ctx, tenant, collection))
             .onConflict(CHUNK_ORPHANED_AT.TENANT_ID, CHUNK_ORPHANED_AT.COLLECTION, CHUNK_ORPHANED_AT.CHASH)
             .doUpdate().set(CHUNK_ORPHANED_AT.ORPHANED_AT, then).execute());
     }

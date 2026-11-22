@@ -112,18 +112,6 @@ public final class TenantImportPlan {
     }
 
     /**
-     * Columns the file carries and the load drops, because the engine assigns them: {@code catalog_collections.collection_id}
-     * comes from the column's own sequence on every restored row (RDR-229 P3.8: no route accepts a client-supplied id, and
-     * the engine role cannot {@code setval} past one, the doctrine of every other serial key here). The column is staged
-     * and reported as skipped. P3.11 decides how a bundle carries the id.
-     */
-    static final Map<String, Set<String>> SERVER_ASSIGNED = Map.of("catalog_collections", Set.of("collection_id"));
-
-    private static boolean serverAssigned(String table, String column) {
-        return SERVER_ASSIGNED.getOrDefault(table, Set.of()).contains(column);
-    }
-
-    /**
      * @param file          the file's tables (header order is ignored: the plan is in registry order)
      * @param targetColumns the live columns of every registry table the engine can load, by table name; a table
      *                      absent from the map is one the target no longer has
@@ -178,13 +166,6 @@ public final class TenantImportPlan {
             for (Column c : f.columns()) {
                 fileNames.add(c.name());
                 TargetColumn t = liveByName.get(c.name());
-                if (serverAssigned(e.name(), c.name())) {
-                    // staged, never loaded: the engine's sequence assigns it (see SERVER_ASSIGNED)
-                    if (t != null && plainType(c.type())) {
-                        retiredCols.add(c.name());
-                        continue;
-                    }
-                }
                 if (t == null) {
                     if (retiredColumn(retired, e.name(), c.name())) {
                         if (!plainType(c.type())) {

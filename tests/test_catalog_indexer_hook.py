@@ -67,7 +67,7 @@ def _make_catalog(tmp_path: Path) -> tuple[Path, ActiveCatalog]:
 class TestCatalogHookSkipped:
     @pytest.mark.t2_tenant
     def test_skipped_when_not_initialized(self, tmp_path, monkeypatch):
-        from tests._catalog_fixture_ops import catalog_hook_seeded as _catalog_hook
+        from nexus.indexer import _catalog_hook
 
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "no-catalog"))
         # Should not raise
@@ -83,7 +83,7 @@ class TestCatalogHookSkipped:
 @pytest.mark.t2_tenant
 class TestCatalogHookOwner:
     def test_owner_auto_created(self, tmp_path, monkeypatch):
-        from tests._catalog_fixture_ops import catalog_hook_seeded as _catalog_hook
+        from nexus.indexer import _catalog_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -98,7 +98,7 @@ class TestCatalogHookOwner:
         assert cat.owner_for_repo("571b8edd") is not None
 
     def test_owner_reused_on_reindex(self, tmp_path, monkeypatch):
-        from tests._catalog_fixture_ops import catalog_hook_seeded as _catalog_hook
+        from nexus.indexer import _catalog_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -119,7 +119,7 @@ class TestCatalogHookOwner:
 @pytest.mark.t2_tenant
 class TestCatalogHookDocuments:
     def test_document_registered_on_first_index(self, tmp_path, monkeypatch):
-        from tests._catalog_fixture_ops import catalog_hook_seeded as _catalog_hook
+        from nexus.indexer import _catalog_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -142,7 +142,7 @@ class TestCatalogHookDocuments:
         assert entry.physical_collection == "code__nexus"
 
     def test_document_updated_on_reindex(self, tmp_path, monkeypatch):
-        from tests._catalog_fixture_ops import catalog_hook_seeded as _catalog_hook
+        from nexus.indexer import _catalog_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -169,7 +169,7 @@ class TestCatalogHookDocuments:
         assert entry2.head_hash == "bbb"  # updated hash
 
     def test_multiple_files(self, tmp_path, monkeypatch):
-        from tests._catalog_fixture_ops import catalog_hook_seeded as _catalog_hook
+        from nexus.indexer import _catalog_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -199,7 +199,7 @@ class TestFixturePathAutoStamp:
     """
 
     def test_fixture_path_is_stamped(self, tmp_path, monkeypatch):
-        from tests._catalog_fixture_ops import catalog_hook_seeded as _catalog_hook
+        from nexus.indexer import _catalog_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -224,7 +224,7 @@ class TestFixturePathAutoStamp:
         auto-stamped -- the bead's own cited leaks (tests/test_*.py
         files) are marked manually via `nx catalog update --meta`, not
         by this automatic rule."""
-        from tests._catalog_fixture_ops import catalog_hook_seeded as _catalog_hook
+        from nexus.indexer import _catalog_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -254,7 +254,7 @@ class TestNeedsFenceOutParam:
     changing at all."""
 
     def test_new_file_populates_needs_fence(self, tmp_path, monkeypatch):
-        from tests._catalog_fixture_ops import catalog_hook_seeded as _catalog_hook
+        from nexus.indexer import _catalog_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -284,7 +284,7 @@ class TestNeedsFenceOutParam:
         (HEAD moves) re-sends every tracked document's head_hash without
         touching a single file's content. Fencing these would force
         every unchanged document to 'indexing' on every commit."""
-        from tests._catalog_fixture_ops import catalog_hook_seeded as _catalog_hook
+        from nexus.indexer import _catalog_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -312,7 +312,7 @@ class TestNeedsFenceOutParam:
     def test_content_change_on_existing_doc_populates_needs_fence(
         self, tmp_path, monkeypatch,
     ):
-        from tests._catalog_fixture_ops import catalog_hook_seeded as _catalog_hook
+        from nexus.indexer import _catalog_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -344,7 +344,7 @@ class TestNeedsFenceOutParam:
         """The out-param is optional — omitting it must not change any
         other behavior (backward compatible with every existing caller
         that doesn't pass it)."""
-        from tests._catalog_fixture_ops import catalog_hook_seeded as _catalog_hook
+        from nexus.indexer import _catalog_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -413,7 +413,7 @@ class TestCatalogHookBatchedLookups:
     observable catalog state a re-run leaves, and that the hook issues no owner list and no per-file lookup of its own."""
 
     def _index(self, tmp_path, files, head_hash="aaa"):
-        from tests._catalog_fixture_ops import catalog_hook_seeded as _catalog_hook
+        from nexus.indexer import _catalog_hook
 
         return _catalog_hook(
             repo=tmp_path, repo_name="nexus", repo_hash="571b8edd",
@@ -526,8 +526,7 @@ class TestFrecencyDocIdMapBatched:
 
     @pytest.mark.t2_tenant
     def test_single_by_owner_no_per_file_lookups(self, tmp_path, monkeypatch):
-        from nexus.indexer import _build_frecency_doc_id_map
-        from tests._catalog_fixture_ops import catalog_hook_seeded as _catalog_hook
+        from nexus.indexer import _build_frecency_doc_id_map, _catalog_hook
         from nexus.repo_identity import _repo_identity
 
         catalog_dir, cat = _make_catalog(tmp_path)
@@ -557,7 +556,7 @@ class TestFrecencyDocIdMapBatched:
 class TestCatalogHookErrorSafe:
     @pytest.mark.t2_tenant
     def test_hook_does_not_propagate_errors(self, tmp_path, monkeypatch):
-        from tests._catalog_fixture_ops import catalog_hook_seeded as _catalog_hook
+        from nexus.indexer import _catalog_hook
 
         catalog_dir, _ = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -601,7 +600,7 @@ class TestRunHousekeeping:
         return p
 
     def _run(self, root: Path, rels: list[str], *, head: str = "h1") -> None:
-        from tests._catalog_fixture_ops import catalog_hook_seeded as _catalog_hook
+        from nexus.indexer import _catalog_hook
 
         files = [(root / r, *self._ctype(r)) for r in rels]
         _catalog_hook(
@@ -913,7 +912,7 @@ class TestCatalogHookForeignCwd:
     def test_hook_writes_correctly_attributed_uris_from_foreign_cwd(
         self, tmp_path, monkeypatch,
     ):
-        from tests._catalog_fixture_ops import catalog_hook_seeded as _catalog_hook
+        from nexus.indexer import _catalog_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -963,7 +962,7 @@ class TestCatalogHookEphemeralPathGuard:
         primary repo sweeps the agent's ephemeral checkout in too. That
         file must be refused; a sibling clean file in the same run must
         still register (nexus-u8n4r's 4,002-doc production evidence)."""
-        from tests._catalog_fixture_ops import catalog_hook_seeded as _catalog_hook
+        from nexus.indexer import _catalog_hook
         from nexus.repo_identity import is_worktree_or_tempdir_path
 
         catalog_dir, cat = _make_catalog(tmp_path)
@@ -1041,7 +1040,7 @@ class TestCatalogHookEphemeralPathGuard:
         dedicated test below
         (``test_worktree_unique_file_with_no_main_mirror_is_skipped``).
         """
-        from tests._catalog_fixture_ops import catalog_hook_seeded as _catalog_hook
+        from nexus.indexer import _catalog_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -1087,7 +1086,7 @@ class TestCatalogHookEphemeralPathGuard:
         clean-shaped main-repo-anchored path the marker predicate never
         flags. The existence check (only consulted when ``repo !=
         main_repo``) is the second signal that catches it."""
-        from tests._catalog_fixture_ops import catalog_hook_seeded as _catalog_hook
+        from nexus.indexer import _catalog_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -1133,7 +1132,7 @@ class TestCatalogHookEphemeralPathGuard:
         ``docs/rdr/`` existing as a dir while the worktree has a FILE at
         that exact path, an unlikely but possible shape) must not count
         as a mirror. ``.is_file()`` closes this."""
-        from tests._catalog_fixture_ops import catalog_hook_seeded as _catalog_hook
+        from nexus.indexer import _catalog_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -1180,7 +1179,7 @@ class TestCatalogHookEphemeralPathGuard:
         temp-dir path (e.g. the pytest tmp-dir suite, or a gate sandbox
         with its own config dir) must stay fully registrable — the
         owner-root exception."""
-        from tests._catalog_fixture_ops import catalog_hook_seeded as _catalog_hook
+        from nexus.indexer import _catalog_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -1218,8 +1217,7 @@ class TestCatalogHookEphemeralPathGuard:
         """
         import subprocess
 
-        from nexus.indexer import _git_ls_files
-        from tests._catalog_fixture_ops import catalog_hook_seeded as _catalog_hook
+        from nexus.indexer import _catalog_hook, _git_ls_files
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -1341,7 +1339,7 @@ class TestCatalogHookReconciledIsNotNew:
     REPO_HASH = "53cae001"
 
     def _hook(self, root, files, head="h1"):
-        from tests._catalog_fixture_ops import catalog_hook_seeded as _catalog_hook
+        from nexus.indexer import _catalog_hook
 
         return _catalog_hook(
             repo=root, repo_name="nexus", repo_hash=self.REPO_HASH, head_hash=head,
@@ -1399,7 +1397,7 @@ class TestCatalogHookReconciledIsNotNew:
         foreign = self._foreign_row(cat, b, collection="code__OLD")
         unregistered: dict = {}
 
-        from tests._catalog_fixture_ops import catalog_hook_seeded as _catalog_hook
+        from nexus.indexer import _catalog_hook
 
         mapping = _catalog_hook(
             repo=tmp_path, repo_name="nexus", repo_hash=self.REPO_HASH, head_hash="h1",

@@ -39,16 +39,6 @@ ROUTE_EXCLUSIONS: dict[str, str] = {
         "segment, collection, content_type, rows}, the 400 on a limit outside 1..10000 and "
         "the 503 on a statement timeout) is validated Java-side by UriSegmentCensusRouteTest"
     ),
-    "/rdr229_completion_counts": (
-        "RDR-229 P3.1 (nexus-p2m1x.17, review N2): the caller's own completion counts for the doctor's RDR-229 rows. "
-        "The client reader (engine_reads.rdr229_completion_counts.read_rdr229_completion_counts, called with the "
-        "catalog reader by nexus.rdr229_completion_health) is tested against a stubbed client "
-        "(tests/catalog/test_rdr229_completion_counts_reader.py), so the fake serves no branch for it and "
-        "HttpCatalogClient has no method of its own (it is at its size ceiling). Its wire shape (registry_rows, "
-        "live_collections, superseded_by_waiting, dangling_tombstones, tables of {table, orphans, unstamped}, the "
-        "405 on a method other than GET and the 503 on a statement timeout) is validated Java-side by "
-        "Rdr229CompletionTenantCountsRouteTest, which reads it as two tenants"
-    ),
     "/manifest/foreign_collection": (
         "GH #1611: engine route for the doctor's foreign-collection row; the "
         "client method (HttpCatalogClient.manifest_foreign_collection) is "

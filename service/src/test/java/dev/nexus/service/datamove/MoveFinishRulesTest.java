@@ -14,7 +14,7 @@ class MoveFinishRulesTest {
 
     private static DataMove move(String schema, String table, String onComplete) {
         return new DataMove("m", "update <driving_table> set n = 1", schema, table, 100, 0, 60_000, "select 1", onComplete,
-            null, null, null, 0, null, null, DataMove.DEFAULT_VERIFY_STATEMENT_TIMEOUT_MS);
+            null, null, null, 0, null, null);
     }
 
     // ── the chunk family ───────────────────────────────────────────────────────────────────────────────────

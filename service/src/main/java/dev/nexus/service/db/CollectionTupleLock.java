@@ -16,22 +16,18 @@ import java.util.TreeSet;
  * The per-tuple advisory lock of RDR-229: a collection's identity tuple is
  * {@code (tenant_id, content_type, owner_id, embedding_model, model_version)}, and a writer that must not race another
  * writer onto the same tuple (the catalog-051-2 owner triggers, and the P3.8 mint when no unique index backs the tuple)
- * takes {@code pg_advisory_xact_lock} on that tuple's key, held to the end of its transaction. The key is STRIPED
- * (collections-003-1, RDR-229 P3.8): one of 256 keys in one namespace, shared by every tenant, so a batch takes at most 256
- * locks. Two unrelated tuples in one stripe serialize (a waiter waits for the holder's whole transaction, and a large batch
- * holds nearly every stripe until it commits); accepted by design, see the changeset's header.
+ * takes {@code pg_advisory_xact_lock} on that tuple's key, held to the end of its transaction.
  *
- * <p><b>One key derivation.</b> The key is {@code nexus.collection_tuple_lock_key(...)}, the SQL function changelog
- * catalog-051-1a created and collections-003-1 striped, and nothing else computes it. The two triggers call the function; this class SELECTs it, so Java never
+ * <p><b>One key derivation.</b> The key is {@code nexus.collection_tuple_lock_key(...)}, the SQL function of changelog
+ * catalog-051-1a, and nothing else computes it. The two triggers call the function; this class SELECTs it, so Java never
  * re-implements the encoding or the hash. Two writers on one tuple therefore always take the same lock and wait for each
  * other.
  *
  * <p><b>One order.</b> A caller that takes SEVERAL tuple locks in one transaction MUST take them through
  * {@link #lock(DSLContext, Collection)}, never one {@code pg_advisory_xact_lock} after another in its own order: that
- * method SELECTs every key ({@link #KEYS_PER_STATEMENT} tuples a statement), sorts the keys ascending by the {@code bigint} the SQL function returns,
+ * method SELECTs every key in one round trip, sorts the keys ascending by the {@code bigint} the SQL function returns,
  * drops duplicates and locks them in that order, so two such callers can never each hold a lock the other waits for.
- * {@link #lockTuple} is the one-tuple case of the same order. A trigger takes the one lock of its own row, per row and
- * in row order, so a statement that fires it for several rows is not sorted (see collections-003-1's header).
+ * {@link #lockTuple} is the one-tuple case of the same order. A trigger takes only the one lock of its own row.
  *
  * <p><b>The five values</b> are the row's own: {@code model_version} is the column's text as stored ({@code 'v1'} and so
  * on). Nothing here normalises, trims or lower-cases; the SQL function encodes them as given.
@@ -56,7 +52,7 @@ public final class CollectionTupleLock {
     }
 
     /**
-     * Take {@code pg_advisory_xact_lock} for each tuple: every key SELECTed ({@link #KEYS_PER_STATEMENT} tuples a statement), sorted ascending, each key
+     * Take {@code pg_advisory_xact_lock} for each tuple: every key SELECTed in one round trip, sorted ascending, each key
      * once, locked in that order.
      *
      * @return the keys in the order they were locked (ascending, no duplicates); empty when {@code tuples} is empty
@@ -72,32 +68,23 @@ public final class CollectionTupleLock {
         return locked;
     }
 
-    /**
-     * Tuples per key statement: five binds each, so a statement stays well under PostgreSQL's 32767-bind limit and a
-     * restore of thousands of collections reads its keys in a handful of round trips (RDR-229 P3.8).
-     */
-    static final int KEYS_PER_STATEMENT = 1000;
-
-    /** The key of each tuple, in argument order: the SQL function, {@link #KEYS_PER_STATEMENT} tuples a statement. */
+    /** The key of each tuple, in argument order, in one statement (a VALUES list joined to the SQL function). */
     private static List<Long> keys(DSLContext ctx, Collection<Tuple> tuples) {
         List<Tuple> in = List.copyOf(tuples);
+        List<Field<?>> keyColumns = new ArrayList<>(in.size());
+        for (Tuple t : in) {
+            keyColumns.add(DSL.function(DSL.name("nexus", "collection_tuple_lock_key"), SQLDataType.BIGINT,
+                DSL.val(t.tenantId()), DSL.val(t.contentType()), DSL.val(t.ownerId()),
+                DSL.val(t.embeddingModel()), DSL.val(t.modelVersion())));
+        }
+        org.jooq.Record row = ctx.select(keyColumns).fetchOne();
         List<Long> keys = new ArrayList<>(in.size());
-        for (int from = 0; from < in.size(); from += KEYS_PER_STATEMENT) {
-            List<Tuple> chunk = in.subList(from, Math.min(in.size(), from + KEYS_PER_STATEMENT));
-            List<Field<?>> keyColumns = new ArrayList<>(chunk.size());
-            for (Tuple t : chunk) {
-                keyColumns.add(DSL.function(DSL.name("nexus", "collection_tuple_lock_key"), SQLDataType.BIGINT,
-                    DSL.val(t.tenantId()), DSL.val(t.contentType()), DSL.val(t.ownerId()),
-                    DSL.val(t.embeddingModel()), DSL.val(t.modelVersion())));
+        for (int i = 0; i < in.size(); i++) {
+            Long k = row.get(i, Long.class);
+            if (k == null) {
+                throw new IllegalStateException("nexus.collection_tuple_lock_key returned NULL for " + in.get(i));
             }
-            org.jooq.Record row = ctx.select(keyColumns).fetchOne();
-            for (int i = 0; i < chunk.size(); i++) {
-                Long k = row.get(i, Long.class);
-                if (k == null) {
-                    throw new IllegalStateException("nexus.collection_tuple_lock_key returned NULL for " + chunk.get(i));
-                }
-                keys.add(k);
-            }
+            keys.add(k);
         }
         return keys;
     }

@@ -46,7 +46,7 @@ def test_slug_named_repo_collection_takes_its_documents_owner_and_is_found_by_ow
 
     name = f"code__arcaneum-6pbwx2ad__{_CODE_MODEL}__v1"
     slug = "arcaneum-6pbwx2ad"
-    writer.register_collection(name, content_type="code", owner_id=slug, embedding_model=_CODE_MODEL, model_version="v1")
+    writer.register_collection(name, content_type="code", owner_id=slug, embedding_model=_CODE_MODEL)
     assert reader.get_collection(name)["owner_id"] == slug, "guard: registered with the slug"
     assert reader.get_collection_owner_root(name) == (slug, ""), "guard: the slug matches no owner row"
 
@@ -64,7 +64,7 @@ def test_slug_named_repo_collection_takes_its_documents_owner_and_is_found_by_ow
     # The re-registration a cold chunk write sends carries the slug again; it changes nothing.
     corpus._REGISTERED_COLLECTIONS.clear()
     corpus._REGISTERED_COLLECTIONS_SCOPED.clear()
-    writer.register_collection(name, content_type="code", owner_id=slug, embedding_model=_CODE_MODEL, model_version="v1")
+    writer.register_collection(name, content_type="code", owner_id=slug, embedding_model=_CODE_MODEL)
     assert reader.get_collection(name)["owner_id"] == segment
 
 
@@ -75,7 +75,7 @@ def test_knowledge_collection_owner_is_not_rewritten_to_its_documents_tumbler(t2
     curator = writer.register_owner("knowledge", "curator")
     subject = "6pbwx-distributed-systems"
     name = f"knowledge__{subject}__{_CTX_MODEL}__v1"
-    writer.register_collection(name, content_type="knowledge", owner_id=subject, embedding_model=_CTX_MODEL, model_version="v1")
+    writer.register_collection(name, content_type="knowledge", owner_id=subject, embedding_model=_CTX_MODEL)
     writer.register(
         owner=curator, title="raft note", content_type="knowledge", physical_collection=name,
         source_uri=f"nx-note://{name}/raft-note",

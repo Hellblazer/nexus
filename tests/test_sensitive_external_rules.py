@@ -190,68 +190,10 @@ def test_a_local_embedder_collection_is_left_alone(name: str) -> None:
     assert sw.resolve_sensitive_collection(name, ack=False, what="t") == name
 
 
-@pytest.fixture
-def rows(monkeypatch: pytest.MonkeyPatch) -> dict[str, dict]:
-    """The registry rows ``mcp_infra.get_collection_row`` answers, by label; a label not in it has no row."""
-    held: dict[str, dict] = {}
-    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda name, **kw: held.get(name))
-    return held
-
-
-def _row(content_type: str, owner_id: str, model: str) -> dict:
-    return {"content_type": content_type, "owner_id": owner_id, "embedding_model": model, "lifecycle_state": "live"}
-
-
-def test_an_unknown_embedder_reads_as_external_and_has_no_sibling(rows) -> None:
+def test_an_unknown_embedder_reads_as_external_and_has_no_sibling() -> None:
     assert sw.is_external_embedder("knowledge__legacy") is True
     with pytest.raises(sw.ExternalEmbedderRefusedError, match="no bge sibling"):
         sw.resolve_sensitive_collection("knowledge__legacy", ack=False, what="t")
-
-
-# RDR-229 P3.8: the engine mints a new subject's label (``c19``), so the name says nothing about the embedder; the
-# registry row does.
-
-def test_a_minted_label_reads_its_embedder_from_its_registry_row(rows) -> None:
-    rows["c19"] = _row("knowledge", "rfvyy-ext", BGE)
-    rows["c20"] = _row("knowledge", "rfvyy-ext", "ext-embedder-x")
-    assert sw.is_external_embedder("c19") is False
-    assert sw.is_external_embedder("c20") is True
-
-
-def test_a_minted_label_with_no_row_or_an_unreadable_one_reads_as_external(monkeypatch: pytest.MonkeyPatch, rows) -> None:
-    assert sw.is_external_embedder("c19") is True, "no row: unknown reads as external"
-
-    def down(name: str, **kw):
-        raise ConnectionError("registry unreachable")
-
-    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", down)
-    assert sw.is_external_embedder("c19") is True, "an unreadable row fails closed"
-    assert sw.bge_sibling("c19") is None
-
-
-def test_the_ack_free_route_of_a_minted_voyage_label_is_the_subjects_bge_collection(monkeypatch: pytest.MonkeyPatch, rows) -> None:
-    rows["c416"] = _row("knowledge", "rfvyy-ext", "ext-embedder-x")
-    monkeypatch.setattr("nexus.catalog.rows.resolve.find_collection", lambda ct, owner, model: None)
-    assert sw.bge_sibling("c416") == f"knowledge__rfvyy-ext__{BGE}__v1"
-    assert sw.resolve_sensitive_collection("c416", ack=False, what="t") == f"knowledge__rfvyy-ext__{BGE}__v1"
-
-
-def test_a_registered_bge_collection_of_the_subject_is_the_sibling_whatever_its_label(monkeypatch: pytest.MonkeyPatch, rows) -> None:
-    """Rendering a name beside a live minted row would register a second live collection on one tuple (409)."""
-    from nexus.catalog.collection_name import CollectionAttributes
-
-    rows["c416"] = _row("knowledge", "rfvyy-ext", "ext-embedder-x")
-    seen: list[tuple[str, str, str]] = []
-
-    def find(ct: str, owner: str, model: str):
-        seen.append((ct, owner, model))
-        return CollectionAttributes(
-            collection_id=417, label="c417", content_type=ct, owner_id=owner, embedding_model=model,
-            model_version=1, dimension=None, lifecycle_state="live")
-
-    monkeypatch.setattr("nexus.catalog.rows.resolve.find_collection", find)
-    assert sw.bge_sibling("c416") == "c417"
-    assert seen == [("knowledge", "rfvyy-ext", BGE)]
 
 
 def test_a_voyage_posture_install_has_no_bge_route(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -434,10 +376,7 @@ def _register_in(path: Path, collection: str, *, source_uri: str = "") -> str:
     """A live document in *collection*, as an earlier non-sensitive index left it (no chunks: the catalog row
     is what a re-index resolves)."""
     from nexus.catalog.factory import make_catalog_writer
-    from tests._catalog_fixture_ops import register_seed_collections
 
-    # RDR-229 P3.1: a document names a registered collection (the engine refuses one that is not, 422).
-    register_seed_collections(collection)
     reader, writer = _reader(), make_catalog_writer()
     owner = reader.curator_owner_tumbler_by_name("rfvyy-ext") or writer.register_owner("rfvyy-ext", "curator")
     tumbler = writer.register(
@@ -481,11 +420,7 @@ def test_the_same_refusal_when_the_document_matches_by_source_uri(t2_service_env
         main, ["index", "md", str(md), "--corpus", "rfvyy-ext", "--sensitive", "--source-uri", "x-devonthink-item://RFVYY-S-B"])
     assert out.exit_code != 0, out.output
     assert tumbler in out.output and _VOYAGE["docs"] in out.output
-    # Read the refusal's own line: the rest of the output carries log lines whose checkout path is the
-    # caller's (a worktree named "...-moves" put "move" in it), which says nothing about the refusal.
-    refusal = next((line for line in out.output.splitlines() if line.startswith("Error:")), "")
-    assert refusal, out.output
-    assert "differs" not in refusal and "move" not in refusal.lower().split("does not move")[0]
+    assert "differs" not in out.output and "move" not in out.output.lower().split("does not move")[0]
     entry = _entry(tumbler)
     assert entry.sensitive is False and entry.physical_collection == _VOYAGE["docs"]
 
@@ -522,70 +457,3 @@ def test_a_pdf_registered_in_voyage_refuses_the_same_way(t2_service_env, tmp_pat
         main, ["index", "pdf", str(pdf), "--corpus", "rfvyy-ext", "--extractor", "pymupdf", "--sensitive"])
     assert out.exit_code != 0 and tumbler in out.output, out.output
     assert _entry(tumbler).sensitive is False
-
-
-def test_a_minted_label_whose_row_names_no_embedding_model_reads_as_external(monkeypatch: pytest.MonkeyPatch) -> None:
-    """RDR-229 P3.8: a row that exists but does not say its embedder is "cannot tell", which fails closed."""
-    import nexus.sensitive_write as sw
-
-    monkeypatch.setattr(sw, "_registry_row", lambda name: {"name": name, "content_type": "knowledge"})
-    assert sw.is_external_embedder("c19") is True
-
-
-@pytest.mark.parametrize(("row", "expected"), [
-    ({"embedding_model": "bge-base-en-v15-768"}, None),
-    ({"embedding_model": "ext-embedder-x"}, "ext-embedder-x"),
-])
-def test_the_sensitivity_doctor_reads_a_minted_labels_embedder_from_its_row(
-    monkeypatch: pytest.MonkeyPatch, row: dict, expected: str | None,
-) -> None:
-    """RDR-229 P3.8: the doctor's WARN row uses the write verbs' rule: a label the engine minted (``c19``) carries no
-    model token, so its row says whether it embeds locally. A minted bge subject is not reported as Voyage."""
-    import nexus.sensitive_write as sw
-    from nexus.catalog import sensitivity_doctor
-
-    monkeypatch.setattr(sw, "_registry_row", lambda name: {"name": name, **row})
-    assert sensitivity_doctor._external_embedder("c19") == expected
-
-
-def test_the_sensitivity_doctor_reports_a_minted_label_with_no_readable_row_as_external(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """No row, or an unreadable one: the doctor keeps its conservative answer (an external embedder), never local."""
-    import nexus.sensitive_write as sw
-    from nexus.catalog import sensitivity_doctor
-
-    monkeypatch.setattr(sw, "_registry_row", lambda name: None)
-    assert sensitivity_doctor._external_embedder("c19") is not None
-
-
-def test_a_found_bge_sibling_is_noted_registered_so_the_later_gate_reads_it_as_local(
-    rows, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """RDR-229 P3.8: a registered bge sibling with no chunk yet is not in the listing, so the write path's later
-    ``is_external_embedder(label)`` checks would read it as unknown (external) and refuse. ``bge_sibling`` notes the
-    found label with its bge row (``collection_mint.note_registered``), which answers those reads."""
-    from nexus import collection_mint
-    from nexus.catalog.collection_name import CollectionAttributes
-
-    rows["c416"] = _row("knowledge", "rfvyy-ext", "ext-embedder-x")
-    noted: list[tuple[str, dict]] = []
-    monkeypatch.setattr(collection_mint, "note_registered", lambda label, row: noted.append((label, row)))
-    monkeypatch.setattr("nexus.catalog.rows.resolve.find_collection", lambda ct, owner, model: CollectionAttributes(
-        collection_id=417, label="c417", content_type=ct, owner_id=owner, embedding_model=model,
-        model_version=1, dimension=None, lifecycle_state="live"))
-
-    assert sw.bge_sibling("c416") == "c417"
-    assert [(label, row.get("embedding_model"), row.get("owner_id")) for label, row in noted] == [
-        ("c417", BGE, "rfvyy-ext")]
-
-
-def test_a_legacy_name_is_external_without_a_registry_read(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Only a label of the engine's minted form (``c`` + digits) is read from its row. A legacy name keeps the
-    conservative answer with no read: ``is_external_embedder`` runs on every index, sensitive or not, so a read
-    there would put a registry round trip (and, with no endpoint, a storage touch) on each legacy write."""
-    reads: list[str] = []
-    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda name, **kw: reads.append(name))
-    assert sw.is_external_embedder("knowledge__legacy") is True
-    assert sw.bge_sibling("code__test") is None
-    assert reads == []

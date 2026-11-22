@@ -9,7 +9,6 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.Chash;
-import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.http.StatusHandler;
 import dev.nexus.service.jooq.binding.Vector;
 import org.jooq.DSLContext;
@@ -163,15 +162,14 @@ class LeafBloatCatalogIntegrationTest {
     List<String> rows(String tenant, String collection, int rows) throws Exception {
         return asSuperuser(su -> {
             PgContainerHelper.insertCollection(su, tenant, collection, M384);
-            Long cid = CollectionIds.require(su, tenant, collection);
             List<String> hex = new ArrayList<>();
             var step = su.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH,
-                CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.METADATA, CHUNKS.COLLECTION_ID);
+                CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.METADATA);
             for (int i = 0; i < rows; i++) {
                 String h = Chash.ofText(tenant + "/" + collection + "/" + i).toHex();
                 hex.add(h);
                 step = step.values(tenant, collection, Chash.fromHex(h).toBytes(), M384, "row " + i, vector(i),
-                    JSONB.jsonb("{}"), cid);
+                    JSONB.jsonb("{}"));
             }
             step.execute();
             return hex;

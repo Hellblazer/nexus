@@ -5,7 +5,6 @@ package dev.nexus.service;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.Chash;
-import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.PgVectorRepository;
 import org.jooq.DSLContext;
@@ -127,7 +126,6 @@ class PgVectorManifestDocKeyFilterTest {
                 .set(CATALOG_DOCUMENTS.TUMBLER, DOC_E)
                 .set(CATALOG_DOCUMENTS.TITLE, "Document E")
                 .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLLECTION_E)
-                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, COLLECTION_E))
                 .set(CATALOG_DOCUMENTS.SOURCE_URI, "file:///" + DOC_E + ".md")
                 .execute();
             // A: enriched. Its catalog meta says tags=alpha (an answered key since nexus-6pfgb.29).
@@ -136,7 +134,6 @@ class PgVectorManifestDocKeyFilterTest {
                 .set(CATALOG_DOCUMENTS.TUMBLER, DOC_A)
                 .set(CATALOG_DOCUMENTS.TITLE, "Document A")
                 .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLLECTION)
-                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, COLLECTION))
                 .set(CATALOG_DOCUMENTS.SOURCE_URI, "file:///" + DOC_A + ".md")
                 .set(CATALOG_DOCUMENTS.AUTHOR, "Alice")
                 .set(CATALOG_DOCUMENTS.INDEXED_AT, OffsetDateTime.parse("2026-03-01T00:00:00Z"))
@@ -156,7 +153,6 @@ class PgVectorManifestDocKeyFilterTest {
                 .set(CATALOG_DOCUMENTS.TUMBLER, DOC_B)
                 .set(CATALOG_DOCUMENTS.TITLE, "Document B")
                 .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLLECTION)
-                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, COLLECTION))
                 .set(CATALOG_DOCUMENTS.SOURCE_URI, "file:///" + DOC_B + ".md")
                 .set(CATALOG_DOCUMENTS.AUTHOR, "")
                 .set(CATALOG_DOCUMENTS.INDEXED_AT, OffsetDateTime.parse("2025-01-01T00:00:00Z"))
@@ -168,7 +164,6 @@ class PgVectorManifestDocKeyFilterTest {
                 .set(CATALOG_DOCUMENTS.TUMBLER, DOC_C)
                 .set(CATALOG_DOCUMENTS.TITLE, "Document C")
                 .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLLECTION)
-                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, COLLECTION))
                 .set(CATALOG_DOCUMENTS.SOURCE_URI, "file:///" + DOC_C + ".md")
                 .set(CATALOG_DOCUMENTS.INDEXED_AT, OffsetDateTime.parse("2024-06-01T00:00:00Z"))
                 .execute();
@@ -178,7 +173,6 @@ class PgVectorManifestDocKeyFilterTest {
                 .set(CATALOG_DOCUMENTS.TUMBLER, DOC_D)
                 .set(CATALOG_DOCUMENTS.TITLE, "Document D")
                 .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLLECTION)
-                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, COLLECTION))
                 .set(CATALOG_DOCUMENTS.SOURCE_URI, "file:///" + DOC_D + ".md")
                 .set(CATALOG_DOCUMENTS.INDEXED_AT, OffsetDateTime.parse("2023-01-01T00:00:00Z"))
                 .set(CATALOG_DOCUMENTS.BIB_ENRICHED_AT, OffsetDateTime.parse("2026-03-03T00:00:00Z"))
@@ -214,7 +208,6 @@ class PgVectorManifestDocKeyFilterTest {
                 .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
                 .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(T))
                 .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, COLLECTION_E)
-                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, COLLECTION_E))
                 .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, MODEL)
                 .set(CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN, false)
                 .execute();
@@ -241,7 +234,6 @@ class PgVectorManifestDocKeyFilterTest {
             .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position)
             .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(chash))
             .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, COLLECTION)
-            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, COLLECTION))
             .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, MODEL)
             .set(CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE, type)
             .set(CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN, labelsWritten)

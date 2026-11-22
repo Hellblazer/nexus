@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
-import dev.nexus.service.db.CollectionIds;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.CatalogRepository;
@@ -237,7 +236,6 @@ class CatalogPurgeTrashTest {
             .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
             .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(chashHex))
             .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
-                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
             // RDR-225: the manifest row carries its chunk's model (both fixture collections are minilm).
             .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, MODEL)
             .execute();
@@ -249,7 +247,6 @@ class CatalogPurgeTrashTest {
             .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
             .set(CATALOG_DOCUMENTS.TITLE, title)
             .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLLECTION)
-                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, COLLECTION))
             .execute();
     }
 

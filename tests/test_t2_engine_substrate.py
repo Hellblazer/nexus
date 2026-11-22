@@ -99,9 +99,6 @@ class TestB6encStoreHookEngineSubstrate:
         col = "knowledge__engine__bge-base-en-v15-768__v1"
         chash, metadatas = single_chunk_manifest_metadata(content)
 
-        from tests._catalog_fixture_ops import register_seed_collections
-
-        register_seed_collections(col)  # RDR-229 P3.1: put_note registers the collection before it calls the hook
         tumbler, created = catalog_store_hook_tracked(
             title="b6enc-engine-smoke", doc_id=chash, collection_name=col,
         )

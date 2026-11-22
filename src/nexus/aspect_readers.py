@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import datetime
 import os
-import re
 import sys
 import time
 from collections.abc import Callable
@@ -140,33 +139,6 @@ NOTE_URI_SCHEME: str = "nx-note://"
 
 _LEGACY_NOTE_SCHEME: str = "chroma://"
 _EXPORT_SCHEME: str = "nxexp://"
-
-
-_SCHEME_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.\-]*):")
-
-
-def _uri_scheme(uri: str) -> str:
-    """The lower-cased scheme of ``uri``, or ``""``. Read from the text before the first ``:`` and nothing else.
-
-    ``urlparse`` is not used for it: it also splits the netloc, and a note URI's netloc is a collection LABEL
-    (``nx-note://<label>/<rest>``), which may hold ``[``, ``?``, ``#`` or a fullwidth solidus. ``urlparse`` raises on
-    the first and the last and cuts the netloc at the other two (RDR-229 P3.6 review I2).
-    """
-    m = _SCHEME_RE.match(uri)
-    return m.group(1).lower() if m else ""
-
-
-def _note_collection_and_source(uri: str) -> tuple[str, str]:
-    """The ``(collection, source_id)`` of an ``nx-note://<label>/<rest>`` (or legacy ``chroma://``) URI.
-
-    The collection is the text up to the first ``/`` of what follows ``://``, whole and as written (a label is
-    minted verbatim); the source id is the rest, percent-decoded, with exactly one leading ``/`` of the separator
-    consumed, so ``nx-note://c//Users/x`` carries ``/Users/x``. The engine's ``NoteUri.collectionOf`` cuts at the
-    same place. Either part may come back empty for a malformed URI; the caller refuses it.
-    """
-    rest = uri.partition("://")[2]
-    collection, _, path = rest.partition("/")
-    return collection, unquote(path)
 
 
 def _collection_is_file_routed(after_scheme: str) -> bool:
@@ -800,10 +772,14 @@ def _read_chroma_uri(
     """
     if t3 is None:
         return ReadFail(reason="unreachable", detail="no chroma client provided")
-    # Not ``urlparse``: the collection is a label that may hold ``[``, ``?``, ``#`` (see ``_uri_scheme``). The one
-    # slash that separates it from the source id is consumed, so an absolute source path round-trips intact
-    # (``nx-note://collection//Users/.../paper.pdf``).
-    collection, source_id = _note_collection_and_source(uri)
+    parsed = urlparse(uri)
+    collection = parsed.netloc
+    # ``urlparse`` always prefixes the path with ``/`` when a netloc
+    # is present. ``removeprefix`` strips exactly one leading slash,
+    # preserving any that are part of the source_path itself (e.g.,
+    # ``/Users/.../paper.pdf`` round-trips intact when constructed as
+    # ``nx-note://collection//Users/...``).
+    source_id = unquote(parsed.path.removeprefix("/"))
     if not collection or not source_id:
         return ReadFail(
             reason="unreachable",
@@ -1405,7 +1381,8 @@ def read_source(
     """
     if not uri:
         return ReadFail(reason="unreachable", detail="empty uri")
-    scheme = _uri_scheme(uri)
+    parsed = urlparse(uri)
+    scheme = parsed.scheme
     if not scheme:
         return ReadFail(reason="scheme_unknown", detail=f"no scheme in {uri!r}")
     reader = _READERS.get(scheme)
@@ -2247,7 +2224,8 @@ def stat_source(
     """
     if not uri:
         return StatFail(reason="error", detail="empty uri")
-    scheme = _uri_scheme(uri)
+    parsed = urlparse(uri)
+    scheme = parsed.scheme
     if not scheme:
         return StatFail(reason="scheme_unknown", detail=f"no scheme in {uri!r}")
     handler = _STAT_HANDLERS.get(scheme)

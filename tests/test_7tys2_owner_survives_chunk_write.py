@@ -42,7 +42,7 @@ def test_reregistration_keeps_the_owner_the_collection_was_registered_with(t2_se
     writer = make_catalog_writer()
     reader = make_catalog_reader()
     writer.register_collection(
-        name, content_type="code", owner_id=OWNER_SEGMENT, embedding_model=_MODEL, model_version="v1",
+        name, content_type="code", owner_id=OWNER_SEGMENT, embedding_model=_MODEL,
     )
     assert reader.get_collection(name)["owner_id"] == OWNER_SEGMENT, "guard: registered with the owner segment"
 

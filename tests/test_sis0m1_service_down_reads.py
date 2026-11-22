@@ -73,17 +73,7 @@ def lease_points_at_a_stopped_service(monkeypatch):
     monkeypatch.setattr("nexus.db.service_endpoint.mint_armed", lambda: False)
 
 
-# RDR-229 P2.8: a read of a named subject reads the subject's catalog row before it resolves the name, through the
-# catalog reader, which does not see the lease this fixture patches into the vector client alone, so its endpoint is
-# unresolvable while the verb goes on to name the service that does not answer. Those two verbs say so.
-_READS_THE_SUBJECT_ROW = pytest.mark.expects_unresolvable_endpoint
-
-
-@pytest.mark.parametrize(
-    "argv",
-    [pytest.param(a, marks=_READS_THE_SUBJECT_ROW) if a[:2] in (["store", "get"], ["store", "list"]) else a for a in _VERBS],
-    ids=lambda a: " ".join(a[:2]),
-)
+@pytest.mark.parametrize("argv", _VERBS, ids=lambda a: " ".join(a[:2]))
 def test_a_read_verb_names_a_service_that_does_not_answer(lease_points_at_a_stopped_service, argv):
     result = CliRunner().invoke(main, argv)
 

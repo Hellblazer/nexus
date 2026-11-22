@@ -24,7 +24,6 @@ positional ``idx`` — the review-gate fix for the wrong-topic-verdict class
 """
 from __future__ import annotations
 
-import itertools
 import re
 import subprocess
 from pathlib import Path
@@ -33,15 +32,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from click.testing import CliRunner
 
+import itertools
+
 import nexus.mcp_infra as _mi
 from nexus.commands.taxonomy_cmd import taxonomy
 from nexus.db.t2 import T2Database
-from tests._chunk_seed import collection_id_sql
-from tests._module_seam import patch_in
+
 from tests._t2_fixture_ops import canonical_chunk_id
-from tests.conftest import (
-    next_import_seed_id,  # session-unique import ids (see conftest note)
-)
+from tests.conftest import next_import_seed_id  # session-unique import ids (see conftest note)
+from tests._module_seam import patch_in
 
 #: RDR-194 P3d (nexus-tk070.p3d): the current test's minted tenant, stashed
 #: by the autouse fixture below so module-level ``_seed_topic`` (called from
@@ -101,9 +100,8 @@ def _seed_chunks_for_tenant(
         "(tenant_id, name, content_type, owner_id, embedding_model, lifecycle_state) "
         f"VALUES ('{tenant}', '{collection}', 'knowledge', 'test-seed', '{model_for_dim}', 'live') "
         "ON CONFLICT DO NOTHING; "
-        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}, embedding_model, collection_id) "
-        f"SELECT v.*, '{model_for_dim}', {collection_id_sql(tenant, collection)} FROM (VALUES {values}) AS v "
-        "ON CONFLICT DO NOTHING;"
+        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}, embedding_model) "
+        f"SELECT v.*, '{model_for_dim}' FROM (VALUES {values}) AS v ON CONFLICT DO NOTHING;"
     )
     psql = Path(state["pg_bin"]) / "psql"
     proc = subprocess.run(

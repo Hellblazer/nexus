@@ -24,12 +24,6 @@ Three modes:
    output and registers the operator's verified UUID assignments.
 
 Beads: nexus-h2pm (DT-link), nexus-4fw8 (synthetic), nexus-oa9k (CSV).
-
-Collections (RDR-229 P3.1, nexus-p2m1x.17): every register below names a collection whose chunks this module just
-read from T3 (``gather_titled_chunks`` / the CSV's own lookup), so the collection has its registry row. None of
-them registers the collection first, on purpose: since P3.1 the engine refuses a document under a collection with
-no registry row (typed 422 ``unregistered_collection``), and for chunks that exist with no row that refusal is the
-right answer, a defect to see, not one to mint away.
 """
 from __future__ import annotations
 
@@ -47,7 +41,6 @@ from nexus.bounded_subprocess import run_bounded
 from nexus.catalog.link_generator import _pdf_content_hash
 from nexus.catalog.rows.legacy_names import split_candidate_collection_name
 from nexus.db.limits import QUOTAS
-from nexus.label_filename import safe_label_filename
 
 if TYPE_CHECKING:
     from nexus.catalog.catalog_protocol import CatalogReader
@@ -579,7 +572,7 @@ def dump_csvs(
     Operators edit ``low_confidence.csv`` and ``unmatched.csv`` then feed
     them back via :func:`apply_csv`.
     """
-    target = out_dir / safe_label_filename(collection)  # a label may hold '..', ':', '\\' (RDR-229 P3.6)
+    target = out_dir / collection
     target.mkdir(parents=True, exist_ok=True)
     matched_path = target / "matched.csv"
     low_path = target / "low_confidence.csv"

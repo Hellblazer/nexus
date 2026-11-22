@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
-import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.jooq.nexus.Routines;
@@ -324,11 +323,11 @@ class CombinedQueryParityTest {
         // RDR-194 P3c: topic_assignments.doc_id is bytea now — decode(lpad(...), 'hex').
         ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                 TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.ASSIGNED_AT,
-                TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID)
+                TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
             .select(ctx.select(DSL.val(TENANT_A, TOPIC_ASSIGNMENTS.TENANT_ID), paddedChash(g),
                     DSL.val(topicId, TOPIC_ASSIGNMENTS.TOPIC_ID),
                     DSL.val(COLL_EXPLAIN, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION), DSL.val(SEED_TS),
-                    DSL.val(modelOf(su, TENANT_A, COLL_EXPLAIN), TOPIC_ASSIGNMENTS.EMBEDDING_MODEL), CollectionIds.idOf(TENANT_A, COLL_EXPLAIN))
+                    DSL.val(modelOf(su, TENANT_A, COLL_EXPLAIN), TOPIC_ASSIGNMENTS.EMBEDDING_MODEL))
                 .from(series))
             .execute();
     }
@@ -399,7 +398,6 @@ class CombinedQueryParityTest {
         DSL.using(su, SQLDialect.POSTGRES).insertInto(DOCUMENT_ASPECTS)
             .set(DOCUMENT_ASPECTS.TENANT_ID, tenantId)
             .set(DOCUMENT_ASPECTS.COLLECTION, collection)
-                .set(DOCUMENT_ASPECTS.COLLECTION_ID, CollectionIds.idOf(tenantId, collection))
             .set(DOCUMENT_ASPECTS.SOURCE_PATH, sourcePath)
             .set(DOCUMENT_ASPECTS.PROPOSED_METHOD, proposedMethod)
             .set(DOCUMENT_ASPECTS.CONFIDENCE, confidence)
@@ -438,7 +436,7 @@ class CombinedQueryParityTest {
         ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
                 DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.PROPOSED_METHOD, DOCUMENT_ASPECTS.CONFIDENCE,
                 DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION, DOCUMENT_ASPECTS.EXTRACTOR_NAME,
-                DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI, DOCUMENT_ASPECTS.COLLECTION_ID)
+                DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
             .select(ctx.select(DSL.val(TENANT_A, DOCUMENT_ASPECTS.TENANT_ID),
                     DSL.val(COLL_ASPECT_EXPLAIN, DOCUMENT_ASPECTS.COLLECTION),
                     DSL.concat(DSL.inline("asx"), DSL.cast(g, SQLDataType.VARCHAR)),
@@ -446,7 +444,7 @@ class CombinedQueryParityTest {
                     DSL.inline("cqp-test-model"), DSL.inline("cqp-test-extractor"),
                     DSL.concat(DSL.inline("asx"), DSL.cast(g, SQLDataType.VARCHAR)),
                     DSL.concat(DSL.val("cqp://" + COLL_ASPECT_EXPLAIN + "/asx", DOCUMENT_ASPECTS.SOURCE_URI),
-                        DSL.cast(g, SQLDataType.VARCHAR)), CollectionIds.idOf(TENANT_A, COLL_ASPECT_EXPLAIN))
+                        DSL.cast(g, SQLDataType.VARCHAR)))
                 .from(series))
             .execute();
     }
@@ -1406,7 +1404,6 @@ class CombinedQueryParityTest {
         DSL.using(su, SQLDialect.POSTGRES).insertInto(CHUNKS)
             .set(CHUNKS.TENANT_ID, tenant)
             .set(CHUNKS.COLLECTION, collection)
-                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
             .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chash))
             .set(CHUNKS.EMBEDDING_MODEL, modelOf(su, tenant, collection))
             .set(CHUNKS.CHUNK_TEXT, tumbler)
@@ -1468,7 +1465,6 @@ class CombinedQueryParityTest {
             .set(CATALOG_DOCUMENTS.CONTENT_TYPE, contentType)
             .set(CATALOG_DOCUMENTS.CORPUS, corpus)
             .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
-                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(tenantId, collection))
             .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER).doNothing()
             .execute();
     }
@@ -1482,7 +1478,6 @@ class CombinedQueryParityTest {
             .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position)
             .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(chash))
             .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
-                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenantId, collection))
             .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, modelOf(su, tenantId, collection))
             .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                 CATALOG_DOCUMENT_CHUNKS.POSITION).doNothing()
@@ -1496,7 +1491,6 @@ class CombinedQueryParityTest {
             .set(TOPICS.TENANT_ID, tenantId)
             .set(TOPICS.LABEL, label)
             .set(TOPICS.COLLECTION, collection)
-                .set(TOPICS.COLLECTION_ID, CollectionIds.idOf(tenantId, collection))
             .set(TOPICS.CREATED_AT, SEED_TS)
             .returningResult(TOPICS.ID)
             .fetchOne(TOPICS.ID);
@@ -1510,7 +1504,6 @@ class CombinedQueryParityTest {
             .set(TOPIC_ASSIGNMENTS.DOC_ID, HexFormat.of().parseHex(docId))
             .set(TOPIC_ASSIGNMENTS.TOPIC_ID, topicId)
             .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, collection)
-                .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, CollectionIds.idOf(tenantId, collection))
             .set(TOPIC_ASSIGNMENTS.ASSIGNED_AT, SEED_TS)
             .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, modelOf(su, tenantId, collection))
             .onConflict(TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID, TOPIC_ASSIGNMENTS.TOPIC_ID)
@@ -1532,13 +1525,13 @@ class CombinedQueryParityTest {
                                        String tenantId, String prefix, String author, String collection) {
         ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
                 CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.AUTHOR, CATALOG_DOCUMENTS.YEAR,
-                CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.CORPUS, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
+                CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.CORPUS, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
             .select(ctx.select(DSL.val(tenantId, CATALOG_DOCUMENTS.TENANT_ID),
                     DSL.concat(DSL.val(prefix, CATALOG_DOCUMENTS.TUMBLER), DSL.cast(g, SQLDataType.VARCHAR)),
                     DSL.concat(DSL.inline("Doc "), DSL.cast(g, SQLDataType.VARCHAR)),
                     DSL.val(author, CATALOG_DOCUMENTS.AUTHOR),
                     DSL.inline(2024), DSL.inline("paper"), DSL.inline("research"),
-                    DSL.val(collection, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION), CollectionIds.idOf(tenantId, collection))
+                    DSL.val(collection, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION))
                 .from(series))
             .execute();
     }
@@ -1549,11 +1542,11 @@ class CombinedQueryParityTest {
                                            String collection, String model) {
         ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                 CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
-                CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID)
+                CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
             .select(ctx.select(DSL.val(tenantId, CATALOG_DOCUMENT_CHUNKS.TENANT_ID),
                     DSL.concat(DSL.val(prefix, CATALOG_DOCUMENT_CHUNKS.DOC_ID), DSL.cast(g, SQLDataType.VARCHAR)),
                     DSL.inline(0), paddedChash(chashN), DSL.val(collection, CATALOG_DOCUMENT_CHUNKS.COLLECTION),
-                    DSL.val(model, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL), CollectionIds.idOf(tenantId, collection))
+                    DSL.val(model, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL))
                 .from(series))
             .execute();
     }
@@ -1565,7 +1558,6 @@ class CombinedQueryParityTest {
         DSL.using(su, SQLDialect.POSTGRES).insertInto(CHUNKS)
             .set(CHUNKS.TENANT_ID, tenantId)
             .set(CHUNKS.COLLECTION, collection)
-                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenantId, collection))
             .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chash))
             .set(CHUNKS.EMBEDDING_MODEL, modelOf(su, tenantId, collection))
             .set(CHUNKS.CHUNK_TEXT, chunkText)
@@ -1583,14 +1575,14 @@ class CombinedQueryParityTest {
                                          Field<Integer> chashN, String tenantId, String prefix,
                                          String collection, String model) {
         ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
-                CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_1024, CHUNKS.COLLECTION_ID)
+                CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_1024)
             .select(ctx.select(DSL.val(tenantId, CHUNKS.TENANT_ID), DSL.val(collection, CHUNKS.COLLECTION),
                     paddedChash(chashN), DSL.val(model, CHUNKS.EMBEDDING_MODEL),
                     DSL.concat(DSL.val(prefix, CHUNKS.CHUNK_TEXT), DSL.cast(g, SQLDataType.VARCHAR)),
                     DSL.cast(DSL.concat(DSL.inline("["),
                             DSL.cast(DSL.cast(g.mod(100), SQLDataType.DOUBLE).div(100.0), SQLDataType.VARCHAR),
                             DSL.inline(",1"), DSL.repeat(DSL.inline(",0"), 1022), DSL.inline("]")),
-                        CHUNKS.EMBEDDING_1024.getDataType()), CollectionIds.idOf(tenantId, collection))
+                        CHUNKS.EMBEDDING_1024.getDataType()))
                 .from(series))
             .execute();
     }

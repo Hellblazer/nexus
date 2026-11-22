@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
-import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.db.TaxonomyRepository;
 import dev.nexus.service.db.TenantScope;
@@ -250,7 +249,6 @@ class CrossPreviewRepositoryTest {
             ctx.insertInto(CHUNKS)
                 .set(CHUNKS.TENANT_ID, tenant)
                 .set(CHUNKS.COLLECTION, collection)
-                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
                 .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(hexChashValue))
                 .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
                 .set(CHUNKS.CHUNK_TEXT, "seed text " + hexChashValue)
@@ -278,7 +276,6 @@ class CrossPreviewRepositoryTest {
             ctx.insertInto(TAXONOMY_CENTROIDS)
                 .set(TAXONOMY_CENTROIDS.TENANT_ID, tenant)
                 .set(TAXONOMY_CENTROIDS.COLLECTION, collection)
-                .set(TAXONOMY_CENTROIDS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
                 .set(TAXONOMY_CENTROIDS.TOPIC_ID, topicId)
                 .set(TAXONOMY_CENTROIDS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
                 .set(TAXONOMY_CENTROIDS.LABEL, "seed-centroid-label")

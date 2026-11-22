@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
-import dev.nexus.service.db.CollectionIds;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.jooq.Field;
 import org.jooq.SQLDialect;
@@ -426,11 +425,6 @@ class VectorSensitivityRouteParityTest {
         CLASSIFIED_DEFINITION_READERS.put("reaper_quarantine_chunks(p_tenant_id text, p_collection text, p_quarantine_collection text, p_quarantined_at text, p_row_limit integer, p_grace interval, p_floor_fraction double precision, p_floor_min_chunks integer, p_dry_run boolean)",
             new Classified("TABLE(moved bigint, reapable_count bigint, total_count bigint, refused boolean, remaining bigint)", Exposure.NO_TEXT,
                 "moves reapable chunks to quarantine: returns counts and a refusal flag"));
-        CLASSIFIED_DEFINITION_READERS.put("rdr229_restamp(p_table text)",
-            new Classified("text", Exposure.NO_TEXT,
-                "RDR-229 P3.1 operator step (vectors-071-1): looks for an orphan row in the table it is given, chunk tables included, "
-                + "by an EXISTS over its name and collection_id columns, and registers one nexus.data_moves row; it never selects "
-                + "chunk_text. The result is a status string built from the table name and a fixed phrase, so it carries no chunk text"));
         CLASSIFIED_DEFINITION_READERS.put("service_tokens_create_tenant_partitions()",
             new Classified("trigger", Exposure.NO_TEXT,
                 "partition maintenance: returns a count, a flag or nothing"));
@@ -1128,7 +1122,7 @@ class VectorSensitivityRouteParityTest {
             String model = PgContainerHelper.collectionModel(dsl, tenant, origin);
             for (var e : text.entrySet()) {
                 dsl.insertInto(CHUNKS)
-                    .set(CHUNKS.TENANT_ID, tenant).set(CHUNKS.COLLECTION, origin).set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, origin))
+                    .set(CHUNKS.TENANT_ID, tenant).set(CHUNKS.COLLECTION, origin)
                     .set(CHUNKS.CHASH, HexFormat.of().parseHex(hexOf(e.getValue())))
                     .set(CHUNKS.EMBEDDING_MODEL, model).set(CHUNKS.CHUNK_TEXT, e.getValue())
                     .set(VectorSeeds.chunkEmbedding(384), VectorSeeds.vecXY(384, 1f, 0f))
@@ -1139,7 +1133,6 @@ class VectorSensitivityRouteParityTest {
                     .set(CATALOG_DOCUMENTS.TENANT_ID, tenant).set(CATALOG_DOCUMENTS.TUMBLER, "doc-" + owned)
                     .set(CATALOG_DOCUMENTS.TITLE, "Doc " + owned).set(CATALOG_DOCUMENTS.CONTENT_TYPE, "paper")
                     .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, origin)
-                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(tenant, origin))
                     .set(CATALOG_DOCUMENTS.SENSITIVE, true)
                     .set(CATALOG_DOCUMENTS.DELETED_AT, owned.equals("owned-tomb") ? OffsetDateTime.now().minusDays(60) : null)
                     .execute();
@@ -1148,7 +1141,6 @@ class VectorSensitivityRouteParityTest {
                     .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
                     .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(hexOf(text.get(owned))))
                     .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, origin)
-                    .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, origin))
                     .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, model)
                     .execute();
             }

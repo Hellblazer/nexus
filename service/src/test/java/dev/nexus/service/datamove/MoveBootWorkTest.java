@@ -95,7 +95,7 @@ class MoveBootWorkTest {
     }
 
     private static DataMove move(String label) {
-        return new DataMove(label, "t", "s", "t", 10, 0, 1000, "v", null, null, null, null, 0, null, null, DataMove.DEFAULT_VERIFY_STATEMENT_TIMEOUT_MS);
+        return new DataMove(label, "t", "s", "t", 10, 0, 1000, "v", null, null, null, null, 0, null, null);
     }
 
     private final FakeClock clock = new FakeClock();
@@ -400,8 +400,7 @@ class MoveBootWorkTest {
         var restarted = new DataMove("m", "t", "s", "t", 10, 0, 1000, "v", null, null, null, null, 3,
             java.time.OffsetDateTime.parse("2026-11-16T23:00:00Z"),
             "retry 3, last 2026-11-16T23:00:00Z: run m/acme-corp/leafed_m1_acme-corp raised sqlstate=40001: "
-                + "could not serialize access; Key (tenant_id)=(acme-corp) conflicts",
-            DataMove.DEFAULT_VERIFY_STATEMENT_TIMEOUT_MS);
+                + "could not serialize access; Key (tenant_id)=(acme-corp) conflicts");
         reader.open = List.of(restarted);
         var w = work(Duration.ofMinutes(15));
 
@@ -489,8 +488,7 @@ class MoveBootWorkTest {
 
         var restarted = new DataMove("r", "t", "s", "t", 10, 0, 1000, "v", null, null, null, null, 3,
             java.time.OffsetDateTime.parse("2026-11-16T23:00:00Z"),
-            "retry 3, last 2026-11-16T23:00:00Z: pg_background is not installed",
-            DataMove.DEFAULT_VERIFY_STATEMENT_TIMEOUT_MS);
+            "retry 3, last 2026-11-16T23:00:00Z: pg_background is not installed");
         reader.open = List.of(restarted);
         w.publish();
         assertThat(entry("r").what()).startsWith("blocked: r:");

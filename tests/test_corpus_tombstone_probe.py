@@ -95,9 +95,6 @@ def test_live_promoted_candidate_no_tombstone_log(monkeypatch) -> None:
     promoted = "knowledge__art__voyage-context-3__v1"
     _patch_get(monkeypatch, stats_names={promoted}, raw_names={promoted})
     client = HttpVectorClient()
-    # RDR-229 P2.8: the subject's catalog row is read before the name resolution; this test is about the
-    # tombstone log, so the registry has no row (as in the test above).
-    monkeypatch.setattr(client, "find_collection", lambda *_a: None)
 
     with capture_logs() as cap:
         result = t3_collection_name(legacy, t3=client)

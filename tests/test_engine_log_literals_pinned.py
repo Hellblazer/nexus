@@ -150,23 +150,6 @@ def _java_literal_regex(lit: str) -> re.Pattern[str]:
     return re.compile(r"\b" + r"\S+".join(re.escape(part) for part in lit.rstrip().split("{}")))
 
 
-#: Fields the engine appended to a line AFTER the real run in ``tests/fixtures/windows_engine`` was captured (the
-#: fixture is verbatim, so it cannot carry them). The pin still fails for a renamed, reordered or removed captured
-#: field; a field appended after the last captured one is allowed here, by name, and nowhere else. Both scripts that
-#: read the line take ``new_changesets=`` only, which comes before every one of them.
-_APPENDED_AFTER_CAPTURE: dict[str, tuple[str, ...]] = {
-    # RDR-246 / RDR-229 P3.8 (e47f4ed624): a self-retrying changeset still unrun after the walk.
-    "schema_migration_complete": ("skipped_retrying_changesets={}",),
-}
-
-
-def _literal_as_captured(event: str, lit: str) -> str:
-    """*lit* without the fields appended after the fixture's real run (see :data:`_APPENDED_AFTER_CAPTURE`)."""
-    for field in _APPENDED_AFTER_CAPTURE.get(event, ()):
-        lit = lit.replace(" " + field, "")
-    return lit
-
-
 @pytest.mark.parametrize(
     "source, event",
     [
@@ -186,7 +169,7 @@ def test_the_current_java_log_literals_still_render_the_lines_the_real_windows_r
     assert real, f"the fixtures hold no event={event} line"
     literals = [lit for lit in _log_literals(source) if lit.startswith(f"event={event}")]
     assert literals, f"{source.name} no longer logs event={event}"
-    assert all(any(_java_literal_regex(_literal_as_captured(event, lit)).search(ln) for lit in literals) for ln in real), (
+    assert all(any(_java_literal_regex(lit).search(ln) for lit in literals) for ln in real), (
         f"no {source.name} literal for event={event} matches the real line {real[0]!r}; literals: {literals}"
     )
 

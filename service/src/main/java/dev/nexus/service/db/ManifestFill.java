@@ -356,8 +356,6 @@ public final class ManifestFill {
             .set(t.SECTION_TYPE, b.field(type))
             .set(t.PAGE_NUMBER, b.field(page))
             .set(t.LABELS_WRITTEN, true)
-            // RDR-229 P3.1: a row the stamp has not reached is stamped by the write that touches it.
-            .set(t.COLLECTION_ID, CatalogIdStamps.keep(t.COLLECTION_ID, t.TENANT_ID, t.COLLECTION))
             .from(b)
             // the target row's own guard: a row a concurrent writer already labelled is not written over
             .where(sameRow(t, tenant, b, bDoc, bPos, bChash).and(t.LABELS_WRITTEN.isFalse()));
@@ -383,7 +381,6 @@ public final class ManifestFill {
             .set(t.LINE_END, DSL.coalesce(t.LINE_END, rle))
             .set(t.CHAR_START, DSL.coalesce(t.CHAR_START, rcs))
             .set(t.CHAR_END, DSL.coalesce(t.CHAR_END, rce))
-            .set(t.COLLECTION_ID, CatalogIdStamps.keep(t.COLLECTION_ID, t.TENANT_ID, t.COLLECTION))
             .from(b)
             // the target row's own guard: a NULL column the chunk records and no column it contradicts, now
             .where(sameRow(t, tenant, b, bDoc, bPos, bChash)

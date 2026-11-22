@@ -9,7 +9,6 @@ import com.sun.net.httpserver.HttpPrincipal;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
-import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
 import org.jooq.SQLDialect;
@@ -93,14 +92,7 @@ class CatalogHandlerSweepAndChashesManyTest {
         return Chash.ofText(seed).toHex();
     }
 
-    private void registerCollection(String collection) {
-        repo.upsertCollection(TENANT, Map.of(
-            "name", collection, "content_type", "code", "owner_id", "http-sweep-" + collection.split("__")[1],
-            "embedding_model", "minilm-l6-v2-384", "model_version", "v1"));
-    }
-
     private void registerDoc(String tumbler, String collection) {
-        registerCollection(collection);   // P3.1: a document under an unregistered collection is a typed 422
         repo.upsertDocument(TENANT, Map.of(
             "tumbler", tumbler, "title", "http-sweep-" + tumbler,
             "content_type", "code", "corpus", "code",
@@ -108,16 +100,19 @@ class CatalogHandlerSweepAndChashesManyTest {
     }
 
     private void seedChunk384(String collection, String hexChash) throws Exception {
-        registerCollection(collection);
+        repo.upsertCollection(TENANT, Map.of(
+            "name", collection, "content_type", "code", "owner_id", "http-sweep-owner",
+            "embedding_model", "minilm-l6-v2-384", "model_version", "v1"));
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             PgContainerHelper.setTenant(su, TenantScope.DEFAULT_TENANT_GUC, TENANT, false);
             var ctx = DSL.using(su, SQLDialect.POSTGRES);
             // RDR-225: this tenant holds no service token, so it has no partition leaves until asked.
             PgContainerHelper.ensureTenantPartitions(ctx, TENANT);
-            ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, CHUNKS.CHASH,
-                    CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384)
-                .values(TENANT, collection, CollectionIds.require(ctx, TENANT, collection), HexFormat.of().parseHex(hexChash),
+            ctx.insertInto(CHUNKS,
+                    CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
+                    CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384)
+                .values(TENANT, collection, HexFormat.of().parseHex(hexChash),
                     PgContainerHelper.collectionModel(ctx, TENANT, collection),
                     "seed text " + hexChash, Vector.of(new float[384]))
                 .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL)

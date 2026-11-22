@@ -57,12 +57,6 @@ public final class QuarantineOrigin {
      */
     public static final String PREFIX = "quarantine-";
 
-    /**
-     * The metadata key beside {@code origin_collection} that holds the origin's registry {@code collection_id}
-     * (RDR-229 P3.1). A JSONB key, not a column; the move writes the name tag, and a retag writes both.
-     */
-    public static final String ORIGIN_ID_KEY = "origin_collection_id";
-
     /** Origin collection deleted: its rows were taken out of one sibling. */
     public static final String OP_DELETE_ORIGIN = "collection_delete_quarantine";
     /** A quarantine collection itself was deleted. */
@@ -291,17 +285,7 @@ public final class QuarantineOrigin {
      */
     static int retagRowsOf(DSLContext ctx, String tenant, String from, String to) {
         Condition rows = rowsOf(tenant, from, to);
-        // RDR-229 P3.1 stage 2b (nexus-p2m1x.17): the tag names the origin by id as well as by name, so a reader can
-        // follow a rename by id. A metadata key, not a column. The id is the registry's now, in this transaction (the
-        // rename registers its target before the retag runs); a target with no registry row is tagged by name alone.
-        Long toId = ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
-            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(to))
-            .fetchOne(CATALOG_COLLECTIONS.COLLECTION_ID);
-        var tag = CatalogRepository.MAPPER.createObjectNode().put("origin_collection", to);
-        if (toId != null) {
-            tag.put(ORIGIN_ID_KEY, toId);
-        }
-        JSONB incoming = JSONB.jsonb(tag.toString());
+        JSONB incoming = JSONB.jsonb(CatalogRepository.MAPPER.createObjectNode().put("origin_collection", to).toString());
         int total = 0;
         List<String> siblings = siblingsHolding(ctx, rows);
         for (String sibling : siblings) {
@@ -309,12 +293,9 @@ public final class QuarantineOrigin {
             // COALESCE: jsonb_concat(NULL, x) is NULL, which would leave a NULL-metadata row untagged while
             // counting and auditing it as retagged. Only rows whose tag actually changes are returned.
             // Does not touch last_written_at: a retag is maintenance, never a client re-write.
-            // The row's own id is set too (the sibling's): chunks carries a NOT VALID CHECK evaluated on every
-            // updated row, which refuses a quarantine row the stamp has not reached.
             List<String> hex = sorted(ctx.update(CHUNKS)
                 .set(CHUNKS.METADATA, PgVectorRepository.mergeMetadata(
                     DSL.coalesce(CHUNKS.METADATA, DSL.val(EMPTY_OBJECT)), DSL.val(incoming), null))
-                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, sibling))
                 .where(rows.and(CHUNKS.COLLECTION.eq(sibling)).and(ORIGIN_TAG.isDistinctFrom(to)))
                 .returningResult(ChashHex.hex(CHUNKS.CHASH)).fetch(ChashHex.hex(CHUNKS.CHASH)));
             if (hex.isEmpty()) {

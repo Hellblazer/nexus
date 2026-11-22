@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 package dev.nexus.service.vectors;
 
-import dev.nexus.service.db.CollectionIds;
 import org.jooq.exception.DataAccessException;
 import dev.nexus.service.VectorSeeds;
 import dev.nexus.service.PgCatalogProbes;
@@ -193,14 +192,6 @@ class PgVectorRepositoryGcQuarantineTest {
      * this suite, so the SQL functions' own handling of an already-existing
      * re-referenced row stays covered.
      */
-    /**
-     * RDR-229 P3.1: the registry id of {@code collection}, or, for the collection these seeds leave unregistered on
-     * purpose, an id no registry row holds (a row that names a collection must carry one, and there is none to carry).
-     */
-    private static org.jooq.Field<Long> idOrStray(String tenant, String collection) {
-        return DSL.coalesce(CollectionIds.idOf(tenant, collection), DSL.val(Long.MAX_VALUE));
-    }
-
     private void seedManifestBypassingFk(String tenant, String docId, String chash, String collection)
             throws Exception {
         try (var conn = pg.createConnection("")) {
@@ -214,30 +205,20 @@ class PgVectorRepositoryGcQuarantineTest {
             // (it reads the collection's model to stamp the row), and the "first-ever origin" scenarios are
             // exactly the ones whose origin is unregistered. The row is written directly instead, carrying the
             // suite's model, which is the model of the chunk it will later be restored with.
-            // RDR-229 P3.1: nor does the document writer accept an unregistered physical collection any more (a typed
-            // 422), so the document row is written directly too, and both rows name the unregistered collection with
-            // an id no registry row holds (a row that names a collection carries one, and this one has no registry row).
+            catalogRepo.upsertDocument(tenant, Map.of(
+                "tumbler", docId,
+                "title", "GC quarantine fixture " + docId,
+                "content_type", "code",
+                "corpus", "code",
+                "physical_collection", collection
+            ));
             try (var conn = pg.createConnection("")) {
                 DSL.using(conn, SQLDialect.POSTGRES)
-                    .insertInto(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS)
-                    .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.TENANT_ID, tenant)
-                    .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.TUMBLER, docId)
-                    .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.TITLE, "GC quarantine fixture " + docId)
-                    .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.CONTENT_TYPE, "code")
-                    .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.CORPUS, "code")
-                    .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
-                    .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, idOrStray(tenant, collection))
-                    .execute();
-                DSL.using(conn, SQLDialect.POSTGRES)
-                    .insertInto(CATALOG_DOCUMENT_CHUNKS)
-                    .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant)
-                    .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, docId)
-                    .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
-                    .set(CATALOG_DOCUMENT_CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chash))
-                    .set(CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, 0)
-                    .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
-                    .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, idOrStray(tenant, collection))
-                    .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, MODEL)
+                    .insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
+                        CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
+                        CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
+                        CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                    .values(tenant, docId, 0, java.util.HexFormat.of().parseHex(chash), 0, collection, MODEL)
                     .execute();
             }
         }
@@ -263,14 +244,10 @@ class PgVectorRepositoryGcQuarantineTest {
             org.jooq.DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             PgContainerHelper.ensureTenantPartitions(ctx, tenant);
             PgContainerHelper.dropConstraint(su, CHUNKS, "chunks_collection_fk");
-            ctx.insertInto(CHUNKS)
-               .set(CHUNKS.TENANT_ID, tenant)
-               .set(CHUNKS.COLLECTION, collection)
-               .set(CHUNKS.COLLECTION_ID, idOrStray(tenant, collection))
-               .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chashHex))
-               .set(CHUNKS.EMBEDDING_MODEL, MODEL)
-               .set(CHUNKS.CHUNK_TEXT, "text")
-               .set(CHUNKS.EMBEDDING_1024, Vector.of(constantVector1024()))
+            ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
+                           CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_1024)
+               .values(tenant, collection, java.util.HexFormat.of().parseHex(chashHex), MODEL, "text",
+                       Vector.of(constantVector1024()))
                .execute();
         }
     }
@@ -650,7 +627,6 @@ class PgVectorRepositoryGcQuarantineTest {
                 DSL.using(conn, SQLDialect.POSTGRES).insertInto(CHUNKS)
                     .set(CHUNKS.TENANT_ID, TENANT_A)
                     .set(CHUNKS.COLLECTION, originCol)
-                    .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT_A, originCol))
                     .setNull(CHUNKS.CHASH)
                     .set(CHUNKS.EMBEDDING_MODEL, MODEL)
                     .set(CHUNKS.CHUNK_TEXT, "x")

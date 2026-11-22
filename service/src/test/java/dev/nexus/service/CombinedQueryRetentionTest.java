@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
-import dev.nexus.service.db.CollectionIds;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgVectorRepositoryContractTest.FakeEmbedder;
@@ -144,7 +143,6 @@ class CombinedQueryRetentionTest {
                    .set(CATALOG_DOCUMENTS.AUTHOR, "ada")
                    .set(CATALOG_DOCUMENTS.CONTENT_TYPE, "paper")
                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COL)
-                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, COL))
                    .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
                    .doNothing()
                    .execute();
@@ -155,8 +153,8 @@ class CombinedQueryRetentionTest {
             ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
                     CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                     CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                    CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID)
-               .values(TENANT, FULL_TUMBLER, 0, HexFormat.of().parseHex(FULL_CHASH), COL, model, CollectionIds.require(ctx, TENANT, COL))
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+               .values(TENANT, FULL_TUMBLER, 0, HexFormat.of().parseHex(FULL_CHASH), COL, model)
                .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                     CATALOG_DOCUMENT_CHUNKS.POSITION)
                .doNothing()
@@ -164,8 +162,8 @@ class CombinedQueryRetentionTest {
             ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
                     CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                     CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                    CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID)
-               .values(TENANT, REFONLY_TUMBLER, 0, HexFormat.of().parseHex(REFONLY_CHASH), COL, model, CollectionIds.require(ctx, TENANT, COL))
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+               .values(TENANT, REFONLY_TUMBLER, 0, HexFormat.of().parseHex(REFONLY_CHASH), COL, model)
                .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                     CATALOG_DOCUMENT_CHUNKS.POSITION)
                .doNothing()
@@ -187,8 +185,8 @@ class CombinedQueryRetentionTest {
 
             // One shared topic, both chashes assigned to it (topic-scoped).
             long topicId = ctx.insertInto(TOPICS,
-                    TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.CREATED_AT, TOPICS.COLLECTION_ID)
-               .values(TENANT, TOPIC_LABEL, COL, OffsetDateTime.parse("2026-01-01T00:00:00+00:00"), CollectionIds.require(ctx, TENANT, COL))
+                    TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.CREATED_AT)
+               .values(TENANT, TOPIC_LABEL, COL, OffsetDateTime.parse("2026-01-01T00:00:00+00:00"))
                .returning(TOPICS.ID)
                .fetchOne()
                .getId();
@@ -196,9 +194,9 @@ class CombinedQueryRetentionTest {
                 ctx.insertInto(TOPIC_ASSIGNMENTS,
                         TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID, TOPIC_ASSIGNMENTS.TOPIC_ID,
                         TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.ASSIGNED_AT,
-                        TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID)
+                        TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
                    .values(TENANT, HexFormat.of().parseHex(chash), topicId, COL,
-                        OffsetDateTime.parse("2026-01-01T00:00:00+00:00"), model, CollectionIds.require(ctx, TENANT, COL))
+                        OffsetDateTime.parse("2026-01-01T00:00:00+00:00"), model)
                    .onConflict(TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                         TOPIC_ASSIGNMENTS.TOPIC_ID)
                    .doNothing()

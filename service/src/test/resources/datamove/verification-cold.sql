@@ -1,1 +1,0 @@
-SELECT 1 FROM dm_test.tenant_plain t WHERE t.n = 0 AND (t.tenant_id = $1 OR $1 IS NULL) UNION ALL SELECT 1 FROM dm_test.cold_marker c WHERE CASE WHEN c.cold THEN pg_sleep(2)::text ELSE 'warm' END = 'never'

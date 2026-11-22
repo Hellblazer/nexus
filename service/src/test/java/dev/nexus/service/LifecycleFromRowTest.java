@@ -85,7 +85,7 @@ class LifecycleFromRowTest extends AtomicWriteTestBase {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("name", name);
         m.put("content_type", "knowledge");
-        m.put("owner_id", "o-" + name);   // each its own owner: a tuple has one live collection (RDR-229 P3.8)
+        m.put("owner_id", "o");
         m.put("embedding_model", "minilm-l6-v2-384");
         m.put("model_version", "v1");
         if (state != null) m.put("lifecycle_state", state);
@@ -420,7 +420,7 @@ class LifecycleFromRowTest extends AtomicWriteTestBase {
         String dormant = col("a8d2");
         repo.upsertCollection(t, reg(dormant, "dormant"));
 
-        var row = repo.collectionForTuple(t, "knowledge", "o-" + dormant, "minilm-l6-v2-384");
+        var row = repo.collectionForTuple(t, "knowledge", "o", "minilm-l6-v2-384");
         assertThat(row).as("guard: the dormant row resolves the tuple").isNotNull();
         assertThat(row.get("name")).isEqualTo(dormant);
         assertThat(row.get("lifecycle_state")).isEqualTo("dormant");

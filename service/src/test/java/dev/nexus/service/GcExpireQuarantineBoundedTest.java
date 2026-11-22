@@ -8,7 +8,6 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
-import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
@@ -198,11 +197,11 @@ class GcExpireQuarantineBoundedTest {
                 hashes.stream().map(h -> Map.<String, Object>of()).toList());
             String model = PgContainerHelper.collectionModel(ctx, TENANT, fx.origin());
             for (int i = 0; i < hashes.size(); i++) {
-                ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
-                        CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
-                        CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-                    .values(TENANT, doc, i, Chash.fromHex(hashes.get(i)).toBytes(), fx.origin(),
-                            CollectionIds.require(ctx, TENANT, fx.origin()), model)
+                ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
+                        CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                        CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
+                        CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                    .values(TENANT, doc, i, Chash.fromHex(hashes.get(i)).toBytes(), fx.origin(), model)
                     .execute();
             }
         });
@@ -532,9 +531,9 @@ class GcExpireQuarantineBoundedTest {
             su.setAutoCommit(true);
             PgContainerHelper.dropConstraint(su, CHUNKS, "chunks_collection_fk");
             DSL.using(su, SQLDialect.POSTGRES)
-               .insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, CHUNKS.CHASH,
-                       CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_768, CHUNKS.METADATA)
-               .values(TENANT, fx.sibling(), CollectionIds.require(DSL.using(su, SQLDialect.POSTGRES), TENANT, fx.sibling()), Chash.fromHex(twin).toBytes(), "bge-base-en-v15-768", "twin",
+               .insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
+                           CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_768, CHUNKS.METADATA)
+               .values(TENANT, fx.sibling(), Chash.fromHex(twin).toBytes(), "bge-base-en-v15-768", "twin",
                        Vector.of(new float[768]), JSONB.jsonb(MAPPER.writeValueAsString(meta(fx, OLD, false))))
                .execute();
         }

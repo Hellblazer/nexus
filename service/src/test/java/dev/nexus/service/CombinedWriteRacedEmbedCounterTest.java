@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
-import dev.nexus.service.db.CollectionIds;
 import org.jooq.impl.DSL;
 import org.jooq.SQLDialect;
 import com.zaxxer.hikari.HikariConfig;
@@ -412,7 +411,6 @@ class CombinedWriteRacedEmbedCounterTest {
             DSL.using(su, SQLDialect.POSTGRES).insertInto(CHUNKS)
                 .set(CHUNKS.TENANT_ID, TENANT)
                 .set(CHUNKS.COLLECTION, COLLECTION)
-                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, COLLECTION))
                 .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(hexChash))
                 .set(CHUNKS.EMBEDDING_MODEL, "minilm-l6-v2-384")
                 .set(CHUNKS.CHUNK_TEXT, text)

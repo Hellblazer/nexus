@@ -330,20 +330,16 @@ def _safe_collection(
 
 
 def _sanitise_owner_segment(name: str) -> str:
-    """Return *name* with any character the conformant owner segment
-    does not admit collapsed to ``-``.
-
-    (Since RDR-229 P3.6 ``validate_collection_name`` is the label rule and
-    admits all of these; the grammar below is the conformant-name one, still
-    enforced by ``is_conformant_collection_name``.)
+    """Return *name* with any character that ``validate_collection_name``
+    would reject collapsed to ``-``.
 
     Conformant grammar (RDR-103): owner segment must contain only
     alphanumerics and hyphens. ``_`` is the segment separator and must
     not appear inside the segment. Dots, slashes, spaces, and any other
     glyph map to ``-``. Repeated hyphens collapse to a single hyphen
     and leading / trailing hyphens are stripped so the resulting
-    segment starts and ends with an alphanumeric, as the conformant
-    grammar requires.
+    segment also satisfies the start-and-end-with-alphanumeric guard
+    in ``validate_collection_name``.
     """
     out_chars: list[str] = []
     for ch in name:

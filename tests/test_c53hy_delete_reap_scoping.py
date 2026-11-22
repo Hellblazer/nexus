@@ -76,7 +76,7 @@ def _seed_live_doc(local_t3: T3Database, *, collection: str, title: str, content
     == *collection*), both keyed on the same content-derived chash.
     Returns the chash.
     """
-    from tests._catalog_fixture_ops import catalog_store_hook_tracked_seeded as catalog_store_hook_tracked  # noqa: PLC0415 — test-local helper import
+    from nexus.catalog.store_hook import catalog_store_hook_tracked  # noqa: PLC0415 — test-local helper import
 
     chash = hashlib.sha256(content.encode()).hexdigest()
     local_t3.put(collection=collection, content=content, title=title)

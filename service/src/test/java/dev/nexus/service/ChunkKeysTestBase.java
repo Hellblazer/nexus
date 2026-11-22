@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
-import dev.nexus.service.db.CollectionIds;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
@@ -225,10 +224,9 @@ abstract class ChunkKeysTestBase extends AtomicWriteTestBase {
             DSL.using(su, SQLDialect.POSTGRES)
                 .insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
                     CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION,
-                    CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CATALOG_DOCUMENTS.METADATA)
-                .values(DSL.val(tenant), DSL.val(tumbler), DSL.val("Doc " + tumbler), DSL.val(contentType),
-                    DSL.val(physicalCollection), CollectionIds.idOf(tenant, physicalCollection),
-                    DSL.val(metadataJson == null ? null : JSONB.jsonb(metadataJson)))
+                    CATALOG_DOCUMENTS.METADATA)
+                .values(tenant, tumbler, "Doc " + tumbler, contentType, physicalCollection,
+                    metadataJson == null ? null : JSONB.jsonb(metadataJson))
                 .execute();
         }
     }

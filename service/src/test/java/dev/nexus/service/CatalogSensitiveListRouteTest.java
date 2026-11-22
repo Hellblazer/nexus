@@ -101,7 +101,6 @@ class CatalogSensitiveListRouteTest {
     /** A registered document in {@code collection}, sensitive when asked: its tumbler. */
     private String doc(String token, String tenant, String collection, boolean sensitive) throws Exception {
         String owner = "f3yqd.sens" + (seq++);
-        CollectionIdSeeds.register(pg, tenant, collection);
         var resp = post(token, tenant, "/v1/catalog/doc/register", mapper.writeValueAsString(Map.of(
             "owner_prefix", owner, "title", "doc " + owner, "content_type", "prose",
             "source_uri", "file:///f3yqd/" + owner + ".md", "physical_collection", collection)));

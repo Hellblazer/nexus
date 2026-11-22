@@ -11,7 +11,6 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import dev.nexus.service.db.CatalogRepository;
-import dev.nexus.service.db.CollectionLabel;
 import dev.nexus.service.db.GraphScopeFilter;
 import dev.nexus.service.vectors.ChunkKeyAllowlistCheck;
 import org.slf4j.Logger;
@@ -66,7 +65,6 @@ import java.util.*;
  *   GET   /v1/catalog/manifest/fill/{job_id}  the fill job: state, stage, done_rows, total_rows, filled, cursor, counts (nexus-f3yqd, R2)
  *   GET   /v1/catalog/manifest/foreign_collection?limit=N  live documents whose manifest names chunks outside their physical_collection (GH #1611)
  *   GET   /v1/catalog/uri_segment_census?limit=N  chroma:// and nx-note:// source-URI rows grouped by table, scheme, segment and collection, with the collection's content type (RDR-229 P1.2)
- *   GET   /v1/catalog/rdr229_completion_counts  the caller's tenant's registry rows, live collections, dangling and self-id tombstones, and orphan/unstamped rows per NOT VALID table (RDR-229 P3.1; /v1/status carries none)
  *   GET   /v1/catalog/sensitive?limit=N  the tenant's live sensitive documents, listed up to N, with the total (nexus-f3yqd)
  *   GET   /v1/catalog/sensitive/locators?limit=N  the live sensitive documents and the live aliases of them, with the six locator fields, sensitive included (nexus-uwggq.2.5)
  *   GET   /v1/catalog/docs/by-scheme?scheme=S&limit=&offset=  live documents whose urlparse(source_uri).scheme is S lowercased, a page of at most 1000 with the exact count (nexus-uwggq.1.5)
@@ -94,8 +92,8 @@ import java.util.*;
  *   POST  /v1/catalog/owners/reactivate  clear an owner's deactivated_at (nexus-cw262)
  *   GET   /v1/catalog/owners/by_repo     get owner by repo_hash
  *   POST  /v1/catalog/collections/upsert upsert collection
- *   GET   /v1/catalog/collections/list   list collections (rows carry collection_id, RDR-229 P3.5a, read-only)
- *   GET   /v1/catalog/collections/get    get collection by name (row carries collection_id; so does /collections/for_tuple)
+ *   GET   /v1/catalog/collections/list   list collections
+ *   GET   /v1/catalog/collections/get    get collection by name
  *   POST  /v1/catalog/collections/supersede supersede collection
  *   POST  /v1/catalog/collections/rename rename collection (cascade)
  *   POST  /v1/catalog/collections/rehome re-home a collection onto a live target (one txn)
@@ -363,7 +361,6 @@ public final class CatalogHandler implements HttpHandler {
                 case "/stub-metadata"         -> handleStubMetadata(exchange, tenant, method);
                 case "/manifest/foreign_collection" -> handleManifestForeignCollection(exchange, tenant, method);
                 case "/uri_segment_census"    -> handleUriSegmentCensus(exchange, tenant, method);
-                case "/rdr229_completion_counts" -> boundedReads.rdr229CompletionCounts(exchange, tenant, method);   // RDR-229 P3.1 review N2: the caller's own counts
                 case "/chash/conformance"     -> handleChashConformance(exchange, tenant, method);
                 // nexus-ysrwi: the third sibling. /docs/orphaned already
                 // existed; links had no equivalent, which is why the client
@@ -518,12 +515,6 @@ public final class CatalogHandler implements HttpHandler {
             // tombstoned target — the non-resurrection rule extended beyond
             // /update. Same 409 shape as CollectionMergeRefused above: a
             // refusal, not a server error.
-            HttpUtil.send(exchange, 409, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
-        } catch (dev.nexus.service.db.MintedLabel.SequenceBehindDataException
-                 | dev.nexus.service.db.MintedLabel.LabelsTakenException
-                 | dev.nexus.service.db.CollectionMint.LiveTupleConflict e) {
-            // RDR-229 P3.8: a refusal of the collection mint or of a registering row that would hold a live tuple
-            // another collection holds. The message names the collections or the remedy; nothing was written.
             HttpUtil.send(exchange, 409, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
         } catch (CatalogRepository.EmbeddingProfileConflictException e) {
             // RDR-204 Phase 1 (bead nexus-ft04v.8): the request is
@@ -2457,24 +2448,6 @@ public final class CatalogHandler implements HttpHandler {
     private void handleCollectionUpsert(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
-        // RDR-229 P3.8: a body naming a collection_id is refused (400) before anything is written, the profile seed below
-        // included.
-        dev.nexus.service.db.CollectionMint.refuseSuppliedId(body);
-        // RDR-229 P3.6: a refused label writes nothing, so it is judged before the lazy profile seed below, which
-        // commits on its own. A NEW label gets the whole rule; an existing row keeps its label whatever it is (the
-        // repository applies the same rule inside the registration, this only moves the refusal ahead of the seed).
-        // A name that is present but not a string is a 400 here, as on the other collection routes (before r2 it reached
-        // the INSERT). A missing or blank name is P3.8's mint branch and falls through to the repository.
-        Object rawName = body.get("name");
-        if (rawName != null && !(rawName instanceof String)) {
-            HttpUtil.send(exchange, 400, "{\"error\":\"name must be a string\"}"); return;
-        }
-        if (rawName instanceof String label && !label.isBlank()) {
-            CollectionLabel.requireStorable(label);
-            if (!repo.collectionExists(tenant, label)) {
-                CollectionLabel.validateUserLabel(label);
-            }
-        }
         // RDR-204 Phase 1 (bead nexus-ft04v.6/.8): this IS the single choke
         // point for "register a collection" (the client's
         // register_collection() -> POST /v1/catalog/collections/upsert ->
@@ -2500,14 +2473,6 @@ public final class CatalogHandler implements HttpHandler {
                 // registration can never 400 on an unrecognised content_type.
                 combinedWriteService.seedEmbeddingProfileForContentType(tenant, s);
             }
-        }
-        if (!(body.get("name") instanceof String registeredName) || registeredName.isBlank()) {
-            // RDR-229 P3.8: no name, the engine mints one and answers the row it registered (collection_id, name and
-            // the attributes), beside the "ok" every answer of this route has carried.
-            Map<String, Object> minted = new LinkedHashMap<>(repo.mintCollection(tenant, body, true));
-            minted.put("ok", true);
-            HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(minted));
-            return;
         }
         repo.upsertCollection(tenant, body, true);
         HttpUtil.send(exchange, 200, "{\"ok\":true}");
@@ -2840,15 +2805,6 @@ public final class CatalogHandler implements HttpHandler {
         if (oldName == null || newName == null) {
             HttpUtil.send(exchange, 400, "{\"error\":\"old_name/new_name (or old/new) required\"}"); return;
         }
-        // RDR-229 P3.6: a NEW rename target is a user-supplied label, so the label rule applies (a 400 through the
-        // route's IllegalArgumentException arm). A target row that already exists, a tombstone a past rename left,
-        // keeps its label whatever it is, so renaming back onto it (the undo) is not refused. A NUL is refused first
-        // of all, before the first read: bound into a lookup it would be a database error, not a 400. A quarantine-
-        // label is a legal label, so the quarantine refusal that follows still answers for it.
-        CollectionLabel.requireStorable(newName);
-        if (!repo.collectionExists(tenant, newName)) {
-            CollectionLabel.validateUserLabel(newName);
-        }
         // nexus-wbfpw.71: refused on a quarantine collection, source or target, before any other check can
         // answer with a different status. CatalogRepository.renameCollection carries the same guard.
         repo.requireNotQuarantine(tenant, "rename", oldName);
@@ -3156,9 +3112,6 @@ public final class CatalogHandler implements HttpHandler {
         Map<String, Object> out = new java.util.LinkedHashMap<>();
         out.put("imported", result.imported());
         out.put("state_corrected", result.stateCorrected());
-        // RDR-229 P3.6 and item 10 (additive): the rows whose label the rule refused, each {name, rule, reason}; the
-        // rest of the batch imported. An older engine omits it, which reads as none.
-        out.put("refused", result.refused());
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(out));
     }
 

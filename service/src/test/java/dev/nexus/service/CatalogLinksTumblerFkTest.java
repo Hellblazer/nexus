@@ -67,7 +67,6 @@ class CatalogLinksTumblerFkTest {
 
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
-            PgContainerHelper.insertCollection(org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES), TENANT, COLLECTION);
         }
 
         var cfg = new HikariConfig();

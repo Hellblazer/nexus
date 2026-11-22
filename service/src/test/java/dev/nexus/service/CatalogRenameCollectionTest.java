@@ -3,7 +3,6 @@
 package dev.nexus.service;
 
 import dev.nexus.service.db.CatalogRepository;
-import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
 import org.jooq.DSLContext;
@@ -381,16 +380,14 @@ class CatalogRenameCollectionTest {
             // OLD telemetry row that will try to move to (ts,'collide',NEW)...
             ctx.insertInto(SEARCH_TELEMETRY, SEARCH_TELEMETRY.TENANT_ID, SEARCH_TELEMETRY.TS,
                            SEARCH_TELEMETRY.QUERY_HASH, SEARCH_TELEMETRY.COLLECTION, SEARCH_TELEMETRY.RAW_COUNT,
-                           SEARCH_TELEMETRY.KEPT_COUNT, SEARCH_TELEMETRY.COLLECTION_ID)
-               .values(TENANT_C, ts, "collide", old, 1, 1, CollectionIds.require(ctx, TENANT_C, old))
+                           SEARCH_TELEMETRY.KEPT_COUNT)
+               .values(TENANT_C, ts, "collide", old, 1, 1)
                .execute();
             // ...but that PK already exists under NEW -> UPDATE collision mid-transaction.
             ctx.insertInto(SEARCH_TELEMETRY, SEARCH_TELEMETRY.TENANT_ID, SEARCH_TELEMETRY.TS,
                            SEARCH_TELEMETRY.QUERY_HASH, SEARCH_TELEMETRY.COLLECTION, SEARCH_TELEMETRY.RAW_COUNT,
-                           SEARCH_TELEMETRY.KEPT_COUNT, SEARCH_TELEMETRY.COLLECTION_ID)
-               .values(TENANT_C, ts, "collide", neu, 9, 9, ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
-                       .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_C)).and(CATALOG_COLLECTIONS.NAME.eq(neu))
-                       .fetchOne(CATALOG_COLLECTIONS.COLLECTION_ID))
+                           SEARCH_TELEMETRY.KEPT_COUNT)
+               .values(TENANT_C, ts, "collide", neu, 9, 9)
                .execute();
         }
 
@@ -438,11 +435,11 @@ class CatalogRenameCollectionTest {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             PgContainerHelper.insertCollection(ctx, TENANT_A, src);
             PgContainerHelper.insertCollection(ctx, TENANT_A, tgt);
-            ctx.insertInto(GC_AUDIT, GC_AUDIT.TENANT_ID, GC_AUDIT.OPERATION, GC_AUDIT.COLLECTION, GC_AUDIT.COLLECTION_ID)
-               .values(TENANT_A, "purge", tgt, CollectionIds.require(ctx, TENANT_A, tgt))
+            ctx.insertInto(GC_AUDIT, GC_AUDIT.TENANT_ID, GC_AUDIT.OPERATION, GC_AUDIT.COLLECTION)
+               .values(TENANT_A, "purge", tgt)
                .execute();
         }
-        assertThat(SupersedeSeeds.supersede(repo, TENANT_A, tgt, "knowledge__nrg-audit-successor__minilm-l6-v2-384__v1", ""))
+        assertThat(repo.supersedeCollection(TENANT_A, tgt, "knowledge__nrg-audit-successor__minilm-l6-v2-384__v1", ""))
             .as("precondition: target retired").isEqualTo(1);
 
         assertThatThrownBy(() -> repo.renameCollection(TENANT_A, src, tgt))
@@ -465,11 +462,11 @@ class CatalogRenameCollectionTest {
             PgContainerHelper.insertCollection(ctx, TENANT_A, src);
             PgContainerHelper.insertCollection(ctx, TENANT_A, tgt);
             ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
-                           CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
-               .values(TENANT_A, "nrg-data-doc", "Doc", tgt, CollectionIds.require(ctx, TENANT_A, tgt))
+                           CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+               .values(TENANT_A, "nrg-data-doc", "Doc", tgt)
                .execute();
         }
-        assertThat(SupersedeSeeds.supersede(repo, TENANT_A, tgt, "knowledge__nrg-data-successor__minilm-l6-v2-384__v1", ""))
+        assertThat(repo.supersedeCollection(TENANT_A, tgt, "knowledge__nrg-data-successor__minilm-l6-v2-384__v1", ""))
             .as("precondition: target retired").isEqualTo(1);
 
         assertThatThrownBy(() -> repo.renameCollection(TENANT_A, src, tgt))
@@ -490,7 +487,7 @@ class CatalogRenameCollectionTest {
             PgContainerHelper.insertCollection(ctx, TENANT_A, src);
             PgContainerHelper.insertCollection(ctx, TENANT_A, tgt);
         }
-        assertThat(SupersedeSeeds.supersede(repo, TENANT_A, tgt, src, ""))
+        assertThat(repo.supersedeCollection(TENANT_A, tgt, src, ""))
             .as("precondition: target retired").isEqualTo(1);
 
         Map<String, Integer> counts = repo.renameCollection(TENANT_A, src, tgt);
@@ -520,8 +517,8 @@ class CatalogRenameCollectionTest {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             PgContainerHelper.insertCollection(ctx, TENANT_A, src);
             ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
-                           CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
-               .values(TENANT_A, "nrg-kept-doc", "Doc", src, CollectionIds.require(ctx, TENANT_A, src))
+                           CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+               .values(TENANT_A, "nrg-kept-doc", "Doc", src)
                .execute();
             RetiredAspectQueueTable.restoreRestrict(ctx);
             RetiredAspectQueueTable.seed(ctx, TENANT_A, src, "nrg-kept-doc", "/p/kept.md", "pending");
@@ -547,8 +544,8 @@ class CatalogRenameCollectionTest {
         DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
         PgContainerHelper.insertCollection(ctx, tenant, coll);
         ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
-                       CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
-           .values(tenant, "rn-doc-1", "Doc 1", coll, CollectionIds.require(ctx, tenant, coll))
+                       CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+           .values(tenant, "rn-doc-1", "Doc 1", coll)
            .execute();
         // chunks: 4 in one unified nexus.chunks table (RDR-191), all of the collection's one model (RDR-225).
         insertChunk384(ctx, tenant, coll, chashBytes("rn384a"), vector(384));
@@ -580,19 +577,19 @@ class CatalogRenameCollectionTest {
         // already registered under coll, so stamp the manifest row the same.
         ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                        CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                       CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID)
-           .values(tenant, "rn-doc-1", 0, chashBytes("rn384a"), coll, model, CollectionIds.require(ctx, tenant, coll))
+                       CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+           .values(tenant, "rn-doc-1", 0, chashBytes("rn384a"), coll, model)
            .execute();
         // (chash_index seeds removed — RDR-187/nexus-piwya.9: router dropped)
         // topics: 1 (explicit id)
         long topicId = Math.abs((long) (tenant + coll).hashCode());
         ctx.insertInto(TOPICS, TOPICS.ID, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.DOC_COUNT,
-                       TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS, TOPICS.COLLECTION_ID)
-           .values(topicId, tenant, "topic-rn", coll, 0, OffsetDateTime.now(), "pending", CollectionIds.require(ctx, tenant, coll))
+                       TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS)
+           .values(topicId, tenant, "topic-rn", coll, 0, OffsetDateTime.now(), "pending")
            .execute();
         // taxonomy_meta: 1 (fk-003-4 RESTRICT)
-        ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION, TAXONOMY_META.COLLECTION_ID)
-           .values(tenant, coll, CollectionIds.require(ctx, tenant, coll))
+        ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
+           .values(tenant, coll)
            .execute();
         // topic_assignments: 2 (source_collection=coll). doc_id is bytea now
         // (nexus-tk070.p3c) — a genuine 64-hex chash, independent of the catalog
@@ -603,13 +600,13 @@ class CatalogRenameCollectionTest {
         // against the two REPURPOSED chunks seeded above.
         ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                        TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
-                       TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID)
-           .values(tenant, hexChashBytes("rn-doc-1"), topicId, "projection", coll, OffsetDateTime.now(), model, CollectionIds.require(ctx, tenant, coll))
+                       TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+           .values(tenant, hexChashBytes("rn-doc-1"), topicId, "projection", coll, OffsetDateTime.now(), model)
            .execute();
         ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                        TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
-                       TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID)
-           .values(tenant, hexChashBytes("rn-doc-2"), topicId, "projection", coll, OffsetDateTime.now(), model, CollectionIds.require(ctx, tenant, coll))
+                       TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+           .values(tenant, hexChashBytes("rn-doc-2"), topicId, "projection", coll, OffsetDateTime.now(), model)
            .execute();
         // centroids: three, one unified nexus.taxonomy_centroids table (RDR-191), all 384-wide (RDR-225).
         // PK is (tenant_id, collection, topic_id, embedding_model) -- three DIFFERENT topic_ids, not
@@ -618,18 +615,18 @@ class CatalogRenameCollectionTest {
         // no default -- supply it explicitly.
         ctx.insertInto(TAXONOMY_CENTROIDS, TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
                        TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.EMBEDDING_MODEL, TAXONOMY_CENTROIDS.LABEL,
-                       TAXONOMY_CENTROIDS.EMBEDDING_384, TAXONOMY_CENTROIDS.COLLECTION_ID)
-           .values(tenant, coll, topicId, model, "", vector(384), CollectionIds.require(ctx, tenant, coll))
+                       TAXONOMY_CENTROIDS.EMBEDDING_384)
+           .values(tenant, coll, topicId, model, "", vector(384))
            .execute();
         ctx.insertInto(TAXONOMY_CENTROIDS, TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
                        TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.EMBEDDING_MODEL, TAXONOMY_CENTROIDS.LABEL,
-                       TAXONOMY_CENTROIDS.EMBEDDING_384, TAXONOMY_CENTROIDS.COLLECTION_ID)
-           .values(tenant, coll, topicId + 1, model, "", vector(384), CollectionIds.require(ctx, tenant, coll))
+                       TAXONOMY_CENTROIDS.EMBEDDING_384)
+           .values(tenant, coll, topicId + 1, model, "", vector(384))
            .execute();
         ctx.insertInto(TAXONOMY_CENTROIDS, TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
                        TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.EMBEDDING_MODEL, TAXONOMY_CENTROIDS.LABEL,
-                       TAXONOMY_CENTROIDS.EMBEDDING_384, TAXONOMY_CENTROIDS.COLLECTION_ID)
-           .values(tenant, coll, topicId + 2, model, "", vector(384), CollectionIds.require(ctx, tenant, coll))
+                       TAXONOMY_CENTROIDS.EMBEDDING_384)
+           .values(tenant, coll, topicId + 2, model, "", vector(384))
            .execute();
         // document_aspects: 2, both doc-rooted at rn-doc-1 (the collection's only
         // registered catalog_documents row -- catalog_documents count elsewhere in
@@ -640,33 +637,33 @@ class CatalogRenameCollectionTest {
         // so it is now a second row against the same doc, distinguished by source_path.
         ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
                        DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
-                       DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI, DOCUMENT_ASPECTS.COLLECTION_ID)
-           .values(tenant, coll, "/p/a1.md", OffsetDateTime.now(), "v1", "docling", "rn-doc-1", "file:///p/a1.md", CollectionIds.require(ctx, tenant, coll))
+                       DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+           .values(tenant, coll, "/p/a1.md", OffsetDateTime.now(), "v1", "docling", "rn-doc-1", "file:///p/a1.md")
            .execute();
         ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
                        DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
-                       DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI, DOCUMENT_ASPECTS.COLLECTION_ID)
-           .values(tenant, coll, "/p/a2.md", OffsetDateTime.now(), "v1", "docling", "rn-doc-1", "file:///p/a2.md", CollectionIds.require(ctx, tenant, coll))
+                       DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+           .values(tenant, coll, "/p/a2.md", OffsetDateTime.now(), "v1", "docling", "rn-doc-1", "file:///p/a2.md")
            .execute();
         // document_highlights: 1. hygiene-001 step 3: source_uri is NOT NULL now too.
         ctx.insertInto(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID,
                        DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.SOURCE_URI,
-                       DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD, DOCUMENT_HIGHLIGHTS.INGESTED_AT, DOCUMENT_HIGHLIGHTS.COLLECTION_ID)
-           .values(tenant, "rn-doc-1", coll, "file:///rn-doc-1-hl", "hi", OffsetDateTime.now(), CollectionIds.require(ctx, tenant, coll))
+                       DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD, DOCUMENT_HIGHLIGHTS.INGESTED_AT)
+           .values(tenant, "rn-doc-1", coll, "file:///rn-doc-1-hl", "hi", OffsetDateTime.now())
            .execute();
         // search_telemetry: 2 (no FK, but re-homed)
         ctx.insertInto(SEARCH_TELEMETRY, SEARCH_TELEMETRY.TENANT_ID, SEARCH_TELEMETRY.TS, SEARCH_TELEMETRY.QUERY_HASH,
-                       SEARCH_TELEMETRY.COLLECTION, SEARCH_TELEMETRY.RAW_COUNT, SEARCH_TELEMETRY.KEPT_COUNT, SEARCH_TELEMETRY.COLLECTION_ID)
-           .values(tenant, OffsetDateTime.now(), "qh1", coll, 10, 5, CollectionIds.require(ctx, tenant, coll))
+                       SEARCH_TELEMETRY.COLLECTION, SEARCH_TELEMETRY.RAW_COUNT, SEARCH_TELEMETRY.KEPT_COUNT)
+           .values(tenant, OffsetDateTime.now(), "qh1", coll, 10, 5)
            .execute();
         ctx.insertInto(SEARCH_TELEMETRY, SEARCH_TELEMETRY.TENANT_ID, SEARCH_TELEMETRY.TS, SEARCH_TELEMETRY.QUERY_HASH,
-                       SEARCH_TELEMETRY.COLLECTION, SEARCH_TELEMETRY.RAW_COUNT, SEARCH_TELEMETRY.KEPT_COUNT, SEARCH_TELEMETRY.COLLECTION_ID)
-           .values(tenant, OffsetDateTime.now(), "qh2", coll, 8, 4, CollectionIds.require(ctx, tenant, coll))
+                       SEARCH_TELEMETRY.COLLECTION, SEARCH_TELEMETRY.RAW_COUNT, SEARCH_TELEMETRY.KEPT_COUNT)
+           .values(tenant, OffsetDateTime.now(), "qh2", coll, 8, 4)
            .execute();
         // hook_failures: 1 (no FK, but re-homed)
         ctx.insertInto(HOOK_FAILURES, HOOK_FAILURES.TENANT_ID, HOOK_FAILURES.DOC_ID, HOOK_FAILURES.COLLECTION,
-                       HOOK_FAILURES.HOOK_NAME, HOOK_FAILURES.ERROR, HOOK_FAILURES.OCCURRED_AT, HOOK_FAILURES.COLLECTION_ID)
-           .values(tenant, "rn-doc-1", coll, "post_store", "boom", OffsetDateTime.now(), CollectionIds.require(ctx, tenant, coll))
+                       HOOK_FAILURES.HOOK_NAME, HOOK_FAILURES.ERROR, HOOK_FAILURES.OCCURRED_AT)
+           .values(tenant, "rn-doc-1", coll, "post_store", "boom", OffsetDateTime.now())
            .execute();
         // relevance_log: 2 (no FK, but re-homed — RDR-164 §Approach Phase 3 third audit table)
         // nexus-lgdel.l1: chunk_id must be canonical 64-hex TEXT now
@@ -676,15 +673,15 @@ class CatalogRenameCollectionTest {
         // column; chunk_id here is TEXT and needs a real 64-hex STRING.
         ctx.insertInto(RELEVANCE_LOG, RELEVANCE_LOG.TENANT_ID, RELEVANCE_LOG.QUERY, RELEVANCE_LOG.CHUNK_ID,
                        RELEVANCE_LOG.COLLECTION, RELEVANCE_LOG.ACTION, RELEVANCE_LOG.SESSION_ID,
-                       RELEVANCE_LOG.TIMESTAMP, RELEVANCE_LOG.COLLECTION_ID)
+                       RELEVANCE_LOG.TIMESTAMP)
            .values(tenant, "q1", "0b2ace5def2ecf1234ae0db2a062b83fe40dd330121844b37bc8bdfb6b2f3ea5", coll, "click",
-                   "s1", OffsetDateTime.now(), CollectionIds.require(ctx, tenant, coll))
+                   "s1", OffsetDateTime.now())
            .execute();
         ctx.insertInto(RELEVANCE_LOG, RELEVANCE_LOG.TENANT_ID, RELEVANCE_LOG.QUERY, RELEVANCE_LOG.CHUNK_ID,
                        RELEVANCE_LOG.COLLECTION, RELEVANCE_LOG.ACTION, RELEVANCE_LOG.SESSION_ID,
-                       RELEVANCE_LOG.TIMESTAMP, RELEVANCE_LOG.COLLECTION_ID)
+                       RELEVANCE_LOG.TIMESTAMP)
            .values(tenant, "q2", "f7088d7f354fadfc6fe69df2f0a9f2057a715e9a62672258a88ee200e72f1c22", coll, "skip",
-                   "s1", OffsetDateTime.now(), CollectionIds.require(ctx, tenant, coll))
+                   "s1", OffsetDateTime.now())
            .execute();
     }
 

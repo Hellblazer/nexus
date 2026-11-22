@@ -129,7 +129,6 @@ final class MoveTestDb {
         registerCollection(t, collection);
         with(dsl -> dsl.insertInto(DOCUMENT_ASPECTS)
             .set(DOCUMENT_ASPECTS.TENANT_ID, t).set(DOCUMENT_ASPECTS.COLLECTION, collection)
-            .set(DOCUMENT_ASPECTS.COLLECTION_ID, CollectionIds.idOf(t, collection))
             .set(DOCUMENT_ASPECTS.SOURCE_PATH, "p").set(DOCUMENT_ASPECTS.EXTRACTED_AT, OffsetDateTime.now())
             .set(DOCUMENT_ASPECTS.MODEL_VERSION, "v").set(DOCUMENT_ASPECTS.EXTRACTOR_NAME, "e")
             .set(DOCUMENT_ASPECTS.SOURCE_URI, "file:///p").set(DOCUMENT_ASPECTS.DOC_ID, docId)

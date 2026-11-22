@@ -579,18 +579,6 @@ class TestHardKillBlastRadius:
         )
         assert len(none_state_paths) == file_count - kill_after
 
-        # RDR-229 P3.8: the engine allows one live collection a tuple. The child registered the repo's docs
-        # collection under its path-derived name (before the repo's catalog owner existed), and this pass finds the
-        # owner and moves it to the owner's conformant name (RDR-103's migration). In a real install T3 is the same
-        # database for both runs, so the migration finds the collection there and renames it; this suite's T3 is
-        # per-process, so the collection the child registered is created here, as the child left it, for the
-        # migration to find.
-        from nexus.registry import RepoRegistry
-
-        recorded = RepoRegistry(repo.parent / "repos.json").get(repo)
-        assert recorded and recorded["docs_collection"], "the child registered the repo's docs collection"
-        local_t3.get_or_create_collection(recorded["docs_collection"])
-
         self._run(repo, local_t3, monkeypatch)  # a normal, non-crashing pass
 
         after = {str(e.file_path): e for e in active_reader().all_documents()}

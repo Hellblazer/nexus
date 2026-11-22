@@ -63,24 +63,6 @@ public final class BootWorkRegistry {
         this.clock = Objects.requireNonNull(clock, "clock");
     }
 
-    private volatile java.util.function.Supplier<String> rdr229Completion;
-
-    /**
-     * RDR-229 P3.1 (fix round A, critique B1), [additive]: the source of {@code /v1/status}'s {@code rdr229_completion} field,
-     * a JSON object rendered from memory. It is held here, beside {@code boot_work}, because the status route already reads this
-     * registry, but it is NOT work and is never an entry: the three-gate state waits by design until P3.4, and an entry for it
-     * would count as work in every idle rule that reads {@code boot_work}. Null unbinds.
-     */
-    public void rdr229Completion(java.util.function.Supplier<String> source) {
-        this.rdr229Completion = source;
-    }
-
-    /** The {@code rdr229_completion} JSON object, or null when no check is bound or it has not read yet. */
-    public String rdr229Completion() {
-        var source = rdr229Completion;
-        return source == null ? null : source.get();
-    }
-
     /**
      * Announce work. An id already registered is replaced, as a new run of the same work: it keeps its place in the
      * order and gets a new {@code startedAt} and no step.

@@ -96,11 +96,9 @@ def _write(repo: Path, rel: str, text: str) -> Path:
 
 
 def _run_hook(repo: Path, indexed_files: list[tuple[Path, str, str]]) -> list[str]:
-    from tests._catalog_fixture_ops import catalog_hook_seeded
-
     ActiveCatalog()
     phases: list[str] = []
-    catalog_hook_seeded(
+    indexer_mod._catalog_hook(
         repo=repo, repo_name="nexus", repo_hash="571b8edd", head_hash="abc",
         indexed_files=indexed_files, on_phase=phases.append,
     )
@@ -172,9 +170,7 @@ class TestLinkingSubPhases:
         calls = _stub_generators(monkeypatch, clock, {"rdr": 1.0, "prose": 1.0, "pdf": 1.0})
         rdr = _write(tmp_path, "docs/rdr/rdr-002-y.md", "# RDR-002\n")
         ActiveCatalog()
-        from tests._catalog_fixture_ops import catalog_hook_seeded
-
-        catalog_hook_seeded(
+        indexer_mod._catalog_hook(
             repo=tmp_path, repo_name="nexus", repo_hash="571b8edd", head_hash="abc",
             indexed_files=[(rdr, "rdr", "rdr__nexus")],
         )
@@ -365,9 +361,7 @@ class TestChangedRdrIsRelinked:
 
         # unchanged content, new HEAD: nothing to relink
         ActiveCatalog()
-        from tests._catalog_fixture_ops import catalog_hook_seeded
-
-        catalog_hook_seeded(
+        indexer_mod._catalog_hook(
             repo=tmp_path, repo_name="nexus", repo_hash="571b8edd", head_hash="def",
             indexed_files=files, on_phase=lambda _m: None,
         )

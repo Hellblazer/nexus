@@ -4,7 +4,6 @@ import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
 import org.jooq.SQLDialect;
 import org.jooq.DSLContext;
-import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.TenantConstants;
 import dev.nexus.service.db.TenantScope;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -63,9 +62,7 @@ class RemapSchemaLiquibaseTest {
     // RF-186-1: raw facts only. A verdict column added here MUST fail test 1.
     private static final Set<String> EXPECTED_COLUMNS = Set.of(
         "tenant_id", "source_collection", "old_id",
-        "new_chash", "target_collection", "created_at", "provenance",
-        // vectors-068 (RDR-229 P3.1): the ids beside the two names, nullable raw facts like the names; not verdicts
-        "source_collection_id", "target_collection_id"
+        "new_chash", "target_collection", "created_at", "provenance"
     );
 
     private static final String SVC_ROLE = "svc_remap_schema_test";
@@ -129,30 +126,16 @@ class RemapSchemaLiquibaseTest {
 
             List<PgCatalogProbes.Policy> policies = PgCatalogProbes.policies(ctx, "nexus", "chash_remap");
             assertThat(policies).as("a policy must exist on nexus.chash_remap").isNotEmpty();
-            // RDR-229 P3.1 (vectors-070): the tenant policy, and the migrating role's owner-read SELECT policy.
-            // The tenant-GUC assertions below read the tenant policy by name, not whichever policy comes first.
-            PgCatalogProbes.Policy tenant = policies.stream()
-                .filter(p -> p.policyname().equals("tenant_isolation")).findFirst().orElseThrow();
-            String qual = tenant.qual();
-            String withCheck = tenant.withCheck();
+            String qual = policies.get(0).qual();
+            String withCheck = policies.get(0).withCheck();
             assertThat(qual)
                 .as("USING predicate must read the nexus.tenant GUC")
                 .contains("current_setting('" + TenantConstants.GUC_NAME + "'");
             assertThat(withCheck)
                 .as("WITH CHECK predicate must read the nexus.tenant GUC")
                 .contains("current_setting('" + TenantConstants.GUC_NAME + "'");
-            assertThat(policies).extracting(PgCatalogProbes.Policy::policyname)
-                .as("exactly the tenant policy and the owner-read policy expected on nexus.chash_remap")
-                .containsExactlyInAnyOrder("tenant_isolation", "chash_remap_owner_read");
-            PgCatalogProbes.Policy ownerRead = policies.stream()
-                .filter(p -> p.policyname().equals("chash_remap_owner_read")).findFirst().orElseThrow();
-            assertThat(ownerRead.cmd()).isEqualTo("SELECT");
-            assertThat(ownerRead.qual()).isEqualTo("true");
-            assertThat(ownerRead.withCheck()).isNull();
-            assertThat(PgCatalogProbes.policyRoles(ctx, "nexus", "chash_remap").stream()
-                    .filter(p -> p.policyname().equals("chash_remap_owner_read"))
-                    .map(PgCatalogProbes.PolicyRoles::toString).toList())
-                .containsExactly("chash_remap_owner_read roles={" + PgContainerHelper.USERNAME + "} cmd=SELECT");
+            assertThat(policies)
+                .as("exactly one policy expected on nexus.chash_remap").hasSize(1);
         }
     }
 
@@ -193,15 +176,19 @@ class RemapSchemaLiquibaseTest {
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
                 stampGuc(su, "check-tenant");
-                remapRow(DSL.using(su, SQLDialect.POSTGRES), "check-tenant", "src-coll", "legacy-1",
-                    new byte[16],  // 16 bytes, not 32
-                    "tgt-coll").execute();
+                DSL.using(su, SQLDialect.POSTGRES)
+                   .insertInto(CHASH_REMAP, CHASH_REMAP.TENANT_ID, CHASH_REMAP.SOURCE_COLLECTION,
+                           CHASH_REMAP.OLD_ID, CHASH_REMAP.NEW_CHASH, CHASH_REMAP.TARGET_COLLECTION,
+                           CHASH_REMAP.CREATED_AT, CHASH_REMAP.PROVENANCE)
+                   .values("check-tenant", "src-coll", "legacy-1", new byte[16],  // 16 bytes, not 32
+                       "tgt-coll", OffsetDateTime.now(), "test")
+                   .execute();
             }
         })
         .as("new_chash whose stored width != 32 bytes must be rejected by the CHECK "
             + "constraint (the legacy 16-byte-decoded shape D3's gate reasoning names)")
         .isInstanceOf(Exception.class)
-        .hasMessageContaining("chash_remap_new_chash_octet_check");
+        .hasMessageContaining("check constraint");
     }
 
     /**
@@ -214,8 +201,13 @@ class RemapSchemaLiquibaseTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             stampGuc(su, "check-tenant-ok");
-            remapRow(DSL.using(su, SQLDialect.POSTGRES), "check-tenant-ok", "src-coll", "legacy-1", new byte[32],
-                "tgt-coll").execute();
+            DSL.using(su, SQLDialect.POSTGRES)
+               .insertInto(CHASH_REMAP, CHASH_REMAP.TENANT_ID, CHASH_REMAP.SOURCE_COLLECTION,
+                       CHASH_REMAP.OLD_ID, CHASH_REMAP.NEW_CHASH, CHASH_REMAP.TARGET_COLLECTION,
+                       CHASH_REMAP.CREATED_AT, CHASH_REMAP.PROVENANCE)
+               .values("check-tenant-ok", "src-coll", "legacy-1", new byte[32],
+                   "tgt-coll", OffsetDateTime.now(), "test")
+               .execute();
         }
     }
 
@@ -351,27 +343,14 @@ class RemapSchemaLiquibaseTest {
         DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
         ctx.select(DSL.function("set_config", SQLDataType.VARCHAR,
             DSL.val(TenantConstants.GUC_NAME), DSL.val(tenant), DSL.inline(true))).fetch();
-        remapRow(ctx, tenant, sourceCollection, oldId, newChash, "tgt-" + sourceCollection)
+        ctx.insertInto(CHASH_REMAP, CHASH_REMAP.TENANT_ID, CHASH_REMAP.SOURCE_COLLECTION,
+                CHASH_REMAP.OLD_ID, CHASH_REMAP.NEW_CHASH, CHASH_REMAP.TARGET_COLLECTION,
+                CHASH_REMAP.CREATED_AT, CHASH_REMAP.PROVENANCE)
+           .values(tenant, sourceCollection, oldId, newChash, "tgt-" + sourceCollection,
+               OffsetDateTime.now(), "test-seed")
            .onConflict(CHASH_REMAP.TENANT_ID, CHASH_REMAP.SOURCE_COLLECTION, CHASH_REMAP.OLD_ID)
            .doNothing()
            .execute();
-    }
-
-    /**
-     * A map row under two registered collections, with both ids (vectors-068, RDR-229 P3.1: a row that names a
-     * collection must carry its registry id). Registers both names first, as the engine's typed 422 requires.
-     */
-    private static org.jooq.InsertSetMoreStep<?> remapRow(DSLContext ctx, String tenant, String source, String oldId,
-                                                         byte[] newChash, String target) {
-        PgContainerHelper.insertCollection(ctx, tenant, source);
-        PgContainerHelper.insertCollection(ctx, tenant, target);
-        return ctx.insertInto(CHASH_REMAP)
-            .set(CHASH_REMAP.TENANT_ID, tenant).set(CHASH_REMAP.SOURCE_COLLECTION, source)
-            .set(CHASH_REMAP.SOURCE_COLLECTION_ID, CollectionIds.idOf(tenant, source))
-            .set(CHASH_REMAP.OLD_ID, oldId).set(CHASH_REMAP.NEW_CHASH, newChash)
-            .set(CHASH_REMAP.TARGET_COLLECTION, target)
-            .set(CHASH_REMAP.TARGET_COLLECTION_ID, CollectionIds.idOf(tenant, target))
-            .set(CHASH_REMAP.CREATED_AT, OffsetDateTime.now()).set(CHASH_REMAP.PROVENANCE, "test");
     }
 
     /** A conformant 32-byte new_chash value, distinct per fill byte (test fixtures only). */

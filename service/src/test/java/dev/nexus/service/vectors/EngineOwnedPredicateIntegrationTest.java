@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
-import dev.nexus.service.db.CollectionIds;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
@@ -138,27 +137,12 @@ class EngineOwnedPredicateIntegrationTest {
                                      OffsetDateTime when, Vector vector, String metadataJson) {
         var series = DSL.generateSeries(1, count).as("g", "n");
         Field<Integer> n = series.field("n", Integer.class);
-        ctx.insertInto(CHUNKS,
-                CHUNKS.TENANT_ID,
-                CHUNKS.COLLECTION,
-                CHUNKS.COLLECTION_ID,
-                CHUNKS.CHASH,
-                CHUNKS.EMBEDDING_MODEL,
-                CHUNKS.CHUNK_TEXT,
-                CHUNKS.EMBEDDING_384,
-                CHUNKS.CREATED_AT,
-                CHUNKS.LAST_WRITTEN_AT,
-                CHUNKS.METADATA)
-           .select(ctx.select(DSL.inline(TENANT),
-              DSL.inline(collection),
-              CollectionIds.idOf(DSL.inline(TENANT), DSL.inline(collection)),
-              chash(prefix + collection, n),
-              DSL.inline(PgContainerHelper.collectionModel(ctx, TENANT, collection)),
-              DSL.inline("x"),
-              DSL.val(vector, CHUNKS.EMBEDDING_384.getDataType()),
-              DSL.val(when),
-              DSL.val(when),
-              DSL.val(JSONB.valueOf(metadataJson))).from(series))
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
+                CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.CREATED_AT, CHUNKS.LAST_WRITTEN_AT, CHUNKS.METADATA)
+           .select(ctx.select(DSL.inline(TENANT), DSL.inline(collection), chash(prefix + collection, n),
+                              DSL.inline(PgContainerHelper.collectionModel(ctx, TENANT, collection)), DSL.inline("x"),
+                              DSL.val(vector, CHUNKS.EMBEDDING_384.getDataType()),
+                              DSL.val(when), DSL.val(when), DSL.val(JSONB.valueOf(metadataJson))).from(series))
            .execute();
     }
 
@@ -632,9 +616,8 @@ class EngineOwnedPredicateIntegrationTest {
                 + " reaper_expire_client_quarantine (3) call it")
             .isGreaterThanOrEqualTo(8);
         assertThat(writes).as("non-vacuity: vectors-024-1 writes both keys, vectors-030-1 (RDR-225) redefines that"
-                + " one write site to carry the model, vectors-069 (RDR-229 P3.1) redefines it again to carry the"
-                + " collection id, and the scan saw all three")
-            .isEqualTo(6);
+                + " one write site to carry the model, and the scan saw both")
+            .isEqualTo(4);
         assertThat(removals).as("non-vacuity: vectors-025 removes both keys, and the scan saw it").isGreaterThanOrEqualTo(2);
         assertThat(offenders).isEmpty();
     }

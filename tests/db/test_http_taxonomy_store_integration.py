@@ -160,10 +160,8 @@ def _seed_chunks(pg: dict, tenant: str, collection: str, chash_hexes: list[str],
         "(tenant_id, name, content_type, owner_id, embedding_model, lifecycle_state) "
         f"VALUES ('{tenant}', '{collection}', 'knowledge', 'test-seed', '{model_for_dim}', 'live') "
         "ON CONFLICT DO NOTHING; "
-        # RDR-229 P3.1: each chunk carries the registry's collection_id beside the name.
-        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}, embedding_model, collection_id) "
-        f"SELECT v.*, '{model_for_dim}', (SELECT collection_id FROM nexus.catalog_collections "
-        f"WHERE tenant_id = '{tenant}' AND name = '{collection}') FROM (VALUES {values}) AS v ON CONFLICT DO NOTHING;"
+        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}, embedding_model) "
+        f"SELECT v.*, '{model_for_dim}' FROM (VALUES {values}) AS v ON CONFLICT DO NOTHING;"
     ))
 
 

@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
-import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.TenantScope;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
@@ -49,9 +48,6 @@ class ReembedJobsSchemaLiquibaseTest {
         Map.entry("job_id", "uuid NO"),
         Map.entry("source_collection", "text NO"),
         Map.entry("target_collection", "text NO"),
-        // RDR-229 P3.1 (vectors-068): the registry ids beside the two names, nullable until the stamp reaches the row
-        Map.entry("source_collection_id", "int8 YES"),
-        Map.entry("target_collection_id", "int8 YES"),
         Map.entry("state", "text NO"),
         Map.entry("disposition", "text YES"),
         Map.entry("doc_cursor", "text NO"),
@@ -107,8 +103,7 @@ class ReembedJobsSchemaLiquibaseTest {
             Map<String, String> jobs = constraints(ctx, "reembed_jobs");
             assertThat(jobs).containsOnlyKeys("reembed_jobs_pk", "reembed_jobs_state_check",
                 "reembed_jobs_disposition_check", "reembed_jobs_cutover_step_check",
-                "reembed_jobs_failure_reason_check",
-                "reembed_jobs_source_collection_id_check", "reembed_jobs_target_collection_id_check");
+                "reembed_jobs_failure_reason_check");
             assertThat(jobs.get("reembed_jobs_pk")).isEqualTo("PRIMARY KEY (tenant_id, job_id)");
             assertThat(jobs.get("reembed_jobs_state_check")).contains("'planned'", "'running'", "'paused'",
                 "'failed'", "'aborted'", "'cutover'", "'done'", "'done_with_skips'");
@@ -147,24 +142,8 @@ class ReembedJobsSchemaLiquibaseTest {
                 assertThat(rls.enabled()).as(table + " RLS ENABLE").isTrue();
                 assertThat(rls.forced()).as(table + " RLS FORCE").isTrue();
                 List<PgCatalogProbes.Policy> policies = PgCatalogProbes.policies(ctx, "nexus", table);
-                // RDR-229 P3.1 (vectors-070): nexus.reembed_jobs also has the migrating role's owner-read SELECT
-                // policy; nexus.reembed_job_moves has none (its move is not a stamp move), so it stays exactly one.
-                if (table.equals("reembed_jobs")) {
-                    assertThat(policies).as(table + " policies").extracting(PgCatalogProbes.Policy::policyname)
-                        .containsExactlyInAnyOrder("tenant_isolation", "reembed_jobs_owner_read");
-                    PgCatalogProbes.Policy ownerRead = policies.stream()
-                        .filter(p -> p.policyname().equals("reembed_jobs_owner_read")).findFirst().orElseThrow();
-                    assertThat(ownerRead.cmd()).isEqualTo("SELECT");
-                    assertThat(ownerRead.qual()).isEqualTo("true");
-                    assertThat(ownerRead.withCheck()).isNull();
-                    assertThat(PgCatalogProbes.policyRoles(ctx, "nexus", table).stream()
-                            .filter(p -> p.policyname().equals("reembed_jobs_owner_read"))
-                            .map(PgCatalogProbes.PolicyRoles::toString).toList())
-                        .containsExactly("reembed_jobs_owner_read roles={" + PgContainerHelper.USERNAME + "} cmd=SELECT");
-                } else {
-                    assertThat(policies).as(table + " policies").extracting(PgCatalogProbes.Policy::policyname)
-                        .containsExactly("tenant_isolation");
-                }
+                assertThat(policies).as(table + " policies").hasSize(1);
+                assertThat(policies.get(0).policyname()).isEqualTo("tenant_isolation");
             }
         }
     }
@@ -175,8 +154,6 @@ class ReembedJobsSchemaLiquibaseTest {
     void reembedJobs_checksRejectUnknownValues() throws Exception {
         try (Connection su = pg.createConnection("")) {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            register(ctx, "check-tenant", TGT, "docs__c__a__v1", "docs__c__b__v1", "docs__c__c__v1", "docs__c__d__v1",
-                "docs__c__e__v1", "docs__c__f__v1");
             insertJob(ctx, "check-tenant", UUID.randomUUID(), "docs__c__a__v1", "planned");
 
             assertThatThrownBy(() -> insertJob(ctx, "check-tenant", UUID.randomUUID(), "docs__c__b__v1", "done!"))
@@ -205,11 +182,8 @@ class ReembedJobsSchemaLiquibaseTest {
         try (Connection su = pg.createConnection("")) {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             String tenant = "lock-tenant";
-            register(ctx, tenant, TGT, SRC + "-terminal");
-            register(ctx, "lock-tenant-b", TGT, SRC + "-planned");
             for (String locking : List.of("planned", "running", "paused", "cutover", "failed")) {
                 String source = SRC + "-" + locking;
-                register(ctx, tenant, source);
                 insertJob(ctx, tenant, UUID.randomUUID(), source, locking);
                 assertThatThrownBy(() -> insertJob(ctx, tenant, UUID.randomUUID(), source, "planned"))
                     .as("a job in " + locking + " holds its source")
@@ -251,11 +225,6 @@ class ReembedJobsSchemaLiquibaseTest {
             svcDs = new com.zaxxer.hikari.HikariDataSource(cfg);
             TenantScope tenantScope = new TenantScope(svcDs);
 
-            try (Connection su = dedicated.createConnection("")) {
-                for (String t : List.of("reembed-tenant-a", "reembed-tenant-b")) {
-                    register(DSL.using(su, SQLDialect.POSTGRES), t, SRC, TGT);
-                }
-            }
             UUID jobA = UUID.randomUUID();
             UUID jobB = UUID.randomUUID();
             tenantScope.withTenant("reembed-tenant-a", ctx -> insertJob(ctx, "reembed-tenant-a", jobA, SRC, "planned"));
@@ -305,13 +274,6 @@ class ReembedJobsSchemaLiquibaseTest {
                 PgCatalogProbes.ConstraintDefinition::definition));
     }
 
-    /** Registers the names for the tenant (superuser ctx): a job row carries its names' registry ids, set by subselect. */
-    private static void register(DSLContext su, String tenant, String... names) {
-        for (String name : names) {
-            PgContainerHelper.insertCollection(su, tenant, name);
-        }
-    }
-
     private static int insertJob(DSLContext ctx, String tenant, UUID job, String source, String state) {
         return insertJob(ctx, tenant, job, source, state, j -> { });
     }
@@ -324,8 +286,6 @@ class ReembedJobsSchemaLiquibaseTest {
             .set(REEMBED_JOBS.JOB_ID, job)
             .set(REEMBED_JOBS.SOURCE_COLLECTION, source)
             .set(REEMBED_JOBS.TARGET_COLLECTION, TGT)
-            .set(REEMBED_JOBS.SOURCE_COLLECTION_ID, CollectionIds.idOf(tenant, source))
-            .set(REEMBED_JOBS.TARGET_COLLECTION_ID, CollectionIds.idOf(tenant, TGT))
             .set(REEMBED_JOBS.STATE, state)
             .set(REEMBED_JOBS.STARTED_AT, now)
             .set(REEMBED_JOBS.UPDATED_AT, now);

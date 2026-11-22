@@ -9,7 +9,6 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.Chash;
-import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.PgSession.PciSettings;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.vectors.PciCanary.Result;
@@ -235,14 +234,13 @@ class PciAnchorRebuildIntegrationTest {
         int gen = ++generation;
         asSuperuser(su -> {
             PgContainerHelper.insertCollection(su, tenant, collection, M384);
-            Long cid = CollectionIds.require(su, tenant, collection);
             for (int from = 0; from < rows; from += 250) {
                 var step = su.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH,
-                    CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.METADATA, CHUNKS.COLLECTION_ID);
+                    CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.METADATA);
                 for (int i = from; i < Math.min(rows, from + 250); i++) {
                     step = step.values(tenant, collection,
                         Chash.fromHex(Chash.ofText(tenant + "/" + collection + "/" + gen + "/" + i).toHex()).toBytes(),
-                        M384, "row " + i, vector(i), JSONB.jsonb("{}"), cid);
+                        M384, "row " + i, vector(i), JSONB.jsonb("{}"));
                 }
                 step.onConflictDoNothing().execute();
             }
@@ -859,13 +857,12 @@ class PciAnchorRebuildIntegrationTest {
     void addRows(String tenant, String collection, int rows) throws Exception {
         int gen = ++generation;
         asSuperuser(su -> {
-            Long cid = CollectionIds.require(su, tenant, collection);
             var step = su.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
-                CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.METADATA, CHUNKS.COLLECTION_ID);
+                CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.METADATA);
             for (int i = 0; i < rows; i++) {
                 step = step.values(tenant, collection,
                     Chash.fromHex(Chash.ofText(tenant + "/" + collection + "/add/" + gen + "/" + i).toHex()).toBytes(),
-                    M384, "added " + i, vector(1000 + gen * 100 + i), JSONB.jsonb("{}"), cid);
+                    M384, "added " + i, vector(1000 + gen * 100 + i), JSONB.jsonb("{}"));
             }
             step.onConflictDoNothing().execute();
             return null;

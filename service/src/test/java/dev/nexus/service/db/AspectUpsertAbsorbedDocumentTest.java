@@ -91,8 +91,7 @@ class AspectUpsertAbsorbedDocumentTest {
         repo.upsertOwner(t, o);
     }
 
-    private String doc(String t, String title, String sourceUri, String filePath) throws Exception {
-        db.registerCollection(t, COLL);   // RDR-229 P3.1: a document names its collection by registry id, so the collection is registered first
+    private String doc(String t, String title, String sourceUri, String filePath) {
         Map<String, Object> f = new LinkedHashMap<>();
         f.put("title", title);
         f.put("file_path", filePath);

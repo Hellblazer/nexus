@@ -27,15 +27,12 @@ def runner() -> CliRunner:
 def _register(name: str, *, content_type: str = "docs") -> None:
     from nexus.catalog.factory import make_catalog_writer
 
-    # The model is the tenant's own embedding profile (which this test's substrate seeds for local-mode
-    # content types): an explicit mismatched value 422s (RDR-204 profile conflict). RDR-229 P3.8: the
-    # client derives nothing from the name, so it is stated here. Each name gets its own owner: two live collections
-    # on one tuple are refused (the live-tuple guard).
-    from nexus.corpus import effective_embedding_model_for_writes
-
+    # embedding_model deliberately omitted: register_collection derives it
+    # (collection_registration_kwargs) from the tenant's own embedding
+    # profile, which this test's substrate seeds for local-mode content
+    # types -- an explicit mismatched value 422s (RDR-204 profile conflict).
     make_catalog_writer().register_collection(
-        name, content_type=content_type, owner_id=name.split("__", 1)[-1],
-        embedding_model=effective_embedding_model_for_writes(content_type), model_version="v1",
+        name, content_type=content_type, owner_id="l46pu-cli",
     )
 
 

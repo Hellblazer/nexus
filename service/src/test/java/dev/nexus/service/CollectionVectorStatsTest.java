@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
-import dev.nexus.service.db.CollectionIds;
 import java.time.OffsetDateTime;
 import org.jooq.impl.DSL;
 import org.jooq.DSLContext;
@@ -559,7 +558,6 @@ class CollectionVectorStatsTest {
             .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
             .set(CATALOG_DOCUMENTS.TITLE, "Test Doc " + tumbler)
             .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, physicalCollection)
-                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(tenantId, physicalCollection))
             .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER).doNothing()
             .execute();
     }
@@ -606,7 +604,6 @@ class CollectionVectorStatsTest {
             .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position)
             .set(CATALOG_DOCUMENT_CHUNKS.CHASH, chash.getBytes(StandardCharsets.US_ASCII))
             .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
-                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenantId, collection))
             .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(seed, tenantId, collection))
             .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                 CATALOG_DOCUMENT_CHUNKS.POSITION).doNothing()
@@ -628,7 +625,6 @@ class CollectionVectorStatsTest {
         ctx.insertInto(CHUNKS)
             .set(CHUNKS.TENANT_ID, tenantId)
             .set(CHUNKS.COLLECTION, collection)
-                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenantId, collection))
             .set(CHUNKS.CHASH, chash.getBytes(StandardCharsets.US_ASCII))
             .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenantId, collection))
             .set(CHUNKS.CHUNK_TEXT, chunkText)

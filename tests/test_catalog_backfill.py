@@ -200,11 +200,6 @@ class TestBackfillCommand:
     @patch("nexus.commands.catalog._make_t3")
     @patch("nexus.commands.catalog._make_registry")
     def test_backfill_cli(self, mock_reg_fn, mock_t3_fn, catalog_env, tmp_path):
-        from tests._catalog_fixture_ops import register_seed_collections
-
-        # RDR-229 P3.1: the backfill registers documents under the collections T3 lists, which hold chunks and so
-        # have registry rows; the mocked listing names three that the seed registers.
-        register_seed_collections("code__myrepo", "docs__myrepo", "knowledge__delos")
         mock_reg_fn.return_value = _mock_registry(tmp_path)
         mock_t3_fn.return_value = _mock_t3()
 
@@ -453,9 +448,6 @@ class TestBackfillFromT3CLI:
         only, skipping the original 4-pass backfill."""
         repo_root = tmp_path / "cli_repo"
         repo_root.mkdir()
-        from tests._catalog_fixture_ops import register_seed_collections
-
-        register_seed_collections("code__cli_repo-cafebabe")
         # Pre-register the owner so the recovery path can attribute.
         cat = ActiveCatalog()
         cat.register_owner(

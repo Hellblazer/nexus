@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
-import dev.nexus.service.db.CollectionIds;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
@@ -185,14 +184,13 @@ class VectorSensitivityExcludePlanShapeTest {
 
     private void seedCollection(DSLContext ctx, String collection, int rows, Random rnd) {
         byte[][] chash = new byte[rows][];
-        final Long collectionId = CollectionIds.require(ctx, TENANT, collection);
         for (int from = 0; from < rows; from += 250) {
             int to = Math.min(rows, from + 250);
-            var step = ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, CHUNKS.CHASH,
+            var step = ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH,
                 CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384);
             for (int i = from; i < to; i++) {
                 chash[i] = sha256(collection + "|" + i);
-                step = step.values(TENANT, collection, collectionId, chash[i], MODEL, "t" + i, Vector.of(gaussianUnit(rnd, 384)));
+                step = step.values(TENANT, collection, chash[i], MODEL, "t" + i, Vector.of(gaussianUnit(rnd, 384)));
             }
             step.execute();
         }
@@ -202,7 +200,6 @@ class VectorSensitivityExcludePlanShapeTest {
                 .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT).set(CATALOG_DOCUMENTS.TUMBLER, doc(collection, d))
                 .set(CATALOG_DOCUMENTS.TITLE, "doc " + d).set(CATALOG_DOCUMENTS.CONTENT_TYPE, "paper")
                 .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
-                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
                 .set(CATALOG_DOCUMENTS.SENSITIVE, d % SENSITIVE_EVERY == 0)
                 .execute();
         }
@@ -210,13 +207,12 @@ class VectorSensitivityExcludePlanShapeTest {
             int to = Math.min(rows, from + 250);
             var step = ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
                 CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID,
-                CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL);
-            org.jooq.InsertValuesStep7<?, String, String, Integer, byte[], String, Long, String> values = null;
+                CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL);
+            org.jooq.InsertValuesStep6<?, String, String, Integer, byte[], String, String> values = null;
             for (int i = from; i < to; i++) {
                 values = (values == null ? step : values)
                     .values(TENANT, doc(collection, i / CHUNKS_PER_DOC), i % CHUNKS_PER_DOC, chash[i], collection,
-                            collectionId, MODEL);
+                            MODEL);
             }
             values.execute();
         }
@@ -245,40 +241,21 @@ class VectorSensitivityExcludePlanShapeTest {
             var d = DSL.generateSeries(0, docs - 1).as("gd", "d");
             Field<Integer> di = d.field("d", Integer.class);
             Field<Boolean> sensitive = sensitiveEvery > 0 ? di.mod(sensitiveEvery).eq(0) : DSL.inline(false);
-            ctx.insertInto(CATALOG_DOCUMENTS,
-                    CATALOG_DOCUMENTS.TENANT_ID,
-                    CATALOG_DOCUMENTS.TUMBLER,
-                    CATALOG_DOCUMENTS.TITLE,
-                    CATALOG_DOCUMENTS.CONTENT_TYPE,
-                    CATALOG_DOCUMENTS.PHYSICAL_COLLECTION,
-                    CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID,
+            ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                    CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION,
                     CATALOG_DOCUMENTS.SENSITIVE)
-                .select(ctx.select(DSL.inline(tenant),
-                   DSL.inline(docPrefix).concat(di.cast(SQLDataType.VARCHAR)),
-                   DSL.inline("doc ").concat(di.cast(SQLDataType.VARCHAR)),
-                   DSL.inline("paper"),
-                   DSL.inline(collection),
-                   CollectionIds.idOf(DSL.inline(tenant), DSL.inline(collection)),
-                   sensitive).from(d))
+                .select(ctx.select(DSL.inline(tenant), DSL.inline(docPrefix).concat(di.cast(SQLDataType.VARCHAR)),
+                    DSL.inline("doc ").concat(di.cast(SQLDataType.VARCHAR)), DSL.inline("paper"),
+                    DSL.inline(collection), sensitive).from(d))
                 .execute();
-            ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
-                    CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
-                    CATALOG_DOCUMENT_CHUNKS.DOC_ID,
-                    CATALOG_DOCUMENT_CHUNKS.POSITION,
-                    CATALOG_DOCUMENT_CHUNKS.CHASH,
-                    CATALOG_DOCUMENT_CHUNKS.COLLECTION,
-                    CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID,
-                    CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
+            ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                    CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
                     CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX)
                 .select(ctx.select(DSL.inline(tenant),
-                   DSL.inline(docPrefix).concat(DSL.floor(i.div(CHUNKS_PER_DOC)).cast(SQLDataType.INTEGER)
+                    DSL.inline(docPrefix).concat(DSL.floor(i.div(CHUNKS_PER_DOC)).cast(SQLDataType.INTEGER)
                         .cast(SQLDataType.VARCHAR)),
-                   i.mod(CHUNKS_PER_DOC),
-                   chash,
-                   DSL.inline(collection),
-                   CollectionIds.idOf(DSL.inline(tenant), DSL.inline(collection)),
-                   DSL.inline(model),
-                   i.mod(CHUNKS_PER_DOC))
+                    i.mod(CHUNKS_PER_DOC), chash, DSL.inline(collection), DSL.inline(model), i.mod(CHUNKS_PER_DOC))
                     .from(g))
                 .execute();
         } finally {

@@ -250,41 +250,6 @@ class GrantsNexusSvcUpgradeIntegrationTest {
         // policy follows the registering includes and reads the same unborn state, so it goes with them.
         List<String> stripped = new ArrayList<>(ShippedMoveRegistrations.byInclude().keySet());
         stripped.add("db/changelog/vectors-065-catalog-collections-owner-read.xml");
-        // RDR-229 P3.1 (nexus-p2m1x.17): the stamp family builds on the registry and the policy above, so it is as unborn as they
-        // are: vectors-068 (the collection_id columns and CHECKs the stamp moves fill and validate), vectors-069 (the dual-write
-        // functions) and vectors-070 (the stamp moves and their owner-read policies). vectors-070 and catalog-052 register
-        // moves, so the scan above already holds them; they are named again only to make the list say so, and added only when
-        // the scan did not find them (a second entry would find its include already stripped). Sam's ruling (ask
-        // p31-existing-schema-tests) names 068, 069 and 070; no walk failure has shown 068 or 069 to be needed here (they touch no
-        // registry), they are stripped because the old state predates the stamp family as a whole.
-        //
-        // datamoves-002 (the finisher's verify_statement_timeout_ms column, an ALTER TABLE nexus.data_moves with no precondition) is
-        // the one include after datamoves-001 that reads the registry and is not a registering include, so the scan cannot hold it:
-        // left in, the old walk fails at datamoves-002-1 with 'relation "nexus.data_moves" does not exist' (chas run of 911747ea29).
-        // It landed after this list was written and is independent of P3.1; the new boot applies it after datamoves-001.
-        //
-        // RDR-229 P3.8 (nexus-p2m1x.28): the collections family is as unborn as the stamp family it builds on. collections-002's
-        // sequence-heal function reads catalog_collections.collection_id, which vectors-068 adds; left in, the old walk fails
-        // there with 'column c.collection_id does not exist' (chas run of 32fc5c484b). collections-001 and -003 go with it: the
-        // old state predates P3.8 as a whole, and the new boot applies all three.
-        for (String unborn : List.of("db/changelog/datamoves-002-verify-statement-timeout.xml",
-                "db/changelog/vectors-068-collection-id-expand.xml",
-                "db/changelog/vectors-069-collection-id-dual-write-functions.xml",
-                "db/changelog/vectors-070-collection-id-stamp-moves.xml",
-                "db/changelog/collections-001-tuple-unique-index.xml",
-                "db/changelog/collections-002-collection-id-seq-heal-function.xml",
-                "db/changelog/collections-003-tuple-lock-stripes.xml")) {
-            if (!stripped.contains(unborn)) {
-                stripped.add(unborn);
-            }
-        }
-        assertThat(stripped).as("non-vacuity: the registry's own follow-up and the P3.1 includes are in the old state's strip list")
-            .contains("db/changelog/datamoves-002-verify-statement-timeout.xml",
-                "db/changelog/vectors-068-collection-id-expand.xml",
-                "db/changelog/vectors-069-collection-id-dual-write-functions.xml",
-                "db/changelog/vectors-070-collection-id-stamp-moves.xml",
-                "db/changelog/collections-002-collection-id-seq-heal-function.xml",
-                "db/changelog/catalog-052-residue-moves-supersede.xml");
         for (String registering : stripped) {
             String include = "<include file=\"" + registering + "\"/>";
             assertThat(master).as("the master includes " + registering).contains(include);

@@ -10,7 +10,6 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.fasterxml.jackson.databind.JsonNode;
 import dev.nexus.service.db.AdminConnection;
 import dev.nexus.service.db.AdminDdlSession;
-import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.ManifestCheck;
 import dev.nexus.service.db.ManifestCheckAdmin;
 import dev.nexus.service.db.TenantConstants;
@@ -92,9 +91,6 @@ abstract class ManifestCheckRoutesIntegrationBase extends ChunkKeysTestBase {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            // RDR-229 P3.1: a manifest row that names a collection carries its registry id, so the tenant's row of the
-            // collection exists (idempotent, every tenant used) before the replica role turns the foreign keys off
-            PgContainerHelper.insertCollection(ctx, tenant, "mci-collection");
             ctx.set(DSL.name("session_replication_role"), DSL.inline("replica")).execute();
             var insert = ctx.insertInto(CATALOG_DOCUMENT_CHUNKS)
                 .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant)
@@ -103,7 +99,6 @@ abstract class ManifestCheckRoutesIntegrationBase extends ChunkKeysTestBase {
                 .set(CATALOG_DOCUMENT_CHUNKS.CHASH,
                     MessageDigest.getInstance("SHA-256").digest(doc.getBytes(StandardCharsets.UTF_8)))
                 .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, "mci-collection")
-                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, "mci-collection"))
                 .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, MODEL)
                 // NOT NULL, and the BEFORE INSERT default trigger is off under replica: a check that is not about
                 // chunk_index leaves it equal to position, one that is overrides it below

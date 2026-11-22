@@ -109,10 +109,7 @@ def catalog(tmp_path, monkeypatch):
     monkeypatch.setattr(HttpCatalogClient, "_get", fake_get)
 
     from tests._catalog_fixture_ops import ActiveCatalog
-    active = ActiveCatalog()
-    # the fake engine's rows, for a test that seeds a row the client can no longer register (a blank model_version)
-    active.fake_rows = fake_rows  # type: ignore[attr-defined]
-    return active
+    return ActiveCatalog()
 
 
 # ── owner_segment_for_tumbler ────────────────────────────────────────────
@@ -359,18 +356,14 @@ def test_collection_for_conformant_row_with_empty_model_version(catalog) -> None
     back to the returned conformant name's version, with a warning
     (``collection_for_row_model_version_empty``), until P1.2's census
     (nexus-p2m1x.2) reads zero such rows. ``bump=True`` then adds one.
-
-    RDR-229 P3.8: ``register_collection`` refuses a blank ``model_version`` (D1 refuses it for a new row
-    on the engine too), so the legacy row is seeded straight into the fake engine, the way an install
-    that predates D1 carries it.
     """
     from structlog.testing import capture_logs
 
     name = "code__1-7__voyage-code-3__v3"
-    catalog.fake_rows[name] = {
-        "name": name, "content_type": "code", "owner_id": "1-7",
-        "embedding_model": "voyage-code-3", "model_version": "",
-    }
+    catalog.register_collection(
+        name, content_type="code", owner_id="1-7",
+        embedding_model="voyage-code-3", model_version="",
+    )
     assert catalog.collection_for("code", "1.7", "voyage-code-3").model_version == 3
     with capture_logs() as logs:
         bumped = catalog.collection_for(

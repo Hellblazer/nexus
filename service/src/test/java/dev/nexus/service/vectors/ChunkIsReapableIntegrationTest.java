@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
-import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.PgActivityProbe;
 import dev.nexus.service.PgCatalogProbes;
 import dev.nexus.service.PgContainerHelper;
@@ -434,14 +433,11 @@ class ChunkIsReapableIntegrationTest extends ChunkReapableTestBase {
             ageTo(ctx, t, KNOWLEDGE, incoming, DAYS_40);
         });
 
-        su(ctx -> ctx.insertInto(CATALOG_DOCUMENT_CHUNKS)
-            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, t)
-            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, "stamp-up1")
-            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 3)
-            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, bytes(incoming))
-            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, KNOWLEDGE)
-            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(t, KNOWLEDGE))
-            .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, t, KNOWLEDGE))
+        su(ctx -> ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
+                CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
+                CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+            .values(t, "stamp-up1", 3, bytes(incoming), KNOWLEDGE,
+                PgContainerHelper.collectionModel(ctx, t, KNOWLEDGE))
             .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION)
             .doUpdate().set(CATALOG_DOCUMENT_CHUNKS.CHASH, bytes(incoming)).execute());
 
@@ -718,26 +714,14 @@ class ChunkIsReapableIntegrationTest extends ChunkReapableTestBase {
         su(ctx -> {
             assertThat(PgCatalogProbes.columnNames(ctx, "nexus", "chunk_orphaned_at"))
                 // RDR-225: the record carries its chunk's embedding_model (the four-column chunk foreign key).
-                // RDR-229 P3.1: and the registry id of its collection (collection_id, vectors-068).
-                .containsExactlyInAnyOrder("tenant_id", "collection", "chash", "orphaned_at", "embedding_model",
-                    "collection_id");
+                .containsExactlyInAnyOrder("tenant_id", "collection", "chash", "orphaned_at", "embedding_model");
             PgCatalogProbes.RowSecurity rls = PgCatalogProbes.rowSecurity(ctx, "nexus", "chunk_orphaned_at");
             assertThat(rls).as("nexus.chunk_orphaned_at must exist").isNotNull();
             assertThat(rls.enabled()).as("RLS ENABLE").isTrue();
             assertThat(rls.forced()).as("RLS FORCE").isTrue();
             List<PgCatalogProbes.Policy> policies = PgCatalogProbes.policies(ctx, "nexus", "chunk_orphaned_at");
-            // RDR-229 P3.1 (vectors-070): the tenant policy, and the migrating role's owner-read SELECT policy.
-            assertThat(policies).extracting(PgCatalogProbes.Policy::policyname)
-                .containsExactlyInAnyOrder("tenant_isolation", "chunk_orphaned_at_owner_read");
-            PgCatalogProbes.Policy ownerRead = policies.stream()
-                .filter(p -> p.policyname().equals("chunk_orphaned_at_owner_read")).findFirst().orElseThrow();
-            assertThat(ownerRead.cmd()).isEqualTo("SELECT");
-            assertThat(ownerRead.qual()).isEqualTo("true");
-            assertThat(ownerRead.withCheck()).isNull();
-            assertThat(PgCatalogProbes.policyRoles(ctx, "nexus", "chunk_orphaned_at").stream()
-                    .filter(p -> p.policyname().equals("chunk_orphaned_at_owner_read"))
-                    .map(PgCatalogProbes.PolicyRoles::toString).toList())
-                .containsExactly("chunk_orphaned_at_owner_read roles={" + PgContainerHelper.USERNAME + "} cmd=SELECT");
+            assertThat(policies).hasSize(1);
+            assertThat(policies.get(0).policyname()).isEqualTo("tenant_isolation");
             PgCatalogProbes.Constraint fk = PgCatalogProbes.foreignKey(ctx, "nexus", "chunk_orphaned_at_chunk_fk");
             assertThat(fk).as("the record must not outlive or misname its chunk").isNotNull();
             assertThat(fk.confdeltype()).as("ON DELETE CASCADE").isEqualTo("c");

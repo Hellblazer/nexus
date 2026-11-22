@@ -80,24 +80,6 @@ class PipelineHandlerTest {
         service = new NexusService(0, TOKEN, svcDs);
         service.start();
         http = HttpClient.newHttpClient();
-
-        // AuthFilter's once-per-process ghost sweep deletes a registered-but-chunkless collection at a tenant's first
-        // request: burn it for both tenants before the registrations below.
-        for (String token : List.of(TOKEN, OTHER_TOKEN)) {
-            http.send(TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list")
-                .header("Authorization", "Bearer " + token).GET().build(), HttpResponse.BodyHandlers.ofString());
-        }
-
-        // RDR-229 P3.1 stage 2b: pdf_pipeline carries its collection's registry id (a NAME_ID CHECK), so a create for a
-        // collection the registry does not hold is refused 422. Register the collections these tests name, as the
-        // client does before it creates a run.
-        try (Connection su = pg.createConnection("")) {
-            var ctx = DSL.using(su, SQLDialect.POSTGRES);
-            for (String name : List.of("knowledge__t", "knowledge__h8", "knowledge__e7gone", "knowledge__e7keep")) {
-                PgContainerHelper.insertCollection(ctx, TENANT, name);
-                PgContainerHelper.insertCollection(ctx, OTHER_TENANT, name);
-            }
-        }
     }
 
     @AfterAll

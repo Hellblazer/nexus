@@ -217,7 +217,7 @@ def _write(root: Path, rel: str, text: str = "x = 1\n") -> Path:
 
 
 def _hook(repo: Path, files: list[Path], globs: tuple[str, ...], *, head: str = "h1"):
-    from tests._catalog_fixture_ops import catalog_hook_seeded as _catalog_hook  # noqa: PLC0415 — heavy module, deferred to the test that needs it
+    from nexus.indexer import _catalog_hook  # noqa: PLC0415 — heavy module, deferred to the test that needs it
 
     wanted: set[Path] = set()
     confirmed: set[Path] = set()

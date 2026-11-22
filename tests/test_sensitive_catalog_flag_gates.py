@@ -902,10 +902,6 @@ def test_the_refused_reput_puts_the_identity_stamp_back(t2_service_env, tmp_path
     collection = f"knowledge__{CORPUS}__voyage-context-3__v1"
     title = "stamp restore note"
     old_chash = hashlib.sha256(b"the old text of the note").hexdigest()
-    from tests._catalog_fixture_ops import register_seed_collections
-
-    # RDR-229 P3.1: a document names a registered collection (the engine refuses one that is not, 422).
-    register_seed_collections(collection)
     writer = make_catalog_writer()
     try:
         owner = writer.register_owner("knowledge", "curator")

@@ -523,9 +523,7 @@ def test_project_art_resolves_to_owner_1_2_on_a_fixture_catalog() -> None:
     in the live catalog, so the repo-preferred rule is exercised."""
     from nexus.catalog.http_catalog_client import HttpCatalogClient
     from nexus.plans.evidence import build_evidence_request, catalog_name_lookup
-    from tests._catalog_fixture_ops import register_seed_collections
 
-    register_seed_collections("rdr__1-1__x__v1", "rdr__1-2__x__v1")
     with HttpCatalogClient() as cat:
         nexus_owner = cat.register_owner("nexus", "repo", repo_hash="fixturehash1")
         art_owner = cat.register_owner("ART", "repo", repo_hash="fixturehash2")

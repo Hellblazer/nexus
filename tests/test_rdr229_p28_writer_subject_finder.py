@@ -19,7 +19,6 @@ from click.testing import CliRunner
 
 import nexus.catalog.factory as factory
 import nexus.corpus as corpus
-from nexus import collection_mint
 from nexus.catalog.collection_name import CollectionAttributes
 from nexus.cli import main
 from nexus.commands.dt import _resolve_dt_collection
@@ -47,35 +46,6 @@ def _finder_returning(row: CollectionAttributes | None) -> MagicMock:
 def _install_finder(monkeypatch: pytest.MonkeyPatch, finder) -> None:
     """Replace the factory the writers call, so the real catalog reader is never built."""
     monkeypatch.setattr(corpus, "catalog_subject_finder", lambda: finder)
-
-
-class _MintingWriter:
-    """The catalog writer a new subject is registered through (RDR-229 P3.8): every nameless registration answers
-    the row the engine minted, ``c42``."""
-
-    def __init__(self) -> None:
-        self.calls: list[dict] = []
-
-    def register_collection(self, *args, **kwargs):
-        assert args == (), "registered by attributes, no name"
-        self.calls.append(kwargs)
-        return _attrs("c42", subject=kwargs["owner_id"])
-
-    def close(self) -> None:
-        pass
-
-
-@pytest.fixture
-def minting(monkeypatch: pytest.MonkeyPatch):
-    """A catalog writer that mints, with no engine behind the profile check."""
-    writer = _MintingWriter()
-    monkeypatch.setattr(factory, "make_catalog_writer", lambda *a, **k: writer)
-    monkeypatch.setattr(corpus, "_profile_model_for_content_type", lambda ct: None)
-    collection_mint.forget_all()
-    corpus._REGISTERED_COLLECTIONS.clear()
-    yield writer
-    collection_mint.forget_all()
-    corpus._REGISTERED_COLLECTIONS.clear()
 
 
 @pytest.fixture
@@ -115,17 +85,14 @@ def test_index_md_writes_to_the_label_of_the_subjects_row(runner, fake_md, monke
     finder.assert_called_once_with("knowledge", "field-notes", _MODEL)
 
 
-def test_index_md_with_no_row_registers_by_attributes_and_writes_to_the_minted_label(
-    runner, fake_md, monkeypatch, minting,
-) -> None:
+def test_index_md_with_no_row_renders_the_name_as_before(runner, fake_md, monkeypatch) -> None:
     finder = _finder_returning(None)
     _install_finder(monkeypatch, finder)
     with patch("nexus.doc_indexer.index_markdown", return_value=_MD_RESULT) as m:
         result = runner.invoke(main, ["index", "md", str(fake_md), "--collection", "field-notes"])
     assert result.exit_code == 0, result.output
-    assert m.call_args.kwargs["collection_name"] == "c42"
+    assert m.call_args.kwargs["collection_name"] == _RENDERED
     finder.assert_called_once_with("knowledge", "field-notes", _MODEL)
-    assert [c["owner_id"] for c in minting.calls] == ["field-notes"]
 
 
 def test_index_md_fails_loudly_when_the_registry_cannot_be_read(runner, fake_md, monkeypatch) -> None:
@@ -159,14 +126,12 @@ def test_index_pdf_writes_to_the_label_of_the_subjects_row(runner, fake_pdf, mon
     assert m.call_args.kwargs["collection_name"] == "notes-from-2024"
 
 
-def test_index_pdf_with_no_row_registers_by_attributes_and_writes_to_the_minted_label(
-    runner, fake_pdf, monkeypatch, minting,
-) -> None:
+def test_index_pdf_with_no_row_renders_the_name_as_before(runner, fake_pdf, monkeypatch) -> None:
     _install_finder(monkeypatch, _finder_returning(None))
     with patch("nexus.doc_indexer.index_pdf", return_value=_PDF_RESULT) as m:
         result = runner.invoke(main, ["index", "pdf", str(fake_pdf), "--collection", "field-notes"])
     assert result.exit_code == 0, result.output
-    assert m.call_args.kwargs["collection_name"] == "c42"
+    assert m.call_args.kwargs["collection_name"] == _RENDERED
 
 
 def test_index_pdf_dry_run_reads_no_row(runner, fake_pdf, monkeypatch) -> None:
@@ -219,11 +184,9 @@ def test_dt_collection_override_writes_to_the_label_of_the_subjects_row(monkeypa
     assert _resolve_dt_collection("field-notes", "dt", ".pdf") == "notes-from-2024"
 
 
-def test_dt_collection_override_with_no_row_registers_by_attributes_and_answers_the_minted_label(
-    monkeypatch, minting,
-) -> None:
+def test_dt_collection_override_with_no_row_renders_the_name_as_before(monkeypatch) -> None:
     _install_finder(monkeypatch, _finder_returning(None))
-    assert _resolve_dt_collection("field-notes", "dt", ".pdf") == "c42"
+    assert _resolve_dt_collection("field-notes", "dt", ".pdf") == _RENDERED
 
 
 def test_dt_collection_override_refuses_an_unreadable_registry(monkeypatch) -> None:
@@ -249,7 +212,7 @@ def test_the_finder_serves_a_read_too_and_a_failed_read_falls_back() -> None:
     ) == _RENDERED
 
 
-def test_the_finder_underscored_subject_is_looked_up_by_its_owner_segment(minting) -> None:
+def test_the_finder_underscored_subject_is_looked_up_by_its_owner_segment() -> None:
     finder = _finder_returning(None)
     t3_collection_name("field_notes", for_write=True, subject_finder=finder)
     finder.assert_called_once_with("knowledge", "field-notes", _MODEL)
@@ -275,9 +238,7 @@ def test_a_given_t3_uses_its_own_find_collection_not_the_finder() -> None:
     finder.assert_not_called()
 
 
-def test_a_t3_less_call_with_no_finder_makes_no_catalog_read(monkeypatch, minting) -> None:
-    """No finder is a dry run or a static context: it renders, reads no row and registers nothing (RDR-229 P3.8:
-    only a write that passes a finder registers a new subject)."""
+def test_a_t3_less_call_with_no_finder_makes_no_catalog_read(monkeypatch) -> None:
     def boom(*a, **k):
         raise AssertionError("a t3-less call with no finder must not read the catalog")
 
@@ -285,7 +246,6 @@ def test_a_t3_less_call_with_no_finder_makes_no_catalog_read(monkeypatch, mintin
     assert t3_collection_name("field-notes", for_write=True) == _RENDERED
     assert t3_collection_name("field-notes") == _RENDERED
     assert t3_collection_name("knowledge__field-notes", for_write=True) == _RENDERED
-    assert minting.calls == []
 
 
 # -- catalog_subject_finder --------------------------------------------------
@@ -317,7 +277,7 @@ def test_the_finder_closes_the_reader_when_the_read_raises(monkeypatch) -> None:
     reader.close.assert_called_once_with()
 
 
-def test_the_finder_calls_only_find_collection_and_close_on_the_reader(monkeypatch, minting) -> None:
+def test_the_finder_calls_only_find_collection_and_close_on_the_reader(monkeypatch) -> None:
     """The finder touches the catalog reader only through find_collection and close; with
     no t3 there is nothing for it to probe (nexus-hmxi's no-grandfathering rule stands)."""
     reader = MagicMock(spec=["find_collection", "close"])
@@ -325,5 +285,5 @@ def test_the_finder_calls_only_find_collection_and_close_on_the_reader(monkeypat
     monkeypatch.setattr(factory, "make_catalog_reader", lambda: reader)
     assert t3_collection_name(
         "field-notes", for_write=True, subject_finder=corpus.catalog_subject_finder(),
-    ) == "c42"
+    ) == _RENDERED
     assert [c[0] for c in reader.method_calls] == ["find_collection", "close"]

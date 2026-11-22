@@ -233,28 +233,10 @@ def test_write_path_targets_voyage_not_bge_when_key_present(monkeypatch) -> None
     monkeypatch.setattr("nexus.config.local_embed_model_is_voyage", lambda: True)
     monkeypatch.setattr("nexus.config.get_credential", lambda name: "configured-key")
     t3 = _FakeT3ForCollectionName({"knowledge__art__bge-base-en-v15-768__v1"})
-    # RDR-229 P3.8: the new voyage sibling is a NEW tuple, registered by attributes; the engine mints its label.
-    from nexus.catalog.collection_name import CollectionAttributes
-
-    registered: list[dict] = []
-
-    class _Writer:
-        def register_collection(self, **kw):
-            registered.append(kw)
-            return CollectionAttributes(
-                collection_id=9, label="c9", content_type=kw["content_type"], owner_id=kw["owner_id"],
-                embedding_model=kw["embedding_model"], model_version=1, dimension=None, lifecycle_state="live",
-            )
-
-        def close(self) -> None:
-            pass
-
-    t3._collection_registrar = lambda: _Writer()
-    monkeypatch.setattr("nexus.corpus._profile_model_for_content_type", lambda ct: None)
-    assert t3_collection_name("art", t3=t3, for_write=True) == "c9"
-    assert [(r["content_type"], r["owner_id"], r["embedding_model"]) for r in registered] == [
-        ("knowledge", "art", "voyage-context-3"),
-    ], "the new sibling is the voyage tuple, not the pre-existing bge collection"
+    assert (
+        t3_collection_name("art", t3=t3, for_write=True)
+        == "knowledge__art__voyage-context-3__v1"
+    )
 
 
 def test_read_path_still_finds_bge_when_key_present(monkeypatch) -> None:
@@ -399,27 +381,10 @@ def test_write_path_mints_voyage_when_key_present_and_nothing_preexisting(
     monkeypatch.setattr("nexus.config.local_embed_model_is_voyage", lambda: True)
     monkeypatch.setattr("nexus.config.get_credential", lambda name: "configured-key")
     t3 = _FakeT3ForCollectionName(set())
-    # RDR-229 P3.8: the mint is the engine's. The new subject is registered with the canonical voyage token
-    # and the label the engine answers is the write target.
-    from nexus.catalog.collection_name import CollectionAttributes
-
-    registered: list[dict] = []
-
-    class _Writer:
-        def register_collection(self, **kw):
-            registered.append(kw)
-            return CollectionAttributes(
-                collection_id=5, label="c5", content_type=kw["content_type"], owner_id=kw["owner_id"],
-                embedding_model=kw["embedding_model"], model_version=1, dimension=None, lifecycle_state="live",
-            )
-
-        def close(self) -> None:
-            pass
-
-    t3._collection_registrar = lambda: _Writer()
-    monkeypatch.setattr("nexus.corpus._profile_model_for_content_type", lambda ct: None)
-    assert t3_collection_name("art", t3=t3, for_write=True) == "c5"
-    assert [r["embedding_model"] for r in registered] == ["voyage-context-3"]
+    assert (
+        t3_collection_name("art", t3=t3, for_write=True)
+        == "knowledge__art__voyage-context-3__v1"
+    )
 
 
 def test_effective_in_cloud_mode_delegates_to_canonical(cloud_mode) -> None:

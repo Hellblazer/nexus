@@ -4,7 +4,6 @@ package dev.nexus.service.db;
 
 import org.jooq.Condition;
 import org.jooq.DSLContext;
-import org.jooq.Field;
 import org.jooq.impl.DSL;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -141,13 +140,6 @@ public final class PipelineRepository {
     private record LockedRun(long pipelineId, int runEpoch) {}
 
     private final TenantScope tenantScope;
-
-    /** RDR-229 P3.1: the id of the row's own collection name, set by every UPDATE of a pdf_pipeline row (the NOT VALID
-     *  CHECK looks at each updated row, and a row not stamped yet has a name and no id). An id already stored is kept:
-     *  the name is not changing, and the registry row may be gone by then (a cutover deletes it), which would null
-     *  the id beside a non-empty name. */
-    private static final Field<Long> OWN_ID = DSL.coalesce(PDF_PIPELINE.COLLECTION_ID,
-        CollectionIds.idOf(PDF_PIPELINE.TENANT_ID, PDF_PIPELINE.COLLECTION));
 
     public PipelineRepository(TenantScope tenantScope) {
         this.tenantScope = tenantScope;
@@ -286,10 +278,8 @@ public final class PipelineRepository {
                             PDF_PIPELINE.TENANT_ID, PDF_PIPELINE.CONTENT_HASH,
                             PDF_PIPELINE.PDF_PATH, PDF_PIPELINE.COLLECTION,
                             PDF_PIPELINE.KEYED_BY,
-                            PDF_PIPELINE.STATUS, PDF_PIPELINE.STARTED_AT, PDF_PIPELINE.UPDATED_AT,
-                            PDF_PIPELINE.COLLECTION_ID)
-                       .values(tenant, contentHash, pdfPath, collection, keyedBy, "running", now, now,
-                               CollectionIds.require(ctx, tenant, collection))   // RDR-229 P3.1: typed 422 when unregistered
+                            PDF_PIPELINE.STATUS, PDF_PIPELINE.STARTED_AT, PDF_PIPELINE.UPDATED_AT)
+                       .values(tenant, contentHash, pdfPath, collection, keyedBy, "running", now, now)
                        .onConflictDoNothing()
                        .returning(PDF_PIPELINE.PIPELINE_ID, PDF_PIPELINE.RUN_EPOCH)
                        .fetchOne();
@@ -334,7 +324,6 @@ public final class PipelineRepository {
                        .set(PDF_PIPELINE.KEYED_BY, keyedBy)
                        .set(PDF_PIPELINE.RUN_EPOCH, PDF_PIPELINE.RUN_EPOCH.plus(1))
                        .set(PDF_PIPELINE.UPDATED_AT, now)
-                       .set(PDF_PIPELINE.COLLECTION_ID, OWN_ID)
                        .where(PDF_PIPELINE.TENANT_ID.eq(tenant)
                                .and(PDF_PIPELINE.PIPELINE_ID.eq(existing)))
                        .returning(PDF_PIPELINE.RUN_EPOCH)
@@ -374,7 +363,6 @@ public final class PipelineRepository {
            .set(PDF_PIPELINE.EXTRACTION_META, "")
            .set(PDF_PIPELINE.STARTED_AT, now)
            .set(PDF_PIPELINE.UPDATED_AT, now)
-           .set(PDF_PIPELINE.COLLECTION_ID, OWN_ID)
            .where(PDF_PIPELINE.TENANT_ID.eq(tenant).and(PDF_PIPELINE.PIPELINE_ID.eq(pipelineId)))
            .returning(PDF_PIPELINE.RUN_EPOCH)
            .fetchOne(PDF_PIPELINE.RUN_EPOCH);
@@ -418,8 +406,7 @@ public final class PipelineRepository {
             LockedRun run = lockRun(ctx, tenant, ref);
             if (run == null) return null;
             long id = run.pipelineId();
-            var update = ctx.update(PDF_PIPELINE).set(PDF_PIPELINE.UPDATED_AT, now)
-                .set(PDF_PIPELINE.COLLECTION_ID, OWN_ID);
+            var update = ctx.update(PDF_PIPELINE).set(PDF_PIPELINE.UPDATED_AT, now);
             for (var entry : fields.entrySet()) {
                 update = update.set(
                     DSL.field(DSL.name("nexus", "pdf_pipeline", entry.getKey()), Integer.class),
@@ -476,7 +463,6 @@ public final class PipelineRepository {
             long id = run.pipelineId();
             start.begin(ctx)
                  .set(PDF_PIPELINE.UPDATED_AT, now)
-                 .set(PDF_PIPELINE.COLLECTION_ID, OWN_ID)
                  .where(PDF_PIPELINE.TENANT_ID.eq(tenant)
                          .and(PDF_PIPELINE.PIPELINE_ID.eq(id))
                          .and(only))
@@ -683,7 +669,6 @@ public final class PipelineRepository {
             ctx.update(PDF_PIPELINE)
                .set(PDF_PIPELINE.CHUNKS_UPLOADED, 0)
                .set(PDF_PIPELINE.UPDATED_AT, now)
-               .set(PDF_PIPELINE.COLLECTION_ID, OWN_ID)
                .where(PDF_PIPELINE.TENANT_ID.eq(tenant).and(PDF_PIPELINE.PIPELINE_ID.eq(id)))
                .execute();
             return reset;
@@ -755,7 +740,6 @@ public final class PipelineRepository {
                .set(PDF_PIPELINE.CHUNKS_UPLOADED, 0)
                .set(PDF_PIPELINE.PAGES_EXTRACTED, 0)
                .set(PDF_PIPELINE.UPDATED_AT, now)
-               .set(PDF_PIPELINE.COLLECTION_ID, OWN_ID)
                .where(PDF_PIPELINE.TENANT_ID.eq(tenant).and(PDF_PIPELINE.PIPELINE_ID.eq(id)))
                .execute();
             return null;

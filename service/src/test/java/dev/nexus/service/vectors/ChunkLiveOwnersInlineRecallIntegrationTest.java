@@ -6,7 +6,6 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.Chash;
-import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
 import org.jooq.Condition;
@@ -206,8 +205,6 @@ class ChunkLiveOwnersInlineRecallIntegrationTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            // RDR-229 P3.1: a row naming a collection carries the registry id beside it (the *_collection_id_check CHECKs).
-            Long collId = CollectionIds.require(ctx, TENANT, COLLECTION);
             for (int i = 0; i < liveIds.size(); i++) {
                 String id = liveIds.get(i);
                 ctx.insertInto(CATALOG_DOCUMENTS)
@@ -216,17 +213,15 @@ class ChunkLiveOwnersInlineRecallIntegrationTest {
                     .set(CATALOG_DOCUMENTS.TITLE, "Doc")
                     .set(CATALOG_DOCUMENTS.CONTENT_TYPE, "prose")
                     .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLLECTION)
-                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, collId)
                     .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
                     .doNothing()
                     .execute();
                 ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
                         CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                         CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                        CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
-                        CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID)
+                        CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
                     .values(TENANT, id, 0, HexFormat.of().parseHex(liveChashes.get(i)), COLLECTION,
-                        PgContainerHelper.collectionModel(ctx, TENANT, COLLECTION), collId)
+                        PgContainerHelper.collectionModel(ctx, TENANT, COLLECTION))
                     .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                         CATALOG_DOCUMENT_CHUNKS.POSITION)
                     .doNothing()

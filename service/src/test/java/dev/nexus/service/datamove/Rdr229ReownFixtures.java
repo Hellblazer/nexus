@@ -7,7 +7,6 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_OWNERS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.nexus.service.PgContainerHelper;
-import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
 import org.junit.jupiter.api.BeforeEach;
@@ -44,12 +43,6 @@ abstract class Rdr229ReownFixtures extends DataMoveIntegrationBase {
 
     @BeforeEach
     void freshCatalog() throws Exception {
-        // RDR-229 P3.8: collections-001-2 builds the live-tuple index on the first boot after this move completes, and the
-        // class shares one database, so a later test would meet it. The move runs over duplicated tuples, which only exist
-        // before the index does: every test starts without it (on a single-use connection, see CollectionMintSupport).
-        try (Connection c = pg.createConnection("")) {
-            dev.nexus.service.CollectionMintSupport.dropIndex(DSL.using(c, SQLDialect.POSTGRES));
-        }
         ctx().deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.TENANT_ID.like("rdr229-reown-%")).execute();
         ctx().deleteFrom(CATALOG_OWNERS).where(CATALOG_OWNERS.TENANT_ID.like("rdr229-reown-%")).execute();
         ctx().deleteFrom(table("nexus", "gc_audit")).where(DSL.field(DSL.name("tenant_id"), String.class).like("rdr229-reown-%"))
@@ -97,24 +90,12 @@ abstract class Rdr229ReownFixtures extends DataMoveIntegrationBase {
 
     void collection(String tenant, String name, String owner, String lifecycle, String supersededBy) {
         String contentType = name.substring(0, name.indexOf("__"));
-        ctx().insertInto(CATALOG_COLLECTIONS)
-            .set(CATALOG_COLLECTIONS.TENANT_ID, tenant).set(CATALOG_COLLECTIONS.NAME, name)
-            .set(CATALOG_COLLECTIONS.CONTENT_TYPE, contentType).set(CATALOG_COLLECTIONS.OWNER_ID, owner)
-            .set(CATALOG_COLLECTIONS.EMBEDDING_MODEL, contentType.contains("code") ? "voyage-code-3" : "voyage-context-3")
-            .set(CATALOG_COLLECTIONS.MODEL_VERSION, "v1").set(CATALOG_COLLECTIONS.LIFECYCLE_STATE, lifecycle)
+        ctx().insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
+                CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL,
+                CATALOG_COLLECTIONS.MODEL_VERSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE, CATALOG_COLLECTIONS.SUPERSEDED_BY)
+            .values(tenant, name, contentType, owner,
+                contentType.contains("code") ? "voyage-code-3" : "voyage-context-3", "v1", lifecycle, supersededBy)
             .execute();
-        // RDR-229 P3.1 (R7): a tombstone carries its successor's registry id, or its own when the successor is not registered (yet): the
-        // row goes in live and is then made the tombstone, as the engine's own registration does (CollectionTombstones.stampTombstone)
-        if (!supersededBy.isEmpty()) {
-            var succ = CATALOG_COLLECTIONS.as("succ");
-            ctx().update(CATALOG_COLLECTIONS)
-                .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, supersededBy)
-                .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, org.jooq.impl.DSL.coalesce(
-                    org.jooq.impl.DSL.field(org.jooq.impl.DSL.select(succ.COLLECTION_ID).from(succ)
-                        .where(succ.TENANT_ID.eq(tenant)).and(succ.NAME.eq(supersededBy))),
-                    CATALOG_COLLECTIONS.COLLECTION_ID))
-                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(name)).execute();
-        }
     }
 
     /** A live collection whose stored model_version is {@code version} ({@code ""}: not yet written by D2's repair). */

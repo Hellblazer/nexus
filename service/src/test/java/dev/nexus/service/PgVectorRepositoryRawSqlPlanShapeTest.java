@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
-import dev.nexus.service.db.CollectionIds;
 import java.util.Random;
 import java.util.HexFormat;
 import org.jooq.Field;
@@ -277,7 +276,6 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
                 // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
                 PgContainerHelper.insertCollection(ctx, TENANT, coll);
                 String model = PgContainerHelper.collectionModel(ctx, TENANT, coll);
-                Long collectionId = CollectionIds.require(ctx, TENANT, coll);
                 Field<Vector> embField = VectorSeeds.chunkEmbedding(dim);
                 // Filler: CHUNKS_PER_DIM independently-random vectors (never collides with
                 // the single "nearest" row seeded below — see the method javadoc for why
@@ -285,14 +283,14 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
                 // Java-side from one seeded Random, components uniform in [-1, 1), and
                 // inserted FILLER_BATCH rows per statement.
                 for (int first = 1; first <= CHUNKS_PER_DIM; first += FILLER_BATCH) {
-                    var ins = ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID,
-                        CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, embField);
+                    var ins = ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH,
+                        CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, embField);
                     for (int i = first; i < first + FILLER_BATCH && i <= CHUNKS_PER_DIM; i++) {
                         float[] f = new float[dim];
                         for (int k = 0; k < dim; k++) {
                             f[k] = fillerRandom.nextFloat() * 2f - 1f;
                         }
-                        ins = ins.values(TENANT, coll, collectionId,
+                        ins = ins.values(TENANT, coll,
                             HexFormat.of().parseHex(md5x2("planshape-" + dim + "-" + i, "fill-" + dim + "-" + i)),
                             model, "planshape filler chunk " + i, Vector.of(f));
                     }
@@ -305,7 +303,6 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
                 ctx.insertInto(CHUNKS)
                     .set(CHUNKS.TENANT_ID, TENANT)
                     .set(CHUNKS.COLLECTION, coll)
-                    .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, coll))
                     .set(CHUNKS.CHASH, HexFormat.of().parseHex(nearestChash))
                     .set(CHUNKS.EMBEDDING_MODEL, model)
                     .set(CHUNKS.CHUNK_TEXT, "planshape nearest target chunk")
@@ -339,15 +336,14 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
                 .set(CATALOG_DOCUMENTS.TUMBLER, "planshape-graphhop-doc")
                 .set(CATALOG_DOCUMENTS.TITLE, "planshape graph-hop seed doc")
                 .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COL_768)
-                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, COL_768))
                 .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER).doNothing()
                 .execute();
             seed.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                     CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
-                    CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                    CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
                 .select(seed.select(CHUNKS.TENANT_ID, DSL.inline("planshape-graphhop-doc"),
                         DSL.rowNumber().over(DSL.orderBy(CHUNKS.CHASH)), CHUNKS.CHASH, CHUNKS.COLLECTION,
-                        CHUNKS.COLLECTION_ID, CHUNKS.EMBEDDING_MODEL)
+                        CHUNKS.EMBEDDING_MODEL)
                     .from(CHUNKS)
                     .where(CHUNKS.TENANT_ID.eq(TENANT).and(CHUNKS.COLLECTION.eq(COL_768))))
                 .execute();
@@ -357,7 +353,6 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
                 .set(TOPICS.TENANT_ID, TENANT)
                 .set(TOPICS.LABEL, "planshape-topic")
                 .set(TOPICS.COLLECTION, COL_384)
-                .set(TOPICS.COLLECTION_ID, CollectionIds.idOf(TENANT, COL_384))
                 .set(TOPICS.DOC_COUNT, 0)
                 .set(TOPICS.CREATED_AT, DSL.currentOffsetDateTime())
                 .set(TOPICS.REVIEW_STATUS, "pending")
@@ -379,11 +374,9 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
             // directly, no encode('hex').
             seed.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                     TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
-                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, TOPIC_ASSIGNMENTS.ASSIGNED_AT,
-                    TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+                    TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
                 .select(seed.select(CHUNKS.TENANT_ID, CHUNKS.CHASH, DSL.inline(900001L),
-                        DSL.inline("planshape-seed"), CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID,
-                        DSL.currentOffsetDateTime(),
+                        DSL.inline("planshape-seed"), CHUNKS.COLLECTION, DSL.currentOffsetDateTime(),
                         CHUNKS.EMBEDDING_MODEL)
                     .from(CHUNKS)
                     .where(CHUNKS.TENANT_ID.eq(TENANT).and(CHUNKS.COLLECTION.eq(COL_384))

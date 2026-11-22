@@ -9,7 +9,6 @@ import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgVectorRepositoryContractTest.FakeEmbedder;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
-import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.RequestLedgerActivity;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.PgVectorRepository;
@@ -289,11 +288,11 @@ class KeyedSweepRouteTest {
             catalog.upsertDocument(TENANT, Map.of(
                 "tumbler", docId, "title", "ks-" + id + "-" + i, "content_type", "code", "corpus", "code",
                 "physical_collection", origin, "chunk_count", 0));
-            su(ctx -> ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
-                    CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                    CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID,
-                    CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-                .values(TENANT, docId, 0, Chash.fromHex(chash).toBytes(), origin, CollectionIds.require(ctx, TENANT, origin),
+            su(ctx -> ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
+                    CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                    CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                .values(TENANT, docId, 0, Chash.fromHex(chash).toBytes(), origin,
                     PgContainerHelper.collectionModel(ctx, TENANT, origin))
                 .execute());
         }
@@ -1325,10 +1324,8 @@ class KeyedSweepRouteTest {
             if (doc != null) {
                 ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
                         CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION,
-                        CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CATALOG_DOCUMENTS.CHUNK_COUNT, CATALOG_DOCUMENTS.FILE_PATH,
-                        CATALOG_DOCUMENTS.METADATA)
-                    .values(TENANT, doc, "Locked document", origin, CollectionIds.require(ctx, TENANT, origin), 1, "l.md",
-                            JSONB.jsonb("{}")).execute();
+                        CATALOG_DOCUMENTS.CHUNK_COUNT, CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.METADATA)
+                    .values(TENANT, doc, "Locked document", origin, 1, "l.md", JSONB.jsonb("{}")).execute();
             }
         });
         return new Qr(origin, first, second, firstHashes, secondHashes, doc);

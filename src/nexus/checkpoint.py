@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from pathlib import Path
 
 import structlog
@@ -41,17 +40,8 @@ def checkpoint_path(content_hash: str, collection: str) -> Path:
     return CHECKPOINT_DIR / f"{content_hash}-{collection}.json"
 
 
-#: The collection names an older client could have written a checkpoint for: the old collection-name shape's
-#: characters and length (the 3 to 63 character minimum is not needed here). A collection label is free-form now
-#: (RDR-229 P3.6), up to 255 bytes and any of ``:``, ``/``, ``\\``: a file name built from one can exceed the filesystem's
-#: 255 bytes or hold a character Windows refuses. No legacy file can exist for such a label.
-_LEGACY_CHECKPOINT_COLLECTION = re.compile(r"[A-Za-z0-9_-]{1,63}")
-
-
 def delete_checkpoint(content_hash: str, collection: str) -> None:
-    """Delete a checkpoint file if it exists. A collection label outside the old name shape has none, and is a no-op."""
-    if not _LEGACY_CHECKPOINT_COLLECTION.fullmatch(collection):
-        return
+    """Delete a checkpoint file if it exists."""
     target = checkpoint_path(content_hash, collection)
     try:
         target.unlink()

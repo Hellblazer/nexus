@@ -5,7 +5,6 @@ package dev.nexus.service;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.Chash;
-import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.jooq.nexus.Routines;
@@ -287,16 +286,11 @@ class GcQuarantineOrphansBoundedTest {
             try {
                 float[] unit = new float[384];
                 unit[0] = 1f;
-                // P3.1: a chunk must carry its collection's registry id (NOT NULL CHECK), so the origin is registered for
-                // the insert and its registry row removed after it, which leaves the legacy shape the function must refuse.
-                PgContainerHelper.insertCollection(ctx, TENANT, src);
-                ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, CHUNKS.CHASH,
-                        CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384)
-                   .values(TENANT, src, CollectionIds.require(ctx, TENANT, src), Chash.ofText("a6mon unreg").toBytes(),
-                           "minilm-l6-v2-384", "text", Vector.of(unit))
+                ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
+                               CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384)
+                   .values(TENANT, src, Chash.ofText("a6mon unreg").toBytes(), "minilm-l6-v2-384", "text",
+                           Vector.of(unit))
                    .execute();
-                ctx.deleteFrom(CATALOG_COLLECTIONS)
-                   .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(src)).execute();
                 // RDR-192 Step 8: the function only reaches its registration check for a chunk
                 // older than the grace window; no origin row means it is aged by raw SQL here.
                 ctx.update(CHUNKS).set(CHUNKS.LAST_WRITTEN_AT, java.time.OffsetDateTime.now().minusDays(40))

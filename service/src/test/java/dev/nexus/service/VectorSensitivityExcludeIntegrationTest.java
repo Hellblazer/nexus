@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
-import dev.nexus.service.db.CollectionIds;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariConfig;
@@ -206,7 +205,7 @@ class VectorSensitivityExcludeIntegrationTest {
         String model = PgContainerHelper.collectionModel(dsl, TENANT, collection);
         MODELS.put(dim, model);
         long topic = dsl.insertInto(TOPICS)
-            .set(TOPICS.TENANT_ID, TENANT).set(TOPICS.LABEL, TOPIC).set(TOPICS.COLLECTION, collection).set(TOPICS.COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
+            .set(TOPICS.TENANT_ID, TENANT).set(TOPICS.LABEL, TOPIC).set(TOPICS.COLLECTION, collection)
             .set(TOPICS.CREATED_AT, SEED_TS)
             .returningResult(TOPICS.ID).fetchOne(TOPICS.ID);
         TOPIC_IDS.put(dim, topic);
@@ -214,7 +213,7 @@ class VectorSensitivityExcludeIntegrationTest {
             byte[] chash = HexFormat.of().parseHex(hex(e.getKey()));
             double theta = e.getValue();
             dsl.insertInto(CHUNKS)
-                .set(CHUNKS.TENANT_ID, TENANT).set(CHUNKS.COLLECTION, collection).set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, collection)).set(CHUNKS.CHASH, chash)
+                .set(CHUNKS.TENANT_ID, TENANT).set(CHUNKS.COLLECTION, collection).set(CHUNKS.CHASH, chash)
                 .set(CHUNKS.EMBEDDING_MODEL, model).set(CHUNKS.CHUNK_TEXT, text(e.getKey()))
                 .set(VectorSeeds.chunkEmbedding(dim),
                      VectorSeeds.vecXY(dim, (float) Math.cos(theta), (float) Math.sin(theta)))
@@ -222,7 +221,7 @@ class VectorSensitivityExcludeIntegrationTest {
                 .execute();
             dsl.insertInto(TOPIC_ASSIGNMENTS)
                 .set(TOPIC_ASSIGNMENTS.TENANT_ID, TENANT).set(TOPIC_ASSIGNMENTS.DOC_ID, chash)
-                .set(TOPIC_ASSIGNMENTS.TOPIC_ID, topic).set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, collection).set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
+                .set(TOPIC_ASSIGNMENTS.TOPIC_ID, topic).set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, collection)
                 .set(TOPIC_ASSIGNMENTS.ASSIGNED_AT, SEED_TS).set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, model)
                 .execute();
         }
@@ -232,7 +231,6 @@ class VectorSensitivityExcludeIntegrationTest {
                 .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT).set(CATALOG_DOCUMENTS.TUMBLER, doc)
                 .set(CATALOG_DOCUMENTS.TITLE, "Doc " + doc).set(CATALOG_DOCUMENTS.CONTENT_TYPE, "paper")
                 .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
-                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
                 .set(CATALOG_DOCUMENTS.SENSITIVE, SENSITIVE_DOCS.contains(e.getKey()))
                 .execute();
             dsl.insertInto(CATALOG_DOCUMENT_CHUNKS)
@@ -240,11 +238,10 @@ class VectorSensitivityExcludeIntegrationTest {
                 .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
                 .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(hex(e.getValue())))
                 .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
-                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
                 .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, model)
                 .execute();
             dsl.insertInto(DOCUMENT_ASPECTS)
-                .set(DOCUMENT_ASPECTS.TENANT_ID, TENANT).set(DOCUMENT_ASPECTS.COLLECTION, collection).set(DOCUMENT_ASPECTS.COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
+                .set(DOCUMENT_ASPECTS.TENANT_ID, TENANT).set(DOCUMENT_ASPECTS.COLLECTION, collection)
                 .set(DOCUMENT_ASPECTS.SOURCE_PATH, doc).set(DOCUMENT_ASPECTS.PROPOSED_METHOD, "gradient descent")
                 .set(DOCUMENT_ASPECTS.CONFIDENCE, 0.9).set(DOCUMENT_ASPECTS.EXTRACTED_AT, SEED_TS)
                 .set(DOCUMENT_ASPECTS.MODEL_VERSION, "rfvyy73").set(DOCUMENT_ASPECTS.EXTRACTOR_NAME, "rfvyy73")
@@ -257,7 +254,6 @@ class VectorSensitivityExcludeIntegrationTest {
             .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT).set(CATALOG_DOCUMENTS.TUMBLER, seed)
             .set(CATALOG_DOCUMENTS.TITLE, "Seed " + dim).set(CATALOG_DOCUMENTS.CONTENT_TYPE, "paper")
             .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
-            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
             .execute();
         for (String stem : OWNS.keySet()) {
             dsl.insertInto(CATALOG_LINKS, CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER,
@@ -278,7 +274,7 @@ class VectorSensitivityExcludeIntegrationTest {
             byte[] chash = HexFormat.of().parseHex(hex(key));
             double theta = 2.95 + 0.03 * i;
             dsl.insertInto(CHUNKS)
-                .set(CHUNKS.TENANT_ID, TENANT).set(CHUNKS.COLLECTION, COLL_B).set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, COLL_B)).set(CHUNKS.CHASH, chash)
+                .set(CHUNKS.TENANT_ID, TENANT).set(CHUNKS.COLLECTION, COLL_B).set(CHUNKS.CHASH, chash)
                 .set(CHUNKS.EMBEDDING_MODEL, model).set(CHUNKS.CHUNK_TEXT, text(key))
                 .set(VectorSeeds.chunkEmbedding(384),
                      VectorSeeds.vecXY(384, (float) Math.cos(theta), (float) Math.sin(theta)))
@@ -288,14 +284,12 @@ class VectorSensitivityExcludeIntegrationTest {
                 .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT).set(CATALOG_DOCUMENTS.TUMBLER, doc)
                 .set(CATALOG_DOCUMENTS.TITLE, "Doc " + doc).set(CATALOG_DOCUMENTS.CONTENT_TYPE, "paper")
                 .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLL_B)
-                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, COLL_B))
                 .set(CATALOG_DOCUMENTS.SENSITIVE, false)
                 .execute();
             dsl.insertInto(CATALOG_DOCUMENT_CHUNKS)
                 .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, TENANT).set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, doc)
                 .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0).set(CATALOG_DOCUMENT_CHUNKS.CHASH, chash)
                 .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, COLL_B)
-                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, COLL_B))
                 .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, model)
                 .execute();
         }
@@ -526,7 +520,7 @@ class VectorSensitivityExcludeIntegrationTest {
                 String doc = tumbler(key, dim);
                 byte[] chash = HexFormat.of().parseHex(hex(key));
                 dsl.insertInto(CHUNKS)
-                    .set(CHUNKS.TENANT_ID, TENANT).set(CHUNKS.COLLECTION, collection).set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, collection)).set(CHUNKS.CHASH, chash)
+                    .set(CHUNKS.TENANT_ID, TENANT).set(CHUNKS.COLLECTION, collection).set(CHUNKS.CHASH, chash)
                     .set(CHUNKS.EMBEDDING_MODEL, model).set(CHUNKS.CHUNK_TEXT, text(key))
                     .set(VectorSeeds.chunkEmbedding(dim),
                          VectorSeeds.vecXY(dim, (float) Math.cos(theta), (float) Math.sin(theta)))
@@ -535,18 +529,16 @@ class VectorSensitivityExcludeIntegrationTest {
                     .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT).set(CATALOG_DOCUMENTS.TUMBLER, doc)
                     .set(CATALOG_DOCUMENTS.TITLE, "Doc " + doc).set(CATALOG_DOCUMENTS.CONTENT_TYPE, "paper")
                     .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
-                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
                     .set(CATALOG_DOCUMENTS.SENSITIVE, BS.equals(key))
                     .execute();
                 dsl.insertInto(CATALOG_DOCUMENT_CHUNKS)
                     .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, TENANT).set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, doc)
                     .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0).set(CATALOG_DOCUMENT_CHUNKS.CHASH, chash)
                     .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
-                    .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
                     .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, model)
                     .execute();
                 dsl.insertInto(DOCUMENT_ASPECTS)
-                    .set(DOCUMENT_ASPECTS.TENANT_ID, TENANT).set(DOCUMENT_ASPECTS.COLLECTION, collection).set(DOCUMENT_ASPECTS.COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
+                    .set(DOCUMENT_ASPECTS.TENANT_ID, TENANT).set(DOCUMENT_ASPECTS.COLLECTION, collection)
                     .set(DOCUMENT_ASPECTS.SOURCE_PATH, doc).set(DOCUMENT_ASPECTS.PROPOSED_METHOD, "gradient descent")
                     .set(DOCUMENT_ASPECTS.CONFIDENCE, 0.9).set(DOCUMENT_ASPECTS.EXTRACTED_AT, SEED_TS)
                     .set(DOCUMENT_ASPECTS.MODEL_VERSION, "rfvyy73").set(DOCUMENT_ASPECTS.EXTRACTOR_NAME, "rfvyy73")
@@ -1516,19 +1508,17 @@ class VectorSensitivityExcludeIntegrationTest {
                                List<String> chashes) {
         dsl.insertInto(CATALOG_DOCUMENTS)
             .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT).set(CATALOG_DOCUMENTS.TUMBLER, stem)
-            .set(CATALOG_DOCUMENTS.TITLE, stem).set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection).set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
+            .set(CATALOG_DOCUMENTS.TITLE, stem).set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
             .set(CATALOG_DOCUMENTS.SENSITIVE, sensitive)
             .execute();
-        final Long collectionId = CollectionIds.require(dsl, TENANT, collection);
         for (int from = 0; from < chashes.size(); from += 200) {
             var step = dsl.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
                 CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID,
-                CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL);
-            org.jooq.InsertValuesStep7<?, String, String, Integer, byte[], String, Long, String> values = null;
+                CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL);
+            org.jooq.InsertValuesStep6<?, String, String, Integer, byte[], String, String> values = null;
             for (int i = from; i < Math.min(chashes.size(), from + 200); i++) {
                 byte[] chash = HexFormat.of().parseHex(chashes.get(i));
-                values = (values == null ? step : values).values(TENANT, stem, i, chash, collection, collectionId, model);
+                values = (values == null ? step : values).values(TENANT, stem, i, chash, collection, model);
             }
             values.execute();
         }

@@ -6,7 +6,6 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.ChashHex;
-import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.CollectionRegistry;
 import dev.nexus.service.db.ModelPartitions;
 import dev.nexus.service.db.DeadlockRetry;
@@ -1302,29 +1301,21 @@ public final class PgVectorRepository {
                     // lists diverge whenever the existence-partition skipped any embeds, so
                     // embeddings.get(idx) would silently pair the wrong vector with a chash.
                     DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
-                    // RDR-229 P3.1 stage 2b (nexus-p2m1x.17): the collection's registry id, read in THIS transaction
-                    // (never cached: a rename or a re-registration gives the name a new id), set beside the name on
-                    // every row and on the conflict arm. chunks carries CHECK (collection_id IS NOT NULL) NOT VALID,
-                    // so a row without it is refused (23514); the conflict arm also stamps a chunk the stamp has not
-                    // reached, whose update the CHECK would otherwise refuse. An unregistered name refuses here, 422.
-                    final Long collectionId = CollectionIds.require(ctx, tenant, collection);
                     var insert = ctx.insertInto(ch.table())
                         .columns(ch.tenantId(), ch.collection(), ch.chash(), ch.embeddingModel(),
-                                 ch.chunkText(), ch.embedding(), ch.metadata(), CHUNKS.COLLECTION_ID);
+                                 ch.chunkText(), ch.embedding(), ch.metadata());
                     for (int k = 0; k < finalInsertIdx.size(); k++) {
                         int idx = finalInsertIdx.get(k);
                         insert = insert.values(tenant, collection, dedupIds.get(idx), embeddingModel,
                                 dedupDocs.get(idx),
                                 Vector.of(embeddings.get(k)),
-                                JSONB.jsonb(toJson(dedupMetas.get(idx))),
-                                collectionId);
+                                JSONB.jsonb(toJson(dedupMetas.get(idx))));
                     }
                     // RDR-225: the four-column primary key (the partition keys are part of it).
                     insert.onConflict(ch.tenantId(), ch.collection(), ch.chash(), ch.embeddingModel())
                           .doUpdate()
                           .set(ch.chunkText(), DSL.excluded(ch.chunkText()))
                           .set(ch.embedding(), DSL.excluded(ch.embedding()))
-                          .set(CHUNKS.COLLECTION_ID, DSL.excluded(CHUNKS.COLLECTION_ID))
                           // nexus-w94eo: MERGES metadata (mergeMetadata: current || incoming)
                           // rather than replacing it wholesale. This is the fix for the
                           // diagnosed late-commit revert — a 504'd upsert-chunks attempt the
@@ -8304,17 +8295,6 @@ FROM scope s
     }
 
     /**
-     * RDR-229 P3.1 stage 2b (nexus-p2m1x.17): the registry id of the updated chunk row's OWN collection, for an UPDATE
-     * that names no collection column. {@code chunks} carries a NOT VALID CHECK that is evaluated on every row version
-     * an UPDATE writes, so a chunk the P3.1 stamp has not reached (collection set, {@code collection_id} NULL) is
-     * refused (23514) by any UPDATE that leaves the id alone. Correlated on the row's own {@code (tenant_id,
-     * collection)}, so one statement shape serves every row; NULL for {@code ''}, as the CHECK wants.
-     */
-    private static Field<Long> rowCollectionId(DimTables.ChunkTable ch) {
-        return CollectionIds.idOf(ch.tenantId(), ch.collection());
-    }
-
-    /**
      * Ctx-level metadata-only UPDATE for exactly one chash — the shared SQL shape
      * behind {@link #updateMetadata} (its own short transaction, the HTTP
      * frecency-reindex and post-extraction-enrichment paths). {@link
@@ -8343,7 +8323,6 @@ FROM scope s
         // stamp keep a chunk with no live owner alive forever.
         return ctx.update(ch.table())
                   .set(ch.metadata(), mergeMetadata(ch.metadata(), incoming, deleteKeys))
-                  .set(CHUNKS.COLLECTION_ID, rowCollectionId(ch))
                   .where(ch.collection().eq(collection).and(ch.chash().eq(chash)))
                   .execute();
     }
@@ -8469,7 +8448,6 @@ FROM scope s
                 queries.add(ctx.update(ch.table())
                                .set(ch.metadata(), value)
                                .set(ch.lastWrittenAt(), DimTables.lastWrittenNow())
-                               .set(CHUNKS.COLLECTION_ID, rowCollectionId(ch))
                                .where(ch.collection().eq(collection).and(ch.chash().eq(ids.get(idx)))));
             }
             int[] affectedCounts = ctx.batch(queries).execute();

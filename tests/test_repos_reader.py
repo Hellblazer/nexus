@@ -258,16 +258,14 @@ class TestFromCatalog:
         )
         owner_id = owner_str.replace(".", "-")
         old_name = f"docs__myrepo-1-2-zzzold__{_DOCS_MODEL}__v1"
-        # RDR-229 P3.8: the engine refuses a second live collection on one tuple, so the successor is the
-        # tuple's next version (v2), as a re-embed makes it; the old one is superseded by it just below.
-        new_name = f"docs__myrepo-1-2-aaanew__{_DOCS_MODEL}__v2"
+        new_name = f"docs__myrepo-1-2-aaanew__{_DOCS_MODEL}__v1"
         cat.register_collection(
             old_name, content_type="docs", owner_id=owner_id,
             embedding_model=_DOCS_MODEL, model_version="1",
         )
         cat.register_collection(
             new_name, content_type="docs", owner_id=owner_id,
-            embedding_model=_DOCS_MODEL, model_version="2",
+            embedding_model=_DOCS_MODEL, model_version="1",
         )
         # Guard: old_name must sort ABOVE new_name by name DESC, or a naive
         # NAME DESC pick would land on it for the wrong reason.

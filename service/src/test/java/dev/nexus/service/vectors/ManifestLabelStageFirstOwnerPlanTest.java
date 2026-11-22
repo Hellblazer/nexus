@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
-import dev.nexus.service.db.CollectionIds;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
@@ -94,7 +93,6 @@ class ManifestLabelStageFirstOwnerPlanTest {
                 ctx.insertInto(CHUNKS)
                     .set(CHUNKS.TENANT_ID, TENANT)
                     .set(CHUNKS.COLLECTION, COL)
-                    .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, COL))
                     .set(CHUNKS.CHASH, HexFormat.of().parseHex(hex))
                     .set(CHUNKS.EMBEDDING_MODEL, MODEL)
                     .set(CHUNKS.CHUNK_TEXT, "text " + c)
@@ -108,7 +106,6 @@ class ManifestLabelStageFirstOwnerPlanTest {
                     .set(CATALOG_DOCUMENTS.TUMBLER, doc)
                     .set(CATALOG_DOCUMENTS.TITLE, doc)
                     .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COL)
-                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, COL))
                     .set(CATALOG_DOCUMENTS.SOURCE_URI, "file:///" + doc + ".md")
                     .execute();
             }
@@ -137,7 +134,6 @@ class ManifestLabelStageFirstOwnerPlanTest {
             .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position)
             .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(hex))
             .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, COL)
-            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, COL))
             .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, MODEL)
             .execute();
     }

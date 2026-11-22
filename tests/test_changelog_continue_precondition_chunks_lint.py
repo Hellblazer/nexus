@@ -61,33 +61,6 @@ _CONTINUE_ALLOWLIST: dict[tuple[str, str], str] = {
     # DROP TABLE nexus.aspect_extraction_queue (AEL on it and, for its two FKs, on catalog_documents and
     # catalog_collections) and DROP FUNCTION of its counting helper: no chunk table, leaf or builder object.
     ("aspects-005-retire-aspect-queue-table.xml", "aspects-005-2"): "aspect queue retirement",
-    # ADD COLUMN and a NOT VALID CHECK on nexus.aspect_extraction_queue (AEL on that table only), inside a DO block
-    # that does nothing when the table is absent; skipped while the migration role does not own a kept table. The
-    # body names no chunk table, leaf or builder object (RDR-229 P3.1, residual R3).
-    ("vectors-068-collection-id-expand.xml", "vectors-068-18"): "aspect queue id column",
-    # A NOT VALID CHECK on nexus.catalog_collections (AEL on that one table), skipped while a tombstone with a blank
-    # model_version and no superseded_by_id exists, so D2's repair UPDATE cannot meet it (RDR-229 P3.1, item e). The
-    # precondition is a read of catalog_collections; the body names no chunk table, leaf or builder object.
-    ("vectors-068-collection-id-expand.xml", "vectors-068-19"): "superseded_by CHECK waits on D2 data",
-    # One INSERT into nexus.data_moves (ROW EXCLUSIVE on that registry table only), inside a DO block that does nothing
-    # when nexus.aspect_extraction_queue is absent; the precondition and the block read pg_class and pg_attribute for the
-    # queue and take no lock on it. The body names no chunk table, leaf or builder object (RDR-229 P3.1, residual R3).
-    ("vectors-070-collection-id-stamp-moves.xml", "vectors-070-30"): "aspect queue stamp move registration",
-    # SET LOCAL lock_timeout = '5s', then DROP POLICY IF EXISTS and CREATE POLICY on nexus.aspect_extraction_queue only
-    # (ACCESS EXCLUSIVE on that one table, bounded by the 5 s lock_timeout), inside a DO block that does nothing when the
-    # table is absent; the rest is reads of pg_roles, pg_policy and pg_class. The body names no chunk table, leaf or
-    # builder object (RDR-229 P3.1, residual R3).
-    ("vectors-070-collection-id-stamp-moves.xml", "vectors-070-31"): "aspect queue owner-read policy",
-    # CREATE UNIQUE INDEX on nexus.catalog_collections (SHARE on it for one build of a registry of hundreds of rows) and,
-    # in its guard, the counter's ALTER TABLE on that table (ACCESS EXCLUSIVE for one count) plus a read of
-    # nexus.data_moves. No chunk table, leaf or builder object is named, and a CREATE INDEX CONCURRENTLY on a leaf holds
-    # no lock on the registry, so the build cannot be what either statement waits behind.
-    ("collections-001-tuple-unique-index.xml", "collections-001-2"): "gated live-tuple unique index (RDR-229 P3.8)",
-    # CREATE UNIQUE INDEX on nexus.catalog_collections (tenant_id, name) under SET LOCAL lock_timeout = '5s' (SHARE on
-    # that one table for one build of a registry of hundreds of rows), failOnError="false" so a build that cannot get
-    # its lock is retried at the next boot; the guard reads pg_class through to_regclass and takes no lock. No chunk
-    # table, leaf or builder object is named, and a CREATE INDEX CONCURRENTLY on a leaf holds no lock on the registry.
-    ("catalog-053-live-label-unique.xml", "catalog-053-1"): "live-label unique index (RDR-229 P3.6)",
 }
 
 # Elements the lint cannot read into: what they run is not in the changelog text.

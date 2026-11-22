@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
-import dev.nexus.service.db.CollectionIds;
 import liquibase.Contexts;
 import liquibase.LabelExpression;
 import liquibase.Liquibase;
@@ -414,7 +413,6 @@ class Taxonomy014TenantFkRepointTest {
             .set(TOPICS.LABEL, tenant + "-topic")
             .set(TOPICS.PARENT_ID, parentId)
             .set(TOPICS.COLLECTION, "coll")
-            .set(TOPICS.COLLECTION_ID, CollectionIds.idOf(tenant, "coll"))
             .set(TOPICS.CREATED_AT, DSL.currentOffsetDateTime())
             .returningResult(TOPICS.ID)
             .fetchOne(TOPICS.ID);
@@ -449,7 +447,6 @@ class Taxonomy014TenantFkRepointTest {
             .set(TOPICS.TENANT_ID, tenant)
             .set(TOPICS.LABEL, tenant + "-doc-count-topic")
             .set(TOPICS.COLLECTION, collection)
-            .set(TOPICS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
             .set(TOPICS.DOC_COUNT, docCount)
             .set(TOPICS.CREATED_AT, DSL.currentOffsetDateTime())
             .returningResult(TOPICS.ID)
@@ -474,7 +471,6 @@ class Taxonomy014TenantFkRepointTest {
         ctx.insertInto(CHUNKS)
             .set(CHUNKS.TENANT_ID, tenant)
             .set(CHUNKS.COLLECTION, collection)
-            .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
             .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chashHex))
             .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
             .set(CHUNKS.CHUNK_TEXT, "doc-count-trigger-test chunk")
@@ -494,7 +490,6 @@ class Taxonomy014TenantFkRepointTest {
             .set(TOPIC_ASSIGNMENTS.TOPIC_ID, topicId)
             .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY, "manual")
             .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, sourceCollection)
-            .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, CollectionIds.idOf(tenant, sourceCollection))
             .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL,
                 PgContainerHelper.collectionModel(ctx, tenant, sourceCollection))
             .execute();

@@ -20,32 +20,11 @@ from tests.test_sensitive_external_rules import _CONTENT, _VOYAGE, BGE, Stop, _r
 _TITLE = "rfvyy-existing-voyage-note"
 
 
-def _hold_the_row_under_voyage(name: str) -> None:
-    """Make the registry row of the seeded Voyage collection say Voyage.
-
-    The substrate's engine registers every collection under its bge profile, so the row a seed registers for
-    this name holds ``bge-base-en-v15-768`` whatever the name says. P3.8's engine allows one live collection a
-    tuple, and the bge sibling a sensitive put routes to is the tuple (knowledge, rfvyy-ext, bge, v1): the
-    seeded row would hold it and refuse the sibling's registration (409). A Voyage collection holds the Voyage
-    model, as in an install that embeds with Voyage."""
-    from tests._catalog_fixture_ops import _run_psql
-    from tests._chunk_seed import _lit, ambient_tenant
-
-    _run_psql(
-        "UPDATE nexus.catalog_collections SET embedding_model = 'voyage-context-3' "
-        f"WHERE tenant_id = {_lit(ambient_tenant())} AND name = {_lit(name)};"
-    )
-
-
 def _plain_note_in_voyage(title: str = _TITLE):
     """A live note that an earlier non-sensitive put left in the Voyage collection (the catalog row is what a
     re-put resolves)."""
     from nexus.catalog.factory import make_catalog_writer
-    from tests._catalog_fixture_ops import register_seed_collections
 
-    # RDR-229 P3.1: a document names a registered collection (the engine refuses one that is not, 422).
-    register_seed_collections(_VOYAGE["knowledge"])
-    _hold_the_row_under_voyage(_VOYAGE["knowledge"])
     reader, writer = _reader(), make_catalog_writer()
     owner = reader.curator_owner_tumbler_by_name("rfvyy-ext") or writer.register_owner("rfvyy-ext", "curator")
     tumbler = writer.register(

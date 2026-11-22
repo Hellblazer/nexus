@@ -171,7 +171,6 @@ public final class TelemetryRepository {
                 .set(RELEVANCE_LOG.ACTION, action)
                 .set(RELEVANCE_LOG.SESSION_ID, str(sessionId))
                 .set(RELEVANCE_LOG.COLLECTION, str(collection))
-                .set(RELEVANCE_LOG.COLLECTION_ID, CollectionIds.idOf(tenant, str(collection)))   // RDR-229 P3.1: NULL when unknown
                 .set(RELEVANCE_LOG.TIMESTAMP, now)
                 .onConflictDoNothing()
                 .returningResult(RELEVANCE_LOG.ID)
@@ -198,15 +197,11 @@ public final class TelemetryRepository {
                 RELEVANCE_LOG.COLLECTION,
                 RELEVANCE_LOG.ACTION,
                 RELEVANCE_LOG.SESSION_ID,
-                RELEVANCE_LOG.TIMESTAMP,
-                RELEVANCE_LOG.COLLECTION_ID);
-            var ids = CollectionIdLookup.idsOf(ctx, tenant,
-                rows.stream().map(r -> r.size() > 2 ? r.get(2) : "").toList());   // RDR-229 P3.1
+                RELEVANCE_LOG.TIMESTAMP);
             for (var r : rows) {
-                String coll = r.size() > 2 ? r.get(2) : "";
                 step = step.values(tenant,
-                    r.get(0), r.get(1), coll,
-                    r.get(3), r.size() > 4 ? r.get(4) : "", now, ids.get(coll));
+                    r.get(0), r.get(1), r.size() > 2 ? r.get(2) : "",
+                    r.get(3), r.size() > 4 ? r.get(4) : "", now);
             }
             return step.onConflictDoNothing().execute();
         });
@@ -360,7 +355,6 @@ public final class TelemetryRepository {
                 .set(RELEVANCE_LOG.QUERY, query)
                 .set(RELEVANCE_LOG.CHUNK_ID, chunkId)
                 .set(RELEVANCE_LOG.COLLECTION, str(collection))
-                .set(RELEVANCE_LOG.COLLECTION_ID, CollectionIds.idOf(tenant, str(collection)))
                 .set(RELEVANCE_LOG.ACTION, action)
                 .set(RELEVANCE_LOG.SESSION_ID, str(sessionId))
                 .set(RELEVANCE_LOG.TIMESTAMP, ts)
@@ -395,7 +389,6 @@ public final class TelemetryRepository {
                     .set(SEARCH_TELEMETRY.TS, ts)
                     .set(SEARCH_TELEMETRY.QUERY_HASH, queryHash)
                     .set(SEARCH_TELEMETRY.COLLECTION, collection)
-                    .set(SEARCH_TELEMETRY.COLLECTION_ID, CollectionIds.idOf(tenant, collection))   // RDR-229 P3.1
                     .set(SEARCH_TELEMETRY.RAW_COUNT, rawCount)
                     .set(SEARCH_TELEMETRY.KEPT_COUNT, keptCount)
                     .set(SEARCH_TELEMETRY.TOP_DISTANCE, topDist)
@@ -644,12 +637,10 @@ public final class TelemetryRepository {
             CatalogRepository.refuseUnderReembedJob(ctx, tenant, "rename", oldName, newName);
             int searchCount = ctx.update(SEARCH_TELEMETRY)
                 .set(SEARCH_TELEMETRY.COLLECTION, newName)
-                .set(SEARCH_TELEMETRY.COLLECTION_ID, CollectionIds.idOf(tenant, newName))
                 .where(SEARCH_TELEMETRY.COLLECTION.eq(oldName))
                 .execute();
             int hookCount = ctx.update(HOOK_FAILURES)
                 .set(HOOK_FAILURES.COLLECTION, newName)
-                .set(HOOK_FAILURES.COLLECTION_ID, CollectionIds.idOf(tenant, newName))
                 .where(HOOK_FAILURES.COLLECTION.eq(oldName))
                 .execute();
             return Map.of("search_telemetry", searchCount, "hook_failures", hookCount);
@@ -675,7 +666,6 @@ public final class TelemetryRepository {
                 .set(SEARCH_TELEMETRY.TS, ts)
                 .set(SEARCH_TELEMETRY.QUERY_HASH, queryHash)
                 .set(SEARCH_TELEMETRY.COLLECTION, collection)
-                .set(SEARCH_TELEMETRY.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
                 .set(SEARCH_TELEMETRY.RAW_COUNT, rawCount)
                 .set(SEARCH_TELEMETRY.KEPT_COUNT, keptCount)
                 .set(SEARCH_TELEMETRY.TOP_DISTANCE, topDistance)
@@ -1775,7 +1765,6 @@ public final class TelemetryRepository {
                 .set(HOOK_FAILURES.TENANT_ID, tenant)
                 .set(HOOK_FAILURES.DOC_ID, str(docId))
                 .set(HOOK_FAILURES.COLLECTION, str(collection))
-                .set(HOOK_FAILURES.COLLECTION_ID, CollectionIds.idOf(tenant, str(collection)))
                 .set(HOOK_FAILURES.HOOK_NAME, hookName)
                 .set(HOOK_FAILURES.ERROR, str(error))
                 .set(HOOK_FAILURES.OCCURRED_AT, occurredAt)
@@ -1810,7 +1799,6 @@ public final class TelemetryRepository {
                 .set(HOOK_FAILURES.TENANT_ID, tenant)
                 .set(HOOK_FAILURES.DOC_ID, str(docId))
                 .set(HOOK_FAILURES.COLLECTION, str(collection))
-                .set(HOOK_FAILURES.COLLECTION_ID, CollectionIds.idOf(tenant, str(collection)))
                 .set(HOOK_FAILURES.HOOK_NAME, hookName)
                 .set(HOOK_FAILURES.ERROR, str(error))
                 .set(HOOK_FAILURES.OCCURRED_AT, occurredAt)
@@ -2263,36 +2251,34 @@ public final class TelemetryRepository {
     }
 
     private static void importRelevanceLogBatch(DSLContext ctx, String tenant, List<Map<String, Object>> rows) {
-        final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / 8);
-        var ids = CollectionIdLookup.idsOf(ctx, tenant, rows.stream().map(r -> str(optS(r, "collection"))).toList());
+        final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / 7);
         for (int start = 0; start < rows.size(); start += chunkSize) {
             var batch = rows.subList(start, Math.min(start + chunkSize, rows.size()));
             var insert = ctx.insertInto(RELEVANCE_LOG,
                     RELEVANCE_LOG.TENANT_ID, RELEVANCE_LOG.QUERY, RELEVANCE_LOG.CHUNK_ID,
                     RELEVANCE_LOG.COLLECTION, RELEVANCE_LOG.ACTION, RELEVANCE_LOG.SESSION_ID,
-                    RELEVANCE_LOG.TIMESTAMP, RELEVANCE_LOG.COLLECTION_ID);
+                    RELEVANCE_LOG.TIMESTAMP);
             for (var r : batch) {
                 insert = insert.values(tenant, reqS(r, "query"), reqS(r, "chunk_id"),
                         str(optS(r, "collection")), reqS(r, "action"), str(optS(r, "session_id")),
-                        parseTsStrict(reqS(r, "timestamp")), ids.get(str(optS(r, "collection"))));
+                        parseTsStrict(reqS(r, "timestamp")));
             }
             insert.onConflictDoNothing().execute();
         }
     }
 
     private static void importSearchTelemetryBatch(DSLContext ctx, String tenant, List<Map<String, Object>> rows) {
-        final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / 9);
-        var ids = CollectionIdLookup.idsOf(ctx, tenant, rows.stream().map(r -> optS(r, "collection")).toList());
+        final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / 8);
         for (int start = 0; start < rows.size(); start += chunkSize) {
             var batch = rows.subList(start, Math.min(start + chunkSize, rows.size()));
             var insert = ctx.insertInto(SEARCH_TELEMETRY,
                     SEARCH_TELEMETRY.TENANT_ID, SEARCH_TELEMETRY.TS, SEARCH_TELEMETRY.QUERY_HASH,
                     SEARCH_TELEMETRY.COLLECTION, SEARCH_TELEMETRY.RAW_COUNT, SEARCH_TELEMETRY.KEPT_COUNT,
-                    SEARCH_TELEMETRY.TOP_DISTANCE, SEARCH_TELEMETRY.THRESHOLD, SEARCH_TELEMETRY.COLLECTION_ID);
+                    SEARCH_TELEMETRY.TOP_DISTANCE, SEARCH_TELEMETRY.THRESHOLD);
             for (var r : batch) {
                 insert = insert.values(tenant, parseTsStrict(reqS(r, "ts")), reqS(r, "query_hash"),
                         reqS(r, "collection"), reqI(r, "raw_count"), reqI(r, "kept_count"),
-                        optD(r, "top_distance"), optD(r, "threshold"), ids.get(reqS(r, "collection")));
+                        optD(r, "top_distance"), optD(r, "threshold"));
             }
             insert.onConflictDoNothing().execute();
         }
@@ -2343,21 +2329,19 @@ public final class TelemetryRepository {
     }
 
     private static void importHookFailuresBatch(DSLContext ctx, String tenant, List<Map<String, Object>> rows) {
-        final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / 10);
-        var ids = CollectionIdLookup.idsOf(ctx, tenant, rows.stream().map(r -> str(optS(r, "collection"))).toList());
+        final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / 9);
         for (int start = 0; start < rows.size(); start += chunkSize) {
             var batch = rows.subList(start, Math.min(start + chunkSize, rows.size()));
             var insert = ctx.insertInto(HOOK_FAILURES,
                     HOOK_FAILURES.TENANT_ID, HOOK_FAILURES.DOC_ID, HOOK_FAILURES.COLLECTION,
                     HOOK_FAILURES.HOOK_NAME, HOOK_FAILURES.ERROR, HOOK_FAILURES.OCCURRED_AT,
-                    HOOK_FAILURES.BATCH_DOC_IDS, HOOK_FAILURES.IS_BATCH, HOOK_FAILURES.CHAIN,
-                    HOOK_FAILURES.COLLECTION_ID);
+                    HOOK_FAILURES.BATCH_DOC_IDS, HOOK_FAILURES.IS_BATCH, HOOK_FAILURES.CHAIN);
             for (var r : batch) {
                 String chain = str(optS(r, "chain"));
                 insert = insert.values(tenant, str(optS(r, "doc_id")), str(optS(r, "collection")),
                         reqS(r, "hook_name"), str(optS(r, "error")), parseTsStrict(reqS(r, "occurred_at")),
                         jsonbOrNull(optS(r, "batch_doc_ids")), Boolean.TRUE.equals(r.get("is_batch")),
-                        chain.isBlank() ? "single" : chain, ids.get(str(optS(r, "collection"))));
+                        chain.isBlank() ? "single" : chain);
             }
             insert.onConflictDoNothing().execute();
         }

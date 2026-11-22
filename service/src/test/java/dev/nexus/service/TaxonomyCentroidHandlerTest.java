@@ -286,8 +286,8 @@ class TaxonomyCentroidHandlerTest {
         // Topic ids no other test in this class uses: the class shares one database, and a centroid left under
         // the retired name would otherwise show up in another test's cross-collection listing.
         upsert(coll, 9001L, 1.0f, 0.0f, "before", 1);
-        SupersedeSeeds.supersede(new dev.nexus.service.db.CatalogRepository(new dev.nexus.service.db.TenantScope(svcDs)),
-            TENANT, coll, successor, "");
+        new dev.nexus.service.db.CatalogRepository(new dev.nexus.service.db.TenantScope(svcDs))
+            .supersedeCollection(TENANT, coll, successor, "");
 
         var rec = new java.util.LinkedHashMap<String, Object>();
         rec.put("collection", coll);

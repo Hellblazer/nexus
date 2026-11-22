@@ -430,20 +430,6 @@ ALLOWLIST: tuple[tuple[str, str, str], ...] = (
         "changelog too, and the LEFT JOIN yields the same zero rows toggled "
         "or not.",
     ),
-    *(
-        (
-            f"vectors-070-{n}",
-            "nexus.data_moves",
-            "nexus-p2m1x.17 (RDR-229 P3.1 stage 3): a registering INSERT into nexus.data_moves. The statements "
-            "the analyzer reads as a subquery on FORCE-RLS tables (nexus.catalog_collections and the driven table) are "
-            "string literals, the move's template, verification and on_complete: DATA that the move worker runs "
-            "later as the migrating role through its owner-read policies (vectors-065 and the policy "
-            "changesets of this file). The walk reads and writes no row of either table "
-            "(DataMoveChangesetGateTest, the upgrade-boot write gate nexus-f3yqd.1), so no tenant can be "
-            "invisible to it.",
-        )
-        for n in range(1, 16)
-    ),
 )
 
 

@@ -47,10 +47,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tests._catalog_fixture_ops import (
-    ActiveCatalog,
-    seed_row_when_profile_refuses,  # noqa: F401 — an autouse fixture: the pre-flight's registration meets the substrate's bge profile
-)
+from tests._catalog_fixture_ops import ActiveCatalog
 
 from tests.conftest import fake_credentials
 from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction

@@ -7,7 +7,6 @@ import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.VectorSeeds;
 import dev.nexus.service.db.Chash;
-import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
@@ -283,17 +282,13 @@ class ChunkLiveOwnersRecallExtendedIntegrationTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(false);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            // RDR-229 P3.1: a row naming a collection carries the registry id beside it (the *_collection_id_check CHECKs).
-            List<Long> collIds = new ArrayList<>(COLLECTIONS);
-            for (int c = 0; c < COLLECTIONS; c++) collIds.add(CollectionIds.require(ctx, TENANT, collections.get(c)));
             for (int c = 0; c < COLLECTIONS; c++) {
                 List<Query> docQueries = new ArrayList<>(docIds.get(c).size());
                 for (String id : docIds.get(c)) {
                     docQueries.add(ctx.insertInto(CATALOG_DOCUMENTS,
                             CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE,
-                            CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION,
-                            CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
-                        .values(TENANT, id, "Doc", "prose", collections.get(c), collIds.get(c)));
+                            CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+                        .values(TENANT, id, "Doc", "prose", collections.get(c)));
                 }
                 ctx.batch(docQueries).execute();
             }
@@ -314,10 +309,9 @@ class ChunkLiveOwnersRecallExtendedIntegrationTest {
                     pending.add(ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
                             CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                             CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                            CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
-                            CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID)
+                            CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
                         .values(TENANT, docIds.get(c).get(doc[i]), nextPosition[doc[i]]++,
-                            HexFormat.of().parseHex(chashHex.get(c).get(i)), collections.get(c), model, collIds.get(c)));
+                            HexFormat.of().parseHex(chashHex.get(c).get(i)), collections.get(c), model));
                     if (pending.size() == manifestBatch || written == owned) {
                         ctx.batch(pending).execute();
                         su.commit();

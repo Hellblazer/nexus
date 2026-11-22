@@ -20,20 +20,6 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class CatalogReconcileCommitNoteUriRuleTest extends CatalogReconcileTestBase {
 
-    /** RDR-229 P3.1: a document names its collection by registry id, so every collection this class files a document under or stages is registered for each fresh tenant. */
-    @Override
-    String newTenant() {
-        String t = super.newTenant();
-        try (Connection su = pg.createConnection("")) {
-            for (String name : List.of("code__seed", "code__old", "docs__old", "plainlabel", "knowledge__old", "knowledge__new")) {
-                PgContainerHelper.insertCollection(org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES), t, name);
-            }
-        } catch (java.sql.SQLException e) {
-            throw new IllegalStateException(e);
-        }
-        return t;
-    }
-
     @BeforeAll
     void boot() throws Exception {
         migrate();

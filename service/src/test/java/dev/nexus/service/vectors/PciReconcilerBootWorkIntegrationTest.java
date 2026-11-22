@@ -10,7 +10,6 @@ import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.BootWorkRegistry;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.Chash;
-import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.PgSession.PciSettings;
 import dev.nexus.service.http.StatusHandler;
 import dev.nexus.service.jooq.binding.Vector;
@@ -193,14 +192,13 @@ class PciReconcilerBootWorkIntegrationTest {
         int gen = ++generation;
         asSuperuser(su -> {
             PgContainerHelper.insertCollection(su, tenant, collection, M384);
-            Long cid = CollectionIds.require(su, tenant, collection);
             for (int from = 0; from < rows; from += 250) {
                 var step = su.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH,
-                    CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.METADATA, CHUNKS.COLLECTION_ID);
+                    CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.METADATA);
                 for (int i = from; i < Math.min(rows, from + 250); i++) {
                     String h = Chash.ofText(tenant + "/" + collection + "/" + gen + "/" + i).toHex();
                     step = step.values(tenant, collection, Chash.fromHex(h).toBytes(), M384, "row " + i,
-                        vector(i), JSONB.jsonb("{}"), cid);
+                        vector(i), JSONB.jsonb("{}"));
                 }
                 step.onConflictDoNothing().execute();
             }
@@ -222,17 +220,17 @@ class PciReconcilerBootWorkIntegrationTest {
 
         HeldWrite(String tenant) throws Exception {
             String held = name("held-" + tenant);
-            Long heldId = asSuperuser(su -> {
+            asSuperuser(su -> {
                 PgContainerHelper.insertCollection(su, tenant, held, M384);
-                return CollectionIds.require(su, tenant, held);
+                return null;
             });
             conn = pg.createConnection("");
             conn.setAutoCommit(false);
             DSL.using(conn, SQLDialect.POSTGRES)
                 .insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
-                    CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.METADATA, CHUNKS.COLLECTION_ID)
+                    CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.METADATA)
                 .values(tenant, held, Chash.fromHex(Chash.ofText("held/" + tenant).toHex()).toBytes(), M384, "held",
-                    vector(1), JSONB.jsonb("{}"), heldId)
+                    vector(1), JSONB.jsonb("{}"))
                 .execute();
         }
 

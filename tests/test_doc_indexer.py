@@ -19,7 +19,6 @@ from nexus.doc_indexer import (
 )
 from tests._catalog_fixture_ops import (
     ActiveCatalog, count_documents, documents_by_file_path, seed_manifest_chunks,
-    seed_row_when_profile_refuses,  # noqa: F401 — an autouse fixture: the pre-flight's registration meets the substrate's bge profile
 )
 
 # nexus-0y4c6: hoisted out of test_index_md_falls_back_to_local_embedder_
@@ -1154,7 +1153,7 @@ class TestCatalogMarkdownHookEphemeralPathGuard:
     def test_worktree_marker_path_with_clean_owner_root_is_skipped(
         self, tmp_path, monkeypatch,
     ):
-        from tests._catalog_fixture_ops import catalog_markdown_hook_seeded as _catalog_markdown_hook
+        from nexus.doc_indexer import _catalog_markdown_hook
         from nexus.repo_identity import is_worktree_or_tempdir_path
 
         # Linux/CI-vs-macOS divergence (nexus-u8n4r CI red, 2026-08-03): on
@@ -1200,7 +1199,7 @@ class TestCatalogMarkdownHookEphemeralPathGuard:
     def test_worktree_marker_path_with_owner_rooted_in_tmp_is_registered(
         self, tmp_path,
     ):
-        from tests._catalog_fixture_ops import catalog_markdown_hook_seeded as _catalog_markdown_hook
+        from nexus.doc_indexer import _catalog_markdown_hook
 
         cat = ActiveCatalog()
         corpus = "u8n4r-md-tmp"
@@ -1251,7 +1250,7 @@ class TestCatalogMarkdownHookEphemeralPathGuard:
         worktree_md.parent.mkdir(parents=True)
         worktree_md.write_text("# RDR 999\n", encoding="utf-8")
 
-        from tests._catalog_fixture_ops import catalog_markdown_hook_seeded as _catalog_markdown_hook
+        from nexus.doc_indexer import _catalog_markdown_hook
 
         import structlog.testing
         with structlog.testing.capture_logs() as logs:
@@ -1292,7 +1291,7 @@ class TestCatalogMarkdownHookEphemeralPathGuard:
         worktree_md.parent.mkdir(parents=True)
         worktree_md.write_text("# unique\n", encoding="utf-8")
 
-        from tests._catalog_fixture_ops import catalog_markdown_hook_seeded as _catalog_markdown_hook
+        from nexus.doc_indexer import _catalog_markdown_hook
 
         _catalog_markdown_hook(
             worktree_md, "rdr__kkumv-md-no-mirror", "rdr", corpus, 3,
@@ -1312,7 +1311,7 @@ class TestMarkdownCatalogHookPhysicalCollectionRepointLogging:
     def test_reindex_into_different_collection_logs_repoint(self, tmp_path):
         import structlog.testing
 
-        from tests._catalog_fixture_ops import catalog_markdown_hook_seeded as _catalog_markdown_hook
+        from nexus.doc_indexer import _catalog_markdown_hook
 
         cat = ActiveCatalog()
         corpus = "t952k-md-repoint"
@@ -1338,7 +1337,7 @@ class TestMarkdownCatalogHookPhysicalCollectionRepointLogging:
     def test_reindex_into_same_collection_logs_nothing(self, tmp_path):
         import structlog.testing
 
-        from tests._catalog_fixture_ops import catalog_markdown_hook_seeded as _catalog_markdown_hook
+        from nexus.doc_indexer import _catalog_markdown_hook
 
         corpus = "t952k-md-nop"
         md_path = tmp_path / "t952k-nop.md"

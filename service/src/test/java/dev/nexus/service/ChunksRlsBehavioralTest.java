@@ -1,6 +1,5 @@
 package dev.nexus.service;
 
-import dev.nexus.service.db.CollectionIds;
 import java.util.HexFormat;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
@@ -246,7 +245,6 @@ class ChunksRlsBehavioralTest {
                 ctx.insertInto(CHUNKS)
                     .set(CHUNKS.TENANT_ID, TENANT_B)
                     .set(CHUNKS.COLLECTION, col)
-                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT_B, col))
                     .set(CHUNKS.CHASH, HexFormat.of().parseHex(padChash("chash-wc-cross-" + dim)))
                     .set(CHUNKS.EMBEDDING_MODEL, modelFor(dim))
                     .set(CHUNKS.CHUNK_TEXT, "cross-tenant inject")
@@ -451,7 +449,6 @@ class ChunksRlsBehavioralTest {
             ctx.insertInto(CHUNKS)
                 .set(CHUNKS.TENANT_ID, tenant)
                 .set(CHUNKS.COLLECTION, collection)
-                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
                 .set(CHUNKS.CHASH, HexFormat.of().parseHex(paddedChash))
                 .set(CHUNKS.EMBEDDING_MODEL, modelFor(dim))
                 .set(CHUNKS.CHUNK_TEXT, chunkText)

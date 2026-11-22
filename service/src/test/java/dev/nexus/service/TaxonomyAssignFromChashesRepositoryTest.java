@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
-import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.db.TaxonomyRepository;
 import dev.nexus.service.db.TenantScope;
@@ -407,7 +406,6 @@ class TaxonomyAssignFromChashesRepositoryTest {
                 .set(TOPIC_ASSIGNMENTS.SIMILARITY, 0.999)
                 .set(TOPIC_ASSIGNMENTS.ASSIGNED_AT, DSL.currentOffsetDateTime())
                 .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, col)
-                .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, CollectionIds.idOf(tenant, col))
                 // RDR-225: the assignment carries the model of the chunk it references.
                 .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(seed, tenant, col))
                 .execute();
@@ -670,7 +668,6 @@ class TaxonomyAssignFromChashesRepositoryTest {
             ctx.insertInto(CHUNKS)
                 .set(CHUNKS.TENANT_ID, tenant)
                 .set(CHUNKS.COLLECTION, collection)
-                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
                 .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(hexChashValue))
                 // RDR-225: a chunk carries its collection's model (its vector width must be that model's dim).
                 .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
@@ -730,7 +727,6 @@ class TaxonomyAssignFromChashesRepositoryTest {
             ctx.insertInto(TAXONOMY_CENTROIDS)
                 .set(TAXONOMY_CENTROIDS.TENANT_ID, tenant)
                 .set(TAXONOMY_CENTROIDS.COLLECTION, collection)
-                .set(TAXONOMY_CENTROIDS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
                 .set(TAXONOMY_CENTROIDS.TOPIC_ID, topicId)
                 .set(TAXONOMY_CENTROIDS.LABEL, "seed-centroid-label")
                 .set(TAXONOMY_CENTROIDS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))

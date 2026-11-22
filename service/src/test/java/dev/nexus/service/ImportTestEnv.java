@@ -258,26 +258,11 @@ final class ImportTestEnv implements AutoCloseable {
         }
     }
 
-    /** A step a test runs between two reads of one export session. */
-    @FunctionalInterface
-    interface Step {
-        void run() throws Exception;
-    }
-
     /** Exports {@code token}'s tenant over the export routes into a file (every table, every page). */
     BackupFile export(String token) throws Exception {
-        return export(token, () -> { });
-    }
-
-    /**
-     * As {@link #export(String)}, with {@code afterHeader} run once the session is open and its header read, before the first
-     * page: a write there lands after the session's snapshot, so a consistent export must not show it.
-     */
-    BackupFile export(String token, Step afterHeader) throws Exception {
         HttpResponse<String> open = call("POST", "/v1/tenant/export", token);
         assertThat(open.statusCode()).as(open.body()).isEqualTo(200);
         ObjectNode header = (ObjectNode) json(open);
-        afterHeader.run();
         String id = header.get("session_id").asText();
         for (String drop : List.of("session_id", "created_at", "expires_at", "idle_timeout_seconds", "total_timeout_seconds")) {
             header.remove(drop);

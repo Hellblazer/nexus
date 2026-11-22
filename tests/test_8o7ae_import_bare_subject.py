@@ -44,10 +44,6 @@ def test_import_into_bare_subject_lands_where_other_verbs_read(t2_service_env, t
     title, body = "o7ae note", "o7ae note body for the bare subject import"
     source_uri = uri_for(src, title)
     assert source_uri is not None
-    # RDR-229 P3.1: a document names a registered collection (the engine refuses one that is not, 422).
-    from tests._catalog_fixture_ops import register_seed_collections
-
-    register_seed_collections(src)
     tumbler = str(writer.register(
         owner=owner, title=title, content_type="knowledge",
         physical_collection=src, source_uri=source_uri,

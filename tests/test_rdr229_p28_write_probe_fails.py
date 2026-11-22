@@ -53,23 +53,7 @@ def test_a_write_refuses_when_a_later_probe_fails() -> None:
     assert t3_collection_name("knowledge__field-notes", t3=_Probe(failing={"knowledge__field-notes"})) == _RENDERED
 
 
-def test_a_write_that_probes_cleanly_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No failure, no change: the conformant name that exists stays the target. One that does not exist is a new
-    subject, registered by attributes (RDR-229 P3.8): the engine's minted label is the target, not the rendered name."""
-    from nexus.catalog.collection_name import CollectionAttributes
-
-    class _Writer:
-        def register_collection(self, **kwargs):
-            return CollectionAttributes(
-                collection_id=7, label="c7", content_type="knowledge", owner_id=kwargs["owner_id"],
-                embedding_model=kwargs["embedding_model"], model_version=1, dimension=1024, lifecycle_state="live",
-            )
-
-        def close(self) -> None:
-            pass
-
-    monkeypatch.setattr(corpus, "_profile_model_for_content_type", lambda ct: None)
+def test_a_write_that_probes_cleanly_is_unchanged() -> None:
+    """No failure, no change: the conformant name that exists, and the one that does not."""
     assert t3_collection_name("field-notes", t3=_Probe(present={_RENDERED}, failing=set()), for_write=True) == _RENDERED
-    fresh = _Probe(failing=set())
-    fresh._collection_registrar = lambda: _Writer()
-    assert t3_collection_name("field-notes", t3=fresh, for_write=True) == "c7"
+    assert t3_collection_name("field-notes", t3=_Probe(failing=set()), for_write=True) == _RENDERED

@@ -1062,9 +1062,7 @@ class TestEnqueueHookDocIdWiring:
         # wiring assertion (verbatim persistence) is unchanged, and the
         # FK leg is exercised live.
         from nexus.catalog.http_catalog_client import HttpCatalogClient
-        from tests._catalog_fixture_ops import register_seed_collections
 
-        register_seed_collections("knowledge__delos")
         with HttpCatalogClient() as cat:
             owner = cat.register_owner(
                 "wiring-repo",

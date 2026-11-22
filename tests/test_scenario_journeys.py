@@ -445,17 +445,6 @@ def test_index_repo_routes_code_to_code_corpus(t2_service_env, tmp_path: Path) -
     )
 
 
-def _is_knowledge_collection(name: str) -> bool:
-    """True when the registry row of *name* says it is a knowledge collection.
-
-    RDR-229 P3.8: a new knowledge subject goes to a label the engine mints (``c53``), so the name no longer
-    begins ``knowledge__``; the row's content type is what says which corpus a hit came from."""
-    from nexus.mcp_infra import get_collection_row
-
-    row = get_collection_row(name)
-    return bool(row) and row["content_type"] == "knowledge"
-
-
 @pytest.mark.scenario
 def test_cross_corpus_search_routes_correctly(t2_service_env, tmp_path: Path) -> None:
     """Journey 4: cross-corpus search routing — the CSV/multi-``--corpus``
@@ -499,7 +488,7 @@ def test_cross_corpus_search_routes_correctly(t2_service_env, tmp_path: Path) ->
     assert wombat_search.exit_code == 0, wombat_search.output
     wombat_hits = json.loads(wombat_search.stdout)
     assert any(
-        h.get("title") == "scenario4-wombat-note" and _is_knowledge_collection(h["collection"])
+        h.get("title") == "scenario4-wombat-note" and h["collection"].startswith("knowledge__")
         for h in wombat_hits
     ), f"expected the knowledge-corpus wombat note among combined-corpus hits: {wombat_hits}"
 
@@ -517,7 +506,7 @@ def test_cross_corpus_search_routes_correctly(t2_service_env, tmp_path: Path) ->
     # actually reached both distinct collections between them — proving the
     # comma-expansion resolved to >=2 real target collections, not one.
     all_collections_seen = {h["collection"] for h in wombat_hits + octopus_hits}
-    knowledge_seen = any(_is_knowledge_collection(c) for c in all_collections_seen)
+    knowledge_seen = any(c.startswith("knowledge__") for c in all_collections_seen)
     docs_seen = any(c.startswith("docs__scenario4__") for c in all_collections_seen)
     assert knowledge_seen and docs_seen, (
         f"combined --corpus {combined_corpus!r} did not route to both corpora: "

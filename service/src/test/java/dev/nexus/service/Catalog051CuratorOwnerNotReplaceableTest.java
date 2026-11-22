@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
-import dev.nexus.service.db.CollectionIds;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_OWNERS;
@@ -60,13 +59,7 @@ class Catalog051CuratorOwnerNotReplaceableTest {
                 .isEqualTo("1-32");
 
             // (3) the BEFORE trigger on INSERT: the documents already exist when the collection registers
-            // RDR-229 P3.1: the legacy state, a document whose collection has no registry row yet: the NOT VALID CHECK is lifted for the one insert
-            P31CheckReplay.lift(ctx, P31CheckReplay.CATALOG_DOCUMENTS);
-            try {
-                document(ctx, "1.33.7", CURATOR_LATE);
-            } finally {
-                P31CheckReplay.restore(ctx, P31CheckReplay.CATALOG_DOCUMENTS);
-            }
+            document(ctx, "1.33.7", CURATOR_LATE);
             collection(ctx, CURATOR_LATE, "docs", "1-32");
             assertThat(ownerOf(ctx, CURATOR_LATE)).as("a registration over existing documents keeps its owner")
                 .isEqualTo("1-32");
@@ -96,11 +89,9 @@ class Catalog051CuratorOwnerNotReplaceableTest {
     }
 
     private static void document(DSLContext ctx, String tumbler, String collection) {
-        ctx.insertInto(CATALOG_DOCUMENTS)
-            .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT).set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
-            .set(CATALOG_DOCUMENTS.TITLE, "doc " + tumbler).set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
-            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, collection))   // RDR-229 P3.1: the id beside the name
-            .execute();
+        ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+            .values(TENANT, tumbler, "doc " + tumbler, collection).execute();
     }
 
     private static String ownerOf(DSLContext ctx, String name) {

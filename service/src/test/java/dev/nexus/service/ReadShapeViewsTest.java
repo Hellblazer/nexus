@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
-import dev.nexus.service.db.CollectionIds;
 import org.jooq.Table;
 import org.jooq.impl.DSL;
 import org.jooq.SQLDialect;
@@ -149,30 +148,27 @@ class ReadShapeViewsTest {
 
     private static void seedDoc(DSLContext ctx, String tenant, String tumbler,
                                 String ctype, String coll) {
-        PgContainerHelper.insertCollection(ctx, tenant, coll);   // P3.1: a document names a registered collection
-        ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE,
-                CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION,
-                CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CATALOG_DOCUMENTS.INDEXED_AT)
-            .values(tenant, tumbler, "T", ctype, coll, CollectionIds.require(ctx, tenant, coll), OffsetDateTime.parse("2026-01-01T00:00:00Z"))
+        ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION,
+                CATALOG_DOCUMENTS.INDEXED_AT)
+            .values(tenant, tumbler, "T", ctype, coll, OffsetDateTime.parse("2026-01-01T00:00:00Z"))
             .execute();
     }
 
     private static void seedTopic(DSLContext ctx, String tenant, String label, String coll) {
         // RDR-164 P1a: register the collection (topics_collection_fk).
         PgContainerHelper.insertCollection(ctx, tenant, coll);
-        ctx.insertInto(TOPICS, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.COLLECTION_ID, TOPICS.DOC_COUNT,
+        ctx.insertInto(TOPICS, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.DOC_COUNT,
                 TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS)
-            .values(tenant, label, coll, CollectionIds.require(ctx, tenant, coll), 0, OffsetDateTime.now(), "pending")
+            .values(tenant, label, coll, 0, OffsetDateTime.now(), "pending")
             .execute();
     }
 
     private static void seedDocIndexed(DSLContext ctx, String tenant, String tumbler,
                                        String coll, String indexedAt) {
-        PgContainerHelper.insertCollection(ctx, tenant, coll);   // P3.1: a document names a registered collection
-        ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE,
-                CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CATALOG_DOCUMENTS.INDEXED_AT)
-            .values(tenant, tumbler, "T", coll, CollectionIds.require(ctx, tenant, coll),
-                    indexedAt == null ? null : OffsetDateTime.parse(indexedAt))
+        ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.INDEXED_AT)
+            .values(tenant, tumbler, "T", coll, indexedAt == null ? null : OffsetDateTime.parse(indexedAt))
             .execute();
     }
 
@@ -217,8 +213,8 @@ class ReadShapeViewsTest {
             // Undated doc (NULL indexed_at, the '' -> NULL post-migration shape) — must
             // NOT win the MAX and must NOT count toward the stale_source_ratio denominator.
             ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
-                    CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
-                .values(TENANT_A, "chmp.4", "T", col, CollectionIds.require(ctx, TENANT_A, col))
+                    CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+                .values(TENANT_A, "chmp.4", "T", col)
                 .execute();
 
             var row = ctx.select(COLLECTION_HEALTH_META.LAST_INDEXED, COLLECTION_HEALTH_META.ORPHAN_COUNT,
@@ -502,15 +498,15 @@ class ReadShapeViewsTest {
         float[] v = new float[768];
         java.util.Arrays.fill(v, 0.1f);
         final String model = PgContainerHelper.collectionModel(ctx, tenant, collection);
-        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, CHUNKS.CHASH,
-                CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_768)
-            .values(tenant, collection, CollectionIds.require(ctx, tenant, collection), c, model, "stub", Vector.of(v))
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
+                CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_768)
+            .values(tenant, collection, c, model, "stub", Vector.of(v))
             .onConflictDoNothing()
             .execute();
         ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                 CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
-                CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-            .values(tenant, docId, pos, c, collection, CollectionIds.require(ctx, tenant, collection), model)
+                CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+            .values(tenant, docId, pos, c, collection, model)
             .execute();
     }
 

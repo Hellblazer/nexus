@@ -132,11 +132,6 @@ public final class DataMoveWorker implements AutoCloseable {
     Runnable beforeSessionOpenHook;
     /** Test seam: runs after a CALL has returned and the call connection is clean, before the run's row is read again. */
     Runnable afterCallHook;
-    /**
-     * Runs when a move is recorded complete ({@code completed_at}), on the worker's thread: the completion check re-reads then
-     * (RDR-229 P3.1, {@link CompletionBootWork#onMoveCompleted}). It must not block; a throw is logged and goes no further.
-     */
-    private volatile Runnable onMoveCompleted = () -> { };
     private volatile Thread loop;
     private volatile CallConnection callConnection;
     /** The one admin session the registry is read on, kept between cycles; guarded by {@code registryLock}. */
@@ -179,11 +174,6 @@ public final class DataMoveWorker implements AutoCloseable {
         return new DataMoveWorker(admin, installer, settings, name, Clock.systemUTC(),
             new MoveStates(Clock.systemUTC()), new DataMoveFailureHandler(admin, name, Clock.systemUTC()),
             new VerifyingFinisher(), singletonLockHeld);
-    }
-
-    /** Sets what runs when a move is recorded complete; see the field. A null clears it. */
-    public void onMoveCompleted(Runnable listener) {
-        this.onMoveCompleted = listener == null ? () -> { } : listener;
     }
 
     /** The worker's in-memory view of its moves. */
@@ -569,10 +559,7 @@ public final class DataMoveWorker implements AutoCloseable {
         MoveFinisher.Result result = finisher.finish(new MoveFinisher.Context(move, tenants, ctx, admin, applicationName,
             () -> stopped));
         switch (result.outcome()) {
-            case COMPLETED -> {
-                states.forget(move.label());
-                notifyCompleted(move);
-            }
+            case COMPLETED -> states.forget(move.label());
             case FAILED -> {
                 MoveEvents.failed(move.label(), "FINISH", null, null, result.reason());
                 states.failed(move, result.reason());
@@ -588,15 +575,6 @@ public final class DataMoveWorker implements AutoCloseable {
         }
         if (result.outcome() == MoveFinisher.Outcome.COMPLETED || result.outcome() == MoveFinisher.Outcome.LEFT_OPEN) {
             clearRetries(move, ctx);   // a clean pass resets the count; no failure reached the handler to do it
-        }
-    }
-
-    private void notifyCompleted(DataMove move) {
-        try {
-            onMoveCompleted.run();
-        } catch (RuntimeException e) {   // a listener is the engine's, never the worker's failure
-            log.warn("event=data_move_completed_listener_failed label={} cause=\"{}\"", move.label(),
-                FailureHandler.oneLine(e.toString()));
         }
     }
 

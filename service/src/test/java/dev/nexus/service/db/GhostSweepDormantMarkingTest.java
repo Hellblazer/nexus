@@ -3,7 +3,6 @@
 package dev.nexus.service.db;
 
 import com.zaxxer.hikari.HikariConfig;
-import dev.nexus.service.db.CollectionIds;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.jooq.binding.Vector;
@@ -122,8 +121,8 @@ class GhostSweepDormantMarkingTest {
             PgContainerHelper.insertCollection(ctx, TENANT_PARAM, ANCHOR_COLL);
             PgContainerHelper.insertCollection(ctx, TENANT_PARAM, ANCHOR_TOPICS_COLL);
             ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
-                           CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
-               .values(TENANT_PARAM, ANCHOR_DOC, "Anchor Doc", ANCHOR_COLL, CollectionIds.require(ctx, TENANT_PARAM, ANCHOR_COLL)).execute();
+                           CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+               .values(TENANT_PARAM, ANCHOR_DOC, "Anchor Doc", ANCHOR_COLL).execute();
             // nexus-ft04v.3 fix check: ANCHOR_TOPICS_COLL has NOTHING referencing it
             // until the "topic_assignments" parametrised case runs (that case is what
             // populates a topics row against it) -- but EVERY earlier parametrised
@@ -137,9 +136,9 @@ class GhostSweepDormantMarkingTest {
             // sweep call onward -- the same reason ANCHOR_COLL needs no such fix: its own
             // ANCHOR_DOC row above already keeps it non-empty from the start.
             ctx.insertInto(TOPICS, TOPICS.ID, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION,
-                           TOPICS.DOC_COUNT, TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS, TOPICS.COLLECTION_ID)
+                           TOPICS.DOC_COUNT, TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS)
                .values(9_000_000_000L, TENANT_PARAM, "anchor-topics-keep-alive", ANCHOR_TOPICS_COLL, 0,
-                       OffsetDateTime.now(), "pending", CollectionIds.require(ctx, TENANT_PARAM, ANCHOR_TOPICS_COLL))
+                       OffsetDateTime.now(), "pending")
                .execute();
         }
     }
@@ -238,88 +237,88 @@ class GhostSweepDormantMarkingTest {
                 ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
                                CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
                                CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
-                               CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID)
+                               CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
                    .values(TENANT_PARAM, ANCHOR_DOC, 0, chashBytes(coll + "-mf"), coll,
-                           PgContainerHelper.collectionModel(ctx, TENANT_PARAM, coll), CollectionIds.require(ctx, TENANT_PARAM, coll))
+                           PgContainerHelper.collectionModel(ctx, TENANT_PARAM, coll))
                    .execute();
             }
             case "topic_assignments" -> {
                 long topicId = Math.abs((long) (coll + "-anchor-topic").hashCode());
                 ctx.insertInto(TOPICS, TOPICS.ID, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION,
-                               TOPICS.DOC_COUNT, TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS, TOPICS.COLLECTION_ID)
+                               TOPICS.DOC_COUNT, TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS)
                    .values(topicId, TENANT_PARAM, "anchor-topic", ANCHOR_TOPICS_COLL, 0, OffsetDateTime.now(),
-                           "pending", CollectionIds.require(ctx, TENANT_PARAM, ANCHOR_TOPICS_COLL))
+                           "pending")
                    .execute();
                 insertChunk384(ctx, TENANT_PARAM, coll, hexChashBytes(coll + "-ta"), vector(384));
                 ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                                TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY,
                                TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.ASSIGNED_AT,
-                               TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID)
+                               TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
                    .values(TENANT_PARAM, hexChashBytes(coll + "-ta"), topicId, "projection", coll,
-                           OffsetDateTime.now(), PgContainerHelper.collectionModel(ctx, TENANT_PARAM, coll), CollectionIds.require(ctx, TENANT_PARAM, coll))
+                           OffsetDateTime.now(), PgContainerHelper.collectionModel(ctx, TENANT_PARAM, coll))
                    .execute();
             }
             case "topics" -> {
                 long topicId = Math.abs((long) (coll + "-topic").hashCode());
                 ctx.insertInto(TOPICS, TOPICS.ID, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION,
-                               TOPICS.DOC_COUNT, TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS, TOPICS.COLLECTION_ID)
-                   .values(topicId, TENANT_PARAM, "topic-gs", coll, 0, OffsetDateTime.now(), "pending", CollectionIds.require(ctx, TENANT_PARAM, coll))
+                               TOPICS.DOC_COUNT, TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS)
+                   .values(topicId, TENANT_PARAM, "topic-gs", coll, 0, OffsetDateTime.now(), "pending")
                    .execute();
             }
-            case "taxonomy_meta" -> ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION, TAXONOMY_META.COLLECTION_ID)
-                .values(TENANT_PARAM, coll, CollectionIds.require(ctx, TENANT_PARAM, coll)).execute();
+            case "taxonomy_meta" -> ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
+                .values(TENANT_PARAM, coll).execute();
             case "taxonomy_centroids" -> {
                 long topicId = Math.abs((long) (coll + "-centroid").hashCode());
                 ctx.insertInto(TAXONOMY_CENTROIDS, TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
                                TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.EMBEDDING_MODEL,
-                               TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.EMBEDDING_384, TAXONOMY_CENTROIDS.COLLECTION_ID)
+                               TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.EMBEDDING_384)
                    .values(TENANT_PARAM, coll, topicId, PgContainerHelper.collectionModel(ctx, TENANT_PARAM, coll),
-                           "", vector(384), CollectionIds.require(ctx, TENANT_PARAM, coll))
+                           "", vector(384))
                    .execute();
             }
             case "document_aspects" -> ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID,
                                DOCUMENT_ASPECTS.COLLECTION, DOCUMENT_ASPECTS.SOURCE_PATH,
                                DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
                                DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID,
-                               DOCUMENT_ASPECTS.SOURCE_URI, DOCUMENT_ASPECTS.COLLECTION_ID)
+                               DOCUMENT_ASPECTS.SOURCE_URI)
                 .values(TENANT_PARAM, coll, "/p/" + coll + ".md", OffsetDateTime.now(), "v1", "docling", ANCHOR_DOC,
-                        "file:///p/" + coll + ".md", CollectionIds.require(ctx, TENANT_PARAM, coll))
+                        "file:///p/" + coll + ".md")
                 .execute();
             case "document_highlights" -> ctx.insertInto(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID,
                                DOCUMENT_HIGHLIGHTS.DOC_ID, DOCUMENT_HIGHLIGHTS.COLLECTION,
                                DOCUMENT_HIGHLIGHTS.SOURCE_URI, DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD,
-                               DOCUMENT_HIGHLIGHTS.INGESTED_AT, DOCUMENT_HIGHLIGHTS.COLLECTION_ID)
-                .values(TENANT_PARAM, ANCHOR_DOC, coll, "file:///" + coll + "-hl", "hi", OffsetDateTime.now(), CollectionIds.require(ctx, TENANT_PARAM, coll))
+                               DOCUMENT_HIGHLIGHTS.INGESTED_AT)
+                .values(TENANT_PARAM, ANCHOR_DOC, coll, "file:///" + coll + "-hl", "hi", OffsetDateTime.now())
                 .execute();
             case "catalog_documents" -> ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID,
                                CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE,
-                               CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
-                .values(TENANT_PARAM, "gs-doc-" + coll, "Doc", coll, CollectionIds.require(ctx, TENANT_PARAM, coll))
+                               CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+                .values(TENANT_PARAM, "gs-doc-" + coll, "Doc", coll)
                 .execute();
             case "relevance_log" -> ctx.insertInto(RELEVANCE_LOG, RELEVANCE_LOG.TENANT_ID, RELEVANCE_LOG.QUERY,
                                RELEVANCE_LOG.CHUNK_ID, RELEVANCE_LOG.COLLECTION, RELEVANCE_LOG.ACTION,
-                               RELEVANCE_LOG.SESSION_ID, RELEVANCE_LOG.TIMESTAMP, RELEVANCE_LOG.COLLECTION_ID)
-                .values(TENANT_PARAM, "q1", hexChash(coll), coll, "click", "s1", OffsetDateTime.now(), CollectionIds.require(ctx, TENANT_PARAM, coll))
+                               RELEVANCE_LOG.SESSION_ID, RELEVANCE_LOG.TIMESTAMP)
+                .values(TENANT_PARAM, "q1", hexChash(coll), coll, "click", "s1", OffsetDateTime.now())
                 .execute();
             case "search_telemetry" -> ctx.insertInto(SEARCH_TELEMETRY, SEARCH_TELEMETRY.TENANT_ID,
                                SEARCH_TELEMETRY.TS, SEARCH_TELEMETRY.QUERY_HASH, SEARCH_TELEMETRY.COLLECTION,
-                               SEARCH_TELEMETRY.RAW_COUNT, SEARCH_TELEMETRY.KEPT_COUNT, SEARCH_TELEMETRY.COLLECTION_ID)
-                .values(TENANT_PARAM, OffsetDateTime.now(), "qh-" + coll, coll, 10, 5, CollectionIds.require(ctx, TENANT_PARAM, coll))
+                               SEARCH_TELEMETRY.RAW_COUNT, SEARCH_TELEMETRY.KEPT_COUNT)
+                .values(TENANT_PARAM, OffsetDateTime.now(), "qh-" + coll, coll, 10, 5)
                 .execute();
             case "hook_failures" -> ctx.insertInto(HOOK_FAILURES, HOOK_FAILURES.TENANT_ID, HOOK_FAILURES.DOC_ID,
                                HOOK_FAILURES.COLLECTION, HOOK_FAILURES.HOOK_NAME, HOOK_FAILURES.ERROR,
-                               HOOK_FAILURES.OCCURRED_AT, HOOK_FAILURES.COLLECTION_ID)
-                .values(TENANT_PARAM, "gs-hf-doc", coll, "post_store", "boom", OffsetDateTime.now(), CollectionIds.require(ctx, TENANT_PARAM, coll))
+                               HOOK_FAILURES.OCCURRED_AT)
+                .values(TENANT_PARAM, "gs-hf-doc", coll, "post_store", "boom", OffsetDateTime.now())
                 .execute();
-            case "gc_audit" -> ctx.insertInto(GC_AUDIT, GC_AUDIT.TENANT_ID, GC_AUDIT.OPERATION, GC_AUDIT.COLLECTION, GC_AUDIT.COLLECTION_ID)
-                .values(TENANT_PARAM, "purge", coll, CollectionIds.require(ctx, TENANT_PARAM, coll))
+            case "gc_audit" -> ctx.insertInto(GC_AUDIT, GC_AUDIT.TENANT_ID, GC_AUDIT.OPERATION, GC_AUDIT.COLLECTION)
+                .values(TENANT_PARAM, "purge", coll)
                 .execute();
             case "canary_query_ring" -> ctx.insertInto(CANARY_QUERY_RING, CANARY_QUERY_RING.TENANT_ID,
                                CANARY_QUERY_RING.COLLECTION, CANARY_QUERY_RING.EMBEDDING_MODEL,
                                CANARY_QUERY_RING.EMBEDDING_384, CANARY_QUERY_RING.VECTOR_DIGEST,
-                               CANARY_QUERY_RING.ADDED_AT, CANARY_QUERY_RING.COLLECTION_ID)
+                               CANARY_QUERY_RING.ADDED_AT)
                 .values(TENANT_PARAM, coll, PgContainerHelper.collectionModel(ctx, TENANT_PARAM, coll),
-                        vector(384), chashBytes(coll + "-ring"), OffsetDateTime.now(), CollectionIds.require(ctx, TENANT_PARAM, coll))
+                        vector(384), chashBytes(coll + "-ring"), OffsetDateTime.now())
                 .execute();
             default -> throw new IllegalArgumentException(
                 "no seed case for COLLECTION_SCOPED_TABLES entry '" + countKey + "' -- "
@@ -375,8 +374,8 @@ class GhostSweepDormantMarkingTest {
             // A taxonomy_meta row keeps the collection non-empty (collectionIsEmpty
             // false) with no collection_vector_stats row -- MARKED_DORMANT, not
             // DELETED, exactly like countsLoggedPerTenant's "dormant" fixture above.
-            ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION, TAXONOMY_META.COLLECTION_ID)
-               .values(tenant, coll, CollectionIds.require(ctx, tenant, coll)).execute();
+            ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
+               .values(tenant, coll).execute();
         }
         CollectionRegistry.markKnown(tenant, coll,
             new CollectionRow("knowledge", "gs-dormant-evict", "minilm-l6-v2-384", 384, "live"));
@@ -412,8 +411,8 @@ class GhostSweepDormantMarkingTest {
             su.setAutoCommit(true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             PgContainerHelper.insertCollection(ctx, tenant, coll);
-            ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION, TAXONOMY_META.COLLECTION_ID)
-               .values(tenant, coll, CollectionIds.require(ctx, tenant, coll)).execute();
+            ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
+               .values(tenant, coll).execute();
         }
 
         CatalogRepository.GhostSweepResult first = repo.sweepGhostsAndMarkDormant(tenant);
@@ -456,8 +455,8 @@ class GhostSweepDormantMarkingTest {
             su.setAutoCommit(true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             PgContainerHelper.insertCollection(ctx, tenant, coll);
-            ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION, TAXONOMY_META.COLLECTION_ID)
-               .values(tenant, coll, CollectionIds.require(ctx, tenant, coll)).execute();
+            ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
+               .values(tenant, coll).execute();
         }
         repo.sweepGhostsAndMarkDormant(tenant);
         assertThat(lifecycleStateOf(tenant, coll)).as("precondition: marked dormant").isEqualTo("dormant");
@@ -498,8 +497,8 @@ class GhostSweepDormantMarkingTest {
             su.setAutoCommit(true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             PgContainerHelper.insertCollection(ctx, tenant, coll);
-            ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION, TAXONOMY_META.COLLECTION_ID)
-               .values(tenant, coll, CollectionIds.require(ctx, tenant, coll)).execute();
+            ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
+               .values(tenant, coll).execute();
             ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.LIFECYCLE_STATE, "disputed")
                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(coll)).execute();
         }
@@ -610,8 +609,8 @@ class GhostSweepDormantMarkingTest {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             PgContainerHelper.insertCollection(ctx, tenant, ghost);
             PgContainerHelper.insertCollection(ctx, tenant, dormant);
-            ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION, TAXONOMY_META.COLLECTION_ID)
-               .values(tenant, dormant, CollectionIds.require(ctx, tenant, dormant)).execute();
+            ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
+               .values(tenant, dormant).execute();
             PgContainerHelper.insertCollection(ctx, tenant, unchanged);
             insertChunk384(ctx, tenant, unchanged, chashBytes(unchanged), vector(384));
         }
@@ -689,8 +688,8 @@ class GhostSweepDormantMarkingTest {
             // A taxonomy_meta row keeps collectionIsEmpty false (referenced), with no
             // collection_vector_stats row -- exactly the shape that flips a non-quarantine
             // row to 'dormant' (see dormantMarking_evictsCollectionRegistry_mirroringDeleteDiscipline).
-            ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION, TAXONOMY_META.COLLECTION_ID)
-               .values(tenant, coll, CollectionIds.require(ctx, tenant, coll)).execute();
+            ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
+               .values(tenant, coll).execute();
         }
 
         CatalogRepository.GhostSweepResult result = repo.sweepGhostsAndMarkDormant(tenant);
@@ -727,8 +726,8 @@ class GhostSweepDormantMarkingTest {
             su.setAutoCommit(true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             PgContainerHelper.insertCollection(ctx, tenant, coll);
-            ctx.insertInto(GC_AUDIT, GC_AUDIT.TENANT_ID, GC_AUDIT.OPERATION, GC_AUDIT.COLLECTION, GC_AUDIT.COLLECTION_ID)
-               .values(tenant, "gc_expire_quarantine", coll, CollectionIds.require(ctx, tenant, coll))
+            ctx.insertInto(GC_AUDIT, GC_AUDIT.TENANT_ID, GC_AUDIT.OPERATION, GC_AUDIT.COLLECTION)
+               .values(tenant, "gc_expire_quarantine", coll)
                .execute();
         }
 
@@ -802,14 +801,14 @@ class GhostSweepDormantMarkingTest {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             PgContainerHelper.insertCollection(ctx, tenant, qGhost);
             PgContainerHelper.insertCollection(ctx, tenant, qReferenced);
-            ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION, TAXONOMY_META.COLLECTION_ID)
-               .values(tenant, qReferenced, CollectionIds.require(ctx, tenant, qReferenced)).execute();
+            ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
+               .values(tenant, qReferenced).execute();
             PgContainerHelper.insertCollection(ctx, tenant, qLive);
             insertChunk384(ctx, tenant, qLive, chashBytes(qLive), vector(384));
             PgContainerHelper.insertCollection(ctx, tenant, ghost);
             PgContainerHelper.insertCollection(ctx, tenant, dormant);
-            ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION, TAXONOMY_META.COLLECTION_ID)
-               .values(tenant, dormant, CollectionIds.require(ctx, tenant, dormant)).execute();
+            ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
+               .values(tenant, dormant).execute();
             PgContainerHelper.insertCollection(ctx, tenant, unchanged);
             insertChunk384(ctx, tenant, unchanged, chashBytes(unchanged), vector(384));
         }
@@ -895,8 +894,8 @@ class GhostSweepDormantMarkingTest {
             su.setAutoCommit(true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             PgContainerHelper.insertCollection(ctx, tenant, coll);
-            ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION, TAXONOMY_META.COLLECTION_ID)
-               .values(tenant, coll, CollectionIds.require(ctx, tenant, coll)).execute();
+            ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
+               .values(tenant, coll).execute();
         }
 
         CatalogRepository.GhostSweepResult result = repo.sweepGhostsAndMarkDormant(tenant);
@@ -956,14 +955,14 @@ class GhostSweepDormantMarkingTest {
             insertChunk384(ctx, tenant, coll, chashBytes(coll), vector(384));
             ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
                            CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION,
-                           CATALOG_DOCUMENTS.DELETED_AT, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
-               .values(tenant, "gs-tombstoned-doc", "Tombstoned", coll, OffsetDateTime.now(), CollectionIds.require(ctx, tenant, coll)).execute();
+                           CATALOG_DOCUMENTS.DELETED_AT)
+               .values(tenant, "gs-tombstoned-doc", "Tombstoned", coll, OffsetDateTime.now()).execute();
             ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
                            CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
                            CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
-                           CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID)
+                           CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
                .values(tenant, "gs-tombstoned-doc", 0, chashBytes(coll), coll,
-                       PgContainerHelper.collectionModel(ctx, tenant, coll), CollectionIds.require(ctx, tenant, coll)).execute();
+                       PgContainerHelper.collectionModel(ctx, tenant, coll)).execute();
         }
 
         CatalogRepository.GhostSweepResult result = repo.sweepGhostsAndMarkDormant(tenant);
@@ -1031,8 +1030,8 @@ class GhostSweepDormantMarkingTest {
             su.setAutoCommit(true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             PgContainerHelper.insertCollection(ctx, tenant, coll);
-            ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION, TAXONOMY_META.COLLECTION_ID)
-               .values(tenant, coll, CollectionIds.require(ctx, tenant, coll)).execute();
+            ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
+               .values(tenant, coll).execute();
         }
         CollectionRegistry.markKnown(tenant, coll,
             new CollectionRow("knowledge", "gs-dryrun-dormant", "minilm-l6-v2-384", 384, "live"));

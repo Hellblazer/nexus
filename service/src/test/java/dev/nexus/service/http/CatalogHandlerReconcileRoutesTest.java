@@ -89,23 +89,6 @@ class CatalogHandlerReconcileRoutesTest {
         handler = new CatalogHandler(repo, null, jobs);
     }
 
-    /** The collections the rows and documents of this class name (P3.1: a write under an unregistered one is refused). */
-    private void registerSeedCollections(String tenant) {
-        registerCollection(tenant, "code__seed");
-        registerCollection(tenant, "knowledge__c1");
-        registerCollection(tenant, "docs__c1");
-    }
-
-    /** Registers {@code name} for {@code tenant} (P3.1: a write under an unregistered collection is a typed 422). */
-    private void registerCollection(String tenant, String name) {
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            PgContainerHelper.insertCollection(org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES), tenant, name);
-        } catch (java.sql.SQLException e) {
-            throw new IllegalStateException(e);
-        }
-    }
-
     @AfterAll
     void stopAll() {
         if (jobs != null) jobs.shutdown();
@@ -115,7 +98,6 @@ class CatalogHandlerReconcileRoutesTest {
 
     private String tenantWithOwner() {
         String t = "rc193http-" + (++tenantSeq);
-        registerSeedCollections(t);
         repo.upsertOwner(t, Map.of("tumbler_prefix", OWNER, "name", "own-" + OWNER, "owner_type", "repo",
             "repo_hash", "h-" + t, "repo_root", "/r"));
         return t;
@@ -602,7 +584,6 @@ class CatalogHandlerReconcileRoutesTest {
     @Test
     void resolve_aNewSourceUri_registersUnderAFreshCuratorOwner_created() throws Exception {
         String t = "rc193http-" + (++tenantSeq);
-        registerSeedCollections(t);
         Resp r = resolve(t, req("owner_name", "knowledge", "source_uri", "nx-note://c1/t1", "title", "T1", "year", 2026));
         assertThat(r.status).as(r.body).isEqualTo(200);
         assertThat(r.json().get("created").asBoolean()).isTrue();
@@ -618,7 +599,6 @@ class CatalogHandlerReconcileRoutesTest {
     @Test
     void resolve_theSameSourceUriAgain_returnsTheSameTumbler_notCreated() throws Exception {
         String t = "rc193http-" + (++tenantSeq);
-        registerSeedCollections(t);
         String first = resolve(t, req("owner_name", "knowledge", "source_uri", "nx-note://c1/t2", "title", "T2"))
             .json().get("tumbler").asText();
         Resp again = resolve(t, req("owner_name", "knowledge", "source_uri", "nx-note://c1/t2", "title", "T2"));
@@ -631,7 +611,6 @@ class CatalogHandlerReconcileRoutesTest {
     @Test
     void resolve_aFilePath_isKeyedByItsDerivedSourceUri() throws Exception {
         String t = "rc193http-" + (++tenantSeq);
-        registerSeedCollections(t);
         Resp first = resolve(t, req("owner_name", "standalone-docs", "file_path", "/work/a/b.md", "title", "B"));
         assertThat(first.json().get("created").asBoolean()).isTrue();
         Record d = docBy(t, first.json().get("tumbler").asText());
@@ -644,7 +623,6 @@ class CatalogHandlerReconcileRoutesTest {
     @Test
     void resolve_aMatchOnAnEmptyTitleAndYear_backfillsThem_andNeverOverwritesAnExistingOne() throws Exception {
         String t = "rc193http-" + (++tenantSeq);
-        registerSeedCollections(t);
         String prefix = registerCurator(t, "knowledge");
         String bare = repo.registerDocument(t, prefix, Map.of("source_uri", "nx-note://c1/bare", "title", "",
             "content_type", "knowledge", "physical_collection", "knowledge__c1"));
@@ -666,7 +644,6 @@ class CatalogHandlerReconcileRoutesTest {
     @Test
     void resolve_aSourceUriHeldByAnotherOwner_isForeignOwner_andNothingIsAdoptedOrWritten() throws Exception {
         String t = "rc193http-" + (++tenantSeq);
-        registerSeedCollections(t);
         String theirs = registerCurator(t, "someone-elses");
         String held = repo.registerDocument(t, theirs, Map.of("source_uri", "nx-note://c1/held", "title", "",
             "content_type", "knowledge", "physical_collection", "knowledge__c1"));
@@ -683,7 +660,6 @@ class CatalogHandlerReconcileRoutesTest {
     @Test
     void resolve_titleFallback_matchesAGhostOnly_andStampsItsSourceUri() throws Exception {
         String t = "rc193http-" + (++tenantSeq);
-        registerSeedCollections(t);
         String prefix = registerCurator(t, "knowledge");
         String ghost = repo.registerDocument(t, prefix, Map.of("title", "Ghost Note", "content_type", "knowledge",
             "physical_collection", "knowledge__c1", "chunk_count", 0));
@@ -707,7 +683,6 @@ class CatalogHandlerReconcileRoutesTest {
     @Test
     void resolve_withoutTitleFallback_aGhostIsNotMatchedByTitle() throws Exception {
         String t = "rc193http-" + (++tenantSeq);
-        registerSeedCollections(t);
         String prefix = registerCurator(t, "knowledge");
         String ghost = repo.registerDocument(t, prefix, Map.of("title", "Ghost Two", "content_type", "knowledge",
             "physical_collection", "knowledge__c1", "chunk_count", 0));
@@ -719,7 +694,6 @@ class CatalogHandlerReconcileRoutesTest {
     @Test
     void resolve_titleFallback_neverAdoptsAnotherOwnersGhost() throws Exception {
         String t = "rc193http-" + (++tenantSeq);
-        registerSeedCollections(t);
         String theirs = registerCurator(t, "someone-elses");
         String ghost = repo.registerDocument(t, theirs, Map.of("title", "Ghost Three", "content_type", "knowledge",
             "physical_collection", "knowledge__c1", "chunk_count", 0));
@@ -732,7 +706,6 @@ class CatalogHandlerReconcileRoutesTest {
     @Test
     void resolve_theCuratorKeyNamesTheOwnerToo() throws Exception {
         String t = "rc193http-" + (++tenantSeq);
-        registerSeedCollections(t);
         Resp r = resolve(t, req("curator", "standalone-pdfs", "source_uri", "file:///p/x.pdf", "title", "X"));
         assertThat(r.status).as(r.body).isEqualTo(200);
         assertThat(r.json().get("tumbler").asText()).startsWith(curatorPrefix(t, "standalone-pdfs") + ".");
@@ -741,7 +714,6 @@ class CatalogHandlerReconcileRoutesTest {
     @Test
     void resolve_isKeyedByTheOwnerToo_aRepoOwnerOfTheSameNameIsNotACurator() throws Exception {
         String t = "rc193http-" + (++tenantSeq);
-        registerSeedCollections(t);
         repo.upsertOwner(t, Map.of("tumbler_prefix", "1.1", "name", "knowledge", "owner_type", "repo",
             "repo_hash", "hh-" + t, "repo_root", "/r"));
         Resp r = resolve(t, req("owner_name", "knowledge", "source_uri", "nx-note://c1/same-name", "title", "N"));
@@ -752,7 +724,6 @@ class CatalogHandlerReconcileRoutesTest {
     @Test
     void resolve_refusesABodyItCannotKey_andAGet() throws Exception {
         String t = "rc193http-" + (++tenantSeq);
-        registerSeedCollections(t);
         for (Map<String, Object> body : List.of(
                 req("source_uri", "nx-note://c/x", "title", "T"),
                 req("owner_name", "", "source_uri", "nx-note://c/x", "title", "T"),
@@ -924,7 +895,6 @@ class CatalogHandlerReconcileRoutesTest {
     @Test
     void resolve_titleFallback_appliesTheRequestsContentType_aGhostOfAnotherTypeIsNotAdopted() throws Exception {
         String t = "rc193http-" + (++tenantSeq);
-        registerSeedCollections(t);
         String prefix = registerCurator(t, "knowledge");
         String proseGhost = repo.registerDocument(t, prefix, Map.of("title", "Typed Ghost", "content_type", "prose",
             "physical_collection", "docs__c1", "chunk_count", 0));
@@ -947,7 +917,6 @@ class CatalogHandlerReconcileRoutesTest {
     @Test
     void resolve_sensitiveIsABoolean_aNonBooleanIs400NamingTheField_trueFlagsANewRow() throws Exception {
         String t = "rc193http-" + (++tenantSeq);
-        registerSeedCollections(t);
         for (Object bad : List.of("true", "yes", 1, List.of(true))) {
             Resp r = resolve(t, req("owner_name", "knowledge", "source_uri", "nx-note://c1/sens-bad", "title", "S", "sensitive", bad));
             assertThat(r.status).as("sensitive=" + bad + " -> " + r.body).isEqualTo(400);
@@ -967,8 +936,6 @@ class CatalogHandlerReconcileRoutesTest {
     void resolve_oneTenantNeverSeesAnothersDocuments_andWritesUnderItsOwnOnly() throws Exception {
         String a = "rc193http-" + (++tenantSeq);
         String b = "rc193http-" + (++tenantSeq);
-        registerSeedCollections(a);
-        registerSeedCollections(b);
         String prefixA = registerCurator(a, "knowledge");
         String docA = resolve(a, req("owner_name", "knowledge", "source_uri", "nx-note://c1/shared", "title", "Shared Title"))
             .json().get("tumbler").asText();

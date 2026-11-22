@@ -9,7 +9,6 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.Chash;
-import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.PgSession.PciSettings;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.vectors.PciCanary.Result;
@@ -251,15 +250,14 @@ class PciReindexIntegrationTest {
         int gen = ++generation;
         return asSuperuser(su -> {
             List<String> hex = new ArrayList<>();
-            Long cid = CollectionIds.require(su, tenant, collection);
             for (int from = 0; from < rows; from += 250) {
                 var step = su.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH,
-                    CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.METADATA, CHUNKS.COLLECTION_ID);
+                    CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.METADATA);
                 for (int i = from; i < Math.min(rows, from + 250); i++) {
                     String h = Chash.ofText(tenant + "/" + collection + "/" + gen + "/" + i).toHex();
                     hex.add(h);
                     step = step.values(tenant, collection, Chash.fromHex(h).toBytes(), M384, "row " + i,
-                        vector(gen * 1000 + i), JSONB.jsonb("{}"), cid);
+                        vector(gen * 1000 + i), JSONB.jsonb("{}"));
                 }
                 step.onConflictDoNothing().execute();
             }

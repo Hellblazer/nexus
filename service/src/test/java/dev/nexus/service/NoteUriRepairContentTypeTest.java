@@ -319,10 +319,8 @@ class NoteUriRepairContentTypeTest {
         Fx f = new Fx("unregistered");
         String gone = "c999" + SEQ.incrementAndGet();
         seedNote(f.tenant, "ok", f.y, f.nx(f.x1, "fine"));
-        registerCollection(f.tenant, gone);
         seedNote(f.tenant, "un", gone, f.nx(f.x1, "orphan"));
         seedNote(f.tenant, "un2", gone, f.nx(f.x1, "orphan2"));
-        dropRegistryRow(f.tenant, gone);
 
         Map<String, Object> r = repo.repairStaleNoteUris(f.tenant, true, 1000, 5);
 
@@ -338,9 +336,7 @@ class NoteUriRepairContentTypeTest {
     void census_aDocsNamedCollectionWithNoRegistryRowIsRefused_asUnregistered_notByItsName() throws Exception {
         Fx f = new Fx("docs-unregistered");
         String ghost = "docs__ghost-" + SEQ.incrementAndGet() + "__minilm-l6-v2-384__v1";
-        registerCollection(f.tenant, ghost);
         seedNote(f.tenant, "g1", ghost, f.nx(f.x1, "alpha"));
-        dropRegistryRow(f.tenant, ghost);
 
         Map<String, Object> r = repo.repairStaleNoteUris(f.tenant, false, 1000, 5);
 
@@ -361,26 +357,6 @@ class NoteUriRepairContentTypeTest {
 
     private static String coll(String slug) {
         return "knowledge__" + slug + "__minilm-l6-v2-384__v1";
-    }
-
-    /**
-     * Registers {@code name}: since P3.1 a document under an unregistered collection is refused (typed 422), so a
-     * row whose collection has no registry row is seeded by registering first and then {@link #dropRegistryRow}.
-     */
-    private void registerCollection(String tenant, String name) throws Exception {
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant, name);
-        }
-    }
-
-    /** The legacy shape the census must refuse: a live row naming a collection whose registry row is gone. */
-    private void dropRegistryRow(String tenant, String name) throws Exception {
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            DSL.using(su, SQLDialect.POSTGRES).deleteFrom(CATALOG_COLLECTIONS)
-                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(name)).execute();
-        }
     }
 
     private void seedNote(String tenant, String tumbler, String collection, String uri) {

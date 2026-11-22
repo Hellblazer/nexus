@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
-import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
@@ -241,8 +240,8 @@ class CatalogDocumentCascadeTest {
         // Register the collection first (document_aspects carries an fk-003 collection FK).
         PgContainerHelper.insertCollection(ctx, tenant, COLL);
         ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
-                       CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
-           .values(tenant, tumbler, "Doc", COLL, CollectionIds.require(ctx, tenant, COLL))
+                       CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+           .values(tenant, tumbler, "Doc", COLL)
            .execute();
         // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
         // matching nexus.chunks row for the manifest insert below.
@@ -250,8 +249,8 @@ class CatalogDocumentCascadeTest {
         // RDR-225: a chunk and every row that references it carry the collection's model.
         final String model = PgContainerHelper.collectionModel(ctx, tenant, COLL);
         ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
-                       CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.COLLECTION_ID)
-           .values(tenant, COLL, manifestChash, model, "text", vector384(), CollectionIds.require(ctx, tenant, COLL))
+                       CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384)
+           .values(tenant, COLL, manifestChash, model, "text", vector384())
            .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL)
            .doNothing()
            .execute();
@@ -260,21 +259,21 @@ class CatalogDocumentCascadeTest {
         // already registered under COLL, so stamp the manifest row the same.
         ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                        CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                       CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID)
-           .values(tenant, tumbler, 0, manifestChash, COLL, model, CollectionIds.require(ctx, tenant, COLL))
+                       CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+           .values(tenant, tumbler, 0, manifestChash, COLL, model)
            .execute();
         // hygiene-001 steps 1/3 (nexus-tk070.p6a follow-on): document_aspects.source_uri
         // and document_highlights.source_uri are both NOT NULL now.
         ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
                        DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
-                       DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI, DOCUMENT_ASPECTS.COLLECTION_ID)
+                       DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
            .values(tenant, COLL, "/p/a-" + tenant + "-" + tumbler + ".md", java.time.OffsetDateTime.now(), "v1",
-                   "docling", tumbler, "file:///p/a-" + tenant + "-" + tumbler + ".md", CollectionIds.require(ctx, tenant, COLL))
+                   "docling", tumbler, "file:///p/a-" + tenant + "-" + tumbler + ".md")
            .execute();
         ctx.insertInto(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID,
                        DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.SOURCE_URI,
-                       DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD, DOCUMENT_HIGHLIGHTS.INGESTED_AT, DOCUMENT_HIGHLIGHTS.COLLECTION_ID)
-           .values(tenant, tumbler, COLL, "file:///hl-" + tenant + "-" + tumbler, "hi", java.time.OffsetDateTime.now(), CollectionIds.require(ctx, tenant, COLL))
+                       DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD, DOCUMENT_HIGHLIGHTS.INGESTED_AT)
+           .values(tenant, tumbler, COLL, "file:///hl-" + tenant + "-" + tumbler, "hi", java.time.OffsetDateTime.now())
            .execute();
     }
 
@@ -288,8 +287,8 @@ class CatalogDocumentCascadeTest {
         // Mask to 32 bits before widening so Math.abs cannot overflow on Integer.MIN_VALUE.
         long topicId = (tenant + docId).hashCode() & 0xFFFFFFFFL;
         ctx.insertInto(TOPICS, TOPICS.ID, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.DOC_COUNT,
-                       TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS, TOPICS.COLLECTION_ID)
-           .values(topicId, tenant, "topic-dc", COLL, 0, java.time.OffsetDateTime.now(), "pending", CollectionIds.require(ctx, tenant, COLL))
+                       TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS)
+           .values(topicId, tenant, "topic-dc", COLL, 0, java.time.OffsetDateTime.now(), "pending")
            .execute();
         // RDR-194 P3d (nexus-tk070.p3d): topic_assignments_chunk_fk now requires a
         // matching nexus.chunks row for this INSERT to succeed at all -- HexFormat.parseHex
@@ -300,15 +299,15 @@ class CatalogDocumentCascadeTest {
         byte[] realChash = java.util.HexFormat.of().parseHex(hexChash(docId));
         final String model = PgContainerHelper.collectionModel(ctx, tenant, COLL);
         ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
-                       CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.COLLECTION_ID)
-           .values(tenant, COLL, realChash, model, "text", vector384(), CollectionIds.require(ctx, tenant, COLL))
+                       CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384)
+           .values(tenant, COLL, realChash, model, "text", vector384())
            .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL)
            .doNothing()
            .execute();
         ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                        TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
-                       TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID)
-           .values(tenant, realChash, topicId, "projection", COLL, java.time.OffsetDateTime.now(), model, CollectionIds.require(ctx, tenant, COLL))
+                       TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+           .values(tenant, realChash, topicId, "projection", COLL, java.time.OffsetDateTime.now(), model)
            .execute();
     }
 

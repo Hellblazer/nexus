@@ -61,16 +61,13 @@ def seed_chunk(tenant: str, collection: str, text: str, metadata: dict) -> str:
     vec = "[" + ",".join(["0"] * 768) + "]"
     psql(
         "INSERT INTO nexus.chunks "
-        "(tenant_id, collection, chash, chunk_text, embedding_768, metadata, embedding_model, collection_id) "
+        "(tenant_id, collection, chash, chunk_text, embedding_768, metadata, embedding_model) "
         f"VALUES ({lit(tenant)}, {lit(collection)}, decode({lit(chash)}, 'hex'), {lit(text)}, "
         f"{lit(vec)}::nexus.vector, {lit(json.dumps({'chunk_text_hash': chash, **metadata}))}::jsonb, "
         # RDR-225: the row carries its collection's registered model (the partition route and the
         # composite foreign key), which a caller that registered the collection under another
         # state has already fixed.
         "(SELECT embedding_model FROM nexus.catalog_collections "
-        f"WHERE tenant_id = {lit(tenant)} AND name = {lit(collection)}), "
-        # RDR-229 P3.1: and the registry's collection_id beside the name (chunks_collection_id_check).
-        "(SELECT collection_id FROM nexus.catalog_collections "
         f"WHERE tenant_id = {lit(tenant)} AND name = {lit(collection)})) "
         "ON CONFLICT DO NOTHING"
     )

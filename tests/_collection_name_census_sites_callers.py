@@ -74,7 +74,7 @@ SITES: tuple[S, ...] = (
       ('def _legacy_or_nonconformant(r: dict) -> bool:', 'return bool(r.get("legacy_grandfathered")) or _parse(r["name"])[0] is None'),
       'primitive_call', 'diagnostic', DIAG_P12),
     S('src/nexus/catalog/recovery_bundle.py',
-      ('return resolved', 'return target_collection_for(rec["collection"], t3)'),
+      ('from nexus.catalog.store_hook import split_note_tags  # noqa: PLC0415 — deferred, store_hook has a heavy import graph', 'col_name = target_collection_for(rec["collection"], t3)'),
       'primitive_call', 'migration-source', TCF),
     S('src/nexus/catalog/recovery_bundle.py',
       ('try:', 'target_col = target_collection_for(collection, t3)'),

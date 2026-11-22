@@ -1,7 +1,6 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 package dev.nexus.service.db;
 
-import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.jooq.binding.Vector;
 import org.jooq.DSLContext;
@@ -334,10 +333,10 @@ class TaxonomyAssignBoundsIntegrationTest {
             su.setAutoCommit(true);
             var ctx = DSL.using(su, SQLDialect.POSTGRES);
             ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH,
-                           CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_1024, CHUNKS.COLLECTION_ID)
+                           CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_1024)
                .values(tenant, collection, HexFormat.of().parseHex(hexChashValue),
                        PgContainerHelper.collectionModel(ctx, tenant, collection),
-                       "seed text " + hexChashValue, Vector.of(emb), CollectionIds.require(ctx, tenant, collection))
+                       "seed text " + hexChashValue, Vector.of(emb))
                .execute();
         }
     }
@@ -353,9 +352,9 @@ class TaxonomyAssignBoundsIntegrationTest {
             var ctx = DSL.using(su, SQLDialect.POSTGRES);
             ctx.insertInto(TAXONOMY_CENTROIDS, TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
                            TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.LABEL,
-                           TAXONOMY_CENTROIDS.EMBEDDING_MODEL, TAXONOMY_CENTROIDS.EMBEDDING_1024, TAXONOMY_CENTROIDS.COLLECTION_ID)
+                           TAXONOMY_CENTROIDS.EMBEDDING_MODEL, TAXONOMY_CENTROIDS.EMBEDDING_1024)
                .values(tenant, collection, topicId, "seed-centroid-label",
-                       PgContainerHelper.collectionModel(ctx, tenant, collection), Vector.of(emb), CollectionIds.require(ctx, tenant, collection))
+                       PgContainerHelper.collectionModel(ctx, tenant, collection), Vector.of(emb))
                .execute();
         }
     }

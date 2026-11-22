@@ -1074,12 +1074,12 @@ class RefreshableHttpStoreMixin:
         kwargs: dict[str, Any] = {
             "json": payload,
             "idempotent": idempotent,
-            "retry_read_timeout": retry_read_timeout, "mutates": mutates,
+            "retry_read_timeout": retry_read_timeout,
+            "mutates": mutates,
         }
         if timeout is not None:
             kwargs["timeout"] = timeout
-        from nexus.registration_retry import post_with_registration_retry  # noqa: PLC0415 — RDR-229 P3.1: a write refused with the typed unregistered 422 re-registers once, here for every store
-        return post_with_registration_retry(self, path, kwargs, mutates=mutates)
+        return self._send("POST", path, **kwargs)
 
     def _get(
         self,

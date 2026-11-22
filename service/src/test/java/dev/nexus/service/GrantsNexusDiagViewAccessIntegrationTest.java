@@ -3,7 +3,6 @@
 package dev.nexus.service;
 
 import dev.nexus.service.db.CatalogRepository;
-import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
 import liquibase.Contexts;
@@ -513,7 +512,6 @@ class GrantsNexusDiagViewAccessIntegrationTest {
                 scope.withTenant(tenant, ctx -> ctx.insertInto(CANARY_QUERY_RING)
                     .set(CANARY_QUERY_RING.TENANT_ID, tenant)
                     .set(CANARY_QUERY_RING.COLLECTION, coll)
-                    .set(CANARY_QUERY_RING.COLLECTION_ID, CollectionIds.idOf(tenant, coll))
                     .set(CANARY_QUERY_RING.EMBEDDING_MODEL, model)
                     .set(CANARY_QUERY_RING.EMBEDDING_384, Vector.of(floats))
                     .set(CANARY_QUERY_RING.VECTOR_DIGEST, digest)
@@ -617,10 +615,6 @@ class GrantsNexusDiagViewAccessIntegrationTest {
         try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase(DIAG_ROLE, ADMIN_ROLE);
              Connection su = pg.createConnection("")) {
             provisionAndMigrate(pg, su);
-            // a job names registered collections: the P3.1 CHECK needs each name's id beside it
-            var seed = DSL.using(su, SQLDialect.POSTGRES);
-            PgContainerHelper.insertCollection(seed, "reembed-grants", "docs__o__bge-base-en-v15-768__v1");
-            PgContainerHelper.insertCollection(seed, "reembed-grants", "docs__o__minilm-l6-v2-384__v1");
 
             var cfg = new com.zaxxer.hikari.HikariConfig();
             cfg.setJdbcUrl(pg.getJdbcUrl());
@@ -637,9 +631,7 @@ class GrantsNexusDiagViewAccessIntegrationTest {
                     .set(REEMBED_JOBS.TENANT_ID, tenant)
                     .set(REEMBED_JOBS.JOB_ID, job)
                     .set(REEMBED_JOBS.SOURCE_COLLECTION, "docs__o__bge-base-en-v15-768__v1")
-                    .set(REEMBED_JOBS.SOURCE_COLLECTION_ID, CollectionIds.idOf(tenant, "docs__o__bge-base-en-v15-768__v1"))
                     .set(REEMBED_JOBS.TARGET_COLLECTION, "docs__o__minilm-l6-v2-384__v1")
-                    .set(REEMBED_JOBS.TARGET_COLLECTION_ID, CollectionIds.idOf(tenant, "docs__o__minilm-l6-v2-384__v1"))
                     .set(REEMBED_JOBS.STATE, "planned")
                     .set(REEMBED_JOBS.STARTED_AT, now)
                     .set(REEMBED_JOBS.UPDATED_AT, now)

@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
-import dev.nexus.service.db.CollectionIds;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.db.CatalogRepository;
@@ -133,21 +132,11 @@ class UriSegmentCensusRouteTest {
                 PgContainerHelper.insertCatalogDocument(ctx, tenant, tumbler);
                 var upd = ctx.update(CATALOG_DOCUMENTS)
                     .set(CATALOG_DOCUMENTS.SOURCE_URI, uriBase + "/doc" + seq)
-                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
-                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, idOrStray(tenant, collection));
+                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection);
                 var q = deleted ? upd.set(CATALOG_DOCUMENTS.DELETED_AT, OffsetDateTime.parse("2026-11-01T00:00:00+00:00")) : upd;
                 assertThat(q.where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))).execute()).isEqualTo(1);
             }
         }
-    }
-
-    /**
-     * RDR-229 P3.1: a row that names a collection carries its registry id. {@code unregistered-coll} is the fixture's
-     * collection with no registry row, so it has no id to carry; the row gets one no registry row holds, and the
-     * census still finds the document's collection unregistered by name.
-     */
-    private static org.jooq.Field<Long> idOrStray(String tenant, String collection) {
-        return DSL.coalesce(CollectionIds.idOf(tenant, collection), DSL.val(Long.MAX_VALUE));
     }
 
     private void aspects(String tenant, String collection, String uriBase, int n) throws Exception {
@@ -160,7 +149,6 @@ class UriSegmentCensusRouteTest {
                     .set(DOCUMENT_ASPECTS.DOC_ID, tumbler)
                     .set(DOCUMENT_ASPECTS.TENANT_ID, tenant)
                     .set(DOCUMENT_ASPECTS.COLLECTION, collection)
-                    .set(DOCUMENT_ASPECTS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
                     .set(DOCUMENT_ASPECTS.SOURCE_PATH, "p" + (seq++) + ".md")
                     .set(DOCUMENT_ASPECTS.EXTRACTED_AT, OffsetDateTime.now())
                     .set(DOCUMENT_ASPECTS.MODEL_VERSION, "test-model")
@@ -182,7 +170,6 @@ class UriSegmentCensusRouteTest {
                     .set(DOCUMENT_HIGHLIGHTS.DOC_ID, tumbler)
                     .set(DOCUMENT_HIGHLIGHTS.SOURCE_URI, uriBase + "/h" + seq)
                     .set(DOCUMENT_HIGHLIGHTS.COLLECTION, collection)
-                    .set(DOCUMENT_HIGHLIGHTS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
                     .set(DOCUMENT_HIGHLIGHTS.INGESTED_AT, OffsetDateTime.now())
                     .execute();
             }
@@ -264,7 +251,6 @@ class UriSegmentCensusRouteTest {
             PgContainerHelper.insertCatalogDocument(ctx, TENANT, t);
             ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.SOURCE_URI, "chroma://bare")
                 .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, LABEL)
-                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, idOrStray(TENANT, LABEL))
                 .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT).and(CATALOG_DOCUMENTS.TUMBLER.eq(t))).execute();
         }
         var gs = groups(census(""));

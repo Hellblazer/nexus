@@ -5,7 +5,6 @@ package dev.nexus.service;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.Chash;
-import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.PgVectorRepository;
 import org.jooq.DSLContext;
@@ -233,7 +232,6 @@ class PgVectorOwnerSpanTest {
             .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
             .set(CATALOG_DOCUMENTS.TITLE, tumbler)
             .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
-            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(tenant, collection))
             .set(CATALOG_DOCUMENTS.SOURCE_URI, uri(tumbler))
             .execute();
     }
@@ -257,7 +255,6 @@ class PgVectorOwnerSpanTest {
             .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position)
             .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(chash))
             .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
-            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
             .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, MODEL)
             .set(CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE, type)
             .set(CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN, true)

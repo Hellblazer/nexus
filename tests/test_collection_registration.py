@@ -282,80 +282,11 @@ def test_409_is_treated_as_already_registered(
         "conflict", request=MagicMock(), response=response,
     )
     name = "knowledge__ensure-409-test"
-    writer.get_collection.return_value = {"name": name}   # the race's winner registered it: the row reads back
 
     ensure_collection_registered(name, registrar=lambda: writer)  # must not raise
 
     assert name in corpus._REGISTERED_COLLECTIONS
     writer.close.assert_called_once()
-
-
-@pytest.mark.t2_tenant
-def test_a_409_whose_name_did_not_register_is_raised_not_cached(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """RDR-229 P3.8: the engine also answers 409 for a REFUSAL (a new row on a live tuple another collection holds,
-    every minted label taken, a sequence behind the data). That is not a won race: the name was never registered, so
-    caching it would turn the refusal into a later 422 "not registered". A 409 is a race only when the row reads back."""
-    monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
-    monkeypatch.setattr(
-        "nexus.db.http_vector_client.is_vector_service_mode", lambda: True,
-    )
-    writer = _fake_writer()
-    response = MagicMock(status_code=409)
-    writer.register_collection.side_effect = httpx.HTTPStatusError(
-        "collections 'a' and 'b' are both live for the tuple", request=MagicMock(), response=response,
-    )
-    writer.get_collection.return_value = None
-    name = "knowledge__ensure-409-refused-test"
-
-    with pytest.raises(httpx.HTTPStatusError):
-        ensure_collection_registered(name, registrar=lambda: writer)
-
-    assert name not in corpus._REGISTERED_COLLECTIONS
-
-
-class _WriteOnlyWriter:
-    """The ambient catalog writer's shape (``nexus.catalog.factory._ServiceCatalogWriter``): writes only, no
-    ``get_collection``, so a read-back must go through the catalog reader."""
-
-    def __init__(self, exc: Exception) -> None:
-        self._exc = exc
-
-    def register_collection(self, name: str, **_kw: object) -> None:
-        raise self._exc
-
-    def close(self) -> None:
-        pass
-
-
-@pytest.mark.t2_tenant
-@pytest.mark.parametrize("read_back", [None, {"name": "knowledge__ensure-409-ambient", "superseded_by": "knowledge__x"}],
-                         ids=["no-row", "superseded-row"])
-def test_a_409_on_the_ambient_writer_reads_back_through_the_reader_and_a_missing_or_retired_row_is_raised(
-    monkeypatch: pytest.MonkeyPatch, read_back: object,
-) -> None:
-    """The default registrar hands back a write-only writer with no ``get_collection``: the 409 read-back must not be
-    skipped for it. A row that is absent, or retired (superseded), is not a won race."""
-    import nexus.catalog.factory as factory
-
-    monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
-    monkeypatch.setattr("nexus.db.http_vector_client.is_vector_service_mode", lambda: True)
-    reader = MagicMock()
-    # the pre-read finds no row (the name is new to this process); the read-back after the 409 answers read_back,
-    # which for a retired row is the race in which another writer registered and then superseded the name
-    answers = iter([None, read_back])
-    reader.get_collection.side_effect = lambda _name: next(answers, read_back)
-    monkeypatch.setattr(factory, "make_catalog_reader", lambda: reader)
-    exc = httpx.HTTPStatusError("collections 'a' and 'b' are both live for the tuple", request=MagicMock(),
-                                response=MagicMock(status_code=409))
-    name = "knowledge__ensure-409-ambient"
-
-    with pytest.raises(httpx.HTTPStatusError):
-        ensure_collection_registered(name, registrar=lambda: _WriteOnlyWriter(exc))
-
-    assert name not in corpus._REGISTERED_COLLECTIONS
-    reader.get_collection.assert_called_with(name)
 
 
 @pytest.mark.t2_tenant
@@ -1181,7 +1112,6 @@ class TestEnsureCollectionRegisteredInvalidatesCollectionsCache:
             "already registered", request=MagicMock(), response=response,
         )
         name = "knowledge__cache-invalidation-409-test"
-        writer.get_collection.return_value = {"name": name}   # the race's winner registered it: the row reads back
 
         ensure_collection_registered(name, registrar=lambda: writer)
 
@@ -1228,20 +1158,6 @@ class TestRegisterCollectionCallSitesRouteThroughTheSeam:
         # ("w.register_collection('<TARGET>'); ..."), never a real call;
         # matches the substring scan below but is not executable code.
         "src/nexus/commands/catalog_cmds/doctor.py",
-        # RDR-229 P3.8 (nexus-p2m1x.28): registration by ATTRIBUTES, with no name. The seam is keyed on a
-        # name (its cache, its row read, its name-derived kwargs), and a collection the engine is about to
-        # name has none yet. collection_mint.register_by_attributes makes the same profile check before the
-        # wire call (EmbeddingProfileMismatchError), then seeds the seam's cache with the minted label so the
-        # write path's own ensure_collection_registered(label) is a hit.
-        "src/nexus/collection_mint.py",
-        # RDR-229 P3.9 (nexus-p2m1x.29): a recovery-bundle import registers the bundle's own label by NAME after its
-        # own resolver has read the row (it refuses a live row of another tuple rather than upserting over it). The
-        # model it sends is effective_embedding_model_for_writes(content_type), which reads local.embed_model, not
-        # the engine's embedding profile, so its resolver makes the seam's profile check itself
-        # (_profile_model_for_content_type; a mismatch refuses that collection before any register call), and the
-        # engine's register-time 422 stands behind it. A minted-form label goes through
-        # collection_mint.register_by_attributes, the site above, after the same check.
-        "src/nexus/catalog/recovery_bundle.py",
     })
 
     def test_non_seam_register_collection_call_sites_are_the_pinned_set(self) -> None:

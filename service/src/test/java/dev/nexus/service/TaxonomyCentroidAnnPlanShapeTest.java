@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
-import dev.nexus.service.db.CollectionIds;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantScope;
@@ -219,7 +218,11 @@ class TaxonomyCentroidAnnPlanShapeTest {
             for (int dim : new int[] {1024, 768, 384}) {
                 PgContainerHelper.insertCollection(ctx, TENANT, supFor(dim), modelFor(dim));
                 PgContainerHelper.insertCollection(ctx, TENANT, liveFor(dim), modelFor(dim));
-                CollectionIdSeeds.supersede(ctx, TENANT, supFor(dim), "successor-of-" + supFor(dim));
+                ctx.update(CATALOG_COLLECTIONS)
+                    .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, "successor-of-" + supFor(dim))
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT))
+                    .and(CATALOG_COLLECTIONS.NAME.eq(supFor(dim)))
+                    .execute();
             }
             // Deterministic filler positions (CLAUDE.md: seeded randomness) -- a
             // client-side seeded Random replaces the retired setseed(0.42)/random()
@@ -235,28 +238,28 @@ class TaxonomyCentroidAnnPlanShapeTest {
                 // Filler: CENTROIDS_PER_DIM independently-random vectors (never collides
                 // with the single "nearest" row seeded below — see the method javadoc).
                 var insert = ctx.insertInto(TAXONOMY_CENTROIDS,
-                    TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION, TAXONOMY_CENTROIDS.COLLECTION_ID,
+                    TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
                     TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.EMBEDDING_MODEL, embCol,
                     TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.DOC_COUNT);
                 for (int i = 1; i <= CENTROIDS_PER_DIM; i++) {
-                    insert = insert.values(TENANT, coll, CollectionIds.require(ctx, TENANT, coll), (long) i, modelFor(dim), fillerVector(rnd, dim), "filler", 1);
+                    insert = insert.values(TENANT, coll, (long) i, modelFor(dim), fillerVector(rnd, dim), "filler", 1);
                 }
                 insert.execute();
                 // The single nearest row: unit vector along the first axis.
                 ctx.insertInto(TAXONOMY_CENTROIDS,
-                        TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION, TAXONOMY_CENTROIDS.COLLECTION_ID,
+                        TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
                         TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.EMBEDDING_MODEL, embCol,
                         TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.DOC_COUNT)
-                    .values(TENANT, coll, CollectionIds.require(ctx, TENANT, coll), (long) (CENTROIDS_PER_DIM + dim), modelFor(dim), queryVec(dim), "nearest", 1)
+                    .values(TENANT, coll, (long) (CENTROIDS_PER_DIM + dim), modelFor(dim), queryVec(dim), "nearest", 1)
                     .execute();
                 // nexus-2k8wi: the retired collection's centroid sits EXACTLY on the query (the nearest foreign one);
                 // the live foreign collection's is a little off it.
                 ctx.insertInto(TAXONOMY_CENTROIDS,
-                        TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION, TAXONOMY_CENTROIDS.COLLECTION_ID,
+                        TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
                         TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.EMBEDDING_MODEL, embCol,
                         TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.DOC_COUNT)
-                    .values(TENANT, supFor(dim), CollectionIds.require(ctx, TENANT, supFor(dim)), SUP_TOPIC, modelFor(dim), queryVec(dim), "superseded", 1)
-                    .values(TENANT, liveFor(dim), CollectionIds.require(ctx, TENANT, liveFor(dim)), LIVE_TOPIC, modelFor(dim), offAxisVec(dim), "live-foreign", 1)
+                    .values(TENANT, supFor(dim), SUP_TOPIC, modelFor(dim), queryVec(dim), "superseded", 1)
+                    .values(TENANT, liveFor(dim), LIVE_TOPIC, modelFor(dim), offAxisVec(dim), "live-foreign", 1)
                     .execute();
                 PgContainerHelper.analyzeTable(su, TAXONOMY_CENTROIDS);
             }
@@ -267,16 +270,16 @@ class TaxonomyCentroidAnnPlanShapeTest {
             // RDR-225: the two rows sit in two model partitions (the primary key carries the model, and
             // a centroid has no registry foreign key), the mid-migration shape a re-embed passes through.
             ctx.insertInto(TAXONOMY_CENTROIDS,
-                    TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION, TAXONOMY_CENTROIDS.COLLECTION_ID,
+                    TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
                     TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.EMBEDDING_MODEL,
                     TAXONOMY_CENTROIDS.EMBEDDING_384, TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.DOC_COUNT)
-                .values(TENANT, COL_MIXED, CollectionIds.require(ctx, TENANT, COL_MIXED), 1L, MODEL_384, queryVec(384), "mixed-384", 1)
+                .values(TENANT, COL_MIXED, 1L, MODEL_384, queryVec(384), "mixed-384", 1)
                 .execute();
             ctx.insertInto(TAXONOMY_CENTROIDS,
-                    TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION, TAXONOMY_CENTROIDS.COLLECTION_ID,
+                    TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
                     TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.EMBEDDING_MODEL,
                     TAXONOMY_CENTROIDS.EMBEDDING_768, TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.DOC_COUNT)
-                .values(TENANT, COL_MIXED, CollectionIds.require(ctx, TENANT, COL_MIXED), 2L, MODEL_768, queryVec(768), "mixed-768", 1)
+                .values(TENANT, COL_MIXED, 2L, MODEL_768, queryVec(768), "mixed-768", 1)
                 .execute();
             PgContainerHelper.analyzeTable(su, TAXONOMY_CENTROIDS);
         }

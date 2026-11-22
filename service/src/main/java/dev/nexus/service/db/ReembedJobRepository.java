@@ -302,9 +302,6 @@ public final class ReembedJobRepository {
                 .set(REEMBED_JOBS.JOB_ID, jobId)
                 .set(REEMBED_JOBS.SOURCE_COLLECTION, source)
                 .set(REEMBED_JOBS.TARGET_COLLECTION, target)
-                // RDR-229 P3.1: both ends' registry ids, read in this transaction (typed 422 when one is unregistered)
-                .set(REEMBED_JOBS.SOURCE_COLLECTION_ID, CollectionIds.require(ctx, tenant, source))
-                .set(REEMBED_JOBS.TARGET_COLLECTION_ID, CollectionIds.require(ctx, tenant, target))
                 .set(REEMBED_JOBS.STATE, PLANNED)
                 .set(REEMBED_JOBS.TOKEN_CAP, tokenCap)
                 .set(REEMBED_JOBS.KEEP_SOURCE, keepSource)
@@ -416,9 +413,7 @@ public final class ReembedJobRepository {
             scope.withTenant(tenant, ctx -> {
                 var update = ctx.update(REEMBED_JOBS)
                     .set(REEMBED_JOBS.STATE, to)
-                    .set(REEMBED_JOBS.UPDATED_AT, clock())
-                    .set(REEMBED_JOBS.SOURCE_COLLECTION_ID, SOURCE_OWN_ID)
-                    .set(REEMBED_JOBS.TARGET_COLLECTION_ID, TARGET_OWN_ID);
+                    .set(REEMBED_JOBS.UPDATED_AT, clock());
                 if (change.failureReason() != null) {
                     update = update.set(REEMBED_JOBS.FAILURE_REASON, change.failureReason());
                 } else if (!keepsReason) {
@@ -493,8 +488,6 @@ public final class ReembedJobRepository {
                     .setNull(REEMBED_JOBS.LAST_ERROR)
                     .setNull(REEMBED_JOBS.FINISHED_AT)
                     .set(REEMBED_JOBS.UPDATED_AT, clock())
-                    .set(REEMBED_JOBS.SOURCE_COLLECTION_ID, SOURCE_OWN_ID)
-                    .set(REEMBED_JOBS.TARGET_COLLECTION_ID, TARGET_OWN_ID)
                     .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
                     .and(REEMBED_JOBS.JOB_ID.eq(jobId))
                     .and(REEMBED_JOBS.STATE.eq(DONE))
@@ -521,8 +514,6 @@ public final class ReembedJobRepository {
             .set(REEMBED_JOBS.DOC_CURSOR, "")
             .setNull(REEMBED_JOBS.FAILURE_REASON)
             .set(REEMBED_JOBS.UPDATED_AT, clock())
-            .set(REEMBED_JOBS.SOURCE_COLLECTION_ID, SOURCE_OWN_ID)
-            .set(REEMBED_JOBS.TARGET_COLLECTION_ID, TARGET_OWN_ID)
             .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
             .and(REEMBED_JOBS.JOB_ID.eq(jobId))
             .and(REEMBED_JOBS.STATE.eq(CUTOVER))
@@ -627,9 +618,7 @@ public final class ReembedJobRepository {
                 .set(REEMBED_JOBS.CHUNKS_EMBEDDED, REEMBED_JOBS.CHUNKS_EMBEDDED.plus(batch.chunksEmbedded()))
                 .set(REEMBED_JOBS.CHUNKS_REUSED, REEMBED_JOBS.CHUNKS_REUSED.plus(batch.chunksReused()))
                 .set(REEMBED_JOBS.TOKENS_BILLED, REEMBED_JOBS.TOKENS_BILLED.plus(batch.tokensBilled()))
-                .set(REEMBED_JOBS.UPDATED_AT, clock())
-                .set(REEMBED_JOBS.SOURCE_COLLECTION_ID, SOURCE_OWN_ID)
-                .set(REEMBED_JOBS.TARGET_COLLECTION_ID, TARGET_OWN_ID);
+                .set(REEMBED_JOBS.UPDATED_AT, clock());
             if (batch.cursor() != null) {
                 update = update.set(REEMBED_JOBS.DOC_CURSOR,
                     DSL.greatest(REEMBED_JOBS.DOC_CURSOR, DSL.val(batch.cursor())));
@@ -663,8 +652,6 @@ public final class ReembedJobRepository {
             .set(REEMBED_JOBS.PASS_NUMBER, (short) (fromPass + 1))
             .set(REEMBED_JOBS.DOC_CURSOR, "")
             .set(REEMBED_JOBS.UPDATED_AT, clock())
-            .set(REEMBED_JOBS.SOURCE_COLLECTION_ID, SOURCE_OWN_ID)
-            .set(REEMBED_JOBS.TARGET_COLLECTION_ID, TARGET_OWN_ID)
             .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
             .and(REEMBED_JOBS.JOB_ID.eq(jobId))
             .and(REEMBED_JOBS.STATE.eq(RUNNING))
@@ -712,9 +699,7 @@ public final class ReembedJobRepository {
             }
             var update = ctx.update(REEMBED_JOBS)
                 .set(REEMBED_JOBS.CUTOVER_STEP, step)
-                .set(REEMBED_JOBS.UPDATED_AT, clock())
-                .set(REEMBED_JOBS.SOURCE_COLLECTION_ID, SOURCE_OWN_ID)
-                .set(REEMBED_JOBS.TARGET_COLLECTION_ID, TARGET_OWN_ID);
+                .set(REEMBED_JOBS.UPDATED_AT, clock());
             if (note != null) {
                 update = update.set(REEMBED_JOBS.LAST_ERROR, note.isEmpty() ? null : note);
             }
@@ -747,8 +732,6 @@ public final class ReembedJobRepository {
             int set = ctx.update(REEMBED_JOBS)
                 .set(REEMBED_JOBS.LAST_ERROR, message)
                 .set(REEMBED_JOBS.UPDATED_AT, clock())
-                .set(REEMBED_JOBS.SOURCE_COLLECTION_ID, SOURCE_OWN_ID)
-                .set(REEMBED_JOBS.TARGET_COLLECTION_ID, TARGET_OWN_ID)
                 .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
                 .and(REEMBED_JOBS.JOB_ID.eq(jobId))
                 .and(REEMBED_JOBS.STATE.eq(state))
@@ -795,8 +778,6 @@ public final class ReembedJobRepository {
             return ctx.update(REEMBED_JOBS)
                 .set(REEMBED_JOBS.DISPOSITION, "revived")
                 .set(REEMBED_JOBS.UPDATED_AT, clock())
-                .set(REEMBED_JOBS.SOURCE_COLLECTION_ID, SOURCE_OWN_ID)
-                .set(REEMBED_JOBS.TARGET_COLLECTION_ID, TARGET_OWN_ID)
                 .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
                 .and(REEMBED_JOBS.JOB_ID.eq(latest.get().get(REEMBED_JOBS.JOB_ID)))
                 .returning()
@@ -860,23 +841,12 @@ public final class ReembedJobRepository {
             .set(REEMBED_JOBS.DOCUMENTS_SKIPPED, REEMBED_JOBS.DOCUMENTS_SKIPPED.plus(skippedDelta))
             .set(REEMBED_JOBS.DOC_CURSOR, DSL.greatest(REEMBED_JOBS.DOC_CURSOR, DSL.val(docId)))
             .set(REEMBED_JOBS.UPDATED_AT, clock())
-            .set(REEMBED_JOBS.SOURCE_COLLECTION_ID, SOURCE_OWN_ID)
-            .set(REEMBED_JOBS.TARGET_COLLECTION_ID, TARGET_OWN_ID)
             .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
             .and(REEMBED_JOBS.JOB_ID.eq(jobId))
             .execute();
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────
-
-    /** RDR-229 P3.1: the ids of the row's own source and target names, set by every UPDATE of a job row (the NOT VALID
-     *  CHECKs look at each updated row, and a row not stamped yet has names and no ids). An id already stored is kept
-     *  (no UPDATE here changes a name), because a cutover deletes the source's registry row and a live subselect would
-     *  then null the id beside a non-empty name. */
-    private static final Field<Long> SOURCE_OWN_ID = DSL.coalesce(REEMBED_JOBS.SOURCE_COLLECTION_ID,
-        CollectionIds.idOf(REEMBED_JOBS.TENANT_ID, REEMBED_JOBS.SOURCE_COLLECTION));
-    private static final Field<Long> TARGET_OWN_ID = DSL.coalesce(REEMBED_JOBS.TARGET_COLLECTION_ID,
-        CollectionIds.idOf(REEMBED_JOBS.TENANT_ID, REEMBED_JOBS.TARGET_COLLECTION));
 
     private static Field<OffsetDateTime> clock() {
         return DSL.function("clock_timestamp", SQLDataType.TIMESTAMPWITHTIMEZONE);

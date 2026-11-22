@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
-import dev.nexus.service.db.CollectionIds;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.Chash;
@@ -177,7 +176,6 @@ class RouteBManifestPreFilterTest {
             .set(CATALOG_DOCUMENTS.TUMBLER, doc)
             .set(CATALOG_DOCUMENTS.TITLE, title)
             .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
-            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(tenant, collection))
             .set(CATALOG_DOCUMENTS.SOURCE_URI, "file:///" + doc + ".md")
             .set(CATALOG_DOCUMENTS.AUTHOR, author)
             .execute();
@@ -187,7 +185,6 @@ class RouteBManifestPreFilterTest {
         seed.insertInto(DOCUMENT_ASPECTS)
             .set(DOCUMENT_ASPECTS.TENANT_ID, tenant)
             .set(DOCUMENT_ASPECTS.COLLECTION, collection)
-            .set(DOCUMENT_ASPECTS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
             .set(DOCUMENT_ASPECTS.SOURCE_PATH, doc + ".md")
             .set(DOCUMENT_ASPECTS.PROPOSED_METHOD, "gradient descent")
             .set(DOCUMENT_ASPECTS.CONFIDENCE, 0.9)
@@ -207,7 +204,6 @@ class RouteBManifestPreFilterTest {
             .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position)
             .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(chash))
             .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
-            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
             .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, model)
             .set(CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE, sectionType)
             .set(CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN, true)
@@ -394,7 +390,6 @@ class RouteBManifestPreFilterTest {
             .set(CATALOG_DOCUMENTS.TUMBLER, doc)
             .set(CATALOG_DOCUMENTS.TITLE, title)
             .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CT_COLLECTION)
-            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(CT_TENANT, CT_COLLECTION))
             .set(CATALOG_DOCUMENTS.SOURCE_URI, "file:///" + doc + ".md");
         if (contentType != null) insert = insert.set(CATALOG_DOCUMENTS.CONTENT_TYPE, contentType);
         if (filePath != null) insert = insert.set(CATALOG_DOCUMENTS.FILE_PATH, filePath);
@@ -532,7 +527,6 @@ class RouteBManifestPreFilterTest {
                 var insert = seed.insertInto(CHUNKS)
                     .set(CHUNKS.TENANT_ID, tenant)
                     .set(CHUNKS.COLLECTION, collection)
-                    .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
                     .set(CHUNKS.CHASH, HexFormat.of().parseHex(chash))
                     .set(CHUNKS.EMBEDDING_MODEL, model)
                     .set(CHUNKS.CHUNK_TEXT, "dim chunk")

@@ -3,7 +3,6 @@
 package dev.nexus.service;
 
 import com.zaxxer.hikari.HikariConfig;
-import dev.nexus.service.db.CollectionIds;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
@@ -332,16 +331,16 @@ class DocumentMoveTest {
     void seedAspect(String collection, String docId, String path, String marker) {
         su(ctx -> ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
                 DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
-                DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI, DOCUMENT_ASPECTS.COLLECTION_ID)
-            .values(TENANT, collection, path, OffsetDateTime.now(), marker, "docling", docId, "file:///" + path, CollectionIds.require(ctx, TENANT, collection))
+                DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+            .values(TENANT, collection, path, OffsetDateTime.now(), marker, "docling", docId, "file:///" + path)
             .execute());
     }
 
     void seedHighlight(String collection, String docId) {
         su(ctx -> ctx.insertInto(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID,
                 DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.SOURCE_URI, DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD,
-                DOCUMENT_HIGHLIGHTS.INGESTED_AT, DOCUMENT_HIGHLIGHTS.COLLECTION_ID)
-            .values(TENANT, docId, collection, "file:///hl/" + docId, "highlight", OffsetDateTime.now(), CollectionIds.require(ctx, TENANT, collection))
+                DOCUMENT_HIGHLIGHTS.INGESTED_AT)
+            .values(TENANT, docId, collection, "file:///hl/" + docId, "highlight", OffsetDateTime.now())
             .execute());
     }
 

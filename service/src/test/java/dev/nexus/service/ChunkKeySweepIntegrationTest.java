@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
-import dev.nexus.service.db.CollectionIds;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
@@ -522,8 +521,7 @@ class ChunkKeySweepIntegrationTest extends ChunkKeysTestBase {
             ctx.alterTable(CHUNKS).dropConstraint("chunks_chash_octet_check").execute();
             try {
                 ctx.insertInto(CHUNKS)
-                    .set(CHUNKS.TENANT_ID, tenant).set(CHUNKS.COLLECTION, live)
-                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, live)).set(CHUNKS.CHASH, narrow)
+                    .set(CHUNKS.TENANT_ID, tenant).set(CHUNKS.COLLECTION, live).set(CHUNKS.CHASH, narrow)
                     .set(CHUNKS.EMBEDDING_MODEL, MODEL).set(CHUNKS.CHUNK_TEXT, "narrow")
                     .set(CHUNKS.EMBEDDING_384, dev.nexus.service.jooq.binding.Vector.of(new float[384]))
                     .set(CHUNKS.METADATA, org.jooq.JSONB.jsonb("{\"title\":\"legacy narrow\"}"))
@@ -635,8 +633,7 @@ class ChunkKeySweepIntegrationTest extends ChunkKeysTestBase {
                 .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant).set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, "doc.dead")
                 .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
                 .set(CATALOG_DOCUMENT_CHUNKS.CHASH, Chash.fromHex(hexOf(tenant, live, "c13")).toBytes())
-                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, live)
-                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, live)).set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, MODEL)
+                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, live).set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, MODEL)
                 .set(CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN, false)
                 .set(CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE, "Gone").execute();
             ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.DELETED_AT, java.time.OffsetDateTime.now())

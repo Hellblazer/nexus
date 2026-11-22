@@ -39,7 +39,6 @@ from nexus.commands.catalog_cmds.doctor import (
     doctor_cmd,
 )
 from nexus.corpus import t3_collection_name
-from nexus.knowledge_subject import catalog_subject_finder
 from nexus.db.http_vector_client import HttpVectorClient, VectorServiceError
 from tests.conftest import catalog_row_for_collection_name
 from nexus.mcp.core import store_put
@@ -481,7 +480,7 @@ def _strand_a_superseded_chunk(client: HttpVectorClient, subject: str, title: st
     v2 = f"{subject} second version: completely rewritten text about lighthouse lenses"
     with patch("nexus.mcp.core._get_t3", return_value=client):
         store_put(content=v1, collection=subject, title=title)
-    collection = t3_collection_name(subject, subject_finder=catalog_subject_finder())
+    collection = t3_collection_name(subject, t3=client)
     reader = make_catalog_reader()
     assert reader is not None
     doc = reader.by_source_uri(uri_for(collection, title))

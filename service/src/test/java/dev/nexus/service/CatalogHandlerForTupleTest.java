@@ -126,10 +126,9 @@ class CatalogHandlerForTupleTest {
             "{\"name\":\"old-notes-p28\",\"content_type\":\"knowledge\",\"owner_id\":\"retired-notes\","
                 + "\"embedding_model\":\"" + KNOWLEDGE_MODEL + "\",\"model_version\":\"v1\","
                 + "\"display_name\":\"\",\"legacy_grandfathered\":true}");
-        // the successor is v2: a second live row on the old row's tuple is refused by the registration (RDR-229 P3.8)
         post("/v1/catalog/collections/upsert",
             "{\"name\":\"new-notes-p28\",\"content_type\":\"knowledge\",\"owner_id\":\"retired-notes\","
-                + "\"embedding_model\":\"" + KNOWLEDGE_MODEL + "\",\"model_version\":\"v2\","
+                + "\"embedding_model\":\"" + KNOWLEDGE_MODEL + "\",\"model_version\":\"v1\","
                 + "\"display_name\":\"\",\"legacy_grandfathered\":true}");
         var sup = post("/v1/catalog/collections/supersede",
             "{\"name\":\"old-notes-p28\",\"superseded_by\":\"new-notes-p28\"}");

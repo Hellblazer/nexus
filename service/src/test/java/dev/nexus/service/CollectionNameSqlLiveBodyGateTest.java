@@ -137,25 +137,20 @@ class CollectionNameSqlLiveBodyGateTest {
     /** The functions the RDR rewrites, each with the changelog that last defines it: the scan must resolve all three. */
     static final Map<String, String> REQUIRED_LIVE = Map.of(
         "nexus.chash_conformance_report", "vectors-063-live-functions-read-collection-row.xml",
-        // RDR-229 P3.1 stage 2b: vectors-069 redefines these two once more to set collection_id (a body change of the id writes only;
-        // the census below is unchanged because no name-parsing expression moved).
-        "nexus.quarantine_restore_chunks", "vectors-069-collection-id-dual-write-functions.xml",
-        "nexus.reaper_expire_client_quarantine", "vectors-069-collection-id-dual-write-functions.xml");
+        "nexus.quarantine_restore_chunks", "vectors-063-live-functions-read-collection-row.xml",
+        "nexus.reaper_expire_client_quarantine", "vectors-063-live-functions-read-collection-row.xml");
 
-    /** Floors on the real tree (234 includes and 120 live functions: 233 at the first run, 234 at develop 118701321; catalog-051-1a added nexus.collection_tuple_lock_key, 119 to 120; vectors-071-1 added nexus.rdr229_restamp, 120 to 121; RDR-229 P3.8's collections-001-1 and collections-002 added nexus.catalog_collection_tuple_duplicates_unscoped, nexus.collection_id_seq_heal and nexus.collection_id_taken, 121 to 124); a scan below them read too little. */
+    /** Floors on the real tree (234 includes and 120 live functions: 233 at the first run, 234 at develop 118701321; catalog-051-1a added nexus.collection_tuple_lock_key, 119 to 120); a scan below them read too little. */
     static final int INCLUDES_FLOOR = 234;
     static final int LIVE_FUNCTIONS_FLOOR = 100;
 
     /**
      * The live functions the real tree resolves to (name plus signature), pinned exactly, with no live overload today: the
-     * key count equals the name count. A resolver that stops folding a type spelling or a DEFAULT reads more
+     * key count equals the name count (119). A resolver that stops folding a type spelling or a DEFAULT reads 120 or 146
      * here (stale signatures that were really dropped), so this pin is what makes the normaliser load-bearing. A function
-     * added or dropped moves it, in the same edit. 120 -> 121 at RDR-229 P3.1 fix round A: vectors-071-1 adds
-     * {@code nexus.rdr229_restamp(text)}. It is a live function but not a name-parsing site: it matches move LABELS with
-     * {@code starts_with(m.label, ...)} and compares collection names only by equality against {@code catalog_collections.name}, so
-     * {@link #NAME_PARSING_CENSUS} is unchanged.
+     * added or dropped moves it, in the same edit.
      */
-    static final int LIVE_FUNCTIONS_PIN = 124;
+    static final int LIVE_FUNCTIONS_PIN = 120;
 
     // ── model ───────────────────────────────────────────────────────────
 

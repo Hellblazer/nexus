@@ -1,6 +1,5 @@
 package dev.nexus.service;
 
-import dev.nexus.service.db.CollectionIds;
 import org.jooq.impl.DSL;
 import org.jooq.SQLDialect;
 import org.jooq.DSLContext;
@@ -383,21 +382,15 @@ class VectorsUnifyCentroidsIntegrationTest {
                 // RDR-225 (nexus-3wh8d.13): a centroid carries a model, which routes it to a partition, and its
                 // vector's width must be that model's dimension; the tenant needs its leaves.
                 PgContainerHelper.ensureTenantPartitions(ctx, "t1");
-                // RDR-229 P3.1: a centroid names its collection's registry id too (a NOT VALID CHECK), so "c" is
-                // registered: otherwise the id CHECK, not the one-embedding CHECK this test is about, refuses every row.
-                PgContainerHelper.insertCollection(ctx, "t1", "c", "bge-base-en-v15-768");
 
                 // Zero embeddings -> rejected. label supplied (hygiene-001-9b
                 // made taxonomy_centroids.label NOT NULL) so the
                 // exactly_one_embedding CHECK -- not the unrelated NOT NULL
                 // constraint -- is what fires here.
-                assertThatThrownBy(() -> ctx.insertInto(TAXONOMY_CENTROIDS)
-                    .set(TAXONOMY_CENTROIDS.TENANT_ID, "t1")
-                    .set(TAXONOMY_CENTROIDS.COLLECTION, "c")
-                    .set(TAXONOMY_CENTROIDS.COLLECTION_ID, CollectionIds.idOf("t1", "c"))
-                    .set(TAXONOMY_CENTROIDS.TOPIC_ID, 100L)
-                    .set(TAXONOMY_CENTROIDS.LABEL, "zero-embedding-label")
-                    .set(TAXONOMY_CENTROIDS.EMBEDDING_MODEL, "bge-base-en-v15-768")
+                assertThatThrownBy(() -> ctx.insertInto(TAXONOMY_CENTROIDS,
+                        TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
+                        TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.EMBEDDING_MODEL)
+                    .values("t1", "c", 100L, "zero-embedding-label", "bge-base-en-v15-768")
                     .execute())
                   .as("zero-embedding row must violate a CHECK (taxonomy_centroids_exactly_one_embedding or the model partition's dimension CHECK, whichever PostgreSQL reports first)")
                   .isInstanceOf(DataAccessException.class)
@@ -408,15 +401,11 @@ class VectorsUnifyCentroidsIntegrationTest {
                 Arrays.fill(v384, 0.01f);
                 float[] v768 = new float[768];
                 Arrays.fill(v768, 0.01f);
-                assertThatThrownBy(() -> ctx.insertInto(TAXONOMY_CENTROIDS)
-                    .set(TAXONOMY_CENTROIDS.TENANT_ID, "t1")
-                    .set(TAXONOMY_CENTROIDS.COLLECTION, "c")
-                    .set(TAXONOMY_CENTROIDS.COLLECTION_ID, CollectionIds.idOf("t1", "c"))
-                    .set(TAXONOMY_CENTROIDS.TOPIC_ID, 101L)
-                    .set(TAXONOMY_CENTROIDS.LABEL, "two-embedding-label")
-                    .set(TAXONOMY_CENTROIDS.EMBEDDING_MODEL, "bge-base-en-v15-768")
-                    .set(TAXONOMY_CENTROIDS.EMBEDDING_384, Vector.of(v384))
-                    .set(TAXONOMY_CENTROIDS.EMBEDDING_768, Vector.of(v768))
+                assertThatThrownBy(() -> ctx.insertInto(TAXONOMY_CENTROIDS,
+                        TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
+                        TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.EMBEDDING_MODEL,
+                        TAXONOMY_CENTROIDS.EMBEDDING_384, TAXONOMY_CENTROIDS.EMBEDDING_768)
+                    .values("t1", "c", 101L, "two-embedding-label", "bge-base-en-v15-768", Vector.of(v384), Vector.of(v768))
                     .execute())
                   .as("two-embedding row must violate a CHECK (taxonomy_centroids_exactly_one_embedding or the model partition's dimension CHECK)")
                   .isInstanceOf(DataAccessException.class)
@@ -440,14 +429,10 @@ class VectorsUnifyCentroidsIntegrationTest {
                         case 768 -> "bge-base-en-v15-768";
                         default -> "voyage-code-3";
                     };
-                    assertThatCode(() -> ctx.insertInto(TAXONOMY_CENTROIDS)
-                        .set(TAXONOMY_CENTROIDS.TENANT_ID, "t1")
-                        .set(TAXONOMY_CENTROIDS.COLLECTION, "c")
-                        .set(TAXONOMY_CENTROIDS.COLLECTION_ID, CollectionIds.idOf("t1", "c"))
-                        .set(TAXONOMY_CENTROIDS.TOPIC_ID, topicId)
-                        .set(TAXONOMY_CENTROIDS.LABEL, "one-embedding-label")
-                        .set(TAXONOMY_CENTROIDS.EMBEDDING_MODEL, model)
-                        .set(embeddingField, Vector.of(vec))
+                    assertThatCode(() -> ctx.insertInto(TAXONOMY_CENTROIDS,
+                            TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
+                            TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.EMBEDDING_MODEL, embeddingField)
+                        .values("t1", "c", topicId, "one-embedding-label", model, Vector.of(vec))
                         .execute())
                         .as("single embedding_%d row must be accepted", dim)
                         .doesNotThrowAnyException();

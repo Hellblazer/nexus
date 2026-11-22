@@ -1,7 +1,6 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 package dev.nexus.service;
 
-import dev.nexus.service.db.CollectionIds;
 import org.jooq.impl.SQLDataType;
 import org.jooq.Field;
 import org.jooq.DSLContext;
@@ -246,10 +245,9 @@ class DenseGateScanBudgetIntegrationTest {
         Field<String> components = DSL.field(ctx.select(DSL.groupConcat(DSL.cast(DSL.rand(), SQLDataType.VARCHAR))
                 .separator(","))
             .from(DSL.generateSeries(DSL.inline(1), DSL.inline(384).plus(g.minus(g)))));
-        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, CHUNKS.CHASH,
-                CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384)
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
+                CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384)
             .select(ctx.select(DSL.val(TENANT, CHUNKS.TENANT_ID), DSL.val(collection, CHUNKS.COLLECTION),
-                    CollectionIds.idOf(TENANT, collection),
                     DSL.function("sha256", SQLDataType.BLOB,
                         DSL.function("convert_to", SQLDataType.BLOB,
                             DSL.concat(DSL.val(hashPrefix, CHUNKS.CHUNK_TEXT), DSL.cast(g, SQLDataType.VARCHAR)),

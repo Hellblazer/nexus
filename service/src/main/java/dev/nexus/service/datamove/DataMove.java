@@ -24,11 +24,7 @@ public record DataMove(
         String pausedBy,
         int transientRetries,
         OffsetDateTime lastTransientAt,
-        String lastTransient,
-        int verifyStatementTimeoutMs) {
-
-    /** The column's default: the bound on the finisher's first, READ ONLY verification pass (datamoves-002). */
-    public static final int DEFAULT_VERIFY_STATEMENT_TIMEOUT_MS = 60_000;
+        String lastTransient) {
 
     public boolean paused() {
         return pausedAt != null;

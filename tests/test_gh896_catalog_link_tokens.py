@@ -638,9 +638,7 @@ def _register_catalog_doc(
     the exact shape ``nx index repo`` produces
     (``CatalogRepository.deriveSourceUri``)."""
     from nexus.catalog.http_catalog_client import HttpCatalogClient
-    from tests._catalog_fixture_ops import register_seed_collections
 
-    register_seed_collections("knowledge__gh896")
     with HttpCatalogClient() as cat:
         owner = cat.register_owner(
             owner_name, "repo", repo_hash="gh896-test-hash",

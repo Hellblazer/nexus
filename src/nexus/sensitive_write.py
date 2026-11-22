@@ -98,81 +98,31 @@ def _parse_collection(collection_name: str) -> Any:
         return None
 
 
-def _registry_row(collection_name: str) -> dict | None:
-    """The registry row of a collection whose name carries no attributes, or ``None`` when there is none or it
-    cannot be read (RDR-229 P3.8: the engine mints a new subject's label, ``c19``, so the name says nothing about
-    its embedder; the row does). A caller reads ``None`` as "unknown", which is external, never safe.
-
-    Only a label of the engine's minted form is read. A legacy name answers ``None`` with no read, as it did before
-    P3.8: ``is_external_embedder`` runs on every index, sensitive or not, so a read there would cost each legacy
-    write a registry round trip."""
-    from nexus import mcp_infra  # noqa: PLC0415 — deferred: mcp_infra is heavy, and only a name that does not parse needs it
-    from nexus.corpus import _MINTED_LABEL_RE  # noqa: PLC0415 — deferred: corpus is heavy
-
-    if not _MINTED_LABEL_RE.fullmatch(collection_name):
-        return None
-    try:
-        row = mcp_infra.get_collection_row(collection_name)
-    except Exception:  # noqa: BLE001 — an unreadable registry is "cannot tell", which fails closed
-        _log.warning("sensitive_collection_row_unreadable", collection=collection_name, exc_info=True)
-        return None
-    return row if isinstance(row, dict) else None
-
-
 def is_external_embedder(collection_name: str) -> bool:
     """True when *collection_name* is embedded off this machine, or when that cannot be told.
 
     A conformant name carries its embedder token: the local tokens (bge, MiniLM) embed here, anything
-    else (Voyage) does not. A name that does not parse (a label the engine minted, or a legacy name) is
-    read from its registry row's ``embedding_model``. A name without a token and without a readable row is
-    unknown, and an unknown embedder reads as external, never as safe.
+    else (Voyage) does not. A name without a token (a legacy two-segment name) is unknown, and an
+    unknown embedder reads as external, never as safe.
     """
     from nexus.corpus import LOCAL_EMBEDDING_MODELS  # noqa: PLC0415 — deferred: corpus is heavy
 
     parsed = _parse_collection(collection_name)
-    if parsed is not None:
-        return parsed.embedding_model not in LOCAL_EMBEDDING_MODELS
-    row = _registry_row(collection_name)
-    return not row or row.get("embedding_model") not in LOCAL_EMBEDDING_MODELS
+    return parsed is None or parsed.embedding_model not in LOCAL_EMBEDDING_MODELS
 
 
 def bge_sibling(collection_name: str) -> str | None:
-    """The bge collection of the same prefix and subject as *collection_name*, else ``None``.
+    """``<prefix>__<subject>__bge-base-en-v15-768__v1`` for a conformant *collection_name*, else ``None``.
 
-    A conformant name renders ``<prefix>__<subject>__bge-base-en-v15-768__v1`` (every prefix: ``knowledge__``,
-    ``docs__``, ``rdr__``, ``code__``); the version segment is ``v1``, the sibling being a different collection,
-    not a newer version of the Voyage one. A name that does not parse (a minted label) has its ``(content_type,
-    owner_id)`` read from its registry row, and the answer is the subject's registered bge collection under
-    whatever label it has: a rendered name beside a live minted row would be a second live collection on one
-    tuple, which the engine refuses (409). With none registered it is the rendered name, as for a conformant one.
-    ``None`` when the name has no row to read.
+    Works for every prefix (``knowledge__``, ``docs__``, ``rdr__``, ``code__``). The version segment is
+    ``v1``: the sibling is a different collection, not a newer version of the Voyage one.
     """
     from nexus.catalog.collection_name import CollectionName  # noqa: PLC0415 — deferred: leaf value object
 
     parsed = _parse_collection(collection_name)
-    if parsed is not None:
-        return CollectionName(parsed.content_type, parsed.owner_id, BGE_TOKEN, 1).render()
-    row = _registry_row(collection_name)
-    if not row or not row.get("content_type") or not row.get("owner_id"):
+    if parsed is None:
         return None
-    content_type, owner_id = row["content_type"], row["owner_id"]
-    from nexus.knowledge_subject import catalog_subject_finder  # noqa: PLC0415 — deferred: reads the catalog
-
-    try:
-        existing = catalog_subject_finder()(content_type, owner_id, BGE_TOKEN)
-    except Exception:  # noqa: BLE001 — a lookup that failed cannot tell a registered sibling from none
-        _log.warning("sensitive_bge_sibling_lookup_failed", collection=collection_name, exc_info=True)
-        return None
-    if existing is not None and getattr(existing, "label", ""):
-        # A registered sibling with no chunk yet is not in the listing, so the write path's later
-        # is_external_embedder(label) checks would read it as unknown (external) and refuse: note its row.
-        from nexus import collection_mint  # noqa: PLC0415 — deferred: collection_mint imports corpus
-
-        collection_mint.note_registered(existing.label, {
-            "content_type": existing.content_type, "owner_id": existing.owner_id,
-            "embedding_model": existing.embedding_model, "lifecycle_state": existing.lifecycle_state or "live"})
-        return existing.label
-    return CollectionName(content_type, owner_id, BGE_TOKEN, 1).render()
+    return CollectionName(parsed.content_type, parsed.owner_id, BGE_TOKEN, 1).render()
 
 
 def _cloud_endpoint() -> str:

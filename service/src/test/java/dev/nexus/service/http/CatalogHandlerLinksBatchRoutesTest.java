@@ -74,16 +74,6 @@ class CatalogHandlerLinksBatchRoutesTest {
         handler = new CatalogHandler(repo);
     }
 
-    /** Registers {@code name} for {@code tenant} (P3.1: a write under an unregistered collection is a typed 422). */
-    private void registerCollection(String tenant, String name) {
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            PgContainerHelper.insertCollection(org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES), tenant, name);
-        } catch (java.sql.SQLException e) {
-            throw new IllegalStateException(e);
-        }
-    }
-
     @AfterAll
     void stopAll() {
         if (svcDs != null) svcDs.close();
@@ -92,7 +82,6 @@ class CatalogHandlerLinksBatchRoutesTest {
 
     private String tenantWithDocs() {
         String t = "lb193http-" + (++tenantSeq);
-        registerCollection(t, "docs__seed");
         repo.upsertOwner(t, Map.of("tumbler_prefix", "1.1", "name", "own-1.1", "owner_type", "repo",
             "repo_hash", "h-" + t, "repo_root", "/r"));
         for (String p : List.of("a.md", "b.md")) {

@@ -76,9 +76,7 @@
     tk; the UPDATE reads mv and references tlk (AND (SELECT count(*) FROM tlk) >= 0), which runs it to completion before the
     UPDATE writes a row. A chunk therefore holds at most chunk_size tuple locks (1000), however many tuples the tenant has: a
     tenant with more tuples than the lock table holds (about 6400 at max_locks_per_transaction 64) cannot fail the move with
-    53200, which is class 53 and would retry forever. (Since collections-003-1 the key is
-    one of 256 stripes, so a chunk holds at most 256 tuple locks, and while it holds a stripe every lock-taking registration
-    in that stripe, of any tenant, waits: accepted by design, RDR-229 P3.8.) ORDER. The keys are locked in ascending order, which is the order
+    53200, which is class 53 and would retry forever. ORDER. The keys are locked in ascending order, which is the order
     CollectionTupleLock.lock uses for every Java caller, so no two takers of several tuples hold a lock the other waits on. In
     one statement that order holds because tlk's FROM is the materialised tk, a subquery with DISTINCT and ORDER BY that the
     planner does not flatten or re-sort, and the volatile function in tlk's select list is evaluated for the rows in the order

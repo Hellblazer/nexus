@@ -1,7 +1,6 @@
 package dev.nexus.service;
 
 import java.util.HexFormat;
-import dev.nexus.service.db.CollectionIds;
 import java.time.OffsetDateTime;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.ChashRepository;
@@ -166,7 +165,6 @@ class ChashRepositoryTest {
                 .set(CATALOG_DOCUMENTS.CONTENT_TYPE, "paper")
                 .set(CATALOG_DOCUMENTS.CORPUS, "research")
                 .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, "ren-src")
-            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.require(seed, TENANT_A, "ren-src"))
                 .execute();
             seed.insertInto(CATALOG_DOCUMENT_CHUNKS)
                 .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, TENANT_A)
@@ -174,7 +172,6 @@ class ChashRepositoryTest {
                 .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
                 .set(CATALOG_DOCUMENT_CHUNKS.CHASH, ch("ren-1").toBytes())
                 .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, "ren-src")
-            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.require(seed, TENANT_A, "ren-src"))
                 .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
                     PgContainerHelper.collectionModel(seed, TENANT_A, "ren-src"))
                 .execute();
@@ -501,7 +498,6 @@ class ChashRepositoryTest {
         ctx.insertInto(CHUNKS)
             .set(CHUNKS.TENANT_ID, tenant)
             .set(CHUNKS.COLLECTION, collection)
-            .set(CHUNKS.COLLECTION_ID, CollectionIds.require(ctx, tenant, collection))
             .set(CHUNKS.CHASH, HexFormat.of().parseHex(chash.toHex()))
             .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
             .set(CHUNKS.CHUNK_TEXT, "chunk " + chash.toHex().substring(0, 8))

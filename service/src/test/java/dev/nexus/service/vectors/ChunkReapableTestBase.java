@@ -7,7 +7,6 @@ import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgCatalogProbes;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.Chash;
-import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.TenantScope;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
@@ -138,11 +137,9 @@ abstract class ChunkReapableTestBase {
     protected void recordOrphaning(String tenant, String collection, String hex, Duration age) throws Exception {
         OffsetDateTime then = OffsetDateTime.now().minus(age);
         // RDR-225: the record carries its chunk's embedding model (the four-column chunk foreign key).
-        su(ctx -> ctx.insertInto(CHUNK_ORPHANED_AT)
-            .set(CHUNK_ORPHANED_AT.TENANT_ID, tenant).set(CHUNK_ORPHANED_AT.COLLECTION, collection)
-            .set(CHUNK_ORPHANED_AT.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
-            .set(CHUNK_ORPHANED_AT.CHASH, bytes(hex)).set(CHUNK_ORPHANED_AT.ORPHANED_AT, then)
-            .set(CHUNK_ORPHANED_AT.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
+        su(ctx -> ctx.insertInto(CHUNK_ORPHANED_AT, CHUNK_ORPHANED_AT.TENANT_ID, CHUNK_ORPHANED_AT.COLLECTION,
+                CHUNK_ORPHANED_AT.CHASH, CHUNK_ORPHANED_AT.ORPHANED_AT, CHUNK_ORPHANED_AT.EMBEDDING_MODEL)
+            .values(tenant, collection, bytes(hex), then, PgContainerHelper.collectionModel(ctx, tenant, collection))
             .onConflict(CHUNK_ORPHANED_AT.TENANT_ID, CHUNK_ORPHANED_AT.COLLECTION, CHUNK_ORPHANED_AT.CHASH)
             .doUpdate().set(CHUNK_ORPHANED_AT.ORPHANED_AT, then).execute());
     }
@@ -173,23 +170,20 @@ abstract class ChunkReapableTestBase {
     }
 
     protected void document(String tenant, String tumbler, String collection, boolean tombstoned) throws Exception {
-        su(ctx -> ctx.insertInto(CATALOG_DOCUMENTS)
-            .set(CATALOG_DOCUMENTS.TENANT_ID, tenant).set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
-            .set(CATALOG_DOCUMENTS.TITLE, "doc " + tumbler).set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
-            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(tenant, collection))
-            .set(CATALOG_DOCUMENTS.DELETED_AT, tombstoned ? OffsetDateTime.now().minusDays(1) : null)
+        su(ctx -> ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.DELETED_AT)
+            .values(tenant, tumbler, "doc " + tumbler, collection, tombstoned ? OffsetDateTime.now().minusDays(1) : null)
             .onConflictDoNothing().execute());
     }
 
     protected void manifestRow(String tenant, String docId, String collection, String hex, int position)
             throws Exception {
-        su(ctx -> ctx.insertInto(CATALOG_DOCUMENT_CHUNKS)
-            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant).set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, docId)
-            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position).set(CATALOG_DOCUMENT_CHUNKS.CHASH, bytes(hex))
-            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
-            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
-            .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
-            .execute());
+        su(ctx -> ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
+                CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
+                CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+            .values(tenant, docId, position, bytes(hex), collection,
+                PgContainerHelper.collectionModel(ctx, tenant, collection)).execute());
     }
 
     protected OffsetDateTime lastWrittenAt(String tenant, String collection, String hex) throws Exception {

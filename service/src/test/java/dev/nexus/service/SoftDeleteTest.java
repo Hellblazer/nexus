@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
-import dev.nexus.service.db.CollectionIds;
 import org.jooq.DSLContext;
 import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
@@ -1003,14 +1002,11 @@ class SoftDeleteTest {
      */
     private static void insertManifestRow(DSLContext ctx, String tenantId, String docId,
                                            int position, byte[] chash, String collection) {
-        ctx.insertInto(CATALOG_DOCUMENT_CHUNKS)
-            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenantId)
-            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, docId)
-            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position)
-            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, chash)
-            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
-            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenantId, collection))
-            .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenantId, collection))
+        ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+            .values(tenantId, docId, position, chash, collection,
+                PgContainerHelper.collectionModel(ctx, tenantId, collection))
             .onConflictDoNothing()
             .execute();
     }
@@ -1025,16 +1021,11 @@ class SoftDeleteTest {
         // RDR-164 P1a: register the collection (document_aspects_collection_fk).
         PgContainerHelper.insertCollection(ctx, tenantId, collection);
         // hygiene-001 step 1 (nexus-tk070.p6a follow-on): source_uri is NOT NULL now too.
-        ctx.insertInto(DOCUMENT_ASPECTS)
-            .set(DOCUMENT_ASPECTS.TENANT_ID, tenantId)
-            .set(DOCUMENT_ASPECTS.COLLECTION, collection)
-            .set(DOCUMENT_ASPECTS.COLLECTION_ID, CollectionIds.idOf(tenantId, collection))
-            .set(DOCUMENT_ASPECTS.SOURCE_PATH, sourcePath)
-            .set(DOCUMENT_ASPECTS.EXTRACTED_AT, OffsetDateTime.now())
-            .set(DOCUMENT_ASPECTS.MODEL_VERSION, "v1")
-            .set(DOCUMENT_ASPECTS.EXTRACTOR_NAME, "docling")
-            .set(DOCUMENT_ASPECTS.DOC_ID, tumbler)
-            .set(DOCUMENT_ASPECTS.SOURCE_URI, "file:///" + sourcePath)
+        ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
+                DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
+                DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+            .values(tenantId, collection, sourcePath, OffsetDateTime.now(), "v1", "docling", tumbler,
+                "file:///" + sourcePath)
             .onConflictDoNothing()
             .execute();
     }
@@ -1047,14 +1038,10 @@ class SoftDeleteTest {
      */
     private static void insertChunk384(DSLContext ctx, String tenantId, String collection,
                                         byte[] chash, String chunkText) {
-        ctx.insertInto(CHUNKS)
-            .set(CHUNKS.TENANT_ID, tenantId)
-            .set(CHUNKS.COLLECTION, collection)
-            .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenantId, collection))
-            .set(CHUNKS.CHASH, chash)
-            .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenantId, collection))
-            .set(CHUNKS.CHUNK_TEXT, chunkText)
-            .set(CHUNKS.EMBEDDING_384, vector(384))
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
+                CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384)
+            .values(tenantId, collection, chash, PgContainerHelper.collectionModel(ctx, tenantId, collection),
+                chunkText, vector(384))
             .onConflictDoNothing()
             .execute();
     }

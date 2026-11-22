@@ -84,16 +84,6 @@ class CatalogHandlerSensitivityTest {
         handler = new CatalogHandler(repo);
     }
 
-    /** Registers {@code name} for {@code tenant} (P3.1: a write under an unregistered collection is a typed 422). */
-    private void registerCollection(String tenant, String name) {
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            PgContainerHelper.insertCollection(org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES), tenant, name);
-        } catch (java.sql.SQLException e) {
-            throw new IllegalStateException(e);
-        }
-    }
-
     @AfterAll
     void stopAll() {
         if (svcDs != null) svcDs.close();
@@ -110,7 +100,6 @@ class CatalogHandlerSensitivityTest {
         f.put("file_path", name + ".md");
         f.put("source_uri", "file:///r/" + name + ".md");
         f.put("physical_collection", COLL);
-        registerCollection(tenant, COLL);
         if (sensitive) f.put("sensitive", true);
         return repo.registerDocument(tenant, OWNER, f);
     }

@@ -3,7 +3,6 @@
 package dev.nexus.service.reembed;
 
 import dev.nexus.service.db.ReembedJobRepository.Job;
-import dev.nexus.service.SupersedeSeeds;
 import dev.nexus.service.db.ReembedJobRepository.Transition;
 import dev.nexus.service.reembed.TargetSelection.CollectionRow;
 import dev.nexus.service.reembed.TargetSelection.Decision;
@@ -140,7 +139,7 @@ class ReembedTargetTest extends ReembedFixture {
     @Test
     void aSourceSupersededByAnotherNameIsRefusedNamingBoth() {
         Fx fx = pair("elsewhere");
-        assertThat(SupersedeSeeds.supersede(catalog, fx.tenant(), fx.src(), "somewhere-else", null)).isEqualTo(1);
+        assertThat(catalog.supersedeCollection(fx.tenant(), fx.src(), "somewhere-else", null)).isEqualTo(1);
 
         Decision decision = wayBack(fx, null);
 

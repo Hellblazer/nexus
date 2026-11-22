@@ -23,7 +23,7 @@ rows server-side (:mod:`nexus.catalog.engine_reads.uri_segments`). This module c
 
 GATING. The row WARNs and never fails, and is not in ``doctor._GATING_SUPPLEMENTARY_CHECKS``. RDR-229 calls it a
 pre-flight, but it is information, and this row is where the residue is COUNTED: P2.10's repair moves
-(``rdr229-residue-*``, and from P3.1 their replacements ``rdr229-p31-residue-*``) restore a file-routed segment where they can and skip, silently, a row whose new value a live
+(``rdr229-residue-*``) restore a file-routed segment where they can and skip, silently, a row whose new value a live
 document already holds, so what a move leaves behind is read here, from the census, and not from the move. A FAIL would
 make ``nx doctor`` exit non-zero on every install that carries any, for a state the moves may already be clearing.
 
@@ -227,9 +227,6 @@ def render_text(report: dict, *, limit: int = 50) -> list[str]:  # noqa: ARG001 
         lines.append(
             "  RDR-229 P2.10's repair moves (data moves rdr229-residue-*, run by the engine in the background) restore a "
             "file-routed segment to the rows whose segment is their own collection; a row whose new value a live document "
-            "holds is skipped, and the rest stay in this count. From P3.1 an open one of those moves is superseded by a "
-            "replacement that also sets the collection id (rdr229-p31-residue-catalog-documents, "
-            "rdr229-p31-residue-document-aspects, rdr229-p31-residue-document-highlights), so on an upgraded install the "
-            "move that runs carries the rdr229-p31-residue-* label. Re-run this row after the moves complete: what it still "
+            "holds is skipped, and the rest stay in this count. Re-run this row after the moves complete: what it still "
             "counts is what they did not clear. This row never fails the sweep.")
     return lines

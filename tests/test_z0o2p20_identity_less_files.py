@@ -43,7 +43,7 @@ def _point_catalog_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
 def _hook(repo: Path, files: list[Path], *, head: str = "h1", repo_hash: str = "z0o2p2000",
           content_type: str = "code", collection: str = "code__z0o2p20"):
     """Run the real ``_catalog_hook``; return ``(file_to_doc_id, unregistered)``."""
-    from tests._catalog_fixture_ops import catalog_hook_seeded as _catalog_hook
+    from nexus.indexer import _catalog_hook
 
     unregistered: dict[Path, str] = {}
     result = _catalog_hook(

@@ -255,7 +255,6 @@ class TenantPartitionFunctionsIntegrationTest {
             c.setAutoCommit(true);
             var ctx = dsl(c);
             PgContainerHelper.setTenant(c, "nexus.tenant", "alpha", false);
-            PgContainerHelper.insertCollection(ctx, "alpha", "coll");
             assertThatThrownBy(() -> PartitionScratch.insertCentroid(ctx, "alpha", "coll", 1L, BGE_768, 1024))
                 .satisfies(t -> assertThat(sqlState(t)).isEqualTo("23514"));
             assertThat(PartitionScratch.insertCentroid(ctx, "alpha", "coll", 1L, BGE_768, 768)).isEqualTo(1);

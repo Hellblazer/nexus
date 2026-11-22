@@ -12,15 +12,14 @@ from __future__ import annotations
 import os
 import subprocess
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import pytest
 
 from nexus.db.t2 import T2Database
-from tests._chunk_seed import collection_id_sql
 from tests._t2_fixture_ops import canonical_chunk_id
 from tests.conftest import make_vector_test_client
+from typing import Any
 
 # RDR-225: the substrate registers every collection under bge-base-en-v15-768, and the
 # engine requires a centroid's width to equal its collection model's dimension.
@@ -67,9 +66,8 @@ def _seed_chunks_for_tenant(
         "(tenant_id, name, content_type, owner_id, embedding_model, lifecycle_state) "
         f"VALUES ('{tenant}', '{collection}', 'knowledge', 'test-seed', '{model_for_dim}', 'live') "
         "ON CONFLICT DO NOTHING; "
-        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}, embedding_model, collection_id) "
-        f"SELECT v.*, '{model_for_dim}', {collection_id_sql(tenant, collection)} FROM (VALUES {values}) AS v "
-        "ON CONFLICT DO NOTHING;"
+        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}, embedding_model) "
+        f"SELECT v.*, '{model_for_dim}' FROM (VALUES {values}) AS v ON CONFLICT DO NOTHING;"
     )
     psql = Path(state["pg_bin"]) / "psql"
     proc = subprocess.run(

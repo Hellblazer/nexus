@@ -389,10 +389,7 @@ def test_catalog_doctor_fails_on_a_flagged_document_with_an_aspect_row_and_warns
     from nexus.db.t2.http_document_aspects_store import HttpDocumentAspectsStore
     from tests.test_document_aspects_store import _make_record
 
-    from tests._catalog_fixture_ops import register_seed_collections
-
     coll = "knowledge__rfvyy617__bge-base-en-v15-768__v1"
-    register_seed_collections(coll)
     with HttpCatalogClient() as cat:
         owner = cat.register_owner("rfvyy617-owner", owner_type="curator", tumbler_prefix="72.1")
         doc = str(cat.register(owner, "flagged", content_type="knowledge", physical_collection=coll,
@@ -433,9 +430,6 @@ def test_the_default_queue_read_fails_on_a_live_tuple_task_and_passes_over_a_dea
                            separators=(",", ":"))
         store.out("aspects", keys, None, body, nonce=doc)
 
-    from tests._catalog_fixture_ops import register_seed_collections
-
-    register_seed_collections(coll)
     with HttpCatalogClient() as cat:
         owner = cat.register_owner("hbnmldoc-owner", owner_type="curator", tumbler_prefix="73.1")
         dead_doc, live_doc = (
@@ -567,9 +561,7 @@ def test_catalog_doctor_external_embedder_row_on_the_engine(t2_service_env) -> N
     assert text.exit_code == 0 and "not applicable" in text.output and "[✓]" not in text.output
 
     from nexus.catalog.http_catalog_client import HttpCatalogClient
-    from tests._catalog_fixture_ops import register_seed_collections
 
-    register_seed_collections(VOYAGE, BGE)
     with HttpCatalogClient() as cat:
         owner = cat.register_owner("rfvyy87-owner", owner_type="curator", tumbler_prefix="74.1")
         ext = str(cat.register(owner, "ext", content_type="knowledge", physical_collection=VOYAGE,

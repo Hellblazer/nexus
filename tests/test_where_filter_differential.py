@@ -75,9 +75,6 @@ class _Stores:
 
         self.client = hvc.HttpVectorClient(tenant=tenant)
         doc_hash = hashlib.sha256("".join(texts).encode()).hexdigest()
-        from tests._catalog_fixture_ops import register_seed_collections
-
-        register_seed_collections(self.collection)  # RDR-229 P3.1: put_note registers it before it calls the hook
         tumbler, _ = catalog_store_hook_tracked(
             title=f"where-differential-{uuid.uuid4().hex}", doc_id=doc_hash,
             collection_name=self.collection)

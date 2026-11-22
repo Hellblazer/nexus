@@ -31,9 +31,7 @@ import java.util.List;
  * a missing function or an ungranted table is the text's own fault; a verification connection that cannot be opened is a
  * {@link Stage#CONNECTION} failure, always transient. {@code on_complete} is transient for those same errors plus its lock
  * timeout (55P03), a deadlock (40P01) and a serialization failure (40001): its completion transaction rolls back whole, so a
- * retry is safe; the verification the completion transaction repeats first ({@link Stage#RECHECK}) is classified the same way, a
- * session that carried a tenant (no error) included, and a row it finds is {@link Stage#VERIFICATION_NONEMPTY}, permanent.
- * Everything else, no error included, is permanent.
+ * retry is safe. Everything else, no error included, is permanent.
  */
 final class DataMoveFailureClassifier {
 
@@ -87,12 +85,10 @@ final class DataMoveFailureClassifier {
      * Whether a failure of a verification or {@code on_complete} statement is the host's: the statement timeout (57014), a lost
      * connection (class 08), a shutdown or startup (57P01 to 57P03) and a busy host (class 53). {@code on_complete} also takes
      * its lock timeout (55P03), a deadlock (40P01) and a serialization failure (40001), which live writers cause during its
-     * DDL; its transaction rolls back whole, so a retry is safe. The first pass's verification is a READ ONLY SELECT at the server's
-     * default isolation with no lock_timeout, so in the shipped session it cannot raise 40001 or 55P03 (a lock wait ends at the
-     * statement timeout, 57014) and 40P01 needs a lock cycle with DDL; those three are kept permanent there as unreachable, not
-     * because they are the text's fault. The same text run again in the completion transaction ({@link Stage#RECHECK}) is not
-     * unreachable: that transaction sets {@code lock_timeout}, so a wait behind an ACCESS EXCLUSIVE holder (a DDL, a LOCK TABLE)
-     * raises 55P03, and the re-check is classified with {@code onComplete} true.
+     * DDL; its transaction rolls back whole, so a retry is safe. A verification is a READ ONLY SELECT at the server's default
+     * isolation with no lock_timeout, so in the shipped session it cannot raise 40001 or 55P03 (a lock wait ends at the
+     * statement timeout, 57014) and 40P01 needs a lock cycle with DDL; those three are kept permanent there as unreachable,
+     * not because they are the text's fault.
      */
     static boolean transientSession(String sqlstate, boolean onComplete) {
         if (sqlstate == null) {
@@ -165,10 +161,6 @@ final class DataMoveFailureClassifier {
             // a connection still carrying a tenant (null), the statement timeout, a lost connection, a shutdown or a busy host
             // can pass; any other error is the verification text's own (a missing function, an ungranted table): permanent
             case VERIFICATION -> raised == null || transientSession(raised.getSQLState(), false)
-                ? Verdict.transientFailure(detail) : Verdict.permanentFailure(detail);
-            // the completion transaction's own re-check: it runs under that transaction's lock_timeout, so the lock and conflict
-            // states are transient as for on_complete; a session that carried a tenant (null) is the connection's, as for VERIFICATION
-            case RECHECK -> raised == null || transientSession(raised.getSQLState(), true)
                 ? Verdict.transientFailure(detail) : Verdict.permanentFailure(detail);
             // the completion transaction rolled back whole, so a lock or statement timeout, a deadlock, a serialization failure,
             // a lost connection, a shutdown or a busy host retries safely; anything else, no error included, is the move's

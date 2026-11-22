@@ -1083,7 +1083,6 @@ def export_cmd(
 
     from nexus.errors import EmbeddingModelMismatch, FormatVersionError  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
     from nexus.exporter import export_collection  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-    from nexus.label_filename import safe_label_filename  # noqa: PLC0415 — deferred, as export_collection above
 
     if export_all and collection:
         raise click.UsageError("Cannot specify COLLECTION together with --all.")
@@ -1105,7 +1104,7 @@ def export_cmd(
         total_exported = 0
         for info in collections_info:
             col_name: str = info["name"]
-            fname = f"{safe_label_filename(col_name)}-{today}.nxexp"  # a label may hold ':', '\\', '..' (RDR-229 P3.6)
+            fname = f"{col_name}-{today}.nxexp"
             out_path = out_dir / fname
             try:
                 result = export_collection(
@@ -1125,7 +1124,7 @@ def export_cmd(
         click.echo(f"\nTotal: {total_exported} records across {len(collections_info)} collections.")
     else:
         col_name = _resolve_bare_subject(collection, t3=db)
-        out_path = Path(output) if output else Path(f"{safe_label_filename(col_name)}.nxexp")
+        out_path = Path(output) if output else Path(f"{col_name}.nxexp")
         try:
             result = export_collection(
                 db=db,

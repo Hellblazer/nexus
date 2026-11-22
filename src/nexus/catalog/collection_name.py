@@ -238,11 +238,8 @@ class CollectionAttributes:
     Callers that hold a :class:`CollectionAttributes` read the label and the
     attributes from the row and never parse them out of the name.
 
-    ``collection_id`` is always a number on an engine that has the column (the registry's
-    identity is NOT NULL, vectors-068-1); it is ``None`` on an older engine, which sends no
-    key, for a ``null`` the client accepts defensively, and for a name that is about to be
-    minted. It is not stable across a rename until P3.7's name-key drop and R6's
-    ``ids_stable`` signal: do not cache by it before then. ``label`` is the
+    ``collection_id`` is ``None`` until the engine carries the surrogate key
+    (RDR-229 P3.1), and for a name that is about to be minted. ``label`` is the
     registered name; until the engine sends a separate label field it is the
     row's ``name``. ``model_version`` is ``None`` for a registered row whose
     ``model_version`` is blank and whose name carries none (a grandfathered slug):
@@ -279,10 +276,6 @@ class CollectionAttributes:
             row, content_type=content_type, owner_id=owner_id, embedding_model=embedding_model,
         )
         cid = row.get("collection_id")
-        if cid is not None and (not isinstance(cid, int) or isinstance(cid, bool)):
-            _log.warning(
-                "collection_row_collection_id_malformed", collection=label, value_type=type(cid).__name__,
-            )
         dim = row.get("dimension")
         state = row.get("lifecycle_state")
         return cls(

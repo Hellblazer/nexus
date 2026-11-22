@@ -1,7 +1,6 @@
 package dev.nexus.service;
 
 import dev.nexus.service.db.CatalogRepository;
-import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.TenantScope;
 import java.util.HexFormat;
 import org.jooq.SQLDialect;
@@ -82,18 +81,16 @@ class ManifestCollectionStampTest {
 
         // One registered document with a physical_collection, plus a matching
         // 1024-dim chunk row (the combined query joins chunks ⋈ manifest ⋈ docs).
+        docTumbler = repo.registerDocument(TENANT, "9.1", Map.of(
+            "title", "stamp doc", "content_type", "knowledge",
+            "physical_collection", COLL));
         try (Connection su = pg.createConnection("")) {
             // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLL);
-            // P3.1: the document names a registered collection, or the write is refused (typed 422)
-            docTumbler = repo.registerDocument(TENANT, "9.1", Map.of(
-                "title", "stamp doc", "content_type", "knowledge",
-                "physical_collection", COLL));
             var dsl = DSL.using(su, SQLDialect.POSTGRES);
             dsl.insertInto(CHUNKS)
                 .set(CHUNKS.TENANT_ID, TENANT)
                 .set(CHUNKS.COLLECTION, COLL)
-            .set(CHUNKS.COLLECTION_ID, CollectionIds.require(dsl, TENANT, COLL))
                 .set(CHUNKS.CHASH, HexFormat.of().parseHex(CH_A))
                 .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(dsl, TENANT, COLL))
                 .set(CHUNKS.CHUNK_TEXT, "alpha text")
@@ -128,7 +125,6 @@ class ManifestCollectionStampTest {
             dsl.insertInto(CHUNKS)
                 .set(CHUNKS.TENANT_ID, TENANT)
                 .set(CHUNKS.COLLECTION, coll)
-            .set(CHUNKS.COLLECTION_ID, CollectionIds.require(dsl, TENANT, coll))
                 .set(CHUNKS.CHASH, HexFormat.of().parseHex(chash))
                 .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(dsl, TENANT, coll))
                 .set(CHUNKS.CHUNK_TEXT, text)
@@ -163,9 +159,9 @@ class ManifestCollectionStampTest {
         // ONLY exception the null-collection call can throw is repo.writeMani-
         // fest's own requireNonBlank IllegalArgumentException -- the contract this
         // test pins -- rather than an unrelated FK/NOT-NULL failure from this
-        // seeding helper. P3.1: a chunk under "" has no id to carry (nexus.chunks.collection_id is NOT NULL and "" means
-        // unset), so the blank case skips seeding too, and the writer's own rejection is still the only exception.
-        if (collection == null || collection.isEmpty()) {
+        // seeding helper. The blank ("") case seeds normally: "" is a valid, if
+        // unusual, NAME value and was never the problem.
+        if (collection == null) {
             return;
         }
         seedChunkContent(collection, chashHex, "stub " + chashHex);

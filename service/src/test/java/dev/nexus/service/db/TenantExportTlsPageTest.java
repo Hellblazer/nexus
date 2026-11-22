@@ -71,7 +71,6 @@ class TenantExportTlsPageTest {
                 dsl.insertInto(CHUNKS)
                     .set(CHUNKS.TENANT_ID, A)
                     .set(CHUNKS.COLLECTION, COLLECTION)
-                    .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(A, COLLECTION))
                     .set(CHUNKS.CHASH, MessageDigest.getInstance("SHA-256")
                         .digest(text.getBytes(java.nio.charset.StandardCharsets.UTF_8)))
                     .set(CHUNKS.EMBEDDING_MODEL, BGE)

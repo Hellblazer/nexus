@@ -27,7 +27,6 @@ from pathlib import Path
 import pytest
 
 from nexus.db.http_vector_client import HttpVectorClient
-from tests._chunk_seed import collection_id_sql
 
 pytestmark = pytest.mark.t2_tenant
 
@@ -102,9 +101,8 @@ def _seed_chunk(tenant: str, collection: str, chash_hex: str, *, dim: int = 768)
         "(tenant_id, name, content_type, owner_id, embedding_model, lifecycle_state) "
         f"VALUES ('{tenant}', '{collection}', 'knowledge', 'test-seed', '{model_for_dim}', 'live') "
         "ON CONFLICT DO NOTHING; "
-        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}, embedding_model, collection_id) "
-        f"VALUES ('{tenant}', '{collection}', decode('{chash_hex}', 'hex'), 'seed', '{vec}'::nexus.vector, '{model_for_dim}', "
-        f"{collection_id_sql(tenant, collection)}) "
+        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}, embedding_model) "
+        f"VALUES ('{tenant}', '{collection}', decode('{chash_hex}', 'hex'), 'seed', '{vec}'::nexus.vector, '{model_for_dim}') "
         "ON CONFLICT DO NOTHING;"
     )
     psql = Path(state["pg_bin"]) / "psql"
@@ -286,9 +284,8 @@ class TestPipelineDeleteCascade:
     """
 
     def test_cli_delete_cascades_pipeline_rows(self, tmp_path, monkeypatch):
-        from unittest.mock import MagicMock, patch
-
         from click.testing import CliRunner
+        from unittest.mock import MagicMock, patch
 
         from nexus.commands.collection import delete_cmd
         from nexus.db.t2 import T2Database
@@ -344,13 +341,12 @@ class TestPipelineDeleteCascade:
     def test_cli_delete_cascades_pipeline_when_t3_absent(self, tmp_path):
         """Same fail-open contract as taxonomy/chash: cascade runs even
         when the T3 collection is already gone (recovery path)."""
-        from unittest.mock import MagicMock, patch
-
         from click.testing import CliRunner
+        from unittest.mock import MagicMock, patch
+        from nexus.errors import CollectionNotFoundError as NotFoundError
 
         from nexus.commands.collection import delete_cmd
         from nexus.db.t2 import T2Database
-        from nexus.errors import CollectionNotFoundError as NotFoundError
         from tests.pipeline_fake_engine import make_fake_engine_db
 
         db_path = tmp_path / "memory.db"

@@ -61,9 +61,6 @@
     A document registration touches one collection, so the trigger takes one tuple lock in it and cannot deadlock
     against itself; a deadlock there needs a second lock the caller took first, and surfaces to that caller.
 
-    STRIPED SINCE collections-003-1 (RDR-229 P3.8): the function now answers one of 256 keys in one namespace (the HASH below
-    gives the stripe's low 8 bits), so the 64-bit key space and the collision argument below describe catalog-051-1a's
-    original body; the changeSets here are unchanged. See collections-003-tuple-lock-stripes.xml.
     THE LOCK KEY, catalog-051-1a (a new function, nexus.collection_tuple_lock_key, in its own changeSet before 049-2).
     Every writer that serialises on a tuple must derive the SAME key, or two writers on one tuple do not wait for each
     other; and any writer that takes several tuple locks must take them in one order, or two of them deadlock. So the key

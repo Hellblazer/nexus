@@ -4,7 +4,6 @@ package dev.nexus.service.http;
 
 import dev.nexus.service.VectorSeeds;
 import dev.nexus.service.PgCatalogProbes;
-import dev.nexus.service.db.CollectionIds;
 import org.jooq.impl.DSL;
 import org.jooq.SQLDialect;
 import com.sun.net.httpserver.Headers;
@@ -851,7 +850,6 @@ class IndexRunFenceTest {
             ctx.insertInto(CHUNKS)
                 .set(CHUNKS.TENANT_ID, TENANT)
                 .set(CHUNKS.COLLECTION, COLLECTION)
-                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, COLLECTION))
                 .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chashHex))
                 .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, TENANT, COLLECTION))
                 .set(CHUNKS.CHUNK_TEXT, "chunk text")

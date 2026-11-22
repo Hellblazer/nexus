@@ -1,6 +1,5 @@
 package dev.nexus.service;
 
-import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -197,9 +196,9 @@ class ForeignKeyConstraintTest {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             DataAccessException ex = assertThrows(DataAccessException.class, () ->
                 ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
-                        DOCUMENT_ASPECTS.COLLECTION_ID, DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT,
-                        DOCUMENT_ASPECTS.MODEL_VERSION, DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.SOURCE_URI)
-                    .values(TENANT_A, "knowledge__a", CollectionIds.require(ctx, TENANT_A, "knowledge__a"), "path/not-nullable-doc-id.pdf", OffsetDateTime.now(), "v1",
+                        DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
+                        DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.SOURCE_URI)
+                    .values(TENANT_A, "knowledge__a", "path/not-nullable-doc-id.pdf", OffsetDateTime.now(), "v1",
                         "docling", "file:///path/not-nullable-doc-id.pdf")
                     .execute()
             );
@@ -232,8 +231,8 @@ class ForeignKeyConstraintTest {
             // decode() produces, so it would never match seedChunk's chunks row.
             ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                     TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
-                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
-                .values(TENANT_A, chashBytes, 100L, "hdbscan", "col-a", CollectionIds.require(ctx, TENANT_A, "col-a"), OffsetDateTime.now(), MODEL)
+                    TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+                .values(TENANT_A, chashBytes, 100L, "hdbscan", "col-a", OffsetDateTime.now(), MODEL)
                 .execute();
             int count = ctx.selectCount().from(TOPIC_ASSIGNMENTS)
                 .where(TOPIC_ASSIGNMENTS.TENANT_ID.eq(TENANT_A)).and(TOPIC_ASSIGNMENTS.DOC_ID.eq(chashBytes))
@@ -252,15 +251,14 @@ class ForeignKeyConstraintTest {
             DataAccessException ex = assertThrows(DataAccessException.class, () ->
                 ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                         TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
-                        TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, TOPIC_ASSIGNMENTS.ASSIGNED_AT,
-                        TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+                        TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
                     // nexus-cbo4a batch 10 review fold-in: the pre-conversion raw SQL
                     // (git show 7cd690dde) inserted this doc_id as a bare quoted string
                     // literal with NO decode(..., 'hex') wrapper -- ASCII-escape-format
                     // bytes of the hex STRING, not a genuine hex-decode, unlike the
                     // sibling tests above/below that DO call decode() in the original.
                     .values(TENANT_A, chashAscii(hexChash("fk-topicAssignment-topicIdFk")), 999999L,
-                        "hdbscan", "col-a", CollectionIds.require(ctx, TENANT_A, "col-a"), OffsetDateTime.now(), MODEL)
+                        "hdbscan", "col-a", OffsetDateTime.now(), MODEL)
                     .execute()
             );
             assertThat(ex.getMessage()).containsIgnoringCase("foreign key");
@@ -287,8 +285,8 @@ class ForeignKeyConstraintTest {
             // Genuine hex-decoded bytes (RDR-194 P3d): see the sibling test's identical note.
             ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                     TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
-                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
-                .values(TENANT_A, chashBytes, 199L, "hdbscan", "col-a", CollectionIds.require(ctx, TENANT_A, "col-a"), OffsetDateTime.now(), MODEL)
+                    TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+                .values(TENANT_A, chashBytes, 199L, "hdbscan", "col-a", OffsetDateTime.now(), MODEL)
                 .execute();
 
             ctx.deleteFrom(CATALOG_DOCUMENTS)
@@ -318,9 +316,9 @@ class ForeignKeyConstraintTest {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             DataAccessException ex = assertThrows(DataAccessException.class, () ->
                 ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
-                        DOCUMENT_ASPECTS.COLLECTION_ID, DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT,
-                        DOCUMENT_ASPECTS.MODEL_VERSION, DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.SOURCE_URI)
-                    .values(TENANT_A, "knowledge__a", CollectionIds.require(ctx, TENANT_A, "knowledge__a"), "path/null-doc.pdf", OffsetDateTime.now(), "v1", "docling",
+                        DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
+                        DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.SOURCE_URI)
+                    .values(TENANT_A, "knowledge__a", "path/null-doc.pdf", OffsetDateTime.now(), "v1", "docling",
                         "file:///path/null-doc.pdf")
                     .execute()
             );
@@ -338,10 +336,9 @@ class ForeignKeyConstraintTest {
             PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "3.1");
             // hygiene-001 step 1: source_uri is NOT NULL now too, alongside doc_id.
             ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
-                    DOCUMENT_ASPECTS.COLLECTION_ID, DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT,
-                    DOCUMENT_ASPECTS.MODEL_VERSION, DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID,
-                    DOCUMENT_ASPECTS.SOURCE_URI)
-                .values(TENANT_A, "knowledge__b", CollectionIds.require(ctx, TENANT_A, "knowledge__b"), "path/valid-doc.pdf", OffsetDateTime.now(), "v1", "docling", "3.1",
+                    DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
+                    DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+                .values(TENANT_A, "knowledge__b", "path/valid-doc.pdf", OffsetDateTime.now(), "v1", "docling", "3.1",
                     "file:///path/valid-doc.pdf")
                 .execute();
             String docId = ctx.select(DOCUMENT_ASPECTS.DOC_ID).from(DOCUMENT_ASPECTS)
@@ -361,10 +358,9 @@ class ForeignKeyConstraintTest {
             // NOT NULL check doesn't fire ahead of the FK check under test.
             DataAccessException ex = assertThrows(DataAccessException.class, () ->
                 ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
-                        DOCUMENT_ASPECTS.COLLECTION_ID, DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT,
-                        DOCUMENT_ASPECTS.MODEL_VERSION, DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID,
-                        DOCUMENT_ASPECTS.SOURCE_URI)
-                    .values(TENANT_A, "knowledge__c", CollectionIds.require(ctx, TENANT_A, "knowledge__c"), "path/orphan.pdf", OffsetDateTime.now(), "v1", "docling",
+                        DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
+                        DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+                    .values(TENANT_A, "knowledge__c", "path/orphan.pdf", OffsetDateTime.now(), "v1", "docling",
                         "no-such-tumbler", "file:///path/orphan.pdf")
                     .execute()
             );
@@ -380,10 +376,9 @@ class ForeignKeyConstraintTest {
             PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "3.99");
             // hygiene-001 step 1: source_uri is NOT NULL now, alongside doc_id.
             ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
-                    DOCUMENT_ASPECTS.COLLECTION_ID, DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT,
-                    DOCUMENT_ASPECTS.MODEL_VERSION, DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID,
-                    DOCUMENT_ASPECTS.SOURCE_URI)
-                .values(TENANT_A, "knowledge__d", CollectionIds.require(ctx, TENANT_A, "knowledge__d"), "path/cascade-aspect.pdf", OffsetDateTime.now(), "v1", "docling",
+                    DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
+                    DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+                .values(TENANT_A, "knowledge__d", "path/cascade-aspect.pdf", OffsetDateTime.now(), "v1", "docling",
                     "3.99", "file:///path/cascade-aspect.pdf")
                 .execute();
 
@@ -411,9 +406,8 @@ class ForeignKeyConstraintTest {
             // hygiene-001 step 3: source_uri and collection are NOT NULL now;
             // 'knowledge__b' is pre-registered for TENANT_A in startAll() Phase 3.5.
             ctx.insertInto(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID,
-                    DOCUMENT_HIGHLIGHTS.SOURCE_URI, DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.COLLECTION_ID,
-                    DOCUMENT_HIGHLIGHTS.INGESTED_AT)
-                .values(TENANT_A, "4.1", "file:///4.1", "knowledge__b", CollectionIds.require(ctx, TENANT_A, "knowledge__b"), OffsetDateTime.now())
+                    DOCUMENT_HIGHLIGHTS.SOURCE_URI, DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.INGESTED_AT)
+                .values(TENANT_A, "4.1", "file:///4.1", "knowledge__b", OffsetDateTime.now())
                 .execute();
             int count = ctx.selectCount().from(DOCUMENT_HIGHLIGHTS)
                 .where(DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(TENANT_A)).and(DOCUMENT_HIGHLIGHTS.DOC_ID.eq("4.1"))
@@ -431,9 +425,8 @@ class ForeignKeyConstraintTest {
             // them so that check doesn't fire ahead of the doc-id FK check under test.
             DataAccessException ex = assertThrows(DataAccessException.class, () ->
                 ctx.insertInto(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID,
-                        DOCUMENT_HIGHLIGHTS.SOURCE_URI, DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.COLLECTION_ID,
-                        DOCUMENT_HIGHLIGHTS.INGESTED_AT)
-                    .values(TENANT_A, "no-such-tumbler-hl", "file:///no-such-tumbler-hl", "knowledge__c", CollectionIds.require(ctx, TENANT_A, "knowledge__c"),
+                        DOCUMENT_HIGHLIGHTS.SOURCE_URI, DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.INGESTED_AT)
+                    .values(TENANT_A, "no-such-tumbler-hl", "file:///no-such-tumbler-hl", "knowledge__c",
                         OffsetDateTime.now())
                     .execute()
             );
@@ -449,10 +442,8 @@ class ForeignKeyConstraintTest {
             PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "4.99");
             // hygiene-001 step 3: source_uri/collection are NOT NULL now.
             ctx.insertInto(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID,
-                    DOCUMENT_HIGHLIGHTS.SOURCE_URI, DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.COLLECTION_ID,
-                    DOCUMENT_HIGHLIGHTS.INGESTED_AT)
-                .values(TENANT_A, "4.99", "file:///4.99", "knowledge__d", CollectionIds.require(ctx, TENANT_A, "knowledge__d"),
-                        OffsetDateTime.now())
+                    DOCUMENT_HIGHLIGHTS.SOURCE_URI, DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.INGESTED_AT)
+                .values(TENANT_A, "4.99", "file:///4.99", "knowledge__d", OffsetDateTime.now())
                 .execute();
 
             ctx.deleteFrom(CATALOG_DOCUMENTS)
@@ -490,10 +481,9 @@ class ForeignKeyConstraintTest {
             // check doesn't fire ahead of the composite FK check under test.
             DataAccessException ex = assertThrows(DataAccessException.class, () ->
                 ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
-                        DOCUMENT_ASPECTS.COLLECTION_ID, DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT,
-                        DOCUMENT_ASPECTS.MODEL_VERSION, DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID,
-                        DOCUMENT_ASPECTS.SOURCE_URI)
-                    .values(TENANT_B, "knowledge__x", CollectionIds.require(ctx, TENANT_B, "knowledge__x"), "path/cross-tenant.pdf", OffsetDateTime.now(), "v1", "docling",
+                        DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
+                        DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+                    .values(TENANT_B, "knowledge__x", "path/cross-tenant.pdf", OffsetDateTime.now(), "v1", "docling",
                         TUMBLER_A, "file:///path/cross-tenant.pdf")
                     .execute()
             );
@@ -514,10 +504,8 @@ class ForeignKeyConstraintTest {
             // 'knowledge__x' is pre-registered for TENANT_B in Phase 3.5.
             DataAccessException ex = assertThrows(DataAccessException.class, () ->
                 ctx.insertInto(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID,
-                        DOCUMENT_HIGHLIGHTS.SOURCE_URI, DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.COLLECTION_ID,
-                        DOCUMENT_HIGHLIGHTS.INGESTED_AT)
-                    .values(TENANT_B, TUMBLER_A, "file:///cross-tenant-hl", "knowledge__x",
-                            CollectionIds.require(ctx, TENANT_B, "knowledge__x"), OffsetDateTime.now())
+                        DOCUMENT_HIGHLIGHTS.SOURCE_URI, DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.INGESTED_AT)
+                    .values(TENANT_B, TUMBLER_A, "file:///cross-tenant-hl", "knowledge__x", OffsetDateTime.now())
                     .execute()
             );
             assertThat(ex.getMessage())
@@ -540,15 +528,15 @@ class ForeignKeyConstraintTest {
             // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires
             // a matching nexus.chunks row for this CONTROL insert to succeed.
             byte[] chash = chashAscii("abc123abc123abc123abc123abc12300");
-            ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, CHUNKS.CHASH,
-                    CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_768)
-                .values(TENANT_A, "fk-chunk-coll", CollectionIds.require(ctx, TENANT_A, "fk-chunk-coll"), chash, MODEL, "text", vector(768))
+            ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
+                    CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_768)
+                .values(TENANT_A, "fk-chunk-coll", chash, MODEL, "text", vector(768))
                 .onConflictDoNothing()
                 .execute();
             ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                     CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
-                    CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-                .values(TENANT_A, "chunk-doc-1", 0, chash, "fk-chunk-coll", CollectionIds.require(ctx, TENANT_A, "fk-chunk-coll"), MODEL)
+                    CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                .values(TENANT_A, "chunk-doc-1", 0, chash, "fk-chunk-coll", MODEL)
                 .execute();
             int count = ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS)
                 .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT_A)).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("chunk-doc-1"))
@@ -566,9 +554,9 @@ class ForeignKeyConstraintTest {
             DataAccessException ex = assertThrows(DataAccessException.class, () ->
                 ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                         CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
-                        CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                    CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
                     .values(TENANT_A, "nonexistent-chunk-doc", 0, chashAscii("deadbeefdeadbeefdeadbeefdeadbeef"),
-                        "fk-chunk-coll", CollectionIds.require(ctx, TENANT_A, "fk-chunk-coll"), MODEL)
+                        "fk-chunk-coll", MODEL)
                     .execute()
             );
             assertThat(ex.getMessage())
@@ -588,17 +576,17 @@ class ForeignKeyConstraintTest {
             // a matching nexus.chunks row for each of these two manifest inserts.
             byte[] chash0 = chashAscii("hash0000000000000000000000000000");
             byte[] chash1 = chashAscii("hash1111111111111111111111111111");
-            ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, CHUNKS.CHASH,
-                    CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_768)
-                .values(TENANT_A, "fk-chunk-coll", CollectionIds.require(ctx, TENANT_A, "fk-chunk-coll"), chash0, MODEL, "text0", vector(768))
-                .values(TENANT_A, "fk-chunk-coll", CollectionIds.require(ctx, TENANT_A, "fk-chunk-coll"), chash1, MODEL, "text1", vector(768))
+            ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
+                    CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_768)
+                .values(TENANT_A, "fk-chunk-coll", chash0, MODEL, "text0", vector(768))
+                .values(TENANT_A, "fk-chunk-coll", chash1, MODEL, "text1", vector(768))
                 .onConflictDoNothing()
                 .execute();
             ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                     CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
-                    CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-                .values(TENANT_A, "chunk-cascade-doc", 0, chash0, "fk-chunk-coll", CollectionIds.require(ctx, TENANT_A, "fk-chunk-coll"), MODEL)
-                .values(TENANT_A, "chunk-cascade-doc", 1, chash1, "fk-chunk-coll", CollectionIds.require(ctx, TENANT_A, "fk-chunk-coll"), MODEL)
+                    CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                .values(TENANT_A, "chunk-cascade-doc", 0, chash0, "fk-chunk-coll", MODEL)
+                .values(TENANT_A, "chunk-cascade-doc", 1, chash1, "fk-chunk-coll", MODEL)
                 .execute();
 
             int before = ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS)
@@ -632,9 +620,8 @@ class ForeignKeyConstraintTest {
             DataAccessException ex = assertThrows(DataAccessException.class, () ->
                 ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                         CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
-                        CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-                    .values(TENANT_B, TUMBLER_A, 0, chashAscii("crosshashcrosshashcrosshash00000"), "fk-chunk-coll",
-                            CollectionIds.require(ctx, TENANT_B, "fk-chunk-coll"), MODEL)
+                    CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                    .values(TENANT_B, TUMBLER_A, 0, chashAscii("crosshashcrosshashcrosshash00000"), "fk-chunk-coll", MODEL)
                     .execute()
             );
             assertThat(ex.getMessage())
@@ -710,9 +697,8 @@ class ForeignKeyConstraintTest {
             // succeeds_noCatalogFk's identical note.
             ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                     TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
-                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
-                .values(TENANT_A, chashBytes, 300L, "hdbscan", "col-rls", CollectionIds.require(ctx, TENANT_A, "col-rls"),
-                        OffsetDateTime.now(), MODEL)
+                    TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+                .values(TENANT_A, chashBytes, 300L, "hdbscan", "col-rls", OffsetDateTime.now(), MODEL)
                 .execute();
         }
 
@@ -752,10 +738,9 @@ class ForeignKeyConstraintTest {
             PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "rls-asp-tumbler");
             // hygiene-001 step 1: source_uri is NOT NULL now, alongside doc_id.
             ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
-                    DOCUMENT_ASPECTS.COLLECTION_ID, DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT,
-                    DOCUMENT_ASPECTS.MODEL_VERSION, DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID,
-                    DOCUMENT_ASPECTS.SOURCE_URI)
-                .values(TENANT_A, "knowledge__rls", CollectionIds.require(ctx, TENANT_A, "knowledge__rls"), "path/rls-aspect.pdf", OffsetDateTime.now(), "v1", "docling",
+                    DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
+                    DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+                .values(TENANT_A, "knowledge__rls", "path/rls-aspect.pdf", OffsetDateTime.now(), "v1", "docling",
                     "rls-asp-tumbler", "file:///path/rls-aspect.pdf")
                 .execute();
         }
@@ -802,9 +787,9 @@ class ForeignKeyConstraintTest {
      */
     private static void seedChunk(DSLContext ctx, String tenantId, String collection, byte[] chashBytes) {
         PgContainerHelper.insertCollection(ctx, tenantId, collection);
-        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, CHUNKS.CHASH,
-                CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_768)
-            .values(tenantId, collection, CollectionIds.require(ctx, tenantId, collection), chashBytes, MODEL, "fk-test chunk", vector(768))
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
+                CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_768)
+            .values(tenantId, collection, chashBytes, MODEL, "fk-test chunk", vector(768))
             .onConflictDoNothing()
             .execute();
     }
@@ -817,9 +802,9 @@ class ForeignKeyConstraintTest {
     private static void insertTopic(DSLContext ctx, String tenantId, long id, String label, String collection) {
         // RDR-164 P1a: register the topic's collection (topics_collection_fk).
         PgContainerHelper.insertCollection(ctx, tenantId, collection);
-        ctx.insertInto(TOPICS, TOPICS.ID, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.COLLECTION_ID,
-                TOPICS.DOC_COUNT, TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS)
-            .values(id, tenantId, label, collection, CollectionIds.require(ctx, tenantId, collection), 0, OffsetDateTime.now(), "pending")
+        ctx.insertInto(TOPICS, TOPICS.ID, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.DOC_COUNT,
+                TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS)
+            .values(id, tenantId, label, collection, 0, OffsetDateTime.now(), "pending")
             .onConflictDoNothing()
             .execute();
     }

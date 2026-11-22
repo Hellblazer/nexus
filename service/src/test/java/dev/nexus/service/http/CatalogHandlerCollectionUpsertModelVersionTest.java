@@ -41,7 +41,7 @@ class CatalogHandlerCollectionUpsertModelVersionTest extends AtomicWriteTestBase
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("name", name);
         m.put("content_type", "knowledge");
-        m.put("owner_id", "o-" + name);   // each its own owner: a tuple has one live collection (RDR-229 P3.8)
+        m.put("owner_id", "o");
         m.put("embedding_model", "minilm-l6-v2-384");
         if (version != null) m.put("model_version", version);
         return m;
@@ -162,13 +162,6 @@ class CatalogHandlerCollectionUpsertModelVersionTest extends AtomicWriteTestBase
             again.add(row("legacy_big_" + i, ""));
         }
 
-        // RDR-229 P3.8: with the live-tuple index absent (the re-own move never completes in this database) the import
-        // locks the stripe of every fresh live tuple: 33,000 tuples, at most 256 locks. When each tuple had a key of its
-        // own, this import ran the shared lock table out ("out of shared memory"). The index must be absent to test that.
-        try (var su = pg.createConnection("")) {
-            assertThat(dev.nexus.service.CollectionMintSupport.indexPresent(org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES)))
-                .as("non-vacuity: the live-tuple index is absent, so the import takes the tuple locks").isFalse();
-        }
         repo.importCollectionsBatch(t, first);
         assertThat(rowCount(t)).as("every row of the first import landed").isEqualTo(n);
         repo.importCollectionsBatch(t, again);

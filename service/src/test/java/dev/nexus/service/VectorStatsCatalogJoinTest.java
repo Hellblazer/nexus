@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
-import dev.nexus.service.db.CollectionIds;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantScope;
@@ -256,22 +255,17 @@ class VectorStatsCatalogJoinTest {
      */
     private static void ownChunk(org.jooq.DSLContext ctx, String collection, byte[] chashBytes) {
         String docId = "own-" + collection;
-        ctx.insertInto(CATALOG_DOCUMENTS)
-            .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT)
-            .set(CATALOG_DOCUMENTS.TUMBLER, docId)
-            .set(CATALOG_DOCUMENTS.TITLE, "Owner " + docId)
-            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
-            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
+        ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+            .values(TENANT, docId, "Owner " + docId, collection)
             .onConflictDoNothing()
             .execute();
-        ctx.insertInto(CATALOG_DOCUMENT_CHUNKS)
-            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, TENANT)
-            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, docId)
-            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
-            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, chashBytes)
-            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
-            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
-            .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, TENANT, collection))
+        ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
+                CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
+                CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+            .values(TENANT, docId, 0, chashBytes, collection,
+                PgContainerHelper.collectionModel(ctx, TENANT, collection))
             .onConflictDoNothing()
             .execute();
     }

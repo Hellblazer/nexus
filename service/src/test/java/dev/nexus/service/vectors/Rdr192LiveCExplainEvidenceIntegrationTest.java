@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
-import dev.nexus.service.db.CollectionIds;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgCatalogProbes;
@@ -273,11 +272,10 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
             final String model = PgContainerHelper.collectionModel(ctx, TENANT, COLL);
             List<Query> docs = new ArrayList<>();
             for (int d = 0; d < NUM_DOCS; d++) {
-                docs.add(ctx.insertInto(CATALOG_DOCUMENTS)
-                    .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT).set(CATALOG_DOCUMENTS.TUMBLER, doc(d))
-                    .set(CATALOG_DOCUMENTS.TITLE, "Doc " + d).set(CATALOG_DOCUMENTS.CONTENT_TYPE, "prose")
-                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLL)
-                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, COLL)));
+                docs.add(ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID,
+                        CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.CONTENT_TYPE,
+                        CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+                    .values(TENANT, doc(d), "Doc " + d, "prose", COLL));
             }
             ctx.batch(docs).execute();
             su.commit();
@@ -286,13 +284,12 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
                 List<Query> rows = new ArrayList<>();
                 for (int i = start; i < end; i++) {
                     int d = Math.min(NUM_DOCS - 1, i / perDoc);
-                    rows.add(ctx.insertInto(CATALOG_DOCUMENT_CHUNKS)
-                        .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, TENANT).set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, doc(d))
-                        .set(CATALOG_DOCUMENT_CHUNKS.POSITION, i - d * perDoc)
-                        .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(chashHex.get(i)))
-                        .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, COLL)
-                        .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, COLL))
-                        .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, model));
+                    rows.add(ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
+                            CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
+                            CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                            CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                        .values(TENANT, doc(d), i - d * perDoc, HexFormat.of().parseHex(chashHex.get(i)), COLL,
+                                model));
                 }
                 ctx.batch(rows).execute();
                 su.commit();
@@ -306,25 +303,19 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
             su.commit();
 
             long topicId = 9_100_000_001L;
-            ctx.insertInto(TOPICS)
-               .set(TOPICS.ID, topicId).set(TOPICS.TENANT_ID, TENANT).set(TOPICS.LABEL, TOPIC_LABEL)
-               .set(TOPICS.COLLECTION, COLL)
-               .set(TOPICS.COLLECTION_ID, CollectionIds.idOf(TENANT, COLL))
-               .set(TOPICS.DOC_COUNT, TOPIC_CHUNKS)
-               .set(TOPICS.CREATED_AT, OffsetDateTime.now())
-               .set(TOPICS.REVIEW_STATUS, "pending")
+            ctx.insertInto(TOPICS, TOPICS.ID, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION,
+                           TOPICS.DOC_COUNT, TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS)
+               .values(topicId, TENANT, TOPIC_LABEL, COLL, TOPIC_CHUNKS, OffsetDateTime.now(), "pending")
                .execute();
             for (int start = 0; start < TOPIC_CHUNKS; start += 1000) {
                 List<Query> rows = new ArrayList<>();
                 for (int i = start; i < Math.min(start + 1000, TOPIC_CHUNKS); i++) {
-                    rows.add(ctx.insertInto(TOPIC_ASSIGNMENTS)
-                        .set(TOPIC_ASSIGNMENTS.TENANT_ID, TENANT).set(TOPIC_ASSIGNMENTS.DOC_ID, HexFormat.of().parseHex(chashHex.get(i)))
-                        .set(TOPIC_ASSIGNMENTS.TOPIC_ID, topicId)
-                        .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY, "projection")
-                        .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, COLL)
-                        .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, CollectionIds.idOf(TENANT, COLL))
-                        .set(TOPIC_ASSIGNMENTS.ASSIGNED_AT, OffsetDateTime.now())
-                        .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, model));
+                    rows.add(ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID,
+                            TOPIC_ASSIGNMENTS.DOC_ID, TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY,
+                            TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.ASSIGNED_AT,
+                            TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+                        .values(TENANT, HexFormat.of().parseHex(chashHex.get(i)), topicId, "projection", COLL,
+                                OffsetDateTime.now(), model));
                 }
                 ctx.batch(rows).execute();
                 su.commit();
@@ -367,19 +358,17 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            ctx.insertInto(CATALOG_DOCUMENTS)
-               .set(CATALOG_DOCUMENTS.TENANT_ID, OTHER_TENANT).set(CATALOG_DOCUMENTS.TUMBLER, "rdr192-other-doc-0000")
-               .set(CATALOG_DOCUMENTS.TITLE, "Other doc").set(CATALOG_DOCUMENTS.CONTENT_TYPE, "prose")
-               .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, OTHER_COLL)
-               .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(OTHER_TENANT, OTHER_COLL)).execute();
+            ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                    CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+               .values(OTHER_TENANT, "rdr192-other-doc-0000", "Other doc", "prose", OTHER_COLL).execute();
             List<Query> rows = new ArrayList<>();
             for (int i = 0; i < OTHER_CHUNKS; i++) {
-                rows.add(ctx.insertInto(CATALOG_DOCUMENT_CHUNKS)
-                    .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, OTHER_TENANT).set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, "rdr192-other-doc-0000")
-                    .set(CATALOG_DOCUMENT_CHUNKS.POSITION, i).set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(ids.get(i)))
-                    .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, OTHER_COLL)
-                    .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(OTHER_TENANT, OTHER_COLL))
-                    .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, OTHER_TENANT, OTHER_COLL)));
+                rows.add(ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
+                        CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
+                        CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                        CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                    .values(OTHER_TENANT, "rdr192-other-doc-0000", i, HexFormat.of().parseHex(ids.get(i)), OTHER_COLL,
+                            PgContainerHelper.collectionModel(ctx, OTHER_TENANT, OTHER_COLL)));
             }
             ctx.batch(rows).execute();
         }
@@ -898,11 +887,8 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
                 .sorted().toList();
             // RDR-225 adds create_tenant_partitions: nexus_svc calls it for a tenant that has no service token
             // yet, and it must create the tenant's partitions as their owner.
-            // RDR-229 P3.8 (collections-002): collection_id_seq_heal and collection_id_taken are definer on purpose: they read every tenant's
-            // collection_id (nexus_svc sees one under FORCE RLS) and the heal advances the shared sequence (nextval only), which nexus_svc
-            // cannot. Each answers a number or a boolean, search_path is pinned, EXECUTE is nexus_svc's only, and neither writes a table.
             assertThat(definers).containsExactly(
-                "collection_id_seq_heal", "collection_id_taken", "create_tenant_partitions", "ensure_vector_extensions_relocated", "ensure_vector_extensions_unrelocated",
+                "create_tenant_partitions", "ensure_vector_extensions_relocated", "ensure_vector_extensions_unrelocated",
                 "text_gate_probe_1024", "text_gate_probe_384", "text_gate_probe_768",
                 // nexus-bbtc2 (vectors-060): the by-collection probes take the probes' posture, definer here.
                 "text_gate_probe_by_collection_1024", "text_gate_probe_by_collection_384",

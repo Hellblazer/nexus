@@ -20,9 +20,6 @@ from nexus.corpus import index_model_for_collection
 from nexus.doc_indexer import _pdf_chunks, _sha256, index_pdf
 from nexus.indexer import _index_pdf_file
 from nexus.pdf_extractor import PDFExtractor
-from tests._catalog_fixture_ops import (
-    seed_row_when_profile_refuses,  # noqa: F401 — an autouse fixture: the pre-flight's registration meets the substrate's bge profile
-)
 from tests._mineru_rearm import mineru_importorskip
 from tests.conftest import set_credentials
 from tests._mineru_cache import shared_mineru_extraction  # noqa: F401 - the fixture, opted into below

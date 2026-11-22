@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
-import dev.nexus.service.db.CollectionIds;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariConfig;
@@ -313,7 +312,6 @@ class ManifestRouteBDifferentialTest {
                 seed.insertInto(CHUNKS)
                     .set(CHUNKS.TENANT_ID, TENANT)
                     .set(CHUNKS.COLLECTION, COLL)
-                    .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, COLL))
                     .set(CHUNKS.CHASH, HexFormat.of().parseHex(chash(i)))
                     .set(CHUNKS.EMBEDDING_MODEL, MODEL)
                     .set(CHUNKS.CHUNK_TEXT, "diff-b chunk " + i)
@@ -333,7 +331,6 @@ class ManifestRouteBDifferentialTest {
                 seed.insertInto(CHUNKS)
                     .set(CHUNKS.TENANT_ID, TENANT)
                     .set(CHUNKS.COLLECTION, COLL)
-                    .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, COLL))
                     .set(CHUNKS.CHASH, HexFormat.of().parseHex(chash(chunk)))
                     .set(CHUNKS.EMBEDDING_MODEL, MODEL)
                     .set(CHUNKS.CHUNK_TEXT, "diff-b chunk " + chunk)
@@ -352,7 +349,6 @@ class ManifestRouteBDifferentialTest {
                     .set(CATALOG_DOCUMENTS.TUMBLER, d.id())
                     .set(CATALOG_DOCUMENTS.TITLE, d.title())
                     .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLL)
-                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, COLL))
                     .set(CATALOG_DOCUMENTS.SOURCE_URI, "file:///" + d.id() + ".md")
                     .set(CATALOG_DOCUMENTS.BIB_YEAR, d.bibYear())
                     .set(CATALOG_DOCUMENTS.BIB_AUTHORS, d.bibAuthors())
@@ -379,7 +375,6 @@ class ManifestRouteBDifferentialTest {
                     .set(CATALOG_DOCUMENT_CHUNKS.POSITION, o.position())
                     .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(chash(o.chunk())))
                     .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, COLL)
-                    .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, COLL))
                     .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, MODEL)
                     .set(CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE, o.written() ? o.sectionTitle() : null)
                     .set(CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE, o.written() ? o.sectionType() : null)

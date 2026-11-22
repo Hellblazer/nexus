@@ -19,7 +19,6 @@ import dev.nexus.service.db.AdminConnection;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.ChunkReaper.Settings;
 import dev.nexus.service.db.ChashConstraintValidator;
-import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.LegacyChunkSurvey;
 import dev.nexus.service.db.LadderRepository;
 import dev.nexus.service.db.Rdr192BackfillGate;
@@ -378,8 +377,7 @@ class LegacyChunkReportsRouteTest extends LegacyChashFixture {
         seed(ctx -> {
             document(ctx, TENANT_A, "1.1", COLLECTION, "complete");
             ctx.insertInto(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.TENANT_ID, TENANT_B).set(CATALOG_DOCUMENTS.TUMBLER, "1.1")
-                .set(CATALOG_DOCUMENTS.TITLE, "tenant B one").set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLLECTION)
-                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT_B, COLLECTION)).execute();
+                .set(CATALOG_DOCUMENTS.TITLE, "tenant B one").set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLLECTION).execute();
             for (String t : new String[]{TENANT_A, TENANT_B}) {
                 referenceOnlyChunk(ctx, t, COLLECTION, shared);
                 manifest(ctx, t, COLLECTION, "1.1", 0, shared);

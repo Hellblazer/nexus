@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
-import dev.nexus.service.db.CollectionIds;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
@@ -106,7 +105,6 @@ class ManifestQualifyingHitsTest {
             .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
             .set(CATALOG_DOCUMENTS.TITLE, title)
             .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
-            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(tenant, collection))
             .set(CATALOG_DOCUMENTS.SOURCE_URI, "file:///" + tumbler + ".md");
         if (deleted) {
             step = step.set(CATALOG_DOCUMENTS.DELETED_AT, OffsetDateTime.now().minusDays(1));
@@ -117,17 +115,13 @@ class ManifestQualifyingHitsTest {
     /** One manifest row: label columns written ({@code written}) or left to the chunk row's value (legacy). */
     private static void occurrence(DSLContext seed, String tenant, String doc, int position, String collection,
                                    int chunk, String sectionType, Integer page, boolean written) {
-        seed.insertInto(CATALOG_DOCUMENT_CHUNKS)
-            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant)
-            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, doc)
-            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position)
-            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(chash(collection, chunk)))
-            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
-            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
-            .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, MODEL)
-            .set(CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE, written ? sectionType : null)
-            .set(CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER, written ? page : null)
-            .set(CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN, written)
+        seed.insertInto(CATALOG_DOCUMENT_CHUNKS,
+                CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
+                CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE,
+                CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER, CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN)
+            .values(tenant, doc, position, HexFormat.of().parseHex(chash(collection, chunk)), collection, MODEL,
+                written ? sectionType : null, written ? page : null, written)
             .execute();
     }
 

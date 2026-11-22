@@ -97,11 +97,6 @@ def vec(t2_service_env):
 def _register(title: str, pieces: list[str], collection: str = _COLLECTION) -> str:
     from nexus.catalog.store_hook import catalog_store_hook_tracked
 
-    from tests._catalog_fixture_ops import register_seed_collections
-
-    # RDR-229 P3.1: the hook registers a document under a registered collection (the engine refuses one that
-    # is not, 422), as put_note arranges first.
-    register_seed_collections(collection)
     first, _ = note_manifest_metadata(pieces)
     tumbler, _created = catalog_store_hook_tracked(title=title, doc_id=first, collection_name=collection)
     assert tumbler, "catalog registration must succeed against the real service"

@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
-import dev.nexus.service.db.CollectionIds;
 import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
@@ -153,7 +152,7 @@ class PciQueryRingIntegrationTest {
 
     private void insertOldRow(String tenant, String collection, int seed, OffsetDateTime addedAt) {
         scope.withTenant(tenant, ctx -> ctx.insertInto(CANARY_QUERY_RING)
-            .set(CANARY_QUERY_RING.TENANT_ID, tenant).set(CANARY_QUERY_RING.COLLECTION, collection).set(CANARY_QUERY_RING.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
+            .set(CANARY_QUERY_RING.TENANT_ID, tenant).set(CANARY_QUERY_RING.COLLECTION, collection)
             .set(CANARY_QUERY_RING.EMBEDDING_MODEL, modelOf(tenant, collection))
             .set(CANARY_QUERY_RING.EMBEDDING_384, Vector.of(vec(seed)))
             .set(CANARY_QUERY_RING.VECTOR_DIGEST, PciQueryRing.digest(vec(seed)))
@@ -376,74 +375,6 @@ class PciQueryRingIntegrationTest {
         assertThat(rows(t, gone)).isZero();
         assertThat(logLines()).anyMatch(l -> l.contains("event=pci_ring_flush") && l.contains("skipped=1")
             && l.contains("failed=0"));
-        assertThat(appender.list).as("a structured warning names the tenant and the collection that did not resolve")
-            .anyMatch(ev -> ev.getLevel() == ch.qos.logback.classic.Level.WARN
-                && ev.getFormattedMessage().contains("event=pci_ring_entry_unregistered")
-                && ev.getFormattedMessage().contains("tenant=" + t) && ev.getFormattedMessage().contains("collection=" + gone));
-    }
-
-    /**
-     * RDR-229 P3.1: the function raises for a name that does not resolve (SQLSTATE 23503), and the writer, which is the only
-     * caller (a search only enqueues; it never reaches the function), logs it and carries on: nothing throws out of the flush,
-     * the other tenant's entries in the same flush are written, and the ring's own failure counter stays at zero.
-     */
-    @Test
-    void anEntryWhoseCollectionNeverResolves_isLoggedAndNeverFailsTheFlush_orAnotherTenantsEntries() throws Exception {
-        String t = newTenant();
-        String other = newTenant();
-        String unregistered = collectionOf(t, "never");
-        String ok = collectionOf(other, "ok");
-        register(other, ok);
-        PciQueryRing ring = ring(scope);
-        ring.admit(t, QueryVector.alone(modelOf(other, ok), vec(1), unregistered));   // no registry row for it in tenant t
-        admit(ring, other, ok, 2);
-
-        int written = ring.flushNow();
-
-        assertThat(written).as("the other tenant's entry").isEqualTo(1);
-        assertThat(rows(other, ok)).isEqualTo(1);
-        assertThat(rows(t, unregistered)).isZero();
-        assertThat(logLines()).anyMatch(l -> l.contains("event=pci_ring_entry_unregistered")
-            && l.contains("tenant=" + t) && l.contains("collection=" + unregistered));
-        assertThat(logLines()).anyMatch(l -> l.contains("event=pci_ring_flush") && l.contains("written=1")
-            && l.contains("failed=0"));
-    }
-
-    /**
-     * An entry that fails as unregistered is dropped after its one WARN, never requeued: the writer drains the queue before it
-     * writes and re-offers nothing, so a deleted collection's entry does not retry and log on every flush. Pinned with a
-     * multi-entry batch, which takes the entry-by-entry retry path inside one flush; the retry must not leave the entry behind.
-     */
-    @Test
-    void anUnregisteredEntryIsDroppedAfterOneWarning_theNextFlushLogsAndWritesNothingForIt_theOthersAreUnaffected() throws Exception {
-        String t = newTenant();
-        String unregistered = collectionOf(t, "gone-for-good");
-        String kept = collectionOf(t, "kept");
-        register(t, kept);
-        PciQueryRing ring = ring(scope);
-        admit(ring, t, kept, 1);
-        ring.admit(t, QueryVector.alone(modelOf(t, kept), vec(2), unregistered));   // no registry row for it
-        admit(ring, t, kept, 3);
-
-        assertThat(ring.flushNow()).as("the two entries that resolve").isEqualTo(2);
-        assertThat(rows(t, kept)).isEqualTo(2);
-        assertThat(rows(t, unregistered)).isZero();
-        assertThat(ring.queued()).as("nothing was put back on the queue").isZero();
-        long warnings = appender.list.stream().filter(ev -> ev.getLevel() == ch.qos.logback.classic.Level.WARN
-            && ev.getFormattedMessage().contains("event=pci_ring_entry_unregistered")
-            && ev.getFormattedMessage().contains("collection=" + unregistered)).count();
-        assertThat(warnings).as("exactly one warning for the entry").isEqualTo(1);
-
-        appender.list.clear();
-        admit(ring, t, kept, 4);                                                      // a later flush with only a good entry
-        assertThat(ring.flushNow()).isEqualTo(1);
-        assertThat(rows(t, kept)).isEqualTo(3);
-        assertThat(rows(t, unregistered)).as("still nothing written for it").isZero();
-        assertThat(logLines()).as("and nothing logged for it").noneMatch(l -> l.contains("pci_ring_entry_unregistered")
-            || l.contains(unregistered));
-        appender.list.clear();
-        assertThat(ring.flushNow()).as("an empty flush").isZero();
-        assertThat(logLines()).as("logs nothing about it either").noneMatch(l -> l.contains(unregistered));
     }
 
     // -- bounds and failure -------------------------------------------------------------------------------------

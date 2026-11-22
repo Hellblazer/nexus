@@ -86,8 +86,7 @@ final class DataMoveRegistry {
                 integer("m", "chunk_size"), integer("m", "sleep_ms"), integer("m", "statement_timeout_ms"),
                 text("m", "verification"), text("m", "on_complete"), stamp("m", "registered_at"),
                 stamp("m", "paused_at"), text("m", "paused_by"), integer("m", "transient_retries"),
-                stamp("m", "last_transient_at"), text("m", "last_transient"),
-                integer("m", "verify_statement_timeout_ms"))
+                stamp("m", "last_transient_at"), text("m", "last_transient"))
             .from(m)
             .where(stamp("m", "completed_at").isNull())
             .and(stamp("m", "failed_at").isNull())
@@ -96,6 +95,6 @@ final class DataMoveRegistry {
             .orderBy(stamp("m", "registered_at"), text("m", "label"))
             .fetch(r -> new DataMove(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(), r.value6(),
                 r.value7(), r.value8(), r.value9(), r.value10(), r.value11(), r.value12(), r.value13(), r.value14(),
-                r.value15(), r.value16()));
+                r.value15()));
     }
 }

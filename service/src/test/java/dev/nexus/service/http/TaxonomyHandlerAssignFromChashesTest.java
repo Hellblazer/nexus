@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.http;
 
-import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.VectorSeeds;
 import com.sun.net.httpserver.Headers;
@@ -207,7 +206,6 @@ class TaxonomyHandlerAssignFromChashesTest {
             DSL.using(su, SQLDialect.POSTGRES).insertInto(CHUNKS)
                 .set(CHUNKS.TENANT_ID, TENANT)
                 .set(CHUNKS.COLLECTION, COL)
-                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, COL))
                 .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(hexChashValue))
                 .set(CHUNKS.EMBEDDING_MODEL, MODEL)
                 .set(CHUNKS.CHUNK_TEXT, "seed text " + hexChashValue)
@@ -243,7 +241,6 @@ class TaxonomyHandlerAssignFromChashesTest {
             DSL.using(su, SQLDialect.POSTGRES).insertInto(TAXONOMY_CENTROIDS)
                 .set(TAXONOMY_CENTROIDS.TENANT_ID, TENANT)
                 .set(TAXONOMY_CENTROIDS.COLLECTION, collection)
-                .set(TAXONOMY_CENTROIDS.COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
                 .set(TAXONOMY_CENTROIDS.TOPIC_ID, topicId)
                 .set(TAXONOMY_CENTROIDS.LABEL, "seed-centroid-label")
                 .set(TAXONOMY_CENTROIDS.EMBEDDING_MODEL, MODEL)

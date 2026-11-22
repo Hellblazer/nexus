@@ -12,7 +12,6 @@ nexus-010w5.1
 nexus-01doz
 nexus-01tnm
 nexus-0221b
-nexus-02454
 nexus-0299w
 nexus-02avu
 nexus-02o82
@@ -550,7 +549,6 @@ nexus-20w.1
 nexus-217
 nexus-217c3
 nexus-21drl
-nexus-21kr3
 nexus-223oj
 nexus-2297
 nexus-22man
@@ -895,7 +893,6 @@ nexus-3pfj0
 nexus-3pfj0.1
 nexus-3piej
 nexus-3ppub
-nexus-3ptnh
 nexus-3qhls
 nexus-3ra9h
 nexus-3ra9h.1
@@ -1404,7 +1401,6 @@ nexus-5axey
 nexus-5b9v0
 nexus-5b9v0.1
 nexus-5cez
-nexus-5clu8
 nexus-5cmqi
 nexus-5crgr
 nexus-5ctw8
@@ -2064,7 +2060,6 @@ nexus-7shci.1
 nexus-7shei
 nexus-7srul
 nexus-7srul.1
-nexus-7t3w1
 nexus-7t4a
 nexus-7t86z
 nexus-7tlhl
@@ -2146,7 +2141,6 @@ nexus-872w
 nexus-886w
 nexus-889ff
 nexus-889ff.1
-nexus-88aj0
 nexus-88e
 nexus-88e.1
 nexus-88pt1
@@ -5821,7 +5815,6 @@ nexus-mr443.1
 nexus-mr89x
 nexus-mr89x.1
 nexus-mrmq
-nexus-mrmqw
 nexus-mrq
 nexus-mrq.1
 nexus-mrsgp
@@ -5920,7 +5913,6 @@ nexus-n36sw
 nexus-n36sw.1
 nexus-n3bwh
 nexus-n3bwh.1
-nexus-n3hhc
 nexus-n3md
 nexus-n3qu
 nexus-n3qu.1

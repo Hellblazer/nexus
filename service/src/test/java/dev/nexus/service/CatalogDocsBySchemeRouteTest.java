@@ -27,19 +27,6 @@ class CatalogDocsBySchemeRouteTest extends CatalogDocsBySchemeBase {
         PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
     }
 
-    /**
-     * RDR-229 P3.1: a document names COLL by registry id, so COLL is registered for both tenants. It runs after the
-     * base's startup (which burns each tenant's ghost sweep, and that sweep removes a collection nothing references).
-     */
-    @org.junit.jupiter.api.BeforeAll
-    void registerRouteCollection() throws Exception {
-        try (Connection su = pg.createConnection("")) {
-            var dsl = org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES);
-            PgContainerHelper.insertCollection(dsl, TENANT, COLL);
-            PgContainerHelper.insertCollection(dsl, TENANT_B, COLL);
-        }
-    }
-
     @Test
     void theClusterIsNotCtypeC() throws Exception {
         assertThat(databaseCtype()).isNotIn("C", "POSIX");

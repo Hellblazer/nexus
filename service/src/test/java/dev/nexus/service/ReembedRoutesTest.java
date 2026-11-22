@@ -41,7 +41,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
-import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_PROFILE;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -218,11 +217,6 @@ class ReembedRoutesTest {
             PgContainerHelper.insertCollection(ctx, t.tenant(), collection);
             return null;
         });
-    }
-
-    private void unregister(Tn t, String name) {
-        su(ctx -> ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.TENANT_ID.eq(t.tenant()))
-            .and(CATALOG_COLLECTIONS.NAME.eq(name)).execute());
     }
 
     private Tn tenant(String tag) {
@@ -419,7 +413,9 @@ class ReembedRoutesTest {
     void anAbsentTargetIsRegisteredFromTheClientsNameAndTheProfileFixesItsModel() throws Exception {
         Tn t = tenant("reg");
         String fresh = name(t, MINI, 2);
-        unregister(t, t.tgt());
+        su(ctx -> ctx.deleteFrom(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+            .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(t.tenant()))
+            .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(t.tgt())).execute());
         assertThat(catalog.getCollection(t.tenant(), fresh)).isNull();
         // The client's name says one model; the profile says another. The profile gate fixes the registered model.
         String misleading = TYPE + "__" + t.owner() + "__voyage-context-3__v1";
@@ -437,7 +433,9 @@ class ReembedRoutesTest {
     @Test
     void anAbsentTargetWithNoNameIs400_andNothingIsRegistered() throws Exception {
         Tn t = tenant("noname");
-        unregister(t, t.tgt());
+        su(ctx -> ctx.deleteFrom(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+            .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(t.tenant()))
+            .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(t.tgt())).execute());
 
         var r = post(t, "/jobs", startBody(t.src()));
 
@@ -447,66 +445,18 @@ class ReembedRoutesTest {
     }
 
     @Test
-    void aTargetRegistrationThatLosesARaceOnItsTupleIs409NamingBothCollections_notA500() throws Exception {
-        // RDR-229 P3.8: with the live-tuple index present, a registration that passes its pre-check and then meets a
-        // concurrent insert of the same tuple raises the index's own 23505. The route answers the named refusal (409, both
-        // collections), not "internal server error". A row of another tuple is registered and committed first; an open
-        // transaction moves it onto the target's tuple and does not commit, so the start's pre-check cannot see it.
-        Tn t = tenant("race");
-        var collections = dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
-        String fresh = name(t, MINI, 2);
-        String blocker = "reembed-race-blocker-" + t.owner();
-        su(ctx -> {
-            ctx.deleteFrom(collections).where(collections.TENANT_ID.eq(t.tenant())).and(collections.NAME.eq(t.tgt())).execute();
-            PgContainerHelper.insertCollection(ctx, t.tenant(), blocker);
-            CollectionMintSupport.createIndex(ctx);
-            return null;
-        });
-        var racer = java.util.concurrent.Executors.newSingleThreadExecutor();
-        try (Connection open = pg.createConnection("")) {
-            open.setAutoCommit(false);
-            DSL.using(open, SQLDialect.POSTGRES).update(collections)
-                .set(collections.CONTENT_TYPE, TYPE).set(collections.OWNER_ID, t.owner())
-                .set(collections.EMBEDDING_MODEL, MINI).set(collections.MODEL_VERSION, "v2")
-                .where(collections.TENANT_ID.eq(t.tenant())).and(collections.NAME.eq(blocker)).execute();
-            var start = racer.submit(() -> post(t, "/jobs", "{\"source_collection\":\"" + t.src()
-                + "\",\"target_collection\":\"" + fresh + "\"}"));
-            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
-            while (!su(CollectionMintSupport::someSessionWaitsOnALock)) {
-                if (start.isDone() || System.nanoTime() > deadline) {
-                    open.rollback();
-                    throw new AssertionError("the start did not wait on the open transaction's row (done: " + start.isDone() + ")");
-                }
-                Thread.sleep(25);
-            }
-            open.commit();
-
-            var r = start.get(60, TimeUnit.SECONDS);
-
-            assertThat(r.statusCode()).as(r.body()).isEqualTo(409);
-            assertThat(json(r).get("error").toString()).contains(blocker).contains(fresh);
-            assertThat(catalog.getCollection(t.tenant(), fresh)).as("the loser wrote nothing").isNull();
-            assertThat(jobs.listByStates(t.tenant(), ReembedJobRepository.LOCK_STATES)).as("and started no job").isEmpty();
-        } finally {
-            racer.shutdownNow();
-            su(ctx -> {
-                CollectionMintSupport.dropIndex(ctx);
-                return null;
-            });
-        }
-    }
-
-    @Test
     void aClientNamedTargetThatIsRegisteredWithAnotherTupleIs409_andIsNotRepointed() throws Exception {
         Tn t = tenant("mismatch");
-        unregister(t, t.tgt());
+        su(ctx -> ctx.deleteFrom(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+            .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(t.tenant()))
+            .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(t.tgt())).execute());
         // The name the client wants is already a bge collection (another tuple), superseded by something else.
         String taken = name(t, MINI, 7);
         su(ctx -> {
             PgContainerHelper.insertCollection(ctx, t.tenant(), taken, BGE);
             return null;
         });
-        SupersedeSeeds.supersede(catalog, t.tenant(), taken, t.src(), null);
+        catalog.supersedeCollection(t.tenant(), taken, t.src(), null);
 
         var r = post(t, "/jobs", "{\"source_collection\":\"" + t.src() + "\",\"target_collection\":\"" + taken
             + "\"}");
@@ -525,11 +475,11 @@ class ReembedRoutesTest {
         if ("done".equals(how)) {
             advance(t, first, "running", "cutover");
             assertThat(jobs.setCutoverStep(t.tenant(), first, "superseded")).isTrue();
-            assertThat(SupersedeSeeds.supersede(catalog, t.tenant(), t.src(), t.tgt(), null)).isEqualTo(1);
+            assertThat(catalog.supersedeCollection(t.tenant(), t.src(), t.tgt(), null)).isEqualTo(1);
             advance(t, first, "done");
         } else {
             advance(t, first, "running", "aborted");
-            assertThat(SupersedeSeeds.supersede(catalog, t.tenant(), t.src(), t.tgt(), null)).isEqualTo(1);
+            assertThat(catalog.supersedeCollection(t.tenant(), t.src(), t.tgt(), null)).isEqualTo(1);
         }
         setProfile(t.tenant(), BGE, 768);
         return first;
@@ -591,7 +541,7 @@ class ReembedRoutesTest {
         register(t, third);
         setProfile(t.tenant(), BGE, 768);
         // The bge sibling A is superseded by a third collection, not by the source B of the new job.
-        assertThat(SupersedeSeeds.supersede(catalog, t.tenant(), t.src(), third, null)).isEqualTo(1);
+        assertThat(catalog.supersedeCollection(t.tenant(), t.src(), third, null)).isEqualTo(1);
 
         var r = post(t, "/jobs", startBody(t.tgt()));
 
@@ -1078,7 +1028,9 @@ class ReembedRoutesTest {
     @Test
     void planOfAnAbsentTargetSaysRegisterAndRegistersNothing() throws Exception {
         Tn t = tenant("planreg");
-        unregister(t, t.tgt());
+        su(ctx -> ctx.deleteFrom(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+            .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(t.tenant()))
+            .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(t.tgt())).execute());
         String fresh = name(t, MINI, 2);
 
         var r = post(t, "/plan", "{\"source_collection\":\"" + t.src() + "\",\"target_collection\":\"" + fresh
@@ -1092,7 +1044,9 @@ class ReembedRoutesTest {
     @Test
     void planRefusesWhatAStartWouldRefuse() throws Exception {
         Tn t = tenant("planref");
-        unregister(t, t.tgt());
+        su(ctx -> ctx.deleteFrom(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+            .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(t.tenant()))
+            .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(t.tgt())).execute());
 
         var noName = post(t, "/plan", planBody(t.src()));
         assertThat(noName.statusCode()).as("an absent target and no name to register").isEqualTo(400);
@@ -1118,7 +1072,9 @@ class ReembedRoutesTest {
     void aTargetNameThatIsNotConformantIsRefusedByPlanAndStart_andNothingIsRegistered() throws Exception {
         // Review: the engine reads the target's version off its minted name, so a target to register must be conformant.
         Tn t = tenant("legacyname");
-        unregister(t, t.tgt());
+        su(ctx -> ctx.deleteFrom(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+            .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(t.tenant()))
+            .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(t.tgt())).execute());
         String legacy = "my_legacy_target_" + t.owner();
 
         var plan = post(t, "/plan", "{\"source_collection\":\"" + t.src() + "\",\"target_collection\":\"" + legacy + "\"}");
@@ -1136,7 +1092,9 @@ class ReembedRoutesTest {
     void aQuarantinePrefixedTargetIsRefusedByPlanAndStart_andNoRowAndNoJobIsCreated() throws Exception {
         // Review N1: a re-embed target named quarantine-<conformant> would mint a live row under the engine's prefix.
         Tn t = tenant("qtarget");
-        unregister(t, t.tgt());
+        su(ctx -> ctx.deleteFrom(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+            .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(t.tenant()))
+            .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(t.tgt())).execute());
         String quarantineName = "quarantine-" + t.tgt();
 
         var plan = post(t, "/plan", "{\"source_collection\":\"" + t.src() + "\",\"target_collection\":\"" + quarantineName + "\"}");
@@ -1248,7 +1206,7 @@ class ReembedRoutesTest {
         UUID first = id(startOk(t, t.src()));
         advance(t, first, "running", "cutover");
         assertThat(jobs.setCutoverStep(t.tenant(), first, "superseded")).isTrue();
-        assertThat(SupersedeSeeds.supersede(catalog, t.tenant(), t.src(), t.tgt(), null)).isEqualTo(1);
+        assertThat(catalog.supersedeCollection(t.tenant(), t.src(), t.tgt(), null)).isEqualTo(1);
         Job cutover = job(t, first);
         jobs.applyTransition(t.tenant(), first, "cutover", cutover.cutoverStep(), "done",
             Transition.disposition("kept_tombstoned")).orElseThrow();
@@ -1339,7 +1297,7 @@ class ReembedRoutesTest {
             Tn t = tenant("reentno" + disposition.replace("_", ""));
             UUID first = id(startOk(t, t.src()));
             advance(t, first, "running", "cutover");
-            assertThat(SupersedeSeeds.supersede(catalog, t.tenant(), t.src(), t.tgt(), null)).isEqualTo(1);
+            assertThat(catalog.supersedeCollection(t.tenant(), t.src(), t.tgt(), null)).isEqualTo(1);
             Job cutover = job(t, first);
             jobs.applyTransition(t.tenant(), first, "cutover", cutover.cutoverStep(), "done",
                 Transition.disposition(disposition)).orElseThrow();
@@ -1358,10 +1316,7 @@ class ReembedRoutesTest {
         UUID first = id(startOk(t, t.src()));
         advance(t, first, "running", "cutover");
         // the source was superseded by something other than this job's target
-        // RDR-229 P3.1: the successor is registered first, under the engine's profile model (SupersedeSeeds would
-        // give it the source's, which the profile refuses for a knowledge name).
-        su(ctx -> { PgContainerHelper.insertCollection(ctx, t.tenant(), "somewhere-else", MINI); return null; });
-        assertThat(SupersedeSeeds.supersede(catalog, t.tenant(), t.src(), "somewhere-else", null)).isEqualTo(1);
+        assertThat(catalog.supersedeCollection(t.tenant(), t.src(), "somewhere-else", null)).isEqualTo(1);
         Job cutover = job(t, first);
         jobs.applyTransition(t.tenant(), first, "cutover", cutover.cutoverStep(), "done",
             Transition.disposition("kept_tombstoned")).orElseThrow();
@@ -1377,7 +1332,7 @@ class ReembedRoutesTest {
     void aReEntryIntoATargetThatIsSupersededIsRefused() throws Exception {
         Tn t = tenant("reenttgt");
         UUID first = keptTombstonedLeg(t);
-        assertThat(SupersedeSeeds.supersede(catalog, t.tenant(), t.tgt(), "elsewhere", null)).isEqualTo(1);
+        assertThat(catalog.supersedeCollection(t.tenant(), t.tgt(), "elsewhere", null)).isEqualTo(1);
 
         var r = post(t, "/jobs", startBody(t.src()));
 
@@ -1423,8 +1378,6 @@ class ReembedRoutesTest {
         Tn t = tenant("reentdrain");
         UUID first = keptTombstonedLeg(t);
         // a job started directly on the re-entered job's TARGET as its source
-        // RDR-229 P3.1: a job's collections are registered (the engine refuses an unregistered one with a typed 422).
-        su(ctx -> { PgContainerHelper.insertCollection(ctx, t.tenant(), "knowledge__elsewhere__" + MINI + "__v1", MINI); return null; });
         Job draining = jobs.start(t.tenant(), t.tgt(), "knowledge__elsewhere__" + MINI + "__v1", null, false, false);
 
         var r = post(t, "/jobs", startBody(t.src()));
@@ -1575,7 +1528,9 @@ class ReembedRoutesTest {
         Tn t = tenant("resumegone");
         UUID failed = id(startOk(t, t.src()));
         advance(t, failed, "running", "failed");
-        unregister(t, t.tgt());
+        su(ctx -> ctx.deleteFrom(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+            .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(t.tenant()))
+            .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(t.tgt())).execute());
         serving(() -> List.of(BGE), () -> {
             var r = post(t, "/jobs/" + failed + "/resume", "");
             assertThat(r.statusCode()).as("the runner fails a missing target loud; resume applies").isEqualTo(200);
