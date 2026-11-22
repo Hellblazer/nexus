@@ -138,7 +138,7 @@ public final class VectorHandler implements HttpHandler {
     /**
      * RDR-204 Phase 2 fix round 2 (nexus-ft04v.16 fix round 2, S1, coordinator
      * design change): names dropped by {@link PgVectorRepository#registeredSurvivors}
-     * from a multi-collection fan-out read, each name percent-encoded as UTF-8
+     * from a multi-collection fan-out read, each name form-encoded as UTF-8 (a space is {@code +}, other bytes {@code %XX})
      * ({@link SkippedCollectionsHeader#encode}) and the names joined with a comma. Since
      * RDR-229 P3.6 a label may hold a space, non-ASCII letters and (should the comma
      * ruling be relaxed) a comma, none of which a raw header value carries safely
@@ -3006,7 +3006,6 @@ public final class VectorHandler implements HttpHandler {
             ex.getResponseHeaders().set(SKIPPED_COLLECTIONS_HEADER, SkippedCollectionsHeader.encode(skipped));
         }
     }
-
 
     // ── Request parsing helpers ───────────────────────────────────────────────
 
