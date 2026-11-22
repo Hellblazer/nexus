@@ -5,12 +5,16 @@ A collection's ``name`` is a label (RDR-229 item 7): what a person types and rea
 ChromaDB identifier. The rule is non-empty, valid UTF-8, no control character, at most 255 UTF-8 bytes, not of
 the minted form ``c`` + ASCII digits (the engine's own, item 8), and no ``/`` (Sam's ruling, T2
 ``nexus/sam-ruling-rdr229-label-slash-2026-11-21``). The engine twin is ``dev.nexus.service.db.CollectionLabel.validateUserLabel``;
-``service/src/test/java/dev/nexus/service/db/CollectionLabelTest.java`` pins the same table.
+``service/src/test/java/dev/nexus/service/db/CollectionLabelTest.java`` reads the same case table,
+``service/src/test/resources/label-rule-cases.json`` (nexus-mrmqw).
 
 The conformant-shape check for a NEW collection (``is_conformant_collection_name``) is a different gate and is
 not exercised here.
 """
 from __future__ import annotations
+
+import json
+from pathlib import Path
 
 import pytest
 
@@ -18,66 +22,38 @@ from nexus import corpus
 from nexus.corpus import validate_collection_name
 
 
-@pytest.mark.parametrize(
-    "label",
-    [
-        "a" * 100,
-        "My Notes",
-        "notes 50%: café",
-        "日本語のノート",
-        "ab",
-        "a",
-        "-leading-hyphen",
-        "trailing_",
-        "a.b",
-        "code__myrepo",
-        "docs__1-1__model-docs__v1",
-        "c",
-        "C1",
-        "c1a",
-        "cc1",
-        "c-1",
-        "ac1",
-        "c١",  # c + ARABIC-INDIC DIGIT ONE: not an ASCII digit, so not the minted form
-        "é" * 127,  # 254 bytes
-        "é" * 127 + "a",  # exactly 255 bytes
-        "a" * 255,
-        "x‍y",  # ZERO WIDTH JOINER (Cf) is allowed: Persian, Indic scripts and emoji sequences need it
-        "a b",
-        "inner space",
-    ],
-    ids=lambda s: repr(s)[:24],
-)
-def test_a_label_the_rule_allows_is_accepted(label: str) -> None:
-    validate_collection_name(label)
+#: The case table both halves read (nexus-mrmqw): the engine's CollectionLabelTest reads the same file, so the two
+#: rules cannot drift apart case by case.
+CASES_PATH = Path(__file__).resolve().parents[1] / "service" / "src" / "test" / "resources" / "label-rule-cases.json"
+_DOC = json.loads(CASES_PATH.read_text(encoding="utf-8"))
 
 
-@pytest.mark.parametrize(
-    "label, why",
-    [
-        ("", "empty"),
-        ("a\x00b", "NUL"),
-        ("a\nb", "newline"),
-        ("a\tb", "tab"),
-        ("a\x1fb", "unit separator"),
-        ("a\x7fb", "DEL"),
-        ("a\x85b", "C1 control NEL"),
-        ("a b", "LINE SEPARATOR"),
-        ("a b", "PARAGRAPH SEPARATOR"),
-        ("a\ud800b", "lone surrogate: not valid UTF-8"),
-        ("a" * 256, "256 bytes"),
-        ("é" * 128, "256 bytes in 128 characters"),
-        ("é" * 127 + "ab", "256 bytes"),
-        ("c1", "minted form"),
-        ("c0", "minted form"),
-        ("c007", "minted form, leading zeros reserved"),
-        ("c1234567890123456789", "minted form, long"),
-    ],
-    ids=lambda v: repr(v)[:24],
-)
-def test_a_label_the_rule_refuses_raises_value_error(label: str, why: str) -> None:
-    with pytest.raises(ValueError):
+def _label(case: dict) -> str:
+    return case["label"] if "label" in case else "".join(text * times for text, times in case["parts"])
+
+
+_CASES = [pytest.param(_label(c), c["rule"], id=f"{c['rule'] or 'legal'}:{_label(c)!r}"[:48]) for c in _DOC["cases"]]
+
+
+def test_the_case_table_is_not_empty_and_covers_every_rule() -> None:
+    assert len(_DOC["cases"]) >= 60
+    assert {c["rule"] for c in _DOC["cases"]} == set(_DOC["rules"]) | {None}
+
+
+def test_the_client_checks_the_clauses_in_the_tables_order() -> None:
+    """nexus-pqirj: the engine's CollectionLabelTest pins its own order to the same list."""
+    assert corpus.LABEL_RULES == tuple(_DOC["rules"])
+
+
+@pytest.mark.parametrize("label, rule", _CASES)
+def test_each_case_breaks_the_rule_the_table_names(label: str, rule: str | None) -> None:
+    breach = corpus.label_breach(label)
+    assert (breach and breach[0]) == rule, breach
+    if rule is None:
         validate_collection_name(label)
+    else:
+        with pytest.raises(ValueError):
+            validate_collection_name(label)
 
 
 def test_the_minted_form_refusal_names_the_reason() -> None:
