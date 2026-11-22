@@ -22,7 +22,7 @@ import java.util.List;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class Rdr229P37NamePathCascadeTest {
 
-    private static final int N = 4000;
+    private static final int N = 6000;
     private static final List<String> TRIGGERS = List.of(
         "catalog_document_chunks:trg_catalog_document_chunks_name_from_chunk", "chunk_orphaned_at:trg_chunk_orphaned_at_name_from_chunk",
         "topic_assignments:trg_topic_assignments_name_from_chunk");
@@ -47,7 +47,10 @@ class Rdr229P37NamePathCascadeTest {
         return "knowledge__" + owner + "__minilm-l6-v2-384__v" + version;
     }
 
-    /** One chunk, then N more copied from it with other chashes; a manifest row per chunk, an orphaned-at and a topic assignment for each of the first N/2. */
+    /**
+     * One chunk, then N more copied from it with other chashes (N + 1 in all, in chash order). A manifest row for the first N/2, an orphaned-at
+     * record for the next N/2 (a chunk with a manifest row has no record: the manifest UPDATE trigger clears it), a topic assignment for the first N/2.
+     */
     private void seed(String tenant, String name) {
         engine.su(ctx -> {
             PgContainerHelper.insertCollection(ctx, tenant, name);
@@ -61,10 +64,10 @@ class Rdr229P37NamePathCascadeTest {
             PgContainerHelper.insertCatalogDocument(ctx, tenant, "casc.doc." + name);
             ctx.execute("INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection, embedding_model, collection_id) "
                 + "SELECT tenant_id, ?, (row_number() OVER (ORDER BY chash)) - 1, chash, collection, embedding_model, collection_id "
-                + "FROM nexus.chunks WHERE tenant_id = ? AND collection = ?", "casc.doc." + name, tenant, name);
+                + "FROM (SELECT * FROM nexus.chunks WHERE tenant_id = ? AND collection = ? ORDER BY chash LIMIT " + N / 2 + ") c", "casc.doc." + name, tenant, name);
             ctx.execute("INSERT INTO nexus.chunk_orphaned_at (tenant_id, collection, chash, orphaned_at, embedding_model, collection_id) "
                 + "SELECT tenant_id, collection, chash, now(), embedding_model, collection_id FROM nexus.chunks "
-                + "WHERE tenant_id = ? AND collection = ? ORDER BY chash LIMIT ?", tenant, name, N / 2);
+                + "WHERE tenant_id = ? AND collection = ? ORDER BY chash OFFSET ? LIMIT ?", tenant, name, N / 2, N / 2);
             long topic = ctx.fetchOne("INSERT INTO nexus.topics (tenant_id, label, collection, collection_id, created_at) "
                 + "VALUES (?, 't', ?, ?, now()) RETURNING id", tenant, name, id).get(0, Long.class);
             ctx.execute("INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by, source_collection, embedding_model, "
@@ -87,7 +90,7 @@ class Rdr229P37NamePathCascadeTest {
 
     private long renameMillis(String tenant, String token, String oldName, String newName) throws Exception {
         long[] before = childCounts(tenant, oldName);
-        assertThat(before).as("non-vacuity: children to cascade").containsExactly(N + 1L, N / 2L, N / 2L);
+        assertThat(before).as("non-vacuity: children to cascade").containsExactly(N / 2L, N / 2L, N / 2L);
         long started = System.nanoTime();
         var r = engine.rename(token, oldName, newName);
         long ms = (System.nanoTime() - started) / 1_000_000;
@@ -142,7 +145,7 @@ class Rdr229P37NamePathCascadeTest {
             }
         }
 
-        System.out.println("TIMING name-path rename of " + (N + 1) + " chunks, " + (N + 1) + " manifest, " + N / 2 + " orphaned, " + N / 2
+        System.out.println("TIMING name-path rename of " + (N + 1) + " chunks, " + N / 2 + " manifest, " + N / 2 + " orphaned, " + N / 2
             + " assignment rows: triggers disabled " + withoutMs + " ms, installed " + withMs + " ms, installed without the tombstone guard "
             + unguardedMs + " ms");
         assertThat(unguardedMs).as("load-bearing: without the guard the same cascade is slower (guarded " + withMs + " ms)").isGreaterThan(withMs);

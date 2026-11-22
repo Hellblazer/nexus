@@ -53,11 +53,11 @@ class Rdr229P37ChildNameMismatchTest {
     // ---- a second tenant -----------------------------------------------------------------------------------------------------
 
     /** The world of tenant "p37-cn-mt" plus tenant "p37-b4-mt" (sorting first) holding the same chash under the same collection id. */
-    private Rdr229ChildNameWorld secondTenantWorld() throws Exception {
-        var w = Rdr229ChildNameWorld.renamed(engine, "mt", Rdr229ChildNameWorld.MODEL_384, 384);
-        String other = "p37-b4-mt";
+    private Rdr229ChildNameWorld secondTenantWorld(String tag) throws Exception {
+        var w = Rdr229ChildNameWorld.renamed(engine, tag, Rdr229ChildNameWorld.MODEL_384, 384);
+        String other = "p37-b4-" + tag;
         engine.newTenant(other);
-        String otherName = Rdr229ChildNameWorld.collection("p37b4mt", w.model, 1);
+        String otherName = Rdr229ChildNameWorld.collection("p37b4" + tag, w.model, 1);
         engine.su(ctx -> {
             PgContainerHelper.insertCollection(ctx, other, otherName);
             ctx.execute("UPDATE nexus.catalog_collections SET collection_id = ? WHERE tenant_id = ? AND name = ?", w.id, other, otherName);
@@ -69,21 +69,21 @@ class Rdr229P37ChildNameMismatchTest {
 
     @Test
     void aSecondTenantHoldingTheSameChashAndTheSameCollectionIdDoesNotConfuseTheLookup() throws Exception {
-        var w = secondTenantWorld();
+        var w = secondTenantWorld("mt");
         w.run(w.manifestInsert("cn.mt.d0", 0, w.newName, w.ex[0]));
         assertThat(w.manifestNames("cn.mt.d0")).as("the chunk of THIS tenant: its stored name, not the other tenant's").containsExactly(w.oldName);
     }
 
     @Test
     void droppingTheTenantPredicateFromStep2TurnsTheSecondTenantTestRed() throws Exception {
-        var w = secondTenantWorld();
+        var w = secondTenantWorld("mu");
         assertThat(original).as("non-vacuity: the text to mutate carries the predicate").contains(STEP2_TENANT);
         install(original.replace(STEP2_TENANT, "c.collection_id = NEW.collection_id"));
         try {
             boolean red;
             try {
-                w.run(w.manifestInsert("cn.mt.d1", 0, w.newName, w.ex[0]));
-                red = !w.manifestNames("cn.mt.d1").equals(List.of(w.oldName));
+                w.run(w.manifestInsert("cn.mu.d1", 0, w.newName, w.ex[0]));
+                red = !w.manifestNames("cn.mu.d1").equals(List.of(w.oldName));
             } catch (RuntimeException refused) {
                 red = true;   // the key refused the other tenant's name
             }

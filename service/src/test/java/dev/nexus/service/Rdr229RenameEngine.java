@@ -164,6 +164,11 @@ final class Rdr229RenameEngine implements AutoCloseable {
             }
 
             @Override
+            public boolean dropMoveComplete() {
+                return inner.dropMoveComplete();
+            }
+
+            @Override
             public <T> T pinned(java.util.function.Supplier<T> rename) {
                 pinnedRenames.incrementAndGet();
                 return inner.pinned(rename);

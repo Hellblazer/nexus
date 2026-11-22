@@ -384,7 +384,8 @@ public final class CompletionBootWork implements AutoCloseable {
                     log.warn("event=rdr229_rename_window_busy waited_ms={} cause=\"a pinned rename is still open; the gate 3 latch is deferred to the next sample\"",
                         renameWindowWait.toMillis());
                     scheduleRetry();
-                    latest = result.withoutGate3("a collection rename is still open: gate 3 is deferred to the next sample");
+                    latest = result.withoutGate3("a collection rename is still open: gate 3 is deferred to the next sample")
+                        .withGate3Latched(gate3Latch);   // the reader's own result carries the live gate 3 as its latch
                     result = latest;
                     publishRestartEntry(result);
                     return countWaiting(result);
