@@ -26,7 +26,7 @@ There are ten displays. `<owner>` is the owner's alias, else its identity id: fr
 | You own it, the red is from your push (`earliest_suspect`) | `Develop is red at <sha>, first red in your push. Diagnose it.` | yes |
 | You own it, the leader takes it (`owner_unleased`, `owner_not_live`, `owner_not_member`, `no_record`, `chain_gap`, `stamper_error`) | `Develop is red at <sha>; the leader takes it (<reason>). Diagnose it.` | yes |
 | You own it after a hand-off (`handoff`) | `Develop is red at <sha>; it was handed to you after no acknowledgement. Diagnose it.` | yes |
-| You own it after the previous owner said it is not theirs (`disclaimed`, from `nx ci ack --not-mine`) | `Develop is red at <sha>; handed to you: the previous owner said it is not theirs. Diagnose it.` | yes |
+| You own it after the previous owner said it is not theirs (`disclaimed`, from `nx ci ack --not-mine`) | `Develop is red at <sha>; handed to you: <previous owner> said it is not theirs. Diagnose it.` | yes |
 | Escalated because its owner acknowledged it and it stayed open (`escalated` with `stalled`), and it names you or no one | `Develop is red at <sha>, acknowledged by <owner> but still open after N min. Raise an ask to Sam.` | yes |
 | The same stall, and you are the owner that acknowledged it | `Develop is red at <sha>; you acknowledged it but it is still open after N min. The leader is raising it with Sam.` | no |
 | The same stall, and it names someone else | `Develop is red at <sha>; <owner> acknowledged it but it is still open after N min. The leader is raising it with Sam. Hold your pushes.` | no |

@@ -82,6 +82,7 @@ def _row(
     stalled_owner: str | None = None,
     stalled_since: str | None = None,
     red_since: str | None = None,
+    previous_owner: str | None = None,
 ) -> dict:
     """The arguments the aura maps from an owner row (body.owner, body.owner_alias, body.next, body.next_alias,
     body.reason, body.refresh, dims.sha) and from the session (self.identity). A null owner or next, and an alias the
@@ -97,7 +98,7 @@ def _row(
     if next_alias is not None:
         out["next_alias"] = next_alias
     for name, value in (("stalled", stalled), ("stalled_owner", stalled_owner), ("stalled_since", stalled_since),
-                        ("red_since", red_since)):
+                        ("red_since", red_since), ("previous_owner", previous_owner)):
         if value is not None:
             out[name] = value
     return out
@@ -128,6 +129,7 @@ def test_the_header_declares_the_owner_row_fields_and_me_and_grants_nothing() ->
         ("stalled_owner", "string", True),
         ("stalled_since", "string", True),
         ("red_since", "string", True),
+        ("previous_owner", "string", True),
         ("me", "string", False),
     ]
     assert h.grants == frozenset()
@@ -174,7 +176,12 @@ DISPLAYS = [
     pytest.param(
         _row(ME, reason="disclaimed"),
         f"Develop is red at {SHORT}; handed to you: the previous owner said it is not theirs. Diagnose it." + ACK,
-        id="owner-after-disclaim",
+        id="owner-after-disclaim-previous-owner-unnamed",
+    ),
+    pytest.param(
+        _row(ME, reason="disclaimed", previous_owner=OTHER),
+        f"Develop is red at {SHORT}; handed to you: {OTHER} said it is not theirs. Diagnose it." + ACK,
+        id="owner-after-disclaim-names-the-previous-owner",
     ),
     pytest.param(
         _stalled(ME),
@@ -453,6 +460,7 @@ def test_the_shipped_aura_maps_the_owner_row_and_the_session_identity() -> None:
         "stalled_owner": ("body", "stalled_owner"),
         "stalled_since": ("body", "stalled_since"),
         "red_since": ("body", "red_since"),
+        "previous_owner": ("body", "previous_owner"),
         "me": ("self", "identity"),
     }
 
@@ -506,7 +514,7 @@ OWNER_TEMPLATE = {
             for name in (
                 "state", "conclusion", "workflow", "job", "sha", "run", "n", "base", "owner", "owner_alias", "next",
                 "next_alias", "reason", "suspects", "episode_at", "refresh", "handoffs", "runs", "attempt", "url",
-                "stalled", "stalled_owner", "stalled_since", "red_since",
+                "stalled", "stalled_owner", "stalled_since", "red_since", "previous_owner",
             )
         }
     },
@@ -529,7 +537,7 @@ def test_the_shipped_aura_is_refused_by_a_template_without_the_owner_fields() ->
     findings, _ = check_dictionary(_shipped(), [{**OWNER_TEMPLATE, "doc": {"body": old_body}}])
     assert {f.key for f in findings} == {
         "args.owner", "args.owner_alias", "args.next", "args.next_alias", "args.refresh", "args.reason",
-        "args.stalled", "args.stalled_owner", "args.stalled_since", "args.red_since"}
+        "args.stalled", "args.stalled_owner", "args.stalled_since", "args.red_since", "args.previous_owner"}
 
 
 # -- who may post the owner row (RDR-252 "The stamper": the engine stamps ``from=engine``; round 1 B3) ----------------
