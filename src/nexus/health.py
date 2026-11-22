@@ -10243,9 +10243,7 @@ def _check_pending_rungs() -> list[HealthResult]:
     # answers the engine's reaper gate or none is recorded and the reaper stays refused.
     # On a local engine the decline is doctor's bounded reads, not the managed rule, so the reason is left out there.
     from nexus.upgrade_ladder.auto_guard import (  # noqa: PLC0415 — deferred to avoid module-load cost
-        RETIRE_KEYS_OPERATOR_NOTE,
-        managed_service,
-        sweep_is_operator_only,
+        RETIRE_KEYS_OPERATOR_NOTE, managed_service, sweep_is_operator_only,
     )
 
     try:
@@ -10261,9 +10259,9 @@ def _check_pending_rungs() -> list[HealthResult]:
     # data token a client presents whenever `mint_token` is configured, so an interactive `nx upgrade` cannot clear
     # it either: its sweep is the operator verb. The test is `sweep_is_operator_only()` (managed and `mint_armed()`)
     # and nothing more: a managed client with a tenant or root credential, or a static data token with no
-    # `mint_token`, keeps "not checked". The rung's own detect() is left alone; the other readers of its status
-    # (`upgrade_finish.pending_data_rung_callout`, `nx upgrade`'s status line) use the same helper. So is every other
-    # declined rung, rdr192-manifest-backfill included.
+    # `mint_token`, keeps "not checked", as does every other declined rung (rdr192-manifest-backfill included). The
+    # rung's own detect() is left alone: `upgrade_finish.pending_data_rung_callout` uses the same helper, and
+    # `nx upgrade`'s dry-run line needs none, because detect() already reads the route's 403 as not applicable.
     sweep_na = sweep_is_operator_only()
     na_names = [name for name, _status in declined if sweep_na and name == _ladder_registry.RUNG_RETIRE_KEYS_SWEEP]
     not_checked = [

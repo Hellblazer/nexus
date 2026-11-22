@@ -17,7 +17,9 @@ import pytest
 
 from nexus import health, upgrade_finish
 from nexus.commands.upgrade import _run_ladder
+from nexus.db import service_endpoint
 from nexus.db.http_vector_client import VectorServiceError
+from nexus.upgrade_ladder import auto_guard
 from nexus.upgrade_ladder.auto_guard import INTERACTIVE_REMEDY
 from nexus.upgrade_ladder.completion import CompletionRecord
 from nexus.upgrade_ladder.registry import (
@@ -28,8 +30,8 @@ from nexus.upgrade_ladder.registry import (
     LadderRegistry,
     default_registry,
 )
-from nexus.upgrade_ladder.runner import LadderRunner, RungOutcome
 from nexus.upgrade_ladder.rungs.manifest_section_labels import TITLE_RULE_MARK
+from nexus.upgrade_ladder.runner import LadderRunner, RungOutcome
 from nexus.upgrade_ladder.unattended import bounded_reads, unattended_run
 from tests.upgrade.conftest import InMemoryCompletionLedger
 
@@ -357,8 +359,7 @@ def test_nx_upgrade_dry_run_lists_no_pending_line_for_the_sweep_on_a_mint_creden
     install: _Install, mint_credential: None, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     """`commands/upgrade.py`'s dry-run "pending" line: the engine refuses this client's dry run with 403, so detect()
-    reads the sweep as not applicable and the line is never printed for it (no change was needed there). The tenant
-    credential client's dry run is accepted and reads its count, so the line is a real one."""
+    reads the sweep as not applicable and the line is never printed for it (no change was needed there)."""
     class Refusing:
         def chunk_keys_dry_run(self, **_kw) -> dict:
             raise VectorServiceError("the sweep needs a tenant or root credential, not scope data", code=403)
@@ -367,3 +368,13 @@ def test_nx_upgrade_dry_run_lists_no_pending_line_for_the_sweep_on_a_mint_creden
     _run_ladder(dry_run=True, auto_mode=False)
     out = capsys.readouterr().out
     assert not [ln for ln in out.splitlines() if RUNG_RETIRE_KEYS_SWEEP in ln and "pending" in ln], out
+
+
+def test_the_operator_only_test_fails_closed_so_an_error_keeps_the_warning(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unreadable mode or credential answers False: the rung keeps "not checked" and its remedy, never n/a."""
+    def boom() -> bool:
+        raise RuntimeError("unreadable")
+
+    assert auto_guard.sweep_is_operator_only(managed_fn=boom) is False
+    monkeypatch.setattr(service_endpoint, "mint_armed", boom)
+    assert auto_guard.sweep_is_operator_only(managed_fn=lambda: True) is False

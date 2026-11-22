@@ -45,8 +45,8 @@ def managed_service() -> bool:
 
 #: Why the retire-keys-sweep rung is not applicable to a client that holds ``mint_token``: the sweep route takes a tenant
 #: or root credential and answers 403 to the data token such a client presents on every route
-#: (``http_vector_client._request``). One text for every surface that says so (``nx doctor``, the version-change callout,
-#: ``nx upgrade --dry-run``).
+#: (``http_vector_client._request``). One text for every surface that says so (``nx doctor`` and the version-change
+#: callout).
 RETIRE_KEYS_OPERATOR_NOTE = (
     "its sweep is the operator verb `nx t3 retire-keys`, which needs the root token and runs from a host without "
     "mint_token"
