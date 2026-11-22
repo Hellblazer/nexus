@@ -358,6 +358,11 @@ ROUTE_MAP: dict[str, Step] = {
     "POST /v1/taxonomy/assignments/prune_projection": Step("route-prune-projection", "py", ["-c", _routes.PRUNE_PROJECTION],
                                                            expect_route="/v1/taxonomy/assignments/prune_projection",
                                                            expect_stdout="match=bogus refused 400"),
+    # RDR-229 P3.1 (nexus-p2m1x.17, vectors-074): the commit refuses a row under an unregistered collection per row.
+    "POST /v1/catalog/reconcile/commit": Step("route-reconcile-commit-unregistered", "py",
+                                              ["-c", _routes.RECONCILE_COMMIT_REFUSES_UNREGISTERED],
+                                              expect_route="/v1/catalog/reconcile/commit",
+                                              expect_stdout="refused the unregistered collection per row"),
 }
 
 _ROUTE_RE = re.compile(r"`(GET|POST|PUT|PATCH|DELETE) (/v1/[A-Za-z0-9_\-/.{}]+)")
