@@ -214,6 +214,11 @@ print("status keys:", len(status), "rdr229_completion:", "present" if completion
 index = status.get("collection_tuple_index_present")
 assert index is None or isinstance(index, bool), "collection_tuple_index_present is not a boolean"
 print("collection_tuple_index_present:", "absent" if index is None else index)
+# RDR-229 P3.12: /v1/status names live_label_index_present (absent on an older engine or when its probe could not run;
+# the doctor reads an absent key as "not checked", never false).
+label_index = status.get("live_label_index_present")
+assert label_index is None or isinstance(label_index, bool), "live_label_index_present is not a boolean"
+print("live_label_index_present:", "absent" if label_index is None else label_index)
 """
 
 IMPORT_MARKER = r"""
