@@ -109,7 +109,7 @@ BEGIN
         PERFORM pg_catalog.set_config(v_key, '1|' || NEW.collection || ' -> ' || v_stored, true);
     ELSE
         PERFORM pg_catalog.set_config(v_key,
-            (pg_catalog.split_part(v_state, '|', 1)::integer + 1)::text || '|'
+            (pg_catalog.substr(v_state, 1, pg_catalog.strpos(v_state, '|') - 1)::integer + 1)::text || '|'
                 || pg_catalog.substr(v_state, pg_catalog.strpos(v_state, '|') + 1), true);
     END IF;
     NEW.collection := v_stored;
@@ -159,7 +159,7 @@ BEGIN
         PERFORM pg_catalog.set_config(v_key, '1|' || NEW.collection || ' -> ' || v_stored, true);
     ELSE
         PERFORM pg_catalog.set_config(v_key,
-            (pg_catalog.split_part(v_state, '|', 1)::integer + 1)::text || '|'
+            (pg_catalog.substr(v_state, 1, pg_catalog.strpos(v_state, '|') - 1)::integer + 1)::text || '|'
                 || pg_catalog.substr(v_state, pg_catalog.strpos(v_state, '|') + 1), true);
     END IF;
     NEW.collection := v_stored;
@@ -209,7 +209,7 @@ BEGIN
         PERFORM pg_catalog.set_config(v_key, '1|' || NEW.source_collection || ' -> ' || v_stored, true);
     ELSE
         PERFORM pg_catalog.set_config(v_key,
-            (pg_catalog.split_part(v_state, '|', 1)::integer + 1)::text || '|'
+            (pg_catalog.substr(v_state, 1, pg_catalog.strpos(v_state, '|') - 1)::integer + 1)::text || '|'
                 || pg_catalog.substr(v_state, pg_catalog.strpos(v_state, '|') + 1), true);
     END IF;
     NEW.source_collection := v_stored;
@@ -229,7 +229,7 @@ BEGIN
     IF v_state IS NOT NULL AND v_state <> '' THEN
         PERFORM pg_catalog.set_config(v_key, '', true);
         RAISE LOG 'RDR-229: nexus.% took the chunk''s stored collection name on % row(s) of one statement (first: %)',
-            TG_TABLE_NAME, pg_catalog.split_part(v_state, '|', 1),
+            TG_TABLE_NAME, pg_catalog.substr(v_state, 1, pg_catalog.strpos(v_state, '|') - 1),
             pg_catalog.substr(v_state, pg_catalog.strpos(v_state, '|') + 1);
     END IF;
     RETURN NULL;

@@ -83,10 +83,13 @@ class Rdr229P37RenameWindowPinTest {
     }
 
     @Test
-    void theRenameRouteRunsInsideTheWindow() throws Exception {
+    void theRenameRouteRunsInsideTheWindow_evenWhenItIsRefusedFromTheLatch() throws Exception {
+        // the first test flipped gate 3 and so latched it: closing the live input now does not return a rename to the name path
+        // (that path, and its pinning, is Rdr229P37RenameWindowTest stage 1, on an engine whose gate 3 never opened)
         engine.gate3(false);
         assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(30), () -> !engine.completion().gate3()))
-            .as("gate 3 is closed for the name path").isTrue();
+            .as("the live gate 3 is closed").isTrue();
+        assertThat(engine.completion().gate3Latched()).as("but the latch holds").isTrue();
         String tenant = "p37-pin";
         String token = engine.newTenant(tenant);
         String oldName = "knowledge__p37pin__minilm-l6-v2-384__v1";
@@ -98,7 +101,8 @@ class Rdr229P37RenameWindowPinTest {
 
         var r = engine.rename(token, oldName, "knowledge__p37pin__minilm-l6-v2-384__v2");
 
-        assertThat(r.status()).as("the name path before gate 3: " + r).isEqualTo(200);
-        assertThat(engine.pinnedRenames() - before).as("the rename ran inside the window, once").isEqualTo(1);
+        assertThat(r.refused()).as("from the latch a rename is one-row or refused, never the name path; here the drop move or the restart is awaited: " + r)
+            .isTrue();
+        assertThat(engine.pinnedRenames() - before).as("the rename ran inside the window, once, refused or not").isEqualTo(1);
     }
 }
