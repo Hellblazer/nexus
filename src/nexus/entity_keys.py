@@ -165,8 +165,11 @@ def _rendered_name_of_label(collection: str) -> str:
     RDR-229 P3.8: a new knowledge subject's collection is a label the engine minted (``c19``), which a glob over
     ``knowledge__herb-*`` cannot match, so the label is matched by the name its attributes render. The row cache
     carries no ``model_version``, so the name is rendered at ``v1``; a glob that pins another version does not
-    match a label. Imports lazily: only a label with no glob match of its own reads the registry."""
-    if not collection or "__" in collection:
+    match a label. Imports lazily: only a label with no glob match of its own reads the registry, and only one of
+    the engine's minted form; a legacy name is matched by its own name alone, with no read."""
+    from nexus.corpus import _MINTED_LABEL_RE  # noqa: PLC0415 — deferred: corpus is heavy
+
+    if not _MINTED_LABEL_RE.fullmatch(collection or ""):
         return ""
     from nexus import mcp_infra  # noqa: PLC0415 — deferred: mcp_infra is heavy and only a label needs it
 
