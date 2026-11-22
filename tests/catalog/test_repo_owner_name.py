@@ -23,6 +23,7 @@ import structlog
 
 from nexus.catalog.engine_writes.repo_owner_name import repo_owner_name
 from nexus.catalog.tumbler import Tumbler
+from tests._module_seam import setattr_in
 
 _HASH = "bbbb2222"
 
@@ -144,7 +145,7 @@ def test_a_foreign_machine_path_that_raises_einval_is_not_live_and_keeps_the_nam
             raise OSError(errno.EINVAL, "Invalid argument")
         return real_stat(path, *args, **kwargs)
 
-    monkeypatch.setattr("nexus.catalog.engine_writes.repo_owner_name.os.stat", stat)
+    setattr_in(monkeypatch, "nexus.catalog.engine_writes.repo_owner_name", "os.stat", stat)
     assert _name(_Cat(_owner(foreign)), second) == "nexus"
 
 
