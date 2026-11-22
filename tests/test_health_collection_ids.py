@@ -175,18 +175,18 @@ def test_a_null_registry_id_outranks_a_wait_and_survives_unread_counts() -> None
 
 
 def _listed(raw_rows: list[dict]) -> list[dict]:
-    """Rows as the doctor reads them: through the real HttpCatalogClient.list_collections over a stubbed GET."""
+    """Rows as the doctor reads them: the real HttpCatalogClient.list_collection_rows (uncoerced) over a stubbed GET."""
     from nexus.catalog.http_catalog_client import HttpCatalogClient  # noqa: PLC0415 — test-local
 
     client = HttpCatalogClient(base_url="http://127.0.0.1:9", _token="t")
     client._get = lambda path, **_kw: {"collections": raw_rows}  # type: ignore[method-assign]
-    return client.list_collections()
+    return client.list_collection_rows()
 
 
 def test_an_engine_that_lists_no_ids_is_not_checked_never_a_failure() -> None:
     # every released engine before P3.5a's read half: no collection_id key; the client reads it as None on every row
     rows = _listed([{"name": "docs__a__m__v1", "superseded_by": ""}, {"name": "c9", "superseded_by": ""}])
-    assert all(r["collection_id"] is None for r in rows), "the client fills the key"
+    assert all("collection_id" not in r for r in rows), "the uncoerced read keeps the key absent"
     r = _ids(_counts(), rows)
     assert r.ok is True and not r.warn, r
     assert "no collection_id:" not in r.detail and "this engine does not list collection_id" in r.detail, r.detail
@@ -383,3 +383,25 @@ def test_the_sweep_runs_the_rows_on_the_status_it_was_handed(monkeypatch: pytest
     by_label = {r.label: r for r in results if r.label in (IDS_LABEL, CLASH_LABEL, INDEX_LABEL)}
     assert set(by_label) == {IDS_LABEL, CLASH_LABEL, INDEX_LABEL}
     assert by_label[INDEX_LABEL].warn is True
+
+
+def test_an_id_listing_engine_whose_every_row_is_null_fails_naming_them() -> None:
+    # linda's pre-review: the capability is the key's presence, never "some row holds an int"
+    rows = _listed([{"name": "a", "superseded_by": "", "collection_id": None},
+                    {"name": "b", "superseded_by": "", "collection_id": None}])
+    r = _ids(_counts(), rows)
+    assert r.ok is False and not r.warn and "2 registry row(s) with no collection_id: 'a', 'b'" in r.detail, r.detail
+
+
+def test_the_doctor_reads_the_uncoerced_listing_when_the_reader_offers_it(monkeypatch) -> None:
+    from nexus.catalog.http_catalog_client import HttpCatalogClient  # noqa: PLC0415 — test-local
+
+    client = HttpCatalogClient(base_url="http://127.0.0.1:9", _token="t")
+    # an engine before P3.5a's read half: no collection_id key. Read through the coerced list_collections, the key would
+    # be filled with None and every row would fail; the uncoerced read keeps it absent, so the row is "not checked".
+    client._get = lambda path, **_kw: {"collections": [{"name": "a", "superseded_by": ""}, {"name": "b", "superseded_by": ""}]}  # type: ignore[method-assign]
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: client)
+    counts = _counts()
+    out = {x.label: x for x in check_collection_ids(_STATUS_OK, counts_reader=lambda: counts, rows_reader=None)}
+    r = out[IDS_LABEL]
+    assert r.ok is True and not r.warn and "this engine does not list collection_id" in r.detail, r.detail
