@@ -396,6 +396,8 @@ class CollectionRegistryFkExtraTest {
             // manual, nexus-cbo4a batch 10).
             for (int i = 0; i < ALL_FOUR_FK_TABLES.size(); i++) {
                 ctx.alterTable(ALL_FOUR_FK_TABLES.get(i)).dropConstraintIfExists(ALL_FOUR_FK_NAMES.get(i)).execute();
+                // RDR-229 P3.3a: and the id twin beside it, which refuses the unissued id the orphan rows below carry
+                P33aTwinFixtures.dropTwin(ctx, ALL_FOUR_FK_TABLES.get(i).getName());
             }
 
             // Seed orphan rows referencing collections NOT in catalog_collections.
@@ -642,6 +644,7 @@ class CollectionRegistryFkExtraTest {
             Runnable orphanInsert, Runnable reconcileInsert) throws Exception {
         // FK absent (dropped by GROUP F); seed an orphan row while it is absent.
         ctx.alterTable(table).dropConstraintIfExists(fkName).execute();
+        P33aTwinFixtures.dropTwin(ctx, table.getName());   // RDR-229 P3.3a: the id twin enforces the unissued id the orphan row carries
         orphanInsert.run();
         assertThat(ctx.selectCount().from(CATALOG_COLLECTIONS)
                 .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))

@@ -49,7 +49,8 @@ import java.util.TreeSet;
  *
  * <p><b>The gates, in order</b> (a gate holds only if the one before it does):
  * <ol>
- *   <li>every stamp move (and P3.3a's, when a later release adds them) is complete: P3.3b's pass starts;</li>
+ *   <li>every stamp move and every P3.3a id-twin validation move ({@link FkTwins}) is complete: P3.3b's pass starts. A P3.3a label is
+ *       complete only while its twin foreign key is present and validated, as a stamp label is only while its CHECKs are;</li>
  *   <li>also both P3.3c swap moves and the three child validation moves (a later release adds them): P3.4's builds start;</li>
  *   <li>also P3.4 complete on the install, per residual S-2 (nexus-p2m1x.40): every collection the planner would index has a
  *       VALID id-predicate index, read from the registry and the index catalog, never from the existence of name indexes
@@ -100,6 +101,16 @@ public final class CompletionCheck {
         /** P3.1's read set: one stamp label per table that carries a CHECK. Gate 2 adds nothing until P3.3c. */
         public static ReadSet p31() {
             return new ReadSet(StampLabels.all(), List.of());
+        }
+
+        /**
+         * P3.3a's read set (nexus-p2m1x.19): P3.1's stamp labels and the seven id-twin validation labels ({@code db/rdr229/p33a-fk-twins.tsv}),
+         * all in gate 1: P3.3b's pass starts only once the twins are validated. Gate 2 adds nothing until P3.3c.
+         */
+        public static ReadSet p33a() {
+            List<String> gate1 = new ArrayList<>(StampLabels.all());
+            gate1.addAll(FkTwins.labels());
+            return new ReadSet(gate1, List.of());
         }
     }
 
@@ -215,6 +226,7 @@ public final class CompletionCheck {
         Map<String, List<P31Checks.Row>> checksByTable = P31Checks.checksByTable();
         Set<String> tables = tablesPresent(ctx);
         Map<String, Boolean> checkValidated = readChecks(ctx, checksByTable, tables);
+        Map<String, Boolean> twinValidated = readTwins(ctx, tables);
 
         List<CheckState> checks = new ArrayList<>();
         for (var e : checksByTable.entrySet()) {
@@ -234,7 +246,7 @@ public final class CompletionCheck {
         labelsRead.addAll(readSet.gate2Labels());
         Map<String, LabelState> states = new LinkedHashMap<>();
         for (String label : labelsRead) {
-            states.put(label, labelState(ctx, label, moves, checksByTable, tables, checkValidated, counter, violators));
+            states.put(label, labelState(ctx, label, moves, checksByTable, tables, checkValidated, twinValidated, counter, violators));
         }
 
         boolean gate1 = supersededByPresent
@@ -271,9 +283,10 @@ public final class CompletionCheck {
 
     private static LabelState labelState(DSLContext ctx, String label, Map<String, Move> moves,
                                          Map<String, List<P31Checks.Row>> checksByTable, Set<String> tables,
-                                         Map<String, Boolean> checkValidated, ViolatorCounter counter,
-                                         List<Violators> violators) {
-        String table = StampLabels.tableOf(label).orElse(null);
+                                         Map<String, Boolean> checkValidated, Map<String, Boolean> twinValidated,
+                                         ViolatorCounter counter, List<Violators> violators) {
+        Optional<FkTwins.Row> twin = FkTwins.byLabel(label);
+        String table = twin.map(FkTwins.Row::table).orElseGet(() -> StampLabels.tableOf(label).orElse(null));
         Move row = moves.get(label);
 
         boolean done = complete(ctx, label, moves, new HashSet<>());
@@ -287,6 +300,18 @@ public final class CompletionCheck {
         if (!done) {
             return new LabelState(label, table, Status.INCOMPLETE, row == null ? "no row in nexus.data_moves"
                 : (row.failed() ? "failed, and its driving table exists" : "open"));
+        }
+        if (twin.isPresent()) {
+            // P3.3a: the move is done, and the label is complete only while its twin is on the table and validated (the stamp
+            // label's CHECK rule). The twin is a foreign key, not a row count: a NOT VALID one waits on nothing the check can count.
+            Boolean validated = twinValidated.get(twin.get().twin());
+            if (validated == null) {
+                return tables.contains(table)
+                    ? new LabelState(label, table, Status.INCOMPLETE, "foreign key " + twin.get().twin() + " is missing")
+                    : new LabelState(label, table, Status.COMPLETE, "");
+            }
+            return validated ? new LabelState(label, table, Status.COMPLETE, "")
+                : new LabelState(label, table, Status.INCOMPLETE, "foreign key " + twin.get().twin() + " is NOT VALID");
         }
         if (table == null || !checksByTable.containsKey(table)) {
             return new LabelState(label, table, Status.COMPLETE, "");
@@ -404,6 +429,38 @@ public final class CompletionCheck {
                 if (e.getKey().equals(r.value2()) && e.getValue().stream().anyMatch(x -> x.constraint().equals(r.value1()))) {
                     out.put(r.value1(), r.value3());
                 }
+            }
+        }
+        return out;
+    }
+
+    /** constraint name to {@code convalidated}, for the P3.3a id twins found on their own table. */
+    static Map<String, Boolean> readTwins(DSLContext ctx, Set<String> tables) {
+        Map<String, String> tableOfTwin = new HashMap<>();
+        for (FkTwins.Row r : FkTwins.load()) {
+            if (tables.contains(r.table())) {
+                tableOfTwin.put(r.twin(), r.table());
+            }
+        }
+        Map<String, Boolean> out = new HashMap<>();
+        if (tableOfTwin.isEmpty()) {
+            return out;
+        }
+        var con = DSL.table(DSL.name("pg_catalog", "pg_constraint")).as("con");
+        var cls = DSL.table(DSL.name("pg_catalog", "pg_class")).as("cls");
+        var ns = DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("ns");
+        Field<String> conname = DSL.field(DSL.name("con", "conname"), String.class);
+        Field<String> relname = DSL.field(DSL.name("cls", "relname"), String.class);
+        Field<Boolean> validated = DSL.field(DSL.name("con", "convalidated"), Boolean.class);
+        for (var r : ctx.select(conname, relname, validated).from(con)
+                .join(cls).on(DSL.field(DSL.name("cls", "oid")).eq(DSL.field(DSL.name("con", "conrelid"))))
+                .join(ns).on(DSL.field(DSL.name("ns", "oid")).eq(DSL.field(DSL.name("cls", "relnamespace"))))
+                .where(DSL.field(DSL.name("ns", "nspname"), String.class).eq("nexus"))
+                .and(DSL.field(DSL.name("con", "contype"), String.class).eq("f"))
+                .and(conname.in(tableOfTwin.keySet())).fetch()) {
+            // the constraint of its own table only
+            if (r.value2().equals(tableOfTwin.get(r.value1()))) {
+                out.put(r.value1(), r.value3());
             }
         }
         return out;

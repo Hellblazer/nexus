@@ -50,9 +50,11 @@ final class StampLabels {
      * The explicit allowlist of residual R3 (nexus-p2m1x.42): the labels that count as <i>not applicable</i>, rather than
      * incomplete, while they have no row or a failed one and their table or its {@code collection_id} column is absent.
      * {@code aspect_extraction_queue} is absent on most installs (aspects-005 drops it) and its column is missing on an
-     * install whose kept table another role owns (vectors-068-18 is skipped, unrecorded). P3.3a adds its queue validation
-     * label here when it ships; every other label with no row stays incomplete.
+     * install whose kept table another role owns (vectors-068-18 is skipped, unrecorded). The two labels are the queue's stamp
+     * and its P3.3a id-twin validation (nexus-p2m1x.19, {@link FkTwins}), which share the table and the column; every other
+     * label with no row stays incomplete.
      */
     static final Map<String, Applicability> NOT_APPLICABLE_WHEN_ABSENT = Map.of(
-        labelFor("aspect_extraction_queue"), new Applicability("aspect_extraction_queue", "collection_id"));
+        labelFor("aspect_extraction_queue"), new Applicability("aspect_extraction_queue", "collection_id"),
+        FkTwins.PREFIX + "aspect_extraction_queue", new Applicability("aspect_extraction_queue", "collection_id"));
 }

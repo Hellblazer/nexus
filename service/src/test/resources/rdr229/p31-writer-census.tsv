@@ -6,13 +6,16 @@
 # kinds: jooq (literal TABLE constant), helper (ch.table(), ct.table(), COLLECTION_SCOPED_TABLES loop), by-name (TenantImportLoad), sql_function,
 # data_move (a registered nexus.data_moves template; file column is 'label [changelog:template line]', line the INSERT's; note says whether it sets the id, is superseded or handled, or is a VIOLATION).
 family	table	file_or_function	line	op	kind	name_columns_written	id_columns	has_check	note
+aspects	aspect_extraction_queue	rdr229-fkvalidate-aspect_extraction_queue [vectors-072-collection-id-fk-twins.xml:283]	280	update	data_move	-	collection_id	yes	sets collection_id
 aspects	aspect_extraction_queue	rdr229-stamp-aspect_extraction_queue [vectors-070-collection-id-stamp-moves.xml:330]	327	update	data_move	-	collection_id	yes	sets collection_id
 aspects	canary_query_ring	nexus.canary_query_ring_upsert [vectors-069-collection-id-dual-write-functions.xml:7786]	7738	insert	sql_function	collection	collection_id	yes	
 aspects	canary_query_ring	nexus.canary_query_ring_upsert [vectors-069-collection-id-dual-write-functions.xml:7792]	7738	insert	sql_function	collection	collection_id	yes	
 aspects	canary_query_ring	nexus.canary_query_ring_upsert [vectors-069-collection-id-dual-write-functions.xml:7798]	7738	insert	sql_function	collection	collection_id	yes	
+aspects	canary_query_ring	rdr229-fkvalidate-canary_query_ring [vectors-072-collection-id-fk-twins.xml:259]	256	update	data_move	-	collection_id	yes	sets collection_id
 aspects	canary_query_ring	rdr229-stamp-canary_query_ring [vectors-070-collection-id-stamp-moves.xml:169]	166	update	data_move	-	collection_id	yes	sets collection_id
 aspects	canary_query_ring	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11594	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)
 aspects	canary_query_ring	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12045	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)
+aspects	document_aspects	rdr229-fkvalidate-document_aspects [vectors-072-collection-id-fk-twins.xml:191]	188	update	data_move	-	collection_id	yes	sets collection_id
 aspects	document_aspects	rdr229-p31-residue-document-aspects [catalog-052-residue-moves-supersede.xml:110]	107	update	data_move	-	collection_id	yes	sets collection_id
 aspects	document_aspects	rdr229-p31-residue-document-aspects [catalog-052-residue-moves-supersede.xml:192]	189	update	data_move	-	collection_id	yes	sets collection_id
 aspects	document_aspects	rdr229-residue-document-aspects [catalog-049-note-uri-residue.xml:1509]	1506	update	data_move	-	collection_id	yes	superseded by rdr229-p31-residue-document-aspects
@@ -32,6 +35,7 @@ aspects	document_aspects	service/src/main/java/dev/nexus/service/db/CatalogRepos
 aspects	document_aspects	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11654	update	jooq	-	collection_id	yes	
 aspects	document_aspects	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12045	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)
 aspects	document_aspects	service/src/main/java/dev/nexus/service/db/TenantImportLoad.java	332	insert	by-name	collection	collection_id	yes	TenantImportLoad by-name INSERT ... SELECT over TenantExport.TABLES
+aspects	document_highlights	rdr229-fkvalidate-document_highlights [vectors-072-collection-id-fk-twins.xml:242]	239	update	data_move	-	collection_id	yes	sets collection_id
 aspects	document_highlights	rdr229-p31-residue-document-highlights [catalog-052-residue-moves-supersede.xml:142]	107	update	data_move	-	collection_id	yes	sets collection_id
 aspects	document_highlights	rdr229-p31-residue-document-highlights [catalog-052-residue-moves-supersede.xml:243]	240	update	data_move	-	collection_id	yes	sets collection_id
 aspects	document_highlights	rdr229-residue-document-highlights [catalog-049-note-uri-residue.xml:1538]	1506	update	data_move	-	collection_id	yes	superseded by rdr229-p31-residue-document-highlights
@@ -219,6 +223,7 @@ taxonomy	taxonomy_centroids	rdr229-stamp-taxonomy_centroids [vectors-070-collect
 taxonomy	taxonomy_centroids	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11594	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)
 taxonomy	taxonomy_centroids	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12045	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)
 taxonomy	taxonomy_centroids	service/src/main/java/dev/nexus/service/vectors/TaxonomyCentroidRepository.java	163	insert	helper	collection	collection_id	yes	ct.table() helper
+taxonomy	taxonomy_meta	rdr229-fkvalidate-taxonomy_meta [vectors-072-collection-id-fk-twins.xml:225]	222	update	data_move	-	collection_id	yes	sets collection_id
 taxonomy	taxonomy_meta	rdr229-stamp-taxonomy_meta [vectors-070-collection-id-stamp-moves.xml:220]	217	update	data_move	-	collection_id	yes	sets collection_id
 taxonomy	taxonomy_meta	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11594	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)
 taxonomy	taxonomy_meta	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12045	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)
@@ -233,6 +238,7 @@ taxonomy	topic_assignments	nexus.assign_from_chashes_384 [vectors-069-collection
 taxonomy	topic_assignments	nexus.assign_from_chashes_384 [vectors-069-collection-id-dual-write-functions.xml:4911]	4772	insert	sql_function	source_collection	source_collection_id	yes	
 taxonomy	topic_assignments	nexus.assign_from_chashes_768 [vectors-069-collection-id-dual-write-functions.xml:5163]	5080	insert	sql_function	source_collection	source_collection_id	yes	
 taxonomy	topic_assignments	nexus.assign_from_chashes_768 [vectors-069-collection-id-dual-write-functions.xml:5210]	5080	insert	sql_function	source_collection	source_collection_id	yes	
+taxonomy	topic_assignments	rdr229-fkvalidate-topic_assignments [vectors-072-collection-id-fk-twins.xml:174]	171	update	data_move	-	source_collection_id	yes	sets source_collection_id
 taxonomy	topic_assignments	rdr229-stamp-topic_assignments [vectors-070-collection-id-stamp-moves.xml:305]	302	update	data_move	-	source_collection_id	yes	sets source_collection_id
 taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/CatalogIdStamps.java	112	update	jooq	-	source_collection_id	yes	
 taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11594	update	helper	source_collection	source_collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)
@@ -249,6 +255,7 @@ taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/TenantImpo
 taxonomy	topics	nexus.topics_doc_count_recount_del [vectors-069-collection-id-dual-write-functions.xml:5911]	5852	update	sql_function	collection	collection_id	yes	
 taxonomy	topics	nexus.topics_doc_count_recount_ins [vectors-069-collection-id-dual-write-functions.xml:5736]	5660	update	sql_function	collection	collection_id	yes	
 taxonomy	topics	nexus.topics_recount_doc_count [vectors-069-collection-id-dual-write-functions.xml:6026]	6012	update	sql_function	collection	collection_id	yes	
+taxonomy	topics	rdr229-fkvalidate-topics [vectors-072-collection-id-fk-twins.xml:208]	205	update	data_move	-	collection_id	yes	sets collection_id
 taxonomy	topics	rdr229-stamp-topics [vectors-070-collection-id-stamp-moves.xml:237]	234	update	data_move	-	collection_id	yes	sets collection_id
 taxonomy	topics	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11594	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)
 taxonomy	topics	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12045	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)
