@@ -375,7 +375,7 @@ class ReembedCutoverTest extends ReembedFixture {
         Job cutover = inCutover(fx, started);    // an empty source: the pass completed
         su(ctx -> ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.TENANT_ID.eq(fx.tenant()))
             .and(CATALOG_COLLECTIONS.NAME.eq(fx.src())).execute());
-        dev.nexus.service.db.CollectionRegistry.evictTenant(fx.tenant());
+        dev.nexus.service.db.CollectionRegistry.shared().evictTenant(fx.tenant());
 
         runner(fx, ONE_DOC_PER_BATCH).tick();
 

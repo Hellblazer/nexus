@@ -159,7 +159,7 @@ class TenantResetRouteTest {
             assertThat(resp.statusCode()).as(resp.body()).isEqualTo(403);
             assertThat(CollectionRegistry.isKnown(tenant, "c")).as("a refused call evicts nothing").isTrue();
         } finally {
-            CollectionRegistry.evictTenant(tenant);
+            CollectionRegistry.shared().evictTenant(tenant);
         }
     }
 
@@ -183,7 +183,7 @@ class TenantResetRouteTest {
             assertThat(CollectionRegistry.isKnown(tenant, "c")).as("the data bearer's own tenant is untouched").isTrue();
             assertThat(CollectionRegistry.isKnown("default", defaultCollection)).as("root's own tenant is untouched").isTrue();
         } finally {
-            CollectionRegistry.evictTenant(tenant);
+            CollectionRegistry.shared().evictTenant(tenant);
             CollectionRegistry.evict("default", defaultCollection);
         }
     }
@@ -250,7 +250,7 @@ class TenantResetRouteTest {
             assertThat(resp.body()).contains("NX_SEARCH_PCI");
             assertThat(CollectionRegistry.isKnown(tenant, "c")).isTrue();
         } finally {
-            CollectionRegistry.evictTenant(tenant);
+            CollectionRegistry.shared().evictTenant(tenant);
         }
     }
 
@@ -423,8 +423,8 @@ class TenantResetRouteTest {
             second.forEach(count -> assertThat(count.asInt()).as("a second reset has nothing left").isZero());
         } finally {
             on.dataTokenSweepOverride = null;
-            CollectionRegistry.evictTenant(x);
-            CollectionRegistry.evictTenant(y);
+            CollectionRegistry.shared().evictTenant(x);
+            CollectionRegistry.shared().evictTenant(y);
         }
     }
 
