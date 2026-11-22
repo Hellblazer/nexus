@@ -41,7 +41,7 @@ import java.util.List;
  * inside the re-check's budget for a state the gate already excludes.
  *
  * <p><b>on_complete</b>, one transaction, no EXCEPTION clause (a 55P03 lock timeout propagates, and the finisher records it as a
- * transient blocked state and retries, RDR-246 fail-fast): (a) refuse when the table has no valid unique key on the id columns
+ * transient blocked state and retries, RDR-246 fail-fast): (0) chunks only, wait for the child index (see {@code requireChildIndex}: 55P03, transient); (a) refuse when the table has no valid unique key on the id columns
  * (SQLSTATE 55000, permanent); (b) chunks only, add the three child id keys beside their name keys, {@code NOT VALID},
  * {@code ON UPDATE CASCADE}, each with its name key's ON DELETE action (the manifest's is DEFERRABLE INITIALLY DEFERRED, see the comment in {@code chunksOnComplete}); (c) chunks only, register the three
  * validation moves, after their constraints exist in this transaction; (d) chunks only, add the RDR-225 composite on the id, which
@@ -74,6 +74,9 @@ public final class Rdr229SwapMove {
     /** The label prefix and suffix of a child's validation move: {@code rdr229-fkvalidate-<table>-chunk-fk}. */
     static final String VALIDATION_LABEL_PREFIX = "rdr229-fkvalidate-";
     static final String VALIDATION_LABEL_SUFFIX = "-chunk-fk";
+
+    /** The index the chunks swap waits for: the child-side lookup of chunk_orphaned_at's id key (vectors-074-1). */
+    public static final String CHILD_INDEX = "idx_chunk_orphaned_at_tenant_chash";
 
     /** The composite on the id from nexus.chunks to the registry. */
     public static final String COMPOSITE_CONSTRAINT = "chunks_collection_id_fk";
@@ -235,6 +238,30 @@ public final class Rdr229SwapMove {
             """.formatted(table, keyColumn, sortedKey(keyColumn));
     }
 
+    /**
+     * The chunks swap's first statement: it waits until a boot has built {@link #CHILD_INDEX} (vectors-074-1), and a swap that adds the
+     * child id keys before it would make every chunk delete read the whole of chunk_orphaned_at. It RAISES SQLSTATE 55P03
+     * ({@code lock_not_available}) with a message naming the index, and that is a choice of class, not of meaning: the framework has no
+     * missing-prerequisite path an {@code on_complete} can signal (RDR-246's reason class {@code missing_prerequisite} is a label the
+     * reporter derives from one fixed reason, "pg_background is not installed", and the transient/permanent decision reads the SQLSTATE
+     * alone). 55P03 from {@code on_complete} is TRANSIENT ({@code DataMoveFailureClassifier#transientSession}): the move is left blocked
+     * with a retry and a backoff, not failed, and the completion transaction rolls back whole, so nothing is added. A check in the
+     * verification would be PERMANENT (a non-empty verification fails the move for good, and the pass registers each swap once), so a
+     * boot that failed to build the index would wedge the swap. It runs before {@link #requireIdKey} and before any DDL.
+     */
+    private static String requireChildIndex() {
+        return """
+                IF NOT EXISTS (SELECT 1
+                                 FROM pg_catalog.pg_index i
+                                 JOIN pg_catalog.pg_class c ON c.oid = i.indexrelid
+                                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                                WHERE n.nspname = 'nexus' AND c.relname = '%1$s' AND i.indisvalid) THEN
+                    RAISE EXCEPTION 'rdr229 swap of nexus.chunks is waiting: index nexus.%1$s is not built or is INVALID; the migration builds it at the next boot'
+                        USING ERRCODE = 'lock_not_available';
+                END IF;
+            """.formatted(CHILD_INDEX);
+    }
+
     private static String centroidsOnComplete() {
         return "DO $swap$\nBEGIN\n" + requireIdKey("taxonomy_centroids", "topic_id") + "END\n$swap$";
     }
@@ -280,7 +307,8 @@ public final class Rdr229SwapMove {
     }
 
     private static String chunksOnComplete() {
-        StringBuilder sql = new StringBuilder("DO $swap$\nBEGIN\n").append(requireIdKey("chunks", "chash"));
+        StringBuilder sql = new StringBuilder("DO $swap$\nBEGIN\n").append(requireChildIndex())
+            .append(requireIdKey("chunks", "chash"));
         // the child id keys first (see CHILDREN for their actions and the manifest key's deferral), then the validation moves,
         // registered after the constraints they validate exist in this transaction
         CHILDREN.forEach(c -> sql.append(childKey(c)));

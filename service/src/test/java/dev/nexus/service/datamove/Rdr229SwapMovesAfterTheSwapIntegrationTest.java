@@ -452,4 +452,53 @@ class Rdr229SwapMovesAfterTheSwapIntegrationTest extends Rdr229SwapMovesFixtures
         assertThat(manifest).as("catalog_document_chunks").contains("idx_catalog_chunks_chash").doesNotContain("Seq Scan");
         assertThat(assignments).as("topic_assignments").contains("idx_ta_tenant_doc_id").doesNotContain("Seq Scan");
     }
+
+    // ── 15: the chunks swap waits for the child index (transient, never a wedge) ────────────────────────────
+
+    /**
+     * The chunks swap's on_complete first checks that {@code idx_chunk_orphaned_at_tenant_chash} (vectors-074-1) is built and valid, and with
+     * it absent raises 55P03: a TRANSIENT blocked state (failed_at stays NULL, last_transient is set), the completion rolls back whole so
+     * nothing is added to a child table. A verification arm would have been permanent and wedged the swap. Once a boot has built the index
+     * the same move completes on its next pass (the backoff is moved into the past, as the clock would).
+     */
+    @Test
+    void anAbsentChildIndexBlocksTheSwapTransiently_andItCompletesOnceTheIndexIsBuilt() throws Exception {
+        seed("noindex");
+        registerSwaps();
+        try (Connection c = pg.createConnection("")) {
+            c.setAutoCommit(true);
+            PgContainerHelper.replayChangesetRollback(c, "db/changelog/vectors-074-chunk-orphaned-at-chash-index.xml", "vectors-074-1");
+        }
+        try {
+            runSwaps(new VerifyingFinisher());
+
+            var chunks = moves(LABEL_F.eq(CHUNKS_SWAP)).get(0);
+            assertThat(chunks.get("completed_at")).as("the swap did not complete").isNull();
+            assertThat(chunks.get("failed_at")).as("transient: blocked, not failed").isNull();
+            assertThat(chunks.get("last_transient")).as("the blocked state is recorded").isNotNull();
+            assertThat((String) chunks.get("last_transient")).contains("55P03").contains(Rdr229SwapMove.CHILD_INDEX);
+            assertThat((Integer) chunks.get("transient_retries")).as("and counted: it retries").isGreaterThanOrEqualTo(1);
+            for (String child : CHILD_ID_COLUMN.keySet()) {
+                assertThat(idTwins(child)).as("rolled back: no id twin on " + child).isEmpty();
+            }
+            assertThat(compositeOnId()).as("nor the composite").isEmpty();
+            assertThat(registeredBySwap()).as("nor a validation move").isEmpty();
+        } finally {
+            // a boot builds the index (vectors-074-1 does; a plain build here: no concurrency in a test)
+            ctx().createIndexIfNotExists(Rdr229SwapMove.CHILD_INDEX).on(DSL.table(DSL.name("nexus", "chunk_orphaned_at")),
+                DSL.field(DSL.name("tenant_id")), DSL.field(DSL.name("chash"))).execute();
+        }
+
+        // time passes: the retry is due
+        ctx().update(DSL.table(DSL.name("nexus", "data_moves")))
+            .set(DSL.field(DSL.name("last_transient_at"), OffsetDateTime.class), OffsetDateTime.now().minusHours(1))
+            .where(LABEL.eq(CHUNKS_SWAP)).execute();
+        runSwaps(new VerifyingFinisher());
+
+        assertThat(completedAt(CHUNKS_SWAP)).as("the same move completes on its next pass").isNotNull();
+        for (String child : CHILD_ID_COLUMN.keySet()) {
+            assertThat(idTwins(child)).as("and adds the id twin on " + child).hasSize(1);
+        }
+        assertThat(compositeOnId()).hasSize(1);
+    }
 }
