@@ -2557,12 +2557,22 @@ def _warn_skipped_collections(route: str, requested: list[str]) -> None:
     )
 
 
+def split_skipped_collections_header(raw: str | None) -> list[str]:
+    """The names an ``X-Nexus-Skipped-Collections`` value carries: comma-separated, each form-encoded as UTF-8 by the
+    engine (``VectorHandler.encodeSkippedCollections``, nexus-5clu8), so a label holding a space, a comma or a
+    non-ASCII letter survives the header. A legacy name encodes to itself, so an older engine's raw value decodes to
+    the same list."""
+    from urllib.parse import unquote_plus  # noqa: PLC0415 — stdlib, read only when a fan-out skipped a name
+
+    if not raw:
+        return []
+    return [unquote_plus(part) for part in raw.split(",") if part]
+
+
 def _log_skipped_collections(route: str, requested: list[str], raw: str | None) -> list[str]:
     """Log the skipped-collections warning for the already-popped header value
     *raw* and return the skipped names (empty when the header was absent)."""
-    if not raw:
-        return []
-    skipped = [name for name in raw.split(",") if name]
+    skipped = split_skipped_collections_header(raw)
     if not skipped:
         return []
     _log.warning(
