@@ -65,9 +65,12 @@ def _bind_identity(config_dir: Path, session_id: str = SESSION_ID, identity: str
     """A token file (no token) binding *session_id* to *identity*, as the SessionStart bind writes one."""
     directory = config_dir / "identity"
     directory.mkdir(parents=True, exist_ok=True)
-    (directory / f"{abs(hash(session_id)) % 10**6}.1.token").write_text(
+    target = directory / f"{abs(hash(session_id)) % 10**6}.1.token"
+    scratch = directory / f".{target.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    scratch.write_text(
         json.dumps({"identity": identity, "generation": 1, "pid": 1, "started_at": 1,
                     "session_id": session_id, "session_ids": [session_id]}), encoding="utf-8")
+    os.replace(scratch, target)  # atomic: two concurrent runs rebind the same file and a reader never sees it half written
 
 
 def _payload(**overrides: str) -> str:
@@ -1461,6 +1464,78 @@ class TestAClearedRecordIsNeitherReadNorDrained:
         for gone in ("_drain_cleared_record", "_read_cleared_record", "_prune_stale_cleared_records", "_drain_named_mailbox"):
             assert not hasattr(wheel, gone), gone
             assert gone not in text, gone
+
+
+class TestTheIdentityMailboxPassIsLockedAndExactlyOnce:
+    """The two properties the retired cleared-record drain tests pinned, ported onto the identity address
+    (RDR-253 Phase 2): the pass fails closed on a pending lock it cannot take, and two real drains on one session
+    deliver each row exactly once."""
+
+    @_ENTRY_POINTS
+    def test_a_held_pending_lock_makes_the_pass_skip_and_claim_nothing(self, tmp_path, engine, argv) -> None:
+        """nexus-galkv.6 fix 3 (gate audit round 2). A lock the pass cannot acquire within its bound fails CLOSED: no
+        claim against the mailbox at all, never the old behaviour of running unlocked past the timeout, which could
+        duplicate a delivery."""
+        eng = engine()
+        eng.rows = [_row("s1-mail", body="held behind the lock")]
+        _wired(tmp_path, eng)
+        lock_path = tmp_path / "config" / "tuple-watch" / f"{IDENTITY}.pending.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+        lock_fd(fd, blocking=True)
+        try:
+            res = _run(tmp_path=tmp_path, argv=argv)
+        finally:
+            unlock_fd(fd)
+            os.close(fd)
+
+        assert res.returncode == 0, res.stderr
+        assert "held behind the lock" not in res.stdout
+        assert "SKIP" in res.stderr
+        assert IDENTITY in res.stderr
+        in_bodies = [b for p, b in eng.calls if p == "/v1/tuples/in"]
+        assert not any((b.get("keys_pattern") or {}).get("to") == IDENTITY for b in in_bodies), (
+            "the pass claimed from the mailbox despite the unavailable lock"
+        )
+
+    @_ENTRY_POINTS
+    def test_two_processes_on_one_session_concurrently_deliver_exactly_once(self, tmp_path, engine, argv) -> None:
+        """Two real drains of one session (two terminals on a resumed session) run CONCURRENTLY as subprocesses
+        against one engine. Every message is delivered exactly once across the two outputs."""
+        eng = engine()
+        eng.rows = [_row(f"m{i}", body=f"concurrent-{i}") for i in range(5)]
+        _wired(tmp_path, eng)
+        _bind_identity(tmp_path / "config")
+
+        results: dict[str, subprocess.CompletedProcess[str]] = {}
+        barrier = threading.Barrier(2)
+
+        def _go(key: str) -> None:
+            barrier.wait(timeout=10)
+            results[key] = _run(tmp_path=tmp_path, argv=argv)
+
+        threads = [threading.Thread(target=_go, args=(key,)) for key in ("x", "y")]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=60)
+
+        assert not any(t.is_alive() for t in threads), "a drain subprocess hung"
+        res_x, res_y = results["x"], results["y"]
+        assert res_x.returncode == 0, res_x.stderr
+        assert res_y.returncode == 0, res_y.stderr
+
+        expected = {f"concurrent-{i}" for i in range(5)}
+        delivered_x = {m for m in expected if m in res_x.stdout}
+        delivered_y = {m for m in expected if m in res_y.stdout}
+        assert delivered_x & delivered_y == set(), (
+            f"a message was delivered to both processes: {delivered_x & delivered_y}\n"
+            f"x stdout:\n{res_x.stdout}\ny stdout:\n{res_y.stdout}"
+        )
+        assert delivered_x | delivered_y == expected, (
+            f"not every message was delivered: missing {expected - (delivered_x | delivered_y)}\n"
+            f"x stdout:\n{res_x.stdout}\ny stdout:\n{res_y.stdout}"
+        )
 
 
 # ── Size pre-check (bead nexus-r7xao) ────────────────────────────────────────
