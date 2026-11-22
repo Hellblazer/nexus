@@ -121,8 +121,31 @@ class Rdr229P37NamePathCascadeTest {
         }
         long withMs = renameMillis(tenant, token, enabledOld, coll("p37casca", 2));
 
+        // the same rename with the three functions replaced by mutants WITHOUT the tombstone guard (what this commit's predecessor shipped):
+        // the cascade runs step 2 for every row. The guard is what keeps the cascade at the cost above.
+        String unguardedOld = coll("p37cascc", 1);
+        seed(tenant, unguardedOld);
+        List<String> names = List.of(Vectors079Text.MANIFEST, Vectors079Text.ORPHANED, Vectors079Text.ASSIGNMENTS);
+        List<String> originals = new java.util.ArrayList<>();
+        for (String n : names) {
+            originals.add(Vectors079Text.function(n));
+        }
+        long unguardedMs;
+        try {
+            for (String o : originals) {
+                engine.su(ctx -> ctx.execute(Vectors079Text.withoutTombstoneGuard(o)));
+            }
+            unguardedMs = renameMillis(tenant, token, unguardedOld, coll("p37cascc", 2));
+        } finally {
+            for (String o : originals) {
+                engine.su(ctx -> ctx.execute(o));
+            }
+        }
+
         System.out.println("TIMING name-path rename of " + (N + 1) + " chunks, " + (N + 1) + " manifest, " + N / 2 + " orphaned, " + N / 2
-            + " assignment rows: triggers disabled " + withoutMs + " ms, installed " + withMs + " ms");
+            + " assignment rows: triggers disabled " + withoutMs + " ms, installed " + withMs + " ms, installed without the tombstone guard "
+            + unguardedMs + " ms");
+        assertThat(unguardedMs).as("load-bearing: without the guard the same cascade is slower (guarded " + withMs + " ms)").isGreaterThan(withMs);
         assertThat(withMs).as("the cascade costs about what it costs without the triggers (disabled " + withoutMs + " ms): no by-id scan per row")
             .isLessThanOrEqualTo(withoutMs * 3 + 3000);
     }
