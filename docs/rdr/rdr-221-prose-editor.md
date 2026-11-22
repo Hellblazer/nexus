@@ -125,7 +125,7 @@ copy in Typora. Each finding is a T2 record, `nexus_rdr/221-research-N`.
    check that only warns (`rdr-gate-checklist`); skill files get a structural
    lint (`writing-nx-skills`); reference docs, CHANGELOG and commit messages
    get nothing. Unedited samples include an 80-word sentence in
-   `docs/storage-tiers.md` (line 173), and CHANGELOG bullets across releases 7.63.0 to
+   `docs/storage-tiers.md` (line 173 then, line 194 now, 78 words by a later count), and CHANGELOG bullets across releases 7.63.0 to
    7.66.0 with a median of 90 words, 13 of 65 at 150 or more and the longest
    560 (measured 2026-09-29); other
    unedited docs (`workflows.md`, `querying-guide.md`) are clean. The
@@ -231,7 +231,7 @@ copy in Typora. Each finding is a T2 record, `nexus_rdr/221-research-N`.
   storage one), and 0 of 20 in 10 runs on the small one with two edits rejected
   and the rest held. The pre-registered floor is 10 measurable runs per
   document; the small document had 4 and the storage one 9 in the first batch
-  (`tests/prose_edit/acceptance/README.md`, line 175), so the storage document
+  (`tests/prose_edit/acceptance/README.md`, lines 174-175), so the storage document
   missed the floor by one; the second batch added 10 on the small one. Not
   measured: a class of change (another em dash is proposed again, by design), a
   different change at the same spot, several reruns, and a document changed
@@ -880,7 +880,8 @@ critique `nexus/critique-3616b9868f-none-2026-11-22`.
   on `docs/storage-tiers.md` in Phase 2 on 2026-10-05, before Amendment A1
   (2 edits, 5 queries, 1 paragraph cut), and left the 78-word "Domain split
   (RDR-063...)" sentence untouched (now `docs/storage-tiers.md:194`); no A1 run
-  has been made on it. The changelog trial was one short entry (`CHANGELOG.md:17`),
+  has been made on it. The changelog trial was one short entry (nexus-2k66t.3, then under
+  `[Unreleased]`, now `CHANGELOG.md:1396`),
   and the long CHANGELOG entries were not exercised (T2
   `nexus/critique-3616b9868f-none-2026-11-22`, `nexus_rdr/221-phase2-results`).
 - **Gap 2, corrections are guidance, never an edit pass: mechanism solved,
@@ -899,7 +900,12 @@ critique `nexus/critique-3616b9868f-none-2026-11-22`.
   qualifier into a query. The `site-page` voice pass, now `prose-cut`, remains
   the only cutter applied without a per-edit accept, and it covers `web/` pages
   and essays only.
-- **Gap 4, voice has no anchor outside one skill: solved.**
+- **Gap 4, voice has no anchor outside one skill: solved for four genres.**
+  Exemplars exist for 4 of the 6 genres the brief names (`rdr`,
+  `reference-doc`, `changelog`, `exploration-essay`; T2 `nexus_prose`
+  `genre/*`). Voice cards are stored per document on the author's yes, so far
+  for essay and web documents only. The how-to and commit-message genres have
+  no exemplars, by Sam's drop (Step 3.2).
 
 ### Scope Verification
 
@@ -961,5 +967,5 @@ closed as moot and not active, since the tally it served was dropped.
   - Deployment: the editor shipped as the opt-in plugin `conexus-prose-edit` (`prose-edit/`), not a project skill under `.claude/`; Approach, Technical Design, Step 1.2, Step 3.3, Alternative 3, Trade-offs and Cross-Cutting follow.
   - The marked-up copy and viewer are gone (conexus 8.3.0); Step 1.1, Failure Modes, Day 2, the Test Plan and the Risks mitigation follow. Filter drops are listed in the chat.
   - Critical Assumptions "Worth accepting" and "Voice kept" ticked on the Phase 2 pass; "Memory helps" ticked on its narrow measurement; all four boxes dispositioned.
-  - A "Gap disposition" block in the Finalization Gate: Gap 2 solved, Gap 4 solved, Gap 3 accepted as reduced, Gap 1 partly solved.
+  - A "Gap disposition" block in the Finalization Gate: Gap 2 solved, Gap 4 solved, Gap 3 accepted as reduced, Gap 1 partly solved (Gap 2 later restated as "mechanism solved, coverage partial" and Gap 4 as "solved for four genres").
 - 2026-11-22 (second commit, after the re-critique `nexus/critique-85a121250a-none-2026-11-22-r2`: 0 Critical, 5 Significant, all evidence overclaims): the Gap 1 disposition says the storage-tiers sentence was exercised pre-A1 and untouched, and that the how-to and commit-message genres were dropped by Sam ("Drop them"); Gap 2 reads "mechanism solved, coverage partial" with the corrections not carried; "Memory helps" is split into two boxes (first half ticked with its missed 10-run floor, second half waived as not measured); the Phase 1 exit points at what it does not claim; the stale cites (`line-editor.md` rule now line 68, Discovery 12's `site-page` lines 36 and 69) and the `prose/viewer` claim are corrected; nexus-b0b40 is closed as moot; "the only automated cutter" now reads "the only cutter applied without a per-edit accept".
