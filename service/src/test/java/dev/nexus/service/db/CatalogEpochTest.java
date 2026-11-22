@@ -33,15 +33,25 @@ import java.net.http.HttpResponse;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.time.OffsetDateTime;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneId;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
+import javax.sql.DataSource;
 
 /**
  * RDR-229 P3.11 (nexus-p2m1x.31): {@link CatalogEpoch}, the token a client cache keyed by
  * {@code (catalog_epoch, collection_id)} compares to drop on a tenant restore and on a PITR rewind.
+ *
+ * <p>Not tested here: the log line for a pg_control function that answers NULL
+ * ({@code event=catalog_epoch_cluster_null}, and {@code cause=pg_control_member_null} on the boot line). PostgreSQL
+ * cannot be made to answer NULL from {@code pg_control_system()}, {@code pg_control_checkpoint()} or
+ * {@code pg_postmaster_start_time()}, so the branch has no input to drive it.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class CatalogEpochTest {
@@ -335,6 +345,113 @@ class CatalogEpochTest {
         restoreControlPrivileges();
         runChangelog("revoke-postmaster");
         assertThat(status().get("catalog_epoch_available").asBoolean()).as("one revoked").isFalse();
+    }
+
+    // ── CatalogEpochStatus: the 5 s cache and the log lines ──────────────────────────
+
+    /** A clock the test moves. */
+    private static final class MovableClock extends Clock {
+        long millis = 1_000_000L;
+        @Override public ZoneId getZone() { return ZoneId.of("UTC"); }
+        @Override public Clock withZone(ZoneId zone) { return this; }
+        @Override public Instant instant() { return Instant.ofEpochMilli(millis); }
+        @Override public long millis() { return millis; }
+    }
+
+    /** A DataSource that counts the connections asked of it; {@code failing} makes each ask throw. */
+    private static DataSource counting(DataSource real, AtomicInteger asks, boolean failing) {
+        return (DataSource) java.lang.reflect.Proxy.newProxyInstance(DataSource.class.getClassLoader(),
+            new Class<?>[] {DataSource.class}, (proxy, method, args) -> {
+                if (method.getName().equals("getConnection")) {
+                    asks.incrementAndGet();
+                    if (failing) throw new SQLException("database is down");
+                }
+                try {
+                    return method.invoke(real, args);
+                } catch (java.lang.reflect.InvocationTargetException e) {
+                    throw e.getCause();
+                }
+            });
+    }
+
+    @Test
+    void theStatusAnswerIsCachedForFiveSecondsThenAskedAgain() {
+        var asks = new AtomicInteger();
+        var clock = new MovableClock();
+        var supplier = CatalogEpochStatus.statusSupplier(counting(svcDs, asks, false), clock);
+        assertThat(asks.get()).as("the boot ask").isEqualTo(1);
+        assertThat(supplier.get()).isTrue();
+        clock.millis += CatalogEpochStatus.TTL_MILLIS - 1;
+        assertThat(supplier.get()).isTrue();
+        assertThat(asks.get()).as("two gets inside the window made no new probe").isEqualTo(1);
+        clock.millis += 1;
+        assertThat(supplier.get()).isTrue();
+        assertThat(asks.get()).as("after the window, a second probe").isEqualTo(2);
+    }
+
+    @Test
+    void aProbeThatCannotRunIsCachedToo_andLoggedOncePerTransition() {
+        var asks = new AtomicInteger();
+        var clock = new MovableClock();
+        try (var logs = captureLogs()) {
+            var supplier = CatalogEpochStatus.statusSupplier(counting(svcDs, asks, true), clock);
+            assertThat(supplier.get()).as("cannot tell: no answer").isNull();
+            assertThat(supplier.get()).isNull();
+            assertThat(asks.get()).as("the failure is cached inside the window: one probe").isEqualTo(1);
+            clock.millis += CatalogEpochStatus.TTL_MILLIS;
+            assertThat(supplier.get()).isNull();
+            assertThat(asks.get()).as("after the window, one more").isEqualTo(2);
+            assertThat(logs.lines()).as("one line for the transition, none for the repeat")
+                .hasSize(1).allSatisfy(l -> assertThat(l).contains("event=catalog_epoch_probe_unavailable"));
+        }
+    }
+
+    @Test
+    void theBootWarnFiresOnceWhenThePrivilegeIsMissing_naming_theCause() throws Exception {
+        runChangelog("revoke-postmaster");
+        var clock = new MovableClock();
+        try (var logs = captureLogs()) {
+            var supplier = CatalogEpochStatus.statusSupplier(svcDs, clock);
+            assertThat(supplier.get()).isFalse();
+            clock.millis += CatalogEpochStatus.TTL_MILLIS;
+            assertThat(supplier.get()).as("asked again, still no").isFalse();
+            assertThat(logs.lines()).as("the warn is per transition, not per probe").hasSize(1)
+                .allSatisfy(l -> assertThat(l).contains("event=catalog_epoch_unavailable")
+                    .contains("cause=pg_control_not_readable").contains("pg_control_system()")
+                    .contains("pg_control_checkpoint()").contains("client_keys_by=label"));
+        }
+    }
+
+    @Test
+    void noWarnWhenTheEpochIsAvailable() {
+        try (var logs = captureLogs()) {
+            var supplier = CatalogEpochStatus.statusSupplier(svcDs, new MovableClock());
+            assertThat(supplier.get()).isTrue();
+            assertThat(logs.lines()).isEmpty();
+        }
+    }
+
+    /** The WARN lines of CatalogEpochStatus while open. */
+    private static final class Logs implements AutoCloseable {
+        private final ch.qos.logback.classic.Logger logger = (ch.qos.logback.classic.Logger)
+            org.slf4j.LoggerFactory.getLogger(CatalogEpochStatus.class);
+        private final ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> appender =
+            new ch.qos.logback.core.read.ListAppender<>();
+        Logs() {
+            appender.start();
+            logger.addAppender(appender);
+        }
+        List<String> lines() {
+            return appender.list.stream().map(e -> e.getFormattedMessage()).toList();
+        }
+        @Override public void close() {
+            logger.detachAppender(appender);
+            appender.stop();
+        }
+    }
+
+    private static Logs captureLogs() {
+        return new Logs();
     }
 
     // ── test 5: the real probe ───────────────────────────────────────────────────────
