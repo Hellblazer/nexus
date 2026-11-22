@@ -429,3 +429,19 @@ def test_the_cli_and_mcp_puts_write_the_same_catalog_meta(t2_service_env, tmp_pa
     assert _entry_meta(collection, "Mcp record")["entity_key"] == "CUST-0018"
     assert _entry_meta(collection, "CUST-0042")["entity_key"] == "CUST-0042"
     assert _entry_meta(collection, "CUST-0043")["entity_key"] == "CUST-0043"
+
+
+def test_a_legacy_name_matches_by_its_own_name_with_no_registry_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """RDR-229 P3.8: only a label of the engine's minted form (``c19``) is matched through its registry row; a
+    legacy name with no glob match of its own answers ``None`` without a read."""
+    from nexus import entity_keys
+
+    reads: list[str] = []
+    monkeypatch.setattr(entity_keys, "is_code_collection", lambda c: False)  # its own row read is P2.9's, not this one
+    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda name, **kw: reads.append(name))
+    config = {"entity": {"collections": {"knowledge__herb-*": r"HERB-\d+"}}}
+    assert entity_keys.pattern_for_collection("legacy", config) is None
+    assert entity_keys.pattern_for_collection("knowledge__other", config) is None
+    assert reads == []
+    assert entity_keys.pattern_for_collection("c19", config) is None
+    assert reads == ["c19"]
