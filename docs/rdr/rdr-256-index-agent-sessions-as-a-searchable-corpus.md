@@ -114,7 +114,7 @@ and RDR-229.
 | Prior RDR | Relationship | What it means for this one |
 | --- | --- | --- |
 | RDR-131 T2 Session Rollup Summaries | Abandoned predecessor, different object | It proposed LLM rollup summaries over aged **T2 memory entries** (not transcripts) to bound context injection. It was abandoned on 2026-09-12 as a batch with RDR-132 and RDR-133 because it was an unresearched stub, explicitly "not a ruling that the idea is wrong" (rdr-131 `abandon_reason`). Nothing here repeats it: this RDR indexes transcripts, writes no summaries, and changes nothing about T2. |
-| RDR-207 Summarization at the T2 Expiry Boundary | Precedent | It took RDR-131's live half and decided that a rollup is an attended command, never a session-end side effect (rdr-207:392), because session end is the worst context for an LLM call (:334-339) and a hallucinated summary is worse than none (:344-346). This RDR adds no LLM call, in a hook or otherwise, and keeps its documents out of the existing aspect-extraction queue, which would send them to one (Technical Design, Write path and hooks). |
+| RDR-207 Summarization at the T2 Expiry Boundary | Precedent | It took RDR-131's live half and decided that a rollup is an attended command, never a session-end side effect (rdr-207:392), because session end is the worst context for an LLM call (:334-339) and a hallucinated summary is worse than none (:344-346). This RDR adds no LLM call, in a hook or otherwise, and keeps its documents out of every existing aspect-extraction path, automatic or attended, each of which would send them to one (Technical Design, Write path and hooks). |
 | RDR-240 Procedures as Lua scripts | Origin of the transcript reader | Its `transcripts.sessions` verb owns the file listing and line framing (`src/nexus/lua_runtime/transcripts_read.py`). This RDR reuses those, not the verb: the verb is a read-only count surface and never returns tool results (rdr-240:361-365). It has no active-path walk (256-research-2). |
 | RDR-243 Document sensitivity | Hard constraint | Its LLM-surface table (`src/nexus/tables/llm-surfaces.toml`) gets this RDR's surfaces as rows, and a session the scanner flags is stamped `sensitive`. The flag is not the corpus-wide protection, because it withholds a document from the session model by default (Q1), and agents are this corpus's readers (256-research-8). |
 | RDR-103 / RDR-204 collection names and attributes | Considered | A fifth content type would join both RDRs' enumerations of content types; it is the rejected Alternative 3 (256-research-12). |
@@ -277,11 +277,14 @@ candidate scanners.
   the reconstructed path with the compaction summary's own account on
   three real sessions).
 - [ ] **A3.** Vector and lexical search over the narrative rendering finds
-  session content well enough to be useful. **Status**: Unverified.
-  **Method**: Spike (the Minimum Viable Validation's retrieval check).
+  session content well enough to be useful, with bge and with
+  `voyage-context-3`. **Status**: Unverified. **Method**: Spike (the
+  Minimum Viable Validation's retrieval check, run on each embedder; the
+  `voyage-context-3` run needs Sam's go and an announced window).
 - [x] **A4.** Re-sending a grown session's chunks re-embeds only new chunk
   text. **Status**: Verified (256-research-7). **Method**: Source Search.
-- [ ] **A5.** The explicit-only attribute can be one nullable column on
+- [ ] **A5.** The explicit-only attribute can be one `NOT NULL DEFAULT
+  false` column on
   `catalog_collections`, returned by the engine's collection listing and so
   carried in the client's row cache, and exported whole by the tenant
   backup. **Status**: Unverified; the listing, cache and export shapes were
@@ -297,8 +300,8 @@ candidate scanners.
 ### Approach
 
 Index the narrative of each main session into one knowledge subject,
-`agent-sessions`, redacted, adding no LLM call and skipping the existing
-aspect-extraction enqueue for the subject; keep the subject out of
+`agent-sessions`, redacted, adding no LLM call and barring the subject
+from every existing aspect-extraction path; keep the subject out of
 default searches with an explicit-only collection attribute; record each
 chunk's JSONL line range in the manifest; expand a hit by reading those
 lines back from the transcript. Concretely:
@@ -306,12 +309,12 @@ lines back from the transcript. Concretely:
 1. **What is indexed.** Main transcripts only, active path only, narrative
    only: human-typed prompts, assistant text, plaintext thinking, subagent
    reports (the result of an `Agent` tool call, and a task notification that
-   carries one), and one short line per tool call naming the tool and, when
-   the call has one, its file path or query; a command's text is not on the
-   line, so a Bash call is named by its tool alone (Sam, 2026-11-21).
-   Tool inputs beyond that path or query, tool results, harness-injected
-   text (`isMeta`) and bookkeeping lines are never embedded; expand returns
-   them.
+   carries one), and one short line per tool call naming the tool and, for
+   the tools the tool-line table in Technical Design lists, the one input
+   field it names; a command's text is never on the line, so a Bash call is
+   named by its tool alone (Sam, 2026-11-21). Every other tool input, every
+   tool result other than a subagent report, harness-injected text
+   (`isMeta`) and bookkeeping lines are never embedded; expand returns them.
 2. **Where it lives.** The knowledge subject `agent-sessions`, owned by its
    subject under Sam's owner-is-source ruling (T2
    `nexus/sam-ruling-rdr229-owner-is-source-2026-11-21`). One catalog
@@ -344,8 +347,9 @@ lines back from the transcript. Concretely:
 **Decoder.** A new module, `src/nexus/sessions/decode.py` (name provisional),
 reusing `transcripts_read.py`'s project listing, line framing and
 oversized-line guard (promoted from their underscore names). It emits
-records `(record_id, line_no, kind, text, tool_name, tool_target, ts)`.
-Ids follow diderot's scheme: the native `uuid`, with
+records `(record_id, line_no, kind, text, tool_name, tool_target, ts)`;
+`tool_target` holds only the field the tool-line table below names for
+that tool, and is empty for every other tool. Ids follow diderot's scheme: the native `uuid`, with
 `<uuid>:<kind>:<block>` when one line becomes several records. The active
 path follows diderot's rule (FORMATS.md:42-48) with one change, taken from
 256-research-4: at a `compact_boundary` whose `logicalParentUuid` is not in
@@ -358,15 +362,48 @@ on the document.
 `[user] ...`, `[assistant] ...`, `[thinking] ...`,
 `[subagent report: <description>] ...`, `[tool Read] src/nexus/corpus.py`,
 `[tool Bash]`.
-Chunks are filled greedily at record boundaries from the start of the path to
-a target size, set by the chunk-size check in Phase 1 Step 2 and recorded
-once as a research finding. The ceilings it works under: a stored chunk is
-at most 16,384 bytes, and chunkers target 12,288 (`db/limits.py:38-39`);
-the embedder reads at most 512 tokens with bge and 32,000 with
-`voyage-context-3` (`embed_window.py:29-35`). A chunk carries a one-line header naming the
-session's title and date so a hit reads in context. The renderer version is
-stored on the document; a change to it re-renders every session at its next
-run, which costs embeds and is announced in the command's output.
+
+*Tool lines.* A tool line carries the tool's name and, for the tools in
+this table, one input field; every tool not in it, Bash, Agent, Task and
+every MCP tool among them, is named by its tool alone.
+
+| Tool | Field on the tool line |
+| --- | --- |
+| `Read`, `Edit`, `Write`, `NotebookEdit` | the file path |
+| `Grep`, `Glob` | the pattern, and the path when one is given |
+| `WebSearch` | the query |
+| `WebFetch` | the URL with its query string and fragment dropped |
+
+Step 3 measures these fields; a tool whose field carries a secret-shaped
+string the scanner misses moves to "named alone" before Phase 1 exits.
+
+*Chunks.* Chunks are filled greedily at record boundaries from the start
+of the path up to a target. The target is bounded twice: by
+`SAFE_CHUNK_BYTES`, the 12,288-byte target of every chunker
+(`db/limits.py:39`), and by the embedder's token window, which the session
+chunker takes from `window_for_collection` as the existing chunkers do
+(`doc_indexer.py:2643, 2757`): 512 tokens on a bge collection, and none on
+a Voyage collection, whose 32,000-token window a chunk under the byte
+target cannot reach (`embed_window.py:4-13, 29-35`). `MAX_DOCUMENT_BYTES`
+(16,384) is not a ceiling here: it is a storage quota the upsert path
+does not enforce (`db/http_vector_client.py:3881-3896`). Step 2 records
+one target per embedder as a research finding.
+
+*Over-size records.* A record whose rendering exceeds the target is split
+deterministically, at line breaks and then at sentence ends, into parts
+with ids `<record_id>:p<n>` (n from 1). Each part is its own chunk, carries
+the record's full line range, and is never packed with another record.
+Expand re-renders the record, splits it the same way and compares part
+n's SHA-256 with the chunk's chash.
+
+*Title.* The session's title and date are not in the chunk text, so a
+title that arrives late (a `custom-title` record) changes no chash. Search
+output prints them before a hit, read from the catalog document's title
+and meta at display time.
+
+The renderer version is stored on the document; a change to it re-renders
+every session at its next run, which costs embeds and is announced in the
+command's output.
 
 **Placement.** The subject is typed bare, `agent-sessions`, as
 `docs/collections.md` Rule 3 requires; the catalog renders or mints the
@@ -399,23 +436,42 @@ collections (`docs/collections.md` Rule 1).
   RDR-229 P3.9 lands: a client recovery-bundle import, which registers the
   collection without its registry row (256-research-18). `nx doctor` reports
   a `knowledge` collection owned by `agent-sessions` without the attribute.
-- *Read.* The client row cache (`mcp_infra.py:985-996`) gains the key. The
-  readers that skip a collection with it: bare-corpus fan-out in
-  `resolve_corpus` stage 2 (`corpus.py:2662`), which also serves the
-  default corpora and the `corpus="all"` expansion (`mcp/core.py:4305-4316`);
-  the MCP fan-out listing (`mcp_infra.get_live_collection_names`,
-  `mcp_infra.py:1249`); the `nx store list` and `nx store get` knowledge
-  scope (`commands/store.py:_store_scope`, `:550-576`), which filters
-  `db.list_collections` itself, outside both of those; the collection-name
-  hint the `nx_answer` planner prompt carries (`mcp/core.py:13224`); the
+- *Read, through one seam.* The client row cache (`mcp_infra.py:985-996`)
+  gains the key. One predicate decides it: `is_default_scope_row(row)`,
+  new beside `is_live_collection_row` (`db/http_vector_client.py:3384`),
+  true for a row that is live by that predicate and does not carry
+  `explicit_only`. Every reader that builds a scope the caller did not name
+  filters through it, and no reader tests the key itself. The readers:
+  bare-corpus fan-out in `resolve_corpus` stage 2 (`corpus.py:2662`), which
+  also serves the default corpora and the `corpus="all"` expansion
+  (`mcp/core.py:4305-4316`); the MCP fan-out listing
+  (`mcp_infra.get_live_collection_names`, `mcp_infra.py:1249`), which also
+  feeds the collection-name hint of the `nx_answer` planner prompt
+  (`mcp/core.py:13225`, where `_get_collection_names` is that function's
+  alias, `mcp/core.py:88`); the `nx store list` and `nx store get`
+  knowledge scope (`commands/store.py:_store_scope`, `:550-576`), which
+  filters `db.list_collections` itself, outside both of those; the
+  reusable-subject list an agent preamble prints
+  (`commands/command_context.py:_knowledge_collections`, `:1299-1331`); the
   Knowledge Map (`nexus.context:generate_context_l1`
   and `hooks/subagent_start:_knowledge_map_section`, the targets of the
   Knowledge Map row of `llm-surfaces.toml`); and automatic taxonomy
   discovery and labelling (`commands/taxonomy_cmd.py`
-  `discover_for_collection` and `_generate_labels_batch`). Naming the
-  collection, or the corpus `knowledge__agent-sessions`, searches it. A lint
-  test in the style of `tests/test_bc7ps_routing_uses_live_listing.py` pins
-  that every fan-out site reads the attribute.
+  `discover_for_collection` and `_generate_labels_batch`). The aspect gate
+  (Write path and hooks) reads the same row but is not a scope builder.
+  Naming the collection, or the corpus `knowledge__agent-sessions`,
+  searches it.
+- *The lint is positive.* The existing live-listing lint checks a fixed
+  list of routing modules
+  (`tests/test_bc7ps_routing_uses_live_listing.py:287-295`), so a scope
+  builder outside that list, as `commands/store.py` is, goes unseen. The new
+  lint walks every module under `src/nexus` and finds every listing call
+  (`list_collections`, `get_collection_names`, `live_collection_rows`,
+  `list_live_collections`, `get_live_collection_names`). Each such call must either have its rows pass
+  through `is_default_scope_row` in the same function, or sit on an
+  allowlist entry with a reason (an inventory, doctor, maintenance or
+  explicit-name path that must see every collection). An unlisted call
+  fails, and an allowlist entry that no longer matches a call fails.
 - *Ordering against RDR-229.* None needed for meaning: the attribute is
   read from the row, never from the name, so P3.6's label rule and P3.8's
   minted labels leave it unchanged (256-research-18). Three code sites are
@@ -429,8 +485,11 @@ collections (`docs/collections.md` Rule 1).
 **Catalog and manifest.**
 
 - Document identity is the session uuid. `source_uri` is
-  `claude-session:<session-uuid>` (scheme name provisional; inferred, not
-  read, whether the catalog accepts an unregistered scheme). The title is
+  `claude-session:<session-uuid>` (scheme name provisional). A new scheme
+  enters `_KNOWN_URI_SCHEMES` only once its reader is registered in
+  `nexus.aspect_readers` (`catalog/types.py:64-66`), and the engine owns
+  `source_uri` at register time (`:67-69`), so whether it accepts the scheme
+  is a Step 1 spike, before any write depends on it. The title is
   the session's `custom-title` or `agent-name` record when present, else
   the first typed prompt cut to 80 characters.
 - Document meta: host name, project directory, repository owner tumbler
@@ -445,22 +504,61 @@ private name), which writes the chunks with their manifest and fires no
 hook. Its caller fires the post-store hooks, and with no registry given it
 installs the default chain (`install_default_hooks`,
 `hook_registry.py:544-574`), as `_index_document` does
-(`doc_indexer.py:2208-2233`). The chain has three hooks, and each does this
-for the subject:
+(`doc_indexer.py:2208-2233`). The session indexer is a new caller, and it
+takes on what `_index_document` does around the writer:
 
-| Hook | What it does | For `agent-sessions` |
+- The writer is promoted to a public name (or wrapped by one) in
+  `doc_indexer`, so the sessions module calls no private name across
+  modules.
+- The content hash it stamps is the fence key, and only the functions in
+  the fence-key lint's `_ORIGINS` may make one, as `_sha256(<file param>)`
+  (`tests/test_fence_key_is_a_file_hash_lint.py:44-55`). The session
+  indexer's entry function is added there by hand, with the key
+  `_sha256(transcript_path)`: the file's bytes at hashing time. A write to
+  the transcript after hashing shows up as a changed hash at the next run.
+- It is a new `fire_batch` producer, so it gets an entry in the producer
+  allowlist of `tests/test_vw594_fence_coverage_gate.py` (`:16-24`), and it
+  owns the index-run fence: it begins the fence, writes with
+  `defer_completion=True`, fires the hooks, and sends the completion stamp
+  last, as `_index_document` does (`doc_indexer.py:2197-2202, 2237-2245`).
+- It builds its own `HookRegistry` holding only
+  `taxonomy_assign_batch_hook`, so the aspect hook is never installed for
+  a session write; the manifest hook is not needed, because the writer
+  already wrote the manifest (`doc_indexer.py:2212-2217`).
+
+| Default hook | What it does | For `agent-sessions` |
 | --- | --- | --- |
-| `manifest_write_batch_hook` | writes the catalog manifest | dropped by the caller, because the write already wrote the manifest (`doc_indexer.py:2212-2217`) |
-| `taxonomy_assign_batch_hook` | the engine assigns the new chunks to their nearest topics (`mcp_infra.py:2529-2535`); no LLM call | runs; discovery and labelling skip the subject (Read, above), so it has no topics of its own (inferred, not read, what assignment does for a collection with none) |
-| `aspect_extraction_enqueue_hook` | queues the document for aspect extraction; `knowledge` maps to `scholarly-paper-v1`, which runs `claude -p` (`aspect_extractor.py:1054-1055`; `llm-surfaces.toml` rows `aspect-enqueue-hook`, `aspect-worker-drain`, `aspect-extraction-cli`, endpoint `anthropic`) | **skipped**: this RDR adds an early return for a collection whose row carries `explicit_only` |
+| `manifest_write_batch_hook` | writes the catalog manifest | not installed; the writer already wrote it |
+| `taxonomy_assign_batch_hook` | the engine assigns the new chunks to their nearest topics (`mcp_infra.py:2529-2535`); no LLM call | runs; discovery and labelling skip the subject (Read, above), so it has no topics of its own (inferred, not read, what assignment does for a collection with none; Step 4 reads it) |
+| `aspect_extraction_enqueue_hook` | queues the document for aspect extraction; a `knowledge` collection's base config is `scholarly-paper-v1`, and a prose document is re-routed to `general-prose-v1`, both run through `claude -p` (`aspect_extractor.py:1054-1062`; `llm-surfaces.toml` rows `aspect-enqueue-hook`, `aspect-worker-drain`, `aspect-extraction-cli`, `aspect-extraction-api`, `enrich-aspects`) | not installed, and barred by the gate below in any case |
 
-Today the enqueue returns early only when `select_config` finds no
-extractor, the source is not prose, the document id cannot be resolved, or
-the document is sensitive (`aspect_worker.py:1529-1573`); a non-sensitive
-session would be queued and sent to `claude -p`. The new return reads the
-attribute from the cached row, before `select_config`, and is logged as
-`aspect_enqueue_skipped_explicit_only`. Any future `explicit_only`
-collection is skipped the same way.
+*The aspect gate.* Not installing the hook covers one path; others reach
+the extractor without it: the batch enqueue in the indexer
+(`indexer.py:6455-6459`), the worker drain, and the attended
+`nx enrich aspects <collection>`. All of them pass `select_config`
+(`aspect_extractor.py:1048`), and `extract_aspects` returns nothing when
+it gives no config (`aspect_extractor.py:1583-1585`) (256-research-22). So
+the gate goes there: `select_config` returns `None` for a collection whose
+row carries `explicit_only`, and also, failing closed, for any collection
+whose candidate subject (`corpus.candidate_knowledge_subject`,
+`corpus.py:890-905`) is `agent-sessions`, whatever the row says or
+whether it can be read. The subject check covers a row that is missing,
+unreadable, or stale in the 60-second row cache before a re-assertion is
+seen. It reads the name, which the attribute itself never does (Ordering
+against RDR-229, below): it is an extra bar for one subject, not the
+attribute's meaning. It works while names carry the subject. After RDR-229
+P3.8 a minted label carries none, but it also derives no content type, so
+a collection with no readable row already gets no config
+(`corpus.py:872, 883`); a stale cached row is then the remaining gap, and
+by then P3.9 carries the attribute in the registry row from registration
+on, so the row has it from its first read (inferred, not read; Step 4
+checks P3.8 and P3.9 on develop). A gated call is logged as `aspect_gate_explicit_only`. `nx enrich
+aspects` on such a collection refuses with its own message naming the
+attribute, rather than the generic "no extractor config" text
+(`commands/enrich.py:1754-1761`). A future `explicit_only` collection
+outside the subject is gated by its row alone, so a stale row can let one
+document of it through until the cache refreshes; only the subject has the
+fail-closed check.
 
 **Expand.** `expand(tumbler, position) -> ExpandResult` reads the manifest
 row and asks the transcript sources, in order, for the lines of that range.
@@ -520,7 +618,14 @@ plugin mapping, so the plugins are configured before its first use in the
 process (256-research-17). The verification filter is never configured, so
 no candidate is sent anywhere, and a test runs the scanner with sockets
 blocked. The redactor is `redact(text) -> (text, findings)`; a chunk it
-cannot process is not written, and the run reports it. The choice and its
+cannot process is not written, and the run reports it. `scan_line` sees one
+line at a time, so a private key's header line matches and its body lines
+do not. The redactor therefore treats a `-----BEGIN ... PRIVATE KEY-----`
+line as the start of a span that runs through the matching `-----END ...
+PRIVATE KEY-----` line, and replaces the whole span, across lines, with one
+`[redacted:private-key]`; a BEGIN with no END redacts to the end of the
+record. Expand output passes through the same redactor, so a key in a tool
+result comes back redacted, never verbatim. The choice and its
 trade-offs are argued under Alternatives (Alternative 5).
 
 **Sensitivity for flagged sessions.** A session whose narrative has any
@@ -544,11 +649,12 @@ filled from the install's posture:
 > in your nexus cloud tenant | the embedder on this machine, and stores it
 > in your local nexus engine]. It sends your typed prompts, the assistant's
 > replies and reasoning, subagent reports, and one line per tool call
-> naming the tool and the file path or query it was given, never a
-> command's text. A secret scan replaces what it
-> recognises before anything is sent; it does not recognise every secret.
-> No other tool input, and no tool result, is ever sent. Nothing is sent to
-> a language model. A session in which the scan
+> naming the tool and, for file, search and web tools, the path, pattern,
+> query or URL it was given, never a command's text. A secret scan replaces
+> what it recognises before anything is sent; it does not recognise every
+> secret. No other tool input, and no other tool result, is sent by this
+> command. This command calls no text-generating model. A session in which
+> the scan
 > found something is also marked sensitive, which keeps it from agents and
 > language-model features, and is still sent in its redacted form. To
 > accept, run `nx index sessions --ack`.
@@ -569,19 +675,35 @@ indexing" (sends redacted narrative chunks; endpoints `voyage` and
 behaviour `disclose`), and "Session corpus: expand" (sends redacted verbatim
 records to `session-model`; behaviour `withhold`, so a sensitive or excluded
 session is never returned to the model). The registry lint then covers both
-call sites. No other row is added: this RDR adds no LLM call, and the
-aspect-extraction rows (`aspect-enqueue-hook`, `aspect-worker-drain`,
-`aspect-extraction-cli`) never see the subject, because the enqueue skips
-an `explicit_only` collection (Write path and hooks).
+call sites. The table is one row per RDR-243 census row, with `census_row`
+unique in 1..25 (`llm-surfaces.toml:6-17`) and `CENSUS_ROW_COUNT = 25`
+(`tables/llm_surfaces.py:55`), pinned by
+`tests/tables/test_llm_surfaces_table.py:73` (256-research-24). The two rows
+take census rows 26 and 27: Step 4 raises the count to 27, widens the
+header's range, updates that pin, and regenerates the privacy-policy table
+(`scripts/gen_privacy_policy_table.py --write`). No other row is added:
+this RDR adds no LLM call, and the aspect-extraction rows
+(`aspect-enqueue-hook`, `aspect-worker-drain`, `aspect-extraction-cli`,
+`aspect-extraction-api`, `enrich-aspects`) reach no document of the
+subject, because `select_config` gives it no config (Write path and
+hooks).
 
 **Commands (names provisional).**
 
 ```text
 nx index sessions [--project repo|all|<dir>] [--session <uuid>] [--since DATE] [--dry-run] [--ack]
 nx sessions expand <tumbler> --position N [--json]
-nx sessions forget <session-uuid>
-nx sessions list [--project ...]          # indexed sessions, counts, last run, statuses
+nx sessions forget <session-uuid> [--undo]
+nx sessions list [--project ...] [--check]  # indexed sessions, counts, last run, statuses; --check re-verifies a sample through expand
+nx collection list                          # existing verb; gains an explicit-only column
+nx collection explicit-only clear <collection> --reason TEXT   # the one route that clears the attribute
 ```
+
+`forget` removes the session's chunks and catalog document and adds its id
+to `sessions.exclude` in `config.yml`, which every run skips, so the next
+run does not index it again; `forget --undo` removes the entry, and the
+next run indexes the session afresh. Removed chunks stay in engine backups
+taken before the forget until those backups age out.
 
 The command module is new (`src/nexus/commands/sessions.py`), registered on
 the `index` group for the first verb; `commands/index.py` is near its size
@@ -594,8 +716,10 @@ ceiling (4,280 of 4,442 lines in `scripts/file-size-exceptions.txt`).
 | Project listing, line framing | `src/nexus/lua_runtime/transcripts_read.py` | Reuse: promote `_files`, `_lines` to public names. |
 | Session-to-repository membership | `src/nexus/lua_runtime/transcripts_projects.py` | Reuse, for the repository in document meta. |
 | Active-path decoder | none (256-research-2) | New. |
-| Chunk write, embed skip, manifest | `src/nexus/doc_indexer.py` write path (`_write_chunks_with_owner_rows`, private; its caller fires the hooks) | Reuse. |
-| Aspect-extraction enqueue | `aspect_worker.aspect_extraction_enqueue_hook` | Extend: skip an `explicit_only` collection. |
+| Chunk write, embed skip, manifest | `src/nexus/doc_indexer.py` write path (`_write_chunks_with_owner_rows`, private; its caller fires the hooks and owns the fence and stamp) | Reuse: promote or wrap the writer; add the session origin to the fence-key lint and the producer to the vw594 allowlist. |
+| Aspect-extraction gate | `aspect_extractor.select_config`, which every aspect path passes | Extend: no config for an `explicit_only` collection, failing closed for the subject. |
+| Default-scope filter | `is_live_collection_row` (`db/http_vector_client.py:3384`) | Extend: `is_default_scope_row` beside it; a positive lint over every listing call. |
+| LLM-surface registry | `llm-surfaces.toml`, `CENSUS_ROW_COUNT` | Extend: census rows 26 and 27. |
 | Line-range positions | `catalog_document_chunks.line_start/line_end` | Reuse; no schema change. |
 | Collection registration and row cache | `register_collection`, `mcp_infra` row cache | Extend with `explicit_only`. |
 | Fan-out skip | lifecycle-state filter in `corpus.py` | Extend with the attribute. |
@@ -611,8 +735,8 @@ Nexus has a lexical leg and a reranker that diderot lacks (memo axis 2), so
 verbatim narrative is searchable without an LLM rewriting it first. The
 narrative is about 1 percent of the bytes, so volume is bounded. The scope
 also follows the secrets: every secret-shaped string found sat in tool
-inputs or results, which are never embedded beyond a tool line's path or
-query.
+inputs or results, which are never embedded other than subagent reports
+and a tool line's one named field.
 
 A knowledge subject with one attribute is Sam's choice (Q2), made after the
 census showed what a fifth content type costs (Alternative 3). The subject
@@ -665,7 +789,7 @@ RDR's plan. Any summary work needs a later decision from Sam.
 
 **Reason for rejection**: volume and exposure, for content expand already
 returns. Sam's Q1 answer also states that tool inputs and results are never
-embedded.
+embedded, other than subagent reports and a tool line's one named field.
 
 ### Alternative 3: A fifth content type, `session`, owned per repository
 
@@ -748,12 +872,13 @@ never match. What remains missed is a secret with a format no rule knows
 that is also hex, all one case, or broken by punctuation. The design
 accepts that miss because no secret-shaped string of any kind appeared in
 the embedded narrative in the scan, only in tool inputs and results, which
-are never embedded beyond a tool line's path or query (256-research-5,
+are never embedded beyond a tool line's one named field (256-research-5,
 -16). That scan counted whole tool inputs and did not record which field
-held a hit, so the path or query on a rendered tool line is not yet
-measured; Step 3 measures it (256-research-20). The design also accepts
+held a hit, so the named fields on rendered tool lines are not yet
+measured; Step 3 measures them and moves a tool whose field carries a
+missed secret to "named alone" (256-research-20). The design also accepts
 the miss because `nx sessions forget`
-removes a session after the fact. The zero is a measurement on 67,000
+removes a session after the fact, for good, since it also excludes it. The zero is a measurement on 67,000
 lines of one project, not a bound; Step 3 re-measures on every project's
 sessions before the first managed-mode run.
 
@@ -777,7 +902,8 @@ sessions before the first managed-mode run.
 - Positive: past sessions answer questions in seconds; a compacted session
   can find what it said before compaction.
 - Positive: no LLM call added and no new model surface beyond the
-  embedder; the existing aspect-extraction queue skips the subject.
+  embedder; no aspect-extraction path, automatic or attended, reaches the
+  subject.
 - Positive: no change to the content-type vocabulary, and no wait on
   RDR-229.
 - Negative: on a managed install, redacted narrative goes to Voyage and the
@@ -792,10 +918,11 @@ sessions before the first managed-mode run.
 
 - **Risk**: a secret the scanner does not know reaches the embedder.
   **Mitigation**: tool inputs and results, where every measured hit sat,
-  are never embedded beyond a tool line's path or query, and a command's
+  are never embedded beyond a tool line's one named field, and a command's
   text never; four nexus plugins for the formats this project uses; Step
-  3's measurement of rendered tool lines; `nx sessions forget`; the canary
-  test plants tokens in narrative and in a tool line's path.
+  3's measurement of the named fields; `nx sessions forget`, which also
+  excludes the session from later runs; the canary test plants tokens in
+  narrative, in each named field, and in inputs that are never on a line.
 - **Risk**: a collection of the subject without the attribute leaks
   sessions into every default search. **Mitigation**: sibling inheritance at
   registration, re-assertion on every indexing run, a doctor check, and the
@@ -845,13 +972,16 @@ was reasoned before.
 
 ### Prerequisites
 
-- [ ] A2 verified at Step 1, A3 at the Minimum Viable Validation, A5 at
-  Step 4.
+- [ ] A2 and the `claude-session:` scheme verified at Step 1, A3 at the
+  Minimum Viable Validation (bge, then `voyage-context-3` in an announced
+  window with Sam's go), A5 at Step 4.
 
 ### Minimum Viable Validation
 
-On a local engine with the bge embedder (no cloud, no Voyage; the check
-covers bge only, and says nothing about `voyage-context-3` retrieval), index ten
+First on a local engine with the bge embedder (no cloud, no Voyage), then,
+inside an announced window with Sam's go, on a `voyage-context-3` engine
+with the same sessions and questions, since a target chosen under bge's
+512-token window says nothing about Voyage retrieval. On each, index ten
 real nexus sessions, five of them compacted. A retrieval check of twelve
 questions, each with the session and line it should find, written before
 the run from Sam's T2 records of those sessions: eight must return a chunk
@@ -871,55 +1001,82 @@ output, or outbound payload, and that session is stamped sensitive.
 Tests first, on fixtures built from real transcripts with their text
 replaced: active path with the missing-logical-parent fallback, rewinds,
 duplicate uuids, sidechain lines, oversized lines, and a resumed session
-for A1. Verify A2 on three compacted sessions.
+for A1. Verify A2 on three compacted sessions. Spike the `claude-session:`
+source URI against a local engine: register one document with it, read it
+back, and record whether the engine accepts the scheme and what a reader
+registration in `nexus.aspect_readers` it needs (`catalog/types.py:64-69`);
+if the engine refuses it, the scheme is chosen here, before Step 5 writes
+any document. Decode tool calls to the tool-line table's fields only, with
+`tool_target` empty for every other tool.
 
 #### Step 2: Renderer, chunking, chunk-size check
 
-Deterministic rendering and greedy chunking; a test that appending records
-changes only the tail chunk's chash. Measure retrieval at two chunk sizes
-on the validation set and record the chosen size as a research finding.
+Deterministic rendering and greedy chunking under the two bounds
+(`SAFE_CHUNK_BYTES` and the collection's token window); the over-size
+split into `:p<n>` parts; a test that appending records changes only the
+tail chunk's chash, and one where the title record arrives after earlier
+chunks were written and their chashes do not change. Measure retrieval at
+two chunk sizes on the validation set and record the chosen target per
+embedder as a research finding: bge first, `voyage-context-3` in the
+announced window.
 
 #### Step 3: Scanner
 
 Add `detect-secrets==1.5.0`; the four nexus plugins, each with a test on
 its synthetic shape bare and inside a sentence; the redactor; the
-blocked-socket test; the canary test; flagged-session stamping through the
-RDR-243 write path. Re-run the false-positive count of 256-research-17 over
-the narrative of every project's sessions on Sam's machine, not only
-nexus's, with the rendered tool lines counted as their own class beside
-assistant text and subagent reports, and record it as a research finding
-before the first managed-mode run.
+blocked-socket test; the canary test; the multi-line private-key span,
+with a fixture holding a key across lines, one with no END line, and one
+inside an expand result; flagged-session stamping through the RDR-243
+write path. Re-run the false-positive count of 256-research-17 over the
+narrative of every project's sessions on Sam's machine, not only nexus's,
+with the rendered tool lines counted as their own class beside assistant
+text and subagent reports. Separately, re-run the census of
+256-research-5 (every secret-shaped string, whether the scanner flags it or
+not) over the rendered tool-line fields of the same sessions, per tool; a
+tool whose field holds one the scanner misses moves to "named alone" in
+the tool-line table. Record both as research findings before the first
+managed-mode run.
 
 #### Step 4: Explicit-only attribute and the subject
 
 Verify A5. Check the three sites shared with RDR-229 (row-cache key list,
 `register_collection`, tenant export) on develop and fold in whatever P3
 has landed. The Liquibase changeset, sibling inheritance in the engine's
-registration, the client row-cache key, the fan-out, Knowledge Map and
-taxonomy skips with their lint, the aspect-enqueue skip with its test, the
-doctor check, and the two `llm-surfaces.toml` rows. The engine part ships in an engine cut.
+registration, the client row-cache key, `is_default_scope_row` and the
+readers that filter through it, the positive listing lint with its
+allowlist, the `select_config` gate with its fail-closed subject check and
+the `nx enrich aspects` refusal, a read of what taxonomy assignment does
+for a collection with no topics, the doctor check, the explicit-only
+column in `nx collection list` and the `nx collection explicit-only
+clear` route, and the two `llm-surfaces.toml` rows with the census count
+raised to 27. The engine part ships in an engine cut.
 
 #### Step 5: Commands, acknowledgement and expand
 
 `nx index sessions` with the acknowledgement and its stored block and the
-attribute re-assertion, `nx sessions expand` through `TranscriptSource`
-with `LocalFileSource`, `forget` and `list`, with `--dry-run` printing what
-would be indexed and the bytes it would send. Run the Minimum Viable
-Validation.
+attribute re-assertion, through the promoted writer with its own hook
+registry, the index-run fence and the deferred completion stamp, the
+fence-key origin and the vw594 allowlist entry; `nx sessions expand`
+through `TranscriptSource` with `LocalFileSource`; `forget` with its
+exclusion entry and `--undo`; `list` with `--check`; and `--dry-run`
+printing what would be indexed and the bytes it would send. Run the
+Minimum Viable Validation.
 
 ### Phase 2: Operational Activation
 
 #### Activation Step 1: SessionEnd hook
 
 An opt-in SessionEnd hook runs `nx index sessions --session <id>` detached
-for a main session. It adds no LLM call, and the write it triggers queues
+for a main session. It adds no LLM call, and the write it triggers reaches
 no aspect extraction (Write path and hooks). It runs on native Windows before its push
 (AGENTS.md rule 14, since it lands under `conexus/hooks/`).
 
 #### Activation Step 2: MCP expand
 
 An MCP tool for expand, so agents need not shell out; it goes through the
-MCP read-tool output rules of RDR-243.
+MCP read-tool output rules of RDR-243. Its output is the redactor's output,
+as on the CLI: a private key, single-line or multi-line, comes back as
+`[redacted:private-key]`, and any other finding as `[redacted:<type>]`.
 
 ### Not in scope
 
@@ -935,9 +1092,9 @@ MCP read-tool output rules of RDR-243.
 
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
-| `agent-sessions` collections (one per embedding model) | In scope (`nx sessions list`, `nx collection list`) | In scope (`list` shows per-session counts, versions, last run; `nx collection list` shows the attribute) | In scope (`nx sessions forget`; a collection by the usual collection delete) | In scope (`expand` statuses; `list --check` re-verifies a sample; doctor checks the attribute) | Tenant backup (RDR-248) carries rows and chunks; a client bundle carries the attribute from RDR-229 P3.9, re-asserted until then; verbatim records wait for the archive RDR |
-| `explicit_only` column | In scope (`nx collection list`) | N/A | In scope (CLI clear with a reason) | In scope (doctor) | With the collection row |
-| `sessions.ack`, `sessions.exclude` config | In scope (`nx config get`) | In scope (the ack block names its endpoints and time) | In scope (unset; indexing then refuses) | In scope (every run compares endpoints) | N/A |
+| `agent-sessions` collections (one per embedding model) | In scope (`nx sessions list`, `nx collection list`) | In scope (`list` shows per-session counts, versions, last run; `nx collection list` shows the attribute) | In scope (`nx sessions forget`, which also excludes the session from later runs, `--undo` to reverse; a collection by the usual collection delete; engine backups keep removed chunks until they age out) | In scope (`expand` statuses; `list --check` re-verifies a sample; doctor checks the attribute) | Tenant backup (RDR-248) carries rows and chunks; a client bundle carries the attribute from RDR-229 P3.9, re-asserted until then; verbatim records wait for the archive RDR |
+| `explicit_only` column | In scope (`nx collection list`) | N/A | In scope (`nx collection explicit-only clear <collection> --reason`) | In scope (doctor) | With the collection row |
+| `sessions.ack`, `sessions.exclude` config | In scope (`nx config get`) | In scope (the ack block names its endpoints and time) | In scope (unset `sessions.ack`, after which indexing refuses; `nx sessions forget --undo` removes one exclusion) | In scope (every run compares endpoints) | N/A |
 
 ### New Dependencies
 
@@ -952,14 +1109,36 @@ both already locked; 256-research-14). No other.
   path; after re-index the manifest has no chunk from them.
 - **Scenario**: session grows by 50 records. **Verify**: earlier chunks keep
   their chash; only the tail and new chunks are embedded.
+- **Scenario**: the session's `custom-title` record arrives after its
+  first chunks were indexed. **Verify**: those chunks keep their chash;
+  search output shows the new title.
+- **Scenario**: a record whose rendering exceeds the target on a bge
+  collection. **Verify**: it splits into `:p<n>` parts, none over the token
+  window or `SAFE_CHUNK_BYTES`, each carrying the record's line range, and
+  expand verifies each part `ok`.
 - **Scenario**: planted tokens in assistant text, thinking, a subagent
-  report, a tool result, a Bash command and a tool call's file path.
-  **Verify**: none appears in any chunk, expand result or outbound request
-  (canary); no rendered Bash line carries command text; the session is
+  report, a tool result, a Bash command, a tool call's file path, a Grep
+  pattern, a WebFetch query string, an Agent prompt and an MCP tool
+  argument. **Verify**: none appears in any chunk, expand result or
+  outbound request (canary); no rendered Bash, Agent or MCP line carries
+  input text, and no WebFetch line carries a query string; the session is
   stamped sensitive.
-- **Scenario**: a session is written through the default hook chain.
-  **Verify**: the aspect queue has no row for its document, and the log
-  records `aspect_enqueue_skipped_explicit_only`.
+- **Scenario**: a multi-line private key in a tool result and in
+  assistant text, and a BEGIN line with no END. **Verify**: each becomes
+  one `[redacted:private-key]` covering the body lines, in chunks and in
+  expand output.
+- **Scenario**: a session is indexed, then the worker drains, the indexer's
+  batch enqueue runs over the collection, and `nx enrich aspects` is run
+  on it. **Verify**: the aspect queue has no row for its document, no
+  extractor runs, the log records `aspect_gate_explicit_only`, and
+  `nx enrich aspects` exits with its explicit-only refusal.
+- **Scenario**: a collection of the subject whose cached row lacks the
+  attribute, and one whose row cannot be read. **Verify**: `select_config`
+  still gives no config for either (the fail-closed subject check).
+- **Scenario**: a listing call added in a new module that neither filters
+  through `is_default_scope_row` nor has an allowlist entry, and an
+  allowlist entry for a call that no longer exists. **Verify**: the
+  positive lint fails on each.
 - **Scenario**: the scanner runs with sockets blocked. **Verify**: no
   connection attempt.
 - **Scenario**: the 12 synthetic shapes of 256-research-17, bare and inside
@@ -969,10 +1148,12 @@ both already locked; 256-research-14). No other.
   endpoints changed after it. **Verify**: the command prints the wording
   and writes nothing; the second refuses naming both endpoint lists.
 - **Scenario**: bare `search(corpus="knowledge")`, `corpus="all"`, the
-  default corpus, `nx store list knowledge`, `nx store get` and the MCP
-  `store_get` on the bare `knowledge` scope, the Knowledge Map and a
-  taxonomy discover over all collections. **Verify**: no session chunk or topic; naming the collection
-  returns hits.
+  default corpus, `nx store list` (its default `-c knowledge`),
+  `nx store get <DOC_ID>` for a session document and the MCP `store_get`
+  on the bare `knowledge` scope, the `nx_answer` planner's collection hint,
+  an agent preamble's reusable-subject list, the Knowledge Map and a
+  taxonomy discover over all collections. **Verify**: no session chunk,
+  document, name or topic; naming the collection returns hits.
 - **Scenario**: a sensitive session in local mode creates the bge sibling.
   **Verify**: the sibling has the attribute without the writer setting it.
 - **Scenario**: the subject's collection registered without the attribute,
@@ -988,6 +1169,9 @@ both already locked; 256-research-14). No other.
 - **Scenario**: excluded session id and excluded project glob. **Verify**:
   nothing indexed; a previously indexed excluded session is reported, not
   silently kept.
+- **Scenario**: `nx sessions forget` on an indexed session, then a full
+  run, then `forget --undo` and another run. **Verify**: the session is
+  absent after the first run and indexed again after the second.
 - **Scenario**: a run whose engine write fails half way. **Verify**: the
   document keeps its prior manifest; the next run completes.
 
@@ -999,9 +1183,11 @@ both already locked; 256-research-14). No other.
    **Expected**: 8 of 12 found in the top five, each expand `ok`.
 2. **Scenario**: the canary over every registered session surface.
    **Expected**: zero planted tokens outbound.
-3. **Scenario**: the explicit-only lint.
-   **Expected**: every fan-out, Knowledge Map and taxonomy site reads the
-   attribute.
+3. **Scenario**: the positive listing lint.
+   **Expected**: every listing call under `src/nexus` either filters
+   through `is_default_scope_row` or has an allowlist entry with a reason;
+   its first live run's counts (calls examined, filtered, allowlisted) go
+   in its bead.
 
 ### Performance Expectations
 
@@ -1018,9 +1204,13 @@ of all 137 sessions is roughly 110 MB by the 20-session rate).
 
 Gate round 1 found two contradictions, both fixed: the claim that the
 RDR makes no LLM call, while the default hook chain would queue every
-session for aspect extraction through `claude -p` (now skipped, Write path
-and hooks), and the claim that tool inputs are never embedded, while the
-tool line carried a command prefix (now dropped, Sam 2026-11-21). Two
+non-sensitive session for aspect extraction through `claude -p` (now
+barred at `select_config` for every aspect path, Write path and hooks),
+and the claim that tool inputs are never embedded, while the tool line
+carried a command prefix (now dropped, Sam 2026-11-21). Gate round 2 found
+the remaining wording wider than the design (the aspect gate covered one
+path; the acknowledgement's "no tool result" sat beside subagent reports;
+"path or query" was undefined per tool), each fixed in the round-2 fix. Two
 tensions, both resolved in the design. RDR-243's `sensitive` flag is
 the project's privacy tool, yet the corpus as a whole is not flagged; the
 flag withholds documents from agents, who are the corpus's readers, so the
@@ -1029,8 +1219,10 @@ for sessions the scanner flags. And the research memo proposed the dchash
 span and diderot's active-path rule; the findings show both fail on real
 transcripts (256-research-4, -10), so the design departs from the memo
 there. RDR-229 Phase 3 shares three code sites with Step 4 but no meaning,
-so it imposes no order. No contradiction remains between the findings and
-the proposed solution.
+so it imposes no order. One tension is left open on purpose: Sam's Q1
+words say tool inputs are never embedded, and a tool line's named field is
+part of a tool input; the design reads his option-1 ruling as the scope of
+Q1 and keeps every other input field off the line.
 
 ### Assumption Verification
 
@@ -1049,7 +1241,7 @@ Step 4 before the steps that rely on them.
 | Re-embed skip for held chunk text | nexus engine (RDR-181) | Source Search |
 | `line_start`/`line_end` manifest columns | catalog `document_chunks` | Source Search (key table); write path not yet read |
 | `explicit_only` in the listing, row cache and export | nexus engine and client | Assumed (A5), Step 4 |
-| `claude-session:` source URI | catalog | Assumed, Step 4 |
+| `claude-session:` source URI | catalog | Assumed; spiked at Step 1 |
 | `scan_line`, `transient_settings`, `RegexBasedDetector`, custom-plugin path | detect-secrets 1.5.0 | Source Search and Spike |
 | Transcript record shape | Claude Code (undocumented) | Spike on real files |
 
@@ -1080,8 +1272,9 @@ planted-token canary. None of it is deferred.
   session and project, `--since` for a partial backfill.
 - **Secret/credential lifecycle**: secrets found are redacted, never
   stored; the scanner makes no network call; flagged sessions are stamped
-  sensitive; `forget` removes an indexed session. The command reads no
-  credentials.
+  sensitive; `forget` removes an indexed session and excludes it from later
+  runs, and engine backups taken before it keep the removed chunks until
+  they age out. The command reads no credentials.
 - **Memory management**: a file is decoded line by line with the existing
   64 MB line cap (`transcripts_read.py:35`); the active-path walk holds one
   id map per file (about 110,000 entries for the largest, inferred from the
@@ -1100,7 +1293,8 @@ Sam answered the first draft's questions on 2026-11-21 (T2
 
 1. **Cloud after acknowledgement.** Redacted narrative may go to Voyage and
    the tenant after a one-time acknowledgement that names where it goes;
-   tool inputs and results are never embedded. A tool line names only the
+   tool inputs and results are never embedded, other than subagent reports
+   and a tool line's path or query. A tool line names only the
    tool and its file path or query, never a command's text (Sam,
    2026-11-21, ask `rdr256-command-prefix`, option 1: "drop the prefix; the
    line names only the tool and its path or query, Q1 stays literally
