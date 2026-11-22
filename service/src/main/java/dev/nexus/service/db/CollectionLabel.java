@@ -47,6 +47,15 @@ public final class CollectionLabel {
      */
     static final boolean REFUSE_SLASH = true;
 
+    /**
+     * RDR-229 item 7: a label holding {@code ','} or beginning or ending with whitespace is refused (Sam's ruling on
+     * ask {@code rdr229-label-comma-space}, 2026-11-21). MCP search and plan confinement read a corpus list with
+     * {@code split(",")} then {@code strip()}, so such a label could be registered but never named there. Relaxable
+     * later, like {@link #REFUSE_SLASH}: a later ruling flips this (and the client's {@code LABEL_REFUSES_COMMA_SPACE})
+     * and changes {@code CollectionLabelTest.aLabelHoldingACommaOrEdgeWhitespaceIsRefused}.
+     */
+    static final boolean REFUSE_COMMA_AND_EDGE_SPACE = true;
+
     /** The most UTF-8 bytes a label may hold (RDR-229 item 7). */
     static final int MAX_LABEL_BYTES = 255;
 
@@ -65,7 +74,9 @@ public final class CollectionLabel {
         new NamedClause("valid_utf8", CollectionLabel::validUtf8),
         new NamedClause("no_control_character", CollectionLabel::noControlCharacter),
         new NamedClause("within_byte_limit", CollectionLabel::withinByteLimit),
-        new NamedClause("no_slash", CollectionLabel::noSlash));
+        new NamedClause("no_slash", CollectionLabel::noSlash),
+        new NamedClause("no_comma", CollectionLabel::noComma),
+        new NamedClause("no_edge_whitespace", CollectionLabel::noEdgeWhitespace));
 
     /** The clauses {@link #requireStorable} runs, under the names {@code SHAPE_CLAUSES} gives the same two refusals. */
     private static final java.util.List<NamedClause> STORABLE_CLAUSES = java.util.List.of(
@@ -84,8 +95,9 @@ public final class CollectionLabel {
      * Refuses a label a USER supplied, as an {@link IllegalArgumentException} (the engine's 400): the label rule of
      * RDR-229 item 7, twin of the client's {@code validate_collection_name}. The rule is: non-empty, valid UTF-8
      * (no lone surrogate), no control character, at most {@value #MAX_LABEL_BYTES} UTF-8 bytes, not of the minted
-     * form ({@link #isMintedForm}, so a user cannot claim a label a later mint would produce), and no {@code '/'}
-     * while {@link #REFUSE_SLASH} holds.
+     * form ({@link #isMintedForm}, so a user cannot claim a label a later mint would produce), no {@code '/'}
+     * while {@link #REFUSE_SLASH} holds, and no {@code ','} and no whitespace at either end while
+     * {@link #REFUSE_COMMA_AND_EDGE_SPACE} holds.
      *
      * <p>Control characters are the Unicode categories Cc (the C0 and C1 controls, NUL and DEL among them), Zl and Zp
      * (U+2028 and U+2029, which break a line in a terminal, a log or a note URI). Cf is allowed on purpose: the
@@ -207,6 +219,29 @@ public final class CollectionLabel {
     private static void noSlash(String label) {
         if (REFUSE_SLASH && label.indexOf('/') >= 0) {
             throw new IllegalArgumentException("collection label " + quoted(label) + " holds '/', which a label may not hold");
+        }
+    }
+
+    private static void noComma(String label) {
+        if (REFUSE_COMMA_AND_EDGE_SPACE && label.indexOf(',') >= 0) {
+            throw new IllegalArgumentException("collection label " + quoted(label) + " holds ',', which a label may not hold");
+        }
+    }
+
+    /**
+     * Whitespace is Python's {@code str.strip()} set, the one the comma-list readers apply: once the control clause has
+     * refused Cc, Zl and Zp, that set is exactly the Unicode category Zs (space separators, U+0020 and U+00A0 among
+     * them), checked here on the first and last code point.
+     */
+    private static void noEdgeWhitespace(String label) {
+        if (!REFUSE_COMMA_AND_EDGE_SPACE || label.isEmpty()) {
+            return;
+        }
+        int first = label.codePointAt(0);
+        int last = label.codePointBefore(label.length());
+        if (Character.getType(first) == Character.SPACE_SEPARATOR || Character.getType(last) == Character.SPACE_SEPARATOR) {
+            throw new IllegalArgumentException("collection label " + quoted(label)
+                + " begins or ends with whitespace, which a label may not");
         }
     }
 

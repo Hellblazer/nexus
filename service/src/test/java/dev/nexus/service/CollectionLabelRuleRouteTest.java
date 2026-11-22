@@ -299,20 +299,22 @@ class CollectionLabelRuleRouteTest {
 
     @Test
     void importRefusesOnlyTheRowsWhoseLabelBreaksTheShape_theOthersLand() throws Exception {
-        // RDR-229 item 10: "refuses that collection; the rest of the bundle imports". Four bad labels, one per
+        // RDR-229 item 10: "refuses that collection; the rest of the bundle imports". Five bad labels, one per
         // clause the route can carry, around a good row and a minted-form row (never refused on import).
         String overlong = "\u00e9".repeat(130);
         var resp = post("/v1/catalog/import/collection", Map.of("rows", List.of(
             importRow("import good first"), importRow("import/bad"), importRow("import\u0007bell"),
-            importRow(overlong), importRow("c4343"), importRow("import good last"))));
+            importRow(overlong), importRow("import,comma"), importRow("import edge "), importRow("c4343"),
+            importRow("import good last"))));
         assertThat(refusedRules(resp)).containsExactly(
             Map.entry("import/bad", "no_slash"), Map.entry("import\u0007bell", "no_control_character"),
-            Map.entry(overlong, "within_byte_limit"));
+            Map.entry(overlong, "within_byte_limit"), Map.entry("import,comma", "no_comma"),
+            Map.entry("import edge ", "no_edge_whitespace"));
         assertThat(resp.body()).as("imported counts the rows that were not refused").contains("\"imported\":3");
         for (String landed : List.of("import good first", "c4343", "import good last")) {
             assertThat(isRegistered(landed)).as(landed).isTrue();
         }
-        for (String refused : List.of("import/bad", "import\u0007bell", overlong)) {
+        for (String refused : List.of("import/bad", "import\u0007bell", overlong, "import,comma", "import edge ")) {
             assertThat(isRegistered(refused)).as("refused: " + refused.length()).isFalse();
         }
     }
