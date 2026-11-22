@@ -224,7 +224,9 @@ public final class ReembedHandler implements HttpHandler {
             HttpUtil.send(exchange, 409, MAPPER.writeValueAsString(orderedMap(
                 "error", e.getMessage(), "retryable", true)));
         } catch (CatalogRepository.EmbeddingProfileConflictException e) {
-            HttpUtil.send(exchange, 422, error(e.getMessage()));
+            // RDR-229 P3.1 (nexus-p2m1x.17): a typed reason beside the message when the refusal carries one.
+            HttpUtil.send(exchange, 422, e.reason() == null ? error(e.getMessage())
+                : MAPPER.writeValueAsString(orderedMap("error", e.getMessage(), "reason", e.reason())));
         } catch (dev.nexus.service.db.CollectionMint.LiveTupleConflict e) {
             // RDR-229 P3.8: registering or reviving the target would give its tuple a second live collection; the message
             // names both, and nothing was written.

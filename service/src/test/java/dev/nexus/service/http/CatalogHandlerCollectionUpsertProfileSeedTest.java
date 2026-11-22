@@ -162,6 +162,27 @@ class CatalogHandlerCollectionUpsertProfileSeedTest {
     }
 
     @Test
+    void aModelTheProfileDisagreesWith_refuses422_withTheTypedReasonBesideTheMessage() throws Exception {
+        // RDR-229 P3.1 (nexus-p2m1x.17, linda 2026-11-22): the profile refusal carries reason=embedding_profile_mismatch
+        // beside the unchanged message, so a client matches the reason, not the wording.
+        String tenant = "cloud-shaped-tenant-http-reason";
+        CapturingExchange seed = post("/v1/catalog/collections/upsert",
+            "{\"name\":\"code__" + tenant + "__voyage-code-3__v1\",\"content_type\":\"code\","
+            + "\"owner_id\":\"" + tenant + "\",\"embedding_model\":\"voyage-code-3\",\"model_version\":\"v1\"}");
+        handleWithTenant(seed, tenant);
+        assertThat(seed.status).isEqualTo(200);
+
+        CapturingExchange ex = post("/v1/catalog/collections/upsert",
+            "{\"name\":\"code__" + tenant + "-b__bge-base-en-v15-768__v1\",\"content_type\":\"code\","
+            + "\"owner_id\":\"" + tenant + "-b\",\"embedding_model\":\"bge-base-en-v15-768\",\"model_version\":\"v1\"}");
+        handleWithTenant(ex, tenant);
+        assertThat(ex.status).isEqualTo(422);
+        var body = new com.fasterxml.jackson.databind.ObjectMapper().readTree(ex.bodyString());
+        assertThat(body.path("reason").asText()).as(ex.bodyString()).isEqualTo("embedding_profile_mismatch");
+        assertThat(body.path("error").asText()).as("the message is unchanged").contains("refusing to register");
+    }
+
+    @Test
     void registeringWithNoContentType_refuses422_namingTheField() throws Exception {
         // RDR-204 Phase 1 (Sam's decision): the legacy no-content_type registration
         // contract is retired -- hygiene-002-1's non-empty CHECK on content_type
