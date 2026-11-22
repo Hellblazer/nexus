@@ -115,9 +115,17 @@ final class RestoreIdFill {
      * a file that carries them keeps them in its own list and one that does not gets them added.
      */
     static List<String> filledColumns(DSLContext ctx, ExportTable table, Stage rows) {
-        List<String> candidates = REGISTRY.equals(table.name()) ? List.of("collection_id", "superseded_by_id")
-            : PAIRS.getOrDefault(table.name(), List.of()).stream().map(Pair::idColumn).toList();
-        return candidates.stream().filter(c -> stageHasColumn(ctx, rows, c)).toList();
+        return computedColumns(table.name()).stream().filter(c -> stageHasColumn(ctx, rows, c)).toList();
+    }
+
+    /**
+     * The id columns of {@code table} this class computes on every restore, whatever the file holds: the registry's own
+     * ids, and every other table's ids from the expand's list. The import's plan does not require them from the file
+     * (TenantImportPlan#identityColumns), because {@link #fill} writes them before the insert.
+     */
+    static List<String> computedColumns(String table) {
+        return REGISTRY.equals(table) ? List.of("collection_id", "superseded_by_id")
+            : PAIRS.getOrDefault(table, List.of()).stream().map(Pair::idColumn).toList();
     }
 
     // ── the refusal ─────────────────────────────────────────────────────────────────────────────
