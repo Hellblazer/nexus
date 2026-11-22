@@ -78,6 +78,16 @@ _CONTINUE_ALLOWLIST: dict[tuple[str, str], str] = {
     # table is absent; the rest is reads of pg_roles, pg_policy and pg_class. The body names no chunk table, leaf or
     # builder object (RDR-229 P3.1, residual R3).
     ("vectors-070-collection-id-stamp-moves.xml", "vectors-070-31"): "aspect queue owner-read policy",
+    # SET LOCAL lock_timeout = '5s', then ALTER TABLE nexus.aspect_extraction_queue ADD CONSTRAINT ... FOREIGN KEY ... NOT VALID
+    # (SHARE ROW EXCLUSIVE on that table and on nexus.catalog_collections for an instant, bounded by the 5 s lock_timeout),
+    # inside a DO block that does nothing when the table is absent or has no collection_id column; the CONTINUE
+    # precondition is a read of pg_class and pg_attribute. The body names no chunk table, leaf or builder object, and
+    # the registry is not a chunk-family table, so the lock cannot wait behind or hold up a builder (RDR-229 P3.3a, residual R3).
+    ("vectors-072-collection-id-fk-twins.xml", "vectors-072-7"): "aspect queue id twin foreign key",
+    # One INSERT into nexus.data_moves (ROW EXCLUSIVE on that registry table only), inside a DO block that does nothing
+    # when nexus.aspect_extraction_queue or its twin is absent; the precondition and the block read pg_class and
+    # pg_constraint and take no lock on the queue. The body names no chunk table, leaf or builder object (RDR-229 P3.3a, residual R3).
+    ("vectors-072-collection-id-fk-twins.xml", "vectors-072-17"): "aspect queue twin validation move registration",
     # CREATE UNIQUE INDEX on nexus.catalog_collections (SHARE on it for one build of a registry of hundreds of rows) and,
     # in its guard, the counter's ALTER TABLE on that table (ACCESS EXCLUSIVE for one count) plus a read of
     # nexus.data_moves. No chunk table, leaf or builder object is named, and a CREATE INDEX CONCURRENTLY on a leaf holds
