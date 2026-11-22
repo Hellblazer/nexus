@@ -91,6 +91,15 @@ class LeafIdUniqueIndexPartitionFunctionIntegrationTest {
         }
     }
 
+    /** {@code nexus.partition_ensure_leaf(parent, model partition, tenant, true)}: true when the call created the leaf. */
+    private static boolean ensureLeaf(DSLContext ctx, String parent, String modelPartition, String tenant) {
+        var regclass = new org.jooq.impl.DefaultDataType<>(SQLDialect.POSTGRES, Object.class, "regclass");
+        return Boolean.TRUE.equals(ctx.select(DSL.function(DSL.name("nexus", "partition_ensure_leaf"),
+                org.jooq.impl.SQLDataType.BOOLEAN, DSL.val(parent).cast(regclass), DSL.val(modelPartition).cast(regclass),
+                DSL.val(tenant), DSL.val(true)))
+            .fetchOne(0, Boolean.class));
+    }
+
     /** The unique id indexes of the tenant's leaves of {@code key}'s table (a leaf's relation name ends with the tenant's hash). */
     private List<Idx> leafIndexes(IdKeyIndexProbe.Key key, List<String> leaves) throws Exception {
         return asOwner(ctx -> IdKeyIndexProbe.indexes(ctx, key)).stream().filter(i -> i.leaf() && leaves.contains(i.relation())).toList();
@@ -148,9 +157,7 @@ class LeafIdUniqueIndexPartitionFunctionIntegrationTest {
         for (var key : IdKeyIndexProbe.KEYS) {
             String parent = "nexus." + key.table();
             String modelPartition = asOwner(ctx -> IdKeyIndexProbe.modelPartitions(ctx, key)).get(0);
-            boolean created = asOwner(ctx -> ctx.fetchValue(
-                "SELECT nexus.partition_ensure_leaf(?::regclass, ?::regclass, ?, true)", parent, modelPartition, tenant)
-                instanceof Boolean b && b);
+            boolean created = asOwner(ctx -> ensureLeaf(ctx, parent, modelPartition, tenant));
             assertThat(created).as("%s: the leaf did not exist, so the helper creates it", key.table()).isTrue();
 
             List<String> leaves = tenantLeaves(key, tenant);
@@ -158,9 +165,7 @@ class LeafIdUniqueIndexPartitionFunctionIntegrationTest {
             assertThat(leafIndexes(key, leaves)).as("%s: it has one unique id index, valid", key.table())
                 .hasSize(1).allMatch(Idx::valid);
 
-            boolean again = asOwner(ctx -> ctx.fetchValue(
-                "SELECT nexus.partition_ensure_leaf(?::regclass, ?::regclass, ?, true)", parent, modelPartition, tenant)
-                instanceof Boolean b && b);
+            boolean again = asOwner(ctx -> ensureLeaf(ctx, parent, modelPartition, tenant));
             assertThat(again).as("%s: the second call finds the leaf by its bound", key.table()).isFalse();
             assertThat(leafIndexes(key, leaves)).as("%s: and adds no second index", key.table()).hasSize(1);
         }
@@ -181,8 +186,10 @@ class LeafIdUniqueIndexPartitionFunctionIntegrationTest {
     @SuppressWarnings("deprecation")
     void withTheParentConstraintPresentANewLeafEndsWithExactlyOneUniqueIdIndex() throws Exception {
         for (var key : IdKeyIndexProbe.KEYS) {
-            asOwner(ctx -> ctx.execute("ALTER TABLE nexus." + key.table() + " ADD CONSTRAINT p33b_fixture_" + key.table()
-                + "_cid_key UNIQUE (" + key.columns() + ")"));
+            asOwner(ctx -> ctx.alterTable(DSL.table(DSL.name("nexus", key.table())))
+                .add(DSL.constraint(DSL.name("p33b_fixture_" + key.table() + "_cid_key"))
+                    .unique(java.util.Arrays.stream(key.columns().split(", ")).map(c -> DSL.field(DSL.name(c))).toList()))
+                .execute());
         }
         String viaCreate = "p33b-post-create-" + System.nanoTime();
         String viaEnsure = "p33b-post-ensure-" + System.nanoTime();
@@ -195,9 +202,7 @@ class LeafIdUniqueIndexPartitionFunctionIntegrationTest {
         });
         for (var key : IdKeyIndexProbe.KEYS) {
             String modelPartition = asOwner(ctx -> IdKeyIndexProbe.modelPartitions(ctx, key)).get(0);
-            boolean created = asOwner(ctx -> ctx.fetchValue(
-                "SELECT nexus.partition_ensure_leaf(?::regclass, ?::regclass, ?, true)", "nexus." + key.table(), modelPartition, viaEnsure)
-                instanceof Boolean b && b);
+            boolean created = asOwner(ctx -> ensureLeaf(ctx, "nexus." + key.table(), modelPartition, viaEnsure));
             assertThat(created).as("%s: the helper created the leaf", key.table()).isTrue();
 
             assertThat(asOwner(ctx -> IdKeyIndexProbe.indexes(ctx, key)).stream().filter(i -> i.level() == 0).toList())

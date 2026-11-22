@@ -251,7 +251,9 @@ migration_wal_bytes_per_worker = 12143000
 # Measured: chas lab-m via lab-remote, 2026-11-22, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on integration/rdr229-phase3-r12 bb86932c0b: ddl: migration=2832.
 # 2832 -> 2833 (2026-11-22, nexus-p2m1x.17, the RDR-229 Phase 3 reland): vectors-074 redefines nexus.catalog_reconcile_commit (one CREATE OR REPLACE FUNCTION) so a row whose physical_collection has no registry row is refused per row (unregistered_collection) instead of failing the commit; still under Sam's 2860 cap (ask rdr229-phase3-ddl-ceiling).
 # Measured: chas lab-m via lab-remote, 2026-11-22, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on integration/rdr229-phase3-r13 37d7129b95: ddl: migration=2833 (hellmini's macOS bundle measured the same).
-migration_ddl_per_worker = 2833
+# 2838 -> 2839 (2026-11-22, nexus-p2m1x.20, RDR-229 P3.3b leaf helper redefinition, under Sam's 2860 cap): vectors-073-1 is one CREATE OR REPLACE FUNCTION nexus.partition_ensure_leaf (vectors-034-1's body plus the id unique index block); its rollback is not counted. The pass's own run-time DDL (LeafIndexPass) is not Liquibase and does not count. This branch's file still read 2682 (the P3.1, P3.3a, P3.6 and P3.8 increases go to Sam in one ask and are bumped on the integration branch, 2832 on -r12); the value here is the measured count of this tree.
+# Measured: chas lab-m via lab-remote, 2026-11-22, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued: ddl: migration=2838 on 2f455cd718 (P3.3a's tip, before) and migration=2839 with vectors-073 (after).
+migration_ddl_per_worker = 2839
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]

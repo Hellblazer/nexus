@@ -449,6 +449,14 @@ class RawSqlGateTest {
             // identifier, key or prefix is concatenated in Java. Plain JDBC Statement.execute, as PciBuilderSession's
             // does. Single-homed: AdminDdlSession#ddl, for the chunk constraints and the catalog TTL CHECK alike.
             "runDdl", Map.of(".execute(sql)", 1))),
+        Map.entry("LeafIndexPass.java", Map.of(
+            // SANCTIONED RAW (RDR-229 P3.3b, nexus-p2m1x.20): CREATE UNIQUE INDEX CONCURRENTLY, DROP INDEX CONCURRENTLY, ALTER TABLE ...
+            // ADD CONSTRAINT UNIQUE (USING INDEX) and ALTER INDEX ... ATTACH PARTITION have no typed jOOQ form, and a concurrent build
+            // cannot run inside a function or a transaction block, so the pass sends them on its own autocommit admin connection. The
+            // text is rendered by PostgreSQL's format() with %I and %s (LeafIndexPass.Session#ddl) from a literal template and catalog
+            // names; the %s column list is a constant of LeafIndexPass.KEYS. Plain JDBC Statement.execute, as PciBuilderSession's and
+            // AdminDdlSession's do. Single-homed: Session#ddl.
+            "runDdl", Map.of(".execute(sql)", 1))),
         Map.entry("MoveSql.java", Map.of(
             // SANCTIONED RAW (RDR-246, nexus-f3yqd.2.14): a data move's verification query and on_complete are SQL text
             // that a changeset registered in nexus.data_moves (the registry's own columns); the worker runs them and
