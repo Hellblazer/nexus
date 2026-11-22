@@ -9,15 +9,21 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import dev.nexus.service.PgCatalogProbes;
 import dev.nexus.service.db.SchemaMigrator;
+import org.jooq.DSLContext;
+import org.jooq.Field;
+import org.jooq.SQLDialect;
+import org.jooq.Table;
+import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.slf4j.LoggerFactory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import java.sql.Connection;
-import java.sql.Statement;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Function;
 
 /**
  * RDR-229 P3.4 (nexus-p2m1x.22): {@link IdUniqueIndexPass}, its id-keyed UNIQUE arbiters and the id twins' plain supporting indexes, built at run time
@@ -27,39 +33,64 @@ class IdUniqueIndexPassIntegrationTest extends DataMoveIntegrationBase {
 
     private static final String TENANT = "p34-iduq";
 
+    private static final Table<?> TAXONOMY_META = table("nexus", "taxonomy_meta");
+    private static final Table<?> PDF_PIPELINE = table("nexus", "pdf_pipeline");
+    private static final Table<?> REEMBED_JOBS = table("nexus", "reembed_jobs");
+    private static final Field<String> COLLECTION = DSL.field(DSL.name("collection"), String.class);
+    private static final Field<String> SOURCE_COLLECTION = DSL.field(DSL.name("source_collection"), String.class);
+
+    private static Field<Object> column(String name) {
+        return DSL.field(DSL.name(name));
+    }
+
     @AfterEach
     void dropTheIndexesAndRows() throws Exception {
-        try (Connection su = pg.createConnection(""); Statement st = su.createStatement()) {
-            su.setAutoCommit(true);
+        asReplica(d -> {
+            // jOOQ renders DROP INDEX without the schema of its name (an index is dropped by its own name), so the schema goes on the path
+            d.set(DSL.name("search_path"), DSL.inline("nexus")).execute();
             for (IdUniqueIndexPass.Spec s : IdUniqueIndexPass.SPECS) {
-                st.execute("DROP INDEX IF EXISTS nexus." + s.index());
+                d.dropIndexIfExists(DSL.name(s.index())).execute();
+                assertThat(PgCatalogProbes.indexExists(d, "nexus", s.index())).as("%s is dropped", s.index()).isFalse();
             }
-            st.execute("SET session_replication_role = replica");
-            st.execute("DELETE FROM nexus.taxonomy_meta WHERE tenant_id = '" + TENANT + "'");
-            st.execute("DELETE FROM nexus.pdf_pipeline WHERE tenant_id = '" + TENANT + "'");
-            st.execute("DELETE FROM nexus.reembed_jobs WHERE tenant_id = '" + TENANT + "'");
+            for (Table<?> t : List.of(TAXONOMY_META, PDF_PIPELINE, REEMBED_JOBS)) {
+                d.deleteFrom(t).where(TENANT_ID.eq(TENANT)).execute();
+            }
+            return 0;
+        });
+    }
+
+    /** Runs {@code work} on a fresh superuser connection, which ends with the call. */
+    private <T> T asSuperuser(Function<DSLContext, T> work) throws Exception {
+        try (Connection conn = pg.createConnection("")) {
+            conn.setAutoCommit(true);
+            return work.apply(DSL.using(conn, SQLDialect.POSTGRES));
         }
     }
 
-    /** Runs {@code sql} as the superuser with triggers and foreign keys off (session_replication_role replica); unique indexes still hold. */
-    private int plain(String sql) throws Exception {
-        try (Connection su = pg.createConnection(""); Statement st = su.createStatement()) {
-            st.execute("SET session_replication_role = replica");
-            return st.executeUpdate(sql);
-        }
+    /** As {@link #asSuperuser}, with triggers and foreign keys off (session_replication_role replica); unique indexes still hold. */
+    private <T> T asReplica(Function<DSLContext, T> work) throws Exception {
+        return asSuperuser(d -> {
+            d.set(DSL.name("session_replication_role"), DSL.inline("replica")).execute();
+            return work.apply(d);
+        });
+    }
+
+    private static Field<Object> advisoryLock(String function) {
+        return DSL.function(function, SQLDataType.OTHER, DSL.val(SchemaMigrator.MIGRATION_ADVISORY_LOCK_KEY));
     }
 
     /** While a schema migration holds its advisory lock the pass builds nothing and leaves its entry for the next tick. */
     @Test
     void whileAMigrationHoldsItsLockThePassStandsDown() throws Exception {
         var registry = new BootWorkRegistry(Clock.systemUTC());
-        try (Connection walk = pg.createConnection(""); Statement st = walk.createStatement()) {
-            st.execute("SELECT pg_advisory_lock(" + SchemaMigrator.MIGRATION_ADVISORY_LOCK_KEY + ")");
+        try (Connection walk = pg.createConnection("")) {
+            var walkCtx = DSL.using(walk, SQLDialect.POSTGRES);
+            walkCtx.select(advisoryLock("pg_advisory_lock")).fetch();
             var r = pass(registry, true).runOnce();
             assertThat(r.built()).as("nothing built under a migration").isZero();
             assertThat(registry.snapshot()).as("the work is still reported, not finished")
                 .anyMatch(e -> e.id().equals(IdUniqueIndexPass.BOOT_WORK_ID));
-            st.execute("SELECT pg_advisory_unlock(" + SchemaMigrator.MIGRATION_ADVISORY_LOCK_KEY + ")");
+            walkCtx.select(advisoryLock("pg_advisory_unlock")).fetch();
         }
         assertThat(pass(registry, true).runOnce().built()).as("after it, the next tick builds").isEqualTo(applicable());
         assertThat(registry.snapshot()).noneMatch(e -> e.id().equals(IdUniqueIndexPass.BOOT_WORK_ID));
@@ -75,30 +106,46 @@ class IdUniqueIndexPassIntegrationTest extends DataMoveIntegrationBase {
      */
     @Test
     void aPipelineRowWrittenAgainUnderTheNewLabelIsNotDuplicatedOnceTheTwinExists() throws Exception {
-        String first = "INSERT INTO nexus.pdf_pipeline (tenant_id, content_hash, pdf_path, collection, keyed_by, status, started_at, updated_at,"
-            + " collection_id) VALUES ('" + TENANT + "', 'h1', '/a.pdf', '%s', 'document', 'running', now(), now(), 990101) ON CONFLICT DO NOTHING";
-        assertThat(plain(first.formatted("docs__p34-old"))).isEqualTo(1);
-        assertThat(plain(first.formatted("docs__p34-new"))).as("control: without the twin the new label makes a second row").isEqualTo(1);
-        plain("DELETE FROM nexus.pdf_pipeline WHERE tenant_id = '" + TENANT + "' AND collection = 'docs__p34-new'");
+        assertThat(pipelineRow("docs__p34-old")).isEqualTo(1);
+        assertThat(pipelineRow("docs__p34-new")).as("control: without the twin the new label makes a second row").isEqualTo(1);
+        asReplica(d -> d.deleteFrom(PDF_PIPELINE).where(TENANT_ID.eq(TENANT)).and(COLLECTION.eq("docs__p34-new")).execute());
 
         pass(new BootWorkRegistry(Clock.systemUTC()), true).runOnce();
-        assertThat(plain(first.formatted("docs__p34-new"))).as("with the twin: no second row").isZero();
-        assertThat(ctx().fetchCount(ctx().selectFrom("nexus.pdf_pipeline").where("tenant_id = ?", TENANT))).isEqualTo(1);
+        assertThat(pipelineRow("docs__p34-new")).as("with the twin: no second row").isZero();
+        assertThat(ctx().fetchCount(DSL.selectOne().from(PDF_PIPELINE).where(TENANT_ID.eq(TENANT)))).isEqualTo(1);
+    }
+
+    /** PipelineRepository#create's insert: ON CONFLICT DO NOTHING with no target, so it arbitrates on every unique index. Rows written: 0 or 1. */
+    private int pipelineRow(String label) throws Exception {
+        return asReplica(d -> d.insertInto(PDF_PIPELINE)
+            .columns(column("tenant_id"), column("content_hash"), column("pdf_path"), column("collection"), column("keyed_by"),
+                column("status"), column("started_at"), column("updated_at"), column("collection_id"))
+            .values(DSL.inline(TENANT), DSL.inline("h1"), DSL.inline("/a.pdf"), DSL.inline(label), DSL.inline("document"),
+                DSL.inline("running"), DSL.currentTimestamp(), DSL.currentTimestamp(), DSL.inline(990101L))
+            .onConflictDoNothing().execute());
     }
 
     /** The same for reembed_jobs: a second active job for one collection under its new label is refused by the twin's partial index. */
     @Test
     void aReembedJobStartedAgainUnderTheNewLabelIsNotDuplicatedOnceTheTwinExists() throws Exception {
-        String job = "INSERT INTO nexus.reembed_jobs (tenant_id, job_id, source_collection, target_collection, state, started_at, updated_at,"
-            + " source_collection_id, target_collection_id) VALUES ('" + TENANT + "', gen_random_uuid(), '%s', 'code__p34-target', 'planned',"
-            + " now(), now(), 990201, 990202) ON CONFLICT DO NOTHING";
-        assertThat(plain(job.formatted("code__p34-old"))).isEqualTo(1);
-        assertThat(plain(job.formatted("code__p34-new"))).as("control: without the twin a second active job starts").isEqualTo(1);
-        plain("DELETE FROM nexus.reembed_jobs WHERE tenant_id = '" + TENANT + "' AND source_collection = 'code__p34-new'");
+        assertThat(reembedJob("code__p34-old")).isEqualTo(1);
+        assertThat(reembedJob("code__p34-new")).as("control: without the twin a second active job starts").isEqualTo(1);
+        asReplica(d -> d.deleteFrom(REEMBED_JOBS).where(TENANT_ID.eq(TENANT)).and(SOURCE_COLLECTION.eq("code__p34-new")).execute());
 
         pass(new BootWorkRegistry(Clock.systemUTC()), true).runOnce();
-        assertThat(plain(job.formatted("code__p34-new"))).as("with the twin: no second active job").isZero();
-        assertThat(ctx().fetchCount(ctx().selectFrom("nexus.reembed_jobs").where("tenant_id = ?", TENANT))).isEqualTo(1);
+        assertThat(reembedJob("code__p34-new")).as("with the twin: no second active job").isZero();
+        assertThat(ctx().fetchCount(DSL.selectOne().from(REEMBED_JOBS).where(TENANT_ID.eq(TENANT)))).isEqualTo(1);
+    }
+
+    /** ReembedJobRepository's insert: ON CONFLICT DO NOTHING with no target. Rows written: 0 or 1. */
+    private int reembedJob(String sourceLabel) throws Exception {
+        return asReplica(d -> d.insertInto(REEMBED_JOBS)
+            .columns(column("tenant_id"), column("job_id"), column("source_collection"), column("target_collection"), column("state"),
+                column("started_at"), column("updated_at"), column("source_collection_id"), column("target_collection_id"))
+            .values(DSL.inline(TENANT), DSL.function(DSL.name("gen_random_uuid"), SQLDataType.UUID), DSL.inline(sourceLabel),
+                DSL.inline("code__p34-target"), DSL.inline("planned"), DSL.currentTimestamp(), DSL.currentTimestamp(),
+                DSL.inline(990201L), DSL.inline(990202L))
+            .onConflictDoNothing().execute());
     }
 
     /** How many of the pass's indexes apply here: the retired queue's does not where its table is gone (a fresh walk). */
@@ -131,7 +178,13 @@ class IdUniqueIndexPassIntegrationTest extends DataMoveIntegrationBase {
         assertThat(IdUniqueIndexPass.allValid(ctx())).as("gate 3's read").isTrue();
         assertThat(PgCatalogProbes.indexDef(ctx(), "nexus", "idx_topics_root_label_id_uq"))
             .as("the upsert's predicate exactly, or ON CONFLICT cannot infer it")
-            .isEqualTo("CREATE UNIQUE INDEX idx_topics_root_label_id_uq ON nexus.topics USING btree (tenant_id, collection_id, label) WHERE (parent_id IS NULL)");
+            .startsWith("CREATE ")
+            .endsWith("UNIQUE INDEX idx_topics_root_label_id_uq ON nexus.topics USING btree (tenant_id, collection_id, label) WHERE (parent_id IS NULL)");
+        assertThat(PgCatalogProbes.indexDef(ctx(), "nexus", "idx_catalog_chunks_collection_id"))
+            .as("the id twin of idx_catalog_chunks_collection, a full index, which gate 3 requires")
+            .startsWith("CREATE ")
+            .endsWith("INDEX idx_catalog_chunks_collection_id ON nexus.catalog_document_chunks USING btree (tenant_id, collection_id)")
+            .doesNotContain("UNIQUE").doesNotContain("WHERE");
         assertThat(registry.snapshot()).as("the entry is gone once the work is done").noneMatch(e -> e.id().equals(IdUniqueIndexPass.BOOT_WORK_ID));
         assertThat(pass(registry, true).runOnce().built()).as("a second pass builds nothing").isZero();
     }
@@ -140,9 +193,9 @@ class IdUniqueIndexPassIntegrationTest extends DataMoveIntegrationBase {
     @Test
     void anInvalidLeftoverIsDroppedAndRebuilt() throws Exception {
         pass(new BootWorkRegistry(Clock.systemUTC()), true).runOnce();
-        try (Connection su = pg.createConnection(""); Statement st = su.createStatement()) {
-            st.execute("UPDATE pg_catalog.pg_index SET indisvalid = false WHERE indexrelid = 'nexus.idx_taxonomy_meta_id_uq'::regclass");
-        }
+        asSuperuser(d -> d.update(table("pg_catalog", "pg_index")).set(DSL.field(DSL.name("indisvalid"), Boolean.class), false)
+            .where(column("indexrelid").eq(DSL.function("to_regclass", SQLDataType.OTHER, DSL.val("nexus.idx_taxonomy_meta_id_uq"))))
+            .execute());
         assertThat(IdUniqueIndexPass.allValid(ctx())).isFalse();
 
         var r = pass(new BootWorkRegistry(Clock.systemUTC()), true).runOnce();
@@ -159,11 +212,10 @@ class IdUniqueIndexPassIntegrationTest extends DataMoveIntegrationBase {
      */
     @Test
     void aDuplicateOnTheIdIsReportedAsCorruptionOnceAndNeverLooped() throws Exception {
-        try (Connection su = pg.createConnection(""); Statement st = su.createStatement()) {
-            st.execute("SET session_replication_role = replica");   // no trigger rewrites the id, no foreign key checks the plant
-            st.execute("INSERT INTO nexus.taxonomy_meta (tenant_id, collection, collection_id) VALUES ('" + TENANT + "', 'p34-a', 990001), ('"
-                + TENANT + "', 'p34-b', 990001)");
-        }
+        // replica: no trigger rewrites the id, no foreign key checks the plant
+        asReplica(d -> d.insertInto(TAXONOMY_META).columns(column("tenant_id"), column("collection"), column("collection_id"))
+            .values(DSL.inline(TENANT), DSL.inline("p34-a"), DSL.inline(990001L))
+            .values(DSL.inline(TENANT), DSL.inline("p34-b"), DSL.inline(990001L)).execute());
         var registry = new BootWorkRegistry(Clock.systemUTC());
         var pass = pass(registry, true);
         List<String> sent = new ArrayList<>();
@@ -197,10 +249,7 @@ class IdUniqueIndexPassIntegrationTest extends DataMoveIntegrationBase {
         assertThat(second.corrupt()).containsExactly("taxonomy_meta");
         assertThat(sent).as("not built again in this engine's life").noneMatch(s -> s.contains("idx_taxonomy_meta_id_uq"));
 
-        try (Connection su = pg.createConnection(""); Statement st = su.createStatement()) {
-            st.execute("SET session_replication_role = replica");
-            st.execute("DELETE FROM nexus.taxonomy_meta WHERE tenant_id = '" + TENANT + "' AND collection = 'p34-b'");
-        }
+        asReplica(d -> d.deleteFrom(TAXONOMY_META).where(TENANT_ID.eq(TENANT)).and(COLLECTION.eq("p34-b")).execute());
         var nextEngine = pass(new BootWorkRegistry(Clock.systemUTC()), true).runOnce();
         assertThat(nextEngine.built()).as("repaired, the next engine's pass builds it").isEqualTo(1);
         assertThat(IdUniqueIndexPass.allValid(ctx())).isTrue();

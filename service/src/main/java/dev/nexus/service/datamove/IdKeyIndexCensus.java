@@ -3,8 +3,19 @@
 package dev.nexus.service.datamove;
 
 import org.jooq.DSLContext;
+import org.jooq.Field;
+import org.jooq.Record5;
+import org.jooq.Result;
+import org.jooq.Table;
+import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * RDR-229 P3.4 (nexus-p2m1x.22, linda's ruling 2026-11-22): the census of the supporting indexes of the id keys. An id key is a
@@ -32,28 +43,106 @@ public final class IdKeyIndexCensus {
     /** One id key: its table, its name, and whether an index supports it. */
     public record Key(String table, String constraint, boolean supported) { }
 
-    private static final String SQL = """
-        SELECT r.relname AS tbl, c.conname AS con,
-               EXISTS (SELECT 1 FROM pg_catalog.pg_index i
-                        WHERE i.indrelid = c.conrelid AND i.indisvalid AND i.indpred IS NULL AND i.indnkeyatts >= 2
-                          AND i.indkey[0] = ANY (c.conkey) AND i.indkey[1] = ANY (c.conkey)
-                          AND (i.indkey[0] = t.attnum OR i.indkey[1] = t.attnum)) AS supported
-          FROM pg_catalog.pg_constraint c
-          JOIN pg_catalog.pg_class r ON r.oid = c.conrelid
-          JOIN pg_catalog.pg_namespace n ON n.oid = r.relnamespace
-          LEFT JOIN pg_catalog.pg_attribute t ON t.attrelid = c.conrelid AND t.attname = 'tenant_id' AND NOT t.attisdropped
-         WHERE n.nspname = 'nexus' AND c.contype = 'f' AND c.conparentid = 0
-           AND EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
-                        WHERE a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey) AND a.attname = ANY (?::text[]))
-         ORDER BY r.relname, c.conname
-        """;
+    private static final Table<?> CONSTRAINT = DSL.table(DSL.name("pg_catalog", "pg_constraint"));
+    private static final Table<?> CLASS = DSL.table(DSL.name("pg_catalog", "pg_class"));
+    private static final Table<?> NAMESPACE = DSL.table(DSL.name("pg_catalog", "pg_namespace"));
+    private static final Table<?> ATTRIBUTE = DSL.table(DSL.name("pg_catalog", "pg_attribute"));
+    private static final Table<?> INDEX = DSL.table(DSL.name("pg_catalog", "pg_index"));
+
+    private static final Field<String> REL = DSL.field(DSL.name("r", "relname"), String.class);
+    private static final Field<String> CON = DSL.field(DSL.name("c", "conname"), String.class);
+    private static final Field<Short[]> CONKEY = DSL.field(DSL.name("c", "conkey"), SQLDataType.SMALLINT.getArrayDataType());
+    private static final Field<Short> ATTNUM = DSL.field(DSL.name("a", "attnum"), Short.class);
+    private static final Field<String> ATTNAME = DSL.field(DSL.name("a", "attname"), String.class);
 
     private IdKeyIndexCensus() { /* static */ }
 
-    /** Every id key, in table then name order. A key on a table with no tenant_id column is listed and never supported. */
+    /** The top-level foreign keys of schema nexus, each with its columns' attributes, in table then name order; one row per attribute of the table. */
+    private static Result<Record5<String, String, Short[], Short, String>> keyAttributes(DSLContext ctx) {
+        return ctx.select(REL, CON, CONKEY, ATTNUM, ATTNAME)
+            .from(CONSTRAINT.as("c"))
+            .join(CLASS.as("r")).on(DSL.field(DSL.name("r", "oid")).eq(DSL.field(DSL.name("c", "conrelid"))))
+            .join(NAMESPACE.as("n")).on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("r", "relnamespace"))))
+            .join(ATTRIBUTE.as("a")).on(DSL.field(DSL.name("a", "attrelid")).eq(DSL.field(DSL.name("c", "conrelid"))))
+            .where(DSL.field(DSL.name("n", "nspname"), String.class).eq("nexus"))
+            .and(DSL.field(DSL.name("c", "contype"), String.class).eq(DSL.inline("f")))
+            .and(DSL.field(DSL.name("c", "conparentid"), Long.class).eq(DSL.inline(0L)))
+            .and(ATTNUM.gt((short) 0))
+            .and(DSL.field(DSL.name("a", "attisdropped"), Boolean.class).isFalse())
+            .orderBy(REL, CON, ATTNUM)
+            .fetch();
+    }
+
+    /** The VALID, non-partial indexes of schema nexus with two or more key columns, by table: each one's key columns (attnums) in order. */
+    private static Map<String, List<List<Short>>> candidateIndexes(DSLContext ctx) {
+        Field<String> indkey = DSL.cast(DSL.field(DSL.name("i", "indkey")), SQLDataType.VARCHAR);
+        Map<String, List<List<Short>>> byTable = new HashMap<>();
+        ctx.select(REL, indkey, DSL.field(DSL.name("i", "indnkeyatts"), Integer.class))
+            .from(INDEX.as("i"))
+            .join(CLASS.as("r")).on(DSL.field(DSL.name("r", "oid")).eq(DSL.field(DSL.name("i", "indrelid"))))
+            .join(NAMESPACE.as("n")).on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("r", "relnamespace"))))
+            .where(DSL.field(DSL.name("n", "nspname"), String.class).eq("nexus"))
+            .and(DSL.field(DSL.name("i", "indisvalid"), Boolean.class))
+            .and(DSL.field(DSL.name("i", "indpred")).isNull())
+            .and(DSL.field(DSL.name("i", "indnkeyatts"), Integer.class).ge(2))
+            .fetch()
+            .forEach(row -> {
+                String[] parts = row.get(indkey).trim().split("\\s+");   // int2vector as text: "1 2 3"
+                List<Short> cols = new ArrayList<>(2);
+                for (int k = 0; k < 2; k++) {   // only the first two key columns are read by the rule
+                    cols.add(Short.valueOf(parts[k]));
+                }
+                byTable.computeIfAbsent(row.get(REL), t -> new ArrayList<>()).add(cols);
+            });
+        return byTable;
+    }
+
+    /**
+     * Every id key, in table then name order. A key on a table with no tenant_id column is listed and never supported. The array
+     * operations of the rule ({@code indkey[n] = ANY (conkey)}) have no typed jOOQ form, so the catalog's columns are read and the rule
+     * is applied here.
+     */
     public static List<Key> keys(DSLContext ctx) {
-        return ctx.resultQuery(SQL, (Object) ID_COLUMNS.toArray(String[]::new))
-            .fetch(r -> new Key(r.get("tbl", String.class), r.get("con", String.class), Boolean.TRUE.equals(r.get("supported", Boolean.class))));
+        Map<String, List<List<Short>>> indexes = candidateIndexes(ctx);
+        List<Key> out = new ArrayList<>();
+        String table = null;
+        String con = null;
+        Set<Short> conkey = null;
+        boolean idColumn = false;
+        Short tenantAttnum = null;
+        for (var row : keyAttributes(ctx)) {
+            String t = row.get(REL);
+            String c = row.get(CON);
+            if (!t.equals(table) || !c.equals(con)) {
+                if (con != null && idColumn) {
+                    out.add(key(table, con, conkey, tenantAttnum, indexes));
+                }
+                table = t;
+                con = c;
+                conkey = new HashSet<>(List.of(row.get(CONKEY)));
+                idColumn = false;
+                tenantAttnum = null;
+            }
+            short attnum = row.get(ATTNUM);
+            if (conkey.contains(attnum) && ID_COLUMNS.contains(row.get(ATTNAME))) {
+                idColumn = true;
+            }
+            if ("tenant_id".equals(row.get(ATTNAME))) {
+                tenantAttnum = attnum;
+            }
+        }
+        if (con != null && idColumn) {
+            out.add(key(table, con, conkey, tenantAttnum, indexes));
+        }
+        return out;
+    }
+
+    /** The rule for one key: an index whose first two columns are both columns of the key and one of them is tenant_id. */
+    private static Key key(String table, String con, Set<Short> conkey, Short tenantAttnum, Map<String, List<List<Short>>> indexes) {
+        boolean supported = tenantAttnum != null && indexes.getOrDefault(table, List.of()).stream()
+            .anyMatch(cols -> conkey.contains(cols.get(0)) && conkey.contains(cols.get(1))
+                && (cols.get(0).equals(tenantAttnum) || cols.get(1).equals(tenantAttnum)));
+        return new Key(table, con, supported);
     }
 
     /** The id keys no index supports: empty is the census passing. */

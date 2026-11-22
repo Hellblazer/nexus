@@ -6,7 +6,10 @@ import dev.nexus.service.BootWorkRegistry;
 import dev.nexus.service.db.AdminConnection;
 import dev.nexus.service.db.SchemaMigrator;
 import dev.nexus.service.vectors.PciBuilderSession;
+import org.jooq.Condition;
 import org.jooq.DSLContext;
+import org.jooq.Field;
+import org.jooq.Table;
 import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
@@ -19,6 +22,7 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -74,6 +78,23 @@ public final class IdUniqueIndexPass implements AutoCloseable {
     static final Duration BUILD_STATEMENT_TIMEOUT = Duration.ofHours(6);
     static final int DUPLICATES_LOGGED = 5;
 
+    private static final String SCHEMA = "nexus";
+    private static final String BUILD_TEMPLATE = "CREATE %sINDEX CONCURRENTLY %I ON %I.%I (%s)%s";
+    private static final String DROP_TEMPLATE = "DROP INDEX CONCURRENTLY IF EXISTS %I.%I";
+
+    private static final Table<?> INDEX = DSL.table(DSL.name("pg_catalog", "pg_index"));
+    private static final Table<?> CLASS = DSL.table(DSL.name("pg_catalog", "pg_class"));
+    private static final Table<?> NAMESPACE = DSL.table(DSL.name("pg_catalog", "pg_namespace"));
+    private static final Table<?> ATTRIBUTE = DSL.table(DSL.name("pg_catalog", "pg_attribute"));
+
+    private static Field<Object> col(String alias, String column) {
+        return DSL.field(DSL.name(alias, column));
+    }
+
+    private static Field<String> text(String alias, String column) {
+        return DSL.field(DSL.name(alias, column), String.class);
+    }
+
     /**
      * One index: its table, name, key columns and partial predicate ({@code null} for none) in the form {@code pg_get_expr} deparses it,
      * whether it is UNIQUE (an arbiter) or plain (a foreign key's supporting index), and whether its table may be absent (the retired queue:
@@ -88,14 +109,14 @@ public final class IdUniqueIndexPass implements AutoCloseable {
             return new Spec(table, index, columns, null, false, optional);
         }
 
-        String definition() {
-            return "CREATE " + (unique ? "UNIQUE " : "") + "INDEX CONCURRENTLY " + index + " ON nexus." + table + " (" + columns + ")"
-                + (predicate == null ? "" : " WHERE " + predicate);
+        /** The arguments of {@link #BUILD_TEMPLATE}: the UNIQUE keyword, index, schema, table, column list and WHERE clause (constants of this class and {@link ArbiterTwins}). */
+        String[] buildArguments() {
+            return new String[] {unique ? "UNIQUE " : "", index, SCHEMA, table, columns, predicate == null ? "" : " WHERE " + predicate};
         }
     }
 
     /**
-     * The arbiters ({@link ArbiterTwins#builtByThePass}), then the four supporting indexes. The topics and reembed_jobs predicates are exact; the topics one is exactly the upsert's ({@code ON CONFLICT (tenant_id, collection_id, label) WHERE parent_id IS NULL}),
+     * The arbiters ({@link ArbiterTwins#builtByThePass}), then the five supporting indexes. The topics and reembed_jobs predicates are exact; the topics one is exactly the upsert's ({@code ON CONFLICT (tenant_id, collection_id, label) WHERE parent_id IS NULL}),
      * or PostgreSQL cannot infer the index as its arbiter.
      */
     public static final List<Spec> SPECS = java.util.stream.Stream.concat(
@@ -107,7 +128,10 @@ public final class IdUniqueIndexPass implements AutoCloseable {
         Spec.support("topic_assignments", "idx_ta_tenant_source_collection_id", "tenant_id, source_collection_id", false),
         Spec.support("topics", "idx_topics_tenant_collection_id", "tenant_id, collection_id", false),
         Spec.support("document_highlights", "idx_doc_highlights_collection_id", "tenant_id, collection_id", false),
-        Spec.support("aspect_extraction_queue", "idx_aspect_queue_collection_id", "tenant_id, collection_id", true))).toList();
+        Spec.support("aspect_extraction_queue", "idx_aspect_queue_collection_id", "tenant_id, collection_id", true),
+        // the id twin of idx_catalog_chunks_collection (tenant_id, collection) WHERE collection IS NOT NULL, for the R2 anti-join on the
+        // id path (linda 2026-11-22); a full index, and gate 3 requires it
+        Spec.support("catalog_document_chunks", "idx_catalog_chunks_collection_id", "tenant_id, collection_id", false))).toList();
 
     /** Gate 2 of the completion check; production wires the completion reporter's latest read. */
     @FunctionalInterface
@@ -159,29 +183,50 @@ public final class IdUniqueIndexPass implements AutoCloseable {
         if (s.optional() && !applicable(ctx, s)) {
             return true;   // the retired queue table is gone, or has no id column: nothing to support
         }
-        // catalog fields, not pg_get_indexdef's text, which schema-qualifies by the reader's search_path (review r1, Minor 7)
-        var r = ctx.fetchOne("""
-            SELECT i.indisvalid AND i.indisunique = ? AND t.relname = ? AS shape,
-                   (SELECT string_agg(a.attname, ', ' ORDER BY k.ord) FROM generate_series(0, i.indnkeyatts - 1) k(ord)
-                      JOIN pg_catalog.pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[k.ord]) AS cols,
-                   pg_catalog.pg_get_expr(i.indpred, i.indrelid) AS pred
-              FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class c ON c.oid = i.indexrelid
-              JOIN pg_catalog.pg_class t ON t.oid = i.indrelid
-              JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-             WHERE n.nspname = 'nexus' AND c.relname = ?""", s.unique(), s.table(), s.index());
-        if (r == null || !Boolean.TRUE.equals(r.get("shape", Boolean.class))) {
+        // catalog fields, not pg_get_indexdef's text, which schema-qualifies by the reader's search_path (review r1, Minor 7). The key
+        // columns come from indkey (an int2vector, read as its text) and the table's attributes, joined: one row per attribute.
+        Field<String> indkey = DSL.cast(col("i", "indkey"), SQLDataType.VARCHAR);
+        Field<Integer> nkeyatts = DSL.field(DSL.name("i", "indnkeyatts"), Integer.class);
+        Field<Boolean> isValid = DSL.field(DSL.name("i", "indisvalid"), Boolean.class);
+        Field<Boolean> isUnique = DSL.field(DSL.name("i", "indisunique"), Boolean.class);
+        Field<String> pred = DSL.function(DSL.name("pg_catalog", "pg_get_expr"), String.class, col("i", "indpred"), col("i", "indrelid"));
+        Field<Short> attnum = DSL.field(DSL.name("a", "attnum"), Short.class);
+        var rows = ctx.select(isValid, isUnique, text("t", "relname"), indkey, nkeyatts, pred, attnum, text("a", "attname"))
+            .from(INDEX.as("i"))
+            .join(CLASS.as("c")).on(col("c", "oid").eq(col("i", "indexrelid")))
+            .join(CLASS.as("t")).on(col("t", "oid").eq(col("i", "indrelid")))
+            .join(NAMESPACE.as("n")).on(col("n", "oid").eq(col("c", "relnamespace")))
+            .join(ATTRIBUTE.as("a")).on(col("a", "attrelid").eq(col("i", "indrelid")))
+            .where(text("n", "nspname").eq(SCHEMA)).and(text("c", "relname").eq(s.index()))
+            .and(attnum.gt((short) 0))
+            .fetch();
+        if (rows.isEmpty()) {
             return false;
         }
-        String pred = r.get("pred", String.class);
+        var first = rows.get(0);
+        if (!Boolean.TRUE.equals(first.get(isValid)) || !Objects.equals(first.get(isUnique), s.unique()) || !s.table().equals(first.get(text("t", "relname")))) {
+            return false;
+        }
+        Map<Short, String> names = new LinkedHashMap<>();
+        rows.forEach(r -> names.put(r.get(attnum), r.get(text("a", "attname"))));
+        String[] key = first.get(indkey).trim().split("\\s+");
+        List<String> cols = new ArrayList<>();
+        for (int k = 0; k < first.get(nkeyatts); k++) {
+            cols.add(names.get(Short.valueOf(key[k])));
+        }
         String want = s.predicate() == null ? null : "(" + s.predicate() + ")";
-        return s.columns().equals(r.get("cols", String.class)) && Objects.equals(want, pred);
+        return s.columns().equals(String.join(", ", cols)) && Objects.equals(want, first.get(pred));
     }
 
     /** The table exists with its id column (the first id-named column of the key). */
     static boolean applicable(DSLContext ctx, Spec s) {
         String idColumn = java.util.Arrays.stream(s.columns().split(",\\s*")).filter(c -> c.endsWith("collection_id")).findFirst().orElseThrow();
-        return ctx.fetchExists(DSL.selectOne().from("pg_catalog.pg_attribute a")
-            .where("a.attrelid = to_regclass(?) AND a.attname = ? AND NOT a.attisdropped", "nexus." + s.table(), idColumn));
+        return ctx.fetchExists(DSL.selectOne().from(ATTRIBUTE.as("a"))
+            .join(CLASS.as("c")).on(col("c", "oid").eq(col("a", "attrelid")))
+            .join(NAMESPACE.as("n")).on(col("n", "oid").eq(col("c", "relnamespace")))
+            .where(text("n", "nspname").eq(SCHEMA)).and(text("c", "relname").eq(s.table()))
+            .and(text("a", "attname").eq(idColumn))
+            .and(DSL.field(DSL.name("a", "attisdropped"), Boolean.class).isFalse()));
     }
 
     /** The status text for a table whose build hit a duplicate on the id key. */
@@ -299,18 +344,19 @@ public final class IdUniqueIndexPass implements AutoCloseable {
                     dropped++;
                 }
                 try {
-                    exec(conn, "SET lock_timeout = 0");
-                    exec(conn, "SET statement_timeout = '" + BUILD_STATEMENT_TIMEOUT.toMillis() + "ms'");
-                    exec(conn, s.definition());
+                    setSession(ctx, "lock_timeout", "0");
+                    setSession(ctx, "statement_timeout", BUILD_STATEMENT_TIMEOUT.toMillis() + "ms");
+                    ddl(conn, ctx, BUILD_TEMPLATE, s.buildArguments());
                     built++;
                     registry.progress(BOOT_WORK_ID, (long) built, (long) todo.size());
                     log.info("event=id_unique_index_built table={} index={}", s.table(), s.index());
-                } catch (SQLException e) {
-                    if (s.unique() && "23505".equals(e.getSQLState())) {
+                } catch (SQLException | DataAccessException e) {
+                    String state = sqlState(e);
+                    if (s.unique() && "23505".equals(state)) {
                         duplicate(conn, ctx, s);
                     } else {
                         log.warn("event=id_unique_index_build_failed table={} cause=\"{}\" retry=next_tick", s.table(), oneLine(e));
-                        if (connectionLost(e.getSQLState())) {
+                        if (connectionLost(state)) {
                             break;
                         }
                     }
@@ -318,9 +364,9 @@ public final class IdUniqueIndexPass implements AutoCloseable {
             }
         } finally {
             try {
-                exec(conn, "RESET lock_timeout");
-                exec(conn, "RESET statement_timeout");
-            } catch (SQLException e) {   // a dead connection (the walk ended the backend): the session goes with it
+                setSession(ctx, "lock_timeout", null);   // set_config with NULL resets to the default
+                setSession(ctx, "statement_timeout", null);
+            } catch (DataAccessException e) {   // a dead connection (the walk ended the backend): the session goes with it
                 log.debug("event=id_unique_index_reset_skipped cause=\"{}\"", oneLine(e));
             }
             if (!corrupt.isEmpty()) {
@@ -344,10 +390,19 @@ public final class IdUniqueIndexPass implements AutoCloseable {
         }
         List<String> keys = new ArrayList<>();
         try {
-            String sql = "SELECT " + s.columns().replace(", ", "::text || '/' || ") + "::text AS k, count(*) AS n FROM nexus." + s.table()
-                + (s.predicate() == null ? "" : " WHERE " + s.predicate()) + " GROUP BY " + s.columns()
-                + " HAVING count(*) > 1 ORDER BY 1 LIMIT " + DUPLICATES_LOGGED;
-            ctx.fetch(sql).forEach(r -> keys.add(r.get("k", String.class) + " x" + r.get("n", Long.class)));
+            List<Field<?>> columns = Arrays.stream(s.columns().split(",\\s*")).<Field<?>>map(c -> DSL.field(DSL.name(c))).toList();
+            Field<?>[] parts = new Field<?>[columns.size() * 2 - 1];
+            for (int k = 0; k < columns.size(); k++) {
+                parts[2 * k] = DSL.cast(columns.get(k), SQLDataType.VARCHAR);
+                if (k > 0) {
+                    parts[2 * k - 1] = DSL.inline("/");
+                }
+            }
+            Field<String> key = DSL.concat(parts);
+            Field<Integer> n = DSL.count();
+            ctx.select(key, n).from(DSL.table(DSL.name(SCHEMA, s.table()))).where(filter(s))
+                .groupBy(columns).having(n.gt(1)).orderBy(key).limit(DUPLICATES_LOGGED)
+                .forEach(r -> keys.add(r.get(key) + " x" + r.get(n)));
         } catch (DataAccessException e) {
             keys.add("(could not read: " + oneLine(e) + ")");
         }
@@ -360,29 +415,73 @@ public final class IdUniqueIndexPass implements AutoCloseable {
         if (!invalidExists(ctx, s)) {
             return false;
         }
-        exec(conn, "SET lock_timeout = '5s'");
+        setSession(ctx, "lock_timeout", "5s");
         if (!invalidExists(ctx, s)) {
             return false;
         }
-        exec(conn, "DROP INDEX CONCURRENTLY IF EXISTS nexus." + s.index());
+        ddl(conn, ctx, DROP_TEMPLATE, SCHEMA, s.index());
         log.info("event=id_unique_index_dropped reason=invalid_leftover table={}", s.table());
         return true;
     }
 
     private static boolean invalidExists(DSLContext ctx, Spec s) {
-        return ctx.fetchExists(DSL.selectOne().from("pg_catalog.pg_index i JOIN pg_catalog.pg_class c ON c.oid = i.indexrelid "
-            + "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace")
-            .where("n.nspname = 'nexus' AND c.relname = ? AND NOT i.indisvalid", s.index()));
+        return ctx.fetchExists(DSL.selectOne().from(INDEX.as("i"))
+            .join(CLASS.as("c")).on(col("c", "oid").eq(col("i", "indexrelid")))
+            .join(NAMESPACE.as("n")).on(col("n", "oid").eq(col("c", "relnamespace")))
+            .where(text("n", "nspname").eq(SCHEMA)).and(text("c", "relname").eq(s.index()))
+            .and(DSL.field(DSL.name("i", "indisvalid"), Boolean.class).isFalse()));
     }
 
-    private void exec(Connection conn, String sql) throws SQLException {
+    /**
+     * The predicate of {@code s} as a typed condition, for the duplicate report: only the forms {@link #SPECS} carries have one (a new
+     * predicate fails here, in the pass's own tests, rather than reading a different set of rows).
+     */
+    static Condition filter(Spec s) {
+        if (s.predicate() == null) {
+            return DSL.noCondition();
+        }
+        if (s.predicate().equals(ArbiterTwins.TOPICS_ROOT)) {
+            return DSL.field(DSL.name("parent_id")).isNull();
+        }
+        if (s.predicate().equals(ArbiterTwins.REEMBED_ACTIVE)) {
+            return DSL.field(DSL.name("state"), String.class).in(ArbiterTwins.REEMBED_ACTIVE_STATES);
+        }
+        throw new IllegalStateException("no typed form for the predicate of " + s.index() + ": " + s.predicate());
+    }
+
+    /** Session settings go through set_config (no SET text); a null value resets the setting to its default. */
+    private static void setSession(DSLContext ctx, String name, String value) {
+        ctx.select(DSL.function("set_config", SQLDataType.VARCHAR, DSL.val(name), DSL.val(value, SQLDataType.VARCHAR), DSL.inline(false))).fetch();
+    }
+
+    /** Renders {@code template} with PostgreSQL's {@code format()} ({@code %I} and {@code %s}), shows the text to the test seam and sends it. */
+    private void ddl(Connection conn, DSLContext ctx, String template, String... args) throws SQLException {
+        Field<?>[] params = new Field<?>[args.length + 1];
+        params[0] = DSL.val(template);
+        for (int i = 0; i < args.length; i++) {
+            params[i + 1] = DSL.val(args[i]);
+        }
+        String sql = ctx.select(DSL.function("format", SQLDataType.CLOB, params)).fetchOne(0, String.class);
         Consumer<String> hook = beforeStatement;
         if (hook != null) {
             hook.accept(sql);
         }
+        runDdl(conn, sql);
+    }
+
+    // SANCTIONED RAW (RDR-229 P3.4, nexus-p2m1x.22): CREATE [UNIQUE] INDEX CONCURRENTLY and DROP INDEX CONCURRENTLY have no typed jOOQ
+    // form, and a concurrent build cannot run in a function or a transaction block, which rules out a SECURITY DEFINER wrapper. The
+    // text is rendered by PostgreSQL's format() with %I and %s (ddl) from a literal template, so no identifier is concatenated in
+    // Java; the column list and predicate are constants of SPECS and ArbiterTwins. Plain JDBC Statement.execute, as LeafIndexPass's
+    // and PciBuilderSession's. Single-homed: runDdl.
+    private static void runDdl(Connection conn, String sql) throws SQLException {
         try (Statement st = conn.createStatement()) {
             st.execute(sql);
         }
+    }
+
+    private static String sqlState(Exception e) {
+        return e instanceof SQLException sql ? sql.getSQLState() : e instanceof DataAccessException d ? d.sqlState() : null;
     }
 
     /** The tables of the indexes found corrupt, in the order found. */

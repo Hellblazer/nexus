@@ -457,6 +457,13 @@ class RawSqlGateTest {
             // names; the %s column list is a constant of LeafIndexPass.KEYS. Plain JDBC Statement.execute, as PciBuilderSession's and
             // AdminDdlSession's do. Single-homed: Session#ddl.
             "runDdl", Map.of(".execute(sql)", 1))),
+        Map.entry("IdUniqueIndexPass.java", Map.of(
+            // SANCTIONED RAW (RDR-229 P3.4, nexus-p2m1x.22): CREATE [UNIQUE] INDEX CONCURRENTLY and DROP INDEX CONCURRENTLY have no typed
+            // jOOQ form, and a concurrent build cannot run inside a function or a transaction block, so the pass sends them on its own
+            // autocommit admin connection. The text is rendered by PostgreSQL's format() with %I and %s (IdUniqueIndexPass#ddl) from a
+            // literal template; the %s column list and predicate are constants of IdUniqueIndexPass.SPECS and ArbiterTwins. Plain JDBC
+            // Statement.execute, as LeafIndexPass's and PciBuilderSession's do. Single-homed: runDdl.
+            "runDdl", Map.of(".execute(sql)", 1))),
         Map.entry("MoveSql.java", Map.of(
             // SANCTIONED RAW (RDR-246, nexus-f3yqd.2.14): a data move's verification query and on_complete are SQL text
             // that a changeset registered in nexus.data_moves (the registry's own columns); the worker runs them and

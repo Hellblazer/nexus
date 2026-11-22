@@ -51,25 +51,20 @@ class Rdr229ArbiterTwinCensusIntegrationTest extends Rdr229SwapMovesFixtures {
         return table + "(" + columns + ")" + (predicate == null ? "" : " WHERE " + predicate);
     }
 
+    /** Column names whose presence in an index makes it name-holding; on catalog_collections the label column is {@code name}. */
+    static final List<String> NAME_COLUMNS = List.of("collection", "source_collection", "target_collection", "physical_collection",
+        "origin_collection", "quarantine_collection");
+
     /** Every VALID unique index in schema nexus on a top-level table (not a partition) whose key includes a collection-name column. */
     TreeSet<String> nameHoldingUniques() {
         var out = new TreeSet<String>();
-        ctx().fetch("""
-            SELECT t.relname AS tbl,
-                   (SELECT string_agg(a.attname, ', ' ORDER BY k.ord) FROM generate_series(0, i.indnkeyatts - 1) k(ord)
-                      JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[k.ord]) AS cols,
-                   pg_get_expr(i.indpred, i.indrelid) AS pred
-              FROM pg_index i JOIN pg_class t ON t.oid = i.indrelid JOIN pg_namespace n ON n.oid = t.relnamespace
-             WHERE n.nspname = 'nexus' AND i.indisunique AND i.indisvalid AND NOT t.relispartition
-               AND EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = i.indrelid AND a.attnum = ANY (i.indkey)
-                            AND (a.attname IN ('collection', 'source_collection', 'target_collection', 'physical_collection', 'origin_collection', 'quarantine_collection') OR (t.relname = 'catalog_collections' AND a.attname = 'name')))
-            """).forEach(r -> {
-                String pred = r.get("pred", String.class);
-                if (pred != null && pred.startsWith("(") && pred.endsWith(")")) {
-                    pred = pred.substring(1, pred.length() - 1);
-                }
-                out.add(key(r.get("tbl", String.class), r.get("cols", String.class), pred));
-            });
+        for (var index : IdIndexCatalogReads.uniqueIndexes(ctx())) {
+            boolean holdsName = index.coveredColumns().stream()
+                .anyMatch(c -> NAME_COLUMNS.contains(c) || (index.table().equals("catalog_collections") && c.equals("name")));
+            if (holdsName) {
+                out.add(key(index.table(), index.keyColumns(), index.predicate()));
+            }
+        }
         return out;
     }
 
@@ -98,18 +93,11 @@ class Rdr229ArbiterTwinCensusIntegrationTest extends Rdr229SwapMovesFixtures {
 
     TreeSet<String> idUniques(String table) {
         var out = new TreeSet<String>();
-        ctx().fetch("""
-            SELECT (SELECT string_agg(a.attname, ', ' ORDER BY k.ord) FROM generate_series(0, i.indnkeyatts - 1) k(ord)
-                      JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[k.ord]) AS cols,
-                   pg_get_expr(i.indpred, i.indrelid) AS pred
-              FROM pg_index i JOIN pg_class t ON t.oid = i.indrelid JOIN pg_namespace n ON n.oid = t.relnamespace
-             WHERE n.nspname = 'nexus' AND t.relname = ? AND i.indisunique AND i.indisvalid""", table).forEach(r -> {
-                String pred = r.get("pred", String.class);
-                if (pred != null && pred.startsWith("(") && pred.endsWith(")")) {
-                    pred = pred.substring(1, pred.length() - 1);
-                }
-                out.add(key(table, r.get("cols", String.class), pred));
-            });
+        for (var index : IdIndexCatalogReads.uniqueIndexes(ctx())) {
+            if (index.table().equals(table)) {
+                out.add(key(table, index.keyColumns(), index.predicate()));
+            }
+        }
         return out;
     }
 }

@@ -3,6 +3,7 @@
 package dev.nexus.service.datamove;
 
 import java.util.List;
+import java.util.stream.Collectors;
 
 /**
  * RDR-229 P3.4 (nexus-p2m1x.22): the one checked list of ON CONFLICT arbiters on a collection-name key and the id-keyed twin each has, from
@@ -24,9 +25,15 @@ import java.util.List;
  */
 public record ArbiterTwins(String table, String nameColumns, String idColumns, String predicate, String twinIndex) {
 
-    /** reembed_jobs_source_lock's predicate (vectors-037), the active job states. */
+    /** reembed_jobs_source_lock's active job states (vectors-037). */
+    public static final List<String> REEMBED_ACTIVE_STATES = List.of("planned", "running", "paused", "cutover", "failed");
+
+    /** reembed_jobs_source_lock's predicate (vectors-037), the active job states, as {@code pg_get_expr} deparses it. */
     public static final String REEMBED_ACTIVE =
-        "state = ANY (ARRAY['planned'::text, 'running'::text, 'paused'::text, 'cutover'::text, 'failed'::text])";
+        "state = ANY (ARRAY[" + REEMBED_ACTIVE_STATES.stream().map(st -> "'" + st + "'::text").collect(Collectors.joining(", ")) + "])";
+
+    /** The topics arbiter's predicate: only a root topic has a label key (the upsert's {@code WHERE parent_id IS NULL}). */
+    public static final String TOPICS_ROOT = "parent_id IS NULL";
 
     public static final List<ArbiterTwins> ALL = List.of(
         // the P3.3b/c parent UNIQUE on the id key, attached once both swaps complete (gate 2)
@@ -39,7 +46,7 @@ public record ArbiterTwins(String table, String nameColumns, String idColumns, S
         new ArbiterTwins("chash_remap", "tenant_id, source_collection, old_id", "tenant_id, source_collection_id, old_id", null,
             "idx_chash_remap_id_old_id_uq"),
         new ArbiterTwins("taxonomy_meta", "tenant_id, collection", "tenant_id, collection_id", null, "idx_taxonomy_meta_id_uq"),
-        new ArbiterTwins("topics", "tenant_id, collection, label", "tenant_id, collection_id, label", "parent_id IS NULL",
+        new ArbiterTwins("topics", "tenant_id, collection, label", "tenant_id, collection_id, label", TOPICS_ROOT,
             "idx_topics_root_label_id_uq"),
         // the census's two SQL arbiters: stamp_chunks_on_manifest_delete/_update and canary_query_ring_upsert (vectors-069)
         new ArbiterTwins("chunk_orphaned_at", "tenant_id, collection, chash", "tenant_id, collection_id, chash", null,

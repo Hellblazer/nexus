@@ -196,6 +196,7 @@ final class TenantKeyedStateTables {
         notKeyed.put("MoveBootWork.Snapshot.progress", DATA_MOVE_REPORT);
         fillCompletionCheck(notKeyed);   // RDR-229 P3.1 (nexus-p2m1x.17): the boot-time completion check is engine-wide
         fillLeafIndexPass(notKeyed);   // RDR-229 P3.3b (nexus-p2m1x.20): the per-leaf id unique-index pass is engine-wide
+        fillIdUniqueIndexPass(notKeyed);   // RDR-229 P3.4 (nexus-p2m1x.22): the id-keyed index pass is engine-wide
         // nexus-f3yqd.2.18: the engine's own database passwords, set once at startup; the engine's, so no tenant's
         notKeyed.put("SecretMask.SECRETS", "the engine's own database passwords (the admin and the application role), added once "
             + "at startup; process-wide credentials of the engine, never a tenant's, and nothing a tenant's reset has to clear");
@@ -858,6 +859,24 @@ final class TenantKeyedStateTables {
             + "read per step and dropped with it");
         notKeyed.put("LeafIndexCatalog.Tree.leaves", LEAF_INDEX_PASS_ENGINE_WIDE + "a snapshot of one table's leaf partitions "
             + "(relation names; a leaf's tenant is in its bound, which nothing here reads), read per step and dropped with it");
+    }
+
+    private static final String ID_UNIQUE_INDEX_PASS_ENGINE_WIDE = "the RDR-229 P3.4 id-keyed index pass is engine-wide, never a "
+        + "tenant's: it reads pg_catalog (index states of the nexus tables it indexes) and builds indexes with CREATE INDEX CONCURRENTLY "
+        + "on the engine's admin connection, and holds table and index names and counts, no tenant id and no row of any tenant "
+        + "(a duplicate's key values go to the engine log, never into these fields); ";
+
+    /** RDR-229 P3.4: {@code IdUniqueIndexPass}: every collection it holds is per-engine bookkeeping or a test seam. */
+    private static void fillIdUniqueIndexPass(Map<String, String> notKeyed) {
+        notKeyed.put("IdUniqueIndexPass.Result.corrupt", ID_UNIQUE_INDEX_PASS_ENGINE_WIDE + "the tables whose index build hit a "
+            + "duplicate so far, by table name, returned to the caller and not kept");
+        notKeyed.put("IdUniqueIndexPass.corrupt", ID_UNIQUE_INDEX_PASS_ENGINE_WIDE + "the indexes whose build hit a duplicate, by "
+            + "index name, with the status text (which names the table, never a tenant or a key); bounded by the number of indexes the "
+            + "pass builds, in memory only (the next engine tries again), read and written under the pass lock");
+        notKeyed.put("IdUniqueIndexPass.SPECS", ID_UNIQUE_INDEX_PASS_ENGINE_WIDE + "the pass's fixed list of indexes (table, index "
+            + "name, key columns, predicate), built from ArbiterTwins and constants; the same for every tenant and never changed");
+        notKeyed.put("IdUniqueIndexPass.beforeStatement", ID_UNIQUE_INDEX_PASS_ENGINE_WIDE + "a test seam: a consumer that sees "
+            + "each DDL statement's text before the pass sends it; null in production");
     }
 
     private static final String COMPLETION_ENGINE_WIDE = "the RDR-229 boot-time completion check is engine-wide, never a "

@@ -5,8 +5,11 @@ package dev.nexus.service.datamove;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.nexus.service.vectors.Rdr229SwapMove;
+import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.junit.jupiter.api.Test;
 
+import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -37,7 +40,7 @@ class Rdr229IdKeyIndexCensusIntegrationTest extends Rdr229SwapMovesFixtures {
 
         List<String> expected = new ArrayList<>(P33C_KEYS);
         for (FkTwins.Row row : FkTwins.load()) {
-            if (ctx().fetchOne("SELECT to_regclass(?)::text", "nexus." + row.table()).get(0) != null) {
+            if (IdIndexCatalogReads.relationExists(ctx(), row.table())) {
                 expected.add(row.twin());
             }
         }
@@ -55,23 +58,27 @@ class Rdr229IdKeyIndexCensusIntegrationTest extends Rdr229SwapMovesFixtures {
      */
     @Test
     void aKeyWhoseIndexesDoNotLeadWithTwoOfItsColumnsIsUnsupported() {
-        String t = "nexus.p34_census_plant";
+        var plant = DSL.table(DSL.name("nexus", "p34_census_plant"));
+        var tenant = DSL.field(DSL.name("tenant_id"), String.class);
+        var id = DSL.field(DSL.name("collection_id"), Long.class);
+        var madeAt = DSL.field(DSL.name("made_at"), OffsetDateTime.class);
         try {
-            ctx().execute("CREATE TABLE " + t + " (tenant_id text NOT NULL, collection_id bigint, made_at timestamptz,"
-                + " CONSTRAINT p34_census_plant_collection_id_fk FOREIGN KEY (tenant_id, collection_id)"
-                + " REFERENCES nexus.catalog_collections (tenant_id, collection_id))");
-            ctx().execute("CREATE INDEX p34_census_plant_made_at ON " + t + " (made_at, tenant_id, collection_id)");
-            ctx().execute("CREATE INDEX p34_census_plant_partial ON " + t + " (tenant_id, collection_id) WHERE made_at IS NOT NULL");
-            ctx().execute("CREATE INDEX p34_census_plant_tenant ON " + t + " (tenant_id)");
+            ctx().createTable(plant).column(tenant, SQLDataType.CLOB.nullable(false)).column(id).column(madeAt)
+                .constraint(DSL.constraint("p34_census_plant_collection_id_fk").foreignKey(tenant, id)
+                    .references(DSL.table(DSL.name("nexus", "catalog_collections")), tenant, id))
+                .execute();
+            ctx().createIndex(DSL.name("p34_census_plant_made_at")).on(plant, madeAt, tenant, id).execute();
+            ctx().createIndex(DSL.name("p34_census_plant_partial")).on(plant, tenant, id).where(madeAt.isNotNull()).execute();
+            ctx().createIndex(DSL.name("p34_census_plant_tenant")).on(plant, tenant).execute();
             assertThat(IdKeyIndexCensus.unsupported(ctx())).extracting(IdKeyIndexCensus.Key::constraint)
                 .as("led by a column outside the key, partial, or one column only: none supports the key")
                 .contains("p34_census_plant_collection_id_fk");
 
-            ctx().execute("CREATE INDEX p34_census_plant_id ON " + t + " (collection_id, tenant_id)");
+            ctx().createIndex(DSL.name("p34_census_plant_id")).on(plant, id, tenant).execute();
             assertThat(IdKeyIndexCensus.keys(ctx())).filteredOn(k -> k.constraint().equals("p34_census_plant_collection_id_fk"))
                 .singleElement().extracting(IdKeyIndexCensus.Key::supported).as("(id column, tenant_id) supports it").isEqualTo(true);
         } finally {
-            ctx().execute("DROP TABLE IF EXISTS " + t);
+            ctx().dropTableIfExists(plant).execute();
         }
     }
 }
