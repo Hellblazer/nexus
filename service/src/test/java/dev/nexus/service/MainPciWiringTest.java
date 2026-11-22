@@ -507,14 +507,11 @@ class MainPciWiringTest {
     /**
      * RDR-229 P3.3b (nexus-p2m1x.20): the per-leaf id unique-index pass is started once, at main's top level, after the completion check
      * it reads, handed that check's LATEST read of gate 1 (a null read holds nothing), and closed in the shutdown steps; and its method
-     * returns null while {@code Rdr229SwapMove.PLACEHOLDER} is true, before it builds the pass.
-     *
-     * <p>P3.3c (nexus-p2m1x.21) deletes the constant and the guard in {@code Main}; its commit must edit this pin's guard assertions
-     * ({@code guard}, and the {@code noCheck > guard} order) in the same breath, or this test goes red on the missing guard.
-     * {@code MainLeafIndexPassGuardTest} holds the constant and the swap move's body together across that edit.
+     * returns null without a completion check, before it builds the pass. P3.3c (nexus-p2m1x.21) deleted the placeholder constant and its
+     * guard: the pass starts under its other conditions only, and {@code MainLeafIndexPassGuardTest} holds that.
      */
     @Test
-    void theLeafIndexPassStartsAfterTheCompletionCheck_readsItsLatestGate1_closesInTheShutdownSteps_andIsGuardedByThePlaceholder() throws Exception {
+    void theLeafIndexPassStartsAfterTheCompletionCheck_readsItsLatestGate1_closesInTheShutdownSteps_andNeedsACompletionCheck() throws Exception {
         String src = code(main());
         int check = src.indexOf("var completionCheck = startCompletionBootWork(");
         int start = src.indexOf("var leafIndexPass = startLeafIndexPass(");
@@ -539,14 +536,12 @@ class MainPciWiringTest {
         assertThat(method).isPositive();
         int body = src.indexOf('{', src.indexOf(')', src.indexOf("completionCheck)", method)));
         String text = src.substring(body, matchingClose(src, body));
-        int guard = text.indexOf("if (dev.nexus.service.vectors.Rdr229SwapMove.PLACEHOLDER) {");
         int noCheck = text.indexOf("if (completionCheck == null) {");
         int build = text.indexOf("new dev.nexus.service.vectors.LeafIndexPass(");
-        assertThat(guard).as("the placeholder guard").isNotNegative();
-        assertThat(text.substring(guard, text.indexOf('}', guard))).as("the guard returns null").contains("return null;");
-        assertThat(noCheck).as("no completion check, no pass: and said so").isGreaterThan(guard);
+        assertThat(text).as("no placeholder guard: P3.3c deleted it").doesNotContain("PLACEHOLDER");
+        assertThat(noCheck).as("no completion check, no pass: and said so").isNotNegative();
         assertThat(text.substring(noCheck, text.indexOf('}', noCheck))).contains("leaf_index_pass_not_started").contains("return null;");
-        assertThat(build).as("the pass is built after both guards").isGreaterThan(noCheck);
+        assertThat(build).as("the pass is built after the guard").isGreaterThan(noCheck);
         assertThat(text).as("the gate is the check's latest read; null holds nothing")
             .contains("completionCheck.latest()").contains("latest != null && latest.gate1()");
     }
