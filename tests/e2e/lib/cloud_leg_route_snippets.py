@@ -124,6 +124,23 @@ else:
     raise SystemExit("match=bogus was accepted: the engine ignores the match field, or the edge strips it")
 """
 
+TELEMETRY_RENAME = r"""
+import httpx
+from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
+# nexus-n3hhc: the telemetry rename judges its target with the label rule. Probed so it cannot move a row: nothing is
+# recorded under the source name, so the legal rename answers zero counts. The minted-form target must then be refused
+# with 400 before either table is touched; an engine without the check would answer 200.
+store = HttpTelemetryStore()
+print(store.rename_collection(old="@label@-tel-probe", new="@label@-tel-probe-renamed"))
+try:
+    store.rename_collection(old="@label@-tel-probe", new="c42")
+except httpx.HTTPStatusError as exc:
+    assert exc.response.status_code == 400, f"a minted-form target answered {exc.response.status_code}, not 400"
+    print("minted target refused 400")
+else:
+    raise SystemExit("a minted-form target was accepted: the engine does not judge the telemetry rename target")
+"""
+
 ENGINE_STATUS = r"""
 from nexus.db.http_engine_status import fetch_engine_status
 # RDR-229 P3.1 (nexus-p2m1x.17): the boot-time completion check reports in an optional top-level key of this
