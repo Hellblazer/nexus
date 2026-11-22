@@ -247,7 +247,11 @@ def test_pointer_is_a_knowledge_note_in_the_research_subject_with_its_category(d
     name = _gate(db, "nexus-c1")
     _phase3("nexus-c1")
     col = gr.collection_name(make_t3())
-    assert col.startswith("knowledge__nexus-rdr-research__")
+    # RDR-229 P3.8: the subject's collection is the label the engine minted (c<id>); the subject is its row's owner.
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — local to this one check
+
+    row = make_catalog_reader().get_collection(col)
+    assert row and (row["content_type"], row["owner_id"]) == ("knowledge", "nexus-rdr-research"), row
     # a note's own keys live on its catalog document (RDR-236)
     (pointer,) = documents_by_title(POINTER_P3)
     (archive,) = documents_by_title(f"{REPO}/{name}")
