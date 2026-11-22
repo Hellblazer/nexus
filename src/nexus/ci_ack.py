@@ -62,19 +62,27 @@ def identity_view(identity: str) -> Mapping[str, Any]:
     return identity_record_lookup()(identity)
 
 
-def counted_identity() -> str:
+def counted_identity(strict: bool = False) -> str:
     """The identity an ack from this process counts for, or "" when it holds none: :func:`own_identity`, except that a
     delegated identity (a ``claude -p`` child) is mapped to its parent, as the engine maps the child's session stamp
     (``BoardReads.identities``). Only a delegated child pays the record read: a seat's token record says nothing about
     its kind, so the identity service is asked, and a seat's answer (or a failed read of it) leaves the identity as it
     is. A delegated identity whose parent cannot be read is refused (``ValueError``): its own id would be a label the
-    engine does not count."""
+    engine does not count.
+
+    *strict* is for a caller that must not take a guess for an answer (``nx ci check-hold``): when the record cannot be
+    read, the token's own id is NOT returned, because for a delegated child it is the wrong id (the engine counts the
+    parent); the read failure is raised as ``ValueError`` instead. ``nx ci ack`` keeps the lenient default, so its behaviour
+    is unchanged."""
     own = own_identity()
     if not own:
         return ""
     try:
         view = identity_view(own)
-    except Exception:  # noqa: BLE001 -- unreadable: the label stays the token's own id, which is right for a seat
+    except Exception as exc:  # noqa: BLE001 -- unreadable: the label stays the token's own id, which is right for a seat
+        if strict:
+            raise ValueError(f"the identity record of {own} could not be read ({type(exc).__name__}: {exc}), so it cannot be "
+                             "told whether it is a delegated child counted as its parent") from exc
         return own
     if view.get("kind") != "delegated":
         return own

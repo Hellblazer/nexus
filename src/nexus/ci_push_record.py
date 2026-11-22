@@ -10,8 +10,10 @@ The write is the stamped one (the client sends its session header and identity t
 session). The status line says whether it was: ``PUSH_RECORD_OK ... stamped``, or ``PUSH_RECORD_UNSTAMPED`` when the write
 went out with nothing to stamp it with (no session token and no identity token) or after the client had to resend it without
 a session token the engine rejected; an unstamped record still links ``base`` to the tip in the chain, but names no pusher.
-When the write fails, one minimal record (``base``, the tip, ``from``; no session header; the same nonce, so a write that
-did land is not doubled) is tried so the chain keeps its link, and the status line says which was written. A push that
+When the write fails, one minimal record (``base``, the tip, ``from``; no T1 session header; the same nonce, so a write that
+did land is not doubled) is tried so the chain keeps its link. Only the T1 session header is dropped: an RDR-253 identity token
+still rides the write, so a process that holds one gets the record stamped by it, and one that does not writes it unstamped;
+the status line says which was written, and which of the two it is. A push that
 overrode the develop-red hold carries the reason in the body as ``red_fix``, on either record, so the board shows every
 escape. The whole body stays under the template's cap (:data:`BODY_MAX_BYTES`, ``max_body_bytes`` in ``board-ci.yaml``), so
 the reason is cut by serialized UTF-8 bytes, never by characters, and control characters and newlines in it become spaces.
@@ -85,6 +87,17 @@ def _hint(store: Any, name: str, default: Any) -> Any:
         return default
 
 
+def _stamp_state(store: Any) -> tuple[bool, bool, int, int]:
+    """What *store* says it stamps a write with, and how often it has dropped those stamps so far: ``(session header,
+    identity token, headerless retries, identity-token resends without the token)``. A store that does not say is taken to
+    stamp with its session header and to have dropped nothing."""
+    session = _hint(store, "session_stamps", None)
+    if session is None:
+        session = _hint(store, "would_stamp", True)
+    return (bool(session), bool(_hint(store, "identity_stamps", False)), int(_hint(store, "headerless_retries", 0)),
+            int(_hint(store, "identity_dropped_resends", 0)))
+
+
 def write(store: Any, base: str, from_sha: str, to_sha: str, count: int | None, label: str, red_fix: str | None) -> str:
     """Write the push record; the one status line: ``PUSH_RECORD_OK`` (stamped), ``PUSH_RECORD_UNSTAMPED`` (written, with no
     session stamp), ``PUSH_RECORD_FALLBACK`` (the stamped write failed, the minimal unstamped record stands) or
@@ -94,26 +107,36 @@ def write(store: Any, base: str, from_sha: str, to_sha: str, count: int | None, 
     subspace, topic = f"board/ci/{base}--push", f"{base}--push"
     dims = {"from": label, "kind": "push", "sha": to_sha}
     nonce = f"push-{to_sha}"
-    would_stamp = bool(_hint(store, "would_stamp", True))
-    retries_before = int(_hint(store, "headerless_retries", 0))
+    session, identity, retries, id_drops = _stamp_state(store)
     try:
         store.out(subspace, {"topic": topic}, dims, body(from_sha, count, red_fix), nonce=nonce)
     except Exception as first:  # noqa: BLE001 -- the push landed; a record fault is reported, never raised
         why = _why(first)
     else:
-        resent = int(_hint(store, "headerless_retries", 0)) > retries_before
-        if not would_stamp:
-            lost = "no session token or identity token to send with it"
-        elif resent and not bool(_hint(store, "identity_stamps", False)):
-            lost = "the engine rejected the session token and the write was resent without it"
-        else:
+        _, _, retries_after, id_drops_after = _stamp_state(store)
+        session_dropped, identity_dropped = retries_after > retries, id_drops_after > id_drops
+        if (session and not session_dropped) or (identity and not identity_dropped):
             return f"PUSH_RECORD_OK {to_sha[:12]} from={label} stamped"
+        if not session and not identity:
+            lost = "no session token or identity token to send with it"
+        else:
+            rejected = [name for name, dropped in (("session token", session and session_dropped),
+                                                    ("identity token", identity and identity_dropped)) if dropped]
+            lost = f"the engine rejected the {' and the '.join(rejected)} and the write was resent without it"
         return (f"PUSH_RECORD_UNSTAMPED the record for {to_sha[:12]} was written with no session stamp ({lost}): the chain keeps "
                 "its link but this push has no pusher")
+    # The fallback drops the T1 session header only. An RDR-253 identity token still rides the write (`token_header` attaches it
+    # to a send), so a process that holds one still gets the record stamped; one that does not, or whose token is dropped on a
+    # 401 resend, writes an unstamped record. The line says which.
+    _, _, _, drops_before = _stamp_state(store)
     try:
         with without_session_header():
             store.out(subspace, {"topic": topic}, dims, body(from_sha, None, red_fix), nonce=nonce)
     except Exception as second:  # noqa: BLE001
         return f"PUSH_RECORD_FAILED {why}; the minimal unstamped retry failed too ({_why(second)}) (the push stands, no record was written)"
-    return (f"PUSH_RECORD_FALLBACK the stamped write failed ({why}); an unstamped record with base, tip and from={label} was written, "
-            "so the chain keeps its link but this push has no pusher")
+    _, _, _, drops_after = _stamp_state(store)
+    head = (f"PUSH_RECORD_FALLBACK the stamped write failed ({why}); a minimal record (base, tip, from={label}) was written "
+            "without the T1 session header")
+    if identity and drops_after == drops_before:
+        return f"{head} and is still stamped by the identity token this process holds: the chain keeps its link and the push names its pusher"
+    return f"{head} and no identity token stamps it, so it is unstamped and this push has no pusher: the chain keeps its link"

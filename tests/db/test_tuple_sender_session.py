@@ -669,6 +669,52 @@ class TestStampHints:
         store.out("mailbox/x", {"to": "x"}, {"from": "y"}, nonce="n2")  # the memo now keeps the token off: no second retry
         assert store.headerless_retries == 1
 
+    def test_session_stamps_is_the_t1_header_alone(self, monkeypatch) -> None:
+        monkeypatch.setattr("nexus.identity.token_header.identity_headers", lambda: {"X-Nexus-Identity-Token": "t"})
+        assert _store(_ok).session_stamps() is False, "an identity token is not a session header"
+        monkeypatch.setenv("NX_T1_SESSION", TOKEN)
+        assert _store(_ok).session_stamps() is True
+
+    def test_an_identity_token_resent_without_the_token_is_counted(self, monkeypatch) -> None:
+        """Review r2 M1: a 401 on a send that carried the identity token is resent once without it
+        (``retry_headers_after_401``); the store counts that resend, so a caller can tell the write lost its stamp."""
+        from nexus.identity import token_contract  # noqa: PLC0415
+
+        held = {token_contract.IDENTITY_TOKEN_HEADER: "identity-token-bbbb"}
+        monkeypatch.setattr("nexus.identity.token_header.fenced_identity_headers", lambda method, path: dict(held))
+        monkeypatch.setattr("nexus.identity.token_header.current", lambda **kw: None)   # no newer token to resend with
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            if token_contract.IDENTITY_TOKEN_HEADER in request.headers:
+                return httpx.Response(401, json={"error": "identity token refused"})
+            return _ok(request)
+
+        store = _store(handler)
+        before = store.identity_dropped_resends          # process-wide, so the test reads a difference
+        store.out("mailbox/x", {"to": "x"}, {"from": "y"}, nonce="n")
+        assert [token_contract.IDENTITY_TOKEN_HEADER in r.headers for r in seen] == [True, False]
+        assert store.identity_dropped_resends == before + 1
+
+    def test_an_identity_token_resent_with_a_newer_token_is_not_a_drop(self, monkeypatch) -> None:
+        from types import SimpleNamespace  # noqa: PLC0415
+
+        from nexus.identity import token_contract  # noqa: PLC0415
+
+        monkeypatch.setattr("nexus.identity.token_header.fenced_identity_headers",
+                            lambda method, path: {token_contract.IDENTITY_TOKEN_HEADER: "old"})
+        monkeypatch.setattr("nexus.identity.token_header.current", lambda **kw: SimpleNamespace(token="new"))
+        monkeypatch.setattr("nexus.identity.token_contract.headers", lambda token: {token_contract.IDENTITY_TOKEN_HEADER: token})
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(401) if request.headers.get(token_contract.IDENTITY_TOKEN_HEADER) == "old" else _ok(request)
+
+        store = _store(handler)
+        before = store.identity_dropped_resends
+        store.out("mailbox/x", {"to": "x"}, {"from": "y"}, nonce="n")
+        assert store.identity_dropped_resends == before
+
     def test_a_clean_write_counts_no_retry(self, monkeypatch) -> None:
         monkeypatch.setenv("NX_T1_SESSION", TOKEN)
         store = _store(_ok)

@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from nexus import ci_reds
+from nexus.tuple_directory import looks_like_session_id
 
 #: Rows of a subspace one check reads, newest first: far more than one red writes.
 READ_ROWS = 300
@@ -88,7 +89,11 @@ def evaluate(owner_rows: list[Any], push_rows: list[Any], identity: str, resolve
         sha = str((row.dims or {}).get("sha") or "").lower()
         if sha not in suspects:
             continue
-        who = resolver.poster(row)
+        # A stamp that is no session id (a hand-posted row, an old client's) names nobody: this suspect is unattributed. That
+        # is not a failed lookup, so it must not make the whole check UNCHECKED and let everyone through; only a real read or
+        # lookup failure (an exception or transport error from the session index, counted in ``resolver.unresolved``) does.
+        sender = getattr(row, "sender_session", None)
+        who = resolver.poster(row) if sender and looks_like_session_id(str(sender)) else None
         if who is not None:
             attributed.add(sha)
         if identity and who == identity:

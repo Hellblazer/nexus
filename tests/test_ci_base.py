@@ -129,6 +129,7 @@ def _wait(monkeypatch: pytest.MonkeyPatch, repo: Path, *extra: str) -> tuple[Any
 
     def fake_wait(sha: str, tmin: float, fresh: bool, latest: bool, repo_: str, branch: str, gh: str, park: int) -> None:
         seen.append(branch)
+        WAITED_REPOS.append(repo_)
         raise SystemExit(0)
 
     class NoLabel:  # the work label is a best-effort write to the identity service; not under test here
@@ -172,3 +173,37 @@ def test_an_explicit_branch_is_used_whatever_the_refs_say(monkeypatch: pytest.Mo
     _ref(repo, "refs/remotes/origin/develop", _commit(repo))
     result, seen = _wait(monkeypatch, repo, "--branch", "main")
     assert result.exit_code == 0 and seen == ["main"]
+
+
+# ── review r2 N4: an explicit name is lower-cased like a derived one ──────────────────────────────────────────
+
+WAITED_REPOS: list[str] = []
+
+
+def test_an_explicit_wait_repo_is_lower_cased(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    WAITED_REPOS.clear()
+    repo = _repo(tmp_path / "r", "https://github.com/acme/widgets.git")
+    result, seen = _wait(monkeypatch, repo, "--repo", "ART", "--branch", "develop", "--gh-repo", "Hellblazer/ART")
+    assert result.exit_code == 0 and seen == ["develop"] and WAITED_REPOS == ["art"], (result.output, WAITED_REPOS)
+
+
+@pytest.mark.parametrize("command", ["check-hold", "record-push"])
+def test_an_explicit_push_base_is_lower_cased(monkeypatch: pytest.MonkeyPatch, command: str) -> None:
+    subspaces: list[str] = []
+
+    class Store:
+        def rd(self, subspace: str, *a: Any, **k: Any) -> list[Any]:
+            subspaces.append(subspace)
+            return []
+
+        def out(self, subspace: str, *a: Any, **k: Any) -> str:
+            subspaces.append(subspace)
+            return "t" * 64
+
+    monkeypatch.setattr(ci_cmd, "_store", lambda: Store())
+    monkeypatch.setattr("nexus.ci_ack.own_identity", lambda: "i5")
+    monkeypatch.setattr("nexus.ci_ack.counted_identity", lambda strict=False: "i5")
+    extra = ["--from-sha", SHA, "--to-sha", "b" * 40] if command == "record-push" else []
+    result = CliRunner().invoke(ci_cmd.ci_group, [command, "--base", "ART-main", *extra])
+    assert result.exit_code == 0, result.output
+    assert subspaces and all(s.startswith("board/ci/art-main--") for s in subspaces), subspaces

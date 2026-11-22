@@ -15,12 +15,14 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from click.testing import CliRunner
 
 from nexus import ci_base
 from nexus.commands import ci_cmd
 from nexus.db.t2 import http_tuple_store
+from nexus.identity import token_contract
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FROM_SHA, TO_SHA = "a" * 40, "b" * 40
@@ -32,16 +34,21 @@ class _Store:
     ``fail_unstamped`` calls made without it."""
 
     def __init__(self, fail_stamped: int = 0, fail_unstamped: int = 0, *, session_header: bool = True,
-                 drops_header_on_write: bool = False, identity_token: bool = False) -> None:
+                 drops_header_on_write: bool = False, identity_token: bool = False, drops_identity_on_write: bool = False) -> None:
         self.calls: list[dict[str, Any]] = []
         self.fail_stamped, self.fail_unstamped = fail_stamped, fail_unstamped
         self.session_header = session_header          # whether a write would carry the session header at all
         self.drops_header_on_write = drops_header_on_write  # the 401 headerless retry: the write lands without the session header
         self.identity_token = identity_token          # an RDR-253 identity token stamps the write whatever happens to the header
+        self.drops_identity_on_write = drops_identity_on_write  # the identity-token 401 resend: the write lands without the token
         self.headerless_retries = 0
+        self.identity_dropped_resends = 0
 
     def would_stamp(self) -> bool:
         return self.session_header or self.identity_token
+
+    def session_stamps(self) -> bool:
+        return self.session_header
 
     def identity_stamps(self) -> bool:
         return self.identity_token
@@ -50,6 +57,8 @@ class _Store:
         stamped = not http_tuple_store._drop_session_header.get()
         if stamped and self.drops_header_on_write:
             self.headerless_retries += 1
+        if stamped and self.drops_identity_on_write:
+            self.identity_dropped_resends += 1
         self.calls.append({"subspace": subspace, "keys": keys, "dims": dims, "body": json.loads(body or "{}"), "raw_body": body or "",
                            "nonce": nonce, "stamped": stamped})
         if stamped and self.fail_stamped:
@@ -118,6 +127,108 @@ def test_a_headerless_resend_is_still_stamped_when_an_identity_token_rides_the_w
 def test_no_session_header_but_an_identity_token_is_stamped(monkeypatch: pytest.MonkeyPatch) -> None:
     result = _run(monkeypatch, _Store(session_header=False, identity_token=True))
     assert result.stdout.startswith("PUSH_RECORD_OK "), result.stdout
+
+
+@pytest.mark.parametrize("kwargs", [
+    dict(session_header=False, identity_token=True, drops_identity_on_write=True),   # the identity token alone, resent without it
+    dict(session_header=True, identity_token=True, drops_identity_on_write=True, drops_header_on_write=True),   # both resent without
+], ids=["identity-only", "both"])
+def test_an_identity_token_resend_without_the_token_is_unstamped_like_a_headerless_resend(monkeypatch: pytest.MonkeyPatch, kwargs: dict) -> None:
+    """Review r2 M1: the 401 resend of an identity-token send goes out without the token; with no other stamp left, the record
+    is unstamped, and the status line says so."""
+    result = _run(monkeypatch, _Store(**kwargs))
+    line = result.stdout.strip().splitlines()[-1]
+    assert result.exit_code == 0 and line.startswith("PUSH_RECORD_UNSTAMPED "), result.output
+    assert "rejected" in line and "identity token" in line, line
+
+
+@pytest.mark.parametrize("kwargs", [
+    dict(session_header=True, identity_token=True, drops_identity_on_write=True),    # the session header still stamps it
+    dict(session_header=True, identity_token=True, drops_header_on_write=True),      # the identity token still stamps it
+], ids=["session-header-survives", "identity-token-survives"])
+def test_a_record_with_one_stamp_surviving_the_resend_is_still_stamped(monkeypatch: pytest.MonkeyPatch, kwargs: dict) -> None:
+    result = _run(monkeypatch, _Store(**kwargs))
+    assert result.stdout.startswith("PUSH_RECORD_OK ") and result.stdout.strip().endswith(" stamped"), result.output
+
+
+# ── review r2 N1: what the fallback record really is, read off the requests that go out ──────────────────────────
+
+IDENTITY_HEADER = token_contract.IDENTITY_TOKEN_HEADER
+T1_HEADER = "X-Nexus-T1-Session"
+
+
+def _wire_store(monkeypatch: pytest.MonkeyPatch, *, identity_held: bool, first_status: int = 422) -> tuple[Any, list[Any]]:
+    """A real ``HttpTupleStore`` over a fake transport: the first write is refused (so the fallback runs), the second lands.
+    The session token is set in the environment; an identity token is held or not. Returns the store and the requests."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if len(seen) == 1:
+            return httpx.Response(first_status, json={"error": "bad_request", "message": "refused for the test"})
+        return httpx.Response(200, json={"id": "b" * 64})
+
+    monkeypatch.setattr(http_tuple_store.HttpTupleStore, "_rejected_sessions", {})
+    monkeypatch.setenv("NX_SERVICE_TOKEN", "data-token")
+    monkeypatch.setenv("NX_T1_SESSION", "session-token-aaaa")
+    held = {IDENTITY_HEADER: "identity-token-bbbb"} if identity_held else {}
+    monkeypatch.setattr("nexus.identity.token_header.fenced_identity_headers", lambda method, path: dict(held))
+    monkeypatch.setattr("nexus.identity.token_header.identity_headers", lambda: dict(held))
+    store = http_tuple_store.HttpTupleStore(base_url="http://mock.test")
+    store._client = httpx.Client(transport=httpx.MockTransport(handler))
+    store._invalidate_and_reresolve = lambda: None  # type: ignore[method-assign]
+    return store, seen
+
+
+@pytest.mark.parametrize("identity_held", [True, False], ids=["identity-token-held", "no-identity-token"])
+def test_the_fallback_request_drops_only_the_t1_session_header(monkeypatch: pytest.MonkeyPatch, identity_held: bool) -> None:
+    """Asserted on the outgoing request headers, not on the ContextVar that drives them: the stamped write carries the T1
+    session header (and the identity token when held); the fallback carries no T1 header, and the identity token still, when
+    one is held, so the engine still stamps the record from it."""
+    from nexus import ci_push_record  # noqa: PLC0415
+
+    store, seen = _wire_store(monkeypatch, identity_held=identity_held)
+    line = ci_push_record.write(store, "nexus-develop", FROM_SHA, TO_SHA, 1, "i5", None)
+    assert len(seen) == 2, [r.url.path for r in seen]
+    first, second = seen
+    assert T1_HEADER in first.headers and (IDENTITY_HEADER in first.headers) is identity_held
+    assert T1_HEADER not in second.headers, "the fallback is written without the T1 session header"
+    assert (IDENTITY_HEADER in second.headers) is identity_held, "an identity token still rides the fallback"
+    assert line.startswith("PUSH_RECORD_FALLBACK ") and "without the T1 session header" in line
+    if identity_held:
+        assert "still stamped by the identity token" in line and "no pusher" not in line, line
+    else:
+        assert "unstamped" in line and "no pusher" in line, line
+
+
+def test_a_fallback_whose_identity_token_is_dropped_on_its_own_resend_is_unstamped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fallback itself can meet a 401 on its identity token and be resent without it; then no stamp is left and the line
+    must not claim one."""
+    from nexus import ci_push_record  # noqa: PLC0415
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if len(seen) == 1:
+            return httpx.Response(422, json={"error": "bad_request", "message": "refused"})
+        if len(seen) == 2 and IDENTITY_HEADER in request.headers:
+            return httpx.Response(401, json={"error": "token refused"})
+        return httpx.Response(200, json={"id": "b" * 64})
+
+    monkeypatch.setattr(http_tuple_store.HttpTupleStore, "_rejected_sessions", {})
+    monkeypatch.setenv("NX_SERVICE_TOKEN", "data-token")
+    monkeypatch.setenv("NX_T1_SESSION", "session-token-aaaa")
+    held = {IDENTITY_HEADER: "identity-token-bbbb"}
+    monkeypatch.setattr("nexus.identity.token_header.fenced_identity_headers", lambda method, path: dict(held))
+    monkeypatch.setattr("nexus.identity.token_header.identity_headers", lambda: dict(held))
+    monkeypatch.setattr("nexus.identity.token_header.current", lambda **kw: None)   # nothing newer to resend with
+    store = http_tuple_store.HttpTupleStore(base_url="http://mock.test")
+    store._client = httpx.Client(transport=httpx.MockTransport(handler))
+    store._invalidate_and_reresolve = lambda: None  # type: ignore[method-assign]
+    line = ci_push_record.write(store, "nexus-develop", FROM_SHA, TO_SHA, 1, "i5", None)
+    assert [IDENTITY_HEADER in r.headers for r in seen] == [True, True, False], "stamped try, fallback with the token, its resend without"
+    assert line.startswith("PUSH_RECORD_FALLBACK ") and "no pusher" in line and "still stamped" not in line, line
 
 
 def test_a_store_that_cannot_say_whether_it_stamps_is_taken_at_its_word(monkeypatch: pytest.MonkeyPatch) -> None:

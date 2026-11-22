@@ -788,11 +788,23 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     #: writes a row it wants stamped compares it before and after the write to learn whether the stamp was lost on the way.
     headerless_retries: int = 0
 
+    @property
+    def identity_dropped_resends(self) -> int:
+        """How many sends this process resent without their RDR-253 identity token after a 401 (``token_header``'s resend,
+        process-wide, not per store). Read before and after a write, like :attr:`headerless_retries`."""
+        from nexus.identity import token_header  # noqa: PLC0415 -- deferred: leaf import cost
+
+        return token_header.dropped_resends()
+
+    def session_stamps(self) -> bool:
+        """Whether a write made now would carry a usable ``NX_T1_SESSION`` token as the session header."""
+        return bool(self._session_token())
+
     def would_stamp(self) -> bool:
         """Whether a write made now carries something the engine stamps a sender session from: a usable ``NX_T1_SESSION``
         token, or the RDR-253 identity token. A hint from what the client would send; the write's response does not say what
         the engine stamped."""
-        return bool(self._session_token()) or self.identity_stamps()
+        return self.session_stamps() or self.identity_stamps()
 
     def identity_stamps(self) -> bool:
         """Whether an RDR-253 identity token rides this process's requests (so a write is stamped with that identity's session

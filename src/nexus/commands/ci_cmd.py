@@ -130,7 +130,8 @@ def ci_wait_cmd(
             click.echo(f"{sha[:12]} unusable: cannot tell which repo's board to wait on: no origin remote with a repo "
                        "name here; give --repo")
             raise SystemExit(ci_wait.EXIT_UNUSABLE)
-        repo = origin[1].lower()   # the adapter writes the board topic with the repo name lower-cased
+        repo = origin[1]
+    repo = repo.lower()   # the adapter writes the board topic with the repo name lower-cased, however it was named here
     if gh_repo is not None:
         gh = gh_repo
     elif origin is not None and origin[1].lower() == repo.lower():
@@ -360,6 +361,8 @@ def ci_ack_cmd(sha: str, base: str | None, topic: str | None, not_mine: bool, no
         topic = f"{base}--owner"
     if topic is not None and not _OWNER_TOPIC.fullmatch(topic):
         raise click.ClickException(f"{topic!r} is not an owner post: name it <base topic>--owner, as in <repo>-develop--owner")
+    if topic is not None:
+        topic = topic.lower()   # the adapter writes the topic lower-cased: a board named in upper case is the same board
     repo = None
     if topic is None:
         # No board named: the origin remote names the repo, and never anything else does (no default repo).
@@ -424,7 +427,7 @@ def _push_base(base: str | None, remote: str, branch: str | None) -> str:
     if base:
         if not ci_base.BASE.fullmatch(base):
             raise click.UsageError(f"--base {base!r} is not a board topic base: use <repo>-<branch>, as in <repo>-develop")
-        return base
+        return base.lower()   # the adapter writes the topic lower-cased, so a base typed in upper case is the same board
     try:
         return ci_base.derive(remote, branch)
     except ci_base.BaseUnderivableError as exc:
@@ -465,10 +468,15 @@ def ci_check_hold_cmd(base: str | None, remote: str, branch: str | None, tips: t
     from nexus import ci_push_gate, ci_push_record  # noqa: PLC0415 -- deferred: CLI startup cost
 
     base = _push_base(base, remote, branch)
-    reason = (ci_push_record.clean_reason(red_fix) or "(no reason given)") if red_fix is not None else ""
+    # A reason that is blank once cleaned (empty, whitespace, control characters) is no reason: the flag then counts as not
+    # given, so the push is held and told to give one, never overridden with nothing on the record.
+    reason = ci_push_record.clean_reason(red_fix)
+    blank_red_fix = red_fix is not None and not reason
+    if blank_red_fix:
+        red_fix = None
     identity_error: Exception | None = None
     try:
-        identity = ci_ack.counted_identity()
+        identity = ci_ack.counted_identity(strict=True)   # a failed record read is raised, not answered with a delegated child's own id
     except Exception as exc:  # noqa: BLE001 -- an identity that could not be READ is not a caller with none: never a refusal
         identity, identity_error = "", exc
     try:
@@ -500,6 +508,9 @@ def ci_check_hold_cmd(base: str | None, remote: str, branch: str | None, tips: t
             shown = ", ".join(s[:12] for s in verdict.unattributed[:5]) + (f" (+{len(verdict.unattributed) - 5} more)" if len(verdict.unattributed) > 5 else "")
             click.echo(f"Suspect(s) unattributed (no push record, or one with no stamp the session index maps): {shown}. Their pusher "
                        "cannot be told, so none of them lets this push through: if this push is the fix, use --red-fix '<reason>'.")
+        if blank_red_fix:
+            click.echo("--red-fix was given with a blank reason, so it did not override the hold: give a reason, "
+                       "--red-fix '<reason>', so the push is on the record.")
         click.echo("Hold your pushes until the red clears, or hand the fix to the owner. A push that is the fix: "
                    "--red-fix '<reason>', on the record.")
         raise SystemExit(CHECK_HOLD_REFUSED)

@@ -123,7 +123,7 @@ class _Store:
 
 def _invoke(monkeypatch: pytest.MonkeyPatch, store: _Store, *extra: str, identity: str = ME) -> Any:
     monkeypatch.setattr(ci_cmd, "_store", lambda: store)
-    monkeypatch.setattr("nexus.ci_ack.counted_identity", lambda: identity)
+    monkeypatch.setattr("nexus.ci_ack.counted_identity", lambda strict=False: identity)
     monkeypatch.setattr(ci_push_gate, "default_resolver", _resolver)
     return CliRunner().invoke(ci_cmd.ci_group, ["check-hold", "--base", "nexus-develop", *extra])
 
@@ -140,7 +140,7 @@ def test_check_hold_refuses_with_exit_13_and_the_refusal_line_naming_owner_and_s
 def test_check_hold_reads_the_subspaces_of_the_base_it_was_given(monkeypatch: pytest.MonkeyPatch) -> None:
     store = _Store(_open(), [])
     monkeypatch.setattr(ci_cmd, "_store", lambda: store)
-    monkeypatch.setattr("nexus.ci_ack.counted_identity", lambda: ME)
+    monkeypatch.setattr("nexus.ci_ack.counted_identity", lambda strict=False: ME)
     monkeypatch.setattr(ci_push_gate, "default_resolver", _resolver)
     CliRunner().invoke(ci_cmd.ci_group, ["check-hold", "--base", "otherrepo-main"])
     assert store.reads == ["board/ci/otherrepo-main--owner", "board/ci/otherrepo-main--push"]
@@ -195,14 +195,14 @@ def test_a_read_failure_with_red_fix_still_prints_the_reason_as_not_needed(monke
 
 def test_an_unresolvable_suspect_pusher_is_unchecked_on_stderr(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ci_cmd, "_store", lambda: _Store(_open(), [_push_row(SUSPECT, SESSION_PEER)]))
-    monkeypatch.setattr("nexus.ci_ack.counted_identity", lambda: ME)
+    monkeypatch.setattr("nexus.ci_ack.counted_identity", lambda strict=False: ME)
     monkeypatch.setattr(ci_push_gate, "default_resolver", lambda: ci_reds.AckResolver(None))
     result = CliRunner().invoke(ci_cmd.ci_group, ["check-hold", "--base", "nexus-develop"])
     assert result.exit_code == 0 and "PUSH_GATE_UNCHECKED" in result.stderr
 
 
 def _identity_raises(monkeypatch: pytest.MonkeyPatch, exc: BaseException) -> None:
-    def boom() -> str:
+    def boom(strict: bool = False) -> str:
         raise exc
 
     monkeypatch.setattr("nexus.ci_ack.counted_identity", boom)
@@ -265,6 +265,131 @@ def test_the_module_docstring_names_the_command_check_hold_not_push_gate() -> No
     assert "check-hold" in text and "push-gate" not in text
     import inspect  # noqa: PLC0415
     assert "push-gate" not in inspect.getsource(ci_push_gate)
+
+
+class _UnknownSession(Exception):
+    """The identity service's own answer for a session its index does not hold (404 ``unknown_session``): a final answer."""
+
+    status, code = 404, "unknown_session"
+
+
+def _resolver_with_unmapped(unmapped: str) -> ci_reds.AckResolver:
+    def lookup(sid: str) -> Any:
+        if sid == unmapped:
+            raise _UnknownSession(sid)
+        return {"identity": SESSIONS[sid], "kind": "seat"}
+
+    return ci_reds.AckResolver(lookup)
+
+
+STRANGER_SESSION = "33333333-3333-4333-8333-333333333333"
+
+
+@pytest.mark.parametrize("stamp", ["s100", "not-a-uuid", " "], ids=["short-id", "no-uuid", "blank"])
+def test_a_suspect_whose_stamp_is_no_session_id_is_unattributed_not_a_reason_to_stop_checking(stamp: str) -> None:
+    """Review r2 N3: one suspect's odd stamp must not turn the whole check UNCHECKED and let everyone through."""
+    v = ci_push_gate.evaluate(_open(), [_push_row(SUSPECT, stamp), _push_row(RED_TIP, SESSION_PEER)], ME, _resolver())
+    assert v.refuse and not v.unchecked, v
+    assert v.unattributed == (SUSPECT,)
+
+
+def test_a_suspect_the_session_index_cannot_map_is_unattributed_not_unchecked() -> None:
+    v = ci_push_gate.evaluate(_open(), [_push_row(SUSPECT, STRANGER_SESSION), _push_row(RED_TIP, SESSION_PEER)], ME,
+                              _resolver_with_unmapped(STRANGER_SESSION))
+    assert v.refuse and not v.unchecked and v.unattributed == (SUSPECT,), v
+
+
+def test_the_caller_who_pushed_another_suspect_still_passes_when_one_suspect_is_unattributed() -> None:
+    v = ci_push_gate.evaluate(_open(), [_push_row(SUSPECT, "s100"), _push_row(RED_TIP, SESSION_ME)], ME, _resolver())
+    assert not v.refuse and not v.unchecked and "you pushed suspect" in v.detail
+
+
+def test_a_real_lookup_failure_still_makes_the_check_unchecked() -> None:
+    """An exception from the index (not its own 404) is a read failure: warn, do not refuse."""
+    def lookup(sid: str) -> Any:
+        raise ConnectionError("identity service down")
+
+    v = ci_push_gate.evaluate(_open(), [_push_row(SUSPECT, SESSION_PEER), _push_row(RED_TIP, "s100")], ME, ci_reds.AckResolver(lookup))
+    assert v.unchecked and not v.refuse, v
+
+
+def test_check_hold_names_the_odd_stamp_suspect_unattributed_in_the_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
+    result = _invoke(monkeypatch, _Store(_open(), [_push_row(SUSPECT, "s100"), _push_row(RED_TIP, SESSION_PEER)]))
+    assert result.exit_code == 13, result.output
+    assert any("unattributed" in ln and SUSPECT[:12] in ln and RED_TIP[:12] not in ln for ln in result.stdout.splitlines()), result.stdout
+
+
+# ── review r2 N2: a --red-fix that is blank once cleaned is no flag ─────────────────────────────────────────────
+
+@pytest.mark.parametrize("blank", ["", " ", " \n\t ", "\x07\x1b"], ids=["empty", "space", "whitespace", "controls"])
+def test_a_blank_red_fix_does_not_override_the_hold_and_asks_for_a_reason(monkeypatch: pytest.MonkeyPatch, blank: str) -> None:
+    result = _invoke(monkeypatch, _Store(_open(), []), "--red-fix", blank)
+    assert result.exit_code == 13, result.output
+    assert not result.stdout.startswith(ci_push_gate.RED_FIX_APPLIED) and ci_push_gate.RED_FIX_APPLIED not in result.stdout
+    assert any("--red-fix" in ln and "reason" in ln and "blank" in ln for ln in result.stdout.splitlines()), result.stdout
+
+
+@pytest.mark.parametrize("blank", ["", " \n "], ids=["empty", "whitespace"])
+def test_a_blank_red_fix_with_no_red_prints_no_marker_at_all(monkeypatch: pytest.MonkeyPatch, blank: str) -> None:
+    result = _invoke(monkeypatch, _Store([], []), "--red-fix", blank)
+    assert result.exit_code == 0 and "PUSH_RED_FIX" not in result.output, result.output
+
+
+def test_a_red_fix_with_a_reason_is_not_called_blank(monkeypatch: pytest.MonkeyPatch) -> None:
+    result = _invoke(monkeypatch, _Store(_open(), []), "--red-fix", "owner away")
+    assert result.exit_code == 0 and result.stdout.startswith(ci_push_gate.RED_FIX_APPLIED), result.output
+
+
+# ── review r2 S3 residual: a failed identity-record read for a delegated child is UNCHECKED, not the child's own id ──
+
+def test_the_strict_identity_read_refuses_to_answer_with_the_childs_own_id_when_its_record_cannot_be_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    from nexus import ci_ack  # noqa: PLC0415
+
+    def broken(identity: str) -> Any:
+        raise ConnectionError("identity service down")
+
+    monkeypatch.setattr("nexus.ci_ack.own_identity", lambda: "i7")
+    monkeypatch.setattr("nexus.ci_ack.identity_view", broken)
+    assert ci_ack.counted_identity() == "i7", "the ack verb's behaviour is unchanged: the token's own id"
+    with pytest.raises(Exception, match="i7"):
+        ci_ack.counted_identity(strict=True)
+
+
+def test_the_strict_identity_read_answers_as_before_when_the_record_reads(monkeypatch: pytest.MonkeyPatch) -> None:
+    from nexus import ci_ack  # noqa: PLC0415
+
+    views = {"i7": {"kind": "delegated", "parent": "i5"}, "i5": {"kind": "seat"}}
+    monkeypatch.setattr("nexus.ci_ack.identity_view", lambda who: views[who])
+    monkeypatch.setattr("nexus.ci_ack.own_identity", lambda: "i7")
+    assert ci_ack.counted_identity(strict=True) == "i5"
+    monkeypatch.setattr("nexus.ci_ack.own_identity", lambda: "i5")
+    assert ci_ack.counted_identity(strict=True) == "i5"
+    monkeypatch.setattr("nexus.ci_ack.own_identity", lambda: "")
+    assert ci_ack.counted_identity(strict=True) == ""
+
+
+def test_check_hold_with_an_unreadable_identity_record_is_unchecked_not_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real strict reader, end to end: the token names i7, its record cannot be read, a red is open that i7 does not own.
+    Taking i7 for a seat would refuse a delegated child of the owner; the check says it could not tell."""
+    def broken(identity: str) -> Any:
+        raise ConnectionError("identity service down")
+
+    monkeypatch.setattr(ci_cmd, "_store", lambda: _Store(_open(), []))
+    monkeypatch.setattr(ci_push_gate, "default_resolver", _resolver)
+    monkeypatch.setattr("nexus.ci_ack.own_identity", lambda: "i7")
+    monkeypatch.setattr("nexus.ci_ack.identity_view", broken)
+    result = CliRunner().invoke(ci_cmd.ci_group, ["check-hold", "--base", "nexus-develop"])
+    assert result.exit_code == 0 and "PUSH_REFUSED" not in result.output, result.output
+    assert result.stderr.startswith("PUSH_GATE_UNCHECKED ") and "i7" in result.stderr and "nx identity show" in result.stderr
+
+
+def test_check_hold_allows_the_owners_child_whose_record_reads(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ci_cmd, "_store", lambda: _Store(_open(), []))
+    monkeypatch.setattr(ci_push_gate, "default_resolver", _resolver)
+    monkeypatch.setattr("nexus.ci_ack.own_identity", lambda: "i77")
+    monkeypatch.setattr("nexus.ci_ack.identity_view", lambda who: {"kind": "delegated", "parent": OWNER})
+    result = CliRunner().invoke(ci_cmd.ci_group, ["check-hold", "--base", "nexus-develop"])
+    assert result.exit_code == 0 and result.stdout == "", result.output
 
 
 def test_check_hold_with_no_derivable_base_is_refused_naming_the_base_flag(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:

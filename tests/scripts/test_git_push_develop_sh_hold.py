@@ -268,7 +268,7 @@ def _real_check_hold(monkeypatch: pytest.MonkeyPatch, *args: str, red: bool, ide
             return list(owner_rows) if subspace.endswith("--owner") else []
 
     monkeypatch.setattr(ci_cmd, "_store", lambda: Store())
-    monkeypatch.setattr("nexus.ci_ack.counted_identity", lambda: identity)
+    monkeypatch.setattr("nexus.ci_ack.counted_identity", lambda strict=False: identity)
     monkeypatch.setattr(ci_push_gate, "default_resolver", lambda: ci_reds.AckResolver(None))
     result = CliRunner().invoke(ci_cmd.ci_group, ["check-hold", "--base", "nexus-develop", *args])
     return result.exit_code, result.stdout

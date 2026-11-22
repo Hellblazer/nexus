@@ -185,6 +185,18 @@ def test_base_names_any_repos_board(
     assert wire.sent[-1]["keys"] == {"topic": "halcyon-main--owner"}
 
 
+@pytest.mark.parametrize("flag, value", [("--base", "HALCYON-main"), ("--topic", "HALCYON-main--owner")], ids=["base", "topic"])
+def test_an_explicit_board_name_is_lower_cased_as_the_adapter_writes_it(
+    wire: _Wire, identity: list[str], monkeypatch: pytest.MonkeyPatch, flag: str, value: str,
+) -> None:
+    """Review r2 N4: the adapter's ``topic_for`` lower-cases the repo name, so an upper-case board named by hand is the same
+    board, not an empty one nobody posts to."""
+    _open_red(wire)
+    assert _run([SHA[:7], flag, value], wire, monkeypatch).exit_code == 0
+    assert wire.sent[-1]["subspace"] == "board/ci/halcyon-main--owner"
+    assert wire.sent[-1]["keys"] == {"topic": "halcyon-main--owner"}
+
+
 # ── no --base: the repo is derived from the origin remote, and nothing falls back to nexus ──────────────────────
 
 
