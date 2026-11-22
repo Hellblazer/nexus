@@ -155,6 +155,12 @@ class TestUnregisteredCauses:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         import nexus.catalog.factory as factory
+        from tests._catalog_fixture_ops import register_seed_collections
+
+        # RDR-229 P3.1 (nexus-p2m1x.17): a catalog write needs a registry row, and the seed registers the collection
+        # through the same reader this test makes unreachable. Register it first, while the reader works; the hook's
+        # own failure, below, is then the only one in play.
+        register_seed_collections("code__z0o2p20")
 
         def boom(**kw):
             raise RuntimeError("catalog unreachable")
