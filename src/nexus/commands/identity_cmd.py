@@ -117,7 +117,8 @@ def claim_cmd(ctx: click.Context, seat: str, take_over: bool) -> None:
 
     Runs only from an interactive Claude session (not a claude -p child), never for a seat held by an ancestor of
     this process, and never from a plain shell. The identity this session held before is closed: an ephemeral ends,
-    a seat is released.
+    a seat is released. A seat nobody holds is started rather than taken over, which a data-scoped credential (a
+    Claude Desktop session's) may do; taking over a held seat needs the tenant credential.
     """
     from nexus.identity import ops  # noqa: PLC0415
 

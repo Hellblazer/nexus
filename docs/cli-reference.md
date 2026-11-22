@@ -6071,6 +6071,8 @@ nx identity claim SEAT --take-over
 
 Supersede `SEAT`'s current holder with the Claude session this command runs under: that process is bound as a new generation and its token file is written, and the identity it held before is closed (`end` for an ephemeral, `release` for a seat). Refused when the nearest Claude ancestor is not an interactive session (its registry `entrypoint` must be `cli` or `claude-desktop`; a `claude -p` child is `sdk-cli`), when the seat's holder is an ancestor of this process, and when there is no Claude ancestor with a registry file (a plain shell).
 
+A seat nobody holds (`unheld` or `ended`) is bound with the `start` event and printed as `claimed`; a held seat is taken over with `takeover` and printed as `took over`. A data-scoped credential, such as a Claude Desktop session's, may send `start` but not `takeover`, so it can claim an unheld seat while it runs, and taking over a held one needs the tenant credential.
+
 | Flag | Description |
 |------|-------------|
 | `--take-over` | Required. Confirms superseding the holder |

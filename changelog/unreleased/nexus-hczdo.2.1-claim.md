@@ -1,0 +1,3 @@
+### Changed
+
+- **`nx identity claim SEAT --take-over` binds a seat nobody holds with `start`, so a running session on a data-scoped credential can claim one.** A Claude Desktop session's `nx` holds a data credential, which the engine lets send `start` but not `takeover`, so claiming its own new seat was refused (`forbidden: a 'data' credential may not send the 'takeover' event`) and the session could bind only at its next SessionStart. A held seat is still taken over with `takeover`, which needs the tenant credential. The command prints `claimed` for the first case and `took over` for the second (nexus-hczdo.2.1).

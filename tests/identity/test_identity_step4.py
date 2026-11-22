@@ -78,6 +78,25 @@ def row_a_take_over_records_a_takeover_row_a_new_generation_and_ends_the_callers
     assert world.indexed("s2")["identity"] == alpha, "the session index follows the take-over"
 
 
+def row_a_claim_of_an_unheld_seat_starts_it_and_sends_no_takeover(world: World) -> None:
+    """RDR-253 Phase 2 (kestrel, 2026-11-22): a seat nobody holds is bound with ``start``, the event a data credential may
+    send, so a running Desktop session on a data-scoped credential can claim a seat made for it. ``takeover`` is a
+    tenant-credential event and is kept for a seat another process holds (the row above)."""
+    seat = world.seat("kestrel")
+    world.process(200, os_start=T1, session_id="s2")
+    mine = world.hook(200, "startup", "s2")
+    assert mine.action == "ephemeral"
+
+    lines = claim(_env(world, 200), world.q("kestrel"))
+
+    assert any("claimed" in line for line in lines), lines
+    view = world.identity(seat)
+    assert (view["state"], view["holder"]["pid"]) == ("live", 200)
+    assert world.events(seat) == ["start"], "an unheld seat is started, never taken over"
+    assert world.events(mine.identity) == ["start", "end"]
+    assert read_token_file(token_path(world.identity_dir, 200, 200_000)).identity == seat
+
+
 def row_a_take_over_releases_the_callers_previous_seat_bound_under_a_vanished_hostname(world: World) -> None:
     """GitHub issue 1679: the caller holds the seat ``beta``, bound before the host key under a hostname the network has
     since changed. The engine reads the release as the holder's own only when it names that host, so the client sends the
@@ -90,7 +109,8 @@ def row_a_take_over_releases_the_callers_previous_seat_bound_under_a_vanished_ho
     assert world.hook(200, "startup", "s2", seat="beta").identity == beta
     world.host = world.procs.host = key
     lines = claim(_env(world, 200), world.q("alpha"))
-    assert any("took over" in line for line in lines) and any("closed the previous identity" in line for line in lines), lines
+    # alpha is unheld, so the claim starts it (the row above): what this row checks is the previous seat's release.
+    assert any("claimed" in line for line in lines) and any("closed the previous identity" in line for line in lines), lines
     assert world.identity(beta)["state"] == "unheld" and world.events(beta) == ["start", "release"]
     assert world.identity(alpha)["holder"]["pid"] == 200
 
@@ -238,6 +258,7 @@ def row_a_delegated_child_writes_its_own_threads_entry_reads_its_parents_and_is_
 
 ROWS = (
     row_a_take_over_records_a_takeover_row_a_new_generation_and_ends_the_callers_ephemeral,
+    row_a_claim_of_an_unheld_seat_starts_it_and_sends_no_takeover,
     row_a_take_over_releases_the_callers_previous_seat_bound_under_a_vanished_hostname,
     row_release_frees_a_gone_holders_seat_with_the_verdict_and_is_refused_while_the_holder_runs,
     row_promote_keeps_the_binding_and_the_next_launch_that_names_the_seat_binds_it,

@@ -576,8 +576,17 @@ def _claude_ancestor(env: IdentityEnv, facts: CallerFacts) -> Any:
     return entry
 
 
+#: Seat states with no holder: ``claim`` binds these with ``start`` (RDR-253 Phase 2).
+_UNHELD_STATES = frozenset({"unheld", "ended"})
+
+
 def claim(env: IdentityEnv, ref: str) -> list[str]:
-    """``claim <seat> --take-over``: supersede the seat's holder with the caller's own Claude process."""
+    """``claim <seat> --take-over``: supersede the seat's holder with the caller's own Claude process.
+
+    A seat nobody holds (``unheld`` or ``ended``) is bound with ``start``, which every credential may send: a running
+    session on a data-scoped credential (a Claude Desktop session, kestrel 2026-11-22) can claim a seat made for it
+    without a new SessionStart. A held seat is taken over with ``takeover``, a tenant-credential event; if the seat
+    became held between the read and a ``start``, the claim reads it again once and takes it over."""
     facts = env.caller()
     entry = _claude_ancestor(env, facts)
     if entry is None:
@@ -606,10 +615,12 @@ def claim(env: IdentityEnv, ref: str) -> list[str]:
             raise IdentityCommandError(
                 f"{name} is held by pid {holder_pid}, an ancestor of this process: a child cannot take its parent's seat")
         previous = _previous(env, facts.claude_pid, entry.started_at)
+        event = "start" if view.get("state") in _UNHELD_STATES else "takeover"
         try:
-            bound = env.client.bind(view["id"], "takeover", int(view["generation"]), evidence)
+            bound = env.client.bind(view["id"], event, int(view["generation"]), evidence)
         except IdentityApiError as exc:
-            if exc.status == 409 and exc.code == "generation_conflict" and attempt == 1:
+            if exc.status == 409 and attempt == 1 and (exc.code == "generation_conflict"
+                                                        or (event == "start" and exc.code == "held")):
                 continue  # the seat moved between the read and the bind: read it again, once (as the hook's bind does)
             raise IdentityCommandError(f"{exc.code or exc.status}: {exc.message}") from exc
         except IdentityUnavailableError as exc:
@@ -617,7 +628,8 @@ def claim(env: IdentityEnv, ref: str) -> list[str]:
         break
     token, lifetime = token_contract.token_from_response(bound)
     _write_token(env, bound, token, lifetime, entry, proc_start)
-    lines = [f"took over {name} ({view['id']}) at generation {bound['generation']}: pid {facts.claude_pid} holds it now"]
+    verb = "claimed" if event == "start" else "took over"
+    lines = [f"{verb} {name} ({view['id']}) at generation {bound['generation']}: pid {facts.claude_pid} holds it now"]
     if previous is not None and previous["id"] != view["id"]:
         lines.append(_close_previous(env, previous, evidence))
     return lines
