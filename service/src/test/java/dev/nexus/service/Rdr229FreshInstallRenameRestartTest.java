@@ -58,6 +58,10 @@ class Rdr229FreshInstallRenameRestartTest {
             assertThat(engine.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, first)))
                 .as("boot 1: the refused rename wrote nothing" + why).isNotNull();
 
+            // boot_work tells the operator to restart (nx doctor), and the drop move was registered exactly once
+            assertThat(engine.restartEntryPresent()).as("boot 1: boot_work lists the restart entry" + why).isTrue();
+            assertThat(engine.moveRows(Rdr229RenameEngine.DROP_LABEL)).as("boot 1: the drop move is registered once" + why).isEqualTo(1);
+
             // the restart signal is visible where an operator reads it
             JsonNode status = engine.statusCompletion();
             assertThat(status.path("rename_missing").asText("absent"))
@@ -80,6 +84,8 @@ class Rdr229FreshInstallRenameRestartTest {
                 .containsAll(ids);
             assertThat(engine.statusCompletion().path("rename_missing").asText("absent"))
                 .as("boot 2: the status no longer asks for a restart").isEqualTo("none");
+            assertThat(engine.restartEntryPresent()).as("boot 2: the restart entry has left boot_work").isFalse();
+            assertThat(engine.moveRows(Rdr229RenameEngine.DROP_LABEL)).as("boot 2: the reboot registered nothing more").isEqualTo(1);
 
             String second = coll("r9b", 1);
             engine.su(ctx -> {
