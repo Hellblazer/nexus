@@ -10,6 +10,7 @@ import dev.nexus.service.PgCatalogProbes;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.VectorSeeds;
 import dev.nexus.service.vectors.LeafIndexPass;
+import dev.nexus.service.vectors.Rdr229SwapMove;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
@@ -45,8 +46,8 @@ import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS;
  * {@link CollectionIdStampMovesIntegrationTest}; the base empties the registry before each scenario. This class lives in the
  * {@code datamove} package, not beside {@code LeafIndexPassIntegrationTest}, because the worker's finisher and its seams are
  * package-private. The swap rows come from {@link LeafIndexPass#runOnce} (P3.3b). On a branch where that pass is not built yet,
- * {@link #registerSwaps} puts the id unique keys and the rows in itself (a row is the stamp move's row of the same table, no
- * {@code on_complete}), so the scenarios fail on what P3.3c adds and not on P3.3b's absence; with the pass built, the pass's rows
+ * {@link #registerSwaps} puts the id unique keys and the rows in itself (a row is {@link Rdr229SwapMove#spec} and the pass's
+ * identity fields), so the scenarios run the swap P3.3c owns and not P3.3b's absence; with the pass built, the pass's rows
  * are the ones that run and the fallback never fires.
  *
  * <p><b>Names.</b> RDR-229 item 6 names the three child tables and the keys they reference but not the id keys' constraint
@@ -79,7 +80,7 @@ class Rdr229SwapMovesIntegrationTest extends DataMoveIntegrationBase {
     private static final Field<String> LABEL_F = DSL.field(DSL.name("label"), String.class);
     private static final Field<String> TENANT_F = DSL.field(DSL.name("tenant_id"), String.class);
 
-    /** The stamp moves' rows as the walk wrote them, by table: the shape a fallback swap row copies. */
+    /** The stamp moves' rows as the walk wrote them, by table: captured to assert the walk registered them (P3.1), the precondition of every swap. */
     private static final Map<String, Map<String, Object>> stampRows = new LinkedHashMap<>();
 
     private final List<String> tenantsUsed = new ArrayList<>();
@@ -154,8 +155,9 @@ class Rdr229SwapMovesIntegrationTest extends DataMoveIntegrationBase {
 
     /**
      * What P3.3b leaves: the id unique keys, and each table's swap row. The pass registers them; where it does not (it is not built
-     * on this branch), the keys are added here by the PostgreSQL route that recurses through the partitions, and the row is the stamp
-     * move's row of the table without an {@code on_complete}.
+     * on this branch), the keys are added here by the PostgreSQL route that recurses through the partitions (the same end state: a valid
+     * unique constraint on the parent and one attached on every leaf), and the row is built from {@link Rdr229SwapMove#spec} plus the
+     * pass's identity fields: real rows in the state the pass leaves, not a mock.
      */
     private void registerSwaps() {
         new LeafIndexPass(adminConnection, new BootWorkRegistry(Clock.systemUTC()), c -> true, ENGINE_VERSION).runOnce();
@@ -169,12 +171,21 @@ class Rdr229SwapMovesIntegrationTest extends DataMoveIntegrationBase {
             }
             String label = LeafIndexPass.swapLabel(key.table());
             if (!ctx().fetchExists(table("nexus", "data_moves"), LABEL.eq(label))) {
-                Map<String, Object> row = new LinkedHashMap<>(stampRows.get(key.table()));
+                // the row in the state the pass leaves: its identity fields are the pass's (LeafIndexPass#registerSwap), the rest is P3.3c's
+                Rdr229SwapMove.Spec spec = Rdr229SwapMove.spec(key.table());
+                Map<String, Object> row = new LinkedHashMap<>();
                 row.put("label", label);
+                row.put("driving_schema", "nexus");
+                row.put("driving_table", key.table());
                 row.put("changeset_id", LeafIndexPass.CHANGESET_PREFIX + ENGINE_VERSION);
-                row.put("on_complete", null);
                 row.put("supersedes", null);
-                row.remove("registered_at");
+                row.put("template", spec.template());
+                row.put("chunk_size", spec.chunkSize());
+                row.put("sleep_ms", spec.sleepMs());
+                row.put("statement_timeout_ms", spec.statementTimeoutMs());
+                row.put("verify_statement_timeout_ms", spec.verifyStatementTimeoutMs());
+                row.put("verification", spec.verification());
+                row.put("on_complete", spec.onComplete());
                 List<Field<?>> columns = new ArrayList<>();
                 List<Object> values = new ArrayList<>();
                 row.forEach((k, v) -> {
