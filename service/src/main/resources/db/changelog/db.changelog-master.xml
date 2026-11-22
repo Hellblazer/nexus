@@ -2416,9 +2416,10 @@
     <include file="db/changelog/vectors-073-leaf-id-unique-index.xml"/>
 
     <!--
-        Bead nexus-p2m1x.21 (RDR-229 P3.3c): vectors-074-1 builds idx_chunk_orphaned_at_tenant_chash on nexus.chunk_orphaned_at (tenant_id, chash) with CREATE INDEX
-        CONCURRENTLY IF NOT EXISTS, in a changeset of its own with runInTransaction="false": the child-side lookup of chunk_orphaned_at_chunk_id_fk, which the
-        name primary key cannot serve. DATA EFFECT: none. After vectors-073, before the grants-nexus-svc.xml runAlways block. See the included file's header.
+        Bead nexus-p2m1x.21 (RDR-229 P3.3c): vectors-074-1 builds idx_chunk_orphaned_at_tenant_chash on nexus.chunk_orphaned_at (tenant_id, chash), the child-side lookup of
+        chunk_orphaned_at_chunk_id_fk. A self-retrying changeset (onFail="CONTINUE", failOnError="false", runInTransaction="false"): it drops an INVALID leftover of the
+        index and builds it, each CONCURRENTLY, under lock_timeout 30 s, so a boot never hangs or halts on it and a killed build heals on the next boot. DATA EFFECT: none.
+        After vectors-073, before the grants-nexus-svc.xml runAlways block. See the included file's header.
     -->
     <include file="db/changelog/vectors-074-chunk-orphaned-at-chash-index.xml"/>
 
