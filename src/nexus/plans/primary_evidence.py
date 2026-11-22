@@ -37,6 +37,7 @@ Merging this evidence ahead of the plan's inputs is :mod:`nexus.plans.reserved_s
 
 from __future__ import annotations
 
+import shlex
 import os
 import re
 import time
@@ -829,7 +830,7 @@ def _why_unknown(unknown: Mapping[str, tuple[str, list[str], str]], capped: bool
     hints: list[str] = []
     for code, flag in ((NO_ASPECT_ROW, ""), (OTHER_EXTRACTOR, " --all"), (FRONTMATTER_NOT_PARSED, " --all")):
         for coll in sorted(collections.get(code, ())):
-            cmd = f"`nx enrich aspects {coll}{flag} --validate-sample 0`"
+            cmd = f"`nx enrich aspects {shlex.quote(coll)}{flag} --validate-sample 0`"
             if cmd not in hints:
                 hints.append(cmd)
     remedy = (

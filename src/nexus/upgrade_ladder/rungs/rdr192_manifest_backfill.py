@@ -387,7 +387,7 @@ def _remedy(reading: CensusReading) -> str:
             "running it again cannot heal them, and no verb does. Their text is hidden "
             "from `nx store get` and search and no `nx` verb reads it, so a fix needs "
             "your own copy of each note. `nx t3 census-manifest-less --collection "
-            f"{example}` lists each chunk with its owner document's title. To heal one, "
+            f"{shlex.quote(example)}` lists each chunk with its owner document's title. To heal one, "
             "re-put your copy under the same title into the collection named there, "
             f"for example `nx store put - --collection {shlex.quote(example)} --title '<title>'`: "
             "the new chunk is manifested under the same document and the old chunk is "
