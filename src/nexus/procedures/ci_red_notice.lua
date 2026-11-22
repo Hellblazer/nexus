@@ -16,12 +16,13 @@
 --   owner, a red the leader takes (any other reason but handoff and escalated): the reason is named
 --   owner, after a hand-off (reason handoff): "handed to you after no acknowledgement"
 --   escalated, naming me or naming no one (a member sees it): raise an ask to Sam
---   next up: "<owner> owns it. You are next up."
+--   next up: "<owner> owns it. You are next up." No wake: a nudge row wakes it (ci_red_nudge), and a hand-off that
+--     seats it as owner wakes it through the owner display.
 --   everyone else: "<owner> owns it. Hold your pushes." No wake.
 --
--- wake is true only on a row that is not a refresh (refresh false), when me is the owner or next up, or when the
--- row is escalated and names me or names no one (the load gate has made me a member of the serving group).
--- A refresh row rewrites the block and does not wake again.
+-- wake is true only on a row that is not a refresh (refresh false), when me is the owner, or when the row is
+-- escalated and names me or names no one (the load gate has made me a member of the serving group). Next up is shown
+-- and never woken here (RDR-252 audit S2). A refresh row rewrites the block and does not wake again.
 --
 -- Values a tuple's writer controls (sha, owner, owner_alias, next, next_alias, reason, me) are checked against their grammar and never
 -- echoed in an error: the error text is logged.
@@ -80,8 +81,10 @@ if owner == me or (escalated and owner == nil) then
 elseif owner == nil then
   text = head .. "; no one is named as owner. Hold your pushes."
 elseif next_up == me then
+  -- Shown, not woken (RDR-252 audit S2): the owner usually acknowledges within two minutes, so a wake here cost the
+  -- conductor most of its sessions' interruptions. Next up is woken by a nudge row (ci_red_nudge) when half the
+  -- deadline has passed with no ack, and a hand-off that seats it as owner wakes it through the owner branch above.
   text = head .. "; " .. owner_name .. " owns it. You are next up."
-  wake = not args.refresh
 else
   text = head .. "; " .. owner_name .. " owns it. Hold your pushes."
 end

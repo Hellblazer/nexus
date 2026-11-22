@@ -1,5 +1,5 @@
 aura = "ci_develop_red"
-summary = "A red develop sha and who owns it, posted to this session's threads entry; wakes the owner and next up."
+summary = "A red develop sha and who owns it, posted to this session's threads entry; wakes the owner; next up is shown it and woken by ci_develop_nudge."
 procedure = "ci_red_notice"
 
 [load]

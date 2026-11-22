@@ -1,0 +1,3 @@
+### Changed
+
+- **The `ci_develop_red` aura shows next up the red and no longer wakes it; a new `ci_develop_nudge` aura wakes it when the owner has not acknowledged.** The owner usually acknowledges within two minutes, and a wake on every red cost the conductor most of its interruptions. The owner wake and a hand-off that seats a session as owner are unchanged. When half the acknowledgement deadline passes with no ack, the engine (a later cut) posts a `kind=nudge` row naming next up in `body.next`, and `ci_develop_nudge`, a second aura you turn on by name, wakes that session. Until the engine posts nudges, next up is display-only (RDR-252 post-close audit S2, nexus-igea9).
