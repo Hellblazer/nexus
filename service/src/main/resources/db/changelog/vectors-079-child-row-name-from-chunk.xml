@@ -32,16 +32,18 @@
     ON UPDATE CASCADE; for such a cascaded row the chunk is found by name but under the new id, no chunk carries the child's old id,
     so nothing is replaced and the rename is unchanged.
 
-    ONE LOG LINE PER STATEMENT, NOT PER ROW. A writer that supplied a name other than the chunk's has its value replaced; after a
-    one-row rename that is every write for an existing chunk until the writers read the stored name themselves, so a per-row line
-    would be one per manifest row of a re-index. The row trigger counts a replacement in a transaction-local setting named for the
-    table (nexus.child_name_fix_<table>: the count, a pipe, the first supplied -> stored pair) and an AFTER INSERT OR UPDATE
-    FOR EACH STATEMENT trigger, which fires once per statement (nested statements in a function included, and an INSERT ... ON
-    CONFLICT DO UPDATE once for each event), writes one RAISE LOG line with the count and the sample and clears the setting. LOG
-    reaches the server log at the default log_min_messages and no client at the default client_min_messages, so a buggy writer
-    stays visible to the operator and an API client sees nothing. A statement that fails rolls its setting back with its
-    (sub)transaction, so no count leaks into the next statement. A transition table cannot serve here: the AFTER trigger sees the
-    row after the BEFORE trigger replaced it, and a BEFORE trigger takes no transition table.
+    ONE LOG LINE PER TRANSACTION, NOT PER ROW. A writer that supplied a name other than the chunk's has its value replaced; after a
+    one-row rename that is every write for an existing chunk until the writers read the stored name themselves, so a per-row line would
+    be one per manifest row of a re-index. The row function logs inside itself, no second trigger: on the first replacement in a
+    transaction it sets the transaction-local setting nexus.child_name_fix_logged (set_config is_local) and writes one RAISE LOG line
+    naming the table, the supplied and the stored name, the first 12 hex digits of the chunk key, the connection's application_name and
+    backend pid (enough to find the writer in the server log), and stays silent while the setting is on. Once per TRANSACTION, one flag
+    for the three tables: a second statement of the same transaction, on any of them, logs nothing more; a new transaction logs again. A
+    savepoint rolled back un-sets the flag with it (the setting is transactional), so the next replacement after the rollback logs again,
+    and the line of the rolled-back statement stays in the server log (a log line cannot be taken back). LOG reaches the server log at
+    the default log_min_messages and no client at the default client_min_messages, so a buggy writer stays visible to the operator and an
+    API client sees nothing. (An earlier shape logged once per statement from an AFTER statement trigger; it cost three triggers, a
+    function and a REVOKE of DDL, which the P3.5+P3.7 budget did not have.)
 
     POSTURE. SECURITY INVOKER (the lookup reads nexus.chunks under the writer's own row-level security, as the stamp triggers of
     vectors-021 and vectors-061 do), every pg_catalog function schema-qualified, EXECUTE revoked from PUBLIC (a trigger function needs
@@ -60,7 +62,7 @@
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
 
     <changeSet id="vectors-079-1" author="nexus-p2m1x.27">
-        <comment>nexus-p2m1x.27 (RDR-229 P3.7): a BEFORE INSERT OR UPDATE row trigger on nexus.catalog_document_chunks, nexus.chunk_orphaned_at and nexus.topic_assignments sets the child row's collection name (source_collection on topic_assignments) from the chunk row it references, found by the chunk's key (the primary key under the supplied name, else the child's collection id), so a child row written under a renamed collection's new label for an existing chunk takes the chunk's stored name and the chunk name key holds; and an AFTER INSERT OR UPDATE FOR EACH STATEMENT trigger on each table logs a replaced name once per statement (RAISE LOG, the count and the first pair). SECURITY INVOKER, EXECUTE revoked from PUBLIC. No data effect: function and trigger definitions only. Dropped with the name columns in P4.1.</comment>
+        <comment>nexus-p2m1x.27 (RDR-229 P3.7): a BEFORE INSERT OR UPDATE row trigger on nexus.catalog_document_chunks, nexus.chunk_orphaned_at and nexus.topic_assignments sets the child row's collection name (source_collection on topic_assignments) from the chunk row it references, found by the chunk's key (the primary key under the supplied name, else the child's collection id), so a child row written under a renamed collection's new label for an existing chunk takes the chunk's stored name and the chunk name key holds; and the row function logs a replaced name once per transaction (RAISE LOG: table, supplied and stored name, chunk key prefix, application_name, backend pid). SECURITY INVOKER, EXECUTE revoked from PUBLIC. No data effect: function and trigger definitions only. Dropped with the name columns in P4.1.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 SET LOCAL lock_timeout = '5s';
 
@@ -72,8 +74,6 @@ AS $function$
 DECLARE
     v_chunk_id  bigint;
     v_stored    text;
-    v_key       text;
-    v_state     text;
 BEGIN
     IF NEW.collection_id IS NULL THEN
         RETURN NEW;
@@ -103,14 +103,11 @@ BEGIN
     IF NOT FOUND OR v_stored = NEW.collection THEN
         RETURN NEW;
     END IF;
-    v_key := 'nexus.child_name_fix_' || TG_TABLE_NAME;
-    v_state := pg_catalog.current_setting(v_key, true);
-    IF v_state IS NULL OR v_state = '' THEN
-        PERFORM pg_catalog.set_config(v_key, '1|' || NEW.collection || ' -> ' || v_stored, true);
-    ELSE
-        PERFORM pg_catalog.set_config(v_key,
-            (pg_catalog.substr(v_state, 1, pg_catalog.strpos(v_state, '|') - 1)::integer + 1)::text || '|'
-                || pg_catalog.substr(v_state, pg_catalog.strpos(v_state, '|') + 1), true);
+    IF pg_catalog.current_setting('nexus.child_name_fix_logged', true) IS DISTINCT FROM 'on' THEN
+        PERFORM pg_catalog.set_config('nexus.child_name_fix_logged', 'on', true);
+        RAISE LOG 'RDR-229: nexus.% took the chunk''s stored collection name (supplied %, stored %, chunk %, application %, pid %); further replacements in this transaction are not logged',
+            TG_TABLE_NAME, NEW.collection, v_stored, pg_catalog.substr(pg_catalog.encode(NEW.chash, 'hex'), 1, 12),
+            pg_catalog.current_setting('application_name'), pg_catalog.pg_backend_pid();
     END IF;
     NEW.collection := v_stored;
     RETURN NEW;
@@ -125,8 +122,6 @@ AS $function$
 DECLARE
     v_chunk_id  bigint;
     v_stored    text;
-    v_key       text;
-    v_state     text;
 BEGIN
     IF NEW.collection_id IS NULL THEN
         RETURN NEW;
@@ -153,14 +148,11 @@ BEGIN
     IF NOT FOUND OR v_stored = NEW.collection THEN
         RETURN NEW;
     END IF;
-    v_key := 'nexus.child_name_fix_' || TG_TABLE_NAME;
-    v_state := pg_catalog.current_setting(v_key, true);
-    IF v_state IS NULL OR v_state = '' THEN
-        PERFORM pg_catalog.set_config(v_key, '1|' || NEW.collection || ' -> ' || v_stored, true);
-    ELSE
-        PERFORM pg_catalog.set_config(v_key,
-            (pg_catalog.substr(v_state, 1, pg_catalog.strpos(v_state, '|') - 1)::integer + 1)::text || '|'
-                || pg_catalog.substr(v_state, pg_catalog.strpos(v_state, '|') + 1), true);
+    IF pg_catalog.current_setting('nexus.child_name_fix_logged', true) IS DISTINCT FROM 'on' THEN
+        PERFORM pg_catalog.set_config('nexus.child_name_fix_logged', 'on', true);
+        RAISE LOG 'RDR-229: nexus.% took the chunk''s stored collection name (supplied %, stored %, chunk %, application %, pid %); further replacements in this transaction are not logged',
+            TG_TABLE_NAME, NEW.collection, v_stored, pg_catalog.substr(pg_catalog.encode(NEW.chash, 'hex'), 1, 12),
+            pg_catalog.current_setting('application_name'), pg_catalog.pg_backend_pid();
     END IF;
     NEW.collection := v_stored;
     RETURN NEW;
@@ -175,8 +167,6 @@ AS $function$
 DECLARE
     v_chunk_id  bigint;
     v_stored    text;
-    v_key       text;
-    v_state     text;
 BEGIN
     IF NEW.source_collection_id IS NULL THEN
         RETURN NEW;
@@ -203,80 +193,41 @@ BEGIN
     IF NOT FOUND OR v_stored = NEW.source_collection THEN
         RETURN NEW;
     END IF;
-    v_key := 'nexus.child_name_fix_' || TG_TABLE_NAME;
-    v_state := pg_catalog.current_setting(v_key, true);
-    IF v_state IS NULL OR v_state = '' THEN
-        PERFORM pg_catalog.set_config(v_key, '1|' || NEW.source_collection || ' -> ' || v_stored, true);
-    ELSE
-        PERFORM pg_catalog.set_config(v_key,
-            (pg_catalog.substr(v_state, 1, pg_catalog.strpos(v_state, '|') - 1)::integer + 1)::text || '|'
-                || pg_catalog.substr(v_state, pg_catalog.strpos(v_state, '|') + 1), true);
+    IF pg_catalog.current_setting('nexus.child_name_fix_logged', true) IS DISTINCT FROM 'on' THEN
+        PERFORM pg_catalog.set_config('nexus.child_name_fix_logged', 'on', true);
+        RAISE LOG 'RDR-229: nexus.% took the chunk''s stored collection name (supplied %, stored %, chunk %, application %, pid %); further replacements in this transaction are not logged',
+            TG_TABLE_NAME, NEW.source_collection, v_stored, pg_catalog.substr(pg_catalog.encode(NEW.doc_id, 'hex'), 1, 12),
+            pg_catalog.current_setting('application_name'), pg_catalog.pg_backend_pid();
     END IF;
     NEW.source_collection := v_stored;
     RETURN NEW;
 END;
 $function$;
 
--- ---- the once-per-statement line, shared by the three tables
-CREATE OR REPLACE FUNCTION nexus.child_name_fix_log()
- RETURNS trigger
- LANGUAGE plpgsql
-AS $function$
-DECLARE
-    v_key    text := 'nexus.child_name_fix_' || TG_TABLE_NAME;
-    v_state  text := pg_catalog.current_setting(v_key, true);
-BEGIN
-    IF v_state IS NOT NULL AND v_state <> '' THEN
-        PERFORM pg_catalog.set_config(v_key, '', true);
-        RAISE LOG 'RDR-229: nexus.% took the chunk''s stored collection name on % row(s) of one statement (first: %)',
-            TG_TABLE_NAME, pg_catalog.substr(v_state, 1, pg_catalog.strpos(v_state, '|') - 1),
-            pg_catalog.substr(v_state, pg_catalog.strpos(v_state, '|') + 1);
-    END IF;
-    RETURN NULL;
-END;
-$function$;
-
 REVOKE EXECUTE ON FUNCTION nexus.catalog_document_chunks_name_from_chunk() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION nexus.chunk_orphaned_at_name_from_chunk() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION nexus.topic_assignments_name_from_chunk() FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION nexus.child_name_fix_log() FROM PUBLIC;
 
 CREATE TRIGGER trg_catalog_document_chunks_name_from_chunk
     BEFORE INSERT OR UPDATE ON nexus.catalog_document_chunks
     FOR EACH ROW
     EXECUTE FUNCTION nexus.catalog_document_chunks_name_from_chunk();
-CREATE TRIGGER trg_catalog_document_chunks_name_fix_log
-    AFTER INSERT OR UPDATE ON nexus.catalog_document_chunks
-    FOR EACH STATEMENT
-    EXECUTE FUNCTION nexus.child_name_fix_log();
 
 CREATE TRIGGER trg_chunk_orphaned_at_name_from_chunk
     BEFORE INSERT OR UPDATE ON nexus.chunk_orphaned_at
     FOR EACH ROW
     EXECUTE FUNCTION nexus.chunk_orphaned_at_name_from_chunk();
-CREATE TRIGGER trg_chunk_orphaned_at_name_fix_log
-    AFTER INSERT OR UPDATE ON nexus.chunk_orphaned_at
-    FOR EACH STATEMENT
-    EXECUTE FUNCTION nexus.child_name_fix_log();
 
 CREATE TRIGGER trg_topic_assignments_name_from_chunk
     BEFORE INSERT OR UPDATE ON nexus.topic_assignments
     FOR EACH ROW
     EXECUTE FUNCTION nexus.topic_assignments_name_from_chunk();
-CREATE TRIGGER trg_topic_assignments_name_fix_log
-    AFTER INSERT OR UPDATE ON nexus.topic_assignments
-    FOR EACH STATEMENT
-    EXECUTE FUNCTION nexus.child_name_fix_log();
 ]]></sql>
         <rollback>
             <sql splitStatements="false" stripComments="false"><![CDATA[
-DROP TRIGGER IF EXISTS trg_topic_assignments_name_fix_log ON nexus.topic_assignments;
 DROP TRIGGER IF EXISTS trg_topic_assignments_name_from_chunk ON nexus.topic_assignments;
-DROP TRIGGER IF EXISTS trg_chunk_orphaned_at_name_fix_log ON nexus.chunk_orphaned_at;
 DROP TRIGGER IF EXISTS trg_chunk_orphaned_at_name_from_chunk ON nexus.chunk_orphaned_at;
-DROP TRIGGER IF EXISTS trg_catalog_document_chunks_name_fix_log ON nexus.catalog_document_chunks;
 DROP TRIGGER IF EXISTS trg_catalog_document_chunks_name_from_chunk ON nexus.catalog_document_chunks;
-DROP FUNCTION IF EXISTS nexus.child_name_fix_log();
 DROP FUNCTION IF EXISTS nexus.topic_assignments_name_from_chunk();
 DROP FUNCTION IF EXISTS nexus.chunk_orphaned_at_name_from_chunk();
 DROP FUNCTION IF EXISTS nexus.catalog_document_chunks_name_from_chunk();

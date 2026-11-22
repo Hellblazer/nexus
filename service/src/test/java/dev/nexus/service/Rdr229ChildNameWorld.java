@@ -27,7 +27,7 @@ final class Rdr229ChildNameWorld {
     static final String MODEL_384 = "minilm-l6-v2-384";
     static final String MODEL_768 = "bge-base-en-v15-768";
     static final String MODEL_1024 = "voyage-code-3";
-    /** The line vectors-079's statement trigger writes, up to the table name. */
+    /** The line vectors-079's row trigger writes, up to the table name. */
     static final String LOG_PREFIX = "RDR-229: nexus.";
 
     final Rdr229RenameEngine engine;
@@ -184,6 +184,31 @@ final class Rdr229ChildNameWorld {
                     s.execute(sql);
                     lines.addAll(logged(s));
                 }
+            }
+            return lines;
+        }));
+    }
+
+    /**
+     * As {@link #run}, but all the statements are ONE transaction (committed at the end), on a connection with
+     * {@code client_min_messages = log}. The line is logged once per transaction (vectors-079), so this is the shape that shows it.
+     */
+    List<String> runInOneTransaction(String... statements) {
+        return engine.su(ctx -> ctx.connectionResult(c -> {
+            List<String> lines = new ArrayList<>();
+            c.setAutoCommit(false);
+            try (Statement s = c.createStatement()) {
+                s.execute("SET client_min_messages = log");
+                for (String sql : statements) {
+                    s.execute(sql);
+                    lines.addAll(logged(s));
+                }
+                c.commit();
+            } catch (SQLException e) {
+                c.rollback();
+                throw e;
+            } finally {
+                c.setAutoCommit(true);
             }
             return lines;
         }));
