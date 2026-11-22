@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-p2m1x.31 (RDR-229 P3.11): take EXECUTE away from PUBLIC and from the service role of CatalogEpochTest on pg_postmaster_start_time(), so the engine's role is refused as on a locked-down cluster
+    (grant: undoing every revoke). The names are fixed (pg_catalog functions); no placeholder, so RawSqlGateTest's
+    parameterised-changelog lists need no entry. Superuser, runAlways. Run through CatalogEpochTest.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="test-pgcontrol-revoke-postmaster-1" author="nexus-p2m1x.31" runAlways="true">
+        <sql splitStatements="false">
+REVOKE EXECUTE ON FUNCTION pg_catalog.pg_postmaster_start_time() FROM PUBLIC;
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'svc_catalog_epoch') THEN
+        REVOKE EXECUTE ON FUNCTION pg_catalog.pg_postmaster_start_time() FROM svc_catalog_epoch;
+    END IF;
+END
+$$;
+        </sql>
+        <rollback>
+            <!-- Test-only. -->
+        </rollback>
+    </changeSet>
+</databaseChangeLog>
