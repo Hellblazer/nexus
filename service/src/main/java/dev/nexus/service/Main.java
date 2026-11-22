@@ -696,6 +696,9 @@ public final class Main {
         // nexus-p2m1x.20 (RDR-229 P3.3b): the per-leaf id unique-index pass, after the engine serves. Not the PCI reconciler's: it runs whether
         // NX_SEARCH_PCI is on or off and starts only when gate 1 of the completion check holds (its latest read; no check, no pass).
         var leafIndexPass = startLeafIndexPass(bootWork, adminConnection, completionCheck);
+        // nexus-p2m1x.22 (RDR-229 P3.4): the four id-keyed UNIQUE indexes P3.5c's upserts arbitrate on, after the engine serves, once gate 2 of
+        // the completion check holds (its latest read; no check, no pass). Gate 3 requires them.
+        var idUniqueIndexPass = startIdUniqueIndexPass(bootWork, adminConnection, completionCheck);
 
         // Parent-death watchdog (nexus-03bcg): exit if the supervisor (our parent
         // process) dies, so an OOM-killed supervisor leaves no orphaned-but-serving
@@ -754,6 +757,9 @@ public final class Main {
             }
             if (leafIndexPass != null) {
                 leafIndexPass.close();   // a build in flight keeps running in Postgres
+            }
+            if (idUniqueIndexPass != null) {
+                idUniqueIndexPass.close();   // a build in flight keeps running in Postgres
             }
             stopPciReconciler.run();
             // nexus-g17tf: right after the listener stops and the reconciler's stop
@@ -871,6 +877,31 @@ public final class Main {
             throw e;
         } catch (Throwable e) {
             log.error("event=leaf_index_pass_not_started cause=\"{}\"", e.toString(), e);
+            return null;
+        }
+    }
+
+    /**
+     * RDR-229 P3.4: the id unique-index pass, or null when it is not started; never throws. Not started without a completion check (its
+     * gate is the check's latest read of gate 2). Package-private so a test can call it.
+     */
+    static dev.nexus.service.datamove.IdUniqueIndexPass startIdUniqueIndexPass(BootWorkRegistry bootWork,
+            dev.nexus.service.db.AdminConnection admin, dev.nexus.service.datamove.CompletionBootWork completionCheck) {
+        if (completionCheck == null) {
+            log.error("event=id_unique_index_pass_not_started reason=no_completion_check");
+            return null;
+        }
+        try {
+            var pass = new dev.nexus.service.datamove.IdUniqueIndexPass(admin, bootWork, () -> {
+                var latest = completionCheck.latest();
+                return latest != null && latest.gate2();
+            });
+            pass.start();
+            return pass;
+        } catch (VirtualMachineError e) {
+            throw e;
+        } catch (Throwable e) {
+            log.error("event=id_unique_index_pass_not_started cause=\"{}\"", e.toString(), e);
             return null;
         }
     }
