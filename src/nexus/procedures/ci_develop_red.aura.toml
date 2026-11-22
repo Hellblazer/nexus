@@ -17,6 +17,10 @@ next = "body.next"
 next_alias = "body.next_alias"
 refresh = "body.refresh"
 reason = "body.reason"
+stalled = "body.stalled"
+stalled_owner = "body.stalled_owner"
+stalled_since = "body.stalled_since"
+red_since = "body.red_since"
 me = "self.identity"
 
 [when]

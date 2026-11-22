@@ -185,10 +185,40 @@ def test_a_nudge_from_any_other_writer_fires_nothing(writer: str) -> None:
     assert rec.runs == [] and rec.sets == []
 
 
-def test_a_nudge_a_client_posted_as_the_engine_fires_nothing() -> None:
-    rec = _offer({"kind": "nudge", "sha": SHA, "from": "engine"}, '{"next": "i7"}', {"show": True, "text": "x", "wake": True},
-                 sender_session="5f0c1a2e-8b34-4d6f-9a10-0c2b7e4d9a31")
-    assert rec.runs == [] and rec.sets == []
+def _offer_stamped(sender_session: str | None, stamp_known: bool) -> _Recorder:
+    from nexus.auras.runtime import AuraRuntime  # noqa: PLC0415
+    from nexus.db.t2.records import TupleRow  # noqa: PLC0415
+
+    aura = _shipped()
+    rec = _Recorder({"show": True, "text": "x", "wake": True})
+    rt = AuraRuntime([aura], writer=rec, run=rec.run, identity=ME)
+    rt.offer(aura.subspace, [TupleRow(
+        id="t1", subspace=aura.subspace, template="", keys={}, dims={"kind": "nudge", "sha": SHA, "from": "engine"},
+        body='{"next": "i7"}', claim_state=None, claimant=None, lease_until=None, attempts=0, consumed_at=None,
+        consumed_by=None, expires_at=None, created_at=None, sender_session=sender_session,
+        sender_session_known=stamp_known)])
+    assert rt.wait_idle(30)
+    return rec
+
+
+def test_the_engines_own_nudge_wakes_and_is_the_control_for_the_forged_ones() -> None:
+    """The engine writes a nudge with from=engine and no sender session (OwnerDecision.nudged tests the same pair), so
+    a row with that shape fires; the forgeries below differ from it in one respect each."""
+    rec = _offer_stamped(None, True)
+    assert len(rec.runs) == 1 and rec.sets == ["x"]
+
+
+@pytest.mark.parametrize(
+    ("sender_session", "stamp_known"),
+    [("5f0c1a2e-8b34-4d6f-9a10-0c2b7e4d9a31", True), (None, False), ("", False), ("", True)],
+    ids=["client-stamped", "stamp-not-rendered", "blank-and-not-rendered", "blank-stamp-rendered"],
+)
+def test_a_nudge_a_client_posted_as_the_engine_fires_nothing_and_wakes_no_one(sender_session: str | None, stamp_known: bool) -> None:
+    """RDR-252 critique S3 for the nudge: `from` is typed by the writer, so only a row the engine wrote counts, the same
+    test the owner and clear rows pass (from=engine, a null sender session). A forged nudge naming this session must not
+    wake it, run the procedure or write a block."""
+    rec = _offer_stamped(sender_session, stamp_known)
+    assert rec.runs == [] and rec.sets == [] and rec.removes == []
 
 
 def test_a_clear_row_removes_the_nudge_block() -> None:
