@@ -45,10 +45,20 @@
         <preConditions onFail="CONTINUE" onError="CONTINUE">
             <sqlCheck expectedResult="0">SELECT COUNT(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'nexus' AND c.relname = 'idx_chunk_orphaned_at_tenant_chash' AND i.indisvalid</sqlCheck>
         </preConditions>
-        <comment>nexus.chunk_orphaned_at (tenant_id, chash): the child-side lookup of the chunk's id key, chunk_orphaned_at_chunk_id_fk (RDR-229 P3.3c). Self-retrying (onFail CONTINUE, failOnError false): drops an INVALID leftover of the index, then builds it, each CONCURRENTLY, outside a transaction, under lock_timeout 30 s. DATA EFFECT: none. The rollback drops the index.</comment>
+        <comment>nexus.chunk_orphaned_at (tenant_id, chash): the child-side lookup of the chunk's id key, chunk_orphaned_at_chunk_id_fk (RDR-229 P3.3c). Self-retrying (onFail CONTINUE, failOnError false): drops an INVALID leftover of the index (a DO block that runs a plain DROP INDEX under lock_timeout 5 s only when pg_index holds an INVALID index of that name, so a boot with nothing to heal executes no DDL), then builds it CONCURRENTLY, outside a transaction, under lock_timeout 30 s. DATA EFFECT: none. The rollback drops the index.</comment>
+        <sql splitStatements="false" stripComments="false">
+DO $heal$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = 'nexus' AND c.relname = 'idx_chunk_orphaned_at_tenant_chash' AND NOT i.indisvalid) THEN
+        PERFORM set_config('lock_timeout', '5s', true);
+        DROP INDEX nexus.idx_chunk_orphaned_at_tenant_chash;
+    END IF;
+END
+$heal$;
+        </sql>
         <sql splitStatements="true" stripComments="false">
 SET lock_timeout = '30s';
-DROP INDEX CONCURRENTLY IF EXISTS nexus.idx_chunk_orphaned_at_tenant_chash;
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_chunk_orphaned_at_tenant_chash
     ON nexus.chunk_orphaned_at (tenant_id, chash);
 RESET lock_timeout;
