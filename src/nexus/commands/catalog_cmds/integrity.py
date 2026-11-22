@@ -21,6 +21,7 @@ in ``commands.catalog``; it is shared with setup / consolidate / backfill).
 """
 from __future__ import annotations
 
+import shlex
 import json
 import os
 from pathlib import Path
@@ -1696,7 +1697,7 @@ def _heal_ghosts(
                 # The put command needs the original content. We emit a
                 # template so the user can paste their source material.
                 click.echo(
-                    f"    nx store put --collection {coll} "
+                    f"    nx store put --collection {shlex.quote(coll)} "
                     f"--title {d['title']!r} < source.md"
                 )
             # anything else = skip

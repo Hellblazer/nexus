@@ -831,7 +831,7 @@ def _holder_hint(db: T3Database, collection: str, col_name: str, holds: Callable
     except Exception:  # noqa: BLE001 — the hint only improves a not-found answer; it must not replace it
         _log.warning("store_delete_holder_hint_failed", collection=col_name, exc_info=False)
         return ""
-    return f"; it is in {holder}: pass --collection {holder}" if holder else ""
+    return f"; it is in {holder}: pass --collection {shlex.quote(holder)}" if holder else ""
 
 
 def _delete_by_title(

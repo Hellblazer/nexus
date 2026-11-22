@@ -13,6 +13,7 @@ Kept out of :mod:`nexus.health` (over its file-size cap); the sweep calls :func:
 """
 from __future__ import annotations
 
+import shlex
 from typing import Any
 
 import structlog
@@ -115,10 +116,10 @@ def _fixes(doc: dict) -> list[str]:
     home, other = doc["physical_collection"], doc["collections"][0]
     return [
         f"nx catalog show {doc['tumbler']}   (names the document's source file; repeat for each document listed)",
-        f"nx index pdf <that file> --collection {home} --force   (for a Markdown document, nx index md): re-sends "
+        f"nx index pdf <that file> --collection {shlex.quote(home)} --force   (for a Markdown document, nx index md): re-sends "
         f"the document's chunks to {home} and replaces ALL of its manifest rows with rows naming them. It does not "
         f"remove the copy in {other}",
-        f"nx t3 gc -c {other} --dry-run   (lists the chunks in {other} that have had no manifest owner for 30 days, "
+        f"nx t3 gc -c {shlex.quote(other)} --dry-run   (lists the chunks in {other} that have had no manifest owner for 30 days, "
         "so right after the re-index it lists none of the stray copy; the stray copy stays until it passes that "
         "grace, then gc moves it to quarantine, and it expires later)",
     ]
