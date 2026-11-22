@@ -11,6 +11,8 @@ import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.AdminConnection;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.CollectionIds;
+import dev.nexus.service.db.PciBuilders;
+import dev.nexus.service.db.SchemaMigrator;
 import dev.nexus.service.db.PgSession.PciSettings;
 import dev.nexus.service.datamove.CompletionCheck;
 import dev.nexus.service.jooq.binding.Vector;
@@ -31,16 +33,22 @@ import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
 import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneId;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * RDR-229 P3.3b (nexus-p2m1x.20), the failing tests of the per-leaf unique-index pass ({@link LeafIndexPass}), against the real
@@ -158,12 +166,18 @@ class LeafIndexPassIntegrationTest {
     }
 
     LeafIndexPass openPass() {
-        return pass(ctx -> true);
+        return pass(() -> true);
     }
 
     /** A tenant with leaves under every model partition of both tables, created the way production's token trigger does (as the owner). */
     @SuppressWarnings("deprecation")
     String newTenant(String tag) throws Exception {
+        return newTenant(tag, true);
+    }
+
+    /** As above; {@code withoutHelperIndexes} false keeps what the helper made, for a leaf born under a table that already has its constraint. */
+    @SuppressWarnings("deprecation")
+    String newTenant(String tag, boolean withoutHelperIndexes) throws Exception {
         String tenant = "p33b-" + tag;
         tenants.add(tenant);
         asOwner(owner -> {
@@ -174,11 +188,13 @@ class LeafIndexPassIntegrationTest {
         // A leaf made through the helper after the cut carries a unique id index of its own (vectors-073; tested in
         // LeafIdUniqueIndexPartitionFunctionIntegrationTest). The pass is for the leaves that existed before the cut, which have none,
         // so the fixture takes the helper's away: every test starts from leaves with no id index.
-        asSuperuser(su -> {
-            IdKeyIndexProbe.reset(su);
-            return null;
-        });
-        assertThat(everyIdIndex()).as("the fixture's leaves start with no id index").isEmpty();
+        if (withoutHelperIndexes) {
+            asSuperuser(su -> {
+                IdKeyIndexProbe.reset(su);
+                return null;
+            });
+            assertThat(everyIdIndex()).as("the fixture's leaves start with no id index").isEmpty();
+        }
         return tenant;
     }
 
@@ -400,6 +416,11 @@ class LeafIndexPassIntegrationTest {
         assertThat(chunksParent.get(0).valid()).isTrue();
     }
 
+    /** True when the chain of every key is whole: a valid constraint-backed index at every level, attached to its parent's. */
+    boolean whole(LeafIndexPass.Key... keys) throws Exception {
+        return asSuperuser(su -> java.util.Arrays.stream(keys).allMatch(k -> LeafIndexPass.chainComplete(su, k)));
+    }
+
     List<Idx> parentIndexes(IdKeyIndexProbe.Key key) throws Exception {
         return asSuperuser(su -> IdKeyIndexProbe.indexes(su, key)).stream().filter(i -> i.level() == 0).toList();
     }
@@ -419,8 +440,14 @@ class LeafIndexPassIntegrationTest {
         collection(tenant, name(tenant, "a"), 3);
         assertThat(stampMoves(false)).as("precondition: the stamp moves are registered").isPositive();
         assertThat(stampMoves(true)).as("precondition: no stamp move can run here, so none completed").isZero();
-        LeafIndexPass.Gate1 real = ctx -> CompletionCheck.evaluate(ctx).gate1();
-        Boolean realGate = asOwner(real::holds);
+    LeafIndexPass.Gate1 real = () -> {
+            try {
+                return asOwner(ctx -> CompletionCheck.evaluate(ctx).gate1());
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        };
+        Boolean realGate = real.holds();
         assertThat(realGate).as("precondition: the real gate 1 does not hold").isFalse();
 
         var blocked = pass(real).runOnce();
@@ -540,5 +567,426 @@ class LeafIndexPassIntegrationTest {
             assertThat(template.split("<chunking_clause>", -1)).as("<chunking_clause> exactly once").hasSize(2);
             assertThat((String) row.get("verification")).isNotBlank();
         }
+    }
+
+    // -- 7: visible to the migration walk ----------------------------------------------------------------------------
+
+    /** Raised by a test's {@code beforeDdl} hook to end a pass at a chosen statement: the state before that statement is what the test seeds. */
+    static final class StopHere extends RuntimeException {
+        StopHere() {
+            super("stop here", null, false, false);
+        }
+    }
+
+    /** Holds an advisory lock on a session of its own until closed: another engine's pass, or the migration walk. */
+    final class HeldLock implements AutoCloseable {
+        final Connection conn;
+
+        HeldLock(long key) throws Exception {
+            conn = pg.createConnection("");
+            conn.setAutoCommit(true);
+            Boolean got = DSL.using(conn, SQLDialect.POSTGRES)
+                .select(DSL.function("pg_try_advisory_lock", org.jooq.impl.SQLDataType.BOOLEAN, DSL.val(key))).fetchOne(0, Boolean.class);
+            assertThat(got).as("the test's session took lock %s", key).isTrue();
+        }
+
+        @Override
+        public void close() throws Exception {
+            conn.close();   // the session ends and the lock goes with it
+        }
+    }
+
+    /** The pass's backend carries the builders' {@code application_name} prefix, the one the walk's termination and the on_complete's match. */
+    @Test
+    void thePassNamesItsBackendLikeAPciBuilder_soTheWalkAndTheOnCompleteEndIt() {
+        assertThat(LeafIndexPass.APPLICATION_NAME).startsWith(PciBuilderSession.APPLICATION_NAME_PREFIX);
+    }
+
+    /**
+     * CR-S1: with the migration advisory lock held by another session, a pass sends no statement and builds nothing, whether the lock is
+     * held when the pass starts or is taken between two of its statements (the hook takes it at the first statement the pass is about
+     * to send); released, the next pass does the whole job.
+     */
+    @Test
+    void withTheMigrationLockHeld_theRunSendsNoDdl_atTheStartAndBetweenStatements() throws Exception {
+        String tenant = newTenant("migration");
+        collection(tenant, name(tenant, "a"), 3);
+        List<LeafIndexPass.Ddl> sent = new ArrayList<>();
+
+        try (HeldLock migration = new HeldLock(SchemaMigrator.MIGRATION_ADVISORY_LOCK_KEY)) {
+            var pass = openPass();
+            pass.beforeDdl(sent::add);
+            var result = pass.runOnce();
+            assertThat(result.gateHeld()).as("a migration walks: the pass stands down").isFalse();
+            assertThat(result.built()).isZero();
+            assertThat(sent).as("no statement was even prepared to send").isEmpty();
+            assertThat(everyIdIndex()).isEmpty();
+            assertThat(swapLabels()).isEmpty();
+        }
+
+        HeldLock[] late = new HeldLock[1];
+        try {
+            var pass = openPass();
+            pass.beforeDdl(statement -> {
+                if (late[0] == null) {
+                    try {
+                        late[0] = new HeldLock(SchemaMigrator.MIGRATION_ADVISORY_LOCK_KEY);   // the walk starts after the pass did
+                    } catch (Exception e) {
+                        throw new IllegalStateException(e);
+                    }
+                }
+                sent.add(statement);
+            });
+            var cut = pass.runOnce();
+            assertThat(late[0]).as("the hook ran: the pass was about to send its first statement").isNotNull();
+            assertThat(cut.built()).as("and the statement was not sent").isZero();
+            assertThat(sent).as("the hook saw one statement and the pass ended there").hasSize(1);
+            assertThat(everyIdIndex()).as("no index, valid or not").isEmpty();
+            assertThat(swapLabels()).isEmpty();
+        } finally {
+            if (late[0] != null) {
+                late[0].close();
+            }
+        }
+
+        var after = openPass().runOnce();
+        assertThat(after.gateHeld()).isTrue();
+        assertThat(chunksLeavesWithoutIndex()).isEmpty();
+        assertThat(swapLabels()).containsExactly(CHUNKS_SWAP, CENTROIDS_SWAP);
+    }
+
+    /** CR-S5: a second session holding the pass's own lock (another engine's pass) makes {@code runOnce} send nothing. */
+    @Test
+    void aSecondSessionHoldingThePassLockMakesRunOnceSendNothing() throws Exception {
+        String tenant = newTenant("peer");
+        collection(tenant, name(tenant, "a"), 3);
+        List<LeafIndexPass.Ddl> sent = new ArrayList<>();
+        try (HeldLock peer = new HeldLock(LeafIndexPass.LOCK_KEY)) {
+            var pass = openPass();
+            pass.beforeDdl(sent::add);
+            var result = pass.runOnce();
+            assertThat(result.gateHeld()).as("standby: not a pass").isFalse();
+            assertThat(result.built() + result.dropped()).isZero();
+            assertThat(result.registered()).isEmpty();
+            assertThat(sent).isEmpty();
+            assertThat(everyIdIndex()).isEmpty();
+            assertThat(swapLabels()).isEmpty();
+        }
+        assertThat(openPass().runOnce().registered()).as("the peer gone, the pass runs").containsExactlyInAnyOrder(CHUNKS_SWAP, CENTROIDS_SWAP);
+    }
+
+    /**
+     * Linda's requirement (b), and the walk's termination finding the pass: a build in flight is held on a lock of the test's, the pass's
+     * backend is ended with the one call the migration walk and the on_complete make ({@code PciBuilders.terminate}; it finds the pass by
+     * the builders' name prefix), the CREATE INDEX CONCURRENTLY dies leaving an INVALID index and the pass ends without throwing; the next
+     * pass drops that index and rebuilds, and no INVALID index remains.
+     */
+    @Test
+    void aBuildKilledByTheWalksTerminationLeavesAnInvalidIndexTheNextPassDropsAndRebuilds() throws Exception {
+        String tenant = newTenant("killed");
+        collection(tenant, name(tenant, "a"), 3);
+        long leftoverOid;
+        try (Connection blocker = pg.createConnection("")) {
+            blocker.setAutoCommit(false);
+            try {
+                // a write in flight on the tenant's rows: its ROW EXCLUSIVE lock on every leaf of the tenant makes a CREATE INDEX
+                // CONCURRENTLY there wait (after it has made its INVALID catalog entry) for the transaction to end
+                DSL.using(blocker, SQLDialect.POSTGRES).update(CHUNKS).set(CHUNKS.CHUNK_TEXT, "held").where(CHUNKS.TENANT_ID.eq(tenant)).execute();
+                CompletableFuture<LeafIndexPass.Result> running = CompletableFuture.supplyAsync(() -> openPass().runOnce());
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(120);
+                List<Idx> invalid = List.of();
+                while (invalid.isEmpty() && System.nanoTime() < deadline) {
+                    Thread.sleep(100);
+                    invalid = asSuperuser(su -> IdKeyIndexProbe.indexes(su, IdKeyIndexProbe.CHUNKS)).stream().filter(i -> !i.valid()).toList();
+                }
+                assertThat(invalid).as("a build is in flight: its index is INVALID and the pass waits on the test's lock").isNotEmpty();
+                leftoverOid = invalid.get(0).indexOid();
+
+                int ended = asSuperuser(su -> PciBuilders.terminate(su, "reason=test_walk", org.slf4j.LoggerFactory.getLogger("leaf-index-test")));
+                assertThat(ended).as("the walk's termination found the pass's backend by its name").isEqualTo(1);
+                running.get(60, TimeUnit.SECONDS);   // the pass ends; it does not throw into its caller
+            } finally {
+                blocker.rollback();
+            }
+        }
+        List<Idx> killed = asSuperuser(su -> IdKeyIndexProbe.indexes(su, IdKeyIndexProbe.CHUNKS)).stream().filter(i -> !i.valid()).toList();
+        assertThat(killed).as("the killed build left its INVALID index").isNotEmpty();
+        assertThat(killed.stream().map(Idx::indexOid)).contains(leftoverOid);
+        assertThat(swapLabels()).as("and the table is not registered").isEmpty();
+
+        var next = openPass().runOnce();
+
+        assertThat(next.dropped()).as("the next pass drops the leftover").isGreaterThanOrEqualTo(1);
+        assertThat(asSuperuser(su -> IdKeyIndexProbe.indexes(su, IdKeyIndexProbe.CHUNKS)).stream().map(Idx::indexOid))
+            .as("and rebuilds: the leftover's oid is gone").doesNotContain(leftoverOid);
+        assertThat(asSuperuser(su -> IdKeyIndexProbe.indexes(su, IdKeyIndexProbe.CHUNKS)).stream().filter(i -> !i.valid()).toList())
+            .as("no INVALID id index is left").isEmpty();
+        assertThat(swapLabels()).containsExactly(CHUNKS_SWAP, CENTROIDS_SWAP);
+    }
+
+    // -- 8: boot_work, resume, a finished table ----------------------------------------------------------------------
+
+    /** {@code boot_work}: the entry is present while the pass builds, its {@code done} counts the indexes built so far of a constant {@code total}, and it is gone after. */
+    @Test
+    void theBootWorkEntryCountsTheBuildsWhileRunning_andIsGoneAfter() throws Exception {
+        String tenant = newTenant("bootwork");
+        collection(tenant, name(tenant, "a"), 3);
+        var registry = new BootWorkRegistry(Clock.systemUTC());
+        var pass = new LeafIndexPass(admin, registry, () -> true, ENGINE_VERSION);
+        List<String> seen = new ArrayList<>();
+        pass.beforeDdl(statement -> {
+            if (statement.kind() == LeafIndexPass.Kind.BUILD) {
+                registry.snapshot().stream().filter(e -> LeafIndexPass.BOOT_WORK_ID.equals(e.id())).findFirst()
+                    .ifPresentOrElse(e -> seen.add(e.done() + "/" + e.total()), () -> seen.add("absent"));
+            }
+        });
+        assertThat(registry.snapshot()).as("none before").noneMatch(e -> LeafIndexPass.BOOT_WORK_ID.equals(e.id()));
+
+        var result = pass.runOnce();
+
+        int total = result.built();
+        assertThat(total).as("every leaf of both tables had a build").isPositive();
+        assertThat(seen).as("at the start of build i the entry says i of total")
+            .containsExactlyElementsOf(java.util.stream.IntStream.range(0, total).mapToObj(i -> i + "/" + total).toList());
+        assertThat(registry.snapshot()).as("gone once the pass ends").noneMatch(e -> LeafIndexPass.BOOT_WORK_ID.equals(e.id()));
+    }
+
+    /**
+     * A pass cut at a chosen statement leaves the state before it, and the next pass resumes from there, completes the chain and registers
+     * the swaps once. Three cuts: after the parent's ONLY constraint and before any model partition's; after a leaf's constraint and
+     * before its attach; after every model partition's constraint and before the first model attach. In each state {@code chainComplete}
+     * is false and no swap is registered (an unattached model index, a missing leaf constraint, a missing model constraint: no swap).
+     */
+    @Test
+    void aPassCutAtEachStepOfTheRouteResumes_chainCompleteIsFalseUntilTheChainIsWhole_andTheSwapsRegisterOnce() throws Exception {
+        String tenant = newTenant("resume");
+        collection(tenant, name(tenant, "a"), 3);
+        var chunks = LeafIndexPass.KEYS.get(0);
+        var centroids = LeafIndexPass.KEYS.get(1);
+        // the first statement that is not sent: the first model partition's constraint, the first leaf's attach, the first model's attach
+        var stops = List.<java.util.function.Predicate<LeafIndexPass.Ddl>>of(
+            st -> st.kind() == LeafIndexPass.Kind.PARENT_CONSTRAINT && st.target().startsWith("chunks_m"),
+            st -> st.kind() == LeafIndexPass.Kind.ATTACH && st.target().startsWith("chunks_m"),
+            st -> st.kind() == LeafIndexPass.Kind.ATTACH && st.target().equals("chunks_cid_uq"));
+        for (int stop = 0; stop < stops.size(); stop++) {
+            var at = stops.get(stop);
+            int cutAt = stop;
+            clean();
+            var cut = openPass();
+            cut.beforeDdl(st -> {
+                if (at.test(st)) {
+                    throw new StopHere();
+                }
+            });
+            assertThatThrownBy(cut::runOnce).as("cut %s", cutAt).isInstanceOf(StopHere.class);
+            assertThat(whole(chunks)).as("cut %s: the chain is not whole", cutAt).isFalse();
+            assertThat(swapLabels()).as("cut %s: nothing registered", cutAt).isEmpty();
+
+            var resumed = openPass().runOnce();
+
+            assertThat(whole(chunks, centroids))
+                .as("resumed from cut %s: both chains whole", cutAt).isTrue();
+            assertThat(resumed.registered()).as("resumed from cut %s", cutAt).containsExactlyInAnyOrder(CHUNKS_SWAP, CENTROIDS_SWAP);
+            assertThat(everyIdIndex()).as("resumed from cut %s: every index valid, and backing a constraint", cutAt)
+                .allMatch(Idx::valid).allMatch(i -> i.constraint() != null);
+            assertThat(swapRows()).as("one row per label").hasSize(2);
+        }
+    }
+
+    /**
+     * M3, the helper window: the parent has its id constraint and a model partition does not yet, so a leaf made now has no index (the
+     * helper stands down for a constrained parent; the model has nothing to clone). The next pass builds that leaf's index and adopts it:
+     * every leaf ends with one valid, constraint-backed, attached index, and the swap registers.
+     */
+    @Test
+    void aLeafMadeWhileTheParentIsConstrainedAndTheModelIsNot_getsItsIndexFromTheNextPass() throws Exception {
+        String old = newTenant("window-old");
+        collection(old, name(old, "a"), 3);
+        var cut = openPass();
+        cut.beforeDdl(st -> {
+            if (st.kind() == LeafIndexPass.Kind.PARENT_CONSTRAINT && st.target().startsWith("chunks_m")) {
+                throw new StopHere();
+            }
+        });
+        assertThatThrownBy(cut::runOnce).isInstanceOf(StopHere.class);
+        assertThat(parentIndexes(IdKeyIndexProbe.CHUNKS)).as("the parent has its constraint").hasSize(1);
+
+        String fresh = newTenant("window-new", false);
+        collection(fresh, name(fresh, "a"), 2);
+        String leaf = chunksLeaf(fresh);
+        assertThat(chunksLeavesWithoutIndex()).as("the new leaf has no index: the window").contains(leaf);
+
+        var result = openPass().runOnce();
+
+        assertThat(chunksLeavesWithoutIndex()).isEmpty();
+        assertThat(result.built()).as("the pass built the new leaf's index").isGreaterThanOrEqualTo(1);
+        assertThat(asSuperuser(su -> IdKeyIndexProbe.indexes(su, IdKeyIndexProbe.CHUNKS)).stream().filter(i -> i.relation().equals(leaf)).toList())
+            .as("exactly one index on the leaf: valid, constraint-backed, attached").hasSize(1)
+            .allMatch(Idx::valid).allMatch(i -> i.constraint() != null).allMatch(i -> i.parentIndex() != null);
+        assertThat(whole(LeafIndexPass.KEYS.get(0))).isTrue();
+        assertThat(swapLabels()).containsExactly(CHUNKS_SWAP, CENTROIDS_SWAP);
+    }
+
+    /** A second pass over a finished store does nothing: no statement, nothing built or dropped or registered, and the same index oids. */
+    @Test
+    void aSecondPassOverAFinishedStoreSendsNothing() throws Exception {
+        String tenant = newTenant("twice");
+        collection(tenant, name(tenant, "a"), 3);
+        var first = openPass().runOnce();
+        assertThat(first.registered()).containsExactlyInAnyOrder(CHUNKS_SWAP, CENTROIDS_SWAP);
+        List<Long> oids = everyIdIndex().stream().map(Idx::indexOid).sorted().toList();
+        var registeredAt = swapRows().stream().collect(Collectors.toMap(r -> (String) r.get("label"), r -> r.get("registered_at")));
+        List<LeafIndexPass.Ddl> sent = new ArrayList<>();
+        var pass = openPass();
+        pass.beforeDdl(sent::add);
+
+        var second = pass.runOnce();
+
+        assertThat(second.gateHeld()).isTrue();
+        assertThat(second.built()).isZero();
+        assertThat(second.dropped()).isZero();
+        assertThat(second.registered()).isEmpty();
+        assertThat(sent).as("no statement").isEmpty();
+        assertThat(everyIdIndex().stream().map(Idx::indexOid).sorted().toList()).as("the same indexes, not rebuilt").isEqualTo(oids);
+        assertThat(swapRows().stream().collect(Collectors.toMap(r -> (String) r.get("label"), r -> r.get("registered_at"))))
+            .isEqualTo(registeredAt);
+    }
+
+    // -- 9: the leftover re-read, the backoff ------------------------------------------------------------------------
+
+    /**
+     * The leftover's {@code indisvalid} is read again immediately before the DROP (as {@code PciBuilderSession.Pass#drop} does): an index
+     * that turned valid since the pass's first read (here, at the DROP statement) is not dropped, and the leaf is not built beside it.
+     */
+    @Test
+    void aLeftoverThatTurnedValidBeforeTheDropIsNotDropped() throws Exception {
+        String tenant = newTenant("stale");
+        collection(tenant, name(tenant, "a"), 3);
+        String leaf = chunksLeaf(tenant);
+        String schema = leaf.substring(0, leaf.indexOf('.'));
+        String relation = leaf.substring(leaf.indexOf('.') + 1);
+        String leftover = LeafIndexPass.leafIndexName(relation);
+        asSuperuser(su -> {
+            var cols = java.util.Arrays.stream(IdKeyIndexProbe.CHUNKS.columns().split(", ")).map(c -> DSL.field(DSL.name(c))).toList();
+            su.createUniqueIndex(DSL.name(leftover)).on(DSL.table(DSL.name(schema, relation)), cols).execute();
+            return null;
+        });
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.markIndexInvalid(su, schema, leftover);
+        }
+        long oid = asSuperuser(su -> IdKeyIndexProbe.indexes(su, IdKeyIndexProbe.CHUNKS)).stream()
+            .filter(i -> i.relation().equals(leaf)).findFirst().orElseThrow().indexOid();
+        List<LeafIndexPass.Ddl> drops = new ArrayList<>();
+        var pass = openPass();
+        pass.beforeDdl(statement -> {
+            if (statement.kind() == LeafIndexPass.Kind.DROP) {
+                drops.add(statement);
+                try (Connection su = pg.createConnection("")) {
+                    PgContainerHelper.markIndexValid(su, schema, leftover);   // an operator's build finished after the pass's first read
+                } catch (java.sql.SQLException e) {
+                    throw new IllegalStateException(e);
+                }
+            }
+        });
+
+        var result = pass.runOnce();
+
+        assertThat(drops).as("the pass was about to drop it").hasSize(1);
+        assertThat(result.dropped()).as("the second read found it valid: no DROP was sent").isZero();
+        List<Idx> after = asSuperuser(su -> IdKeyIndexProbe.indexes(su, IdKeyIndexProbe.CHUNKS)).stream().filter(i -> i.relation().equals(leaf)).toList();
+        assertThat(after).as("the index is still there, once, valid, the same one").hasSize(1);
+        assertThat(after.get(0).valid()).isTrue();
+        assertThat(after.get(0).indexOid()).isEqualTo(oid);
+    }
+
+    /** A settable clock: the backoff reads it, and the test moves it. */
+    static final class MutableClock extends Clock {
+        Instant now = Instant.parse("2026-11-22T10:00:00Z");
+
+        @Override
+        public ZoneId getZone() {
+            return ZoneId.of("UTC");
+        }
+
+        @Override
+        public Clock withZone(ZoneId zone) {
+            return this;
+        }
+
+        @Override
+        public Instant instant() {
+            return now;
+        }
+    }
+
+    /**
+     * CR-S3: a leaf whose build fails (a duplicate under the id key) is not dropped and rebuilt on every tick: it waits 5 minutes after the
+     * first failure, 10 after the second, 20 after the third, and the wait is in memory on a clock the test sets (no sleeps). {@code done}
+     * of the boot_work entry counts the builds that succeeded only. Once the duplicate is gone the leaf builds and the table registers.
+     */
+    @Test
+    void aLeafWhoseBuildFailedWaitsOutAnExponentialBackoff_andOnlySuccessesCountInBootWork() throws Exception {
+        String tenant = newTenant("backoff");
+        collection(tenant, name(tenant, "a"), 3);
+        duplicateUnderTheIdKey(tenant, name(tenant, "a"), name(tenant, "dup"));
+        String leaf = chunksLeaf(tenant);
+        String relation = leaf.substring(leaf.indexOf('.') + 1);
+        var clock = new MutableClock();
+        var registry = new BootWorkRegistry(clock);
+        var pass = new LeafIndexPass(admin, registry, () -> true, ENGINE_VERSION, clock);
+        List<LeafIndexPass.Ddl> sent = new ArrayList<>();
+        List<String> progress = new ArrayList<>();
+        AtomicBoolean failedSeen = new AtomicBoolean();
+        AtomicInteger builds = new AtomicInteger();
+        pass.beforeDdl(statement -> {
+            sent.add(statement);
+            if (statement.kind() == LeafIndexPass.Kind.BUILD) {
+                int succeeded = builds.getAndIncrement() - (failedSeen.get() ? 1 : 0);
+                registry.snapshot().stream().filter(e -> LeafIndexPass.BOOT_WORK_ID.equals(e.id())).findFirst()
+                    .ifPresent(e -> progress.add(e.done() + "/" + succeeded));
+                if (statement.target().equals(relation)) {
+                    failedSeen.set(true);
+                }
+            }
+        });
+
+        Runnable tick = () -> {
+            builds.set(0);
+            failedSeen.set(false);
+            pass.runOnce();
+        };
+        java.util.function.Function<LeafIndexPass.Kind, Long> count = kind ->
+            sent.stream().filter(q -> q.kind() == kind && (kind == LeafIndexPass.Kind.DROP
+                ? q.target().equals(LeafIndexPass.leafIndexName(relation)) : q.target().equals(relation))).count();
+
+        tick.run();   // t0: the first attempt fails
+        assertThat(count.apply(LeafIndexPass.Kind.BUILD)).isEqualTo(1);
+        assertThat(progress).as("done at the start of each build is the number of builds that succeeded before it, a failure not counted")
+            .allSatisfy(p -> assertThat(p.substring(0, p.indexOf('/'))).isEqualTo(p.substring(p.indexOf('/') + 1)));
+
+        clock.now = clock.now.plus(java.time.Duration.ofMinutes(1));
+        tick.run();   // inside the first 5 minutes: not touched
+        assertThat(count.apply(LeafIndexPass.Kind.BUILD)).as("no second attempt inside 5 minutes").isEqualTo(1);
+        assertThat(count.apply(LeafIndexPass.Kind.DROP)).as("and no drop").isZero();
+
+        clock.now = clock.now.plus(java.time.Duration.ofMinutes(5));   // t0 + 6
+        tick.run();
+        assertThat(count.apply(LeafIndexPass.Kind.DROP)).as("after 5 minutes the leftover is dropped").isEqualTo(1);
+        assertThat(count.apply(LeafIndexPass.Kind.BUILD)).as("and rebuilt (and fails again)").isEqualTo(2);
+
+        clock.now = clock.now.plus(java.time.Duration.ofMinutes(9));   // t0 + 15: the second wait is 10 minutes, from t0 + 6
+        tick.run();
+        assertThat(count.apply(LeafIndexPass.Kind.BUILD)).as("inside the second, doubled wait").isEqualTo(2);
+
+        clock.now = clock.now.plus(java.time.Duration.ofMinutes(2));   // t0 + 17
+        tick.run();
+        assertThat(count.apply(LeafIndexPass.Kind.BUILD)).as("after it").isEqualTo(3);
+        assertThat(swapLabels()).as("the duplicate holds the chunks table back").containsExactly(CENTROIDS_SWAP);
+
+        removeDuplicate(tenant, name(tenant, "dup"));
+        clock.now = clock.now.plus(java.time.Duration.ofMinutes(21));   // t0 + 38: past the third wait (20 minutes from t0 + 17)
+        var last = pass.runOnce();
+        assertThat(last.registered()).as("the leaf builds and the chunks swap registers").containsExactly(CHUNKS_SWAP);
+        assertThat(chunksLeavesWithoutIndex()).isEmpty();
     }
 }
