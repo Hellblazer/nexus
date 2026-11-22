@@ -18,6 +18,8 @@ _GH_REPO = re.compile(r"[\w.-]+/[\w.-]+")
 _OWNER_TOPIC = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*--owner")
 #: Rows of the owner subspace one ``nx ci ack`` reads, newest first: far more than one red writes.
 _ACK_READ_ROWS = 300
+#: The longest note a disclaim carries: one line a threads entry or a terminal shows whole.
+_NOTE_MAX = 200
 #: The clock the unknown-subspace fallback measures the board wait with (a seam for tests).
 _now = time.monotonic
 #: The sleep between GitHub reads under --latest-attempt (a seam for tests).
@@ -249,8 +251,22 @@ def _current_red(store: Any, subspace: str, topic: str) -> ci_reds.Episode | Non
 @click.argument("sha")
 @click.option("--topic", default="nexus-develop--owner", show_default=True,
               help="The owner post to acknowledge on: board/ci/<TOPIC>. A base topic, a double dash and `owner`.")
-def ci_ack_cmd(sha: str, topic: str) -> None:
+@click.option("--not-mine", "not_mine", is_flag=True,
+              help="Say the red is not yours instead of acknowledging it: post a `disclaim` row for SHA. The engine "
+                   "does not act on it yet, so it is recorded only; from the engine cut that reads it, a disclaim "
+                   "from the red's current owner hands the red on at once, as a missed deadline does, and one from "
+                   "anyone else is ignored.")
+@click.option("--note", default=None,
+              help=f"With --not-mine, a line saying why or who has it (at most {_NOTE_MAX} characters, no control "
+                   "characters). Shown by `nx group ack-times`.")
+def ci_ack_cmd(sha: str, topic: str, not_mine: bool, note: str | None) -> None:
     """Acknowledge a red develop: post the owner's ack for SHA, signed with this session's identity id.
+
+    With --not-mine the row is a `disclaim` instead: "this red is not mine". It is recorded only until the engine cut
+    that reads it; from then on a disclaim from the red's current owner hands the red on at once, without waiting for
+    the acknowledgement deadline. It takes the same SHA, the same owner check and the same identity as an ack. An ack
+    only says "seen", and a disclaim says "someone else should take it".
+
 
     SHA is the red's sha or a prefix of at least 7 hex digits; it is resolved against the tips of the CURRENT red on
     board/ci/<TOPIC>: the shas its owner rows carry, since its first row (a red that a newer one replaced, or a clear row
@@ -260,6 +276,10 @@ def ci_ack_cmd(sha: str, topic: str) -> None:
     the sender-session stamp the board gives the row, which is this session's. With no identity the command refuses;
     `nx identity show` says whether this session holds one.
     """
+    if note is not None and not not_mine:
+        raise click.ClickException("--note goes with --not-mine: an ack carries no note")
+    if note is not None and (len(note) > _NOTE_MAX or not note.isprintable()):
+        raise click.ClickException(f"the note must be a single line of printable characters, at most {_NOTE_MAX} long")
     if not re.fullmatch(r"[0-9a-fA-F]{7,40}", sha):
         raise click.ClickException(f"{sha!r} is not a commit sha: give 7 to 40 hex digits")
     if not _OWNER_TOPIC.fullmatch(topic):
@@ -277,14 +297,15 @@ def ci_ack_cmd(sha: str, topic: str) -> None:
     except Exception as exc:  # noqa: BLE001 -- CLI boundary: one line and exit 1
         raise click.ClickException(f"could not read {subspace}: {type(exc).__name__}: {exc}") from exc
     if red is None:
-        raise click.ClickException(f"no open red on {subspace}: nothing to acknowledge")
+        raise click.ClickException(f"no open red on {subspace}: nothing to {'disclaim' if not_mine else 'acknowledge'}")
     latest = red.rows[-1][2]
     owner = latest.get("owner")
+    what, fate = ("a disclaim", "the engine would ignore it") if not_mine else ("an ack", "counts for nobody")
     if not owner:
-        raise click.ClickException(f"the red on {subspace} has no owner; an ack from {identity} counts for nobody")
+        raise click.ClickException(f"the red on {subspace} has no owner; {what} from {identity} {fate}")
     if owner != identity:
         named = f"{owner} ({latest['owner_alias']})" if latest.get("owner_alias") else str(owner)
-        raise click.ClickException(f"the red is owned by {named}; an ack from {identity} counts for nobody")
+        raise click.ClickException(f"the red is owned by {named}; {what} from {identity} {fate}")
     tips = {str((row.dims or {}).get("sha") or "").lower() for _, row, _ in red.rows}
     tips = {t for t in tips if re.fullmatch(r"[0-9a-f]{7,64}", t)}
     found = sorted(t for t in tips if t.startswith(sha.lower()))
@@ -293,9 +314,14 @@ def ci_ack_cmd(sha: str, topic: str) -> None:
         raise click.ClickException(
             f"{sha} is {'ambiguous among' if found else 'not one of'} the red tips on {subspace} ({named})")
     full = found[0]
+    kind = "disclaim" if not_mine else "ack"
     try:
-        row_id = store.out(subspace, {"topic": topic}, {"kind": "ack", "from": identity, "sha": full},
-                           nonce=uuid.uuid4().hex)
+        row_id = store.out(subspace, {"topic": topic}, {"kind": kind, "from": identity, "sha": full},
+                           body=note or None, nonce=uuid.uuid4().hex)
     except Exception as exc:  # noqa: BLE001 -- CLI boundary: one line and exit 1
-        raise click.ClickException(f"could not post the ack: {type(exc).__name__}: {exc}") from exc
+        raise click.ClickException(f"could not post the {kind}: {type(exc).__name__}: {exc}") from exc
+    if not_mine:
+        click.echo(f"disclaimed {full[:7]} on {subspace} as {identity} ({row_id[:12]}); recorded only until the engine "
+                   "cut that reads it hands the red on")
+        return
     click.echo(f"acked {full[:7]} on {subspace} as {identity} ({row_id[:12]})")

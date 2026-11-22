@@ -387,6 +387,12 @@ def reds_from(rows: list[Any], resolver: AckResolver | None = None) -> list[dict
             "cleared_at": cleared.isoformat().replace("+00:00", "Z") if cleared else None,
             # Acks on a red tip, inside the red, that the engine ignores (null or unmapped stamp), up to the counting ack.
             "ignored_acks": resolver.ignored - ignored_before,
+            # The owner's `not mine` rows (`nx ci ack --not-mine`), recorded for display: never an ack, never in minutes.
+            "disclaims": [
+                {"at": row.created_at, "from": (row.dims or {}).get("from"), "sha": (row.dims or {}).get("sha"),
+                 "note": (row.body or None)}
+                for _, row in red.disclaims
+            ],
         })
     return out
 
@@ -441,3 +447,5 @@ def ack_times_cmd(ctx: click.Context, name: str, as_json: bool) -> None:
     for r in reds:
         ack = f"acked by {r['acked_by_alias'] or r['acked_by']} at {r['acked_at']}, {r['minutes']} min" if r["acked_at"] else "no ack"
         click.echo(f"  {str(r['sha'])[:12]}  episode {r['episode_at']}  {ack}" + (f"  ({r['handoffs']} hand-off)" if r["handoffs"] else ""))
+        for d in r["disclaims"]:
+            click.echo(f"    disclaimed by {d['from']} at {d['at']}" + (f": {d['note']}" if d["note"] else ""))

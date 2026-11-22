@@ -33,9 +33,13 @@ _log = structlog.get_logger(__name__)
 #: ``board/ci/<topic>--owner``: the subspace the stamper posts owner rows on and an owner acknowledges on.
 OWNER_SUBSPACE = re.compile(r"board/ci/[^/]+--owner")
 
+#: The kinds of owner-subspace row a session posts and the engine reads by sender: an ack, and a disclaim (the owner's
+#: "this red is not mine", RDR-252 audit S1). Both carry the poster's identity id in ``from``.
+STAMPED_KINDS = frozenset({"ack", "disclaim"})
+
 NO_IDENTITY_MESSAGE = (
-    "this process holds no identity, so it cannot sign an ack: an ack on a board/ci owner subspace carries the "
-    "poster's identity id in `from`, never a name. Run `nx identity show` to see whether this session holds one"
+    "this process holds no identity, so it cannot sign an ack or a disclaim: a row of either kind on a board/ci owner "
+    "subspace carries the poster's identity id in `from`, never a name. Run `nx identity show` to see whether this session holds one"
 )
 
 
@@ -82,8 +86,8 @@ def counted_identity() -> str:
 
 
 def is_ack_write(subspace: str, dims: Mapping[str, str] | None) -> bool:
-    """True for a ``kind=ack`` row on a ``board/ci/<topic>--owner`` subspace."""
-    return bool(OWNER_SUBSPACE.fullmatch(subspace)) and (dims or {}).get("kind") == "ack"
+    """True for a ``kind=ack`` or ``kind=disclaim`` row on a ``board/ci/<topic>--owner`` subspace."""
+    return bool(OWNER_SUBSPACE.fullmatch(subspace)) and (dims or {}).get("kind") in STAMPED_KINDS
 
 
 def stamp_ack_from(subspace: str, dims: dict[str, str] | None) -> dict[str, str] | None:

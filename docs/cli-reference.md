@@ -3123,8 +3123,10 @@ Click's own usage errors (a missing sha, `--timeout` out of range) exit 2, as fo
 ### nx ci ack
 
 ```
-nx ci ack <sha> [--topic nexus-develop--owner]
+nx ci ack <sha> [--topic nexus-develop--owner] [--not-mine [--note TEXT]]
 ```
+
+`--not-mine` says the red is not yours instead of acknowledging it. The row is `kind=disclaim` (same subspace, same sha handling, same owner check, same `from=<your identity id>`), and `--note` adds one line (at most 200 printable characters, no control characters) as the row's body. A disclaim is recorded only until the engine cut that reads it: from that cut on, a disclaim from the red's current owner hands the red on at once, as a missed deadline does (reason `disclaimed`), and a disclaim from anyone else is ignored (so the verb refuses a caller who is not the owner). An ack only says "seen"; a disclaim says "someone else should take this". `nx group ack-times` lists a red's disclaims (`disclaims` in `--json`, one `disclaimed by` line each) and never counts one as an ack.
 
 Acknowledges a red develop: posts the owner's `kind=ack` row on `board/ci/<topic>` with `from=<your identity id>`, the full sha and a fresh nonce, and prints `acked <sha7> on <subspace> as <identity>`. `<sha>` is the red's sha or a prefix of at least 7 hex digits; it is resolved against the tips of the CURRENT red on the owner post (the `sha` of each of its owner rows; a red that a newer one replaced or a `clear` row ended is not open, and a `suspects` entry is not a tip), and refused when it is no tip of it, when it is ambiguous, when no red is open, or when it is not 7 to 40 hex digits. It also refuses a caller who is not the red's current owner (`the red is owned by iN (alias); an ack from iM counts for nobody`), because the engine counts an ack only from the owner. With no identity the command refuses (`nx identity show` says whether the session holds one). The engine counts the row's sender-session stamp, never `from`; `from` is a label people read (`nx group ack-times` does not read it), and this verb writes the identity id there, never a name. A delegated child (a `claude -p` process with an identity of its own) is checked and signed as its parent, the identity the engine counts its session for; one whose parent cannot be read is refused. A `kind=owner` or `kind=clear` row that a session wrote, not the engine (`from` other than `engine`, or a sender-session stamp), is ignored when finding the open red, as the engine ignores it. The `ci_develop_red` aura's state line ends `Ack: nx ci ack <sha7>`. `--topic` names the owner post and must end `--owner`.
 
@@ -6245,7 +6247,7 @@ The calibration read for `NAME`'s acknowledgement deadline: per red on the topic
 
 | Flag | Description |
 |------|-------------|
-| `--json` | Print the reds as JSON (`topic`, `sha`, `episode_at`, `reason`, `owner`, `owner_alias`, `handoffs`, `acked_at`, `acked_by`, `acked_by_alias`, `minutes`, `cleared_at`); each alias is null when the owner row carries none |
+| `--json` | Print the reds as JSON (`topic`, `sha`, `episode_at`, `reason`, `owner`, `owner_alias`, `handoffs`, `acked_at`, `acked_by`, `acked_by_alias`, `minutes`, `cleared_at`, `disclaims`: each `{at, from, sha, note}` of the `nx ci ack --not-mine` rows posted while the red was open); each alias is null when the owner row carries none |
 
 ## nx service
 
