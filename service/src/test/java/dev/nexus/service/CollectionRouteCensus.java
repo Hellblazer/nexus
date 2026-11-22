@@ -40,11 +40,28 @@ final class CollectionRouteCensus {
     enum Tier { GENERIC, HEAVY, RENAME, DELETE }
 
     /**
+     * The engine a row runs against. {@link #STANDARD} is the shared fixture's engine (no embedder, not local). {@link
+     * #LOCAL_EMBED} is the variant built like {@code ReembedRoutesTest}'s: an {@code EmbedderRouter}, {@code
+     * NX_ENGINE_LOCAL=1} and a recording re-embed executor. The embed and re-embed routes answer 503 before they read their
+     * collection on the standard engine, so no check about the selector can reach them there. Only those three rows use it
+     * ({@link CollectionRouteCensusTest} pins that); the standard engine's mode is not changed for the other rows.
+     */
+    enum Engine { STANDARD, LOCAL_EMBED }
+
+    /**
      * One collection-valued request field. {@code list}: the field carries an array of collections ({@code collections}).
      * A slot after the first is a second collection the route also takes (a supersede's successor, a re-home's target, a
-     * quarantine sibling); the fixture registers one collection per slot, per side.
+     * quarantine sibling); the fixture registers one collection per slot, per side. {@code nestedIn}: the name of the request
+     * array whose every element carries the collection field ("" for a top-level field). The route's {@code extras} then
+     * belong inside the element, beside the selector, and a nested row has exactly one slot.
      */
-    record Slot(String labelField, String idField, boolean list) { }
+    record Slot(String labelField, String idField, boolean list, String nestedIn) {
+
+        /** True when the field travels inside each element of the request array {@link #nestedIn()}, not at the top level. */
+        boolean nested() {
+            return !nestedIn.isEmpty();
+        }
+    }
 
     /**
      * @param method   HTTP method
@@ -56,9 +73,10 @@ final class CollectionRouteCensus {
      * @param tier     see {@link Tier}
      * @param handler  the handler source file under {@code service/src/main/java/dev/nexus/service/http}
      * @param readsId  the name of the handler method that reads the fields (for the report; the line is in the report)
+     * @param engine   the engine the route is run against, see {@link Engine}
      */
     record Route(String method, String path, Where where, List<Slot> slots, String extras, Tier tier, String handler,
-                 String readsId) {
+                 String readsId, Engine engine) {
 
         String label() {
             return method + " " + path;
@@ -80,8 +98,16 @@ final class CollectionRouteCensus {
     private static final String TELEMETRY = "TelemetryHandler.java";
     private static final String CHASH = "ChashHandler.java";
 
+    /** A 384-wide vector, the width of the fixture's minilm collections, for a centroid the engine will accept. */
+    private static final String EMBEDDING_384 = "[" + String.join(",", java.util.Collections.nCopies(384, "0.1")) + "]";
+
     private static Slot one(String labelField, String idField) {
-        return new Slot(labelField, idField, false);
+        return new Slot(labelField, idField, false, "");
+    }
+
+    /** A single-valued collection field inside each element of the request array {@code array} (RDR convention: {@code collection_id}). */
+    private static Slot nested(String array, String labelField, String idField) {
+        return new Slot(labelField, idField, false, array);
     }
 
     private static Slot coll() {
@@ -93,15 +119,21 @@ final class CollectionRouteCensus {
     }
 
     private static Slot many() {
-        return new Slot("collections", "collection_ids", true);
+        return new Slot("collections", "collection_ids", true, "");
     }
 
     private static Route get(String path, Slot slot, String extras, Tier tier, String handler, String method) {
-        return new Route("GET", path, Where.QUERY, List.of(slot), extras, tier, handler, method);
+        return new Route("GET", path, Where.QUERY, List.of(slot), extras, tier, handler, method, Engine.STANDARD);
     }
 
     private static Route post(String path, List<Slot> slots, String extras, Tier tier, String handler, String method) {
-        return new Route("POST", path, Where.BODY, slots, extras, tier, handler, method);
+        return new Route("POST", path, Where.BODY, slots, extras, tier, handler, method, Engine.STANDARD);
+    }
+
+    /** {@code route}, run against the {@link Engine#LOCAL_EMBED} engine. */
+    private static Route onLocalEmbed(Route route) {
+        return new Route(route.method(), route.path(), route.where(), route.slots(), route.extras(), route.tier(),
+            route.handler(), route.readsId(), Engine.LOCAL_EMBED);
     }
 
     private static Route post(String path, Slot slot, String extras, Tier tier, String handler, String method) {
@@ -123,11 +155,12 @@ final class CollectionRouteCensus {
         r.add(post(c + "/collections/supersede",
             List.of(name(), one("superseded_by", "superseded_by_id")), "", Tier.GENERIC, CATALOG,
             "handleCollectionSupersede"));
+        // The fields are "source" and "target", so the convention's X_id twin is source_id / target_id (not source_collection_id).
         r.add(post(c + "/collections/rehome",
-            List.of(one("source", "source_collection_id"), one("target", "target_collection_id")), "", Tier.HEAVY,
+            List.of(one("source", "source_id"), one("target", "target_id")), "", Tier.HEAVY,
             CATALOG, "handleCollectionRehome"));
         r.add(post(c + "/collections/rehome/status",
-            List.of(one("source", "source_collection_id"), one("target", "target_collection_id")), "", Tier.HEAVY,
+            List.of(one("source", "source_id"), one("target", "target_id")), "", Tier.HEAVY,
             CATALOG, "handleCollectionRehomeStatus"));
         r.add(post(c + "/collections/rename", one("old_name", "collection_id"), "\"new_name\":\"{NEW}\"", Tier.RENAME,
             CATALOG, "handleCollectionRename"));
@@ -176,7 +209,7 @@ final class CollectionRouteCensus {
         r.add(post(v + "/update-metadata", coll(), "\"ids\":[\"" + HEX + "\"],\"metadatas\":[{}]", Tier.GENERIC, VECTOR,
             "handleUpdateMetadata"));
         r.add(get(v + "/count", coll(), "", Tier.GENERIC, VECTOR, "handleCount"));
-        r.add(post(v + "/embed", coll(), "\"texts\":[\"p35a\"]", Tier.HEAVY, VECTOR, "handleEmbed"));
+        r.add(onLocalEmbed(post(v + "/embed", coll(), "\"texts\":[\"p35a\"]", Tier.HEAVY, VECTOR, "handleEmbed")));
         r.add(post(v + "/gc/quarantine-orphans",
             List.of(coll(), one("quarantine_collection", "quarantine_collection_id")),
             "\"quarantined_at\":\"2026-01-01T00:00:00Z\"", Tier.HEAVY, VECTOR, "handleGcQuarantineOrphans"));
@@ -192,12 +225,12 @@ final class CollectionRouteCensus {
             "\"chashes\":[\"" + HEX + "\"]", Tier.HEAVY, VECTOR, "handleGcQuarantineRestore"));
         r.add(post(v + "/manifest-less-census", coll(), "", Tier.GENERIC, VECTOR, "handleManifestLessCensus"));
         r.add(post(v + "/reapable", coll(), "", Tier.GENERIC, VECTOR, "handleReapable"));
-        r.add(post(v + "/reembed/plan",
+        r.add(onLocalEmbed(post(v + "/reembed/plan",
             List.of(one("source_collection", "source_collection_id"), one("target_collection", "target_collection_id")),
-            "", Tier.HEAVY, REEMBED, "plan"));
-        r.add(post(v + "/reembed/jobs",
+            "", Tier.HEAVY, REEMBED, "plan")));
+        r.add(onLocalEmbed(post(v + "/reembed/jobs",
             List.of(one("source_collection", "source_collection_id"), one("target_collection", "target_collection_id")),
-            "", Tier.HEAVY, REEMBED, "start"));
+            "", Tier.HEAVY, REEMBED, "start")));
 
         // ---- /v1/taxonomy (TaxonomyHandler) -----------------------------------------------------------------------
         String t = "/v1/taxonomy";
@@ -207,10 +240,13 @@ final class CollectionRouteCensus {
         r.add(post(t + "/topics/insert", coll(), "\"label\":\"p35a-topic\",\"doc_count\":1", Tier.GENERIC, TAXONOMY,
             "handleInsertTopic"));
         r.add(post(t + "/assignments/assign", one("source_collection", "source_collection_id"),
-            "\"doc_id\":\"p35a-doc\",\"topic_id\":1,\"assigned_by\":\"p35a\"", Tier.HEAVY, TAXONOMY, "handleAssign"));
-        r.add(post(t + "/assignments/assign_from_chashes", coll(), "\"chashes\":[]", Tier.GENERIC, TAXONOMY,
-            "handleAssignFromChashes"));
-        r.add(post(t + "/assignments/cross-preview", coll(), "\"chashes\":[]", Tier.GENERIC, TAXONOMY,
+            "\"doc_id\":\"" + HEX + "\",\"topic_id\":1,\"assigned_by\":\"p35a\"", Tier.HEAVY, TAXONOMY, "handleAssign"));
+        // The handlers refuse an empty chashes array (400) before they read the collection, and the repository returns an
+        // empty answer for an empty list without resolving the collection, so the request carries one valid chash.
+        // cross_collection:false keeps assign_from_chashes off the cross pass (which widens the coverage check).
+        r.add(post(t + "/assignments/assign_from_chashes", coll(), "\"chashes\":[\"" + HEX + "\"],\"cross_collection\":false",
+            Tier.GENERIC, TAXONOMY, "handleAssignFromChashes"));
+        r.add(post(t + "/assignments/cross-preview", coll(), "\"chashes\":[\"" + HEX + "\"]", Tier.GENERIC, TAXONOMY,
             "handleCrossPreview"));
         r.add(post(t + "/assignments/unassigned", coll(), "", Tier.GENERIC, TAXONOMY, "handleUnassignedChashes"));
         r.add(post(t + "/purge_collection", coll(), "", Tier.GENERIC, TAXONOMY, "handlePurgeCollection"));
@@ -218,7 +254,7 @@ final class CollectionRouteCensus {
         r.add(get(t + "/meta/last_count", coll(), "", Tier.GENERIC, TAXONOMY, "handleLastDiscoverCount"));
         r.add(post(t + "/meta/last_discover_batch", many(), "", Tier.GENERIC, TAXONOMY, "handleLastDiscoverBatch"));
         r.add(get(t + "/top_topics", coll(), "", Tier.GENERIC, TAXONOMY, "handleTopTopics"));
-        r.add(get(t + "/chunk_grounded", one("source_collection", "source_collection_id"), "&doc_id=p35a-doc",
+        r.add(get(t + "/chunk_grounded", one("source_collection", "source_collection_id"), "&doc_id=" + HEX,
             Tier.GENERIC, TAXONOMY, "handleChunkGrounded"));
         r.add(get(t + "/audit", coll(), "", Tier.GENERIC, TAXONOMY, "handleAuditCollection"));
         r.add(post(t + "/topics/persist_split", one("collection_name", "collection_id"), "\"topic_id\":1", Tier.HEAVY,
@@ -227,8 +263,11 @@ final class CollectionRouteCensus {
         r.add(post(t + "/topics/persist_rebuild", coll(), "", Tier.GENERIC, TAXONOMY, "handlePersistRebuild"));
         r.add(post(t + "/topics/persist_discovered", coll(), "\"specs\":[]", Tier.GENERIC, TAXONOMY,
             "handlePersistDiscovered"));
-        r.add(post(t + "/centroids/upsert", coll(), "\"topic_id\":1,\"embedding\":[0.1]", Tier.HEAVY, TAXONOMY,
-            "handleCentroidUpsert"));
+        // The one nested selector: the handler reads "collection" from each element of "records", so the request carries
+        // the label or the id inside the record, and the extras (topic_id, a 384-wide embedding) are the record's other
+        // fields. GENERIC: the label request must write (the test also counts the centroid, so a no-op cannot pass).
+        r.add(post(t + "/centroids/upsert", nested("records", "collection", "collection_id"),
+            "\"topic_id\":1,\"embedding\":" + EMBEDDING_384, Tier.GENERIC, TAXONOMY, "handleCentroidUpsert"));
         r.add(post(t + "/centroids/query", coll(), "\"embedding\":[0.1]", Tier.HEAVY, TAXONOMY, "handleCentroidQuery"));
         r.add(get(t + "/centroids/count", coll(), "", Tier.GENERIC, TAXONOMY, "handleCentroidCount"));
         r.add(get(t + "/centroids/by_collection", coll(), "", Tier.GENERIC, TAXONOMY, "handleCentroidByCollection"));
@@ -244,8 +283,8 @@ final class CollectionRouteCensus {
         r.add(post(a + "/salient_sentences/set_by_key", coll(), "\"source_path\":\"p35a.md\"", Tier.GENERIC, ASPECT,
             "handleSetSalientByKey"));
         r.add(post(a + "/upsert", coll(), "\"source_path\":\"p35a.md\"", Tier.HEAVY, ASPECT, "handleUpsert"));
-        r.add(post(a + "/highlights/upsert", coll(), "\"doc_id\":\"p35a-doc\"", Tier.HEAVY, ASPECT,
-            "handleHighlightUpsert"));
+        r.add(post(a + "/highlights/upsert", coll(), "\"doc_id\":\"p35a-doc\",\"ingested_at\":\"2026-01-01T00:00:00Z\","
+            + "\"highlights_md\":\"p35a\"", Tier.HEAVY, ASPECT, "handleHighlightUpsert"));
 
         // ---- /v1/chash (the two read routes; the five write routes answer 410 Gone), /v1/remap, /v1/pipeline,
         // ---- /v1/telemetry ------------------------------------------------------------------------------------------
@@ -258,9 +297,14 @@ final class CollectionRouteCensus {
         r.add(post("/v1/remap/clear_leg",
             List.of(one("source_collection", "source_collection_id"), one("target_collection", "target_collection_id")),
             "", Tier.GENERIC, REMAP, "handleClearLeg"));
-        r.add(post("/v1/remap/record_batch", one("source_collection", "source_collection_id"), "\"entries\":[]",
-            Tier.GENERIC, REMAP, "handleRecordBatch"));
-        r.add(post("/v1/pipeline/create", coll(), "\"content_hash\":\"p35a-hash\",\"pdf_path\":\"/p35a.pdf\"", Tier.HEAVY,
+        // record_batch refuses an empty entries array before it reads anything; each entry carries its own target. HEAVY: the
+        // repository may refuse an entry whose target is not a registered collection, which the label request may answer.
+        r.add(post("/v1/remap/record_batch", one("source_collection", "source_collection_id"),
+            "\"entries\":[{\"old_id\":\"p35a-old\",\"new_chash\":\"" + HEX + "\",\"target_collection\":\"{NEW}\","
+                + "\"provenance\":\"p35a\"}]", Tier.HEAVY, REMAP, "handleRecordBatch"));
+        // content_hash is {NEW}: a pipeline is keyed by its content hash alone (not by collection), so the label and the id
+        // request must not share one or the second is refused as already running whatever the route does with the id.
+        r.add(post("/v1/pipeline/create", coll(), "\"content_hash\":\"p35a-{NEW}\",\"pdf_path\":\"/p35a.pdf\"", Tier.HEAVY,
             PIPELINE, "handleCreate"));
         r.add(post("/v1/pipeline/delete_collection", coll(), "", Tier.GENERIC, PIPELINE, "handleDeleteCollection"));
         r.add(post("/v1/telemetry/relevance/log", coll(),
