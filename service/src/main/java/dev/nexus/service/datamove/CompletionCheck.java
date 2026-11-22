@@ -154,6 +154,26 @@ public final class CompletionCheck {
     }
 
     /**
+     * RDR-229 P3.7: the two facts besides gate 3 that end the rename refusal. {@code dropMoveComplete}: the name-key drop move
+     * ({@link NameKeyDropMove#LABEL}) has {@code completed_at}; a label with no row is incomplete, like every label. {@code listed}
+     * and {@code missing}: the P3.5b changeset ids the list names ({@link P35bChangesets}) and those {@code databasechangelog} does
+     * not record as applied. A missing or empty list is refused: {@link #p35bApplied} is false then.
+     */
+    public record RenameState(boolean dropMoveComplete, int listed, List<String> missing) {
+        public RenameState {
+            missing = List.copyOf(missing);
+        }
+
+        /** Not read yet, or built by hand: the drop move incomplete and no list. */
+        public static final RenameState NOT_READ = new RenameState(false, 0, List.of());
+
+        /** Every changeset of a non-empty list has applied. */
+        public boolean p35bApplied() {
+            return listed > 0 && missing.isEmpty();
+        }
+    }
+
+    /**
      * R7's pre-flight (RDR-229 item 6, "dangling tombstones"; linda's ruling 2026-11-21): the registry's tombstones whose
      * {@code superseded_by} names no row of their tenant, by content type, and the tombstones the stamp resolved to its fallback
      * (their {@code superseded_by_id} is their own {@code collection_id}: retired, no successor). Counts only: {@code /v1/status}
@@ -196,17 +216,41 @@ public final class CompletionCheck {
      * @param gate3Uncovered          planned collections with no VALID id index, when gate 3 was asked
      * @param gate3Why                why gate 3 does not hold, or empty
      * @param dangling                R7's pre-flight: the registry's tombstones that name no successor, by content type
+     * @param rename                  RDR-229 P3.7: what the one-row rename waits for besides gate 3 ({@link RenameState})
      */
     public record Result(boolean gate1, boolean gate2, boolean gate3, List<LabelState> labels, List<CheckState> checks,
                          boolean supersededByCheckPresent, long supersededByWaiting, List<Violators> violators,
-                         List<String> gate3Uncovered, String gate3Why, Dangling dangling) {
+                         List<String> gate3Uncovered, String gate3Why, Dangling dangling, RenameState rename) {
 
-        /** As above with no dangling-tombstone read (a caller that built the result by hand). */
+        /** As above with no dangling-tombstone read and no rename read (a caller that built the result by hand). */
         public Result(boolean gate1, boolean gate2, boolean gate3, List<LabelState> labels, List<CheckState> checks,
                       boolean supersededByCheckPresent, long supersededByWaiting, List<Violators> violators,
                       List<String> gate3Uncovered, String gate3Why) {
             this(gate1, gate2, gate3, labels, checks, supersededByCheckPresent, supersededByWaiting, violators, gate3Uncovered,
-                gate3Why, Dangling.UNREAD);
+                gate3Why, Dangling.UNREAD, RenameState.NOT_READ);
+        }
+
+        /**
+         * The first thing a rename still waits for, the one answer the refusal, {@code GET /v1/status} and the in-process readiness
+         * share ({@link RenameReadiness}): {@link RenameReadiness.Missing#NONE} before gate 3 (the rename is the name path and nothing
+         * is awaited), then the name-key drop move, then the restart that applies P3.5b's changesets.
+         */
+        public RenameReadiness.Missing renameMissing() {
+            if (!gate3) {
+                return RenameReadiness.Missing.NONE;
+            }
+            if (!rename.dropMoveComplete()) {
+                return RenameReadiness.Missing.NAME_KEY_DROP_MOVE;
+            }
+            return rename.p35bApplied() ? RenameReadiness.Missing.NONE : RenameReadiness.Missing.P35B_RESTART;
+        }
+
+        /**
+         * Whether a restart is what an install waits for: every stamp move is complete (gate 1) and the P3.5b list names changesets
+         * that have not all applied. A missing or empty list is no restart's to fix, so it does not count.
+         */
+        public boolean restartNeeded() {
+            return gate1 && rename.listed() > 0 && !rename.p35bApplied();
         }
 
         public List<LabelState> incomplete() {
@@ -228,7 +272,17 @@ public final class CompletionCheck {
      * the three gates. Writes nothing.
      */
     static Result evaluate(DSLContext ctx, ReadSet readSet, Gate3Source gate3, ViolatorCounter counter) {
+        return evaluate(ctx, readSet, gate3, counter, P35bChangesets.resource());
+    }
+
+    /**
+     * As above, with the P3.5b changeset ids the one-row rename waits for supplied by {@code p35b} (the resource {@link P35bChangesets} reads
+     * in production; a test passes its own list).
+     */
+    static Result evaluate(DSLContext ctx, ReadSet readSet, Gate3Source gate3, ViolatorCounter counter,
+                           java.util.function.Supplier<Set<String>> p35b) {
         Objects.requireNonNull(readSet, "readSet");
+        Objects.requireNonNull(p35b, "p35b");
         Objects.requireNonNull(gate3, "gate3");
         Objects.requireNonNull(counter, "counter");
         Map<String, Move> moves = readMoves(ctx);
@@ -285,7 +339,25 @@ public final class CompletionCheck {
             }
         }
         return new Result(gate1, gate2, gate3Holds, List.copyOf(states.values()), List.copyOf(checks), supersededByPresent,
-            waiting, List.copyOf(violators), List.copyOf(uncovered), why, danglingTombstones(ctx, tables, null));
+            waiting, List.copyOf(violators), List.copyOf(uncovered), why, danglingTombstones(ctx, tables, null),
+            renameState(ctx, moves, p35b.get()));
+    }
+
+    /** P3.7: the name-key drop move's completion (a label with no row is incomplete) and the P3.5b changesets not yet in databasechangelog. */
+    private static RenameState renameState(DSLContext ctx, Map<String, Move> moves, Set<String> listed) {
+        boolean dropped = complete(ctx, NameKeyDropMove.LABEL, moves, new HashSet<>());
+        if (listed.isEmpty()) {
+            return new RenameState(dropped, 0, List.of());
+        }
+        Set<String> missing = new TreeSet<>(listed);
+        var log = DSL.table(DSL.name("public", "databasechangelog"));
+        if (ctx.fetchExists(DSL.selectOne().where(DSL.function("to_regclass", Object.class, DSL.val("public.databasechangelog")).isNotNull()))) {
+            Field<String> id = DSL.field(DSL.name("id"), String.class);
+            Field<String> execType = DSL.field(DSL.name("exectype"), String.class);
+            missing.removeAll(ctx.select(id).from(log).where(id.in(listed)).and(execType.in("EXECUTED", "RERAN", "MARK_RAN"))
+                .fetch(id));
+        }
+        return new RenameState(dropped, listed.size(), List.copyOf(missing));
     }
 
     // ---- one label ---------------------------------------------------------------------------------------------------

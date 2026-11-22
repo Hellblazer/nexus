@@ -17,6 +17,17 @@ public interface RenameReadiness {
     /** The first thing a rename still waits for, or {@link Missing#NONE}. */
     Missing missing();
 
+    /**
+     * RDR-229 P3.7, the rename window (fix check A O-5): runs {@code rename}, a whole rename including its commit, with gate 3 unable to
+     * flip from false to true underneath it. A name-path rename that began before gate 3 held would otherwise commit after the id readers
+     * switched, and give the collection a new id they have not seen. The completion check holds the flip until every rename pinned
+     * here has returned ({@link CompletionBootWork#renameReadiness()}); a rename that starts after the flip reads gate 3 as true and is
+     * refused or runs one-row. The default runs {@code rename} as is, for a readiness that has no window ({@link #ready()}, a test's lambda).
+     */
+    default <T> T pinned(java.util.function.Supplier<T> rename) {
+        return rename.get();
+    }
+
     /** What a rename from gate 3 waits for; the wire value is {@code missing} on the 409 {@code rename_refused}. */
     enum Missing {
         /** Nothing: a rename may run. */

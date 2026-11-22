@@ -33,7 +33,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * by design (gate 3 cannot hold until P3.4 builds its id indexes), so an entry for them stays on every install, and on a bundle
  * that lacks pg_background it deferred the very swap that lets the stamp moves run. An older nx reads {@code boot_work} the same
  * way, so the state is never published there; nothing this class reports is work. (The moves themselves, which are work, are
- * {@code boot_work} entries of {@link MoveBootWork}.)
+ * {@code boot_work} entries of {@link MoveBootWork}.) One exception, RDR-229 P3.7: while every stamp move is complete and a P3.5b changeset has
+ * not applied, the engine needs one restart, and the entry {@value #RESTART_ENTRY_ID} says so ({@code nx doctor}), until that restart applies them.
  *
  * <p><b>It reads and reports; it writes nothing.</b> The session is opened {@code default_transaction_read_only = on}, so a
  * write would raise at the server, and the check itself holds no write. Sam's rule is no boot-time data migrations.
@@ -70,8 +71,13 @@ public final class CompletionBootWork implements AutoCloseable {
         void close();
     }
 
+    /** The {@code boot_work} id of the restart that applies P3.5b's changesets (RDR-229 P3.7). */
+    public static final String RESTART_ENTRY_ID = "rdr229-restart";
+
     private final BootWorkRegistry registry;
     private final Reader reader;
+    /** Read side: a rename in flight ({@link RenameReadiness#pinned}). Write side: gate 3 flipping to true, in {@link #publish}. Fair, so a flip is not starved. */
+    private final java.util.concurrent.locks.ReentrantReadWriteLock renameWindow = new java.util.concurrent.locks.ReentrantReadWriteLock(true);
     private final Object sampleLock = new Object();
     private final Clock clock;
     /** Where an event's read runs; null before {@link #start}, when the event only marks that a read is owed. */
@@ -89,7 +95,16 @@ public final class CompletionBootWork implements AutoCloseable {
      */
     public CompletionBootWork(BootWorkRegistry registry, AdminConnection admin, CompletionCheck.ReadSet readSet,
                               CompletionCheck.Gate3Source gate3) {
-        this(registry, new DbReader(admin, readSet, gate3, Clock.systemUTC()));
+        this(registry, admin, readSet, gate3, P35bChangesets.resource());
+    }
+
+    /**
+     * As above, with the P3.5b changeset ids the one-row rename waits for supplied by {@code p35b} ({@link P35bChangesets#resource()} in
+     * production; a test passes its own list). An empty set is refused: a rename waits.
+     */
+    public CompletionBootWork(BootWorkRegistry registry, AdminConnection admin, CompletionCheck.ReadSet readSet,
+                              CompletionCheck.Gate3Source gate3, java.util.function.Supplier<java.util.Set<String>> p35b) {
+        this(registry, new DbReader(admin, readSet, gate3, Clock.systemUTC(), p35b));
     }
 
     /**
@@ -144,11 +159,29 @@ public final class CompletionBootWork implements AutoCloseable {
     }
 
     /**
-     * What a rename from gate 3 still waits for, read per call ({@link RenameReadiness}). STUB: always ready; P3.7's code adds the
-     * name-key drop move and the databasechangelog reads (the P3.5b changesets) to the check and answers from them.
+     * What a rename from gate 3 still waits for, read per call ({@link RenameReadiness}), from the latest sample, the one that
+     * {@link #gate3()} reads: {@link CompletionCheck.Result#renameMissing()}. Before the first sample it answers that the name-key drop move is
+     * missing (not known yet is not ready). Its {@link RenameReadiness#pinned} is the rename window ({@code renameWindow}): gate 3's flip
+     * to true waits for every pinned rename to return.
      */
     public RenameReadiness renameReadiness() {
-        return RenameReadiness.ready();
+        return new RenameReadiness() {
+            @Override
+            public Missing missing() {
+                var r = latest();
+                return r == null ? Missing.NAME_KEY_DROP_MOVE : r.renameMissing();
+            }
+
+            @Override
+            public <T> T pinned(java.util.function.Supplier<T> rename) {
+                renameWindow.readLock().lock();
+                try {
+                    return rename.get();
+                } finally {
+                    renameWindow.readLock().unlock();
+                }
+            }
+        };
     }
 
     /** Reads now, outside the schedule, for a consumer that must not wait for the next sample. */
@@ -253,6 +286,7 @@ public final class CompletionBootWork implements AutoCloseable {
         }
         closed = true;
         registry.rdr229Completion(null);
+        registry.finish(RESTART_ENTRY_ID);
         try {
             reader.abort();
         } finally {
@@ -284,10 +318,41 @@ public final class CompletionBootWork implements AutoCloseable {
                 }
                 return -1;
             }
-            latest = result;
+            CompletionCheck.Result before = latest;
+            if (result.gate3() && (before == null || !before.gate3())) {
+                // gate 3 flips to true: wait for every pinned rename to return, so none commits a name-path rewrite after the readers switch (O-5)
+                renameWindow.writeLock().lock();
+                try {
+                    latest = result;
+                } finally {
+                    renameWindow.writeLock().unlock();
+                }
+            } else {
+                latest = result;
+            }
+            publishRestartEntry(result);
             long holding = (result.gate1() ? 1 : 0) + (result.gate2() ? 1 : 0) + (result.gate3() ? 1 : 0);
             return (holding < 3 ? 1 : 0) + (int) result.checks().stream().filter(c -> !c.present()).count()
                 + byTable(result.violators()).size();
+        }
+    }
+
+    /**
+     * RDR-229 P3.7: while every stamp move is complete and a P3.5b changeset has not applied, the engine needs one restart, and says so in
+     * {@code boot_work}, where {@code nx doctor} reads it; it leaves the list when the changesets have applied (the restart ran). Not the
+     * three gates, which are not work ({@link CompletionBootWork}): a restart is the one step an operator takes, and it is what the entry names.
+     */
+    private void publishRestartEntry(CompletionCheck.Result result) {
+        if (result.restartNeeded()) {
+            String what = "restart the engine once: it applies the P3.5b changesets that a collection rename waits for ("
+                + result.rename().missing().size() + " of " + result.rename().listed() + " not applied yet)";
+            if (registry.snapshot().stream().anyMatch(e -> RESTART_ENTRY_ID.equals(e.id()))) {
+                registry.update(RESTART_ENTRY_ID, what, null, null, null);   // keeps startedAt: a sample is not a new run
+            } else {
+                registry.register(RESTART_ENTRY_ID, what, null, null, null, true, "nothing is lost: the restart is the step that applies them");
+            }
+        } else {
+            registry.finish(RESTART_ENTRY_ID);
         }
     }
 
@@ -359,9 +424,12 @@ public final class CompletionBootWork implements AutoCloseable {
         private final CompletionCheck.ReadSet readSet;
         private final CompletionCheck.Gate3Source gate3;
         private final CompletionCheck.ViolatorCounter counter;
+        private final java.util.function.Supplier<java.util.Set<String>> p35b;
         private volatile AdminDdlSession session;
 
-        DbReader(AdminConnection admin, CompletionCheck.ReadSet readSet, CompletionCheck.Gate3Source gate3, Clock clock) {
+        DbReader(AdminConnection admin, CompletionCheck.ReadSet readSet, CompletionCheck.Gate3Source gate3, Clock clock,
+                 java.util.function.Supplier<java.util.Set<String>> p35b) {
+            this.p35b = Objects.requireNonNull(p35b, "p35b");
             this.admin = Objects.requireNonNull(admin, "admin");
             this.readSet = Objects.requireNonNull(readSet, "readSet");
             this.gate3 = Objects.requireNonNull(gate3, "gate3");
@@ -379,7 +447,7 @@ public final class CompletionBootWork implements AutoCloseable {
                     s.setSession("default_transaction_read_only", "on");
                     session = s;
                 }
-                return CompletionCheck.evaluate(s.ctx(), readSet, gate3, counter);
+                return CompletionCheck.evaluate(s.ctx(), readSet, gate3, counter, p35b);
             } catch (RuntimeException e) {
                 close();   // a failed session is replaced on the next sample
                 throw e;
