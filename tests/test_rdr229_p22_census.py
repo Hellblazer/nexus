@@ -126,8 +126,9 @@ def test_the_pin_fell_from_the_p29_count() -> None:
     P3.6 (nexus-p2m1x.26, 2026-11-21) lowers it to 211: ``validate_collection_name`` is the label rule and reads no part
     of a name (the ChromaDB-shape regex and the overflow hint's ``split_candidate_collection_name`` are gone), so it is no
     longer a derived helper and its two ``T3Database`` callers (create and the rename target) left the ledger. mint
-    131 -> 129, primitive_call 179 -> 177."""
-    assert PARSE_SITE_PIN == 211
+    131 -> 129, primitive_call 179 -> 177. P3.8's fallout round raises it by one, to 212: ``entity_keys`` matches a minted
+    label's configured glob against the conformant name its registry row renders, a second label-pattern fnmatch."""
+    assert PARSE_SITE_PIN == 212
 
 
 def test_collection_attributes_is_one_type() -> None:
