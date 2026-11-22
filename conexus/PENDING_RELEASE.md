@@ -53,5 +53,6 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/hooks/scripts/mailbox_drain.py`: drains only `mailbox/<identity>`, never `mailbox/<session id>` (nexus-hczdo.2.1, RDR-253 Phase 2)
 - `conexus/skills/mailbox/SKILL.md`: mail is addressed by identity id or seat name; the session mailbox, the `directory/<name>` lease and `nx tuple directory` are gone (nexus-hczdo.2.1)
 - `conexus/skills/peer-messaging/SKILL.md`: a send to a peer goes to its identity id or seat name, never a session id or `ListAgents` name (nexus-hczdo.2.1)
+- `conexus/skills/orchestration/SKILL.md`: the T1 scope note no longer names the retired machine-wide `current_session` file; a process's session id is `NX_SESSION_ID`, `CLAUDE_CODE_SESSION_ID` or its own identity token file (RDR-253 Phase 2, nexus-hczdo.2.1)
 
 ## Deferred to the next client release

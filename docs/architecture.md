@@ -1404,7 +1404,7 @@ Every shipped template must be *offerable* — reachable by some question. A tem
 2. **No ORM client-side** -- Python T2/T3/catalog clients speak HTTP to the engine, never SQL; the engine owns schema via Liquibase-managed Postgres (with a jOOQ-generated codegen layer server-side, `service/pom.xml`). The historical direct-`sqlite3` T2 (WAL + FTS5, stdlib) was the migration source, retired at RDR-158 P4.
 3. **Constructor injection** -- Dependencies via constructor, no global singletons.
 4. **Ported, not imported** -- SeaGOAT and Arcaneum patterns rewritten in Nexus module structure.
-5. **Session-id-scoped T1, service-backed** -- Historically ([RDR-149](rdr/rdr-149-unified-service-registry-substrate.md) P4) the MCP server's chroma lifespan started a per-session ChromaDB HTTP server and published a leased registry record at `~/.config/nexus/t1_addr.<session_id>`; that discovery mechanism retired with the chroma substrate ([RDR-155](rdr/rdr-155-pgvector-t3-consolidation.md) P4b). Today `get_t1_database` routes T1 to `HttpScratchStore` over the one `nexus-service`, scoped by the same Claude session-id (resolved from `~/.config/nexus/current_session`) — child agents and Bash-tool siblings resolve the same session-id and share T1 scratch across the agent tree; concurrent independent windows stay isolated via distinct session-ids. The in-process `NX_T1_ISOLATED=1` opt-out that survived that retirement is itself retired (nexus-4lkmz, Hal determination 2026-07-28: "T1 exists in PG only") — setting it now hard-fails with `T1IsolatedLegRetiredError` instead of opting into a private in-process `InMemoryVectorClient`; a process outside service-mode routing raises `T1ServerNotFoundError` rather than inventing a private store.
+5. **Session-id-scoped T1, service-backed** -- Historically ([RDR-149](rdr/rdr-149-unified-service-registry-substrate.md) P4) the MCP server's chroma lifespan started a per-session ChromaDB HTTP server and published a leased registry record at `~/.config/nexus/t1_addr.<session_id>`; that discovery mechanism retired with the chroma substrate ([RDR-155](rdr/rdr-155-pgvector-t3-consolidation.md) P4b). Today `get_t1_database` routes T1 to `HttpScratchStore` over the one `nexus-service`, scoped by the same Claude session-id (resolved by `nexus.session.resolve_session_id`: `NX_SESSION_ID`, `CLAUDE_CODE_SESSION_ID`, then the process's own identity token file; RDR-253 Phase 2 retired the machine-wide `current_session` file) — child agents and Bash-tool siblings resolve the same session-id and share T1 scratch across the agent tree; concurrent independent windows stay isolated via distinct session-ids. The in-process `NX_T1_ISOLATED=1` opt-out that survived that retirement is itself retired (nexus-4lkmz, Hal determination 2026-07-28: "T1 exists in PG only") — setting it now hard-fails with `T1IsolatedLegRetiredError` instead of opting into a private in-process `InMemoryVectorClient`; a process outside service-mode routing raises `T1ServerNotFoundError` rather than inventing a private store.
 6. **MCP tools over agent-spawns for utility operations** ([RDR-080](rdr/rdr-080-retrieval-layer-consolidation.md)) -- Operations that formerly required spawning a named agent are now MCP tools that execute in-process. The superseded agent files (`knowledge-tidier`, `plan-auditor`, `plan-enricher`) were deleted outright (nexus-cnzei.4), not retained as stubs.
 
    **Boundary rule**: If an operation can be expressed as a deterministic function of its inputs and completes in under one API call, it is an MCP tool. If it requires multi-turn reasoning, tool selection, or context accumulation across turns, it is an agent.
@@ -1436,15 +1436,16 @@ consumed by the MCP lifespan's watcher (nexus-d76vc, one poll tick, old
 rows strand rather than migrate). `nx` CLI T1 follows the current
 transcript session's live lease, fails loud on an explicit session id
 with no lease (nexus-f7xyq), and falls through to a shared CLI identity
-only on a bare invocation. `~/.config/nexus/current_session` is a
-machine-wide last-writer-wins file, never a per-conversation value, and an
-MCP server that Claude Code did not start (Cursor, Codex, Gemini) never
-takes its T1 scope from it (nexus-xs7fp). T2 attribution resolves through
-`resolve_active_session_id` and inherits that gate, so a gated server's rows
-carry a NULL session label; only operator dispatch keeps a raw file read, as
-its last tier, because without it a `claude -p` child's SessionStart hook
-overwrites the file. A bare CLI in a terminal still labels with the file's
-last writer (nexus-d8yul). Consequences: durable
+only on a bare invocation. The session id comes from
+`nexus.session.resolve_session_id` (`NX_SESSION_ID`, `CLAUDE_CODE_SESSION_ID`,
+then the process's own identity token file); the machine-wide
+`~/.config/nexus/current_session` file, last-writer-wins and never a
+per-conversation value, is retired (RDR-253 Phase 2) and nothing reads it. An
+MCP server that Claude Code did not start (Cursor, Codex, Gemini) has none of
+the three, so it has no T1 scope (nexus-xs7fp). T2 attribution resolves
+through `resolve_session_id` too, so such a server's rows carry a NULL session
+label, and operator dispatch resolves its parent session the same way
+(nexus-d8yul). Consequences: durable
 write-back goes to T2, and an agent's write-back is declared lost only
 after the agent has terminated.
 

@@ -78,7 +78,6 @@ else
   stats before
   run_claude S1 "$U1" "$(sub "$TS/prompts/s1_send.txt")"
   stats after_S1
-  { echo "## directory $NAME"; nx tuple directory "$NAME" 2>&1; } >> "$OUT/poststate.txt"
   run_claude S2 "$U2" "$(sub "$TS/prompts/s2_claim.txt")"
   stats after_S2
   run_claude S3 "$U3" "$(sub "$TS/prompts/s3_uncued.txt")"

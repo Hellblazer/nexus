@@ -7977,9 +7977,9 @@ def memory_put(
         # over MemoryStore's fall-back. Subagents carry NX_SESSION_ID set
         # by claude_dispatch (RDR-094). When it is unset the store resolves
         # the session through ``resolve_session_id``: CLAUDE_CODE_
-        # SESSION_ID, then the machine-wide current_session file, which an
-        # MCP server Claude Code did not start never consults (nexus-xs7fp),
-        # so such a server's write carries no session (nexus-d8yul).
+        # SESSION_ID, then the process's own identity token file. An MCP
+        # server Claude Code did not start has neither (nexus-xs7fp), so
+        # such a server's write carries no session (nexus-d8yul).
         if session:
             session_arg: str | None = session
         else:

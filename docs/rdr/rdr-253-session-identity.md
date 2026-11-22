@@ -628,7 +628,8 @@ file at all (a plain shell), since `find_immediate_claude_pid` would
 otherwise fall back to the shell itself. The hook prints the take-over remedy only into interactive sessions.
 The claim binds the caller's own Claude process (its nearest Claude ancestor,
 `nexus_rdr/253-research-9` (c)) as a new generation and writes the token
-file. The caller's previous identity is closed: an ephemeral one gets `end`
+file. It starts an unheld or ended seat with `start`, which a data credential
+may send, and takes a held seat with `takeover`. The caller's previous identity is closed: an ephemeral one gets `end`
 (its state is then pruned by retention), and a seat the caller held gets
 `release`, leaving that seat `unheld`. `nx identity release <seat>` frees a
 seat whose holder is gone: on the holder's host (judged as in "A host is a machine key") it runs the holder check and
@@ -1116,6 +1117,10 @@ Self-certifying identifiers, signed binding events, witnesses.
   `identity_token_required`), except for an `unleased` seat's.
 - A seat with no live binding receives mail: it waits in `mailbox/<id>` for
   the next binding.
+- An unbound Claude Code session (its bind failed, for example with the engine
+  down at start) receives no mail, because mail is addressed to identities
+  alone, and its threads board entry is found by no reader until the session
+  binds; the SessionStart mailbox line says so for such a session.
 - The laptop sleeps: every seat lapses and revives on wake, with no change of
   generation, no refusal and no seizure.
 

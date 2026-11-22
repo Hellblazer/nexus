@@ -93,40 +93,40 @@ over time:
 
 Service-backed since RDR-155 P4b: in service mode `get_t1_database` routes
 scratch to `HttpScratchStore` over the one `nexus-service`, scoped by the
-Claude session-id resolved via `nexus.session.resolve_active_session_id()`'s
-tiered chain: `NX_SESSION_ID` env, then `CLAUDE_CODE_SESSION_ID` env
+Claude session-id resolved by `nexus.session.resolve_session_id()`'s
+chain: an explicit argument, `NX_SESSION_ID` env, `CLAUDE_CODE_SESSION_ID` env
 (inherited by child Agent-tool and Bash-tool processes, so they resolve the
-same session-id as their parent and share scratch space), and only as a
-last resort the flat file `~/.config/nexus/current_session`, a
-machine-wide, last-writer-wins record a concurrent session can overwrite.
-An explicit `NX_SESSION_ID`/`CLAUDE_CODE_SESSION_ID` with no live lease
-fails loud with `T1ServerNotFoundError` rather than silently falling
-through to the flat file; only a **bare** invocation (neither env var set)
-uses the flat-file fallback. Concurrent independent Claude Code windows
-stay isolated because each has its own session-id.
+same session-id as their parent and share scratch space), then the session id
+in the process's own identity token file (the file of its nearest Claude
+ancestor, or the one a delegated child was handed through `NX_IDENTITY_TOKEN`).
+RDR-253 Phase 2 retired the machine-wide `~/.config/nexus/current_session`
+file the chain used to end with: nothing writes or reads it, so a second
+Claude window can no longer hand another window's tools its scratch. An
+explicit `NX_SESSION_ID`/`CLAUDE_CODE_SESSION_ID` with no live lease
+fails loud with `T1ServerNotFoundError`; a bare invocation (no env var, no
+Claude ancestor) resolves nothing, and its T1 metadata says `unknown`.
+Concurrent independent Claude Code windows stay isolated because each has
+its own session-id.
 
 An MCP server that Claude Code did not start (`nx-mcp` under Cursor, Codex
-CLI, Gemini CLI, or a Claude Desktop chat) never takes its T1 scope from
-the flat file (nexus-xs7fp): the file names whichever Claude session wrote
-it last, which that host has no claim on and which may already have ended.
-"Started by Claude Code" means the process environment carries `CLAUDECODE`
-or `CLAUDE_CODE_ENTRYPOINT`, which Claude Code sets on every subprocess,
-MCP servers included. Such a server has no session id, so its `scratch`
-tools report that T1 is unavailable for the process and every other tool is
-unaffected. Set `NX_SESSION_ID` in the server's environment to give it a
-scratch scope. A bare `nx` in a terminal and the hooks still use the file.
+CLI, Gemini CLI, or a Claude Desktop chat) has no session id to take its T1
+scope from (nexus-xs7fp): it has neither env variable, and no Claude
+ancestor's token file names a session. "Started by Claude Code" means the
+process environment carries `CLAUDECODE` or `CLAUDE_CODE_ENTRYPOINT`, which
+Claude Code sets on every subprocess, MCP servers included, and which picks
+the remedy text of the error below. Such a server's `scratch` tools report
+that T1 is unavailable for the process and every other tool is unaffected.
+Set `NX_SESSION_ID` in the server's environment to give it a scratch scope.
 No host-local id is minted in its place: nexus-4lkmz decision 2 is "never a
 shared identity, never a silent private store".
 
 T2 attribution (the `session` label on `memory_put` rows) resolves through
-`resolve_active_session_id` and so inherits this gate: a gated server's rows
-carry NULL (nexus-d8yul). Only operator dispatch keeps a raw file read, as
-its last tier, because without it a `claude -p` child's SessionStart hook
-overwrites `current_session`. A bare CLI in a terminal still labels with
-the file's last writer. One case the gate cannot close: a host launched
-from inside a Claude Code shell inherits that shell's
-`CLAUDE_CODE_SESSION_ID`, which the resolver answers (tier 3) before the
-gate is consulted, so that host keeps the launching session's scope.
+`resolve_session_id` and so inherits the same chain: a server with no session
+carries NULL (nexus-d8yul). Operator dispatch resolves its parent session the
+same way. One case the chain cannot close: a host launched from inside a Claude
+Code shell inherits that shell's `CLAUDE_CODE_SESSION_ID`, which the resolver
+answers (tier 2) before the token file is consulted, so that host keeps the
+launching session's scope.
 
 The chroma-backed per-session T1 server (and its `t1_addr.<session_id>`
 lease discovery) retired with the chroma substrate. The in-process
@@ -322,7 +322,7 @@ nx store import myrepo-backup.nxexp --collection code__newname
 
 The tuple space is the ninth T2 store (`db.tuples`, `HttpTupleStore`), for cross-agent and cross-instance coordination metadata (a mailbox, a work queue, a lock), not for notes or search hits. Seven templates ship today:
 
-- **`mailbox/<address>`**: messages to an agent id or a session id, 7-day retention.
+- **`mailbox/<address>`**: messages to an agent id or an identity id (RDR-253 Phase 2: never a session id), 7-day retention.
 - **`directory/<name>`** (RDR-208 Phase 1 Step 1): read-only session-directory lease entries, 7-day retention. Nothing in the client writes or reads it since RDR-253 Phase 2; the template leaves with a later engine release.
 - **`board/<topic>`**, **`queue/<name>`** and **`lock/<resource>`** (RDR-211): a broadcast board (7 days), a shared work queue (2 days) and a mutual-exclusion lock (7 days when idle).
 - **`board/ci/<topic>`** (RDR-220): CI status posts, 3-day retention.
