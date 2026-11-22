@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import java.util.List;
+
 /**
  * RDR-229 P3.3c (nexus-p2m1x.21): the text and tuning of the two swap moves, {@code rdr229-swap-chunks} and
  * {@code rdr229-swap-taxonomy_centroids}. {@link LeafIndexPass} (P3.3b) owns the identity of the row (label, driving table,
@@ -17,17 +19,26 @@ package dev.nexus.service.vectors;
  * min(5 s, statement/2), 700 ms, so there is no lock constant here); {@link #VERIFY_STATEMENT_TIMEOUT_MS} 60 s for the finisher's
  * first, READ ONLY verification pass, which is the warm-up (Sam, T2 {@code nexus/sam-ruling-split-move-bounds-2026-11-21}).
  *
- * <p><b>Verification</b> (runs READ ONLY, ACCESS SHARE only, once table-wide and once per tenant, and again warm inside the
- * completion transaction under the 1400 ms budget): it returns a row for each leaf of the table without a valid unique index on the
- * id key, and no row otherwise. Everything else in it is a plain scan that returns nothing, written as
- * {@code WHERE (SELECT count(..) ..) < 0} so the planner has to run it; there is no {@code pg_prewarm}. For the chunks swap that is
- * (1) the anti-join of {@code nexus.chunks} to {@code nexus.catalog_collections} on the composite's three columns, which is the
- * query the composite's validation runs (so whichever plan the planner picks, it reads what {@code on_complete} will read: the leaf
- * heaps or the id-key indexes, and the registry), and (2) a count over a column no index holds, which forces a read of every heap
- * page. Both arms run in the table-wide run only ({@code $1 IS NULL}): they are about the table, not a tenant, so a tenant's run
- * would repeat the whole scan. They do not report an orphan row: the table-wide run reads the registry as the migrating role, whose
- * owner-read policy (vectors-065) is not present on an install where the serving role migrates, and there a missing registry would
- * read as every chunk orphaned and fail the move for good; the composite's own validation reports a real orphan.
+ * <p><b>Verification</b> (runs READ ONLY, ACCESS SHARE only, once table-wide and once per tenant, and again inside the completion
+ * transaction under the 1400 ms budget): it returns a row for each leaf of the table without a valid unique index on the id key, and no
+ * row otherwise. Everything else in it is a warm-up, a plain scan that returns nothing, written as
+ * {@code WHERE CASE WHEN <read only> THEN (SELECT count(..) ..) ELSE 0 END < 0} so the planner has to run it and only in a READ ONLY
+ * transaction ({@code current_setting('transaction_read_only') = 'on'}): the finisher's first pass is READ ONLY, and the completion
+ * transaction's re-check is read-write, where the warm set is already hot and a second full-heap scan would spend the 1400 ms budget
+ * ({@code VerifyingFinisher#recheck} runs the text under what is left of it, then {@code on_complete} gets a fresh 1400 ms). There is
+ * no {@code pg_prewarm}. For the chunks swap the warm-up is (1) the anti-join of {@code nexus.chunks} to {@code nexus.catalog_collections}
+ * on the composite's three columns, which is the query the composite's validation runs (so whichever plan the planner picks, it reads
+ * what {@code on_complete} will read: the leaf heaps or the id-key indexes, and the registry), and (2) a count over a column no index
+ * holds, which forces a read of every heap page. Both arms run in the table-wide run only ({@code $1 IS NULL}): they are about the
+ * table, not a tenant, so a tenant's run would repeat the whole scan. They do not report an orphan row: the table-wide run reads the
+ * registry as the migrating role, whose owner-read policy (vectors-065) is not present on an install where the serving role migrates,
+ * and there a missing registry would read as every chunk orphaned and fail the move for good; the composite's own validation reports
+ * a real orphan.
+ *
+ * <p><b>A deliberate deviation from item 6:</b> the RDR says the verification also returns any row with a null id. It does not. Gate 1
+ * requires P3.1's NOT NULL CHECK on {@code collection_id} to be present and validated before the pass registers this move (the stamp
+ * label is complete only while its table's CHECKs are), so a null id cannot be there, and the arm would cost another scan of the table
+ * inside the re-check's budget for a state the gate already excludes.
  *
  * <p><b>on_complete</b>, one transaction, no EXCEPTION clause (a 55P03 lock timeout propagates, and the finisher records it as a
  * transient blocked state and retries, RDR-246 fail-fast): (a) refuse when the table has no valid unique key on the id columns
@@ -65,7 +76,31 @@ public final class Rdr229SwapMove {
     static final String VALIDATION_LABEL_SUFFIX = "-chunk-fk";
 
     /** The composite on the id from nexus.chunks to the registry. */
-    static final String COMPOSITE_CONSTRAINT = "chunks_collection_id_fk";
+    public static final String COMPOSITE_CONSTRAINT = "chunks_collection_id_fk";
+
+    /** One child table of chunks: its id key's name, the id and chash columns it carries, its name column and the key's actions. */
+    private record Child(String table, String constraint, String idColumn, String chashColumn, String nameColumn, String onDelete,
+                         String deferrable) { }
+
+    /**
+     * The three child tables, in the order their keys are added and their validation moves registered. Each key keeps its name key's
+     * ON DELETE action (vectors-030:1017-1050): the manifest's is NO ACTION, the other two CASCADE. The manifest's id key is
+     * DEFERRABLE INITIALLY DEFERRED, NOT its name key's INITIALLY IMMEDIATE (linda, 2026-11-22): purge_trash and its kin defer only
+     * fk_catalog_chunks_chunk by name (the live definition of purge_trash, vectors-030:3115, and
+     * {@code CatalogRepository#deferManifestChunkFk}), and delete chunks while manifest rows still exist, so an immediate id key would
+     * raise 23503 there until P3.5b; changing those sites needs changesets against the DDL cap. PostgreSQL never defers a referential
+     * action, so ON UPDATE CASCADE still fires at the statement and only the orphan check moves to the commit. The name key stays
+     * IMMEDIATE until P4.1; nexus-p2m1x.35 decides this key's final mode.
+     */
+    private static final List<Child> CHILDREN = List.of(
+        new Child("catalog_document_chunks", "fk_catalog_chunks_chunk_id", "collection_id", "chash", "collection", "",
+            "DEFERRABLE INITIALLY DEFERRED"),
+        new Child("chunk_orphaned_at", "chunk_orphaned_at_chunk_id_fk", "collection_id", "chash", "collection", "CASCADE", ""),
+        new Child("topic_assignments", "topic_assignments_chunk_id_fk", "source_collection_id", "doc_id", "source_collection",
+            "CASCADE", ""));
+
+    /** The three child tables whose id keys into the chunks id key the chunks swap adds, and whose validation moves it registers. */
+    public static final List<String> CHILD_TABLES = CHILDREN.stream().map(Child::table).toList();
 
     /**
      * What a swap row carries beyond its identity.
@@ -90,6 +125,16 @@ public final class Rdr229SwapMove {
             default -> throw new IllegalArgumentException("no swap move for table " + table
                 + ": the swaps are nexus.chunks and nexus.taxonomy_centroids");
         };
+    }
+
+    /** The name of {@code childTable}'s id key into the chunks id key ({@link #CHILD_TABLES}). */
+    public static String childKeyConstraint(String childTable) {
+        return child(childTable).constraint();
+    }
+
+    private static Child child(String childTable) {
+        return CHILDREN.stream().filter(c -> c.table().equals(childTable)).findFirst()
+            .orElseThrow(() -> new IllegalArgumentException(childTable + " is not a child of chunks: " + CHILD_TABLES));
     }
 
     /** The label of the validation move of {@code childTable}'s id key into chunks. */
@@ -148,21 +193,25 @@ public final class Rdr229SwapMove {
             .map(c -> "'" + c + "'").collect(java.util.stream.Collectors.joining(", "));
     }
 
-    private static String chunksVerification() {
-        return leafKeyVerification("chunks", "chash") + """
+    /** The read-only guard of a warm-up arm: the arm runs only in a READ ONLY transaction, the finisher's first pass. */
+    private static String warmWhenReadOnly(String scan) {
+        return "WHERE $1 IS NULL\n"
+            + "               AND CASE WHEN pg_catalog.current_setting('transaction_read_only') = 'on'\n"
+            + "                        THEN (" + scan + ")\n"
+            + "                        ELSE 0 END < 0";
+    }
 
-            UNION ALL
-            SELECT 1
-             WHERE $1 IS NULL
-               AND (SELECT pg_catalog.count(*)
-                      FROM nexus.chunks c
-                      LEFT JOIN nexus.catalog_collections cc
-                        ON cc.tenant_id = c.tenant_id AND cc.collection_id = c.collection_id AND cc.embedding_model = c.embedding_model
-                     WHERE cc.tenant_id IS NULL) < 0
-            UNION ALL
-            SELECT 1
-             WHERE $1 IS NULL
-               AND (SELECT pg_catalog.count(c.chunk_text) FROM nexus.chunks c) < 0""";
+    private static String chunksVerification() {
+        return leafKeyVerification("chunks", "chash")
+            + "\n            UNION ALL\n            SELECT 1\n             "
+            + warmWhenReadOnly("""
+                SELECT pg_catalog.count(*)
+                                              FROM nexus.chunks c
+                                              LEFT JOIN nexus.catalog_collections cc
+                                                ON cc.tenant_id = c.tenant_id AND cc.collection_id = c.collection_id AND cc.embedding_model = c.embedding_model
+                                             WHERE cc.tenant_id IS NULL""")
+            + "\n            UNION ALL\n            SELECT 1\n             "
+            + warmWhenReadOnly("SELECT pg_catalog.count(c.chunk_text) FROM nexus.chunks c");
     }
 
     // ── on_complete ────────────────────────────────────────────────────────────────────────────────────────
@@ -191,7 +240,7 @@ public final class Rdr229SwapMove {
     }
 
     /** One child's id key into chunks, added NOT VALID if absent. */
-    private static String childKey(String table, String constraint, String idColumn, String onDelete, String deferrable) {
+    private static String childKey(Child c) {
         return """
                 IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint
                                 WHERE conrelid = 'nexus.%1$s'::pg_catalog.regclass AND conname = '%2$s') THEN
@@ -200,8 +249,8 @@ public final class Rdr229SwapMove {
                         REFERENCES nexus.chunks (tenant_id, collection_id, chash, embedding_model)
                         ON UPDATE CASCADE%5$s%6$s NOT VALID;
                 END IF;
-            """.formatted(table, constraint, idColumn, table.equals("topic_assignments") ? "doc_id" : "chash",
-                onDelete.isEmpty() ? "" : " ON DELETE " + onDelete, deferrable.isEmpty() ? "" : " " + deferrable);
+            """.formatted(c.table(), c.constraint(), c.idColumn(), c.chashColumn(),
+                c.onDelete().isEmpty() ? "" : " ON DELETE " + c.onDelete(), c.deferrable().isEmpty() ? "" : " " + c.deferrable());
     }
 
     /**
@@ -210,7 +259,11 @@ public final class Rdr229SwapMove {
      * pass adds none; its {@code changeset_id} is the swap row's (a move registered by another move's on_complete takes the id of the
      * row whose text holds its INSERT).
      */
-    private static String validationMove(String table, String nameColumn, String idColumn, String constraint) {
+    private static String validationMove(Child c) {
+        String table = c.table();
+        String nameColumn = c.nameColumn();
+        String idColumn = c.idColumn();
+        String constraint = c.constraint();
         String label = validationLabel(table);
         String validate = "DO $val$ BEGIN IF EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = 'nexus." + table
             + "'::pg_catalog.regclass AND conname = '" + constraint + "') THEN ALTER TABLE nexus." + table
@@ -227,24 +280,13 @@ public final class Rdr229SwapMove {
     }
 
     private static String chunksOnComplete() {
-        return "DO $swap$\nBEGIN\n"
-            + requireIdKey("chunks", "chash")
-            // the name keys' own ON DELETE actions (vectors-030:1017-1050): the manifest's is NO ACTION, the other two CASCADE.
-            // The manifest's id key is DEFERRABLE INITIALLY DEFERRED, NOT its name key's INITIALLY IMMEDIATE (linda, 2026-11-22):
-            // purge_trash and its kin defer only fk_catalog_chunks_chunk by name (the live definition of purge_trash,
-            // vectors-030:3115, and CatalogRepository#deferManifestChunkFk), and delete chunks while manifest rows still exist, so
-            // an immediate id key would raise 23503 there until P3.5b; changing those sites needs changesets against the DDL cap.
-            // PostgreSQL never defers a referential action, so ON UPDATE CASCADE still fires at the statement and only the
-            // orphan check moves to the commit. The name key stays IMMEDIATE until P4.1; nexus-p2m1x.35 decides this key's final mode.
-            + childKey("catalog_document_chunks", "fk_catalog_chunks_chunk_id", "collection_id", "", "DEFERRABLE INITIALLY DEFERRED")
-            + childKey("topic_assignments", "topic_assignments_chunk_id_fk", "source_collection_id", "CASCADE", "")
-            + childKey("chunk_orphaned_at", "chunk_orphaned_at_chunk_id_fk", "collection_id", "CASCADE", "")
-            // the validation moves, registered after the constraints they validate exist in this transaction
-            + validationMove("catalog_document_chunks", "collection", "collection_id", "fk_catalog_chunks_chunk_id")
-            + validationMove("topic_assignments", "source_collection", "source_collection_id", "topic_assignments_chunk_id_fk")
-            + validationMove("chunk_orphaned_at", "collection", "collection_id", "chunk_orphaned_at_chunk_id_fk")
-            // the RDR-225 composite on the id: added without NOT VALID, so it validates here (the referencing table is partitioned)
-            + """
+        StringBuilder sql = new StringBuilder("DO $swap$\nBEGIN\n").append(requireIdKey("chunks", "chash"));
+        // the child id keys first (see CHILDREN for their actions and the manifest key's deferral), then the validation moves,
+        // registered after the constraints they validate exist in this transaction
+        CHILDREN.forEach(c -> sql.append(childKey(c)));
+        CHILDREN.forEach(c -> sql.append(validationMove(c)));
+        // the RDR-225 composite on the id: added without NOT VALID, so it validates here (the referencing table is partitioned)
+        sql.append("""
                 IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint
                                 WHERE conrelid = 'nexus.chunks'::pg_catalog.regclass AND conname = '%s') THEN
                     ALTER TABLE nexus.chunks ADD CONSTRAINT %s
@@ -252,7 +294,7 @@ public final class Rdr229SwapMove {
                         REFERENCES nexus.catalog_collections (tenant_id, collection_id, embedding_model)
                         ON DELETE RESTRICT;
                 END IF;
-            """.formatted(COMPOSITE_CONSTRAINT, COMPOSITE_CONSTRAINT)
-            + "END\n$swap$";
+            """.formatted(COMPOSITE_CONSTRAINT, COMPOSITE_CONSTRAINT));
+        return sql.append("END\n$swap$").toString();
     }
 }
