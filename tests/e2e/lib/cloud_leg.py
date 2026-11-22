@@ -341,6 +341,9 @@ ROUTE_MAP: dict[str, Step] = {
     "POST /v1/catalog/collections/upsert": Step("route-collections-upsert", "py", ["-c", _routes.COLLECTION_UPSERT],
                                                 expect_route="/v1/catalog/collections/upsert"),
     # RDR-229 P3.1 (nexus-p2m1x.17): the completion check's report, and the typed 422 of the dual write.
+    # RDR-229 P3.11 (nexus-p2m1x.31): the restore marker's relabel keys.
+    "GET /v1/tenant/import-marker": Step("route-tenant-import-marker", "py", ["-c", _routes.IMPORT_MARKER],
+                                         expect_route="/v1/tenant/import-marker"),
     "GET /v1/status": Step("route-engine-status", "py", ["-c", _routes.ENGINE_STATUS], expect_route="/v1/status"),
     "POST /v1/catalog/doc/register": Step("route-doc-register-unregistered", "py", ["-c", _routes.DOC_REGISTER_UNREGISTERED],
                                           expect_route="/v1/catalog/doc/register",
