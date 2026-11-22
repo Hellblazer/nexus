@@ -1,0 +1,297 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-p2m1x.19 (RDR-229 P3.3a, item 6 "Switch": the foreign-key repoint). Each of the seven registry foreign keys from a table that is not
+    partitioned gains an id twin beside the name key, added NOT VALID, and each twin has one registered data move that validates it. The name key stays:
+    P3.7's name-key drop move drops all seven. The one list of the twins, their columns, ON DELETE actions and move labels is
+    service/src/main/resources/db/rdr229/p33a-fk-twins.tsv; Rdr229FkTwinsChangesetShapeTest pins this file against it both ways.
+
+    THE TWINS. FOREIGN KEY (tenant_id, <id column>) REFERENCES nexus.catalog_collections (tenant_id, collection_id), the registry's id UNIQUE
+    (vectors-068-1), NOT VALID: enforced on every new and every updated row at once and scanning nothing, so an upgrade boot rewrites no row of a table that
+    grows (RDR-246's write gate, nexus-f3yqd.1; DataMoveChangesetGateTest). A row whose id is NULL passes (MATCH SIMPLE), so the rows the stamp has not
+    reached, and the rows of a pre-P3.1 engine, are no violation. canary_query_ring's twin is the three-column key (tenant_id, collection_id,
+    embedding_model), as its name key is (vectors-054-1), against the registry's id UNIQUE on the same three (vectors-068-1). ON DELETE is the name key's
+    own action, so a collection delete behaves as it did: RESTRICT on topic_assignments (fk-002-5), document_aspects, topics, taxonomy_meta and
+    document_highlights (fk-003), CASCADE on canary_query_ring (vectors-054-1) and on the queue (aspects-005-1, which replaced fk-003-2's RESTRICT).
+    ON UPDATE is the default: a collection id never changes (the name key's ON UPDATE CASCADE carries a rename; the id does not move), so the registry's
+    UPDATE of a name fires no check of the twin. Each twin is its own changeset, under SET LOCAL lock_timeout = '5s' (the ALTER takes SHARE ROW EXCLUSIVE on
+    the table and on nexus.catalog_collections for an instant). Names are <table>_<id column>_fk.
+
+    THE MOVES. One registered data move per twin, rdr229-fkvalidate-<table>, in its own changeset after the twins. Its driving table is the referencing table,
+    its template and its verification are that table's P3.1 stamp move's word for word (vectors-070: a re-stamp of the rows still NULL, so a row the stamp
+    has not reached is stamped here and a row the dual write stamped is not written again), and its on_complete is the existence-guarded VALIDATE CONSTRAINT of
+    the twin (pg_constraint has it by conrelid and conname, as the stamp moves' on_completes do, so a table or twin that is gone is a no-op, not a 42704).
+    No orphan guard is needed: the name key guarantees every row's name has a registry row, and a NULL id passes. THIS FILE ONLY REGISTERS: every move changeset
+    is one INSERT into nexus.data_moves; none reads or writes a row of a user-data table. The VALIDATE takes SHARE UPDATE EXCLUSIVE on the table and
+    ROW SHARE on the registry, so no DML waits on it (P3.2 fork: longest 0.8 s). The values are P3.2's (T2 nexus_rdr/229-p32-fork-results-2026-11-20; Sam's
+    ask C ruling, T2 nexus/sam-ruling-rdr229-ask-c-2026-11-20): topic_assignments 1000 rows and 2000 ms (its walk writes about 0.57 MB of prune WAL per 1000
+    rows right after the stamp), every other table 10000 rows and 8000 ms, statement_timeout_ms 60000 on all (lock_timeout of on_complete is
+    min(5 s, half the bound) = 5 s). NX_DATA_MOVE_SLEEP_MS is engine-wide and overrides every sleep_ms: it stays unset in the cloud for these moves.
+    The seven labels join the completion check's read set, gate 1 (CompletionCheck.ReadSet.p33a): a label is complete only while its move is complete AND
+    its twin is present and validated.
+
+    THE OWNER-READ POLICIES. The worker's table-wide run reads every tenant's rows as the migrating role, which needs an owner-read policy on each driving
+    table. All seven have one already: topic_assignments, topics, taxonomy_meta and canary_query_ring from vectors-070, document_aspects and
+    document_highlights from catalog-050, the queue from vectors-070-31. This file creates none.
+
+    THE QUEUE (R3). nexus.aspect_extraction_queue is absent on most installs (aspects-005 drops it). Its twin (vectors-072-7) and move (vectors-072-17) are
+    guarded the way vectors-068-18 and vectors-070-30 are: a DO guard for the absent table, and a CONTINUE precondition that skips the changeset, unrecorded
+    and retried at every boot, while the table exists without its collection_id column (vectors-068-18 was skipped: another role owns the table) or the move's
+    twin is not there yet. Where the table is absent nothing is added or registered and the completion check counts the label as not applicable
+    (StampLabels.NOT_APPLICABLE_WHEN_ABSENT).
+
+    THE DOWNGRADE BOUNDARY (R5) IS NOT MOVED. A twin refuses only a row that names an id no registry row carries, which a pre-P3.1 engine never writes (it
+    writes no id), and it copies the name key's ON DELETE action, so the operator down-step (p31-downstep.sql) leaves the twins in place and an old engine
+    runs unchanged. Each changeset's <rollback> is the full inverse of its add or registration.
+
+    OUT OF SCOPE. chunks_collection_fk and the three child keys into nexus.chunks (P3.3c); TenantExport's key model (P3.11).
+
+    NUMBERING. vectors-072 follows vectors-071 and is provisional until the final rebase: take the first free vectors- number then. Placed after
+    vectors-071 and before the grants-nexus-svc.xml runAlways block.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-072-1" author="nexus-p2m1x.19">
+        <comment>nexus.topic_assignments: topic_assignments_source_collection_id_fk FOREIGN KEY (tenant_id, source_collection_id) REFERENCES nexus.catalog_collections (tenant_id, collection_id), ON DELETE RESTRICT (the name key topic_assignments_collection_fk's own action), NOT VALID, beside the name key, which stays. ON UPDATE is the default: a collection id never changes. DATA EFFECT: none. ADD CONSTRAINT ... NOT VALID scans no row and writes none; the twin is enforced on every new or updated row from this changeset on. The ALTER takes SHARE ROW EXCLUSIVE on topic_assignments and on nexus.catalog_collections for an instant, under lock_timeout 5 s. The rollback drops the twin.</comment>
+        <sql splitStatements="true" stripComments="false">
+SET LOCAL lock_timeout = '5s';
+ALTER TABLE nexus.topic_assignments ADD CONSTRAINT topic_assignments_source_collection_id_fk FOREIGN KEY (tenant_id, source_collection_id) REFERENCES nexus.catalog_collections (tenant_id, collection_id) ON DELETE RESTRICT NOT VALID;
+        </sql>
+        <rollback>
+            <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.topic_assignments DROP CONSTRAINT IF EXISTS topic_assignments_source_collection_id_fk;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-072-2" author="nexus-p2m1x.19">
+        <comment>nexus.document_aspects: document_aspects_collection_id_fk FOREIGN KEY (tenant_id, collection_id) REFERENCES nexus.catalog_collections (tenant_id, collection_id), ON DELETE RESTRICT (the name key document_aspects_collection_fk's own action), NOT VALID, beside the name key, which stays. ON UPDATE is the default: a collection id never changes. DATA EFFECT: none. ADD CONSTRAINT ... NOT VALID scans no row and writes none; the twin is enforced on every new or updated row from this changeset on. The ALTER takes SHARE ROW EXCLUSIVE on document_aspects and on nexus.catalog_collections for an instant, under lock_timeout 5 s. The rollback drops the twin.</comment>
+        <sql splitStatements="true" stripComments="false">
+SET LOCAL lock_timeout = '5s';
+ALTER TABLE nexus.document_aspects ADD CONSTRAINT document_aspects_collection_id_fk FOREIGN KEY (tenant_id, collection_id) REFERENCES nexus.catalog_collections (tenant_id, collection_id) ON DELETE RESTRICT NOT VALID;
+        </sql>
+        <rollback>
+            <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.document_aspects DROP CONSTRAINT IF EXISTS document_aspects_collection_id_fk;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-072-3" author="nexus-p2m1x.19">
+        <comment>nexus.topics: topics_collection_id_fk FOREIGN KEY (tenant_id, collection_id) REFERENCES nexus.catalog_collections (tenant_id, collection_id), ON DELETE RESTRICT (the name key topics_collection_fk's own action), NOT VALID, beside the name key, which stays. ON UPDATE is the default: a collection id never changes. DATA EFFECT: none. ADD CONSTRAINT ... NOT VALID scans no row and writes none; the twin is enforced on every new or updated row from this changeset on. The ALTER takes SHARE ROW EXCLUSIVE on topics and on nexus.catalog_collections for an instant, under lock_timeout 5 s. The rollback drops the twin.</comment>
+        <sql splitStatements="true" stripComments="false">
+SET LOCAL lock_timeout = '5s';
+ALTER TABLE nexus.topics ADD CONSTRAINT topics_collection_id_fk FOREIGN KEY (tenant_id, collection_id) REFERENCES nexus.catalog_collections (tenant_id, collection_id) ON DELETE RESTRICT NOT VALID;
+        </sql>
+        <rollback>
+            <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.topics DROP CONSTRAINT IF EXISTS topics_collection_id_fk;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-072-4" author="nexus-p2m1x.19">
+        <comment>nexus.taxonomy_meta: taxonomy_meta_collection_id_fk FOREIGN KEY (tenant_id, collection_id) REFERENCES nexus.catalog_collections (tenant_id, collection_id), ON DELETE RESTRICT (the name key taxonomy_meta_collection_fk's own action), NOT VALID, beside the name key, which stays. ON UPDATE is the default: a collection id never changes. DATA EFFECT: none. ADD CONSTRAINT ... NOT VALID scans no row and writes none; the twin is enforced on every new or updated row from this changeset on. The ALTER takes SHARE ROW EXCLUSIVE on taxonomy_meta and on nexus.catalog_collections for an instant, under lock_timeout 5 s. The rollback drops the twin.</comment>
+        <sql splitStatements="true" stripComments="false">
+SET LOCAL lock_timeout = '5s';
+ALTER TABLE nexus.taxonomy_meta ADD CONSTRAINT taxonomy_meta_collection_id_fk FOREIGN KEY (tenant_id, collection_id) REFERENCES nexus.catalog_collections (tenant_id, collection_id) ON DELETE RESTRICT NOT VALID;
+        </sql>
+        <rollback>
+            <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.taxonomy_meta DROP CONSTRAINT IF EXISTS taxonomy_meta_collection_id_fk;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-072-5" author="nexus-p2m1x.19">
+        <comment>nexus.document_highlights: document_highlights_collection_id_fk FOREIGN KEY (tenant_id, collection_id) REFERENCES nexus.catalog_collections (tenant_id, collection_id), ON DELETE RESTRICT (the name key document_highlights_collection_fk's own action), NOT VALID, beside the name key, which stays. ON UPDATE is the default: a collection id never changes. DATA EFFECT: none. ADD CONSTRAINT ... NOT VALID scans no row and writes none; the twin is enforced on every new or updated row from this changeset on. The ALTER takes SHARE ROW EXCLUSIVE on document_highlights and on nexus.catalog_collections for an instant, under lock_timeout 5 s. The rollback drops the twin.</comment>
+        <sql splitStatements="true" stripComments="false">
+SET LOCAL lock_timeout = '5s';
+ALTER TABLE nexus.document_highlights ADD CONSTRAINT document_highlights_collection_id_fk FOREIGN KEY (tenant_id, collection_id) REFERENCES nexus.catalog_collections (tenant_id, collection_id) ON DELETE RESTRICT NOT VALID;
+        </sql>
+        <rollback>
+            <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.document_highlights DROP CONSTRAINT IF EXISTS document_highlights_collection_id_fk;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-072-6" author="nexus-p2m1x.19">
+        <comment>nexus.canary_query_ring: canary_query_ring_collection_id_fk FOREIGN KEY (tenant_id, collection_id, embedding_model) REFERENCES nexus.catalog_collections (tenant_id, collection_id, embedding_model), ON DELETE CASCADE (the name key canary_query_ring_collection_fk's own action), NOT VALID, beside the name key, which stays. ON UPDATE is the default: a collection id never changes. DATA EFFECT: none. ADD CONSTRAINT ... NOT VALID scans no row and writes none; the twin is enforced on every new or updated row from this changeset on. The ALTER takes SHARE ROW EXCLUSIVE on canary_query_ring and on nexus.catalog_collections for an instant, under lock_timeout 5 s. The rollback drops the twin.</comment>
+        <sql splitStatements="true" stripComments="false">
+SET LOCAL lock_timeout = '5s';
+ALTER TABLE nexus.canary_query_ring ADD CONSTRAINT canary_query_ring_collection_id_fk FOREIGN KEY (tenant_id, collection_id, embedding_model) REFERENCES nexus.catalog_collections (tenant_id, collection_id, embedding_model) ON DELETE CASCADE NOT VALID;
+        </sql>
+        <rollback>
+            <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.canary_query_ring DROP CONSTRAINT IF EXISTS canary_query_ring_collection_id_fk;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-072-7" author="nexus-p2m1x.19">
+        <preConditions onFail="CONTINUE" onError="CONTINUE">
+            <sqlCheck expectedResult="0">SELECT count(*) FROM pg_class c WHERE c.oid = to_regclass('nexus.aspect_extraction_queue') AND (NOT pg_has_role(current_user, c.relowner, 'USAGE') OR NOT EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = c.oid AND a.attname = 'collection_id' AND NOT a.attisdropped))</sqlCheck>
+        </preConditions>
+        <comment>nexus.aspect_extraction_queue: aspect_extraction_queue_collection_id_fk FOREIGN KEY (tenant_id, collection_id) REFERENCES nexus.catalog_collections (tenant_id, collection_id), ON DELETE CASCADE (the name key aspect_extraction_queue_collection_fk's own action), NOT VALID, beside the name key, which stays. ON UPDATE is the default: a collection id never changes. Guarded the way vectors-068-18 is: a DO guard for the absent table and the missing column, and a precondition with onFail="CONTINUE" onError="CONTINUE" that skips the changeset, unrecorded, while the table exists without its collection_id column or another role owns it (the ALTER would raise, and a boot must not halt: the no-wedge directive); the next boot retries it. An absent table passes the precondition, the DO guard does nothing and the changeset is recorded, so a fresh install never retries. DATA EFFECT: none. ADD CONSTRAINT ... NOT VALID scans no row and writes none; the twin is enforced on every new or updated row from this changeset on. The ALTER takes SHARE ROW EXCLUSIVE on aspect_extraction_queue and on nexus.catalog_collections for an instant, under lock_timeout 5 s. The rollback drops the twin.</comment>
+        <sql splitStatements="false" stripComments="false">
+SET LOCAL lock_timeout = '5s';
+DO $q$
+BEGIN
+    IF to_regclass('nexus.aspect_extraction_queue') IS NOT NULL
+       AND EXISTS (SELECT 1 FROM pg_attribute a
+                    WHERE a.attrelid = to_regclass('nexus.aspect_extraction_queue') AND a.attname = 'collection_id' AND NOT a.attisdropped) THEN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                        WHERE conrelid = to_regclass('nexus.aspect_extraction_queue') AND conname = 'aspect_extraction_queue_collection_id_fk') THEN
+            ALTER TABLE nexus.aspect_extraction_queue ADD CONSTRAINT aspect_extraction_queue_collection_id_fk FOREIGN KEY (tenant_id, collection_id) REFERENCES nexus.catalog_collections (tenant_id, collection_id) ON DELETE CASCADE NOT VALID;
+        END IF;
+    END IF;
+END
+$q$;
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+DO $q$
+BEGIN
+    IF to_regclass('nexus.aspect_extraction_queue') IS NOT NULL THEN
+        ALTER TABLE nexus.aspect_extraction_queue DROP CONSTRAINT IF EXISTS aspect_extraction_queue_collection_id_fk;
+    END IF;
+END
+$q$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-072-11" author="nexus-p2m1x.19">
+        <comment>Register the data move rdr229-fkvalidate-topic_assignments over nexus.topic_assignments (RDR-229 P3.3a, nexus-p2m1x.19): one INSERT into nexus.data_moves, no policy (the table has its owner-read policy already), no row of topic_assignments read or written. chunk_size 1000, sleep_ms 2000, statement_timeout_ms 60000 (P3.2, Sam's ask C). Template and verification are the stamp move rdr229-stamp-topic_assignments's, word for word: a re-stamp of the rows whose id is still NULL. A chunk-family move: its on_complete ends the per-collection index builders first (VerifyingFinisher). DATA EFFECT: one row added to the global registry nexus.data_moves; no existing row of any table changes at boot. The registered move, run by the engine after it serves, sets the id from the registry row of the same tenant and name where it is NULL and then validates topic_assignments_source_collection_id_fk (SHARE UPDATE EXCLUSIVE, no DML blocked) only if pg_constraint has it; the rollback unregisters it and does not undo a stamp or a validation that ran.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms,
+                              statement_timeout_ms, verification, on_complete, changeset_id)
+VALUES ('rdr229-fkvalidate-topic_assignments',
+        'UPDATE <driving_table> SET source_collection_id = COALESCE(t.source_collection_id, (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = t.tenant_id AND cc.name = t.source_collection)) WHERE NULLIF(t.source_collection, '''') IS NOT NULL AND t.source_collection_id IS NULL AND EXISTS (SELECT 1 FROM nexus.catalog_collections cc WHERE cc.tenant_id = t.tenant_id AND cc.name = t.source_collection) AND <chunking_clause>',
+        'nexus', 'topic_assignments', 1000, 2000, 60000,
+        'SELECT 1 FROM nexus.topic_assignments t WHERE NULLIF(t.source_collection, '''') IS NOT NULL AND t.source_collection_id IS NULL AND EXISTS (SELECT 1 FROM nexus.catalog_collections cc WHERE cc.tenant_id = t.tenant_id AND cc.name = t.source_collection) AND (t.tenant_id = $1 OR $1 IS NULL)',
+        'DO $v$ BEGIN IF EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = ''nexus.topic_assignments''::pg_catalog.regclass AND conname = ''topic_assignments_source_collection_id_fk'') THEN ALTER TABLE nexus.topic_assignments VALIDATE CONSTRAINT topic_assignments_source_collection_id_fk; END IF; END $v$',
+        'vectors-072-11');
+        ]]></sql>
+        <rollback>
+            <sql>DELETE FROM nexus.data_moves WHERE label = 'rdr229-fkvalidate-topic_assignments'</sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-072-12" author="nexus-p2m1x.19">
+        <comment>Register the data move rdr229-fkvalidate-document_aspects over nexus.document_aspects (RDR-229 P3.3a, nexus-p2m1x.19): one INSERT into nexus.data_moves, no policy (the table has its owner-read policy already), no row of document_aspects read or written. chunk_size 10000, sleep_ms 8000, statement_timeout_ms 60000 (P3.2, Sam's ask C). Template and verification are the stamp move rdr229-stamp-document_aspects's, word for word: a re-stamp of the rows whose id is still NULL. DATA EFFECT: one row added to the global registry nexus.data_moves; no existing row of any table changes at boot. The registered move, run by the engine after it serves, sets the id from the registry row of the same tenant and name where it is NULL and then validates document_aspects_collection_id_fk (SHARE UPDATE EXCLUSIVE, no DML blocked) only if pg_constraint has it; the rollback unregisters it and does not undo a stamp or a validation that ran.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms,
+                              statement_timeout_ms, verification, on_complete, changeset_id)
+VALUES ('rdr229-fkvalidate-document_aspects',
+        'UPDATE <driving_table> SET collection_id = COALESCE(t.collection_id, (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = t.tenant_id AND cc.name = t.collection)) WHERE NULLIF(t.collection, '''') IS NOT NULL AND t.collection_id IS NULL AND EXISTS (SELECT 1 FROM nexus.catalog_collections cc WHERE cc.tenant_id = t.tenant_id AND cc.name = t.collection) AND <chunking_clause>',
+        'nexus', 'document_aspects', 10000, 8000, 60000,
+        'SELECT 1 FROM nexus.document_aspects t WHERE NULLIF(t.collection, '''') IS NOT NULL AND t.collection_id IS NULL AND EXISTS (SELECT 1 FROM nexus.catalog_collections cc WHERE cc.tenant_id = t.tenant_id AND cc.name = t.collection) AND (t.tenant_id = $1 OR $1 IS NULL)',
+        'DO $v$ BEGIN IF EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = ''nexus.document_aspects''::pg_catalog.regclass AND conname = ''document_aspects_collection_id_fk'') THEN ALTER TABLE nexus.document_aspects VALIDATE CONSTRAINT document_aspects_collection_id_fk; END IF; END $v$',
+        'vectors-072-12');
+        ]]></sql>
+        <rollback>
+            <sql>DELETE FROM nexus.data_moves WHERE label = 'rdr229-fkvalidate-document_aspects'</sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-072-13" author="nexus-p2m1x.19">
+        <comment>Register the data move rdr229-fkvalidate-topics over nexus.topics (RDR-229 P3.3a, nexus-p2m1x.19): one INSERT into nexus.data_moves, no policy (the table has its owner-read policy already), no row of topics read or written. chunk_size 10000, sleep_ms 8000, statement_timeout_ms 60000 (P3.2, Sam's ask C). Template and verification are the stamp move rdr229-stamp-topics's, word for word: a re-stamp of the rows whose id is still NULL. DATA EFFECT: one row added to the global registry nexus.data_moves; no existing row of any table changes at boot. The registered move, run by the engine after it serves, sets the id from the registry row of the same tenant and name where it is NULL and then validates topics_collection_id_fk (SHARE UPDATE EXCLUSIVE, no DML blocked) only if pg_constraint has it; the rollback unregisters it and does not undo a stamp or a validation that ran.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms,
+                              statement_timeout_ms, verification, on_complete, changeset_id)
+VALUES ('rdr229-fkvalidate-topics',
+        'UPDATE <driving_table> SET collection_id = COALESCE(t.collection_id, (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = t.tenant_id AND cc.name = t.collection)) WHERE NULLIF(t.collection, '''') IS NOT NULL AND t.collection_id IS NULL AND EXISTS (SELECT 1 FROM nexus.catalog_collections cc WHERE cc.tenant_id = t.tenant_id AND cc.name = t.collection) AND <chunking_clause>',
+        'nexus', 'topics', 10000, 8000, 60000,
+        'SELECT 1 FROM nexus.topics t WHERE NULLIF(t.collection, '''') IS NOT NULL AND t.collection_id IS NULL AND EXISTS (SELECT 1 FROM nexus.catalog_collections cc WHERE cc.tenant_id = t.tenant_id AND cc.name = t.collection) AND (t.tenant_id = $1 OR $1 IS NULL)',
+        'DO $v$ BEGIN IF EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = ''nexus.topics''::pg_catalog.regclass AND conname = ''topics_collection_id_fk'') THEN ALTER TABLE nexus.topics VALIDATE CONSTRAINT topics_collection_id_fk; END IF; END $v$',
+        'vectors-072-13');
+        ]]></sql>
+        <rollback>
+            <sql>DELETE FROM nexus.data_moves WHERE label = 'rdr229-fkvalidate-topics'</sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-072-14" author="nexus-p2m1x.19">
+        <comment>Register the data move rdr229-fkvalidate-taxonomy_meta over nexus.taxonomy_meta (RDR-229 P3.3a, nexus-p2m1x.19): one INSERT into nexus.data_moves, no policy (the table has its owner-read policy already), no row of taxonomy_meta read or written. chunk_size 10000, sleep_ms 8000, statement_timeout_ms 60000 (P3.2, Sam's ask C). Template and verification are the stamp move rdr229-stamp-taxonomy_meta's, word for word: a re-stamp of the rows whose id is still NULL. DATA EFFECT: one row added to the global registry nexus.data_moves; no existing row of any table changes at boot. The registered move, run by the engine after it serves, sets the id from the registry row of the same tenant and name where it is NULL and then validates taxonomy_meta_collection_id_fk (SHARE UPDATE EXCLUSIVE, no DML blocked) only if pg_constraint has it; the rollback unregisters it and does not undo a stamp or a validation that ran.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms,
+                              statement_timeout_ms, verification, on_complete, changeset_id)
+VALUES ('rdr229-fkvalidate-taxonomy_meta',
+        'UPDATE <driving_table> SET collection_id = COALESCE(t.collection_id, (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = t.tenant_id AND cc.name = t.collection)) WHERE NULLIF(t.collection, '''') IS NOT NULL AND t.collection_id IS NULL AND EXISTS (SELECT 1 FROM nexus.catalog_collections cc WHERE cc.tenant_id = t.tenant_id AND cc.name = t.collection) AND <chunking_clause>',
+        'nexus', 'taxonomy_meta', 10000, 8000, 60000,
+        'SELECT 1 FROM nexus.taxonomy_meta t WHERE NULLIF(t.collection, '''') IS NOT NULL AND t.collection_id IS NULL AND EXISTS (SELECT 1 FROM nexus.catalog_collections cc WHERE cc.tenant_id = t.tenant_id AND cc.name = t.collection) AND (t.tenant_id = $1 OR $1 IS NULL)',
+        'DO $v$ BEGIN IF EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = ''nexus.taxonomy_meta''::pg_catalog.regclass AND conname = ''taxonomy_meta_collection_id_fk'') THEN ALTER TABLE nexus.taxonomy_meta VALIDATE CONSTRAINT taxonomy_meta_collection_id_fk; END IF; END $v$',
+        'vectors-072-14');
+        ]]></sql>
+        <rollback>
+            <sql>DELETE FROM nexus.data_moves WHERE label = 'rdr229-fkvalidate-taxonomy_meta'</sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-072-15" author="nexus-p2m1x.19">
+        <comment>Register the data move rdr229-fkvalidate-document_highlights over nexus.document_highlights (RDR-229 P3.3a, nexus-p2m1x.19): one INSERT into nexus.data_moves, no policy (the table has its owner-read policy already), no row of document_highlights read or written. chunk_size 10000, sleep_ms 8000, statement_timeout_ms 60000 (P3.2, Sam's ask C). Template and verification are the stamp move rdr229-stamp-document_highlights's, word for word: a re-stamp of the rows whose id is still NULL. DATA EFFECT: one row added to the global registry nexus.data_moves; no existing row of any table changes at boot. The registered move, run by the engine after it serves, sets the id from the registry row of the same tenant and name where it is NULL and then validates document_highlights_collection_id_fk (SHARE UPDATE EXCLUSIVE, no DML blocked) only if pg_constraint has it; the rollback unregisters it and does not undo a stamp or a validation that ran.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms,
+                              statement_timeout_ms, verification, on_complete, changeset_id)
+VALUES ('rdr229-fkvalidate-document_highlights',
+        'UPDATE <driving_table> SET collection_id = COALESCE(t.collection_id, (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = t.tenant_id AND cc.name = t.collection)) WHERE NULLIF(t.collection, '''') IS NOT NULL AND t.collection_id IS NULL AND EXISTS (SELECT 1 FROM nexus.catalog_collections cc WHERE cc.tenant_id = t.tenant_id AND cc.name = t.collection) AND <chunking_clause>',
+        'nexus', 'document_highlights', 10000, 8000, 60000,
+        'SELECT 1 FROM nexus.document_highlights t WHERE NULLIF(t.collection, '''') IS NOT NULL AND t.collection_id IS NULL AND EXISTS (SELECT 1 FROM nexus.catalog_collections cc WHERE cc.tenant_id = t.tenant_id AND cc.name = t.collection) AND (t.tenant_id = $1 OR $1 IS NULL)',
+        'DO $v$ BEGIN IF EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = ''nexus.document_highlights''::pg_catalog.regclass AND conname = ''document_highlights_collection_id_fk'') THEN ALTER TABLE nexus.document_highlights VALIDATE CONSTRAINT document_highlights_collection_id_fk; END IF; END $v$',
+        'vectors-072-15');
+        ]]></sql>
+        <rollback>
+            <sql>DELETE FROM nexus.data_moves WHERE label = 'rdr229-fkvalidate-document_highlights'</sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-072-16" author="nexus-p2m1x.19">
+        <comment>Register the data move rdr229-fkvalidate-canary_query_ring over nexus.canary_query_ring (RDR-229 P3.3a, nexus-p2m1x.19): one INSERT into nexus.data_moves, no policy (the table has its owner-read policy already), no row of canary_query_ring read or written. chunk_size 10000, sleep_ms 8000, statement_timeout_ms 60000 (P3.2, Sam's ask C). Template and verification are the stamp move rdr229-stamp-canary_query_ring's, word for word: a re-stamp of the rows whose id is still NULL. DATA EFFECT: one row added to the global registry nexus.data_moves; no existing row of any table changes at boot. The registered move, run by the engine after it serves, sets the id from the registry row of the same tenant and name where it is NULL and then validates canary_query_ring_collection_id_fk (SHARE UPDATE EXCLUSIVE, no DML blocked) only if pg_constraint has it; the rollback unregisters it and does not undo a stamp or a validation that ran.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms,
+                              statement_timeout_ms, verification, on_complete, changeset_id)
+VALUES ('rdr229-fkvalidate-canary_query_ring',
+        'UPDATE <driving_table> SET collection_id = COALESCE(t.collection_id, (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = t.tenant_id AND cc.name = t.collection)) WHERE NULLIF(t.collection, '''') IS NOT NULL AND t.collection_id IS NULL AND EXISTS (SELECT 1 FROM nexus.catalog_collections cc WHERE cc.tenant_id = t.tenant_id AND cc.name = t.collection) AND <chunking_clause>',
+        'nexus', 'canary_query_ring', 10000, 8000, 60000,
+        'SELECT 1 FROM nexus.canary_query_ring t WHERE NULLIF(t.collection, '''') IS NOT NULL AND t.collection_id IS NULL AND EXISTS (SELECT 1 FROM nexus.catalog_collections cc WHERE cc.tenant_id = t.tenant_id AND cc.name = t.collection) AND (t.tenant_id = $1 OR $1 IS NULL)',
+        'DO $v$ BEGIN IF EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = ''nexus.canary_query_ring''::pg_catalog.regclass AND conname = ''canary_query_ring_collection_id_fk'') THEN ALTER TABLE nexus.canary_query_ring VALIDATE CONSTRAINT canary_query_ring_collection_id_fk; END IF; END $v$',
+        'vectors-072-16');
+        ]]></sql>
+        <rollback>
+            <sql>DELETE FROM nexus.data_moves WHERE label = 'rdr229-fkvalidate-canary_query_ring'</sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-072-17" author="nexus-p2m1x.19">
+        <preConditions onFail="CONTINUE" onError="CONTINUE">
+            <sqlCheck expectedResult="0">SELECT count(*) FROM pg_class c WHERE c.oid = to_regclass('nexus.aspect_extraction_queue') AND NOT EXISTS (SELECT 1 FROM pg_constraint k WHERE k.conrelid = c.oid AND k.conname = 'aspect_extraction_queue_collection_id_fk')</sqlCheck>
+        </preConditions>
+        <comment>Register the data move rdr229-fkvalidate-aspect_extraction_queue over nexus.aspect_extraction_queue (RDR-229 P3.3a, nexus-p2m1x.19): one INSERT into nexus.data_moves, no policy (the table has its owner-read policy already), no row of aspect_extraction_queue read or written. chunk_size 10000, sleep_ms 8000, statement_timeout_ms 60000 (P3.2, Sam's ask C). Template and verification are the stamp move rdr229-stamp-aspect_extraction_queue's, word for word: a re-stamp of the rows whose id is still NULL. Registered only where the retired table is kept AND its twin is there (a precondition with onFail="CONTINUE" onError="CONTINUE" skips the changeset, unrecorded, while the table exists without the twin: the next boot retries it), guarded by a DO block for the absent table the way vectors-070-30 is. Where to_regclass('nexus.aspect_extraction_queue') is NULL nothing is registered and the completion check counts the label as not applicable. DATA EFFECT: at most one row added to the global registry nexus.data_moves; no existing row of any table changes at boot. The registered move, run by the engine after it serves, sets the id from the registry row of the same tenant and name where it is NULL and then validates aspect_extraction_queue_collection_id_fk (SHARE UPDATE EXCLUSIVE, no DML blocked) only if pg_constraint has it; the rollback unregisters it and does not undo a stamp or a validation that ran.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+DO $q$
+BEGIN
+    IF to_regclass('nexus.aspect_extraction_queue') IS NOT NULL
+       AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('nexus.aspect_extraction_queue') AND conname = 'aspect_extraction_queue_collection_id_fk') THEN
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms,
+                              statement_timeout_ms, verification, on_complete, changeset_id)
+VALUES ('rdr229-fkvalidate-aspect_extraction_queue',
+        'UPDATE <driving_table> SET collection_id = COALESCE(t.collection_id, (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = t.tenant_id AND cc.name = t.collection)) WHERE NULLIF(t.collection, '''') IS NOT NULL AND t.collection_id IS NULL AND EXISTS (SELECT 1 FROM nexus.catalog_collections cc WHERE cc.tenant_id = t.tenant_id AND cc.name = t.collection) AND <chunking_clause>',
+        'nexus', 'aspect_extraction_queue', 10000, 8000, 60000,
+        'SELECT 1 FROM nexus.aspect_extraction_queue t WHERE NULLIF(t.collection, '''') IS NOT NULL AND t.collection_id IS NULL AND EXISTS (SELECT 1 FROM nexus.catalog_collections cc WHERE cc.tenant_id = t.tenant_id AND cc.name = t.collection) AND (t.tenant_id = $1 OR $1 IS NULL)',
+        'DO $v$ BEGIN IF to_regclass(''nexus.aspect_extraction_queue'') IS NOT NULL THEN IF EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = to_regclass(''nexus.aspect_extraction_queue'') AND conname = ''aspect_extraction_queue_collection_id_fk'') THEN ALTER TABLE nexus.aspect_extraction_queue VALIDATE CONSTRAINT aspect_extraction_queue_collection_id_fk; END IF; END IF; END $v$',
+        'vectors-072-17');
+    END IF;
+END
+$q$;
+        ]]></sql>
+        <rollback>
+            <sql>DELETE FROM nexus.data_moves WHERE label = 'rdr229-fkvalidate-aspect_extraction_queue'</sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

@@ -50,6 +50,7 @@ class CompletionCheckIntegrationTest {
     private static final String COLLECTION = "code__p31-cc__voyage-code-3__v1";
     private static final String QUEUE = "aspect_extraction_queue";
     private static final String QUEUE_LABEL = StampLabels.labelFor(QUEUE);
+    private static final String FK_QUEUE_LABEL = FkTwins.PREFIX + QUEUE;
     private static final String DOCS_LABEL = StampLabels.labelFor("catalog_documents");
     private static final String DOCS_CHECK = "catalog_documents_physical_collection_id_check";
 
@@ -120,6 +121,32 @@ class CompletionCheckIntegrationTest {
         return r.labels().stream().filter(l -> l.label().equals(label)).findFirst().orElseThrow();
     }
 
+    /** The twin's changeset replayed: rollback drops it, forward adds it back NOT VALID. The changeset's own text, so no DDL string lives here. */
+    private void dropTwin(String table) {
+        replayTwin(table, true);
+    }
+
+    private void addTwin(String table) {
+        replayTwin(table, false);
+    }
+
+    private void replayTwin(String table, boolean rollback) {
+        ctx.connection(c -> {
+            try {
+                String id = FkTwinSpecs.ddlChangeset(FkTwinSpecs.indexOf(table));
+                if (rollback) {
+                    PgContainerHelper.replayChangesetRollback(c, FkTwinSpecs.CHANGELOG, id);
+                } else {
+                    PgContainerHelper.replayChangeset(c, FkTwinSpecs.CHANGELOG, id);
+                }
+            } catch (java.sql.SQLException | RuntimeException e) {
+                throw e;
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        });
+    }
+
     private void validate(String table, String constraint) throws Exception {
         PgContainerHelper.validateConstraint(su, DSL.table(DSL.name("nexus", table)), constraint);
     }
@@ -159,12 +186,13 @@ class CompletionCheckIntegrationTest {
 
     @Test
     void aLabelWithNoRowStaysIncomplete_theQueueExceptionIsAnAllowlistOfOneLabel() {
-        // P3.3a's queue validation label is not on the allowlist yet; an extension label with no row is incomplete.
-        CompletionCheck.Result r = run(gate1("rdr229-p33a-queue-validation", "rdr229-stamp-nonexistent"));
+        // an extension label that is not on the allowlist is incomplete when it has no row.
+        CompletionCheck.Result r = run(gate1("rdr229-p33c-swap-validation", "rdr229-stamp-nonexistent"));
         assertThat(r.incomplete()).extracting(CompletionCheck.LabelState::label)
-            .containsExactly("rdr229-p33a-queue-validation", "rdr229-stamp-nonexistent");
+            .containsExactly("rdr229-p33c-swap-validation", "rdr229-stamp-nonexistent");
         assertThat(r.gate1()).isFalse();
-        assertThat(StampLabels.NOT_APPLICABLE_WHEN_ABSENT).as("the allowlist is exactly the queue's stamp label").containsOnlyKeys(QUEUE_LABEL);
+        assertThat(StampLabels.NOT_APPLICABLE_WHEN_ABSENT).as("the allowlist is exactly the queue's two labels: its stamp and its P3.3a twin validation")
+            .containsOnlyKeys(QUEUE_LABEL, FK_QUEUE_LABEL);
     }
 
     @Test
@@ -457,6 +485,57 @@ class CompletionCheckIntegrationTest {
         assertThat(done.gate2()).isTrue();
     }
 
+    // ---- P3.3a's read set: the stamp labels and the seven id-twin validation labels (nexus-p2m1x.19) ---------------------
+
+    @Test
+    void p33asReadSetIsTheStampLabelsAndTheSevenTwinValidationLabels_allInGate1_andP31sReadSetIsUnchanged() {
+        List<String> twinLabels = FkTwins.labels();
+        assertThat(twinLabels).as("non-vacuity: seven twins").hasSize(7).doesNotHaveDuplicates()
+            .allSatisfy(l -> assertThat(l).startsWith("rdr229-fkvalidate-").doesNotContain("/")).contains(FK_QUEUE_LABEL);
+        assertThat(CompletionCheck.ReadSet.p33a().gate1Labels()).hasSize(23)
+            .containsExactlyElementsOf(java.util.stream.Stream.concat(StampLabels.all().stream(), twinLabels.stream()).toList());
+        assertThat(CompletionCheck.ReadSet.p33a().gate2Labels()).as("gate 2 adds nothing until P3.3c").isEmpty();
+        assertThat(CompletionCheck.ReadSet.p31().gate1Labels()).as("P3.1's read set is what it was").isEqualTo(StampLabels.all());
+    }
+
+    @Test
+    void aTwinLabelIsCompleteOnlyWhileItsMoveIsCompleteAndItsTwinIsPresentAndValidated() throws Exception {
+        FkTwins.Row topics = FkTwinSpecs.twin("topics");
+        dropTwin("topics");
+        addTwin("topics");   // NOT VALID, whatever an earlier case validated
+        register(topics.label(), "topics", null);
+        CompletionCheck.LabelState open = state(run(gate1(topics.label())), topics.label());
+        assertThat(open.status()).as("a registered, open move").isEqualTo(CompletionCheck.Status.INCOMPLETE);
+        assertThat(open.why()).isEqualTo("open");
+        assertThat(open.table()).as("the label names its table").isEqualTo("topics");
+
+        complete(topics.label());
+        CompletionCheck.LabelState notValid = state(run(gate1(topics.label())), topics.label());
+        assertThat(notValid.status()).as("the move is done and the twin is still NOT VALID").isEqualTo(CompletionCheck.Status.INCOMPLETE);
+        assertThat(notValid.why()).contains(topics.twin()).contains("NOT VALID");
+
+        validate("topics", topics.twin());
+        assertThat(state(run(gate1(topics.label())), topics.label()).status()).as("done and validated").isEqualTo(CompletionCheck.Status.COMPLETE);
+        assertThat(run(gate1(topics.label())).gate1()).isTrue();
+
+        dropTwin("topics");
+        try {
+            CompletionCheck.LabelState gone = state(run(gate1(topics.label())), topics.label());
+            assertThat(gone.status()).as("the twin is gone while its table is there").isEqualTo(CompletionCheck.Status.INCOMPLETE);
+            assertThat(gone.why()).contains(topics.twin()).contains("missing");
+        } finally {
+            addTwin("topics");
+        }
+    }
+
+    @Test
+    void theQueuesTwinLabelAloneHoldsGate1OnAFreshInstall_noQueueMoveIsRegistered() {
+        CompletionCheck.Result r = run(gate1(FK_QUEUE_LABEL));
+        assertThat(ctx.fetchCount(MOVES)).as("no move is registered: nothing registers one when the table is absent").isZero();
+        assertThat(r.labels().get(0).status()).isEqualTo(CompletionCheck.Status.NOT_APPLICABLE);
+        assertThat(r.gate1()).isTrue();
+    }
+
     // ---- P3.1's whole read set (last: it validates every CHECK of the walk) ----------------------------------------------
 
     @Test
@@ -488,5 +567,40 @@ class CompletionCheckIntegrationTest {
         assertThat(r.gate2()).isTrue();
         assertThat(r.gate3()).isFalse();
         assertThat(r.gate3Why()).contains("P3.4");
+    }
+
+    @Test
+    void p33asWholeReadSet_gate1And2HoldOnceEveryMoveIsCompleteEveryCheckAndEveryTwinValidated() throws Exception {
+        int registered = 0;
+        for (var e : P31Checks.checksByTable().entrySet()) {
+            String table = e.getKey();
+            if (table.equals(QUEUE)) {
+                continue;   // absent on this install
+            }
+            register(StampLabels.labelFor(table), table, null);
+            complete(StampLabels.labelFor(table));
+            registered++;
+            for (P31Checks.Row row : e.getValue()) {
+                validate(table, row.constraint());
+            }
+        }
+        CompletionCheck.Result before = run(CompletionCheck.ReadSet.p33a());
+        assertThat(before.incomplete()).as("the stamp labels are done, the six twin labels have no row").hasSize(6);
+        assertThat(before.gate1()).isFalse();
+        for (FkTwins.Row r : FkTwinSpecs.alwaysThere()) {
+            register(r.label(), r.table(), null);
+            complete(r.label());
+            registered++;
+            validate(r.table(), r.twin());
+        }
+        assertThat(registered).as("non-vacuity: 15 stamp moves and 6 twin moves, every table but the absent queue").isEqualTo(21);
+        CompletionCheck.Result r = run(CompletionCheck.ReadSet.p33a());
+        assertThat(r.incomplete()).isEmpty();
+        assertThat(r.labelsSatisfied()).as("23 labels, the two queue ones not applicable").isEqualTo(23);
+        assertThat(r.labels().stream().filter(l -> l.status() == CompletionCheck.Status.NOT_APPLICABLE).map(CompletionCheck.LabelState::label))
+            .containsExactlyInAnyOrder(QUEUE_LABEL, FK_QUEUE_LABEL);
+        assertThat(r.gate1()).isTrue();
+        assertThat(r.gate2()).isTrue();
+        assertThat(r.gate3()).isFalse();
     }
 }
