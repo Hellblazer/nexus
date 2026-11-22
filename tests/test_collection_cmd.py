@@ -117,6 +117,25 @@ def test_list_prints_the_five_catalog_columns(runner, env_creds, mock_db) -> Non
 
 
 @pytest.mark.usefixtures("cloud_mode")
+def test_list_prints_the_collection_id_first_and_a_dash_for_a_null_id(runner, env_creds, mock_db) -> None:
+    """RDR-229 P3.12 (nexus-p2m1x.32): the ID column comes first among the catalog columns and reads the row's
+    ``collection_id``; a row the stamp has not given an id prints ``-``. Every other column is unchanged."""
+    minted, unstamped = "c9001", "code__1-1__voyage-code-3__v1"
+    mock_db.list_collections.return_value = [
+        {"name": minted, "count": 3}, {"name": unstamped, "count": 4},
+    ]
+    result = _invoke_list_with_rows(runner, mock_db, [
+        {**_row(minted, "code", "1-1", "voyage-code-3", 1024), "collection_id": 9001},
+        {**_row(unstamped, "code", "1-1", "voyage-code-3", 1024), "collection_id": None},
+    ])
+    assert result.exit_code == 0, result.output
+    header = result.output.splitlines()[0].split()
+    assert header == ["NAME", "CHUNKS", "STORED", "ID", "CONTENT_TYPE", "OWNER", "MODEL", "DIM", "STATE"], header
+    assert _line_for(result.output, minted).split() == [minted, "3", "3", "9001", "code", "1-1", "voyage-code-3", "1024", "live"]
+    assert _line_for(result.output, unstamped).split() == [unstamped, "4", "4", "-", "code", "1-1", "voyage-code-3", "1024", "live"]
+
+
+@pytest.mark.usefixtures("cloud_mode")
 def test_list_shows_stored_beside_live_counts(runner, env_creds, mock_db) -> None:
     """nexus-7q8zg: a quarantine sibling holds stored chunks with no live
     owner. list printed its live count, 0, while shape and catalog verify

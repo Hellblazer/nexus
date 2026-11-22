@@ -87,6 +87,7 @@ def collection() -> None:
 
 
 _LIST_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("ID", "collection_id"),  # RDR-229 P3.12 (nexus-p2m1x.32): the registry's identity; None (not yet stamped) prints "-"
     ("CONTENT_TYPE", "content_type"),
     ("OWNER", "owner_id"),
     ("MODEL", "embedding_model"),
