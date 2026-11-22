@@ -836,6 +836,11 @@ final class TenantKeyedStateTables {
             + "inserted (rdr229-swap-<table>), returned to the caller and not kept");
         notKeyed.put("LeafIndexPass.Session.registered", LEAF_INDEX_PASS_ENGINE_WIDE + "the labels this pass has inserted so far; "
             + "the session lives for one pass and is closed with its connection");
+        notKeyed.put("LeafIndexPass.backoffs", LEAF_INDEX_PASS_ENGINE_WIDE + "the leaves whose build failed, by leaf relation name, with a "
+            + "failure count and the time the next attempt may start; bounded by the leaf count, in memory only, and read and "
+            + "written on the pass's own thread under its pass lock");
+        notKeyed.put("LeafIndexPass.beforeDdl", LEAF_INDEX_PASS_ENGINE_WIDE + "a test seam: a consumer that sees each DDL statement "
+            + "(its kind, relation and text) before the pass sends it; null in production");
         notKeyed.put("LeafIndexCatalog.Tree.models", LEAF_INDEX_PASS_ENGINE_WIDE + "a snapshot of one table's model partitions, "
             + "read per step and dropped with it");
         notKeyed.put("LeafIndexCatalog.Tree.leaves", LEAF_INDEX_PASS_ENGINE_WIDE + "a snapshot of one table's leaf partitions "

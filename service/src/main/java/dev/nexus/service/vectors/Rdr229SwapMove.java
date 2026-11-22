@@ -13,10 +13,17 @@ package dev.nexus.service.vectors;
  * {@code collection_id} itself, so it writes no row, its verification finds none, and it has no on_complete. A build that carries it
  * and not P3.3c's body is not a release candidate: both land in the one engine cut (P3.3), and a store that ran the placeholder to
  * completion would never register the real row (registration is one INSERT per label, {@code WHERE NOT EXISTS}).
+ *
+ * <p><b>The guard.</b> {@link #PLACEHOLDER} is true while this body is the placeholder, and {@code Main.startLeafIndexPass} starts no pass
+ * while it is, so an engine built from this class registers no inert swap row. Bob's P3.3c commit (nexus-p2m1x.21) deletes the constant
+ * together with the placeholder body; {@code Main} then stops compiling until the guard is removed in that same commit.
  */
 public final class Rdr229SwapMove {
 
     private Rdr229SwapMove() { /* static */ }
+
+    /** True while {@link #spec} is the inert placeholder. P3.3c (nexus-p2m1x.21) deletes this constant with the placeholder body. */
+    public static final boolean PLACEHOLDER = true;
 
     /**
      * The seven fields of a swap move's row beyond its label, driving table and changeset_id, which {@link LeafIndexPass} supplies.
