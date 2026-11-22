@@ -361,6 +361,8 @@ final class TenantKeyedStateTables {
         notKeyed.put("NexusService.aspectQueueDrain", "the drain object bound once at boot; it keeps its state in a "
             + "per-run tally that dies with the run");
         notKeyed.put("StatusHandler.aspectQueue", "a supplier of the install-wide drain result; not keyed by tenant");
+        notKeyed.put("StatusHandler.catalogEpoch", "a supplier of whether the install's role can read the cluster facts the catalog epoch hashes (RDR-229 P3.11); one install-wide boolean, not keyed by tenant");
+        notKeyed.put("CatalogEpoch.NULL_LOGGED", "a once-per-process latch for the WARN that a pg_control member read NULL (RDR-229 P3.11); one install-wide flag, not keyed by tenant");
         notKeyed.put("StatusHandler.collectionTupleIndex", "a supplier of whether the install-wide live-tuple index exists (RDR-229 P3.8); not keyed by tenant");
         notKeyed.put("StatusHandler.liveLabelIndex", "a supplier of whether the install-wide live-label index exists and is valid (RDR-229 P3.12); not keyed by tenant");
         notKeyed.put("AspectQueueDrain.TENANT", "the tenant_id column of the retired queue table, a jOOQ field "
