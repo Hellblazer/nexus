@@ -271,7 +271,14 @@ migration_wal_bytes_per_worker = 13411126
 # Measured: chas lab-m via lab-remote, 2026-11-23, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued
 # on the stack replayed onto develop e635c9a72b (stack-replay/rdr229-phase3 611fb3df2f): ddl: migration=2844, under Sam's 2960 cap for the
 # single P3.5+P3.7 cut (T2 nexus/sam-ruling-rdr229-p35-ddl-cap-2026-11-22).
-migration_ddl_per_worker = 2844
+# 2841 -> 2935 (2026-11-23, nexus-p2m1x.24, RDR-229 P3.5b SQL readers, under Sam's 2960 cap for the P3.5+P3.7 cut, T2 nexus/sam-ruling-rdr229-p35-ddl-cap-2026-11-22;
+# linda's rulings): vectors-077 is 38 CREATE OR REPLACE redefinitions (36 functions, 2 views) and 38 CREATE FUNCTION id twins (<name>_by_id),
+# plus a REVOKE FROM PUBLIC and a GRANT TO nexus_svc on each of the 9 twins whose original revokes PUBLIC (text_gate_probe, text_gate_probe_by_collection,
+# search_topic_set): 38 + 38 + 18 = 94. vectors-078 (12 CONTINUE-gated changesets) adds 0 here: a fresh walk skips them until the stamp moves complete.
+# Measured: chas lab-m via lab-remote, 2026-11-23, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on
+# P3.5b rebased onto b7e58b6c5f (gate jar rebuilt): ddl: migration=2935.
+# 2844 + 94 = 2938 for the replay with P3.5b (computed; the assembly re-measures it).
+migration_ddl_per_worker = 2938
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]
