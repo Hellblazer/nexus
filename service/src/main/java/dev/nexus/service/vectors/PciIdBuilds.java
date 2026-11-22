@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import dev.nexus.service.db.PgSession.PciSettings;
 import dev.nexus.service.vectors.PciCatalog.Leaf;
 import dev.nexus.service.vectors.PciReconcilePlanner.RegistryRow;
 import org.jooq.DSLContext;
@@ -11,11 +12,15 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.BooleanSupplier;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 
 /**
@@ -159,14 +164,73 @@ final class PciIdBuilds {
         return out;
     }
 
-    /** The id backoff keys of the registry rows that can still build, so {@code forgetStaleBackoff} keeps their failures. */
-    static Set<String> buildableKeys(Collection<RegistryRow> registry) {
+    /**
+     * The registry rows of the leaf's (tenant, model). The tenant predicate is REQUIRED, not belt and braces: a superuser or BYPASSRLS admin role is
+     * not filtered by row-level security, and another tenant's live row of the same name would mask this leaf's NOT_IN_REGISTRY drop.
+     */
+    static List<RegistryRow> registry(DSLContext tx, String tenant, String model) {
+        return tx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.LIFECYCLE_STATE,
+                CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.COLLECTION_ID)
+            .from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+            .and(CATALOG_COLLECTIONS.EMBEDDING_MODEL.eq(model))
+            .fetch(r -> new RegistryRow(r.value1(), r.value2(), r.value3(), r.value4()));
+    }
+
+    /**
+     * The backoff keys of the registry rows that can still build, so {@code forgetStaleBackoff} keeps their failures: the name of each, and the id
+     * backoff key of each that has an id.
+     */
+    static Set<String> buildable(Collection<RegistryRow> registry) {
         Set<String> out = new HashSet<>();
         for (RegistryRow row : registry) {
-            if (row.collectionId() != null && row.live() && !row.superseded()) {
-                out.add(PciReconcilePlanner.idBackoffKey(row.collectionId()));
+            if (row.live() && !row.superseded()) {
+                out.add(row.name());
+                if (row.collectionId() != null) {
+                    out.add(PciReconcilePlanner.idBackoffKey(row.collectionId()));
+                }
             }
         }
         return out;
+    }
+
+    /**
+     * The collections the leaf's counting transaction counts: those with a name index ({@code indexed}), those with an id index (an id index judges
+     * its collection by the count too), and the registry's buildable ones. Only a collection that can build counts for anything; a quarantined one
+     * without an index decides nothing.
+     */
+    static Set<String> countTargets(Leaf leaf, Set<String> indexed, Collection<RegistryRow> registry) {
+        Set<String> out = new LinkedHashSet<>(indexed);
+        out.addAll(idIndexedNames(leaf, registry));
+        for (RegistryRow row : registry) {
+            if (row.live() && !row.superseded()) {
+                out.add(row.name());
+            }
+        }
+        return out;
+    }
+
+    /**
+     * The leaf's plan with the id half ({@link PciReconcilePlanner#planWithIds}): the null-id read is {@link #nullIdCollections} and the recount of
+     * the ids' candidates is {@link PciLeafCounting#count} capped at {@code rankCap}, both in the counting transaction {@code tx}.
+     */
+    static PciReconcilePlanner.Plan plan(DSLContext tx, Leaf leaf, int dimension, Map<String, Integer> counts,
+                                         Collection<RegistryRow> registry, Set<String> backedOff, String inFlight,
+                                         PciSettings settings, boolean gate2, boolean gate3, int rankCap) {
+        var inputs = new PciReconcilePlanner.IdPlanInputs(gate2, new PciReconcilePlanner.IdReads() {
+            @Override
+            public Set<String> nullIdCollections(Collection<RegistryRow> candidates) {
+                return PciIdBuilds.nullIdCollections(tx, leaf, candidates);
+            }
+
+            @Override
+            public Map<String, Integer> recount(Collection<String> collections) {
+                Map<String, Integer> out = new HashMap<>();
+                collections.forEach(c ->
+                    out.put(c, PciLeafCounting.count(tx, dimension, c, leaf.model(), leaf.tenant(), rankCap)));
+                return out;
+            }
+        }, gate3);
+        return PciReconcilePlanner.planWithIds(leaf, counts, registry, backedOff, inFlight, settings, inputs);
     }
 }

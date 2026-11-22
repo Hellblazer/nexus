@@ -44,7 +44,6 @@ import java.util.function.Supplier;
 import java.util.function.ToIntFunction;
 import java.util.random.RandomGenerator;
 
-import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_MODELS;
 
 /**
@@ -936,35 +935,12 @@ public final class PciReconciler {
 
     private record Planned(List<Action> actions, int dimension, long countMillis, PciAnchorLedger.Reads anchors) { }
 
-    /**
-     * The first statements of every counting transaction: the per-statement timeout, a custom plan, the leaf's tenant,
-     * and a read-back of it. False (and logged) when the tenant did not take, and the transaction must do nothing more.
-     */
-    private boolean beginCounting(DSLContext tx, Leaf leaf) {
-        String tenant = leaf.tenant();
-        // setLocal binds the matching network timeout with the statement timeout (nexus-u9zkn); the pass puts the
-        // connection's own, longer one back when the transaction ends.
-        PgSession.setLocal(tx, "statement_timeout", Long.toString(countTimeout.toMillis()));
-        tx.select(DSL.function("set_config", SQLDataType.VARCHAR, DSL.val("plan_cache_mode"),
-            DSL.val("force_custom_plan"), DSL.inline(true))).fetch();
-        tenantBinder.bind(tx, tenant);
-        String bound = tx.select(DSL.function("current_setting", SQLDataType.VARCHAR, DSL.val("nexus.tenant"),
-            DSL.inline(true))).fetchOne(0, String.class);
-        if (!tenant.equals(bound)) {
-            log.error("event=pci_count_tenant_mismatch leaf={} expected_tenant={} actual_tenant={} "
-                + "detail=\"counts under the wrong tenant read other rows or none; the leaf is skipped\"",
-                leafId(leaf), tenant, bound);
-            return false;
-        }
-        return true;
-    }
-
     /** The body of the counting transaction for one leaf; {@code null} means skip the leaf. */
     private Planned countAndPlan(DSLContext tx, Leaf leaf, boolean gate2, boolean gate3) {
         long startedNanos = System.nanoTime();
         String tenant = leaf.tenant();
         String model = leaf.model();
-        if (!beginCounting(tx, leaf)) {
+        if (!PciLeafCounting.begin(tx, leaf, countTimeout, tenantBinder)) {
             return null;
         }
 
@@ -974,23 +950,8 @@ public final class PciReconciler {
             log.warn("event=pci_reconcile_leaf_skipped leaf={} reason=unknown_model model={}", leafId(leaf), model);
             return null;
         }
-        // The tenant predicate below is REQUIRED, not belt and braces: a superuser or BYPASSRLS admin role is not filtered
-        // by row-level security, and another tenant's live row of the same name would mask this leaf's NOT_IN_REGISTRY drop.
-        List<RegistryRow> registry = tx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.LIFECYCLE_STATE,
-                CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.COLLECTION_ID)
-            .from(CATALOG_COLLECTIONS)
-            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
-            .and(CATALOG_COLLECTIONS.EMBEDDING_MODEL.eq(model))
-            .fetch(r -> new RegistryRow(r.value1(), r.value2(), r.value3(), r.value4()));
-
-        Set<String> buildable = new HashSet<>();
-        for (RegistryRow row : registry) {
-            if (row.live() && !row.superseded()) {
-                buildable.add(row.name());
-            }
-        }
-        buildable.addAll(PciIdBuilds.buildableKeys(registry));
-        forgetStaleBackoff(leaf, buildable);
+        List<RegistryRow> registry = PciIdBuilds.registry(tx, tenant, model);
+        forgetStaleBackoff(leaf, PciIdBuilds.buildable(registry));
 
         Set<String> indexed = new LinkedHashSet<>();
         for (Index index : leaf.indexes()) {
@@ -1001,19 +962,12 @@ public final class PciReconciler {
                 }
             }
         }
-        Set<String> toCount = new LinkedHashSet<>(indexed);
-        toCount.addAll(PciIdBuilds.idIndexedNames(leaf, registry));   // an id index judges its collection by the count too
-        for (RegistryRow row : registry) {
-            // Only a collection that can build counts for anything; a quarantined one without an index decides nothing.
-            if (row.live() && !row.superseded()) {
-                toCount.add(row.name());
-            }
-        }
+        Set<String> toCount = PciIdBuilds.countTargets(leaf, indexed, registry);
 
         int b = settings.buildMinRows();
         Map<String, Integer> counts = new HashMap<>();
         for (String collection : toCount) {
-            counts.put(collection, count(tx, dimension, collection, model, tenant, b));
+            counts.put(collection, PciLeafCounting.count(tx, dimension, collection, model, tenant, b));
         }
 
         Instant now = clock.instant();
@@ -1037,25 +991,12 @@ public final class PciReconciler {
         if (recounted) {
             int rankCap = Math.multiplyExact(b, RANK_CAP_FACTOR);
             for (String collection : candidates) {
-                counts.put(collection, count(tx, dimension, collection, model, tenant, rankCap));
+                counts.put(collection, PciLeafCounting.count(tx, dimension, collection, model, tenant, rankCap));
             }
         }
         // RDR-229 P3.4: the id half. The null-id read runs only once gate 2 holds, for the collections that could build.
-        int rankCap = Math.multiplyExact(b, RANK_CAP_FACTOR);
-        var idInputs = new PciReconcilePlanner.IdPlanInputs(gate2, new PciReconcilePlanner.IdReads() {
-            @Override
-            public Set<String> nullIdCollections(Collection<RegistryRow> candidates) {
-                return PciIdBuilds.nullIdCollections(tx, leaf, candidates);
-            }
-
-            @Override
-            public Map<String, Integer> recount(Collection<String> collections) {
-                Map<String, Integer> out = new HashMap<>();
-                collections.forEach(c -> out.put(c, count(tx, dimension, c, model, tenant, rankCap)));
-                return out;
-            }
-        }, gate3);
-        var plan = PciReconcilePlanner.planWithIds(leaf, counts, registry, backedOff, inFlight, settings, idInputs);
+        var plan = PciIdBuilds.plan(tx, leaf, dimension, counts, registry, backedOff, inFlight, settings, gate2, gate3,
+            Math.multiplyExact(b, RANK_CAP_FACTOR));
         List<Action> actions = plan.actions();
         PciAnchorLedger.Reads anchors = readAnchors(tx, leaf, dimension, actions, now);
         // One reading, logged and carried: the pass line's sum and max are over exactly these figures. The per-leaf
@@ -1077,18 +1018,6 @@ public final class PciReconciler {
         List<Index> subjects = leaf.indexes().stream()
             .filter(i -> (i.parsed() || i.idParsed()) && i.valid() && !dropping.contains(i.name())).toList();
         return subjects.isEmpty() ? PciAnchorLedger.Reads.NONE : ledger.read(tx, leaf, dim, subjects, now);
-    }
-
-    /**
-     * Rows of {@code collection} on the leaf's (model, tenant) key, stopped at {@code cap + 1}. The probe's explicit
-     * {@code tenant_id} predicate is REQUIRED for correctness: the admin role reads every tenant's chunks
-     * ({@code chunks_gate_probe_owner_read}, vectors-029), so without it a same-named collection of another tenant would
-     * be added to the count and a leaf would build an index its own rows do not warrant.
-     */
-    private static int count(DSLContext tx, int dim, String collection, String model, String tenant, int cap) {
-        Integer n = PgVectorRepository.probeSelectedRowsQuery(tx, dim, new String[] {collection}, model, tenant, cap)
-            .fetchOne(0, Integer.class);
-        return n == null ? 0 : n;
     }
 
     // -- execution, in autocommit ------------------------------------------------------------------------------
@@ -1169,7 +1098,7 @@ public final class PciReconciler {
         long[] figures;
         try {
             figures = pass.transaction(tx -> {
-                if (!beginCounting(tx, leaf)) {
+                if (!PciLeafCounting.begin(tx, leaf, countTimeout, tenantBinder)) {
                     return null;
                 }
                 PgSession.setLocal(tx, "lock_timeout", SIZE_LOCK_TIMEOUT);
