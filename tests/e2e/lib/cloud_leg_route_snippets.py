@@ -140,6 +140,29 @@ assert index is None or isinstance(index, bool), "collection_tuple_index_present
 print("collection_tuple_index_present:", "absent" if index is None else index)
 """
 
+IMPORT_MARKER = r"""
+from nexus.backup import cloud_import
+# RDR-229 P3.11 (nexus-p2m1x.31): GET /v1/tenant/import-marker answers the caller's own tenant's restore marker
+# (None when nothing was restored). After a relabelling restore it carries `collections_relabelled` (a list) and
+# `collections_relabelled_count` (an int); both are absent on an older engine. Read-only, nothing is written.
+client = cloud_import.connect()
+try:
+    marker = client.read_marker()
+    assert marker is None or isinstance(marker, dict), "the import marker is neither absent nor an object"
+    if isinstance(marker, dict):
+        relabelled = marker.get("collections_relabelled")
+        assert relabelled is None or isinstance(relabelled, list), "collections_relabelled is not a list"
+        count = marker.get("collections_relabelled_count")
+        assert count is None or isinstance(count, int), "collections_relabelled_count is not an int"
+    print("import marker:", "absent" if marker is None else "present")
+finally:
+    for name in ("close_http", "close_all"):
+        close = getattr(client, name, None)
+        if callable(close):
+            close()
+            break
+"""
+
 DOC_REGISTER_UNREGISTERED = r"""
 from nexus.commands.catalog import _get_catalog
 from nexus.registration_retry import unregistered_collection_name
