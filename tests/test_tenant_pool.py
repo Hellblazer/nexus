@@ -40,6 +40,7 @@ from nexus.service_handles import SharedClientSlot
 from tests import _ddl_counter, _engine_substrate, _storage_touch_guard, _tenant_drop, _tenant_pool
 from tests._engine_substrate import drop_test_tenant, ensure_engine, mint_test_tenant
 from tests._tenant_pool import TenantLeakError, TenantLeaseBusyError, TenantPool
+from tests._tenant_pool_seeds import _STRAY_CHUNK_SQL
 
 COLLECTION = "knowledge__pooltest__bge-base-en-v15-768__v1"
 GHOST_KEY = "rdr204_ghost_sweep_v1"
@@ -123,20 +124,6 @@ def test_census_names_a_row_left_in_a_plain_table(state: dict[str, Any]) -> None
         _tenant_pool.census(state, tenant)  # and the wipe makes it pass again
     finally:
         drop_test_tenant(state, tenant)
-
-
-#: One chunk row in a partition leaf, under a collection that has a registry row. Since RDR-229 P3.1 (nexus-p2m1x.17)
-#: a chunk carries the registry's ``collection_id`` beside the name (``chunks_collection_id_check``), so the row's
-#: registry row is made first and the id read back from it, in the same statement text.
-_STRAY_CHUNK_SQL = (
-    "SET session_replication_role = replica; "
-    "INSERT INTO nexus.catalog_collections (tenant_id, name, content_type, owner_id, embedding_model, lifecycle_state) "
-    "VALUES (:'tenant', 'c', 'knowledge', 'test-seed', 'bge-base-en-v15-768', 'live'); "
-    "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_768, embedding_model, collection_id) "
-    "VALUES (:'tenant', 'c', decode(repeat('00', 32), 'hex'), 'x', "
-    "array_fill(0.1::real, ARRAY[768])::nexus.vector(768), 'bge-base-en-v15-768', "
-    "(SELECT collection_id FROM nexus.catalog_collections WHERE tenant_id = :'tenant' AND name = 'c'));"
-)
 
 
 def test_census_names_a_row_left_in_a_partition_leaf(state: dict[str, Any]) -> None:
