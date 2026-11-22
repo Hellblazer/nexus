@@ -124,3 +124,15 @@ def test_control_other_work_beside_the_restart_notice_still_defers_the_swap_and_
     status["boot_work"] += [dict(_RESTART_ENTRY), {**_OLD_ENTRY, "id": "pci-build:x", "what": "building an index"}]
     assert _busy(monkeypatch, tmp_path, status) is not None
     assert not _harness.boot_work_settled(status)
+
+
+def test_the_restart_needed_status_the_engine_publishes_is_idle_for_both_rules(monkeypatch, tmp_path):
+    """The status of an install whose stamps are done and whose P3.5b changesets wait for a restart: the one entry in
+    ``boot_work`` is ``rdr229-restart`` and ``rename_missing`` says ``restart``. (Written by hand from the engine's shape: the
+    Java fixture test renders the three states above; this one's entry is ``CompletionBootWork.publishRestartEntry``'s.)"""
+    status = _fixture("restart_needed")
+    assert [e["id"] for e in status["boot_work"]] == ["rdr229-restart"], "non-vacuity: the restart entry is the only work listed"
+    assert status["rdr229_completion"]["rename_missing"] == "restart"
+    assert _busy(monkeypatch, tmp_path, status) is None
+    assert _harness.boot_work_settled(status)
+    assert _harness.status_says_idle(200, status)
