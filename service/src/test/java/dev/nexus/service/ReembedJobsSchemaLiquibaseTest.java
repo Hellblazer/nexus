@@ -147,8 +147,24 @@ class ReembedJobsSchemaLiquibaseTest {
                 assertThat(rls.enabled()).as(table + " RLS ENABLE").isTrue();
                 assertThat(rls.forced()).as(table + " RLS FORCE").isTrue();
                 List<PgCatalogProbes.Policy> policies = PgCatalogProbes.policies(ctx, "nexus", table);
-                assertThat(policies).as(table + " policies").hasSize(1);
-                assertThat(policies.get(0).policyname()).isEqualTo("tenant_isolation");
+                // RDR-229 P3.1 (vectors-070): nexus.reembed_jobs also has the migrating role's owner-read SELECT
+                // policy; nexus.reembed_job_moves has none (its move is not a stamp move), so it stays exactly one.
+                if (table.equals("reembed_jobs")) {
+                    assertThat(policies).as(table + " policies").extracting(PgCatalogProbes.Policy::policyname)
+                        .containsExactlyInAnyOrder("tenant_isolation", "reembed_jobs_owner_read");
+                    PgCatalogProbes.Policy ownerRead = policies.stream()
+                        .filter(p -> p.policyname().equals("reembed_jobs_owner_read")).findFirst().orElseThrow();
+                    assertThat(ownerRead.cmd()).isEqualTo("SELECT");
+                    assertThat(ownerRead.qual()).isEqualTo("true");
+                    assertThat(ownerRead.withCheck()).isNull();
+                    assertThat(PgCatalogProbes.policyRoles(ctx, "nexus", table).stream()
+                            .filter(p -> p.policyname().equals("reembed_jobs_owner_read"))
+                            .map(PgCatalogProbes.PolicyRoles::toString).toList())
+                        .containsExactly("reembed_jobs_owner_read roles={" + PgContainerHelper.USERNAME + "} cmd=SELECT");
+                } else {
+                    assertThat(policies).as(table + " policies").extracting(PgCatalogProbes.Policy::policyname)
+                        .containsExactly("tenant_isolation");
+                }
             }
         }
     }

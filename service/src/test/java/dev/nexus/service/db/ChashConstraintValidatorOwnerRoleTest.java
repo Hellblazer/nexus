@@ -35,7 +35,8 @@ import java.util.List;
  * production's {@code nexus_admin} is ({@link ChashConstraintValidator}, "Role and connection"). Every table the job touches
  * is FORCE row-level security with a policy keyed to the tenant stamp, which this session never sets, so a count taken as the
  * session reads no row. The {@code nexus.chunks} leaves carry an owner SELECT policy for the migrating role (here the role is
- * made a member of the one the policy names, as production's admin role is it); the manifest has none. The job must (1) read
+ * made a member of the one the policy names, as production's admin role is it); the manifest has one too since RDR-229 P3.1
+ * (catalog_document_chunks_owner_read, vectors-070), so the owner reads it and reports its bad row as a pre-check count. The job must (1) read
  * every tenant's rows where the role can, (2) report the pre-check as unavailable and not guess where it cannot, letting the
  * VALIDATE refuse, and (3) never take a lock stronger than ACCESS SHARE or lift FORCE: a reader that holds ACCESS SHARE on
  * every table through the whole run must not block it, which an ACCESS EXCLUSIVE {@code NO FORCE ROW LEVEL SECURITY} would.
@@ -190,7 +191,7 @@ class ChashConstraintValidatorOwnerRoleTest {
 
     @Test
     @Order(1)
-    void theOwnerReadsEveryTenantsChunkRows_butSaysUnavailableForTheManifest_andAltersNothingOnADryRun() throws Exception {
+    void theOwnerReadsEveryTenantsChunkRowsAndTheManifest_reportingTheBadRowOfEach_andAltersNothingOnADryRun() throws Exception {
         var before = forceFlags();
         assertThat(before.values()).as("the tables are FORCE row-level security").doesNotContain(false).isNotEmpty();
 
@@ -201,27 +202,43 @@ class ChashConstraintValidatorOwnerRoleTest {
         assertThat(result.stopped()).isNull();
         assertThat(dry.total).isPositive();
         var refused = dry.steps.stream().filter(s -> s.outcome() == Outcome.REFUSED).toList();
-        assertThat(refused).as("tenant A's leaf, read through the owner policy, with its one bad row").hasSize(1);
-        assertThat(refused.get(0).reason()).isEqualTo("bad_rows");
-        assertThat(refused.get(0).badRows()).isEqualTo(1L);
-        assertThat(refused.get(0).exampleChashes()).containsExactly(LEGACY_HEX);
-        assertThat(refused.get(0).precheck()).isEqualTo("bad_rows");
-        assertThat(refused.get(0).table()).startsWith("nexus.chunks_");
-        assertThat(refused.get(0).detail().unattributed()).as("a leaf's counts are any tenant's rows").isTrue();
-        assertThat(refused.get(0).detail().chunks()).hasSize(1);
-        assertThat(refused.get(0).detail().chunks().get(0).owners().owners()).extracting(o -> o.docId()).containsExactly("9.9");
+        // RDR-229 P3.1 (vectors-070): the manifest carries an owner-read policy for the migrating role, so the owner reads it too
+        // and its one bad row is refused alongside tenant A's leaf, as a pre-check count (it was precheck_unavailable)
+        assertThat(refused).as("tenant A's leaf and the manifest, each read through its owner policy, each with its one bad row")
+            .hasSize(2);
+        assertThat(refused.stream().filter(s -> s.table().startsWith("nexus.chunks_"))).as("tenant A's leaf").hasSize(1);
+        Step leaf = refused.stream().filter(s -> s.table().startsWith("nexus.chunks_")).findFirst().orElseThrow();
+        assertThat(leaf.reason()).isEqualTo("bad_rows");
+        assertThat(leaf.badRows()).isEqualTo(1L);
+        assertThat(leaf.exampleChashes()).containsExactly(LEGACY_HEX);
+        assertThat(leaf.precheck()).isEqualTo("bad_rows");
+        assertThat(leaf.table()).startsWith("nexus.chunks_");
+        assertThat(leaf.detail().unattributed()).as("a leaf's counts are any tenant's rows").isTrue();
+        assertThat(leaf.detail().chunks()).hasSize(1);
+        assertThat(leaf.detail().chunks().get(0).owners().owners()).extracting(o -> o.docId()).containsExactly("9.9");
 
         Step manifest = dry.steps.stream().filter(s -> s.table().equals("nexus.catalog_document_chunks")).findFirst().orElseThrow();
-        assertThat(manifest.outcome()).as("a dry run does not guess that the manifest would validate").isEqualTo(Outcome.DEFERRED);
-        assertThat(manifest.reason()).isEqualTo("precheck_unavailable");
-        assertThat(manifest.precheck()).isEqualTo("unavailable");
+        assertThat(refused).as("the manifest's step is one of the two refusals").contains(manifest);
+        assertThat(manifest.outcome()).as("the owner reads the manifest, so a dry run refuses its bad row").isEqualTo(Outcome.REFUSED);
+        assertThat(manifest.reason()).isEqualTo("bad_rows");
+        assertThat(manifest.precheck()).as("a count of the owner's own, not unavailable").isEqualTo("bad_rows");
+        assertThat(manifest.badRows()).isEqualTo(1L);
+        assertThat(manifest.badRowsCapped()).isFalse();
+        assertThat(manifest.exampleChashes()).containsExactly(LEGACY_HEX);
+        assertThat(manifest.tenantRows()).as("no per-tenant recount: the pre-check already read every tenant's rows").isEmpty();
+        assertThat(manifest.detail()).as("the per-reason account by tenant").isNotNull();
+        assertThat(manifest.detail().reasonCounts()).containsOnlyKeys("manifest_without_chunk").containsEntry("manifest_without_chunk", 1L);
+        assertThat(manifest.detail().countsCapped()).isFalse();
+        assertThat(manifest.detail().tenants()).containsExactly(TENANT_A);
+        assertThat(manifest.detail().unattributed()).isFalse();
+        assertThat(manifest.detail().documents().get("manifest_without_chunk").docs()).extracting(d -> d.docId()).containsExactly("9.9");
         assertThat(dry.steps.stream().filter(s -> s.outcome() == Outcome.WOULD_VALIDATE)).as("the clean chunk leaves").isNotEmpty();
         assertThat(forceFlags()).as("FORCE ROW LEVEL SECURITY was never lifted").isEqualTo(before);
     }
 
     @Test
     @Order(2)
-    void aBadManifestRow_isRefusedByTheValidateItself_countedPerTenantAfterwards_andTheConstraintStaysNotValid() throws Exception {
+    void aBadManifestRow_isRefusedByThePrecheckTheOwnerPolicyAllows_beforeAnyValidate_andTheConstraintStaysNotValid() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSL.using(su, SQLDialect.POSTGRES).update(CHUNKS).set(CHUNKS.CHASH, sha256("fixed"))
@@ -235,13 +252,16 @@ class ChashConstraintValidatorOwnerRoleTest {
         Step manifest = run.steps.stream().filter(s -> s.table().equals("nexus.catalog_document_chunks")).findFirst().orElseThrow();
         assertThat(manifest.outcome()).isEqualTo(Outcome.REFUSED);
         assertThat(manifest.reason()).isEqualTo("bad_rows");
-        assertThat(manifest.precheck()).as("the pre-check stays unavailable; the count is the refusal's own").isEqualTo("unavailable");
-        assertThat(manifest.badRows()).as("counted per known tenant through its scoped session, after the VALIDATE failed")
+        // RDR-229 P3.1 (vectors-070): the owner reads the manifest through catalog_document_chunks_owner_read, so the pre-check is
+        // available and counts the bad row itself (it was unavailable, and the count came from the VALIDATE's refusal and a
+        // per-tenant recount through scoped sessions: tenantRows was {TENANT_A=1}, and is now empty because nothing was recounted)
+        assertThat(manifest.precheck()).as("the pre-check counted the bad row itself").isEqualTo("bad_rows");
+        assertThat(manifest.badRows()).as("counted by the owner's pre-check, before any VALIDATE ran")
             .isEqualTo(1L);
-        assertThat(manifest.tenantRows()).containsExactly(java.util.Map.entry(TENANT_A, 1L));
+        assertThat(manifest.tenantRows()).as("no per-tenant recount: the pre-check already read every tenant's rows").isEmpty();
         assertThat(manifest.exampleChashes()).containsExactly(LEGACY_HEX);
         assertThat(manifest.badRowsCapped()).isFalse();
-        // the pre-check was unavailable, so the account is the per-tenant one through the scoped sessions, exact and attributed
+        // the account is the per-tenant one through the scoped sessions, exact and attributed
         assertThat(manifest.detail()).as("the per-reason account by tenant, not an RLS-subset floor").isNotNull();
         assertThat(manifest.detail().reasonCounts()).containsOnlyKeys("manifest_without_chunk").containsEntry("manifest_without_chunk", 1L);
         assertThat(manifest.detail().countsCapped()).isFalse();

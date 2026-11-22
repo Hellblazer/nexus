@@ -221,10 +221,22 @@ class CanaryQueryRingSchemaLiquibaseTest {
             assertThat(rls.enabled()).as("RLS ENABLE").isTrue();
             assertThat(rls.forced()).as("RLS FORCE").isTrue();
             List<PgCatalogProbes.Policy> policies = PgCatalogProbes.policies(ctx, "nexus", "canary_query_ring");
-            assertThat(policies).hasSize(1);
-            assertThat(policies.get(0).policyname()).isEqualTo("tenant_isolation");
-            assertThat(policies.get(0).qual()).contains("nexus.tenant");
-            assertThat(policies.get(0).withCheck()).contains("nexus.tenant");
+            // RDR-229 P3.1 (vectors-070): the tenant policy, and the migrating role's owner-read SELECT policy.
+            assertThat(policies).extracting(PgCatalogProbes.Policy::policyname)
+                .containsExactlyInAnyOrder("tenant_isolation", "canary_query_ring_owner_read");
+            PgCatalogProbes.Policy tenant = policies.stream()
+                .filter(p -> p.policyname().equals("tenant_isolation")).findFirst().orElseThrow();
+            assertThat(tenant.qual()).contains("nexus.tenant");
+            assertThat(tenant.withCheck()).contains("nexus.tenant");
+            PgCatalogProbes.Policy ownerRead = policies.stream()
+                .filter(p -> p.policyname().equals("canary_query_ring_owner_read")).findFirst().orElseThrow();
+            assertThat(ownerRead.cmd()).isEqualTo("SELECT");
+            assertThat(ownerRead.qual()).isEqualTo("true");
+            assertThat(ownerRead.withCheck()).isNull();
+            assertThat(PgCatalogProbes.policyRoles(ctx, "nexus", "canary_query_ring").stream()
+                    .filter(p -> p.policyname().equals("canary_query_ring_owner_read"))
+                    .map(PgCatalogProbes.PolicyRoles::toString).toList())
+                .containsExactly("canary_query_ring_owner_read roles={" + PgContainerHelper.USERNAME + "} cmd=SELECT");
         }
     }
 
