@@ -17,6 +17,13 @@ import java.util.Set;
  * naming the restart, and the restart signal is visible on {@code GET /v1/status}. After the restart the changelog holds every id of
  * {@code db/rdr229/p35b-continue-changesets.txt} and the rename succeeds.
  *
+ * <p><b>One leg is faked while P3.5b's list is absent</b> ({@link Rdr229RenameEngine#usingFixtureList()}): there is no P3.5b changeset
+ * for boot 2's walk to apply, so {@code restart()} itself records a harness fixture id as EXECUTED, and "databasechangelog holds every
+ * P3.5b changeset" after boot 2 proves only that the readiness arithmetic follows the changelog, never that P3.5b's real CONTINUE
+ * changesets apply at the second boot. The assertion says so in its description while the fixture stands in. The tripwire for the real
+ * leg is {@link #theP35bChangesetListIsShippedAndNamesAtLeastOneChangeset}, red until the list exists; the fixture applies only when the
+ * resource is absent, never when it is present and empty.
+ *
  * <p>One test, staged, because each stage is the state the next one starts from. The refusal is asserted before the signal and the
  * changelog list, so on a tree without P3.7 it fails on the rename's behaviour first.
  */
@@ -80,7 +87,10 @@ class Rdr229FreshInstallRenameRestartTest {
                 () -> engine.completion().gate3() && engine.readiness().filter(Missing.NONE::equals).isPresent()))
                 .as("boot 2: gate 3 holds and nothing is missing; readiness " + engine.readiness().map(Object::toString)
                     .orElse("unreadable")).isTrue();
-            assertThat(engine.appliedChangesets()).as("boot 2: databasechangelog holds every P3.5b CONTINUE changeset")
+            assertThat(engine.appliedChangesets()).as("boot 2: databasechangelog holds every P3.5b CONTINUE changeset"
+                    + (Rdr229RenameEngine.usingFixtureList()
+                        ? " [FAKED LEG: P3.5b's list is absent, so restart() recorded the harness fixture id as EXECUTED; "
+                            + "no real P3.5b changeset was applied by boot 2's walk]" : ""))
                 .containsAll(ids);
             assertThat(engine.statusCompletion().path("rename_missing").asText("absent"))
                 .as("boot 2: the status no longer asks for a restart").isEqualTo("none");
@@ -97,5 +107,18 @@ class Rdr229FreshInstallRenameRestartTest {
             assertThat(engine.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, coll("r9b", 2))))
                 .as("boot 2: the renamed collection is registered under its new label").isNotNull();
         }
+    }
+
+    /**
+     * The tripwire for the faked leg above: the resource P3.5b's code writes exists and names at least one changeset. Red until P3.5b's
+     * list lands (it has twelve ids and arrives with the rebase onto P3.5b); a green fresh-install test with this one red means the
+     * boot-2 leg ran on the fixture.
+     */
+    @Test
+    void theP35bChangesetListIsShippedAndNamesAtLeastOneChangeset() {
+        assertThat(dev.nexus.service.datamove.P35bChangesets.resourceAbsent())
+            .as("db/rdr229/p35b-continue-changesets.txt is on the classpath (P3.5b's code writes it)").isFalse();
+        assertThat(dev.nexus.service.datamove.P35bChangesets.fromResource())
+            .as("and it lists at least one P3.5b changeset id: an empty list leaves the rename refused for ever").isNotEmpty();
     }
 }
