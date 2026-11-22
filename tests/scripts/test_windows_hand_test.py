@@ -46,14 +46,14 @@ def test_the_set_is_the_ci_steps_own_arguments_junit_included() -> None:
 
 def test_a_missing_step_fails_loud(tmp_path: Path) -> None:
     wf = tmp_path / "wf.yml"
-    wf.write_text("jobs:\n  j:\n    steps:\n      - name: other\n        run: echo\n", encoding="utf-8")
+    wf.write_text(f"jobs:\n  {wht.SET_JOB}:\n    steps:\n      - name: other\n        run: echo\n", encoding="utf-8")
     with pytest.raises(SystemExit, match="expected one"):
         wht.ci_set_args(wf)
 
 
 def test_a_set_step_that_changed_shape_fails_loud(tmp_path: Path) -> None:
     wf = tmp_path / "wf.yml"
-    wf.write_text(f"jobs:\n  j:\n    steps:\n      - name: {wht.SET_STEP}\n        run: echo hi\n", encoding="utf-8")
+    wf.write_text(f"jobs:\n  {wht.SET_JOB}:\n    steps:\n      - name: {wht.SET_STEP}\n        run: echo hi\n", encoding="utf-8")
     with pytest.raises(SystemExit, match="shape changed"):
         wht.ci_set_args(wf)
 
@@ -663,3 +663,21 @@ def test_the_entry_point_installs_the_signal_handlers_before_main() -> None:
     (block,) = [n for n in tree.body if isinstance(n, ast.If) and "__main__" in ast.unparse(n.test)]
     calls = [ast.unparse(s) for s in block.body]
     assert calls[0] == "end_on_signal()" and "main()" in calls[1], calls
+
+
+def test_a_step_of_the_same_name_in_another_job_is_not_the_set_jobs(tmp_path: Path) -> None:
+    """nexus-21kr3: the label-windows job repeats the fixup and floor steps; a hand run copies the set job's."""
+    wf = tmp_path / "wf.yml"
+    wf.write_text(
+        f"jobs:\n  {wht.SET_JOB}:\n    steps:\n      - name: {wht.FIXUP_STEP}\n        run: echo set\n"
+        f"  label-windows:\n    steps:\n      - name: {wht.FIXUP_STEP}\n        run: echo label\n",
+        encoding="utf-8",
+    )
+    assert wht.ci_step_run(wht.FIXUP_STEP, wf).strip() == "echo set"
+    import yaml  # noqa: PLC0415 -- as the other workflow readers here
+
+    # the real workflow carries the name twice, and the lookup still finds exactly one
+    doc = yaml.safe_load(wht.WORKFLOW.read_text(encoding="utf-8"))
+    named = [j for j, body in doc["jobs"].items() for s in body.get("steps") or [] if s.get("name") == wht.FIXUP_STEP]
+    assert wht.SET_JOB in named and len(named) >= 2, named
+    assert wht.ci_step_run(wht.FIXUP_STEP) and wht.ci_step_run(wht.FLOOR_STEP)
