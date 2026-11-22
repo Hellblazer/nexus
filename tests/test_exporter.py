@@ -688,18 +688,22 @@ class TestEmbeddingModelGateOfAMintedLabel:
             return real(db)
 
         monkeypatch.setattr(exporter, "_owners_apply", _reached)
-        # voyage-context-3: a model the name guess for ``c9`` never answers, so only the row can pass it
+        # a model the name guess for ``c9`` never answers, so only the row can pass it
+        assert exporter.index_model_for_collection("c9") != "ext-embedder-x"
         with pytest.raises(_PastTheGate):
             self._run(ephemeral_db, tmp_path, monkeypatch,
-                      row_model="voyage-context-3", export_model="voyage-context-3")
+                      row_model="ext-embedder-x", export_model="ext-embedder-x")
 
     def test_an_export_in_another_model_than_the_rows_is_refused_naming_the_rows_model(
         self, ephemeral_db, tmp_path, monkeypatch,
     ) -> None:
+        import nexus.exporter as exporter
+
+        # the export is in the model the name guess answers for ``c9``, so only the row's model can refuse it
         with pytest.raises(EmbeddingModelMismatch) as exc_info:
             self._run(ephemeral_db, tmp_path, monkeypatch,
-                      row_model="voyage-context-3", export_model="voyage-code-3")
-        assert "requires 'voyage-context-3'" in str(exc_info.value) and "'c9'" in str(exc_info.value)
+                      row_model="ext-embedder-x", export_model=exporter.index_model_for_collection("c9"))
+        assert "requires 'ext-embedder-x'" in str(exc_info.value) and "'c9'" in str(exc_info.value)
 
 
 # ── Unit: format version validation ──────────────────────────────────────────

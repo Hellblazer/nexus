@@ -213,7 +213,7 @@ def test_an_unknown_embedder_reads_as_external_and_has_no_sibling(rows) -> None:
 
 def test_a_minted_label_reads_its_embedder_from_its_registry_row(rows) -> None:
     rows["c19"] = _row("knowledge", "rfvyy-ext", BGE)
-    rows["c20"] = _row("knowledge", "rfvyy-ext", "voyage-context-3")
+    rows["c20"] = _row("knowledge", "rfvyy-ext", "ext-embedder-x")
     assert sw.is_external_embedder("c19") is False
     assert sw.is_external_embedder("c20") is True
 
@@ -230,7 +230,7 @@ def test_a_minted_label_with_no_row_or_an_unreadable_one_reads_as_external(monke
 
 
 def test_the_ack_free_route_of_a_minted_voyage_label_is_the_subjects_bge_collection(monkeypatch: pytest.MonkeyPatch, rows) -> None:
-    rows["c416"] = _row("knowledge", "rfvyy-ext", "voyage-context-3")
+    rows["c416"] = _row("knowledge", "rfvyy-ext", "ext-embedder-x")
     monkeypatch.setattr("nexus.catalog.rows.resolve.find_collection", lambda ct, owner, model: None)
     assert sw.bge_sibling("c416") == f"knowledge__rfvyy-ext__{BGE}__v1"
     assert sw.resolve_sensitive_collection("c416", ack=False, what="t") == f"knowledge__rfvyy-ext__{BGE}__v1"
@@ -240,7 +240,7 @@ def test_a_registered_bge_collection_of_the_subject_is_the_sibling_whatever_its_
     """Rendering a name beside a live minted row would register a second live collection on one tuple (409)."""
     from nexus.catalog.collection_name import CollectionAttributes
 
-    rows["c416"] = _row("knowledge", "rfvyy-ext", "voyage-context-3")
+    rows["c416"] = _row("knowledge", "rfvyy-ext", "ext-embedder-x")
     seen: list[tuple[str, str, str]] = []
 
     def find(ct: str, owner: str, model: str):
@@ -534,7 +534,7 @@ def test_a_minted_label_whose_row_names_no_embedding_model_reads_as_external(mon
 
 @pytest.mark.parametrize(("row", "expected"), [
     ({"embedding_model": "bge-base-en-v15-768"}, None),
-    ({"embedding_model": "voyage-context-3"}, "voyage-context-3"),
+    ({"embedding_model": "ext-embedder-x"}, "ext-embedder-x"),
 ])
 def test_the_sensitivity_doctor_reads_a_minted_labels_embedder_from_its_row(
     monkeypatch: pytest.MonkeyPatch, row: dict, expected: str | None,
@@ -568,7 +568,7 @@ def test_a_found_bge_sibling_is_noted_registered_so_the_later_gate_reads_it_as_l
     from nexus import collection_mint
     from nexus.catalog.collection_name import CollectionAttributes
 
-    rows["c416"] = _row("knowledge", "rfvyy-ext", "voyage-context-3")
+    rows["c416"] = _row("knowledge", "rfvyy-ext", "ext-embedder-x")
     noted: list[tuple[str, dict]] = []
     monkeypatch.setattr(collection_mint, "note_registered", lambda label, row: noted.append((label, row)))
     monkeypatch.setattr("nexus.catalog.rows.resolve.find_collection", lambda ct, owner, model: CollectionAttributes(
