@@ -69,7 +69,7 @@ import java.util.function.Consumer;
  *
  * <p><b>Registering.</b> One {@code INSERT ... WHERE NOT EXISTS} on the label, on the admin connection, with the text of
  * {@link Rdr229SwapMove#spec} (P3.3c's) and the run-time changeset_id {@link #CHANGESET_PREFIX}{@code <engine version>} (S-3 point
- * 3, rule 2: an engine pass whose changeset has no on_complete text). A row that exists, however it got there, is left alone.
+ * 3, rule 2: the engine registers the row, not another move's on_complete). A row that exists, however it got there, is left alone.
  *
  * <p><b>Locks.</b> The ONLY constraints and the leaf constraints take short exclusive locks on a table that serves; each runs under a
  * {@link #DDL_LOCK_TIMEOUT} lock timeout and a failure leaves the rest for the next tick. The builds take {@code lock_timeout 0} (as
