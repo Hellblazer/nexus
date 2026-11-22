@@ -74,10 +74,24 @@ class TenantExportCollectionIdParityTest {
         List<String> why = new ArrayList<>();
         if (!e.namedColumns().contains(column)) why.add("not named by the registry entry");
         if (!e.triggerMaintained().contains(column)) why.add("not maintained (import-computed ids are skipped by the load's verification)");
-        if (!e.notReferences().contains(column)) why.add("not classed as an id that holds no other row's key");
+        // Before its id foreign key the twin holds no other row's key; under one (P3.3a, P3.3c) it is that key's reference
+        // instead. Either way the load must not remap it: a reference is safe only to a parent with no reassigned id, by the
+        // parent's collection_id, so the load inserts the value the fill wrote.
+        List<Reference> keys = e.references().stream().filter(r -> r.columns().contains(column)).toList();
+        if (keys.isEmpty() && !e.notReferences().contains(column)) {
+            why.add("neither classed as an id that holds no other row's key nor under an id foreign key");
+        }
+        if (!keys.isEmpty() && e.notReferences().contains(column)) {
+            why.add("under an id foreign key and still classed as holding no other row's key");
+        }
         if (column.equals(e.reassignedId())) why.add("declared as the reassignedId, which is the primary key a restore draws from its own sequence");
-        for (Reference r : e.references()) {
-            if (r.columns().contains(column)) why.add("declared as a reference to " + r.parentName() + ", which the load would then remap");
+        for (Reference r : keys) {
+            ExportTable parent = TenantExport.entry(r.parentTable()).orElse(null);
+            boolean byId = r.foreignKey() && r.parentColumns().get(r.columns().indexOf(column)).equals("collection_id");
+            if (!byId || parent == null || parent.reassignedId() != null) {
+                why.add("declared as a reference to " + r.parentName() + " that is not an id foreign key to a parent with no "
+                    + "reassigned id, which the load would then remap");
+            }
         }
         return why.isEmpty() ? null : table + "." + column + ": " + String.join("; ", why);
     }
