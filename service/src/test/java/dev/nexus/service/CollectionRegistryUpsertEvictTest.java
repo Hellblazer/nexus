@@ -76,14 +76,13 @@ class CollectionRegistryUpsertEvictTest {
     }
 
     private void upsert(String tenant, String name, String contentType) {
-        upsert(tenant, name, contentType, "");
+        // owner_id carries a CHECK (owner_id <> ''), and a tuple allows one live collection: one owner per name.
+        upsert(tenant, name, contentType, "o-" + name);
     }
 
     private void upsert(String tenant, String name, String contentType, String owner) {
         Map<String, Object> coll = new HashMap<>();
-        if (!owner.isEmpty()) {
-            coll.put("owner_id", owner);
-        }
+        coll.put("owner_id", owner);
         coll.put("name", name);
         coll.put("content_type", contentType);
         coll.put("model_version", "v1");
