@@ -44,7 +44,7 @@ from nexus.corpus import validate_collection_name
         "a" * 255,
         "x‍y",  # ZERO WIDTH JOINER (Cf) is allowed: Persian, Indic scripts and emoji sequences need it
         "a b",
-        " leading space",
+        "inner space",
     ],
     ids=lambda s: repr(s)[:24],
 )
@@ -107,3 +107,18 @@ def test_a_label_holding_a_slash_is_refused() -> None:
         validate_collection_name("a/b")
     with pytest.raises(ValueError, match="/"):
         validate_collection_name("/")
+
+
+# The ',' and edge-whitespace clause is Sam's ruling on ask rdr229-label-comma-space (2026-11-21): MCP search and plan
+# confinement read a corpus list with split(",") then strip(), so such a label could not be named there. One named
+# clause, LABEL_REFUSES_COMMA_SPACE here and CollectionLabel.REFUSE_COMMA_AND_EDGE_SPACE in the engine.
+@pytest.mark.parametrize("label", ["a,b", ",", " notes", "notes ", " ", "\u00a0notes", "notes\u3000", "\u2003"])
+def test_a_label_holding_a_comma_or_edge_whitespace_is_refused(label: str) -> None:
+    assert corpus.LABEL_REFUSES_COMMA_SPACE is True
+    with pytest.raises(ValueError, match="','|whitespace"):
+        validate_collection_name(label)
+
+
+@pytest.mark.parametrize("label", ["notes 50%: café", "a b", "a\u00a0b", "notes\u200d"])
+def test_inner_whitespace_and_an_edge_format_character_are_allowed(label: str) -> None:
+    validate_collection_name(label)
