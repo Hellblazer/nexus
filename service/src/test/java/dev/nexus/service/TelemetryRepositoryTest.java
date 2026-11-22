@@ -1214,6 +1214,27 @@ class TelemetryRepositoryTest {
         assertThat(((Number) stats.get("row_count")).longValue()).isEqualTo(0L);
     }
 
+    /**
+     * nexus-n3hhc: the rename target is a label a user supplied, so the route judges it with the label rule the
+     * catalog rename applies to the same target (CollectionLabel.validateUserLabel) and refuses a breach (the
+     * handler's 400) with neither table touched.
+     */
+    @Test @Order(15)
+    void renameCollection_refusesATargetTheLabelRuleRefusesAndTouchesNothing() {
+        String oldColl = "old-collection-n3hhc";
+        String ts = OffsetDateTime.now(ZoneOffset.UTC).toString();
+        repo.importSearchRow(TENANT_A, ts, "n3hhc-hash", oldColl, 5, 3, 0.4, 0.5);
+        for (String bad : java.util.List.of("", "c42", "a/b", "a,b", " edge", "a\nb", "a".repeat(256))) {
+            assertThatThrownBy(() -> repo.renameCollection(TENANT_A, oldColl, bad))
+                .as("target %s", bad.length() > 20 ? bad.substring(0, 20) + "..." : bad)
+                .isInstanceOf(IllegalArgumentException.class);
+        }
+        var stats = repo.queryCollectionStats(TENANT_A, oldColl, 1);
+        assertThat(((Number) stats.get("row_count")).longValue()).isEqualTo(1L);
+        // a label that holds a space, '%', ':' and a non-ASCII letter is a legal target
+        assertThat(repo.renameCollection(TENANT_A, oldColl, "notes 50%: café").get("search_telemetry")).isEqualTo(1);
+    }
+
     // ── parseTsStrict — fail-loud on import with blank/malformed timestamp ────────
 
     /**
