@@ -247,6 +247,11 @@ final class Rdr229ChildNameWorld {
      * on the name key. Zero when every child row is where the keys want it.
      */
     long childrenNotOnTheirChunksName() {
+        return childrenNotOnTheirChunksName(engine, tenant);
+    }
+
+    /** As {@link #childrenNotOnTheirChunksName()} for any tenant of {@code engine}. */
+    static long childrenNotOnTheirChunksName(Rdr229RenameEngine engine, String tenant) {
         return engine.su(ctx -> ctx.fetchOne(
             "SELECT (SELECT count(*) FROM nexus.catalog_document_chunks m WHERE m.tenant_id = ? AND NOT EXISTS "
                 + "(SELECT 1 FROM nexus.chunks c WHERE c.tenant_id = m.tenant_id AND c.collection = m.collection AND c.chash = m.chash "
