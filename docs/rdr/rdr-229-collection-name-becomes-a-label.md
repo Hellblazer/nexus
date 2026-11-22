@@ -2939,7 +2939,12 @@ its acceptance is that test green plus the census pin it lowers.
   not supported on a partitioned table, so the method (per leaf, or a plain
   `ADD PRIMARY KEY` on the parent) is open for P4.1's design (bead
   nexus-p2m1x.35, comment 23:02, which corrects the 17:42 ruling; T2
-  `229-research-105`). The `vectors-079` trigger
+  `229-research-105`). The leaf-creating helper `partition_ensure_leaf`
+  checks for the parent's id key with `contype = 'u'`
+  (`vectors-073-leaf-id-unique-index.xml:98-100`); once the key is a primary
+  key that check must also match it (`contype IN ('u', 'p')`), or each new
+  leaf gets a duplicate `<leaf>_cid_uq` (bead nexus-p2m1x.35, linda's G7
+  correction; T2 `229-research-118`). The `vectors-079` trigger
   that sets a child row's name from its chunk goes with the name columns,
   and the two `chunk_orphaned_at` stamp triggers switch to the id twin
   (comments 17:55 and 18:13; T2 `229-research-110`). Then the name columns
