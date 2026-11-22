@@ -95,30 +95,19 @@ public final class IdUniqueIndexPass implements AutoCloseable {
     }
 
     /**
-     * The eight arbiters, then the four supporting indexes. The topics and reembed_jobs predicates are exact; the topics one is exactly the upsert's ({@code ON CONFLICT (tenant_id, collection_id, label) WHERE parent_id IS NULL}),
+     * The arbiters ({@link ArbiterTwins#builtByThePass}), then the four supporting indexes. The topics and reembed_jobs predicates are exact; the topics one is exactly the upsert's ({@code ON CONFLICT (tenant_id, collection_id, label) WHERE parent_id IS NULL}),
      * or PostgreSQL cannot infer the index as its arbiter.
      */
-    public static final List<Spec> SPECS = List.of(
-        Spec.arbiter("document_aspects", "idx_doc_aspects_id_source_path_uq", "tenant_id, collection_id, source_path", null),
-        Spec.arbiter("chash_remap", "idx_chash_remap_id_old_id_uq", "tenant_id, source_collection_id, old_id", null),
-        Spec.arbiter("taxonomy_meta", "idx_taxonomy_meta_id_uq", "tenant_id, collection_id", null),
-        Spec.arbiter("topics", "idx_topics_root_label_id_uq", "tenant_id, collection_id, label", "parent_id IS NULL"),
-        // the two SQL arbiters P3.4's census found beside the mapping: stamp_chunks_on_manifest_delete/_update (vectors-069-12/-13) and
-        // canary_query_ring_upsert (vectors-069) upsert ON CONFLICT on these tables' name keys
-        Spec.arbiter("chunk_orphaned_at", "idx_chunk_orphaned_at_id_chash_uq", "tenant_id, collection_id, chash", null),
-        Spec.arbiter("canary_query_ring", "idx_canary_query_ring_id_digest_uq", "tenant_id, collection_id, vector_digest", null),
-        // target-less ON CONFLICT DO NOTHING (PipelineRepository, ReembedJobRepository) arbitrates on every unique index, so the twin protects
-        // them with no code change once the row carries its id (P3.1's dual write); reembed_jobs keeps reembed_jobs_source_lock's predicate exactly
-        Spec.arbiter("pdf_pipeline", "idx_pdf_pipeline_id_uq", "tenant_id, content_hash, collection_id, pdf_path", null),
-        Spec.arbiter("reembed_jobs", "idx_reembed_jobs_source_id_lock", "tenant_id, source_collection_id",
-            "state = ANY (ARRAY['planned'::text, 'running'::text, 'paused'::text, 'cutover'::text, 'failed'::text])"),
+    public static final List<Spec> SPECS = java.util.stream.Stream.concat(
+        ArbiterTwins.builtByThePass().stream().map(a -> Spec.arbiter(a.table(), a.twinIndex(), a.idColumns(), a.predicate())),
+        java.util.stream.Stream.of(
         // The supporting indexes of P3.3a's id twins (linda 2026-11-22: out of the boot walk, which an upgrade boot's 64 MiB write bound and
-        // the RDR's no-index-builds-at-boot rule forbid) that no arbiter above already covers with its leading (tenant_id, id) columns:
+        // the RDR's no-index-builds-at-boot rule forbid) that no arbiter already covers with its leading (tenant_id, id) columns:
         // document_aspects, taxonomy_meta and canary_query_ring are covered; topics' arbiter is partial, which IdKeyIndexCensus does not count.
         Spec.support("topic_assignments", "idx_ta_tenant_source_collection_id", "tenant_id, source_collection_id", false),
         Spec.support("topics", "idx_topics_tenant_collection_id", "tenant_id, collection_id", false),
         Spec.support("document_highlights", "idx_doc_highlights_collection_id", "tenant_id, collection_id", false),
-        Spec.support("aspect_extraction_queue", "idx_aspect_queue_collection_id", "tenant_id, collection_id", true));
+        Spec.support("aspect_extraction_queue", "idx_aspect_queue_collection_id", "tenant_id, collection_id", true))).toList();
 
     /** Gate 2 of the completion check; production wires the completion reporter's latest read. */
     @FunctionalInterface

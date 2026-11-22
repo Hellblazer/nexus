@@ -31,20 +31,10 @@ class Rdr229ArbiterTwinCensusIntegrationTest extends Rdr229SwapMovesFixtures {
     /** An arbiter: its table, the name key's columns (and predicate), and the id twin's columns (and predicate); null twin = label kept. */
     record Arbiter(String table, String nameColumns, String idColumns, String predicate) { }
 
-    static final String REEMBED_ACTIVE = "state = ANY (ARRAY['planned'::text, 'running'::text, 'paused'::text, 'cutover'::text, 'failed'::text])";
-
-    static final List<Arbiter> ARBITERS = List.of(
-        new Arbiter("chunks", "tenant_id, collection, chash, embedding_model", "tenant_id, collection_id, chash, embedding_model", null),
-        new Arbiter("taxonomy_centroids", "tenant_id, collection, topic_id, embedding_model", "tenant_id, collection_id, topic_id, embedding_model", null),
-        new Arbiter("document_aspects", "tenant_id, collection, source_path", "tenant_id, collection_id, source_path", null),
-        new Arbiter("chash_remap", "tenant_id, source_collection, old_id", "tenant_id, source_collection_id, old_id", null),
-        new Arbiter("taxonomy_meta", "tenant_id, collection", "tenant_id, collection_id", null),
-        new Arbiter("topics", "tenant_id, collection, label", "tenant_id, collection_id, label", "parent_id IS NULL"),
-        new Arbiter("chunk_orphaned_at", "tenant_id, collection, chash", "tenant_id, collection_id, chash", null),
-        new Arbiter("canary_query_ring", "tenant_id, collection, vector_digest", "tenant_id, collection_id, vector_digest", null),
-        new Arbiter("pdf_pipeline", "tenant_id, content_hash, collection, pdf_path", "tenant_id, content_hash, collection_id, pdf_path", null),
-        new Arbiter("reembed_jobs", "tenant_id, source_collection", "tenant_id, source_collection_id", REEMBED_ACTIVE),
-        new Arbiter("catalog_collections", "tenant_id, name", null, null));
+    /** The checked list in main code ({@link ArbiterTwins}), and the registry, whose upserts keep the label (G15). */
+    static final List<Arbiter> ARBITERS = java.util.stream.Stream.concat(
+        ArbiterTwins.ALL.stream().map(a -> new Arbiter(a.table(), a.nameColumns(), a.idColumns(), a.predicate())),
+        java.util.stream.Stream.of(new Arbiter("catalog_collections", "tenant_id, name", null, null))).toList();
 
     /** Name-holding unique indexes no upsert arbitrates on (elsinore's P3.5c census, op=on_conflict), by "table(columns)". */
     static final Map<String, String> EXEMPT = new LinkedHashMap<>();
