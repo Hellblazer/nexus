@@ -156,6 +156,11 @@ _FLOCK_ALLOWED_MODULES = frozenset({
     # --auto` runs do not stack backfills on one tenant. A holder that loses
     # the race defers; no lease, no heartbeat, no daemon-scope election.
     "upgrade_ladder/rungs/rdr192_manifest_backfill.py",
+    # The MinerU pipeline weights root lock (F35, nexus-7t3w1): a critical section around filling
+    # <cache>/nexus/mineru/pipeline-<rev> so two runs never download the same file twice or race a
+    # rename into place. Blocking for interactive runs, non-blocking for refuse-policy runs (which fall
+    # back instead of waiting); no lease, no heartbeat, no daemon-scope election.
+    "mineru_weights.py",
     # MiniLM ONNX first-use provisioning lock (nexus-ccre5): a blocking
     # critical section on <cache>/.ensure.lock so concurrent cold-cache callers
     # (eight xdist workers, several nx processes) download and publish the

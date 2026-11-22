@@ -644,16 +644,6 @@ def test_the_remedy_text_names_the_three_real_remedies(env):
     assert "mineru-models-download" in message and "MINERU_MODEL_SOURCE=local" in message and "mineru.json" in message
 
 
-def test_the_doctor_skip_line_gives_the_same_three_remedies(monkeypatch):
-    from nexus.commands import doctor  # noqa: PLC0415
-
-    monkeypatch.delenv("MINERU_FORMULA_CH_SUPPORT", raising=False)
-    monkeypatch.delenv("MINERU_MODEL_SOURCE", raising=False)
-    line = doctor._mineru_weights_skip_line()
-    assert "skipped" in line and "mineru-models-download" in line
-    assert "nexus release asset" in line and mw.BASE_URL_ENV in line and "MINERU_MODEL_SOURCE=local" in line
-
-
 def test_child_env_sets_hf_offline_so_an_accidental_hub_call_fails_loudly(env):
     _complete_root(env)
     assert mw.child_env()["HF_HUB_OFFLINE"] == "1"

@@ -2047,17 +2047,6 @@ def _mineru_weights_skip_line() -> str:
     source = configured if configured in _MINERU_DOWNLOAD_SOURCES else "huggingface"
     command = mineru_console_command("mineru-models-download", "-s", source, "-m", "pipeline")
     where = "from PowerShell " if command.startswith("& ") else ""  # the Windows form is a PowerShell call
-    if _mineru_formula_model() == "unimernet_small":
-        # F35: nexus fetches its own verified copy from the release assets; the plain Hugging Face download
-        # fills a cache nexus's MinerU processes do not read, so it is only the first half of the last remedy.
-        from nexus.mineru_weights import BASE_URL_ENV  # noqa: PLC0415 — deferred import (startup cost)
-
-        return (
-            "  (MinerU pipeline weights not found; real-parse check skipped. Any PDF-indexing command "
-            "(`nx index pdf`) fetches them from the nexus release asset; re-run it to resume. Or set "
-            f"{BASE_URL_ENV} to a mirror that holds the assets. Or fetch the models yourself {where}with "
-            f"`{command}` and set MINERU_MODEL_SOURCE=local with your own mineru.json.)"
-        )
     caveat = (
         f" MINERU_MODEL_SOURCE={configured} is not searched for cached weights; the download records them in mineru.json."
         if configured and configured != "huggingface"
