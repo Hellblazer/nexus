@@ -1,6 +1,6 @@
 -- procedure: ci_red_notice
 -- summary: The line an aura shows for an owner row of a red develop: who owns it and what this session does.
--- args: sha:string, owner:string?, owner_alias:string?, next:string?, next_alias:string?, refresh:boolean, reason:string, stalled:boolean?, stalled_owner:string?, stalled_since:string?, red_since:string?, me:string
+-- args: sha:string, owner:string?, owner_alias:string?, next:string?, next_alias:string?, refresh:boolean, reason:string, stalled:boolean?, stalled_owner:string?, stalled_since:string?, red_since:string?, previous_owner:string?, me:string
 -- grants: none
 
 -- RDR-252 Step 4 (nexus-igea9.7), the procedure the shipped ci_develop_red aura wraps. It reads nothing and
@@ -15,7 +15,7 @@
 --   owner, the pusher's own red (reason earliest_suspect): "first red in your push"
 --   owner, a red the leader takes (any other reason but handoff and escalated): the reason is named
 --   owner, after a hand-off (reason handoff): "handed to you after no acknowledgement"
---   owner, after a disclaim (reason disclaimed): "handed to you: the previous owner said it is not theirs"
+--   owner, after a disclaim (reason disclaimed): "handed to you: <previous_owner> said it is not theirs"
 --   escalated and stalled (an acknowledged red still open; body.stalled, stalled_owner, stalled_since, red_since):
 --     the leader (owner, or no one named): "acknowledged by <owner> but still open after N min. Raise an ask to Sam."
 --     the owner that stalled it: "you acknowledged it but it is still open ..." (no hold, no wake)
@@ -61,6 +61,8 @@ end
 -- A stall escalation (reason escalated, stalled true: a red its owner acknowledged and never fixed) names the owner that
 -- stalled it and the two instants the engine stamped, the red's first and the stall's declaration.
 local stalled_owner = segment(args.stalled_owner, "stalled_owner")
+-- A disclaim hand-off names the owner that said "not mine" (body.previous_owner, from the engine cut that adds it).
+local previous_owner = segment(args.previous_owner, "previous_owner")
 
 -- Whole minutes from the instant a to the instant b, both ISO-8601 UTC ("2026-11-22T10:00:00Z", a fraction allowed),
 -- or nil when either does not parse or b is earlier. The sandbox has no clock or date library, so the day count is the
@@ -129,8 +131,9 @@ elseif owner == me or (escalated and owner == nil) then
     elseif reason == "handoff" then
       text = head .. "; it was handed to you after no acknowledgement. Diagnose it."
     elseif reason == "disclaimed" then
-      -- The previous owner posted `nx ci ack --not-mine`; the row names no one but you, so the text does not either.
-      text = head .. "; handed to you: the previous owner said it is not theirs. Diagnose it."
+      -- The previous owner posted `nx ci ack --not-mine`. A row from an engine that does not name it says "the previous
+      -- owner".
+      text = head .. "; handed to you: " .. (previous_owner or "the previous owner") .. " said it is not theirs. Diagnose it."
     else
       text = head .. "; the leader takes it (" .. reason .. "). Diagnose it."
     end
