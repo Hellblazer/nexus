@@ -44,7 +44,10 @@ class TenantExportIdTwinModelTest {
             if (t == null) continue;   // aspect_extraction_queue is absent on most installs and not registered
             examined++;
             assertThat(t.triggerMaintained()).as("%s is rewritten by the import", id).contains(tc[1]);
-            assertThat(t.notReferences()).as("%s is classified as holding no other row's key", id).contains(tc[1]);
+            // no other row's key, or (from P3.3a and P3.3c) the reference of its id foreign key: exactly one of the two
+            boolean keyed = t.references().stream().anyMatch(r -> r.foreignKey() && r.columns().contains(tc[1]));
+            assertThat(keyed != t.notReferences().contains(tc[1]))
+                .as("%s is classified once: as holding no other row's key, or as its id foreign key's reference", id).isTrue();
             assertThat(t.reassignedId()).as("%s is not a reassigned id", id).isNotEqualTo(tc[1]);
         }
         assertThat(examined).as("non-vacuity: the expand's id columns that the registry holds").isGreaterThanOrEqualTo(21);
