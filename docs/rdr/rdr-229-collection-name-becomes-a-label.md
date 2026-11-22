@@ -2876,11 +2876,15 @@ its acceptance is that test green plus the census pin it lowers.
   collection delete` by label or id (it takes a name today,
   `commands/collection.py:547-550`). T2 `229-research-48`. Test: each
   surface on a fixture with a null id and a minted label.
-- P3.R Review gate for Phase 3. Engine cuts for P3.1, P3.3, P3.4, P3.5
-  with P3.7 as one cut (the rename refusal, the name-key drop move's
-  registration and the one-row rename; P3.7), P3.6, P3.8 and P3.11; client
-  floor bumps in the release that first depends on each. One release may
-  hold several of these cuts, and an install may skip releases, so the
+- P3.R Review gate for Phase 3. The rest of Phase 3 ships as one engine
+  cut: the -r13 reland and P3.3 through P3.12 (P3.7's rename refusal, the
+  name-key drop move's registration and the one-row rename included) are
+  stacked on one branch with one verification pass, not a reland and a cut
+  per step (Sam's ruling, T2 `nexus/sam-ruling-rdr229-compress-phase3-2026-11-22`;
+  T2 `229-research-120`). The engine cut and the client release are each
+  Sam's go; client floor bumps go in the release that first depends on
+  the cut. One release may
+  hold more than one Phase 3 cut, and an install may skip releases, so the
   cut order does not decide when an install's readers switch; its own
   stamp moves' `completed_at` does (item 6, "Readers during the stamp").
 
@@ -2949,7 +2953,13 @@ its acceptance is that test green plus the census pin it lowers.
   the key is a primary key both must also match it (`contype IN ('u', 'p')`
   and `PRIMARY KEY (cols)`), or each new leaf gets a duplicate
   `<leaf>_cid_uq` (bead nexus-p2m1x.35, linda's G7 correction; T2
-  `229-research-118`, `229-research-119`). The `vectors-079` trigger
+  `229-research-118`, `229-research-119`). P3.3b's pass reads the id key as
+  a UNIQUE the same way (`LeafIndexCatalog.java:106-107`), so it must match
+  the promoted key too, or the pass plans new builds after the swap; and the
+  three child id foreign keys depend on the id UNIQUE, so the swap moves or
+  recreates them in the same transaction (inferred, not read, until P4.1's
+  design reads it; bead nexus-p2m1x.35, comment 23:20; T2 `229-research-121`).
+  The `vectors-079` trigger
   that sets a child row's name from its chunk goes with the name columns,
   and the two `chunk_orphaned_at` stamp triggers switch to the id twin
   (comments 17:55 and 18:13; T2 `229-research-110`). Then the name columns
@@ -3591,4 +3601,4 @@ large, and moved under a ratchet.
   the client seam, the owner-read policies, the R7 reader contract and the
   restore split. Risks, Failure Modes and Day 2: the downgrade boundary at
   P3.1's cut and the single-role install. No decision or criterion changed.
-- 2026-11-22: Phase 3 wording, matching reviewed stacked code and linda's rulings (grant 3; nexus-p2m1x.20, .21, .31, .35): P3.3b's pass adds the id key and P3.3c's `on_complete` checks it and adds the child keys, the manifest child key is DEFERRABLE INITIALLY DEFERRED, the chunk_orphaned_at index is vectors-075's self-healing boot changeset, and TwinKeyUpsert is the retry rule for name/id unique pairs until P4.1; item 10 and P3.11: the by-id restore ships in the P3.5+P3.7 cut, not P4.1, with the minted-label relabel, the stripped unmapped quarantine origin id, catalog_epoch's derivation and the booted-schema parity; P4.1's design notes (G1, G7, views first, RESTRICT drops, the deferral and trigger notes). P3.4, P3.5 and P3.7 follow when their code is reviewed and stacked. Two decisions moved on linda's rulings: the by-id restore from P4.1 to the P3.5+P3.7 cut, and the catalog epoch placed in the P3.5+P3.7 cut (it replaces the 11-20 cut-C1 timing; the RDR had placed it nowhere) (bead nexus-p2m1x.31, comments 08:24 and 08:49; bead nexus-p2m1x.35, comment 17:42; T2 `229-research-116`). No test criterion changed in this entry.
+- 2026-11-22: Phase 3 wording, matching reviewed stacked code and linda's rulings (grant 3; nexus-p2m1x.20, .21, .31, .35): P3.3b's pass adds the id key and P3.3c's `on_complete` checks it and adds the child keys, the manifest child key is DEFERRABLE INITIALLY DEFERRED, the chunk_orphaned_at index is vectors-075's self-healing boot changeset, and TwinKeyUpsert is the retry rule for name/id unique pairs until P4.1; item 10 and P3.11: the by-id restore ships in the P3.5+P3.7 cut, not P4.1, with the minted-label relabel, the stripped unmapped quarantine origin id, catalog_epoch's derivation and the booted-schema parity; P4.1's design notes (G1, G7, views first, RESTRICT drops, the deferral and trigger notes). P3.R: the rest of Phase 3 is one engine cut (Sam's ruling, T2 `nexus/sam-ruling-rdr229-compress-phase3-2026-11-22`). P3.4, P3.5 and P3.7 follow when their code is reviewed and stacked. Two decisions moved on linda's rulings: the by-id restore from P4.1 to the P3.5+P3.7 cut, and the catalog epoch placed in the P3.5+P3.7 cut (it replaces the 11-20 cut-C1 timing; the RDR had placed it nowhere) (bead nexus-p2m1x.31, comments 08:24 and 08:49; bead nexus-p2m1x.35, comment 17:42; T2 `229-research-116`). No test criterion changed in this entry.
