@@ -262,19 +262,10 @@ class CollectionRenameRefusalTest {
         assertThat(before.json().path("catalog_epoch").isTextual()).as("non-vacuity: there is an epoch before the revoke: %s",
             before.body()).isTrue();
 
-        List<String> fns = List.of("pg_catalog.pg_control_system()", "pg_catalog.pg_control_checkpoint()");
         try {
-            fx.asSuperuser(ctx -> {
-                for (String fn : fns) {
-                    ctx.revoke(DSL.privilege("EXECUTE")).on(DSL.table("FUNCTION " + fn))
-                        .from(DSL.role(DSL.unquotedName("PUBLIC"))).execute();
-                    ctx.revoke(DSL.privilege("EXECUTE")).on(DSL.table("FUNCTION " + fn))
-                        .from(DSL.role(PgContainerHelper.SVC_USERNAME)).execute();
-                }
-                return null;
-            });
+            runPgControlChangelog("revoke");
             Boolean svcCanExecute = fx.asSuperuser(ctx -> ctx.select(DSL.function("has_function_privilege", Boolean.class,
-                    DSL.inline(PgContainerHelper.SVC_USERNAME), DSL.inline(fns.get(0)), DSL.inline("EXECUTE")))
+                    DSL.inline(PgContainerHelper.SVC_USERNAME), DSL.inline("pg_catalog.pg_control_system()"), DSL.inline("EXECUTE")))
                 .fetchOne(0, Boolean.class));
             assertThat(svcCanExecute).as("the revoke took: the engine role cannot execute pg_control_system()")
                 .isFalse();
@@ -285,14 +276,18 @@ class CollectionRenameRefusalTest {
             assertThat(j.path("ids_stable").isBoolean()).as("ids_stable stays: %s", r.body()).isTrue();
             assertThat(j.has("catalog_epoch")).as("the key is omitted, not null: %s", r.body()).isFalse();
         } finally {
-            fx.asSuperuser(ctx -> {
-                for (String fn : fns) {
-                    ctx.grant(DSL.privilege("EXECUTE")).on(DSL.table("FUNCTION " + fn))
-                        .to(DSL.role(DSL.unquotedName("PUBLIC"))).execute();
-                }
-                return null;
-            });
+            runPgControlChangelog("grant");
         }
+    }
+
+    /** Runs db/changelog-test/db.changelog-test-p35a-pgcontrol-{mode}.xml as the superuser (fixed names; RawSqlGateTest). */
+    private void runPgControlChangelog(String mode) {
+        fx.asSuperuser(ctx -> {
+            ctx.connection(c -> PgContainerHelper.runSuperuserTestChangelog(c,
+                "db/changelog-test/db.changelog-test-p35a-pgcontrol-" + mode + ".xml",
+                "databasechangelog_test_p35a_pgcontrol_" + mode, java.util.Map.of()));
+            return null;
+        });
     }
 
     // ---- the per-store rename routes (linda's ruling 3) ----------------------------------------------------------------

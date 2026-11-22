@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-p2m1x.23 (RDR-229 P3.5a): take EXECUTE away from PUBLIC and from the engine's role (nexus_svc) on pg_control_system(), pg_control_checkpoint() and pg_postmaster_start_time(), the
+    three CatalogEpoch reads, so CollectionRenameRefusalTest sees a rename on a locked-down cluster omit catalog_epoch. The names
+    are fixed (pg_catalog functions, the fixture's service role); no placeholder. Superuser, runAlways.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="test-p35a-pgcontrol-revoke-1" author="nexus-p2m1x.23" runAlways="true">
+        <sql splitStatements="false">
+REVOKE EXECUTE ON FUNCTION pg_catalog.pg_control_system() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pg_catalog.pg_control_checkpoint() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pg_catalog.pg_postmaster_start_time() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pg_catalog.pg_control_system() FROM nexus_svc;
+REVOKE EXECUTE ON FUNCTION pg_catalog.pg_control_checkpoint() FROM nexus_svc;
+REVOKE EXECUTE ON FUNCTION pg_catalog.pg_postmaster_start_time() FROM nexus_svc;
+        </sql>
+        <rollback>
+            <!-- Test-only. -->
+        </rollback>
+    </changeSet>
+</databaseChangeLog>
