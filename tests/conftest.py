@@ -93,6 +93,13 @@ def _disable_aspect_worker_autostart() -> None:
 
 _disable_aspect_worker_autostart()
 
+# nexus-niyl5: every psql child the suite starts reads and writes UTF-8. A Windows psql otherwise takes the
+# console's ANSI code page as its client encoding, and PG refuses a non-ASCII byte of UTF-8 SQL as invalid
+# (0xe9 on the P3.6 native-Windows run). The test's half is encoding="utf-8" at each text-mode psql call,
+# held by tests/test_psql_subprocess_encoding_lint.py. Assigned, not setdefault: an exported LATIN1 would
+# break that pairing. A call that builds its env from scratch sets the variable itself.
+os.environ["PGCLIENTENCODING"] = "UTF8"
+
 # RDR-155 P4b P0a': import at collection start so the engine substrate
 # resolves PG binaries against the AMBIENT env (per-test fixtures patch
 # HOME/NEXUS_CONFIG_DIR before the lazy first ensure_engine() call).

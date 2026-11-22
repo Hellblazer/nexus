@@ -303,7 +303,7 @@ def _run_psql_in_container(pg_user: str, pg_db: str, sql: str) -> None:
             "psql", "-U", pg_user, "-d", pg_db,
             "-v", "ON_ERROR_STOP=1", "-c", sql,
         ],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8",
     )
     if result.returncode != 0:
         raise RuntimeError(

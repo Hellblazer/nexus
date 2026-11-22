@@ -99,7 +99,7 @@ def _psql(state: dict, sql: str) -> list[str]:
             "-d", state["pg_dbname"],
             "-tAc", sql,
         ],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True, text=True, encoding="utf-8", timeout=60,
     )
     assert proc.returncode == 0, (
         f"psql failed ({proc.returncode}) running:\n{sql}\n"

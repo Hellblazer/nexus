@@ -114,7 +114,7 @@ def diag_cluster(request):
         proc = subprocess.run(
             [str(bins.psql), "-w", "-h", "127.0.0.1", "-p", str(port), "-U", os_user,
              "-d", "nexus", "-v", "ON_ERROR_STOP=1", "-tAc", sql],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, encoding="utf-8", timeout=30,
             env={**os.environ, "PGPASSWORD": su_pw},
         )
         assert proc.returncode == 0, proc.stderr
@@ -150,7 +150,7 @@ def diag_cluster(request):
             [str(bins.psql), "-w", "-h", "127.0.0.1", "-p", str(port),
              "-U", "nexus_diag", "-d", "nexus", "-v", "ON_ERROR_STOP=1",
              "-tAc", sql],
-            capture_output=True, text=True, timeout=30, env=env,
+            capture_output=True, text=True, encoding="utf-8", timeout=30, env=env,
         )
 
     yield {"su": su, "diag": diag}

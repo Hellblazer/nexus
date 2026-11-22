@@ -80,7 +80,7 @@ def _login(bins: pp.PgBinaries, port: int, user: str, password: str | None, db: 
     return subprocess.run(
         [str(bins.psql), "-X", "-w", "-h", "127.0.0.1", "-p", str(port), "-U", user,
          "-d", db, "-t", "-A", "-c", "SELECT current_user"],
-        capture_output=True, text=True, env=env, timeout=60,
+        capture_output=True, text=True, encoding="utf-8", env=env, timeout=60,
     )
 
 

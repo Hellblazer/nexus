@@ -150,7 +150,7 @@ def _run_seed_psql(sql: str, caller: str) -> None:
             "-U", state["pg_user"], "-d", state["pg_dbname"],
             "-v", "ON_ERROR_STOP=1", "-1", "-f", "-",
         ],
-        input=sql, capture_output=True, text=True, timeout=60,
+        input=sql, capture_output=True, text=True, encoding="utf-8", timeout=60,
     )
     assert proc.returncode == 0, f"{caller} failed: {proc.stdout}\n{proc.stderr}"
 
@@ -246,7 +246,7 @@ def _seed_chunks_for_tenant(
             "-U", state["pg_user"], "-d", state["pg_dbname"],
             "-v", "ON_ERROR_STOP=1", "-1", "-f", "-",
         ],
-        input=sql, capture_output=True, text=True, timeout=30,
+        input=sql, capture_output=True, text=True, encoding="utf-8", timeout=30,
     )
     assert proc.returncode == 0, f"_seed_chunks_for_tenant failed: {proc.stdout}\n{proc.stderr}"
 

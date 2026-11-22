@@ -185,7 +185,7 @@ logging_collector = off
         proc = subprocess.run(
             [str(self.bin / exe_name("psql")), "-h", "127.0.0.1", "-p", str(self.port), "-U", user or self.user, "-d", db,
              "-v", "ON_ERROR_STOP=1", "-X", "-A", "-t", *(extra or []), "-c", sql],
-            capture_output=True, text=True, env=env, timeout=timeout,
+            capture_output=True, text=True, encoding="utf-8", env=env, timeout=timeout,
         )
         if proc.returncode != 0:
             raise RuntimeError(f"psql failed: {proc.stderr.strip()[:600]}\n  sql: {sql[:300]}")
@@ -195,7 +195,7 @@ logging_collector = off
         proc = subprocess.run(
             [str(self.bin / exe_name("psql")), "-h", "127.0.0.1", "-p", str(self.port), "-U", self.user, "-d", _DB,
              "-v", "ON_ERROR_STOP=1", "-X", "-q", "-f", "-"],
-            input="SET search_path TO nexus, public, pg_catalog;\n" + script, capture_output=True, text=True, timeout=timeout,
+            input="SET search_path TO nexus, public, pg_catalog;\n" + script, capture_output=True, text=True, encoding="utf-8", timeout=timeout,
         )
         if proc.returncode != 0:
             raise RuntimeError(f"psql script failed: {proc.stderr.strip()[:800]}")
@@ -408,7 +408,7 @@ def _explain(cluster: Cluster, select: str, tenant: str, settings: str = "") -> 
     proc = subprocess.run(
         [str(cluster.bin / exe_name("psql")), "-h", "127.0.0.1", "-p", str(cluster.port), "-U", "nexus_svc", "-d", _DB,
          "-X", "-A", "-t", "-c", sql],
-        capture_output=True, text=True, env={**os.environ, "PGPASSWORD": "nexus_svc_pass"}, timeout=600,
+        capture_output=True, text=True, encoding="utf-8", env={**os.environ, "PGPASSWORD": "nexus_svc_pass"}, timeout=600,
     )
     return proc.stdout + proc.stderr
 

@@ -71,7 +71,7 @@ def _hold(sql: str, hold_s: float = HOLD_S) -> subprocess.Popen:
     proc = subprocess.Popen(
         [str(Path(state["pg_bin"]) / "psql"), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
          "-U", state["pg_user"], "-d", state["pg_dbname"], "-v", "ON_ERROR_STOP=1", "-A", "-t", "-f", "-"],
-        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, encoding="utf-8",
     )
     assert proc.stdin is not None
     proc.stdin.write(sql)

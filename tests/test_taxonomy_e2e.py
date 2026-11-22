@@ -103,7 +103,7 @@ def _seed_chunks_for_tenant(
             "-U", state["pg_user"], "-d", state["pg_dbname"],
             "-v", "ON_ERROR_STOP=1", "-1", "-f", "-",
         ],
-        input=sql, capture_output=True, text=True, timeout=60,
+        input=sql, capture_output=True, text=True, encoding="utf-8", timeout=60,
     )
     assert proc.returncode == 0, f"_seed_chunks_for_tenant failed: {proc.stdout}\n{proc.stderr}"
 

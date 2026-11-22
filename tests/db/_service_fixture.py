@@ -1080,7 +1080,7 @@ def seed_chunks_sql(
         [str(pg_bin_dir() / "psql"), "-h", "127.0.0.1", "-p", str(pg["port"]),
          "-U", pg["user"], "-d", pg["dbname"], "-v", "ON_ERROR_STOP=1", "-q", "-f", "-"],
         input=chunks_insert_sql(tenant, collection, ids, texts, metas, embeddings),
-        capture_output=True, text=True, timeout=120,
+        capture_output=True, text=True, encoding="utf-8", timeout=120,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"seed_chunks_sql failed ({proc.returncode}): {proc.stderr[:400]}")

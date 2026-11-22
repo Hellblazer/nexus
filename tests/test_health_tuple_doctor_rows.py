@@ -744,7 +744,7 @@ class TestCheckTupleSweepFreshnessRealPostgres:
         proc = _subprocess.run(
             [str(psql_bin), "-h", "127.0.0.1", "-p", str(pg_port), "-U", pg_user,
              "-d", dbname, "-v", "ON_ERROR_STOP=1", "-c", insert_sql],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding="utf-8",
         )
         assert proc.returncode == 0, f"seeding nexus.tuple_tenants failed: {proc.stderr}"
 

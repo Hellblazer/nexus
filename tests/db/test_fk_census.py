@@ -61,7 +61,7 @@ def _psql_csv(state: dict, sql: str) -> list[str]:
             "-d", state["pg_dbname"],
             "-t", "-A", "-F,", "-c", sql,
         ],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True, text=True, encoding="utf-8", timeout=60,
     )
     assert proc.returncode == 0, (
         f"psql failed ({proc.returncode}) running:\n{sql}\n"
@@ -89,7 +89,7 @@ def _run_census_file(state: dict) -> str:
             "-A", "-F,",
             "-f", str(_CENSUS_SQL_PATH),
         ],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True, text=True, encoding="utf-8", timeout=60,
     )
     assert proc.returncode == 0, (
         f"fk_census.sql failed ({proc.returncode}) via psql -f:\n"

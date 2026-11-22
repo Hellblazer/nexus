@@ -2438,7 +2438,7 @@ def _psql_command(
         proc = subprocess.run(
             [str(bin_dir / "psql"), "-X", "-q", "-h", "127.0.0.1", "-p", str(pg_port),
              "-U", pg_user, "-d", _DBNAME, "-v", "ON_ERROR_STOP=1", "-c", sql],
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True, text=True, encoding="utf-8", timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"psql timed out after {timeout}s") from exc
@@ -2675,7 +2675,7 @@ def _boot() -> dict:
             [str(bin_dir / "psql"), "-h", "127.0.0.1", "-p", str(pg_port),
              "-U", pg_user, "-d", _DBNAME, "-v", "ON_ERROR_STOP=1",
              "-c", SERVICE_ROLES_SQL],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding="utf-8",
         )
         if proc.returncode != 0:
             raise RuntimeError(

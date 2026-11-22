@@ -363,7 +363,7 @@ class TestLockHeldRealEngine:
             [str(state["pg_bin"] / "psql"), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
              "-U", state["pg_user"], "-d", "nexus_t2_substrate", "-v", "ON_ERROR_STOP=1",
              "-tAc", sql],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding="utf-8",
         )
         assert proc.returncode == 0, proc.stderr
         return proc.stdout.strip()

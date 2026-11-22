@@ -34,7 +34,7 @@ def psql(sql: str) -> str:
             "-U", state["pg_user"], "-d", state["pg_dbname"],
             "-v", "ON_ERROR_STOP=1", "-At", "-1", "-f", "-",
         ],
-        input=sql, capture_output=True, text=True, timeout=60,
+        input=sql, capture_output=True, text=True, encoding="utf-8", timeout=60,
     )
     assert proc.returncode == 0, f"psql failed: {proc.stderr}\nSQL: {sql}"
     return proc.stdout

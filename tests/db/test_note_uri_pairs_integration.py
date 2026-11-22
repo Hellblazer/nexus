@@ -36,7 +36,7 @@ def _psql(state: dict, sql: str) -> None:
     proc = subprocess.run(
         [str(Path(state["pg_bin"]) / "psql"), "-X", "-h", "127.0.0.1", "-p", str(state["pg_port"]),
          "-U", state["pg_user"], "-d", state["pg_dbname"], "-v", "ON_ERROR_STOP=1", "-c", sql],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True, text=True, encoding="utf-8", timeout=60,
     )
     assert proc.returncode == 0, f"psql failed: {proc.stderr}\nSQL: {sql}"
 

@@ -391,7 +391,7 @@ class TestCreateExtensionLive:
         return subprocess.run(
             [str(bins.psql), "-w", "-h", "127.0.0.1", "-p", str(port),
              "-U", os_user, "-d", NEXUS_DB_NAME, "-t", "-A", "-c", sql],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, encoding="utf-8", timeout=30,
         )
 
     def test_cluster_accepts_connections(self, provisioned):
