@@ -32,8 +32,17 @@ final class FkTwins {
     record Row(String table, String fkColumns, String referencedColumns, String twin, String onDelete, String label,
                String nameKey) { }
 
-    /** Every twin of the list, in file order. */
+    /** The list, parsed once: the completion check reads it on every sample. P31Checks re-reads its file each call; this one does not. */
+    private static final class Holder {
+        static final List<Row> ROWS = parse();
+    }
+
+    /** Every twin of the list, in file order (parsed once, then served from memory). */
     static List<Row> load() {
+        return Holder.ROWS;
+    }
+
+    private static List<Row> parse() {
         List<Row> rows = new ArrayList<>();
         try (InputStream in = FkTwins.class.getClassLoader().getResourceAsStream(RESOURCE)) {
             if (in == null) {
