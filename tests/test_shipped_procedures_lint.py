@@ -32,9 +32,9 @@ pytestmark = pytest.mark.lint
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PROCEDURES = REPO_ROOT / "src" / "nexus" / "procedures"
 #: The procedures that ship at this commit; a sweep that finds fewer is looking in the wrong place.
-SHIPPED_FLOOR = {"ci_red_notice", "research_add", "transcripts"}
+SHIPPED_FLOOR = {"ci_red_notice", "ci_red_nudge", "research_add", "transcripts"}
 #: The auras that ship (RDR-249 Technical Design 7); each sits beside the procedure it wraps.
-SHIPPED_AURAS = {"ci_develop_red"}
+SHIPPED_AURAS = {"ci_develop_red", "ci_develop_nudge"}
 AURA_SUFFIX = ".aura.toml"
 
 

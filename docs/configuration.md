@@ -224,7 +224,7 @@ Merge behavior: nested dict keys are **additive** (both global and per-repo keys
 Declarative auras (RDR-249) ship off, `ci_develop_red` included, and nexus turns none on for you. A user opts in by name under `auras:` in the global config:
 
 ```yaml
-auras: {ci_develop_red: on}
+auras: {ci_develop_red: on, ci_develop_nudge: on}
 ```
 
 A per-repo `.nexus.yml` may set the same key and overrides the global value, either way (`off` there turns off a global `on`). `NX_AURAS_OFF` overrides both and can only turn auras off: `all` turns every aura off, and a comma-separated list of names turns those off (for a CI job or any process that should run none). The decision is made in that order, lowest first: default (off), global config, repo config, env. `nx aura list` shows each aura's state and the level that decided it. A value that is not `on` or `off` is refused with the file and key named, never read as off. See [`nx aura`](cli-reference.md#nx-aura) and the [Auras guide](auras.md).

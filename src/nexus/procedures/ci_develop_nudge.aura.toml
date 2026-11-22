@@ -1,0 +1,26 @@
+aura = "ci_develop_nudge"
+summary = "Wakes next up when the owner of a red develop has not acknowledged it by half the deadline."
+procedure = "ci_red_nudge"
+
+[load]
+group = "push-train"
+
+[trigger]
+subspace = "board/ci/nexus-develop--owner"
+match = { kind = "nudge", from = "engine" }
+
+[args]
+sha = "dims.sha"
+next = "body.next"
+next_alias = "body.next_alias"
+me = "self.identity"
+
+[when]
+field = "show"
+
+[clear]
+match = { kind = "clear", from = "engine" }
+
+[display]
+channel = "wake"
+threads = "develop CI nudge"

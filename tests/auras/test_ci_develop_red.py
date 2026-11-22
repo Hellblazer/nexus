@@ -182,13 +182,14 @@ def test_a_row_naming_no_owner_that_is_not_escalated_holds_everyone() -> None:
     assert out["wake"] is False
 
 
-# wake: true only on refresh false, for the owner, for next up, and on an escalated row that names me or has no owner.
+# wake: true only on refresh false, for the owner, and on an escalated row that names me or has no owner. Next up is shown
+# the red and not woken (RDR-252 audit S2, nexus-igea9): a nudge row wakes it, tests/auras/test_ci_red_nudge.py.
 WAKES = [
     pytest.param(_row(ME), True, id="owner"),
     pytest.param(_row(ME, refresh=True), False, id="owner-refresh"),
     pytest.param(_row(ME, reason="handoff"), True, id="handoff-owner"),
     pytest.param(_row(ME, reason="no_record"), True, id="leader-takes-owner"),
-    pytest.param(_row(OTHER, ME), True, id="next-up"),
+    pytest.param(_row(OTHER, ME), False, id="next-up-is-shown-not-woken"),
     pytest.param(_row(OTHER, ME, refresh=True), False, id="next-up-refresh"),
     pytest.param(_row(OTHER, THIRD), False, id="everyone-else"),
     pytest.param(_row(OTHER), False, id="everyone-else-no-next"),
@@ -283,10 +284,17 @@ def test_the_notice_names_the_owner_by_id_when_the_row_has_no_alias() -> None:
     assert out["text"] == f"Develop is red at {SHORT}; {OTHER} owns it. Hold your pushes."
 
 
-def test_next_up_sees_the_owners_alias_and_still_wakes() -> None:
+def test_next_up_sees_the_owners_alias_and_is_not_woken() -> None:
     out = _run(**_row(OTHER, ME, owner_alias="halcyon", next_alias="tamsin"))
     assert out["text"] == f"Develop is red at {SHORT}; halcyon owns it. You are next up."
-    assert out["wake"] is True
+    assert out["show"] is True and out["wake"] is False
+
+
+def test_a_hand_off_that_seats_me_as_owner_wakes_through_the_owner_branch() -> None:
+    """The case that used to wake the next-up session: after a hand-off the row names it OWNER, and that wakes."""
+    out = _run(**_row(ME, reason="handoff"))
+    assert out["wake"] is True and "handed to you" in out["text"]
+    assert _run(**_row(OTHER, ME, reason="handoff"))["wake"] is False, "named next up on a hand-off row: still no wake"
 
 
 def test_an_alias_is_a_name_only_and_never_decides_who_this_session_is() -> None:
