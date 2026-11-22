@@ -358,16 +358,8 @@ ROUTE_MAP: dict[str, Step] = {
     "POST /v1/taxonomy/assignments/prune_projection": Step("route-prune-projection", "py", ["-c", _routes.PRUNE_PROJECTION],
                                                            expect_route="/v1/taxonomy/assignments/prune_projection",
                                                            expect_stdout="match=bogus refused 400"),
-    "POST /v1/telemetry/rename_collection": Step("route-telemetry-rename", "py", ["-c", _routes.TELEMETRY_RENAME],
-                                                 expect_route="/v1/telemetry/rename_collection",
-                                                 expect_stdout="minted target refused 400"),
-    "POST /v1/chash/rename_collection": Step("route-chash-rename-refusal", "py", ["-c", _routes.CHASH_RENAME_REFUSAL],
-                                             expect_route="/v1/chash/rename_collection",
-                                             expect_stdout="chash minted target refused 400"),
-    "POST /v1/taxonomy/rename_collection": Step("route-taxonomy-rename-refusal", "py",
-                                                ["-c", _routes.TAXONOMY_RENAME_REFUSAL],
-                                                expect_route="/v1/taxonomy/rename_collection",
-                                                expect_stdout="taxonomy minted target refused 400"),
+    **{route: Step(name, "py", ["-c", code], expect_route=route.split(" ", 1)[1], expect_stdout=stdout)
+       for route, (name, code, stdout) in _routes.LABEL_RULE_RENAME_PROBES.items()},  # nexus-n3hhc, its class
 }
 
 _ROUTE_RE = re.compile(r"`(GET|POST|PUT|PATCH|DELETE) (/v1/[A-Za-z0-9_\-/.{}]+)")
