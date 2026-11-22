@@ -519,9 +519,11 @@ public final class OwnerDecision {
      * <ul>
      *   <li>the current owner's own ack (an {@code ack} row on a red tip) or push: the red is acknowledged, and the
      *       stall deadline is the later of {@code episode_at} and that sign, plus {@code stall_factor} deadlines;</li>
-     *   <li>a push by any other identity that is or was an owner of this red: it postpones the deadline, so the
-     *       acknowledgement deadline counts from the later of {@code episode_at} and that push (S1a as it happened: the
-     *       original owner's fix landed after the hand-off);</li>
+     *   <li>a push by any other identity that is or was an owner of this red, or by any live member of the serving
+     *       group: it restarts the deadline, so the hand-off or escalation deadline counts from the later of
+     *       {@code episode_at} and that push (S1a as it happened: the original owner's fix landed after the hand-off;
+     *       and a member who owns nothing and pushed no suspect can only push onto a red with a stated fix). It is no
+     *       ack: only the current owner's own push or {@code ack} row moves to the stall window;</li>
      *   <li>none: the acknowledgement deadline, {@code episode_at} plus the topic's deadline, with a nudge to next up at
      *       half of it while the row names one and none was posted this episode.</li>
      * </ul>
@@ -553,7 +555,7 @@ public final class OwnerDecision {
         Set<String> owners = episodeOwners(in.owners(), owner);
         Sign live = null;
         for (Sign p : pushes) {
-            if (owners.contains(p.identity())) {
+            if (owners.contains(p.identity()) || (in.group().isMember(p.identity()) && in.ids().live(p.identity()))) {
                 live = Sign.later(live, p);
             }
             if (owner.equals(p.identity())) {

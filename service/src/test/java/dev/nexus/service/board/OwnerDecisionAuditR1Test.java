@@ -87,18 +87,6 @@ class OwnerDecisionAuditR1Test {
         assertThat(OwnerFixture.bodyOf(f.onDeadline().post())).containsEntry("reason", "escalated");
     }
 
-    @Test
-    void aPushByAnIdentityThatWasNeverOwnerPostponesNothing() {
-        OwnerFixture f = new OwnerFixture().seat("A").seat("C");
-        f.push("X", "G0", "A").done("X", "failure");
-        f.now(EPISODE);
-        f.recordNow(f.decide());                       // owner A, next up C (or the leader)
-        f.at(after(5)).push("Z", "X", "C");            // C is next up, not an owner yet
-        f.now(after(21));
-
-        assertThat(OwnerFixture.bodyOf(f.onDeadline().post())).containsEntry("reason", "handoff");
-    }
-
     // ── 3: the hard cap ──────────────────────────────────────────────────────────────────────────────────────
 
     @Test
@@ -186,5 +174,95 @@ class OwnerDecisionAuditR1Test {
         Map<String, Object> b = OwnerFixture.bodyOf(late.post());
         assertThat(b).containsEntry("reason", "escalated").containsEntry("stalled", true).containsEntry("stalled_owner", "A")
             .containsEntry("stalled_since", after(2).toString());
+    }
+
+    // ── a member's push on the red restarts the deadline (colophon fixing a red handed to halcyon) ───────────────
+
+    /** Pushes fix number {@code n} (1 based) by {@code pusher} at {@code minutes} after t0, on the one before it. */
+    private static void pushFix(OwnerFixture f, String pusher, int n, long minutes) {
+        f.at(after(minutes)).push("Z" + n, n == 1 ? "X" : "Z" + (n - 1), pusher);
+    }
+
+    @Test
+    void aGroupMembersPushOnTheRedRestartsTheCurrentOwnersDeadlineUntilTheHardCapEscalates() {
+        OwnerFixture f = new OwnerFixture().seat("A").seat("C");
+        f.push("X", "G0", "A").done("X", "failure");
+        f.now(EPISODE);
+        f.recordNow(f.decide());                       // t0: red, owner A, next up the leader L
+        f.now(after(20));
+        OwnerDecision.Decision handed = f.onDeadline();
+        assertThat(OwnerFixture.bodyOf(handed.post())).containsEntry("owner", "L");
+        f.recordNow(handed);                           // t0+20: handed to L; C is a member who never owned the red
+        pushFix(f, "C", 1, 21);                        // t0+21: C pushes the fix; the red stays open
+
+        f.now(after(40));
+        OwnerDecision.Decision d = f.onDeadline();
+        assertThat(d.post()).as("no hand-off or escalation at t0+40: member C is fixing it").isNull();
+        assertThat(d.deadline()).as("restarted from the push, the plain 20 minutes, no stall window")
+            .isEqualTo(after(21).plus(Duration.ofMinutes(20)));
+
+        for (int n = 2; n <= 6; n++) {                 // C keeps pushing, every 19 minutes, and the red stays open
+            pushFix(f, "C", n, 21 + 19L * (n - 1));
+            f.now(after(21 + 19L * (n - 1) + 1));
+            assertThat(f.onDeadline().post()).as("push " + n + " postpones it again").isNull();
+        }
+        f.now(after(119));
+        assertThat(f.onDeadline().post()).as("still inside the hard cap").isNull();
+        f.now(after(121));
+        Map<String, Object> b = OwnerFixture.bodyOf(f.onDeadline().post());
+        assertThat(b).as("the hard cap binds however many pushes").containsEntry("reason", "escalated")
+            .containsEntry("stalled", true).containsEntry("red_since", EPISODE.toString());
+    }
+
+    @Test
+    void theSessionThatCausedTheRedPushesTheFixAfterTheLeaderGotItAndOnlyTheLeadersDeadlineRestarts() {
+        OwnerFixture f = new OwnerFixture().seat("A");
+        f.push("X", "G0", "A").done("X", "failure");   // A pushed the commit that went red
+        f.now(EPISODE);
+        f.recordNow(f.decide());                       // owner A, next up the leader L (the conductor)
+        f.now(after(20));
+        OwnerDecision.Decision handed = f.onDeadline();
+        assertThat(OwnerFixture.bodyOf(handed.post())).containsEntry("owner", "L").containsEntry("reason", "handoff");
+        f.recordNow(handed);                           // no ack: the red went to the leader
+        pushFix(f, "A", 1, 21);                        // A, now a non-owner, pushes the fix chained from the red tip
+
+        f.now(after(30));
+        OwnerDecision.Decision d = f.onDeadline();
+        assertThat(d.post()).isNull();
+        assertThat(d.deadline()).as("the leader's deadline restarts from A's push: no ack, so no stall window")
+            .isEqualTo(after(21).plus(Duration.ofMinutes(20)));
+        f.now(after(42));
+        OwnerDecision.Decision late = f.onDeadline();
+        assertThat(OwnerFixture.bodyOf(late.post())).as("if the red is still open at the restarted deadline it escalates, unstalled")
+            .containsEntry("reason", "escalated").doesNotContainKey("stalled");
+    }
+
+    @Test
+    void aPushByAnIdentityOutsideTheGroupChangesNothing() {
+        OwnerFixture f = new OwnerFixture().seat("A").seat("N");
+        f.notMember("N");
+        f.push("X", "G0", "A").done("X", "failure");
+        f.now(EPISODE);
+        f.recordNow(f.decide());
+        f.at(after(5)).push("Z", "X", "N");
+        f.now(after(21));
+
+        assertThat(OwnerFixture.bodyOf(f.onDeadline().post())).containsEntry("reason", "handoff");
+    }
+
+    @Test
+    void aMembersPushIsNoAckForTheCurrentOwnerSoItGetsNoStallWindow() {
+        OwnerFixture f = new OwnerFixture().seat("A").seat("C");
+        f.push("X", "G0", "A").done("X", "failure");
+        f.now(EPISODE);
+        f.recordNow(f.decide());                       // owner A
+        f.at(after(15)).push("Z", "X", "C");           // a member's push restarts A's deadline from t0+15 ...
+        f.now(after(30));
+
+        OwnerDecision.Post inside = f.onDeadline().post();
+        assertThat(inside == null || "nudge".equals(inside.kind())).as("inside the restarted 20 minutes: no owner row").isTrue();
+        f.now(after(36));
+        assertThat(OwnerFixture.bodyOf(f.onDeadline().post())).as("... and A, who never acked, is still handed on at its end")
+            .containsEntry("reason", "handoff");
     }
 }

@@ -39,7 +39,7 @@ class AckDeadlineTimerRestartTest {
     @Test
     void aRestartAfterARefreshKeepsTheOriginalDeadline() {
         OwnerFixture f = openRed();
-        f.push("Z", "Y", "C").done("Z", "failure");   // C pushes: the owner A has not, so no ack counts
+        f.push("Z", "Y", null).done("Z", "failure");   // an unstamped push (no pusher is known): no sign of life of anyone
         f.recordNow(f.decide());   // the refreshed row, same episode
         f.now(EPISODE.plus(Duration.ofMinutes(10)));
 

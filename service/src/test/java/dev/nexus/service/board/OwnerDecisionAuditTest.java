@@ -62,9 +62,10 @@ class OwnerDecisionAuditTest {
     }
 
     @Test
-    void aPushByAnotherIdentityIsNoAckAndTheDeadlineStillHandsOff() {
+    void aPushByAnIdentityOutsideTheGroupIsNoAckAndTheDeadlineStillHandsOff() {
         OwnerFixture f = openRed();
-        f.at(after(15)).push("Z", "Y", "C");            // C is not the owner
+        f.seat("N").notMember("N");
+        f.at(after(15)).push("Z", "Y", "N");            // N is not in the group, let alone the owner
         f.now(after(21));
 
         assertThat(OwnerFixture.bodyOf(f.onDeadline().post())).containsEntry("reason", "handoff").containsEntry("owner", "C");
