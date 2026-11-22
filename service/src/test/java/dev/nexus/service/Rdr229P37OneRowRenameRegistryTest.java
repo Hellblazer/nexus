@@ -8,6 +8,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.nexus.service.db.CollectionIds;
 import org.jooq.DSLContext;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -164,5 +165,74 @@ class Rdr229P37OneRowRenameRegistryTest {
             .fetchOne());
         assertThat(row.value1()).as("the tombstone's name chain ends at a registered row").isEqualTo(renamed);
         assertThat(row.value2()).as("and its id still names the same collection").isEqualTo(id);
+    }
+
+    /** The name chain the name readers follow until P4.0: from {@code from} through {@code superseded_by} while it is not '' . */
+    private String walkByName(String tenant, String from) {
+        String at = from;
+        for (int hops = 0; hops < 10; hops++) {
+            String name = at;
+            String next = engine.su(ctx -> ctx.select(CATALOG_COLLECTIONS.SUPERSEDED_BY).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(name)).fetchOne(0, String.class));
+            assertThat(next).as("every name on the chain is a registered row (a dangling name ends the walk): " + name).isNotNull();
+            if (next.isEmpty()) {
+                return at;
+            }
+            at = next;
+        }
+        throw new AssertionError("the chain from " + from + " does not end in ten hops");
+    }
+
+    /** The A -> B chain of the bead: A's tombstone names B, B is renamed one-row to C, and the chain walked by name reaches C. */
+    @Test
+    void aChainAToB_afterBIsRenamedToC_isWalkedByNameToC_andATombstoneNamingAnotherLabelIsUntouched() throws Exception {
+        String tenant = "p37-chainabc";
+        String token = engine.newTenant(tenant);
+        String a = coll("p37chaina2", 1);   // each of A, B and the decoy under another owner: a tuple has one live collection
+        String b = coll("p37chainb2", 1);
+        String c = coll("p37chainb2", 2);
+        String d = coll("p37chaind2", 1);   // the decoy: a tombstone whose superseded_by is NOT the label being renamed
+        String e = coll("p37chaine2", 1);   // the decoy's live successor
+        engine.su(ctx -> {
+            for (String name : new String[] {a, b, d, e}) {
+                PgContainerHelper.insertCollection(ctx, tenant, name);
+            }
+            tombstone(ctx, tenant, a, b);
+            tombstone(ctx, tenant, d, e);
+            return null;
+        });
+        long bId = engine.su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, b));
+        var decoyBefore = engine.su(ctx -> ctx.select(CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.SUPERSEDED_BY_ID,
+                DSL.field(DSL.name("xmin"), String.class)).from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(d)).fetchOne());
+        assertThat(walkByName(tenant, a)).as("non-vacuity: before the rename the chain A -> B ends at B").isEqualTo(b);
+
+        var r = engine.rename(token, b, c, Map.of("content_type", "knowledge"));
+
+        assertThat(r.status()).as("B is renamed one-row to C: " + r).isEqualTo(200);
+        assertThat(engine.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, c))).as("the one-row rename: B's row, same id").isEqualTo(bId);
+        assertThat(walkByName(tenant, a)).as("the chain A -> B, walked by name, reaches the renamed collection C").isEqualTo(c);
+        var decoyAfter = engine.su(ctx -> ctx.select(CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.SUPERSEDED_BY_ID,
+                DSL.field(DSL.name("xmin"), String.class)).from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(d)).fetchOne());
+        assertThat(decoyAfter.value1()).as("a tombstone whose superseded_by is not the old label keeps it").isEqualTo(e);
+        assertThat(decoyAfter.value3()).as("and its row was not rewritten at all (same xmin): the repoint is bounded to the old label")
+            .isEqualTo(decoyBefore.value3());
+    }
+
+    private static void tombstone(DSLContext ctx, String tenant, String name, String successor) {
+        ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, successor)
+            .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, Rdr229RenameChecks.registryId(ctx, tenant, successor))
+            .set(CATALOG_COLLECTIONS.SUPERSEDED_AT, OffsetDateTime.now())
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(name)).execute();
+    }
+
+    /** S-3 rule 2: the drop move's row names the registering engine and its version, not the stage-1 'engine-pass:' value. */
+    @Test
+    void theDropMoveRowsChangesetIdNamesTheEngineVersionThatRegisteredIt() {
+        String id = engine.su(ctx -> ctx.select(DSL.field(DSL.name("changeset_id"), String.class))
+            .from(DSL.table(DSL.name("nexus", "data_moves")))
+            .where(DSL.field(DSL.name("label"), String.class).eq("rdr229-name-key-drop")).fetchOne(0, String.class));
+        assertThat(id).isEqualTo("engine:rdr229-name-key-drop:" + Rdr229RenameEngine.ENGINE_VERSION);
     }
 }

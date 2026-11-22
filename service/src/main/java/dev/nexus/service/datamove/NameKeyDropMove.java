@@ -36,10 +36,24 @@ public final class NameKeyDropMove {
     public static final String LABEL = "rdr229-name-key-drop";
 
     /**
-     * {@code changeset_id} of the row. The move has no changeset (it is registered by an engine pass), so the column, NOT NULL,
-     * names the registrant.
+     * The first part of the row's {@code changeset_id}. The move has no changeset (it is registered by an engine pass), so the column,
+     * NOT NULL, names the registrant: {@code engine:rdr229-name-key-drop:<engine version>} (S-3 rule 2, the run-time form that
+     * P2.10 set), see {@link #changesetId}.
      */
-    public static final String CHANGESET_ID = "engine-pass:rdr229-name-key-drop";
+    static final String CHANGESET_ID_PREFIX = "engine:" + LABEL + ":";
+
+    /**
+     * The {@code changeset_id} of the row {@link #registerIfAbsent} inserts: {@code engine:rdr229-name-key-drop:<engine version>}, so the
+     * row says which engine registered it.
+     *
+     * @param engineVersion the engine's release identity, or its app version on an unstamped build ({@code VersionHandler#engineVersion})
+     */
+    public static String changesetId(String engineVersion) {
+        if (engineVersion == null || engineVersion.isBlank()) {
+            throw new IllegalArgumentException("the name-key drop move's changeset_id names the registering engine's version; none was given");
+        }
+        return CHANGESET_ID_PREFIX + engineVersion;
+    }
 
     /** One registry name foreign key: the table it is on and its constraint name. */
     public record NameKey(String table, String constraint) { }
@@ -96,9 +110,11 @@ public final class NameKeyDropMove {
      * yields to the migration lock and the walk's termination list; none of that is this method's.
      *
      * @param snapshot the completion check's latest result; null (not read yet) or gate 3 not holding registers nothing
+     * @param engineVersion the registering engine's version, written into the row's {@code changeset_id} ({@link #changesetId})
      * @return true when this call inserted the row
      */
-    public static boolean registerIfAbsent(CompletionCheck.Result snapshot, DSLContext admin) {
+    public static boolean registerIfAbsent(CompletionCheck.Result snapshot, DSLContext admin, String engineVersion) {
+        String changesetId = changesetId(engineVersion);   // refused first: a blank version is a wiring defect, however early the pass runs
         if (snapshot == null || !snapshot.gate3()) {
             return false;
         }
@@ -111,7 +127,7 @@ public final class NameKeyDropMove {
                 DSL.field(DSL.name("verification"), String.class), DSL.field(DSL.name("on_complete"), String.class),
                 DSL.field(DSL.name("changeset_id"), String.class))
             .values(LABEL, TEMPLATE, DRIVING_SCHEMA, DRIVING_TABLE, CHUNK_SIZE, SLEEP_MS, STATEMENT_TIMEOUT_MS, VERIFICATION,
-                onComplete(), CHANGESET_ID)
+                onComplete(), changesetId)
             .onConflict(DSL.field(DSL.name("label"), String.class)).doNothing()
             .execute() == 1;
     }
