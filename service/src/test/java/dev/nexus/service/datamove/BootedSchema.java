@@ -52,8 +52,8 @@ public final class BootedSchema {
     /** How long the drive may run before it fails naming what is still open. A boot over an empty install takes seconds. */
     static final Duration DRIVE_BOUND = Duration.ofMinutes(5);
 
-    /** The three child tables whose id key into {@code nexus.chunks} the chunks swap's {@code on_complete} adds and validates. */
-    static final List<String> CHUNK_CHILD_TABLES = List.of("catalog_document_chunks", "chunk_orphaned_at", "topic_assignments");
+    /** The child tables whose id key into {@code nexus.chunks} the chunks swap's {@code on_complete} adds and validates. */
+    static final List<String> CHUNK_CHILD_TABLES = Rdr229SwapMove.CHILD_TABLES;
 
     /** The two tables a swap move is registered for (P3.3b registers, P3.3c completes). */
     static final List<String> SWAP_TABLES = List.of("chunks", "taxonomy_centroids");
