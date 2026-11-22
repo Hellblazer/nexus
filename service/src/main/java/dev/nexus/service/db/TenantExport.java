@@ -282,8 +282,8 @@ public final class TenantExport {
         /**
          * An id twin (RDR-229 P3.1): a nullable bigint beside a collection name column, or the registry's own
          * {@code collection_id}. The import never reads it from the file: it computes it from the loaded registry (by name, or
-         * from the registry id's own sequence). So it is declared maintained (a column the load rewrites, which the load's
-         * verification skips) and as an id-shaped column that holds no other row's key.
+         * from the registry id's own sequence). So it is declared maintained (a column the load rewrites: the file's value is
+         * never the one inserted) and as an id-shaped column that holds no other row's key.
          */
         Entry importComputed(String column) {
             maintained(column);
