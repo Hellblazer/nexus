@@ -112,6 +112,15 @@ public final class CompletionCheck {
             gate1.addAll(FkTwins.labels());
             return new ReadSet(gate1, List.of());
         }
+
+        /**
+         * The read set a running engine reads: the one factory {@link CompletionBootWork#atBoot} and {@link #evaluate(DSLContext)} share, so the
+         * boot wiring and the default cannot name different sets. It is the newest phase's set; a later step changes this one line and the test
+         * that pins it ({@code CompletionBootReadSetTest}).
+         */
+        public static ReadSet boot() {
+            return p33a();
+        }
     }
 
     /**
@@ -209,9 +218,9 @@ public final class CompletionCheck {
         }
     }
 
-    /** {@link #evaluate(DSLContext, ReadSet, Gate3Source, ViolatorCounter)} for P3.1's read set, gate 3 not installed. */
+    /** {@link #evaluate(DSLContext, ReadSet, Gate3Source, ViolatorCounter)} for the boot read set ({@link ReadSet#boot()}), gate 3 not installed. */
     public static Result evaluate(DSLContext ctx) {
-        return evaluate(ctx, ReadSet.p31(), Gate3Source.NOT_INSTALLED, DIRECT);
+        return evaluate(ctx, ReadSet.boot(), Gate3Source.NOT_INSTALLED, DIRECT);
     }
 
     /**

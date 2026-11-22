@@ -848,6 +848,8 @@ final class TenantKeyedStateTables {
         notKeyed.put("CompletionBootWork.CachedCounter.kept", COMPLETION_ENGINE_WIDE + "this cache holds one violating-row "
             + "count per CHECK constraint name for ten minutes; the counts are summed over every tenant and carry no "
             + "tenant identity, and a reset only makes a count stale until it expires");
+        notKeyed.put("FkTwins.Holder.ROWS", "the RDR-229 P3.3a id-twin list (db/rdr229/p33a-fk-twins.tsv), parsed once from the classpath; "
+            + "table, constraint and label names, no tenant state");
         notKeyed.put("CompletionCheck.ReadSet.gate1Labels", "the move labels gate 1 reads, fixed at construction; "
             + "global registry labels, not keyed by tenant");
         notKeyed.put("CompletionCheck.ReadSet.gate2Labels", "the move labels gate 2 reads, fixed at construction; "

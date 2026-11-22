@@ -444,6 +444,20 @@ ALLOWLIST: tuple[tuple[str, str, str], ...] = (
         )
         for n in range(1, 16)
     ),
+    *(
+        (
+            f"vectors-072-{n}",
+            "nexus.data_moves",
+            "nexus-p2m1x.19 (RDR-229 P3.3a): a registering INSERT into nexus.data_moves, the same shape and the same "
+            "reason as the vectors-070 block above. The statements the analyzer reads as a subquery on FORCE-RLS "
+            "tables (nexus.catalog_collections and the driven table) are string literals, the move's template, "
+            "verification and on_complete: DATA that the move worker runs later as the migrating role through the "
+            "owner-read policies vectors-070, catalog-050 and vectors-070-31 already create. The walk reads and "
+            "writes no row of either table (DataMoveChangesetGateTest, the upgrade-boot write gate "
+            "nexus-f3yqd.1), so no tenant can be invisible to it.",
+        )
+        for n in range(11, 17)
+    ),
 )
 
 
