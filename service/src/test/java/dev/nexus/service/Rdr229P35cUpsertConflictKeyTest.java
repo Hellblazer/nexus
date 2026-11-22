@@ -3,77 +3,104 @@
 package dev.nexus.service;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.fail;
 
+import dev.nexus.service.datamove.Gate3;
+import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
+import dev.nexus.service.db.CombinedWriteService;
+import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.vectors.Embedder;
+import dev.nexus.service.vectors.EmbedderRouter;
 import dev.nexus.service.vectors.PgVectorRepository;
 import dev.nexus.service.vectors.TaxonomyCentroidRepository;
 import dev.nexus.service.vectors.TaxonomyCentroidRepository.CentroidRecord;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
-import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Named;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
-import java.lang.reflect.Method;
 import java.sql.Connection;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
-import java.util.function.BooleanSupplier;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.Stream;
 
 /**
- * RDR-229 P3.5c (nexus-p2m1x.25), test first: the engine's two upserts take the id key as their conflict target from gate 3
- * on the install (RDR item 6, "Readers during the stamp"; P3.5c step).
+ * RDR-229 P3.5c (nexus-p2m1x.25), test first: the engine's three upserts that conflict on a collection name key take the id key
+ * as their conflict target from gate 3 on the install (RDR item 6, "Readers during the stamp"; P3.5c step), and go back to the
+ * name key when gate 3 stops holding (linda 2026-11-22).
  *
- * <p>{@code PgVectorRepository#upsertChunks} conflicts on {@code (tenant_id, collection, chash, embedding_model)} and
- * {@code TaxonomyCentroidRepository#upsertCentroids} on {@code (tenant_id, collection, topic_id, embedding_model)} (the name
- * keys, the primary keys). From gate 3 each conflicts on the id key, {@code (tenant_id, collection_id, chash | topic_id,
- * embedding_model)}, so a write that matches an existing row by {@code collection_id} under a different name updates that
- * row; a second row for one collection id is never inserted.
+ * <p>The three upserts, each a subject of every test below:
+ * <ul>
+ *   <li>chunks: {@code PgVectorRepository#upsertChunks} ({@code PgVectorRepository.java:1323}), conflict {@code (tenant_id,
+ *       collection, chash, embedding_model)};</li>
+ *   <li>centroids: {@code TaxonomyCentroidRepository#upsertCentroids} ({@code :169}), conflict {@code (tenant_id, collection,
+ *       topic_id, embedding_model)};</li>
+ *   <li>manifest chunks: {@code CatalogRepository#upsertManifestChunkVectors} ({@code CatalogRepository.java:6753}), a private
+ *       static method that the public {@code writeManifestMany} (through {@code writeManifestRows}) and {@code
+ *       appendManifestChunks} (through {@code appendOneDocumentTx}) reach; driven here through {@code
+ *       CombinedWriteService#writeManyCombined}, which owns the embed and calls {@code writeManifestMany}.</li>
+ * </ul>
+ * From gate 3 each conflicts on the id key, {@code (tenant_id, collection_id, chash | topic_id, embedding_model)}: a write that
+ * matches an existing row by {@code collection_id} under a different name updates that row; a second row for one collection id
+ * is never inserted. When gate 3 stops holding (an id index went INVALID) the next write arbitrates on the name key again.
  *
- * <p>The state the tests build is the one a name-path rename leaves in the window the RDR names: the registry holds two
- * names A and B, B carries id Y, and a stored row names A (so the name foreign key holds) and id Y. A write for B resolves
- * to id Y and finds that row by the id key only. The id unique key (P3.3b/P3.3c builds it per leaf; this tree has neither)
- * is created by the test over the partitioned parent, and dropped again, so the guard tests keep the name key alone as
- * their arbiter.
- *
- * <p><b>The gate-3 seam does not exist yet.</b> {@code CompletionBootWork#latest()} holds {@code Result#gate3()} and only
- * {@code Main} reaches it; neither repository can read it. This test is written against the smallest seam the P3.5c commit
- * would add, found by reflection so that this test tree compiles without it (the seam's absence is the test's first, and
- * stated, failure):
+ * <p><b>This file does not compile until P3.5c adds the constructors below</b> (accepted on this feature branch: they stay red
+ * until the code exists). Every call that takes a {@link Gate3} is in one of the three static factories at the foot of the
+ * class, so the compile error is in those three places only. The shapes they expect, each storing the gate and reading
+ * {@link Gate3#holds()} on every upsert, never caching it:
  * <pre>{@code
- *   public void idKeyConflictTarget(java.util.function.BooleanSupplier gate3Holds)   // on both repositories; default: never
+ *   new PgVectorRepository(TenantScope, Embedder docEmbedder, Embedder queryEmbedder, Gate3 gate3)
+ *   new TaxonomyCentroidRepository(TenantScope, Gate3 gate3)
+ *   new CatalogRepository(TenantScope, Gate3 gate3)
  * }</pre>
- * {@code Main} would pass {@code () -> { var r = completionCheck.latest(); return r != null && r.gate3(); }}, read on every
- * upsert so the switch takes effect with no restart (the RDR's "no restart" rule). If P3.5c names the seam otherwise, change
- * {@link #SEAM} and {@link #gate3(Object, boolean)} only.
  *
- * <p>Guards (pass today): before gate 3 a write matches by name. Id-key tests (fail today): once gate 3 holds, by id.
+ * <p><b>Design point the manifest subject surfaces.</b> A manifest row references its chunk by the name foreign key {@code
+ * fk_catalog_chunks_chunk} until P3.7 drops it. The id-key arm updates the row that names A and carries B's id; the manifest row
+ * the same write inserts names B. So the id-key arm's DO UPDATE must also set {@code collection} to the writer's name, or the
+ * foreign key refuses the manifest row and the write fails. The id-key test requires the write to succeed, which holds only if
+ * the arm does that. (The other two upserts are free to do the same; no test asserts the surviving name.)
+ *
+ * <p>Fixture. The state is the one a name-path rename leaves in the window the RDR names: the registry holds two names A and B,
+ * B carries id Y, and a stored row names A (so the name foreign key holds) and id Y. A write for B resolves to Y and finds that
+ * row by the id key only. The id unique key (P3.3b/P3.3c build it per leaf; this tree has neither) is created by the id-key and
+ * flip tests over the partitioned parent and dropped again, so the guards keep the name key alone as their arbiter.
+ *
+ * <p>Tests: guards (pass once the constructors exist, and the name key is today's behaviour), id-key (fail until the conflict
+ * target moves), flip (gate 3 true, then false: the second write must arbitrate as the guard does).
  */
 class Rdr229P35cUpsertConflictKeyTest extends AtomicWriteTestBase {
 
-    private static final String SEAM = "idKeyConflictTarget";
     private static final String MODEL = "minilm-l6-v2-384";
     private static final String CHUNK_ID_KEY = "p35c_chunks_id_key";
     private static final String CENTROID_ID_KEY = "p35c_centroids_id_key";
 
-    private PgVectorRepository vectors;
-    private TaxonomyCentroidRepository centroids;
+    // ---- the one place the not-yet-existing constructors are called --------------------------------------------
+
+    private static PgVectorRepository pgVectorRepository(TenantScope scope, Embedder embedder, Gate3 gate3) {
+        return new PgVectorRepository(scope, embedder, embedder, gate3);
+    }
+
+    private static TaxonomyCentroidRepository taxonomyCentroidRepository(TenantScope scope, Gate3 gate3) {
+        return new TaxonomyCentroidRepository(scope, gate3);
+    }
+
+    private static CatalogRepository catalogRepository(TenantScope scope, Gate3 gate3) {
+        return new CatalogRepository(scope, gate3);
+    }
 
     // ---- fixture -----------------------------------------------------------------------------------------------
 
-    private void ensureRepositories() {
-        if (vectors == null) {
-            vectors = new PgVectorRepository(tenantScope, embedder, embedder);
-            centroids = new TaxonomyCentroidRepository(tenantScope);
-        }
-    }
-
     private String register(String tag) {
-        String c = "knowledge__p35c" + tag + seq.incrementAndGet() + "__" + MODEL + "__v1";
+        String c = "code__p35c" + tag + seq.incrementAndGet() + "__" + MODEL + "__v1";
         registerCollection(c);
         return c;
     }
@@ -83,28 +110,6 @@ class Rdr229P35cUpsertConflictKeyTest extends AtomicWriteTestBase {
             return DSL.using(su, SQLDialect.POSTGRES).select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
                 .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(name))
                 .fetchOne(CATALOG_COLLECTIONS.COLLECTION_ID);
-        }
-    }
-
-    /**
-     * Turns the repository's id-key conflict target on or off by the proposed seam; fails, naming it, while the seam is
-     * absent. The supplier is read per upsert (a constant here; Main's reads the completion check).
-     */
-    private static void gate3(Object repository, boolean holds) {
-        Method seam;
-        try {
-            seam = repository.getClass().getMethod(SEAM, BooleanSupplier.class);
-        } catch (NoSuchMethodException e) {
-            fail("the gate-3 seam is missing: " + repository.getClass().getSimpleName() + "." + SEAM
-                + "(BooleanSupplier) does not exist, so the upsert cannot learn that gate 3 holds on the install "
-                + "(CompletionBootWork#latest().gate3() is reachable only from Main)");
-            return;
-        }
-        try {
-            BooleanSupplier supplier = () -> holds;
-            seam.invoke(repository, supplier);
-        } catch (ReflectiveOperationException e) {
-            throw new AssertionError("the gate-3 seam threw", e);
         }
     }
 
@@ -131,189 +136,256 @@ class Rdr229P35cUpsertConflictKeyTest extends AtomicWriteTestBase {
         void run() throws Exception;
     }
 
+    // ---- the three upserts, behind one shape -------------------------------------------------------------------
+
+    /** One upsert under test. A key names one row (a chash for chunks, a topic for centroids); a text is the written value. */
+    private abstract class Upsert {
+        /** A key no other test of this class uses. */
+        abstract String newKey();
+
+        /** Writes {@code key} into {@code collection} with {@code gate3} on the repository that owns the upsert. */
+        abstract void write(Gate3 gate3, String collection, String key, String text);
+
+        /** Stores a row named {@code a} for {@code key}, carrying the registry id of {@code b}. */
+        abstract void seedNamedAWithIdOfB(String a, String b, String key, String text) throws Exception;
+
+        /** The rows of (tenant, collection id, key) as (name, text). */
+        abstract List<Map.Entry<String, String>> rowsOfId(Long id, String key) throws Exception;
+
+        /** Removes what every write of {@code key} left, so a later id unique key can be built. */
+        abstract void delete(String key) throws Exception;
+    }
+
+    private class Chunks extends Upsert {
+        @Override
+        String newKey() {
+            return Chash.ofText("p35c chunk " + seq.incrementAndGet()).toHex();
+        }
+
+        @Override
+        void write(Gate3 gate3, String collection, String key, String text) {
+            pgVectorRepository(tenantScope, embedder, gate3)
+                .upsertChunks(TENANT, collection, List.of(key), List.of(text), List.of(Map.of()), true);
+        }
+
+        @Override
+        void seedNamedAWithIdOfB(String a, String b, String key, String text) throws Exception {
+            try (Connection su = pg.createConnection("")) {
+                su.setAutoCommit(true);
+                DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+                PgContainerHelper.insertChunks(ctx, TENANT, a, List.of(key), List.of(text), List.of(new float[384]),
+                    List.of(Map.of()));
+                int n = ctx.update(CHUNKS).set(CHUNKS.COLLECTION_ID, registryId(b))
+                    .where(CHUNKS.TENANT_ID.eq(TENANT)).and(CHUNKS.COLLECTION.eq(a))
+                    .and(CHUNKS.CHASH.eq(HexFormat.of().parseHex(key))).execute();
+                assertThat(n).as("fixture: the stored chunk carries the other collection's id").isEqualTo(1);
+            }
+        }
+
+        @Override
+        List<Map.Entry<String, String>> rowsOfId(Long id, String key) throws Exception {
+            try (Connection su = pg.createConnection("")) {
+                return DSL.using(su, SQLDialect.POSTGRES).select(CHUNKS.COLLECTION, CHUNKS.CHUNK_TEXT).from(CHUNKS)
+                    .where(CHUNKS.TENANT_ID.eq(TENANT)).and(CHUNKS.COLLECTION_ID.eq(id))
+                    .and(CHUNKS.CHASH.eq(HexFormat.of().parseHex(key)))
+                    .fetch(r -> Map.entry(r.value1(), String.valueOf(r.value2())));
+            }
+        }
+
+        @Override
+        void delete(String key) throws Exception {
+            try (Connection su = pg.createConnection("")) {
+                DSL.using(su, SQLDialect.POSTGRES).deleteFrom(CHUNKS)
+                    .where(CHUNKS.TENANT_ID.eq(TENANT)).and(CHUNKS.CHASH.eq(HexFormat.of().parseHex(key))).execute();
+            }
+        }
+    }
+
+    /** The manifest path: the same chunk rows, written by {@code CatalogRepository} behind a document's manifest rows. */
+    private class ManifestChunks extends Chunks {
+        @Override
+        void write(Gate3 gate3, String collection, String key, String text) {
+            var catalog = catalogRepository(tenantScope, gate3);
+            var combined = new CombinedWriteService(tenantScope, catalog, new EmbedderRouter(embedder, "document"));
+            String docId = freshDoc("p35c", collection);
+            combined.writeManyCombined(TENANT, collection, List.of(chunk(key, text)),
+                List.of(doc(docId, List.of(row(0, key)))), null, false, true);
+        }
+
+        @Override
+        void delete(String key) throws Exception {
+            try (Connection su = pg.createConnection("")) {
+                DSL.using(su, SQLDialect.POSTGRES).deleteFrom(CATALOG_DOCUMENT_CHUNKS)
+                    .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT))
+                    .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(HexFormat.of().parseHex(key))).execute();
+            }
+            super.delete(key);
+        }
+    }
+
+    private class Centroids extends Upsert {
+        @Override
+        String newKey() {
+            return Long.toString(7_000L + seq.incrementAndGet());
+        }
+
+        @Override
+        void write(Gate3 gate3, String collection, String key, String text) {
+            taxonomyCentroidRepository(tenantScope, gate3)
+                .upsertCentroids(TENANT, List.of(new CentroidRecord(collection, Long.parseLong(key), new float[384], text, 2)));
+        }
+
+        @Override
+        void seedNamedAWithIdOfB(String a, String b, String key, String text) throws Exception {
+            write(Gate3.never(), a, key, text);
+            try (Connection su = pg.createConnection("")) {
+                int n = DSL.using(su, SQLDialect.POSTGRES).update(TAXONOMY_CENTROIDS)
+                    .set(TAXONOMY_CENTROIDS.COLLECTION_ID, registryId(b))
+                    .where(TAXONOMY_CENTROIDS.TENANT_ID.eq(TENANT)).and(TAXONOMY_CENTROIDS.COLLECTION.eq(a))
+                    .and(TAXONOMY_CENTROIDS.TOPIC_ID.eq(Long.parseLong(key))).execute();
+                assertThat(n).as("fixture: the stored centroid carries the other collection's id").isEqualTo(1);
+            }
+        }
+
+        @Override
+        List<Map.Entry<String, String>> rowsOfId(Long id, String key) throws Exception {
+            try (Connection su = pg.createConnection("")) {
+                return DSL.using(su, SQLDialect.POSTGRES).select(TAXONOMY_CENTROIDS.COLLECTION, TAXONOMY_CENTROIDS.LABEL)
+                    .from(TAXONOMY_CENTROIDS)
+                    .where(TAXONOMY_CENTROIDS.TENANT_ID.eq(TENANT)).and(TAXONOMY_CENTROIDS.COLLECTION_ID.eq(id))
+                    .and(TAXONOMY_CENTROIDS.TOPIC_ID.eq(Long.parseLong(key)))
+                    .fetch(r -> Map.entry(r.value1(), String.valueOf(r.value2())));
+            }
+        }
+
+        @Override
+        void delete(String key) throws Exception {
+            try (Connection su = pg.createConnection("")) {
+                DSL.using(su, SQLDialect.POSTGRES).deleteFrom(TAXONOMY_CENTROIDS)
+                    .where(TAXONOMY_CENTROIDS.TENANT_ID.eq(TENANT)).and(TAXONOMY_CENTROIDS.TOPIC_ID.eq(Long.parseLong(key)))
+                    .execute();
+            }
+        }
+    }
+
+    Stream<Arguments> upserts() {
+        return Stream.of(
+            Arguments.of(Named.of("chunks (PgVectorRepository:1323)", new Chunks())),
+            Arguments.of(Named.of("centroids (TaxonomyCentroidRepository:169)", new Centroids())),
+            Arguments.of(Named.of("manifest chunks (CatalogRepository:6753)", new ManifestChunks())));
+    }
+
+    // ---- guards: before gate 3 the key is the name -------------------------------------------------------------
+
+    /** GUARD: with {@link Gate3#never()} a write under the SAME name updates the row in place (the name key). */
+    @ParameterizedTest
+    @MethodSource("upserts")
+    void beforeGate3AWriteUnderTheSameNameUpdatesTheRow(Upsert u) throws Exception {
+        String b = register("gb");
+        String key = u.newKey();
+        u.write(Gate3.never(), b, key, "first");
+
+        u.write(Gate3.never(), b, key, "second");
+
+        assertThat(u.rowsOfId(registryId(b), key)).as("one row for the name; the second write took it")
+            .containsExactly(Map.entry(b, "second"));
+        u.delete(key);
+    }
+
     /**
-     * A guard that leaves two rows for one collection id would make the id unique key impossible to build for the id-key tests that
-     * share this database (23505 at CREATE UNIQUE INDEX), so those guards delete what they wrote.
+     * GUARD: with {@link Gate3#never()} the arbiter is the name key and nothing else, so a write under a DIFFERENT name for the
+     * same collection id inserts a second row. (No id unique key exists here: it is built only inside {@link #withIdKeys}.)
      */
-    private void deleteChunksOf(String hex) throws Exception {
-        try (Connection su = pg.createConnection("")) {
-            DSL.using(su, SQLDialect.POSTGRES).deleteFrom(CHUNKS)
-                .where(CHUNKS.TENANT_ID.eq(TENANT)).and(CHUNKS.CHASH.eq(HexFormat.of().parseHex(hex))).execute();
-        }
-    }
-
-    private void deleteCentroidsOf(long topic) throws Exception {
-        try (Connection su = pg.createConnection("")) {
-            DSL.using(su, SQLDialect.POSTGRES).deleteFrom(TAXONOMY_CENTROIDS)
-                .where(TAXONOMY_CENTROIDS.TENANT_ID.eq(TENANT)).and(TAXONOMY_CENTROIDS.TOPIC_ID.eq(topic)).execute();
-        }
-    }
-
-    // ---- chunks ------------------------------------------------------------------------------------------------
-
-    /** The chunk rows of {@code (tenant, id)} with this chash, as (name, text). */
-    private List<Map.Entry<String, String>> chunkRowsOfId(Long id, String hex) throws Exception {
-        try (Connection su = pg.createConnection("")) {
-            return DSL.using(su, SQLDialect.POSTGRES).select(CHUNKS.COLLECTION, CHUNKS.CHUNK_TEXT).from(CHUNKS)
-                .where(CHUNKS.TENANT_ID.eq(TENANT)).and(CHUNKS.COLLECTION_ID.eq(id))
-                .and(CHUNKS.CHASH.eq(HexFormat.of().parseHex(hex)))
-                .fetch(r -> Map.entry(r.value1(), String.valueOf(r.value2())));
-        }
-    }
-
-    /** Seeds a chunk under {@code a}, then gives it id {@code idOfB}: the stored row names A and carries B's id. */
-    private String seedChunkNamedAWithIdOfB(String a, String b, String text) throws Exception {
-        String hex = Chash.ofText(text).toHex();
-        vectors.upsertChunks(TENANT, a, List.of(hex), List.of(text), List.of(Map.of()), false);
-        try (Connection su = pg.createConnection("")) {
-            int n = DSL.using(su, SQLDialect.POSTGRES).update(CHUNKS).set(CHUNKS.COLLECTION_ID, registryId(b))
-                .where(CHUNKS.TENANT_ID.eq(TENANT)).and(CHUNKS.COLLECTION.eq(a))
-                .and(CHUNKS.CHASH.eq(HexFormat.of().parseHex(hex))).execute();
-            assertThat(n).as("fixture: the stored chunk carries the other collection's id").isEqualTo(1);
-        }
-        return hex;
-    }
-
-    /** GUARD, passes today: before gate 3 the conflict target is the name key, so a write under the SAME name updates in place. */
-    @Test
-    void beforeGate3AChunkWriteUnderTheSameNameUpdatesTheRow() throws Exception {
-        ensureRepositories();
+    @ParameterizedTest
+    @MethodSource("upserts")
+    void beforeGate3AWriteUnderAnotherNameWithTheSameIdInsertsASecondRow(Upsert u) throws Exception {
         String a = register("ga");
-        String text = "same name " + seq.incrementAndGet();
-        String hex = Chash.ofText(text).toHex();
-        vectors.upsertChunks(TENANT, a, List.of(hex), List.of(text), List.of(Map.of()), false);
-
-        vectors.upsertChunks(TENANT, a, List.of(hex), List.of(text), List.of(Map.of()), true);   // force_re_embed: the DO UPDATE arm
-
-        assertThat(chunkRowsOfId(registryId(a), hex)).as("one row for (collection, chash): the name key matched").hasSize(1);
-    }
-
-    /**
-     * GUARD, passes today: before gate 3 the arbiter is the name key and nothing else, so a write under a DIFFERENT name for the
-     * same collection id inserts a second row. (Run without the id unique key, which only exists inside {@link #withIdKeys}.)
-     */
-    @Test
-    void beforeGate3AChunkWriteUnderAnotherNameWithTheSameIdInsertsASecondRow() throws Exception {
-        ensureRepositories();
-        String a = register("gb1");
-        String b = register("gb2");
-        String hex = seedChunkNamedAWithIdOfB(a, b, "name key only " + seq.incrementAndGet());
-
+        String b = register("gb");
+        String key = u.newKey();
+        u.seedNamedAWithIdOfB(a, b, key, "seed");
         try {
-            vectors.upsertChunks(TENANT, b, List.of(hex), List.of("replacement"), List.of(Map.of()), true);
+            u.write(Gate3.never(), b, key, "replacement");
 
-            assertThat(chunkRowsOfId(registryId(b), hex))
-                .as("the name key (B, chash) has no row, so the write inserts; two rows now carry one collection id")
+            assertThat(u.rowsOfId(registryId(b), key))
+                .as("the name key (B, key) has no row, so the write inserts; two rows now carry one collection id")
                 .hasSize(2);
         } finally {
-            deleteChunksOf(hex);
+            u.delete(key);
         }
     }
 
+    // ---- from gate 3: the key is the id ------------------------------------------------------------------------
+
     /**
-     * FAILS today (no seam; and once the seam exists, until the conflict target moves): with gate 3 held and the id unique key
-     * on the leaf, the write for B finds the row that names A and carries B's id, and updates it. One row, the new text.
+     * FAILS until the conflict target moves: with gate 3 held and the id unique key built, the write for B finds the row that
+     * names A and carries B's id, and updates it. One row for the collection id, holding the new text.
      */
-    @Test
-    void fromGate3AChunkWriteMatchingByIdUpdatesThatRowInsteadOfInsertingASecond() throws Exception {
-        ensureRepositories();
+    @ParameterizedTest
+    @MethodSource("upserts")
+    void fromGate3AWriteMatchingByIdUpdatesThatRowInsteadOfInsertingASecond(Upsert u) throws Exception {
         String a = register("ia");
         String b = register("ib");
-        String hex = seedChunkNamedAWithIdOfB(a, b, "by id " + seq.incrementAndGet());
+        String key = u.newKey();
+        u.seedNamedAWithIdOfB(a, b, key, "seed");
         Long idOfB = registryId(b);
 
-        withIdKeys(() -> {
-            gate3(vectors, true);
-            try {
-                vectors.upsertChunks(TENANT, b, List.of(hex), List.of("replacement text"), List.of(Map.of()), true);
-            } finally {
-                gate3(vectors, false);
-            }
-        });
+        withIdKeys(() -> u.write(() -> true, b, key, "replacement text"));
 
-        var rows = chunkRowsOfId(idOfB, hex);
-        assertThat(rows).as("the id key matched the existing row: still one row for (collection id, chash)").hasSize(1);
+        var rows = u.rowsOfId(idOfB, key);
+        assertThat(rows).as("the id key matched the existing row: still one row for (collection id, key)").hasSize(1);
         assertThat(rows.get(0).getValue()).as("and that row took the write").isEqualTo("replacement text");
     }
 
-    // ---- centroids ---------------------------------------------------------------------------------------------
+    // ---- the flip: gate 3 holds, then stops holding ------------------------------------------------------------
 
-    private static final long TOPIC = 7_001L;
-
-    private List<Map.Entry<String, String>> centroidRowsOfId(Long id, long topic) throws Exception {
-        try (Connection su = pg.createConnection("")) {
-            return DSL.using(su, SQLDialect.POSTGRES).select(TAXONOMY_CENTROIDS.COLLECTION, TAXONOMY_CENTROIDS.LABEL)
-                .from(TAXONOMY_CENTROIDS)
-                .where(TAXONOMY_CENTROIDS.TENANT_ID.eq(TENANT)).and(TAXONOMY_CENTROIDS.COLLECTION_ID.eq(id))
-                .and(TAXONOMY_CENTROIDS.TOPIC_ID.eq(topic))
-                .fetch(r -> Map.entry(r.value1(), String.valueOf(r.value2())));
-        }
-    }
-
-    private void seedCentroidNamedAWithIdOfB(String a, String b, long topic) throws Exception {
-        centroids.upsertCentroids(TENANT, List.of(new CentroidRecord(a, topic, new float[384], "original", 1)));
-        try (Connection su = pg.createConnection("")) {
-            int n = DSL.using(su, SQLDialect.POSTGRES).update(TAXONOMY_CENTROIDS)
-                .set(TAXONOMY_CENTROIDS.COLLECTION_ID, registryId(b))
-                .where(TAXONOMY_CENTROIDS.TENANT_ID.eq(TENANT)).and(TAXONOMY_CENTROIDS.COLLECTION.eq(a))
-                .and(TAXONOMY_CENTROIDS.TOPIC_ID.eq(topic)).execute();
-            assertThat(n).as("fixture: the stored centroid carries the other collection's id").isEqualTo(1);
-        }
-    }
-
-    /** GUARD, passes today: before gate 3 a centroid write under the same name updates in place (the name key). */
-    @Test
-    void beforeGate3ACentroidWriteUnderTheSameNameUpdatesTheRow() throws Exception {
-        ensureRepositories();
-        String a = register("ca");
-        long topic = TOPIC + seq.incrementAndGet();
-        centroids.upsertCentroids(TENANT, List.of(new CentroidRecord(a, topic, new float[384], "first", 1)));
-
-        centroids.upsertCentroids(TENANT, List.of(new CentroidRecord(a, topic, new float[384], "second", 2)));
-
-        assertThat(centroidRowsOfId(registryId(a), topic)).as("one row; its label is the second write's")
-            .containsExactly(Map.entry(a, "second"));
-    }
-
-    /** GUARD, passes today: before gate 3 the arbiter is the name key, so another name with the same id inserts a second centroid. */
-    @Test
-    void beforeGate3ACentroidWriteUnderAnotherNameWithTheSameIdInsertsASecondRow() throws Exception {
-        ensureRepositories();
-        String a = register("cb1");
-        String b = register("cb2");
-        long topic = TOPIC + seq.incrementAndGet();
-        seedCentroidNamedAWithIdOfB(a, b, topic);
-
-        try {
-            centroids.upsertCentroids(TENANT, List.of(new CentroidRecord(b, topic, new float[384], "replacement", 2)));
-
-            assertThat(centroidRowsOfId(registryId(b), topic)).as("the name key (B, topic) has no row, so the write inserts").hasSize(2);
-        } finally {
-            deleteCentroidsOf(topic);
-        }
-    }
-
-    /** FAILS today (no seam; then until the conflict target moves): with gate 3 held the write for B updates the row named A. */
-    @Test
-    void fromGate3ACentroidWriteMatchingByIdUpdatesThatRowInsteadOfInsertingASecond() throws Exception {
-        ensureRepositories();
-        String a = register("ca1");
-        String b = register("ca2");
-        long topic = TOPIC + seq.incrementAndGet();
-        seedCentroidNamedAWithIdOfB(a, b, topic);
+    /**
+     * FAILS until the conflict target moves and reads the gate on every write. A {@link Gate3} backed by an {@link AtomicBoolean}:
+     * with it true a write goes to the id key (as above); set false (an id index went INVALID) the next write arbitrates on the
+     * name key again, exactly as the guards do. Both keys exist, so two writes tell the keys apart:
+     * <ul>
+     *   <li>a write whose name matches a row is a name-key conflict: that row is updated, one row remains;</li>
+     *   <li>a write whose id matches a row named otherwise is NOT matched by the id key any more: the row that names A keeps
+     *       its seed text (the write inserts a second row, which the live id unique key refuses, or is arbitrated by the name
+     *       key alone; either way the id key did not update A's row).</li>
+     * </ul>
+     */
+    @ParameterizedTest
+    @MethodSource("upserts")
+    void whenGate3StopsHoldingTheNextWriteArbitratesOnTheNameKeyAgain(Upsert u) throws Exception {
+        String a = register("fa");
+        String b = register("fb");
         Long idOfB = registryId(b);
+        var gate = new AtomicBoolean(true);
+        Gate3 gate3 = gate::get;
+        String byId = u.newKey(), sameName = u.newKey(), idOnlyAfter = u.newKey();
+        try {
+            u.seedNamedAWithIdOfB(a, b, byId, "seed");
+            withIdKeys(() -> {
+                // gate 3 holds: the id key
+                u.write(gate3, b, byId, "id write");
+                assertThat(u.rowsOfId(idOfB, byId)).as("gate 3 true: matched by id, one row").hasSize(1)
+                    .allSatisfy(r -> assertThat(r.getValue()).isEqualTo("id write"));
 
-        withIdKeys(() -> {
-            gate3(centroids, true);
-            try {
-                centroids.upsertCentroids(TENANT, List.of(new CentroidRecord(b, topic, new float[384], "replacement", 2)));
-            } finally {
-                gate3(centroids, false);
-            }
-        });
+                // gate 3 stops holding: the name key
+                gate.set(false);
+                u.write(Gate3.never(), b, sameName, "same name v1");   // a row named B, carrying B's id
+                u.write(gate3, b, sameName, "same name v2");
+                assertThat(u.rowsOfId(idOfB, sameName)).as("gate 3 false: matched by the name, one row, updated")
+                    .containsExactly(Map.entry(b, "same name v2"));
 
-        var rows = centroidRowsOfId(idOfB, topic);
-        assertThat(rows).as("the id key matched the existing row: still one row for (collection id, topic)").hasSize(1);
-        assertThat(rows.get(0).getValue()).as("and that row took the write").isEqualTo("replacement");
+                u.seedNamedAWithIdOfB(a, b, idOnlyAfter, "seed after");
+                try {
+                    u.write(gate3, b, idOnlyAfter, "must not match by id");
+                } catch (RuntimeException expectedWhenTheIdKeyRefusesTheSecondRow) {
+                    // the name key finds no row, so the INSERT meets the id unique key: 23505, the statement rolls back
+                }
+                assertThat(u.rowsOfId(idOfB, idOnlyAfter)).as("gate 3 false: the id key no longer updates the row that names A")
+                    .contains(Map.entry(a, "seed after"));
+            });
+        } finally {
+            u.delete(byId);
+            u.delete(sameName);
+            u.delete(idOnlyAfter);
+        }
     }
 }
