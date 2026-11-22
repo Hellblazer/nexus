@@ -133,8 +133,10 @@ def registered_or_seeded(real: Any) -> Any:
     return wrapper
 
 
-#: The engine's text for a registration its embedding profile refuses (``CollectionRegistration``: an
-#: ``EmbeddingProfileConflictException``, sent as a 422 with no typed reason, so the message is the only marker).
+#: The engine's typed reason for a registration its embedding profile refuses (``CollectionRegistration.
+#: EMBEDDING_PROFILE_MISMATCH_REASON``, RDR-229 P3.1), and its message text, matched only on an engine that sends no
+#: reason yet.
+_PROFILE_REFUSAL_REASON = "embedding_profile_mismatch"
 _PROFILE_REFUSAL_MARKER = "refusing to register"
 
 
@@ -156,8 +158,15 @@ def is_profile_refusal(exc: BaseException) -> bool:
         return True
     if isinstance(exc, httpx.HTTPStatusError):
         response = exc.response
-        status = response.status_code if response is not None else None
-        return status == 422 and _PROFILE_REFUSAL_MARKER in str(exc)
+        if response is None or response.status_code != 422:
+            return False
+        try:
+            reason = response.json().get("reason")
+        except Exception:  # noqa: BLE001 — a body that is not JSON carries no reason
+            reason = None
+        if reason is not None:
+            return reason == _PROFILE_REFUSAL_REASON
+        return _PROFILE_REFUSAL_MARKER in str(exc)  # an engine without the typed reason
     return False
 
 

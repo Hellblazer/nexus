@@ -9758,7 +9758,11 @@ public final class CatalogRepository {
      * tests, not just the status code (bead ACCEPTANCE).
      */
     public static final class EmbeddingProfileConflictException extends RuntimeException {
-        public EmbeddingProfileConflictException(String message) { super(message); }
+        /** RDR-229 P3.1 (nexus-p2m1x.17): the typed wire {@code reason}, or null when the refusal has none yet. */
+        private final String reason;
+        public EmbeddingProfileConflictException(String message) { this(null, message); }
+        public EmbeddingProfileConflictException(String reason, String message) { super(message); this.reason = reason; }
+        public String reason() { return reason; }
     }
 
     /**

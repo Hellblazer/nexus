@@ -533,7 +533,10 @@ public final class CatalogHandler implements HttpHandler {
             // "well-formed but unprocessable in this configuration" contract.
             // The message names the authoritative value; tests assert its
             // content, not just the status.
-            HttpUtil.send(exchange, 422, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
+            // RDR-229 P3.1 (nexus-p2m1x.17): a typed reason beside the message when the refusal carries one.
+            HttpUtil.send(exchange, 422, MAPPER.writeValueAsString(e.reason() == null
+                ? java.util.Map.of("error", e.getMessage())
+                : java.util.Map.of("error", e.getMessage(), "reason", e.reason())));
         } catch (CatalogRepository.DocumentNotFoundException e) {
             // nexus-s13u0/RDR-191 GATE-2 review High: a manifest write
             // (write/append/import_chunks_batch) against a doc_id with no

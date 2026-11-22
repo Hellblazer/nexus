@@ -28,6 +28,14 @@ import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_PROFILE;
  */
 public final class CollectionRegistration {
 
+    /**
+     * RDR-229 P3.1 (nexus-p2m1x.17, linda 2026-11-22): the typed {@code reason} of the 422 that refuses a registration
+     * whose {@code embedding_model} the tenant's embedding profile disagrees with, beside the existing message, so a
+     * client matches the reason, not the wording. Additive (wire ledger).
+     */
+    public static final String EMBEDDING_PROFILE_MISMATCH_REASON = "embedding_profile_mismatch";
+
+
     /** {@code <content_type>__<owner>__<embedding_model>__v<n>}, as the client's {@code _CONFORMANT_COLLECTION_RE}. */
     private static final Pattern CONFORMANT_VERSION =
         Pattern.compile("^[a-z][a-z0-9-]*__.+__([a-z][a-z0-9-]*)__(v[0-9]+)$");
@@ -255,7 +263,7 @@ public final class CollectionRegistration {
         }
         if (profileModel != null) {
             if (requestedModel != null && !requestedModel.isBlank() && !requestedModel.equals(profileModel)) {
-                throw new CatalogRepository.EmbeddingProfileConflictException(
+                throw new CatalogRepository.EmbeddingProfileConflictException(EMBEDDING_PROFILE_MISMATCH_REASON,
                     "the embedding profile for content_type '" + contentType + "' is '"
                     + profileModel + "'; refusing to register '" + label
                     + "' with embedding_model '" + requestedModel + "'");
