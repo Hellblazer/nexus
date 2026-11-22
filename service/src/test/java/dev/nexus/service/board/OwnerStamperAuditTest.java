@@ -233,6 +233,35 @@ class OwnerStamperAuditTest {
     }
 
     @Test
+    void aLiveMembersStampedPushHoldsTheHandOffPastTheDeadlineUntilItsTipsVerdict() {
+        String[] f = openRed();                          // lead leads; alpha owns the red on Y; carol is next up
+        se.push(f[0], StamperEnv.BASE, "Z", "Y", "sess-lead");   // the leader, a live member and no owner, pushes a fix on Y
+
+        deadlineAfter(f, 21);
+        assertThat(rows(f[0])).as("past the 20-minute deadline, the fix is still in CI: held").containsExactly("owner/earliest_suspect");
+
+        se.done(f[0], StamperEnv.BASE, "Z", "failure");  // the fix's verdict lands red: the row is refreshed to Z
+        Instant verdictAt = se.tuples.rdp(f[0], "board/ci/nexus-develop--done", Map.of(), 20, null).stream()
+            .filter(r -> "Z".equals(r.dims().get("sha"))).findFirst().orElseThrow().createdAt().toInstant();
+        // Row times are the database's: the test clock is set from the verdict's own time.
+        se.env.ids.clock.set(verdictAt.plus(Duration.ofMinutes(19)));
+        for (int i = 1; i < f.length; i++) {
+            se.env.renew(f[0], f[i]);
+        }
+        se.stamper.onDeadline(f[0], StamperEnv.BASE);
+        assertThat(rows(f[0])).as("19 minutes after the verdict: still no hand-off (next up has been nudged by now)")
+            .doesNotContain("owner/handoff").contains("nudge/null");
+
+        se.env.ids.clock.set(verdictAt.plus(Duration.ofMinutes(21)));
+        for (int i = 1; i < f.length; i++) {
+            se.env.renew(f[0], f[i]);
+        }
+        se.stamper.onDeadline(f[0], StamperEnv.BASE);
+        assertThat(rows(f[0])).as("one deadline after the verdict the red is handed on").last().isEqualTo("owner/handoff");
+        assertThat(se.ownerRows(f[0], StamperEnv.BASE).getLast().body()).containsEntry("owner", f[3]);
+    }
+
+    @Test
     void aStrangersLaterDisclaimDoesNotMaskTheOwnersEarlierOne() {
         String[] f = openRed();
         se.disclaimRowOnly(f[0], StamperEnv.BASE, "Y", "sess-alpha");   // the owner's disclaim, whose evaluation did not run

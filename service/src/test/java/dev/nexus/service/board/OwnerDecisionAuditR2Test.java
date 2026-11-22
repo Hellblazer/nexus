@@ -88,6 +88,21 @@ class OwnerDecisionAuditR2Test {
         assertThat(OwnerFixture.bodyOf(f.onDeadline().post())).containsEntry("reason", "handoff");
     }
 
+    @Test
+    void aHeldDeadlineHasNoNudgeEitherWhileTheMembersFixIsStillInCi() {
+        OwnerFixture f = new OwnerFixture().seat("A").seat("C");
+        f.push("X", "G0", "A").done("X", "failure");
+        f.now(EPISODE);
+        f.recordNow(f.decide());                        // owner A, next up the leader L
+        f.at(after(5)).push("Z1", "X", "C");            // member C pushes on the red tip after the verdict; no verdict for Z1 yet
+        f.now(after(11));                               // past half the deadline, where a nudge would otherwise be due
+
+        OwnerDecision.Decision d = f.onDeadline();
+
+        assertThat(d.post()).as("no owner row and no nudge: the fix is in CI").isNull();
+        assertThat(d.nudgeAt()).as("none pending either").isNull();
+    }
+
     // ── 2: open_minutes and stalled_sign ─────────────────────────────────────────────────────────────────────
 
     @Test
