@@ -58,11 +58,13 @@ def started_by_claude_code() -> bool:
 def _token_file_session_id() -> str | None:
     """The session id this process's token file records (RDR-253): the file of its nearest Claude ancestor, or the one
     a delegated child was given. Per process, never machine-wide, so a second top-level session cannot clobber it the
-    way it clobbered the retired ``current_session`` file. None with no Claude ancestor or no usable token."""
+    way it clobbered the retired ``current_session`` file. Read whether or not the token is usable now: the session id
+    is a label, and an expired token (a laptop sleep, until the MCP heartbeat renews it) does not change which session
+    this is. None with no Claude ancestor or no readable file."""
     try:
         from nexus.identity import token_header  # noqa: PLC0415 — deferred: leaf import cost, rare tier
 
-        record = token_header.current()
+        record = token_header.recorded()
     except Exception:  # noqa: BLE001 — a label lookup never fails its caller
         return None
     sid = record.session_id if record is not None else None

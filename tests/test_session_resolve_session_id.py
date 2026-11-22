@@ -27,7 +27,7 @@ class _Record:
 
 @pytest.fixture
 def token_session(monkeypatch: pytest.MonkeyPatch):
-    """Restore the real token-file tier (conftest stubs it) over a fake ``token_header.current``."""
+    """Restore the real token-file tier (conftest stubs it) over a fake ``token_header.recorded``."""
     from nexus.identity import token_header
 
     monkeypatch.setattr(session, "_token_file_session_id", _REAL_TOKEN_TIER)
@@ -36,9 +36,9 @@ def token_session(monkeypatch: pytest.MonkeyPatch):
         if isinstance(value, Exception):
             def _raise():
                 raise value
-            monkeypatch.setattr(token_header, "current", lambda **_: _raise())
+            monkeypatch.setattr(token_header, "recorded", lambda: _raise())
         else:
-            monkeypatch.setattr(token_header, "current", lambda **_: value)
+            monkeypatch.setattr(token_header, "recorded", lambda: value)
     return _set
 
 
@@ -236,7 +236,7 @@ class TestTheUnavailableRemedyFollowsTheHost:
 
 
 class TestTheRealTokenFileTier:
-    """The conftest stub and the faked ``token_header.current`` above leave the real chain from a token file on disk to
+    """The conftest stub and the faked ``token_header.recorded`` above leave the real chain from a token file on disk to
     ``resolve_session_id`` unexercised. This reads one: the file a delegated child is handed (``NX_IDENTITY_TOKEN``),
     written with the repo's own writer, through the unstubbed ``_token_file_session_id``."""
 
@@ -270,6 +270,13 @@ class TestTheRealTokenFileTier:
     def test_a_missing_token_file_resolves_nothing(self, tmp_path, monkeypatch) -> None:
         monkeypatch.setenv("NX_IDENTITY_TOKEN", str(tmp_path / "identity" / "9.9.token"))
         assert session.resolve_session_id() is None
+
+    @pytest.mark.parametrize("overrides", [dict(expires_at=1.0), dict(token=None)])
+    def test_an_expired_or_tokenless_file_still_names_its_session(self, tmp_path, monkeypatch, overrides) -> None:
+        """The session id is a label, true whether or not the token can be sent right now (a laptop sleep expires it
+        until the MCP heartbeat renews it): an unusable token must not turn a known session into an unresolved one."""
+        monkeypatch.setenv("NX_IDENTITY_TOKEN", str(self._write(tmp_path, **overrides)))
+        assert session.resolve_session_id() == "sess-from-the-file"
 
     def test_a_file_with_no_session_id_resolves_nothing(self, tmp_path, monkeypatch) -> None:
         monkeypatch.setenv("NX_IDENTITY_TOKEN", str(self._write(tmp_path, session_id=None)))

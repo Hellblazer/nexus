@@ -164,6 +164,16 @@ def current(*, now: float | None = None) -> TokenFile | None:
     return _current_with_path(now=now)[1]
 
 
+def recorded() -> TokenFile | None:
+    """This process's token file record whether or not its token may be sent now: what the file says about the process
+    (its identity, its session id) stays true after the token expires. :func:`current` is for sending."""
+    record = _read()[1]
+    if record is None and has_claude_ancestor():
+        _pause(REREAD_DELAY_S)
+        record = _read()[1]
+    return record
+
+
 def _current_with_path(*, now: float | None = None) -> tuple[Path | None, TokenFile | None]:
     path, record = _read()
     if record is None and has_claude_ancestor():

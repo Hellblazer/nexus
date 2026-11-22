@@ -3042,7 +3042,7 @@ def _no_real_resume_pointer_store(request, monkeypatch):
 def _session_id_reads_no_real_token_file(monkeypatch):
     """RDR-253 Phase 2: :func:`nexus.session.resolve_session_id`'s last tier reads this process's token file, and the
     suite usually runs under a live Claude session, whose token file would name the real session. Every test sees no
-    token-file session; the tests of that tier patch ``nexus.identity.token_header.current`` and restore the real
+    token-file session; the tests of that tier patch ``nexus.identity.token_header.recorded`` and restore the real
     ``_token_file_session_id`` themselves."""
     import nexus.session as session
 
