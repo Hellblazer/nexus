@@ -153,12 +153,12 @@ class CollectionNameSqlLiveBodyGateTest {
      * added or dropped moves it, in the same edit. 120 -> 121 at RDR-229 P3.1 fix round A: vectors-071-1 adds
      * {@code nexus.rdr229_restamp(text)}. It is a live function but not a name-parsing site: it matches move LABELS with
      * {@code starts_with(m.label, ...)} and compares collection names only by equality against {@code catalog_collections.name}, so
-     * {@link #NAME_PARSING_CENSUS} is unchanged. 124 -> 128 at RDR-229 P3.7: vectors-079-1 adds the four child-row name trigger functions
+     * {@link #NAME_PARSING_CENSUS} is unchanged. 124 -> 127 at RDR-229 P3.7: vectors-079-1 adds the three child-row name trigger functions
      * ({@code nexus.catalog_document_chunks_name_from_chunk}, {@code nexus.chunk_orphaned_at_name_from_chunk},
-     * {@code nexus.topic_assignments_name_from_chunk}, {@code nexus.child_name_fix_log}). They read the chunk's STORED name column by
-     * equality and parse no name (the log line's count is cut with substr and strpos, not split_part), so the census is unchanged.
+     * {@code nexus.topic_assignments_name_from_chunk}). They read the chunk's STORED name column by
+     * equality and parse no name (the log line is a RAISE LOG of the names, no split_part), so the census is unchanged.
      */
-    static final int LIVE_FUNCTIONS_PIN = 128;
+    static final int LIVE_FUNCTIONS_PIN = 127;
 
     // ── model ───────────────────────────────────────────────────────────
 

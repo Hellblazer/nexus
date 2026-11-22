@@ -16,7 +16,7 @@ import java.sql.Connection;
 import java.util.List;
 
 /**
- * RDR-229 P3.7 (nexus-p2m1x.27), vectors-079-1 on a migrated schema: it creates the six triggers and four functions, its rollback
+ * RDR-229 P3.7 (nexus-p2m1x.27), vectors-079-1 on a migrated schema: it creates the three triggers and three functions, its rollback
  * removes every one of them, and replaying the changeset brings them back. Its own database (a template clone).
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -25,12 +25,9 @@ class Vectors079RollbackIntegrationTest {
     private static final String FILE = "db/changelog/vectors-079-child-row-name-from-chunk.xml";
     private static final String ID = "vectors-079-1";
     private static final List<String> TRIGGERS = List.of(
-        "trg_catalog_document_chunks_name_from_chunk", "trg_catalog_document_chunks_name_fix_log",
-        "trg_chunk_orphaned_at_name_from_chunk", "trg_chunk_orphaned_at_name_fix_log",
-        "trg_topic_assignments_name_from_chunk", "trg_topic_assignments_name_fix_log");
+        "trg_catalog_document_chunks_name_from_chunk", "trg_chunk_orphaned_at_name_from_chunk", "trg_topic_assignments_name_from_chunk");
     private static final List<String> FUNCTIONS = List.of(
-        "catalog_document_chunks_name_from_chunk", "chunk_orphaned_at_name_from_chunk", "topic_assignments_name_from_chunk",
-        "child_name_fix_log");
+        "catalog_document_chunks_name_from_chunk", "chunk_orphaned_at_name_from_chunk", "topic_assignments_name_from_chunk");
 
     private PostgreSQLContainer<?> pg;
 
@@ -63,7 +60,7 @@ class Vectors079RollbackIntegrationTest {
     }
 
     @Test
-    void theChangesetCreatesSixTriggersAndFourFunctions_itsRollbackRemovesAll_andAReplayRestoresThem() throws Exception {
+    void theChangesetCreatesThreeTriggersAndThreeFunctions_itsRollbackRemovesAll_andAReplayRestoresThem() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             assertThat(triggers(su)).as("the migration created every trigger").containsExactlyInAnyOrderElementsOf(TRIGGERS);

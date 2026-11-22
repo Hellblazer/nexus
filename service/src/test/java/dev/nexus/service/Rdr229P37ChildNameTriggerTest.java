@@ -89,11 +89,12 @@ class Rdr229P37ChildNameTriggerTest {
         assertThat(w.childrenNotOnTheirChunksName()).isZero();
     }
 
-    // ---- a mixed batch, and the once-per-statement line ------------------------------------------------------------------------
+    // ---- a mixed batch, and the once-per-transaction line ----------------------------------------------------------------------
 
     @Test
-    void aMixedBatchOfExistingAndNewChunksCommitsInOneStatement_forEachTable_andIsLoggedOncePerStatement() throws Exception {
+    void aMixedBatchOfExistingAndNewChunksCommitsInOneStatement_forEachTable_andIsLoggedOnce() throws Exception {
         var w = world("mix");
+        // three statements, each its own transaction (autocommit): five rows each, three of them replaced, one line each, not one per row
         List<String> lines = w.run(
             w.manifestInsert("cn.mix.d0", 0, w.newName, w.ex[0], w.nw[0], w.ex[1], w.nw[1], w.ex[2]),
             w.orphanedInsert(w.newName, w.ex[0], w.nw[0], w.ex[1], w.nw[1], w.ex[2]),
@@ -104,33 +105,54 @@ class Rdr229P37ChildNameTriggerTest {
         assertThat(w.orphanedNames()).hasSize(5);
         assertThat(w.assignmentNames()).hasSize(5);
         assertThat(w.childrenNotOnTheirChunksName()).isZero();
-        assertThat(lines).as("three statements replaced three names each: one line each, not one per row").hasSize(3);
+        assertThat(lines).as("three transactions, each replaced three names: one line each, not one per row").hasSize(3);
         for (String table : List.of("catalog_document_chunks", "chunk_orphaned_at", "topic_assignments")) {
             assertThat(lines).anySatisfy(l -> assertThat(l).contains(Rdr229ChildNameWorld.LOG_PREFIX + table)
-                .contains("on 3 row(s) of one statement").contains(" -> " + w.oldName));
+                .contains("supplied " + w.newName).contains("stored " + w.oldName).contains("application ").contains("pid "));
         }
-        assertThat(lines.get(0)).as("the sample is the first row replaced: supplied -> stored").contains("first: " + w.newName + " -> " + w.oldName);
+        assertThat(lines.get(0)).as("the sample is the first row replaced, with the chunk key prefix")
+            .contains("chunk " + w.hex(w.ex[0]).substring(0, 12));
     }
 
     @Test
-    void aStatementThatReplacesNothingLogsNothing_andTheNextCountStartsAtOne() throws Exception {
+    void aSecondStatementInTheSameTransactionLogsNothingMore_onAnyOfTheThreeTables_andANewTransactionLogsAgain() throws Exception {
+        var w = world("tx");
+        List<String> one = w.runInOneTransaction(
+            w.manifestInsert("cn.tx.d0", 0, w.newName, w.ex[0], w.ex[1]),
+            w.manifestInsert("cn.tx.d1", 0, w.newName, w.ex[2]),
+            w.orphanedInsert(w.newName, w.ex[3]),
+            w.assignmentInsert(w.newName, w.ex[4]));
+        assertThat(one).as("one line for the whole transaction: four statements, three tables, five replaced rows").hasSize(1);
+        assertThat(one.get(0)).contains(Rdr229ChildNameWorld.LOG_PREFIX + "catalog_document_chunks").contains("supplied " + w.newName);
+        assertThat(w.childrenNotOnTheirChunksName()).isZero();
+
+        List<String> next = w.runInOneTransaction(w.orphanedInsert(w.newName, w.ex[0]));
+        assertThat(next).as("a new transaction logs again").singleElement().asString().contains(Rdr229ChildNameWorld.LOG_PREFIX + "chunk_orphaned_at");
+    }
+
+    @Test
+    void aStatementThatReplacesNothingLogsNothing_andDoesNotSetTheFlag() throws Exception {
         var w = world("quiet");
         List<String> quiet = w.run(w.manifestInsert("cn.quiet.d0", 0, w.newName, w.nw[0], w.nw[1]));
         assertThat(quiet).as("only new chunks, written under the label they carry: nothing replaced, nothing logged").isEmpty();
 
-        List<String> first = w.run(w.manifestInsert("cn.quiet.d1", 0, w.newName, w.ex[0], w.ex[1]));
-        List<String> second = w.run(w.manifestInsert("cn.quiet.d2", 0, w.newName, w.ex[2]));
-        assertThat(first).singleElement().asString().contains("on 2 row(s)");
-        assertThat(second).as("the count is per statement, not cumulative").singleElement().asString().contains("on 1 row(s)");
+        List<String> tx = w.runInOneTransaction(
+            w.manifestInsert("cn.quiet.d1", 0, w.newName, w.nw[2]),   // nothing replaced: the flag stays off
+            w.manifestInsert("cn.quiet.d2", 0, w.newName, w.ex[0]));
+        assertThat(tx).as("the first replacement of the transaction logs, although a statement before it replaced nothing").hasSize(1);
     }
 
+    /**
+     * A rolled-back savepoint: the flag is transactional, so the rollback un-sets it and the next replacement logs again. The line of the
+     * rolled-back statement stays in the server log (a log line cannot be taken back), so a transaction can log twice in this case.
+     */
     @Test
-    void aFailedStatementsCountDoesNotLeakIntoTheNextStatementOfTheTransaction() throws Exception {
+    void aRolledBackSavepointUnsetsTheFlag_soTheNextReplacementLogsAgain() throws Exception {
         var w = world("leak");
-        // row 1 is replaced (the count is set), row 2 repeats row 1's position and fails the primary key before the statement trigger can run
+        // row 1 is replaced (the flag is set, the line is logged), row 2 repeats row 1's position and fails the primary key
         String failing = w.manifestInsert("cn.leak.d0", 0, w.newName, w.ex[0]) + ", ('" + w.tenant + "','cn.leak.d0',0," + "decode('"
             + w.hex(w.ex[1]) + "','hex'),'" + w.newName + "','" + w.model + "'," + w.id + ")";
-        List<String> lines = engine.su(ctx -> ctx.connectionResult(c -> {
+        List<String> after = engine.su(ctx -> ctx.connectionResult(c -> {
             c.setAutoCommit(false);
             try (Statement s = c.createStatement()) {
                 s.execute("SET client_min_messages = log");
@@ -143,12 +165,14 @@ class Rdr229P37ChildNameTriggerTest {
                 }
                 s.execute(w.manifestInsert("cn.leak.d1", 0, w.newName, w.ex[2]));
                 List<String> out = Rdr229ChildNameWorld.logged(s);
+                s.execute(w.manifestInsert("cn.leak.d2", 0, w.newName, w.ex[3]));
+                out.addAll(Rdr229ChildNameWorld.logged(s));
                 c.commit();
                 return out;
             }
         }));
-        assertThat(lines).as("the rolled-back statement's replaced row is not counted: this statement replaced one").singleElement()
-            .asString().contains("on 1 row(s)");
+        assertThat(after).as("the rollback un-set the flag, so the statement after it logs; the one after that is silent")
+            .singleElement().asString().contains("supplied " + w.newName);
     }
 
     // ---- updates --------------------------------------------------------------------------------------------------------------
@@ -163,7 +187,7 @@ class Rdr229P37ChildNameTriggerTest {
         List<String> moved = w.run("UPDATE nexus.catalog_document_chunks SET chash = decode('" + w.hex(w.ex[0]) + "','hex') "
             + "WHERE tenant_id = '" + w.tenant + "' AND doc_id = 'cn.upd.d0' AND position = 0");
         assertThat(w.manifestNames("cn.upd.d0")).as("the UPDATE moved the key, so the name follows the chunk").containsExactly(w.oldName);
-        assertThat(moved).singleElement().asString().contains("on 1 row(s)");
+        assertThat(moved).singleElement().asString().contains("supplied " + w.newName).contains("stored " + w.oldName);
 
         List<String> stamp = w.run("UPDATE nexus.catalog_document_chunks SET collection_id = collection_id WHERE tenant_id = '" + w.tenant + "'");
         assertThat(stamp).as("an UPDATE that leaves the key alone (the stamp's shape) costs no lookup and logs nothing").isEmpty();
