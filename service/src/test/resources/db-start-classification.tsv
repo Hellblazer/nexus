@@ -96,3 +96,4 @@ DataMoveIntegrationBase	startDataMove	IMAGE	the base of DataMoveWorkerIntegratio
 DataMoveOwnerReadSingleRoleIntegrationTest	startDataMove	IMAGE	the single-role posture of the owner-read pattern: migrated by nexus_svc as the one role, the policy changeset must be MARK_RAN and the registering one must still run, which needs a database that nexus_svc owns and the pg_background image
 CatalogDocsByAuthorFoldCtypeCTest	newContainer	IMAGE	boots a cluster initdb with --no-locale -E UTF8 as the local bundle is (C ctype), which the shared en_US.utf8 test cluster cannot be
 CatalogDocsBySchemeCtypeCTest	newContainer	IMAGE	boots a cluster initdb with --no-locale -E UTF8 as the local bundle is (C ctype), which the shared en_US.utf8 test cluster cannot be
+CatalogEpochRestartTest	newContainer	NETWORK	publishes a second port for a second postmaster it restarts in place; the container's own postmaster is PID 1 and cannot be restarted without ending the container
