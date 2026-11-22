@@ -95,6 +95,12 @@ final class TenantKeyedStateTables {
         keyed.put("TupleWaitRegistry.perClaimantParked", TUPLE_WAITS);   // a count of live parks; aborting forces zero
         keyed.put("TokenCache.map", TOKEN_CACHE);
         keyed.put("CollectionRegistry.KNOWN", COLLECTIONS);
+        // RDR-229 P3.5a (nexus-p2m1x.23): the id index beside the label index, filled and dropped with it. The two instance
+        // fields are the maps one registry reads: the process-wide registry's alias KNOWN and KNOWN_BY_ID (evicted by the one
+        // evictor), and a registry a test builds with new owns an isolated pair that no tenant reset reaches.
+        keyed.put("CollectionRegistry.KNOWN_BY_ID", COLLECTIONS);
+        keyed.put("CollectionRegistry.known", COLLECTIONS);
+        keyed.put("CollectionRegistry.knownById", COLLECTIONS);
         keyed.put("CatalogRepository.ghostSweepCheckedTenants", GHOST_SWEEP);
         keyed.put("MintRateLimiter.credentials", MINT_RATE);
         keyed.put("MintRateLimiter.CredentialState.tenants", MINT_RATE);
@@ -182,6 +188,11 @@ final class TenantKeyedStateTables {
         notKeyed.put("CatalogMoves.FoldPlan.aliased", RESULT);   // RDR-254: the fold read for one owner move
         notKeyed.put("CatalogMoves.FoldPlan.withHighlights", RESULT);   // RDR-254: the fold read for one owner move
         notKeyed.put("CatalogDocReads.MetaFilter.equalities", RESULT);
+        notKeyed.put("RenameOutcome.counts", RESULT);   // RDR-229 P3.5a: one rename's per-table counts
+        notKeyed.put("CollectionSelectors.Route.slots", "a row of the route table, fixed when the class loads "
+            + "(RDR-229 P3.5a): which request fields of one route name a collection; holds no tenant");
+        notKeyed.put("CollectionSelectors.Slot.labelFields", "a row of the route table, fixed when the class loads "
+            + "(RDR-229 P3.5a): the names one collection field is read under; holds no tenant");
         notKeyed.put("CatalogDocReads.MetaFilter.bounds", RESULT);
         notKeyed.put("CatalogSensitiveLocatorReads.Page.documents", RESULT);
         notKeyed.put("PdfStubMetadataReads.Page.collections", RESULT);   // nexus-f3yqd: one stub-metadata call's collections

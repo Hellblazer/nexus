@@ -259,7 +259,7 @@ class CollectionRegistryTest {
         CollectionRegistry.markKnown("t1", "c2", row);
         CollectionRegistry.markKnown("t2", "c1", row);
 
-        CollectionRegistry.evictTenant("t1");
+        CollectionRegistry.shared().evictTenant("t1");
 
         assertThat(CollectionRegistry.isKnown("t1", "c1")).isFalse();
         assertThat(CollectionRegistry.isKnown("t1", "c2")).isFalse();
@@ -268,12 +268,12 @@ class CollectionRegistryTest {
         // collide with "t1" — the '|' separator is part of the prefix test).
         assertThat(CollectionRegistry.isKnown("t2", "c1")).isTrue();
         CollectionRegistry.markKnown("t1x", "c9", row);
-        CollectionRegistry.evictTenant("t1");
+        CollectionRegistry.shared().evictTenant("t1");
         assertThat(CollectionRegistry.isKnown("t1x", "c9"))
                 .as("evictTenant(\"t1\") must not evict tenant \"t1x\" via a bare prefix match")
                 .isTrue();
         // Evicting a tenant with no cached entries is a harmless no-op.
-        CollectionRegistry.evictTenant("never-known-tenant");
+        CollectionRegistry.shared().evictTenant("never-known-tenant");
     }
 
     // -------------------------------------------------------------------------
@@ -430,7 +430,7 @@ class CollectionRegistryTest {
         // nexus-hkh1y: evictTenant (a profile write, the tenant reset route) counts as an evict too.
         String name = "code__cr-race-tenant__voyage-code-3__v1";
         seedRegisteredWithAttributes(name, "code", "cr-race-tenant", "voyage-code-3", 1024, "live");
-        CollectionRegistry.afterMissReadForTests = () -> CollectionRegistry.evictTenant(TENANT);
+        CollectionRegistry.afterMissReadForTests = () -> CollectionRegistry.shared().evictTenant(TENANT);
         try {
             tenantScope.withTenant(TENANT, ctx -> CollectionRegistry.require(ctx, TENANT, name));
         } finally {
