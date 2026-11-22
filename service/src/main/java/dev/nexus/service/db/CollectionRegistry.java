@@ -3,8 +3,10 @@
 package dev.nexus.service.db;
 
 import dev.nexus.service.datamove.Gate3;
+import org.jooq.Condition;
 import org.jooq.DSLContext;
-import org.jooq.Record7;
+import org.jooq.Field;
+import org.jooq.Record;
 
 import java.util.Map;
 import java.util.Optional;
@@ -90,78 +92,272 @@ import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_MODELS;
  * nexus-5tykh: {@link EngineSingletonLock} takes a session advisory lock at boot, so a second engine on the same
  * database refuses to start, and an engine that loses the lock and finds another holder exits. An engine that
  * loses it and takes it back calls {@link #evictAll}, because another engine may have run in the gap.
+ *
+ * <p><b>RDR-229 P3.5a (bead nexus-p2m1x.23): keyed by id with a label index.</b> A row is cached under its label and under
+ * its id; one resolution by either key fills both, an evict by label drops both, and a fill that raced an evict (the
+ * nexus-hkh1y guard) is dropped for both. The process-wide cache is one {@link #shared()} registry, which every static method
+ * below serves and the route boundary uses; a registry built with {@code new} owns a cache of its own (the isolated registry
+ * of a test). Each registry takes {@link Gate3} by constructor and reads it per call ({@link #readerKey}), so the switch from
+ * the name to the id needs no restart. Until gate 3 the readers still key on the label.
  */
+
 public final class CollectionRegistry {
 
+    /** The process-wide label index; {@link #SHARED} aliases it, and the static methods are {@code SHARED}'s. */
     private static final Map<String, CollectionRow> KNOWN = new ConcurrentHashMap<>();
+
+    /**
+     * RDR-229 P3.5a: the process-wide id index, {@code tenant|collection_id} to the same row {@link #KNOWN} holds under its label.
+     * Filled and dropped with {@link #KNOWN} under {@link #FILL_LOCK}. A row that carries no id (the short {@link CollectionRow}
+     * constructors) is in the label index only.
+     */
+    private static final Map<String, CollectionRow> KNOWN_BY_ID = new ConcurrentHashMap<>();
 
     /**
      * nexus-hkh1y: a {@link #require} miss reads the row and then caches it, and an evict can land
      * between the two (a supersede or rename commits and evicts while the read is in flight). Caching
      * that read would put back the live row the evict just removed, with no TTL to age it out. Every
-     * evict bumps {@link #evictions} under {@link #FILL_LOCK}; a miss notes the count before its read
+     * evict bumps the eviction count under {@link #FILL_LOCK}; a miss notes the count before its read
      * and caches only if it is unchanged, under the same lock, so a read that started before an evict
      * never re-caches. Taken on misses and evicts only, never on a cache hit.
      */
     private static final Object FILL_LOCK = new Object();
-    private static long evictions;
+    private static final long[] EVICTIONS = new long[1];
 
     /** Test seam (nexus-hkh1y): runs between a miss's read and its cache fill. */
     static volatile Runnable afterMissReadForTests;
 
-    /**
-     * RDR-229 P3.5a: the registry takes the gate-3 signal by constructor (linda, 2026-11-22; the one seam P3.5a and P3.5c
-     * share), read per call, so the switch from the name to the id needs no restart. STUB: the instance API below is the
-     * shape the tests pin; every static method above still serves the existing callers and the {@code Gate3} is not read yet.
-     */
+    /** The registry over the process-wide cache. Declared after the two indexes it aliases. */
+    private static final CollectionRegistry SHARED =
+        new CollectionRegistry(Gate3.never(), KNOWN, KNOWN_BY_ID, FILL_LOCK, EVICTIONS);
+
     private final Gate3 gate3;
+    private final Map<String, CollectionRow> known;
+    private final Map<String, CollectionRow> knownById;
+    private final Object fillLock;
+    private final long[] evictions;
 
-    public CollectionRegistry(Gate3 gate3) {
-        this.gate3 = gate3;
-    }
-
-    // ---- RDR-229 P3.5a instance API: STUBS (the code commit makes them real) --------------------------------------------
-
-    /** STUB: today's behaviour, {@link #require} by label. The id index is not built yet. */
-    public CollectionRow resolveLabel(DSLContext ctx, String tenant, String label) {
-        return require(ctx, tenant, label);
-    }
-
-    /** STUB: not implemented. Will raise {@link UnknownCollectionIdException} for an id with no row of the tenant. */
-    public CollectionRow resolveId(DSLContext ctx, String tenant, long collectionId) {
-        throw new UnsupportedOperationException("P3.5a: not implemented");
-    }
-
-    /** STUB: today's behaviour, {@link #cached} by label. */
-    public Optional<CollectionRow> cachedByLabel(String tenant, String label) {
-        return cached(tenant, label);
-    }
-
-    /** STUB: not implemented. There is no id index yet. */
-    public Optional<CollectionRow> cachedById(String tenant, long collectionId) {
-        throw new UnsupportedOperationException("P3.5a: not implemented");
-    }
-
-    /** STUB: today's behaviour, {@link #evict} by label (it will also drop the id entry). */
-    public void evictLabel(String tenant, String label) {
-        evict(tenant, label);
+    private CollectionRegistry(Gate3 gate3, Map<String, CollectionRow> known, Map<String, CollectionRow> knownById,
+                               Object fillLock, long[] evictions) {
+        this.gate3 = java.util.Objects.requireNonNull(gate3, "gate3");
+        this.known = known;
+        this.knownById = knownById;
+        this.fillLock = fillLock;
+        this.evictions = evictions;
     }
 
     /**
-     * STUB: not implemented. Will be the label the reader keys on while {@link Gate3} does not hold, and the id
-     * ({@link CollectionRow#collectionId()}) once it does.
+     * A registry with a cache of its own (empty, and no other registry's), reading {@code gate3} per call. What a test builds;
+     * production code uses {@link #shared(Gate3)}, so an evict by a repository reaches the cache the route boundary reads.
+     */
+    public CollectionRegistry(Gate3 gate3) {
+        this(gate3, new ConcurrentHashMap<>(), new ConcurrentHashMap<>(), new Object(), new long[1]);
+    }
+
+    /** The process-wide registry, gate 3 never holding: what the static methods below are. */
+    public static CollectionRegistry shared() {
+        return SHARED;
+    }
+
+    /** A registry over the process-wide cache that reads {@code gate3} per call: the route boundary's. */
+    public static CollectionRegistry shared(Gate3 gate3) {
+        return new CollectionRegistry(gate3, KNOWN, KNOWN_BY_ID, FILL_LOCK, EVICTIONS);
+    }
+
+    // ---- the id-keyed API (RDR-229 P3.5a) -------------------------------------------------------------------------------
+
+    /** {@link #require} by label, on this registry's cache. */
+    public CollectionRow resolveLabel(DSLContext ctx, String tenant, String label) {
+        Optional<CollectionRow> hit = cachedByLabel(tenant, label);
+        if (hit.isPresent()) {
+            return hit.get();
+        }
+        return fill(ctx, tenant, CATALOG_COLLECTIONS.NAME.eq(label),
+            () -> new UnregisteredCollectionException(tenant, label));
+    }
+
+    /**
+     * The row of {@code collectionId} in {@code tenant}: the cached one, else read by id and cached under both keys unless an
+     * evict ran between the read and the fill (nexus-hkh1y). A retired row is returned (it names its successor) and cached
+     * under neither key, as {@link #markKnown} does for a label.
+     *
+     * @throws UnknownCollectionIdException if the tenant has no row with that id (never an
+     *         {@link UnregisteredCollectionException}, which a label with no row raises)
+     */
+    public CollectionRow resolveId(DSLContext ctx, String tenant, long collectionId) {
+        Optional<CollectionRow> hit = cachedById(tenant, collectionId);
+        if (hit.isPresent()) {
+            return hit.get();
+        }
+        return fill(ctx, tenant, CATALOG_COLLECTIONS.COLLECTION_ID.eq(collectionId),
+            () -> new UnknownCollectionIdException(tenant, collectionId));
+    }
+
+    /** {@link #resolveId}, for a caller outside an open transaction: a cache hit opens none, a miss opens one short read. */
+    public CollectionRow lookupId(TenantScope scope, String tenant, long collectionId) {
+        Optional<CollectionRow> hit = cachedById(tenant, collectionId);
+        if (hit.isPresent()) {
+            return hit.get();
+        }
+        return scope.withTenant(tenant, ctx -> resolveId(ctx, tenant, collectionId));
+    }
+
+    /** The cached row of {@code label}, if any; never touches the database. */
+    public Optional<CollectionRow> cachedByLabel(String tenant, String label) {
+        return Optional.ofNullable(known.get(key(tenant, label)));
+    }
+
+    /** The cached row of {@code collectionId}, if any; never touches the database. */
+    public Optional<CollectionRow> cachedById(String tenant, long collectionId) {
+        return Optional.ofNullable(knownById.get(idKey(tenant, collectionId)));
+    }
+
+    /** {@link #evict} by label, on this registry's cache; it drops the id entry of the same row too. */
+    public void evictLabel(String tenant, String label) {
+        synchronized (fillLock) {
+            evictions[0]++;
+            dropLabel(tenant, label);
+        }
+    }
+
+    /**
+     * Forget every row cached for {@code tenant}, under both keys (RDR-204 bead nexus-ft04v.6). Called post-commit after an
+     * {@code embedding_profile} write for that tenant: defense-in-depth, not a correctness requirement, since a profile write never
+     * touches an existing {@code catalog_collections} row, so no cached entry is actually stale after one; it makes a
+     * registration for that tenant re-verify against the database rather than trust in-process state that predates the profile
+     * change. Also the {@code CollectionRegistry} evictor of the test-only tenant reset route (bead nexus-0bl77): after the reset
+     * deletes the tenant's rows, a cached row would be a stale positive. Bumps the eviction count, so a miss that began before it
+     * caches nothing.
+     *
+     * @return the number of rows removed, whatever the number of index entries each has
+     */
+    public int evictTenant(String tenant) {
+        String prefix = tenant + '|';
+        int[] removed = {0};
+        synchronized (fillLock) {
+            evictions[0]++;
+            known.keySet().removeIf(k -> {
+                boolean mine = k.startsWith(prefix);
+                if (mine) {
+                    removed[0]++;
+                }
+                return mine;
+            });
+            knownById.keySet().removeIf(k -> k.startsWith(prefix));
+        }
+        return removed[0];
+    }
+
+    /**
+     * What a reader keys its query on: the label while {@link Gate3} does not hold (the name columns, as before P3.5), the id
+     * ({@link CollectionRow#collectionId()}) once it does. Decided per call from the injected signal, so the switch needs no
+     * restart and drops back if gate 3 does.
      */
     public Object readerKey(CollectionRow row) {
-        throw new UnsupportedOperationException("P3.5a: not implemented");
+        return gate3.holds() ? (Object) row.collectionId() : row.label();
     }
 
     private static String key(String tenant, String collection) {
-        // Printable delimiter on purpose (wave review): the original '\0' made git
+        // Printable delimiter on purpose (wave review): the original '\0' made the version-control tool
         // treat this FILE as binary, so every diff rendered as "Bin N -> M bytes"
         // and logic changes were invisible to text review. '|' is not legal in
         // tenant ids or conformant collection names, so keys cannot collide.
         return tenant + '|' + collection;
     }
+
+    private static String idKey(String tenant, long collectionId) {
+        return tenant + '|' + collectionId;
+    }
+
+    /** Caches {@code row} under {@code collection} and, when it has an id, under that; see {@link #markKnown}. */
+    private void mark(String tenant, String collection, CollectionRow row) {
+        synchronized (fillLock) {
+            if (row.isSuperseded()) {
+                // nexus-mp8ys: a retired name is never cached. The cache answers "may this write
+                // proceed without a read", and a revive (POST /collections/upsert) clears
+                // superseded_by; upsertCollection evicts after it commits (nexus-afkjy), but a cached
+                // tombstone could still refuse the name between that commit and the evict.
+                // Uncached, every read of a tombstone re-reads it.
+                dropLabel(tenant, collection);
+                return;
+            }
+            CollectionRow previous = known.put(key(tenant, collection), row);
+            if (previous != null && previous.collectionId() > 0 && previous.collectionId() != row.collectionId()) {
+                // the label now names another row (a delete and a re-registration): the old id must not resolve
+                knownById.remove(idKey(tenant, previous.collectionId()));
+            }
+            if (row.collectionId() > 0) {
+                knownById.put(idKey(tenant, row.collectionId()), row);
+            }
+        }
+    }
+
+    /** Drops the label entry and the id entry of the row it holds. The caller holds {@link #fillLock}. */
+    private void dropLabel(String tenant, String collection) {
+        CollectionRow gone = known.remove(key(tenant, collection));
+        if (gone != null && gone.collectionId() > 0) {
+            knownById.remove(idKey(tenant, gone.collectionId()));
+        }
+    }
+
+    /**
+     * The miss path of {@link #resolveLabel} and {@link #resolveId}: read the one row {@code where} selects (by label or by
+     * id), build its {@link CollectionRow}, and cache it under both keys unless an evict ran between the read and the fill
+     * (nexus-hkh1y), in which case the row is returned and not cached.
+     */
+    private CollectionRow fill(DSLContext ctx, String tenant, Condition where,
+                               java.util.function.Supplier<RuntimeException> missing) {
+        long evictionsBeforeRead;
+        synchronized (fillLock) {
+            evictionsBeforeRead = evictions[0];
+        }
+        Field<Integer> modelDimension = EMBEDDING_MODELS.DIMENSION.as("model_dimension");
+        Record r = ctx.select(
+                CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.COLLECTION_ID,
+                CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.DIMENSION,
+                CATALOG_COLLECTIONS.LIFECYCLE_STATE, modelDimension,
+                CATALOG_COLLECTIONS.SUPERSEDED_BY)
+            .from(CATALOG_COLLECTIONS)
+            .leftJoin(EMBEDDING_MODELS)
+                .on(EMBEDDING_MODELS.EMBEDDING_MODEL.eq(CATALOG_COLLECTIONS.EMBEDDING_MODEL))
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(where))
+            .fetchOne();
+        if (r == null) {
+            throw missing.get();
+        }
+        String label = r.get(CATALOG_COLLECTIONS.NAME);
+        // RDR-204 Phase 2 follow-up (bead nexus-ft04v.16, hygiene-002 finding):
+        // catalog_collections.dimension is NULL BY DESIGN for a walked zero-chunk row
+        // and for a dormant/disputed row with no single agreed dimension --
+        // embedding_model is never NULL (NOT NULL + FK to embedding_models since
+        // hygiene-002-1), so COALESCE to the model's own seeded dimension rather than
+        // ever caching a fabricated sentinel a caller could silently misread as real.
+        Integer catalogDim = r.get(CATALOG_COLLECTIONS.DIMENSION);
+        Integer dimension = catalogDim != null ? catalogDim : r.get(modelDimension);
+        if (dimension == null) {
+            throw new IllegalStateException(
+                "collection '" + label + "' for tenant '" + tenant + "' has no resolvable "
+                + "dimension: catalog_collections.dimension is NULL and its embedding_model '"
+                + r.get(CATALOG_COLLECTIONS.EMBEDDING_MODEL) + "' has no nexus.embedding_models row to fall back to");
+        }
+        Long id = r.get(CATALOG_COLLECTIONS.COLLECTION_ID);
+        CollectionRow row = new CollectionRow(r.get(CATALOG_COLLECTIONS.CONTENT_TYPE), r.get(CATALOG_COLLECTIONS.OWNER_ID),
+            r.get(CATALOG_COLLECTIONS.EMBEDDING_MODEL), dimension, r.get(CATALOG_COLLECTIONS.LIFECYCLE_STATE),
+            r.get(CATALOG_COLLECTIONS.SUPERSEDED_BY), id == null ? 0L : id, label);
+        Runnable seam = afterMissReadForTests;
+        if (seam != null) {
+            seam.run();
+        }
+        synchronized (fillLock) {
+            if (evictions[0] == evictionsBeforeRead) {
+                mark(tenant, label, row);
+            }
+        }
+        return row;
+    }
+
+    // ---- the process-wide registry, as static methods (every caller that predates the id) ---------------------------------
 
     /** True when {@code (tenant, collection)} is known-registered — safe to skip the INSERT. */
     public static boolean isKnown(String tenant, String collection) {
@@ -173,7 +369,7 @@ public final class CollectionRegistry {
      * Never touches the database — a pure in-process read.
      */
     public static Optional<CollectionRow> cached(String tenant, String collection) {
-        return Optional.ofNullable(KNOWN.get(key(tenant, collection)));
+        return SHARED.cachedByLabel(tenant, collection);
     }
 
     /**
@@ -186,19 +382,10 @@ public final class CollectionRegistry {
      * <p>No production code outside this class calls it (nexus-hkh1y): an unguarded put of a
      * row read before a concurrent evict re-caches the stale row. Production fills go through
      * {@link #require}/{@link #lookup}, whose fill checks the eviction count; this stays public
-     * as the seeding seam tests in other packages use.
+     * as the seeding seam tests in other packages use. A retired row is not cached (nexus-mp8ys).
      */
     public static void markKnown(String tenant, String collection, CollectionRow row) {
-        if (row.isSuperseded()) {
-            // nexus-mp8ys: a retired name is never cached. The cache answers "may this write
-            // proceed without a read", and a revive (POST /collections/upsert) clears
-            // superseded_by; upsertCollection evicts after it commits (nexus-afkjy), but a cached
-            // tombstone could still refuse the name between that commit and the evict.
-            // Uncached, every read of a tombstone re-reads it.
-            KNOWN.remove(key(tenant, collection));
-            return;
-        }
-        KNOWN.put(key(tenant, collection), row);
+        SHARED.mark(tenant, collection, row);
     }
 
     /**
@@ -220,61 +407,23 @@ public final class CollectionRegistry {
      * errors rather than writing orphaned rows.
      */
     public static void evict(String tenant, String collection) {
-        synchronized (FILL_LOCK) {
-            evictions++;
-            KNOWN.remove(key(tenant, collection));
-        }
+        SHARED.evictLabel(tenant, collection);
     }
 
     /**
-     * Forget every {@code (tenant, collection)} pair cached for {@code tenant}
-     * (RDR-204 bead nexus-ft04v.6). Called post-commit after an
-     * {@code embedding_profile} write for that tenant — defense-in-depth, not a
-     * correctness requirement: a profile write never touches an existing
-     * {@code catalog_collections} row (the row records the model its vectors
-     * were already embedded with; the profile only governs what NEW
-     * registrations get), so no cached entry is actually stale after one. This
-     * exists so a subsequent registration for that tenant always re-verifies
-     * against the database rather than trusting in-process state that predates
-     * the profile change, mirroring the post-commit discipline of {@link
-     * #evict}.
-     *
-     * <p>Also the {@code CollectionRegistry} evictor of the test-only tenant reset
-     * route (bead nexus-0bl77): after the reset deletes the tenant's
-     * {@code catalog_collections} rows, a cached pair would be a stale positive.
-     *
-     * @param tenant the tenant whose cached entries should be forgotten
-     * @return the number of cached pairs removed
-     */
-    public static int evictTenant(String tenant) {
-        String prefix = tenant + '|';
-        int[] removed = {0};
-        synchronized (FILL_LOCK) {
-            evictions++;
-            KNOWN.keySet().removeIf(k -> {
-                boolean mine = k.startsWith(prefix);
-                if (mine) {
-                    removed[0]++;
-                }
-                return mine;
-            });
-        }
-        return removed[0];
-    }
-
-    /**
-     * Forget every cached pair, for every tenant (nexus-5tykh). {@link EngineSingletonLock} calls it after the engine
+     * Forget every cached row, for every tenant (nexus-5tykh). {@link EngineSingletonLock} calls it after the engine
      * lost its one-engine-per-database lock and took it back: another engine may have served the database in the
      * gap and changed or superseded rows this cache still holds. Bumps the eviction count, so a miss whose read
      * began before this call caches nothing.
      *
-     * @return the number of cached pairs removed
+     * @return the number of cached rows removed
      */
     public static int evictAll() {
         synchronized (FILL_LOCK) {
-            evictions++;
+            EVICTIONS[0]++;
             int removed = KNOWN.size();
             KNOWN.clear();
+            KNOWN_BY_ID.clear();
             return removed;
         }
     }
@@ -282,8 +431,9 @@ public final class CollectionRegistry {
     /** Test-only: clears all cached entries. */
     static void clearForTests() {
         synchronized (FILL_LOCK) {
-            evictions++;
+            EVICTIONS[0]++;
             KNOWN.clear();
+            KNOWN_BY_ID.clear();
         }
     }
 
@@ -311,54 +461,7 @@ public final class CollectionRegistry {
      *         a caller a fabricated dimension; see {@link CollectionRow}'s javadoc)
      */
     public static CollectionRow require(DSLContext ctx, String tenant, String collection) {
-        Optional<CollectionRow> hit = cached(tenant, collection);
-        if (hit.isPresent()) {
-            return hit.get();
-        }
-        long evictionsBeforeRead;
-        synchronized (FILL_LOCK) {
-            evictionsBeforeRead = evictions;
-        }
-        Record7<String, String, String, Integer, String, Integer, String> r = ctx.select(
-                CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
-                CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.DIMENSION,
-                CATALOG_COLLECTIONS.LIFECYCLE_STATE, EMBEDDING_MODELS.DIMENSION,
-                CATALOG_COLLECTIONS.SUPERSEDED_BY)
-            .from(CATALOG_COLLECTIONS)
-            .leftJoin(EMBEDDING_MODELS)
-                .on(EMBEDDING_MODELS.EMBEDDING_MODEL.eq(CATALOG_COLLECTIONS.EMBEDDING_MODEL))
-            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
-                .and(CATALOG_COLLECTIONS.NAME.eq(collection)))
-            .fetchOne();
-        if (r == null) {
-            throw new UnregisteredCollectionException(tenant, collection);
-        }
-        // RDR-204 Phase 2 follow-up (bead nexus-ft04v.16, hygiene-002 finding):
-        // catalog_collections.dimension is NULL BY DESIGN for a walked zero-chunk row
-        // and for a dormant/disputed row with no single agreed dimension --
-        // embedding_model is never NULL (NOT NULL + FK to embedding_models since
-        // hygiene-002-1), so COALESCE to the model's own seeded dimension rather than
-        // ever caching a fabricated sentinel a caller could silently misread as real.
-        Integer catalogDim = r.value4();
-        Integer modelDim = r.value6();
-        Integer dimension = catalogDim != null ? catalogDim : modelDim;
-        if (dimension == null) {
-            throw new IllegalStateException(
-                "collection '" + collection + "' for tenant '" + tenant + "' has no resolvable "
-                + "dimension: catalog_collections.dimension is NULL and its embedding_model '"
-                + r.value3() + "' has no nexus.embedding_models row to fall back to");
-        }
-        CollectionRow row = new CollectionRow(r.value1(), r.value2(), r.value3(), dimension, r.value5(), r.value7());
-        Runnable seam = afterMissReadForTests;
-        if (seam != null) {
-            seam.run();
-        }
-        synchronized (FILL_LOCK) {
-            if (evictions == evictionsBeforeRead) {
-                markKnown(tenant, collection, row);
-            }
-        }
-        return row;
+        return SHARED.resolveLabel(ctx, tenant, collection);
     }
 
     /**
