@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import dev.nexus.service.datamove.Gate3;
+
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.db.CatalogRepository;
@@ -373,6 +375,13 @@ public final class PgVectorRepository {
     private final PciIndexSet    pciIndexes;
     /** RDR-227: the sampled check that the planner still reaches a per-collection index; never null. */
     private final PciPlanCheck   planCheck;
+    /**
+     * RDR-229 P3.5c (nexus-p2m1x.25): the gate-3 signal this repository's name-key upsert switches to the id key on.
+     * STUB: stored, not read yet; the P3.5c code commit makes the upsert read {@link Gate3#holds()} per call. Until then
+     * every constructor leaves it {@link Gate3#never()}.
+     */
+    private Gate3 gate3 = Gate3.never();
+
 
     /**
      * The RLS-stamping gateway this repository was constructed with (RDR-204 Phase 2,
@@ -416,6 +425,12 @@ public final class PgVectorRepository {
                               Embedder queryEmbedder) {
         this(tenantScope, docEmbedder, queryEmbedder, GET_ALL_METADATA_MAX_ROWS, PciIndexSet.NONE,
              PciPlanCheck.production());
+    }
+
+    /** {@link #PgVectorRepository(TenantScope, Embedder, Embedder)} with the gate-3 signal (RDR-229 P3.5c; a stub until the code commit). */
+    public PgVectorRepository(TenantScope tenantScope, Embedder docEmbedder, Embedder queryEmbedder, Gate3 gate3) {
+        this(tenantScope, docEmbedder, queryEmbedder);
+        this.gate3 = java.util.Objects.requireNonNull(gate3, "gate3");
     }
 
     /** {@link #PgVectorRepository(TenantScope, Embedder, Embedder)} with the per-collection index set (RDR-227). */
