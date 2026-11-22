@@ -101,6 +101,9 @@ class ManifestWriteRetryGateTest {
         Map.entry("LegacyChunkSurvey", "nexus-f3yqd: reads manifest rows to find a chunk's owners and to classify a manifest row by its chunk;"
             + " writes nothing"),
         Map.entry("SchemaMigrator", "names the table in the chash-length constraint map: DDL bookkeeping, no DML"),
+        Map.entry("Rdr229SwapMove", "nexus-p2m1x.21: the text of the chunks swap's on_complete: ADD CONSTRAINT ... NOT VALID of the manifest's"
+            + " id key (DDL) and the registering INSERTs of the move that validates it, whose template is the data-move worker's"
+            + " re-stamp (retried by the worker); it changes no manifest row itself"),
         Map.entry("ChunkFamily", "nexus-f3yqd.2.14: the data-move worker's list of chunk-family table names (a name match on"
             + " an on_complete text); it reads no table"),
         Map.entry("ValidateConstraintsJobs", "nexus-f3yqd: names nexus.catalog_document_chunks as a table its refusal reports on; no DML"),
