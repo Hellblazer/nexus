@@ -56,6 +56,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  * route's other validation. {@link Tier#HEAVY} routes need a document, a chunk or a job that the fixture does not build; for
  * them the label request may be refused, and the unknown-id and both-given checks are what prove the selector is read.
  * {@link #idResolvesToItsOwnCollection} is the check that an id reaches the right collection and not just some collection.
+ *
+ * <p>linda's ruling 2 (2026-11-22): the 400 (both given, non-integer) and the 404 {@code unknown_collection_id} apply to id
+ * input only. A label no row has keeps today's answer on the routes that refuse one, 422 {@code unregistered_collection}
+ * ({@link #anUnregisteredLabelKeepsTheTyped422_whileAnUnknownIdIsTheTyped404}); nothing in this class asserts a 404 or 400 for a label.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class CollectionRoutesByIdTest {
@@ -313,6 +317,33 @@ class CollectionRoutesByIdTest {
                 + "\"model_version\":\"v1\",\"collection_id\":424242}");
             assertThat(r.status()).as(r.body()).isEqualTo(400);
             assertThat(fx.exists(label)).as("a refused registration writes nothing").isFalse();
+        }
+    }
+
+    /**
+     * linda's ruling 2 (2026-11-22): the 400 and 404 rules apply to id input only. A LABEL that no row has keeps today's answer
+     * on the routes that refuse one: 422 {@code unregistered_collection} naming the label, never a 404, and never the
+     * {@code unknown_collection_id} an id gets. The by-id work does not move it, under either gate state. The route is
+     * {@code /v1/taxonomy/topics/insert}, a write the fixture can drive that refuses an unregistered label today
+     * ({@code TaxonomyRepository.insertTopic} requires the registry row); the same route with an id no row has is the typed
+     * 404, for contrast.
+     */
+    @Test
+    void anUnregisteredLabelKeepsTheTyped422_whileAnUnknownIdIsTheTyped404() {
+        for (boolean gate3 : new boolean[] {false, true}) {
+            fx.gate3.set(gate3);
+            String never = CollectionRouteFixture.label("never-registered" + (gate3 ? "g1" : "g0"));
+            Resp byLabel = fx.post("/v1/taxonomy/topics/insert",
+                "{\"collection\":" + json(never) + ",\"label\":\"p35a-topic\",\"doc_count\":1}");
+            assertThat(byLabel.status()).as("gate3=%s, an unregistered label: %s", gate3, byLabel.body()).isEqualTo(422);
+            assertThat(byLabel.reason()).as("typed: %s", byLabel.body()).isEqualTo("unregistered_collection");
+            assertThat(byLabel.json().path("collection").asText()).as("names the label: %s", byLabel.body()).isEqualTo(never);
+            assertThat(fx.exists(never)).as("a refused write registers nothing").isFalse();
+
+            Resp byId = fx.post("/v1/taxonomy/topics/insert",
+                "{\"collection_id\":" + UNKNOWN_ID + ",\"label\":\"p35a-topic\",\"doc_count\":1}");
+            assertThat(byId.status()).as("gate3=%s, an unknown id: %s", gate3, byId.body()).isEqualTo(404);
+            assertThat(byId.reason()).isEqualTo("unknown_collection_id");
         }
     }
 }
