@@ -131,14 +131,14 @@ class TenantKeyedEvictorsTest {
         CollectionRegistry.markKnown(x, "c2", row);
         CollectionRegistry.markKnown(lookalike, "c1", row);
         try {
-            assertThat(CollectionRegistry.evictTenant(x)).isEqualTo(2);
+            assertThat(CollectionRegistry.shared().evictTenant(x)).isEqualTo(2);
 
             assertThat(CollectionRegistry.isKnown(x, "c1")).isFalse();
             assertThat(CollectionRegistry.isKnown(x, "c2")).isFalse();
             assertThat(CollectionRegistry.isKnown(lookalike, "c1")).as("a different tenant is intact").isTrue();
-            assertThat(CollectionRegistry.evictTenant(x)).as("second call has nothing to do").isZero();
+            assertThat(CollectionRegistry.shared().evictTenant(x)).as("second call has nothing to do").isZero();
         } finally {
-            CollectionRegistry.evictTenant(lookalike);
+            CollectionRegistry.shared().evictTenant(lookalike);
         }
     }
 
@@ -350,7 +350,7 @@ class TenantKeyedEvictorsTest {
         var row = new CollectionRow("code", "1.1", "voyage-code-3", 1024, "live");
         CollectionRegistry.markKnown(piped, "c1", row);
         CollectionRegistry.markKnown(piped, "c|2", row);
-        assertThat(CollectionRegistry.evictTenant(piped)).as("CollectionRegistry, both pairs").isEqualTo(2);
+        assertThat(CollectionRegistry.shared().evictTenant(piped)).as("CollectionRegistry, both pairs").isEqualTo(2);
 
         String slashed = "we/ird-" + UUID.randomUUID().toString().substring(0, 8);
         var reaper = newReaper();
