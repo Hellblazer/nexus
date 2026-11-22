@@ -101,9 +101,16 @@ def _parse_collection(collection_name: str) -> Any:
 def _registry_row(collection_name: str) -> dict | None:
     """The registry row of a collection whose name carries no attributes, or ``None`` when there is none or it
     cannot be read (RDR-229 P3.8: the engine mints a new subject's label, ``c19``, so the name says nothing about
-    its embedder; the row does). A caller reads ``None`` as "unknown", which is external, never safe."""
-    from nexus import mcp_infra  # noqa: PLC0415 — deferred: mcp_infra is heavy, and only a name that does not parse needs it
+    its embedder; the row does). A caller reads ``None`` as "unknown", which is external, never safe.
 
+    Only a label of the engine's minted form is read. A legacy name answers ``None`` with no read, as it did before
+    P3.8: ``is_external_embedder`` runs on every index, sensitive or not, so a read there would cost each legacy
+    write a registry round trip."""
+    from nexus import mcp_infra  # noqa: PLC0415 — deferred: mcp_infra is heavy, and only a name that does not parse needs it
+    from nexus.corpus import _MINTED_LABEL_RE  # noqa: PLC0415 — deferred: corpus is heavy
+
+    if not _MINTED_LABEL_RE.fullmatch(collection_name):
+        return None
     try:
         row = mcp_infra.get_collection_row(collection_name)
     except Exception:  # noqa: BLE001 — an unreadable registry is "cannot tell", which fails closed
