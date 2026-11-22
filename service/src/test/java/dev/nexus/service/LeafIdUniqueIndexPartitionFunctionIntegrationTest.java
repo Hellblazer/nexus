@@ -165,4 +165,52 @@ class LeafIdUniqueIndexPartitionFunctionIntegrationTest {
             assertThat(leafIndexes(key, leaves)).as("%s: and adds no second index", key.table()).hasSize(1);
         }
     }
+
+    /**
+     * The state after the pass (linda's seam ruling 2026-11-22, item 3): the parent carries the id UNIQUE constraint. The helper then
+     * branches on that constraint in pg_constraint, not on an index name: PostgreSQL itself creates the index on a leaf made under a
+     * constrained parent (under a name of its own), so the helper must create none, and the leaf ends with exactly one unique id
+     * index and no duplicate. The fixture adds the constraint the way PostgreSQL's recursive form does (every existing partition at
+     * both levels gets and attaches its own), which is the end state of the pass's route; both creation paths are run on a new
+     * tenant, and both before-the-constraint tests above stay.
+     *
+     * <p>Against the helper as it is on this branch (it creates no index) this test is green: PostgreSQL's index is the one index.
+     * It is the guard for the change that makes the helper index a leaf in the pre-constraint state, which must not do it here too.
+     */
+    @Test
+    @SuppressWarnings("deprecation")
+    void withTheParentConstraintPresentANewLeafEndsWithExactlyOneUniqueIdIndex() throws Exception {
+        for (var key : IdKeyIndexProbe.KEYS) {
+            asOwner(ctx -> ctx.execute("ALTER TABLE nexus." + key.table() + " ADD CONSTRAINT p33b_fixture_" + key.table()
+                + "_cid_key UNIQUE (" + key.columns() + ")"));
+        }
+        String viaCreate = "p33b-post-create-" + System.nanoTime();
+        String viaEnsure = "p33b-post-ensure-" + System.nanoTime();
+        tenants.add(viaCreate);
+        tenants.add(viaEnsure);
+        asOwner(ctx -> {
+            dev.nexus.service.jooq.nexus.Routines.createTenantPartitions(ctx.configuration(), "nexus.chunks", viaCreate, true, true);
+            dev.nexus.service.jooq.nexus.Routines.createTenantPartitions(ctx.configuration(), "nexus.taxonomy_centroids", viaCreate, true, true);
+            return null;
+        });
+        for (var key : IdKeyIndexProbe.KEYS) {
+            String modelPartition = asOwner(ctx -> IdKeyIndexProbe.modelPartitions(ctx, key)).get(0);
+            boolean created = asOwner(ctx -> ctx.fetchValue(
+                "SELECT nexus.partition_ensure_leaf(?::regclass, ?::regclass, ?, true)", "nexus." + key.table(), modelPartition, viaEnsure)
+                instanceof Boolean b && b);
+            assertThat(created).as("%s: the helper created the leaf", key.table()).isTrue();
+
+            assertThat(asOwner(ctx -> IdKeyIndexProbe.indexes(ctx, key)).stream().filter(i -> i.level() == 0).toList())
+                .as("%s: precondition: the parent carries the id constraint", key.table()).hasSize(1);
+            for (String tenant : List.of(viaCreate, viaEnsure)) {
+                List<String> leaves = tenantLeaves(key, tenant);
+                assertThat(leaves).as("%s %s: leaves", key.table(), tenant).isNotEmpty();
+                assertThat(leafIndexes(key, leaves).stream().map(Idx::relation).toList())
+                    .as("%s %s: exactly one unique id index on every new leaf, no duplicate", key.table(), tenant)
+                    .containsExactlyInAnyOrderElementsOf(leaves);
+                assertThat(leafIndexes(key, leaves)).as("%s %s: valid and attached to the model partition's", key.table(), tenant)
+                    .allMatch(i -> i.valid() && i.parentIndex() != null);
+            }
+        }
+    }
 }

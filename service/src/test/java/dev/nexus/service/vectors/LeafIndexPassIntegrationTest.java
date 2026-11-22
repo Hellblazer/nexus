@@ -354,6 +354,41 @@ class LeafIndexPassIntegrationTest {
         assertThat(swapLabels()).containsExactly(CHUNKS_SWAP, CENTROIDS_SWAP);
     }
 
+    // -- 2b --------------------------------------------------------------------------------------------------------
+
+    /**
+     * Linda's seam ruling 2026-11-22, item 1: the pass adds a table's PARENT id constraint only once every leaf of that table has
+     * a valid index. One chunks leaf cannot be indexed, so the chunks parent has no id constraint (and no index of any kind at the
+     * parent) after the pass, while the centroids, whose leaves all index, have theirs: the second assertion is what shows the pass
+     * ran and made the parent constraint for the table that was ready. Once the duplicate is gone the next pass adds the chunks one.
+     */
+    @Test
+    void theParentConstraintIsNotAddedWhileAnyLeafOfThatTableLacksAValidIndex() throws Exception {
+        String tenant = newTenant("noparent");
+        collection(tenant, name(tenant, "a"), 3);
+        duplicateUnderTheIdKey(tenant, name(tenant, "a"), name(tenant, "dup"));
+
+        openPass().runOnce();
+
+        List<Idx> centroidsParent = parentIndexes(IdKeyIndexProbe.CENTROIDS);
+        assertThat(centroidsParent).as("centroids: every leaf valid, so the parent constraint is there").hasSize(1);
+        assertThat(centroidsParent.get(0).constraint()).isNotNull();
+        assertThat(parentIndexes(IdKeyIndexProbe.CHUNKS)).as("chunks: a leaf has no valid index, so no parent constraint and no parent index")
+            .isEmpty();
+
+        removeDuplicate(tenant, name(tenant, "dup"));
+        openPass().runOnce();
+
+        List<Idx> chunksParent = parentIndexes(IdKeyIndexProbe.CHUNKS);
+        assertThat(chunksParent).as("chunks: the pass that finds every leaf valid adds the parent constraint").hasSize(1);
+        assertThat(chunksParent.get(0).constraint()).isNotNull();
+        assertThat(chunksParent.get(0).valid()).isTrue();
+    }
+
+    List<Idx> parentIndexes(IdKeyIndexProbe.Key key) throws Exception {
+        return asSuperuser(su -> IdKeyIndexProbe.indexes(su, key)).stream().filter(i -> i.level() == 0).toList();
+    }
+
     // -- 3 ---------------------------------------------------------------------------------------------------------
 
     /**
