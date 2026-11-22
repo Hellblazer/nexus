@@ -1899,8 +1899,12 @@ def import_collection(
         )
     expected_model: str = index_model_for_collection(collection_name)
     # RDR-229 P3.8: a target the engine minted (``c9``) carries no model in its name, and the name guess answers a
-    # Voyage model for it; the target's registry row (read above) holds the model its vectors are in.
-    if target_row and target_row.get("embedding_model") and embedding_model_for_collection_name(collection_name) is None:
+    # Voyage model for it; the target's registry row (read above) holds the model its vectors are in. Only the
+    # minted form: a legacy two-segment target keeps its prefix guess here, and its row's model reaches the engine
+    # leg instead (the RDR-229 item 9 non-stranding guard, tests/test_rdr229_non_stranding_guards.py).
+    from nexus.corpus import _MINTED_LABEL_RE  # noqa: PLC0415 — deferred: corpus is heavy
+
+    if target_row and target_row.get("embedding_model") and _MINTED_LABEL_RE.fullmatch(collection_name):
         expected_model = target_row["embedding_model"]
 
     # GH #1370 D2: --assume-model overrides the header's (possibly wrong)
