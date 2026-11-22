@@ -16,7 +16,7 @@ import pytest
 
 from nexus.collection_rename import rename_collection_data_plane
 
-_NEW = "docs__1-1__voyage-context-3__v1"
+_NEW = "docs__1-1__bge-base-en-v15-768__v1"
 
 
 def _t3() -> MagicMock:

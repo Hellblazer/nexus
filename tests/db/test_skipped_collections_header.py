@@ -22,7 +22,7 @@ def test_the_engines_encoding_decodes_to_the_labels() -> None:
 
 
 def test_an_older_engines_raw_legacy_names_decode_unchanged() -> None:
-    raw = "docs__1-1__voyage-context-3__v1,knowledge__notes,code__a.b-c_d__v2"
+    raw = "docs__1-1__bge-base-en-v15-768__v1,knowledge__notes,code__a.b-c_d__v2"
     assert split_skipped_collections_header(raw) == raw.split(",")
 
 

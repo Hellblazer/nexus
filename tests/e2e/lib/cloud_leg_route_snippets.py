@@ -190,6 +190,16 @@ else:
     raise SystemExit("a minted-form target was accepted: the engine does not judge the taxonomy rename target")
 """
 
+#: The rename routes that judge their target with the label rule (nexus-n3hhc and its class): route -> (step name, the
+#: probe, the line it must print). cloud_leg.ROUTE_MAP builds one Step from each.
+LABEL_RULE_RENAME_PROBES: dict[str, tuple[str, str, str]] = {
+    "POST /v1/telemetry/rename_collection": ("route-telemetry-rename", TELEMETRY_RENAME, "minted target refused 400"),
+    "POST /v1/chash/rename_collection": ("route-chash-rename-refusal", CHASH_RENAME_REFUSAL,
+                                         "chash minted target refused 400"),
+    "POST /v1/taxonomy/rename_collection": ("route-taxonomy-rename-refusal", TAXONOMY_RENAME_REFUSAL,
+                                            "taxonomy minted target refused 400"),
+}
+
 ENGINE_STATUS = r"""
 from nexus.db.http_engine_status import fetch_engine_status
 # RDR-229 P3.1 (nexus-p2m1x.17): the boot-time completion check reports in an optional top-level key of this
