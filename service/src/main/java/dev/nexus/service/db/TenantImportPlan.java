@@ -275,8 +275,10 @@ public final class TenantImportPlan {
         if (e.reassignedId() != null) names.add(e.reassignedId());
         for (Reference r : e.references()) {
             // An id twin under its id foreign key (RDR-229 P3.3a, P3.3c) is a reference the import computes itself
-            // (RestoreIdFill, before the insert), so a backup taken before P3.1, which lacks it, still loads.
-            for (String c : r.columns()) if (!e.triggerMaintained().contains(c)) names.add(c);
+            // (RestoreIdFill, before the insert), so a backup taken before P3.1, which lacks it, still loads. Exactly the
+            // columns RestoreIdFill computes are exempt, not every maintained column: one it does not fill stays required.
+            List<String> computed = RestoreIdFill.computedColumns(e.name());
+            for (String c : r.columns()) if (!computed.contains(c)) names.add(c);
         }
         names.remove("tenant_id");
         return names;
