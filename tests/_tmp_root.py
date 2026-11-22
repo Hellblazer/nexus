@@ -352,7 +352,7 @@ def _prepare_root(root: Path) -> None:
     st = root.lstat()
     if not stat.S_ISDIR(st.st_mode):
         raise PermissionError(f"{root} is not a real directory")
-    if st.st_uid != int(sub._current_uid()):
+    if os.name != "nt" and st.st_uid != int(sub._current_uid()):  # st_uid is 0 on Windows
         raise PermissionError(f"{root} is owned by uid {st.st_uid}")
     if st.st_mode & 0o077:
         root.chmod(0o700)
@@ -484,7 +484,7 @@ def sweep_stale_runs(
     clock = time.time() if now is None else now
     try:
         entries = sorted(root.iterdir())
-        me = int(sub._current_uid())
+        me = None if os.name == "nt" else int(sub._current_uid())  # the identity is a SID there; st_uid is 0
     except (OSError, ValueError):
         return removed
     for d in entries:
@@ -492,7 +492,7 @@ def sweep_stale_runs(
             if not d.name.startswith(_RUN_PREFIX):
                 continue
             st = d.lstat()
-            if not stat.S_ISDIR(st.st_mode) or st.st_uid != me:
+            if not stat.S_ISDIR(st.st_mode) or (me is not None and st.st_uid != me):
                 continue
             lock_state, lock_fd = _lock_probe(d)
             try:

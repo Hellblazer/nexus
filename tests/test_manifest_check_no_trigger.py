@@ -46,7 +46,7 @@ NAMING_ALLOWED = {
     "tests/test_catalog_ttl_check_no_trigger.py",
     # the chunk routes' own scan lists the one class that borrows its comparison; the file name is spelled in two parts
     # because that scan reads this file too
-    "tests/test_retire_" + "keys.py",
+    "tests/test_retire_" + "keys_no_trigger.py",
 }
 NAMES = (
     "manifest-chunk-index-check", "manifest-labels-check", "ManifestCheck", "manifestCheck", "ManifestChunkIndexCheck",

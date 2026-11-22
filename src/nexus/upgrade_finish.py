@@ -1109,7 +1109,9 @@ def restart_stale(
                 run_bounded(nx_argv("mineru", "stop"), text=False, timeout=60)
                 started = run_bounded(
                     nx_argv("mineru", "start"), text=False, timeout=300,
-                    env={**os.environ, "NX_PDF_STACK": "refuse"},
+                    # F34 (nexus-7t3w1): nor into MinerU's 1.2 GB weight fetch, which the
+                    # PDF-indexing commands do before their first page; a restart needs none.
+                    env={**os.environ, "NX_PDF_STACK": "refuse", "NX_MINERU_WEIGHTS_FETCH_SKIP": "1"},
                     # nexus-9pc2f: the MinerU server `start` spawns must outlive this call;
                     # a contained child's Windows job is closed on return and kills it.
                     contained=False,

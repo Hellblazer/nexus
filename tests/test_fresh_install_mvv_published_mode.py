@@ -275,7 +275,7 @@ def test_the_summary_names_the_formula_pdf_check_status_before_the_sentinel() ->
     """nexus-tr1rj.20: a skipped formula-PDF check must read as skipped in the summary
     (with its reason), never as a covered one; the PASSED sentinel stays last."""
     text = _text()
-    status = text.index('echo "FRESH-INSTALL MVV formula-PDF check (MinerU, published bytes): $FORMULA_PDF_STATUS"')
+    status = text.index('echo "FRESH-INSTALL MVV formula-PDF check (MinerU, $FORMULA_PDF_LAYER): $FORMULA_PDF_STATUS"')
     sentinel = text.index('echo "FRESH-INSTALL MVV PASSED', status)
     assert status < sentinel
     assert 'FORMULA_PDF_STATUS="SKIPPED (reason: $NX_MVV_FORMULA_PDF_SKIP_REASON)"' in text
@@ -1275,7 +1275,29 @@ def test_local_wheel_install_applies_the_wheels_own_overrides() -> None:
     local_block = text[text.index('Build the wheel under test ──"'):]
     local_block = local_block[: local_block.index("MCP entry-point handshake")]
     assert 'nexus/_install/overrides.txt' in local_block
-    assert '--overrides "$OVERRIDES_FILE" "$WHEEL"' in local_block
+    assert '--overrides "$OVERRIDES_FILE" \\\n        --constraints "$CONSTRAINTS_FILE" "$_LOCAL_SPEC"' in local_block
+    assert 'nexus/_install/constraints.txt' in local_block
+
+
+def test_the_local_wheel_layer_installs_the_pdf_extra_when_the_formula_check_runs() -> None:
+    """F34 (nexus-7t3w1; Sam 2026-11-21, T2 nexus/sam-ruling-855-go-2026-11-21): the formula-PDF check runs on
+    the candidate wheel before the tag, so the local layer installs it with the `pdf` extra when the check is on."""
+    text = _text()
+    local_block = text[text.index('Build the wheel under test ──"'):]
+    local_block = local_block[: local_block.index("MCP entry-point handshake")]
+    assert '_LOCAL_SPEC="conexus[pdf] @ file://$WHEEL"' in local_block
+    assert 'if [ "$FORMULA_PDF_CHECK_ON" = "1" ]; then' in local_block
+
+
+def test_the_formula_pdf_block_runs_in_both_modes_and_proves_the_f34_fetch() -> None:
+    """F34: the block is no longer --published only, and it fails a virgin-HOME index that did not fetch
+    MinerU's weights as its own step (the verdict function, self-tested in --self-test)."""
+    text = _text()
+    block = text[text.index("FORMULA_PDF_CHECK_RAN=0"):]
+    block = block[: block.index("generation install path on the virgin HOME")]
+    assert "applies to --published only" not in block
+    assert '_f34_weights_fetch_verdict < "$LOGS/index-formula-pdf.log"' in block
+    assert "models--opendatalab--PDF-Extract-Kit-1.0" in block
 
 
 # ── the formula-PDF check is default-on; a skip needs a recorded reason (nexus-tr1rj.20) ──
@@ -1314,10 +1336,9 @@ def test_skipping_the_formula_check_with_a_reason_runs_slim(tmp_path, monkeypatc
         _cleanup_preserved_evidence(result)
 
 
-def test_the_local_wheel_layer_needs_no_skip_reason(tmp_path, monkeypatch) -> None:
-    """The check applies to published bytes only: a local-wheel run with the check off and NO
-    reason is not refused. A stub `uv` fails the first build step, so the run stops there,
-    on an ordinary failure rather than the exit-2 refusal."""
+def test_the_local_wheel_layer_refuses_a_skip_with_no_reason(tmp_path, monkeypatch) -> None:
+    """F34: the check runs on the local layer too, so a local run with the check off and NO reason is
+    refused (exit 2) before any build, exactly as a published one is."""
     monkeypatch.setenv("NX_MVV_FORMULA_PDF_CHECK", "0")
     monkeypatch.delenv("NX_MVV_FORMULA_PDF_SKIP_REASON", raising=False)
     stub_dir = tmp_path / "bin"
@@ -1329,7 +1350,7 @@ def test_the_local_wheel_layer_needs_no_skip_reason(tmp_path, monkeypatch) -> No
     env["PATH"] = f"{stub_dir}:{env.get('PATH', '')}"
     result = subprocess.run([str(SCRIPT)], env=env, capture_output=True, text=True, timeout=60)
     try:
-        assert "refusing to skip the formula-PDF check" not in result.stderr, result.stderr
-        assert result.returncode not in (0, 2), result.stdout + result.stderr
+        assert "refusing to skip the formula-PDF check" in result.stderr, result.stderr
+        assert result.returncode == 2, result.stdout + result.stderr
     finally:
         _remove_evidence(result.stderr)

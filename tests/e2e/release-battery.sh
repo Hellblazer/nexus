@@ -6,7 +6,10 @@
 #
 # Six legs and a preflight (cleanup step 11, nexus-0r1uz; dual nexus-oc2bk; resolve nexus-2k66t.4.4;
 # plugins nexus-z7ddd):
-#   mvv    tests/e2e/fresh-install-mvv.sh                              the core install invariant
+#   mvv    tests/e2e/fresh-install-mvv.sh                              the core install invariant, and the
+#                                                                     formula-PDF check through MinerU on the
+#                                                                     candidate wheel with an empty model cache
+#                                                                     (F34, nexus-7t3w1; its status is in the table)
 #   pkgup  tests/e2e/migration-rehearsal/run.sh --package-upgrade    package-upgrade convergence
 #   lsg    NX_GATE_SMOKE_ONLY=1 tests/e2e/local-service-gate.sh       the local-service gate, smoke leg only (nexus-jh1f2)
 #   dual   tests/e2e/dual-embedder-gate.sh                            the keyed bge + Voyage engine (needs a key)
@@ -374,6 +377,14 @@ finish_leg() {  # finish_leg <leg> <rc>
   prop="$(printf '%s\n' "$clean" | grep -oE 'PROPAGATION_WAIT_S=[0-9]+' | tail -1 || true)"
   if [ -n "$prop" ] && [[ "$line" != *"$prop"* ]]; then
     line="$line  [$prop]"
+  fi
+  # F34 (nexus-7t3w1; Sam 2026-11-21, T2 nexus/sam-ruling-855-go-2026-11-21): the mvv leg runs the
+  # formula-PDF check through MinerU on the candidate wheel, in a virgin HOME with an empty model
+  # cache, before the tag. Its status goes into the verdict table, so a recorded skip reads as one.
+  if [ "$leg" = mvv ] && [[ "$clean" == *"FRESH-INSTALL MVV"* ]]; then
+    local formula
+    formula="$(printf '%s\n' "$clean" | grep -oE 'formula-PDF check \(MinerU, [^)]*\): .*' | tail -1 || true)"
+    line="$line  [${formula:-formula-PDF check: no status line}]"
   fi
   LEG_LINE[$leg]="$line"
   echo "[$(date +%H:%M:%S)] END   $leg: ${LEG_STATUS[$leg]} rc=$rc wall=$(( LEG_END[$leg] - LEG_START[$leg] ))s — $line"

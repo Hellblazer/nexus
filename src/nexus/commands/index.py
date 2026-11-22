@@ -41,6 +41,14 @@ class _PdfStackHeldFailure(click.ClickException):
     exit_code = pdf_stack.EXIT_REFUSED
 
 
+class _MineruWeightsHeldFailure(click.ClickException):
+    """F34 (nexus-7t3w1): ``nx index repo`` ended with PDFs held back because MinerU's pipeline weights were
+    not fetched (the fetch failed, or a background run may not download them): exit 75 (EX_TEMPFAIL,
+    retryable), after code and prose were indexed. The stack is installed; this is not a refused install."""
+
+    exit_code = pdf_stack.EXIT_NETWORK
+
+
 def _registry_path() -> Path:
     from nexus.config import nexus_config_dir  # noqa: PLC0415 — deliberate function-local import (read at call time; nexus.config does not import the commands surface, so there is no cycle)
 
@@ -1978,6 +1986,15 @@ def index_repo_cmd(
                 f"{pdf_stack.POLICY_ENV}=refuse (or pdf_stack.auto_install: false) forbids "
                 f"installing it here. Code and prose were indexed. "
                 f"Run: {pdf_stack.repair_command()}   then re-run `nx index repo`."
+            )
+        # F34 (nexus-7t3w1): PDFs held because MinerU's pipeline weights were not fetched. The stack
+        # is installed, so this is never the refused-install message above; it names the fetch.
+        weights_held = (stats or {}).get("pdf_mineru_weights_held", 0)
+        if weights_held and _run_failure is None:
+            _run_failure = _MineruWeightsHeldFailure(
+                f"{weights_held} PDF(s) were NOT indexed: "
+                f"{(stats or {}).get('pdf_mineru_weights_problem') or 'fetching MinerU pipeline weights failed.'} "
+                "Code and prose were indexed; re-run `nx index repo` once the weights are fetched."
             )
         # nexus-tr1rj.24: PDFs held because the MinerU time limit is unusable. Code, prose and RDR
         # files were indexed; the held PDFs are listed and the run ends non-zero (a MinerU problem

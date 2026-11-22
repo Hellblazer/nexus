@@ -254,7 +254,7 @@ tests/test_rdr237_pymupdf_extractor.py 1484
 tests/test_rdr_preamble.py 2401
 tests/test_rdr_set_status.py 1312
 tests/test_repo_only_references_lint.py 1395
-tests/test_retire_keys.py 1763
+tests/test_retire_keys.py 1640
 tests/test_routing_hooks.py 1525
 tests/test_routing_subagent_git_write.py 4333
 tests/test_scenario_journeys.py 1265

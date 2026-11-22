@@ -438,6 +438,7 @@ class TestRestartStale:
         assert sp.call_count == 2
         start_kwargs = sp.call_args_list[1].kwargs
         assert start_kwargs["env"]["NX_PDF_STACK"] == "refuse", "a restart pass must never install"
+        assert start_kwargs["env"]["NX_MINERU_WEIGHTS_FETCH_SKIP"] == "1", "nor fetch MinerU's weights (F34)"
         assert any("cycled MinerU" in a for a in actions)
 
     def test_mineru_start_refused_with_69_is_reported_not_called_a_cycle(self):

@@ -134,3 +134,20 @@ def test_other_legs_unaffected_no_propagation_wait_in_log(tmp_path) -> None:
     line = _run_finish_leg(tmp_path, log, verdict_regex="LOCAL-SERVICE GATE (PASSED|FAILED)", rc=0)
     assert line == "LOCAL-SERVICE GATE PASSED"
     assert "PROPAGATION_WAIT_S" not in line
+
+
+def test_the_mvv_row_carries_the_formula_pdf_check_status(tmp_path) -> None:
+    """F34 (nexus-7t3w1): the mvv row of the verdict table names the formula-PDF check's status, so a
+    skipped pre-tag MinerU check reads as skipped there; a run with no status line says so."""
+    log = (
+        "FRESH-INSTALL MVV formula-PDF check (MinerU, candidate wheel, local layer): ran\n"
+        "FRESH-INSTALL MVV PASSED — journey ok (LOCAL WHEEL, release-battery layer)\n"
+    )
+    line = _run_finish_leg(tmp_path, log, verdict_regex="FRESH-INSTALL MVV (PASSED|FAILED)", rc=0)
+    assert line.endswith("[formula-PDF check (MinerU, candidate wheel, local layer): ran]"), line
+    (tmp_path / "logs" / "mvv.log").unlink()
+    (tmp_path / "logs").rmdir()
+    line = _run_finish_leg(
+        tmp_path, "FRESH-INSTALL MVV PASSED — journey ok\n", verdict_regex="FRESH-INSTALL MVV (PASSED|FAILED)", rc=0
+    )
+    assert line.endswith("[formula-PDF check: no status line]"), line

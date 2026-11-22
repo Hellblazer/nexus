@@ -1059,6 +1059,34 @@ def ensure_or_exit(
         if defer_rerun:
             raise RerunRequired()
         raise SystemExit(rerun_command())
+    return _weights_or_exit(extractor, hold_on_refuse=hold_on_refuse)
+
+
+def _weights_or_exit(extractor: str, *, hold_on_refuse: bool) -> bool:
+    """F34: with the stack present, fetch MinerU's pipeline weights before any page budget starts
+    (:func:`nexus.mineru_weights.ensure_pipeline_weights`). An empty *extractor* means the
+    configured one. A failed fetch prints what failed and the retry and exits 75 (retryable);
+    with *hold_on_refuse* it raises :class:`nexus.mineru_weights.WeightsFetchError` instead, so
+    ``nx index repo`` holds its PDFs back with that message and indexes the rest."""
+    from nexus import mineru_weights  # noqa: PLC0415 — deferred import (startup cost)
+
+    if not extractor:
+        from nexus.config import get_pdf_extractor  # noqa: PLC0415 — deferred local import — avoids circular deps
+
+        extractor = get_pdf_extractor()
+    if not needs_stack(extractor):
+        return True
+    try:
+        # A background run (``nx index repo`` under the post-commit hook's NX_PDF_STACK=refuse) never
+        # downloads: it holds its PDFs and names the fetch. An interactive command fetches.
+        mineru_weights.ensure_pipeline_weights(
+            _say, allow_fetch=not (hold_on_refuse and policy() == POLICY_REFUSE)
+        )
+    except mineru_weights.WeightsFetchError as exc:
+        if hold_on_refuse:
+            raise
+        _say(f"nx: {exc}")
+        raise SystemExit(EXIT_NETWORK) from exc
     return True
 
 
@@ -1076,12 +1104,14 @@ def _skipped_path() -> Path:
 #: says which; a record written before the cause existed is a stack hold.
 SKIP_CAUSE_STACK = "stack"
 SKIP_CAUSE_BOUNDS = "mineru_bounds"
+#: F34: the stack is present and fetching MinerU's pipeline weights failed.
+SKIP_CAUSE_WEIGHTS = "mineru_weights"
 
 
 def record_skipped(paths: list[Path], *, repo: Path | None = None, cause: str = SKIP_CAUSE_STACK) -> None:
     """Write the PDFs a refusing ``nx index repo`` run did not index, so
     ``nx doctor`` can count them. Replaces the previous record for *repo*, cause included
-    (*cause* is :data:`SKIP_CAUSE_STACK` or :data:`SKIP_CAUSE_BOUNDS`)."""
+    (*cause* is :data:`SKIP_CAUSE_STACK`, :data:`SKIP_CAUSE_BOUNDS` or :data:`SKIP_CAUSE_WEIGHTS`)."""
     path = _skipped_path()
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
