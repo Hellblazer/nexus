@@ -2,6 +2,7 @@
 """CLI command group for topic taxonomy (RDR-061 P3-2, RDR-070 nexus-2dq)."""
 from __future__ import annotations
 
+import shlex
 import asyncio
 import contextvars
 import hashlib
@@ -530,7 +531,7 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
             example = missing_projection[0]
             click.echo(
                 f"Action: {len(missing_projection)} collection(s) have no cross-collection "
-                f"projection. Run `nx taxonomy project {example} --persist` "
+                f"projection. Run `nx taxonomy project {shlex.quote(example)} --persist` "
                 f"(or `nx taxonomy project --backfill --persist` for all)."
             )
 
@@ -894,7 +895,7 @@ def rebuild_cmd(collection: str, project: str, k: int | None) -> None:
     if project and not collection:
         click.echo(
             f"Note: --project is deprecated. Use --collection instead.\n"
-            f"  Hint: nx taxonomy rebuild --collection {project}\n"
+            f"  Hint: nx taxonomy rebuild --collection {shlex.quote(project)}\n"
         )
         collection = project
 
@@ -991,7 +992,7 @@ def reset_cmd(collection: str, yes: bool) -> None:
         f"{counts.get('assignments', 0)} assignments, {counts.get('links', 0)} links, "
         f"{counts.get('centroids', 0)} centroids removed."
     )
-    click.echo(f"Run `nx taxonomy discover --collection {collection}` to rediscover.")
+    click.echo(f"Run `nx taxonomy discover --collection {shlex.quote(collection)}` to rediscover.")
 
 
 # ── Review command (RDR-070, nexus-lbu) ─────────────────────────────────────
@@ -1494,7 +1495,7 @@ def split_cmd(topic_label: str, k: int, collection: str) -> None:
             _echo_stale_projection_hint()
 
             coll_scope = collection_name or collection
-            scope = f" -c {coll_scope}" if coll_scope else ""
+            scope = f" -c {shlex.quote(coll_scope)}" if coll_scope else ""
             click.echo(
                 f"Action: {child_count} new sub-topics have n-gram labels. "
                 f"Run `nx taxonomy label{scope}` to get human-readable labels."

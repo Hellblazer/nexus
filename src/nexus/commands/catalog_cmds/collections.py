@@ -15,6 +15,7 @@ body — keeping this module's imports acyclic and preserving the
 """
 from __future__ import annotations
 
+import shlex
 from pathlib import Path
 
 import click
@@ -386,7 +387,7 @@ def rename_collection_cmd(
             f"{source_model!r} under a name claiming {token_model!r}. "
             f"Rename to {correct_name!r} instead; if the row is the wrong "
             f"one and the vectors really are {token_model!r}, "
-            f"'nx collection rename {old} {new} --force-prefix-change' "
+            f"`nx collection rename {shlex.quote(old)} {shlex.quote(new)} --force-prefix-change` "
             f"carries the override."
         )
 

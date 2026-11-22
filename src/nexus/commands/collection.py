@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import shlex
 import fnmatch
 import re
 import sys
@@ -276,7 +277,7 @@ def info_cmd(name: str) -> None:
         successor = str(_catalog_collection_rows()[0].get(name, {}).get("superseded_by") or "")
         if successor:
             raise click.ClickException(
-                f"collection {name!r} was renamed to {successor} — use: nx collection info {successor}"
+                f"collection {name!r} was renamed to {successor} — use: nx collection info {shlex.quote(successor)}"
             )
         raise click.ClickException(f"collection not found: {name!r} — use: nx collection list")
 
@@ -585,7 +586,7 @@ def delete_cmd(name: str, yes: bool) -> None:
         # claim "Deleted:".
         raise click.ClickException(
             f"delete of '{name}' is unconfirmed: the service cascade failed. "
-            f"Re-run `nx collection delete {name}`."
+            f"Re-run `nx collection delete {shlex.quote(name)}`."
         )
 
     taxonomy_counts = cascade.taxonomy
@@ -1288,7 +1289,7 @@ def reindex_cmd(name: str, force: bool, ack_external_embedder: bool = False) -> 
             f"live catalog document owns them). There is no source to re-index "
             f"from — this would destroy every chunk with no recovery path.\n\n"
             f"  • If you want to delete the collection, run:\n"
-            f"      nx collection delete {name}\n"
+            f"      nx collection delete {shlex.quote(name)}\n"
             f"  • In-place re-embedding (preserve content, swap embedding "
             f"model) is not yet supported. Track at GitHub #367.\n\n"
             f"--force does not bypass this check — there is nothing to force."
@@ -1300,7 +1301,7 @@ def reindex_cmd(name: str, force: bool, ack_external_embedder: bool = False) -> 
             f"belongs to a deleted catalog document, so there is nothing to "
             f"rebuild and the verb would purge the collection and leave it empty. "
             f"Restore a document (`nx catalog restore`), or run "
-            f"`nx collection delete {name}` if the collection should go."
+            f"`nx collection delete {shlex.quote(name)}` if the collection should go."
         )
 
     if sourceless and not force:
@@ -1310,7 +1311,7 @@ def reindex_cmd(name: str, force: bool, ack_external_embedder: bool = False) -> 
             f"sourceless entries cannot be re-indexed and will be LOST. They "
             f"are manual store_put entries and/or hidden chunks: chunks with no "
             f"live catalog document, which a plain listing does not show "
-            f"(`nx collection info {name}` reports live and stored counts; the "
+            f"(`nx collection info {shlex.quote(name)}` reports live and stored counts; the "
             f"difference is the hidden chunks). "
             f"Use --force to proceed and accept that loss."
         )
@@ -1366,10 +1367,10 @@ def reindex_cmd(name: str, force: bool, ack_external_embedder: bool = False) -> 
         # re-run of reindex can dead-end on "not found": say how to tell the two cases apart.
         raise click.ClickException(
             f"reindex of '{name}' stopped: the delete is unconfirmed (the service cascade failed), so "
-            f"the collection may or may not have been deleted. Run `nx collection info {name}`: if it "
-            f"still lists chunks, re-run `nx collection reindex {name}`; if it reports not found, the "
+            f"the collection may or may not have been deleted. Run `nx collection info {shlex.quote(name)}`: if it "
+            f"still lists chunks, re-run `nx collection reindex {shlex.quote(name)}`; if it reports not found, the "
             f"delete committed: re-index from the original sources (`nx index repo` for code, "
-            f"`nx index md` or `nx index pdf` for documents), and `nx collection delete {name}` "
+            f"`nx index md` or `nx index pdf` for documents), and `nx collection delete {shlex.quote(name)}` "
             f"then clears any pipeline rows the unconfirmed delete left."
         )
 
@@ -1469,7 +1470,7 @@ def reindex_cmd(name: str, force: bool, ack_external_embedder: bool = False) -> 
             except Exception as exc:  # noqa: BLE001 — boundary catch surfacing re-index failure to user via click.echo + Exit
                 click.echo(
                     f"Re-indexing failed: {exc}\n"
-                    f"Collection '{name}' was deleted. Re-run 'nx collection reindex {name}' "
+                    f"Collection '{name}' was deleted. Re-run `nx collection reindex {shlex.quote(name)}` "
                     f"after resolving the error, or re-index manually.",
                     err=True,
                 )
@@ -1502,7 +1503,7 @@ def reindex_cmd(name: str, force: bool, ack_external_embedder: bool = False) -> 
                 # and the exit status must say so (nexus-2fyb: never silent).
                 click.echo(
                     f"Re-indexing failed: {exc}\n"
-                    f"Collection '{name}' was deleted. Re-run 'nx collection reindex {name}' "
+                    f"Collection '{name}' was deleted. Re-run `nx collection reindex {shlex.quote(name)}` "
                     f"after resolving the error, or re-index manually.",
                     err=True,
                 )

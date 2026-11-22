@@ -18,6 +18,7 @@ Pure functions where possible, so the CLI tests do not need an engine.
 """
 from __future__ import annotations
 
+import shlex
 import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
@@ -280,7 +281,7 @@ def is_blocked(row: dict) -> bool:
 
 def discover_command(target: str) -> str:
     """The command that builds a target's topics, centroids and assignments in its own embedding space."""
-    return f"nx taxonomy discover --collection {target}"
+    return f"nx taxonomy discover --collection {shlex.quote(target)}"
 
 
 @dataclass(frozen=True)
