@@ -33,6 +33,7 @@ from click.testing import CliRunner
 
 from nexus.aspect_readers import uri_for
 from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
+from nexus.errors import RecoveryBundleFormatTooNewError
 from nexus.catalog.recovery_bundle import ImportSummary, export_bundle, import_bundle, read_bundle
 from nexus.catalog.rows.legacy_names import parse_conformant_collection_name  # moved out of nexus.corpus by P2.2
 from nexus.cli import main
@@ -484,5 +485,5 @@ def test_read_bundle_reads_format_3_and_refuses_format_4(tmp_path):
     header, records = read_bundle(tmp_path / "v3.jsonl")
     assert header["format_version"] == 3 and records == []
 
-    with pytest.raises(ValueError, match=r"format_version 4 exceeds the maximum this build reads \(3\)"):
+    with pytest.raises(RecoveryBundleFormatTooNewError, match=r"format_version 4, and this client reads format_version 3 and earlier"):
         read_bundle(tmp_path / "v4.jsonl")
