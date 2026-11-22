@@ -138,19 +138,24 @@ class Rdr229P31SupersededByCheckWaitTest {
                 assertThat(PgCatalogProbes.constraintCount(ctx, CHECK)).as("the later boot adds it").isEqualTo(1);
                 assertThat(PgCatalogProbes.constraintValidated(ctx, CHECK)).as("and the same changeset validates it: nothing else would").isTrue();
 
-                // every stamp move is complete and every other CHECK validated, as the moves leave them: gate 1 then holds
+                // every gate-1 move is complete and every other constraint it validates is VALID, as the moves leave them: gate 1 then holds.
+                // Gate 1 of the boot read set (CompletionCheck.ReadSet.boot()) is P3.1's stamp labels plus P3.3a's id-twin validation labels
+                // (rdr229-fkvalidate-*, db/rdr229/p33a-fk-twins.tsv), so both families are driven to completion here.
                 var moves = DSL.table(DSL.name("nexus", "data_moves"));
                 var label = DSL.field(DSL.name("label"), String.class);
+                var gate1Moves = label.like("rdr229-stamp-%").or(label.like("rdr229-fkvalidate-%"));
                 var tables = ctx.select(DSL.field(DSL.name("driving_table"), String.class)).from(moves)
-                    .where(label.like("rdr229-stamp-%")).fetch(DSL.field(DSL.name("driving_table"), String.class));
-                assertThat(tables).as("non-vacuity: the walk registered the stamp moves").isNotEmpty();
+                    .where(gate1Moves).fetch(DSL.field(DSL.name("driving_table"), String.class));
+                assertThat(ctx.fetchCount(moves, label.like("rdr229-stamp-%"))).as("non-vacuity: the walk registered the stamp moves").isPositive();
+                assertThat(ctx.fetchCount(moves, label.like("rdr229-fkvalidate-%"))).as("non-vacuity: the walk registered P3.3a's validation moves")
+                    .isPositive();
                 for (var def : PgCatalogProbes.constraintDefinitionsIn(ctx, List.of("nexus"))) {
                     if (def.definition().endsWith("NOT VALID") && tables.contains(def.table())) {
                         P31TestSql.validate(su, DSL.table(DSL.name("nexus", def.table())), def.conname());
                     }
                 }
                 ctx.update(moves).set(DSL.field(DSL.name("completed_at"), java.time.OffsetDateTime.class), java.time.OffsetDateTime.now())
-                    .where(label.like("rdr229-stamp-%")).execute();
+                    .where(gate1Moves).execute();
                 var result = dev.nexus.service.datamove.CompletionCheck.evaluate(ctx);
                 assertThat(result.supersededByCheckPresent()).isTrue();
                 assertThat(result.incomplete()).as("every label is complete or not applicable").isEmpty();
