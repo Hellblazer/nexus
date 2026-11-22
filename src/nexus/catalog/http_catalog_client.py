@@ -3787,6 +3787,15 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             for c in (result.get("collections", []) if result else [])
         ]
 
+    def list_collection_rows(self) -> list[dict]:
+        """Registry rows as the engine sent them (``GET /v1/catalog/collections/list``, every state), without
+        :func:`_coerce_collection_id`: on an engine that does not list ids the ``collection_id`` key is ABSENT, on one
+        that does it is present on every row (an int, or null). ``nx doctor``'s registry null-id check reads this, so
+        it can tell "this engine lists no ids" from "every id is null" (RDR-229 P3.12, nexus-p2m1x.32); everything
+        else uses :meth:`list_collections`."""
+        result = self._get("/collections/list", lifecycle_state=None, content_type=None)
+        return [dict(c) for c in (result.get("collections", []) if result else []) if isinstance(c, dict)]
+
     def get_collection(self, name: str) -> dict | None:
         """One registry row via ``GET /v1/catalog/collections/get``, or ``None`` when unregistered.
 
