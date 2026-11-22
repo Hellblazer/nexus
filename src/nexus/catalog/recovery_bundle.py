@@ -548,7 +548,8 @@ def write_bundle(
         "format": "nexus-recovery-bundle",
         "format_version": RECOVERY_BUNDLE_FORMAT_VERSION,
         "exported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "exported_by": exported_by if exported_by is not None else {"client": "", "engine": ""},
+        # a caller that passes none still records the client; only the engine is unknown here
+        "exported_by": exported_by if exported_by is not None else _exported_by(None),
         "collections": len(collections),
         "knowledge_docs": len(knowledge_docs),
         "links": len(links),
@@ -638,6 +639,10 @@ def exported_by(reader: Any) -> dict[str, str]:
         except Exception:  # noqa: BLE001 — provenance only; an unreachable engine must not fail the export
             engine = ""
     return {"client": client, "engine": engine}
+
+
+#: write_bundle's ``exported_by`` parameter shadows the function's name inside it.
+_exported_by = exported_by
 
 
 # ── Import ──────────────────────────────────────────────────────────────────
