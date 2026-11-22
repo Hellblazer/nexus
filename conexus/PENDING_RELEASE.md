@@ -47,4 +47,8 @@ it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- `conexus/skills/catalog/SKILL.md`: text only: `implements-heuristic` is a legacy type whose automated pass no longer runs (off since engine v0.1.57), and graph traversal excludes it by default, nexus-ybj1b.
+- `conexus/skills/nexus/SKILL.md`: text only: the link-type line marks `implements-heuristic` legacy, no longer generated, nexus-ybj1b.
+- `conexus/skills/rdr-close/SKILL.md`: text only: step 1 of catalog links no longer says the indexer auto-generates `implements-heuristic` links; it says to link a new RDR's files with `implements` directly, nexus-ybj1b.
+
 ## Deferred to the next client release
