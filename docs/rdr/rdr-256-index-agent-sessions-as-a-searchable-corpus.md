@@ -462,12 +462,13 @@ collections (`docs/collections.md` Rule 1).
   Naming the collection, or the corpus `knowledge__agent-sessions`,
   searches it.
 - *The lint is positive.* The existing live-listing lint checks a fixed
-  list of routing modules
+  list of seven routing modules
   (`tests/test_bc7ps_routing_uses_live_listing.py:287-295`), so a scope
   builder outside that list, as `commands/store.py` is, goes unseen. The new
   lint walks every module under `src/nexus` and finds every listing call
   (`list_collections`, `get_collection_names`, `live_collection_rows`,
-  `list_live_collections`, `get_live_collection_names`). Each such call must either have its rows pass
+  `list_live_collections`, `get_live_collection_names`); 34 files hold one
+  today (256-research-23). Each such call must either have its rows pass
   through `is_default_scope_row` in the same function, or sit on an
   allowlist entry with a reason (an inventory, doctor, maintenance or
   explicit-name path that must see every collection). An unlisted call
@@ -498,7 +499,13 @@ collections (`docs/collections.md` Rule 1).
 - Each manifest row sets `line_start` and `line_end` to the JSONL line
   numbers (1-based, inclusive) of the first and last record in the chunk.
 
-**Write path and hooks.** The existing chunk writer is
+**Write path and hooks.** Two terms first. *Aspect extraction* is a
+background job that reads a stored document and asks a language model
+(`claude -p`, or an API endpoint) for structured fields about it, which
+the aspect-scoped search tools filter on.
+The *post-store hooks* are functions the indexer calls after a write; the
+*default hook chain* is the set `install_default_hooks` registers when a
+caller brings none. The existing chunk writer is
 `doc_indexer._write_chunks_with_owner_rows` (`doc_indexer.py:1687`, a
 private name), which writes the chunks with their manifest and fires no
 hook. Its caller fires the post-store hooks, and with no registry given it
@@ -532,7 +539,12 @@ takes on what `_index_document` does around the writer:
 | `taxonomy_assign_batch_hook` | the engine assigns the new chunks to their nearest topics (`mcp_infra.py:2529-2535`); no LLM call | runs; discovery and labelling skip the subject (Read, above), so it has no topics of its own (inferred, not read, what assignment does for a collection with none; Step 4 reads it) |
 | `aspect_extraction_enqueue_hook` | queues the document for aspect extraction; a `knowledge` collection's base config is `scholarly-paper-v1`, and a prose document is re-routed to `general-prose-v1`, both run through `claude -p` (`aspect_extractor.py:1054-1062`; `llm-surfaces.toml` rows `aspect-enqueue-hook`, `aspect-worker-drain`, `aspect-extraction-cli`, `aspect-extraction-api`, `enrich-aspects`) | not installed, and barred by the gate below in any case |
 
-*The aspect gate.* Not installing the hook covers one path; others reach
+*The aspect gate.* Today the enqueue hook returns early in five cases: no
+config from `select_config`, a source that is not prose, an unresolvable
+document id, a sensitivity check that cannot answer (`SensitivityUnknown`),
+and a sensitive document (`aspect_worker.py:1531, 1535, 1560, 1571, 1573`;
+256-research-22). A non-sensitive session passes all five. Not installing
+the hook covers one path; others reach
 the extractor without it: the batch enqueue in the indexer
 (`indexer.py:6455-6459`), the worker drain, and the attended
 `nx enrich aspects <collection>`. All of them pass `select_config`
@@ -1283,7 +1295,8 @@ planted-token canary. None of it is deferred.
 ### Proportionality
 
 Phase 1 is one decoder, one renderer, one scanner dependency with four
-plugins, one engine column with its readers, and four commands, with no
+plugins, one engine column with its readers, four new `nx sessions` and
+`nx index` verbs and one `nx collection` route, with no
 LLM call added. The alternatives section can shrink at lock time.
 
 ## Decisions (Sam)
@@ -1314,7 +1327,8 @@ No question for Sam remains open in this RDR.
 - T3 `research-diderot-vs-nexus-2026-11-21 (1/2)`, `(2/2)` (collection
   nexus-architecture); T3 `architecture-diderot-overview`
   (distributed-systems).
-- T2 `nexus_rdr/256-research-1` through `-21`;
+- T2 `nexus_rdr/256-research-1` through `-24`, with the quotes behind the
+  fix rounds in `nexus_rdr/256-fix-r1-quotes` and `256-fix-r2-quotes`;
   `nexus/sam-ruling-rdr229-owner-is-source-2026-11-21`;
   `nexus/sam-ruling-rdr256-session-corpus-2026-11-21`.
 - diderot clone: `docs/session-ingest.md`, `docs/design.md:190-198,
