@@ -224,7 +224,7 @@ final class Rdr229RenameEngine implements AutoCloseable {
         CompletionBootWork watched = check;
         registrar = new Thread(() -> {
             while (!registrarStop) {
-                try (DSLContext ctx = DSL.using(admin.url(), admin.user(), admin.password())) {
+                try (var ctx = DSL.using(admin.url(), admin.user(), admin.password())) {
                     NameKeyDropMove.registerIfAbsent(watched.latest(), ctx);
                 } catch (RuntimeException e) {
                     // a tick that cannot reach the database is retried on the next one
