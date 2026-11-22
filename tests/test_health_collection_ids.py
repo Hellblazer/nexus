@@ -20,6 +20,7 @@ import pytest
 import nexus.db.http_engine_status as http_status
 import nexus.health as health
 from nexus.catalog.engine_reads import rdr229_completion_counts
+from nexus.catalog.engine_reads.collection_rows import read_collection_rows
 from nexus.catalog.engine_reads.route_unavailable import EngineRouteUnavailable
 from nexus.collection_id_health import (
     CLASH_LABEL,
@@ -175,12 +176,12 @@ def test_a_null_registry_id_outranks_a_wait_and_survives_unread_counts() -> None
 
 
 def _listed(raw_rows: list[dict]) -> list[dict]:
-    """Rows as the doctor reads them: the real HttpCatalogClient.list_collection_rows (uncoerced) over a stubbed GET."""
+    """Rows as the doctor reads them: the real uncoerced reader over HttpCatalogClient with a stubbed GET."""
     from nexus.catalog.http_catalog_client import HttpCatalogClient  # noqa: PLC0415 — test-local
 
     client = HttpCatalogClient(base_url="http://127.0.0.1:9", _token="t")
     client._get = lambda path, **_kw: {"collections": raw_rows}  # type: ignore[method-assign]
-    return client.list_collection_rows()
+    return read_collection_rows(client)
 
 
 def test_an_engine_that_lists_no_ids_is_not_checked_never_a_failure() -> None:
