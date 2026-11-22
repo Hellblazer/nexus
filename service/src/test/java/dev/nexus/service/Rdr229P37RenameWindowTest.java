@@ -103,6 +103,9 @@ class Rdr229P37RenameWindowTest {
         }
         assertThat(engine.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, newName)))
             .as("the name path inserts a new registry row, so the collection has a new id").isNotNull().isNotEqualTo(idBefore);
+        assertThat(engine.moveRows(Rdr229RenameEngine.DROP_LABEL))
+            .as("nothing registers the name-key drop move before gate 3 (the harness's registrar has run throughout)").isZero();
+        assertThat(engine.pinnedRenames()).as("the rename ran inside the rename window").isEqualTo(1);
     }
 
     // ---- stage 2: gate 3 holds, the name-key drop move has not completed -----------------------------------------------------
@@ -124,6 +127,8 @@ class Rdr229P37RenameWindowTest {
         assertThat(engine.completion().gate3()).as("non-vacuity: gate 3 holds").isTrue();
         assertThat(engine.moveCompleted(Rdr229RenameEngine.DROP_LABEL))
             .as("non-vacuity: the name-key drop move has no completed_at (the worker is stopped)").isFalse();
+        assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(30), () -> engine.moveRows(Rdr229RenameEngine.DROP_LABEL) == 1))
+            .as("from gate 3 the registration operation registers the move: one row, and it stays one").isTrue();
         String why = " [readiness " + engine.readiness().map(Object::toString).orElse("unreadable") + "]";
 
         var r = engine.rename(token, oldName, coll("p37w2", 2));
@@ -131,6 +136,7 @@ class Rdr229P37RenameWindowTest {
         assertThat(r.refused()).as("a rename from gate 3 until the move completes is refused 409 rename_refused: " + r + why).isTrue();
         assertThat(r.missing()).as("the error names the move" + why).isEqualTo("name_key_drop_move");
         assertNothingWritten(tenant, oldName, idBefore, chunksBefore, why);
+        assertThat(engine.pinnedRenames()).as("the refused rename ran inside the rename window too").isEqualTo(2);
     }
 
     // ---- stage 3: the move completed, no restart has applied P3.5b's changesets ---------------------------------------------
@@ -158,5 +164,6 @@ class Rdr229P37RenameWindowTest {
         assertThat(r.refused()).as("a rename after the move and before the restart is refused 409 rename_refused: " + r + why).isTrue();
         assertThat(r.missing()).as("the error names the restart" + why).isEqualTo("restart");
         assertNothingWritten(tenant, oldName, idBefore, chunksBefore, why);
+        assertThat(engine.moveRows(Rdr229RenameEngine.DROP_LABEL)).as("the registration is idempotent: still one row").isEqualTo(1);
     }
 }

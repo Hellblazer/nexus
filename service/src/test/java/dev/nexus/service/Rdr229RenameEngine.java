@@ -135,7 +135,7 @@ final class Rdr229RenameEngine implements AutoCloseable {
         bootWork = new BootWorkRegistry(Clock.systemUTC());
         check = new CompletionBootWork(bootWork, admin, CompletionCheck.ReadSet.boot(), this::simulatedGate3,
             Rdr229RenameEngine::p35bIds);
-        readiness = check.renameReadiness();
+        readiness = counting(check.renameReadiness());
         service = new NexusService(0, ROOT, ds, null, null, null, null, null, null, System::getenv,
             () -> dev.nexus.service.db.PgSession.startupPciSettings().enabled(), null, null, check.gate3(), readiness);
         service.bootWork(bootWork);
@@ -143,6 +143,50 @@ final class Rdr229RenameEngine implements AutoCloseable {
         startWorker();
         check.start();
         startRegistrar();
+    }
+
+    /** The renames that went through {@link RenameReadiness#pinned}, over every boot of this engine: a rename that skipped the pin is not counted. */
+    private final java.util.concurrent.atomic.AtomicInteger pinnedRenames = new java.util.concurrent.atomic.AtomicInteger();
+
+    private RenameReadiness counting(RenameReadiness inner) {
+        return new RenameReadiness() {
+            @Override
+            public Missing missing() {
+                return inner.missing();
+            }
+
+            @Override
+            public <T> T pinned(java.util.function.Supplier<T> rename) {
+                pinnedRenames.incrementAndGet();
+                return inner.pinned(rename);
+            }
+        };
+    }
+
+    /** How many renames ran inside the rename window since this engine was built. */
+    int pinnedRenames() {
+        return pinnedRenames.get();
+    }
+
+    /** Runs {@code work} inside the rename window, as a rename does: gate 3 cannot flip to true until it returns. */
+    <T> T pinned(java.util.function.Supplier<T> work) {
+        return readiness.pinned(work);
+    }
+
+    /** The in-process gate-3 signal the engine's readers read, now. */
+    boolean gate3Holds() {
+        return check.gate3().holds();
+    }
+
+    /** Whether {@code boot_work} lists the restart entry (the P3.5b changesets wait for one restart) in this boot. */
+    boolean restartEntryPresent() {
+        return bootWork.snapshot().stream().anyMatch(e -> CompletionBootWork.RESTART_ENTRY_ID.equals(e.id()));
+    }
+
+    /** How many rows {@code nexus.data_moves} holds under {@code label}. */
+    int moveRows(String label) {
+        return su(ctx -> ctx.fetchCount(DSL.table(DSL.name("nexus", "data_moves")),
+            DSL.field(DSL.name("label"), String.class).eq(label)));
     }
 
     /** The P3.5b changeset ids the engine waits for: the real list when it exists, else the harness's one fixture id. */
