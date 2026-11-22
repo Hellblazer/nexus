@@ -2552,6 +2552,14 @@ def session_tasks(s: dict) -> list[str] | None:
 #: Seconds ``session_work`` waits for ``nx identity work list``: --status asks every target, so a hung engine must not stall it.
 WORK_TIMEOUT_S = 5
 
+#: Seconds the one retry of a timed-out read waits. The first ``nx`` a round runs after ``--nx`` reinstalled the client
+#: starts cold (bytecode, the engine connection) and missed 5 s at 18:18:25 on 2026-11-21 (bob, refused a 12-session batch);
+#: the same read took 0.7 s warm.
+WORK_RETRY_TIMEOUT_S = 30
+
+#: Why ``session_work`` could not read a session's work, by session id: the specific reason the ready check names.
+WORK_READ_FAILURES: dict[str, str] = {}
+
 #: Work that runs under the session and ends with it: a restart cuts these off. A worktree or a tmux server outlives it.
 WORK_ENDS_WITH_SESSION = ("wait", "watcher", "labrun", "agent")
 
@@ -2575,9 +2583,10 @@ def session_work(s: dict) -> list[str] | None:
     sid = s.get("sessionId") or ""
     if not sid:
         return None
-    try:
-        done = _nx_identity("work", "list", "--session", sid, "--json", timeout=WORK_TIMEOUT_S)
-    except (OSError, subprocess.SubprocessError):
+    WORK_READ_FAILURES.pop(sid, None)
+    done = _read_work(sid)
+    if isinstance(done, str):
+        WORK_READ_FAILURES[sid] = done
         return None
     if done.returncode != 0:
         said = done.stdout + done.stderr
@@ -2588,13 +2597,39 @@ def session_work(s: dict) -> list[str] | None:
         # onto a release that adds the verb, since the ready check runs before --nx installs the new client.
         if done.returncode == 2 and "No such command" in said:
             return []
+        WORK_READ_FAILURES[sid] = f"nx exit {done.returncode}: {_identity_error(done) or 'no output'}"
         return None
     try:
         rows = json.loads(done.stdout)["work"]
-    except (ValueError, KeyError, TypeError):
+    except (ValueError, KeyError, TypeError) as exc:
+        WORK_READ_FAILURES[sid] = f"unreadable JSON from nx ({type(exc).__name__})"
         return None
+    for r in json.loads(done.stdout).get("reaped") or []:
+        log(f"{label(s)}: closed {r.get('kind')} {r.get('ref')} ({r.get('why')}; {r.get('closed')})")
     return [f"{r['kind']} {r['ref']}" + (STALE_MARK if r.get("stale") else "")
             for r in rows if r.get("state", "running") == "running" and not (r.get("kind") == "wait" and r.get("ref") == sid)]
+
+
+def _read_work(sid: str) -> subprocess.CompletedProcess | str:
+    """``nx identity work list --session SID --reap --json``: closes the rows whose work has ended (nexus-hczdo), then
+    lists. A timeout is retried once on :data:`WORK_RETRY_TIMEOUT_S`; an installed nx with no ``--reap`` (older than this
+    release) is read without it. Returns the finished call, or the reason there is none."""
+    args = ["work", "list", "--session", sid, "--reap", "--json"]
+    for timeout in (WORK_TIMEOUT_S, WORK_RETRY_TIMEOUT_S):
+        try:
+            done = _nx_identity(*args, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            continue
+        except (OSError, subprocess.SubprocessError) as exc:
+            return f"nx could not run: {type(exc).__name__}: {exc}"[:200]
+        if done.returncode == 2 and "No such option" in (done.stdout + done.stderr) and "--reap" in args:
+            args.remove("--reap")
+            try:
+                return _nx_identity(*args, timeout=WORK_RETRY_TIMEOUT_S)
+            except (OSError, subprocess.SubprocessError) as exc:
+                return f"nx could not run: {type(exc).__name__}: {exc}"[:200]
+        return done
+    return f"nx timed out after {WORK_TIMEOUT_S} s and again after {WORK_RETRY_TIMEOUT_S} s"
 
 
 def blocking_work(work: list[str] | None) -> list[str]:
@@ -2625,8 +2660,9 @@ def work_note(work: list[str] | None) -> str:
         out += (f"{len(kept)} outlive a restart and a restart leaves them alone (a worktree or tmux server): {shown(kept)}. "
                 f"Mark finished ones done or forget them (`nx identity work done|forget`). ")
     if stale:
-        out += (f"{len(stale)} stale row(s), listed and not blocking (their process is gone or nobody has written them for "
-                f"12 hours): {shown([w[:-len(STALE_MARK)] for w in stale])}. Mark them done or forget them. ")
+        out += (f"{len(stale)} stale row(s), listed and not blocking: {shown([w[:-len(STALE_MARK)] for w in stale])}. "
+                f"They need nothing from you: a row whose work has ended is closed by the reap at session start and at this "
+                f"check. ")
     return out
 
 
@@ -2986,7 +3022,11 @@ def readiness(found: list[dict], manifest: dict, now: float, max_age: int, calle
                             row["blocker"] = (f"said ready, but {len(cut)} registered work row(s) still run: {cut[0]}"
                                               + (f" (and {len(cut) - 1} more)" if len(cut) > 1 else ""))
                         elif work is None:
-                            row["blocker"] = "said ready, but its registered work could not be read; check it, or --force"
+                            # Held back alone, never the batch (nexus-hczdo): the others restart, this one is named with why.
+                            row["held"] = True
+                            row["blocker"] = ("said ready, but its registered work could not be read ("
+                                              + WORK_READ_FAILURES.get(s["sessionId"], "no reason recorded")
+                                              + "): held back from this restart; check it, then restart it alone")
         rows.append(row)
     return rows
 
@@ -3088,6 +3128,7 @@ def go_gate(found: list[dict], force: bool, max_age: int, now: float | None = No
     manifest, why = load_manifest()
     todo = "Run claude-restart-sessions --ask-ready first, read the table with --status, or pass --force"
     rows: list[dict] = []
+    held: list[dict] = []
     if manifest is None:
         problem, lines = why, []
     elif (bad_round := round_problem(found, manifest, now, max_age)):
@@ -3096,10 +3137,20 @@ def go_gate(found: list[dict], force: bool, max_age: int, now: float | None = No
         rows = readiness(found, manifest, now, max_age, caller_pane)
         if not dry_run and not installed:      # one set of lines per restart round: not a preview, not the call after --nx
             record_round(manifest, rows, now, forced=force)
+        held = [r for r in rows if r.get("held")]
+        if held and not force and len(held) < len(rows):
+            # A session whose work list cannot be read is left out of this batch by name; the others go (nexus-hczdo).
+            # ``found`` is the caller's list: the sessions removed here are not restarted, not by the second call either.
+            gone = {r["sessionId"] for r in held}
+            found[:] = [s for s in found if s["sessionId"] not in gone]
+            for r in held:
+                emit(f"held back {r['name']}: {r['blocker']}")
+            rows = [r for r in rows if not r.get("held")]
         lines = [f"{r['name']}: {r['blocker']}" for r in rows if r["blocker"]]
         problem = f"{len(lines)} of {len(rows)} session(s) are not ready (round {manifest['stamp']})" if lines else ""
     if not problem:
-        emit(f"ready round {manifest['stamp']}: all {len(rows)} session(s) ready and idle")
+        emit(f"ready round {manifest['stamp']}: all {len(rows)} session(s) ready and idle"
+             + (f"; {len(held)} held back" if held else ""))
         return 0
     if force or dry_run:
         emit(f"=== {'--force: restarting although' if force else 'would be REFUSED:'} {problem}")

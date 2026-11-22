@@ -398,6 +398,15 @@ def session_start(claude_session_id: str | None = None, source: str | None = Non
     if session_id and session_id != "unknown":
         # Every source, not just clear/resume: see the writer's docstring.
         _write_tuple_watch_session_marker(session_id, source)
+    if identity is not None:
+        # RDR-253 Step 6 (nexus-hczdo): close the work rows whose work ended without its end being written (an agent in
+        # flight across a restart, a killed lab run). Detached; returns at once; logs a count of what it closed.
+        try:
+            from nexus.hooks.work_reap_child import spawn as _spawn_work_reap  # noqa: PLC0415 — stdlib-only, deferred
+
+            _spawn_work_reap(session_id)
+        except Exception:  # noqa: BLE001 — session start must never break on a reap
+            pass
 
     # nexus-gff3g: do NOT claim "T1 scratch initialized" here. This hook only
     # records the session-id; T1 chroma is owned by the MCP server's FastMCP

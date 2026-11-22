@@ -17,6 +17,11 @@ predates its holder's start) and is purged by a registrar that has time.
 An event with no ``agent_id`` or no ``agent_type`` writes nothing: the harness's own internal stops carry no type and
 ``hooks.json`` never spawns the stop verb for them, so a start for one would leave a row nothing ends.
 
+The stop that fails its first write retries once (:data:`STOP_RETRY_TIMEOUT_S`), and every stop that leaves the row
+behind logs it (``subagent_work_stop_failed``; :func:`nexus.identity.work.forget_own` logs a process with no identity as
+``identity_work_forget_no_identity``). A row no stop removed is closed by
+the reap (:mod:`nexus.identity.work_reap`) at the next SessionStart or restart ready check, which logs it as a missed end.
+
 Never raises and never waits long: :func:`nexus.identity.work.register_own` writes best effort with a 2 s engine timeout, an
 engine that does not know the kind (0.1.198 answers ``bad_kind``; this process then stops asking) or has no identity to
 write for is a False and one log line, and the dispatch or the stop goes on. A success logs one structured line
@@ -32,6 +37,9 @@ import structlog
 __all__ = ["ref_of", "register_start", "register_stop"]
 
 _log = structlog.get_logger(__name__)
+
+#: Seconds the stop's one retry may take, inside the hook's 10 s budget (``hooks.json``) after the first 2 s call.
+STOP_RETRY_TIMEOUT_S = 5.0
 
 
 def ref_of(agent_id: str) -> str:
@@ -72,9 +80,15 @@ def register_stop(payload: Any) -> bool:
         from nexus.identity import work  # noqa: PLC0415
 
         done = bool(work.forget_own("agent", ref_of(ids[0])))
+        if not done:
+            # One retry with the rest of the hook's budget (10 s in hooks.json): the first call's 2 s bound is what a cold
+            # engine connection or a busy cloud edge misses, and a missed stop leaves the row for the reap.
+            done = bool(work.forget_own("agent", ref_of(ids[0]), timeout=STOP_RETRY_TIMEOUT_S))
     except Exception as exc:  # noqa: BLE001 — a label never costs a stop
         _log.warning("subagent_work_label_failed", state="forget", error=f"{type(exc).__name__}: {exc}")
         return False
     if done:
         _log.info("subagent_work_forgotten", agent_id=ids[0], agent_type=ids[1])
+    else:
+        _log.warning("subagent_work_stop_failed", agent_id=ids[0], agent_type=ids[1])
     return done

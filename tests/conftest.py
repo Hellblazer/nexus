@@ -3811,6 +3811,8 @@ def _isolate_service_endpoint_env(monkeypatch: pytest.MonkeyPatch) -> None:
     # nexus-mtheb.4: a SubagentStop nudge run from any test starts no detached
     # dispatch-recorder child; tests of the recorder delenv this themselves.
     monkeypatch.setenv("NX_DISPATCH_COUNTER", "off")
+    # nexus-hczdo: a SessionStart run from any test starts no detached work-reap child (it would read the real engine).
+    monkeypatch.setenv("NX_WORK_REAP_DISABLED", "1")
     # RDR-253 Step 3: a test that starts the MCP lifespan under a real Claude ancestor (a developer running the suite
     # inside a session) would start an identity lease thread reading the real registry. The tests of the lease build
     # IdentityLease directly with injected dependencies and never call start().

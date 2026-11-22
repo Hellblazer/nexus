@@ -61,7 +61,7 @@ def test_the_work_is_read_by_session_id_with_stale_rows_kept_and_marked(crs, mon
     nx = stand_in([row("worktree", "/w/a"), row("tmux", "sock"), {**row("agent", "agent:a1"), "stale": True}, done])
     monkeypatch.setattr(crs, "_nx_identity", nx)
     assert crs.session_work({"sessionId": "sid-1"}) == ["worktree /w/a", "tmux sock", "agent agent:a1 (stale)"]
-    assert nx.calls == [("work", "list", "--session", "sid-1", "--json")]
+    assert nx.calls == [("work", "list", "--session", "sid-1", "--reap", "--json")]
     assert nx.timeouts == [5] == [crs.WORK_TIMEOUT_S], "a hung engine must not stall --status for the default minute"
 
 

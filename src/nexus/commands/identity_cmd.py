@@ -260,8 +260,12 @@ def work_forget_cmd(ctx: click.Context, kind: str, ref: str) -> None:
 @click.option("--running", "only_running", is_flag=True,
               help="Only work that is running and whose identity is alive (a crashed session's running rows are stale).")
 @click.option("--json", "as_json", is_flag=True, help="Print the identity, whether it is alive, and its rows as JSON.")
+@click.option("--reap", "reap_first", is_flag=True,
+              help="First close the running rows whose work has ended (process gone, worktree gone, a ghost of an earlier "
+                   "session); they are listed under 'reaped'.")
 @click.pass_context
-def work_list_cmd(ctx: click.Context, seat: str | None, session_id: str | None, only_running: bool, as_json: bool) -> None:
+def work_list_cmd(ctx: click.Context, seat: str | None, session_id: str | None, only_running: bool, as_json: bool,
+                  reap_first: bool) -> None:
     """List the work of an identity: SEAT (a name or an id), --session, or the caller's own.
 
     A running row of an identity that is not alive is marked stale.
@@ -271,7 +275,7 @@ def work_list_cmd(ctx: click.Context, seat: str | None, session_id: str | None, 
     if seat and session_id:
         raise click.UsageError("give a seat or --session, not both")
     try:
-        report = work.list_rows(_env(ctx), seat, session_id, only_running=only_running)
+        report = work.list_rows(_env(ctx), seat, session_id, only_running=only_running, reap_first=reap_first)
     except IdentityCommandError as exc:
         raise click.ClickException(str(exc)) from exc
     if as_json:
