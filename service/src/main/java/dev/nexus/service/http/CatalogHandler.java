@@ -2984,9 +2984,22 @@ public final class CatalogHandler implements HttpHandler {
         // whenever the target turns out live or absent anyway; it only compares when the
         // target is STILL a non-live tombstone at commit time, same as this handler's own
         // identityOk/empty gate above.
-        Map<String, Integer> counts = repo.renameCollection(tenant, oldName, newName, tgtSuperseded,
+        var renamed = repo.renameCollectionOutcome(tenant, oldName, newName, tgtSuperseded,
             newContentType, newOwnerId, newNameEmbeddingModel);
-        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("renamed", counts)));
+        // RDR-229 P3.5a: the renamed row, for the client to rebind from (residual S-7): the new label, its id and whether
+        // ids survive a rename here, with the catalog epoch an id cache keys on. The key is omitted, never null, when the
+        // engine role cannot read the cluster.
+        Map<String, Object> answer = new LinkedHashMap<>();
+        answer.put("renamed", renamed.counts());
+        answer.put("name", newName);
+        if (renamed.collectionId() > 0) {
+            answer.put("collection_id", renamed.collectionId());
+        }
+        answer.put("ids_stable", renamed.idsStable());
+        if (renamed.catalogEpoch() != null) {
+            answer.put("catalog_epoch", renamed.catalogEpoch());
+        }
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(answer));
     }
 
     /**
@@ -3015,9 +3028,10 @@ public final class CatalogHandler implements HttpHandler {
         if (keepRaw != null && !(keepRaw instanceof Boolean)) {
             HttpUtil.send(exchange, 400, "{\"error\":\"keep_quarantine must be a JSON boolean\"}"); return;
         }
-        boolean keepQuarantine = Boolean.TRUE.equals(keepRaw);
-        Map<String, Integer> counts = repo.deleteCollection(tenant, name, keepQuarantine);
-        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("deleted", counts)));
+        // RDR-229 P3.5a: by label or by collection_id (the route boundary replaced an id with its label and, here only, left the
+        // id it resolved in the body); the refusals and the 200's collection_id and name are CollectionDeleteRoute's.
+        CollectionDeleteRoute.handle(exchange, tenant, repo, name, Boolean.TRUE.equals(keepRaw),
+            body.get(CollectionSelectorFilter.RESOLVED_ID));
     }
 
     private void handleCollectionForTuple(HttpExchange exchange, String tenant, String method) throws IOException {
