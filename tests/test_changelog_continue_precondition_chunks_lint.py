@@ -111,6 +111,20 @@ _CONTINUE_ALLOWLIST: dict[tuple[str, str], str] = {
     # changeset is skipped (failOnError false), not failed. The one table name in the body is the exempt statement shape
     # (_EXEMPT_INDEX_BUILD). No chunk table, leaf, partition helper or builder object is named (RDR-229 P3.3c, nexus-p2m1x.21).
     ("vectors-074-chunk-orphaned-at-chash-index.xml", "vectors-074-1"): "child index of the chunk id key",
+    # The supporting indexes of P3.3a's id twins (RDR-229 P3.4, nexus-p2m1x.22), each shaped like vectors-074-1: SET lock_timeout =
+    # '30s', DROP INDEX CONCURRENTLY IF EXISTS and CREATE INDEX CONCURRENTLY IF NOT EXISTS on one table (tenant_id, <id column>):
+    # SHARE UPDATE EXCLUSIVE on that table and nothing on nexus.chunks or a leaf; a lock wait that ends skips the boot's build
+    # (failOnError false). topic_assignments (vectors-075-1) holds a foreign key into nexus.chunks and its build is the exempt
+    # statement shape; the other five tables hold no such key. The precondition reads pg_index by the index's name only.
+    ("vectors-075-collection-id-fk-twin-indexes.xml", "vectors-075-1"): "id-twin index, topic_assignments",
+    ("vectors-075-collection-id-fk-twin-indexes.xml", "vectors-075-2"): "id-twin index, document_aspects",
+    ("vectors-075-collection-id-fk-twin-indexes.xml", "vectors-075-3"): "id-twin index, topics",
+    ("vectors-075-collection-id-fk-twin-indexes.xml", "vectors-075-4"): "id-twin index, taxonomy_meta",
+    ("vectors-075-collection-id-fk-twin-indexes.xml", "vectors-075-5"): "id-twin index, document_highlights",
+    ("vectors-075-collection-id-fk-twin-indexes.xml", "vectors-075-6"): "id-twin index, canary_query_ring",
+    # The retired queue's (vectors-075-7): a DO-guarded plain CREATE INDEX IF NOT EXISTS on nexus.aspect_extraction_queue
+    # (tenant_id, collection_id) under SET LOCAL lock_timeout = '5s', guarded like vectors-072-7; that table holds no key into chunks.
+    ("vectors-075-collection-id-fk-twin-indexes.xml", "vectors-075-7"): "id-twin index, retired aspect_extraction_queue",
 }
 
 # The one statement shape exempt from the foreign-key-table rule (see the module docstring), matched on the NORMALISED text.
