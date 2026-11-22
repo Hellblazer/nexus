@@ -265,8 +265,10 @@ for inc in includes:
     if not p.exists():
         continue
     raw = p.read_text()
-    text = re.sub(r"<rollback>.*?</rollback>", blank, raw, flags=re.S)
-    text = re.sub(r"<!--.*?-->", blank, text, flags=re.S)
+    # comments first: a header comment that names "<rollback>" in prose must not open a rollback match (vectors-069's did,
+    # and hid vectors-069-1's forward definition of gc_quarantine_orphans behind it)
+    text = re.sub(r"<!--.*?-->", blank, raw, flags=re.S)
+    text = re.sub(r"<rollback>.*?</rollback>", blank, text, flags=re.S)
     fname = inc.split("/")[-1]
     ev = []
     for mm in FN_RE.finditer(text):
