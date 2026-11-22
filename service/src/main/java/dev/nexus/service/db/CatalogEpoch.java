@@ -86,14 +86,29 @@ final class CatalogEpoch {
         return readCluster(ctx).map(cluster -> ofCluster(ctx, tenant, cluster));
     }
 
+    /** Why {@link #of} can or cannot read the cluster as the role {@code ctx} runs as. */
+    enum Availability {
+        AVAILABLE,
+        /** A function is not executable by the role: {@code pg_control_not_readable}. */
+        NOT_READABLE,
+        /** A function answered NULL: {@code pg_control_member_null}. */
+        MEMBER_NULL
+    }
+
+    /** {@link Availability} for the role {@code ctx} runs as; never throws for a missing privilege. */
+    static Availability availability(DSLContext ctx) {
+        Boolean can = ctx.select(DSL.field(canReadCluster())).fetchOne(0, Boolean.class);
+        if (!Boolean.TRUE.equals(can)) return Availability.NOT_READABLE;
+        return readCluster(ctx).isPresent() ? Availability.AVAILABLE : Availability.MEMBER_NULL;
+    }
+
     /**
      * Whether {@link #of} can read the cluster as the role {@code ctx} runs as (the source of {@code /v1/status}'s
      * {@code catalog_epoch_available}). False when a function is not executable or answers NULL; never throws for a
      * missing privilege.
      */
     static boolean available(DSLContext ctx) {
-        Boolean can = ctx.select(DSL.field(canReadCluster())).fetchOne(0, Boolean.class);
-        return Boolean.TRUE.equals(can) && readCluster(ctx).isPresent();
+        return availability(ctx) == Availability.AVAILABLE;
     }
 
     /** The test seam: the epoch for a given cluster identity. The marker is still read from {@code ctx}, which must be scoped to {@code tenant}. */
