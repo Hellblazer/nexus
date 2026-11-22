@@ -106,3 +106,14 @@ def test_a_managed_row_is_recognised_as_the_marker_and_a_plain_pass_is_not(tmp_p
     (r,) = _rows("_check_migration_state", tmp_path / "pg_credentials")
     assert h.is_managed_not_probeable(r)
     assert not h.is_managed_not_probeable(h.HealthResult(label="Schema migrations", ok=True, detail="up to date"))
+
+
+def test_the_human_output_counts_the_rows_that_were_not_checked(tmp_path) -> None:
+    """A green managed doctor says nothing about these rows, so the output ends by saying how many were skipped."""
+    all_rows = [r for n in _ONE_ROW + (_PARTITION,) for r in _rows(n, tmp_path / "pg_credentials")]
+    text, _failed = h.format_health_for_cli(all_rows, local_mode=False)
+    assert text.rstrip().splitlines()[-1] == "8 rows not checked on this deployment."
+    one, _ = h.format_health_for_cli(all_rows[:1], local_mode=False)
+    assert one.rstrip().splitlines()[-1] == "1 row not checked on this deployment."
+    none, _ = h.format_health_for_cli([h.HealthResult(label="Python", ok=True, detail="3.12")], local_mode=False)
+    assert "not checked" not in none

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import os
-import time
 from pathlib import Path
 
 import pytest
@@ -23,6 +22,7 @@ _CONNECTED = "Successfully connected (transport: stdio) in 900ms"
 _REGISTERED = "Channel notifications registered"
 _FAILED = "Connection failed after 120ms: MCP error -32000: ENOENT, executable not found: \"stdio\""
 _DAY = 24 * 3600
+NOW = 1_795_000_000.0  # a constant clock: every mtime below is NOW - age, and every row call passes now=NOW
 
 
 @pytest.fixture(autouse=True)
@@ -35,13 +35,13 @@ def _log(root: Path, project: str, name: str, *lines: str, age_days: float = 0.0
     d.mkdir(parents=True, exist_ok=True)
     f = d / name
     f.write_text("".join(json.dumps({"debug": line}) + "\n" for line in lines), encoding="utf-8")
-    when = time.time() - age_days * _DAY
+    when = NOW - age_days * _DAY
     os.utime(f, (when, when))
     return f
 
 
 def _row(root: Path, cwd: str = "/w/p"):
-    (r,) = h._check_claude_code_mcp_connection(cache_root=root, cwd=Path(cwd))
+    (r,) = h._check_claude_code_mcp_connection(cache_root=root, cwd=Path(cwd), now=NOW)
     return r
 
 
@@ -92,7 +92,49 @@ def test_the_bound_is_seven_days_and_a_long_session_appending_to_an_old_file_cou
 
 
 def test_the_clock_is_a_seam(tmp_path: Path) -> None:
-    f = _log(tmp_path, "-w-p", "2026-11-22T02-20-44-453Z.jsonl", _CONNECTED, _FAILED)
-    later = f.stat().st_mtime + 8 * _DAY
-    (r,) = h._check_claude_code_mcp_connection(cache_root=tmp_path, cwd=Path("/w/p"), now=later)
+    _log(tmp_path, "-w-p", "2026-11-22T02-20-44-453Z.jsonl", _CONNECTED, _FAILED)
+    (r,) = h._check_claude_code_mcp_connection(cache_root=tmp_path, cwd=Path("/w/p"), now=NOW + 8 * _DAY)
     assert r.ok is True and "no recent connection log" in r.detail
+
+
+# ── the newest log is the one last WRITTEN, not the one with the later name (review round 1) ──
+
+
+def test_an_older_named_file_with_a_newer_mtime_beats_a_newer_named_file(tmp_path: Path) -> None:
+    """A reconnect appends to the file of the session's first connection: the older-named file holds the newest
+    state. Same directory, the newer-named file is the stale failure."""
+    _log(tmp_path, "-w-p", "2026-11-20T00-00-00-000Z.jsonl", _CONNECTED, _REGISTERED, age_days=0.1)
+    _log(tmp_path, "-w-p", "2026-11-21T00-00-00-000Z.jsonl", _CONNECTED, _FAILED, age_days=3)
+    r = _row(tmp_path)
+    assert r.ok is True and "registered" in r.detail and "2026-11-20" in r.detail
+
+
+def test_a_six_day_failure_in_the_cwd_does_not_beat_todays_success_elsewhere(tmp_path: Path) -> None:
+    _log(tmp_path, "-w-p", "2026-11-16T00-00-00-000Z.jsonl", _CONNECTED, _FAILED, age_days=6)
+    _log(tmp_path, "-Users-x-nexus", "2026-11-22T02-20-44-453Z.jsonl", _CONNECTED, _REGISTERED, age_days=0.1)
+    r = _row(tmp_path, cwd="/w/p")
+    assert r.ok is True and "registered" in r.detail
+
+
+def test_the_cwd_wins_only_a_tie_on_mtime(tmp_path: Path) -> None:
+    _log(tmp_path, "-w-p", "2026-11-22T00-00-00-000Z.jsonl", _CONNECTED, _FAILED, age_days=1)
+    _log(tmp_path, "-w-q", "2026-11-22T00-00-00-000Z.jsonl", _CONNECTED, _REGISTERED, age_days=1)
+    assert _row(tmp_path, cwd="/w/p").ok is False
+    assert _row(tmp_path, cwd="/w/q").ok is True
+
+
+def test_an_older_failure_and_a_newer_connected_log_without_a_verdict_is_the_current_state(tmp_path: Path) -> None:
+    """The newer log connected and logged no channel line (not in --channels, or an older Claude Code): that is
+    the latest state. The row must not step over it to the older file's failure."""
+    _log(tmp_path, "-w-p", "2026-11-20T00-00-00-000Z.jsonl", _CONNECTED, _FAILED, age_days=2)
+    _log(tmp_path, "-w-p", "2026-11-21T00-00-00-000Z.jsonl", _CONNECTED, age_days=0.1)
+    r = _row(tmp_path)
+    assert r.ok is True and "no channel verdict" in r.detail and "2026-11-21" in r.detail
+
+
+def test_a_newer_log_that_only_began_a_connection_is_still_stepped_over(tmp_path: Path) -> None:
+    """A `claude -p` worker's sibling with no connection outcome says nothing; the interactive session's failure
+    still decides (the pre-existing rule, kept)."""
+    _log(tmp_path, "-w-p", "2026-11-20T00-00-00-000Z.jsonl", _CONNECTED, _FAILED, age_days=2)
+    _log(tmp_path, "-w-p", "2026-11-21T00-00-00-000Z.jsonl", "Starting connection with timeout of 30000ms", age_days=0.1)
+    assert _row(tmp_path).ok is False

@@ -4311,7 +4311,7 @@ parent, as the table owner run `SELECT nexus.partition_sync_access('nexus.chunks
 same for `nexus.taxonomy_centroids` (put right any wrong policy on the parent first: the function copies
 from it).
 
-**Partition rows (RDR-225, nexus-3wh8d.16).** Four `nx doctor` rows cover the per-model, per-tenant layout of
+**Partition rows (RDR-225, nexus-3wh8d.16).** Three `nx doctor` rows cover the per-model, per-tenant layout of
 `nexus.chunks` and `nexus.taxonomy_centroids`. They read the engine's PostgreSQL through the same local admin
 `psql` path as "RLS policies", so they need no engine route. A managed deployment has no `pg_credentials` on the
 client, so on one all three rows render as not applicable (`[ ]`, JSON status `skipped`, no warning) with a line
@@ -4337,6 +4337,11 @@ rows show the same `[ ]` line as `Storage service health`, `Schema migrations`, 
 `tuples.dead_tuple_ratio` and `tuples.sweep_freshness`: the check was not run from this client, it is in
 neither the warning count nor the verdict, and the operator's read-only query is in
 `docs/runbooks/rdr-225-cloud-deploy.md`.
+
+A green managed doctor carries no evidence on these eight rows. What stands behind them is the engine's boot checks, the
+live "Chunk tenant isolation" row, and the operator-side read-only query in that runbook. Three of the eight have no
+server-side check at all: `tuples.dead_tuple_ratio`, `tuples.sweep_freshness` and "Partition leaves". The human
+output ends with a line giving how many rows were not checked on this deployment.
 
 After the ownerless-write release, restart every long-lived `nx-mcp` server and hook-spawned `nx`; the steps are under [`nx upgrade`](#nx-upgrade).
 

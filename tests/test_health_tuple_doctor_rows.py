@@ -18,7 +18,9 @@ informational (ok=True); above it, the identical absence is a loud WARN.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -1709,6 +1711,9 @@ def test_new_channel_delivery_row_absent_from_fresh_install_mvv_allowlist() -> N
 # connection.
 
 
+_MCP_LOG_EPOCH = time.time()  # one clock for every stamped mtime, so two logs of one name tie exactly
+
+
 def _mcp_log(
     root: Path, project_dir: str, server_dir: str, name: str, *lines: str, session: str | None = None,
 ) -> Path:
@@ -1722,6 +1727,11 @@ def _mcp_log(
         "".join(json.dumps({"debug": line, **entry}) + "\n" for line in lines),
         encoding="utf-8",
     )
+    # The row ranks logs by mtime: stamp it from the name (a day ago plus the name's clock time), so the file
+    # names in these tests still say which log is newer and two logs of one name tie.
+    started = datetime.strptime(name[:19], "%Y-%m-%dT%H-%M-%S").replace(tzinfo=UTC)
+    when = _MCP_LOG_EPOCH - 86400 + (started - datetime(2026, 11, 4, tzinfo=UTC)).total_seconds()
+    os.utime(f, (when, when))
     return f
 
 

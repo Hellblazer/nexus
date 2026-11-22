@@ -149,6 +149,12 @@ def format_health_for_cli(
         if r.fatal and not r.ok:
             failed = True
 
+    # A skipped row is ok for the exit code and carries no verdict, so a green sweep says nothing about it:
+    # count them, so a reader of the human output sees how much of the green was not checked (2026-11-22).
+    not_checked = sum(1 for r in results if r.ok and r.skipped)
+    if not_checked:
+        lines.append(f"\n{not_checked} {'row' if not_checked == 1 else 'rows'} not checked on this deployment.")
+
     if failed:
         if local_mode:
             lines.append(
@@ -8985,8 +8991,8 @@ def _check_tuple_table_bloat(
     the SAME local-only ``pg_credentials`` admin-psql path
     ``_check_migration_state``/``_check_rls_present`` already use for
     structural PG facts (LOCAL-ONLY by design, nexus-y3wuu; a managed
-    deployment has no ``pg_credentials`` here, so on one this row is a warning
-    that the check was not run, never a checkmark: nexus-njn1a finding 10). The
+    deployment has no ``pg_credentials`` here, so on one this row renders ``[ ]``
+    (skipped), no warning and never a checkmark: Sam 2026-11-22, was a warning, nexus-njn1a finding 10). The
     query targets ``pg_stat_user_tables`` directly (a system view, always
     queryable) rather than the two tables themselves, so an engine whose
     Liquibase changesets predate ``tuples-001-baseline.xml`` reports zero
@@ -9902,18 +9908,22 @@ def _read_claude_code_log(path: Path) -> list[str]:
     )
 
 
-def _claude_code_log_verdict(lines: list[str]) -> tuple[str | None, str | None, str | None]:
-    """``(verdict, failure_text, session_id)`` for one log. The LAST verdict
+def _claude_code_log_verdict(lines: list[str]) -> tuple[str | None, str | None, str | None, bool]:
+    """``(verdict, failure_text, session_id, connected)`` for one log. The LAST verdict
     wins, because Claude Code appends every reconnect to the same file: a
     ``Successfully connected`` line starts a new connection and clears what the
     previous one left, so the user's own remedy (``/mcp``) turns a
     ``did not declare`` file into a healthy one. *verdict* is ``"failed"``,
     ``"missing"``, ``"registered"`` or ``None`` (no verdict for the latest
     connection: still starting, ``not in --channels list``, or an older Claude
-    Code that logs none)."""
+    Code that logs none). *connected* is True when the log's last connection
+    outcome is ``Successfully connected`` with no failure after it: a log with
+    no channel verdict that is connected is the current state, a log that only
+    started a connection (or only filler) says nothing."""
     verdict: str | None = None
     failure: str | None = None
     session_id: str | None = None
+    connected = False
     for line in lines:
         try:
             entry = json.loads(line)
@@ -9927,30 +9937,37 @@ def _claude_code_log_verdict(lines: list[str]) -> tuple[str | None, str | None, 
         if not isinstance(message, str):
             continue
         if message.startswith("Connection failed"):
-            verdict, failure = "failed", message[:160]
+            verdict, failure, connected = "failed", message[:160], False
         elif message.startswith("Successfully connected"):
-            verdict, failure = None, None
+            verdict, failure, connected = None, None, True
         elif message.startswith("Channel notifications skipped: server did not declare claude/channel capability"):
             verdict, failure = "missing", None
         elif message.startswith("Channel notifications registered"):
             verdict, failure = "registered", None
-    return verdict, failure, session_id
+    return verdict, failure, session_id, connected
 
 
-def _newest_nexus_logs(project_dirs: list[Path], *, cutoff: float) -> tuple[list[Path], Path | None]:
-    """``(recent, newest_stale)``: the nexus server's log files under *project_dirs* that were written to at or
-    after *cutoff* (newest name first, at most :data:`_CLAUDE_CODE_LOG_FILES_EXAMINED`), and the newest name among
-    those that were not. Recency is the file's mtime, not its name: a reconnect appends to the file of the
-    session's first connection."""
-    recent: list[Path] = []
-    stale: list[Path] = []
-    for f in {f for p in project_dirs for d in _CLAUDE_CODE_NEXUS_LOG_DIRS for f in (p / d).glob("*.jsonl")}:
-        try:
-            (recent if f.stat().st_mtime >= cutoff else stale).append(f)
-        except OSError:
-            continue
-    recent.sort(key=lambda f: f.name, reverse=True)
-    stale.sort(key=lambda f: f.name, reverse=True)
+def _newest_nexus_logs(
+    project_dirs: list[Path], *, cutoff: float, preferred: frozenset[Path] = frozenset(),
+) -> tuple[list[Path], Path | None]:
+    """``(recent, newest_stale)``: the nexus server's log files under *project_dirs* last written at or after
+    *cutoff*, newest first (at most :data:`_CLAUDE_CODE_LOG_FILES_EXAMINED`), and the most recently written of
+    those that were not. The order is the file's mtime, read once per file, not its name: a reconnect appends to
+    the file of the session's first connection, so an older-named file can hold the newest state. On equal mtimes
+    a file under one of *preferred* (the current directory's own log directories) comes first, then the later
+    name."""
+    entries: list[tuple[float, bool, str, Path]] = []
+    for p in project_dirs:
+        for d in _CLAUDE_CODE_NEXUS_LOG_DIRS:
+            for f in (p / d).glob("*.jsonl"):
+                try:
+                    mtime = f.stat().st_mtime
+                except OSError:
+                    continue
+                entries.append((mtime, p in preferred, f.name, f))
+    entries.sort(key=lambda e: (e[0], e[1], e[2]), reverse=True)
+    recent = [e[3] for e in entries if e[0] >= cutoff]
+    stale = [e[3] for e in entries if e[0] < cutoff]
     return recent[:_CLAUDE_CODE_LOG_FILES_EXAMINED], (stale[0] if stale else None)
 
 
@@ -9974,12 +9991,15 @@ def _check_claude_code_mcp_connection(
     The file is the newest one that carries a verdict (a ``claude -p`` worker
     or subagent writes verdict-less siblings), or, when
     ``CLAUDE_CODE_SESSION_ID`` names this session, the newest of this
-    session's own files. The directories searched are those of the current
-    directory and the ones above it; when they hold no recent log (a session
-    started elsewhere, or a worktree whose only ancestor directory is ``/``,
-    whose log directory keeps whatever an old run left), every project
-    directory under the cache root is searched, so the newest log for the nexus
-    server is found wherever Claude Code wrote it. A log last written more than
+    session's own files. Every project directory under the cache root is
+    searched, so the newest log for the nexus server is found wherever Claude
+    Code wrote it, and the logs are ranked by when they were last written (a
+    reconnect appends to the file of the session's first connection); the
+    current directory's own log directories (and those above it) win only a
+    tie, so an old failure there cannot outrank today's success elsewhere. A
+    newest file whose last connection outcome is ``Successfully connected``
+    with no channel verdict is the current state, not a file to step over; one
+    that only began a connection is stepped over. A log last written more than
     :data:`_CLAUDE_CODE_LOG_MAX_AGE_SECONDS` ago is not judged: the row is
     informational, "no recent connection log" (2026-11-22: a 2026-10-01 failure
     was reported as the latest connection). Not applicable where no log exists
@@ -9996,23 +10016,23 @@ def _check_claude_code_mcp_connection(
     except (OSError, RuntimeError) as exc:  # a deleted cwd, or no resolvable home
         return na(f"could not derive the Claude Code log location ({exc})")
     cutoff = (time.time() if now is None else now) - _CLAUDE_CODE_LOG_MAX_AGE_SECONDS
-    files, newest_stale = _newest_nexus_logs(directories, cutoff=cutoff)
-    if not files:
-        try:
-            everywhere = [d for d in cache_root.iterdir() if d.is_dir()]
-        except OSError:
-            everywhere = []
-        files, any_stale = _newest_nexus_logs(everywhere, cutoff=cutoff)
-        newest_stale = max(filter(None, (newest_stale, any_stale)), key=lambda f: f.name, default=None)
+    try:
+        everywhere = [d for d in cache_root.iterdir() if d.is_dir()]
+    except OSError:
+        everywhere = []
+    preferred = frozenset(directories)
+    files, newest_stale = _newest_nexus_logs(
+        list(dict.fromkeys([*directories, *everywhere])), cutoff=cutoff, preferred=preferred,
+    )
     if not files:
         if newest_stale is None:
-            return na("no Claude Code MCP log for the nexus server under this directory")
+            return na("no Claude Code MCP log for the nexus server")
         return na(
             f"no recent connection log: the newest Claude Code MCP log for the nexus server ({newest_stale.name}) "
             f"was last written more than {_CLAUDE_CODE_LOG_MAX_AGE_SECONDS // 86400} days ago, so it is not judged"
         )
 
-    scanned: list[tuple[Path, str | None, str | None, str | None]] = []
+    scanned: list[tuple[Path, str | None, str | None, str | None, bool]] = []
     unreadable: str | None = None
     for f in files:
         try:
@@ -10026,8 +10046,10 @@ def _check_claude_code_mcp_connection(
 
     mine = os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
     candidates = [row for row in scanned if mine and row[3] == mine] or scanned
-    chosen = next((row for row in candidates if row[1] is not None), candidates[0])
-    newest, verdict, failure, _session = chosen
+    # The newest file with something to say: a verdict, or a connection that succeeded (a connected file with no
+    # channel verdict is the current state and must not be stepped over for an older file's failure).
+    chosen = next((row for row in candidates if row[1] is not None or row[4]), candidates[0])
+    newest, verdict, failure, _session, _connected = chosen
 
     if verdict == "failed":
         return [HealthResult(
