@@ -4,7 +4,7 @@ package dev.nexus.service.db;
 
 import dev.nexus.service.CollectionIdSites;
 import dev.nexus.service.CollectionIdSites.Site;
-import dev.nexus.service.PgContainerHelper;
+import dev.nexus.service.datamove.BootedSchema;
 import dev.nexus.service.db.TenantExport.ExportTable;
 import dev.nexus.service.db.TenantExport.Reference;
 import dev.nexus.service.db.TenantExportRegistryParityTest.LiveColumn;
@@ -39,7 +39,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>{@link TenantExportRegistryParityTest} already goes red on an undeclared id-shaped column, which says "classify this";
  * this class says what the classification must be, for every site of RDR-229 item 6 ({@link CollectionIdSites#SITES}), read from
- * the live Liquibase-migrated schema.
+ * the live booted schema ({@link BootedSchema}: the walk and the boot work, so P3.3c's id keys are there).
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class TenantExportCollectionIdParityTest {
@@ -52,9 +52,10 @@ class TenantExportCollectionIdParityTest {
 
     @BeforeAll
     void migrateAndRead() throws Exception {
-        pg = PgContainerHelper.start();
+        // A booted install, not the walk alone: P3.3c's id keys are made by data-move on_complete statements (RDR-229 P3.11).
+        pg = BootedSchema.startContainer();
         try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.applyProductSchema(su);
+            BootedSchema.migrateAndBoot(su);
         }
         try (Connection su = pg.createConnection("")) {
             live = TenantExportRegistryParityTest.readLiveRlsTables(DSL.using(su, SQLDialect.POSTGRES));
