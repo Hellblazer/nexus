@@ -6,6 +6,7 @@ importing the corpus module on every invocation.
 """
 from __future__ import annotations
 
+import shlex
 from typing import Any
 
 
@@ -39,9 +40,11 @@ class SupersededCollectionWriteError(RuntimeError):
         self.successor = successor
         # A caller that is not itself writing to a name of its choosing (the
         # indexer takes it from the repo's registry) says what to do instead;
-        # ``{name}`` and ``{successor}`` in *remedy* are filled in.
+        # ``{name}`` and ``{successor}`` in *remedy* are filled in, and ``{quoted_name}`` and ``{quoted_successor}``
+        # with :func:`shlex.quote` for a command the remedy prints (nexus-88aj0).
         advice = (
-            remedy.format(name=name, successor=successor)
+            remedy.format(name=name, successor=successor, quoted_name=shlex.quote(name),
+                          quoted_successor=shlex.quote(successor))
             if remedy is not None
             else f"Write to {successor!r} instead."
         )
