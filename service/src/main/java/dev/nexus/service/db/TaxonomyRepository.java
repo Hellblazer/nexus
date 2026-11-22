@@ -58,9 +58,16 @@ public final class TaxonomyRepository {
                              .withZone(ZoneOffset.UTC);
 
     private final TenantScope tenantScope;
+    /** RDR-229 P3.5a: the rename refusal this repository's rename consults first ({@link RenameGuard#open()} never refuses). */
+    private final RenameGuard renameGuard;
 
     public TaxonomyRepository(TenantScope tenantScope) {
+        this(tenantScope, RenameGuard.open());
+    }
+
+    public TaxonomyRepository(TenantScope tenantScope, RenameGuard renameGuard) {
         this.tenantScope = tenantScope;
+        this.renameGuard = renameGuard;
     }
 
     // ── doc_id hex/bytes boundary (RDR-194 P3c, nexus-tk070.p3c) ────────────────
@@ -1647,6 +1654,7 @@ public final class TaxonomyRepository {
      * (n3hhc's class: a route that writes its target with no label check).
      */
     public Map<String, Integer> renameCollection(String tenant, String oldCol, String newCol) {
+        renameGuard.requireRenameAllowed();   // RDR-229 P3.5a: refused from gate 3 until the one-row rename can run
         CollectionLabel.validateUserLabel(newCol);
         return tenantScope.withTenant(tenant, ctx -> {
             // RDR-210 Phase 6 Step 2 (bead nexus-f98bg): refused while a re-embed job holds either name.

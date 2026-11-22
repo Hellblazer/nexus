@@ -191,11 +191,13 @@ public final class CompletionBootWork implements AutoCloseable {
     }
 
     /**
-     * What a rename from gate 3 still waits for, read per call ({@link RenameReadiness}). STUB: always ready; P3.7's code adds the
-     * name-key drop move and the databasechangelog reads (the P3.5b changesets) to the check and answers from them.
+     * What a rename from gate 3 still waits for, read per call ({@link RenameReadiness}). Until P3.7 registers the name-key drop move
+     * there is no move whose {@code completed_at} could be set, so the answer is true as well as safe: the move is missing. P3.7's code
+     * replaces this with the move's row and the {@code databasechangelog} reads (the P3.5b changesets), from the same snapshot as
+     * {@link #gate3()}. It is only consulted while gate 3 holds, which no release can yet make true.
      */
     public RenameReadiness renameReadiness() {
-        return RenameReadiness.ready();
+        return () -> RenameReadiness.Missing.NAME_KEY_DROP_MOVE;
     }
 
     /** Reads now, outside the schedule, for a consumer that must not wait for the next sample. */
