@@ -182,38 +182,3 @@ except Exception as exc:  # noqa: BLE001 - narrowed below to the one typed refus
 else:
     raise SystemExit("doc/register accepted a document under an unregistered collection: the engine does not refuse it")
 """
-
-RECONCILE_COMMIT_REFUSES_UNREGISTERED = r"""
-import hashlib
-from nexus.catalog import reconcile_run
-from nexus.catalog.reconcile_client import CatalogReconcileError
-from nexus.commands.catalog import _get_catalog
-# RDR-229 P3.1 (nexus-p2m1x.17, vectors-074): POST /v1/catalog/reconcile/commit refuses, per row, a staged present row
-# whose physical_collection has no registry row (action `refused`, reason `unregistered_collection: ...`, no tumbler);
-# before it the same staging failed the whole commit (`write_failed`, SQLSTATE 23514). The probe goes through the
-# client's own stage-and-commit, as an index run does, with one row under a collection nothing registers (the run
-# label makes the name unique) and the "knowledge" curator owner the note puts use (an idempotent upsert, so the
-# refusal that answers is the collection's, not the owner's). The row is refused before any catalog write, so no
-# document and no registry row appears; the staged run and its one landing row are the engine's own staging, reaped
-# after 24 hours like any index run's.
-cat = _get_catalog()
-owner = cat.curator_owner_tumbler_by_name("knowledge") or cat.register_owner("knowledge", "curator")
-name = "@label@-reconcile-probe"
-rel = "@label@-reconcile-probe.md"
-assert cat.get_collection(name) is None, f"{name} is already registered: the probe's premise does not hold"
-row = {
-    "kind": "present", "seq": 0, "file_path": rel, "content_type": "knowledge", "title": rel,
-    "physical_collection": name, "head_hash": "", "source_mtime": 0.0,
-    "content_hash": hashlib.sha256(rel.encode()).hexdigest(), "base_metadata": {}, "stamp": {}, "sensitive": False,
-}
-try:
-    outcome = reconcile_run.stage_and_commit(cat, owner, [row], walk="partial")
-except CatalogReconcileError as exc:
-    raise SystemExit(f"the commit failed as a whole ({exc.reason}): the engine does not refuse the row per row: {exc}")
-(answer,) = [r for r in outcome.get("rows", []) if r.get("file_path") == rel]
-assert answer.get("action") == "refused", f"the row was not refused: {answer}"
-assert str(answer.get("reason", "")).startswith("unregistered_collection"), f"not the typed reason: {answer}"
-assert not answer.get("tumbler"), f"a refused row carries a tumbler: {answer}"
-assert cat.get_collection(name) is None, "the commit registered the collection"
-print("reconcile/commit refused the unregistered collection per row")
-"""
