@@ -3,6 +3,8 @@
 package dev.nexus.service.datamove;
 
 import dev.nexus.service.db.PgSession;
+import dev.nexus.service.vectors.LeafIndexPass;
+import dev.nexus.service.vectors.Rdr229SwapMove;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
@@ -51,7 +53,9 @@ import java.util.TreeSet;
  * <ol>
  *   <li>every stamp move and every P3.3a id-twin validation move ({@link FkTwins}) is complete: P3.3b's pass starts. A P3.3a label is
  *       complete only while its twin foreign key is present and validated, as a stamp label is only while its CHECKs are;</li>
- *   <li>also both P3.3c swap moves and the three child validation moves (a later release adds them): P3.4's builds start;</li>
+ *   <li>also both P3.3c swap moves and the three child validation moves ({@link ReadSet#p33c()}): P3.4's builds start. The swap
+ *       of chunks is complete only while the RDR-225 composite on the id is present and validated, and a child validation label
+ *       only while its id key into the chunks id key is present and validated (the twin rule of P3.3a's labels);</li>
  *   <li>also P3.4 complete on the install, per residual S-2 (nexus-p2m1x.40): every collection the planner would index has a
  *       VALID id-predicate index, read from the registry and the index catalog, never from the existence of name indexes
  *       (the planner drops a name index before it builds, so counting them passes early). {@link Gate3Source} supplies the
@@ -91,6 +95,24 @@ public final class CompletionCheck {
      */
     public record Violators(String table, String constraint, long orphans, long unstamped, boolean counted) { }
 
+    /** A constraint a label stands on: its table and its name. */
+    private record ConstraintRef(String table, String constraint) { }
+
+    /**
+     * P3.3c's labels that are complete only while a constraint is present and validated: each child validation label and its id key, and the
+     * chunks swap and the composite on the id. Built from {@link Rdr229SwapMove} and {@link LeafIndexPass}, never from literals.
+     */
+    private static final Map<String, ConstraintRef> P33C_CONSTRAINTS = p33cConstraints();
+
+    private static Map<String, ConstraintRef> p33cConstraints() {
+        Map<String, ConstraintRef> m = new HashMap<>();
+        for (String child : Rdr229SwapMove.CHILD_TABLES) {
+            m.put(Rdr229SwapMove.validationLabel(child), new ConstraintRef(child, Rdr229SwapMove.childKeyConstraint(child)));
+        }
+        m.put(LeafIndexPass.swapLabel("chunks"), new ConstraintRef("chunks", Rdr229SwapMove.COMPOSITE_CONSTRAINT));
+        return Map.copyOf(m);
+    }
+
     /** The labels each gate reads. A later release adds its labels here (and to the test that pins the set). */
     public record ReadSet(List<String> gate1Labels, List<String> gate2Labels) {
         public ReadSet {
@@ -98,14 +120,14 @@ public final class CompletionCheck {
             gate2Labels = List.copyOf(gate2Labels);
         }
 
-        /** P3.1's read set: one stamp label per table that carries a CHECK. Gate 2 adds nothing until P3.3c. */
+        /** P3.1's read set: one stamp label per table that carries a CHECK. Gate 2 adds nothing. */
         public static ReadSet p31() {
             return new ReadSet(StampLabels.all(), List.of());
         }
 
         /**
          * P3.3a's read set (nexus-p2m1x.19): P3.1's stamp labels and the seven id-twin validation labels ({@code db/rdr229/p33a-fk-twins.tsv}),
-         * all in gate 1: P3.3b's pass starts only once the twins are validated. Gate 2 adds nothing until P3.3c.
+         * all in gate 1: P3.3b's pass starts only once the twins are validated. Gate 2 adds nothing.
          */
         public static ReadSet p33a() {
             List<String> gate1 = new ArrayList<>(StampLabels.all());
@@ -114,12 +136,26 @@ public final class CompletionCheck {
         }
 
         /**
+         * P3.3c's read set (nexus-p2m1x.21): P3.3a's, and in gate 2 the two swap moves ({@link LeafIndexPass#swapLabel}) and the three child
+         * validation moves ({@link Rdr229SwapMove#validationLabel}), named from the classes that write them and never as literals here: P3.4's
+         * per-collection builds start only once every one is complete. A validation label is complete only while its id key is present and
+         * validated, and the chunks swap's only while the composite on the id is.
+         */
+        public static ReadSet p33c() {
+            List<String> gate2 = new ArrayList<>();
+            gate2.add(LeafIndexPass.swapLabel("chunks"));
+            gate2.add(LeafIndexPass.swapLabel("taxonomy_centroids"));
+            Rdr229SwapMove.CHILD_TABLES.forEach(t -> gate2.add(Rdr229SwapMove.validationLabel(t)));
+            return new ReadSet(p33a().gate1Labels(), gate2);
+        }
+
+        /**
          * The read set a running engine reads: the one factory {@link CompletionBootWork#atBoot} and {@link #evaluate(DSLContext)} share, so the
          * boot wiring and the default cannot name different sets. It is the newest phase's set; a later step changes this one line and the test
          * that pins it ({@code CompletionBootReadSetTest}).
          */
         public static ReadSet boot() {
-            return p33a();
+            return p33c();
         }
     }
 
@@ -294,8 +330,9 @@ public final class CompletionCheck {
                                          Map<String, List<P31Checks.Row>> checksByTable, Set<String> tables,
                                          Map<String, Boolean> checkValidated, Map<String, Boolean> twinValidated,
                                          ViolatorCounter counter, List<Violators> violators) {
-        Optional<FkTwins.Row> twin = FkTwins.byLabel(label);
-        String table = twin.map(FkTwins.Row::table).orElseGet(() -> StampLabels.tableOf(label).orElse(null));
+        Optional<ConstraintRef> twin = FkTwins.byLabel(label).map(r -> new ConstraintRef(r.table(), r.twin()))
+            .or(() -> Optional.ofNullable(P33C_CONSTRAINTS.get(label)));
+        String table = twin.map(ConstraintRef::table).orElseGet(() -> StampLabels.tableOf(label).orElse(null));
         Move row = moves.get(label);
 
         boolean done = complete(ctx, label, moves, new HashSet<>());
@@ -313,14 +350,14 @@ public final class CompletionCheck {
         if (twin.isPresent()) {
             // P3.3a: the move is done, and the label is complete only while its twin is on the table and validated (the stamp
             // label's CHECK rule). The twin is a foreign key, not a row count: a NOT VALID one waits on nothing the check can count.
-            Boolean validated = twinValidated.get(twin.get().twin());
+            Boolean validated = twinValidated.get(twin.get().constraint());
             if (validated == null) {
                 return tables.contains(table)
-                    ? new LabelState(label, table, Status.INCOMPLETE, "foreign key " + twin.get().twin() + " is missing")
+                    ? new LabelState(label, table, Status.INCOMPLETE, "foreign key " + twin.get().constraint() + " is missing")
                     : new LabelState(label, table, Status.COMPLETE, "");
             }
             return validated ? new LabelState(label, table, Status.COMPLETE, "")
-                : new LabelState(label, table, Status.INCOMPLETE, "foreign key " + twin.get().twin() + " is NOT VALID");
+                : new LabelState(label, table, Status.INCOMPLETE, "foreign key " + twin.get().constraint() + " is NOT VALID");
         }
         if (table == null || !checksByTable.containsKey(table)) {
             return new LabelState(label, table, Status.COMPLETE, "");
@@ -443,12 +480,17 @@ public final class CompletionCheck {
         return out;
     }
 
-    /** constraint name to {@code convalidated}, for the P3.3a id twins found on their own table. */
+    /** constraint name to {@code convalidated}, for the P3.3a id twins and P3.3c's id keys found on their own table. */
     static Map<String, Boolean> readTwins(DSLContext ctx, Set<String> tables) {
         Map<String, String> tableOfTwin = new HashMap<>();
         for (FkTwins.Row r : FkTwins.load()) {
             if (tables.contains(r.table())) {
                 tableOfTwin.put(r.twin(), r.table());
+            }
+        }
+        for (ConstraintRef r : P33C_CONSTRAINTS.values()) {
+            if (tables.contains(r.table())) {
+                tableOfTwin.put(r.constraint(), r.table());
             }
         }
         Map<String, Boolean> out = new HashMap<>();
@@ -466,6 +508,8 @@ public final class CompletionCheck {
                 .join(ns).on(DSL.field(DSL.name("ns", "oid")).eq(DSL.field(DSL.name("cls", "relnamespace"))))
                 .where(DSL.field(DSL.name("ns", "nspname"), String.class).eq("nexus"))
                 .and(DSL.field(DSL.name("con", "contype"), String.class).eq("f"))
+                // the key itself, not the copies PostgreSQL keeps per referenced partition of a key into a partitioned table (chunks)
+                .and(DSL.field(DSL.name("con", "conparentid"), Long.class).eq(0L))
                 .and(conname.in(tableOfTwin.keySet())).fetch()) {
             // the constraint of its own table only
             if (r.value2().equals(tableOfTwin.get(r.value1()))) {

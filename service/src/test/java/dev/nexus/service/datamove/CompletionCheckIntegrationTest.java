@@ -7,6 +7,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import dev.nexus.service.P31CheckReplay;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.RetiredAspectQueueTable;
+import dev.nexus.service.vectors.LeafIndexPass;
+import dev.nexus.service.vectors.Rdr229SwapMove;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.SQLDialect;
@@ -165,7 +167,7 @@ class CompletionCheckIntegrationTest {
         assertThat(StampLabels.tableOf("rdr229-stamp-relevance_log")).as("a history table has no stamp").isEmpty();
         assertThat(StampLabels.tableOf("something-else")).isEmpty();
         assertThat(CompletionCheck.ReadSet.p31().gate1Labels()).as("the read set is the stamp labels").isEqualTo(labels);
-        assertThat(CompletionCheck.ReadSet.p31().gate2Labels()).as("gate 2 adds nothing until P3.3c").isEmpty();
+        assertThat(CompletionCheck.ReadSet.p31().gate2Labels()).as("gate 2 adds nothing in P3.1's read set").isEmpty();
     }
 
     // ---- an empty registry (R3 a) ------------------------------------------------------------------------------------
@@ -494,7 +496,7 @@ class CompletionCheckIntegrationTest {
             .allSatisfy(l -> assertThat(l).startsWith("rdr229-fkvalidate-").doesNotContain("/")).contains(FK_QUEUE_LABEL);
         assertThat(CompletionCheck.ReadSet.p33a().gate1Labels()).hasSize(23)
             .containsExactlyElementsOf(java.util.stream.Stream.concat(StampLabels.all().stream(), twinLabels.stream()).toList());
-        assertThat(CompletionCheck.ReadSet.p33a().gate2Labels()).as("gate 2 adds nothing until P3.3c").isEmpty();
+        assertThat(CompletionCheck.ReadSet.p33a().gate2Labels()).as("gate 2 adds nothing before P3.3c's read set").isEmpty();
         assertThat(CompletionCheck.ReadSet.p31().gate1Labels()).as("P3.1's read set is what it was").isEqualTo(StampLabels.all());
     }
 
@@ -602,5 +604,77 @@ class CompletionCheckIntegrationTest {
         assertThat(r.gate1()).isTrue();
         assertThat(r.gate2()).isTrue();
         assertThat(r.gate3()).isFalse();
+    }
+
+    // ---- P3.3c's read set: the swap and validation labels in gate 2 (nexus-p2m1x.21) --------------------------------------
+
+    private static final String CHUNKS_SWAP = LeafIndexPass.swapLabel("chunks");
+
+    @Test
+    void p33csReadSetKeepsP33asGate1_andReadsTheTwoSwapsAndTheThreeValidationsInGate2() {
+        assertThat(CompletionCheck.ReadSet.p33c().gate1Labels()).isEqualTo(CompletionCheck.ReadSet.p33a().gate1Labels());
+        assertThat(CompletionCheck.ReadSet.p33c().gate2Labels()).hasSize(5).doesNotHaveDuplicates()
+            .allSatisfy(l -> assertThat(l).doesNotContain("/"))
+            .contains(CHUNKS_SWAP, LeafIndexPass.swapLabel("taxonomy_centroids"))
+            .containsAll(Rdr229SwapMove.CHILD_TABLES.stream().map(Rdr229SwapMove::validationLabel).toList());
+    }
+
+    /** Adds the id keys by the route that recurses (the same end state as the pass), registers and completes the swaps, runs their on_complete. */
+    private void swap() throws Exception {
+        for (var t : List.of(List.of("chunks", "chash"), List.of("taxonomy_centroids", "topic_id"))) {
+            ctx.alterTable(DSL.table(DSL.name("nexus", t.get(0))))
+                .add(DSL.constraint(DSL.name("cc_test_" + t.get(0) + "_id_uq")).unique(DSL.name("tenant_id"), DSL.name("collection_id"),
+                    DSL.name(t.get(1)), DSL.name("embedding_model")))
+                .execute();
+            register(LeafIndexPass.swapLabel(t.get(0)), t.get(0), null);
+        }
+        for (String table : List.of("chunks", "taxonomy_centroids")) {
+            MoveSql.runOnComplete(su, Rdr229SwapMove.spec(table).onComplete());
+            complete(LeafIndexPass.swapLabel(table));
+        }
+        for (String child : Rdr229SwapMove.CHILD_TABLES) {
+            complete(Rdr229SwapMove.validationLabel(child));
+            validate(child, Rdr229SwapMove.childKeyConstraint(child));
+        }
+    }
+
+    private void unswap() {
+        for (String child : Rdr229SwapMove.CHILD_TABLES) {
+            ctx.alterTable(DSL.table(DSL.name("nexus", child))).dropConstraintIfExists(DSL.name(Rdr229SwapMove.childKeyConstraint(child))).execute();
+        }
+        ctx.alterTable(DSL.table(DSL.name("nexus", "chunks"))).dropConstraintIfExists(DSL.name(Rdr229SwapMove.COMPOSITE_CONSTRAINT)).execute();
+        for (String table : List.of("chunks", "taxonomy_centroids")) {
+            ctx.alterTable(DSL.table(DSL.name("nexus", table))).dropConstraintIfExists(DSL.name("cc_test_" + table + "_id_uq")).execute();
+        }
+    }
+
+    @Test
+    void gate2HoldsOnceBothSwapsAndTheThreeValidationsAreCompleteWithTheirConstraintsValidated_andFallsWhenAValidatedConstraintIsDropped()
+            throws Exception {
+        try {
+            swap();
+            var readSet = new CompletionCheck.ReadSet(List.of(), CompletionCheck.ReadSet.p33c().gate2Labels());
+            CompletionCheck.Result held = run(readSet);
+            assertThat(held.incomplete()).as("every label of gate 2 is complete").isEmpty();
+            assertThat(held.labelsSatisfied()).as("non-vacuity: five labels read").isEqualTo(5);
+            assertThat(held.gate2()).isTrue();
+
+            String child = "chunk_orphaned_at";
+            ctx.alterTable(DSL.table(DSL.name("nexus", child))).dropConstraint(DSL.name(Rdr229SwapMove.childKeyConstraint(child))).execute();
+            CompletionCheck.Result child1 = run(readSet);
+            assertThat(child1.gate2()).as("a validation move is done but its validated id key is gone").isFalse();
+            assertThat(state(child1, Rdr229SwapMove.validationLabel(child)).status()).isEqualTo(CompletionCheck.Status.INCOMPLETE);
+            assertThat(state(child1, Rdr229SwapMove.validationLabel(child)).why()).contains(Rdr229SwapMove.childKeyConstraint(child))
+                .contains("missing");
+
+            ctx.alterTable(DSL.table(DSL.name("nexus", "chunks"))).dropConstraint(DSL.name(Rdr229SwapMove.COMPOSITE_CONSTRAINT)).execute();
+            CompletionCheck.Result composite = run(readSet);
+            assertThat(state(composite, CHUNKS_SWAP).status()).as("the chunks swap stands on the composite on the id").isEqualTo(CompletionCheck.Status.INCOMPLETE);
+            assertThat(state(composite, CHUNKS_SWAP).why()).contains(Rdr229SwapMove.COMPOSITE_CONSTRAINT).contains("missing");
+            assertThat(state(composite, LeafIndexPass.swapLabel("taxonomy_centroids")).status())
+                .as("the centroids swap stands on its move alone").isEqualTo(CompletionCheck.Status.COMPLETE);
+        } finally {
+            unswap();
+        }
     }
 }
