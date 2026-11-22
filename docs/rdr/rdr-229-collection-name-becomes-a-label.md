@@ -2721,7 +2721,12 @@ its acceptance is that test green plus the census pin it lowers.
     swap move. The leaf-creating helper creates a leaf's index only while
     the parent lacks the id key (item 6). Test: a pass ended mid-build
     leaves an INVALID index that the next pass drops and rebuilds; the swap
-    is never registered while a leaf's unique index is missing or INVALID.
+    is never registered while a leaf's unique index is missing or INVALID,
+    or while the parent's id key is not attached; a new leaf made after the
+    key is in place gets exactly one valid id index, and one made before it
+    gets the plain index the pass adopts; with `NX_SEARCH_PCI=0` the pass
+    still builds the indexes and registers the swap; with moves blocked it
+    builds no index and registers no swap.
   - P3.3c Swap: per table, a move registered by P3.3b's pass (driving table
     that table, template a re-stamp of rows still null) whose `on_complete`
     refuses unless the id key is already present and valid (it adds none),
@@ -2733,9 +2738,10 @@ its acceptance is that test green plus the census pin it lowers.
     `vectors-075-1` builds. It drops nothing; the name primary key and the
     three name child keys stay until P4.1, and `chunks_collection_fk` until
     P3.7's name-key drop move. Test: no child validation move exists before
-    its constraint does; after the swap, a chunk and a centroid upsert on the
-    name target still succeed, and a name-path rename leaves every child row
-    with the new id.
+    its constraint does; a swap whose id key is missing is refused; after
+    the swap, a chunk and a centroid upsert on the name target still succeed,
+    and a name-path rename leaves every child row with the new id; EXPLAIN
+    of a chunk DELETE after the swap uses `idx_chunk_orphaned_at_tenant_chash`.
 - P3.4 After P3.3: rebuild every per-collection index on `collection_id`
   (predicate and name hash) through the PCI reconciler, which reports in
   `boot_work` and rebuilds a killed build from the start; each collection's
@@ -2861,10 +2867,14 @@ its acceptance is that test green plus the census pin it lowers.
   before the first write. P3.11 is left with what a name cannot settle: a name
   clash with an existing collection in the target (T2 `229-research-190`,
   `229-research-191`, `229-research-193` to `229-research-195`).
-  Test: `TenantExportRegistryParityTest` is green at P3.1 and at P3.3; a
-  backup taken after P3.1 restores with every chunk on its collection's new
-  id; RDR-248's committed fixture, taken before P3.1, still loads with every
-  id filled.
+  Test: `TenantExportRegistryParityTest` reads a booted install's schema
+  (`BootedSchema`) and is green at P3.3 (its expected labels include P3.3b's swap moves, so it cannot be green at P3.1; T2 `229-research-113`); a backup taken after P3.1
+  restores with every chunk on its collection's new id; after a rename of one
+  row, a backup restores every row on the renamed collection's restored id, and
+  a new collection holding the old label receives none of them; a restored
+  minted row's label equals `c` plus its new id, and a later mint at the old
+  number succeeds; RDR-248's committed fixture, taken before P3.1, still loads
+  with every id filled.
 - P3.12 Day 2 surfaces, after P3.5a and P3.6: an id column in `nx
   collection list` (it already shows content type, owner, model, dimension
   and state, `commands/collection.py:91-95`), an `nx doctor` census of null
@@ -3587,3 +3597,4 @@ large, and moved under a ratchet.
   restore split. Risks, Failure Modes and Day 2: the downgrade boundary at
   P3.1's cut and the single-role install. No decision or criterion changed.
 - 2026-11-22: Phase 3 wording, matching reviewed stacked code and linda's rulings (grant 3; nexus-p2m1x.20, .21, .31, .35): P3.3b's pass adds the id key and P3.3c's `on_complete` checks it and adds the child keys, the manifest child key is DEFERRABLE INITIALLY DEFERRED, the chunk_orphaned_at index is vectors-075's self-healing boot changeset, and TwinKeyUpsert is the retry rule for name/id unique pairs until P4.1; item 10 and P3.11: the by-id restore ships in the P3.5+P3.7 cut, not P4.1, with the minted-label relabel, the stripped unmapped quarantine origin id, catalog_epoch's derivation and the booted-schema parity; P4.1's design notes (G1, G7, views first, RESTRICT drops, the deferral and trigger notes). P3.4, P3.5 and P3.7 follow when their code is reviewed and stacked. Two decisions moved on linda's rulings: the by-id restore from P4.1 to the P3.5+P3.7 cut, and the catalog epoch from P3.1 to the P3.5+P3.7 cut (bead nexus-p2m1x.31, comments 08:24 and 08:49; bead nexus-p2m1x.35, comment 17:42; T2 `229-research-116`). No test criterion changed in this entry.
+- 2026-11-22: test lists (on Sam's answer on test criteria, asked by linda): the P3.3b, P3.3c and P3.11 Test sentences gain the tests the reviewed code carries (an unattached parent key, a new leaf, `NX_SEARCH_PCI=0`, moves blocked; a swap refused without the id key, the EXPLAIN of a chunk DELETE; the booted-schema parity, the rename and minted-label restores), and the parity test is green at P3.3, not P3.1 (T2 `229-research-113`, `229-research-116`).
