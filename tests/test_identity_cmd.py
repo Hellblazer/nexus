@@ -5,6 +5,8 @@ process table that is a dict, and :class:`tests.identity.fake_engine.FakeEngine`
 the real engine records for these calls is checked by ``tests/identity/test_identity_step4.py``."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from pathlib import Path
 from typing import Any
 
@@ -374,13 +376,30 @@ def test_show_all_leaves_out_claude_p_children_and_a_dead_process_whose_pid_was_
     assert "no binding" in out
 
 
+#: A clock after the gate's date (the Step 5 tag plus two weeks), for the tests of the binding rules.
+_AFTER_GATE = datetime(2026, 12, 3, 9, 0, tzinfo=timezone.utc).timestamp()
+
+
+@pytest.mark.parametrize("when, opens", [(datetime(2026, 12, 2, 22, 59, tzinfo=timezone.utc), False),
+                                         (datetime(2026, 12, 2, 23, 0, tzinfo=timezone.utc), True)])
+def test_the_phase2_gate_stays_closed_until_two_weeks_after_the_step5_tag(box: Box, when: datetime, opens: bool) -> None:
+    """RDR-253 Phase 2: "once Phase 1 has run for two weeks": 8.5.0 was tagged 2026-11-19, so the gate opens 2026-12-03
+    (Munich midnight, 23:00 UTC the day before) however well bound the box is (review r2 S1)."""
+    from nexus.identity.ops import phase2_gate
+
+    box.running_seat("alpha", 100, client_version="8.5.5")
+    ok, lines = phase2_gate(box.env(), floor="8.5.0", now=when.timestamp())
+    assert ok is opens, lines
+    assert opens or any("2026-12-03" in line for line in lines), lines
+
+
 def test_the_phase2_gate_passes_when_every_live_process_is_bound_at_the_floor(box: Box) -> None:
     from nexus.identity.ops import phase2_gate
 
     box.running_seat("alpha", 100, client_version="8.5.5")
     box.running_seat("desk", 101, entrypoint="claude-desktop", client_version="8.5.0")
     box.procs.start(102, T0, session_id="sid-102", name="child", entrypoint="sdk-cli")   # a claude -p child: not counted
-    ok, lines = phase2_gate(box.env(), floor="8.5.0")
+    ok, lines = phase2_gate(box.env(), floor="8.5.0", now=_AFTER_GATE)
     assert ok, lines
     assert lines[-1].startswith("PHASE2_GATE_OPEN"), lines
 
@@ -390,7 +409,7 @@ def test_the_phase2_gate_refuses_an_unbound_live_process_desktop_included(box: B
 
     box.running_seat("alpha", 100, client_version="8.5.5")
     box.procs.start(101, T0, session_id="sid-101", name="kestrel", entrypoint="claude-desktop")   # live, never bound
-    ok, lines = phase2_gate(box.env(), floor="8.5.0")
+    ok, lines = phase2_gate(box.env(), floor="8.5.0", now=_AFTER_GATE)
     assert not ok
     text = "\n".join(lines)
     assert "PHASE2_GATE_CLOSED" in text and "pid 101" in text and "kestrel" in text and "no binding" in text
@@ -401,7 +420,7 @@ def test_the_phase2_gate_refuses_a_binding_below_the_floor_or_with_no_version(bo
     from nexus.identity.ops import phase2_gate
 
     box.running_seat("old", 100, client_version=version)
-    ok, lines = phase2_gate(box.env(), floor="8.5.0")
+    ok, lines = phase2_gate(box.env(), floor="8.5.0", now=_AFTER_GATE)
     assert not ok
     assert any("old" in line and "below 8.5.0" in line for line in lines), lines
 
@@ -412,9 +431,31 @@ def test_the_phase2_gate_does_not_count_a_binding_whose_holder_is_gone(box: Box)
     box.running_seat("alpha", 100, client_version="8.5.5")
     box.running_seat("sandbox", 101, client_version="8.4.0")
     box.procs.stop(101)                                     # a lapsed sandbox ephemeral: no process, nothing to gate
-    ok, lines = phase2_gate(box.env(), floor="8.5.0")
+    ok, lines = phase2_gate(box.env(), floor="8.5.0", now=_AFTER_GATE)
     assert ok, lines
     assert any("sandbox" in line and "not counted" in line for line in lines), lines
+
+
+def test_the_phase2_gate_does_not_count_a_delegated_binding(box: Box) -> None:
+    """A delegated identity is bound to its dispatcher's process and reports no client version of its own (review r2 N1):
+    a live operator dispatch must not close the gate."""
+    from nexus.identity.ops import phase2_gate
+
+    box.running_seat("alpha", 100, client_version="8.5.5")
+    box.engine.stage(kind="delegated", state="live", generation=1, parent="i1", holder=box.holder(100))
+    ok, lines = phase2_gate(box.env(), floor="8.5.0", now=_AFTER_GATE)
+    assert ok, lines
+
+
+def test_the_phase2_gate_does_not_count_a_binding_whose_pid_was_reused(box: Box) -> None:
+    from nexus.identity.ops import phase2_gate
+
+    box.running_seat("alpha", 100, client_version="8.5.5")
+    box.running_seat("old", 101, client_version="8.4.0")
+    box.procs.procs[101] = T1                 # pid 101 now belongs to a later process: the binding's holder is gone
+    ok, lines = phase2_gate(box.env(), floor="8.5.0", now=_AFTER_GATE)
+    assert ok, lines
+    assert any("old" in line and "not counted" in line for line in lines), lines
 
 
 def test_the_phase2_gate_script_exits_by_the_verdict(box: Box, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
@@ -424,9 +465,9 @@ def test_the_phase2_gate_script_exits_by_the_verdict(box: Box, monkeypatch: pyte
     gate = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(gate)
     box.running_seat("alpha", 100, client_version="8.5.5")
-    assert gate.main([], env=box.env()) == 0
+    assert gate.main([], env=box.env(), now=_AFTER_GATE) == 0
     box.procs.start(101, T0, session_id="sid-101", name="stray")
-    assert gate.main([], env=box.env()) == 1
+    assert gate.main([], env=box.env(), now=_AFTER_GATE) == 1
     assert "pid 101" in capsys.readouterr().out
 
 

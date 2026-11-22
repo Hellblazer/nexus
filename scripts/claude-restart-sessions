@@ -1735,7 +1735,8 @@ _IDENTITY_ID = re.compile(r"i[0-9]+")
 def target_identity(sid: str) -> tuple[str, str]:
     """(identity id, "") for the identity the session holds, or ("", why) when it has none or nx could not say.
 
-    Asked once per session id; a refused or failed call is not kept, so a later ask tries again."""
+    Asked once per session id. An answer that the session holds no identity is kept for the run (it fails safe: the
+    ask is typed); a call that failed is not kept, so a later ask tries again."""
     if sid in IDENTITIES:
         return IDENTITIES[sid]
     try:
@@ -2008,7 +2009,9 @@ NO_WAKE = False
 #: Seconds a resumed session gets to register as idle before its wake, and a mailed wake to start a turn.
 WAKE_IDLE_WAIT = 30
 WAKE_BUSY_WAIT = 60
-WAKE_TTL = 1800
+#: A mailed wake outlives its busy wait by two minutes only: a withdrawal drops its marker but cannot take the row out
+#: of an identity mailbox (only the owner claims there), so a short life is what keeps a leftover copy from coming back.
+WAKE_TTL = WAKE_BUSY_WAIT + 120
 #: Sessions resumed in this run, woken by wake_resumed() once every restart is done, so a slow wake holds up
 #: no other session's restart (each restart is checked against its ready reply's age).
 TO_WAKE: list[dict] = []
@@ -2088,8 +2091,8 @@ def wake(s: dict) -> str:
     *s* is the RESUMED session: sessionId, pane, file (its sessions/<pid>.json) and argv (its own launch line).
     With the conexus channel the wake is mailed (origin note and marker, as every ask from here), and the
     channel starts a turn without touching the prompt. When no turn starts within WAKE_BUSY_WAIT the mail is
-    withdrawn, and only a confirmed withdrawal lets the wake be typed instead: a mail that was taken late, that
-    could not be withdrawn, or whose send may have landed is never typed over, so no session is woken twice.
+    withdrawn by dropping its marker (a copy that still arrives reads as forged, and the row expires with WAKE_TTL),
+    and the wake is typed instead; a send that may have landed is never typed over, so no session is woken twice.
     Without the channel the wake is typed. It is typed only into an empty prompt. Returns what happened.
     """
     name = label(s)
@@ -2263,7 +2266,7 @@ def _write_handoffs(found: list[dict], ready: set[str], wait: int, timeout: int,
                 if not has_channel(s):
                     how = "typed (launched without the conexus channel)"
                 elif not mail_ask(s, path, sender, ttl=timeout + 300):
-                    how = "typed (the mail send failed)"
+                    how = "typed (not mailed: no identity, or the send failed; the log says which)"
                 elif not went_busy(s, n0):
                     # The flag is on the command line but the channel may not be live, or the
                     # model may not act on the mail: fall back rather than wait out the timeout.
@@ -2756,7 +2759,7 @@ def ask_ready(found: list[dict], stamp: str, sender: str, out: list[dict] | None
                 # later run withdraws it (withdraw_ready_asks).
                 tid = SENT_ASKS.pop(s["sessionId"], "")
             else:
-                why = "launched without the conexus channel" if not has_channel(s) else "the mail send failed"
+                why = "launched without the conexus channel" if not has_channel(s) else "not mailed: no identity, or the send failed; the log says which"
                 how = typed_block(s)
                 if how:
                     log(f"SKIP {label(s)}: {how}")

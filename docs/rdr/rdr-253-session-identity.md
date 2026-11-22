@@ -1319,7 +1319,11 @@ newer plugin is seen), checked by `nx
 identity show --all`, which lists the bindings held on this host and the live
 processes without one (not `claude -p` children, whose binding is their
 dispatcher's). The engine has no route that lists every identity, so an identity
-that no process on this host holds does not appear.
+that no process on this host holds does not appear. The gate is coded as
+`scripts/rdr253_phase2_gate.py` (`ops.phase2_gate`): it exits 0 only from 2026-12-03, two weeks after the Step 5 tag,
+when every live Claude process on the host is bound and every binding whose holder still runs reports 8.5.0 or later; it
+names each blocker otherwise. A delegated identity is not counted (its dispatcher is), and neither is a binding whose
+holder process is gone. Its output goes on the bead before the push.
 
 Claude Desktop sessions count like any other (Sam, 2026-11-22: a Desktop exemption granted that morning was dropped
 once kestrel bound; T2 `nexus/sam-ruling-rdr253-desktop-exempt-2026-11-22`). A Desktop process, the one whose Claude

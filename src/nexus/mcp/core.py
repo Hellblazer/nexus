@@ -9736,7 +9736,6 @@ def tuple_subscribe(
             raise ValueError(no_session_id_message())
         with _t2_ctx() as db:
             templates = (db.tuples.registry() or {}).get("templates", [])
-        from nexus.config import nexus_config_dir  # noqa: PLC0415 — rare/branch-local path
         t1, _ = _get_t1()
         subs = _subscriptions.get_or_load(t1, session_id, store_factory=_t2_ctx)
         subs.subscribe(subspace, templates=templates)

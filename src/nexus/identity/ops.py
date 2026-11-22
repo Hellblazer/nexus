@@ -423,6 +423,8 @@ def show_all_lines(env: IdentityEnv) -> list[str]:
 
 #: The Step 5 release (conexus 8.5.0, tagged 2026-11-19): RDR-253 Phase 2's gate needs every binding at it or later.
 PHASE2_CLIENT_FLOOR = "8.5.0"
+#: "Once Phase 1 has run for two weeks" after that tag: the gate opens at the start of 2026-12-03, Munich time.
+PHASE2_GATE_OPENS = "2026-12-03T00:00:00+01:00"
 
 
 def _release(version: Any) -> tuple[int, int, int] | None:
@@ -431,22 +433,34 @@ def _release(version: Any) -> tuple[int, int, int] | None:
     return tuple(int(p) for p in parts) if len(parts) == 3 and all(p.isdigit() for p in parts) else None  # type: ignore[return-value]
 
 
-def phase2_gate(env: IdentityEnv, *, floor: str = PHASE2_CLIENT_FLOOR) -> tuple[bool, list[str]]:
-    """RDR-253 Phase 2's gate, coded: open only when every live Claude process on this host (Desktop included; a
-    ``claude -p`` child is not counted, its binding is its dispatcher's) holds a binding, and every binding held here
-    reports a client at *floor* or later. Returns the verdict and the lines that say why, ending in ``PHASE2_GATE_OPEN``
-    or ``PHASE2_GATE_CLOSED``."""
+def phase2_gate(env: IdentityEnv, *, floor: str = PHASE2_CLIENT_FLOOR, opens: str = PHASE2_GATE_OPENS,
+                now: float | None = None) -> tuple[bool, list[str]]:
+    """RDR-253 Phase 2's gate, coded: open only from *opens* (two weeks after the Step 5 tag), when every live Claude
+    process on this host (Desktop included; a ``claude -p`` child is not counted, its binding is its dispatcher's) holds
+    a binding, and every binding held here whose holder still runs reports a client at *floor* or later. Returns the
+    verdict and the lines that say why, ending in ``PHASE2_GATE_OPEN`` or ``PHASE2_GATE_CLOSED``. *now* is a Unix time
+    (default the env's clock)."""
+    from datetime import datetime  # noqa: PLC0415 — stdlib, only this check needs it
+
     views = _call(bindings_here, env.client, env.host, None, env.identity_dir)
     want = _release(floor)
     lines = [f"bindings on {describe_host(env.host)}:"]
     bound: set[tuple[Any, Any]] = set()
     blockers = 0
+    at = env.clock() if now is None else now
+    if at < datetime.fromisoformat(opens).timestamp():
+        blockers += 1
+        lines.insert(0, f"too early: Phase 1 runs two weeks after the Step 5 tag, so the gate opens {opens[:10]}")
     for view in views:
         holder = view.get("holder") or {}
         bound.add((holder.get("pid"), holder.get("started_at")))
+        if view.get("kind") == "delegated":
+            continue  # bound to its dispatcher's process, with no client version of its own: the dispatcher is counted
         version = view.get("client_version")
         have = _release(version)
-        running = isinstance(holder.get("pid"), int) and env.procs.alive(holder["pid"])
+        pid = holder.get("pid")
+        started = normalise_instant(env.procs.os_start(pid)) if isinstance(pid, int) and env.procs.alive(pid) else None
+        running = started is not None and (not holder.get("proc_start") or holder["proc_start"] == started)
         low = running and (want is None or have is None or have < want)
         blockers += low
         note = f": below {floor}" if low else "" if running else ": holder not running, not counted"
@@ -457,9 +471,8 @@ def phase2_gate(env: IdentityEnv, *, floor: str = PHASE2_CLIENT_FLOOR) -> tuple[
     for entry in stray:
         lines.append(f"  no binding: pid {entry.pid} {entry.name or '(no name)'} ({entry.entrypoint}), session {entry.session_id}")
     blockers += len(stray)
-    verdict = "PHASE2_GATE_OPEN" if not blockers else f"PHASE2_GATE_CLOSED {blockers} blocker(s)"
-    lines.append(f"{verdict}: every live Claude process bound at client {floor} or later"
-                 + ("" if not blockers else " does not hold"))
+    lines.append(f"PHASE2_GATE_OPEN: from {opens[:10]}, every live Claude process bound at client {floor} or later"
+                 if not blockers else f"PHASE2_GATE_CLOSED: {blockers} blocker(s), each named above")
     return not blockers, lines
 
 

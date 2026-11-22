@@ -567,7 +567,7 @@ def test_the_ready_ask_of_an_unbound_target_is_typed_and_records_no_mail(crs, rd
     monkeypatch.setattr(crs, "submit", lambda _pane, line, _f: typed.append(line) or True)
     s = {"sessionId": "sid-9", "name": "tamsin", "pane": "%1", "file": rd / "s.json"}
     [entry] = crs.ask_ready([s], "20261102-100000", "sid-caller")
-    assert entry["how"] == "typed (the mail send failed)" and "tuple_id" not in entry and "marker" not in entry
+    assert entry["how"] == "typed (not mailed: no identity, or the send failed; the log says which)" and "tuple_id" not in entry and "marker" not in entry
     assert typed == [f"Do what {rd / 'ask.txt'} says"]
 
 
