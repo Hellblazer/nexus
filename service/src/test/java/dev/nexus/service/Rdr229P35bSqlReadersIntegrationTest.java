@@ -68,9 +68,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  * and the owner it derives.
  *
  * <p>Diverging name columns. Between a chunk and its manifest row the name columns can differ only once the name key between
- * them ({@code fk_catalog_chunks_chunk}, a foreign key on the name columns) is gone, which is P3.7's name-key drop. The fixture
- * does that drop and then rewrites the manifest row's name, as an id-only writer or the one-row rename leaves it; the id on
- * both sides stays the registry's.
+ * them ({@code fk_catalog_chunks_chunk}, a foreign key on the name columns) is gone. That key stays until P4.1 (P3.7's name-key
+ * drop takes only the keys to the registry, not the child keys between chunk and manifest), so the fixture drops it itself and
+ * rewrites the manifest row's name: the shape an id-only writer leaves once P4.1 has run, with the registry's id on both sides.
+ * The form B views must already read that shape correctly, since P4.1 removes their name arm and nothing else.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -288,48 +289,67 @@ class Rdr229P35bSqlReadersIntegrationTest {
     // ---- T3: P4.1's drop of the name columns -----------------------------------------------------------------------------
 
     /**
-     * RED: P4.1 drops every name column with CASCADE. A form A view that still reads a name column is dropped with it, so after the
-     * form A changesets the three views must survive the drop. live_chunks and collection_vector_stats are form B and keep a name arm
-     * until P4.1 redefines them in its own changeset, so they are not asserted here.
+     * RED: P4.1 drops the name columns with RESTRICT (linda 2026-11-22), so any object still depending on one makes that drop fail.
+     * A form A object must therefore hold no dependency on a name column once its changeset has applied. Read from pg_depend, the
+     * record RESTRICT itself consults: a view's rewrite rule and a trigger's UPDATE OF list each depend on the columns they name.
+     * A literal RESTRICT drop cannot stand in for this here, because before P4.1 the name columns still carry their keys, indexes
+     * and the form B views, which P4.1 removes or redefines first; live_chunks keeps its name arm until then, and the test uses it
+     * to show the probe sees a dependency.
      */
     @Test
     @Order(7)
-    void p41NameColumnDrop_leavesTheFormAViews() throws Exception {
+    void p41NameColumnDrop_noFormAObjectDependsOnANameColumn() throws Exception {
         completeStampsAndMigrate();
         List<String> formAViews = List.of("collection_health_meta", "collection_doc_counts", "topics_with_counts");
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(false);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            for (String view : formAViews) {
-                assertThat(PgCatalogProbes.viewExists(ctx, "nexus", view)).as("non-vacuity: %s exists before the drop", view).isTrue();
-            }
-            int dropped = 0;
+            List<String[]> columns = new ArrayList<>();
             for (String[] tc : nameColumns()) {
-                if (!PgCatalogProbes.columnExists(ctx, "nexus", tc[0], tc[1])) {
-                    continue; // aspect_extraction_queue is absent on most installs
+                if (PgCatalogProbes.columnExists(ctx, "nexus", tc[0], tc[1])) { // aspect_extraction_queue is absent on most installs
+                    columns.add(tc);
                 }
-                ctx.alterTable(DSL.table(DSL.name("nexus", tc[0]))).dropColumn(DSL.field(DSL.name(tc[1]))).cascade().execute();
-                dropped++;
             }
-            assertThat(dropped).as("non-vacuity: the drop reached the name columns of the list").isGreaterThan(10);
-            List<String> missing = new ArrayList<>();
+            assertThat(columns).as("non-vacuity: the name columns of the list exist").hasSizeGreaterThan(10);
             for (String view : formAViews) {
-                if (!PgCatalogProbes.viewExists(ctx, "nexus", view)) {
-                    missing.add(view);
+                assertThat(PgCatalogProbes.viewExists(ctx, "nexus", view)).as("non-vacuity: %s exists", view).isTrue();
+            }
+            assertThat(nameColumnDependents(ctx, columns))
+                .as("non-vacuity: the probe sees the form B view's name arm, which P4.1 redefines before its drop")
+                .contains("view nexus.live_chunks");
+            List<String> formA = new ArrayList<>();
+            for (String dependent : nameColumnDependents(ctx, columns)) {
+                if (formAViews.stream().anyMatch(v -> dependent.equals("view nexus." + v))
+                    || dependent.equals("trigger nexus.catalog_documents." + TRIGGER)) {
+                    formA.add(dependent);
                 }
             }
-            su.rollback();
-            assertThat(missing)
-                .as("these form A views were dropped with the name columns: they still read a name column and must read the id")
+            assertThat(formA)
+                .as("these form A objects still depend on a name column, so P4.1's RESTRICT drop would fail on them: they must read the id")
                 .isEmpty();
         }
-        try (Connection su = pg.createConnection("")) {
-            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            for (String view : formAViews) {
-                assertThat(PgCatalogProbes.viewExists(ctx, "nexus", view)).as("the rolled-back drop left %s", view).isTrue();
-            }
-            assertThat(PgCatalogProbes.columnExists(ctx, "nexus", "chunks", "collection")).as("and the name column").isTrue();
+    }
+
+    /** "view nexus.v" or "trigger nexus.t.name" for every view rule and trigger that pg_depend records as depending on one of the columns. */
+    private static List<String> nameColumnDependents(DSLContext ctx, List<String[]> columns) {
+        List<String> out = new ArrayList<>();
+        for (String[] tc : columns) {
+            out.addAll(ctx.fetch("""
+                SELECT DISTINCT CASE WHEN d.classid = 'pg_rewrite'::regclass THEN 'view nexus.' || vc.relname
+                                     ELSE 'trigger nexus.' || tc.relname || '.' || tg.tgname END AS dependent
+                  FROM pg_depend d
+                  JOIN pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid
+                  JOIN pg_class rc ON rc.oid = d.refobjid
+                  JOIN pg_namespace rn ON rn.oid = rc.relnamespace
+                  LEFT JOIN pg_rewrite rw ON d.classid = 'pg_rewrite'::regclass AND rw.oid = d.objid
+                  LEFT JOIN pg_class vc ON vc.oid = rw.ev_class
+                  LEFT JOIN pg_trigger tg ON d.classid = 'pg_trigger'::regclass AND tg.oid = d.objid
+                  LEFT JOIN pg_class tc ON tc.oid = tg.tgrelid
+                 WHERE d.refclassid = 'pg_class'::regclass AND d.classid IN ('pg_rewrite'::regclass, 'pg_trigger'::regclass)
+                   AND rn.nspname = 'nexus' AND rc.relname = ? AND a.attname = ?
+                   AND (vc.oid IS NULL OR vc.relname <> rc.relname)
+                """, tc[0], tc[1]).getValues("dependent", String.class));
         }
+        return out.stream().distinct().sorted().toList();
     }
 
     // ---- fixtures ------------------------------------------------------------------------------------------------------
