@@ -15,7 +15,7 @@ import pytest
 from nexus.aspect_readers import uri_for
 from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
 from nexus.corpus import t3_collection_name
-from nexus.db.http_vector_client import HttpVectorClient
+from nexus.db.http_vector_client import HttpVectorClient, get_http_vector_client
 from nexus.mcp.core import store_put
 from nexus.upgrade_ladder.protocol import ConvergeOutcome
 from nexus.upgrade_ladder.rungs.note_tags_array import NoteTagsArrayRung
@@ -43,7 +43,10 @@ def test_two_notes_with_identical_text_each_catalog_entry_keeps_its_own_keys(t2_
         store_put(content=body, collection=subject, title="keys-B", tags="beta,two",
                   category="finding", ttl="30d", agent="agent-b")
 
-    collection = t3_collection_name(subject, t3=client)
+    # RDR-229 P3.8: the subject's collection is a minted label (c<id>), found only through its registry row;
+    # a client built under the minted tenant's name answers no row (nexus-fryrd), so the read goes through the
+    # process client, as the CLI's does (the engine binds the tenant to the bearer).
+    collection = t3_collection_name(subject, t3=get_http_vector_client())
     assert _entry_keys(collection, "keys-A") == {
         "tags": ["alpha", "one"], "category": "design", "ttl_days": 7, "source_agent": "agent-a"}
     assert _entry_keys(collection, "keys-B") == {
@@ -59,7 +62,10 @@ def test_a_reput_updates_the_entry_and_a_permanent_reput_clears_the_ttl(t2_servi
         store_put(content="6pfgb5 reput body two", collection=subject, title="reput", tags="new",
                   category="design", agent="agent-a")
 
-    collection = t3_collection_name(subject, t3=client)
+    # RDR-229 P3.8: the subject's collection is a minted label (c<id>), found only through its registry row;
+    # a client built under the minted tenant's name answers no row (nexus-fryrd), so the read goes through the
+    # process client, as the CLI's does (the engine binds the tenant to the bearer).
+    collection = t3_collection_name(subject, t3=get_http_vector_client())
     assert _entry_keys(collection, "reput") == {
         "tags": ["new"], "category": "design", "ttl_days": 0, "source_agent": "agent-a"}
 
@@ -75,7 +81,10 @@ def test_the_note_tags_array_rung_converts_a_legacy_string_on_the_real_engine(t2
                   tags="arch,decision", category="design", agent="agent-a")
         store_put(content="6pfgb38 current note body", collection=subject, title="current",
                   tags="fresh", agent="agent-a")
-    collection = t3_collection_name(subject, t3=client)
+    # RDR-229 P3.8: the subject's collection is a minted label (c<id>), found only through its registry row;
+    # a client built under the minted tenant's name answers no row (nexus-fryrd), so the read goes through the
+    # process client, as the CLI's does (the engine binds the tenant to the bearer).
+    collection = t3_collection_name(subject, t3=get_http_vector_client())
     reader = make_catalog_reader()
     legacy = reader.by_source_uri(uri_for(collection, "legacy"))
     assert legacy is not None and legacy.meta["tags"] == ["arch", "decision"]

@@ -13,7 +13,7 @@ from unittest.mock import patch
 import pytest
 
 from nexus.corpus import t3_collection_name
-from nexus.db.http_vector_client import HttpVectorClient
+from nexus.db.http_vector_client import HttpVectorClient, get_http_vector_client
 from nexus.mcp.core import store_get, store_list, store_put
 
 pytestmark = pytest.mark.integration
@@ -27,7 +27,10 @@ def test_each_note_shows_its_own_tags_and_expiry_when_the_other_wrote_last(t2_se
     with patch("nexus.mcp.core._get_t3", return_value=client):
         store_put(content=_BODY, collection=subject, title="note-a", tags="alpha", ttl="7d")
         store_put(content=_BODY, collection=subject, title="note-b", tags="beta", ttl="30d")  # B writes the row last
-        collection = t3_collection_name(subject, t3=client)
+        # RDR-229 P3.8: the subject's collection is a minted label (c<id>), found only through its registry row;
+        # a client built under the minted tenant's name answers no row (nexus-fryrd), so the read goes through the
+        # process client, as the CLI's does (the engine binds the tenant to the bearer).
+        collection = t3_collection_name(subject, t3=get_http_vector_client())
 
         a = store_get(doc_id="note-a", collection=collection)
         b = store_get(doc_id="note-b", collection=collection)
