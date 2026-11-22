@@ -33,43 +33,76 @@ import java.util.Set;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 
 /**
- * RDR-229 P3.1 (nexus-p2m1x.17): the ids a restore writes beside the collection names. P3.1's NOT VALID CHECKs refuse every
- * row with a non-empty name and a NULL id, and a backup written before the id columns existed holds exactly such rows, so
- * the load fills each id from the RESTORED registry row on {@code (tenant_id, name)}, on the stage, before the table's
- * insert. A file's own ids, where it has any, are another installation's and are never trusted: every twin is overwritten, so
- * the result is the same for a file whose twins are NULL and one whose twins are not. {@code ''} means unset and gives NULL.
- * History tables ({@code relevance_log}, {@code search_telemetry}) are refilled the same way but an unresolved name is not
+ * RDR-229 P3.1 (nexus-p2m1x.17) and P3.11 (nexus-p2m1x.31): the ids a restore writes beside the collection names. P3.1's NOT VALID
+ * CHECKs refuse every row with a non-empty name and a NULL id, and a backup written before the id columns existed holds exactly
+ * such rows, so the load fills each id on the stage, before the table's insert. {@code ''} means unset and gives NULL. History
+ * tables ({@code relevance_log}, {@code search_telemetry}) are filled the same way but an id that resolves to nothing is not
  * refused: they have no CHECK and keep a label.
+ *
+ * <p><b>The rule, per staged row and per (name column, id column) pair.</b> A file's id is the SOURCE installation's, so it is
+ * never written as it is; it is mapped.
+ * <ul>
+ *   <li>The twin is non-null: the id is {@link CollectionIdMap} of it, by id. From P3.7 a rename is one registry row's update
+ *       and the children's name columns are stale until P4.1, so the name of such a row may name no collection, or another one,
+ *       and is not read. A twin the map does not hold is refused ({@link #ORPHAN_ID_CODE}), except in a history table, where it
+ *       gives NULL.</li>
+ *   <li>The twin is NULL, or the file has no such column (a file from before P3.1, or a row stamped late): the id is the
+ *       restored registry row's on {@code (tenant_id, name)}, by name. The name is valid there because the CHECKs of P3.1
+ *       refuse a writer a row with a name and no id, so a NULL twin beside a name only exists before P3.1's stamp completes,
+ *       which is before P3.7's rename can stale a name. A file that contradicts this (a NULL-twin row whose name another row of
+ *       the table carries with the id of a different collection) is refused as {@link #AMBIGUOUS_CODE}. An empty name gives NULL.
+ *       A history table's NULL twin is filled by name only when the file's registry carries no id at all (a file from before
+ *       P3.1); otherwise it stays NULL, because a history label may be an old one.</li>
+ * </ul>
+ * A row whose twin was mapped also takes the mapped registry row's CURRENT name in its name column, so a stale label never
+ * reaches a name foreign key that the target still has (the name-key drop move may not have completed there), and the chunk
+ * family's name keys agree with the rewritten chunk names.
  *
  * <p><b>The registry.</b> {@code catalog_collections.collection_id} is never taken from a file: the engine draws every
  * restored row's id from the column's own sequence ({@code nextval(pg_get_serial_sequence(...))}), so a later mint cannot
  * collide. A row cannot name its own identity in the INSERT that assigns it, so the id is drawn on the stage first and
  * inserted explicitly, a tombstone's as both {@code collection_id} and {@code superseded_by_id} (the CHECK refuses a
- * tombstone with a NULL successor id). {@link #repointTombstones} then, after every registry row is in and before any child
- * table loads, points each tombstone whose successor is in the backup at that row's new id (the R7 invariant); a successor
- * absent from the backup leaves the self id.
+ * tombstone with a NULL successor id). Before the draw overwrites them, the file's {@code collection_id} and
+ * {@code superseded_by_id} are saved to stage columns ({@link #SRC_ID}, {@link #SRC_SUCCESSOR}); the pair
+ * (saved id, drawn id) is the {@link CollectionIdMap}. {@link #repointTombstones} then, after every registry row is in and
+ * before any child table loads, points each tombstone whose file successor id is mapped at that row's new id, one whose file
+ * successor id is NULL at the restored row of its {@code superseded_by} name (the R7 invariant), and leaves any other on its own
+ * id (a successor absent from the backup).
  *
  * <p><b>Relabel (RDR-229 item 10).</b> A label of the minted form ({@link CollectionLabel#isMintedForm}, {@code c<digits>}) is the
  * SOURCE install's own: it was {@code "c" + id} there, and the restore gives the row a new id. So {@link #relabelRegistry} rewrites
  * each such registry row's {@code name} (and any {@code superseded_by} that names it) to {@link CollectionLabel#mintedLabel} of the
  * new id, keeping {@code label == "c" + collection_id} (the minter's invariant), and {@link #relabelNames} carries the same
  * old-to-new map into every name column the fill joins on and into a chunk's {@code origin_collection} tag, in one pass per
- * column (the maps overlap when the backup comes from another installation, so a second pass would rename twice). A label that is
+ * column, before {@link #fillIds} (the maps overlap when the backup comes from another installation, so a second pass would rename twice). A label that is
  * not of the minted form is kept. A note's {@code source_uri} ({@code nx-note://<label>/...}) follows its collection, as
  * {@link NoteUri#moveTo} does for a rename. Each relabel that changes a label is reported, as the recovery bundle's {@code collections_relabelled} does.
  *
- * <p><b>Refusal.</b> {@link #refuseOrphans} runs before the first real-table insert: a non-empty name with no registry row
- * in the backup is {@code restore_orphan_collection}, naming each table, the count and an example name, and nothing is
- * written.
+ * <p><b>Refusal.</b> {@link #refuseOrphans} runs before the first real-table insert, on the stages: a non-null twin that the
+ * file's registry does not hold once is {@link #ORPHAN_ID_CODE}, a NULL-twin row with a non-empty name that no registry row
+ * of the backup holds is {@link #ORPHAN_CODE}, and one whose name another row of the table carries with a different collection's
+ * id is {@link #AMBIGUOUS_CODE}; each names the table and column, the count and an example, and nothing is written.
  *
- * <p>Entry for a table: {@link #fill(DSLContext, String, ExportTable, Stage, CollectionIdMap)}. P3.1 passes
- * {@link CollectionIdMap#empty()}; P3.11 adds a by-id rule beside {@link #fillByName} and the map. The name and id
- * columns come from {@code db/rdr229/p31-checks.tsv}, the one list the expand's changesets are pinned to.
+ * <p>The quarantine tag {@link QuarantineOrigin#ORIGIN_ID_KEY} of a chunk's metadata: an id the map holds is mapped, any other id
+ * is stripped (never resolved by the tag's name, which may be stale), and a tag with no id key is left as it is.
+ *
+ * <p>Entry for a table: {@link #fill}, which returns the map and the registry's relabels ({@link Filled}). The name and id columns come from {@code db/rdr229/p31-checks.tsv}, the one list the
+ * expand's changesets are pinned to.
  */
 final class RestoreIdFill {
 
     /** The stable code at the head of the orphan refusal. */
     static final String ORPHAN_CODE = "restore_orphan_collection";
+
+    /** The stable code at the head of the by-id refusal: a row's collection id that the backup's registry does not hold. */
+    static final String ORPHAN_ID_CODE = "restore_orphan_collection_id";
+
+    /** The stable code at the head of the cross-check refusal: a NULL-twin name that another row of the table carries with another collection's id. */
+    static final String AMBIGUOUS_CODE = "restore_ambiguous_collection_name";
+
+    /** The registry stage's columns that keep the file's own {@code collection_id} and {@code superseded_by_id}. */
+    static final String SRC_ID = "src_collection_id";
+    static final String SRC_SUCCESSOR = "src_superseded_by_id";
 
     private static final String REGISTRY = "catalog_collections";
     private static final String CHUNKS = "chunks";
@@ -78,6 +111,7 @@ final class RestoreIdFill {
     /** The session's temp table of the relabel: the backup's minted-form label and the label of the row's new id. */
     private static final String RELABEL = "nx_imp_relabel";
     private static final int RELABEL_ROWS_PER_INSERT = 2000;
+
 
     /** A name column and the id column beside it; {@code history}: a log table's label, with no CHECK. */
     private record Pair(String nameColumn, String idColumn, boolean history) {
@@ -130,62 +164,124 @@ final class RestoreIdFill {
 
     // ── the refusal ─────────────────────────────────────────────────────────────────────────────
 
-    /** Refuses a backup with a non-empty collection name that no registry row of the backup holds. Writes nothing. */
+    /**
+     * Refuses a backup with a collection that its registry does not hold, by the rule of the fill: a non-null twin is checked
+     * by id against the registry stage's own {@code collection_id} (the file's, still unmapped here; an id held by more than
+     * one registry row is ambiguous and counts as not held), a NULL-twin row by its name. Writes nothing.
+     */
     static void refuseOrphans(DSLContext ctx, Map<String, TablePlan> plan, Map<String, Stage> stages) {
         Stage registry = stages.get(REGISTRY);
-        List<String> found = new ArrayList<>();
+        boolean registryHasIds = registry != null && stageHasColumn(ctx, registry, "collection_id");
+        List<String> byName = new ArrayList<>();
+        List<String> byId = new ArrayList<>();
+        List<String> ambiguous = new ArrayList<>();
         for (ExportTable e : TenantExport.TABLES) {
             TablePlan tp = plan.get(e.name());
             Stage st = stages.get(e.name());
             if (tp == null || st == null || !tp.loads()) continue;
             for (Pair p : PAIRS.getOrDefault(e.name(), List.of())) {
-                if (p.history() || !stageHasColumn(ctx, st, p.nameColumn())) continue;
+                if (p.history()) continue;
+                boolean hasName = stageHasColumn(ctx, st, p.nameColumn());
+                boolean hasId = stageHasColumn(ctx, st, p.idColumn());
+                if (!hasName && !hasId) continue;
                 Table<?> rows = TenantImportStaging.stageTable(st).as("s");
-                Field<String> name = DSL.field(DSL.name("s", p.nameColumn()), SQLDataType.VARCHAR);
-                Condition orphan = name.isNotNull().and(name.ne(""));
-                if (registry != null) {
-                    Table<?> r = TenantImportStaging.stageTable(registry).as("r");
-                    orphan = orphan.and(DSL.notExists(DSL.selectOne().from(r)
-                        .where(DSL.field(DSL.name("r", "name"), SQLDataType.VARCHAR).eq(name))));
+                Field<Long> twin = DSL.field(DSL.name("s", p.idColumn()), SQLDataType.BIGINT);
+                if (hasId) {
+                    Condition orphan = twin.isNotNull();
+                    if (registryHasIds) {
+                        Table<?> r = TenantImportStaging.stageTable(registry).as("r");
+                        Field<Long> held = DSL.field(DSL.name("r", "collection_id"), SQLDataType.BIGINT);
+                        orphan = orphan.and(DSL.not(twin.in(DSL.select(held).from(r).where(held.isNotNull())
+                            .groupBy(held).having(DSL.count().eq(1)))));
+                    }
+                    Record2<Integer, Long> row = ctx.select(DSL.count(), DSL.min(twin)).from(rows).where(orphan).fetchOne();
+                    if (row != null && row.value1() > 0) {
+                        byId.add(e.name() + "." + p.idColumn() + ": " + row.value1() + " row" + (row.value1() == 1 ? "" : "s")
+                            + " carry a collection id that the backup's registry does not hold exactly once (for example "
+                            + row.value2() + ")");
+                    }
                 }
-                Record2<Integer, String> row = ctx.select(DSL.count(), DSL.min(name)).from(rows).where(orphan).fetchOne();
-                if (row != null && row.value1() > 0) {
-                    found.add(e.name() + "." + p.nameColumn() + ": " + row.value1() + " row" + (row.value1() == 1 ? "" : "s")
-                        + " name a collection with no registry row in the backup (for example '" + row.value2() + "')");
+                if (hasName) {
+                    Field<String> name = DSL.field(DSL.name("s", p.nameColumn()), SQLDataType.VARCHAR);
+                    Condition orphan = name.isNotNull().and(name.ne(""));
+                    if (hasId) orphan = orphan.and(twin.isNull());
+                    if (registry != null) {
+                        Table<?> r = TenantImportStaging.stageTable(registry).as("r");
+                        orphan = orphan.and(DSL.notExists(DSL.selectOne().from(r)
+                            .where(DSL.field(DSL.name("r", "name"), SQLDataType.VARCHAR).eq(name))));
+                    }
+                    if (hasId && registryHasIds) {
+                        // a NULL-twin row whose name another row of the table carries with the id of a different collection
+                        Table<?> o = TenantImportStaging.stageTable(st).as("o");
+                        Table<?> r2 = TenantImportStaging.stageTable(registry).as("r2");
+                        Field<String> otherName = DSL.field(DSL.name("o", p.nameColumn()), SQLDataType.VARCHAR);
+                        Field<Long> otherTwin = DSL.field(DSL.name("o", p.idColumn()), SQLDataType.BIGINT);
+                        Field<Long> own = DSL.field(DSL.select(DSL.field(DSL.name("r2", "collection_id"), SQLDataType.BIGINT)).from(r2)
+                            .where(DSL.field(DSL.name("r2", "name"), SQLDataType.VARCHAR).eq(name)));
+                        Condition clash = name.isNotNull().and(name.ne("")).and(twin.isNull())
+                            .and(DSL.exists(DSL.selectOne().from(o).where(otherName.eq(name)).and(otherTwin.isNotNull())
+                                .and(otherTwin.isDistinctFrom(own))));
+                        Record2<Integer, String> amb = ctx.select(DSL.count(), DSL.min(name)).from(rows).where(clash).fetchOne();
+                        if (amb != null && amb.value1() > 0) {
+                            ambiguous.add(e.name() + "." + p.nameColumn() + ": " + amb.value1() + " row" + (amb.value1() == 1 ? "" : "s")
+                                + " name '" + amb.value2() + "' with no collection id, while other rows of the table carry that name "
+                                + "with the id of another collection");
+                        }
+                    }
+                    Record2<Integer, String> row = ctx.select(DSL.count(), DSL.min(name)).from(rows).where(orphan).fetchOne();
+                    if (row != null && row.value1() > 0) {
+                        byName.add(e.name() + "." + p.nameColumn() + ": " + row.value1() + " row" + (row.value1() == 1 ? "" : "s")
+                            + " name a collection with no registry row in the backup (for example '" + row.value2() + "')");
+                    }
                 }
             }
         }
-        if (!found.isEmpty()) {
-            throw new LoadFailedException(ORPHAN_CODE + ": " + String.join("; ", found)
+        List<String> parts = new ArrayList<>();
+        if (!byName.isEmpty()) {
+            parts.add(ORPHAN_CODE + ": " + String.join("; ", byName)
                 + "; a restored row must name a collection the backup's registry holds");
         }
+        if (!byId.isEmpty()) {
+            parts.add(ORPHAN_ID_CODE + ": " + String.join("; ", byId)
+                + "; a restored row's collection id must be one the backup's registry holds");
+        }
+        if (!ambiguous.isEmpty()) {
+            parts.add(AMBIGUOUS_CODE + ": " + String.join("; ", ambiguous)
+                + "; the backup contradicts itself about which collection the name means");
+        }
+        if (!parts.isEmpty()) throw new LoadFailedException(String.join("; ", parts));
     }
 
     // ── the fill ────────────────────────────────────────────────────────────────────────────────
 
+    /** What {@link #fill} gives back: the map after this table, and the registry's relabels (empty for every other table). */
+    record Filled(CollectionIdMap map, List<Relabel> relabelled) {
+    }
+
     /**
-     * Fills {@code table}'s ids on its stage, before the table's insert: the registry draws its own ids, every other table
-     * takes them by name from the restored registry rows.
+     * Fills {@code table}'s ids on its stage, before the table's insert: the registry draws its own ids, builds the map, and
+     * relabels its minted-form labels to the new ids' labels; every other table first takes the relabel in its name columns,
+     * then its ids by the rule in the class comment.
      *
      * @param tenant         the restoring tenant
      * @param rows           the table's stage
-     * @param sourceToTarget the map from the backup's ids to the restored ones: always empty in P3.1 (P3.11 adds the by-id rule)
-     * @return the registry's relabels (a minted-form label and the label of the row's new id), empty for every other table
+     * @param sourceToTarget the map so far: empty until the registry's fill builds it
+     * @return the map after this table (the registry's fill returns the one it built, any other table the one it was given),
+     *         and the registry's relabels (a minted-form label and the label of the row's new id), empty for every other table
      */
-    static List<Relabel> fill(DSLContext ctx, String tenant, ExportTable table, Stage rows, CollectionIdMap sourceToTarget) {
-        if (!sourceToTarget.isEmpty()) {
-            throw new IllegalStateException("filling collection ids by id arrives with RDR-229 P3.11 (nexus-p2m1x.31)");
-        }
+    static Filled fill(DSLContext ctx, String tenant, ExportTable table, Stage rows, CollectionIdMap sourceToTarget) {
+        CollectionIdMap map = sourceToTarget;
         List<Relabel> relabelled = List.of();
         if (REGISTRY.equals(table.name())) {
             drawRegistryIds(ctx, rows);
+            map = buildMap(ctx, rows);
             relabelled = relabelRegistry(ctx, rows);
         } else {
             relabelNames(ctx, table, rows);
         }
-        fillByName(ctx, tenant, table, rows);
-        if (CHUNKS.equals(table.name())) refillOriginTag(ctx, tenant, rows);
-        return relabelled;
+        fillIds(ctx, tenant, table, rows, map);
+        if (CHUNKS.equals(table.name())) refillOriginTag(ctx, rows, map);
+        return new Filled(map, relabelled);
     }
 
     /**
@@ -225,7 +321,7 @@ final class RestoreIdFill {
     /**
      * Carries {@link #relabelRegistry}'s map into {@code table}'s stage: every name column of the expand's list that the stage
      * holds takes the new label of a collection the registry relabelled, and a chunk's {@code origin_collection} tag follows
-     * it. Run before {@link #fillByName}, which joins the restored registry on the name. A no-op when nothing was relabelled.
+     * it. Run before {@link #fillIds}, whose by-name rule joins the restored registry on the name. A no-op when nothing was relabelled.
      */
     private static void relabelNames(DSLContext ctx, ExportTable table, Stage rows) {
         if (!tempTableExists(ctx, RELABEL)) return;
@@ -300,15 +396,19 @@ final class RestoreIdFill {
 
     /**
      * A quarantined chunk's metadata tags its origin by name ({@code origin_collection}) and by id
-     * ({@link QuarantineOrigin#ORIGIN_ID_KEY}). The id is the backup's installation's; a restore mints new ids, so it is refilled
-     * the way the twins are: from the restored registry row of the tag's name, or stripped when that name has no registry row
-     * (or the tag has no name). Every other key of the metadata is kept. A row without the key is not written.
+     * ({@link QuarantineOrigin#ORIGIN_ID_KEY}). The id is the backup's installation's; a restore mints new ids, so a tag that
+     * has the key gets the id the map holds for it, or loses the key when the map holds none (the name beside it is not
+     * consulted: from P3.7 it may be a stale label, or another collection's). Every other key of the metadata is kept. A row
+     * without the key is not written.
      */
-    private static void refillOriginTag(DSLContext ctx, String tenant, Stage rows) {
+    private static void refillOriginTag(DSLContext ctx, Stage rows, CollectionIdMap map) {
         if (!stageHasColumn(ctx, rows, "metadata")) return;
         Field<JSONB> metadata = DSL.field(DSL.name("s", "metadata"), SQLDataType.JSONB);
-        Field<String> originName = DSL.function("jsonb_extract_path_text", SQLDataType.VARCHAR, metadata, DSL.val("origin_collection"));
-        Field<Long> restored = CollectionIds.idOf(DSL.val(tenant), originName);
+        Field<String> originIdText = DSL.function("jsonb_extract_path_text", SQLDataType.VARCHAR, metadata,
+            DSL.val(QuarantineOrigin.ORIGIN_ID_KEY));
+        Field<Long> sourceId = DSL.when(originIdText.likeRegex("^[0-9]{1,18}$"), originIdText.cast(SQLDataType.BIGINT))
+            .otherwise(DSL.castNull(SQLDataType.BIGINT));
+        Field<Long> restored = map.target(sourceId);
         Field<JSONB> refilled = DSL.function("jsonb_set", SQLDataType.JSONB, metadata,
             DSL.val(new String[] {QuarantineOrigin.ORIGIN_ID_KEY}), DSL.function("to_jsonb", SQLDataType.JSONB, restored));
         Field<JSONB> stripped = DSL.function("jsonb_delete", SQLDataType.JSONB, metadata, DSL.val(QuarantineOrigin.ORIGIN_ID_KEY));
@@ -319,35 +419,65 @@ final class RestoreIdFill {
     }
 
     /** The step that follows {@code table}'s insert: after the registry, the tombstones' second pass. */
-    static void afterLoad(DSLContext ctx, String tenant, ExportTable table) {
-        if (REGISTRY.equals(table.name())) repointTombstones(ctx, tenant);
+    static void afterLoad(DSLContext ctx, String tenant, ExportTable table, Stage rows, CollectionIdMap map) {
+        if (REGISTRY.equals(table.name())) repointTombstones(ctx, tenant, rows, map);
     }
 
     /**
-     * Every staged row takes the id of the restored registry row on (tenant, name), whatever the file's own value was (a file's
-     * ids are another installation's and are never trusted); an empty or unresolved name gives NULL.
+     * Every staged row's id, by the rule of the class comment: a non-null twin through the map (NULL when the map does not hold
+     * it, which only a history table can reach, as {@link #refuseOrphans} refused the rest), a NULL or absent twin by the
+     * restored registry row on (tenant, name); an empty or unresolved name gives NULL. A history row with a NULL twin is
+     * filled by name only for a file that predates the ids. A non-history row with an id then takes its collection's current name.
      */
-    private static void fillByName(DSLContext ctx, String tenant, ExportTable table, Stage rows) {
+    private static void fillIds(DSLContext ctx, String tenant, ExportTable table, Stage rows, CollectionIdMap map) {
         for (Pair p : PAIRS.getOrDefault(table.name(), List.of())) {
-            if (!stageHasColumn(ctx, rows, p.nameColumn())) continue;
+            boolean hasName = stageHasColumn(ctx, rows, p.nameColumn());
+            boolean hasId = stageHasColumn(ctx, rows, p.idColumn());
+            if (!hasName && !hasId) continue;
             Field<Long> id = DSL.field(DSL.name(p.idColumn()), SQLDataType.BIGINT);
-            ctx.alterTable(TenantImportStaging.stageTable(rows)).addColumnIfNotExists(id).execute();
-            Field<String> name = DSL.field(DSL.name("s", p.nameColumn()), SQLDataType.VARCHAR);
+            if (!hasId) ctx.alterTable(TenantImportStaging.stageTable(rows)).addColumn(id).execute();
+            Field<Long> twin = DSL.field(DSL.name("s", p.idColumn()), SQLDataType.BIGINT);
+            // a history row keeps a NULL twin unless the file predates the id columns: its label may be an old one
+            boolean nameFillsNullTwin = hasName && (!p.history() || !map.fileCarriesIds());
+            Field<Long> byName = nameFillsNullTwin
+                ? CollectionIds.idOf(DSL.val(tenant), DSL.field(DSL.name("s", p.nameColumn()), SQLDataType.VARCHAR))
+                : DSL.castNull(SQLDataType.BIGINT);
             ctx.update(TenantImportStaging.stageTable(rows).as("s"))
-                .set(id, CollectionIds.idOf(DSL.val(tenant), name))
+                .set(id, DSL.when(twin.isNotNull(), map.target(twin)).otherwise(byName))
                 .execute();
+            if (hasName && !p.history()) {
+                // the row's name becomes its collection's current name, so a stale label never reaches a name key the target keeps
+                var current = CATALOG_COLLECTIONS.as("cur");
+                Field<String> currentName = DSL.field(DSL.select(current.NAME).from(current)
+                    .where(current.TENANT_ID.eq(tenant)).and(current.COLLECTION_ID.eq(twin)));
+                ctx.update(TenantImportStaging.stageTable(rows).as("s"))
+                    .set(DSL.field(DSL.name(p.nameColumn()), SQLDataType.VARCHAR),
+                        DSL.coalesce(currentName, DSL.field(DSL.name("s", p.nameColumn()), SQLDataType.VARCHAR)))
+                    .where(twin.isNotNull())
+                    .execute();
+            }
         }
     }
 
     /**
      * Gives every staged registry row its id from the column's own sequence and each tombstone the same value as its
-     * {@code superseded_by_id}. A file's own {@code collection_id} is overwritten: it is another installation's.
+     * {@code superseded_by_id}. A file's own {@code collection_id} and {@code superseded_by_id} are another installation's:
+     * they are saved to {@link #SRC_ID} and {@link #SRC_SUCCESSOR} first (NULL where the file has no such column), then
+     * overwritten.
      */
     private static void drawRegistryIds(DSLContext ctx, Stage rows) {
         Table<?> stage = TenantImportStaging.stageTable(rows);
         Field<Long> id = DSL.field(DSL.name("collection_id"), SQLDataType.BIGINT);
         Field<Long> successor = DSL.field(DSL.name("superseded_by_id"), SQLDataType.BIGINT);
         Field<String> supersededBy = DSL.field(DSL.name("superseded_by"), SQLDataType.VARCHAR);
+        Field<Long> srcId = DSL.field(DSL.name(SRC_ID), SQLDataType.BIGINT);
+        Field<Long> srcSuccessor = DSL.field(DSL.name(SRC_SUCCESSOR), SQLDataType.BIGINT);
+        boolean hadId = stageHasColumn(ctx, rows, "collection_id");
+        boolean hadSuccessor = stageHasColumn(ctx, rows, "superseded_by_id");
+        ctx.alterTable(stage).addColumnIfNotExists(srcId).execute();
+        ctx.alterTable(stage).addColumnIfNotExists(srcSuccessor).execute();
+        if (hadId) ctx.update(stage).set(srcId, id).execute();
+        if (hadSuccessor) ctx.update(stage).set(srcSuccessor, successor).execute();
         ctx.alterTable(stage).addColumnIfNotExists(id).execute();
         ctx.alterTable(stage).addColumnIfNotExists(successor).execute();
         ctx.alterTable(stage).addColumnIfNotExists(supersededBy).execute();
@@ -360,18 +490,56 @@ final class RestoreIdFill {
     }
 
     /**
-     * After every registry row is in: each tombstone whose {@code superseded_by} names a restored row takes that row's id
-     * (R7), replacing the self id the insert gave it. One whose successor is not in the backup keeps the self id.
-     * P3.11 extends this to map a non-null source successor id through its map, by name as the fallback.
+     * The map of this load: the registry stage's saved file id to its drawn id, for each file id the file's registry holds once.
+     * A file with no ids (before P3.1) gives an empty table, so every row of it is filled by name.
      */
-    static void repointTombstones(DSLContext ctx, String tenant) {
-        var t = CATALOG_COLLECTIONS.as("t");
-        var s = CATALOG_COLLECTIONS.as("succ");
-        List<String> names = ctx.selectDistinct(t.SUPERSEDED_BY).from(t).join(s)
-            .on(s.TENANT_ID.eq(t.TENANT_ID)).and(s.NAME.eq(t.SUPERSEDED_BY))
+    private static CollectionIdMap buildMap(DSLContext ctx, Stage registry) {
+        ctx.createTemporaryTable(DSL.name(CollectionIdMap.TABLE))
+            .column(CollectionIdMap.SOURCE, SQLDataType.BIGINT.nullable(false))
+            .column(CollectionIdMap.TARGET, SQLDataType.BIGINT.nullable(false))
+            .constraints(DSL.primaryKey(CollectionIdMap.SOURCE))
+            .onCommitDrop().execute();
+        Table<?> s = TenantImportStaging.stageTable(registry).as("s");
+        Field<Long> source = DSL.field(DSL.name("s", SRC_ID), SQLDataType.BIGINT);
+        Field<Long> drawn = DSL.field(DSL.name("s", "collection_id"), SQLDataType.BIGINT);
+        ctx.insertInto(DSL.table(DSL.name(CollectionIdMap.TABLE)),
+                DSL.field(DSL.name(CollectionIdMap.SOURCE), SQLDataType.BIGINT), DSL.field(DSL.name(CollectionIdMap.TARGET), SQLDataType.BIGINT))
+            .select(ctx.select(source, DSL.min(drawn)).from(s).where(source.isNotNull()).groupBy(source).having(DSL.count().eq(1)))
+            .execute();
+        boolean carriesIds = ctx.fetchExists(ctx.selectOne().from(s).where(source.isNotNull()));
+        return new CollectionIdMap(CollectionIdMap.TABLE, carriesIds);
+    }
+
+    /**
+     * After every registry row is in: each tombstone takes its successor's id (R7), replacing the self id the insert gave it.
+     * <ul>
+     *   <li>A file successor id that the map holds: the mapped id. The tombstone's {@code superseded_by} name is not read (from
+     *       P3.7 it may be a stale label, or another collection's).</li>
+     *   <li>A NULL file successor id (a file from before P3.1, or a row stamped late): the id of the restored row that
+     *       {@code superseded_by} names, when there is one.</li>
+     *   <li>Any other keeps the self id, as a successor absent from the backup does.</li>
+     * </ul>
+     */
+    static void repointTombstones(DSLContext ctx, String tenant, Stage rows, CollectionIdMap map) {
+        var t = CATALOG_COLLECTIONS;
+        Table<?> s = TenantImportStaging.stageTable(rows).as("s");
+        Field<Long> drawn = DSL.field(DSL.name("s", "collection_id"), SQLDataType.BIGINT);
+        Field<Long> fileSuccessor = DSL.field(DSL.name("s", SRC_SUCCESSOR), SQLDataType.BIGINT);
+        if (!map.isEmpty()) {
+            Field<Long> mapped = DSL.field(DSL.select(map.target(fileSuccessor)).from(s).where(drawn.eq(t.COLLECTION_ID)));
+            ctx.update(t).set(t.SUPERSEDED_BY_ID, mapped)
+                .where(t.TENANT_ID.eq(tenant)).and(t.SUPERSEDED_BY.ne(""))
+                .and(mapped.isNotNull()).and(t.SUPERSEDED_BY_ID.isDistinctFrom(mapped))
+                .execute();
+        }
+        var reg = CATALOG_COLLECTIONS.as("reg");
+        Field<Long> registered = DSL.field(DSL.select(reg.COLLECTION_ID).from(reg)
+            .where(reg.TENANT_ID.eq(t.TENANT_ID)).and(reg.NAME.eq(t.SUPERSEDED_BY)));
+        ctx.update(t).set(t.SUPERSEDED_BY_ID, registered)
             .where(t.TENANT_ID.eq(tenant)).and(t.SUPERSEDED_BY.ne(""))
-            .fetch(t.SUPERSEDED_BY);
-        CollectionTombstones.repointTombstonesNaming(ctx, tenant, names);
+            .and(t.COLLECTION_ID.in(DSL.select(drawn).from(s).where(fileSuccessor.isNull())))
+            .and(registered.isNotNull()).and(t.SUPERSEDED_BY_ID.isDistinctFrom(registered))
+            .execute();
     }
 
     // ── the stage's columns ─────────────────────────────────────────────────────────────────────
@@ -383,6 +551,7 @@ final class RestoreIdFill {
             .where(DSL.field(DSL.name("c", "relname"), String.class).eq(name))
             .and(DSL.field(DSL.name("c", "relnamespace"), Long.class).eq(DSL.function("pg_my_temp_schema", Long.class))));
     }
+
 
     /** True when the session's temp table of {@code st} has {@code column} (a stage has the FILE's columns, not the target's). */
     private static boolean stageHasColumn(DSLContext ctx, Stage st, String column) {

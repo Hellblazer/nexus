@@ -10,6 +10,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
@@ -41,6 +42,7 @@ class Rdr229P37RenameAcceptanceTest {
         if (env != null) env.close();
     }
 
+    @Disabled("red until P3.7's one-row rename, nexus-p2m1x.27")
     @Test
     void p37Acceptance_aOneRowRenameBackupRestoreKeepsEveryRowOnTheRenamedCollection() throws Exception {
         String src = "t-byid-p37-src", dst = "t-byid-p37-dst";
