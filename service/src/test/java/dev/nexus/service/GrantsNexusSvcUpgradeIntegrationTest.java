@@ -267,13 +267,19 @@ class GrantsNexusSvcUpgradeIntegrationTest {
         // sequence-heal function reads catalog_collections.collection_id, which vectors-068 adds; left in, the old walk fails
         // there with 'column c.collection_id does not exist' (chas run of 32fc5c484b). collections-001 and -003 go with it: the
         // old state predates P3.8 as a whole, and the new boot applies all three.
+        //
+        // RDR-229 P3.5b (nexus-p2m1x.24): the reader redefinitions read the collection_id columns vectors-068 adds, so they are as
+        // unborn as it is: left in, the old walk fails at vectors-077-1 (hybrid_search_1024) with 'column c.collection_id does not
+        // exist'. A real database from before the registry walks vectors-068 before them; the new boot applies both files.
         for (String unborn : List.of("db/changelog/datamoves-002-verify-statement-timeout.xml",
                 "db/changelog/vectors-068-collection-id-expand.xml",
                 "db/changelog/vectors-069-collection-id-dual-write-functions.xml",
                 "db/changelog/vectors-070-collection-id-stamp-moves.xml",
                 "db/changelog/collections-001-tuple-unique-index.xml",
                 "db/changelog/collections-002-collection-id-seq-heal-function.xml",
-                "db/changelog/collections-003-tuple-lock-stripes.xml")) {
+                "db/changelog/collections-003-tuple-lock-stripes.xml",
+                "db/changelog/vectors-077-rdr229-p35b-readers-both.xml",
+                "db/changelog/vectors-078-rdr229-p35b-readers-continue.xml")) {
             if (!stripped.contains(unborn)) {
                 stripped.add(unborn);
             }
@@ -284,6 +290,8 @@ class GrantsNexusSvcUpgradeIntegrationTest {
                 "db/changelog/vectors-069-collection-id-dual-write-functions.xml",
                 "db/changelog/vectors-070-collection-id-stamp-moves.xml",
                 "db/changelog/collections-002-collection-id-seq-heal-function.xml",
+                "db/changelog/vectors-077-rdr229-p35b-readers-both.xml",
+                "db/changelog/vectors-078-rdr229-p35b-readers-continue.xml",
                 "db/changelog/catalog-052-residue-moves-supersede.xml");
         for (String registering : stripped) {
             String include = "<include file=\"" + registering + "\"/>";
