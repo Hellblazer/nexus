@@ -56,10 +56,12 @@ import java.util.TreeSet;
  *   <li>also both P3.3c swap moves and the three child validation moves ({@link ReadSet#p33c()}): P3.4's builds start. The swap
  *       of chunks is complete only while the RDR-225 composite on the id is present and validated, and a child validation label
  *       only while its id key into the chunks id key is present and validated (the twin rule of P3.3a's labels);</li>
- *   <li>also P3.4 complete on the install, per residual S-2 (nexus-p2m1x.40): every collection the planner would index has a
- *       VALID id-predicate index, read from the registry and the index catalog, never from the existence of name indexes
- *       (the planner drops a name index before it builds, so counting them passes early). {@link Gate3Source} supplies the
- *       two sets; until P3.4 ships one, gate 3 does not hold.</li>
+ *   <li>also P3.4 complete on the install, per residual S-2 (nexus-p2m1x.40) and linda's rulings of 2026-11-22: the PCI clause
+ *       ({@link Gate3Source}, {@code PciGate3Coverage}). It is read from the database, so every engine, a standby included,
+ *       computes the same answer: every collection the planner indexes by name has a VALID id-predicate index, and an id index
+ *       counts as covered whether or not its name index is gone (the name family retires after gate 3, and that must not flip it).
+ *       With per-collection indexing off ({@code NX_SEARCH_PCI=0}) the clause is not applicable ({@link IdIndexCoverage#pciOff}).
+ *       A store with no index of either kind but a collection at the build threshold does not pass.</li>
  * </ol>
  * Every gate also refuses while {@value #SUPERSEDED_BY_CHECK} is missing (linda's ruling 2026-11-21, item c): that CHECK
  * waits on D2's data (vectors-068-19) and lands on a later boot, and the switch must not run without it.
@@ -164,11 +166,33 @@ public final class CompletionCheck {
      * rows, not backed off, within the cap ranking), the ones with a VALID id-predicate index, and the ones whose id index is
      * INVALID. Keys are whatever identifies a collection to the caller; the check only compares them.
      */
-    public record IdIndexCoverage(Set<String> planned, Set<String> validIdIndexed, Set<String> invalidIdIndexed) {
+    public record IdIndexCoverage(Set<String> planned, Set<String> validIdIndexed, Set<String> invalidIdIndexed,
+                                  boolean notApplicable, boolean nothingToIndex) {
         public IdIndexCoverage {
             planned = Set.copyOf(planned);
             validIdIndexed = Set.copyOf(validIdIndexed);
             invalidIdIndexed = Set.copyOf(invalidIdIndexed);
+        }
+
+        /** Coverage over the keys the source read; neither not-applicable nor a verified empty store. */
+        public IdIndexCoverage(Set<String> planned, Set<String> validIdIndexed, Set<String> invalidIdIndexed) {
+            this(planned, validIdIndexed, invalidIdIndexed, false, false);
+        }
+
+        /**
+         * The PCI clause does not apply: per-collection indexing is off ({@code NX_SEARCH_PCI=0}), so no per-collection index exists to
+         * replace. Reported like {@link StampLabels#NOT_APPLICABLE_WHEN_ABSENT}: gate 3 then rests on its other conditions.
+         */
+        public static IdIndexCoverage pciOff() {
+            return new IdIndexCoverage(Set.of(), Set.of(), Set.of(), true, false);
+        }
+
+        /**
+         * The source read no index of either kind and verified that no live collection reaches the build threshold: there is nothing to
+         * index, so an empty plan is not the quiet planner the empty-plan veto guards against.
+         */
+        public static IdIndexCoverage verifiedEmpty() {
+            return new IdIndexCoverage(Set.of(), Set.of(), Set.of(), false, true);
         }
 
         /** Planned collections with no VALID id index: missing, or INVALID. */
@@ -182,10 +206,10 @@ public final class CompletionCheck {
     /** Where gate 3 reads P3.4's state. */
     @FunctionalInterface
     public interface Gate3Source {
-        /** Empty when no id-predicate index reader exists in this release: gate 3 then does not hold. */
+        /** Empty when the source could not read its state (no source installed, the catalog unreadable): gate 3 then does not hold. */
         Optional<IdIndexCoverage> read(DSLContext ctx);
 
-        /** This release builds no id-predicate index, so gate 3 cannot hold. */
+        /** No source installed (a test, or an engine built without the PCI reconciler): gate 3 cannot hold. */
         Gate3Source NOT_INSTALLED = ctx -> Optional.empty();
     }
 
@@ -231,11 +255,20 @@ public final class CompletionCheck {
      * @param violators               tables whose stamp is done and whose CHECK is still NOT VALID, with the rows that violate it
      * @param gate3Uncovered          planned collections with no VALID id index, when gate 3 was asked
      * @param gate3Why                why gate 3 does not hold, or empty
+     * @param gate3PciNotApplicable   the PCI clause of gate 3 did not apply ({@link IdIndexCoverage#pciOff()}: per-collection indexing is off)
      * @param dangling                R7's pre-flight: the registry's tombstones that name no successor, by content type
      */
     public record Result(boolean gate1, boolean gate2, boolean gate3, List<LabelState> labels, List<CheckState> checks,
                          boolean supersededByCheckPresent, long supersededByWaiting, List<Violators> violators,
-                         List<String> gate3Uncovered, String gate3Why, Dangling dangling) {
+                         List<String> gate3Uncovered, String gate3Why, Dangling dangling, boolean gate3PciNotApplicable) {
+
+        /** As above with the PCI clause applicable. */
+        public Result(boolean gate1, boolean gate2, boolean gate3, List<LabelState> labels, List<CheckState> checks,
+                      boolean supersededByCheckPresent, long supersededByWaiting, List<Violators> violators,
+                      List<String> gate3Uncovered, String gate3Why, Dangling dangling) {
+            this(gate1, gate2, gate3, labels, checks, supersededByCheckPresent, supersededByWaiting, violators, gate3Uncovered,
+                gate3Why, dangling, false);
+        }
 
         /** As above with no dangling-tombstone read (a caller that built the result by hand). */
         public Result(boolean gate1, boolean gate2, boolean gate3, List<LabelState> labels, List<CheckState> checks,
@@ -268,8 +301,17 @@ public final class CompletionCheck {
     }
 
     /**
-     * As above with {@code gate3Extras}: further conditions gate 3 needs beside P3.4's id-predicate indexes (linda 2026-11-22: the four
-     * runtime-built id UNIQUE indexes, {@code IdUniqueIndexPass.allValid}, wired in by that pass's branch). Each is read only once gate 2
+     * {@link #evaluate(DSLContext, ReadSet, Gate3Source, ViolatorCounter, List)} with the counter a running engine uses, for a caller outside this
+     * package that evaluates the gates against a real {@link Gate3Source} (RDR-229 P3.4's end-to-end test).
+     */
+    public static Result evaluate(DSLContext ctx, ReadSet readSet, Gate3Source gate3,
+                                  List<java.util.function.Predicate<DSLContext>> gate3Extras) {
+        return evaluate(ctx, readSet, gate3, DIRECT, gate3Extras);
+    }
+
+    /**
+     * As above with {@code gate3Extras}: further conditions gate 3 needs beside P3.4's id-predicate indexes (linda 2026-11-22: the
+     * runtime-built id UNIQUE indexes, {@code IdUniqueIndexPass.allValid}, which {@code Main} wires in). Each is read only once gate 2
      * holds and the PCI coverage is complete, on the check's read-only session; one that is false, or throws, keeps gate 3 closed.
      * Gate 3 implies gate 2 structurally: nothing past the gate-2 test below is read while gate 2 is false.
      */
@@ -311,6 +353,7 @@ public final class CompletionCheck {
         boolean gate2 = gate1 && readSet.gate2Labels().stream().allMatch(l -> states.get(l).satisfied());
 
         boolean gate3Holds = false;
+        boolean pciNotApplicable = false;
         List<String> uncovered = List.of();
         String why = "";
         if (!gate2) {
@@ -318,8 +361,15 @@ public final class CompletionCheck {
         } else {
             Optional<IdIndexCoverage> coverage = gate3.read(ctx);
             if (coverage.isEmpty()) {
-                why = "this release builds no id-predicate index (P3.4), so no collection has a valid one";
-            } else if (coverage.get().planned().isEmpty() && liveCollections(ctx, tables, null) > 0) {
+                why = "the PCI coverage (P3.4) is not installed or could not be read (no catalog, or no registry rows visible), so nothing says the id indexes exist";
+            } else if (coverage.get().notApplicable()) {
+                pciNotApplicable = true;
+                gate3Holds = extrasHold(ctx, gate3Extras);
+                if (!gate3Holds) {
+                    why = "a further gate 3 condition does not hold (the runtime-built id unique indexes)";
+                }
+            } else if (coverage.get().planned().isEmpty() && !coverage.get().nothingToIndex()
+                && liveCollections(ctx, tables, null) > 0) {
                 // Review F5: an empty plan over a populated registry is a planner that found nothing, or failed quietly; it
                 // is a pass only when there is nothing to plan.
                 // no count: the text goes out on the unauthenticated /v1/status, and a count of collections describes tenants
@@ -336,7 +386,7 @@ public final class CompletionCheck {
             }
         }
         return new Result(gate1, gate2, gate3Holds, List.copyOf(states.values()), List.copyOf(checks), supersededByPresent,
-            waiting, List.copyOf(violators), List.copyOf(uncovered), why, danglingTombstones(ctx, tables, null));
+            waiting, List.copyOf(violators), List.copyOf(uncovered), why, danglingTombstones(ctx, tables, null), pciNotApplicable);
     }
 
     private static boolean extrasHold(DSLContext ctx, List<java.util.function.Predicate<DSLContext>> extras) {

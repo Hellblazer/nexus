@@ -520,6 +520,10 @@ class MainPciWiringTest {
         String lambda = src.substring(gate, src.indexOf("});", gate));
         assertThat(lambda).contains("completionCheck.latest()").contains("latest != null").contains("latest.gate2()");
         assertThat(src.indexOf("pciReconciler.idBuildGate(", gate + 1)).as("wired once").isNegative();
+        int retire = src.indexOf("pciReconciler.retireNameIndexesWhen(");
+        assertThat(retire).as("the name family retires on the check's latest gate 3").isPositive();
+        String retireLambda = src.substring(retire, src.indexOf("});", retire));
+        assertThat(retireLambda).contains("completionCheck.latest()").contains("latest != null").contains("latest.gate3()");
     }
 
     /**

@@ -47,7 +47,11 @@ final class PciReindexState {
     record Subject(Leaf leaf, int dimension, Index index, IndexReading reading) { }
 
     /** A REINDEX that finished whose fresh anchor was not written: what the retry needs to write it. */
-    record Owed(Leaf leaf, int dimension, String collection) { }
+    record Owed(Leaf leaf, int dimension, String collection, Long collectionId) {
+        Owed(Leaf leaf, int dimension, String collection) {
+            this(leaf, dimension, collection, null);
+        }
+    }
 
     private final Map<String, Long> previousRows = new ConcurrentHashMap<>();
     private final Set<String> bulkOwed = ConcurrentHashMap.newKeySet();
@@ -90,7 +94,9 @@ final class PciReindexState {
         for (Look look : looks) {
             for (Index index : look.leaf().indexes()) {
                 IndexReading reading = look.readings().get(index.name());
-                if (reading == null || !index.parsed() || !index.valid() || dropped.contains(index.name())) {
+                // RDR-229 P3.4: an id-predicate index has the same lifecycle as a name one (its anchor, its REINDEX rules).
+                if (reading == null || !(index.parsed() || index.idParsed()) || !index.valid()
+                    || dropped.contains(index.name())) {
                     continue;
                 }
                 read.add(new Subject(look.leaf(), look.dimension(), index, reading));
@@ -120,7 +126,7 @@ final class PciReindexState {
                 previousRows.put(name, reading.rows());
                 continue;
             }
-            out.add(new PciReindexPolicy.Candidate(name, s.index().collection(), s.dimension(), reading.anchor(),
+            out.add(new PciReindexPolicy.Candidate(name, collectionLabel(s.index()), s.dimension(), reading.anchor(),
                 reading.bytes(), reading.rows(),
                 reading.writtenSince(), previousRows(name), bulkOwed.contains(name),
                 result == null ? null : result.state(), result == null ? 0 : result.queries(),
@@ -144,9 +150,22 @@ final class PciReindexState {
         anchorOwed.keySet().retainAll(present);
     }
 
+    /**
+     * What a REINDEX names as the index's collection: the collection of a name index, and for an id index (RDR-229 P3.4, which knows no
+     * name) {@code "#id:<id>"}. Never null, so it is never read as a leaf's own HNSW index.
+     */
+    static String collectionLabel(Index index) {
+        return index.idParsed() ? PciReconcilePlanner.idBackoffKey(index.collectionId()) : index.collection();
+    }
+
     /** The REINDEX of {@code index} finished and its fresh anchor was not written: retry it before judging the index. */
     void anchorOwed(String index, Leaf leaf, int dimension, String collection) {
         anchorOwed.put(index, new Owed(leaf, dimension, collection));
+    }
+
+    /** As above for an id-predicate index. */
+    void anchorOwed(String index, Leaf leaf, int dimension, String collection, Long collectionId) {
+        anchorOwed.put(index, new Owed(leaf, dimension, collection, collectionId));
     }
 
     /** The anchors still owed, by index name. */

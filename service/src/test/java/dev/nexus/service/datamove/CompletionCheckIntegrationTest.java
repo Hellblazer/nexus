@@ -520,6 +520,41 @@ class CompletionCheckIntegrationTest {
         assertThat(read[0]).isFalse();
     }
 
+    /** linda 2026-11-22: with per-collection indexing off the PCI clause is not applicable; gate 3 rests on the rest, the extras included. */
+    @Test
+    void withPciOffTheClauseIsNotApplicable_gate3ReachesHolding_andTheExtrasStillApply() {
+        PgContainerHelper.insertCollection(ctx, TENANT, COLLECTION);
+        try {
+            CompletionCheck.ReadSet rs = new CompletionCheck.ReadSet(List.of(), List.of());
+            CompletionCheck.Result r = CompletionCheck.evaluate(ctx, rs, c -> Optional.of(CompletionCheck.IdIndexCoverage.pciOff()),
+                CompletionCheck.DIRECT, List.of());
+            assertThat(r.gate2()).as("non-vacuity: gate 2 holds and a live collection is registered").isTrue();
+            assertThat(r.gate3()).as("a registered live collection and no PCI: not the empty-plan veto").isTrue();
+            assertThat(r.gate3PciNotApplicable()).isTrue();
+            assertThat(CompletionBootWork.summary(r)).contains("per-collection indexing is off");
+            CompletionCheck.Result refused = CompletionCheck.evaluate(ctx, rs,
+                c -> Optional.of(CompletionCheck.IdIndexCoverage.pciOff()), CompletionCheck.DIRECT, List.of(c -> false));
+            assertThat(refused.gate3()).as("the id unique indexes are still required").isFalse();
+            assertThat(withGate3(everyIndexValid()).gate3PciNotApplicable()).isFalse();
+        } finally {
+            emptyCollectionRegistry();
+        }
+    }
+
+    /** The empty-plan veto stays for an unverified empty plan; a source that verified nothing qualifies lifts it. */
+    @Test
+    void anEmptyPlanOverARegisteredCollection_failsUnlessTheSourceVerifiedThereIsNothingToIndex() {
+        PgContainerHelper.insertCollection(ctx, TENANT, COLLECTION);
+        try {
+            assertThat(withGate3(c -> Optional.of(new CompletionCheck.IdIndexCoverage(Set.of(), Set.of(), Set.of()))).gate3()).isFalse();
+            assertThat(withGate3(c -> Optional.of(CompletionCheck.IdIndexCoverage.verifiedEmpty())).gate3()).isTrue();
+            assertThat(withGate3(c -> Optional.of(new CompletionCheck.IdIndexCoverage(Set.of("unbuilt"), Set.of(), Set.of()))).gate3())
+                .as("a qualifying collection with no index").isFalse();
+        } finally {
+            emptyCollectionRegistry();
+        }
+    }
+
     @Test
     void gate2NeedsItsOwnLabelsOnTopOfGate1() {
         register("ext-gate1", "chunks", null);

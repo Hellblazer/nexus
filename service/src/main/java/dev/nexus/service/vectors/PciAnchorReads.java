@@ -173,6 +173,28 @@ final class PciAnchorReads {
         return n == null ? 0 : n;
     }
 
+    /** {@link #countRows} for the id predicate (RDR-229 P3.4): every row with this {@code collection_id} on the leaf of (model, tenant). */
+    static long countRowsById(DSLContext tx, String model, String tenant, long collectionId) {
+        Long n = tx.select(DSL.count()).from(dev.nexus.service.jooq.nexus.Tables.CHUNKS)
+            .where(dev.nexus.service.jooq.nexus.Tables.CHUNKS.EMBEDDING_MODEL.eq(model))
+            .and(dev.nexus.service.jooq.nexus.Tables.CHUNKS.TENANT_ID.eq(tenant))
+            .and(dev.nexus.service.jooq.nexus.Tables.CHUNKS.COLLECTION_ID.eq(collectionId))
+            .fetchOne(0, Long.class);
+        return n == null ? 0 : n;
+    }
+
+    /** {@link #writtenSince} for the id predicate. */
+    static long writtenSinceById(DSLContext tx, String model, String tenant, long collectionId, Instant builtAt) {
+        var chunks = dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+        Long n = tx.select(DSL.count()).from(chunks)
+            .where(chunks.EMBEDDING_MODEL.eq(model))
+            .and(chunks.TENANT_ID.eq(tenant))
+            .and(chunks.COLLECTION_ID.eq(collectionId))
+            .and(chunks.LAST_WRITTEN_AT.gt(OffsetDateTime.ofInstant(builtAt, ZoneOffset.UTC)))
+            .fetchOne(0, Long.class);
+        return n == null ? 0 : n;
+    }
+
     private static long nz(Long v) {
         return v == null ? 0 : v;
     }
