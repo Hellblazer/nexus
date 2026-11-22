@@ -18,7 +18,6 @@ import dev.nexus.service.vectors.PciBuilderSession.BuilderState;
 import org.jooq.DSLContext;
 import org.jooq.JSONB;
 import org.jooq.SQLDialect;
-import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
@@ -42,7 +41,6 @@ import java.util.stream.Collectors;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * RDR-229 P3.3b (nexus-p2m1x.20), the failing tests of the per-leaf unique-index pass ({@link LeafIndexPass}), against the real
@@ -76,6 +74,8 @@ class LeafIndexPassIntegrationTest {
     static final String ENGINE_VERSION = "9.9.9-p33b-test";
     static final String CHUNKS_SWAP = LeafIndexPass.swapLabel("chunks");
     static final String CENTROIDS_SWAP = LeafIndexPass.swapLabel("taxonomy_centroids");
+    static final org.jooq.Table<?> MOVES = DSL.table(DSL.name("nexus", "data_moves"));
+    static final org.jooq.Field<String> LABEL = DSL.field(DSL.name("label"), String.class);
 
     PostgreSQLContainer<?> pg;
     HikariDataSource adminDs;
@@ -131,7 +131,7 @@ class LeafIndexPassIntegrationTest {
 
     private void clean() throws Exception {
         asSuperuser(su -> {
-            su.execute("DELETE FROM nexus.data_moves WHERE label LIKE 'rdr229-swap-%'");
+            su.deleteFrom(MOVES).where(LABEL.like("rdr229-swap-%")).execute();
             IdKeyIndexProbe.reset(su);
             return null;
         });
@@ -171,6 +171,14 @@ class LeafIndexPassIntegrationTest {
             dev.nexus.service.jooq.nexus.Routines.createTenantPartitions(owner.configuration(), "nexus.taxonomy_centroids", tenant, true, true);
             return null;
         });
+        // A leaf made through the helper after the cut carries a unique id index of its own (vectors-073; tested in
+        // LeafIdUniqueIndexPartitionFunctionIntegrationTest). The pass is for the leaves that existed before the cut, which have none,
+        // so the fixture takes the helper's away: every test starts from leaves with no id index.
+        asSuperuser(su -> {
+            IdKeyIndexProbe.reset(su);
+            return null;
+        });
+        assertThat(everyIdIndex()).as("the fixture's leaves start with no id index").isEmpty();
         return tenant;
     }
 
@@ -237,7 +245,7 @@ class LeafIndexPassIntegrationTest {
     }
 
     void removeDuplicate(String tenant, String secondCollection) throws Exception {
-        asSuperuser(su -> su.execute("DELETE FROM nexus.chunks WHERE tenant_id = ? AND collection = ?", tenant, secondCollection));
+        asSuperuser(su -> su.deleteFrom(CHUNKS).where(CHUNKS.TENANT_ID.eq(tenant)).and(CHUNKS.COLLECTION.eq(secondCollection)).execute());
     }
 
     static String hash(String value, int hexChars) {
@@ -258,9 +266,10 @@ class LeafIndexPassIntegrationTest {
     }
 
     List<Map<String, Object>> swapRows() throws Exception {
-        return asSuperuser(su -> su.fetch("SELECT label, driving_schema, driving_table, template, verification, on_complete, "
-                + "changeset_id, completed_at, registered_at FROM nexus.data_moves WHERE label LIKE 'rdr229-swap-%' ORDER BY label")
-            .intoMaps());
+        return asSuperuser(su -> su.select(LABEL, DSL.field(DSL.name("driving_schema")), DSL.field(DSL.name("driving_table")),
+                DSL.field(DSL.name("template")), DSL.field(DSL.name("verification")), DSL.field(DSL.name("on_complete")),
+                DSL.field(DSL.name("changeset_id")), DSL.field(DSL.name("completed_at")), DSL.field(DSL.name("registered_at")))
+            .from(MOVES).where(LABEL.like("rdr229-swap-%")).orderBy(LABEL).fetch().intoMaps());
     }
 
     List<String> chunksLeavesWithoutIndex() throws Exception {
@@ -285,33 +294,39 @@ class LeafIndexPassIntegrationTest {
 
     /**
      * A pass ended mid-build leaves an INVALID leaf index; the next pass drops it and rebuilds it (RDR-229 P3.3b test; T2
-     * nexus_rdr/229-research-33, the pattern of {@code PciBootWork.ON_STOP}). The leftover is made by a real concurrent build that
-     * fails on a duplicate, named as the pass names its leaf index, so the pass finds it. The duplicate is then removed; what the
-     * next pass must do is the drop and the rebuild, not build beside it: one unique id index on the leaf, valid, and not the
-     * leftover's oid.
+     * nexus_rdr/229-research-33, the pattern of {@code PciBootWork.ON_STOP}). The leftover is an index named as the pass names its
+     * leaf index, marked invalid the way {@code PgContainerHelper.markIndexInvalid} does for the other interrupted-build tests (the
+     * test tree holds no raw SQL, and {@code CREATE INDEX CONCURRENTLY} has no typed form; the failing concurrent build itself is
+     * what test 2 does through the pass). What the next pass must do is the drop and the rebuild, not build beside it: one unique id
+     * index on the leaf, valid, and not the leftover's oid.
      */
     @Test
     void aPassEndedMidBuildLeavesAnInvalidIndexAndTheNextPassDropsAndRebuildsIt() throws Exception {
         String tenant = newTenant("midbuild");
         collection(tenant, name(tenant, "a"), 3);
-        duplicateUnderTheIdKey(tenant, name(tenant, "a"), name(tenant, "dup"));
         String leaf = chunksLeaf(tenant);
-        String leftover = LeafIndexPass.leafIndexName(leaf.substring(leaf.indexOf('.') + 1));
-        assertThatThrownBy(() -> asOwner(owner -> owner.execute("CREATE UNIQUE INDEX CONCURRENTLY \"" + leftover + "\" ON " + leaf
-            + " (tenant_id, collection_id, chash, embedding_model)")))
-            .as("the concurrent build cannot finish over the duplicate")
-            .isInstanceOfSatisfying(DataAccessException.class, e -> assertThat(e.sqlState()).isEqualTo("23505"));
+        String schema = leaf.substring(0, leaf.indexOf('.'));
+        String relation = leaf.substring(leaf.indexOf('.') + 1);
+        String leftover = LeafIndexPass.leafIndexName(relation);
+        asSuperuser(su -> {
+            var cols = java.util.Arrays.stream(IdKeyIndexProbe.CHUNKS.columns().split(", ")).map(c -> DSL.field(DSL.name(c))).toList();
+            su.createUniqueIndex(DSL.name(leftover)).on(DSL.table(DSL.name(schema, relation)), cols).execute();
+            return null;
+        });
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.markIndexInvalid(su, schema, leftover);   // what a build ended mid-way leaves behind
+        }
         List<Idx> before = asSuperuser(su -> IdKeyIndexProbe.indexes(su, IdKeyIndexProbe.CHUNKS)).stream()
             .filter(i -> i.relation().equals(leaf)).toList();
-        assertThat(before).as("precondition: the failed build left one INVALID index on the leaf").hasSize(1);
+        assertThat(before).as("precondition: one INVALID index on the leaf, under the pass's name").hasSize(1);
         assertThat(before.get(0).valid()).isFalse();
         long leftoverOid = before.get(0).indexOid();
-        removeDuplicate(tenant, name(tenant, "dup"));
 
-        openPass().runOnce();
+        var result = openPass().runOnce();
 
         List<Idx> after = asSuperuser(su -> IdKeyIndexProbe.indexes(su, IdKeyIndexProbe.CHUNKS)).stream()
             .filter(i -> i.relation().equals(leaf)).toList();
+        assertThat(result.dropped()).as("the pass dropped the leftover").isEqualTo(1);
         assertThat(after).as("one unique id index on the leaf: the leftover dropped, not built beside").hasSize(1);
         assertThat(after.get(0).valid()).as("and it is valid").isTrue();
         assertThat(after.get(0).indexOid()).as("and it is a rebuild, not the leftover").isNotEqualTo(leftoverOid);
@@ -447,10 +462,11 @@ class LeafIndexPassIntegrationTest {
         assertThat(rows.stream().collect(Collectors.toMap(r -> (String) r.get("label"), r -> r.get("registered_at"))))
             .as("the rows are the first pass's, untouched").isEqualTo(registeredAt);
 
-        asSuperuser(su -> su.execute("DELETE FROM nexus.data_moves WHERE label = ?", CHUNKS_SWAP));
-        asSuperuser(su -> su.execute("INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, "
-            + "sleep_ms, statement_timeout_ms, verification, changeset_id) VALUES (?, 'hand', 'nexus', 'chunks', 1, 0, 1000, 'hand', 'hand-registered')",
-            CHUNKS_SWAP));
+        asSuperuser(su -> su.deleteFrom(MOVES).where(LABEL.eq(CHUNKS_SWAP)).execute());
+        asSuperuser(su -> su.insertInto(MOVES, LABEL, DSL.field(DSL.name("template")), DSL.field(DSL.name("driving_schema")),
+                DSL.field(DSL.name("driving_table")), DSL.field(DSL.name("chunk_size")), DSL.field(DSL.name("sleep_ms")),
+                DSL.field(DSL.name("statement_timeout_ms")), DSL.field(DSL.name("verification")), DSL.field(DSL.name("changeset_id")))
+            .values(CHUNKS_SWAP, "hand", "nexus", "chunks", 1, 0, 1000, "hand", "hand-registered").execute());
         var third = openPass().runOnce();
 
         assertThat(third.registered()).as("the label has a row: no insert").isEmpty();

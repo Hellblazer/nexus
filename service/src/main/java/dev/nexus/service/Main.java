@@ -693,6 +693,9 @@ public final class Main {
             }
             pciReconciler.onPassEnded(completionCheck::onReconcilerPassEnded);
         }
+        // nexus-p2m1x.20 (RDR-229 P3.3b): the per-leaf id unique-index pass, after the engine serves. Not the PCI reconciler's: it runs whether
+        // NX_SEARCH_PCI is on or off and starts only when gate 1 of the completion check holds (its latest read; no check, no pass).
+        var leafIndexPass = startLeafIndexPass(bootWork, adminConnection, completionCheck);
 
         // Parent-death watchdog (nexus-03bcg): exit if the supervisor (our parent
         // process) dies, so an OOM-killed supervisor leaves no orphaned-but-serving
@@ -748,6 +751,9 @@ public final class Main {
             }
             if (completionCheck != null) {
                 completionCheck.close();
+            }
+            if (leafIndexPass != null) {
+                leafIndexPass.close();   // a build in flight keeps running in Postgres
             }
             stopPciReconciler.run();
             // nexus-g17tf: right after the listener stops and the reconciler's stop
@@ -834,6 +840,28 @@ public final class Main {
             throw e;
         } catch (Throwable e) {
             log.error("event=rdr229_completion_not_started cause=\"{}\"", e.toString(), e);
+            return null;
+        }
+    }
+
+    /**
+     * RDR-229 P3.3b: the per-leaf unique-index pass, or null when it cannot start; never throws. Its gate is the completion check's latest
+     * read of gate 1 (a missing check never holds it), and its changeset_id carries the engine's release version ("dev" on an unreleased build).
+     */
+    private static dev.nexus.service.vectors.LeafIndexPass startLeafIndexPass(BootWorkRegistry bootWork,
+            dev.nexus.service.db.AdminConnection admin, dev.nexus.service.datamove.CompletionBootWork completionCheck) {
+        try {
+            String version = dev.nexus.service.http.VersionHandler.resolveReleaseVersion();
+            var pass = new dev.nexus.service.vectors.LeafIndexPass(admin, bootWork, ctx -> {
+                var latest = completionCheck == null ? null : completionCheck.latest();
+                return latest != null && latest.gate1();
+            }, version == null ? "dev" : version);
+            pass.start();
+            return pass;
+        } catch (VirtualMachineError e) {
+            throw e;
+        } catch (Throwable e) {
+            log.error("event=leaf_index_pass_not_started cause=\"{}\"", e.toString(), e);
             return null;
         }
     }
