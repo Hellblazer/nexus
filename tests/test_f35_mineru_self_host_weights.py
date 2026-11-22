@@ -14,6 +14,7 @@ import http.server
 import importlib.util
 import json
 import os
+import stat
 import subprocess
 import sys
 import threading
@@ -24,105 +25,15 @@ import pytest
 
 from nexus import _mineru_spawn, mineru_weights as mw
 from nexus.db.service_bge_model import file_sha256
+from tests._f35_weights_bed import (  # noqa: F401 — env is a fixture
+    _CONTENT, _Assets, _Hub, _complete_root, _hf_usable, _lines, _manifest, _root, env,
+)
 from tests._module_seam import setattr_in
 
 #: tests/conftest.py stubs the fetch and the child env for every other module; this one drives them.
 REAL_MINERU_WEIGHTS_FETCH = True
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-
-#: A manifest of real bytes: three nested paths, one large-ish enough to be a separate file from the small ones.
-_CONTENT = {
-    "models/Layout/PP-DocLayoutV2/config.json": b'{"layout": true}\n',
-    "models/Layout/PP-DocLayoutV2/model.safetensors": b"L" * 4096,
-    "models/MFR/unimernet_hf_small_2503/README.md": b"# unimernet\n",
-    "models/TabRec/SlanetPlus/slanet-plus.onnx": b"S" * 2048,
-}
-
-
-def _manifest(content: dict[str, bytes]) -> tuple[mw.WeightFile, ...]:
-    import hashlib  # noqa: PLC0415
-
-    return tuple(mw.WeightFile(p, len(b), hashlib.sha256(b).hexdigest()) for p, b in content.items())
-
-
-class _Hub:
-    """A Hugging Face cache for the pinned snapshot: ``snapshots/<rev>/<path>`` symlinks into ``blobs/``."""
-
-    def __init__(self, cache: Path):
-        self.storage = cache / ("models--" + mw.WEIGHTS_REPO.replace("/", "--"))
-        self.snapshot = self.storage / "snapshots" / mw.WEIGHTS_REVISION
-
-    def put(self, path: str, data: bytes) -> None:
-        import hashlib  # noqa: PLC0415
-
-        blob = self.storage / "blobs" / hashlib.sha256(data).hexdigest()
-        blob.parent.mkdir(parents=True, exist_ok=True)
-        blob.write_bytes(data)
-        link = self.snapshot / path
-        link.parent.mkdir(parents=True, exist_ok=True)
-        link.unlink(missing_ok=True)
-        link.symlink_to(os.path.relpath(blob, link.parent))
-
-    def fill(self, content: dict[str, bytes]) -> None:
-        for path, data in content.items():
-            self.put(path, data)
-
-
-class _Assets:
-    """The release's assets: ``fetch(url, dest)`` the way ``_httpx_stream`` does (atomic write to dest)."""
-
-    def __init__(self, content: dict[str, bytes]):
-        self.by_name = {mw.asset_name(p): b for p, b in content.items()}
-        self.urls: list[str] = []
-        self.override: dict[str, bytes] = {}
-
-    def __call__(self, url: str, dest: Path) -> None:
-        self.urls.append(url)
-        name = url.rsplit("/", 1)[1]
-        data = self.override.get(name, self.by_name[name])
-        tmp = dest.with_name(dest.name + ".dl")
-        tmp.write_bytes(data)
-        os.replace(tmp, dest)
-
-
-@pytest.fixture
-def env(tmp_path, monkeypatch):
-    """A temp HOME, an empty HF cache, the small manifest, the default source and a local server."""
-    import huggingface_hub  # noqa: PLC0415 — also proves it is importable where the stack is
-    import huggingface_hub.constants as hf_constants  # noqa: PLC0415
-
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
-    cache = tmp_path / "hf-cache"
-    cache.mkdir()
-    monkeypatch.setattr(hf_constants, "HF_HUB_CACHE", str(cache))
-    for name in (
-        mw.SKIP_ENV, mw.BASE_URL_ENV, "MINERU_MODEL_SOURCE", "MINERU_FORMULA_CH_SUPPORT", "MINERU_TOOLS_CONFIG_JSON",
-        "HF_HUB_OFFLINE",
-    ):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(mw, "MANIFEST", _manifest(_CONTENT))
-    monkeypatch.setattr(mw, "_remote_server_configured", lambda: False)
-
-    def _never(*_a, **_k):
-        raise AssertionError("Hugging Face was contacted")
-
-    # F35: Hugging Face is read from its local cache only; every network entry point fails the test.
-    monkeypatch.setattr(huggingface_hub, "snapshot_download", _never)
-    monkeypatch.setattr(huggingface_hub, "hf_hub_download", _never)
-    return type("Env", (), {"home": home, "hub": _Hub(cache), "assets": _Assets(_CONTENT)})()
-
-
-def _lines() -> tuple[list[str], Callable[[str], None]]:
-    out: list[str] = []
-    return out, out.append
-
-
-def _root() -> Path:
-    return mw.weights_root()
-
 
 # ── the pin ─────────────────────────────────────────────────────────────────────────────────────
 
@@ -221,13 +132,40 @@ def test_an_hf_file_of_the_wrong_size_is_not_trusted(env):
     assert env.assets.urls == [f"{mw.asset_base_url()}/{mw.asset_name(path)}"]
 
 
-def test_a_snapshot_at_another_revision_is_not_a_source(env):
-    other = env.hub.storage / "snapshots" / ("f" * 40)
-    for path, data in _CONTENT.items():
+def _other_snapshot(env, revision: str, content: dict[str, bytes]) -> Path:
+    other = env.hub.storage / "snapshots" / revision
+    for path, data in content.items():
         (other / path).parent.mkdir(parents=True, exist_ok=True)
         (other / path).write_bytes(data)
+    return other
+
+
+def test_a_snapshot_at_another_revision_is_a_source_when_its_bytes_verify(env):
+    """An existing install's cache is at whatever revision MinerU last fetched (``main``): its files are as good
+    as the pinned snapshot's when the sha256 matches, so nothing is downloaded for them."""
+    _other_snapshot(env, "f" * 40, _CONTENT)
     assert mw.ensure_pipeline_weights(lambda _l: None, fetch=env.assets) is True
-    assert len(env.assets.urls) == len(_CONTENT)
+    assert env.assets.urls == []
+    assert mw.nexus_weights_ready()
+
+
+def test_a_snapshot_at_another_revision_with_other_bytes_is_not_a_source(env):
+    wrong = "models/Layout/PP-DocLayoutV2/model.safetensors"
+    _other_snapshot(env, "f" * 40, {**_CONTENT, wrong: b"Y" * len(_CONTENT[wrong])})
+    assert mw.ensure_pipeline_weights(lambda _l: None, fetch=env.assets) is True
+    assert env.assets.urls == [f"{mw.asset_base_url()}/{mw.asset_name(wrong)}"]
+
+
+def test_a_blob_named_by_its_sha256_is_found_without_a_snapshot_entry(env):
+    """``blobs/<sha256>`` is looked up first: a snapshot dir that was pruned or never listed the file still seeds."""
+    import hashlib  # noqa: PLC0415
+
+    blobs = env.hub.storage / "blobs"
+    blobs.mkdir(parents=True)
+    for data in _CONTENT.values():
+        (blobs / hashlib.sha256(data).hexdigest()).write_bytes(data)
+    assert mw.ensure_pipeline_weights(lambda _l: None, fetch=env.assets) is True
+    assert env.assets.urls == []
 
 
 # ── no snapshot: everything comes from the asset, verified before it is placed ──────────────────────
@@ -379,10 +317,6 @@ def test_the_chinese_formula_opt_in_keeps_the_hugging_face_fetch(env, monkeypatc
 # ── every MinerU child nexus starts carries the two variables ───────────────────────────────────────
 
 
-def _complete_root(env) -> None:
-    mw.ensure_pipeline_weights(lambda _l: None, fetch=env.assets)
-    assert mw.nexus_weights_ready()
-
 
 def test_child_env_is_empty_until_the_root_is_complete(env):
     assert mw.child_env() == {}
@@ -490,135 +424,249 @@ def test_doctors_parse_probe_child_gets_the_variables(env, monkeypatch):
     assert captured["env"]["MINERU_TOOLS_CONFIG_JSON"] == str(mw.mineru_json_path())
 
 
-# ── the publish script ──────────────────────────────────────────────────────────────────────────────
+# ── an existing install's usable Hugging Face cache never turns into a hold or a download (review C1) ──────────
 
 
-@pytest.fixture(scope="module")
-def publish():
-    spec = importlib.util.spec_from_file_location("publish_mineru_weights", REPO_ROOT / "scripts" / "publish-mineru-weights.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+
+def test_under_refuse_a_usable_hf_cache_with_files_left_over_does_nothing_and_does_not_raise(env, monkeypatch):
+    """Files nexus cannot seed remain, and MinerU can read its own cache: the machine works as before F35."""
+    missing = "models/TabRec/SlanetPlus/slanet-plus.onnx"
+    env.hub.fill({p: d for p, d in _CONTENT.items() if p != missing})
+    _hf_usable(monkeypatch)
+    lines, say = _lines()
+
+    assert mw.ensure_pipeline_weights(say, fetch=env.assets, allow_fetch=False) is False
+
+    assert env.assets.urls == [] and lines == []
+    assert not (_root() / mw.COMPLETE_MARKER).exists()
+    assert mw.child_env() == {}, "the root is incomplete, so MinerU keeps reading its Hugging Face cache"
 
 
-def test_the_repo_license_is_the_agpl_the_script_publishes(publish):
-    assert publish.STATIC_ASSETS["LICENSE-AGPL-3.0.txt"].read_text().lstrip().startswith("GNU AFFERO GENERAL PUBLIC LICENSE")
-    apache = publish.STATIC_ASSETS["LICENSE-Apache-2.0.txt"].read_text()
-    assert "Apache License" in apache and "Version 2.0, January 2004" in apache and len(apache) > 11000
-    notices = publish.STATIC_ASSETS["THIRD-PARTY-NOTICES.md"].read_text()
-    assert mw.WEIGHTS_REVISION in notices and "agpl-3.0" in notices
-    for model in ("PP-DocLayoutV2", "UniMERNet", "PP-OCRv", "PP-LCNet_x1_0_doc_ori", "PP-LCNet_x1_0_table_cls", "SLANet_plus", "unet.onnx"):
-        assert model in notices, model
+def test_under_refuse_with_no_usable_hf_cache_the_missing_files_still_raise(env):
+    with pytest.raises(mw.WeightsFetchError, match="does not download them"):
+        mw.ensure_pipeline_weights(lambda _l: None, fetch=env.assets, allow_fetch=False)
 
 
-def test_staging_from_the_hf_cache_reproduces_the_manifest_and_verifies(env, publish, tmp_path):
+def test_interactive_download_failure_with_a_usable_hf_cache_warns_and_returns_false(env, monkeypatch):
+    missing = "models/TabRec/SlanetPlus/slanet-plus.onnx"
+    env.hub.fill({p: d for p, d in _CONTENT.items() if p != missing})
+    _hf_usable(monkeypatch)
+    env.assets.override[mw.asset_name(missing)] = b"nope"  # size mismatch on download
+    lines, say = _lines()
+
+    assert mw.ensure_pipeline_weights(say, fetch=env.assets) is False
+
+    warning = [ln for ln in lines if "warning" in ln]
+    assert len(warning) == 1 and mw.asset_name(missing) in warning[0] and "Hugging Face cache" in warning[0]
+    assert "size mismatch" in warning[0]
+    assert not (_root() / mw.COMPLETE_MARKER).exists() and mw.child_env() == {}
+
+
+def test_interactive_download_failure_without_a_usable_hf_cache_still_raises(env, monkeypatch):
+    _hf_usable(monkeypatch, False)
+    env.assets.override[mw.asset_name("models/TabRec/SlanetPlus/slanet-plus.onnx")] = b"nope"
+    with pytest.raises(mw.WeightsFetchError, match="size mismatch"):
+        mw.ensure_pipeline_weights(lambda _l: None, fetch=env.assets)
+
+
+def test_the_fetch_line_says_how_much_is_downloaded_when_seeding_covers_part(env):
+    missing = "models/TabRec/SlanetPlus/slanet-plus.onnx"
+    env.hub.fill({p: d for p, d in _CONTENT.items() if p != missing})
+    lines, say = _lines()
+    mw.ensure_pipeline_weights(say, fetch=env.assets)
+    first = lines[0]
+    assert "downloading 2.0 KB" in first and "3 file(s)" in first and "taken from the Hugging Face cache" in first
+
+
+# ── prefetch_is_noop: the one predicate the index gate asks ────────────────────────────────────────────────
+
+
+def test_prefetch_is_noop_is_true_exactly_when_ensure_would_do_nothing(env, monkeypatch):
+    assert not mw.prefetch_is_noop(), "default model, no root: seeding or a download would run"
     env.hub.fill(_CONTENT)
-    stage = tmp_path / "stage"
-    assert publish.main(["--stage-dir", str(stage)]) == 0
-    for entry in mw.MANIFEST:
-        assert file_sha256(stage / entry.asset) == entry.sha256
-    assert (stage / "MANIFEST.tsv").read_text() == "".join(f"{f.path}\t{f.size}\t{f.sha256}\n" for f in mw.MANIFEST)
-    for name in ("LICENSE-AGPL-3.0.txt", "LICENSE-Apache-2.0.txt", "THIRD-PARTY-NOTICES.md"):
-        assert (stage / name).is_file()
-    assert publish.verify_stage(stage) == []
-    assert publish.main(["--stage-dir", str(stage), "--verify-only"]) == 0
-    assert publish.main(["--stage-dir", str(stage)]) == 0  # idempotent on a staged dir
+    assert not mw.prefetch_is_noop(), "an HF cache alone is not enough: ensure would still seed nexus's copy"
+    mw.ensure_pipeline_weights(lambda _l: None, fetch=env.assets)
+    assert mw.prefetch_is_noop()
+    for name, value in ((mw.SKIP_ENV, "1"), ("MINERU_MODEL_SOURCE", "local")):
+        with monkeypatch.context() as m:
+            m.setenv(name, value)
+            assert mw.prefetch_is_noop()
 
 
-def test_the_publish_script_refuses_a_mismatching_staged_file(env, publish, tmp_path, capsys):
+def test_prefetch_is_noop_for_a_remote_server_and_before_any_root(env, monkeypatch):
+    monkeypatch.setattr(mw, "_remote_server_configured", lambda: True)
+    assert mw.prefetch_is_noop()
+
+
+def test_prefetch_is_noop_with_the_chinese_formula_opt_in_follows_the_hf_cache(env, monkeypatch):
+    monkeypatch.setenv("MINERU_FORMULA_CH_SUPPORT", "1")
+    _hf_usable(monkeypatch, False)
+    assert not mw.prefetch_is_noop()
+    _hf_usable(monkeypatch, True)
+    assert mw.prefetch_is_noop()
+    _hf_usable(monkeypatch, False)
+    monkeypatch.setenv("MINERU_MODEL_SOURCE", "modelscope")
+    assert mw.prefetch_is_noop(), "modelscope with the opt-in gets no prefetch, and the gate must not wait on one"
+
+
+# ── the index-repo gate on the DEFAULT formula model ───────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def gate(env, monkeypatch, tmp_path):
+    """``ensure_or_exit`` with the stack present, the real prefetch with the asset stub as its downloader."""
+    from nexus import pdf_stack  # noqa: PLC0415
+
+    monkeypatch.setattr(pdf_stack, "ensure", lambda entry: pdf_stack.Outcome.PRESENT)
+    real = mw.ensure_pipeline_weights
+    monkeypatch.setattr(
+        mw, "ensure_pipeline_weights",
+        lambda say, *, download=None, allow_fetch=True, fetch=None: real(say, allow_fetch=allow_fetch, fetch=env.assets),
+    )
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "paper.pdf").write_bytes(b"%PDF-1.4\n")
+    env.repo = repo
+    return env
+
+
+def _hold(gate, monkeypatch, *, probe, policy):
+    from nexus import pdf_stack  # noqa: PLC0415
+    from nexus.indexer import _hold_pdfs_without_stack  # noqa: PLC0415
+
+    monkeypatch.setenv(pdf_stack.POLICY_ENV, policy)  # restored at teardown, never leaked to the next test
+    return _hold_pdfs_without_stack([gate.repo / "paper.pdf"], gate.repo, probe=probe, extractor="mineru")
+
+
+def test_the_index_gate_under_refuse_with_a_usable_hf_cache_holds_nothing_and_downloads_nothing(gate, monkeypatch):
+    from nexus import pdf_stack  # noqa: PLC0415
+
+    missing = "models/TabRec/SlanetPlus/slanet-plus.onnx"
+    gate.hub.fill({p: d for p, d in _CONTENT.items() if p != missing})
+    _hf_usable(monkeypatch)
+    held = _hold(gate, monkeypatch, probe=lambda paths: paths, policy=pdf_stack.POLICY_REFUSE)
+    assert held == []
+    assert gate.assets.urls == []
+    assert pdf_stack.skipped_count(pdf_stack.SKIP_CAUSE_WEIGHTS) == 0
+
+
+def test_the_index_gate_spends_no_seeding_and_no_download_when_every_pdf_is_current(gate, monkeypatch):
+    from nexus import pdf_stack  # noqa: PLC0415
+
+    gate.hub.fill(_CONTENT)
+    _hf_usable(monkeypatch)  # an existing install: MinerU's own cache is complete, nexus's copy does not exist yet
+    held = _hold(gate, monkeypatch, probe=lambda paths: [], policy=pdf_stack.POLICY_INSTALL)
+    assert held == []
+    assert gate.assets.urls == []
+    assert not _root().exists(), "an all-unchanged walk must not even seed nexus's copy"
+
+
+def test_a_pdf_needing_work_seeds_from_a_matching_hf_cache_with_zero_downloads(gate, monkeypatch):
+    from nexus import pdf_stack  # noqa: PLC0415
+
+    gate.hub.fill(_CONTENT)
+    held = _hold(gate, monkeypatch, probe=lambda paths: paths, policy=pdf_stack.POLICY_INSTALL)
+    assert held == [] and gate.assets.urls == []
+    assert mw.nexus_weights_ready()
+
+
+def test_under_refuse_a_pdf_needing_work_seeds_from_a_matching_hf_cache_too(gate, monkeypatch):
+    """The post-commit hook (``NX_PDF_STACK=refuse``) may seed from a local cache: no network, no hold."""
+    from nexus import pdf_stack  # noqa: PLC0415
+
+    gate.hub.fill(_CONTENT)
+    held = _hold(gate, monkeypatch, probe=lambda paths: paths, policy=pdf_stack.POLICY_REFUSE)
+    assert held == [] and gate.assets.urls == []
+    assert mw.nexus_weights_ready()
+
+
+# ── a second process waits for the first; failures stay named ────────────────────────────────────────────────
+
+
+def test_two_runs_at_once_download_each_file_once(env):
+    results: list[bool] = []
+
+    def slow_fetch(url: str, dest: Path) -> None:
+        import time  # noqa: PLC0415
+
+        time.sleep(0.05)
+        env.assets(url, dest)
+
+    threads = [
+        threading.Thread(target=lambda: results.append(mw.ensure_pipeline_weights(lambda _l: None, fetch=slow_fetch)))
+        for _ in range(2)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    assert sorted(results) == [False, True], results
+    assert len(env.assets.urls) == len(_CONTENT), "the second run waited on the lock and found the work done"
+    assert mw.nexus_weights_ready()
+
+
+def test_a_marker_that_cannot_be_written_is_a_named_error_not_a_raw_oserror(env):
+    (_root() / mw.COMPLETE_MARKER).mkdir(parents=True)  # a directory where the marker file goes
+    with pytest.raises(mw.WeightsFetchError, match="could not be written"):
+        mw.ensure_pipeline_weights(lambda _l: None, fetch=env.assets)
+
+
+def test_a_copy_that_does_not_verify_after_the_cross_device_fallback_is_refused(env, monkeypatch):
     env.hub.fill(_CONTENT)
-    stage = tmp_path / "stage"
-    assert publish.main(["--stage-dir", str(stage)]) == 0
-    victim = stage / mw.asset_name("models/Layout/PP-DocLayoutV2/model.safetensors")
-    victim.write_bytes(b"Q" * len(_CONTENT["models/Layout/PP-DocLayoutV2/model.safetensors"]))  # right size, wrong bytes
 
-    assert publish.main(["--stage-dir", str(stage)]) == 1
-    assert publish.main(["--stage-dir", str(stage), "--verify-only"]) == 1
-    err = capsys.readouterr().err
-    assert "FAIL" in err and "sha256" in err and "Layout__PP-DocLayoutV2__model.safetensors" in err
-    assert victim.read_bytes().startswith(b"Q"), "a mismatching staged file is reported, never silently repaired"
+    def _no_link(*_a, **_k):
+        raise OSError(18, "Invalid cross-device link")
 
+    def _bad_copy(src, dst):
+        Path(dst).write_bytes(b"bit rot")
 
-def test_the_publish_script_refuses_a_mismatching_upstream_file_and_stages_nothing_for_it(env, publish, tmp_path, capsys):
-    bad = "models/MFR/unimernet_hf_small_2503/README.md"
-    env.hub.fill({**_CONTENT, bad: b"X" * len(_CONTENT[bad])})
-    stage = tmp_path / "stage"
-    assert publish.main(["--stage-dir", str(stage)]) == 1
-    assert not (stage / mw.asset_name(bad)).exists()
-    assert not (stage / "MANIFEST.tsv").exists(), "nothing is published as a set when a file fails"
-    assert "does not match the manifest" in capsys.readouterr().err
+    setattr_in(monkeypatch, mw, "os.link", _no_link)
+    setattr_in(monkeypatch, mw, "shutil.copyfile", _bad_copy)
+    with pytest.raises(mw.WeightsFetchError, match="does not match its sha256"):
+        mw.ensure_pipeline_weights(lambda _l: None, fetch=env.assets)
+    assert not (_root() / mw.COMPLETE_MARKER).exists()
+    leftovers = [p for p in _root().rglob("*.part")]
+    assert leftovers == [], "no temp file is left behind"
 
 
-def test_a_missing_staged_asset_fails_verification(env, publish, tmp_path):
-    env.hub.fill(_CONTENT)
-    stage = tmp_path / "stage"
-    publish.main(["--stage-dir", str(stage)])
-    (stage / mw.asset_name("models/TabRec/SlanetPlus/slanet-plus.onnx")).unlink()
-    assert any("missing" in p for p in publish.verify_stage(stage))
+def test_temp_names_are_unique_per_call(env):
+    target = _root() / "models" / "x.bin"
+    assert mw._unique_sibling(target) != mw._unique_sibling(target)
 
 
-def test_the_upload_plan_is_create_all_when_absent_missing_only_when_partial_and_refuses_a_different_asset(publish):
-    staged = {"a": "1", "b": "2", "c": "3"}
-
-    def remote(name: str) -> str:
-        return {"b": "2"}[name]
-
-    assert publish.plan_upload(staged, None, remote) == (["a", "b", "c"], [])
-    assert publish.plan_upload(staged, {"a": "1", "b": None}, remote) == (["c"], [])  # b's digest is fetched
-    assert publish.plan_upload(staged, {"a": "1", "b": "2", "c": "3"}, remote) == ([], [])
-    to_upload, conflicts = publish.plan_upload(staged, {"a": "9"}, remote)
-    assert to_upload == ["b", "c"] and len(conflicts) == 1 and "a:" in conflicts[0]
+def test_the_remedy_text_names_the_three_real_remedies(env):
+    with pytest.raises(mw.WeightsFetchError) as info:
+        mw.ensure_pipeline_weights(lambda _l: None, fetch=lambda url, dest: (_ for _ in ()).throw(OSError("offline")))
+    message = str(info.value)
+    assert "Run the command again to resume" in message
+    assert mw.BASE_URL_ENV in message and "a mirror" in message
+    assert "mineru-models-download" in message and "MINERU_MODEL_SOURCE=local" in message and "mineru.json" in message
 
 
-def test_upload_refuses_a_conflict_and_uploads_nothing(env, publish, tmp_path, monkeypatch):
-    env.hub.fill(_CONTENT)
-    stage = tmp_path / "stage"
-    publish.main(["--stage-dir", str(stage)])
-    name = mw.asset_name("models/Layout/PP-DocLayoutV2/config.json")
-    monkeypatch.setattr(publish, "release_assets", lambda repo, tag: {name: "0" * 64})
-    calls: list[tuple[str, ...]] = []
-    monkeypatch.setattr(publish, "_gh", lambda *a, **k: calls.append(a))
-    lines: list[str] = []
-    assert publish.upload(stage, "owner/repo", dry_run=False, say=lines.append) == 1
-    assert calls == [] and any("REFUSED" in ln and name in ln for ln in lines)
+def test_the_doctor_skip_line_gives_the_same_three_remedies(monkeypatch):
+    from nexus.commands import doctor  # noqa: PLC0415
+
+    monkeypatch.delenv("MINERU_FORMULA_CH_SUPPORT", raising=False)
+    monkeypatch.delenv("MINERU_MODEL_SOURCE", raising=False)
+    line = doctor._mineru_weights_skip_line()
+    assert "skipped" in line and "mineru-models-download" in line
+    assert "nexus release asset" in line and mw.BASE_URL_ENV in line and "MINERU_MODEL_SOURCE=local" in line
 
 
-def test_upload_creates_an_absent_release_not_marked_latest_and_uploads_only_missing_assets_otherwise(
-    env, publish, tmp_path, monkeypatch
-):
-    env.hub.fill(_CONTENT)
-    stage = tmp_path / "stage"
-    publish.main(["--stage-dir", str(stage)])
-    calls: list[tuple[str, ...]] = []
-    monkeypatch.setattr(publish, "_gh", lambda *a, **k: calls.append(a))
-
-    monkeypatch.setattr(publish, "release_assets", lambda repo, tag: None)
-    assert publish.upload(stage, "owner/repo", dry_run=False, say=lambda _l: None) == 0
-    assert calls[0][:3] == ("release", "create", mw.WEIGHTS_ASSET_TAG) and "--latest=false" in calls[0]
-    assert len([a for a in calls[0] if a.startswith(str(stage))]) == len(_CONTENT) + 4
-
-    calls.clear()
-    have = publish.staged_digests(stage)
-    held_back = mw.asset_name("models/TabRec/SlanetPlus/slanet-plus.onnx")
-    monkeypatch.setattr(publish, "release_assets", lambda repo, tag: {n: d for n, d in have.items() if n != held_back})
-    assert publish.upload(stage, "owner/repo", dry_run=False, say=lambda _l: None) == 0
-    assert len(calls) == 1 and calls[0][:3] == ("release", "upload", mw.WEIGHTS_ASSET_TAG)
-    assert [a for a in calls[0] if a.startswith(str(stage))] == [str(stage / held_back)]
-    assert "--clobber" not in calls[0]
-
-    calls.clear()
-    monkeypatch.setattr(publish, "release_assets", lambda repo, tag: dict(have))
-    assert publish.upload(stage, "owner/repo", dry_run=False, say=lambda _l: None) == 0
-    assert calls == []
+def test_child_env_sets_hf_offline_so_an_accidental_hub_call_fails_loudly(env):
+    _complete_root(env)
+    assert mw.child_env()["HF_HUB_OFFLINE"] == "1"
 
 
-def test_dry_run_uploads_nothing(env, publish, tmp_path, monkeypatch):
-    env.hub.fill(_CONTENT)
-    stage = tmp_path / "stage"
-    publish.main(["--stage-dir", str(stage)])
-    monkeypatch.setattr(publish, "release_assets", lambda repo, tag: None)
-    calls: list = []
-    monkeypatch.setattr(publish, "_gh", lambda *a, **k: calls.append(a))
-    assert publish.upload(stage, "owner/repo", dry_run=True, say=lambda _l: None) == 0
-    assert calls == []
+def test_the_nexus_mineru_json_is_private_and_an_unparsable_user_config_is_logged(env):
+    from structlog.testing import capture_logs  # noqa: PLC0415
+
+    _complete_root(env)
+    (env.home / "mineru.json").write_text("{not json")
+    with capture_logs() as logs:
+        config = Path(mw.child_env()["MINERU_TOOLS_CONFIG_JSON"])
+    assert stat.S_IMODE(config.stat().st_mode) == 0o600
+    assert any(e.get("event") == "mineru_user_config_unreadable" for e in logs), logs
+    assert json.loads(config.read_text()) == {"models-dir": {"pipeline": str(_root())}}
+    assert not list(config.parent.glob("*.tmp")), "the unique temp name is renamed away"

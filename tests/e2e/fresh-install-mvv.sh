@@ -224,6 +224,27 @@ _http_server_port() {
     sed -n '/Serving HTTP on/{s/.*port \([0-9][0-9]*\).*/\1/p;q;}'
 }
 
+# F35 (nexus-7t3w1): the nexus-owned mineru.json every MinerU child of this journey was pointed at must exist
+# and name the nexus weights root as models-dir.pipeline. stdin: that file's text; $1: the expected root
+# -> "OK" or "FAIL|<cause>".
+_f35_mineru_json_verdict() {
+    "$E2E_PYTHON" -c '
+import json, sys
+expected = sys.argv[1]
+text = sys.stdin.read()
+try:
+    config = json.loads(text)
+except ValueError as exc:
+    print("FAIL|the nexus mineru.json is not JSON: %s" % exc)
+    raise SystemExit(0)
+pipeline = (config.get("models-dir") or {}).get("pipeline") if isinstance(config, dict) else None
+if pipeline != expected:
+    print("FAIL|the nexus mineru.json names models-dir.pipeline=%r, expected the nexus root %r" % (pipeline, expected))
+else:
+    print("OK")
+' "$1"
+}
+
 _mineru_doctor_verdict() {
     # stdin: `nx doctor --check-mineru` output → "OK" or "FAIL|<cause>"
     "$E2E_PYTHON" -c '
@@ -377,6 +398,16 @@ _self_test() {
     _assert_prefix "RED: huggingface.co contacted -> FAIL" "$out" "FAIL|the first MinerU index contacted huggingface.co"
     out=$(printf '%s\n%s\nnx: MinerU pipeline weights are ready.\nmineru_server_timeout pages=1\n' "$_f34_fetch" "$_f35_asset" | _f34_weights_fetch_verdict)
     _assert_prefix "RED: a page still timed out -> FAIL" "$out" "FAIL|a MinerU page timed out"
+
+    echo "== self-test: _f35_mineru_json_verdict (F35, nexus-7t3w1) =="
+    out=$(printf '{"models-dir": {"pipeline": "/h/.cache/nexus/mineru/pipeline-ed6b654c"}}' | _f35_mineru_json_verdict "/h/.cache/nexus/mineru/pipeline-ed6b654c")
+    _assert_eq "mineru.json names the nexus root -> OK" "$out" "OK"
+    out=$(printf '{"models-dir": {"pipeline": "/elsewhere"}}' | _f35_mineru_json_verdict "/h/.cache/nexus/mineru/pipeline-ed6b654c")
+    _assert_prefix "RED: mineru.json names another root -> FAIL" "$out" "FAIL|the nexus mineru.json names models-dir.pipeline="
+    out=$(printf '{}' | _f35_mineru_json_verdict "/h/root")
+    _assert_prefix "RED: no models-dir at all -> FAIL" "$out" "FAIL|the nexus mineru.json names models-dir.pipeline=None"
+    out=$(printf 'not json' | _f35_mineru_json_verdict "/h/root")
+    _assert_prefix "RED: not JSON -> FAIL" "$out" "FAIL|the nexus mineru.json is not JSON"
 
     echo "== self-test: _http_server_port (F35, nexus-7t3w1) =="
     out=$(printf 'Serving HTTP on 127.0.0.1 port 51234 (http://127.0.0.1:51234/) ...\n' | _http_server_port)
@@ -1478,7 +1509,15 @@ if [ "$FORMULA_PDF_CHECK_ON" = "1" ]; then
             || _fail "no nexus MinerU weights root with a .complete marker under $HOME_DIR/.cache/nexus/mineru after the index (F35)"
         [ ! -e "$HOME_DIR/.cache/huggingface/hub/models--opendatalab--PDF-Extract-Kit-1.0" ] \
             || _fail "the virgin HOME's Hugging Face cache holds MinerU's weights after the index: they were fetched from Hugging Face, not the nexus asset (F35)"
-        echo "  [ok] weights came from the nexus asset (${MINERU_WEIGHTS_BASE_URL:-the release tag}), not Hugging Face (F35)"
+        # F35: the MinerU parse ran from that root, not from some other source: the children's nexus mineru.json
+        # exists and names it. (The index's own parse succeeded and extraction_method=mineru is checked below.)
+        NEXUS_COMPLETE_MARKERS=( "$HOME_DIR"/.cache/nexus/mineru/pipeline-*/.complete )
+        NEXUS_WEIGHTS_ROOT="$(dirname "${NEXUS_COMPLETE_MARKERS[0]}")"
+        [ -f "$HOME_DIR/.cache/nexus/mineru/mineru.json" ] \
+            || _fail "$HOME_DIR/.cache/nexus/mineru/mineru.json does not exist after the index: no MinerU child was pointed at the nexus root (F35)"
+        MINERU_JSON_VERDICT="$(_f35_mineru_json_verdict "$NEXUS_WEIGHTS_ROOT" < "$HOME_DIR/.cache/nexus/mineru/mineru.json")"
+        [ "$MINERU_JSON_VERDICT" = "OK" ] || _fail "${MINERU_JSON_VERDICT#FAIL|} (F35)"
+        echo "  [ok] weights came from the nexus asset (${MINERU_WEIGHTS_BASE_URL:-the release tag}), not Hugging Face; the nexus mineru.json names the root (F35)"
         _nx store list --collection "$FORMULA_COLLECTION" 2>/dev/null \
             | grep -oE '\b[0-9a-f]{64}\b' > "$FORMULA_IDS_DIR/after" || true
         NEW_FORMULA_IDS="$(_new_chunk_ids "$FORMULA_IDS_DIR/before" "$FORMULA_IDS_DIR/after" || true)"

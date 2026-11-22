@@ -13,9 +13,10 @@ are pinned in :data:`MANIFEST` (upstream revision :data:`WEIGHTS_REVISION`) and 
 assets of the immutable release tag :data:`WEIGHTS_ASSET_TAG`, the bge pattern
 (:mod:`nexus.db.service_bge_model`). They land under :func:`weights_root` and every MinerU process nexus
 starts is pointed at them (:func:`child_env`: ``MINERU_MODEL_SOURCE=local`` plus a nexus-owned
-``mineru.json``). A machine that already holds the pinned snapshot in its Hugging Face cache is seeded from
-it with no download. The one formula-model variant the manifest does not carry
-(``MINERU_FORMULA_CH_SUPPORT``) keeps F34's Hugging Face fetch.
+``mineru.json``). Files that verify (by sha256) in the machine's Hugging Face cache, at any revision, are
+linked or copied in with no download, and a machine whose Hugging Face cache MinerU can already read is never
+failed or held for want of nexus's copy (:func:`ensure_pipeline_weights`). The one formula-model variant the
+manifest does not carry (``MINERU_FORMULA_CH_SUPPORT``) keeps F34's Hugging Face fetch.
 
 ``nx doctor`` gates its real-parse check on the same probe (:func:`weights_present`)."""
 
@@ -24,7 +25,9 @@ from __future__ import annotations
 import json
 import os
 import shutil
-from collections.abc import Callable
+import tempfile
+import uuid
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import NamedTuple
 
@@ -198,15 +201,22 @@ def _user_mineru_json() -> Path:
 
 
 def write_mineru_json() -> Path:
-    """Write the nexus ``mineru.json``: the user's file (when readable) with ``models-dir.pipeline`` set to
-    :func:`weights_root`. Rewritten only when the content changes. Never touches the user's file."""
+    """Write the nexus ``mineru.json`` (mode 0600): the user's file (when readable) with ``models-dir.pipeline``
+    set to :func:`weights_root`. Rewritten only when the content changes, through a unique temp name. Never
+    touches the user's file; one that exists but cannot be read or parsed is logged and not copied."""
     config: dict = {}
+    users = _user_mineru_json()
     try:
-        loaded = json.loads(_user_mineru_json().read_text(encoding="utf-8"))
-        if isinstance(loaded, dict):
-            config = loaded
-    except (OSError, ValueError):
-        pass
+        loaded = json.loads(users.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        loaded = None
+    except (OSError, ValueError) as exc:
+        _log.warning("mineru_user_config_unreadable", path=str(users), error=str(exc), error_type=type(exc).__name__)
+        loaded = None
+    if isinstance(loaded, dict):
+        config = loaded
+    elif loaded is not None:
+        _log.warning("mineru_user_config_not_an_object", path=str(users))
     models_dir = config.get("models-dir")
     config["models-dir"] = {**(models_dir if isinstance(models_dir, dict) else {}), "pipeline": str(weights_root())}
     text = json.dumps(config, indent=4) + "\n"
@@ -217,19 +227,25 @@ def write_mineru_json() -> Path:
     except OSError:
         pass
     target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_name(target.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, target)
+    fd, tmp_name = tempfile.mkstemp(prefix=target.name + ".", suffix=".tmp", dir=target.parent)  # 0600
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp_name, target)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
     return target
 
 
 def child_env() -> dict[str, str]:
-    """The two variables every MinerU process nexus starts gets when nexus's verified copy is in use, else ``{}``.
+    """The variables every MinerU process nexus starts gets when nexus's verified copy is in use, else ``{}``.
 
     ``MINERU_MODEL_SOURCE=local`` makes MinerU read ``models-dir.pipeline`` from the JSON at
     ``MINERU_TOOLS_CONFIG_JSON`` (an absolute path; MinerU reads it when ``mineru.utils.config_reader`` is
-    imported, so it has to be in the child's environment from the start). Hugging Face and ModelScope are not
-    contacted. A user who set ``MINERU_MODEL_SOURCE=local`` themselves is left alone."""
+    imported, so it has to be in the child's environment from the start). ``HF_HUB_OFFLINE=1`` makes an
+    accidental Hugging Face call fail at once instead of starting a download inside a page budget; ModelScope
+    is never configured. A user who set ``MINERU_MODEL_SOURCE=local`` themselves is left alone."""
     if not nexus_weights_ready():
         return {}
     try:
@@ -237,7 +253,17 @@ def child_env() -> dict[str, str]:
     except OSError as exc:
         _log.warning("mineru_json_write_failed", error=str(exc), error_type=type(exc).__name__)
         return {}
-    return {"MINERU_MODEL_SOURCE": "local", "MINERU_TOOLS_CONFIG_JSON": str(config)}
+    return {"MINERU_MODEL_SOURCE": "local", "MINERU_TOOLS_CONFIG_JSON": str(config), "HF_HUB_OFFLINE": "1"}
+
+
+def weights_state(env: Mapping[str, str] | None = None) -> str | None:
+    """Which weights a MinerU process got: the nexus root's path when its environment *env* (default: what
+    :func:`child_env` gives now) points at nexus's copy, else None (MinerU's own source). Recorded in the
+    server's pid file at spawn; a running server whose recorded state differs from the current one is cycled."""
+    overlay = child_env() if env is None else env
+    if overlay.get("MINERU_MODEL_SOURCE") == "local" and overlay.get("MINERU_TOOLS_CONFIG_JSON") == str(mineru_json_path()):
+        return str(weights_root())
+    return None
 
 
 def weights_cached() -> bool:
@@ -337,6 +363,35 @@ def _remote_server_configured() -> bool:
     return host is not None and host not in _LOCAL_HOSTS
 
 
+def retry_advice() -> str:
+    """What a user can do when nexus's weights could not be fetched: the three real remedies (the plain
+    ``mineru-models-download -s huggingface`` fills the Hugging Face cache at its newest revision, which
+    nexus's copy does not read)."""
+    return (
+        "Run the command again to resume (files that verified are kept); or set "
+        f"{BASE_URL_ENV} to a mirror that holds the release assets; or fetch the models yourself with "
+        f"`{manual_command()}` and set MINERU_MODEL_SOURCE=local with your own mineru.json (models-dir.pipeline)."
+    )
+
+
+def prefetch_is_noop() -> bool:
+    """True exactly when :func:`ensure_pipeline_weights` would do nothing: no probe, no seeding, no download.
+
+    The ``nx index repo`` gate asks this before it spends a PDF probe on "does any PDF need work": a walk whose
+    PDFs are all current must not cost a seeding or a 1.2 GB download. Nothing to do when the fetch is skipped,
+    the MinerU server is on another host, the user chose ``MINERU_MODEL_SOURCE=local``, nexus's own copy is
+    complete (default formula model), or, with ``MINERU_FORMULA_CH_SUPPORT``, MinerU's own source is not
+    ``huggingface`` or its Hugging Face cache already holds the weights."""
+    if os.environ.get(SKIP_ENV) == "1" or _remote_server_configured():
+        return True
+    source = os.environ.get("MINERU_MODEL_SOURCE", "huggingface")
+    if source == "local":
+        return True
+    if formula_model() != "unimernet_small":
+        return source != "huggingface" or _hf_weights_cached()
+    return _root_complete()
+
+
 def ensure_pipeline_weights(
     say: Callable[[str], None],
     *,
@@ -344,25 +399,34 @@ def ensure_pipeline_weights(
     allow_fetch: bool = True,
     fetch: Fetch | None = None,
 ) -> bool:
-    """Put MinerU's pipeline weights on this machine now when they are not, saying so on *say*.
+    """Put MinerU's pipeline weights where nexus's MinerU processes will read them, saying so on *say*.
 
     Returns True when work ran (a download or a seeding) and False when none was needed. Raises
-    :class:`WeightsFetchError` when work was needed and did not complete. Does nothing, and touches no
-    network, when :data:`SKIP_ENV` is ``1``, when ``pdf.mineru_server_url`` names another host (that server has
-    its own weights), or when the user set ``MINERU_MODEL_SOURCE=local`` (their own models). Any other source
-    setting (unset, ``huggingface``, ``modelscope``) is bypassed: nexus's copy is used, and neither is contacted.
+    :class:`WeightsFetchError` when work was needed, did not complete, and MinerU has nothing usable to fall
+    back on. Does nothing, and touches no network, when :data:`SKIP_ENV` is ``1``, when ``pdf.mineru_server_url``
+    names another host (that server has its own weights), or when the user set ``MINERU_MODEL_SOURCE=local``
+    (their own models). Any other source setting (unset, ``huggingface``, ``modelscope``) is bypassed for the
+    default formula model: nexus's copy is used and neither hub is contacted. :func:`prefetch_is_noop` is the
+    same decision without the work.
 
-    Order of work (F35): nexus's root complete -> nothing. Otherwise per manifest file: already in place with the
-    right size and sha256 -> keep; the pinned Hugging Face snapshot in the local cache has it with the right
-    sha256 -> link or copy it in (no download); else download the release asset, check its size and sha256, and
-    only then rename it into place. The ``.complete`` marker is written after the last file. *fetch*
-    replaces the downloader in tests. With *allow_fetch* False (a background run under ``NX_PDF_STACK=refuse``)
-    a download that would be needed raises :class:`WeightsFetchError` naming the command instead; seeding from a
-    local cache still runs.
+    Order of work (F35), default formula model: nexus's root complete -> nothing. Otherwise per manifest file:
+    already in place with the right size and sha256 -> keep; a copy in the Hugging Face cache whose bytes verify
+    (looked up by sha256 under ``blobs/``, then in every ``snapshots/*`` directory, any revision) -> hard-link or
+    copy it in, no download; else download the release asset, check its size and sha256, and only then rename it
+    into place. The ``.complete`` marker is written after the last file. A second process waits on a lock and
+    finds the work done. *fetch* replaces the downloader in tests.
 
-    With ``MINERU_FORMULA_CH_SUPPORT`` on, the formula model is one the manifest does not carry: F34's
-    Hugging Face fetch (:func:`_ensure_from_huggingface`, with *download* standing in for
-    ``huggingface_hub.snapshot_download``) runs as before."""
+    When some files remain and MinerU's own Hugging Face cache is usable (:func:`_hf_weights_cached`), nexus keeps
+    its pre-F35 behaviour for that machine instead of failing: under *allow_fetch* False (a background run under
+    ``NX_PDF_STACK=refuse``) it does nothing and returns False, and an interactive run that cannot download the
+    rest says so and returns False. In both, the root stays incomplete, :func:`child_env` stays empty and
+    MinerU reads its Hugging Face cache. With no usable Hugging Face cache, *allow_fetch* False or a failed
+    download raises :class:`WeightsFetchError`.
+
+    With ``MINERU_FORMULA_CH_SUPPORT`` on, the formula model is one the manifest does not carry: F34's Hugging
+    Face fetch (:func:`_ensure_from_huggingface`, with *download* standing in for
+    ``huggingface_hub.snapshot_download``) runs as before, and with ``MINERU_MODEL_SOURCE=modelscope`` there is no
+    prefetch at all."""
     if os.environ.get(SKIP_ENV) == "1":
         return False
     if _remote_server_configured():
@@ -374,63 +438,93 @@ def ensure_pipeline_weights(
     return _ensure_nexus_root(say, fetch=fetch, allow_fetch=allow_fetch)
 
 
-def _hf_snapshot_dir() -> Path | None:
-    """The pinned snapshot's directory in the Hugging Face cache, found with no network, or None."""
+def _hf_storage_dir() -> Path | None:
+    """The bundle's directory in the Hugging Face cache (``models--opendatalab--PDF-Extract-Kit-1.0``), or None."""
     try:
         import huggingface_hub.constants as hf_constants  # noqa: PLC0415 — optional dependency deferred (mineru's)
 
-        snapshot = (
-            Path(hf_constants.HF_HUB_CACHE)
-            / ("models--" + WEIGHTS_REPO.replace("/", "--"))
-            / "snapshots"
-            / WEIGHTS_REVISION
-        )
-        return snapshot if snapshot.is_dir() else None
+        storage = Path(hf_constants.HF_HUB_CACHE) / ("models--" + WEIGHTS_REPO.replace("/", "--"))
+        return storage if storage.is_dir() else None
     except Exception:  # noqa: BLE001 — no huggingface_hub or an unreadable cache is just "nothing to seed from"
         return None
+
+
+def _hf_copies(entry: WeightFile, storage: Path | None = None) -> Iterator[Path]:
+    """Candidate copies of *entry* in the Hugging Face cache, any revision: the blob named by its sha256 first
+    (a git-LFS blob is named by its content hash), then the file in each snapshot directory. The caller
+    verifies the bytes; nothing here is trusted."""
+    storage = storage or _hf_storage_dir()
+    if storage is None:
+        return
+    blob = storage / "blobs" / entry.sha256
+    if blob.is_file():
+        yield blob
+    snapshots = storage / "snapshots"
+    try:
+        revisions = sorted(p for p in snapshots.iterdir() if p.is_dir())
+    except OSError:
+        return
+    for revision in revisions:
+        candidate = revision / entry.path
+        if candidate.is_file():
+            yield candidate
 
 
 def _has_verified(path: Path, entry: WeightFile) -> bool:
     from nexus.db.service_bge_model import file_sha256  # noqa: PLC0415 — deferred local import — one hashing helper
 
-    return _size_ok(path, entry.size) and file_sha256(path) == entry.sha256
+    try:
+        return _size_ok(path, entry.size) and file_sha256(path) == entry.sha256
+    except OSError:
+        return False
 
 
-def _place(src: Path, dest: Path) -> None:
-    """Hard-link *src* to *dest*, or copy it when the two are on different filesystems; atomic by rename."""
+def _find_verified_copy(entry: WeightFile, storage: Path | None) -> Path | None:
+    """The first Hugging Face cache copy of *entry* whose size and sha256 match, resolved to the file itself."""
+    seen: set[Path] = set()
+    for candidate in _hf_copies(entry, storage):
+        try:
+            real = candidate.resolve(strict=True)  # a snapshot entry is a symlink to blobs/<hash>
+        except OSError:
+            continue
+        if real in seen:
+            continue
+        seen.add(real)
+        if _has_verified(real, entry):
+            return real
+    return None
+
+
+def _unique_sibling(path: Path, suffix: str = ".part") -> Path:
+    """A path next to *path* no other process or run can also pick."""
+    return path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}{suffix}")
+
+
+def _place(src: Path, dest: Path, entry: WeightFile) -> None:
+    """Hard-link *src* to *dest*, or copy it (and re-check the copy's sha256) when the two are on different
+    filesystems; atomic by rename, through a temp name nothing else uses."""
+    from nexus.db.service_bge_model import file_sha256  # noqa: PLC0415 — deferred local import — one hashing helper
+
     dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_name(dest.name + ".part")
-    tmp.unlink(missing_ok=True)
+    tmp = _unique_sibling(dest)
     try:
         try:
             os.link(src, tmp)
         except OSError:
             shutil.copyfile(src, tmp)
+            if file_sha256(tmp) != entry.sha256:
+                raise OSError(f"the copy of {src.name} does not match its sha256 (a disk or memory fault?)")
         os.replace(tmp, dest)
     finally:
         tmp.unlink(missing_ok=True)
 
 
-def _seed_from_hf(entry: WeightFile, snapshot: Path, dest: Path) -> bool:
-    """Place the snapshot's copy of *entry* at *dest* when it has the pinned size and sha256."""
-    src = snapshot / entry.path
-    try:
-        blob = src.resolve(strict=True)  # the snapshot entry is a symlink to blobs/<hash>; link the blob itself
-    except OSError:
-        return False
-    if not _has_verified(blob, entry):
-        return False
-    _place(blob, dest)
-    return True
-
-
-def _download_asset(entry: WeightFile, root: Path, base: str, fetch: Fetch) -> None:
-    """Fetch *entry*'s asset next to the root, check its size and sha256, then rename it into place.
+def _download_asset(entry: WeightFile, work_dir: Path, root: Path, base: str, fetch: Fetch) -> None:
+    """Fetch *entry*'s asset into *work_dir*, check its size and sha256, then rename it into place.
     Nothing is left at the destination on a failed or mismatching download."""
     from nexus.db import service_bge_model as bge  # noqa: PLC0415 — deferred local import — the asset downloader and digest helper
 
-    part = root / ".partial" / entry.asset
-    part.parent.mkdir(parents=True, exist_ok=True)
+    part = work_dir / entry.asset
     try:
         try:
             fetch(f"{base}/{entry.asset}", part)
@@ -461,65 +555,110 @@ def _ensure_nexus_root(say: Callable[[str], None], *, fetch: Fetch | None, allow
     root = weights_root()
     if _root_complete(root):
         return False
-    snapshot = _hf_snapshot_dir()
-    seeded: list[WeightFile] = []
-    todo: list[WeightFile] = []
+    from nexus._locking import acquire_directory_lock, release_lock  # noqa: PLC0415 — deferred local import — avoids import-time cost
+
     try:
         root.mkdir(parents=True, exist_ok=True)
+        token = acquire_directory_lock(root)
+    except OSError as exc:
+        raise WeightsFetchError(
+            f"preparing MinerU's pipeline weights under {root} failed: {type(exc).__name__}: {exc}. {retry_advice()}"
+        ) from exc
+    try:
+        if _root_complete(root):  # another process finished while this one waited on the lock
+            return False
+        return _fill_nexus_root(root, say, fetch=fetch, allow_fetch=allow_fetch)
+    finally:
+        release_lock(token)
+
+
+def _fill_nexus_root(root: Path, say: Callable[[str], None], *, fetch: Fetch | None, allow_fetch: bool) -> bool:
+    storage = _hf_storage_dir()
+    in_place: list[WeightFile] = []
+    seedable: list[tuple[WeightFile, Path]] = []
+    todo: list[WeightFile] = []
+    try:
         for entry in MANIFEST:
-            dest = root / entry.path
-            if _has_verified(dest, entry):
-                continue
-            if snapshot is not None and _seed_from_hf(entry, snapshot, dest):
-                seeded.append(entry)
+            if _has_verified(root / entry.path, entry):
+                in_place.append(entry)
+            elif (copy := _find_verified_copy(entry, storage)) is not None:
+                seedable.append((entry, copy))
             else:
                 todo.append(entry)
     except OSError as exc:
-        _log.warning("mineru_weights_seed_failed", error=str(exc), error_type=type(exc).__name__)
+        _log.warning("mineru_weights_scan_failed", error=str(exc), error_type=type(exc).__name__)
         raise WeightsFetchError(
-            f"preparing MinerU's pipeline weights under {root} failed: {type(exc).__name__}: {exc}. "
-            f"Run the command again, or fetch them with `{manual_command()}`."
+            f"preparing MinerU's pipeline weights under {root} failed: {type(exc).__name__}: {exc}. {retry_advice()}"
         ) from exc
+    # Files remain and MinerU can already read its own Hugging Face cache: the machine works as it did before
+    # F35, so a background run does nothing and a failed download is a warning, never exit 75.
+    hf_usable = bool(todo) and _hf_weights_cached()
     if todo and not allow_fetch:
+        if hf_usable:
+            _log.info("mineru_weights_nexus_copy_incomplete_hf_cache_in_use", missing=len(todo))
+            return False
         raise WeightsFetchError(
             "MinerU's pipeline weights are not on this machine yet, and this run does not download them "
             "(NX_PDF_STACK=refuse or pdf_stack.auto_install: false). Fetch them by running `nx index pdf` on a "
-            f"PDF, or with `{manual_command()}`."
+            f"PDF. {retry_advice()}"
         )
+    try:
+        for entry, copy in seedable:
+            _place(copy, root / entry.path, entry)
+    except OSError as exc:
+        _log.warning("mineru_weights_seed_failed", error=str(exc), error_type=type(exc).__name__)
+        raise WeightsFetchError(
+            f"seeding MinerU's pipeline weights under {root} failed: {type(exc).__name__}: {exc}. {retry_advice()}"
+        ) from exc
     if todo:
+        needed = sum(e.size for e in todo)
+        found = f" ({len(seedable)} file(s), {_human(sum(e.size for e, _ in seedable))}, are taken from the Hugging Face cache)" if seedable else ""
         say(
             "nx: MinerU's pipeline weights are not on this machine yet. Fetching them now, before any page is "
-            f"parsed (first use only, about {_human(sum(e.size for e in todo))}; several minutes on a slow network)."
+            f"parsed (first use only, downloading {_human(needed)}{found}; several minutes on a slow network)."
         )
-        _log.info("mineru_weights_fetch_start", files=len(todo), seeded=len(seeded), base=asset_base_url())
+        _log.info("mineru_weights_fetch_start", files=len(todo), seeded=len(seedable), base=asset_base_url())
         from nexus.db import service_bge_model as bge  # noqa: PLC0415 — deferred local import — the default asset downloader
 
         downloader = fetch or bge._httpx_stream
         base = asset_base_url()
-        for entry in todo:
-            try:
-                _download_asset(entry, root, base, downloader)
-            except Exception as exc:  # noqa: BLE001 — any fetch failure is the same retry for the user
-                _log.warning("mineru_weights_fetch_failed", asset=entry.asset, error=str(exc), error_type=type(exc).__name__)
-                raise WeightsFetchError(
-                    f"fetching MinerU's pipeline weights failed at {entry.asset}: {type(exc).__name__}: {exc}. "
-                    f"Run the command again to resume the download, or fetch them with `{manual_command()}`."
-                ) from exc
-            say(f"nx:   fetched from nexus asset: {entry.asset} ({_human(entry.size)})")
-    if seeded:
+        work_dir = Path(tempfile.mkdtemp(prefix="dl-", dir=root))
+        try:
+            for entry in todo:
+                try:
+                    _download_asset(entry, work_dir, root, base, downloader)
+                except Exception as exc:  # noqa: BLE001 — any fetch failure is the same retry for the user
+                    _log.warning("mineru_weights_fetch_failed", asset=entry.asset, error=str(exc), error_type=type(exc).__name__)
+                    if hf_usable:
+                        say(
+                            f"nx: warning: fetching MinerU's pipeline weights failed at {entry.asset} "
+                            f"({type(exc).__name__}: {exc}). MinerU will read its own Hugging Face cache, as before; "
+                            f"run the command again to finish nexus's copy. {retry_advice()}"
+                        )
+                        return False
+                    raise WeightsFetchError(
+                        f"fetching MinerU's pipeline weights failed at {entry.asset}: {type(exc).__name__}: {exc}. "
+                        f"{retry_advice()}"
+                    ) from exc
+                say(f"nx:   fetched from nexus asset: {entry.asset} ({_human(entry.size)})")
+        finally:
+            shutil.rmtree(work_dir, ignore_errors=True)
+    if seedable:
         say(
-            f"nx:   seeded {len(seeded)} file(s) ({_human(sum(e.size for e in seeded))}) from the Hugging Face "
+            f"nx:   seeded {len(seedable)} file(s) ({_human(sum(e.size for e, _ in seedable))}) from the Hugging Face "
             "cache; nothing downloaded for them."
         )
     if not all(_size_ok(root / e.path, e.size) for e in MANIFEST):
         _log.warning("mineru_weights_fetch_incomplete")
+        raise WeightsFetchError(f"the MinerU pipeline weights were fetched but some files are still missing. {retry_advice()}")
+    try:
+        (root / COMPLETE_MARKER).write_text(WEIGHTS_REVISION + "\n", encoding="utf-8")
+    except OSError as exc:
         raise WeightsFetchError(
-            "the MinerU pipeline weights were fetched but some files are still missing. "
-            f"Run the command again, or fetch them with `{manual_command()}`."
-        )
-    (root / COMPLETE_MARKER).write_text(WEIGHTS_REVISION + "\n", encoding="utf-8")
-    shutil.rmtree(root / ".partial", ignore_errors=True)
-    _log.info("mineru_weights_fetch_done", downloaded=len(todo), seeded=len(seeded))
+            f"the MinerU pipeline weights are in place but {root / COMPLETE_MARKER} could not be written: "
+            f"{type(exc).__name__}: {exc}. {retry_advice()}"
+        ) from exc
+    _log.info("mineru_weights_fetch_done", downloaded=len(todo), seeded=len(seedable))
     say("nx: MinerU pipeline weights are ready.")
     return True
 

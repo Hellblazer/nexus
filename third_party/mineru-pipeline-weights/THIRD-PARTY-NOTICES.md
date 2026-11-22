@@ -23,3 +23,18 @@ The bundle labels itself `agpl-3.0` (the license block at the end of its README)
 
 Each Hugging Face link above is the model's upstream home; the copy published here is the one in the
 `opendatalab/PDF-Extract-Kit-1.0` link at the top.
+
+## Copyright lines
+
+From the upstream license files, as recorded in nexus's license review of 2026-11-21:
+
+- UniMERNet: Copyright 2024 OpenDataLab.
+- PaddleOCR: Copyright (c) 2016 PaddlePaddle Authors. PaddleOCR carries no NOTICE file.
+- TableStructureRec (the RapidAI project that hosts `unet.onnx`): Copyright 2021 RapidAI.
+
+## Open items
+
+- The weight files carry no license statement of their own from opendatalab. The `agpl-3.0` label on the bundle is
+  a block at the end of its README, not repository metadata, and opendatalab has not been asked which license governs
+  the weights. Every upstream component above is Apache-2.0, which allows redistribution under the bundle's label.
+- The terms of the UniMER-1M dataset that UniMERNet was trained on have not been reviewed.

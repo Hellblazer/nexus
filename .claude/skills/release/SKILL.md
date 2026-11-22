@@ -884,18 +884,29 @@ wheel Step 9 publishes needs those assets to exist, so they go up first. Run it 
 files and their digests are `MANIFEST` in that module, the one source the client, the gate and this script share:
 
 ```bash
-uv run --extra pdf python scripts/publish-mineru-weights.py --stage-dir "$(mktemp -d)" --upload --dry-run   # stage, verify, print the plan
-uv run --extra pdf python scripts/publish-mineru-weights.py --stage-dir <the same dir> --upload              # only under the release's go
+STAGE="$(mktemp -d)"
+uv run --extra pdf python scripts/publish-mineru-weights.py --stage-dir "$STAGE" --upload --dry-run   # stage, verify, print the plan and the tag target
+uv run --extra pdf python scripts/publish-mineru-weights.py --stage-dir "$STAGE" --upload              # only under the release's go
 ```
 
-The script stages the 20 files from the local Hugging Face cache (a cold cache downloads them at the pinned
-revision), verifies each against the manifest, writes `LICENSE-AGPL-3.0.txt`, `LICENSE-Apache-2.0.txt`,
-`THIRD-PARTY-NOTICES.md` and `MANIFEST.tsv`, and uploads to the tag only what is absent: it creates the release
-(not marked latest), never overwrites, and refuses with nothing uploaded if an existing asset's sha256 differs
-from the manifest. It is a no-op once the tag carries every asset, so run it at every cut. Staging and the dry run
-need no go; the upload is a release-asset write, so it waits for the releaser's go for this release. A release that
-bumps the pin (new upstream revision) changes `WEIGHTS_REVISION`, `WEIGHTS_ASSET_TAG`, `MANIFEST` and the notice
-text together, and uses a new tag; never re-upload under the old one.
+The script stages the 20 files from the local Hugging Face cache (any revision whose bytes verify; otherwise a
+download at the pinned revision), verifies each against the manifest, writes `LICENSE-AGPL-3.0.txt`,
+`LICENSE-Apache-2.0.txt`, `THIRD-PARTY-NOTICES.md` and `MANIFEST.tsv`, and uploads to the tag only what is absent.
+It creates the release when it is absent, with the tag at `--target` (default `main`, printed in the dry run; not
+marked latest), and otherwise uploads only the missing assets, never overwriting. It is a no-op once the tag
+carries every asset, so run it at every cut. It refuses, with nothing uploaded and a one-line reason:
+
+- a staged weight file or `MANIFEST.tsv` that does not match the manifest (delete it and stage again);
+- an existing release asset whose sha256 differs for a weight file or `MANIFEST.tsv`;
+- a release that exists only as a draft (publish or delete it by hand first);
+- a release it cannot read through `gh`.
+
+An existing license or notice asset that differs from the repo's text is not a refusal: the published copy stays and
+the script prints a warning, so a wording fix in `THIRD-PARTY-NOTICES.md` never makes a later cut fail. (A fix that
+must reach the release is a manual asset replacement the releaser decides.) Staging and the dry run need no go; the
+upload is a release-asset write, so it waits for the releaser's go for this release. A release that bumps the pin
+(new upstream revision) changes `WEIGHTS_REVISION`, `WEIGHTS_ASSET_TAG`, `MANIFEST` and the notice text together, and
+uses a new tag; never re-upload under the old one.
 
 ### 9. Tag and push IMMEDIATELY after merge (triggers Release workflow + PyPI publish via OIDC)
 

@@ -1321,6 +1321,9 @@ def test_the_local_mode_stages_serves_and_proves_the_f35_asset_fetch() -> None:
     assert "fetched from nexus asset" in verdict and "huggingface[.]co" in verdict
     assert '.cache/nexus/mineru' in block, "the virgin-HOME precondition and the .complete check"
     assert "models--opendatalab--PDF-Extract-Kit-1.0" in block, "the cold-HF-cache precondition stays"
+    assert '_f35_mineru_json_verdict "$NEXUS_WEIGHTS_ROOT" < "$HOME_DIR/.cache/nexus/mineru/mineru.json"' in block, (
+        "the children's nexus mineru.json must exist and name the nexus root"
+    )
 
 
 # ── the formula-PDF check is default-on; a skip needs a recorded reason (nexus-tr1rj.20) ──

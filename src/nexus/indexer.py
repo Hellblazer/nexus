@@ -2652,13 +2652,15 @@ def _hold_pdfs_without_stack(
     from nexus import mineru_weights  # noqa: PLC0415 — deferred import (startup cost)
 
     if probe is not None and pdf_stack.needs_stack(extractor) and (
-        not pdf_stack.state().present or not mineru_weights.weights_cached()
+        not pdf_stack.state().present or not mineru_weights.prefetch_is_noop()
     ):
         # nexus-2k66t.4.8: the stack is absent, so settle first whether any PDF
         # needs extracting. A walk whose PDFs are all indexed and unchanged
         # must not cost the install; the PDFs the probe clears are not held.
         # F34 (nexus-7t3w1): the same holds for MinerU's pipeline weights, which
-        # the gate below fetches (about 1.2 GB) when they are missing.
+        # the gate below fetches (about 1.2 GB) when they are missing. F35: the predicate is
+        # ``prefetch_is_noop``, true exactly when that gate would do nothing (a Hugging Face cache alone
+        # is not enough: the gate would still seed nexus's copy from it).
         pdf_paths = _needing if _needing is not None else probe(pdf_paths)
         if not pdf_paths:
             pdf_stack.record_skipped([*already_held], repo=repo)
