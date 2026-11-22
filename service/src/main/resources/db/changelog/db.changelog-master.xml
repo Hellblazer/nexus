@@ -2396,6 +2396,15 @@
     <include file="db/changelog/vectors-071-collection-id-restamp.xml"/>
 
     <!--
+        Bead nexus-p2m1x.17 (RDR-229 P3.1, linda's ruling): nexus.catalog_reconcile_commit refuses a staged present row whose physical_collection has no
+        registry row (reason unregistered_collection, no tumbler), as it refuses a path outside the owner root, and commits the other rows; without it the
+        write fails catalog_documents_physical_collection_id_check (23514) and the whole commit fails write_failed. The CHECK is not loosened. One
+        CREATE OR REPLACE FUNCTION (vectors-069-20's body plus one refusal step), no DATA EFFECT. The number is provisional, as vectors-071's is.
+        After vectors-071, before the grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/vectors-074-reconcile-refuses-unregistered.xml"/>
+
+    <!--
         Bead nexus-p2m1x.17 (RDR-229 P3.1, review-gate fix round B; P2.10 critique S2): the P2.10 residue repair moves (catalog-049-2) that are not
         complete when P3.1 lands are superseded by replacements whose templates set the collection id with source_uri, since P3.1's NOT VALID CHECKs
         refuse any UPDATE of a row with a name and no id (23514, permanent). One changeset per registry state (the documents move open or failed;
