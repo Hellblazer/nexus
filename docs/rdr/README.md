@@ -238,7 +238,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-218](rdr-218-windows-platform-support.md) | Windows Platform Support: a Low-Friction Plugin Install for the CLI and the Desktop | Architecture | Superseded by RDR-224 | 2026-09-21 |
 | [RDR-219](rdr-219-harness-credentials-never-leave-the-keychain.md) | Harness Credentials Never Leave the Keychain: an Automation Token, Passed by Environment | Architecture | Closed | 2026-09-25 |
 | [RDR-220](rdr-220-ci-status-from-github-webhooks-to-the-tuple-space.md) | CI Status From GitHub Webhooks to the Tuple Space | Architecture | Closed | 2026-09-26 |
-| [RDR-221](rdr-221-prose-editor.md) | Prose Editor: an Example-Anchored Line Editor with Memory in T2 | Feature | Accepted | 2026-09-27 |
+| [RDR-221](rdr-221-prose-editor.md) | Prose Editor: an Example-Anchored Line Editor with Memory in T2 | Feature | Closed | 2026-09-27 |
 | [RDR-222](rdr-222-request-identity-for-mutating-engine-routes.md) | Request Identity for Mutating Engine Routes | Architecture | Closed | 2026-09-27 |
 | [RDR-223](rdr-223-atomic-chunk-plus-owner-write.md) | Atomic Chunk-Plus-Owner Write on Every Client Path | Architecture | Closed | 2026-09-28 |
 | [RDR-224](rdr-224-native-windows-support.md) | Native Windows Support: Windows x64 Engine, PostgreSQL Bundle and Client | Architecture | Closed | 2026-09-30 |
