@@ -262,10 +262,18 @@ class GrantsNexusSvcUpgradeIntegrationTest {
         // the one include after datamoves-001 that reads the registry and is not a registering include, so the scan cannot hold it:
         // left in, the old walk fails at datamoves-002-1 with 'relation "nexus.data_moves" does not exist' (chas run of 911747ea29).
         // It landed after this list was written and is independent of P3.1; the new boot applies it after datamoves-001.
+        //
+        // RDR-229 P3.8 (nexus-p2m1x.28): the collections family is as unborn as the stamp family it builds on. collections-002's
+        // sequence-heal function reads catalog_collections.collection_id, which vectors-068 adds; left in, the old walk fails
+        // there with 'column c.collection_id does not exist' (chas run of 32fc5c484b). collections-001 and -003 go with it: the
+        // old state predates P3.8 as a whole, and the new boot applies all three.
         for (String unborn : List.of("db/changelog/datamoves-002-verify-statement-timeout.xml",
                 "db/changelog/vectors-068-collection-id-expand.xml",
                 "db/changelog/vectors-069-collection-id-dual-write-functions.xml",
-                "db/changelog/vectors-070-collection-id-stamp-moves.xml")) {
+                "db/changelog/vectors-070-collection-id-stamp-moves.xml",
+                "db/changelog/collections-001-tuple-unique-index.xml",
+                "db/changelog/collections-002-collection-id-seq-heal-function.xml",
+                "db/changelog/collections-003-tuple-lock-stripes.xml")) {
             if (!stripped.contains(unborn)) {
                 stripped.add(unborn);
             }
@@ -275,6 +283,7 @@ class GrantsNexusSvcUpgradeIntegrationTest {
                 "db/changelog/vectors-068-collection-id-expand.xml",
                 "db/changelog/vectors-069-collection-id-dual-write-functions.xml",
                 "db/changelog/vectors-070-collection-id-stamp-moves.xml",
+                "db/changelog/collections-002-collection-id-seq-heal-function.xml",
                 "db/changelog/catalog-052-residue-moves-supersede.xml");
         for (String registering : stripped) {
             String include = "<include file=\"" + registering + "\"/>";
