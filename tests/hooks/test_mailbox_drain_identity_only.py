@@ -3,7 +3,7 @@
 
 A session id is not a mail address. Both copies of the hook (the plugin script and the wheel port) run their real
 ``_drain_all`` here, over a token file on disk; only the engine call (``_drain_address``) is a recorder. The
-``/clear`` record drain is stubbed: it is the one session-keyed read left, and is not what these tests are about.
+``/clear`` record drain is gone too, so no address but the identity's is ever drained.
 """
 from __future__ import annotations
 
@@ -42,8 +42,6 @@ def _run(mod: Any, flavour: str, monkeypatch: pytest.MonkeyPatch, config_dir: Pa
     drained: list[str] = []
     monkeypatch.setattr(mod, "_config_dir", lambda: config_dir)
     monkeypatch.setattr(mod, "_resolve_endpoint", lambda _cd: ("http://127.0.0.1:1", "bearer", True))
-    monkeypatch.setattr(mod, "_prune_stale_cleared_records", lambda *_a, **_k: None)
-    monkeypatch.setattr(mod, "_drain_cleared_record", lambda *_a, **_k: None)
     monkeypatch.setattr(mod, "_drain_address", lambda _b, _t, address, **_k: drained.append(address))
     payload = {"session_id": SID}
     if flavour == "plugin":

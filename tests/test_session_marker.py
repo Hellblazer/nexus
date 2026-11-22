@@ -17,8 +17,7 @@ from pathlib import Path
 
 from nexus.session_marker import (
     _read_session_marker,
-    cleared_record_path,
-    record_clear_and_write_session_marker,
+    remove_legacy_cleared_records,
     session_marker_path,
     write_session_marker,
 )
@@ -26,9 +25,6 @@ from nexus.session_marker import (
 class TestPathShapes:
     def test_session_marker_path_shape(self, tmp_path: Path) -> None:
         assert session_marker_path(tmp_path, 4242) == tmp_path / "tuple-watch" / "session.4242"
-
-    def test_cleared_record_path_shape(self, tmp_path: Path) -> None:
-        assert cleared_record_path(tmp_path, "sid") == tmp_path / "tuple-watch" / "cleared.sid"
 
 
 class TestWriteAndReadRoundTrip:
@@ -51,35 +47,17 @@ class TestWriteAndReadRoundTrip:
         assert _read_session_marker(tmp_path, 4242) == "sess-b"
 
 
-class TestRecordClearAndWriteSessionMarker:
-    def test_record_clear_true_with_a_prior_marker_writes_the_record(
-        self, tmp_path: Path,
-    ) -> None:
-        write_session_marker(tmp_path, 4242, "old-sess")
-        record_clear_and_write_session_marker(
-            tmp_path, 4242, "new-sess", record_clear=True,
-        )
-        assert _read_session_marker(tmp_path, 4242) == "new-sess"
-        record = cleared_record_path(tmp_path, "new-sess")
-        assert record.read_text(encoding="utf-8").splitlines() == ["old-sess"]
+class TestRemoveLegacyClearedRecords:
+    """RDR-253 Phase 2: nothing writes or reads a ``cleared.<session id>`` record any more (a session id is not a mail
+    address). An older client may have left some; SessionStart deletes them, since the drain's 7-day prune is gone."""
 
-    def test_record_clear_false_writes_no_record(self, tmp_path: Path) -> None:
-        write_session_marker(tmp_path, 4242, "old-sess")
-        record_clear_and_write_session_marker(
-            tmp_path, 4242, "new-sess", record_clear=False,
-        )
-        assert _read_session_marker(tmp_path, 4242) == "new-sess"
-        assert not cleared_record_path(tmp_path, "new-sess").exists()
+    def test_deletes_every_cleared_record_and_nothing_else(self, tmp_path: Path) -> None:
+        watch = tmp_path / "tuple-watch"
+        watch.mkdir()
+        for name in ("cleared.s2", "cleared.s3", "session.4242", "i12.pending.json"):
+            (watch / name).write_text("x\n", encoding="utf-8")
+        assert remove_legacy_cleared_records(tmp_path) == 2
+        assert sorted(p.name for p in watch.iterdir()) == ["i12.pending.json", "session.4242"]
 
-    def test_no_prior_marker_writes_no_record(self, tmp_path: Path) -> None:
-        record_clear_and_write_session_marker(
-            tmp_path, 4242, "new-sess", record_clear=True,
-        )
-        assert not cleared_record_path(tmp_path, "new-sess").exists()
-
-    def test_same_id_writes_no_record(self, tmp_path: Path) -> None:
-        write_session_marker(tmp_path, 4242, "same-sess")
-        record_clear_and_write_session_marker(
-            tmp_path, 4242, "same-sess", record_clear=True,
-        )
-        assert not cleared_record_path(tmp_path, "same-sess").exists()
+    def test_no_directory_is_nothing_to_do(self, tmp_path: Path) -> None:
+        assert remove_legacy_cleared_records(tmp_path) == 0

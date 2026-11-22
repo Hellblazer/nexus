@@ -1182,67 +1182,33 @@ class TestPartialFailureNeverLosesDeliveredMail:
         for i in range(4):
             assert f"message {i}" in res.stdout
 
-    def test_one_failing_address_does_not_stop_the_other(self, tmp_path, engine) -> None:
-        """``_Skip`` is caught per address, not around the whole loop.
-
-        RDR-208 Phase 3 (bead nexus-galkv.20) retired the per-prompt payload's
-        own address list down to the session's own id alone -- there is no
-        longer a second REGISTERED address to prove isolation against there.
-        The same per-address ``try/except ... continue`` shape still lives in
-        the cleared-record drain (:func:`_drain_cleared_record`, still a list
-        of mailbox ids -- a chained ``/clear`` can name more than one), so this
-        now exercises the property through that path instead: the first named
-        mailbox is made to fail outright, and the second must still be
-        drained."""
-        eng = engine()
-        good = _row("z1", body="from the good address", to="old-addr-2")
-        eng.rows = [good]
-        eng.fail_rd_for = "old-addr-1"
-        _write_cleared_record(tmp_path / "config", SESSION_ID, ["old-addr-1", "old-addr-2"])
-        _wired(tmp_path, eng)
-        res = _run(tmp_path=tmp_path)
-        assert res.returncode == 0
-        assert "SKIP" in res.stderr, "the first address must actually have failed"
-        assert "old-addr-1" in res.stderr
-        assert "from the good address" in res.stdout, (
-            "a failure on the first address stopped the second"
-        )
-
-    def test_an_unexpected_failure_on_one_address_does_not_stop_the_others(
+    def test_a_failing_read_of_the_identity_mailbox_is_a_skip_line_and_never_the_prompts_problem(
         self, tmp_path, engine,
     ) -> None:
-        """The per-address handler for UNEXPECTED exceptions, not just ``_Skip``.
-
-        Written after a mutation showed the sibling malformed-response test could
-        not tell the two handlers apart: deleting the per-address ``except
-        Exception`` left it green, because ``main``'s outer guard caught the same
-        error and still exited 0. The outer guard preserves the exit code and the
-        SKIP line; it does NOT preserve "one bad mailbox must not stop the others",
-        since it catches outside the loop and every later address is abandoned.
-        That is the property only this test pins, and deleting the per-address
-        handler fails it. See the sibling test above for why this now runs
-        through the cleared-record drain rather than a registered instance
-        address (RDR-208 Phase 3, bead nexus-galkv.20).
-        """
+        """``_Skip`` is caught per address. RDR-253 Phase 2 left one address (the identity's), so the property is that
+        its failure ends the pass with a SKIP line and exit 0."""
         eng = engine()
-        good = _row("u1", body="from the second address", to="old-addr-2")
-        eng.rows = [good]
-        eng.malformed_rd_for = "old-addr-1"
-        _write_cleared_record(tmp_path / "config", SESSION_ID, ["old-addr-1", "old-addr-2"])
+        eng.rows = [_row("z1", body="never reached")]
+        eng.fail_rd_for = IDENTITY
         _wired(tmp_path, eng)
-
         res = _run(tmp_path=tmp_path)
-
         assert res.returncode == 0
-        assert "SKIP" in res.stderr and "old-addr-1" in res.stderr, (
-            "the first address must actually have failed"
-        )
-        assert "unexpected" in res.stderr, (
-            "an unanticipated failure must say so, not read as a planned skip"
-        )
-        assert "from the second address" in res.stdout, (
-            "an unexpected failure on the first address abandoned the second"
-        )
+        assert "SKIP" in res.stderr and IDENTITY in res.stderr
+        assert "never reached" not in res.stdout
+
+    def test_an_unexpected_failure_on_the_identity_mailbox_says_so_and_exits_zero(
+        self, tmp_path, engine,
+    ) -> None:
+        """The per-address handler for UNEXPECTED exceptions, not just ``_Skip``: a malformed engine response is a
+        SKIP line naming the exception type, never a traceback on an unrelated prompt."""
+        eng = engine()
+        eng.rows = [_row("u1", body="never reached")]
+        eng.malformed_rd_for = IDENTITY
+        _wired(tmp_path, eng)
+        res = _run(tmp_path=tmp_path)
+        assert res.returncode == 0
+        assert "SKIP" in res.stderr and IDENTITY in res.stderr
+        assert "unexpected" in res.stderr, "an unanticipated failure must say so, not read as a planned skip"
 
     def test_a_poison_row_does_not_stop_the_mail_behind_it(self, tmp_path, engine) -> None:
         """A row whose ``dims`` is not a dict must not silence its own address.
@@ -1458,15 +1424,13 @@ class TestPartialFailureNeverLosesDeliveredMail:
         )
 
 
-# ── Cleared-record drain (RDR-208 Phase 2 Step 3, bead nexus-galkv.6) ───────
+# ── The /clear record is gone (RDR-253 Phase 2, nexus-hczdo.2.1) ───────────
 #
-# On ``/clear``, SessionStart records the previous session id in
-# ``<config>/tuple-watch/cleared.<new session id>``. This hook reads its OWN
-# session's record, after its own mailbox, and empties every mailbox it
-# names -- deleting the record only when EVERY named mailbox's claim loop
-# ended on an empty claim, a fresh probe shows no live row (dead-lettered
-# rows do not count; a row under another process's lease does), and its
-# pending file is empty or missing. Any other outcome keeps the record.
+# RDR-208 Phase 2 Step 3 had SessionStart record the previous session id in
+# ``<config>/tuple-watch/cleared.<new session id>`` on ``/clear`` and this hook
+# empty the mailbox it named. A session id is no longer a mail address, so
+# nothing writes or reads one: the hook leaves a record an older client wrote
+# alone (SessionStart deletes it).
 
 
 def _write_cleared_record(config_dir: Path, session_id: str, ids: list[str]) -> Path:
@@ -1476,346 +1440,27 @@ def _write_cleared_record(config_dir: Path, session_id: str, ids: list[str]) -> 
     return path
 
 
-def _cleared_record_path(config_dir: Path, session_id: str) -> Path:
-    return config_dir / "tuple-watch" / f"cleared.{session_id}"
-
-
-class TestClearedRecordDrain:
-    def test_mail_at_the_named_mailbox_arrives_once_and_the_record_is_deleted(
-        self, tmp_path, engine,
-    ) -> None:
+class TestAClearedRecordIsNeitherReadNorDrained:
+    @_ENTRY_POINTS
+    def test_a_record_naming_an_old_session_mailbox_drains_nothing_from_it(self, tmp_path, engine, argv) -> None:
         eng = engine()
-        eng.rows = [_row("s1-mail", body="stranded by the clear", to="old-sess-id")]
+        eng.rows = [_row("cr1", body="stranded in the old session mailbox", to="old-session-id")]
+        record = _write_cleared_record(tmp_path / "config", SESSION_ID, ["old-session-id"])
         _wired(tmp_path, eng)
-        record = _write_cleared_record(tmp_path / "config", SESSION_ID, ["old-sess-id"])
-
-        res = _run(tmp_path=tmp_path)
-
+        res = _run(tmp_path=tmp_path, argv=argv)
         assert res.returncode == 0, res.stderr
-        assert "stranded by the clear" in res.stdout
-        assert not record.exists()
+        assert "stranded in the old session mailbox" not in res.stdout
+        rd_subspaces = {b.get("subspace") for p, b in eng.calls if p == "/v1/tuples/rd"}
+        assert "mailbox/old-session-id" not in rd_subspaces
+        assert record.exists(), "the hook no longer prunes or deletes records"
 
-        # The next prompt sees no record and no message: exactly once.
-        second = _run(tmp_path=tmp_path)
-        assert second.returncode == 0, second.stderr
-        assert "stranded by the clear" not in second.stdout
+    def test_the_hook_has_no_cleared_record_surface(self) -> None:
+        import nexus.hooks.mailbox_drain as wheel  # noqa: PLC0415
 
-    def test_the_cap_keeps_the_record_and_the_next_pass_confirms_empty(
-        self, tmp_path, engine,
-    ) -> None:
-        """``_MAX_DELIVER`` (10) ends the claim loop without ever seeing an
-        empty claim, so the record must survive that pass -- there may be
-        more left. Only the NEXT pass, which claims nothing, deletes it."""
-        eng = engine()
-        eng.rows = [_row(f"m{i}", body=f"msg{i}", to="old-sess-id") for i in range(10)]
-        _wired(tmp_path, eng)
-        record = _write_cleared_record(tmp_path / "config", SESSION_ID, ["old-sess-id"])
-
-        first = _run(tmp_path=tmp_path)
-        assert first.returncode == 0, first.stderr
-        for i in range(10):
-            assert f"msg{i}" in first.stdout
-        assert record.exists(), "the cap was reached; the record must survive"
-
-        second = _run(tmp_path=tmp_path)
-        assert second.returncode == 0, second.stderr
-        assert second.stdout.strip() == ""
-        assert not record.exists()
-
-    def test_budget_exhausted_before_the_cleared_mailbox_keeps_the_record(
-        self, tmp_path, engine,
-    ) -> None:
-        eng = engine()
-        eng.rows = [_row("s1-mail", body="stranded by the clear", to="old-sess-id")]
-        # Consumes the whole drain budget on the session's OWN mailbox probe,
-        # so the cleared-record drain never even starts.
-        eng.rd_delay_s = 30.0
-        _wired(tmp_path, eng)
-        record = _write_cleared_record(tmp_path / "config", SESSION_ID, ["old-sess-id"])
-
-        res = _run(tmp_path=tmp_path)
-
-        assert res.returncode == 0, res.stderr
-        assert "stranded by the clear" not in res.stdout
-        assert record.exists()
-
-    def test_an_ack_refusal_keeps_the_record(self, tmp_path, engine) -> None:
-        eng = engine()
-        eng.rows = [_row("s1-mail", body="ack will fail", to="old-sess-id")]
-        eng.ack_ok = False
-        _wired(tmp_path, eng)
-        record = _write_cleared_record(tmp_path / "config", SESSION_ID, ["old-sess-id"])
-
-        res = _run(tmp_path=tmp_path)
-
-        assert res.returncode == 0, res.stderr
-        assert "ack will fail" not in res.stdout
-        assert record.exists()
-
-    def test_a_row_under_another_processs_lease_keeps_the_record(
-        self, tmp_path, engine,
-    ) -> None:
-        """The claim loop ends empty (nothing eligible to claim), but the
-        confirming probe afterward still finds the row -- claimed, with a
-        live lease held by a process other than this one -- so it counts as
-        LIVE and the record must survive. ``delivered == 0`` alone is not
-        the delete signal."""
-        eng = engine()
-        row = _row("s1-mail", body="held by a peer", to="old-sess-id")
-        row["claim_state"] = "claimed"
-        row["claimant"] = "some-other-process"
-        row["lease_until"] = time.time() + 300.0
-        eng.rows = [row]
-        _wired(tmp_path, eng)
-        record = _write_cleared_record(tmp_path / "config", SESSION_ID, ["old-sess-id"])
-
-        res = _run(tmp_path=tmp_path)
-
-        assert res.returncode == 0, res.stderr
-        assert "held by a peer" not in res.stdout
-        assert record.exists()
-        assert "/v1/tuples/in" in eng.paths()
-
-    def test_a_leased_row_past_the_first_page_still_keeps_the_record(
-        self, tmp_path, engine,
-    ) -> None:
-        """RDR-208 Phase 2 Step 3 fix 1 (gate audit round 2). Twenty
-        dead-lettered rows fill the confirming probe's first page; a
-        twenty-first row -- claimed, under another process's live lease --
-        sorts strictly after them and only shows up on a SECOND page. A
-        one-page confirming check would miss it entirely and delete the
-        record early.
-        """
-        eng = engine()
-        dead_rows = [
-            _row(f"d{i:02d}", body="dead filler", claim_state="dead", to="old-sess-id")
-            for i in range(20)
-        ]
-        for row in dead_rows:
-            row["created_at"] = "2026-09-12T00:00:00Z"
-        leased = _row("leased-row", body="held by a peer, past the first page", to="old-sess-id")
-        leased["created_at"] = "2026-09-12T00:00:01Z"  # one second later: page 2
-        leased["claim_state"] = "claimed"
-        leased["claimant"] = "some-other-process"
-        leased["lease_until"] = time.time() + 300.0
-        eng.rows = [*dead_rows, leased]
-        _wired(tmp_path, eng)
-        record = _write_cleared_record(tmp_path / "config", SESSION_ID, ["old-sess-id"])
-
-        res = _run(tmp_path=tmp_path)
-
-        assert res.returncode == 0, res.stderr
-        assert "held by a peer, past the first page" not in res.stdout
-        assert record.exists(), (
-            "a live row on the confirming probe's SECOND page was missed; "
-            "the record was deleted while a live claim was still unconfirmed"
-        )
-
-    def test_twenty_dead_rows_with_nothing_live_past_them_deletes_the_record(
-        self, tmp_path, engine,
-    ) -> None:
-        """The same shape as the test above, MINUS the leased row: a full
-        first page of dead-lettered rows and a genuinely empty second page
-        must still delete the record -- pagination must not make an
-        actually-empty mailbox unconfirmable."""
-        eng = engine()
-        dead_rows = [
-            _row(f"d{i:02d}", body="dead filler", claim_state="dead", to="old-sess-id")
-            for i in range(20)
-        ]
-        for row in dead_rows:
-            row["created_at"] = "2026-09-12T00:00:00Z"
-        eng.rows = dead_rows
-        _wired(tmp_path, eng)
-        record = _write_cleared_record(tmp_path / "config", SESSION_ID, ["old-sess-id"])
-
-        res = _run(tmp_path=tmp_path)
-
-        assert res.returncode == 0, res.stderr
-        assert not record.exists()
-
-    def test_a_nonempty_pending_file_keeps_the_record(self, tmp_path, engine) -> None:
-        """A pending entry whose id is STILL PRESENT in the mailbox (here, a
-        dead-lettered row of the same id) is kept by ``_recover_pending``
-        unconditionally -- it is not "absent, so recovered" -- so the pending
-        file stays non-empty after the pass and the cleared record must
-        survive on that basis alone, even though the claim loop itself ended
-        empty and the only row present is dead-lettered (not live).
-        """
-        eng = engine()
-        eng.rows = [_row("ghost-id", body="dead", claim_state="dead", to="old-sess-id")]
-        _wired(tmp_path, eng)
-        config_dir = tmp_path / "config"
-        record = _write_cleared_record(config_dir, SESSION_ID, ["old-sess-id"])
-        pending_dir = config_dir / "tuple-watch"
-        pending_dir.mkdir(parents=True, exist_ok=True)
-        (pending_dir / "old-sess-id.pending.json").write_text(
-            json.dumps({"entries": [
-                {"id": "ghost-id", "rendered": "- an ambiguous earlier ack"},
-            ]}),
-            encoding="utf-8",
-        )
-
-        res = _run(tmp_path=tmp_path)
-
-        assert res.returncode == 0, res.stderr
-        assert record.exists()
-        assert (pending_dir / "old-sess-id.pending.json").exists(), (
-            "the pending entry is present in the mailbox and must be kept, not recovered"
-        )
-
-    def test_a_malformed_id_is_skipped_while_the_others_drain(
-        self, tmp_path, engine,
-    ) -> None:
-        eng = engine()
-        eng.rows = [_row("s1-mail", body="the good one", to="old-sess-id")]
-        _wired(tmp_path, eng)
-        config_dir = tmp_path / "config"
-        path = _cleared_record_path(config_dir, SESSION_ID)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("../etc/passwd\nold-sess-id\n", encoding="utf-8")
-
-        res = _run(tmp_path=tmp_path)
-
-        assert res.returncode == 0, res.stderr
-        assert "the good one" in res.stdout
-        assert "SKIP" in res.stderr
-        assert "malformed" in res.stderr
-        assert not path.exists()
-
-    def test_two_clears_before_a_prompt_drain_both_old_mailboxes(
-        self, tmp_path, engine,
-    ) -> None:
-        """A -> B -> C with no prompt in between: the writer carries both
-        ids forward into one record; this hook drains both from it."""
-        eng = engine()
-        eng.rows = [
-            _row("a-mail", body="from the first clear", to="session-a"),
-            _row("b-mail", body="from the second clear", to="session-b"),
-        ]
-        _wired(tmp_path, eng)
-        record = _write_cleared_record(
-            tmp_path / "config", SESSION_ID, ["session-b", "session-a"],
-        )
-
-        res = _run(tmp_path=tmp_path)
-
-        assert res.returncode == 0, res.stderr
-        assert "from the first clear" in res.stdout
-        assert "from the second clear" in res.stdout
-        assert not record.exists()
-
-    def test_a_fork_leaves_the_parents_mailbox_untouched(
-        self, tmp_path, engine,
-    ) -> None:
-        """No cleared record at all (a fork writes none, per RDR-208's Fork
-        paragraph and Sam's decision 2): this hook never touches the
-        parent's mailbox, and issues no `in` call for it."""
-        eng = engine()
-        eng.rows = [_row("parent-mail", body="still the parent's", to="parent-sess-id")]
-        _wired(tmp_path, eng)
-
-        res = _run(tmp_path=tmp_path)
-
-        assert res.returncode == 0, res.stderr
-        assert "still the parent's" not in res.stdout
-        in_bodies = [b for p, b in eng.calls if p == "/v1/tuples/in"]
-        assert not any(
-            (b.get("keys_pattern") or {}).get("to") == "parent-sess-id" for b in in_bodies
-        )
-
-    def test_a_record_older_than_seven_days_is_pruned(self, tmp_path, engine) -> None:
-        eng = engine()
-        eng.rows = [_row("s1-mail", body="expired mailbox", to="old-sess-id")]
-        _wired(tmp_path, eng)
-        record = _write_cleared_record(tmp_path / "config", SESSION_ID, ["old-sess-id"])
-        old_mtime = time.time() - (8 * 24 * 3600)
-        os.utime(record, (old_mtime, old_mtime))
-
-        res = _run(tmp_path=tmp_path)
-
-        assert res.returncode == 0, res.stderr
-        assert "expired mailbox" not in res.stdout
-        assert not record.exists()
-
-    def test_a_held_pending_lock_makes_the_pass_skip_and_keep_the_record(
-        self, tmp_path, engine,
-    ) -> None:
-        """nexus-galkv.6 fix 3 (gate audit round 2). A lock this pass cannot
-        acquire within its bound must FAIL CLOSED: no claim attempted at
-        all against the mailbox, and the record kept -- never the old
-        behaviour of running the pass unlocked past the timeout, which
-        could duplicate a delivery.
-        """
-        eng = engine()
-        eng.rows = [_row("s1-mail", body="stranded by the clear", to="old-sess-id")]
-        _wired(tmp_path, eng)
-        record = _write_cleared_record(tmp_path / "config", SESSION_ID, ["old-sess-id"])
-        lock_path = tmp_path / "config" / "tuple-watch" / "old-sess-id.pending.lock"
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
-        lock_fd(fd, blocking=True)
-        try:
-            res = _run(tmp_path=tmp_path)
-        finally:
-            unlock_fd(fd)
-            os.close(fd)
-
-        assert res.returncode == 0, res.stderr
-        assert "stranded by the clear" not in res.stdout
-        assert record.exists()
-        assert "SKIP" in res.stderr
-        assert "old-sess-id" in res.stderr
-        in_bodies = [b for p, b in eng.calls if p == "/v1/tuples/in"]
-        assert not any(
-            (b.get("keys_pattern") or {}).get("to") == "old-sess-id" for b in in_bodies
-        ), "the pass claimed from the mailbox despite the unavailable lock"
-
-    def test_two_processes_on_one_session_id_concurrently_deliver_exactly_once(
-        self, tmp_path, engine,
-    ) -> None:
-        """Gate Significant (b). X cleared S1 to S2 (cleared.S2 names S1);
-        mail was already sitting at S1. X's drain (through the record) and
-        Y's ordinary drain (Y still resumes S1) run CONCURRENTLY as two real
-        subprocesses against one engine. Every message is delivered exactly
-        once across the two outputs.
-        """
-        eng = engine()
-        eng.rows = [_row(f"m{i}", body=f"concurrent-{i}", to="old-sess-id") for i in range(5)]
-        _wired(tmp_path, eng)
-        _write_cleared_record(tmp_path / "config", SESSION_ID, ["old-sess-id"])
-
-        results: dict[str, subprocess.CompletedProcess[str]] = {}
-        barrier = threading.Barrier(2)
-
-        def _go(key: str, payload_session_id: str) -> None:
-            barrier.wait(timeout=10)
-            results[key] = _run(tmp_path=tmp_path, stdin=_payload(session_id=payload_session_id))
-
-        tx = threading.Thread(target=_go, args=("x", SESSION_ID))
-        ty = threading.Thread(target=_go, args=("y", "old-sess-id"))
-        tx.start()
-        ty.start()
-        tx.join(timeout=30)
-        ty.join(timeout=30)
-
-        assert not tx.is_alive() and not ty.is_alive(), "a drain subprocess hung"
-        res_x, res_y = results["x"], results["y"]
-        assert res_x.returncode == 0, res_x.stderr
-        assert res_y.returncode == 0, res_y.stderr
-
-        expected = {f"concurrent-{i}" for i in range(5)}
-        delivered_x = {m for m in expected if m in res_x.stdout}
-        delivered_y = {m for m in expected if m in res_y.stdout}
-        assert delivered_x & delivered_y == set(), (
-            f"a message was delivered to both processes: {delivered_x & delivered_y}\n"
-            f"x stdout:\n{res_x.stdout}\ny stdout:\n{res_y.stdout}"
-        )
-        assert delivered_x | delivered_y == expected, (
-            f"not every message was delivered: missing "
-            f"{expected - (delivered_x | delivered_y)}\n"
-            f"x stdout:\n{res_x.stdout}\ny stdout:\n{res_y.stdout}"
-        )
+        text = _PLUGIN_SCRIPT.read_text(encoding="utf-8")
+        for gone in ("_drain_cleared_record", "_read_cleared_record", "_prune_stale_cleared_records", "_drain_named_mailbox"):
+            assert not hasattr(wheel, gone), gone
+            assert gone not in text, gone
 
 
 # ── Size pre-check (bead nexus-r7xao) ────────────────────────────────────────
@@ -2728,17 +2373,6 @@ class TestAskAnswerMatched:
         res, eng = _drain_asks(tmp_path, engine, [row], _fx_record())
         assert eng.get_calls == [("asks", f"{IDENTITY}/{_ASK}/{_ASK_VERSION}")]
         assert SESSION_ID not in eng.get_calls[0][1]
-        assert _MATCHED in res.stdout
-
-    def test_a_cleared_record_mailbox_is_checked_under_its_own_address(self, tmp_path, engine) -> None:
-        old = "old-session-id"
-        eng = engine()
-        eng.rows = [_ask_row("as08", to=old)]
-        _put_answer(eng, _fx_record(), address=old)
-        _wired(tmp_path, eng)
-        _write_cleared_record(tmp_path / "config", SESSION_ID, [old])
-        res = _run(tmp_path=tmp_path, argv=_PLUGIN_ARGV)
-        assert eng.get_calls == [("asks", _ask_title(old))], res.stderr
         assert _MATCHED in res.stdout
 
     def test_an_ack_refused_matched_row_prints_nothing(self, tmp_path, engine) -> None:

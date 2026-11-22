@@ -223,49 +223,26 @@ def _write_t1_handoff_markers(new_session_id: str, identity_fields: dict | None 
         _logger().debug("t1_handoff_marker_write_failed", error=str(exc))
 
 
-def _write_tuple_watch_session_marker(new_session_id: str, source: str | None) -> None:
+def _write_tuple_watch_session_marker(new_session_id: str) -> None:
     """nexus-6konb.12 (MM-3.4 fix 1): record this conversation's current
     session id under this claude process's own marker file, so a reader
     that resolved an OLDER session id for the same conversation can tell
-    it changed. Originally written for a live CLI watcher Monitor to check
-    against its own spawn-time session id and self-stop on a mismatch
-    rather than keep holding its per-address lock on a mailbox nobody
-    watched any more; RDR-211 nexus-rplay.14 deleted that watcher, and the
-    marker's remaining readers are ``nexus.tuple_directory.resolve_default_from``
-    and this function's own ``record_clear_and_write_session_marker`` call
-    below.
+    it changed. RDR-211 nexus-rplay.14 deleted the live CLI watcher that
+    checked it; the marker's remaining readers are
+    ``nexus.tuple_directory.resolve_default_from`` (a send's default
+    ``from`` when no identity is bound) and ``nx tuple wait``'s default
+    target.
 
-    Originally also replaced the deleted Monitor-arm instruction's old
-    TaskStop rule, which could not work in the first place: the fresh
-    conversation it would run in has no memory of the OLD Monitor's
-    harness task id, so there was never a way for it to discover what to
-    stop. This writes a marker a reader checks ITSELF instead, reusing the
-    nexus-d76vc T1-handoff pattern immediately above: writer and
-    reader independently derive the SAME claude ancestor pid via
+    Writer and reader independently derive the SAME claude ancestor pid via
     :func:`nexus.session.find_immediate_claude_pid`, from different vantage
-    points, rather than passing it between them.
+    points, rather than passing it between them (the nexus-d76vc T1-handoff
+    pattern). Written on every SessionStart source, so a marker left by a
+    dead process that owned the same pid is overwritten.
 
-    Written on EVERY SessionStart source, unlike the T1 handoff marker. The
-    marker is keyed by pid and nothing prunes it, and pids are reused: a new
-    Claude process that inherited a dead one's pid would otherwise read that
-    process's last marker, name a session it is not, and stop its own freshly
-    armed watcher on the first cycle. Writing on ``startup`` (and on
-    ``compact``, where the id is unchanged) overwrites whatever a previous
-    owner of the pid left, so a marker always names the CURRENT process's
-    session. The watcher still only stops on a mismatch, so a same-id write
-    is a no-op for it.
-
-    RDR-208 Phase 2 Step 3: on ``source == "clear"`` this also records the
-    session a ``/clear`` just stranded, so
-    :mod:`nexus.hooks.mailbox_drain` can empty that mailbox once
-    (:func:`nexus.session_marker.record_clear_and_write_session_marker`). Never
-    on an INHERITED session id (``NX_SESSION_ID`` set): that names a nested
-    subprocess reusing its parent's session, not a real ``/clear`` boundary
-    a mailbox was stranded at, and recording one there would name a
-    "previous" session that never stopped receiving mail. Every other
-    source (``resume``, ``compact``, ``startup``, ``fork``, or none) writes
-    no record, per the RDR's Fork and Two-processes paragraphs and Sam's
-    decision that a fork leaves the parent's mailbox with the parent.
+    RDR-253 Phase 2: a ``/clear`` no longer records the mailbox it stranded
+    (a session id is not a mail address), and this deletes any
+    ``cleared.<session id>`` record an older client left
+    (:func:`nexus.session_marker.remove_legacy_cleared_records`).
 
     Best-effort: any failure (no ``ps``, no config dir, disk error) is
     logged at debug and swallowed -- a SessionStart hook must never fail
@@ -275,33 +252,28 @@ def _write_tuple_watch_session_marker(new_session_id: str, source: str | None) -
         from nexus import config as _nx_config  # noqa: PLC0415 — deferred import; module attribute so a patched nexus.config reaches it (nexus-78blw)
         from nexus.session import find_immediate_claude_pid  # noqa: PLC0415 — deferred import; rare/branch-local path
         from nexus.session_marker import (  # noqa: PLC0415 — deferred import; rare/branch-local path
-            record_clear_and_write_session_marker,
+            remove_legacy_cleared_records,
+            write_session_marker,
         )
 
         claude_pid = find_immediate_claude_pid()
         if claude_pid <= 0:
             return
-        inherited = bool(os.environ.get("NX_SESSION_ID", "").strip())
-        record_clear_and_write_session_marker(
-            _nx_config.nexus_config_dir(), claude_pid, new_session_id,
-            record_clear=(source == "clear" and not inherited),
-        )
+        state_dir = _nx_config.nexus_config_dir()
+        write_session_marker(state_dir, claude_pid, new_session_id)
+        remove_legacy_cleared_records(state_dir)
     except Exception as exc:  # noqa: BLE001 — best-effort; hook must never crash session-start over a mailbox-watch convenience feature
         _logger().debug("tuple_watch_session_marker_write_failed", error=str(exc))
 
 
 def adopt_session_marker(session_id: str) -> None:
-    """Point this claude process's watcher self-stop marker at *session_id*,
-    recording no ``/clear``.
+    """Point this claude process's session marker at *session_id*.
 
     ``nx hook mailbox-arm`` calls this. ``/branch`` forks a new session in the
     same claude process and runs no SessionStart, so the marker still names
-    the parent session and the parent's watcher keeps running in the fork.
-    Writing the fork's id stops that watcher. No cleared record is written:
-    the parent's mailbox stays with the parent (RDR-208 Fork paragraph).
-    Best-effort, like every marker write here.
+    the parent session. Best-effort, like every marker write here.
     """
-    _write_tuple_watch_session_marker(session_id, None)
+    _write_tuple_watch_session_marker(session_id)
 
 
 # -- SessionStart -------------------------------------------------------------
@@ -394,7 +366,7 @@ def session_start(claude_session_id: str | None = None, source: str | None = Non
         _write_t1_handoff_markers(session_id, _identity_marker_fields(identity, source))
     if session_id and session_id != "unknown":
         # Every source, not just clear/resume: see the writer's docstring.
-        _write_tuple_watch_session_marker(session_id, source)
+        _write_tuple_watch_session_marker(session_id)
     if _holds_its_identity(identity):
         # RDR-253 Step 6 (nexus-hczdo): close the work rows whose work ended without its end being written (an agent in
         # flight across a restart, a killed lab run). Detached; returns at once; logs a count of what it closed.

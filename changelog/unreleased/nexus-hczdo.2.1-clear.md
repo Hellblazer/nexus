@@ -1,0 +1,3 @@
+### Removed
+
+- **A `/clear` no longer leaves a `cleared.<session id>` record, and the drain hook no longer empties old session mailboxes.** Mail is addressed to an identity, which survives `/clear`, so nothing is stranded (RDR-253 Phase 2, nexus-hczdo.2.1). SessionStart stops recording the previous session id, both drain hooks (the plugin script and the `nx-hook` verb) stop reading and pruning `cleared.*` records, and SessionStart deletes the ones an older client left (no age check: nothing reads them now). The tuple-watch session marker stays, for a send's default `from` without an identity and for `nx tuple wait`'s default target. Mail an older client sent to a `mailbox/<session id>` before this release is no longer drained and expires after its 7 days.

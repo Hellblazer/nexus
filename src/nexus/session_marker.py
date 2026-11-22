@@ -6,10 +6,10 @@ Rehomed out of the former CLI mailbox-watch loop module ahead of its
 deletion (RDR-211 nexus-rplay.14, a later bead in the same RDR): these five
 functions are the part of that module OTHER modules import at runtime --
 ``nexus.tuple_directory.resolve_default_from`` (``_read_session_marker``,
-for ``mailbox_send``'s default ``from``) and ``nexus.hooks``'s ``/clear``/
-``/resume`` SessionStart handoff (``record_clear_and_write_session_marker``,
-via ``_write_tuple_watch_session_marker``) -- so they did not leave with the
-watcher loop when it was deleted.
+for ``mailbox_send``'s default ``from``) and ``nexus.hooks``'s SessionStart handoff
+(``write_session_marker``, via ``_write_tuple_watch_session_marker``) and
+``nx tuple wait``'s default target -- so they did not leave with the watcher
+loop when it was deleted.
 
 **Why here, not ``nexus.session`` or ``nexus.db.t1``:** ``nexus.session``
 already owns CLI/session-id identity (``resolve_session_id``,
@@ -21,14 +21,10 @@ touch. ``nexus.db.t1``'s lease helpers (``publish_t1_session_lease`` /
 ``read_t1_session_lease``) are a structurally different mechanism: a
 PG/HTTP-backed T1 session lease reached through the engine, not a flat
 file on disk. Neither is the right layer, so this module is a small,
-single-purpose home for exactly the marker/cleared-record pair.
+single-purpose home for the marker (and, until RDR-253 Phase 2, its cleared record).
 
 **On-disk paths are UNCHANGED (byte-identical)** from the former watcher
-module, because files already on disk are read by those names. The drain
-hook used to carry its own literal copies of them, as a plugin script that
-could not import this package; since nexus-t9klx it is
-:mod:`nexus.hooks.mailbox_drain` and calls :func:`cleared_record_path`
-itself, so this module is the only spelling.
+module, because files already on disk are read by those names.
 
 The former watcher module re-exported these five names as thin
 pass-throughs while it still existed, so every importer kept working
@@ -48,7 +44,7 @@ _log = structlog.get_logger(__name__)
 #: here as a separate copy rather than a shared import: that module's other
 #: uses of the constant (the probe cursor, the per-address lock, the
 #: address-registration directory) were the deleted WATCHER's own state;
-#: this module owns only the marker/cleared-record pair.
+#: this module owns only the marker.
 _STATE_SUBDIR = "tuple-watch"
 
 
@@ -77,8 +73,8 @@ def write_session_marker(state_dir: Path, claude_pid: int, session_id: str) -> N
     nexus-rplay.14 deleted the watcher that read this marker for its own
     self-stop; the marker's remaining readers are
     ``nexus.tuple_directory.resolve_default_from`` (``mailbox_send``'s
-    default ``from``) and this module's own
-    :func:`record_clear_and_write_session_marker`.
+    default ``from`` when no identity is bound) and ``nx tuple wait``'s
+    default target.
 
     Reuses the nexus-d76vc T1-handoff pattern (:mod:`nexus.daemon.t1_handoff`):
     the writer (``nexus.hooks.session_start``, on every SessionStart source)
@@ -118,91 +114,30 @@ def _read_session_marker(state_dir: Path, claude_pid: int) -> str | None:
         return None
 
 
-def cleared_record_path(state_dir: Path, session_id: str) -> Path:
-    """``<state_dir>/tuple-watch/cleared.<session_id>``: the one-time drain
-    record RDR-208 Phase 2 Step 3 hands to
-    :mod:`nexus.hooks.mailbox_drain`. *session_id* is the NEW
-    session's id -- the drain reads its OWN session id's record, never a
-    prior one -- and the file's content is the mailbox(es) a ``/clear``
-    stranded: one bare session id per line. See
-    :func:`record_clear_and_write_session_marker`.
-    """
-    return state_dir / _STATE_SUBDIR / f"cleared.{session_id}"
+def remove_legacy_cleared_records(state_dir: Path) -> int:
+    """Delete every ``<state_dir>/tuple-watch/cleared.<session id>`` record and return how many went.
 
-
-def record_clear_and_write_session_marker(
-    state_dir: Path, claude_pid: int, new_session_id: str, *, record_clear: bool,
-) -> None:
-    """Write *claude_pid*'s session marker for *new_session_id* and, when
-    *record_clear* is true, record the mailbox(es) a ``/clear`` just
-    stranded (RDR-208 Phase 2 Step 3).
-
-    The previous marker is read BEFORE :func:`write_session_marker`
-    overwrites it -- the ordering the RDR's ``/clear`` design requires, so
-    the previous session id is never lost to the very write that would
-    otherwise erase it. No record is written when there was no previous
-    marker, or it already names *new_session_id* (nothing was stranded).
-
-    Chained clears (a second ``/clear`` before the first's drain has run)
-    carry every earlier id forward into the new record and remove the old
-    one: with S1 -> S2 -> S3 and no prompt in between, ``cleared.S3`` ends
-    up naming both S2 and S1, and ``cleared.S2`` -- which no live session
-    can answer to any more, so nothing would ever read it again except the
-    drain's 7-day prune -- is deleted rather than left to strand its own
-    record of S1 unreachably.
-
-    Called only from ``nexus.hooks._write_tuple_watch_session_marker``,
-    whose docstring carries the "never fail SessionStart" contract this
-    relies on: every failure here is caught there. This function itself
-    swallows an ``OSError`` from the record write specifically (matching
-    :func:`write_session_marker`'s own best-effort contract just above),
-    since ``write_session_marker`` already succeeded or failed on its own
-    by the time the record write is attempted.
-    """
-    previous_id = _read_session_marker(state_dir, claude_pid) if record_clear else None
-    write_session_marker(state_dir, claude_pid, new_session_id)
-    if not record_clear or not previous_id or previous_id == new_session_id:
-        return
-
-    ids = [previous_id]
-    old_record = cleared_record_path(state_dir, previous_id)
-    old_ids: list[str] = []
+    RDR-208 Phase 2 Step 3 had ``/clear`` write one naming the mailbox the old session id stranded, and the drain hook
+    empty it. A session id is no longer a mail address (RDR-253 Phase 2), so nothing writes or reads one; an older client
+    may have left some, and the drain's 7-day prune that used to age them out is gone, so SessionStart removes them (a
+    glob of one small directory). Best-effort: an unreadable directory or an undeletable file is skipped."""
+    removed = 0
     try:
-        old_ids = [
-            line.strip()
-            for line in old_record.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
+        found = list((state_dir / _STATE_SUBDIR).glob("cleared.*"))
     except OSError:
-        pass
-    for old_id in old_ids:
-        if old_id not in ids:
-            ids.append(old_id)
-
-    new_record = cleared_record_path(state_dir, new_session_id)
-    try:
-        new_record.parent.mkdir(parents=True, exist_ok=True)
-        tmp = new_record.parent / f"{new_record.name}.{os.getpid()}.tmp"
-        tmp.write_text("\n".join(ids) + "\n", encoding="utf-8")
-        tmp.replace(new_record)
-    except OSError as e:  # pragma: no cover — best-effort, disk-failure path
-        _log.debug(
-            "tuple_watch_cleared_record_write_failed",
-            new_session_id=new_session_id, error=str(e),
-        )
-        return
-
-    if old_ids:
+        return 0
+    for path in found:
         try:
-            old_record.unlink()
+            path.unlink()
+            removed += 1
         except OSError:
-            pass
+            continue
+    return removed
 
 
 __all__ = [
     "_read_session_marker",
-    "cleared_record_path",
-    "record_clear_and_write_session_marker",
+    "remove_legacy_cleared_records",
     "session_marker_path",
     "write_session_marker",
 ]
