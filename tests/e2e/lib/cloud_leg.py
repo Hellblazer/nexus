@@ -361,6 +361,13 @@ ROUTE_MAP: dict[str, Step] = {
     "POST /v1/telemetry/rename_collection": Step("route-telemetry-rename", "py", ["-c", _routes.TELEMETRY_RENAME],
                                                  expect_route="/v1/telemetry/rename_collection",
                                                  expect_stdout="minted target refused 400"),
+    "POST /v1/chash/rename_collection": Step("route-chash-rename-refusal", "py", ["-c", _routes.CHASH_RENAME_REFUSAL],
+                                             expect_route="/v1/chash/rename_collection",
+                                             expect_stdout="chash minted target refused 400"),
+    "POST /v1/taxonomy/rename_collection": Step("route-taxonomy-rename-refusal", "py",
+                                                ["-c", _routes.TAXONOMY_RENAME_REFUSAL],
+                                                expect_route="/v1/taxonomy/rename_collection",
+                                                expect_stdout="taxonomy minted target refused 400"),
 }
 
 _ROUTE_RE = re.compile(r"`(GET|POST|PUT|PATCH|DELETE) (/v1/[A-Za-z0-9_\-/.{}]+)")

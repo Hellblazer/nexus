@@ -154,6 +154,42 @@ else:
     raise SystemExit("a minted-form target was accepted: the engine does not judge the telemetry rename target")
 """
 
+CHASH_RENAME_REFUSAL = r"""
+import httpx
+from nexus.db.t2.http_chash_index import HttpChashIndex
+# nexus-n3hhc's class: the chash rename judges its target with the label rule before any row moves. Refusal only: the
+# probe proves its per-run source holds no chash row, then sends a minted-form target, which must be refused with 400.
+store = HttpChashIndex()
+source = "@label@-chash-probe"
+if store.count_for_collection(source):
+    raise SystemExit(f"refusing: chash rows are recorded under {source!r}")
+try:
+    store.rename_collection(old=source, new="c42")
+except httpx.HTTPStatusError as exc:
+    assert exc.response.status_code == 400, f"a minted-form target answered {exc.response.status_code}, not 400"
+    print("chash minted target refused 400")
+else:
+    raise SystemExit("a minted-form target was accepted: the engine does not judge the chash rename target")
+"""
+
+TAXONOMY_RENAME_REFUSAL = r"""
+import httpx
+from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
+# nexus-n3hhc's class: the taxonomy rename judges its target with the label rule before any row moves. Refusal only:
+# the probe proves its per-run source holds no topic, then sends a minted-form target, which must be refused with 400.
+store = HttpTaxonomyStore()
+source = "@label@-tax-probe"
+if store.get_topics_for_collection(source):
+    raise SystemExit(f"refusing: topics are recorded under {source!r}")
+try:
+    store.rename_collection(source, "c42")
+except httpx.HTTPStatusError as exc:
+    assert exc.response.status_code == 400, f"a minted-form target answered {exc.response.status_code}, not 400"
+    print("taxonomy minted target refused 400")
+else:
+    raise SystemExit("a minted-form target was accepted: the engine does not judge the taxonomy rename target")
+"""
+
 ENGINE_STATUS = r"""
 from nexus.db.http_engine_status import fetch_engine_status
 # RDR-229 P3.1 (nexus-p2m1x.17): the boot-time completion check reports in an optional top-level key of this
