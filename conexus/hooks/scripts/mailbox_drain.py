@@ -682,8 +682,8 @@ def _ask_parse_body(corr: object, body: object) -> dict[str, str] | None:
 
 def _ask_title(address: str, ask: str, version: str) -> str:
     """T2 title of the answer record: ``<asker>/<ask id>/<version>``, the address lower-cased
-    (threads.answer_title writes the same): the identity for mail drained from ``mailbox/<identity>``,
-    the session id for the session mailbox (RDR-253 Step 5)."""
+    (threads.answer_title writes the same): the identity whose ``mailbox/<identity>`` the mail was
+    drained from (RDR-253 Phase 2; the session mailbox is no longer drained)."""
     return f"{address.lower()}/{ask}/{version}"
 
 

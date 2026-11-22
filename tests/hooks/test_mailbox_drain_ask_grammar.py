@@ -129,12 +129,9 @@ def test_the_ask_id_pattern_opens_a_block_in_threads_exactly_when_the_hook_accep
 
 def test_the_record_title_is_the_title_threads_builds(hook: ModuleType) -> None:
     session, ask = _halcyon()
-    assert hook._ask_title(session.session_id, ask.id, ask.version) == answer_title(ask)
-    upper = _text("halcyon.txt").replace(session.session_id, session.session_id.upper())
-    session_u, ask_u = _halcyon(upper)
-    assert session_u.session_id == session.session_id.upper()
-    assert hook._ask_title(session_u.session_id, ask_u.id, ask_u.version) == answer_title(ask_u)
-    assert hook._ask_title(session_u.session_id, ask_u.id, ask_u.version).startswith(session.session_id + "/")
+    assert session.identity, "the fixture entry carries an identity: line (RDR-253 Phase 2: the title keys on it)"
+    assert hook._ask_title(session.identity, ask.id, ask.version) == answer_title(ask)
+    assert answer_title(ask).startswith(session.identity + "/")
 
 
 def test_every_version_threads_computes_is_one_the_hook_accepts(hook: ModuleType) -> None:
