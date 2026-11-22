@@ -27,6 +27,7 @@ from nexus.catalog.tumbler import Tumbler
 from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
 from nexus.db.t3 import T3Database
 from nexus.repo_identity import _repo_identity
+from tests._catalog_fixture_ops import register_seed_collections
 from tests.test_cp46b_runfence_repo_staleness import (  # noqa: F401 - fixtures and helpers shared with the fence tests
     _commit,
     _index,
@@ -171,6 +172,7 @@ def test_two_pdfs_with_the_same_content_in_different_collections_get_one_same_as
     writer = make_catalog_writer()
     try:
         owner = writer.register_owner("e2e_papers", "curator")
+        register_seed_collections("knowledge__fill", "knowledge__alpha", "docs__beta")  # RDR-229 P3.1: a document names a registered collection
         # eight fillers with no content key, then the two PDFs as documents 9 and 10 of the owner: by text
         # "N.10" < "N.9", by number 9 < 10, so the rule decides which one anchors
         for i in range(8):
@@ -228,6 +230,7 @@ def _prune_fixture(cat, writer, name: str) -> tuple[dict[str, Tumbler], set[tupl
     Returns ``(tumbler by label, the same-as links as (from, to,
     created_by) label triples)``."""
     owner = writer.register_owner(f"e2e_prune_{name}", "curator")
+    register_seed_collections(f"knowledge__prune_{name}")  # RDR-229 P3.1: a document names a registered collection
     tumblers = {
         label: writer.register(
             owner, f"{label}.pdf", content_type=ct, physical_collection=f"knowledge__prune_{name}",

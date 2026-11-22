@@ -44,6 +44,14 @@ from tests.conftest import fake_credentials, make_vector_test_client
 pytestmark = [pytest.mark.integration]
 
 
+@pytest.fixture(autouse=True)
+def _double_names_under_the_profile_model(double_topology_mints_profile_model):
+    """RDR-229 P3.1: the run registers its collections with the engine before the catalog hook, so the client-embedding
+    double names them under the tenant's profile model (the engine refuses a ``minilm-l6-v2-384`` name against the bge
+    profile); its vectors never reach the engine. Autouse: it must be in force when ``registry`` names the repo's
+    collections."""
+
+
 def _git_init(repo: Path) -> None:
     for cmd in (
         ["git", "init", "-b", "main"],

@@ -215,6 +215,7 @@ def _repo_with_a_foreign_row_for_notes(
             cat.by_file_path(cat.owner_for_repo(_repo_identity(repo)[1]), "prime.md").physical_collection
             if in_runs_collection else "docs__foreign")
         assert collection, "non-vacuity: the primed repo's docs collection is known"
+        register_seed_collections(collection)  # RDR-229 P3.1: the engine refuses a document under an unregistered collection
         foreign = str(cat.register(other, "foreign notes", content_type="prose", file_path="docs/notes.md",
                                    physical_collection=collection, source_uri=f"file://{held}"))
     finally:

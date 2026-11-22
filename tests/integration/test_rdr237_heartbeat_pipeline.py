@@ -26,6 +26,7 @@ import pytest
 from nexus.db.http_pipeline_client import HttpPipelineDB
 from nexus.pdf_extractor import ExtractionResult
 from nexus.pipeline_stages import extractor_loop
+from tests._catalog_fixture_ops import register_seed_collections
 from tests.integration.test_rdr223_pdf_journey import _COLLECTION
 
 pytestmark = [pytest.mark.integration]
@@ -89,6 +90,7 @@ def test_a_heartbeat_with_a_page_batch_pending_rides_the_next_flush_and_moves_up
     path = tmp_path / "doc.pdf"
     path.write_bytes(b"%PDF-1.4\n")
     db = HttpPipelineDB()
+    register_seed_collections(_COLLECTION)  # RDR-229 P3.1: the engine refuses a pipeline row under an unregistered collection
     db.create_pipeline(content_hash, str(path), _COLLECTION)
     observed: dict = {}
 
@@ -135,6 +137,7 @@ def test_a_heartbeat_with_nothing_pending_flushes_at_once_and_moves_updated_at_b
     path = tmp_path / "doc.pdf"
     path.write_bytes(b"%PDF-1.4\n")
     db = HttpPipelineDB()
+    register_seed_collections(_COLLECTION)  # RDR-229 P3.1: the engine refuses a pipeline row under an unregistered collection
     db.create_pipeline(content_hash, str(path), _COLLECTION)
     observed: dict = {}
 
@@ -165,6 +168,7 @@ def test_a_resumed_runs_heartbeat_never_lowers_pages_extracted(
     path = tmp_path / "doc.pdf"
     path.write_bytes(b"%PDF-1.4\n")
     first = HttpPipelineDB()
+    register_seed_collections(_COLLECTION)  # RDR-229 P3.1: the engine refuses a pipeline row under an unregistered collection
     first.create_pipeline(content_hash, str(path), _COLLECTION)
     for i in range(3):
         first.write_page(content_hash, i, f"page {i + 1}", metadata=_page(i))

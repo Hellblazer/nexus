@@ -385,6 +385,7 @@ class Snapshot:
                                                     "minted": {}, "structures": {}}
         self.key_of: dict[str, str] = {}
         self.case_of_tumbler: dict[str, str] = {}
+        self.unstamped: list[str] = []  # documents in a collection whose registry id the row does not carry
         docs = [d for d in dump["docs"] if self._owns(d["tumbler"])]
         docs.sort(key=lambda d: (self.prefix[d["tumbler"].rpartition(".")[0]], int(d["tumbler"].rpartition(".")[2])))
         ordinal: Counter = Counter()
@@ -402,6 +403,12 @@ class Snapshot:
             cols: dict[str, Any] = {}
             for col, v in d.items():
                 if col == "tumbler":
+                    continue
+                if col == "physical_collection_id":
+                    # RDR-229 P3.1: the registry's id of ``physical_collection``, a per-tenant serial the golden cannot
+                    # hold (the name is compared, in ``physical_collection``). It must be stamped wherever the name is.
+                    if d.get("physical_collection") and v is None:
+                        self.unstamped.append(t)
                     continue
                 if col == "alias_of":
                     v = self.key_of.get(v, v) if v else v
@@ -692,6 +699,7 @@ def test_the_hook_leaves_what_the_client_path_left(tmp_path: Path, t2_tenant: st
                      f"structures {len(now['structures'])}, skipped 0")
         print("\n".join(lines))  # noqa: T201 — the verdict table is the first-run record; read it with -s
         assert len(now["links"]) >= 5 and len(now["documents"]) >= 60, "the fixture is vacuous"
+        assert not snap.unstamped, f"documents in a registered collection without its registry id: {snap.unstamped}"
         assert not diffs, "\n".join(lines) + "\n\n" + "\n".join(_fmt(d) for d in diffs)
     finally:
         sc.close()

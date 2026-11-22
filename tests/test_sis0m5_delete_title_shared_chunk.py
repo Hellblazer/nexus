@@ -115,6 +115,7 @@ def test_delete_title_of_an_unshared_note_still_deletes_its_chunk(t2_service_env
 
 def _two_chunk_note(writer, client, owner, collection: str, title: str) -> tuple[str, str, list[str]]:
     source_uri = uri_for(collection, title)
+    register_seed_collections(collection)  # RDR-229 P3.1: the engine refuses a document under an unregistered collection
     tumbler = str(writer.register(
         owner=owner, title=title, content_type="knowledge",
         physical_collection=collection, source_uri=source_uri,
