@@ -505,6 +505,29 @@ class MainPciWiringTest {
     }
 
     /**
+     * RDR-229 P3.4 (nexus-p2m1x.22): the completion check reads gate 3 from the PCI reconciler ({@code gate3Source()}), and the
+     * reconciler starts no id build until the check's LATEST read says gate 2 holds (a null read holds nothing).
+     */
+    @Test
+    void theCompletionCheckReadsGate3FromTheReconciler_andTheReconcilersIdBuildsWaitForGate2() throws Exception {
+        String src = code(main());
+
+        assertThat(src).as("gate 3's source is the reconciler's, not NOT_INSTALLED")
+            .contains("startCompletionBootWork(bootWork, adminConnection, pciReconciler.gate3Source())");
+        int gate = src.indexOf("pciReconciler.idBuildGate(");
+        assertThat(gate).as("the id-build gate is wired").isPositive();
+        assertThat(src.indexOf("var completionCheck = startCompletionBootWork(")).isLessThan(gate);
+        String lambda = src.substring(gate, src.indexOf("});", gate));
+        assertThat(lambda).contains("completionCheck.latest()").contains("latest != null").contains("latest.gate2()");
+        assertThat(src.indexOf("pciReconciler.idBuildGate(", gate + 1)).as("wired once").isNegative();
+        int retire = src.indexOf("pciReconciler.retireNameIndexesWhen(");
+        assertThat(retire).as("the name family retires on the latched gate 3").isPositive();
+        String retireLambda = src.substring(retire, src.indexOf("});", retire));
+        assertThat(retireLambda).as("the LATCHED value, never the live gate 3").contains("completionCheck.gate3Latched()")
+            .doesNotContain(".gate3()");
+    }
+
+    /**
      * RDR-229 P3.3b (nexus-p2m1x.20): the per-leaf id unique-index pass is started once, at main's top level, after the completion check
      * it reads, handed that check's LATEST read of gate 1 (a null read holds nothing), and closed in the shutdown steps; and its method
      * returns null without a completion check, before it builds the pass. P3.3c (nexus-p2m1x.21) deleted the placeholder constant and its

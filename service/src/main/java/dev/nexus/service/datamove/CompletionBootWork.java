@@ -80,6 +80,7 @@ public final class CompletionBootWork implements AutoCloseable {
     private volatile Instant lastSampleAt;
     private volatile Duration safetyPoll = SAFETY_POLL;
     private volatile CompletionCheck.Result latest;
+    private volatile boolean gate3Latched;
     private volatile boolean closed;
     private String lastError;
     private ScheduledExecutorService scheduler;
@@ -89,15 +90,46 @@ public final class CompletionBootWork implements AutoCloseable {
      */
     public CompletionBootWork(BootWorkRegistry registry, AdminConnection admin, CompletionCheck.ReadSet readSet,
                               CompletionCheck.Gate3Source gate3) {
-        this(registry, new DbReader(admin, readSet, gate3, Clock.systemUTC()));
+        this(registry, admin, readSet, gate3, java.util.List.of());
+    }
+
+    /** As above with the further conditions gate 3 needs ({@link CompletionCheck#evaluate(DSLContext, CompletionCheck.ReadSet, CompletionCheck.Gate3Source, CompletionCheck.ViolatorCounter, java.util.List)}). */
+    public CompletionBootWork(BootWorkRegistry registry, AdminConnection admin, CompletionCheck.ReadSet readSet,
+                              CompletionCheck.Gate3Source gate3, java.util.List<java.util.function.Predicate<DSLContext>> gate3Extras) {
+        this(registry, admin, readSet, gate3, gate3Extras, CompletionCheck.Gate3LatchWriter.IMMEDIATE);
+    }
+
+    /** As above with the seam the latch row write goes through ({@link CompletionCheck.Gate3LatchWriter}); P3.7 puts it under its rename write lock. */
+    public CompletionBootWork(BootWorkRegistry registry, AdminConnection admin, CompletionCheck.ReadSet readSet,
+                              CompletionCheck.Gate3Source gate3, java.util.List<java.util.function.Predicate<DSLContext>> gate3Extras,
+                              CompletionCheck.Gate3LatchWriter latchWriter) {
+        this(registry, new DbReader(admin, readSet, gate3, gate3Extras, latchWriter, Clock.systemUTC()));
     }
 
     /**
-     * The reporter a running engine starts: the boot read set ({@link CompletionCheck.ReadSet#boot()}) and no gate 3 until P3.4 ships one.
+     * The reporter a running engine starts: the boot read set ({@link CompletionCheck.ReadSet#boot()}); gate 3 is not installed unless the caller gives a source (P3.4).
      * {@code Main} builds it only through here, so a test of this factory (and of {@code Main}'s one call to it) pins what boot reads.
      */
     public static CompletionBootWork atBoot(BootWorkRegistry registry, AdminConnection admin) {
-        return new CompletionBootWork(registry, admin, CompletionCheck.ReadSet.boot(), CompletionCheck.Gate3Source.NOT_INSTALLED);
+        return atBoot(registry, admin, CompletionCheck.Gate3Source.NOT_INSTALLED);
+    }
+
+    /** As above with gate 3's source: the PCI reconciler's id-index coverage (RDR-229 P3.4, {@code PciReconciler#gate3Source}). */
+    public static CompletionBootWork atBoot(BootWorkRegistry registry, AdminConnection admin, CompletionCheck.Gate3Source gate3) {
+        return atBoot(registry, admin, gate3, java.util.List.of());
+    }
+
+    /** As above with the further gate 3 conditions: the seam for {@code IdUniqueIndexPass.allValid} (linda 2026-11-22). */
+    public static CompletionBootWork atBoot(BootWorkRegistry registry, AdminConnection admin, CompletionCheck.Gate3Source gate3,
+                                            java.util.List<java.util.function.Predicate<DSLContext>> gate3Extras) {
+        return atBoot(registry, admin, gate3, gate3Extras, CompletionCheck.Gate3LatchWriter.IMMEDIATE);
+    }
+
+    /** As above with the latch write seam (RDR-229 P3.7): the writer receives the row write and runs it when it holds its lock. */
+    public static CompletionBootWork atBoot(BootWorkRegistry registry, AdminConnection admin, CompletionCheck.Gate3Source gate3,
+                                            java.util.List<java.util.function.Predicate<DSLContext>> gate3Extras,
+                                            CompletionCheck.Gate3LatchWriter latchWriter) {
+        return new CompletionBootWork(registry, admin, CompletionCheck.ReadSet.boot(), gate3, gate3Extras, latchWriter);
     }
 
     /** The read set a database-backed reporter reads, or null for a test's injected reader. */
@@ -125,6 +157,16 @@ public final class CompletionBootWork implements AutoCloseable {
     public String statusJson() {
         CompletionCheck.Result r = latest;
         return r == null ? null : CompletionStatusJson.render(r);
+    }
+
+    /**
+     * Whether gate 3 has latched on this install ({@code nexus.rdr229_gate_latch} holds its row), as this engine last read it. Sticky: once a
+     * sample saw the row, this stays true for the life of this reporter, whatever a later read says (a read that fails, or a row deleted under
+     * a running engine). A new reporter reads the database afresh, so a restore that lost the row reads not latched. The name-index retirement and
+     * the engine's id readers go by this value, never by the live gate 3, which an INVALID id index can turn false.
+     */
+    public boolean gate3Latched() {
+        return gate3Latched;
     }
 
     /** The result of the last sample, or null before the first one. */
@@ -266,6 +308,9 @@ public final class CompletionBootWork implements AutoCloseable {
                 return -1;
             }
             latest = result;
+            if (result.gate3Latched()) {
+                gate3Latched = true;
+            }
             long holding = (result.gate1() ? 1 : 0) + (result.gate2() ? 1 : 0) + (result.gate3() ? 1 : 0);
             return (holding < 3 ? 1 : 0) + (int) result.checks().stream().filter(c -> !c.present()).count()
                 + byTable(result.violators()).size();
@@ -300,8 +345,10 @@ public final class CompletionBootWork implements AutoCloseable {
             : "waits (" + unsatisfied + " of " + total + " stamp moves incomplete"
                 + (r.supersededByCheckPresent() ? "" : "; the superseded_by CHECK is missing") + ")";
         String g2 = r.gate2() ? "holds" : (r.gate1() ? "waits (a swap or validation move is incomplete)" : "waits on gate 1");
-        String g3 = r.gate3() ? "holds" : "waits: " + r.gate3Why();
-        return "gate 1 " + g1 + "; gate 2 " + g2 + "; gate 3 " + g3;
+        String g3 = r.gate3() ? (r.gate3PciNotApplicable() ? "holds (per-collection indexing is off: no id index is required)" : "holds")
+            : "waits: " + r.gate3Why();
+        return "gate 1 " + g1 + "; gate 2 " + g2 + "; gate 3 " + g3 + (r.gate3Latched() ? "; gate 3 latched" : "")
+            + (r.idIndexInvalid() ? "; an id-predicate index is INVALID" : "");
     }
 
     static String missing(CompletionCheck.CheckState c, CompletionCheck.Result r) {
@@ -339,13 +386,19 @@ public final class CompletionBootWork implements AutoCloseable {
         private final AdminConnection admin;
         private final CompletionCheck.ReadSet readSet;
         private final CompletionCheck.Gate3Source gate3;
+        private final java.util.List<java.util.function.Predicate<DSLContext>> gate3Extras;
+        private final CompletionCheck.Gate3LatchWriter latchWriter;
         private final CompletionCheck.ViolatorCounter counter;
         private volatile AdminDdlSession session;
 
-        DbReader(AdminConnection admin, CompletionCheck.ReadSet readSet, CompletionCheck.Gate3Source gate3, Clock clock) {
+        DbReader(AdminConnection admin, CompletionCheck.ReadSet readSet, CompletionCheck.Gate3Source gate3,
+                 java.util.List<java.util.function.Predicate<DSLContext>> gate3Extras, CompletionCheck.Gate3LatchWriter latchWriter,
+                 Clock clock) {
             this.admin = Objects.requireNonNull(admin, "admin");
             this.readSet = Objects.requireNonNull(readSet, "readSet");
             this.gate3 = Objects.requireNonNull(gate3, "gate3");
+            this.gate3Extras = java.util.List.copyOf(gate3Extras);
+            this.latchWriter = Objects.requireNonNull(latchWriter, "latchWriter");
             this.counter = new CachedCounter(CompletionCheck.DIRECT, clock, VIOLATOR_TTL);
         }
 
@@ -360,11 +413,25 @@ public final class CompletionBootWork implements AutoCloseable {
                     s.setSession("default_transaction_read_only", "on");
                     session = s;
                 }
-                return CompletionCheck.evaluate(s.ctx(), readSet, gate3, counter);
+                return CompletionCheck.evaluate(s.ctx(), readSet, gate3, counter, gate3Extras, this::writeLatch);
             } catch (RuntimeException e) {
                 close();   // a failed session is replaced on the next sample
                 throw e;
             }
+        }
+
+        /**
+         * The latch write, on a session of its own: the check's session is read only at the server. One short session when gate 3 first holds
+         * ({@code INSERT ... ON CONFLICT DO NOTHING}); a failure is the check's to log, and the next read tries again.
+         */
+        private void writeLatch(DSLContext readCtx, String gate) {
+            latchWriter.latch(() -> {
+                String version = dev.nexus.service.http.VersionHandler.resolveReleaseVersion();
+                try (AdminDdlSession w = AdminDdlSession.open(admin, new AdminDdlSession.Settings("nexus-rdr229-gate-latch", 0L,
+                        "rdr229 gate latch", "nexus", "rdr229_gate_latch", "none"), false)) {
+                    CompletionCheck.insertLatch(w.ctx(), gate, version == null ? "dev" : version);
+                }
+            });
         }
 
         @Override

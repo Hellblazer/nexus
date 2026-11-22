@@ -327,8 +327,16 @@ class TwinKeyUpsertIntegrationTest extends AtomicWriteTestBase {
     @Test
     void pairsMatchTheMigratedSchema() throws Exception {
         twoCollections();
-        var pairs = TwinKeyUpsert.pairs();
-        assertThat(pairs).as("non-vacuity: the helper has pairs").isNotEmpty();
+        // one list (RDR-229 P3.4): the helper's pairs are ArbiterTwins.ALL, in order, as column lists
+        assertThat(TwinKeyUpsert.pairs()).extracting(TwinKeyUpsert.Pair::table)
+            .as("the pairs are ArbiterTwins.ALL, the checked list the arbiter census pins")
+            .containsExactlyElementsOf(dev.nexus.service.datamove.ArbiterTwins.ALL.stream().map(dev.nexus.service.datamove.ArbiterTwins::table).toList());
+        // The migrated schema carries the twins of the entries no runtime pass builds (P3.3b/c's leaf keys, twinIndex null); the other
+        // eight are IdUniqueIndexPass's runtime builds after gate 2, pinned against the live catalog by Rdr229ArbiterTwinCensusIntegrationTest.
+        var migrated = dev.nexus.service.datamove.ArbiterTwins.ALL.stream().filter(a -> a.twinIndex() == null)
+            .map(dev.nexus.service.datamove.ArbiterTwins::table).collect(java.util.stream.Collectors.toSet());
+        var pairs = TwinKeyUpsert.pairs().stream().filter(p -> migrated.contains(p.table())).toList();
+        assertThat(pairs).as("non-vacuity: the helper has pairs the migrated schema carries").isNotEmpty();
         Set<String> checked = new LinkedHashSet<>();
         Map<String, LeafIndex> nameIdx = new LinkedHashMap<>(), idIdx = new LinkedHashMap<>();
         for (var pair : pairs) {

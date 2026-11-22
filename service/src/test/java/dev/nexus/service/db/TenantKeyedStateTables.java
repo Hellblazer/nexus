@@ -196,6 +196,7 @@ final class TenantKeyedStateTables {
         notKeyed.put("MoveBootWork.Snapshot.progress", DATA_MOVE_REPORT);
         fillCompletionCheck(notKeyed);   // RDR-229 P3.1 (nexus-p2m1x.17): the boot-time completion check is engine-wide
         fillLeafIndexPass(notKeyed);   // RDR-229 P3.3b (nexus-p2m1x.20): the per-leaf id unique-index pass is engine-wide
+        fillIdUniqueIndexPass(notKeyed);   // RDR-229 P3.4 (nexus-p2m1x.22): the id-keyed index pass is engine-wide
         // nexus-f3yqd.2.18: the engine's own database passwords, set once at startup; the engine's, so no tenant's
         notKeyed.put("SecretMask.SECRETS", "the engine's own database passwords (the admin and the application role), added once "
             + "at startup; process-wide credentials of the engine, never a tenant's, and nothing a tenant's reset has to clear");
@@ -745,6 +746,17 @@ final class TenantKeyedStateTables {
             notKeyed.put(f, WAITER_LOCAL);
         }
         notKeyed.put("PciReconciler.failures", PCI_OFF);
+        // nexus-p2m1x.22 (RDR-229 P3.4): the id-predicate half's memory. The planned keys are replaced whole by each pass that saw
+        // every leaf (and dropped to unknown by one that did not); the gate and the per-pass plan values are not kept.
+        notKeyed.put("PciIdBuilds.readers", "whether this engine's id readers are present (P3.5's IdReaders.PRESENT, by reflection) as a supplier, bound once at boot; a callback, no data");
+        notKeyed.put("PciIdBuilds.gate3", "the completion check's gate 3 as a supplier, bound once at boot; a callback, no data");
+        notKeyed.put("PciGate3Coverage.vacuity", "the empty-case scan's last answer (a boolean and a time), kept ten minutes; names no tenant or collection");
+        notKeyed.put("PciIdBuilds.gate2", "the completion check's gate 2 as a supplier, bound once at boot; a callback, no data");
+        notKeyed.put("PciReconcilePlanner.Plan.actions", RESULT);
+        notKeyed.put("PciCatalog.Snapshot.validIds", PCI_OFF);
+        notKeyed.put("PciCatalog.Snapshot.invalidIds", PCI_OFF);
+        notKeyed.put("CompletionBootWork.DbReader.gate3Extras", "the further gate 3 conditions, fixed at construction "
+            + "(IdUniqueIndexPass.allValid, wired in Main); callbacks, no tenant state");
         // nexus-4lnn1.1.1 (RDR-230): the DDL half's last look at each index (its anchor, size and counts) and at
         // each leaf's statistics, kept per engine in memory and lost on restart like the failures map above. The
         // The Reads fields are one counting transaction's result, applied once it commits. They live in
@@ -849,11 +861,30 @@ final class TenantKeyedStateTables {
             + "(relation names; a leaf's tenant is in its bound, which nothing here reads), read per step and dropped with it");
     }
 
+    private static final String ID_UNIQUE_INDEX_PASS_ENGINE_WIDE = "the RDR-229 P3.4 id-keyed index pass is engine-wide, never a "
+        + "tenant's: it reads pg_catalog (index states of the nexus tables it indexes) and builds indexes with CREATE INDEX CONCURRENTLY "
+        + "on the engine's admin connection, and holds table and index names and counts, no tenant id and no row of any tenant "
+        + "(a duplicate's key values go to the engine log, never into these fields); ";
+
+    /** RDR-229 P3.4: {@code IdUniqueIndexPass}: every collection it holds is per-engine bookkeeping or a test seam. */
+    private static void fillIdUniqueIndexPass(Map<String, String> notKeyed) {
+        notKeyed.put("IdUniqueIndexPass.Result.corrupt", ID_UNIQUE_INDEX_PASS_ENGINE_WIDE + "the tables whose index build hit a "
+            + "duplicate so far, by table name, returned to the caller and not kept");
+        notKeyed.put("IdUniqueIndexPass.corrupt", ID_UNIQUE_INDEX_PASS_ENGINE_WIDE + "the indexes whose build hit a duplicate, by "
+            + "index name, with the status text (which names the table, never a tenant or a key); bounded by the number of indexes the "
+            + "pass builds, in memory only (the next engine tries again), read and written under the pass lock");
+        notKeyed.put("IdUniqueIndexPass.SPECS", ID_UNIQUE_INDEX_PASS_ENGINE_WIDE + "the pass's fixed list of indexes (table, index "
+            + "name, key columns, predicate), built from ArbiterTwins and constants; the same for every tenant and never changed");
+        notKeyed.put("IdUniqueIndexPass.beforeStatement", ID_UNIQUE_INDEX_PASS_ENGINE_WIDE + "a test seam: a consumer that sees "
+            + "each DDL statement's text before the pass sends it; null in production");
+    }
+
     private static final String COMPLETION_ENGINE_WIDE = "the RDR-229 boot-time completion check is engine-wide, never a "
         + "tenant's: it reads nexus.data_moves (a global registry with no tenant column), pg_catalog and the registry's "
         + "row counts on the engine's admin connection, and a Result holds labels, table and constraint names and counts "
-        + "summed over every tenant, no tenant id (its one slot that can name a collection, gate3Uncovered, is empty "
-        + "while Gate3Source is NOT_INSTALLED, which is what this engine wires); ";
+        + "summed over every tenant, no tenant id on the wire (its one slot that can name a collection, gate3Uncovered, "
+        + "holds P3.4's id keys, model and tenant and collection id, when the PCI reconciler has planned; it is held in "
+        + "memory only, never rendered on /v1/status, and replaced whole by every sample); ";
 
     /** RDR-229 P3.1 (nexus-p2m1x.17): the completion check, its reporter and the two callbacks that wake it. */
     private static void fillCompletionCheck(Map<String, String> notKeyed) {
@@ -883,15 +914,15 @@ final class TenantKeyedStateTables {
             + "global registry labels, not keyed by tenant");
         notKeyed.put("CompletionCheck.ReadSet.gate2Labels", "the move labels gate 2 reads, fixed at construction; "
             + "global registry labels, not keyed by tenant");
-        notKeyed.put("CompletionCheck.IdIndexCoverage.planned", RESULT + "; it exists only once P3.4 supplies a "
-            + "Gate3Source, and the one this engine wires is NOT_INSTALLED");
+        notKeyed.put("CompletionCheck.IdIndexCoverage.planned", RESULT + "; P3.4's PciGate3Coverage supplies it as id keys "
+            + "(model, tenant, collection id) read from the catalog and registry by the check, and it is dropped with the read");
         notKeyed.put("CompletionCheck.IdIndexCoverage.validIdIndexed", RESULT + "; as planned");
         notKeyed.put("CompletionCheck.IdIndexCoverage.invalidIdIndexed", RESULT + "; as planned");
         notKeyed.put("CompletionCheck.Result.labels", RESULT + "; it holds registry labels and their state, no tenant's");
         notKeyed.put("CompletionCheck.Result.checks", RESULT + "; it holds constraint names and whether each is validated");
         notKeyed.put("CompletionCheck.Result.violators", RESULT + "; it holds table and constraint names and counts");
-        notKeyed.put("CompletionCheck.Result.gate3Uncovered", RESULT + "; empty while Gate3Source is NOT_INSTALLED, and "
-            + "replaced whole by the next sample once P3.4 supplies one");
+        notKeyed.put("CompletionCheck.Result.gate3Uncovered", RESULT + "; the planned id keys with no VALID id index, "
+            + "replaced whole by the next sample, in memory only and never rendered on /v1/status");
         notKeyed.put("CompletionCheck.Dangling.byContentType", RESULT + "; R7's dangling-tombstone count by content type "
             + "(a few fixed labels such as code or knowledge), summed over every tenant's registry rows by one GROUP BY on "
             + "content_type: no tenant id or collection name is kept, and the next sample re-derives it");
