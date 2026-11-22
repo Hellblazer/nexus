@@ -3,7 +3,7 @@
 """SessionStart's reap of the session's own work rows (RDR-253 Step 6, nexus-hczdo: the work-row lifecycle).
 
 At every SessionStart, after the identity leg has bound the session, :func:`spawn` starts a detached child that closes the
-identity's running rows whose work has ended (:func:`nexus.identity.work_reap.reap`): an agent that was in flight across a
+identity's running rows whose work has ended (:func:`nexus.identity.reap.reap`): an agent that was in flight across a
 restart, a lab run killed without its end, a worktree that was removed. The hook returns at once; the child makes up to
 one engine call per row under :data:`DEADLINE_S` and logs what it closed with a count, so a non-zero count names an
 end-of-life path that did not write.
@@ -63,11 +63,11 @@ def spawn(session_id: str) -> bool:
 def reap_session(session_id: str, env: Any = None) -> list[dict[str, str]]:
     """Reap the rows of the identity *session_id* belongs to. *env* defaults to the real :class:`IdentityEnv`."""
     from nexus.identity.ops import IdentityEnv  # noqa: PLC0415 — child process only
-    from nexus.identity.work_reap import reap  # noqa: PLC0415 — child process only
+    from nexus.identity.reap import reap  # noqa: PLC0415 — child process only
 
     env = env if env is not None else IdentityEnv.real()
     identity = str(env.client.session(session_id)["identity"])
-    return reap(env, identity)
+    return reap(env, identity, deadline_s=DEADLINE_S - 5.0)   # the alarm (POSIX) is the hard stop; this bound holds on Windows
 
 
 def main(argv: list[str]) -> int:

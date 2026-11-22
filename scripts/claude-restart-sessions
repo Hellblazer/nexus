@@ -2572,7 +2572,7 @@ def is_stale(work_line: str) -> bool:
     return work_line.endswith(STALE_MARK)
 
 
-def session_work(s: dict) -> list[str] | None:
+def session_work(s: dict, reap: bool = False) -> list[str] | None:
     """The background work the session's identity has registered and is still running (RDR-253 Step 6), one line each,
     or None when it cannot be read. Read through ``nx identity work list --json``, which marks a running row stale when its
     identity is not alive, its registering process is gone or it has not been written for 12 hours: a stale row is
@@ -2584,7 +2584,7 @@ def session_work(s: dict) -> list[str] | None:
     if not sid:
         return None
     WORK_READ_FAILURES.pop(sid, None)
-    done = _read_work(sid)
+    done = _read_work(sid, reap=reap)
     if isinstance(done, str):
         WORK_READ_FAILURES[sid] = done
         return None
@@ -2604,18 +2604,31 @@ def session_work(s: dict) -> list[str] | None:
     except (ValueError, KeyError, TypeError) as exc:
         WORK_READ_FAILURES[sid] = f"unreadable JSON from nx ({type(exc).__name__})"
         return None
-    for r in json.loads(done.stdout).get("reaped") or []:
-        log(f"{label(s)}: closed {r.get('kind')} {r.get('ref')} ({r.get('why')}; {r.get('closed')})")
+    report = json.loads(done.stdout)
+    for r in (report.get("reaped") if isinstance(report, dict) else None) or []:
+        if isinstance(r, dict):
+            log(f"{label(s)}: closed {r.get('kind')} {r.get('ref')} ({r.get('why')}; {r.get('closed')})")
+    if isinstance(report, dict) and report.get("reap_error"):
+        log(f"{label(s)}: the reap failed, rows read as they are: {report['reap_error']}")
     return [f"{r['kind']} {r['ref']}" + (STALE_MARK if r.get("stale") else "")
             for r in rows if r.get("state", "running") == "running" and not (r.get("kind") == "wait" and r.get("ref") == sid)]
 
 
-def _read_work(sid: str) -> subprocess.CompletedProcess | str:
-    """``nx identity work list --session SID --reap --json``: closes the rows whose work has ended (nexus-hczdo), then
-    lists. A timeout is retried once on :data:`WORK_RETRY_TIMEOUT_S`; an installed nx with no ``--reap`` (older than this
-    release) is read without it. Returns the finished call, or the reason there is none."""
-    args = ["work", "list", "--session", sid, "--reap", "--json"]
-    for timeout in (WORK_TIMEOUT_S, WORK_RETRY_TIMEOUT_S):
+#: Set once a read has timed out at both bounds in this run: the engine is down or hung, not cold, and every later session
+#: gets the first bound only, so a hung engine costs a 12-session round about one minute, not seven.
+ENGINE_UNANSWERING = False
+
+
+def _read_work(sid: str, reap: bool = False) -> subprocess.CompletedProcess | str:
+    """``nx identity work list --session SID --json``, with ``--reap`` on the restart's own gate (``go_gate``) only, so a
+    view (``--status``, ``--dry-run``, the ask) changes nothing: the gate closes the rows whose work has ended (nexus-hczdo),
+    then lists. A timeout is retried once on :data:`WORK_RETRY_TIMEOUT_S` (a cold ``nx`` after ``--nx`` reinstalled the
+    client), unless an earlier read in this run already failed both (:data:`ENGINE_UNANSWERING`). An installed nx with no
+    ``--reap`` (older than this release) is read without it. Returns the finished call, or the reason there is none."""
+    global ENGINE_UNANSWERING
+    args = ["work", "list", "--session", sid, *(["--reap"] if reap else []), "--json"]
+    bounds = (WORK_TIMEOUT_S,) if ENGINE_UNANSWERING else (WORK_TIMEOUT_S, WORK_RETRY_TIMEOUT_S)
+    for timeout in bounds:
         try:
             done = _nx_identity(*args, timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -2629,6 +2642,9 @@ def _read_work(sid: str) -> subprocess.CompletedProcess | str:
             except (OSError, subprocess.SubprocessError) as exc:
                 return f"nx could not run: {type(exc).__name__}: {exc}"[:200]
         return done
+    if len(bounds) == 1:
+        return f"nx timed out after {WORK_TIMEOUT_S} s (an earlier read in this run timed out twice: no retry)"
+    ENGINE_UNANSWERING = True
     return f"nx timed out after {WORK_TIMEOUT_S} s and again after {WORK_RETRY_TIMEOUT_S} s"
 
 
@@ -2962,7 +2978,8 @@ def reply_since(t: dict, manifest: dict) -> float:
     return t["since"] if _number(t.get("since")) else manifest["at"]
 
 
-def readiness(found: list[dict], manifest: dict, now: float, max_age: int, caller_pane: str = "") -> list[dict]:
+def readiness(found: list[dict], manifest: dict, now: float, max_age: int, caller_pane: str = "",
+              reap: bool = False) -> list[dict]:
     """One row per current target: its reply, the reply's age, its live status, and what blocks a restart.
 
     A row's ``blocker`` is empty only when the session answered ready no longer than ``max_age`` ago
@@ -3016,7 +3033,7 @@ def readiness(found: list[dict], manifest: dict, now: float, max_age: int, calle
                         # Sam 2026-11-19 (T2 nexus/sam-ruling-step6-ready-gate-2026-11-19): ps AND the work rows. A
                         # running labrun, watcher or agent row of a live identity is work a restart would cut off (a wait row
                         # never reaches here: session_work drops the standing one, and a stale row is marked and never blocks).
-                        row["work"] = work = session_work(s)
+                        row["work"] = work = session_work(s, reap=reap)
                         cut = blocking_work(work)
                         if cut:
                             row["blocker"] = (f"said ready, but {len(cut)} registered work row(s) still run: {cut[0]}"
@@ -3134,7 +3151,8 @@ def go_gate(found: list[dict], force: bool, max_age: int, now: float | None = No
     elif (bad_round := round_problem(found, manifest, now, max_age)):
         problem, lines = bad_round, []
     else:
-        rows = readiness(found, manifest, now, max_age, caller_pane)
+        # The gate reaps (closes ended rows) before it reads; a dry run only reads (nexus-hczdo).
+        rows = readiness(found, manifest, now, max_age, caller_pane, reap=not dry_run)
         if not dry_run and not installed:      # one set of lines per restart round: not a preview, not the call after --nx
             record_round(manifest, rows, now, forced=force)
         held = [r for r in rows if r.get("held")]

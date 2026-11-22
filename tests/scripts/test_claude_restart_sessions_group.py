@@ -104,7 +104,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Env:
     monkeypatch.setattr(crs, "ready_path", lambda s, stamp: str(tmp_path / f"ready-{s['name']}-{stamp}.json"))
     monkeypatch.setattr(crs, "check_server", lambda found, quiet=False: (FAKE_SERVER, list(found), ""))
     monkeypatch.setattr(crs, "session_tasks", lambda _s: [])
-    monkeypatch.setattr(crs, "session_work", lambda _s: [])
+    monkeypatch.setattr(crs, "session_work", lambda _s, **k: [])
     monkeypatch.setattr(crs, "ensure_seat", lambda _s: "")
     monkeypatch.setattr(crs, "has_channel", lambda _s: True)
 

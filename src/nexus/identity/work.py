@@ -504,9 +504,6 @@ def forget_own(kind: str, ref: str, *, client: Any = None, identity: str | None 
     try:
         who = identity or caller_identity()
         if who is None:
-            # The row (if a start wrote one) stays until the reap closes it: say so, since a silent no-op here leaves no
-            # trace of the end that did not write (nexus-hczdo).
-            _log.warning("identity_work_forget_no_identity", kind=kind, ref=ref)
             return False
         owned = client is None
         engine = _new_client(timeout) if owned else client
@@ -714,19 +711,30 @@ def list_rows(env: IdentityEnv, seat: str | None = None, session: str | None = N
     is a ``worktree`` whose path is not a directory on this host, when it is a ``wait`` for a session the identity no
     longer holds, or when it is a wait, lab run, agent or watcher whose registering process is gone or that nobody has
     written for 12 hours (:func:`process_stale_why`); the stale row carries ``why``. *only_running* keeps the rows that are
-    ``running`` and not stale. *reap_first* closes the rows whose work has ended (:func:`nexus.identity.work_reap.reap`) before reading, and the
-    report then carries them under ``"reaped"``."""
+    ``running`` and not stale. *reap_first* closes the rows whose work has ended (:func:`nexus.identity.reap.reap`) before
+    reading, and the report then carries them under ``"reaped"``. A reap that fails is reported under ``"reap_error"`` and
+    the list is read anyway: a reaping read never fails where a plain one would not."""
     identity = _target(env, seat, session, who)
+    reaped: list[dict[str, str]] | None = None
+    reap_error: str | None = None
     if reap_first:
-        from nexus.identity.work_reap import reap  # noqa: PLC0415 — deferred: only a reaping read needs it
+        from nexus.identity.reap import reap  # noqa: PLC0415 — deferred: only a reaping read needs it
 
-        reaped = _call(reap, env, identity)
-    else:
-        reaped = None
+        try:
+            reaped = reap(env, identity)
+        except Exception as exc:  # noqa: BLE001 — the list is the answer; the reap is a side effect of reading it
+            reap_error = f"{type(exc).__name__}: {exc}"[:200]
+            _log.warning("identity_work_reap_error", identity=identity, error=reap_error)
     alive = _call(is_alive, env, identity)
     current, started = holder_facts(env.client, identity)
+    work = _call(of, env.client, identity)
+    ended: dict[str, float] = {}
+    if any(w.kind == "agent" and w.state == RUNNING for w in work):
+        from nexus.identity.reap import ended_agents  # noqa: PLC0415 — deferred: only an identity with agent rows reads a transcript
+
+        ended = ended_agents(current)
     rows = []
-    for w in _call(of, env.client, identity):
+    for w in work:
         row = {"kind": w.kind, "ref": w.ref}
         why = None
         if w.state == RUNNING:
@@ -734,10 +742,10 @@ def list_rows(env: IdentityEnv, seat: str | None = None, session: str | None = N
                 why = "the identity is not alive"
             elif worktree_gone(row):
                 why = "the worktree is gone"
-            elif wait_superseded(row, current):
-                why = "a wait from an earlier session"
             else:
-                why = process_stale_why(env, identity, w, holder_started=started)
+                from nexus.identity.reap import reap_why  # noqa: PLC0415 — one witness list for the list and the reap
+
+                why = reap_why(env, identity, w, session=current, holder_started=started, ended=ended)
         if only_running and (w.state != RUNNING or why):
             continue
         entry = {"kind": w.kind, "ref": w.ref, "state": w.state, "updated_at": w.updated_at, "stale": bool(why)}
@@ -747,6 +755,8 @@ def list_rows(env: IdentityEnv, seat: str | None = None, session: str | None = N
     report: dict[str, Any] = {"identity": identity, "alive": alive, "work": rows}
     if reaped is not None:
         report["reaped"] = reaped
+    if reap_error is not None:
+        report["reap_error"] = reap_error
     return report
 
 

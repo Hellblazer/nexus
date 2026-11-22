@@ -60,10 +60,16 @@ def run_row(kind: str, ref: str, stale: bool = False) -> dict[str, Any]:
     return {"kind": kind, "ref": ref, "state": "running", "updated_at": "t", "stale": stale}
 
 
+@pytest.fixture(autouse=True)
+def _engine_answers(crs, monkeypatch):
+    monkeypatch.setattr(crs, "ENGINE_UNANSWERING", False)
+
+
 def test_a_cold_nx_that_misses_the_first_bound_is_read_on_the_retry(crs, monkeypatch) -> None:
     nx = answers(subprocess.TimeoutExpired(["nx"], 5), body(run_row("worktree", "/w")))
     monkeypatch.setattr(crs, "_nx_identity", nx)
-    assert crs.session_work({"sessionId": "sid-bob"}) == ["worktree /w"]
+    assert crs.session_work({"sessionId": "sid-bob"}, reap=True) == ["worktree /w"]
+    assert all("--reap" in args for args, _ in nx.calls)
     assert [t for _, t in nx.calls] == [crs.WORK_TIMEOUT_S, crs.WORK_RETRY_TIMEOUT_S] == [5, 30]
     assert "sid-bob" not in crs.WORK_READ_FAILURES
 
@@ -76,6 +82,7 @@ def test_a_list_that_cannot_be_read_says_why(crs, monkeypatch) -> None:
         (answers(OSError("no nx")), "nx could not run: OSError"),
     ]
     for nx, why in cases:
+        monkeypatch.setattr(crs, "ENGINE_UNANSWERING", False)
         monkeypatch.setattr(crs, "_nx_identity", nx)
         assert crs.session_work({"sessionId": "sid-x"}) is None
         assert why in crs.WORK_READ_FAILURES["sid-x"], why
@@ -84,7 +91,7 @@ def test_a_list_that_cannot_be_read_says_why(crs, monkeypatch) -> None:
 def test_an_installed_nx_without_reap_is_read_without_it(crs, monkeypatch) -> None:
     nx = answers((2, "Error: No such option: --reap"), body(run_row("labrun", "r1")))
     monkeypatch.setattr(crs, "_nx_identity", nx)
-    assert crs.session_work({"sessionId": "sid-1"}) == ["labrun r1"]
+    assert crs.session_work({"sessionId": "sid-1"}, reap=True) == ["labrun r1"]
     assert nx.calls[0][0] == ("work", "list", "--session", "sid-1", "--reap", "--json")
     assert nx.calls[1][0] == ("work", "list", "--session", "sid-1", "--json")
 
@@ -95,7 +102,7 @@ def test_the_rows_the_reap_closed_are_logged_and_not_listed(crs, monkeypatch) ->
     closed = [{"kind": "labrun", "ref": "h:401:1", "why": "its process is gone", "closed": "done"},
               {"kind": "agent", "ref": "agent:a5", "why": "registered before this session started", "closed": "forgotten"}]
     monkeypatch.setattr(crs, "_nx_identity", answers(body(run_row("worktree", "/w"), reaped=closed)))
-    assert crs.session_work({"sessionId": "sid-1", "name": "bob"}) == ["worktree /w"]
+    assert crs.session_work({"sessionId": "sid-1", "name": "bob"}, reap=True) == ["worktree /w"]
     assert any("closed labrun h:401:1 (its process is gone; done)" in line for line in seen)
     assert any("closed agent agent:a5" in line for line in seen)
 
@@ -112,7 +119,8 @@ def _round(crs, monkeypatch, names: list[str], unreadable: set[str]) -> list[dic
     monkeypatch.setattr(crs, "session_tasks", lambda s: [])
     monkeypatch.setattr(crs, "READY_LOG", Path("/dev/null"))
 
-    def work(s: dict) -> list[str] | None:
+    def work(s: dict, reap: bool = False) -> list[str] | None:
+        reaps.append(reap)
         if s["name"] in unreadable:
             crs.WORK_READ_FAILURES[s["sessionId"]] = "nx timed out after 5 s and again after 30 s"
             return None
@@ -120,6 +128,9 @@ def _round(crs, monkeypatch, names: list[str], unreadable: set[str]) -> list[dic
 
     monkeypatch.setattr(crs, "session_work", work)
     return found
+
+
+reaps: list[bool] = []
 
 
 def test_one_unreadable_list_holds_that_session_back_and_the_batch_goes(crs, monkeypatch) -> None:
@@ -151,3 +162,41 @@ def test_stale_rows_alone_neither_block_nor_ask_anyone_to_mark_them(crs, monkeyp
     assert crs.go_gate(found, force=False, max_age=300, caller_pane="%99") == 0 and len(found) == 2
     note = crs.work_note(["labrun h:401:1 (stale)", "agent agent:a1 (stale)"])
     assert "Mark them" not in note and "need nothing from you" in note
+
+
+def test_only_the_gate_reaps_and_a_dry_run_or_a_view_only_reads(crs, monkeypatch) -> None:
+    """S3 / important 3: --status, --dry-run and the ask are views; only the restart's own gate closes rows."""
+    real_session_work = crs.session_work
+    monkeypatch.setattr(crs, "log", lambda line: None)
+    found = _round(crs, monkeypatch, ["bob"], set())
+    reaps.clear()
+    crs.go_gate(found, force=False, max_age=300, caller_pane="%99", dry_run=True)
+    assert reaps == [False]
+    reaps.clear()
+    crs.go_gate(found, force=False, max_age=300, caller_pane="%99")
+    assert reaps == [True]
+    nx = answers(body())
+    monkeypatch.setattr(crs, "_nx_identity", nx)
+    real_session_work({"sessionId": "sid-1"})
+    assert "--reap" not in nx.calls[0][0]
+
+
+def test_after_one_read_times_out_twice_later_reads_get_the_first_bound_only(crs, monkeypatch) -> None:
+    """Important 4: a hung engine cost 35 s a session (seven minutes for twelve); now about one minute."""
+    t = subprocess.TimeoutExpired(["nx"], 5)
+    nx = answers(t, t, t)
+    monkeypatch.setattr(crs, "_nx_identity", nx)
+    assert crs.session_work({"sessionId": "sid-a"}) is None
+    assert crs.session_work({"sessionId": "sid-b"}) is None
+    assert [timeout for _, timeout in nx.calls] == [5, 30, 5]
+    assert "no retry" in crs.WORK_READ_FAILURES["sid-b"]
+
+
+def test_a_reap_error_is_logged_and_the_rows_are_still_read(crs, monkeypatch) -> None:
+    seen: list[str] = []
+    monkeypatch.setattr(crs, "log", seen.append)
+    text = json.dumps({"identity": "i1", "alive": True, "work": [run_row("labrun", "r1")], "reap_error": "RuntimeError: x",
+                       "reaped": ["not-a-dict"]})
+    monkeypatch.setattr(crs, "_nx_identity", answers(text))
+    assert crs.session_work({"sessionId": "sid-1", "name": "bob"}, reap=True) == ["labrun r1"]
+    assert any("the reap failed" in line for line in seen)

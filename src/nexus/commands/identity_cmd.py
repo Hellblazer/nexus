@@ -232,26 +232,34 @@ def work_register_cmd(ctx: click.Context, kind: str, ref: str) -> None:
     _run(ctx, lambda env: work.register_lines(env, kind, ref, work.RUNNING))
 
 
+_OWNER = click.option(
+    "--identity", "owner", default=None,
+    help="The identity that registered the row (the id `register` printed), for a process that has lost its session: "
+         "a lab-remote whose shell ended before the run did. Default: the caller's own.")
+
+
 @work_group.command("done")
 @_KIND
 @_REF
+@_OWNER
 @click.pass_context
-def work_done_cmd(ctx: click.Context, kind: str, ref: str) -> None:
+def work_done_cmd(ctx: click.Context, kind: str, ref: str, owner: str | None) -> None:
     """Mark work this session owns finished (state done)."""
     from nexus.identity import work  # noqa: PLC0415
 
-    _run(ctx, lambda env: work.register_lines(env, kind, ref, work.DONE))
+    _run(ctx, lambda env: work.register_lines(env, kind, ref, work.DONE, who=(lambda: owner) if owner else None))
 
 
 @work_group.command("forget")
 @_KIND
 @_REF
+@_OWNER
 @click.pass_context
-def work_forget_cmd(ctx: click.Context, kind: str, ref: str) -> None:
+def work_forget_cmd(ctx: click.Context, kind: str, ref: str, owner: str | None) -> None:
     """Drop a work row of this session."""
     from nexus.identity import work  # noqa: PLC0415
 
-    _run(ctx, lambda env: work.forget_lines(env, kind, ref))
+    _run(ctx, lambda env: work.forget_lines(env, kind, ref, who=(lambda: owner) if owner else None))
 
 
 @work_group.command("list")
