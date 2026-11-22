@@ -7,6 +7,7 @@ import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.SchemaMigrator;
 import dev.nexus.service.jooq.binding.Vector;
+import dev.nexus.service.jooq.nexus.Routines;
 import liquibase.Contexts;
 import liquibase.LabelExpression;
 import liquibase.Liquibase;
@@ -352,14 +353,13 @@ class Rdr229P35bSqlReadersIntegrationTest {
         }
         String vector = "[" + String.join(",", java.util.Collections.nCopies(384, "0.5")) + "]";
         byte[] digest = MessageDigest.getInstance("SHA-256").digest("p35b-canary-race".getBytes(StandardCharsets.UTF_8));
-        String call = "SELECT nexus.canary_query_ring_upsert(?, ARRAY[?]::text[], ARRAY[?]::text[], ARRAY[?]::text[], ARRAY[?]::bytea[])";
         try (Connection a = pg.createConnection(""); Connection b = pg.createConnection("")) {
             a.setAutoCommit(false);
             b.setAutoCommit(false);
-            int wroteA = upsertCanary(a, call, model, vector, digest);
+            int wroteA = upsertCanary(a, model, vector, digest);
             var bResult = java.util.concurrent.CompletableFuture.supplyAsync(() -> {
                 try {
-                    int n = upsertCanary(b, call, model, vector, digest);
+                    int n = upsertCanary(b, model, vector, digest);
                     b.commit();
                     return n;
                 } catch (Exception e) {
@@ -385,41 +385,70 @@ class Rdr229P35bSqlReadersIntegrationTest {
         }
     }
 
-    private static int upsertCanary(Connection c, String call, String model, String vector, byte[] digest) throws Exception {
-        try (var ps = c.prepareStatement(call)) {
-            ps.setString(1, TENANT);
-            ps.setString(2, HALF);
-            ps.setString(3, model);
-            ps.setString(4, vector);
-            ps.setBytes(5, digest);
-            try (var rs = ps.executeQuery()) {
-                rs.next();
-                return rs.getInt(1);
-            }
-        }
+    /** One entry for {@code HALF} through the generated routine, on the caller's connection (and so inside its open transaction). */
+    private static int upsertCanary(Connection c, String model, String vector, byte[] digest) {
+        Integer written = Routines.canaryQueryRingUpsert(DSL.using(c, SQLDialect.POSTGRES).configuration(), TENANT,
+            new String[] {HALF}, new String[] {model}, new String[] {vector}, new byte[][] {digest});
+        return written == null ? 0 : written;
     }
 
     /** "view nexus.v" or "trigger nexus.t.name" for every view rule and trigger that pg_depend records as depending on one of the columns. */
     private static List<String> nameColumnDependents(DSLContext ctx, List<String[]> columns) {
         List<String> out = new ArrayList<>();
         for (String[] tc : columns) {
-            out.addAll(ctx.fetch("""
-                SELECT DISTINCT CASE WHEN d.classid = 'pg_rewrite'::regclass THEN 'view nexus.' || vc.relname
-                                     ELSE 'trigger nexus.' || tc.relname || '.' || tg.tgname END AS dependent
-                  FROM pg_depend d
-                  JOIN pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid
-                  JOIN pg_class rc ON rc.oid = d.refobjid
-                  JOIN pg_namespace rn ON rn.oid = rc.relnamespace
-                  LEFT JOIN pg_rewrite rw ON d.classid = 'pg_rewrite'::regclass AND rw.oid = d.objid
-                  LEFT JOIN pg_class vc ON vc.oid = rw.ev_class
-                  LEFT JOIN pg_trigger tg ON d.classid = 'pg_trigger'::regclass AND tg.oid = d.objid
-                  LEFT JOIN pg_class tc ON tc.oid = tg.tgrelid
-                 WHERE d.refclassid = 'pg_class'::regclass AND d.classid IN ('pg_rewrite'::regclass, 'pg_trigger'::regclass)
-                   AND rn.nspname = 'nexus' AND rc.relname = ? AND a.attname = ?
-                   AND (vc.oid IS NULL OR vc.relname <> rc.relname)
-                """, tc[0], tc[1]).getValues("dependent", String.class));
+            // a view: its rewrite rule depends on the column (a view's rule also depends on the view itself, which is not a reader)
+            Field<String> view = catStr("vc", "relname");
+            for (String v : ctx.selectDistinct(view)
+                    .from(dependsOnColumn()
+                        .join(cat("pg_rewrite", "rw")).on(DSL.field(DSL.name("rw", "oid")).eq(DSL.field(DSL.name("d", "objid"))))
+                        .join(cat("pg_class", "vc")).on(DSL.field(DSL.name("vc", "oid")).eq(DSL.field(DSL.name("rw", "ev_class")))))
+                    .where(columnIs(tc[0], tc[1], "pg_rewrite"))
+                    .and(view.ne(catStr("rc", "relname")))
+                    .fetch(view)) {
+                out.add("view nexus." + v);
+            }
+            // a trigger: its UPDATE OF list (tgattr) depends on each column it names
+            Field<String> table = catStr("tc", "relname");
+            Field<String> trigger = catStr("tg", "tgname");
+            for (var r : ctx.selectDistinct(table, trigger)
+                    .from(dependsOnColumn()
+                        .join(cat("pg_trigger", "tg")).on(DSL.field(DSL.name("tg", "oid")).eq(DSL.field(DSL.name("d", "objid"))))
+                        .join(cat("pg_class", "tc")).on(DSL.field(DSL.name("tc", "oid")).eq(DSL.field(DSL.name("tg", "tgrelid")))))
+                    .where(columnIs(tc[0], tc[1], "pg_trigger"))
+                    .fetch()) {
+                out.add("trigger nexus." + r.value1() + "." + r.value2());
+            }
         }
         return out.stream().distinct().sorted().toList();
+    }
+
+    /** {@code pg_catalog.<name>} under an alias: the catalog has no jOOQ codegen, so the typed schema-qualified form. */
+    private static Table<?> cat(String name, String alias) {
+        return DSL.table(DSL.name("pg_catalog", name)).as(alias);
+    }
+
+    private static Field<String> catStr(String alias, String column) {
+        return DSL.field(DSL.name(alias, column), String.class);
+    }
+
+    /**
+     * pg_depend (d) joined to the class of its dependent (dc) and of its referenced object (dr), the referenced relation (rc), its
+     * schema (rn) and the referenced column (a); {@link #columnIs} filters it to one column of a nexus relation.
+     */
+    private static Table<?> dependsOnColumn() {
+        return cat("pg_depend", "d")
+            .join(cat("pg_class", "dc")).on(DSL.field(DSL.name("dc", "oid")).eq(DSL.field(DSL.name("d", "classid"))))
+            .join(cat("pg_class", "dr")).on(DSL.field(DSL.name("dr", "oid")).eq(DSL.field(DSL.name("d", "refclassid"))))
+            .join(cat("pg_class", "rc")).on(DSL.field(DSL.name("rc", "oid")).eq(DSL.field(DSL.name("d", "refobjid"))))
+            .join(cat("pg_namespace", "rn")).on(DSL.field(DSL.name("rn", "oid")).eq(DSL.field(DSL.name("rc", "relnamespace"))))
+            .join(cat("pg_attribute", "a")).on(DSL.field(DSL.name("a", "attrelid")).eq(DSL.field(DSL.name("d", "refobjid")))
+                .and(DSL.field(DSL.name("a", "attnum")).eq(DSL.field(DSL.name("d", "refobjsubid")))));
+    }
+
+    /** The dependent is a {@code classOf} object (pg_rewrite or pg_trigger) and the referenced object is nexus.{@code table}.{@code column}. */
+    private static org.jooq.Condition columnIs(String table, String column, String classOf) {
+        return catStr("dc", "relname").eq(classOf).and(catStr("dr", "relname").eq("pg_class"))
+            .and(catStr("rn", "nspname").eq("nexus")).and(catStr("rc", "relname").eq(table)).and(catStr("a", "attname").eq(column));
     }
 
     // ---- fixtures ------------------------------------------------------------------------------------------------------
