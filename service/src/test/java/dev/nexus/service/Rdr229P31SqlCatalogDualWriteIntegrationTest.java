@@ -112,6 +112,13 @@ class Rdr229P31SqlCatalogDualWriteIntegrationTest {
             assertThat(addedAfter).as("the functions that appeared after vectors-069 are exactly the named ones").isEqualTo(ADDED_AFTER_DUAL_WRITE);
             assertThat(before.keySet().stream().filter(k -> !after.containsKey(k)).toList()).as("no function went").isEmpty();
             Set<String> redefined = redefinedFunctions();
+            // RDR-229 P3.5b (vectors-077, nexus-p2m1x.24) redefines the readers so their matches read the id and the name; those
+            // vectors-069 does not touch are checked as later redefinitions (new body, same attributes). Its form-A file (vectors-078)
+            // is gated on the stamp moves completing, which this walk does not run, so it changes nothing here.
+            Set<String> p35b = new TreeSet<>(functionsCreatedIn(P35B_FILE));
+            p35b.removeAll(redefined);
+            assertThat(p35b).as("non-vacuity: vectors-077 redefines readers vectors-069 does not").contains("chash_conformance_report", "chunk_is_reapable");
+            int p35bSeen = 0;
             int same = 0;
             int changed = 0;
             int laterChanged = 0;
@@ -119,9 +126,10 @@ class Rdr229P31SqlCatalogDualWriteIntegrationTest {
                 var b = entry.getValue();
                 var a = after.get(entry.getKey());
                 String fn = entry.getKey().substring(0, entry.getKey().indexOf('('));
-                if (REDEFINED_AFTER_DUAL_WRITE.contains(fn)) {
-                    // a later changeset replaces the body (collections-003); the definition around it is untouched
+                if (REDEFINED_AFTER_DUAL_WRITE.contains(fn) || p35b.contains(fn)) {
+                    // a later changeset replaces the body (collections-003, vectors-073, vectors-077); the definition around it is untouched
                     laterChanged++;
+                    if (p35b.contains(fn)) p35bSeen++;
                     assertThat(a.body()).as("%s has a new body from its later changeset", entry.getKey()).isNotEqualTo(b.body());
                     assertThat(a.arguments()).as("%s arguments", fn).isEqualTo(b.arguments());
                     assertThat(a.result()).as("%s result", fn).isEqualTo(b.result());
@@ -150,7 +158,8 @@ class Rdr229P31SqlCatalogDualWriteIntegrationTest {
                 }
             }
             assertThat(changed).as("non-vacuity: functions redefined").isEqualTo(24);
-            assertThat(laterChanged).as("non-vacuity: functions a later changeset redefines").isEqualTo(REDEFINED_AFTER_DUAL_WRITE.size());
+            assertThat(laterChanged - p35bSeen).as("non-vacuity: functions a later changeset redefines").isEqualTo(REDEFINED_AFTER_DUAL_WRITE.size());
+            assertThat(p35bSeen).as("every vectors-077 reader outside vectors-069 was compared").isGreaterThanOrEqualTo(p35b.size());
             assertThat(same).as("non-vacuity: functions compared and unchanged").isGreaterThan(100);
 
             // the rollback restores every previous body verbatim
@@ -260,6 +269,16 @@ class Rdr229P31SqlCatalogDualWriteIntegrationTest {
      * </ul>
      */
     private static final Set<String> REDEFINED_AFTER_DUAL_WRITE = new TreeSet<>(Set.of("collection_tuple_lock_key", "partition_ensure_leaf"));
+
+    /** RDR-229 P3.5b's form-B readers (nexus-p2m1x.24): every function it redefines is named by a CREATE OR REPLACE in it. */
+    private static final Path P35B_FILE = Path.of("src", "main", "resources", "db", "changelog", "vectors-077-rdr229-p35b-readers-both.xml");
+
+    private static Set<String> functionsCreatedIn(Path file) throws Exception {
+        Set<String> out = new TreeSet<>();
+        Matcher m = Pattern.compile("(?i)CREATE\\s+OR\\s+REPLACE\\s+FUNCTION\\s+nexus\\.(\\w+)\\(").matcher(stripXmlComments(Files.readString(file)));
+        while (m.find()) out.add(m.group(1));
+        return out;
+    }
 
     /** catalog_reconcile_commit, one complete walk that reaches all six of its guarded statements, plus the trash of the renamed row. */
     private static Scenario reconcile() {
