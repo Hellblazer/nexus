@@ -80,6 +80,8 @@ class CollectionRegistryUpsertEvictTest {
         coll.put("name", name);
         coll.put("content_type", contentType);
         coll.put("model_version", "v1");
+        // A fresh tenant has no embedding_profile row, so a new row must name its model (as LifecycleFromRowTest does).
+        coll.put("embedding_model", "minilm-l6-v2-384");
         repo.upsertCollection(tenant, coll);
     }
 

@@ -147,8 +147,9 @@ public final class CollectionRegistry {
         if (row.isSuperseded()) {
             // nexus-mp8ys: a retired name is never cached. The cache answers "may this write
             // proceed without a read", and a revive (POST /collections/upsert) clears
-            // superseded_by without touching the cache, so a cached tombstone would go on
-            // refusing a name that was revived. Uncached, every read of a tombstone re-reads it.
+            // superseded_by; upsertCollection evicts after it commits (nexus-afkjy), but a cached
+            // tombstone could still refuse the name between that commit and the evict.
+            // Uncached, every read of a tombstone re-reads it.
             KNOWN.remove(key(tenant, collection));
             return;
         }
@@ -159,7 +160,10 @@ public final class CollectionRegistry {
      * Forget {@code (tenant, collection)} — MUST be called after any commit that
      * DELETEs the {@code catalog_collections} row ({@code CatalogRepository
      * .deleteCollection}; the canonical branch of {@code CatalogRepository
-     * .renameCollection}, which deletes the OLD row). A stale entry would make
+     * .renameCollection}, which deletes the OLD row) or changes a column a cached
+     * {@link CollectionRow} holds ({@code supersedeCollection}; {@code upsertCollection},
+     * whose conflict arm can change content_type, a placeholder owner and the tombstone,
+     * nexus-afkjy). A stale entry would make
      * every subsequent writer skip re-registration for a later same-named
      * collection, landing chash/chunk rows with no registry stub — the exact
      * silent-skip failure the fail-loud registration design exists to prevent.
