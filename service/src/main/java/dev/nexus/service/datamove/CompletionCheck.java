@@ -32,11 +32,15 @@ import java.util.TreeSet;
  * RDR-229 P3.1 (nexus-p2m1x.17), the boot-time completion check (RDR item 6, "Readers during the stamp"): on each install,
  * have the stamp moves finished, and so may the engine's id readers, the one-row rename and the index builds switch?
  *
- * <p><b>READ ONLY.</b> Nothing here writes a row, runs DDL or registers a move: Sam's rule is no boot-time data migrations,
- * and a data move is a visible, resumable job. {@link #evaluate} reads the registry ({@code nexus.data_moves}, admin
- * connection only: {@code nexus_svc} holds no grant), the catalog and the CHECK constraints, and returns what it found; the
- * engine reports it through {@code boot_work}, which {@code nx doctor} reads ({@link CompletionBootWork}). A test runs it in
- * a READ ONLY transaction, so a write would raise 25006.
+ * <p><b>READS, and writes one row.</b> Nothing here runs DDL, registers a move or migrates data: Sam's rule is no boot-time data
+ * migrations, and a data move is a visible, resumable job. {@link #evaluate} reads the registry ({@code nexus.data_moves}, admin
+ * connection only: {@code nexus_svc} holds no grant), the catalog and the CHECK constraints, and returns what it found; the engine
+ * reports it in its own {@code /v1/status} field, {@code rdr229_completion} ({@link CompletionBootWork}). The one write is the gate 3
+ * latch (P3.4, linda 2026-11-22): the first time gate 3 holds, a row in {@code nexus.rdr229_gate_latch} says so
+ * ({@link LatchWriter}, {@link Gate3LatchWriter}). It never runs on the check's own session, which is read only at the server
+ * ({@code default_transaction_read_only = on}, so a write there raises 25006): the engine's reader writes it on a session of its own. A
+ * caller that passes no writer ({@link LatchWriter#NONE}) writes nothing, and a test that runs the check in a READ ONLY transaction
+ * sees a write refused.
  *
  * <p><b>Complete</b> means the label's move has {@code completed_at}, or the move that supersedes it has. A label with no row
  * is incomplete, because later releases' rows are registered at run time. Two exceptions, both settled by residual R3 (the
@@ -166,9 +170,11 @@ public final class CompletionCheck {
     }
 
     /**
-     * What P3.4 supplies for gate 3: the collections the planner would index on this install (live, not superseded, enough
-     * rows, not backed off, within the cap ranking), the ones with a VALID id-predicate index, and the ones whose id index is
-     * INVALID. Keys are whatever identifies a collection to the caller; the check only compares them.
+     * What P3.4 supplies for gate 3: the collections that REQUIRE an id-predicate index (live, not superseded, and holding a VALID name-predicate
+     * index or an id-predicate index of any validity; read from the database by {@code PciGate3Coverage}, so every engine agrees), the ones with a
+     * VALID id-predicate index, and the ones whose id index is INVALID. Keys are whatever identifies a collection to the caller; the check only
+     * compares them. A collection that qualifies for an index but has none of either kind is not required, except in the empty case
+     * ({@link #nothingToIndex}).
      */
     public record IdIndexCoverage(Set<String> planned, Set<String> validIdIndexed, Set<String> invalidIdIndexed,
                                   boolean notApplicable, boolean nothingToIndex, boolean anyIdIndexInvalid) {
@@ -263,7 +269,7 @@ public final class CompletionCheck {
      * @param supersededByWaiting     while it is missing: the registry rows its changeset waits on (a tombstone with a blank
      *                                model_version and no superseded_by_id), the count nx doctor shows; 0 otherwise
      * @param violators               tables whose stamp is done and whose CHECK is still NOT VALID, with the rows that violate it
-     * @param gate3Uncovered          planned collections with no VALID id index, when gate 3 was asked
+     * @param gate3Uncovered          required collections with no VALID id index, when gate 3 was asked
      * @param gate3Why                why gate 3 does not hold, or empty
      * @param gate3PciNotApplicable   the PCI clause of gate 3 did not apply ({@link IdIndexCoverage#pciOff()}: per-collection indexing is off)
      * @param dangling                R7's pre-flight: the registry's tombstones that name no successor, by content type
@@ -463,12 +469,12 @@ public final class CompletionCheck {
                 // Review F5: an empty plan over a populated registry is a planner that found nothing, or failed quietly; it
                 // is a pass only when there is nothing to plan.
                 // no count: the text goes out on the unauthenticated /v1/status, and a count of collections describes tenants
-                why = "the planner plans no collection while live collections are registered, so there is nothing to say they are covered";
+                why = "no collection requires an id-predicate index while live collections are registered, so nothing says they are covered";
             } else {
                 uncovered = new ArrayList<>(coverage.get().uncovered());
                 gate3Holds = uncovered.isEmpty();
                 if (!gate3Holds) {
-                    why = "collections the planner would index have no VALID id-predicate index (missing or INVALID)";
+                    why = "collections that hold a VALID name-predicate index or an id-predicate index have no VALID id-predicate index (missing or INVALID)";
                 } else if (!extrasHold(ctx, gate3Extras)) {
                     gate3Holds = false;
                     why = "a further gate 3 condition does not hold (the runtime-built id unique indexes)";

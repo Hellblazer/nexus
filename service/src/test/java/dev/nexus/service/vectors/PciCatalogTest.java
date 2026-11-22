@@ -522,4 +522,44 @@ class PciCatalogTest {
         assertThat(snap.unparsedCount()).as("an id index is not an unparsed one").isEqualTo(1);
         assertThat(PciCatalog.idKey("m", "t", 42L)).isNotEqualTo(PciCatalog.idKey("m", "t", 43L));
     }
+
+    // ---- N2: the leftover of an id index's REINDEX CONCURRENTLY ----
+
+    @Test
+    void leftoverCollectionId_isAttributedOnlyToAnInvalidBuilderNamePlusCcnewOrCcold_withAnIdPredicate() {
+        for (String suffix : new String[] {"_ccnew", "_ccold", "_ccnew1", "_ccold12"}) {
+            assertThat(PciCatalog.leftoverCollectionId(GOOD_NAME + suffix, "hnsw", ID_PREDICATE, true, "on", false)).as(suffix).contains(42L);
+        }
+        assertThat(PciCatalog.leftoverCollectionId(GOOD_NAME + "_ccnew", "hnsw", ID_PREDICATE, true, "on", true)).as("valid: never a leftover").isEmpty();
+        assertThat(PciCatalog.leftoverCollectionId(GOOD_NAME, "hnsw", ID_PREDICATE, true, "on", false)).as("the builder's own name").isEmpty();
+        assertThat(PciCatalog.leftoverCollectionId(GOOD_NAME + "_ccnew", "hnsw", GOOD_PREDICATE, true, "on", false)).as("a name predicate").isEmpty();
+        assertThat(PciCatalog.leftoverCollectionId(GOOD_NAME + "_ccnew", "btree", ID_PREDICATE, true, "on", false)).isEmpty();
+        assertThat(PciCatalog.leftoverCollectionId(GOOD_NAME + "_ccnew", "hnsw", ID_PREDICATE, false, "on", false)).isEmpty();
+        assertThat(PciCatalog.leftoverCollectionId(GOOD_NAME + "_ccnew", "hnsw", ID_PREDICATE, true, "off", false)).isEmpty();
+        assertThat(PciCatalog.leftoverCollection(GOOD_NAME + "_ccnew", "hnsw", ID_PREDICATE, true, "on", false))
+            .as("the name rule still reads no id predicate").isEmpty();
+    }
+
+    @Test
+    void anIdLeftoverIsALeftover_notAnIdIndex_andTheSnapshotCountsItAsAnInvalidIdIndex() {
+        var leftover = new PciCatalog.Index(GOOD_NAME + "_ccnew", false, null, null, null, null, null, 42L);
+        assertThat(leftover.leftover()).isTrue();
+        assertThat(leftover.leftoverOfId()).isEqualTo(42L);
+        assertThat(leftover.leftoverOf()).isNull();
+        assertThat(leftover.idParsed()).as("not an id index: nothing serves from it").isFalse();
+        assertThat(leftover.parsed()).isFalse();
+        assertThatThrownBy(() -> new PciCatalog.Index(GOOD_NAME + "_ccnew", true, null, null, null, null, null, 42L))
+            .as("a valid index is never a leftover").isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new PciCatalog.Index("pci_x", false, "c", null, null, null, null, 42L)).isInstanceOf(IllegalArgumentException.class);
+
+        var leaf = new PciCatalog.Leaf("nexus", "l", "m", "t", java.util.List.of(
+            new PciCatalog.Index(PciCatalog.indexNameById("m", "t", 42L), true, null, null, null, null, 42L), leftover));
+        var snap = new PciCatalog.Snapshot(java.util.List.of(leaf));
+
+        assertThat(snap.reindexLeftoverCount()).isEqualTo(1);
+        assertThat(snap.validIdCount()).as("the original").isEqualTo(1);
+        assertThat(snap.invalidIdCount()).as("the leftover is an INVALID id-predicate index: id_index_invalid sees it").isEqualTo(1);
+        assertThat(snap.invalidIdKeys()).containsExactly(PciCatalog.idKey("m", "t", 42L));
+        assertThat(snap.unparsedCount()).isZero();
+    }
 }

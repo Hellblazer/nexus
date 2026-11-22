@@ -625,7 +625,7 @@ public final class PciReconciler {
 
     /**
      * RDR-229 P3.4 (linda, 2026-11-22): gate 3 as it LATCHED ({@code CompletionBootWork#gate3Latched}, never the live gate 3), read at the start of each
-     * pass. Once it holds, and the id readers are present ({@link #idReadersPresent}), the name family retires: no name index is built, and each
+     * pass. Once it holds, and the id readers are present ({@link IdReaders#PRESENT}), the name family retires: no name index is built, and each
      * name index whose collection's id index is VALID is dropped ({@code REPLACED_BY_ID}).
      */
     public void retireNameIndexesWhen(java.util.function.BooleanSupplier gate3) {
@@ -633,7 +633,7 @@ public final class PciReconciler {
     }
 
     /**
-     * Whether this engine's readers select by id (P3.5's {@code IdReaders.PRESENT}, read by reflection by default). The name family retires only
+     * Whether this engine's readers select by id ({@link IdReaders#PRESENT}, which P3.5c flips; the default). The name family retires only
      * when this is true as well as the latched gate 3: the retire drops the indexes the name path serves from.
      */
     public void idReadersPresent(java.util.function.BooleanSupplier present) {

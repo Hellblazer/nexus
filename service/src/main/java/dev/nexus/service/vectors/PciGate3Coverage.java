@@ -98,11 +98,9 @@ final class PciGate3Coverage implements CompletionCheck.Gate3Source {
             return Optional.of(CompletionCheck.IdIndexCoverage.pciOff());
         }
         try {
-            PciCatalog.Snapshot snapshot = catalog.get();
-            if (snapshot.leaves().isEmpty()) {
-                return Optional.empty();   // a failed read, never "there are no indexes"
-            }
-            return readLeaves(ctx, snapshot);
+            // A read that fails throws (caught below: unknown). A snapshot with no leaves is a fresh install with no tenant yet: nothing is
+            // required and nothing qualifies, so the empty rule below decides (verified empty), and a PCI-on install without chunks does not wait forever.
+            return readLeaves(ctx, catalog.get());
         } catch (RuntimeException e) {   // unknown is not "covered"
             log.warn("event=pci_gate3_coverage_unread cause=\"{}\"", e.toString());
             return Optional.empty();
