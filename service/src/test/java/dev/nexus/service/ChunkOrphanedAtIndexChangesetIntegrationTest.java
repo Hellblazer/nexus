@@ -41,7 +41,7 @@ import static org.assertj.core.api.Assertions.fail;
  * RDR-229 P3.3c (nexus-p2m1x.21): {@code vectors-075-1}, the self-retrying changeset that builds
  * {@code idx_chunk_orphaned_at_tenant_chash} on {@code nexus.chunk_orphaned_at (tenant_id, chash)}. A boot must never hang or halt on it,
  * and a killed build heals on the next boot: the precondition (CONTINUE) says no VALID index of the name exists, so whatever exists is
- * INVALID and the body drops it before it builds, each statement CONCURRENTLY under a 30 s {@code lock_timeout}; a failing body is skipped
+ * INVALID and the body drops it before it builds (a DO block runs a plain DROP INDEX under a 5 s {@code lock_timeout} only when an INVALID index of the name exists; the build is CONCURRENTLY under 30 s); a failing body is skipped
  * (failOnError false), nothing is recorded, and the next boot retries.
  *
  * <p>One container, run in order, as the production migration role's shape (a non-superuser owner): a fresh walk builds it; a valid index
