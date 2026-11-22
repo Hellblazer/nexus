@@ -172,6 +172,12 @@ def test_a_command_that_starts_no_pytest_session_needs_no_engine(lp, tmp_path, a
         ["python3", "scripts/watched_pytest.py", "--stall", "180", "--", "env", "NX_TEST_T2_SUBSTRATE=none", "uv", "run", "pytest"],
         ["python3", "scripts/watched_pytest.py", "--", "NX_TEST_T2_SUBSTRATE=none", "uv", "run", "pytest"],
         ["env", "-i", "NX_TEST_T2_SUBSTRATE=none", "uv", "run", "pytest"],
+        # an option VALUE spelled pytest is not the command word (confirm round, b4ca4ec41d)
+        ["uv", "run", "--with", "pytest", "python", "scripts/foo.py"],
+        ["uv", "run", "--with", "pytest", "bash", "scripts/build-gate-jar.sh"],
+        ["uv", "run", "--extra", "pytest", "./script.py"],
+        ["uv", "run", "--python", "pytest", "ls"],
+        ["env", "-C", "pytest", "ls"],
     ],
     ids=lambda argv: " ".join(argv)[:70].replace("\n", "\\n"),
 )
@@ -454,6 +460,23 @@ def test_cli_exits_75_with_one_stderr_line(tmp_path):
     assert done.returncode == 75
     assert done.stdout == ""
     assert len(done.stderr.splitlines()) == 1 and "scripts/build-gate-jar.sh --lab-run" in done.stderr
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="closes the child's fd 2 with a POSIX shell redirect")
+@pytest.mark.parametrize("redirect", ["2>&-", "2>/dev/full"])
+def test_cli_keeps_its_verdict_when_stderr_cannot_be_written(tmp_path, redirect):
+    # a broken stderr must not turn the 75 verdict into exit 1 or 120 (confirm round, b4ca4ec41d)
+    if redirect == "2>/dev/full" and not Path("/dev/full").exists():
+        pytest.skip("no /dev/full on this host")
+    root = _installed_copy(tmp_path, jar=False)
+    clean = {k: v for k, v in os.environ.items() if k != "NX_TEST_T2_SUBSTRATE"}
+    clean["NX_BUILD_LEASE_ROOT"] = str(tmp_path / "leases")
+    script = root / "scripts" / "lab-preflight"
+    done = subprocess.run(
+        ["sh", "-c", f'"$0" "$1" -- uv run pytest {redirect}', sys.executable, str(script)],
+        capture_output=False, env=clean, cwd=root, timeout=CAP_S,
+    )
+    assert done.returncode == 75
 
 
 def test_cli_exits_0_for_no_engine_and_for_a_present_jar_and_reads_the_environment(tmp_path):

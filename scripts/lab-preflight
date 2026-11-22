@@ -99,6 +99,15 @@ def is_compound(words: list[str]) -> bool:
     return any(mark in w for w in words for mark in _COMPOUND_MARKS) or "&" in words
 
 
+#: ``env`` options that take no value. Any other option fails open (the value could read ``pytest``).
+_ENV_FLAGS: frozenset[str] = frozenset({"-i", "--ignore-environment", "-0", "--null", "-v", "--debug"})
+#: ``uv run`` options that take no value. Any other option fails open, as above.
+_UV_RUN_FLAGS: frozenset[str] = frozenset({
+    "--no-sync", "--frozen", "--locked", "--isolated", "--no-project", "--no-dev", "--all-extras",
+    "--active", "--offline", "--no-cache", "-q", "--quiet", "-v", "--verbose", "--exact", "--no-config",
+})
+
+
 def locate_pytest(tokens: list[str]) -> tuple[list[str], str | None] | None:
     """``(words after the pytest command word, NX_TEST_T2_SUBSTRATE assigned before it)``, or ``None``.
 
@@ -119,10 +128,17 @@ def locate_pytest(tokens: list[str]) -> tuple[list[str], str | None] | None:
         elif base in ("env", "export"):
             i += 1
             while base == "env" and i < n and tokens[i].startswith("-"):
-                i += 2 if tokens[i] == "-u" else 1
+                if tokens[i] == "-u":
+                    i += 2
+                elif tokens[i] in _ENV_FLAGS:
+                    i += 1
+                else:
+                    return None  # an option that may take a value: fail open rather than guess
         elif base == "uv" and tokens[i + 1 : i + 2] == ["run"]:
             i += 2
             while i < n and tokens[i].startswith("-"):
+                if tokens[i] not in _UV_RUN_FLAGS:
+                    return None  # --with, --extra, --python, ... take a value that could read "pytest"
                 i += 1
         elif _PYTHON.match(base):
             i += 1
@@ -298,10 +314,17 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None, repo_
             Path(__file__).resolve().parents[1] if repo_root is None else repo_root,
         )
     except Exception as exc:  # noqa: BLE001 — fail open: a bug here must cost a wasted grant, never a refused good run
-        sys.stderr.write(f"lab-preflight: skipped on its own error: {exc!r}\n")
+        try:
+            sys.stderr.write(f"lab-preflight: skipped on its own error: {exc!r}\n")
+        except (OSError, AttributeError, ValueError):
+            sys.stderr = None  # type: ignore[assignment]
         return 0
-    for line in lines:
-        sys.stderr.write(line + "\n")
+    try:
+        for line in lines:
+            sys.stderr.write(line + "\n")
+        sys.stderr.flush()
+    except (OSError, AttributeError, ValueError):
+        sys.stderr = None  # type: ignore[assignment]  # a broken stderr must not turn the verdict into exit 1 or 120
     return code
 
 
