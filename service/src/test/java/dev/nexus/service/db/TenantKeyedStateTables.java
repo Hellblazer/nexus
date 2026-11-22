@@ -848,6 +848,16 @@ final class TenantKeyedStateTables {
         notKeyed.put("CompletionBootWork.CachedCounter.kept", COMPLETION_ENGINE_WIDE + "this cache holds one violating-row "
             + "count per CHECK constraint name for ten minutes; the counts are summed over every tenant and carry no "
             + "tenant identity, and a reset only makes a count stale until it expires");
+        notKeyed.put("CompletionCheck.RenameState.missing", RESULT + "; the P3.5b changeset ids (db/rdr229/p35b-continue-changesets.txt) that "
+            + "databasechangelog does not yet record, schema identifiers fixed by the build, no tenant's");
+        notKeyed.put("CompletionBootWork.renameWindowWait", "how long the gate 3 latch waits for pinned renames (RDR-229 P3.7); "
+            + "process-wide configuration, not keyed by tenant");
+        notKeyed.put("CompletionBootWork.renameWindowRetry", "how long after a deferred latch the next read is scheduled (RDR-229 P3.7); "
+            + "process-wide configuration, not keyed by tenant");
+        notKeyed.put("CompletionBootWork.scheduler", "the reporter's own single-thread schedule (the safety poll and the deferred-latch "
+            + "retry); an executor, holds no data and no tenant state");
+        notKeyed.put("CompletionBootWork.DbReader.p35b", "the supplier of the P3.5b changeset ids the one-row rename waits for "
+            + "(P35bChangesets.resource() in production); fixed at construction, schema identifiers, not keyed by tenant");
         notKeyed.put("FkTwins.Holder.ROWS", "the RDR-229 P3.3a id-twin list (db/rdr229/p33a-fk-twins.tsv), parsed once from the classpath; "
             + "table, constraint and label names, no tenant state");
         notKeyed.put("CompletionCheck.ReadSet.gate1Labels", "the move labels gate 1 reads, fixed at construction; "
