@@ -13,8 +13,8 @@ import dev.nexus.service.datamove.RenameReadiness;
  *
  * <p>From gate 3 ({@link Gate3}) until the one-row rename can run ({@link RenameReadiness}: the name-key drop move complete and
  * every P3.5b changeset applied) a rename is refused with {@link RenameRefusedException}, naming the move, the missing list or the
- * restart. Before gate 3 it is the name path and nothing here is consulted, until the drop move completes: that completion is sticky
- * (P3.7), so a rename is never the name path again once the name keys are gone, even if gate 3 drops back. Both inputs are read on
+ * restart. Before gate 3 it is the name path and nothing here is consulted, until gate 3 is latched: the latch is sticky
+ * (P3.7), so a rename is never the name path again once gate 3 has held, even if the live gate 3 drops back. Both inputs are read on
  * each call, never cached, so the refusal follows gate 3 with no restart.
  *
  * <p>{@link #open()} never refuses: what a repository built without a guard gets, so the callers and tests that predate P3.5a
@@ -45,11 +45,12 @@ public final class RenameGuard {
     }
 
     /**
-     * Whether the one-row regime is in force: gate 3 holds, or the name-key drop move has completed. The second clause is sticky:
-     * a completed move has dropped the name keys, so the name path is over for this install even if gate 3 later drops back to false.
+     * Whether the one-row regime is in force: gate 3 has been LATCHED ({@link RenameReadiness#gate3Latched()}: it held once and is
+     * remembered), or holds now ({@code gate3}, which the latch contains in the engine, so the second term is for a readiness with no
+     * latch, a test's lambda). The live gate 3 dropping back (an id index going INVALID) never returns a rename to the name path.
      */
     private boolean oneRowRegime(boolean gate3Holds) {
-        return gate3Holds || readiness.dropMoveComplete();
+        return readiness.gate3Latched() || gate3Holds;
     }
 
     /**
@@ -67,9 +68,9 @@ public final class RenameGuard {
 
     /**
      * RDR-229 P3.7 (O-5): the whole rename, decision and commit, inside {@link RenameReadiness#pinned}, so gate 3 cannot flip to true
-     * between the path the rename chose and its commit. Gate 3 is read ONCE here, inside the pin; the refusal and the path both follow
-     * that one read (and the drop move's sticky completion), and the path is handed to {@code rename}, so a flap of gate 3 between two
-     * reads can never mix the refusal of one regime with the path of the other.
+     * between the path the rename chose and its commit. The regime is decided ONCE here, inside the pin; the refusal and the path both
+     * follow that one decision, and the path is handed to {@code rename}, so a flap of the live gate 3 between two reads can never mix the
+     * refusal of one regime with the path of the other (the latch itself only ever goes from false to true, under the window).
      *
      * @throws RenameRefusedException when the one-row regime is in force and the one-row rename cannot run yet; nothing was run
      */
@@ -88,10 +89,11 @@ public final class RenameGuard {
 
     /**
      * Whether a collection's id survives a rename on this install (R6/S-7's {@code ids_stable}, the key P3.5a's rename response
-     * carries): gate 3 holds and nothing is missing (the name-key drop move completed and every P3.5b changeset applied), which is the
-     * state in which the rename is the one-row update that keeps the id. Read per call, like both inputs; false while either waits.
+     * carries): gate 3 is latched and nothing is missing (the name-key drop move completed and every P3.5b changeset applied), which is the
+     * state in which the rename is the one-row update that keeps the id. Read per call, like both inputs; false while either waits. The
+     * live gate 3 dropping back does not make ids unstable: the rename stays one-row.
      */
     public boolean idsStable() {
-        return gate3.holds() && readiness.missing() == RenameReadiness.Missing.NONE;
+        return oneRowRegime(gate3.holds()) && readiness.missing() == RenameReadiness.Missing.NONE;
     }
 }

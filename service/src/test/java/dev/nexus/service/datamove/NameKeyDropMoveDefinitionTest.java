@@ -115,15 +115,21 @@ class NameKeyDropMoveDefinitionTest {
     }
 
     @Test
-    void renameMissing_isStickyOnceTheDropMoveCompleted_aDipOfGate3NeverReadsAsTheNamePath() {
-        assertThat(result(false, RenameState(true, 3, List.of("a"))).renameMissing())
-            .as("gate 3 dropped back but the name keys are gone: the restart is still awaited, not NONE (the name path)")
+    void renameMissing_keysOnTheLatchedGate3_aDipOfTheLiveGate3NeverReadsAsTheNamePath() {
+        assertThat(result(false, RenameState(true, 3, List.of("a"))).withGate3Latched(true).renameMissing())
+            .as("the live gate 3 dropped back but it was latched: the restart is still awaited, not NONE (the name path)")
             .isEqualTo(RenameReadiness.Missing.P35B_RESTART);
-        assertThat(result(false, RenameState(true, 0, List.of())).renameMissing()).isEqualTo(RenameReadiness.Missing.P35B_LIST_MISSING);
-        assertThat(result(false, RenameState(true, 3, List.of())).renameMissing())
-            .as("applied: NONE, and the guard reads dropMoveComplete to take the one-row path").isEqualTo(RenameReadiness.Missing.NONE);
-        assertThat(result(false, RenameState(false, 3, List.of())).renameMissing())
-            .as("control: with the move incomplete the same dip is the name path").isEqualTo(RenameReadiness.Missing.NONE);
+        assertThat(result(false, RenameState(true, 0, List.of())).withGate3Latched(true).renameMissing())
+            .isEqualTo(RenameReadiness.Missing.P35B_LIST_MISSING);
+        assertThat(result(false, RenameState(false, 3, List.of())).withGate3Latched(true).renameMissing())
+            .as("latched with the move incomplete: the move is awaited, whatever the live gate says")
+            .isEqualTo(RenameReadiness.Missing.NAME_KEY_DROP_MOVE);
+        assertThat(result(false, RenameState(true, 3, List.of())).withGate3Latched(true).renameMissing())
+            .as("applied: NONE, and the guard reads the latch to take the one-row path").isEqualTo(RenameReadiness.Missing.NONE);
+        assertThat(result(false, RenameState(true, 3, List.of("a"))).renameMissing())
+            .as("control: never latched, the live gate 3 false is the name path").isEqualTo(RenameReadiness.Missing.NONE);
+        assertThat(result(true, RenameState(false, 3, List.of())).gate3Latched())
+            .as("a result built by hand carries the live gate 3 as its latch").isTrue();
     }
 
     @Test

@@ -84,6 +84,8 @@ public final class CompletionBootWork implements AutoCloseable {
     /** Read side: a rename in flight ({@link RenameReadiness#pinned}). Write side: gate 3 flipping to true, in {@link #publish}. Fair, so a flip is not starved. */
     private final java.util.concurrent.locks.ReentrantReadWriteLock renameWindow = new java.util.concurrent.locks.ReentrantReadWriteLock(true);
     private final Object sampleLock = new Object();
+    /** The process-local gate 3 latch: once true it stays true (see {@link #gate3Latched()} for what replaces it). Written under {@code sampleLock}. */
+    private boolean gate3Latch;
     /** How long gate 3's flip waits for the pinned renames before it defers to the next sample. */
     private volatile Duration renameWindowWait = RENAME_WINDOW_WAIT;
     private final Clock clock;
@@ -166,6 +168,19 @@ public final class CompletionBootWork implements AutoCloseable {
     }
 
     /**
+     * Whether gate 3 has been latched on this install: it held once and stays remembered although the live {@link #gate3()} can drop back
+     * (an id index going INVALID). The rename path keys on this ({@link CompletionCheck.Result#gate3Latched()}). Read per call.
+     * TODO(P3.4, vectors-080): the table {@code nexus.rdr229_gate_latch} replaces the process-local latch kept here ({@code gate3Latch}) at
+     * the rebase; the accessor names stay.
+     */
+    public Gate3 gate3Latched() {
+        return () -> {
+            var r = latest();
+            return r != null && r.gate3Latched();
+        };
+    }
+
+    /**
      * What a rename from gate 3 still waits for, read per call ({@link RenameReadiness}), from the latest sample, the one that
      * {@link #gate3()} reads: {@link CompletionCheck.Result#renameMissing()}. Before the first sample it answers that the name-key drop move is
      * missing (not known yet is not ready). Its {@link RenameReadiness#pinned} is the rename window ({@code renameWindow}): gate 3's flip
@@ -180,9 +195,9 @@ public final class CompletionBootWork implements AutoCloseable {
             }
 
             @Override
-            public boolean dropMoveComplete() {
+            public boolean gate3Latched() {
                 var r = latest();
-                return r != null && r.rename().dropMoveComplete();
+                return r != null && r.gate3Latched();
             }
 
             @Override
@@ -336,11 +351,11 @@ public final class CompletionBootWork implements AutoCloseable {
                 }
                 return -1;
             }
-            CompletionCheck.Result before = latest;
-            if (result.gate3() && (before == null || !before.gate3())) {
-                // gate 3 flips to true: wait for every pinned rename to return, so none commits a name-path rewrite after the readers
-                // switch (O-5). The wait is bounded: a rename that holds the window longer than renameWindowWait defers the flip to the
-                // next sample (a read is owed at once) instead of stalling the check, and its readers keep reading gate 3 as false.
+            if (result.gate3() && !gate3Latch) {
+                // gate 3 is about to be latched, a one-time event: wait for every pinned rename to return, so none commits a name-path
+                // rewrite after the readers switch (O-5). The wait is bounded: a rename that holds the window longer than renameWindowWait
+                // defers the latch to the next sample (a read is owed at once) instead of stalling the check, and its readers keep reading
+                // gate 3 as false. After the latch no pin is needed: every rename from then on is one-row or refused.
                 boolean locked;
                 try {
                     locked = renameWindow.writeLock().tryLock(renameWindowWait.toMillis(), TimeUnit.MILLISECONDS);
@@ -349,14 +364,14 @@ public final class CompletionBootWork implements AutoCloseable {
                     locked = false;
                 }
                 if (!locked) {
-                    log.warn("event=rdr229_rename_window_busy waited_ms={} cause=\"a pinned rename is still open; the gate 3 flip is deferred to the next sample\"",
+                    log.warn("event=rdr229_rename_window_busy waited_ms={} cause=\"a pinned rename is still open; the gate 3 latch is deferred to the next sample\"",
                         renameWindowWait.toMillis());
                     readOwed.set(true);
                     return -1;
                 }
                 try {
                     // the sample is as old as the wait: gate 3 may have dropped again while the rename ran, so read again under the
-                    // lock and flip only if it still holds (the fresh sample is what is published either way)
+                    // lock and latch only if it still holds (the fresh sample is what is published either way)
                     try {
                         result = reader.read();
                         lastError = null;
@@ -364,13 +379,17 @@ public final class CompletionBootWork implements AutoCloseable {
                         log.warn("event=rdr229_completion_unreadable cause=\"{}\" during=rename_window", FailureHandler.oneLine(e.toString()));
                         return -1;
                     }
-                    latest = result;
+                    if (result.gate3()) {
+                        gate3Latch = true;
+                    }
+                    latest = result.withGate3Latched(gate3Latch);
                 } finally {
                     renameWindow.writeLock().unlock();
                 }
             } else {
-                latest = result;
+                latest = result.withGate3Latched(gate3Latch);
             }
+            result = latest;
             publishRestartEntry(result);
             long holding = (result.gate1() ? 1 : 0) + (result.gate2() ? 1 : 0) + (result.gate3() ? 1 : 0);
             return (holding < 3 ? 1 : 0) + (int) result.checks().stream().filter(c -> !c.present()).count()

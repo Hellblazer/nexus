@@ -66,7 +66,51 @@ class CompletionBootWorkRenameWindowTest {
         var work2 = work(steady);
         work2.publish();
         assertThat(work2.latest().gate3()).isTrue();
+        assertThat(work2.latest().gate3Latched()).as("and it is latched").isTrue();
         assertThat(steady.reads.get()).isEqualTo(2);
+        assertThat(work.latest().gate3Latched()).as("the first work never latched: its fresh read said no").isFalse();
+    }
+
+    @Test
+    void onceLatched_theLiveGate3CanDropWithoutTheLatchGoing_andNoPinnedRenameBlocksAnotherSample() throws Exception {
+        var reader = new Scripted(true, true, false, false, true);
+        var work = work(reader);
+        work.publish();   // read 1 + the re-read under the lock: latched
+        assertThat(work.gate3Latched().holds()).isTrue();
+
+        // a rename is open: after the latch no sample waits for it (every rename is one-row or refused now)
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        CountDownLatch inside = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        try {
+            Future<?> rename = pool.submit(() -> work.renameReadiness().pinned(() -> {
+                inside.countDown();
+                try {
+                    release.await(30, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                return null;
+            }));
+            assertThat(inside.await(10, TimeUnit.SECONDS)).isTrue();
+            work.renameWindowWait(Duration.ofMillis(100));
+
+            int result = work.publish();   // the live gate 3 is now false
+
+            assertThat(result).as("the sample went through while a rename was open: no flip to wait for").isNotEqualTo(-1);
+            assertThat(work.gate3().holds()).as("the live gate 3 dropped").isFalse();
+            assertThat(work.gate3Latched().holds()).as("the latch stays").isTrue();
+            assertThat(work.renameReadiness().gate3Latched()).isTrue();
+            release.countDown();
+            rename.get(10, TimeUnit.SECONDS);
+            work.publish();
+            work.publish();
+            assertThat(work.gate3().holds()).as("the live gate 3 is back").isTrue();
+            assertThat(work.gate3Latched().holds()).isTrue();
+        } finally {
+            release.countDown();
+            pool.shutdownNow();
+        }
     }
 
     @Test

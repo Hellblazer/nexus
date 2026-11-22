@@ -217,10 +217,30 @@ public final class CompletionCheck {
      * @param gate3Why                why gate 3 does not hold, or empty
      * @param dangling                R7's pre-flight: the registry's tombstones that name no successor, by content type
      * @param rename                  RDR-229 P3.7: what the one-row rename waits for besides gate 3 ({@link RenameState})
+     * @param gate3Latched            gate 3 has held on this install at some point and is remembered, whatever the live {@code gate3}
+     *                                says now (it can drop back when an id index goes INVALID): the rename path decision keys on this, never
+     *                                on the live value. TODO(P3.4, vectors-080): the table {@code nexus.rdr229_gate_latch} (install-wide,
+     *                                survives a restart, rewinds with a PITR) replaces the process-local latch that {@link CompletionBootWork}
+     *                                keeps today; a hand-built result carries {@code gate3} here
      */
     public record Result(boolean gate1, boolean gate2, boolean gate3, List<LabelState> labels, List<CheckState> checks,
                          boolean supersededByCheckPresent, long supersededByWaiting, List<Violators> violators,
-                         List<String> gate3Uncovered, String gate3Why, Dangling dangling, RenameState rename) {
+                         List<String> gate3Uncovered, String gate3Why, Dangling dangling, RenameState rename,
+                         boolean gate3Latched) {
+
+        /** As above with the latch taken from the live gate 3 (a result built by hand, or read before any latch is kept). */
+        public Result(boolean gate1, boolean gate2, boolean gate3, List<LabelState> labels, List<CheckState> checks,
+                      boolean supersededByCheckPresent, long supersededByWaiting, List<Violators> violators,
+                      List<String> gate3Uncovered, String gate3Why, Dangling dangling, RenameState rename) {
+            this(gate1, gate2, gate3, labels, checks, supersededByCheckPresent, supersededByWaiting, violators, gate3Uncovered,
+                gate3Why, dangling, rename, gate3);
+        }
+
+        /** This result with the latch set to {@code latched}. */
+        public Result withGate3Latched(boolean latched) {
+            return latched == gate3Latched ? this : new Result(gate1, gate2, gate3, labels, checks, supersededByCheckPresent,
+                supersededByWaiting, violators, gate3Uncovered, gate3Why, dangling, rename, latched);
+        }
 
         /** As above with no dangling-tombstone read and no rename read (a caller that built the result by hand). */
         public Result(boolean gate1, boolean gate2, boolean gate3, List<LabelState> labels, List<CheckState> checks,
@@ -232,17 +252,20 @@ public final class CompletionCheck {
 
         /**
          * The first thing a rename still waits for, the one answer the refusal, {@code GET /v1/status} and the in-process readiness
-         * share ({@link RenameReadiness}): {@link RenameReadiness.Missing#NONE} before gate 3 while the name-key drop move has not
-         * completed (the rename is the name path and nothing is awaited), then the name-key drop move, then a missing or empty P3.5b list
-         * (a restart cannot fix it), then the restart that applies P3.5b's changesets.
+         * share ({@link RenameReadiness}): {@link RenameReadiness.Missing#NONE} until gate 3 has been latched (the rename is the name path
+         * and nothing is awaited), then the name-key drop move, then a missing or empty P3.5b list (a restart cannot fix it), then the
+         * restart that applies P3.5b's changesets.
          *
-         * <p><b>Sticky once the move completed.</b> A completed drop move has dropped the name keys, so a name-path rewrite would
-         * fail or leave the install half renamed; from {@code completed_at} the answer no longer reads gate 3, and a dip of gate 3 (an
-         * id index going INVALID) leaves a rename one-row or refused, never the name path.
+         * <p><b>Keyed on the latched gate 3, not the live one.</b> The live gate 3 can drop back (an id index going INVALID) after it held,
+         * and that is never a reason to return to the name path: the readers have switched to the id and, once the drop move has run, the
+         * name keys are gone. From the latch a rename is one-row or refused.
          */
         public RenameReadiness.Missing renameMissing() {
+            if (!gate3Latched) {
+                return RenameReadiness.Missing.NONE;
+            }
             if (!rename.dropMoveComplete()) {
-                return gate3 ? RenameReadiness.Missing.NAME_KEY_DROP_MOVE : RenameReadiness.Missing.NONE;
+                return RenameReadiness.Missing.NAME_KEY_DROP_MOVE;
             }
             if (rename.listed() == 0) {
                 return RenameReadiness.Missing.P35B_LIST_MISSING;

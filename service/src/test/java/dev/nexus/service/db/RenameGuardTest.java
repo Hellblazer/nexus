@@ -13,13 +13,13 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * RDR-229 P3.7 (nexus-p2m1x.27), the rename guard's decisions, without a database: gate 3 is read once inside the pin and the path is
- * handed down (review item 6), the drop move's completion is sticky (item 2), and {@code idsStable} is gate 3 holding with nothing
+ * handed down (review item 6), the gate 3 latch decides the path, never the live gate 3 (item 2), and {@code idsStable} is gate 3 holding with nothing
  * missing (item 7).
  */
 class RenameGuardTest {
 
-    /** A readiness with a fixed answer and a drop-move fact. */
-    private static RenameReadiness readiness(Missing missing, boolean dropComplete) {
+    /** A readiness with a fixed answer and a latch fact. */
+    private static RenameReadiness readiness(Missing missing, boolean latched) {
         return new RenameReadiness() {
             @Override
             public Missing missing() {
@@ -27,8 +27,8 @@ class RenameGuardTest {
             }
 
             @Override
-            public boolean dropMoveComplete() {
-                return dropComplete;
+            public boolean gate3Latched() {
+                return latched;
             }
         };
     }
@@ -52,7 +52,7 @@ class RenameGuardTest {
     @Test
     void fromGate3ARenameIsRefusedUntilNothingIsMissing_thenItRunsOneRow() {
         for (Missing missing : new Missing[] {Missing.NAME_KEY_DROP_MOVE, Missing.P35B_LIST_MISSING, Missing.P35B_RESTART}) {
-            var guard = new RenameGuard(() -> true, readiness(missing, missing != Missing.NAME_KEY_DROP_MOVE));
+            var guard = new RenameGuard(() -> true, readiness(missing, false));
             assertThatThrownBy(() -> guard.pinned(oneRow -> "ran")).isInstanceOf(RenameRefusedException.class)
                 .extracting(e -> ((RenameRefusedException) e).missing()).isEqualTo(missing);
         }
@@ -60,18 +60,18 @@ class RenameGuardTest {
     }
 
     @Test
-    void onceTheDropMoveCompleted_aDipOfGate3NeverMakesARenameTheNamePathAgain() {
-        // gate 3 dropped back to false, the move completed, P3.5b not applied: refused (the restart), not the name path
+    void onceGate3IsLatched_aDipOfTheLiveGate3NeverMakesARenameTheNamePathAgain() {
+        // the live gate 3 dropped back to false, the latch holds, P3.5b not applied: refused (the restart), not the name path
         var refused = new RenameGuard(() -> false, readiness(Missing.P35B_RESTART, true));
         assertThatThrownBy(() -> refused.pinned(oneRow -> "name path ran")).isInstanceOf(RenameRefusedException.class)
             .extracting(e -> ((RenameRefusedException) e).missing()).isEqualTo(Missing.P35B_RESTART);
         assertThatThrownBy(refused::requireRenameAllowed).isInstanceOf(RenameRefusedException.class);
 
-        // gate 3 dropped back, the move completed, everything applied: the one-row rename
+        // the live gate 3 dropped back, latched, everything applied: the one-row rename
         var oneRow = new RenameGuard(() -> false, readiness(Missing.NONE, true));
         assertThat(oneRow.<Boolean>pinned(path -> path)).as("sticky: one-row, never the name path").isTrue();
 
-        // control: no completed move and gate 3 false is the name path, as before
+        // control: not latched and the live gate 3 false is the name path, as before
         var before = new RenameGuard(() -> false, readiness(Missing.NONE, false));
         assertThat(before.<Boolean>pinned(path -> path)).isFalse();
         before.requireRenameAllowed();
@@ -81,7 +81,9 @@ class RenameGuardTest {
     void idsStableIsGate3HoldingWithNothingMissing() {
         assertThat(new RenameGuard(() -> true, readiness(Missing.NONE, true)).idsStable()).isTrue();
         assertThat(new RenameGuard(() -> false, readiness(Missing.NONE, true)).idsStable())
-            .as("gate 3 does not hold: the ids are not known stable").isFalse();
+            .as("the live gate 3 dropped back but the latch holds and nothing is missing: the rename stays one-row, the ids stay stable").isTrue();
+        assertThat(new RenameGuard(() -> false, readiness(Missing.NONE, false)).idsStable())
+            .as("gate 3 neither held nor latched: the ids are not known stable").isFalse();
         for (Missing missing : new Missing[] {Missing.NAME_KEY_DROP_MOVE, Missing.P35B_LIST_MISSING, Missing.P35B_RESTART}) {
             assertThat(new RenameGuard(() -> true, readiness(missing, true)).idsStable()).as("missing " + missing).isFalse();
         }

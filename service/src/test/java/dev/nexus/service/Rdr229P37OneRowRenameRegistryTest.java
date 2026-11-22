@@ -236,7 +236,7 @@ class Rdr229P37OneRowRenameRegistryTest {
         assertThat(id).isEqualTo("engine:rdr229-name-key-drop:" + Rdr229RenameEngine.ENGINE_VERSION);
     }
 
-    /** The move completed and P3.5b applied, then gate 3 dips: the rename is still the one-row update (same id), never the name path. */
+    /** The latch is set and P3.5b applied, then the live gate 3 dips: the rename is still the one-row update (same id), never the name path. */
     @Test
     void aRenameAfterGate3DipsOnAnInstallWhoseDropMoveCompleted_isStillOneRow() throws Exception {
         String tenant = "p37-dip";
@@ -250,7 +250,8 @@ class Rdr229P37OneRowRenameRegistryTest {
         engine.gate3(false);
         try {
             assertThat(Rdr229RenameEngine.await(java.time.Duration.ofSeconds(10), () -> !engine.completion().gate3()))
-                .as("non-vacuity: gate 3 dropped back").isTrue();
+                .as("non-vacuity: the live gate 3 dropped back").isTrue();
+            assertThat(engine.completion().gate3Latched()).as("while the latch holds").isTrue();
 
             var r = engine.rename(token, oldName, coll("p37dip", 2));
 
