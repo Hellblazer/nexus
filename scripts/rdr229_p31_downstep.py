@@ -106,6 +106,12 @@ def generate_down_step(list_text: str) -> str:
         "--   psql -X -v ON_ERROR_STOP=1 --single-transaction -f p31-downstep.sql",
         "-- It leaves the id columns, the registry's identity column and every row of the registry of moves alone, and it is",
         "-- safe to run twice. A table that is absent (the retired queue table on most installs) is skipped.",
+        "--",
+        "-- It does NOT drop the P3.3a id twins (the *_fk constraints of p33a-fk-twins.tsv, vectors-072): they stay through a",
+        "-- down-step, and that is safe. A twin refuses only a row whose id names no registry row, a pre-P3.1 engine writes",
+        "-- no id (a NULL id passes a MATCH SIMPLE foreign key), and each twin copies its name key's delete action, so an",
+        "-- old engine runs unchanged. The validation moves' on_completes are existence-guarded (pg_constraint), so a twin",
+        "-- that is absent is a no-op and not a 42704.",
         "SET LOCAL lock_timeout = '5s';",
     ]
     lines += [f"ALTER TABLE IF EXISTS nexus.{table} DROP CONSTRAINT IF EXISTS {constraint};" for table, constraint in rows]
@@ -183,10 +189,11 @@ def generate_verification(list_text: str) -> str:
 
 
 def generate_pause() -> str:
-    """Holds every open stamp move, so the previous engine's move worker starts none of them (its on_complete would fail)."""
+    """Holds every open stamp move and every open P3.3a validation move (rdr229-fkvalidate-, which runs the same re-stamp), so the
+    previous engine's move worker starts none of them (a stamp's on_complete would fail once the CHECKs are gone)."""
     return (
         f"UPDATE nexus.data_moves SET paused_at = now(), paused_by = '{PAUSED_BY}'\n"
-        " WHERE label LIKE 'rdr229-stamp-%' AND completed_at IS NULL AND paused_at IS NULL;\n"
+        " WHERE (label LIKE 'rdr229-stamp-%' OR label LIKE 'rdr229-fkvalidate-%') AND completed_at IS NULL AND paused_at IS NULL;\n"
     )
 
 
@@ -194,7 +201,7 @@ def generate_unpause() -> str:
     """Releases the rows generate_pause held, after the next P3.1 deploy; a hold someone else set (another paused_by) stays."""
     return (
         "UPDATE nexus.data_moves SET paused_at = NULL, paused_by = NULL\n"
-        f" WHERE label LIKE 'rdr229-stamp-%' AND paused_by = '{PAUSED_BY}';\n"
+        f" WHERE (label LIKE 'rdr229-stamp-%' OR label LIKE 'rdr229-fkvalidate-%') AND paused_by = '{PAUSED_BY}';\n"
     )
 
 

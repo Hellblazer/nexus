@@ -574,6 +574,13 @@ ALLOWLIST: tuple[tuple[str, str, str, str], ...] = (
     ("vectors-070-30", "nexus.aspect_extraction_queue", "aspect_extraction_queue_collection_id_check", "on_complete literal, guarded inside its own DO block, run by the engine after boot"),
     ("vectors-070-15", "nexus.chunks", "chunks_collection_id_check", "on_complete literal, guarded inside its own DO block, run by the engine after boot"),
     ("vectors-070-15", "nexus.chunks", "chunks_collection_id_not_null", "on_complete literal, guarded inside its own DO block, run by the engine after boot"),
+    ("vectors-072-11", "nexus.topic_assignments", "topic_assignments_source_collection_id_fk", "on_complete literal, guarded inside its own DO block, run by the engine after boot"),
+    ("vectors-072-12", "nexus.document_aspects", "document_aspects_collection_id_fk", "on_complete literal, guarded inside its own DO block, run by the engine after boot"),
+    ("vectors-072-13", "nexus.topics", "topics_collection_id_fk", "on_complete literal, guarded inside its own DO block, run by the engine after boot"),
+    ("vectors-072-14", "nexus.taxonomy_meta", "taxonomy_meta_collection_id_fk", "on_complete literal, guarded inside its own DO block, run by the engine after boot"),
+    ("vectors-072-15", "nexus.document_highlights", "document_highlights_collection_id_fk", "on_complete literal, guarded inside its own DO block, run by the engine after boot"),
+    ("vectors-072-16", "nexus.canary_query_ring", "canary_query_ring_collection_id_fk", "on_complete literal, guarded inside its own DO block, run by the engine after boot"),
+    ("vectors-072-17", "nexus.aspect_extraction_queue", "aspect_extraction_queue_collection_id_fk", "on_complete literal, guarded inside its own DO block, run by the engine after boot"),
 )
 
 
@@ -1678,5 +1685,5 @@ def test_the_vectors_068_19_exemption_says_why_it_is_safe_and_that_it_is_the_onl
     reason = boot_time[0][3]
     assert "registry is small" in reason
     assert "only boot-time VALIDATE" in reason
-    after_boot = [row for row in ALLOWLIST if row[0].startswith("vectors-070-")]
+    after_boot = [row for row in ALLOWLIST if row[0].startswith(("vectors-070-", "vectors-072-"))]
     assert after_boot and all("after boot" in row[3] for row in after_boot)
