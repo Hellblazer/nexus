@@ -225,7 +225,7 @@ def test_a_kept_entry_carries_no_mailed_ask_to_withdraw(crs, rd, monkeypatch) ->
     crs.write_manifest(manifest["stamp"], manifest["targets"], [], at=manifest["at"])
     _asking(crs, monkeypatch)
     withdrawn: list[str] = []
-    monkeypatch.setattr(crs, "withdraw_ask", lambda sid, tid="", **_k: withdrawn.append(tid) or "withdrawn")
+    monkeypatch.setattr(crs, "withdraw_ask", lambda sid, tid="", **_k: withdrawn.append(tid) or crs.GONE[0])
     _round_now(crs, rd, ["alpha"])
     manifest, _ = crs.load_manifest()
     (alpha,) = manifest["targets"]

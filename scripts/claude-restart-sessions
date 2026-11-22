@@ -11,8 +11,8 @@ development-channel) flag with the same values is dropped from that line, so the
 not pile up one per restart. Once every restart is done, each resumed session gets one
 wake prompt, saying what it was restarted onto and to re-read its board entry: as conexus
 mail with the same origin note and marker as every ask from here when it has the channel
-(typed instead only when no turn starts within a minute and the mail is confirmed
-withdrawn), else typed as a short pointer to /tmp/rw-<id>.txt (removed once that turn
+(typed instead only when no turn starts within a minute and the mail is withdrawn, its marker
+dropped), else typed as a short pointer to /tmp/rw-<id>.txt (removed once that turn
 ends), and typed only into an empty prompt.
 --no-wake leaves it idle as before.
 
@@ -357,7 +357,7 @@ def has_channel(s: dict) -> bool:
 
     `--channels plugin:conexus@nexus-plugins` (the dialog-free form) or the development form
     `--dangerously-load-development-channels server:nexus`. Verified on Claude Code 2.1.316
-    (nexus-cmqe8): mail to an idle session's own mailbox starts a turn and leaves an unsent
+    (nexus-cmqe8): mail to an idle session's own (identity) mailbox starts a turn and leaves an unsent
     draft in its prompt untouched.
     """
     try:
@@ -1726,18 +1726,63 @@ def handoff_prompt(s: dict, path: str, mailed: bool = False) -> str:
             f"When the file is complete, reply with only: cat {path}")
 
 
+#: session id -> (identity id, why none): what `nx identity show --session` said, kept per session id for the run.
+#: An ask goes to the session's identity mailbox (RDR-253 Phase 2: a session drains only mailbox/<its identity id>).
+IDENTITIES: dict[str, tuple[str, str]] = {}
+_IDENTITY_ID = re.compile(r"i[0-9]+")
+
+
+def target_identity(sid: str) -> tuple[str, str]:
+    """(identity id, "") for the identity the session holds, or ("", why) when it has none or nx could not say.
+
+    Asked once per session id; a refused or failed call is not kept, so a later ask tries again."""
+    if sid in IDENTITIES:
+        return IDENTITIES[sid]
+    try:
+        r = _nx_identity("show", "--session", sid, "--json")
+    except (OSError, subprocess.SubprocessError) as e:
+        return "", f"nx identity show failed ({type(e).__name__}: {e})"
+    out = (r.stdout or "") + (r.stderr or "")
+    if r.returncode == 0:
+        try:
+            ident = str(json.loads(r.stdout).get("id") or "")
+        except (ValueError, AttributeError):
+            ident = ""
+        found = (ident, "") if _IDENTITY_ID.fullmatch(ident) else ("", "nx identity show named no identity id")
+    elif "unknown_session" in out:
+        found = ("", "the session holds no identity (unknown_session)")
+    else:
+        tail = out.strip().splitlines()[-1:] or ["no output"]
+        return "", f"nx identity show exited {r.returncode}: {tail[0][:160]}"
+    IDENTITIES[sid] = found
+    return found
+
+
+def ask_address(sid: str, resolve: bool = False) -> str:
+    """The identity mailbox a session's asks go to, for a log or report line; "session <sid8>" when it has none."""
+    ident = (target_identity(sid) if resolve else IDENTITIES.get(sid, ("", "")))[0]
+    return f"mailbox/{ident}" if ident else f"session {sid[:8]}"
+
+
 def mail_ask(s: dict, path: str, sender: str, ttl: int = 1200, *, kind: str = "restart-handoff",
              body: str | None = None, note: str | None = None) -> bool:
-    """Send the handoff ask to the session's own mailbox; the conexus channel delivers it as a turn.
+    """Send the ask to the session's identity mailbox; the conexus channel delivers it as a turn.
 
     Nothing is typed into the pane, so an unsent draft in the prompt is left as it is.
-    The ready round reuses this with its own kind, body and log note.
+    The ready round reuses this with its own kind, body and log note. A session that holds no identity
+    is not mailed (False, with the reason in the log): an 8.6 session drains only its identity's mailbox,
+    so the caller's typed or logged fallback runs instead of an ask nobody would read.
     """
     sid = s["sessionId"]
+    ident, why = target_identity(sid)
+    if not ident:
+        log(f"WARN {label(s)}: not mailed: {why}")
+        return False
+    address = f"mailbox/{ident}"
     # The ask expires soon after the roll would stop waiting for it, so an ask the session never
     # took does not sit in its mailbox for the template's 7 days and land in a later prompt.
-    argv = [_nx_binary(), "tuple", "out", f"mailbox/{sid}", "--key", f"to={sid}", "--dim", f"from={sender}",
-            "--dim", "address_kind=session", "--dim", f"kind={kind}", "--nonce", str(uuid.uuid4()),
+    argv = [_nx_binary(), "tuple", "out", address, "--key", f"to={ident}", "--dim", f"from={sender}",
+            "--dim", "address_kind=identity", "--dim", f"kind={kind}", "--nonce", str(uuid.uuid4()),
             "--ttl-seconds", str(ttl), "--body", body if body is not None else handoff_prompt(s, path, mailed=True)]
     marker = ask_marker(s, path)
     try:  # the session checks it exists before acting: without it the mail would read as forged
@@ -1761,16 +1806,16 @@ def mail_ask(s: dict, path: str, sender: str, ttl: int = 1200, *, kind: str = "r
         # The send may have landed: the marker stays for the ask it may belong to, and the ask is named
         # (no tuple id came back, so it cannot be withdrawn; it expires with its TTL).
         SENT_MARKERS[sid] = marker
-        UNWITHDRAWN.append(f"mailbox/{sid[:8]}: {kind}: the send timed out and may have landed, so it cannot be withdrawn")
-        log(f"WARN {label(s)}: mail to mailbox/{sid} failed ({type(e).__name__}: {e}); it may have landed")
+        UNWITHDRAWN.append(f"{address}: {kind}: the send timed out and may have landed, so it cannot be withdrawn")
+        log(f"WARN {label(s)}: mail to {address} failed ({type(e).__name__}: {e}); it may have landed")
         return False
     except OSError as e:
         drop_marker(marker)
-        log(f"WARN {label(s)}: mail to mailbox/{sid} failed ({type(e).__name__}: {e})")
+        log(f"WARN {label(s)}: mail to {address} failed ({type(e).__name__}: {e})")
         return False
     if r.returncode != 0:
         drop_marker(marker)
-        log(f"WARN {label(s)}: mail to mailbox/{sid} failed (exit {r.returncode}): "
+        log(f"WARN {label(s)}: mail to {address} failed (exit {r.returncode}): "
             f"{(r.stdout + r.stderr).strip().splitlines()[-1:]}")
         return False
     SENT_MARKERS[sid] = marker
@@ -1778,93 +1823,47 @@ def mail_ask(s: dict, path: str, sender: str, ttl: int = 1200, *, kind: str = "r
     if out:
         SENT_ASKS[sid] = out[-1].strip()
     else:
-        UNWITHDRAWN.append(f"mailbox/{sid[:8]}: {kind}: sent, but nx printed no tuple id, so it cannot be withdrawn")
+        UNWITHDRAWN.append(f"{address}: {kind}: sent, but nx printed no tuple id, so it cannot be withdrawn")
         log(f"WARN {label(s)}: mailed, but nx printed no tuple id; the ask cannot be withdrawn and expires in {ttl}s")
     return True
 
 
 #: session id -> tuple id of the handoff ask mailed to it and not yet withdrawn (nexus-o581r).
 SENT_ASKS: dict[str, str] = {}
-#: Who claims an ask back out of a session's mailbox.
+#: Who this script says it is when it sends.
 ASK_CLAIMANT = "claude-restart-sessions"
-#: "mailbox/<sid8>: <what> <tid>: <outcome>" for each ask withdraw_ask could not confirm gone; the
+#: "<mailbox/identity>: <what> <tid>: <outcome>" for each ask that could not be taken back; the
 #: footprint report names them (they expire with their TTL).
 UNWITHDRAWN: list[str] = []
-#: Outcomes that leave no ask behind.
-GONE = ("withdrawn", "already taken or expired")
-
-
-def _nx_tuple(*args: str) -> subprocess.CompletedProcess:
-    return subprocess.run([_nx_binary(), "tuple", *args], capture_output=True, text=True, timeout=60)
+#: What withdraw_ask does to an ask: it drops the ask's marker and leaves the row to its TTL.
+WITHDRAWN = "withdrawn (marker dropped; the row expires with its TTL)"
+#: Outcomes that leave no ask behind that a session would act on.
+GONE = (WITHDRAWN,)
 
 
 def withdraw_ask(sid: str, tid: str = "", what: str = "handoff ask") -> str:
-    """Take this script's own ask back out of mailbox/<sid>, if it is still there: the handoff ask
-    recorded in SENT_ASKS, or, given *tid*, that row (a ready-round ask read back from its manifest;
-    SENT_ASKS is then left as it is). Returns the outcome ("withdrawn", "already taken or expired",
-    or why not; "" when there was nothing to withdraw). Once the handoff ask is gone its ask marker goes
-    too (a ready ask's marker goes in withdraw_ready_asks), so the mail, if a copy outlives it, reads
-    as forged; a marker whose ask could not be confirmed gone stays.
+    """Take this script's own ask back, if it is still out there: the handoff ask recorded in SENT_ASKS,
+    or, given *tid*, that row (a ready-round ask read back from its manifest; SENT_ASKS is then left as it is).
+    Returns WITHDRAWN, or "" when there was nothing to withdraw.
 
-    A mailbox row is re-announced every 150 s (five times) until it is claimed, so an ask left
-    behind reaches a session that was skipped or resumed under the same id as a fresh request.
-    The engine has no delete by id and a claim matches by `to=<sid>` only, which a peer's mail to
-    the same session matches too: each claimed row that is not ours is released unchanged
-    (release counts no attempt), and only ours is acked. Gone already (taken by the session,
-    or expired) is the normal case.
+    An ask goes to the target's identity mailbox, and the engine lets only that identity's own token claim
+    from it (IdentityFence.mailboxClaim), which this script never holds. So nothing is claimed: dropping the
+    ask marker is the withdrawal, because a session acts on this script's mail only while the marker exists,
+    and a copy of the row that outlives it reads as forged. The row itself expires with its TTL (the ask was
+    sent with one that ends soon after the roll stops waiting) and may be re-announced until then; a session
+    that checks the marker declines it. The handoff ask's marker is dropped here; a wake's and a ready ask's
+    marker is dropped by its caller (wake, withdraw_ready_asks), which holds the path.
     """
     own_ask = not tid
     tid = tid or SENT_ASKS.pop(sid, "")
     if not tid:
         return ""
-    marker = str(SENT_MARKERS.pop(sid, "")) if own_ask else ""
-    others: list[str] = []
-    own = ""  # our row's claim until its ack succeeds; released in the finally otherwise
-    outcome = "already taken or expired"
-    try:
-        for _ in range(10):
-            r = _nx_tuple("in", f"mailbox/{sid}", "--pattern", f"to={sid}", "--claimant", ASK_CLAIMANT,
-                          "--lease-s", "60", "--json")
-            if r.returncode != 0:
-                if "No matching tuple" not in (r.stderr or ""):  # an engine error, not a miss
-                    err = (r.stderr or "").strip().splitlines()
-                    outcome = f"not withdrawn (in exited {r.returncode}: {err[-1] if err else 'no stderr'})"
-                break
-            got = json.loads(r.stdout)
-            claim, row = got["claim_id"], got["tuple"]
-            if row.get("id") == tid:
-                # A claim left to lapse counts an attempt and comes back re-announced, so until the
-                # ack succeeds (a non-zero exit or a raise) the finally releases it.
-                own = claim
-                a = _nx_tuple("ack", claim, "--claimant", ASK_CLAIMANT)
-                if a.returncode == 0:
-                    own = ""
-                    outcome = "withdrawn"
-                else:
-                    outcome = f"claimed but not acked (exit {a.returncode}); released"
-                break
-            others.append(claim)
-        else:
-            outcome = "not found among the first 10 rows"
-    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as e:
-        outcome = f"not withdrawn ({type(e).__name__}: {e})"
-    finally:
-        for claim in [*others, own] if own else others:
-            try:
-                rel = _nx_tuple("release", claim, "--claimant", ASK_CLAIMANT)
-                if rel.returncode != 0:
-                    log(f"WARN mailbox/{sid}: could not release a row it claimed (exit {rel.returncode}); "
-                        f"it lapses in 60 s and counts an attempt")
-            except (OSError, subprocess.SubprocessError) as e:
-                log(f"WARN mailbox/{sid}: could not release a row it claimed ({type(e).__name__}: {e})")
-    if outcome not in GONE:
-        UNWITHDRAWN.append(f"mailbox/{sid[:8]}: {what} {tid[:12]}: {outcome}")
-    else:  # an earlier failure for this ask is no longer true
-        UNWITHDRAWN[:] = [u for u in UNWITHDRAWN if f" {tid[:12]}: " not in u]
-        drop_marker(marker)
-    log(f"mailbox/{sid}: {what} {tid[:12]} {outcome}"
-        + (f"; {len(others)} other row(s) claimed and released" if others else ""))
-    return outcome
+    if own_ask:
+        drop_marker(SENT_MARKERS.pop(sid, ""))
+    # An earlier failure for this ask (a send that timed out) is no longer true once its marker is gone.
+    UNWITHDRAWN[:] = [u for u in UNWITHDRAWN if f" {tid[:12]}: " not in u]
+    log(f"{ask_address(sid, resolve=True)}: {what} {tid[:12]} {WITHDRAWN}")
+    return WITHDRAWN
 
 
 def _nx_binary() -> str:
@@ -2118,7 +2117,7 @@ def wake(s: dict) -> str:
             return "not woken: mail may have landed"
         if outcome == "sent":
             gone = withdraw_ask(s["sessionId"], tid, "wake")
-            if gone != "withdrawn":  # withdraw_ask names an unconfirmed one in UNWITHDRAWN itself
+            if gone not in GONE:  # withdraw_ask names an unconfirmed one in UNWITHDRAWN itself
                 log(f"{name}: not woken by typing: the mailed wake is {gone or 'not withdrawn'}")
                 return f"mailed, {gone or 'not withdrawn'}"
             if marker is not None:
@@ -2181,11 +2180,10 @@ def typed_ask(s: dict, path: str) -> bool:
 
 def withdraw_ready_asks(manifest: dict | None, sids: set[str] | None = None, final: bool = False) -> int:
     """Withdraw the ready round's mailed asks its manifest still records (for *sids*, or all), and
-    clear each one's ``tuple_id`` there once it is gone (withdrawn, or already taken or expired); a
-    withdrawal that failed keeps its id, so a later run tries it again and the footprint report
-    names it. A ready ask expires only with its TTL and is re-announced every 150 s until then, so
-    one left behind lands in the session's next prompt as a fresh request (nexus-xwijj). Returns
-    how many were tried.
+    clear each one's ``tuple_id`` there once it is withdrawn. The ask sits in the target's identity
+    mailbox, which only that identity's own token can claim from, so a withdrawal here is dropping the
+    ask's marker below: a copy of the row that survives (it expires with its TTL and is re-announced every
+    150 s until then) reads as forged to the session (nexus-xwijj). Returns how many were tried.
 
     Each target's ``marker`` (its ask's check file) is removed with the ask, and also when the target
     has no ask on record to withdraw (a send that timed out); *final* removes it whatever the
@@ -3757,7 +3755,7 @@ def footprint_report(found: list[dict], handoffs: dict[str, str] | None, manifes
     drafts = sorted(d for p in kept_handoffs if Path(d := str(Path(p).with_suffix("")) + ".draft.txt").exists())
     drafts += mine("claude-restart-*-{sid}-*.draft.txt")
     replies = mine("nexus-restart-ready-*-{sid}-*.json")
-    still = [f"mailbox/{t['sessionId'][:8]}: ready ask {t['tuple_id'][:12]}" for t in manifest["targets"]
+    still = [f"{ask_address(t['sessionId'])}: ready ask {t['tuple_id'][:12]}" for t in manifest["targets"]
              if isinstance(t.get("tuple_id"), str) and t["tuple_id"]
              and not any(f" {t['tuple_id'][:12]}: " in u for u in UNWITHDRAWN)]  # named once
     lines = [f"footprint: removed {removed} ask file(s) (typed-ask instructions and ask markers)",

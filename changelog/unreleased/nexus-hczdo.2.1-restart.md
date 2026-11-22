@@ -1,0 +1,3 @@
+### Fixed
+
+- **`claude-restart-sessions` mails its asks to the target's identity mailbox, since an 8.6 session drains only that one.** The handoff ask, the ready ask and the wake went to `mailbox/<session id>` with `address_kind=session`, which no 8.6 session reads. The script now finds the target's identity (`nx identity show --session`, once per session id) and sends `address_kind=identity`. A session that holds no identity is not mailed, and the existing typed fallback of each ask runs. A withdrawal drops the ask's marker and claims nothing: the engine lets only an identity's own token claim from its mailbox, so a surviving copy of the row reads as forged and expires with its TTL (nexus-hczdo.2.1).

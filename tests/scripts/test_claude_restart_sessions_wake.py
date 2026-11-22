@@ -42,6 +42,10 @@ def crs(tmp_path, monkeypatch):
     # RDR-253 Step 4: restart() makes or keeps a seat through `nx identity`, which reaches the engine; the seat
     # behaviour is tested in test_claude_restart_sessions_seats.py.
     monkeypatch.setattr(module, "ensure_seat", lambda s: "")
+    # RDR-253 Phase 2: an ask goes to the target's identity mailbox, found through `nx identity show --session`.
+    monkeypatch.setattr(module, "IDENTITIES", {})
+    monkeypatch.setattr(module, "_nx_identity",
+                        lambda *a, **k: subprocess.CompletedProcess(a, 0, json.dumps({"id": "i7", "kind": "ephemeral"}), ""))
     return module
 
 
@@ -91,8 +95,9 @@ class Box:
     """A resumed session's registry file, and fakes for the mail, the withdraw, the pane and the typed prompt."""
 
     def __init__(self, crs, monkeypatch, tmp_path: Path, *, channel: bool, status: str = "idle", draft: bool = False,
-                 mail: str = "sent", mail_starts_turn: bool = True, withdraw: str = "withdrawn",
+                 mail: str = "sent", mail_starts_turn: bool = True, withdraw: str | None = None,
                  busy_at_withdraw: bool = False) -> None:
+        withdraw = crs.GONE[0] if withdraw is None else withdraw
         self.file = tmp_path / "sessions" / "999.json"
         self.file.parent.mkdir(exist_ok=True)
         self.set_status(status)
@@ -162,7 +167,7 @@ def test_a_mailed_wake_that_starts_no_turn_is_withdrawn_and_then_typed(crs, monk
     assert box.typed_text().startswith("You were restarted onto conexus 8.2.0")
 
 
-@pytest.mark.parametrize("outcome", ["already taken or expired", "not withdrawn (in exited 1: boom)"])
+@pytest.mark.parametrize("outcome", ["not withdrawn (boom)"])
 def test_a_wake_mail_that_was_not_withdrawn_is_never_typed_over(crs, monkeypatch, tmp_path, outcome) -> None:
     # taken late, or still live: typing would wake the session twice
     box = Box(crs, monkeypatch, tmp_path, channel=True, mail_starts_turn=False, withdraw=outcome)
@@ -261,7 +266,8 @@ def test_the_wake_mail_carries_the_origin_note_and_marker_and_leaves_the_handoff
     argv = sent[0]
     body = argv[argv.index("--body") + 1]
     assert body.startswith("This message comes from claude-restart-sessions") and body.endswith("WAKE TEXT")
-    assert str(marker) in body and "kind=restart-wake" in argv and "to=sid-new-0000" in argv
+    assert str(marker) in body and "kind=restart-wake" in argv and "to=i7" in argv
+    assert argv[3] == "mailbox/i7" and "address_kind=identity" in argv
     assert argv[argv.index("--ttl-seconds") + 1] == str(crs.WAKE_TTL)
     assert crs.SENT_ASKS == {"sid-new-0000": "tid-handoff"}      # the handoff ask's entry is untouched
 
@@ -370,3 +376,28 @@ def test_the_typed_wake_file_is_removed_once_the_turn_ends(crs, monkeypatch, tmp
     box.set_status(after)
     crs.wake_resumed()
     assert (tmp_path / "rw-sid-new.txt").exists() is kept and crs.WAKE_FILES == []
+
+
+def test_a_wake_for_a_target_with_no_identity_is_typed_not_mailed(crs, monkeypatch, tmp_path) -> None:
+    """mail_ask declines an unbound session, _mail_wake reports "failed", and the wake falls back to typing."""
+    file = tmp_path / "sessions" / "999.json"
+    file.parent.mkdir()
+    file.write_text(json.dumps({"sessionId": "sid-new", "pid": 999, "status": "idle"}), encoding="utf-8")
+    s = {"sessionId": "sid-new", "name": "w", "pid": 999, "pane": "%9", "file": file,
+         "argv": f"/x/claude --channels {P} -n w --resume sid-new"}
+    monkeypatch.setattr(crs, "ASK_MARKERS", tmp_path / "markers")
+    monkeypatch.setattr(crs, "IDENTITIES", {})
+    monkeypatch.setattr(crs, "_nx_identity", lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "Error: unknown_session"))
+    setattr_in(monkeypatch, crs, "subprocess.run", lambda argv, **_k: pytest.fail(f"sent {argv}"))
+    typed: list[str] = []
+    monkeypatch.setattr(crs, "submit", lambda _pane, line, _f: typed.append(line) or True)
+    monkeypatch.setattr(crs, "pane_has_draft", lambda _p: False)
+    monkeypatch.setattr(crs, "plugin_versions", lambda: {"conexus@nexus-plugins": "8.2.0"})
+    monkeypatch.setattr(crs, "TMP", tmp_path)
+    monkeypatch.setattr(crs, "WAKE_FILES", [])
+    monkeypatch.setattr(crs, "prompt_count", lambda _sid: 0)
+    monkeypatch.setattr(crs, "WAKE_IDLE_WAIT", 0)
+    monkeypatch.setattr(crs, "WAKE_BUSY_WAIT", 0)
+    assert crs.wake(s) == "typed"
+    assert typed == [f"Read {tmp_path / 'rw-sid-new.txt'}"]
+    assert "not mailed: the session holds no identity" in (tmp_path / "restart.log").read_text()

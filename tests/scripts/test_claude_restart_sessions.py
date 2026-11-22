@@ -28,6 +28,7 @@ import pytest
 
 from tests._module_seam import setattr_in
 from tests._restart_fake_clock import fake_clock as _fake_clock
+from tests._restart_identity import identity_stub as _identity_stub
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "claude-restart-sessions"
 
@@ -54,6 +55,8 @@ def _no_sent_asks(crs, monkeypatch, tmp_path_factory):
     monkeypatch.setattr(crs, "SENT_MARKERS", {})
     monkeypatch.setattr(crs, "MADE_MARKERS", set())
     monkeypatch.setattr(crs, "UNWITHDRAWN", [])
+    monkeypatch.setattr(crs, "IDENTITIES", {})
+    monkeypatch.setattr(crs, "_nx_identity", _identity_stub())   # asks go to the identity mailbox: every session is bound
     monkeypatch.setattr(crs, "ASK_MARKERS", tmp_path_factory.mktemp("ask-markers") / "restart-asks")
     monkeypatch.setattr(crs, "ensure_seat", lambda s: ""), monkeypatch.setattr(crs, "session_work", lambda s, **k: [])  # both reach the engine through `nx identity`; seats: ..._seats.py, work: ..._work.py
     # Never this machine's managed settings, user settings or flags (the channel-swap gate reads them).
@@ -524,7 +527,7 @@ def test_started_on_names_the_channel_dialog_when_the_dev_form_is_still_in_use(c
     assert "dialog" not in (tmp_path / "restart.log").read_text(encoding="utf-8")
 
 
-def test_mail_ask_writes_the_session_mailbox_and_types_nothing(crs, monkeypatch, tmp_path) -> None:
+def test_mail_ask_writes_the_identity_mailbox_and_types_nothing(crs, monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
     seen: list[list[str]] = []
 
@@ -535,10 +538,10 @@ def test_mail_ask_writes_the_session_mailbox_and_types_nothing(crs, monkeypatch,
     setattr_in(monkeypatch, crs, "subprocess.run", fake_run)
     s = {"sessionId": "sid-9", "name": "tamsin"}
     assert crs.mail_ask(s, "/tmp/h.md", "sid-caller") is True
-    assert len(seen) == 1 and seen[0][1:4] == ["tuple", "out", "mailbox/sid-9"]
+    assert len(seen) == 1 and seen[0][1:4] == ["tuple", "out", "mailbox/i9"]
     argv = seen[0]
     pairs = {(argv[i], argv[i + 1]) for i in range(len(argv) - 1)}
-    assert {("--key", "to=sid-9"), ("--dim", "from=sid-caller"), ("--dim", "address_kind=session"),
+    assert {("--key", "to=i9"), ("--dim", "from=sid-caller"), ("--dim", "address_kind=identity"),
             ("--dim", "kind=restart-handoff"), ("--ttl-seconds", "1200")} <= pairs
     assert argv[argv.index("--nonce") + 1]
     body = argv[argv.index("--body") + 1]
@@ -551,7 +554,21 @@ def test_mail_ask_reports_a_failed_send(crs, monkeypatch, tmp_path) -> None:
     setattr_in(monkeypatch, crs, "subprocess.run",
                lambda argv, **_kw: subprocess.CompletedProcess(argv, 1, stdout="", stderr="refused\n"))
     assert crs.mail_ask({"sessionId": "sid-9", "name": "t"}, "/tmp/h.md", "x") is False
-    assert "mail to mailbox/sid-9 failed (exit 1)" in (tmp_path / "restart.log").read_text()
+    assert "mail to mailbox/i9 failed (exit 1)" in (tmp_path / "restart.log").read_text()
+
+
+def test_the_ready_ask_of_an_unbound_target_is_typed_and_records_no_mail(crs, rd, monkeypatch) -> None:
+    monkeypatch.setattr(crs, "_nx_identity", _identity_stub(unbound={"sid-9"}))
+    setattr_in(monkeypatch, crs, "subprocess.run", lambda argv, **_kw: pytest.fail(f"sent {argv}"))
+    monkeypatch.setattr(crs, "has_channel", lambda _s: True)
+    monkeypatch.setattr(crs, "typed_block", lambda _s: "")
+    monkeypatch.setattr(crs, "write_ask_file", lambda _s, _stamp, _text: rd / "ask.txt")
+    typed: list[str] = []
+    monkeypatch.setattr(crs, "submit", lambda _pane, line, _f: typed.append(line) or True)
+    s = {"sessionId": "sid-9", "name": "tamsin", "pane": "%1", "file": rd / "s.json"}
+    [entry] = crs.ask_ready([s], "20261102-100000", "sid-caller")
+    assert entry["how"] == "typed (the mail send failed)" and "tuple_id" not in entry and "marker" not in entry
+    assert typed == [f"Do what {rd / 'ask.txt'} says"]
 
 
 def test_transcript_has_matches_only_a_user_message(crs, monkeypatch, tmp_path) -> None:
@@ -875,7 +892,7 @@ def test_a_send_that_times_out_keeps_its_marker_and_names_the_ask(crs, monkeypat
     assert crs.mail_ask(s, "/tmp/h.md", "x") is False
     assert marker.exists() and crs.SENT_MARKERS == {"sid-9abcdef": marker} and marker in crs.MADE_MARKERS
     assert crs.SENT_ASKS == {}
-    assert len(crs.UNWITHDRAWN) == 1 and "mailbox/sid-9abc" in crs.UNWITHDRAWN[0] and "timed out" in crs.UNWITHDRAWN[0]
+    assert len(crs.UNWITHDRAWN) == 1 and "mailbox/i9" in crs.UNWITHDRAWN[0] and "timed out" in crs.UNWITHDRAWN[0]
 
 
 @pytest.mark.parametrize(("headings", "counted"), [(2, True), (1, False)], ids=["two-headings", "one-heading"])
@@ -1251,7 +1268,7 @@ def test_the_ready_ask_is_mail_of_its_own_kind_naming_the_reply_file(crs, rd, mo
     s = {"sessionId": "sid-9", "name": "tamsin", "pane": "%1", "file": rd / "s.json"}
     out = crs.ask_ready([s], "20261102-100000", "sid-caller")
     argv = seen[0]
-    assert argv[1:4] == ["tuple", "out", "mailbox/sid-9"] and "kind=restart-ready" in argv
+    assert argv[1:4] == ["tuple", "out", "mailbox/i9"] and "kind=restart-ready" in argv
     body = argv[argv.index("--body") + 1]
     path = crs.ready_path(s, "20261102-100000")
     assert path in body and crs.ready_note(s, path) in _log(rd) and str(crs.ask_marker(s, path)) in body
@@ -1761,21 +1778,15 @@ def test_fresh_and_resume_are_opposites(crs, rd, monkeypatch) -> None:
 
 # ── withdrawing a mailed ask (nexus-o581r) ───────────────────────────────────────────────
 
-def _fake_mailbox(crs, monkeypatch, rows: list[str]) -> list[tuple[str, ...]]:
-    """mailbox rows by tuple id, oldest first; `in` claims the next one. Returns the calls made."""
-    calls: list[tuple[str, ...]] = []
-    queue = list(rows)
+def _no_claims(crs, monkeypatch) -> list[list[str]]:
+    """Every process the script starts from here on, recorded: a withdrawal claims nothing, so none is expected."""
+    calls: list[list[str]] = []
 
-    def fake(*args: str) -> subprocess.CompletedProcess:
-        calls.append(args)
-        if args[0] == "in":
-            if not queue:
-                return subprocess.CompletedProcess(args, 1, "", "No matching tuple.")
-            tid = queue.pop(0)
-            return subprocess.CompletedProcess(args, 0, json.dumps({"claim_id": f"c-{tid}", "tuple": {"id": tid}}), "")
-        return subprocess.CompletedProcess(args, 0, "", "")
+    def fake(argv, **_kw):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 1, "", "an identity mailbox is claimed by its owner only")
 
-    monkeypatch.setattr(crs, "_nx_tuple", fake)
+    setattr_in(monkeypatch, crs, "subprocess.run", fake)
     return calls
 
 
@@ -1786,38 +1797,49 @@ def test_mail_ask_records_the_ask_s_tuple_id(crs, monkeypatch, tmp_path) -> None
     assert crs.SENT_ASKS == {"sid-9": "t-ours"}
 
 
-def test_our_ask_is_acked(crs, monkeypatch, tmp_path) -> None:
+def test_a_withdraw_drops_the_marker_and_claims_nothing(crs, monkeypatch, tmp_path) -> None:
+    """An identity mailbox is claimed only by its owner's token (IdentityFence.mailboxClaim), which this script lacks:
+    the withdrawal is the marker, since mail is acted on only while the marker exists."""
     monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
-    crs.SENT_ASKS["sid-9"] = "t-ours"
-    calls = _fake_mailbox(crs, monkeypatch, ["t-ours"])
-    crs.withdraw_ask("sid-9")
-    assert [c[0] for c in calls] == ["in", "ack"] and calls[1][1] == "c-t-ours"
-    assert "handoff ask t-ours withdrawn" in crs.LOG.read_text(encoding="utf-8")
-    assert crs.SENT_ASKS == {}
+    s = {"sessionId": "sid-9", "name": "t"}
+    setattr_in(monkeypatch, crs, "subprocess.run", lambda argv, **_k: subprocess.CompletedProcess(argv, 0, "t-ours\n", ""))
+    assert crs.mail_ask(s, "/tmp/h.md", "x") is True
+    marker = crs.ask_marker(s, "/tmp/h.md")
+    assert marker.exists()
+    calls = _no_claims(crs, monkeypatch)
+    assert crs.withdraw_ask("sid-9") == crs.WITHDRAWN and crs.WITHDRAWN in crs.GONE
+    assert calls == []   # no in, ack or release
+    assert not marker.exists() and crs.SENT_ASKS == {} and crs.SENT_MARKERS == {}
+    log = crs.LOG.read_text(encoding="utf-8")
+    assert "mailbox/i9: handoff ask t-ours withdrawn (marker dropped; the row expires with its TTL)" in log
+    assert "mailbox/sid-9" not in log
 
 
-def test_a_peer_s_mail_claimed_on_the_way_is_released_not_acked(crs, monkeypatch, tmp_path) -> None:
+def test_a_ready_ask_withdraws_by_tuple_id_and_leaves_its_marker_to_withdraw_ready_asks(crs, monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
-    crs.SENT_ASKS["sid-9"] = "t-ours"
-    calls = _fake_mailbox(crs, monkeypatch, ["t-peer", "t-ours"])
-    crs.withdraw_ask("sid-9")
-    assert [(c[0], c[1]) for c in calls if c[0] != "in"] == [("ack", "c-t-ours"), ("release", "c-t-peer")]
-    assert "1 other row(s) claimed and released" in crs.LOG.read_text(encoding="utf-8")
+    calls = _no_claims(crs, monkeypatch)
+    marker = crs.ask_marker({"sessionId": "sid-9"}, "/tmp/r.json")
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.touch()
+    assert crs.withdraw_ask("sid-9", "t-ready", what="ready ask") in crs.GONE
+    assert calls == [] and marker.exists()   # the round file's entry names the marker; withdraw_ready_asks drops it
+    assert "mailbox/i9: ready ask t-ready withdrawn" in crs.LOG.read_text(encoding="utf-8")
 
 
-def test_an_ask_already_taken_is_left_alone(crs, monkeypatch, tmp_path) -> None:
+def test_a_withdraw_for_a_session_with_no_identity_names_the_session_not_a_mailbox(crs, monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
-    crs.SENT_ASKS["sid-9"] = "t-ours"
-    calls = _fake_mailbox(crs, monkeypatch, ["t-peer"])
-    crs.withdraw_ask("sid-9")
-    assert [(c[0], c[1]) for c in calls if c[0] != "in"] == [("release", "c-t-peer")]
-    assert "already taken or expired" in crs.LOG.read_text(encoding="utf-8")
+    monkeypatch.setattr(crs, "_nx_identity", _identity_stub(unbound={"sid-9abcdef"}))
+    assert crs.withdraw_ask("sid-9abcdef", "t-x") in crs.GONE
+    log = crs.LOG.read_text(encoding="utf-8")
+    assert "session sid-9abc: handoff ask t-x withdrawn" in log and "mailbox/" not in log
 
 
 def test_an_unrecorded_session_touches_no_mailbox(crs, monkeypatch, tmp_path) -> None:
-    calls = _fake_mailbox(crs, monkeypatch, ["t-peer"])
-    crs.withdraw_ask("sid-9")
-    assert calls == []
+    calls = _no_claims(crs, monkeypatch)
+    identity_calls: list = []
+    monkeypatch.setattr(crs, "_nx_identity", _identity_stub(calls=identity_calls))
+    assert crs.withdraw_ask("sid-9") == ""
+    assert calls == [] and identity_calls == []
 
 
 def test_write_handoffs_withdraws_every_ask_even_when_it_raises(crs, monkeypatch) -> None:
@@ -1832,80 +1854,6 @@ def test_write_handoffs_withdraws_every_ask_even_when_it_raises(crs, monkeypatch
     with pytest.raises(RuntimeError):
         crs.write_handoffs([], {"idle"}, 1, 1)
     assert withdrawn == ["sid-1"]
-
-
-def _scripted_nx(crs, monkeypatch, replies: dict[str, list[subprocess.CompletedProcess]]) -> list[tuple[str, ...]]:
-    """_nx_tuple answering each verb from its own list of replies, in order."""
-    calls: list[tuple[str, ...]] = []
-
-    def fake(*args: str) -> subprocess.CompletedProcess:
-        calls.append(args)
-        return replies[args[0]].pop(0)
-
-    monkeypatch.setattr(crs, "_nx_tuple", fake)
-    return calls
-
-
-def _cp(code: int, out: str = "", err: str = "") -> subprocess.CompletedProcess:
-    return subprocess.CompletedProcess([], code, out, err)
-
-
-def test_an_engine_error_is_not_logged_as_a_miss(crs, monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
-    crs.SENT_ASKS["sid-9"] = "t-ours"
-    _scripted_nx(crs, monkeypatch, {"in": [_cp(1, err="Error: engine unreachable\n")]})
-    crs.withdraw_ask("sid-9")
-    log = crs.LOG.read_text(encoding="utf-8")
-    assert "not withdrawn (in exited 1: Error: engine unreachable)" in log
-    assert "already taken" not in log
-
-
-def test_a_failed_ack_releases_our_claim(crs, monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
-    crs.SENT_ASKS["sid-9"] = "t-ours"
-    calls = _scripted_nx(crs, monkeypatch, {
-        "in": [_cp(0, json.dumps({"claim_id": "c-ours", "tuple": {"id": "t-ours"}}))],
-        "ack": [_cp(1)], "release": [_cp(0)]})
-    crs.withdraw_ask("sid-9")
-    assert [(c[0], c[1]) for c in calls if c[0] != "in"] == [("ack", "c-ours"), ("release", "c-ours")]
-    assert "claimed but not acked (exit 1); released" in crs.LOG.read_text(encoding="utf-8")
-
-
-def test_an_ack_that_raises_still_releases_our_claim(crs, monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
-    crs.SENT_ASKS["sid-9"] = "t-ours"
-    calls: list[tuple[str, ...]] = []
-
-    def fake(*args: str) -> subprocess.CompletedProcess:
-        calls.append(args)
-        if args[0] == "in":
-            return _cp(0, json.dumps({"claim_id": "c-ours", "tuple": {"id": "t-ours"}}))
-        if args[0] == "ack":
-            raise subprocess.TimeoutExpired(["nx"], 60)
-        return _cp(0)
-
-    monkeypatch.setattr(crs, "_nx_tuple", fake)
-    crs.withdraw_ask("sid-9")
-    assert [(c[0], c[1]) for c in calls if c[0] != "in"] == [("ack", "c-ours"), ("release", "c-ours")]
-    assert "not withdrawn (TimeoutExpired" in crs.LOG.read_text(encoding="utf-8")
-
-
-def test_a_failed_release_is_warned(crs, monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
-    crs.SENT_ASKS["sid-9"] = "t-ours"
-    _scripted_nx(crs, monkeypatch, {
-        "in": [_cp(0, json.dumps({"claim_id": "c-peer", "tuple": {"id": "t-peer"}})), _cp(1, err="No matching tuple.")],
-        "release": [_cp(2)]})
-    crs.withdraw_ask("sid-9")
-    assert "could not release a row it claimed (exit 2)" in crs.LOG.read_text(encoding="utf-8")
-
-
-def test_a_non_object_reply_is_logged_not_raised(crs, monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
-    crs.SENT_ASKS["sid-9"] = "t-ours"
-    _scripted_nx(crs, monkeypatch, {"in": [_cp(0, "[]")]})
-    crs.withdraw_ask("sid-9")
-    assert "not withdrawn (TypeError" in crs.LOG.read_text(encoding="utf-8")
 
 
 def _loop_with_mail(crs, monkeypatch, tmp_path, *, busy: bool) -> list[str]:
@@ -2001,7 +1949,7 @@ def _marker_of(crs, rd, name: str) -> Path:
 
 def test_withdraw_ready_asks_withdraws_the_recorded_rows_once(crs, rd, monkeypatch) -> None:
     calls: list[tuple] = []
-    monkeypatch.setattr(crs, "withdraw_ask", lambda sid, tid="", what="": calls.append((sid, tid, what)) or "withdrawn")
+    monkeypatch.setattr(crs, "withdraw_ask", lambda sid, tid="", what="": calls.append((sid, tid, what)) or crs.GONE[0])
     manifest = _manifest_with_asks(crs, rd, {"alpha": "t-a", "beta": "t-b", "gamma": ""})
     assert crs.withdraw_ready_asks(manifest, {"sid-alpha", "sid-gamma"}) == 1
     assert calls == [("sid-alpha", "t-a", "ready ask")]
@@ -2018,11 +1966,11 @@ def test_a_ready_ask_whose_withdrawal_failed_keeps_its_id(crs, rd, monkeypatch) 
     crs.withdraw_ready_asks(_manifest_with_asks(crs, rd, {"alpha": "t-a"}))
     assert crs.load_manifest()[0]["targets"][0]["tuple_id"] == "t-a"  # tried again by a later run
 
-def test_a_ready_ask_is_acked_by_its_tuple_id_and_leaves_the_handoff_record(crs, rd, monkeypatch) -> None:
+def test_withdrawing_a_ready_ask_by_its_tuple_id_leaves_the_handoff_record(crs, rd, monkeypatch) -> None:
     crs.SENT_ASKS["sid-9"] = "t-handoff"
-    calls = _fake_mailbox(crs, monkeypatch, ["t-ready"])
+    calls = _no_claims(crs, monkeypatch)
     crs.withdraw_ask("sid-9", "t-ready", what="ready ask")
-    assert [c[0] for c in calls] == ["in", "ack"] and calls[1][1] == "c-t-ready"
+    assert calls == []
     assert "ready ask t-ready withdrawn" in _log(rd)
     assert crs.SENT_ASKS == {"sid-9": "t-handoff"}
 
@@ -2031,7 +1979,7 @@ def test_a_new_round_withdraws_the_previous_round_s_asks(crs, rd, monkeypatch) -
     _live(rd, "alpha")
     _manifest_with_asks(crs, rd, {"alpha": "t-old"})
     calls: list[tuple] = []
-    monkeypatch.setattr(crs, "withdraw_ask", lambda sid, tid="", what="": calls.append((sid, tid)) or "withdrawn")
+    monkeypatch.setattr(crs, "withdraw_ask", lambda sid, tid="", what="": calls.append((sid, tid)) or crs.GONE[0])
     setattr_in(monkeypatch, crs, "signal.signal", lambda *_a: None)
     monkeypatch.setattr(crs, "ask_ready", lambda found, stamp, sender, out=None: [])
     a = argparse.Namespace(status=False, dry_run=False, ready_max_age=900)
@@ -2047,7 +1995,7 @@ def test_status_withdraws_only_the_answered_asks(crs, rd, monkeypatch) -> None:
     (rd / "ready-alpha.json").write_text(json.dumps({"ready": True, "reason": "idle", "eta_min": None}), encoding="utf-8")
     (rd / "ready-gamma.json").write_text("{not json", encoding="utf-8")
     calls: list[tuple] = []
-    monkeypatch.setattr(crs, "withdraw_ask", lambda sid, tid="", what="": calls.append((sid, tid)) or "withdrawn")
+    monkeypatch.setattr(crs, "withdraw_ask", lambda sid, tid="", what="": calls.append((sid, tid)) or crs.GONE[0])
     a = argparse.Namespace(status=True, dry_run=False, ready_max_age=900)
     crs.ready_round(a, _found(crs), _found(crs))
     assert sorted(calls) == [("sid-alpha", "t-a"), ("sid-gamma", "t-g")]
@@ -2059,7 +2007,7 @@ def test_a_roll_withdraws_every_ready_ask_first_and_retries_at_the_end(crs, rd, 
     _live(rd, "alpha")
     _manifest_with_asks(crs, rd, {"alpha": "t-a", "beta": "t-b"})
     order: list[str] = []
-    outcomes = {"t-a": ["withdrawn"], "t-b": ["not withdrawn (in exited 1: down)", "withdrawn"]}
+    outcomes = {"t-a": [crs.GONE[0]], "t-b": ["not withdrawn (in exited 1: down)", crs.GONE[0]]}
     monkeypatch.setattr(crs, "withdraw_ask",
                         lambda sid, tid="", what="": order.append(f"withdraw {tid}") or outcomes[tid].pop(0))
     monkeypatch.setattr(crs, "_roll", lambda *a, **k: order.append("roll") or 0)
@@ -2076,7 +2024,7 @@ def test_a_round_started_during_the_roll_is_left_alone(crs, rd, tmpdirs, monkeyp
     _live(rd, "alpha")
     _manifest_with_asks(crs, rd, {"alpha": "t-a"})
     withdrawn: list[str] = []
-    outcomes = {"t-a": ["not withdrawn (in exited 1: down)", "withdrawn"]}
+    outcomes = {"t-a": ["not withdrawn (in exited 1: down)", crs.GONE[0]]}
     monkeypatch.setattr(crs, "withdraw_ask", lambda sid, tid="", what="": withdrawn.append(tid) or outcomes[tid].pop(0))
 
     def roll(*_a, **_k):  # someone starts a new round while the roll runs
@@ -2107,22 +2055,26 @@ def test_the_report_finds_this_run_s_handoffs_by_stamp_when_the_roll_was_interru
 
 
 def test_a_later_withdrawal_clears_an_earlier_failure(crs, rd, tmpdirs, monkeypatch) -> None:
-    monkeypatch.setattr(crs, "_nx_tuple", lambda *a: subprocess.CompletedProcess(a, 1, "", "engine down"))
+    crs.UNWITHDRAWN.append("mailbox/i9: ready ask t-x: the send timed out and may have landed, so it cannot be withdrawn")
+    crs.UNWITHDRAWN.append("mailbox/i9: ready ask t-other: sent, but nx printed no tuple id, so it cannot be withdrawn")
     crs.withdraw_ask("sid-9", "t-x", what="ready ask")
-    assert len(crs.UNWITHDRAWN) == 1
-    _fake_mailbox(crs, monkeypatch, ["t-x"])
-    crs.withdraw_ask("sid-9", "t-x", what="ready ask")
-    assert crs.UNWITHDRAWN == []
+    assert crs.UNWITHDRAWN == ["mailbox/i9: ready ask t-other: sent, but nx printed no tuple id, so it cannot be withdrawn"]
 
 
 def test_a_new_round_says_which_previous_asks_it_could_not_withdraw(crs, rd, monkeypatch, capsys) -> None:
     _live(rd, "alpha")
     _manifest_with_asks(crs, rd, {"alpha": "t-old"})
-    monkeypatch.setattr(crs, "_nx_tuple", lambda *a: subprocess.CompletedProcess(a, 1, "", "engine down"))
+
+    def unconfirmed(sid, tid="", what=""):
+        crs.UNWITHDRAWN.append(f"mailbox/i1: {what} {tid}: not withdrawn (boom)")
+        return "not withdrawn (boom)"
+
+    monkeypatch.setattr(crs, "withdraw_ask", unconfirmed)
     monkeypatch.setattr(crs, "ask_ready", lambda found, stamp, sender, out=None: [])
     a = argparse.Namespace(status=False, dry_run=False, ready_max_age=900)
     crs.ready_round(a, _found(crs), _found(crs))
-    assert "asks of the previous round not withdrawn" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "asks of the previous round not withdrawn" in out and "mailbox/i1: ready ask t-old" in out
 
 
 # ---- ask markers follow their ask (review r1 S2) ----
@@ -2134,24 +2086,14 @@ def test_a_withdrawn_handoff_ask_takes_its_marker_with_it(crs, rd, monkeypatch) 
     assert crs.mail_ask(s, "/tmp/h.md", "x") is True
     marker = crs.ask_marker(s, "/tmp/h.md")
     assert marker.exists() and crs.SENT_MARKERS == {"sid-9abcdef": marker}
-    _fake_mailbox(crs, monkeypatch, ["t-1"])
-    assert crs.withdraw_ask("sid-9abcdef") == "withdrawn"
-    assert not marker.exists() and crs.SENT_MARKERS == {} and crs.MADE_MARKERS == set()
-
-
-def test_a_handoff_ask_that_could_not_be_confirmed_gone_keeps_its_marker(crs, rd, monkeypatch) -> None:
-    s = {"sessionId": "sid-9abcdef", "name": "t"}
-    setattr_in(monkeypatch, crs, "subprocess.run",
-               lambda argv, **_k: subprocess.CompletedProcess(argv, 0, "t-1\n", ""))
-    crs.mail_ask(s, "/tmp/h.md", "x")
-    monkeypatch.setattr(crs, "_nx_tuple", lambda *a: subprocess.CompletedProcess(a, 1, "", "engine down"))
-    assert crs.withdraw_ask("sid-9abcdef").startswith("not withdrawn")
-    assert crs.ask_marker(s, "/tmp/h.md").exists()  # the ask may still be live: its mail must still check out
+    calls = _no_claims(crs, monkeypatch)
+    assert crs.withdraw_ask("sid-9abcdef") == crs.WITHDRAWN
+    assert calls == [] and not marker.exists() and crs.SENT_MARKERS == {} and crs.MADE_MARKERS == set()
 
 
 def test_withdraw_ready_asks_removes_a_marker_with_its_ask_and_only_then(crs, rd, monkeypatch) -> None:
     manifest = _manifest_with_asks(crs, rd, {"alpha": "t-a", "beta": "t-b", "gamma": ""}, markers=True)
-    outcomes = {"t-a": "withdrawn", "t-b": "not withdrawn (in exited 1: down)"}
+    outcomes = {"t-a": crs.GONE[0], "t-b": "not withdrawn (in exited 1: down)"}
     monkeypatch.setattr(crs, "withdraw_ask", lambda sid, tid="", what="": outcomes[tid])
     assert crs.withdraw_ready_asks(manifest, {"sid-alpha", "sid-beta"}) == 2
     assert not _marker_of(crs, rd, "alpha").exists()  # gone with its ask
@@ -2196,7 +2138,7 @@ def test_status_removes_only_the_answered_targets_markers(crs, rd, monkeypatch) 
         _live(rd, n)
     _manifest_with_asks(crs, rd, {"alpha": "t-a", "beta": "t-b"}, markers=True)
     (rd / "ready-alpha.json").write_text(json.dumps({"ready": True, "reason": "idle", "eta_min": None}), encoding="utf-8")
-    monkeypatch.setattr(crs, "withdraw_ask", lambda sid, tid="", what="": "withdrawn")
+    monkeypatch.setattr(crs, "withdraw_ask", lambda sid, tid="", what="": crs.GONE[0])
     a = argparse.Namespace(status=True, dry_run=False, ready_max_age=900)
     crs.ready_round(a, _found(crs), _found(crs))
     assert not _marker_of(crs, rd, "alpha").exists() and _marker_of(crs, rd, "beta").exists()
@@ -2380,7 +2322,7 @@ def test_the_footprint_report_removes_typed_asks_and_names_what_is_kept(crs, rd,
              "nexus-continuation-restart-alpha-aaaa1111-0-earlier.md"]
     for f in files:
         (t / f).write_text("x", encoding="utf-8")
-    crs.UNWITHDRAWN.append("mailbox/aaaa1111: ready ask t-1: not withdrawn (in exited 1: boom)")
+    crs.UNWITHDRAWN.append("mailbox/i1: ready ask t-1: not withdrawn (in exited 1: boom)")
     # this run's handoff ask marker; the round's ready ask marker (recorded in its round file); and two
     # markers that are neither: another session's, and the SAME session's from a newer round
     marker = crs.ask_marker({"sessionId": "aaaa1111-rest"}, "/tmp/h.md")
@@ -2408,20 +2350,11 @@ def test_the_footprint_report_removes_typed_asks_and_names_what_is_kept(crs, rd,
     assert lines[1].startswith("footprint: kept 1 handoff(s) and 2 draft(s) for back-out:")
     assert "cccc3333" not in lines[1]
     assert lines[2] == f"footprint: kept 1 ready reply file(s): {t / 'nexus-restart-ready-alpha-aaaa1111-1.json'}"
-    assert "mailbox/aaaa1111: ready ask t-1: not withdrawn (in exited 1: boom)" in lines[3]
-    assert "mailbox/sid-alph: ready ask t-left" in lines[3]  # still recorded in the round file
+    assert "mailbox/i1: ready ask t-1: not withdrawn (in exited 1: boom)" in lines[3]
+    assert "session sid-alph: ready ask t-left" in lines[3]  # still recorded in the round file
     assert all(ln in _log(rd) for ln in lines)
     for kept in files[3:7]:  # listed, never removed
         assert (t / kept).exists(), kept
-
-
-def test_an_ask_that_could_not_be_withdrawn_is_recorded(crs, rd, tmpdirs, monkeypatch) -> None:
-    monkeypatch.setattr(crs, "_nx_tuple", lambda *a: subprocess.CompletedProcess(a, 1, "", "engine down"))
-    crs.withdraw_ask("sid-9", "t-x", what="ready ask")
-    assert crs.UNWITHDRAWN == ["mailbox/sid-9: ready ask t-x: not withdrawn (in exited 1: engine down)"]
-    _fake_mailbox(crs, monkeypatch, [])
-    crs.withdraw_ask("sid-8", "t-y")  # already gone: nothing recorded
-    assert len(crs.UNWITHDRAWN) == 1
 
 
 def test_the_roll_reports_its_footprint_even_when_it_raises(crs, rd, tmpdirs, monkeypatch) -> None:
@@ -2484,7 +2417,7 @@ def test_a_round_file_that_cannot_be_written_withdraws_its_asks(crs, rd, monkeyp
         {"name": "alpha", "sessionId": "sid-alpha", "path": "/x", "how": "mail", "tuple_id": "t-a"}))
     monkeypatch.setattr(crs, "write_manifest", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
     calls: list = []
-    monkeypatch.setattr(crs, "withdraw_ask", lambda sid, tid="", what="": calls.append(tid) or "withdrawn")
+    monkeypatch.setattr(crs, "withdraw_ask", lambda sid, tid="", what="": calls.append(tid) or crs.GONE[0])
     a = argparse.Namespace(status=False, dry_run=False, ready_max_age=900)
     crs.ready_round(a, _found(crs), _found(crs))
     assert calls == ["t-a"]

@@ -21,8 +21,12 @@ resolves the wrong session. So the sweep fails on any of:
 - a string literal that starts a ``directory/`` address;
 - a ``mailbox/`` address built from a session id: an f-string or a ``+`` whose first interpolated part is a name that
   mentions ``session``;
+- a send marked as session-addressed: the string ``address_kind=session``, or ``address_kind`` set to ``"session"`` as a
+  keyword, a dict entry or an assignment (a send's ``address_kind`` is ``identity`` or ``agent``; a script that builds its
+  address from a plain ``sid`` name escapes the previous rule, and this marker does not);
 
-in Python under ``src/nexus``, ``conexus`` and ``scripts``, and in the shell scripts there (``current_session``,
+in Python under ``src/nexus``, ``conexus`` and ``scripts`` (extensionless files that open with a python shebang, such
+as ``scripts/claude-restart-sessions``, included), and in the shell scripts there (``current_session``,
 ``resolve_active_session_id`` and ``directory/`` as text: the push script's claimant read the file with ``cat``).
 
 An entry in :data:`_ALLOWED` is a decision with its reason. The floors make a sweep that found no files fail.
@@ -42,6 +46,9 @@ TREES = {"src/nexus": REPO_ROOT / "src" / "nexus", "conexus": REPO_ROOT / "conex
 
 #: Python modules each tree must yield, so a moved tree or a broken glob cannot pass by scanning nothing.
 _MIN_PY = {"src/nexus": 300, "conexus": 5, "scripts": 40}
+#: Extensionless python scripts the sweep must parse in scripts/ (claude-restart-sessions), so a broken shebang test
+#: cannot pass by dropping them.
+_MIN_EXTENSIONLESS_PY = 1
 #: Shell scripts the sweep must read in scripts/ (git-push-develop.sh among them).
 _MIN_SHELL = 10
 
@@ -58,14 +65,29 @@ _SKIP_PARTS = {"__pycache__", "out", ".venv", "node_modules"}
 _ALLOWED: dict[str, str] = {}
 
 
+def _is_extensionless_python(p: pathlib.Path) -> bool:
+    """An extensionless file whose first line is a python shebang (``#!/usr/bin/env python3``)."""
+    if p.suffix != "" or not p.is_file():
+        return False
+    try:
+        with p.open("rb") as fh:
+            first = fh.readline(256)
+    except OSError:
+        return False
+    return first.startswith(b"#!") and b"python" in first
+
+
 def _py_files(root: pathlib.Path) -> list[pathlib.Path]:
-    return sorted(p for p in root.rglob("*.py") if not _SKIP_PARTS & set(p.relative_to(root).parts))
+    return sorted(p for p in root.rglob("*")
+                  if not _SKIP_PARTS & set(p.relative_to(root).parts) and (p.suffix == ".py" and p.is_file()
+                                                                         or _is_extensionless_python(p)))
 
 
 def _shell_files(root: pathlib.Path) -> list[pathlib.Path]:
     out = []
     for p in sorted(root.rglob("*")):
-        if not p.is_file() or _SKIP_PARTS & set(p.relative_to(root).parts) or p.suffix == ".py":
+        if not p.is_file() or _SKIP_PARTS & set(p.relative_to(root).parts) or p.suffix == ".py" \
+                or _is_extensionless_python(p):
             continue
         if p.suffix == ".sh":
             out.append(p)
@@ -112,6 +134,25 @@ def _session_mailbox(node: ast.AST) -> bool:
     return False
 
 
+def _is_session_kind(node: ast.AST | None) -> bool:
+    return isinstance(node, ast.Constant) and node.value == "session"
+
+
+def _session_address_kind(node: ast.AST, docs: set[int]) -> bool:
+    """``"address_kind=session"``, ``address_kind="session"`` (keyword), ``{"address_kind": "session"}`` or an assignment."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docs:
+        return node.value == "address_kind=session"
+    if isinstance(node, ast.keyword):
+        return node.arg == "address_kind" and _is_session_kind(node.value)
+    if isinstance(node, ast.Dict):
+        return any(isinstance(k, ast.Constant) and k.value == "address_kind" and _is_session_kind(v)
+                   for k, v in zip(node.keys, node.values))
+    if isinstance(node, ast.Assign):
+        return _is_session_kind(node.value) and any(isinstance(t, ast.Name) and t.id == "address_kind"
+                                                    for t in node.targets)
+    return False
+
+
 def _rel(path: pathlib.Path) -> str:
     try:
         return path.relative_to(REPO_ROOT).as_posix()
@@ -143,6 +184,8 @@ def _py_offenders(path: pathlib.Path) -> list[str]:
                 found.append((line, "a directory/ address"))
         if _session_mailbox(node):
             found.append((line, "a mailbox/<session id> address"))
+        if _session_address_kind(node, docs):
+            found.append((line, "a session-addressed send (address_kind=session)"))
     return [f"{rel}:{ln} {what}" for ln, what in sorted(set(found)) if f"{rel}:{ln}" not in _ALLOWED]
 
 
@@ -171,6 +214,9 @@ def test_nothing_reads_or_writes_current_session() -> None:
 
     for name, floor in _MIN_PY.items():
         assert scanned[name] >= floor, f"{name}: scanned {scanned[name]} Python modules, floor {floor}"
+    extensionless = [p for p in _py_files(TREES["scripts"]) if p.suffix == ""]
+    assert len(extensionless) >= _MIN_EXTENSIONLESS_PY, \
+        f"scripts: parsed {len(extensionless)} extensionless python scripts, floor {_MIN_EXTENSIONLESS_PY}"
     assert sum(1 for p in shell if "scripts" in p.relative_to(REPO_ROOT).parts[:1]) >= _MIN_SHELL, \
         f"scanned {len(shell)} shell scripts, floor {_MIN_SHELL} in scripts/"
     assert not offenders, (
@@ -193,8 +239,31 @@ def test_nothing_reads_or_writes_current_session() -> None:
     ('a = "a directory/ path"', False),
     ('s = self.session_mailbox', True),
     ('from nexus.session import read_claude_session_id', True),
+    ('argv = ["tuple", "out", "--dim", "address_kind=session"]', True),
+    ('argv = ["--dim", f"address_kind=session"]', True),
+    ('send(address_kind="session")', True),
+    ('dims = {"from": me, "address_kind": "session"}', True),
+    ('address_kind = "session"', True),
+    ('argv = ["--dim", "address_kind=identity"]', False),
+    ('send(address_kind="identity")', False),
+    ('dims = {"address_kind": kind}', False),
+    ('def f():\n    """A send marked address_kind=session is retired."""\n', False),
 ])
 def test_the_sweep_matches_what_it_names(tmp_path: pathlib.Path, src: str, expect: bool) -> None:
     probe = tmp_path / "probe.py"
     probe.write_text(src + "\n", encoding="utf-8")
     assert bool(_py_offenders(probe)) is expect
+
+
+def test_an_extensionless_python_script_is_parsed(tmp_path: pathlib.Path) -> None:
+    """scripts/claude-restart-sessions builds ``tuple out`` argv by hand and has no ``.py``: the sweep reads it."""
+    script = tmp_path / "tool"
+    script.write_text('#!/usr/bin/env python3\nargv = ["tuple", "out", "--dim", "address_kind=session"]\n',
+                      encoding="utf-8")
+    shell = tmp_path / "launcher"
+    shell.write_text("#!/bin/bash\necho hi\n", encoding="utf-8")
+    plain = tmp_path / "notes"
+    plain.write_text("address_kind=session\n", encoding="utf-8")
+    assert _py_files(tmp_path) == [script]
+    assert _shell_files(tmp_path) == [shell]
+    assert len(_py_offenders(script)) == 1
