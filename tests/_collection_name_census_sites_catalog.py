@@ -78,7 +78,7 @@ SITES: tuple[S, ...] = (
       ('# is not a new placeholder mint, so the refusal is lifted here alone.', 'return t3_collection_name(base, t3=t3, for_write=True, allow_placeholder=True)'),
       'primitive_call', 'migration-source', MIG_SRC),
     S('src/nexus/catalog/sensitivity_doctor.py',
-      ('except ValueError:', 'return voyage_model_for_collection(collection)'),
+      ('if not isinstance(model, str) or not model:', 'return voyage_model_for_collection(collection)'),
       'primitive_call', 'diagnostic', DIAG_D),
     S('src/nexus/catalog/store_hook.py',
       ('from nexus.corpus import embedding_model_row_preferred  # noqa: PLC0415 — deferred to avoid import cycle', 'window = window_for_model(embedding_model_row_preferred(collection))'),
