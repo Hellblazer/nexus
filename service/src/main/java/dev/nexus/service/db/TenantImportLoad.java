@@ -3,6 +3,7 @@
 package dev.nexus.service.db;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.nexus.service.db.TenantExport.ExportClass;
 import dev.nexus.service.db.TenantExport.ExportTable;
@@ -62,6 +63,9 @@ final class TenantImportLoad {
     static final String MARKER_KEY = "rdr248_restore";
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    /** The most relabels the restore marker lists; its {@code collections_relabelled_count} is the whole number. */
+    static final int MARKER_RELABELS_MAX = 1000;
 
     /** A failure the session reports as {@code failed: <message>}. */
     static final class LoadFailedException extends RuntimeException {
@@ -522,6 +526,11 @@ final class TenantImportLoad {
         marker.put("committed_at", now.toString());
         ObjectNode counts = marker.putObject("row_counts");
         for (TableResult t : report.tables()) counts.put(t.table(), t.inserted());
+        // a restore that relabelled collections says so after the engine forgets the session; bounded, with the true count
+        marker.put("collections_relabelled_count", report.collectionsRelabelled().size());
+        ArrayNode relabelled = marker.putArray("collections_relabelled");
+        report.collectionsRelabelled().stream().limit(MARKER_RELABELS_MAX)
+            .forEach(r -> relabelled.addObject().put("label", r.label()).put("target_label", r.targetLabel()));
         String json = marker.toString();
         ctx.insertInto(CATALOG_META)
             .set(CATALOG_META.TENANT_ID, tenant)
