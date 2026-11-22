@@ -305,8 +305,11 @@ def test_the_runbook_re_adds_the_checks_after_the_redeploy_and_before_it_release
 
 def test_the_runbook_states_the_real_size_of_the_window():
     flat = " ".join(RUNBOOK.read_text(encoding="utf-8").split())
-    # the registry stamp registers first and is one chunk per tenant, so the window closes about a minute after the first boot
-    assert "registry stamp" in flat and "about a minute" in flat
+    # Sam, 2026-11-21 (ask p31-r5-window-registry-stamp): the registry stamp completes about a minute after the first boot
+    # and does not close the window; the window query leaves it and its reruns out
+    assert "registry stamp" in flat and "about a minute" in flat and "do not count" in flat
+    assert "label NOT LIKE 'rdr229-stamp-catalog\\_collections%'" in flat
+    assert "until the first data-table stamp completes" in flat
     # on the cloud the window lasts as long as the moves stay blocked, which is a stated condition
     assert "until pg_background is installed on the cloud's PostgreSQL (nexus-f3yqd.2.23)" in flat
 
