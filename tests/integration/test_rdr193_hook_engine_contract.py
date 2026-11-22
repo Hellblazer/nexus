@@ -26,13 +26,21 @@ import structlog.testing
 from nexus.catalog import link_generator
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
-from tests.test_catalog_hook_reconcile_contract import REPO_HASH, _hook, _write
+from tests._catalog_fixture_ops import catalog_hook_seeded, register_seed_collections
+from tests.test_catalog_hook_reconcile_contract import REPO_HASH, _write
 
 FORBIDDEN_SINGLE_WRITES = {"/v1/catalog/update", "/v1/catalog/update_many", "/v1/catalog/doc/register",
                            "/v1/catalog/doc/register_many", "/v1/catalog/delete", "/v1/catalog/delete_many",
                            "/v1/catalog/link", "/v1/catalog/unlink"}
 
 pytestmark = [pytest.mark.integration, pytest.mark.t2_tenant]
+
+
+def _hook(root: Path, files: list[tuple[Path, str, str]], *, head: str = "h1", **kw):
+    """The catalog hook with its collections registered first, as ``_run_index`` does before it calls it (RDR-229 P3.1:
+    the engine refuses a document under an unregistered collection)."""
+    return catalog_hook_seeded(repo=root, repo_name="hookrepo", repo_hash=REPO_HASH, head_hash=head,
+                               indexed_files=files, **kw)
 
 
 @pytest.fixture(autouse=True)
@@ -200,6 +208,7 @@ def test_a_path_another_owner_holds_in_this_runs_collection_resolves_to_that_row
     try:
         other = cat.register_owner("hook_other", "curator")
         held = _write(tmp_path, "held.txt", "held\n")
+        register_seed_collections("docs__hookrepo")
         foreign = str(cat.register(other, "foreign", content_type="prose", file_path="held.txt",
                                    physical_collection="docs__hookrepo", source_uri=f"file://{held.resolve()}"))
     finally:
@@ -228,6 +237,7 @@ def test_a_path_another_owner_holds_in_another_collection_gets_no_document_id_an
         other = cat.register_owner("hook_other", "curator")
         held = _write(tmp_path, "held.txt", "held\n")
         ok = _write(tmp_path, "ok.txt", "ok\n")
+        register_seed_collections("docs__foreign")
         foreign = str(cat.register(other, "foreign", content_type="prose", file_path="held.txt",
                                    physical_collection="docs__foreign", source_uri=f"file://{held.resolve()}"))
     finally:

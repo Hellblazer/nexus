@@ -51,6 +51,7 @@ from nexus import indexer
 from nexus.catalog import link_generator, reconcile_run
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.repo_identity import _repo_identity
+from tests._catalog_fixture_ops import register_seed_collections
 from tests._engine_substrate import ensure_engine
 from tests._tenant_pool import psql
 
@@ -334,6 +335,8 @@ def _run_hook(c: Copy, offered: list[F], *, head: str, complete: bool, keep: lis
     unreg: dict[Path, str] = {}
     wanted: set[Path] = set()
     confirmed: set[Path] = set()
+    # RDR-229 P3.1: the collections are registered first, as ``_run_index`` does before it calls the hook.
+    register_seed_collections(*COLLECTIONS.values())
     file_to_doc = indexer._catalog_hook(
         repo=c.repo, repo_name=c.name, repo_hash=c.hash, head_hash=head,
         indexed_files=[(c.path(f.rel), f.ctype, COLLECTIONS[f.ctype]) for f in offered],
@@ -530,6 +533,9 @@ class Scenario:
     # -- the state both copies are put in between the seed and the run ---------------------------------------
     def prepare(self, c: Copy) -> None:
         cat, t, sql = self.cat, lambda rel: self.t(c, rel), lambda rel, clause: _update_doc(self.tenant, self.t(c, rel), clause)
+        # RDR-229 P3.1: a document sits only in a registered collection (the engine refuses it, and the physical_collection
+        # check refuses a raw update to a name with no registry row).
+        register_seed_collections("docs__rdr193foreign", STALE_COLLECTION)
         # Rename
         cat.link(t("ren_link_between/a.txt"), t("ren_link_between/b.txt"), "cites", "parity",
                  from_span="1-3", to_span="4-9", note="the link's metadata is not carried")

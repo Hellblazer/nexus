@@ -32,8 +32,9 @@ pytestmark = [
     pytest.mark.skipif(not _ALL_PREREQS, reason="skipped: missing jar or PG binaries (scripts/build-gate-jar.sh)"),
 ]
 
-RDR_COL = "rdr__7-9__voyage-context-3__v1"
-CODE_COL = "code__7-9__voyage-code-3__v1"
+# bge names: this engine has no Voyage key, so its embedding profile is bge-768 and refuses to register a voyage one.
+RDR_COL = "rdr__7-9__bge-base-en-v15-768__v1"
+CODE_COL = "code__7-9__bge-base-en-v15-768__v1"
 
 
 @pytest.fixture
@@ -48,6 +49,9 @@ def catalog(java_service):  # noqa: F811
 
 
 def _register(cat: HttpCatalogClient, title: str, collection: str, content_type: str) -> str:
+    # RDR-229 P3.1: the engine refuses a document under a collection with no registry row (422 unregistered_collection).
+    cat.register_collection(
+        collection, content_type=content_type, owner_id="7.9", embedding_model="bge-base-en-v15-768", model_version="v1")
     out = cat._post("/doc/register", {
         "owner_prefix": "7.9", "title": title, "content_type": content_type,
         "source_uri": f"file:///it/{title}.md", "physical_collection": collection,

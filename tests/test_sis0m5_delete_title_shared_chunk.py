@@ -25,6 +25,7 @@ from nexus.aspect_readers import uri_for
 from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
 from nexus.cli import main
 from nexus.db.http_vector_client import HttpVectorClient
+from tests._catalog_fixture_ops import register_seed_collections
 from tests._chunk_seed import seed_chunks_direct
 
 pytestmark = pytest.mark.integration
@@ -40,6 +41,7 @@ def _note(writer, client, owner, collection: str, title: str, content: str) -> t
     """A store_put-shaped note. Returns ``(tumbler, source_uri, chash)``."""
     source_uri = uri_for(collection, title)
     assert source_uri is not None
+    register_seed_collections(collection)  # RDR-229 P3.1: the engine refuses a document under an unregistered collection
     tumbler = str(writer.register(
         owner=owner, title=title, content_type="knowledge",
         physical_collection=collection, source_uri=source_uri,

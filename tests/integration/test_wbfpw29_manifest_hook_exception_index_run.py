@@ -49,6 +49,7 @@ from unittest.mock import patch
 import pytest
 
 from tests.conftest import fake_credentials
+from tests._catalog_fixture_ops import register_seed_collections
 from tests._chunk_seed import seed_chunks_direct
 
 pytestmark = [pytest.mark.integration]
@@ -113,6 +114,7 @@ def test_heal_manifest_gaps_genuinely_short_rebuild_is_reconciled(
     content_hash = "ee" * 32
     chash = "ff" * 32
 
+    register_seed_collections(collection)  # RDR-229 P3.1: the engine refuses a document under an unregistered collection
     with HttpCatalogClient() as cat:
         owner = cat.register_owner(
             "wbfpw29-short-heal-owner", "repo", repo_hash="wbfpw29-short-heal-hash",
@@ -218,6 +220,7 @@ def test_manifest_write_failure_verdict_reads_the_manifest_back(
     content_hash = "12" * 32
     chash = "34" * 32
 
+    register_seed_collections(collection)  # RDR-229 P3.1: the engine refuses a document under an unregistered collection
     with HttpCatalogClient() as cat:
         owner = cat.owner_for_repo(repo_hash)
         assert owner is not None, "pass 1 must have registered an owner for this repo"
@@ -326,6 +329,7 @@ def test_reconcile_is_the_remedy_the_warning_actually_names(
     content_hash = "aa" * 32
     chash = "bb" * 32
 
+    register_seed_collections(collection)  # RDR-229 P3.1: the engine refuses a document under an unregistered collection
     with HttpCatalogClient() as cat:
         owner = cat.register_owner(
             "wbfpw29-reconcile-owner", "repo", repo_hash="wbfpw29-reconcile-hash",

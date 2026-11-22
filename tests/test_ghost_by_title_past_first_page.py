@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 
 from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
+from tests._catalog_fixture_ops import register_seed_collections
 
 pytestmark = pytest.mark.integration
 
@@ -26,6 +27,7 @@ def test_ghost_ranked_past_the_first_page_is_reconciled(t2_service_env):
     writer = make_catalog_writer()
     assert reader is not None
     owner = writer.register_owner("knowledge", "curator")
+    register_seed_collections(_COLLECTION)  # RDR-229 P3.1: the engine refuses a document under an unregistered collection
     # 70 matching decoys registered first: the page comes back in tumbler
     # string order, so the ghost's later tumbler (1.x.71) sorts past row 50.
     for i in range(70):

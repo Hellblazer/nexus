@@ -128,6 +128,14 @@ class TestT3GcTombstoneSafety:
 
     _OWNER_PREFIX = "1.5"
 
+    @staticmethod
+    def _register_collection(cat, coll: str) -> None:
+        """RDR-229 P3.1: the engine refuses a document under a collection with no registry row. This engine's
+        profile is bge-768 whatever the name says (the stub chunks below follow it)."""
+        cat.register_collection(
+            coll, content_type="code", owner_id="i711w-gc-owner",
+            embedding_model="bge-base-en-v15-768", model_version="v1")
+
     def _owner(self, cat) -> str:
         cat.register_owner(
             name="i711w-gc-owner",
@@ -151,6 +159,7 @@ class TestT3GcTombstoneSafety:
         """
         owner = self._owner(cat)
         coll = "code__i711w-gc1__voyage-code-3__v1"
+        self._register_collection(cat, coll)
         t = cat.register(
             owner,
             "GC Tombstone Doc 1",
@@ -190,6 +199,7 @@ class TestT3GcTombstoneSafety:
     def test_docs_for_chashes_excludes_tombstoned_doc(self, cat, pg_instance) -> None:
         owner = self._owner(cat)
         coll = "code__i711w-gc2__voyage-code-3__v1"
+        self._register_collection(cat, coll)
         t = cat.register(
             owner,
             "GC Tombstone Doc 2",

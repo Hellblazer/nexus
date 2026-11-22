@@ -19,6 +19,7 @@ from click.testing import CliRunner
 from nexus.catalog.factory import make_catalog_writer
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.cli import main
+from tests._catalog_fixture_ops import register_seed_collections
 from tests._chunk_seed import seed_chunks_direct
 
 pytestmark = [pytest.mark.integration]
@@ -47,6 +48,7 @@ def _row(chash: str, position: int, line_start: int, line_end: int) -> dict:
 def test_a_shared_chunk_prints_the_engine_named_owners_path_and_lines() -> None:
     collection = "code__tko2w-owner-line__bge-base-en-v15-768__v1"
     chash = _chash(_SHARED)
+    register_seed_collections(collection)  # RDR-229 P3.1: the engine refuses a document under an unregistered collection
     with HttpCatalogClient() as cat:
         owner = cat.register_owner("tko2w-owner", "repo", repo_hash="tko2w-hash")
         # Registered first, so the lower tumbler: the collection's first owner.

@@ -35,7 +35,7 @@ from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
 from nexus.db.t3 import T3Database
 from nexus.repo_identity import _repo_identity
-from tests._catalog_fixture_ops import active_reader
+from tests._catalog_fixture_ops import active_reader, register_seed_collections
 from tests.integration.test_a3rl7_since_head_skips_unchanged_delta import _head, _index_delta
 from tests.test_cp46b_runfence_repo_staleness import (  # noqa: F401 - fixtures and helpers shared with the fence tests
     _commit,
@@ -386,6 +386,7 @@ def test_a_refused_row_has_no_tumbler_and_the_rest_of_the_run_is_committed(
     cat = HttpCatalogClient()
     try:
         owner = cat.owner_for_repo(_repo_identity(repo)[1])
+        register_seed_collections("code__e2e")  # RDR-229 P3.1: a staged row names a registered collection
         rows = [_present(0, "src/fresh.py"), _present(1, "../escape.py")]
         outcome = reconcile_run.stage_and_commit(cat, owner, rows, walk="partial")
         by_path = {r["file_path"]: r for r in outcome["rows"]}

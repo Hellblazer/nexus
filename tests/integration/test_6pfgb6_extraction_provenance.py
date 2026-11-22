@@ -250,7 +250,9 @@ def test_the_markdown_hook_records_the_source_on_a_fresh_registration_and_a_reso
 
 
 def test_the_pdf_hook_records_on_a_fresh_registration_and_a_resolved_one(tmp_path, monkeypatch) -> None:
-    from nexus.pipeline_stages import _catalog_pdf_hook, extraction_record
+    from nexus.pipeline_stages import extraction_record
+    # RDR-229 P3.1: registers the collection first, as the run's pre-flight does before the hook
+    from tests._catalog_fixture_ops import catalog_pdf_hook_seeded as _catalog_pdf_hook
 
     record = extraction_record({"extraction_method": "pymupdf", "quality_gate_overridden": True})
     created = _write_pdf(tmp_path, "6pfgb6-hook-created")

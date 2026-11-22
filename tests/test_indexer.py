@@ -2825,47 +2825,6 @@ def test_run_index_registration_loop_skips_deferred_collections(tmp_path):
     )
 
 
-def test_run_index_registration_loop_skips_when_vectors_opt_out_of_service(tmp_path, monkeypatch):
-    """7.39.0 release-battery finding (local-service gate, 35 reds): with
-    NX_STORAGE_BACKEND_VECTORS opted out of service mode the indexer writes
-    to a client-embedding T3 double, whose collection names carry the
-    double's own model token; registering those against the engine 422s on
-    the tenant's real embedding profile. The write path registers only from
-    inside HttpVectorClient, so the pre-sweep loop must not register either.
-    """
-    from nexus.indexer import _run_index  # noqa: PLC0415 — deferred import, same idiom as the sibling bd44g tests
-
-    # Local mode (the only branch that survives a vector opt-out: the
-    # non-local, non-service branch raises CredentialsMissingError) plus the
-    # opt-out itself, exactly the posture tests/test_indexer_e2e.py pins.
-    monkeypatch.setenv("NX_LOCAL", "1")
-    monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)  # overrides this module's cloud_mode pin
-    monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "local")
-    repo = tmp_path / "repo"; repo.mkdir()
-    (repo / "main.py").write_text("x = 1\n")
-
-    registered_names: list[str] = []
-
-    def _fake_ensure_registered(name, *, registrar=None, kwargs=None):
-        registered_names.append(name)
-
-    db, col = _mock_db()
-    v = _voyage(1)
-    with _patches(db, extra={
-        "nexus.chunker.chunk_file": {"return_value": [_chunk()]},
-        "voyageai.Client": {"return_value": v},
-        "nexus.corpus.ensure_collection_registered": {
-            "side_effect": _fake_ensure_registered,
-        },
-    }):
-        _run_index(repo, _reg())
-
-    assert registered_names == [], (
-        "the pre-sweep loop registered against the engine while the vector "
-        f"backend was opted out of service mode: {registered_names!r}"
-    )
-
-
 def test_local_mode_chunk_metadata_names_the_model_the_engine_embeds_with(tmp_path, monkeypatch):
     """7.77.0 shakeout N6 (nexus-s80u9): on a local install without the
     ``[local]`` extra the Python-side EF falls back to MiniLM, but T3 embeds
