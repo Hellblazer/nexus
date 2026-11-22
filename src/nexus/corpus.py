@@ -122,7 +122,8 @@ def validate_collection_name(name: str) -> None:
     The label is what a person types and reads; it is no longer a ChromaDB identifier. The rule: non-empty,
     valid UTF-8, no control character (Cc, plus the line and paragraph separators), at most 255 UTF-8 bytes,
     not of the minted form ``c`` followed by ASCII digits (the engine's, so a user cannot claim a label a later
-    mint would produce), and no ``/`` while :data:`LABEL_REFUSES_SLASH` holds. The 63-character cap, the
+    mint would produce), no ``/`` while :data:`LABEL_REFUSES_SLASH` holds, and no ``,`` and no whitespace at
+    either end while :data:`LABEL_REFUSES_COMMA_SPACE` holds. The 63-character cap, the
     3-character minimum, the start/end-alphanumeric rule and the 128-byte cloud limit are gone; so is the
     overflow hint that went with the cap.
 
