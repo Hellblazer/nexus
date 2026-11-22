@@ -16,7 +16,12 @@
     UPDATE of a name fires no check of the twin. Each twin is its own changeset, under SET LOCAL lock_timeout = '5s' (the ALTER takes SHARE ROW EXCLUSIVE on
     the table and on nexus.catalog_collections for an instant). Names are <table>_<id column>_fk.
 
-    THE MOVES. One registered data move per twin, rdr229-fkvalidate-<table>, in its own changeset after the twins. Its driving table is the referencing table,
+    THE MOVES. One registered data move per twin, rdr229-fkvalidate-<table>, in its own changeset after the twins. The RDR's step text says the
+    moves are "registered in the same changeset" as the twins; this file departs from that on purpose, for two reasons. The queue's twin and move need
+    different CONTINUE guards (the twin waits while the table lacks its column or another role owns it; the move waits while the twin is missing), and a
+    precondition skips a whole changeset. And each ALTER runs under its own SET LOCAL lock_timeout in its own transaction, so a twin that cannot get its
+    lock is retried alone and never holds back a registration. Changeset ids vectors-072-8 to -10 are unused: the twins take 1-7 and the moves 11-17, a
+    gap kept so the move of row i is always id i+11 whatever is added between (the tests name the ids that way). Its driving table is the referencing table,
     its template and its verification are that table's P3.1 stamp move's word for word (vectors-070: a re-stamp of the rows still NULL, so a row the stamp
     has not reached is stamped here and a row the dual write stamped is not written again), and its on_complete is the existence-guarded VALIDATE CONSTRAINT of
     the twin (pg_constraint has it by conrelid and conname, as the stamp moves' on_completes do, so a table or twin that is gone is a no-op, not a 42704).
@@ -44,6 +49,10 @@
     runs unchanged. Each changeset's <rollback> is the full inverse of its add or registration.
 
     OUT OF SCOPE. chunks_collection_fk and the three child keys into nexus.chunks (P3.3c); TenantExport's key model (P3.11).
+    FOR P3.3c. FkTwins requires a label to be exactly rdr229-fkvalidate-<table> (it refuses any other row of p33a-fk-twins.tsv at load), and one table
+    carries one twin there. topic_assignments gets a second validation move for its child key into nexus.chunks, which needs a distinct label (for
+    example rdr229-fkvalidate-topic_assignments-chunk-fk) and a relaxed check in FkTwins, with the completion check's table lookup keyed by row and not
+    by label suffix.
 
     NUMBERING. vectors-072 follows vectors-071 and is provisional until the final rebase: take the first free vectors- number then. Placed after
     vectors-071 and before the grants-nexus-svc.xml runAlways block.

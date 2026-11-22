@@ -92,6 +92,19 @@ public final class CompletionBootWork implements AutoCloseable {
         this(registry, new DbReader(admin, readSet, gate3, Clock.systemUTC()));
     }
 
+    /**
+     * The reporter a running engine starts: the boot read set ({@link CompletionCheck.ReadSet#boot()}) and no gate 3 until P3.4 ships one.
+     * {@code Main} builds it only through here, so a test of this factory (and of {@code Main}'s one call to it) pins what boot reads.
+     */
+    public static CompletionBootWork atBoot(BootWorkRegistry registry, AdminConnection admin) {
+        return new CompletionBootWork(registry, admin, CompletionCheck.ReadSet.boot(), CompletionCheck.Gate3Source.NOT_INSTALLED);
+    }
+
+    /** The read set a database-backed reporter reads, or null for a test's injected reader. */
+    CompletionCheck.ReadSet readSet() {
+        return reader instanceof DbReader d ? d.readSet : null;
+    }
+
     CompletionBootWork(BootWorkRegistry registry, Reader reader) {
         this(registry, reader, Clock.systemUTC(), null);
     }

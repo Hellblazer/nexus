@@ -33,8 +33,9 @@ re-add, is generated from it (`scripts/rdr229_p31_downstep.py`, with a drift che
 
 The down-step is supported only while
 
-1. no P3.1 stamp move of a data table has `completed_at` set (the registry's own stamp, `rdr229-stamp-catalog_collections`,
-   and its reruns do not count: Sam, 2026-11-21, ask p31-r5-window-registry-stamp), and
+1. no P3.1 stamp move of a data table, and no P3.3a validation move (`rdr229-fkvalidate-<table>`, which runs the same
+   re-stamp), has `completed_at` set (the registry's own stamp, `rdr229-stamp-catalog_collections`, and its reruns do not
+   count: Sam, 2026-11-21, ask p31-r5-window-registry-stamp), and
 2. in any case before P3.7's name-key drop move completes (that move removes the name key an old engine writes through).
 
 Outside that window a downgrade is **PITR only** (`docs/runbooks/rdr-225-cloud-deploy.md` section 6.4); there is no
@@ -42,7 +43,8 @@ re-attach procedure. Check the window first, as `nexus_admin`:
 
 ```sql
 SELECT label, completed_at FROM nexus.data_moves
- WHERE label LIKE 'rdr229-stamp-%' AND label NOT LIKE 'rdr229-stamp-catalog\_collections%' AND completed_at IS NOT NULL;
+ WHERE (label LIKE 'rdr229-stamp-%' OR label LIKE 'rdr229-fkvalidate-%')
+   AND label NOT LIKE 'rdr229-stamp-catalog\_collections%' AND completed_at IS NOT NULL;
 ```
 
 Zero rows means the first condition holds. Also confirm P3.7's name-key drop move has not completed (its label is in the P3.7
@@ -66,7 +68,7 @@ open while the moves cannot run:
 ## Procedure
 
 1. **Check the window** (above). Zero completed stamp moves.
-2. **Pause the open stamp moves.** As `nexus_admin`. This holds every stamp move that is not complete, so no worker (this engine's
+2. **Pause the open stamp moves.** As `nexus_admin`. This holds every stamp move and every P3.3a validation move (`rdr229-fkvalidate-`) that is not complete, so no worker (this engine's
    or the previous one's) starts one. The worker reads `paused_at` at the start of a move's turn and before each run (one CALL, one tenant and leaf),
    so a run already in flight finishes first and the move stops at the run boundary; it keeps the rows it has stamped. The statement skips a move someone else has already paused, so a hold of the operator's own
    survives the unpause in step 8.
@@ -74,7 +76,7 @@ open while the moves cannot run:
 <!-- p31-pause:begin -->
 ```sql
 UPDATE nexus.data_moves SET paused_at = now(), paused_by = 'rdr229 down-step'
- WHERE label LIKE 'rdr229-stamp-%' AND completed_at IS NULL AND paused_at IS NULL;
+ WHERE (label LIKE 'rdr229-stamp-%' OR label LIKE 'rdr229-fkvalidate-%') AND completed_at IS NULL AND paused_at IS NULL;
 ```
 <!-- p31-pause:end -->
 
@@ -96,6 +98,12 @@ UPDATE nexus.data_moves SET paused_at = now(), paused_by = 'rdr229 down-step'
 --   psql -X -v ON_ERROR_STOP=1 --single-transaction -f p31-downstep.sql
 -- It leaves the id columns, the registry's identity column and every row of the registry of moves alone, and it is
 -- safe to run twice. A table that is absent (the retired queue table on most installs) is skipped.
+--
+-- It does NOT drop the P3.3a id twins (the *_fk constraints of p33a-fk-twins.tsv, vectors-072): they stay through a
+-- down-step, and that is safe. A twin refuses only a row whose id names no registry row, a pre-P3.1 engine writes
+-- no id (a NULL id passes a MATCH SIMPLE foreign key), and each twin copies its name key's delete action, so an
+-- old engine runs unchanged. The validation moves' on_completes are existence-guarded (pg_constraint), so a twin
+-- that is absent is a no-op and not a 42704.
 SET LOCAL lock_timeout = '5s';
 ALTER TABLE IF EXISTS nexus.catalog_collections DROP CONSTRAINT IF EXISTS catalog_collections_superseded_by_id_check;
 ALTER TABLE IF EXISTS nexus.chunks DROP CONSTRAINT IF EXISTS chunks_collection_id_check;
@@ -119,6 +127,13 @@ ALTER TABLE IF EXISTS nexus.reembed_jobs DROP CONSTRAINT IF EXISTS reembed_jobs_
 ALTER TABLE IF EXISTS nexus.reembed_jobs DROP CONSTRAINT IF EXISTS reembed_jobs_target_collection_id_check;
 ```
 <!-- p31-downstep:end -->
+
+**The P3.3a id twins stay through a down-step.** The seven id-twin foreign keys of `p33a-fk-twins.tsv` (vectors-072: `<table>_collection_id_fk`, and `topic_assignments_source_collection_id_fk`)
+are not dropped by this script, and that is safe. A twin refuses only a row whose id names no registry row; the previous
+engine writes no id, and a NULL id passes a `MATCH SIMPLE` foreign key. Each twin copies its name key's ON DELETE action, so a
+collection delete behaves as it did. The validation moves' `on_complete` is existence-guarded on `pg_constraint`, so a twin that
+is absent is a no-op, not a 42704.
+
 
 4. **Verify.** The query returns no row when every listed constraint is gone, on the parents and the leaves:
 
@@ -358,7 +373,7 @@ $q$;
 <!-- p31-unpause:begin -->
 ```sql
 UPDATE nexus.data_moves SET paused_at = NULL, paused_by = NULL
- WHERE label LIKE 'rdr229-stamp-%' AND paused_by = 'rdr229 down-step';
+ WHERE (label LIKE 'rdr229-stamp-%' OR label LIKE 'rdr229-fkvalidate-%') AND paused_by = 'rdr229 down-step';
 ```
 <!-- p31-unpause:end -->
 

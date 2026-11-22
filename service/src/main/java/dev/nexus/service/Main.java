@@ -821,15 +821,13 @@ public final class Main {
     }
 
     /**
-     * RDR-229 P3.1, P3.3a: the completion check's reporter (reading P3.3a's read set), or null when it cannot start; never throws. Gate 3 reads P3.4's id-index
+     * RDR-229 P3.1, P3.3a: the completion check's reporter (the boot read set, CompletionCheck.ReadSet.boot()), or null when it cannot start; never throws. Gate 3 reads P3.4's id-index
      * coverage, which no release builds yet, so it does not hold ({@code Gate3Source.NOT_INSTALLED}).
      */
     private static dev.nexus.service.datamove.CompletionBootWork startCompletionBootWork(BootWorkRegistry bootWork,
             dev.nexus.service.db.AdminConnection admin) {
         try {
-            var check = new dev.nexus.service.datamove.CompletionBootWork(bootWork, admin,
-                dev.nexus.service.datamove.CompletionCheck.ReadSet.p33a(),
-                dev.nexus.service.datamove.CompletionCheck.Gate3Source.NOT_INSTALLED);
+            var check = dev.nexus.service.datamove.CompletionBootWork.atBoot(bootWork, admin);
             check.start();
             return check;
         } catch (VirtualMachineError e) {
