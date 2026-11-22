@@ -406,3 +406,11 @@ def test_the_doctor_reads_the_uncoerced_listing_when_the_reader_offers_it(monkey
     out = {x.label: x for x in check_collection_ids(_STATUS_OK, counts_reader=lambda: counts, rows_reader=None)}
     r = out[IDS_LABEL]
     assert r.ok is True and not r.warn and "this engine does not list collection_id" in r.detail, r.detail
+
+
+def test_an_empty_registry_says_zero_rows_checked_never_that_the_engine_lists_no_ids() -> None:
+    # linda's pre-review: 0 rows makes "every row carries the key" trivially true and "no row carries it" trivially true
+    r = _ids(_counts(), [])
+    assert r.ok is True and not r.warn, r
+    assert "0 registry row(s) checked for a null collection_id (the registry is empty)" in r.detail, r.detail
+    assert "does not list collection_id" not in r.detail, r.detail

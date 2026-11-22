@@ -127,7 +127,10 @@ def _ids_row(counts: dict[str, Any] | None, why: str, retry: bool, rows: list[di
         fix.insert(0, (
             "The registry's id is an identity column (vectors-068-1), so a row without one means that default was removed or "
             "bypassed. Do not stamp it by hand: read the engine's boot log for changeset vectors-068-1 and report the labels named here"))
-    if _lists_ids(rows):
+    if rows == []:
+        # an empty registry: nothing to check, and nothing said about whether the engine lists ids
+        sentences.append("0 registry row(s) checked for a null collection_id (the registry is empty)")
+    elif _lists_ids(rows):
         sentences.append(f"{len(rows)} registry row(s) checked for a null collection_id")
     elif rows is not None:
         sentences.append("registry ids not checked: this engine does not list collection_id")
