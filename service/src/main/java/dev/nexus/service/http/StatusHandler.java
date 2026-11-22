@@ -176,6 +176,20 @@ public final class StatusHandler implements HttpHandler {
         return this;
     }
 
+    private volatile Supplier<Boolean> catalogEpoch;                      // nullable — key omitted
+
+    /**
+     * RDR-229 P3.11 (nexus-p2m1x.31), [additive]: {@code catalog_epoch_available} (bool): whether the engine's role can
+     * read the cluster facts the catalog epoch is made of ({@code pg_control_system()}, {@code pg_control_checkpoint()}
+     * and {@code pg_postmaster_start_time()}). {@code false} means the engine sends no {@code catalog_epoch}, so a client
+     * keys its id cache by label. Absent = an engine that predates the field, or a probe that could not run; a client must
+     * not read an absent key as false. One boolean, no tenant, collection or cluster value.
+     */
+    public StatusHandler catalogEpoch(Supplier<Boolean> catalogEpoch) {
+        this.catalogEpoch = catalogEpoch;
+        return this;
+    }
+
     private volatile Supplier<java.util.List<dev.nexus.service.BootWorkRegistry.Entry>> bootWork;   // null: always []
 
     /**
@@ -727,6 +741,15 @@ public final class StatusHandler implements HttpHandler {
             Boolean present = labelIndex.get();
             if (present != null) {
                 body.append(",\"live_label_index_present\":").append(present);
+            }
+        }
+
+        // RDR-229 P3.11 (nexus-p2m1x.31), [additive]: can the engine's role read the catalog epoch's cluster facts? Absent = cannot tell.
+        Supplier<Boolean> epoch = catalogEpoch;
+        if (epoch != null) {
+            Boolean available = epoch.get();
+            if (available != null) {
+                body.append(",\"catalog_epoch_available\":").append(available);
             }
         }
 

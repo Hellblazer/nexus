@@ -528,6 +528,29 @@ class StatusHandlerTest {
             .doesNotContain("idx_catalog_collections_live_label");
     }
 
+    // ── RDR-229 P3.11 (nexus-p2m1x.31), [additive]: catalog_epoch_available ───────────────────────────────────────
+
+    @Test
+    void catalogEpoch_keyIsAbsentWhenNoSupplierIsWired_andWhenTheProbeCouldNotRun() throws Exception {
+        start(new StatusHandler(null));
+        assertThat(get().has("catalog_epoch_available")).as("an engine that predates the field").isFalse();
+        stop();
+        start(new StatusHandler(null).catalogEpoch(() -> null));
+        assertThat(get().has("catalog_epoch_available")).as("a probe that could not run").isFalse();
+    }
+
+    @Test
+    void catalogEpoch_reportsTrueAndFalse_asABooleanOnly() throws Exception {
+        start(new StatusHandler(null).catalogEpoch(() -> Boolean.TRUE));
+        assertThat(get().get("catalog_epoch_available").isBoolean()).isTrue();
+        assertThat(get().get("catalog_epoch_available").asBoolean()).isTrue();
+        stop();
+        start(new StatusHandler(null).catalogEpoch(() -> Boolean.FALSE));
+        JsonNode body = get();
+        assertThat(body.get("catalog_epoch_available").isBoolean()).isTrue();
+        assertThat(body.get("catalog_epoch_available").asBoolean()).isFalse();
+    }
+
     // ── nexus-43ulx.23 (RDR-227 Step 2), [additive]: per_collection_indexes ─────────────────────────────────────
 
     private static final java.time.Instant READ_AT = java.time.Instant.parse("2026-10-10T08:00:00Z");
