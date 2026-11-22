@@ -189,11 +189,12 @@ def generate_verification(list_text: str) -> str:
 
 
 def generate_pause() -> str:
-    """Holds every open stamp move and every open P3.3a validation move (rdr229-fkvalidate-, which runs the same re-stamp), so the
-    previous engine's move worker starts none of them (a stamp's on_complete would fail once the CHECKs are gone)."""
+    """Holds every open stamp move, every open P3.3a validation move (rdr229-fkvalidate-, which runs the same re-stamp) and every open P3.3c
+    swap move (rdr229-swap-, the same no-op re-stamp, whose on_complete adds the id composite and the child keys), so the previous engine's
+    move worker starts none of them (a stamp's on_complete would fail once the CHECKs are gone)."""
     return (
         f"UPDATE nexus.data_moves SET paused_at = now(), paused_by = '{PAUSED_BY}'\n"
-        " WHERE (label LIKE 'rdr229-stamp-%' OR label LIKE 'rdr229-fkvalidate-%') AND completed_at IS NULL AND paused_at IS NULL;\n"
+        " WHERE (label LIKE 'rdr229-stamp-%' OR label LIKE 'rdr229-fkvalidate-%' OR label LIKE 'rdr229-swap-%') AND completed_at IS NULL AND paused_at IS NULL;\n"
     )
 
 
@@ -201,7 +202,7 @@ def generate_unpause() -> str:
     """Releases the rows generate_pause held, after the next P3.1 deploy; a hold someone else set (another paused_by) stays."""
     return (
         "UPDATE nexus.data_moves SET paused_at = NULL, paused_by = NULL\n"
-        f" WHERE (label LIKE 'rdr229-stamp-%' OR label LIKE 'rdr229-fkvalidate-%') AND paused_by = '{PAUSED_BY}';\n"
+        f" WHERE (label LIKE 'rdr229-stamp-%' OR label LIKE 'rdr229-fkvalidate-%' OR label LIKE 'rdr229-swap-%') AND paused_by = '{PAUSED_BY}';\n"
     )
 
 

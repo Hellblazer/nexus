@@ -68,7 +68,7 @@ open while the moves cannot run:
 ## Procedure
 
 1. **Check the window** (above). Zero completed stamp moves.
-2. **Pause the open stamp moves.** As `nexus_admin`. This holds every stamp move and every P3.3a validation move (`rdr229-fkvalidate-`) that is not complete, so no worker (this engine's
+2. **Pause the open stamp moves.** As `nexus_admin`. This holds every stamp move, every P3.3a validation move (`rdr229-fkvalidate-`) and every P3.3c swap move (`rdr229-swap-`) that is not complete, so no worker (this engine's
    or the previous one's) starts one. The worker reads `paused_at` at the start of a move's turn and before each run (one CALL, one tenant and leaf),
    so a run already in flight finishes first and the move stops at the run boundary; it keeps the rows it has stamped. The statement skips a move someone else has already paused, so a hold of the operator's own
    survives the unpause in step 8.
@@ -76,7 +76,7 @@ open while the moves cannot run:
 <!-- p31-pause:begin -->
 ```sql
 UPDATE nexus.data_moves SET paused_at = now(), paused_by = 'rdr229 down-step'
- WHERE (label LIKE 'rdr229-stamp-%' OR label LIKE 'rdr229-fkvalidate-%') AND completed_at IS NULL AND paused_at IS NULL;
+ WHERE (label LIKE 'rdr229-stamp-%' OR label LIKE 'rdr229-fkvalidate-%' OR label LIKE 'rdr229-swap-%') AND completed_at IS NULL AND paused_at IS NULL;
 ```
 <!-- p31-pause:end -->
 
@@ -372,7 +372,7 @@ $q$;
 <!-- p31-unpause:begin -->
 ```sql
 UPDATE nexus.data_moves SET paused_at = NULL, paused_by = NULL
- WHERE (label LIKE 'rdr229-stamp-%' OR label LIKE 'rdr229-fkvalidate-%') AND paused_by = 'rdr229 down-step';
+ WHERE (label LIKE 'rdr229-stamp-%' OR label LIKE 'rdr229-fkvalidate-%' OR label LIKE 'rdr229-swap-%') AND paused_by = 'rdr229 down-step';
 ```
 <!-- p31-unpause:end -->
 
