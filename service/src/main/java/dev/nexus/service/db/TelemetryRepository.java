@@ -46,9 +46,16 @@ public final class TelemetryRepository {
                              .withZone(ZoneOffset.UTC);
 
     private final TenantScope tenantScope;
+    /** RDR-229 P3.5a: the rename refusal this repository's rename consults first ({@link RenameGuard#open()} never refuses). */
+    private final RenameGuard renameGuard;
 
     public TelemetryRepository(TenantScope tenantScope) {
+        this(tenantScope, RenameGuard.open());
+    }
+
+    public TelemetryRepository(TenantScope tenantScope, RenameGuard renameGuard) {
         this.tenantScope = tenantScope;
+        this.renameGuard = renameGuard;
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────
@@ -645,6 +652,7 @@ public final class TelemetryRepository {
      * collection, so the check is the rule, not a lookup.
      */
     public Map<String, Integer> renameCollection(String tenant, String oldName, String newName) {
+        renameGuard.requireRenameAllowed();   // RDR-229 P3.5a: refused from gate 3 until the one-row rename can run
         CollectionLabel.validateUserLabel(newName);
         // RDR-210 Phase 6 Step 2 (bead nexus-f98bg): one transaction for the guard and both updates, so a
         // refusal leaves neither table touched. Refused while a re-embed job holds either name.
