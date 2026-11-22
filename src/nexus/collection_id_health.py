@@ -58,7 +58,7 @@ _HISTORY_SENTENCE = (
 
 def _lists_ids(rows: list[dict[str, Any]] | None) -> bool:
     """Whether the engine lists registry ids: the CAPABILITY, read from the key's presence in the uncoerced rows
-    (``HttpCatalogClient.list_collection_rows``), never inferred from the values. An engine that lists ids sends the key
+    (``nexus.catalog.engine_reads.collection_rows``), never inferred from the values. An engine that lists ids sends the key
     on every row; one before P3.5a's read half sends none. So an id-listing engine whose rows are ALL null still lists
     ids, and fails below (linda's pre-review, 2026-11-22)."""
     return bool(rows) and all("collection_id" in r for r in rows)
@@ -166,9 +166,13 @@ def _rows_listing(rows_reader: Callable[[], Any] | None) -> tuple[list[dict[str,
             reader = make_catalog_reader()
             if reader is None:
                 return None, "there is no catalog reader"
-            # the uncoerced rows, so an engine that lists no ids leaves the key absent (see _lists_ids)
-            read = getattr(reader, "list_collection_rows", None)
-            rows = read() if callable(read) else reader.list_collections()
+            # the uncoerced rows of the HTTP route, so an engine that lists no ids leaves the key absent (see _lists_ids)
+            if callable(getattr(reader, "_get", None)):
+                from nexus.catalog.engine_reads.collection_rows import read_collection_rows  # noqa: PLC0415 — deferred like the reader
+
+                rows = read_collection_rows(reader)
+            else:
+                rows = reader.list_collections()
         else:
             rows = rows_reader()
     except Exception as exc:  # noqa: BLE001 — best-effort: an unread listing is "cannot say", never "none", and never crashes `nx doctor`
