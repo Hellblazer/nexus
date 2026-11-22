@@ -1103,7 +1103,8 @@ The key moves table by table in strangler order:
   P3.7's one-row rename by the name-key drop move (Switch). Before any of
   the drops below, every name-holding primary key and UNIQUE has a valid
   id-keyed twin (P4.1; bead nexus-p2m1x.35, comment 17:42; T2
-  `229-research-72`). The three name child keys go first. Then the name
+  `229-research-72`). Views that read the name columns are redefined first
+  (comment 09:24); then the three name child keys go. Then the name
   primary keys of the chunks and centroids swap for their id keys in one
   transaction, with the method left open for P4.1's design (bead
   nexus-p2m1x.35, comment 23:02; T2 `229-research-105`). The name columns
@@ -1339,9 +1340,9 @@ while the engine serves:
 - *The name path keeps working after P3.3c.* Both writers name the name
   key as their conflict target: `insert.onConflict(ch.tenantId(),
   ch.collection(), ch.chash(), ch.embeddingModel())`
-  (`PgVectorRepository.java:1294`) and `.onConflict(ct.tenantId(),
+  (`PgVectorRepository.java:1327`) and `.onConflict(ct.tenantId(),
   ct.collection(), ct.topicId(), ct.embeddingModel())`
-  (`TaxonomyCentroidRepository.java:161`). PostgreSQL infers "All
+  (`TaxonomyCentroidRepository.java:172`). PostgreSQL infers "All
   table_name unique indexes that ... contain exactly the conflict_target"
   columns, and "If an attempt at inference is unsuccessful, an error is
   raised" (T2 `229-research-53`). Keeping the name primary key keeps an
@@ -1847,7 +1848,8 @@ backup that holds one orphan row in a CHECK-guarded table is refused whole
 where it used to restore. A history table (`relevance_log`,
 `search_telemetry`) has no CHECK, so an unmapped non-null twin there gives
 NULL and is not refused. An id that the backup's registry holds on two rows
-is left out of the map and refused as an orphan (`CollectionIdMap`; T2
+is left out of the map, so in a CHECK-guarded table it is refused as an
+orphan and in a history table it gives NULL (`CollectionIdMap`; T2
 `229-research-114`). A NULL-twin name that another row of the table
 carries with a different collection's id is refused as
 `restore_ambiguous_collection_name` (T2 `229-research-190`). The quarantine tag's
@@ -1879,9 +1881,11 @@ read on each call. It is empty unless the session is scoped to the tenant and
 the engine's role can execute `pg_control_system()`,
 `pg_control_checkpoint()` and `pg_postmaster_start_time()`, and it is also
 empty when one of those functions answers NULL (T2 `229-research-111`).
-`CatalogEpoch.of` computes it. No response carries it on the stack yet; the
-response that does, which omits it when empty and never sends it as null,
-ships in the P3.5+P3.7 cut (bead nexus-p2m1x.31, comment 08:24). `/v1/status`
+`CatalogEpoch.of` computes it; the code is reviewed and waits on its own
+branch (`feature/nexus-p2m1x.31-catalog-epoch-r2`, 9c6381d479), not yet on
+the stack. No response carries the epoch yet; the response that does omits
+it when empty (bead nexus-p2m1x.31, comment 11:59) and ships in the
+P3.5+P3.7 cut (comment 08:24; T2 `229-research-119`). `/v1/status`
 reports `catalog_epoch_available` as a boolean, absent when the probe cannot
 run; the engine logs a WARN each time that state moves into "unavailable" or
 "cannot tell". No main-resources changeset grants the functions; a test
@@ -2777,8 +2781,8 @@ its acceptance is that test green plus the census pin it lowers.
     physical_collection, deleted_at ON nexus.catalog_documents`) read the
     id (T2 `229-research-37`).
   - P3.5c Java readers: the jOOQ queries on the name columns read the id,
-    and the two upserts (`PgVectorRepository.java:1294`,
-    `TaxonomyCentroidRepository.java:161`) take the id key as their
+    and the two upserts (`PgVectorRepository.java:1327`,
+    `TaxonomyCentroidRepository.java:172`) take the id key as their
     conflict target, from gate 3 on the install (item 6). It also owns the
     reader contract for a tombstone that names no successor, whose
     `superseded_by_id` is its own id (R7): a `RETIRED_NO_SUCCESSOR` marker
@@ -2854,8 +2858,8 @@ its acceptance is that test green plus the census pin it lowers.
   by-id restore, which maps a file's id through the restore's source-to-target
   map, ships in the P3.5+P3.7 cut, not P4.1 (item 10). That cut also carries
   the catalog epoch. The restore's minted-label relabel (`collections_relabelled`)
-  lands in the Phase 3 engine cut that ships P3.8 minting, since -r11 ships
-  the two together (bead nexus-p2m1x.31, comment 09:18; T2 `229-research-112`).
+  lands in the cut that ships P3.8's minting (bead nexus-p2m1x.31, comment
+  09:18; T2 `229-research-112`, `229-research-119`).
   Refusals: `restore_orphan_collection`,
   `restore_orphan_collection_id` and `restore_ambiguous_collection_name`, all
   before the first write. P3.11 is left with what a name cannot settle: a name
@@ -2940,11 +2944,12 @@ its acceptance is that test green plus the census pin it lowers.
   `ADD PRIMARY KEY` on the parent) is open for P4.1's design (bead
   nexus-p2m1x.35, comment 23:02, which corrects the 17:42 ruling; T2
   `229-research-105`). The leaf-creating helper `partition_ensure_leaf`
-  checks for the parent's id key with `contype = 'u'`
-  (`vectors-073-leaf-id-unique-index.xml:98-100`); once the key is a primary
-  key that check must also match it (`contype IN ('u', 'p')`), or each new
-  leaf gets a duplicate `<leaf>_cid_uq` (bead nexus-p2m1x.35, linda's G7
-  correction; T2 `229-research-118`). The `vectors-079` trigger
+  checks for the parent's id key with `contype = 'u'` and a definition equal
+  to `UNIQUE (cols)` (`vectors-073-leaf-id-unique-index.xml:98-100`); once
+  the key is a primary key both must also match it (`contype IN ('u', 'p')`
+  and `PRIMARY KEY (cols)`), or each new leaf gets a duplicate
+  `<leaf>_cid_uq` (bead nexus-p2m1x.35, linda's G7 correction; T2
+  `229-research-118`, `229-research-119`). The `vectors-079` trigger
   that sets a child row's name from its chunk goes with the name columns,
   and the two `chunk_orphaned_at` stamp triggers switch to the id twin
   (comments 17:55 and 18:13; T2 `229-research-110`). Then the name columns
@@ -3586,4 +3591,4 @@ large, and moved under a ratchet.
   the client seam, the owner-read policies, the R7 reader contract and the
   restore split. Risks, Failure Modes and Day 2: the downgrade boundary at
   P3.1's cut and the single-role install. No decision or criterion changed.
-- 2026-11-22: Phase 3 wording, matching reviewed stacked code and linda's rulings (grant 3; nexus-p2m1x.20, .21, .31, .35): P3.3b's pass adds the id key and P3.3c's `on_complete` checks it and adds the child keys, the manifest child key is DEFERRABLE INITIALLY DEFERRED, the chunk_orphaned_at index is vectors-075's self-healing boot changeset, and TwinKeyUpsert is the retry rule for name/id unique pairs until P4.1; item 10 and P3.11: the by-id restore ships in the P3.5+P3.7 cut, not P4.1, with the minted-label relabel, the stripped unmapped quarantine origin id, catalog_epoch's derivation and the booted-schema parity; P4.1's design notes (G1, G7, views first, RESTRICT drops, the deferral and trigger notes). P3.4, P3.5 and P3.7 follow when their code is reviewed and stacked. Two decisions moved on linda's rulings: the by-id restore from P4.1 to the P3.5+P3.7 cut, and the catalog epoch from P3.1 to the P3.5+P3.7 cut (bead nexus-p2m1x.31, comments 08:24 and 08:49; bead nexus-p2m1x.35, comment 17:42; T2 `229-research-116`). No test criterion changed in this entry.
+- 2026-11-22: Phase 3 wording, matching reviewed stacked code and linda's rulings (grant 3; nexus-p2m1x.20, .21, .31, .35): P3.3b's pass adds the id key and P3.3c's `on_complete` checks it and adds the child keys, the manifest child key is DEFERRABLE INITIALLY DEFERRED, the chunk_orphaned_at index is vectors-075's self-healing boot changeset, and TwinKeyUpsert is the retry rule for name/id unique pairs until P4.1; item 10 and P3.11: the by-id restore ships in the P3.5+P3.7 cut, not P4.1, with the minted-label relabel, the stripped unmapped quarantine origin id, catalog_epoch's derivation and the booted-schema parity; P4.1's design notes (G1, G7, views first, RESTRICT drops, the deferral and trigger notes). P3.4, P3.5 and P3.7 follow when their code is reviewed and stacked. Two decisions moved on linda's rulings: the by-id restore from P4.1 to the P3.5+P3.7 cut, and the catalog epoch placed in the P3.5+P3.7 cut (it replaces the 11-20 cut-C1 timing; the RDR had placed it nowhere) (bead nexus-p2m1x.31, comments 08:24 and 08:49; bead nexus-p2m1x.35, comment 17:42; T2 `229-research-116`). No test criterion changed in this entry.
