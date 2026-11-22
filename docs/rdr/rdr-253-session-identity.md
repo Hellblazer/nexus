@@ -1316,23 +1316,11 @@ processes without one (not `claude -p` children, whose binding is their
 dispatcher's). The engine has no route that lists every identity, so an identity
 that no process on this host holds does not appear.
 
-Claude Desktop sessions are exempt from that gate (Sam, 2026-11-22, T2
-`nexus/sam-ruling-rdr253-desktop-exempt-2026-11-22`): it counts terminal sessions only. A Desktop process is the
-one whose Claude registry file records `entrypoint: "claude-desktop"` (`holder.DESKTOP_ENTRYPOINT`; `nx identity
-show --all` prints it beside each unbound process), not a name. The exemption exists because the restart tool
-cannot restart a Desktop session, so one started before Step 3 can still be live and unbound on the gate day
-(kestrel, pid 59764, on 2026-11-22). What Phase 2 does to such a session, the known consequence of the exemption:
-
-- A Desktop session binds like a terminal one, with an unleased binding (`binder.py`, `lease="unleased"` for
-  `facts.desktop`), at its next SessionStart: a new session, a resume or a restart from the Desktop sidebar. From
-  then on it is an identity like any other, and nothing below applies.
-- Until then it has no identity, and Phase 2 removes every path that found it by session id. It receives no mail:
-  nothing is delivered to `mailbox/<session id>` or `directory/<name>` any more, and a send to its session id is
-  refused with the identity address to use. Its threads entry, written with a `session:` line and no `identity:`
-  line, is no longer found by the compaction checkpoint, `nx ask` answer routing, the console's due-date reader or
-  the aura threads block, so an answer Sam gives to one of its asks reaches no session.
-- Nothing it already wrote is lost: the entry and its asks stay in T2 and are found again once the session binds
-  and its entry gains the `identity:` line.
+Claude Desktop sessions count like any other (Sam, 2026-11-22: a Desktop exemption granted that morning was dropped
+once kestrel bound; T2 `nexus/sam-ruling-rdr253-desktop-exempt-2026-11-22`). A Desktop process, the one whose Claude
+registry file records `entrypoint: "claude-desktop"`, binds at SessionStart with an unleased binding (`binder.py`), and
+a running one on a data-scoped credential can claim an unheld seat with `nx identity claim SEAT --take-over`, which
+sends `start` for a seat nobody holds (a data credential may not send `takeover`).
 
 Open items carried into Phase 2 (accepted gaps, Sam 2026-11-19: "yes, accept both for now", T2
 `nexus/sam-ruling-rdr253-accepted-gaps-0198-2026-11-19`):
