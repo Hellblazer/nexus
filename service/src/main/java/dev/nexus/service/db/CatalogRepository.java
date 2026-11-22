@@ -4413,8 +4413,9 @@ public final class CatalogRepository {
     /**
      * {@code content_type} of each named collection of {@code tenant}, read straight from {@code catalog_collections} in
      * the caller's transaction, one query per 500 names. A name with no row is absent from the result. Deliberately not
-     * {@link CollectionRegistry#require}: its process-wide cache is not evicted when {@code upsertCollection} changes a
-     * row's content type, so a hit can name the type the row had before, and this answer decides what {@code apply} rewrites.
+     * {@link CollectionRegistry#require}: it answers from a process-wide cache that is evicted only after a writer's
+     * transaction commits (nexus-afkjy), so it cannot see a change made inside this transaction or one still in flight,
+     * and this answer decides what {@code apply} rewrites.
      */
     private static Map<String, String> contentTypesOf(DSLContext ctx, String tenant, java.util.Collection<String> names) {
         Map<String, String> out = new HashMap<>();
@@ -10056,6 +10057,10 @@ public final class CatalogRepository {
             }
             return null;
         }), CollectionMint.recheckOf(tenant, tuple));
+        // Post-commit (nexus-afkjy): the SET arm above may have changed the row's content_type, owner or tombstone, and
+        // CollectionRegistry.require answers a cached KNOWN entry with no read, so the next require would see the old row
+        // until restart. Same post-commit discipline as delete, rename and supersede; see CollectionRegistry.evict.
+        CollectionRegistry.evict(tenant, s(coll, "name"));
     }
 
     /**
@@ -10637,6 +10642,10 @@ public final class CatalogRepository {
         // name pass the registry check, which is the stranding this refusal exists to stop. The
         // next write re-reads the row, finds the successor and is refused.
         CollectionRegistry.evict(tenant, name);
+        // nexus-afkjy: rederiveOwner above may have changed the successor's owner_id, which its cached row also holds.
+        if (updated > 0 && supersededBy != null && !supersededBy.isEmpty()) {
+            CollectionRegistry.evict(tenant, supersededBy);
+        }
         return updated;
     }
 

@@ -1910,8 +1910,9 @@ has. The routing class is 24 sites plus the `taxonomy__` half of the 12
   `classifyStaleNotes`, runs inside `tenantScope.withTenant(tenant, ctx ->
   ...)`, so it holds `ctx` and `tenant`, and reads each candidate
   collection's `content_type` from `catalog_collections` in that transaction,
-  not through `CollectionRegistry.require`, whose cache an upsert does not
-  evict (nexus-afkjy). Only a `knowledge` row is a rewrite candidate; docs,
+  not through `CollectionRegistry.require`, whose cache is evicted only
+  after a writer commits (an upsert evicts since nexus-afkjy), so it cannot
+  see a change inside this transaction. Only a `knowledge` row is a rewrite candidate; docs,
   rdr and code refuse as `file_routed_collection`, a missing row as
   `unregistered_collection` and any other type as `unproven_content_type`,
   and the rewrite re-reads the type under a share lock on the collection

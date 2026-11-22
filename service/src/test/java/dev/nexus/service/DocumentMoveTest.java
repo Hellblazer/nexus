@@ -902,16 +902,19 @@ class DocumentMoveTest {
     // ═════════════════════════════════════════════════════════════════════════════
 
     @Test
-    void collectionsWithoutAnOwnerOrContentType_areNotSiblings_evenUnderDifferentModels() {
+    void collectionsWithoutAContentTypeAreNotSiblings_andTheOwnerIsReadFromTheRowNotTheCache() {
         // The columns are NOT NULL, so a null cannot be read from the table; the registry cache is the
         // seam that can hand the check a row with one (CollectionRegistry#markKnown is its test door).
         Fx fx = pair("nullowner");
         try {
+            // nexus-afkjy: the owners come from the rows, so a cached owner (here a null) no longer decides; the pair's
+            // real owners agree, and the move is not refused as non-siblings.
             CollectionRegistry.markKnown(TENANT, fx.src(), new CollectionRow("knowledge", null, BGE, 768, "live", ""));
             CollectionRegistry.markKnown(TENANT, fx.tgt(), new CollectionRow("knowledge", null, MINI, 384, "live", ""));
-            assertThatThrownBy(() -> moveSvc.moveDocsCombined(TENANT, fx.src(), fx.tgt(), List.of(), List.of(), Map.of()))
-                .as("two null owners are equal to Objects.equals and are still not siblings")
-                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("model siblings");
+            assertThat(String.valueOf(catchThrowable(
+                    () -> moveSvc.moveDocsCombined(TENANT, fx.src(), fx.tgt(), List.of(), List.of(), Map.of()))))
+                .as("a cached null owner is not read; the rows' owners agree")
+                .doesNotContain("model siblings");
 
             CollectionRegistry.markKnown(TENANT, fx.src(), new CollectionRow(null, "o", BGE, 768, "live", ""));
             CollectionRegistry.markKnown(TENANT, fx.tgt(), new CollectionRow(null, "o", MINI, 384, "live", ""));

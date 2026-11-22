@@ -223,7 +223,7 @@ class NoteUriRepairContentTypeTest {
     void census_aRowTheCacheStillCallsKnowledgeButTheTableCallsDocsIsRefused() throws Exception {
         Fx f = new Fx("stale-cache");
         String label = registerLabel(f.tenant, "knowledge");
-        // The registry caches the row it reads, and upsertCollection's ON CONFLICT never evicts it.
+        // The registry caches the row it reads, and the direct UPDATE below (not upsertCollection, which evicts) leaves it.
         assertThat(tenantScope.withTenant(f.tenant, ctx -> CollectionRegistry.require(ctx, f.tenant, label)).contentType())
             .isEqualTo("knowledge");
         setContentType(f.tenant, label, "docs");
