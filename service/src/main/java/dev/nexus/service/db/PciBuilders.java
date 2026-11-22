@@ -21,6 +21,11 @@ import org.slf4j.Logger;
  * signal is logged at ERROR and swallowed: the builder is optional, and a caller that died because it could not end one
  * would turn an optional feature into an outage.
  *
+ * <p>The per-leaf unique-index pass (RDR-229 P3.3b, {@code LeafIndexPass}) names its backend under the same prefix on purpose (CR-S1),
+ * so the one termination ends it with no second list to keep; the same query therefore also finds it, and {@link #count} and
+ * {@link #terminate} count and end it with the builders. It is not a per-collection builder: it takes no {@code NX_SEARCH_PCI}
+ * setting and runs with PCI off.
+ *
  * <p>Every line is logged through the caller's logger, never this class's: each caller's events (and the tests that
  * capture them, {@code PciBuilderTerminationIntegrationTest} and {@code PciReconcilerIntegrationTest} on
  * {@code SchemaMigrator}) belong to the caller's log, as they did before the extraction.

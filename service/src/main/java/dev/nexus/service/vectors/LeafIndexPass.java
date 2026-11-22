@@ -76,7 +76,10 @@ import java.util.function.Consumer;
  * the PCI builder's do) and a six hour statement timeout: a build the timeout cancels is dropped and rebuilt by the next pass.
  *
  * <p><b>Reporting.</b> {@code boot_work} entry {@link #BOOT_WORK_ID}, present only while a pass has indexes to build, with
- * {@code done} of {@code total}; the unauthenticated status names no leaf, tenant or index.
+ * {@code done} of {@code total}; the unauthenticated status names no leaf, tenant or index. Once both swap rows exist and both chains
+ * are complete the pass is finished and its later ticks open no connection (until the engine restarts). An engine that cannot start
+ * the pass for want of its completion check logs it and writes no entry: an entry that never finishes would read as work in progress
+ * to {@code nx upgrade}.
  */
 public final class LeafIndexPass implements AutoCloseable {
 
@@ -100,8 +103,16 @@ public final class LeafIndexPass implements AutoCloseable {
 
     static final String WHAT = "building unique id indexes";
     static final String UNIT = "indexes";
-    static final String ON_STOP = "a build in flight keeps running in the database when the engine stops; a schema migration or a data move's "
-        + "completion ends it (the walk ends every backend named like a builder), and the INVALID index is then dropped and rebuilt from the start by the next pass";
+    /**
+     * What stopping the engine does to the build in flight, in the words of {@code PciBootWork.ON_STOP} (the same mechanics: this pass's
+     * backend is named like a builder). An engine-only stop leaves the {@code CREATE INDEX CONCURRENTLY} running in Postgres; its session
+     * keeps {@link #LOCK_KEY}, so the next engine's pass stands by until the build ends and then finds the valid index. Ending it takes
+     * stopping Postgres, a restart whose migration has work to do (a pending changeset that is neither runAlways nor self-retrying, or a
+     * partition-access drift to repair; a restart that applies only runAlways or self-retrying changesets keeps the build), or a data
+     * move's completion on a chunk-family table; the INVALID index is then dropped and rebuilt from the start by the next pass.
+     */
+    static final String ON_STOP = "the build keeps running in the database after an engine stop and finishes there (the next engine's pass waits for it); "
+        + "stopping the database, a restart whose migration applies a schema change, or a data move's completion ends it, and it is rebuilt from the start";
 
     /** How long a constraint or attach statement waits for its lock; the next tick retries. */
     static final String DDL_LOCK_TIMEOUT = "700ms";
@@ -158,6 +169,11 @@ public final class LeafIndexPass implements AutoCloseable {
     private final Map<String, Backoff> backoffs = new HashMap<>();
     /** A test seam: sees each statement's text just before it is sent. Null in production. */
     private volatile Consumer<Ddl> beforeDdl;
+    /**
+     * True once both swap rows exist and both chains are complete: the pass has nothing left, so a later tick opens no connection. In
+     * memory only (a restart looks again), guarded by {@link #passLock}.
+     */
+    private boolean finished;
     /** Passes of one object never overlap; not {@code this}, so {@link #close} never waits for a build that runs for hours. */
     private final Object passLock = new Object();
     private ScheduledExecutorService scheduler;   // guarded by this
@@ -247,6 +263,9 @@ public final class LeafIndexPass implements AutoCloseable {
      */
     public Result runOnce() {
         synchronized (passLock) {
+            if (finished) {
+                return new Result(true, 0, 0, List.of());
+            }
             boolean held;
             try {
                 held = gate1.holds();
@@ -368,6 +387,7 @@ public final class LeafIndexPass implements AutoCloseable {
                 for (Key key : open) {
                     routeTable(key);
                 }
+                finished = KEYS.stream().allMatch(this::tableDone);   // a pass that ran to its end; a cut one is not finished
             } catch (PassEnd e) {
                 log.info("event=leaf_index_pass_cut reason={}", e.getMessage());
             }
@@ -593,7 +613,15 @@ public final class LeafIndexPass implements AutoCloseable {
             if (hook != null) {
                 hook.accept(statement);
             }
-            if (migrationHolds()) {
+            boolean migrating;
+            try {
+                migrating = migrationHolds();
+            } catch (DataAccessException e) {
+                // unknown is never "not held", and it is not the statement's failure either: no statement was sent, so no leaf books a backoff
+                log.warn("event=leaf_index_pass_skipped reason=migration_lock_unread cause=\"{}\"", oneLine(e));
+                throw new PassEnd("migration_lock_unread");
+            }
+            if (migrating) {
                 log.info("event=leaf_index_pass_skipped reason=migration_in_progress key={}", SchemaMigrator.MIGRATION_ADVISORY_LOCK_KEY);
                 throw new PassEnd("migration_in_progress");
             }
