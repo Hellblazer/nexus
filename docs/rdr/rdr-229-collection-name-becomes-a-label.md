@@ -1462,15 +1462,22 @@ names are today.
 
 The label rule replaces ChromaDB's limits in `validate_collection_name`:
 non-empty, valid UTF-8 without control characters, at most 255 bytes, no
-`/`, and not of the minted form (item 8) unless the engine minted it, so a
+`/`, no `,`, no whitespace at either end, and not of the minted form (item 8) unless the engine minted it, so a
 user cannot claim a label that a later mint would produce. Sam ruled out
 `/` on 2026-11-21 (T2 `nexus/sam-ruling-rdr229-label-slash-2026-11-21`),
 because a note URI is `nx-note://<label>/<title>` and
 `NoteUri.collectionOf` ends the label at the first `/`. The rule can be
-relaxed later, behind a URI-encoding design. "Control characters" means
+relaxed later, behind a URI-encoding design. Sam ruled out `,` and
+whitespace at either end on 2026-11-21 (ask `rdr229-label-comma-space`),
+because MCP search and plan confinement split a corpus list at `,` and
+strip each part, so such a label could be registered but never named
+there; it can be relaxed later, behind quoting in those lists.
+"Control characters" means
 Unicode category Cc, plus the line and paragraph separators U+2028 and
 U+2029, which break lines in logs and terminals. Format characters (Cf,
 such as ZWJ) are allowed, because scripts and emoji sequences need them.
+"Whitespace" is what Python's `str.strip()` removes; with the control
+characters refused, that is Unicode category Zs.
 Labels are compared as exact strings, with no Unicode normalization, so
 the NFC and NFD spellings of one word are two labels. The engine enforces
 the rule (`CollectionLabel`) on a new collection's registration, on a
@@ -3115,3 +3122,4 @@ large, and moved under a ratchet.
 - 2026-11-21: item 5's tuple guard and re-own move match a92f88c6a0: one held predicate (unsuperseded and not in quarantine, P3.8's index predicate), the guard on the stored version and the move on the effective one, the move taking the tuple lock for its chunk's tuples in key order, and which paths re-run a 40P01; item 12's client census is 217 with `owner_stem` in `legacy_names` (grant 3; P2.R critique S2, S3, S5, nexus-p2m1x.16).
 - 2026-11-21: P3.8 amendment (grant 3, matching reviewed code, nexus-p2m1x.28): item 8 states the live-tuple UNIQUE and the minted-label collision rule; the two open questions on tuple uniqueness and minted-form collisions (Contradiction Check, Scope Verification) are closed by Sam's ruling T2 `nexus/sam-ruling-rdr229-p38-design-gate-v2-2026-11-21`.
 - 2026-11-21: item 7's label rule matches P3.6 as reviewed: no `/` (Sam's ruling), Cc plus U+2028 and U+2029 refused, Cf allowed, no normalization, the engine as the authority with existing rows keeping their labels, and the label-to-file-path sites encoded rather than audited-open; the client census goes 213 -> 211; the `/` question leaves the Contradiction Check (grant 3; P3.6 review r1 and r2, nexus-p2m1x.26).
+- 2026-11-21: item 7's label rule also refuses `,` and whitespace at either end (Sam's ruling on ask `rdr229-label-comma-space`; grant 3, matching reviewed code abab40ee6f and 2cae682256, nexus-p2m1x.26): MCP search and plan confinement split a corpus list at `,` and strip each part; whitespace is category Zs once controls are refused; the import report's `rule` gains `no_comma` and `no_edge_whitespace`.
