@@ -15,6 +15,7 @@ another title, or none, is a second document sharing the chunk, RDR-108) and A i
 from __future__ import annotations
 
 import hashlib
+import re
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
@@ -48,8 +49,14 @@ class _World:
     def put(self, title: str, body: str, *, ttl: str | None = None) -> None:
         kwargs = {"ttl": ttl} if ttl else {}
         with patch("nexus.mcp.core._get_t3", return_value=self.client):
-            store_put(content=body, collection=self.subject, title=title, **kwargs)
-        self.collection = t3_collection_name(self.subject, t3=self.client)
+            out = store_put(content=body, collection=self.subject, title=title, **kwargs)
+        # The collection the put landed in, as store_put reports it ("Stored: <id> -> <collection>"). RDR-229 P3.8:
+        # a new subject's collection is a minted label (c<id>), which a read through this minted-tenant client cannot
+        # find by its tuple (find_collection answers only the process-default tenant, nexus-fryrd), so the put's own
+        # answer is the source, not a second resolution.
+        match = re.search(r"^Stored: \S+ -> (\S+)", out)
+        assert match, out
+        self.collection = match.group(1)
 
     def holders(self, body: str) -> list:
         """The documents whose manifest holds the text's chunk."""

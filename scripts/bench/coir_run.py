@@ -292,10 +292,13 @@ def check_engine_floor(engine: dict) -> None:
                              "or unstamped; the published run needs a stamped engine at or above it")
 
 
-def check_embedding(collection: str, engine: dict) -> None:
-    """Refuse anything but the local bge posture the pre-registration names (and $0 spend)."""
-    if EMBEDDING_TOKEN not in collection:
-        raise HarnessRefusal(f"{collection} is not a {EMBEDDING_TOKEN} collection; the run is local bge only")
+def check_embedding(collection: str, model: str | None, engine: dict) -> None:
+    """Refuse anything but the local bge posture the pre-registration names (and $0 spend). *model* is the
+    collection's registry row's ``embedding_model``: a new subject's label is minted (``c<id>``, RDR-229 P3.8),
+    so the model is never read off the name."""
+    if model != EMBEDDING_TOKEN:
+        raise HarnessRefusal(f"{collection} is not a {EMBEDDING_TOKEN} collection (its row says {model!r}); "
+                             "the run is local bge only")
     if engine.get("embedding_mode") != "onnx-local" or engine.get("embedding_profile") != "bge":
         raise HarnessRefusal(f"engine embeds as {engine}; the run is local bge only")
 
@@ -363,7 +366,7 @@ def run(datasets: Sequence[Dataset], data: Path, out: Path, *, cap_s: float = CA
             _write(out, results)
             continue
         collection = t3_collection_name(ds.subject, t3=t3, for_write=True)
-        check_embedding(collection, engine)
+        check_embedding(collection, (cat.get_collection(collection) or {}).get("embedding_model"), engine)
         ensure_empty(t3, collection)
         text_of = {str(d["_id"]): d["text"] for d in corpus}
         try:

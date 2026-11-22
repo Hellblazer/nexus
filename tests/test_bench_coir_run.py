@@ -155,16 +155,25 @@ _BGE = "knowledge__code-snippets__bge-base-en-v15-768__v1"
 _LOCAL = {"embedding_mode": "onnx-local", "embedding_profile": "bge"}
 
 
-@pytest.mark.parametrize(("collection", "engine", "match"), [
-    ("knowledge__code-snippets__minilm-l6-v2-384__v1", _LOCAL, "is not a bge-base-en-v15-768 collection"),
-    (_BGE, {"embedding_mode": "voyage", "embedding_profile": "bge"}, "engine embeds as"),
-    (_BGE, {"embedding_mode": "onnx-local", "embedding_profile": "minilm"}, "engine embeds as"),
-    (_BGE, {}, "engine embeds as"),
+_BGE_MODEL = "bge-base-en-v15-768"
+
+
+@pytest.mark.parametrize(("collection", "model", "engine", "match"), [
+    ("knowledge__code-snippets__minilm-l6-v2-384__v1", "minilm-l6-v2-384", _LOCAL, "is not a bge-base-en-v15-768 collection"),
+    ("c25", None, _LOCAL, "is not a bge-base-en-v15-768 collection"),
+    (_BGE, _BGE_MODEL, {"embedding_mode": "voyage", "embedding_profile": "bge"}, "engine embeds as"),
+    (_BGE, _BGE_MODEL, {"embedding_mode": "onnx-local", "embedding_profile": "minilm"}, "engine embeds as"),
+    (_BGE, _BGE_MODEL, {}, "engine embeds as"),
 ])
-def test_check_embedding_refuses_anything_but_local_bge(collection, engine, match) -> None:
+def test_check_embedding_refuses_anything_but_local_bge(collection, model, engine, match) -> None:
     with pytest.raises(HarnessRefusal, match=match):
-        check_embedding(collection, engine)
-    check_embedding(_BGE, _LOCAL)
+        check_embedding(collection, model, engine)
+    check_embedding(_BGE, _BGE_MODEL, _LOCAL)
+
+
+def test_check_embedding_reads_the_row_so_a_minted_label_passes() -> None:
+    """RDR-229 P3.8: a new subject's collection is a minted label (``c25``) that names no model; the row does."""
+    check_embedding("c25", _BGE_MODEL, _LOCAL)
 
 
 @pytest.mark.parametrize("paths", [[], ["a.parquet", "b.parquet"]])
@@ -371,11 +380,18 @@ def test_a_search_past_its_timeout_stops_the_run(tmp_path: Path, monkeypatch) ->
         search(nx, "q", "col")
 
 
+class _BgeRows:
+    """A catalog reader whose every collection row is local bge (the run reads the model off the row)."""
+
+    def get_collection(self, name: str) -> dict:
+        return {"name": name, "embedding_model": coir_run.EMBEDDING_TOKEN}
+
+
 def _offline_run(monkeypatch) -> None:
     """run() with every storage handle stubbed: the drops below happen before or instead of an ingest."""
     monkeypatch.setattr(nexus.config, "load_config", lambda: {})
     monkeypatch.setattr(nexus.db, "make_t3", lambda: object())
-    monkeypatch.setattr(factory, "make_catalog_reader", lambda: object())
+    monkeypatch.setattr(factory, "make_catalog_reader", lambda: _BgeRows())
     monkeypatch.setattr(corpus_mod, "t3_collection_name", lambda subject, **_k: f"knowledge__{subject}__{coir_run.EMBEDDING_TOKEN}__v1")
     monkeypatch.setattr(coir_run, "_taxonomy", lambda: None)
     monkeypatch.setattr(coir_run, "engine_info", lambda: {"embedding_mode": "onnx-local", "embedding_profile": "bge"})
