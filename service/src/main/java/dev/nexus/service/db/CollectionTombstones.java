@@ -165,4 +165,25 @@ public final class CollectionTombstones {
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.in(names))
             .execute();
     }
+
+    /**
+     * {@link #deleteRegistryRows} for one row named by id (RDR-229 P3.5a, delete by {@code collection_id}): the row with
+     * {@code id} goes and no other row that happens to share its label, then the retired predecessors in {@code predecessors}
+     * (empty tombstones of it, listed by name) go through {@link #deleteRegistryRows} first. A survivor that names the deleted
+     * row, by its id or by its label, becomes "retired, no successor", as there.
+     *
+     * @return the number of registry rows deleted for {@code id}: 0 or 1, the predecessors not counted
+     */
+    static int deleteRegistryRowById(DSLContext ctx, String tenant, String name, long id, List<String> predecessors) {
+        deleteRegistryRows(ctx, tenant, predecessors);
+        ctx.update(CATALOG_COLLECTIONS)
+            .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, CATALOG_COLLECTIONS.COLLECTION_ID)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+            .and(CATALOG_COLLECTIONS.COLLECTION_ID.ne(id))
+            .and(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.eq(id).or(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(name)))
+            .execute();
+        return ctx.deleteFrom(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(id))
+            .execute();
+    }
 }

@@ -381,6 +381,13 @@ public final class HttpUtil {
      *       Also {@code POST /v1/catalog/collections/rename} (nexus-ucagi) when the request's optional
      *       {@code embedding_model} (the token the client read off the new name) differs from the source
      *       row's: {@code target_collection} is then the new name and {@code target_model} the token.</li>
+     *   <li>{@code rename_refused} (409): a collection rename (the catalog's, or a per-store {@code rename_collection} route)
+     *       while gate 3 holds and the one-row rename cannot run yet, RDR-229 P3.5a ({@link #RENAME_REFUSED_REASON}). The body
+     *       carries {@code missing}: {@code name_key_drop_move} while the name-key drop move has no {@code completed_at},
+     *       else {@code restart} (a P3.5b changeset has not applied). Nothing was renamed. The collection routes also answer
+     *       404 {@code unknown_collection_id} ({@link #UNKNOWN_COLLECTION_ID_REASON}, naming {@code collection_id}) for an id
+     *       no row has, from {@code CollectionSelectorFilter}, and the delete answers 409
+     *       {@code collection_label_ambiguous} ({@link #COLLECTION_LABEL_AMBIGUOUS_REASON}, listing {@code collection_ids}).</li>
      *   <li>{@code collection_superseded} (409): a chunk write (upsert-chunks, or the combined
      *       write_many / append / append_many) named a collection whose row carries {@code superseded_by}
      *       ({@link #COLLECTION_SUPERSEDED_REASON}, nexus-mp8ys). {@code error} carries the same value; the body
@@ -574,6 +581,19 @@ public final class HttpUtil {
                 + ",\"message\":" + jsonString(collectionSuperseded.getMessage())
                 + ",\"collection\":" + jsonString(collectionSuperseded.collection())
                 + ",\"superseded_by\":" + jsonString(collectionSuperseded.supersededBy())
+                + "}");
+            return true;
+        }
+        // RDR-229 P3.5a: a rename (the catalog's or one of the per-store rename_collection routes) from gate 3 until the
+        // one-row rename can run. Raised by the shared rename primitive before anything is written; 409 naming the
+        // missing condition, the name-key drop move or the restart that applies P3.5b's changesets.
+        var renameRefused = renameRefused(e);
+        if (renameRefused != null) {
+            log.warn("event={}_rename_refused {} missing={}", event, context, renameRefused.wireValue());
+            send(exchange, 409,
+                "{\"error\":" + jsonString(renameRefused.getMessage())
+                + ",\"reason\":\"" + RENAME_REFUSED_REASON + "\""
+                + ",\"missing\":" + jsonString(renameRefused.wireValue())
                 + "}");
             return true;
         }
@@ -828,6 +848,25 @@ public final class HttpUtil {
         for (Throwable c = t; c != null; c = c.getCause()) {
             if (c instanceof dev.nexus.service.db.CollectionSupersededException s) {
                 return s;
+            }
+        }
+        return null;
+    }
+
+    /** {@code reason} of the 404 for a {@code collection_id} no row of the tenant has (RDR-229 P3.5a). Wire contract. */
+    static final String UNKNOWN_COLLECTION_ID_REASON = "unknown_collection_id";
+
+    /** {@code reason} of the 409 for a rename refused from gate 3 until the one-row rename can run (RDR-229 P3.5a). Wire contract. */
+    static final String RENAME_REFUSED_REASON = "rename_refused";
+
+    /** {@code reason} of the 409 for a delete by a label that more than one live row holds (RDR-229 P3.5a). Wire contract. */
+    static final String COLLECTION_LABEL_AMBIGUOUS_REASON = "collection_label_ambiguous";
+
+    /** The {@link dev.nexus.service.db.RenameRefusedException} in {@code t}'s cause chain, or null. */
+    static dev.nexus.service.db.RenameRefusedException renameRefused(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof dev.nexus.service.db.RenameRefusedException r) {
+                return r;
             }
         }
         return null;
