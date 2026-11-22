@@ -251,8 +251,8 @@ class LeafIndexPassIntegrationTest extends LeafIndexPassTestBase {
      * which takes no PciSettings, does the S-3 route on two tenants: per leaf a valid unique index backing a UNIQUE constraint,
      * attached to its model partition's, which is attached to the parent's, each level valid. The layout must have two model
      * partitions at least, or the model level is not exercised. The registered rows name the table, carry the run-time
-     * changeset_id {@value LeafIndexPass#CHANGESET_PREFIX}{@code <engine version>} (S-3 point 3, rule 2: the engine inserts, there
-     * is no on_complete text) and a template the data-move registry accepts ({@code <driving_table>} and
+     * changeset_id {@value LeafIndexPass#CHANGESET_PREFIX}{@code <engine version>} (S-3 point 3, rule 2: the engine inserts the row,
+     * not another move's on_complete; the row's own on_complete is {@link Rdr229SwapMove#spec}'s) and a template the data-move registry accepts ({@code <driving_table>} and
      * {@code <chunking_clause>} once each, assert_chunking_template.sql).
      */
     @Test
