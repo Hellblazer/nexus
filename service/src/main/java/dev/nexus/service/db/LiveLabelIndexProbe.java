@@ -19,8 +19,10 @@ import java.util.function.Supplier;
  * exist and is it VALID? The source of {@code GET /v1/status}'s {@code live_label_index_present}. The index is built by
  * the changeset {@code catalog-053-1}, which is {@code failOnError="false"} behind a CONTINUE precondition: a build that
  * cannot get its lock in time, or that the migration role may not run, is rolled back and logged and the walk goes on, so
- * on such an install the index is absent and nothing else says so. An index left INVALID (an interrupted concurrent
- * build) enforces nothing for new rows either, so it counts as absent.
+ * on such an install the index is absent and nothing else says so. {@code catalog-053-1} is a plain {@code CREATE UNIQUE
+ * INDEX} (not {@code CONCURRENTLY}) inside the changeset's transaction, so a failed build leaves no index, never an invalid
+ * one. The {@code indisvalid} check is defensive: an index of that name left INVALID (say, one built by hand with
+ * {@code CONCURRENTLY} and interrupted) enforces nothing for new rows, so it counts as absent too.
  *
  * <p>Same shape as {@link CollectionTupleIndexProbe}: the route is unauthenticated, so the answer is one boolean with no
  * tenant, collection or label text; it is a catalog lookup ({@code to_regclass} joined to {@code pg_index}, both
