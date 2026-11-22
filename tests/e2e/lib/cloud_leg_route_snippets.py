@@ -127,13 +127,24 @@ else:
 TELEMETRY_RENAME = r"""
 import httpx
 from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
-# nexus-n3hhc: the telemetry rename judges its target with the label rule. Probed so it cannot move a row: nothing is
-# recorded under the source name, so the legal rename answers zero counts. The minted-form target must then be refused
-# with 400 before either table is touched; an engine without the check would answer 200.
+# nexus-n3hhc: the telemetry rename judges its target with the label rule. This runs against the production engine at
+# release time, where a data write is Sam's alone, so the probe proves before it renames that nothing is recorded under
+# its source label (unique per run), and refuses to run otherwise (linda's condition). The legal rename then moves zero
+# rows, and the minted-form target must be refused with 400 before either table is touched.
 store = HttpTelemetryStore()
-print(store.rename_collection(old="@label@-tel-probe", new="@label@-tel-probe-renamed"))
+source = "@label@-tel-probe"
+search_rows = int(store.query_collection_stats(source, days=36500).get("row_count") or 0)
+hooks = store.list_hook_failures(days=0, limit=1)
+if hooks["total"] > 10000:
+    raise SystemExit(f"refusing: {hooks['total']} hook_failures rows is too many to prove none is under {source!r}")
+hook_rows = sum(1 for r in store.list_hook_failures(days=0, limit=max(hooks["total"], 1))["rows"]
+                if r.get("collection") == source)
+if search_rows or hook_rows:
+    raise SystemExit(f"refusing: {search_rows} search and {hook_rows} hook rows are recorded under {source!r}")
+print("no rows under the probe source")
+print(store.rename_collection(old=source, new=source + "-renamed"))
 try:
-    store.rename_collection(old="@label@-tel-probe", new="c42")
+    store.rename_collection(old=source, new="c42")
 except httpx.HTTPStatusError as exc:
     assert exc.response.status_code == 400, f"a minted-form target answered {exc.response.status_code}, not 400"
     print("minted target refused 400")
