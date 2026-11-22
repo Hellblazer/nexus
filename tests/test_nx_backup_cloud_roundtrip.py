@@ -225,11 +225,15 @@ def _case_a_restore_into_a_second_tenant_round_trips_with_equal_counts(
         # ids are reassigned, so the check is on what the rows say, not on what they are numbered
         for table, name in (("memory", "title"), ("catalog_documents", "title"), ("chunks", "chash")):
             assert column(dest, table, name) == column(second_file, table, name), f"{table}.{name} differs after the restore"
-        # the comparison the cloud round trip runs (nexus-csayy.10), against a real restore: every table, every column
-        report = _roundtrip_compare().compare(dest, second_file)
-        assert report["verdict"] == "PASS", (report["failures"], report["review"])
         marker = httpx.get(f"{state['base_url']}/v1/tenant/import-marker", headers={"Authorization": f"Bearer {token}"}, timeout=10).json()
         assert marker["present"] is True and marker["marker"]["header_sha256"], marker
+        # the comparison the cloud round trip runs (nexus-csayy.10), against a real restore: every table, every column,
+        # the source read through the restore's relabel of its minted-form labels (RDR-229 P3.11), which the marker lists
+        compare = _roundtrip_compare()
+        relabels = compare.relabels_from_marker(marker)
+        assert relabels, marker  # the seed's collections are minted-form, so the relabel path is what is compared
+        report = compare.compare(dest, second_file, relabels)
+        assert report["verdict"] == "PASS", (report["failures"], report["review"])
 
 
 def _case_the_engines_root_token_is_refused_saying_which_token_to_use(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
