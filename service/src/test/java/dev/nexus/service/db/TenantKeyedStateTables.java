@@ -751,9 +751,7 @@ final class TenantKeyedStateTables {
         notKeyed.put("PciIdBuilds.gate3", "the completion check's gate 3 as a supplier, bound once at boot; a callback, no data");
         notKeyed.put("PciGate3Coverage.vacuity", "the empty-case scan's last answer (a boolean and a time), kept ten minutes; names no tenant or collection");
         notKeyed.put("PciIdBuilds.gate2", "the completion check's gate 2 as a supplier, bound once at boot; a callback, no data");
-        notKeyed.put("PciReconcilePlanner.Plan.plannedIdKeys", RESULT);
         notKeyed.put("PciReconcilePlanner.Plan.actions", RESULT);
-        notKeyed.put("PciReconcilePlanner.IdPlanInputs.nullIdCollections", RESULT);
         notKeyed.put("PciCatalog.Snapshot.validIds", PCI_OFF);
         notKeyed.put("PciCatalog.Snapshot.invalidIds", PCI_OFF);
         notKeyed.put("CompletionBootWork.DbReader.gate3Extras", "the further gate 3 conditions, fixed at construction "
