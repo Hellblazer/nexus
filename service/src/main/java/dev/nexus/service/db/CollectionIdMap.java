@@ -16,11 +16,14 @@ import org.jooq.impl.SQLDataType;
  * registry has loaded: it maps nothing. The temp table is {@code ON COMMIT DROP}, like the stages.
  *
  * <p>A source id held by more than one registry row of the file is ambiguous and is left out: no row can follow it. Whether a
- * file's id maps is therefore decided by this table alone.
+ * file's id maps is therefore decided by this table alone, and {@link RestoreIdFill#refuseOrphans} decides on the stages, before
+ * the table exists, with the same predicate: an id the registry stage holds on exactly one row.
  *
- * @param table the temp table's name; {@code null} for the empty map
+ * @param table           the temp table's name; {@code null} for the empty map
+ * @param fileCarriesIds  true when the file's registry carried at least one {@code collection_id}; false for a file written
+ *                        before the id columns existed (or with every id NULL), the only file whose history rows have no id to follow
  */
-record CollectionIdMap(String table) {
+record CollectionIdMap(String table, boolean fileCarriesIds) {
 
     /** The temp table's name: one map per load, on the load's one session. */
     static final String TABLE = "nx_restore_cid_map";
@@ -28,7 +31,7 @@ record CollectionIdMap(String table) {
     static final String TARGET = "dst_id";
 
     static CollectionIdMap empty() {
-        return new CollectionIdMap(null);
+        return new CollectionIdMap(null, false);
     }
 
     boolean isEmpty() {

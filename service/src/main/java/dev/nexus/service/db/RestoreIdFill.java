@@ -46,9 +46,16 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
  *       and is not read. A twin the map does not hold is refused ({@link #ORPHAN_ID_CODE}), except in a history table, where it
  *       gives NULL.</li>
  *   <li>The twin is NULL, or the file has no such column (a file from before P3.1, or a row stamped late): the id is the
- *       restored registry row's on {@code (tenant_id, name)}, by name. The name is valid there because a NULL twin only exists
- *       before P3.1's stamp completes, which is before P3.7. An empty name gives NULL.</li>
+ *       restored registry row's on {@code (tenant_id, name)}, by name. The name is valid there because the CHECKs of P3.1
+ *       refuse a writer a row with a name and no id, so a NULL twin beside a name only exists before P3.1's stamp completes,
+ *       which is before P3.7's rename can stale a name. A file that contradicts this (a NULL-twin row whose name another row of
+ *       the table carries with the id of a different collection) is refused as {@link #AMBIGUOUS_CODE}. An empty name gives NULL.
+ *       A history table's NULL twin is filled by name only when the file's registry carries no id at all (a file from before
+ *       P3.1); otherwise it stays NULL, because a history label may be an old one.</li>
  * </ul>
+ * A row whose twin was mapped also takes the mapped registry row's CURRENT name in its name column, so a stale label never
+ * reaches a name foreign key that the target still has (the name-key drop move may not have completed there), and the chunk
+ * family's name keys agree with the rewritten chunk names.
  *
  * <p><b>The registry.</b> {@code catalog_collections.collection_id} is never taken from a file: the engine draws every
  * restored row's id from the column's own sequence ({@code nextval(pg_get_serial_sequence(...))}), so a later mint cannot
@@ -62,11 +69,12 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
  * id (a successor absent from the backup).
  *
  * <p><b>Refusal.</b> {@link #refuseOrphans} runs before the first real-table insert, on the stages: a non-null twin that the
- * file's registry does not hold once is {@link #ORPHAN_ID_CODE}, and a NULL-twin row with a non-empty name that no registry row
- * of the backup holds is {@link #ORPHAN_CODE}; each names the table and column, the count and an example, and nothing is written.
+ * file's registry does not hold once is {@link #ORPHAN_ID_CODE}, a NULL-twin row with a non-empty name that no registry row
+ * of the backup holds is {@link #ORPHAN_CODE}, and one whose name another row of the table carries with a different collection's
+ * id is {@link #AMBIGUOUS_CODE}; each names the table and column, the count and an example, and nothing is written.
  *
- * <p>The quarantine tag {@link QuarantineOrigin#ORIGIN_ID_KEY} of a chunk's metadata follows the same rule: by id through the
- * map when it holds a mapped id, else by the tag's name, else stripped.
+ * <p>The quarantine tag {@link QuarantineOrigin#ORIGIN_ID_KEY} of a chunk's metadata: an id the map holds is mapped, any other id
+ * is stripped (never resolved by the tag's name, which may be stale), and a tag with no id key is left as it is.
  *
  * <p>Entry for a table: {@link #fill}. The name and id columns come from {@code db/rdr229/p31-checks.tsv}, the one list the
  * expand's changesets are pinned to.
@@ -78,6 +86,9 @@ final class RestoreIdFill {
 
     /** The stable code at the head of the by-id refusal: a row's collection id that the backup's registry does not hold. */
     static final String ORPHAN_ID_CODE = "restore_orphan_collection_id";
+
+    /** The stable code at the head of the cross-check refusal: a NULL-twin name that another row of the table carries with another collection's id. */
+    static final String AMBIGUOUS_CODE = "restore_ambiguous_collection_name";
 
     /** The registry stage's columns that keep the file's own {@code collection_id} and {@code superseded_by_id}. */
     static final String SRC_ID = "src_collection_id";
@@ -140,6 +151,7 @@ final class RestoreIdFill {
         boolean registryHasIds = registry != null && stageHasColumn(ctx, registry, "collection_id");
         List<String> byName = new ArrayList<>();
         List<String> byId = new ArrayList<>();
+        List<String> ambiguous = new ArrayList<>();
         for (ExportTable e : TenantExport.TABLES) {
             TablePlan tp = plan.get(e.name());
             Stage st = stages.get(e.name());
@@ -175,6 +187,24 @@ final class RestoreIdFill {
                         orphan = orphan.and(DSL.notExists(DSL.selectOne().from(r)
                             .where(DSL.field(DSL.name("r", "name"), SQLDataType.VARCHAR).eq(name))));
                     }
+                    if (hasId && registryHasIds) {
+                        // a NULL-twin row whose name another row of the table carries with the id of a different collection
+                        Table<?> o = TenantImportStaging.stageTable(st).as("o");
+                        Table<?> r2 = TenantImportStaging.stageTable(registry).as("r2");
+                        Field<String> otherName = DSL.field(DSL.name("o", p.nameColumn()), SQLDataType.VARCHAR);
+                        Field<Long> otherTwin = DSL.field(DSL.name("o", p.idColumn()), SQLDataType.BIGINT);
+                        Field<Long> own = DSL.field(DSL.select(DSL.field(DSL.name("r2", "collection_id"), SQLDataType.BIGINT)).from(r2)
+                            .where(DSL.field(DSL.name("r2", "name"), SQLDataType.VARCHAR).eq(name)));
+                        Condition clash = name.isNotNull().and(name.ne("")).and(twin.isNull())
+                            .and(DSL.exists(DSL.selectOne().from(o).where(otherName.eq(name)).and(otherTwin.isNotNull())
+                                .and(otherTwin.isDistinctFrom(own))));
+                        Record2<Integer, String> amb = ctx.select(DSL.count(), DSL.min(name)).from(rows).where(clash).fetchOne();
+                        if (amb != null && amb.value1() > 0) {
+                            ambiguous.add(e.name() + "." + p.nameColumn() + ": " + amb.value1() + " row" + (amb.value1() == 1 ? "" : "s")
+                                + " name '" + amb.value2() + "' with no collection id, while other rows of the table carry that name "
+                                + "with the id of another collection");
+                        }
+                    }
                     Record2<Integer, String> row = ctx.select(DSL.count(), DSL.min(name)).from(rows).where(orphan).fetchOne();
                     if (row != null && row.value1() > 0) {
                         byName.add(e.name() + "." + p.nameColumn() + ": " + row.value1() + " row" + (row.value1() == 1 ? "" : "s")
@@ -191,6 +221,10 @@ final class RestoreIdFill {
         if (!byId.isEmpty()) {
             parts.add(ORPHAN_ID_CODE + ": " + String.join("; ", byId)
                 + "; a restored row's collection id must be one the backup's registry holds");
+        }
+        if (!ambiguous.isEmpty()) {
+            parts.add(AMBIGUOUS_CODE + ": " + String.join("; ", ambiguous)
+                + "; the backup contradicts itself about which collection the name means");
         }
         if (!parts.isEmpty()) throw new LoadFailedException(String.join("; ", parts));
     }
@@ -213,26 +247,25 @@ final class RestoreIdFill {
             map = buildMap(ctx, rows);
         }
         fillIds(ctx, tenant, table, rows, map);
-        if (CHUNKS.equals(table.name())) refillOriginTag(ctx, tenant, rows, map);
+        if (CHUNKS.equals(table.name())) refillOriginTag(ctx, rows, map);
         return map;
     }
 
     /**
      * A quarantined chunk's metadata tags its origin by name ({@code origin_collection}) and by id
-     * ({@link QuarantineOrigin#ORIGIN_ID_KEY}). The id is the backup's installation's; a restore mints new ids, so it is mapped:
-     * through the map when the tag's id is one it holds, else from the restored registry row of the tag's name, else stripped
-     * (the name has no registry row, or the tag has none). Every other key of the metadata is kept. A row without the key is
-     * not written.
+     * ({@link QuarantineOrigin#ORIGIN_ID_KEY}). The id is the backup's installation's; a restore mints new ids, so a tag that
+     * has the key gets the id the map holds for it, or loses the key when the map holds none (the name beside it is not
+     * consulted: from P3.7 it may be a stale label, or another collection's). Every other key of the metadata is kept. A row
+     * without the key is not written.
      */
-    private static void refillOriginTag(DSLContext ctx, String tenant, Stage rows, CollectionIdMap map) {
+    private static void refillOriginTag(DSLContext ctx, Stage rows, CollectionIdMap map) {
         if (!stageHasColumn(ctx, rows, "metadata")) return;
         Field<JSONB> metadata = DSL.field(DSL.name("s", "metadata"), SQLDataType.JSONB);
-        Field<String> originName = DSL.function("jsonb_extract_path_text", SQLDataType.VARCHAR, metadata, DSL.val("origin_collection"));
         Field<String> originIdText = DSL.function("jsonb_extract_path_text", SQLDataType.VARCHAR, metadata,
             DSL.val(QuarantineOrigin.ORIGIN_ID_KEY));
         Field<Long> sourceId = DSL.when(originIdText.likeRegex("^[0-9]{1,18}$"), originIdText.cast(SQLDataType.BIGINT))
             .otherwise(DSL.castNull(SQLDataType.BIGINT));
-        Field<Long> restored = DSL.coalesce(map.target(sourceId), CollectionIds.idOf(DSL.val(tenant), originName));
+        Field<Long> restored = map.target(sourceId);
         Field<JSONB> refilled = DSL.function("jsonb_set", SQLDataType.JSONB, metadata,
             DSL.val(new String[] {QuarantineOrigin.ORIGIN_ID_KEY}), DSL.function("to_jsonb", SQLDataType.JSONB, restored));
         Field<JSONB> stripped = DSL.function("jsonb_delete", SQLDataType.JSONB, metadata, DSL.val(QuarantineOrigin.ORIGIN_ID_KEY));
@@ -250,7 +283,8 @@ final class RestoreIdFill {
     /**
      * Every staged row's id, by the rule of the class comment: a non-null twin through the map (NULL when the map does not hold
      * it, which only a history table can reach, as {@link #refuseOrphans} refused the rest), a NULL or absent twin by the
-     * restored registry row on (tenant, name); an empty or unresolved name gives NULL.
+     * restored registry row on (tenant, name); an empty or unresolved name gives NULL. A history row with a NULL twin is
+     * filled by name only for a file that predates the ids. A non-history row with an id then takes its collection's current name.
      */
     private static void fillIds(DSLContext ctx, String tenant, ExportTable table, Stage rows, CollectionIdMap map) {
         for (Pair p : PAIRS.getOrDefault(table.name(), List.of())) {
@@ -260,12 +294,25 @@ final class RestoreIdFill {
             Field<Long> id = DSL.field(DSL.name(p.idColumn()), SQLDataType.BIGINT);
             if (!hasId) ctx.alterTable(TenantImportStaging.stageTable(rows)).addColumn(id).execute();
             Field<Long> twin = DSL.field(DSL.name("s", p.idColumn()), SQLDataType.BIGINT);
-            Field<Long> byName = hasName
+            // a history row keeps a NULL twin unless the file predates the id columns: its label may be an old one
+            boolean nameFillsNullTwin = hasName && (!p.history() || !map.fileCarriesIds());
+            Field<Long> byName = nameFillsNullTwin
                 ? CollectionIds.idOf(DSL.val(tenant), DSL.field(DSL.name("s", p.nameColumn()), SQLDataType.VARCHAR))
                 : DSL.castNull(SQLDataType.BIGINT);
             ctx.update(TenantImportStaging.stageTable(rows).as("s"))
                 .set(id, DSL.when(twin.isNotNull(), map.target(twin)).otherwise(byName))
                 .execute();
+            if (hasName && !p.history()) {
+                // the row's name becomes its collection's current name, so a stale label never reaches a name key the target keeps
+                var current = CATALOG_COLLECTIONS.as("cur");
+                Field<String> currentName = DSL.field(DSL.select(current.NAME).from(current)
+                    .where(current.TENANT_ID.eq(tenant)).and(current.COLLECTION_ID.eq(twin)));
+                ctx.update(TenantImportStaging.stageTable(rows).as("s"))
+                    .set(DSL.field(DSL.name(p.nameColumn()), SQLDataType.VARCHAR),
+                        DSL.coalesce(currentName, DSL.field(DSL.name("s", p.nameColumn()), SQLDataType.VARCHAR)))
+                    .where(twin.isNotNull())
+                    .execute();
+            }
         }
     }
 
@@ -316,7 +363,8 @@ final class RestoreIdFill {
                 DSL.field(DSL.name(CollectionIdMap.SOURCE), SQLDataType.BIGINT), DSL.field(DSL.name(CollectionIdMap.TARGET), SQLDataType.BIGINT))
             .select(ctx.select(source, DSL.min(drawn)).from(s).where(source.isNotNull()).groupBy(source).having(DSL.count().eq(1)))
             .execute();
-        return new CollectionIdMap(CollectionIdMap.TABLE);
+        boolean carriesIds = ctx.fetchExists(ctx.selectOne().from(s).where(source.isNotNull()));
+        return new CollectionIdMap(CollectionIdMap.TABLE, carriesIds);
     }
 
     /**
