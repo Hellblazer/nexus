@@ -173,7 +173,7 @@ If T2 record has no `epic_bead` field (user skipped planning at accept time):
 
 The RDR already has a catalog entry from the original accept-time indexing. Create links to capture implementation provenance (if catalog is initialized):
 
-1. **Code→RDR links**: The indexer hook auto-generates `implements-heuristic` links via title substring matching. These are created automatically. Review with `nx catalog links <rdr-tumbler> --type implements-heuristic` — promote high-confidence ones to `implements` via `mcp__plugin_conexus_nexus-catalog__link` for link-boost scoring benefit (heuristic links have zero search boost weight).
+1. **Code→RDR links**: Nothing generates `implements-heuristic` links any more (the pass was turned off at engine v0.1.57, nexus-ybj1b); an older RDR may still carry some. Review them with `nx catalog links <rdr-tumbler> --type implements-heuristic` and promote high-confidence ones to `implements` via `mcp__plugin_conexus_nexus-catalog__link` for link-boost scoring benefit (heuristic links have zero search boost weight). For a new RDR, link the implementing files with `implements` directly.
 
 2. **RDR→prior-RDR links**: If the RDR's T2 record has a `supersedes` field, create the catalog link:
    ```

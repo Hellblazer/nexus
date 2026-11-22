@@ -86,7 +86,7 @@ mcp__plugin_conexus_nexus-catalog__link(
 | `supersedes` | Replaces an older version | New RDR superseding old one |
 | `formalizes` | Higher abstraction → raw source | Extracted entities / triples pointing back to an L0 text chunk (RDR-057) |
 
-Do NOT use `implements-heuristic` — that's for the automated linker only.
+Do NOT use `implements-heuristic`: it is a legacy type from an automated pass that no longer runs, and graph traversal excludes it by default.
 
 ## Seed: Set Up Auto-Linker Context
 

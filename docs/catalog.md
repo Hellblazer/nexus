@@ -198,14 +198,14 @@ Conventional `created_by` values:
 
 - `bib_enricher` — Semantic Scholar lookup created a `cites` from a citation match
 - `rdr_implements_pass` — generator pass walked accepted RDRs and emitted strict `implements`
-- `code_rdr_heuristic` — looser pass; emitted `implements-heuristic` on path/symbol substring match
+- `code_rdr_heuristic` — looser pass; emitted `implements-heuristic` on path/symbol substring match. Legacy: the pass was turned off at engine v0.1.57 (nexus-ybj1b) and nothing writes the type now; existing edges remain and graph traversal excludes them by default (nexus-6ppk)
 - `manual` — user authored via `nx catalog link`
 - `auto-linker` — created at storage time from T1 link-context (RDR-053 storage-boundary auto-linker)
 - `llm_linker` — Claude-suggested edge; advisory, manual review recommended before traversing in an audit
 
 When auditing graph traversal, prefer `created_by IN ('bib_enricher', 'rdr_implements_pass', 'manual')` over heuristic creators.
 
-The link-type set is **closed at a given release**. Plans that reference an unknown link type degrade gracefully (warn + drop) so future releases don't break old plans. To add a new type: update the catalog enum, add to `_KNOWN_LINK_TYPES` in `src/nexus/plans/purposes.py`, decide on `created_by` provenance, and update `conexus/plans/purposes.yml` if any existing purpose should include it.
+`catalog_links.link_type` is free text: no enum or CHECK constrains it (`catalog-001-baseline.xml`), so a write with any type succeeds. What a release knows is two allow-lists, which must be kept in step: `_KNOWN_LINK_TYPES` in `src/nexus/plans/purposes.py` (plans that name a type outside it warn and drop it, so future releases don't break old plans) and `DEFAULT_GRAPH_LINK_TYPES` in `service/src/main/java/dev/nexus/service/db/CatalogRepository.java` (the types a traversal that names none follows). A type outside the Java list is stored and returned by `link_query`, but an engine graph traversal that names no types does not follow it. To add a new type: add it to both lists (the Java one ships in an engine release), decide on `created_by` provenance, and update `conexus/plans/purposes.yml` if any existing purpose should include it.
 
 ## Purposes (link-type aliases)
 
