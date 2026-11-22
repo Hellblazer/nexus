@@ -89,6 +89,16 @@ def _slug() -> str:
     return uuid.uuid4().hex[:8]
 
 
+def _register_docs_collections(cat, *names: str) -> None:
+    """RDR-229 P3.1: the engine refuses a document under an unregistered collection, so a test that registers (or moves)
+    a document registers its collections first, under the substrate's bge-768 profile."""
+    for name in names:
+        cat.register_collection(
+            name, content_type="docs", owner_id="i711w-gap-contracts",
+            embedding_model="bge-base-en-v15-768", model_version="v1",
+        )
+
+
 _BIB_KWARGS = {
     "bib_year": 2019,
     "bib_authors": "Dana",
@@ -335,6 +345,7 @@ class TestCollectionMoveBibPreservation:
         clobber behaviour had no service-side test.
         """
         slug = _slug()
+        _register_docs_collections(cat, f"docs__old_{slug}", f"docs__new_{slug}")
         tumbler = cat.register(
             owner, "udc-bib doc", content_type="prose",
             file_path=f"{slug}/a.md", physical_collection=f"docs__old_{slug}",
@@ -362,6 +373,7 @@ class TestCollectionMoveBibPreservation:
         server-side batch tracked by nexus-gmiaf.24).
         """
         slug = _slug()
+        _register_docs_collections(cat, f"docs__old_{slug}", f"docs__new_{slug}")
         tumbler = cat.register(
             owner, "batch-bib doc", content_type="prose",
             file_path=f"{slug}/a.md", physical_collection=f"docs__old_{slug}",

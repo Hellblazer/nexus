@@ -504,6 +504,11 @@ class TestItem19AliasOfPopulation:
     """
 
     def test_set_alias_populates_alias_of_on_the_entry(self, cat, owner):
+        # RDR-229 P3.1: the engine refuses a document under an unregistered collection.
+        cat.register_collection(
+            "code__i711w1-item19__v1", content_type="code", owner_id="i711w1-item19",
+            embedding_model="bge-base-en-v15-768", model_version="v1",
+        )
         src = cat.register(
             title="i711w1-item19-alias-src",
             owner=str(owner),

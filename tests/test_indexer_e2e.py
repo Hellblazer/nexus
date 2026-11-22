@@ -745,6 +745,15 @@ def test_migration_moves_prose_from_code_to_docs(
     # Step 1 — first index populates the catalog with README's tumbler.
     _index(rich_repo, reg, local_t3)
 
+    # Step 1b — settle the registry's collection names. RDR-229 P3.1: the run now registers its collections with the
+    # engine, so the second index's legacy rename (_migrate_legacy_collections) finds the registry row the engine's
+    # rename needs and succeeds; before, it met a 404 and kept the legacy names. The double's vectors live outside the
+    # engine, so the engine's rename does not move them: a chunk seeded under the pre-rename name would sit in a
+    # collection the registry no longer names. Run the migration here, with nothing seeded, and seed under the names
+    # it leaves (the prune below is what this test is about, not the rename).
+    _index(rich_repo, reg, local_t3)
+    info = reg.get(rich_repo)
+
     # Step 2 — read the tumbler that _catalog_hook assigned, via the
     # public reader (raw ``cat._db`` has no service-mode equivalent).
     readme_docs = documents_by_file_path("README.md")

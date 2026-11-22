@@ -235,7 +235,8 @@ def test_the_markdown_hook_records_the_source_on_a_fresh_registration_and_a_reso
     """The hook's other two legs: it mints the row itself when no pre-flight did, and when its
     ``register`` resolved onto an existing row (the engine returns that row without merging ``meta``)
     the record rides an update."""
-    from nexus.doc_indexer import _catalog_markdown_hook
+    # RDR-229 P3.1: registers the collection first, as the run's pre-flight does before the hook
+    from tests._catalog_fixture_ops import catalog_markdown_hook_seeded as _catalog_markdown_hook
 
     created = tmp_path / "6pfgb6-created.md"
     created.write_text("# Created\n\nBody.\n")

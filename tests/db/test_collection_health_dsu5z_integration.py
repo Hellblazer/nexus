@@ -91,7 +91,9 @@ pytestmark = [
 
 _TOKEN  = "dsu5z-inttest-bearer-secret"
 _TENANT = "dsu5z-tenant"
-_COLL   = "knowledge__dsu5z__voyage-context-3__v1"
+# RDR-229 P3.1: the engine refuses a document under an unregistered collection, and refuses to register a collection under a
+# model other than its embedding profile (bge-768 here), so the collection is named for the model it is registered under.
+_COLL   = "knowledge__dsu5z__bge-base-en-v15-768__v1"
 
 
 # ── Port / wait helpers ────────────────────────────────────────────────────────
@@ -246,6 +248,10 @@ def seeded_catalog(cat):
     """
     owner_t = cat.register_owner(
         name="dsu5z-repo", owner_type="repo", tumbler_prefix="20.1"
+    )
+    cat.register_collection(
+        _COLL, content_type="knowledge", owner_id="dsu5z",
+        embedding_model="bge-base-en-v15-768", model_version="v1",
     )
     doc_a = cat.register(
         str(owner_t), "DSU5Z Doc A",

@@ -50,7 +50,7 @@ class TestPdfCatalogHookExtractionRecord:
     document's ``meta``; ``extraction_pages`` is written on every extraction, ``{}`` when clean."""
 
     def test_register_branch_records_method_and_pages(self, tmp_path, monkeypatch):
-        from nexus.pipeline_stages import _catalog_pdf_hook
+        from tests._catalog_fixture_ops import catalog_pdf_hook_seeded as _catalog_pdf_hook  # RDR-229 P3.1: the collection is registered first
 
         _make_catalog(tmp_path)
         _catalog_pdf_hook(
@@ -61,7 +61,7 @@ class TestPdfCatalogHookExtractionRecord:
         assert _meta()["extraction_pages"] == _DEGRADED["extraction_pages"]
 
     def test_update_branch_records_method_and_pages(self, tmp_path, monkeypatch):
-        from nexus.pipeline_stages import _catalog_pdf_hook
+        from tests._catalog_fixture_ops import catalog_pdf_hook_seeded as _catalog_pdf_hook  # RDR-229 P3.1: the collection is registered first
 
         _make_catalog(tmp_path)
         p = Path("/data/papers/rdr237-update.pdf")
@@ -73,7 +73,7 @@ class TestPdfCatalogHookExtractionRecord:
         assert _meta()["extraction_pages"] == _DEGRADED["extraction_pages"]
 
     def test_a_clean_extraction_writes_an_empty_map_on_both_branches(self, tmp_path, monkeypatch):
-        from nexus.pipeline_stages import _catalog_pdf_hook
+        from tests._catalog_fixture_ops import catalog_pdf_hook_seeded as _catalog_pdf_hook  # RDR-229 P3.1: the collection is registered first
 
         _make_catalog(tmp_path)
         p = Path("/data/papers/rdr237-clean.pdf")
@@ -87,7 +87,7 @@ class TestPdfCatalogHookExtractionRecord:
     def test_a_clean_re_extract_clears_an_old_map(self, tmp_path, monkeypatch):
         """The service merges meta key by key and never removes one; the clear works only because
         the hook writes the whole ``extraction_pages`` value, ``{}`` included."""
-        from nexus.pipeline_stages import _catalog_pdf_hook
+        from tests._catalog_fixture_ops import catalog_pdf_hook_seeded as _catalog_pdf_hook  # RDR-229 P3.1: the collection is registered first
 
         _make_catalog(tmp_path)
         p = Path("/data/papers/rdr237-clear.pdf")
@@ -98,7 +98,7 @@ class TestPdfCatalogHookExtractionRecord:
         assert _meta()["extraction_method"] == "mineru"
 
     def test_a_degraded_re_extract_replaces_the_old_map_whole(self, tmp_path, monkeypatch):
-        from nexus.pipeline_stages import _catalog_pdf_hook
+        from tests._catalog_fixture_ops import catalog_pdf_hook_seeded as _catalog_pdf_hook  # RDR-229 P3.1: the collection is registered first
 
         _make_catalog(tmp_path)
         p = Path("/data/papers/rdr237-replace.pdf")
@@ -114,7 +114,7 @@ class TestPdfCatalogHookExtractionRecord:
         merge ``meta``), so the hook follows with an update. Forced here by hiding the row from the
         two lookups that send the hook down its update branch."""
         from nexus.catalog import factory as _factory
-        from nexus.pipeline_stages import _catalog_pdf_hook
+        from tests._catalog_fixture_ops import catalog_pdf_hook_seeded as _catalog_pdf_hook  # RDR-229 P3.1: the collection is registered first
 
         _make_catalog(tmp_path)
         p = Path("/data/papers/rdr237-resolve.pdf")
@@ -143,7 +143,7 @@ class TestPdfCatalogHookExtractionRecord:
         assert _meta()["extraction_method"] == "mineru+degraded"
 
     def test_without_an_extraction_nothing_is_written_to_meta(self, tmp_path, monkeypatch):
-        from nexus.pipeline_stages import _catalog_pdf_hook
+        from tests._catalog_fixture_ops import catalog_pdf_hook_seeded as _catalog_pdf_hook  # RDR-229 P3.1: the collection is registered first
 
         _make_catalog(tmp_path)
         p = Path("/data/papers/rdr237-none.pdf")
@@ -152,7 +152,7 @@ class TestPdfCatalogHookExtractionRecord:
         assert "extraction_pages" not in _meta() and "extraction_method" not in _meta()
 
     def test_an_unnamed_method_does_not_overwrite_a_recorded_one(self, tmp_path, monkeypatch):
-        from nexus.pipeline_stages import _catalog_pdf_hook
+        from tests._catalog_fixture_ops import catalog_pdf_hook_seeded as _catalog_pdf_hook  # RDR-229 P3.1: the collection is registered first
 
         _make_catalog(tmp_path)
         p = Path("/data/papers/rdr237-noname.pdf")
@@ -166,7 +166,7 @@ class TestPdfCatalogHookExtractionRecord:
     def test_legacy_values_stay_readable_and_a_new_extraction_replaces_them(self, tmp_path, monkeypatch):
         """``docling``, ``mineru+docling-degraded`` and ``pymupdf_normalized`` are written by older
         versions and need no migration; the hook neither reads nor rejects them."""
-        from nexus.pipeline_stages import _catalog_pdf_hook
+        from tests._catalog_fixture_ops import catalog_pdf_hook_seeded as _catalog_pdf_hook  # RDR-229 P3.1: the collection is registered first
 
         _make_catalog(tmp_path)
         p = Path("/data/papers/rdr237-legacy.pdf")
@@ -189,7 +189,7 @@ class TestPdfCatalogHookNamesTheRunsThatRecordNothing:
         from structlog.testing import capture_logs
 
         import nexus.repo_identity as repo_identity
-        from nexus.pipeline_stages import _catalog_pdf_hook
+        from tests._catalog_fixture_ops import catalog_pdf_hook_seeded as _catalog_pdf_hook  # RDR-229 P3.1: the collection is registered first
 
         _make_catalog(tmp_path)
         monkeypatch.setattr(repo_identity, "should_skip_ephemeral_registration", lambda *a, **k: True)
@@ -208,7 +208,7 @@ class TestPdfCatalogHookNamesTheRunsThatRecordNothing:
         from structlog.testing import capture_logs
 
         from nexus.catalog import factory as _factory
-        from nexus.pipeline_stages import _catalog_pdf_hook
+        from tests._catalog_fixture_ops import catalog_pdf_hook_seeded as _catalog_pdf_hook  # RDR-229 P3.1: the collection is registered first
 
         _make_catalog(tmp_path)
         p = Path("/data/papers/rdr237-fail.pdf")
@@ -237,7 +237,7 @@ class TestPdfCatalogHookNamesTheRunsThatRecordNothing:
 
         from structlog.testing import capture_logs
 
-        from nexus.pipeline_stages import _catalog_pdf_hook
+        from tests._catalog_fixture_ops import catalog_pdf_hook_seeded as _catalog_pdf_hook  # RDR-229 P3.1: the collection is registered first
 
         pdf = MagicMock(spec=Path)
         pdf.resolve.side_effect = OSError("symlink loop")
