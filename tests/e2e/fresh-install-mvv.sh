@@ -1410,7 +1410,7 @@ if [ "$FORMULA_PDF_CHECK_ON" = "1" ]; then
         if ! _nx index pdf "$FIXTURE_PDF" --extractor mineru --collection "$FORMULA_COLLECTION" \
                 >"$LOGS/index-formula-pdf.log" 2>&1; then
             tail -20 "$LOGS/index-formula-pdf.log" >&2
-            _fail "nx index pdf (MinerU path, published bytes) exited non-zero — see $LOGS/index-formula-pdf.log (GH #1533 class)"
+            _fail "nx index pdf (MinerU path, $FORMULA_PDF_LAYER) exited non-zero — see $LOGS/index-formula-pdf.log (GH #1533 class)"
         fi
         F34_VERDICT="$(_f34_weights_fetch_verdict < "$LOGS/index-formula-pdf.log")"
         [ "$F34_VERDICT" = "OK" ] || _fail "${F34_VERDICT#FAIL|} — see $LOGS/index-formula-pdf.log (F34)"
@@ -1428,7 +1428,7 @@ if [ "$FORMULA_PDF_CHECK_ON" = "1" ]; then
             echo "$IDENT_VERDICT" >&2
             _fail "extractor identity (mineru): ${IDENT_VERDICT#FAIL|} (GH #1533 class)"
         fi
-        echo "  [ok] indexed chunk extraction_method=mineru (identity proven, published bytes, uv-tool layer)"
+        echo "  [ok] indexed chunk extraction_method=mineru (identity proven, $FORMULA_PDF_LAYER)"
     fi
 fi
 
