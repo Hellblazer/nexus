@@ -38,7 +38,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.fail;
 
 /**
- * RDR-229 P3.3c (nexus-p2m1x.21): {@code vectors-074-1}, the self-retrying changeset that builds
+ * RDR-229 P3.3c (nexus-p2m1x.21): {@code vectors-075-1}, the self-retrying changeset that builds
  * {@code idx_chunk_orphaned_at_tenant_chash} on {@code nexus.chunk_orphaned_at (tenant_id, chash)}. A boot must never hang or halt on it,
  * and a killed build heals on the next boot: the precondition (CONTINUE) says no VALID index of the name exists, so whatever exists is
  * INVALID and the body drops it before it builds, each statement CONCURRENTLY under a 30 s {@code lock_timeout}; a failing body is skipped
@@ -55,7 +55,7 @@ class ChunkOrphanedAtIndexChangesetIntegrationTest {
     private static final String ADMIN_ROLE = "nexus_admin_coaidx";
     private static final String ADMIN_PASS = "nexus_admin_coaidx_pass";
     private static final String INDEX = "idx_chunk_orphaned_at_tenant_chash";
-    private static final String CHANGESET = "vectors-074-1";
+    private static final String CHANGESET = "vectors-075-1";
     /** The self-retrying changeset a fresh install always carries (it waits for a data move): the count the walk reports apart. */
     private static final int WAITING_ON_ITS_OWN = 1;
 
@@ -136,7 +136,7 @@ class ChunkOrphanedAtIndexChangesetIntegrationTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             // the changeset's own rollback text (DROP INDEX CONCURRENTLY IF EXISTS), so no DDL string lives here
-            PgContainerHelper.replayChangesetRollback(su, "db/changelog/vectors-074-chunk-orphaned-at-chash-index.xml", CHANGESET);
+            PgContainerHelper.replayChangesetRollback(su, "db/changelog/vectors-075-chunk-orphaned-at-chash-index.xml", CHANGESET);
         }
     }
 
@@ -175,7 +175,7 @@ class ChunkOrphanedAtIndexChangesetIntegrationTest {
         assertThat(logs).anyMatch(l -> l.contains("event=pci_builders_kept") && l.contains("retrying=" + (WAITING_ON_ITS_OWN + 1)));
         assertThat(logs).as("the retrying set is exactly the two").filteredOn(l -> l.contains("event=pci_build_kept_for_retrying"))
             .hasSize(WAITING_ON_ITS_OWN + 1)
-            .anyMatch(l -> l.contains("vectors-074-chunk-orphaned-at-chash-index.xml::vectors-074-1") && l.contains("reason=self_retrying_precondition"))
+            .anyMatch(l -> l.contains("vectors-075-chunk-orphaned-at-chash-index.xml::vectors-075-1") && l.contains("reason=self_retrying_precondition"))
             .anyMatch(l -> l.contains("collections-001-tuple-unique-index.xml::collections-001-2"));
     }
 
