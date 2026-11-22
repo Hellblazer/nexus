@@ -41,7 +41,6 @@ count alone: a document registered for a chunk that was already stored (a
 no-owner chunk gaining a legacy owner), or a manifest row removed. The
 completion record is an attestation, not proof (the rung docstring and the
 reaper's own in-engine census cover it), and it records how many readings came
-import shlex
 from the note and the oldest one's age. 24 hours matches the rung's residual
 window (``RESIDUAL_RETRY_AFTER``) and is what a once-a-day user needs: each
 session reads what it can inside the ``--auto`` time limit and the readings
@@ -72,6 +71,7 @@ correctness.
 """
 from __future__ import annotations
 
+import shlex
 import contextlib
 import json
 from collections.abc import Callable, Iterator, Mapping
