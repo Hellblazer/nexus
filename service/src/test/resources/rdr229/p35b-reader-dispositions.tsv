@@ -1,0 +1,9 @@
+# RDR-229 P3.5b (nexus-p2m1x.24): what P3.5b does with each reader of p35b-reader-census.tsv, one row per (kind, object, name_column).
+# Hand-kept; tests/test_rdr229_p35b_reader_census.py fails while a census reader has no row, a row names no census reader, or a row breaks its rule.
+# disposition:
+#   id             redefined to read the id column instead of the name column (form A: a CONTINUE-gated changeset on the stamp moves)
+#   both           redefined to match by the id where both sides carry one and by the name where either lacks one (form B only); P4.1 removes the name arm
+#   label-kept     keeps reading the registry label on purpose: only for name_column catalog_collections.name, with a one-line reason (linda 2026-11-22)
+#   parse-removed  the name-parsing expression (split_part on '__', a 'quarantine-' prefix) is removed
+# A NULL id is no collection: an id or both reader never falls back to a '' name (linda 2026-11-20).
+kind	object	name_column	disposition	reason
