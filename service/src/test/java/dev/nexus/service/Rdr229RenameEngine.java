@@ -159,8 +159,8 @@ final class Rdr229RenameEngine implements AutoCloseable {
             }
 
             @Override
-            public boolean dropMoveComplete() {
-                return inner.dropMoveComplete();
+            public boolean gate3Latched() {
+                return inner.gate3Latched();
             }
 
             @Override

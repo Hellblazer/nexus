@@ -63,8 +63,8 @@ public final class CompletionBootWork implements AutoCloseable {
     private static final Duration TICK = Duration.ofSeconds(1);
     /** Once gate 3 has latched, how often the coverage read is repeated (it keeps {@code id_index_invalid} current within this period). */
     public static final Duration LATCHED_COVERAGE_PERIOD = Duration.ofMinutes(10);
-    /** How long gate 3's flip to true waits for the renames pinned in the rename window ({@link RenameReadiness#pinned}). */
-    public static final Duration RENAME_WINDOW_WAIT = Duration.ofSeconds(30);
+    /** How long after the latch writer gave up on a pinned rename ({@link RenameWindow}) the retry read is scheduled. */
+    public static final Duration RENAME_WINDOW_RETRY = Duration.ofSeconds(1);
     /** How long a table's violating-row count is kept: the scan is bounded, not free. */
     public static final Duration VIOLATOR_TTL = Duration.ofMinutes(10);
 
@@ -83,11 +83,10 @@ public final class CompletionBootWork implements AutoCloseable {
 
     private final BootWorkRegistry registry;
     private final Reader reader;
-    /** Read side: a rename in flight ({@link RenameReadiness#pinned}). Write side: gate 3 flipping to true, in {@link #publish}. Fair, so a flip is not starved. */
-    private final java.util.concurrent.locks.ReentrantReadWriteLock renameWindow = new java.util.concurrent.locks.ReentrantReadWriteLock(true);
+    /** The rename window ({@link RenameWindow}): renames are pinned in it, and the latch row is written under its write lock. */
+    private final RenameWindow window;
     private final Object sampleLock = new Object();
-    /** How long gate 3's flip waits for the pinned renames before it defers to the next sample. */
-    private volatile Duration renameWindowWait = RENAME_WINDOW_WAIT;
+    private volatile Duration renameWindowRetry = RENAME_WINDOW_RETRY;
     private final Clock clock;
     /** Where an event's read runs; null before {@link #start}, when the event only marks that a read is owed. */
     private volatile Executor eventExecutor;
@@ -137,7 +136,7 @@ public final class CompletionBootWork implements AutoCloseable {
     public CompletionBootWork(BootWorkRegistry registry, AdminConnection admin, CompletionCheck.ReadSet readSet,
                               CompletionCheck.Gate3Source gate3, java.util.List<java.util.function.Predicate<DSLContext>> gate3Extras,
                               CompletionCheck.Gate3LatchWriter latchWriter, Gate3Latch bootLatch, Duration latchedCoveragePeriod) {
-        this(registry, admin, readSet, gate3, gate3Extras, latchWriter, bootLatch, latchedCoveragePeriod, P35bChangesets.resource());
+        this(registry, admin, readSet, gate3, gate3Extras, latchWriter, bootLatch, latchedCoveragePeriod, P35bChangesets.resource(), new RenameWindow());
     }
 
     /**
@@ -147,16 +146,21 @@ public final class CompletionBootWork implements AutoCloseable {
     public CompletionBootWork(BootWorkRegistry registry, AdminConnection admin, CompletionCheck.ReadSet readSet,
                               CompletionCheck.Gate3Source gate3, java.util.function.Supplier<java.util.Set<String>> p35b) {
         this(registry, admin, readSet, gate3, java.util.List.of(), CompletionCheck.Gate3LatchWriter.IMMEDIATE, Gate3Latch.readAtBoot(admin),
-            LATCHED_COVERAGE_PERIOD, p35b);
+            LATCHED_COVERAGE_PERIOD, p35b, new RenameWindow());
     }
 
-    /** The fullest constructor: every seam, the P3.5b list included. */
+    /**
+     * The fullest constructor: every seam, the P3.5b list and the rename window included. The window is what {@code latchWriter} must be built from
+     * ({@link RenameWindow#latchWriter()}) for the latch row and the rename path to begin together; a writer of any other origin leaves the regime to
+     * the row alone ({@link #renameReadiness()} reads both).
+     */
     public CompletionBootWork(BootWorkRegistry registry, AdminConnection admin, CompletionCheck.ReadSet readSet,
                               CompletionCheck.Gate3Source gate3, java.util.List<java.util.function.Predicate<DSLContext>> gate3Extras,
                               CompletionCheck.Gate3LatchWriter latchWriter, Gate3Latch bootLatch, Duration latchedCoveragePeriod,
-                              java.util.function.Supplier<java.util.Set<String>> p35b) {
+                              java.util.function.Supplier<java.util.Set<String>> p35b, RenameWindow window) {
         this(registry, new DbReader(admin, readSet, gate3, gate3Extras, latchWriter, Clock.systemUTC(),
-            Objects.requireNonNull(bootLatch, "bootLatch").latched(), Objects.requireNonNull(latchedCoveragePeriod, "latchedCoveragePeriod"), p35b));
+            Objects.requireNonNull(bootLatch, "bootLatch").latched(), Objects.requireNonNull(latchedCoveragePeriod, "latchedCoveragePeriod"), p35b),
+            Clock.systemUTC(), null, window);
         this.gate3Latched = bootLatch.latched();
         this.gate3LatchPciOff = bootLatch.pciOff();
     }
@@ -194,6 +198,17 @@ public final class CompletionBootWork implements AutoCloseable {
         return new CompletionBootWork(registry, admin, CompletionCheck.ReadSet.boot(), gate3, gate3Extras, latchWriter, bootLatch);
     }
 
+    /**
+     * As above with the rename window: the writer is {@code window.latchWriter()}, so the durable latch and P3.7's one-row regime begin together,
+     * inside the window's write lock (RDR-229 P3.7, wired by {@code Main}).
+     */
+    public static CompletionBootWork atBoot(BootWorkRegistry registry, AdminConnection admin, CompletionCheck.Gate3Source gate3,
+                                            java.util.List<java.util.function.Predicate<DSLContext>> gate3Extras, Gate3Latch bootLatch,
+                                            RenameWindow window) {
+        return new CompletionBootWork(registry, admin, CompletionCheck.ReadSet.boot(), gate3, gate3Extras, window.latchWriter(), bootLatch,
+            LATCHED_COVERAGE_PERIOD, P35bChangesets.resource(), window);
+    }
+
     /** The read set a database-backed reporter reads, or null for a test's injected reader. */
     CompletionCheck.ReadSet readSet() {
         return reader instanceof DbReader d ? d.readSet : null;
@@ -205,6 +220,13 @@ public final class CompletionBootWork implements AutoCloseable {
 
     /** As above with the clock the safety poll reads and the executor an event's read runs on injected (tests: a fixed clock, a direct executor). */
     CompletionBootWork(BootWorkRegistry registry, Reader reader, Clock clock, Executor eventExecutor) {
+        this(registry, reader, clock, eventExecutor, new RenameWindow());
+    }
+
+    /** As above with the rename window the reader's latch writer was built from (tests of the window and the latch seam). */
+    CompletionBootWork(BootWorkRegistry registry, Reader reader, Clock clock, Executor eventExecutor, RenameWindow window) {
+        this.window = Objects.requireNonNull(window, "window");
+        window.onBusy(this::scheduleRetry);
         this.registry = Objects.requireNonNull(registry, "registry");
         this.reader = Objects.requireNonNull(reader, "reader");
         this.clock = Objects.requireNonNull(clock, "clock");
@@ -255,39 +277,35 @@ public final class CompletionBootWork implements AutoCloseable {
 
     /**
      * What a rename from gate 3 still waits for, read per call ({@link RenameReadiness}), from the latest sample, the one that
-     * {@link #gate3()} reads: {@link CompletionCheck.Result#renameMissing()}. Before the first sample it answers that the name-key drop move is
-     * missing (not known yet is not ready). Its {@link RenameReadiness#pinned} is the rename window ({@code renameWindow}): gate 3's flip
-     * to true waits for every pinned rename to return.
+     * {@link #gate3()} reads: {@link CompletionCheck.Result#renameMissing(boolean)}, with the latch read as the rename window's regime or the durable
+     * latch ({@link #gate3Latched()}). Before the first sample it answers that the name-key drop move is missing (not known yet is not ready).
+     * Its {@link RenameReadiness#pinned} is the rename window ({@link RenameWindow}): the latch is written, and the regime flips, only when
+     * every pinned rename has returned.
      */
     public RenameReadiness renameReadiness() {
         return new RenameReadiness() {
             @Override
             public Missing missing() {
                 var r = latest();
-                return r == null ? Missing.NAME_KEY_DROP_MOVE : r.renameMissing();
+                return r == null ? Missing.NAME_KEY_DROP_MOVE : r.renameMissing(latched());
             }
 
             @Override
-            public boolean dropMoveComplete() {
-                var r = latest();
-                return r != null && r.rename().dropMoveComplete();
+            public boolean gate3Latched() {
+                return latched();
             }
 
             @Override
             public <T> T pinned(java.util.function.Supplier<T> rename) {
-                renameWindow.readLock().lock();
-                try {
-                    return rename.get();
-                } finally {
-                    renameWindow.readLock().unlock();
-                }
+                return window.pinned(rename);
+            }
+
+            /** P3.7's in-process regime OR the durable latch (marlowe's accessor), read on every check: a lost flip self-heals from the row. */
+            private boolean latched() {
+                var r = latest();
+                return window.oneRowRegime() || CompletionBootWork.this.gate3Latched() || (r != null && r.gate3Latched());
             }
         };
-    }
-
-    /** Test seam: how long the flip waits for a pinned rename. */
-    void renameWindowWait(Duration wait) {
-        this.renameWindowWait = Objects.requireNonNull(wait, "wait");
     }
 
     /** Reads now, outside the schedule, for a consumer that must not wait for the next sample. */
@@ -400,6 +418,20 @@ public final class CompletionBootWork implements AutoCloseable {
         }
     }
 
+    /** Asks for another read after {@link #RENAME_WINDOW_RETRY} on the schedule's thread (nothing before {@link #start}: the first sample reads everything). */
+    private void scheduleRetry() {
+        readOwed.set(true);
+        ScheduledExecutorService sch = scheduler;
+        if (sch == null || closed) {
+            return;
+        }
+        try {
+            sch.schedule(this::requestRead, renameWindowRetry.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (RuntimeException rejected) {
+            // the schedule was shut down by close(): nothing to read for
+        }
+    }
+
     /**
      * One sample: evaluates the check and keeps the result for {@link #statusJson}.
      *
@@ -424,41 +456,7 @@ public final class CompletionBootWork implements AutoCloseable {
                 }
                 return -1;
             }
-            CompletionCheck.Result before = latest;
-            if (result.gate3() && (before == null || !before.gate3())) {
-                // gate 3 flips to true: wait for every pinned rename to return, so none commits a name-path rewrite after the readers
-                // switch (O-5). The wait is bounded: a rename that holds the window longer than renameWindowWait defers the flip to the
-                // next sample (a read is owed at once) instead of stalling the check, and its readers keep reading gate 3 as false.
-                boolean locked;
-                try {
-                    locked = renameWindow.writeLock().tryLock(renameWindowWait.toMillis(), TimeUnit.MILLISECONDS);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    locked = false;
-                }
-                if (!locked) {
-                    log.warn("event=rdr229_rename_window_busy waited_ms={} cause=\"a pinned rename is still open; the gate 3 flip is deferred to the next sample\"",
-                        renameWindowWait.toMillis());
-                    readOwed.set(true);
-                    return -1;
-                }
-                try {
-                    // the sample is as old as the wait: gate 3 may have dropped again while the rename ran, so read again under the
-                    // lock and flip only if it still holds (the fresh sample is what is published either way)
-                    try {
-                        result = reader.read();
-                        lastError = null;
-                    } catch (RuntimeException e) {
-                        log.warn("event=rdr229_completion_unreadable cause=\"{}\" during=rename_window", FailureHandler.oneLine(e.toString()));
-                        return -1;
-                    }
-                    latest = result;
-                } finally {
-                    renameWindow.writeLock().unlock();
-                }
-            } else {
-                latest = result;
-            }
+            latest = result;
             if (result.gate3Latched()) {
                 gate3Latched = true;
                 gate3LatchPciOff = gate3LatchPciOff || result.gate3LatchPciOff();

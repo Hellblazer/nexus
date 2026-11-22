@@ -29,11 +29,13 @@ public interface RenameReadiness {
     }
 
     /**
-     * Whether the name-key drop move has {@code completed_at}. Sticky: a completion is never undone, so from it a rename is never the
-     * name path again, whatever gate 3 does afterwards (gate 3 can drop back to false when an id index goes INVALID): the one-row rename
-     * once every P3.5b changeset has applied, a refusal until then. The default is false: a readiness with no such fact (a test's lambda).
+     * Whether gate 3 has been latched on this install: it held once and is remembered, whatever the live gate 3 says now. The rename path
+     * decision keys on this, never on the live value: from the latch a rename is one-row or refused, never the name path again, even when
+     * an id index goes INVALID and the live gate 3 drops back. The default is false: a readiness with no latch (a test's lambda).
+     * In the engine it is the rename window's in-process regime or the durable latch ({@code nexus.rdr229_gate_latch}, install-wide and across
+     * restarts), read on every call ({@link CompletionBootWork#renameReadiness()}).
      */
-    default boolean dropMoveComplete() {
+    default boolean gate3Latched() {
         return false;
     }
 

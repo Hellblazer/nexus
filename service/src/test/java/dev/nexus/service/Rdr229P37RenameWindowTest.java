@@ -170,14 +170,15 @@ class Rdr229P37RenameWindowTest {
     // ---- stage 4: the move completed and gate 3 dips ------------------------------------------------------------------------
 
     /**
-     * The drop move has completed, so the name keys are gone: from then on a rename is never the name path, even if gate 3 drops back to
-     * false (an id index going INVALID). Here P3.5b's changesets are still unapplied (boot 1), so it is refused naming the restart; before
+     * Gate 3 was latched (the drop move has completed, the name keys are gone): from then on a rename is never the name path, even if the
+     * live gate 3 drops back to false (an id index going INVALID). Here P3.5b's changesets are still unapplied (boot 1), so it is refused naming the restart; before
      * the fix gate 3 false read as "the name path" and the rename ran it.
      */
     @Test
     @Order(40)
-    void onceTheDropMoveCompleted_aDipOfGate3IsStillRefused_neverTheNamePath() throws Exception {
+    void onceGate3IsLatched_aDipOfTheLiveGate3IsStillRefused_neverTheNamePath() throws Exception {
         assertThat(engine.moveCompleted(Rdr229RenameEngine.DROP_LABEL)).as("non-vacuity: the move completed in stage 3").isTrue();
+        assertThat(engine.completion().gate3Latched()).as("non-vacuity: gate 3 was latched when it held in stage 2").isTrue();
         String tenant = "p37-w4";
         String token = engine.newTenant(tenant);
         String oldName = coll("p37w4", 1);
@@ -189,7 +190,8 @@ class Rdr229P37RenameWindowTest {
         long chunksBefore = engine.su(ctx -> Rdr229RenameChecks.naming(ctx, tenant, "chunks", "collection", oldName));
         engine.gate3(false);
         assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(10), () -> !engine.completion().gate3()))
-            .as("non-vacuity: gate 3 dropped back").isTrue();
+            .as("non-vacuity: the live gate 3 dropped back").isTrue();
+        assertThat(engine.completion().gate3Latched()).as("while the latch holds").isTrue();
         String why = " [readiness " + engine.readiness().map(Object::toString).orElse("unreadable") + "]";
 
         var r = engine.rename(token, oldName, coll("p37w4", 2));

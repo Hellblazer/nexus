@@ -359,17 +359,28 @@ public final class CompletionCheck {
 
         /**
          * The first thing a rename still waits for, the one answer the refusal, {@code GET /v1/status} and the in-process readiness
-         * share ({@link RenameReadiness}): {@link RenameReadiness.Missing#NONE} before gate 3 while the name-key drop move has not
-         * completed (the rename is the name path and nothing is awaited), then the name-key drop move, then a missing or empty P3.5b list
-         * (a restart cannot fix it), then the restart that applies P3.5b's changesets.
+         * share ({@link RenameReadiness}): {@link RenameReadiness.Missing#NONE} until gate 3 has been latched (the rename is the name path
+         * and nothing is awaited), then the name-key drop move, then a missing or empty P3.5b list (a restart cannot fix it), then the
+         * restart that applies P3.5b's changesets.
          *
-         * <p><b>Sticky once the move completed.</b> A completed drop move has dropped the name keys, so a name-path rewrite would
-         * fail or leave the install half renamed; from {@code completed_at} the answer no longer reads gate 3, and a dip of gate 3 (an
-         * id index going INVALID) leaves a rename one-row or refused, never the name path.
+         * <p><b>Keyed on the latched gate 3, not the live one.</b> The live gate 3 can drop back (an id index going INVALID) after it held,
+         * and that is never a reason to return to the name path: the readers have switched to the id and, once the drop move has run, the
+         * name keys are gone. From the latch a rename is one-row or refused.
          */
         public RenameReadiness.Missing renameMissing() {
+            return renameMissing(gate3Latched);
+        }
+
+        /**
+         * As {@link #renameMissing()} with the latch as the caller reads it now: the engine passes the rename window's regime OR the durable latch
+         * ({@link CompletionBootWork#gate3Latched()}), which can be newer than this sample (a sample is read before the latch writer flips the regime).
+         */
+        public RenameReadiness.Missing renameMissing(boolean latched) {
+            if (!latched) {
+                return RenameReadiness.Missing.NONE;
+            }
             if (!rename.dropMoveComplete()) {
-                return gate3 ? RenameReadiness.Missing.NAME_KEY_DROP_MOVE : RenameReadiness.Missing.NONE;
+                return RenameReadiness.Missing.NAME_KEY_DROP_MOVE;
             }
             if (rename.listed() == 0) {
                 return RenameReadiness.Missing.P35B_LIST_MISSING;
