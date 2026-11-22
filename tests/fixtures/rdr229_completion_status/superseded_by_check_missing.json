@@ -8,6 +8,8 @@
     "gates_total" : 3,
     "summary" : "gate 1 waits (15 of 16 stamp moves incomplete; the superseded_by CHECK is missing); gate 2 waits on gate 1; gate 3 waits: gate 2 does not hold",
     "gate3_why" : "gate 2 does not hold",
+    "gate3_latched" : false,
+    "id_index_invalid" : false,
     "labels_total" : 16,
     "labels_incomplete" : [ {
       "label" : "rdr229-stamp-catalog_collections",
