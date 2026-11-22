@@ -9,6 +9,8 @@ import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.datamove.Gate3;
 import dev.nexus.service.datamove.RenameReadiness;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.vectors.Embedder;
+import dev.nexus.service.vectors.EmbedderRouter;
 import dev.nexus.service.vectors.PgVectorRepository;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
@@ -19,6 +21,10 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.sql.Connection;
+import java.util.List;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -70,7 +76,58 @@ final class CollectionRouteFixture implements AutoCloseable {
         }
     }
 
+    /** An embedder that serves the fixture's minilm collections (the router dispatches on the model token). */
+    private static final class MiniEmbedder implements Embedder {
+        @Override
+        public List<float[]> embed(List<String> texts) {
+            List<float[]> out = new java.util.ArrayList<>(texts.size());
+            for (int i = 0; i < texts.size(); i++) {
+                float[] v = new float[384];
+                v[0] = 1.0f;
+                out.add(v);
+            }
+            return out;
+        }
+
+        @Override
+        public String modelToken() {
+            return "minilm-l6-v2-384";
+        }
+    }
+
+    /** As {@code ReembedRoutesTest}'s: records what is executed on it, runs none of it, and schedules nothing. */
+    private static final class RecordingExecutor extends ScheduledThreadPoolExecutor {
+        RecordingExecutor() {
+            super(1, r -> {
+                Thread t = new Thread(r, "recording-p35a-routes-executor");
+                t.setDaemon(true);
+                return t;
+            });
+        }
+
+        @Override
+        public ScheduledFuture<?> scheduleWithFixedDelay(Runnable command, long initialDelay, long delay, TimeUnit unit) {
+            return null;
+        }
+
+        @Override
+        public void execute(Runnable command) {
+            // recorded by being dropped: nothing here runs a re-embed job
+        }
+    }
+
+    /** The standard engine: no embedder, not local. The embed and re-embed routes answer 503 on it. */
     CollectionRouteFixture() throws Exception {
+        this(false);
+    }
+
+    /**
+     * @param localEmbed true for the {@code LOCAL_EMBED} variant ({@link CollectionRouteCensus.Engine}): the engine built
+     *                   like {@code ReembedRoutesTest}'s, an {@code EmbedderRouter} over a minilm embedder,
+     *                   {@code NX_ENGINE_LOCAL=1} through the env supplier, and a recording re-embed executor. Used only by
+     *                   the census rows that name it; every other row runs on the standard engine.
+     */
+    CollectionRouteFixture(boolean localEmbed) throws Exception {
         pg = PgContainerHelper.start();
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.applyProductSchema(su);
@@ -90,8 +147,12 @@ final class CollectionRouteFixture implements AutoCloseable {
         var repo = new PgVectorRepository(new TenantScope(svcDs), embedder, embedder);
         Gate3 gate = gate3::get;
         RenameReadiness readiness = renameWindow::get;
-        service = new NexusService(0, TOKEN, svcDs, null, repo, null, null, null, null, System::getenv, () -> false,
-            null, null, gate, readiness);
+        EmbedderRouter router = localEmbed ? new EmbedderRouter(new MiniEmbedder(), "document") : null;
+        java.util.function.Function<String, String> env = localEmbed
+            ? name -> "NX_ENGINE_LOCAL".equals(name) ? "1" : null
+            : System::getenv;
+        service = new NexusService(0, TOKEN, svcDs, router, repo, null, null, null, null, env, () -> false,
+            localEmbed ? new RecordingExecutor() : null, null, gate, readiness);
         service.start();
         http = TestHttp.client();
         // The tenant's first request runs the once-per-process ghost sweep, which deletes a collection that is registered
