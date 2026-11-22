@@ -639,9 +639,10 @@ public final class TelemetryRepository {
      *
      * <p>nexus-n3hhc: the target is a label a user supplied, so it is judged by the label rule the catalog rename
      * applies to the same target ({@link CollectionLabel#validateUserLabel}); a breach is an
-     * {@link IllegalArgumentException} (the handler's 400) before either table is touched. The target is not
-     * required to be registered: in the T2 rename cascade this route runs after the catalog's own rename, and a
-     * history row may outlive its collection, so the check is the rule, not a lookup.
+     * {@link IllegalArgumentException} (the handler's 400) before either table is touched. The route has no live
+     * client caller (a client's rename goes through the catalog's {@code rename_collection_cascade}; only the unused T2
+     * cascade calls it). The target is not required to be registered, because a history row may outlive its
+     * collection, so the check is the rule, not a lookup.
      */
     public Map<String, Integer> renameCollection(String tenant, String oldName, String newName) {
         CollectionLabel.validateUserLabel(newName);

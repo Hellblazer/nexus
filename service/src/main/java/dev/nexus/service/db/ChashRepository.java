@@ -218,6 +218,8 @@ public final class ChashRepository {
                 || newCollection == null || newCollection.isBlank()) {
             throw new IllegalArgumentException("old and new collection must not be empty");
         }
+        // The target is a label a user supplied: judged by the label rule the catalog rename applies (n3hhc's class).
+        CollectionLabel.validateUserLabel(newCollection);
         // nexus-wbfpw.71: a re-home with no audit row; refused on a quarantine collection, source or target.
         // RDR-229 P2.5: each end by its row (registry cache, else one short read); a row-less target, its prefix.
         QuarantineOrigin.requireNotQuarantine(tenantScope, tenant, "rename", oldCollection);

@@ -1641,8 +1641,13 @@ public final class TaxonomyRepository {
         });
     }
 
-    /** Rename all taxonomy rows from old to new collection. */
+    /**
+     * Rename all taxonomy rows from old to new collection. The target is a label a user supplied, so it is judged by
+     * the label rule the catalog rename applies ({@link CollectionLabel#validateUserLabel}) before any row moves
+     * (n3hhc's class: a route that writes its target with no label check).
+     */
     public Map<String, Integer> renameCollection(String tenant, String oldCol, String newCol) {
+        CollectionLabel.validateUserLabel(newCol);
         return tenantScope.withTenant(tenant, ctx -> {
             // RDR-210 Phase 6 Step 2 (bead nexus-f98bg): refused while a re-embed job holds either name.
             CatalogRepository.refuseUnderReembedJob(ctx, tenant, "rename", oldCol, newCol);
