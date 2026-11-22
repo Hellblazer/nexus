@@ -49,7 +49,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  *   <li>the candidate scan is the {@code chunks_pk} range over (tenant, collection);</li>
  *   <li>the manifest probe is {@code idx_catalog_chunks_chash};</li>
  *   <li>the quarantine probe is the primary key of {@code catalog_collections};</li>
- *   <li>the orphaning-record probe is the primary key of {@code chunk_orphaned_at}, with no sequential scan;</li>
+ *   <li>the orphaning-record probe is an index of {@code chunk_orphaned_at} (its primary key or P3.3c's (tenant_id, chash) child index), with no sequential scan;</li>
  *   <li>and there is NO index on {@code nexus.chunks (last_written_at)}: a btree on it would stop HOT updates
  *       for every client re-write (nexus-wbfpw.43 review item 7). That is asserted against the schema the
  *       changelog builds, so a changeset that adds one turns this red. (An earlier version of this test
@@ -264,8 +264,10 @@ class ChunkIsReapablePlanIntegrationTest {
         assertThat(plan).as("manifest probe:%n%s", plan).contains("idx_catalog_chunks_chash");
         assertThat(plan).as("quarantine probe is the catalog_collections primary key:%n%s", plan)
             .containsPattern("Index (Only )?Scan using \\w*catalog_collections\\w*");
-        assertThat(plan).as("the orphaning record is probed by its primary key, never scanned:%n%s", plan)
-            .containsPattern("Index (Only )?Scan using chunk_orphaned_at_pk")
+        // Either index probes it: the primary key (tenant_id, collection, chash), or RDR-229 P3.3c's child index (tenant_id, chash)
+        // (Rdr229SwapMove.CHILD_INDEX, vectors-075-1), which the planner prefers for the chash-only join.
+        assertThat(plan).as("the orphaning record is probed by an index, never scanned:%n%s", plan)
+            .containsPattern("Index (Only )?Scan using (chunk_orphaned_at_pk|" + dev.nexus.service.vectors.Rdr229SwapMove.CHILD_INDEX + ")")
             .doesNotContainPattern("Seq Scan on chunk_orphaned_at");
     }
 
