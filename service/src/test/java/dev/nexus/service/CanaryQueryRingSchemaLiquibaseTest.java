@@ -193,7 +193,8 @@ class CanaryQueryRingSchemaLiquibaseTest {
                     PgCatalogProbes.ConstraintDefinition::definition));
             assertThat(constraints).containsOnlyKeys(
                 "canary_query_ring_pk", "canary_query_ring_exactly_one_embedding", "canary_query_ring_digest_len",
-                "canary_query_ring_collection_fk", "canary_query_ring_collection_id_check");
+                "canary_query_ring_collection_fk", "canary_query_ring_collection_id_check",
+                "canary_query_ring_collection_id_fk");   // RDR-229 P3.3a: the id twin, NOT VALID until its move runs
             assertThat(constraints.get("canary_query_ring_pk"))
                 .isEqualTo("PRIMARY KEY (tenant_id, collection, vector_digest)");
             assertThat(constraints.get("canary_query_ring_exactly_one_embedding"))
@@ -204,8 +205,13 @@ class CanaryQueryRingSchemaLiquibaseTest {
                 .contains("catalog_collections(tenant_id, name, embedding_model)")
                 .contains("ON DELETE CASCADE");
 
+            assertThat(constraints.get("canary_query_ring_collection_id_fk"))
+                .as("RDR-229 P3.3a: the id twin, beside the name key and with its action")
+                .contains("FOREIGN KEY (tenant_id, collection_id, embedding_model)")
+                .contains("catalog_collections(tenant_id, collection_id, embedding_model)")
+                .contains("ON DELETE CASCADE");
             assertThat(PgCatalogProbes.foreignKeyDeleteActions(ctx, "nexus", "canary_query_ring"))
-                .as("the one foreign key cascades on delete ('c')").containsExactly("c");
+                .as("both foreign keys, the name key and its id twin, cascade on delete ('c')").containsExactly("c", "c");
             assertThat(PgCatalogProbes.indexDefs(ctx, "nexus", "canary_query_ring"))
                 .as("no index but the primary key's: nothing on the vectors")
                 .hasSize(1).allMatch(d -> d.contains("canary_query_ring_pk"));
