@@ -259,7 +259,14 @@ migration_wal_bytes_per_worker = 12143000
 # (linda's allocation): the CREATE TABLE and its primary key's index, +2. No row changed. P3.4's id indexes are runtime DDL after gate 2 and are not counted here.
 # Measured: chas lab-m via lab-remote, 2026-11-22, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on
 # 4b0d995718 (P3.4 on the Phase 3 stack b7e58b6c5f; gate jar rebuilt in the same command): ddl: migration=2843, as on 9712dd4513 before the rebase. Under Sam's 2860 cap.
-migration_ddl_per_worker = 2843
+# 2841 -> 2935 (2026-11-23, nexus-p2m1x.24, RDR-229 P3.5b SQL readers, under Sam's 2960 cap for the P3.5+P3.7 cut, T2 nexus/sam-ruling-rdr229-p35-ddl-cap-2026-11-22;
+# linda's rulings): vectors-077 is 38 CREATE OR REPLACE redefinitions (36 functions, 2 views) and 38 CREATE FUNCTION id twins (<name>_by_id),
+# plus a REVOKE FROM PUBLIC and a GRANT TO nexus_svc on each of the 9 twins whose original revokes PUBLIC (text_gate_probe, text_gate_probe_by_collection,
+# search_topic_set): 38 + 38 + 18 = 94. vectors-078 (12 CONTINUE-gated changesets) adds 0 here: a fresh walk skips them until the stamp moves complete.
+# Measured: chas lab-m via lab-remote, 2026-11-23, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on
+# P3.5b rebased onto b7e58b6c5f (gate jar rebuilt): ddl: migration=2935.
+# 2843 + 94 = 2937 when P3.4 (vectors-080) and P3.5b (vectors-077) are both present (merged locally by P3.5c vectors, not measured).
+migration_ddl_per_worker = 2937
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]
