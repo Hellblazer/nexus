@@ -324,7 +324,8 @@ class JooqRecordReflectionFeatureTest {
     // record type (GroupRecordsRecord), +1.
     // 150 -> 190: nexus-p2m1x.24 (RDR-229 P3.5b), vectors-077-100..139 added 40 id twins (<name>_by_id), 37 RETURNS TABLE and three SETOF bytea, one generated record type each, +40.
     // 190 -> 191: nexus-p2m1x.24, vectors-077-140 adds chunk_live_owners_by_id (RETURNS TABLE), +1.
-    private static final int EXPECTED_RECORD_TYPES = 191;
+    // 191 -> 188: linda 2026-11-22, the three hybrid_search_<dim> twins dropped (no engine caller), -3.
+    private static final int EXPECTED_RECORD_TYPES = 188;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {
