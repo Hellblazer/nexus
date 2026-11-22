@@ -244,9 +244,18 @@ class SchemaMigratorIntegrationTest {
         assertThat(first.pendingAtStart())
             .as("fresh walk: the plan and the landing agree, a self-retrying skip counted apart")
             .isEqualTo(first.newChangesets() + first.skippedRetryingChangesets());
+        // RDR-229 P3.5b (nexus-p2m1x.24): the vectors-078 readers wait for every stamp move the same way. The skip set is
+        // collections-001-2 plus the shipped CONTINUE list; the count pins its size and the identity check pins its members
+        // (every changeset is either recorded or skipped, so both together say the skips are exactly these).
+        Set<String> skips = P35bContinueChangesets.freshWalkSkips();
         assertThat(first.skippedRetryingChangesets())
-            .as("fresh walk: collections-001-2 waits for its data move")
-            .isEqualTo(1);
+            .as("fresh walk: collections-001-2 waits for its data move and the P3.5b CONTINUE readers for the stamps")
+            .isEqualTo(skips.size());
+        try (Connection conn = adminDs.getConnection()) {
+            assertThat(recordedIds(conn))
+                .as("fresh walk: the skipped changesets are exactly the expected ones, none recorded")
+                .doesNotContainAnyElementsOf(skips);
+        }
         assertThat(first.reexecutedChangesets())
             .as("fresh walk re-stamps nothing")
             .isZero();
@@ -2182,12 +2191,18 @@ class SchemaMigratorIntegrationTest {
                         + "the 5 genuinely-pending changesets PLUS the full "
                         + "runAlways set (always considered unrun regardless of "
                         + "prior execution), PLUS a self-retrying (onFail=CONTINUE) changeset still waiting "
-                        + "(collections-001-2, RDR-229 P3.8: never recorded, so unrun at every start) -- "
-                        + "5 + 13 + 1 = 19 on today's changelog (17 on the v0.1.118 walk)")
+                        + "(collections-001-2, RDR-229 P3.8, and the P3.5b CONTINUE readers of vectors-078: never "
+                        + "recorded, so unrun at every start) -- 5 + 13 + the skip set")
                     .isEqualTo(5L + runAlwaysIds.size() + outcome.skippedRetryingChangesets());
+                Set<String> skips = P35bContinueChangesets.freshWalkSkips();
                 assertThat(outcome.skippedRetryingChangesets())
-                    .as("the waiting collections-001-2 is the one skipped self-retrying changeset")
-                    .isEqualTo(1L);
+                    .as("the skipped self-retrying changesets are the waiting collections-001-2 and the P3.5b CONTINUE list")
+                    .isEqualTo((long) skips.size());
+                try (Connection conn = agedDs.getConnection()) {
+                    assertThat(recordedIds(conn))
+                        .as("none of the expected skips is recorded, so the count above names exactly them")
+                        .doesNotContainAnyElementsOf(skips);
+                }
 
                 // ── Assert: every runAlways row's dateexecuted actually moved
                 // during this walk (sanity check the seeded duplicates are
@@ -2582,6 +2597,13 @@ class SchemaMigratorIntegrationTest {
 
     private static long changelogRowCount(Connection c) throws Exception {
         return dsl(c).selectCount().from(databaseChangeLog()).fetchOne(0, long.class);
+    }
+
+    /** Every changeset id recorded in {@code databasechangelog}. */
+    private static Set<String> recordedIds(Connection c) {
+        return new HashSet<>(dsl(c).selectDistinct(DSL.field(DSL.name("id"), String.class))
+            .from(databaseChangeLog())
+            .fetch(0, String.class));
     }
 
     private int catalogDocumentChunksCount(Connection conn, String tenant, String hexChash) {

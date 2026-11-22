@@ -56,8 +56,13 @@ class ChunkOrphanedAtIndexChangesetIntegrationTest {
     private static final String ADMIN_PASS = "nexus_admin_coaidx_pass";
     private static final String INDEX = "idx_chunk_orphaned_at_tenant_chash";
     private static final String CHANGESET = "vectors-075-1";
-    /** The self-retrying changeset a fresh install always carries (it waits for a data move): the count the walk reports apart. */
-    private static final int WAITING_ON_ITS_OWN = 1;
+    /**
+     * The self-retrying changesets a fresh install always carries, which the walk reports apart: collections-001-2 waits for its data
+     * move and the P3.5b CONTINUE readers of vectors-078 wait for the stamp moves (RDR-229 P3.5b, nexus-p2m1x.24; read from the shipped
+     * list, never typed here).
+     */
+    private static final java.util.Set<String> WAITING = P35bContinueChangesets.freshWalkSkips();
+    private static final int WAITING_ON_ITS_OWN = WAITING.size();
 
     private PostgreSQLContainer<?> pg;
     private HikariDataSource adminDs;
@@ -149,7 +154,7 @@ class ChunkOrphanedAtIndexChangesetIntegrationTest {
 
         assertThat(indexValid()).as("the index exists and is VALID").isTrue();
         assertThat(recorded()).as("the changeset ran, so it is recorded").isTrue();
-        assertThat(first.skippedRetryingChangesets()).as("only the changeset that waits for its data move is skipped").isEqualTo(WAITING_ON_ITS_OWN);
+        assertThat(first.skippedRetryingChangesets()).as("only the changesets that wait for their data moves are skipped").isEqualTo(WAITING_ON_ITS_OWN);
         try (Connection su = pg.createConnection("")) {
             assertThat(PgCatalogProbes.indexDef(DSL.using(su, SQLDialect.POSTGRES), "nexus", INDEX))
                 .as("the child-side lookup of chunk_orphaned_at_chunk_id_fk").contains("(tenant_id, chash)");
@@ -173,10 +178,14 @@ class ChunkOrphanedAtIndexChangesetIntegrationTest {
         // the interaction with the per-collection index builders: a self-retrying changeset is not schema work, so a running build is kept, and the boot names it
         assertThat(logs).as("no builder is ended for it").noneMatch(l -> l.contains("event=pci_builders_terminated"));
         assertThat(logs).anyMatch(l -> l.contains("event=pci_builders_kept") && l.contains("retrying=" + (WAITING_ON_ITS_OWN + 1)));
-        assertThat(logs).as("the retrying set is exactly the two").filteredOn(l -> l.contains("event=pci_build_kept_for_retrying"))
-            .hasSize(WAITING_ON_ITS_OWN + 1)
+        List<String> kept = logs.stream().filter(l -> l.contains("event=pci_build_kept_for_retrying")).toList();
+        assertThat(kept).as("the retrying set is exactly the waiting set and this one").hasSize(WAITING_ON_ITS_OWN + 1)
             .anyMatch(l -> l.contains("vectors-075-chunk-orphaned-at-chash-index.xml::vectors-075-1") && l.contains("reason=self_retrying_precondition"))
             .anyMatch(l -> l.contains("collections-001-tuple-unique-index.xml::collections-001-2"));
+        for (String id : P35bContinueChangesets.ids()) {
+            assertThat(kept).as("the P3.5b CONTINUE reader " + id + " is a named member of the retrying set")
+                .anyMatch(l -> l.contains("vectors-078-rdr229-p35b-readers-continue.xml::" + id + " reason="));
+        }
     }
 
     // ── 3: the wait ends, the boot does not fail, the next boot builds it ───────────────────────────────────
