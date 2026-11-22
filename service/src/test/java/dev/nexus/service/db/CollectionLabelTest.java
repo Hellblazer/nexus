@@ -6,6 +6,15 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.Arguments;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
+import java.util.ArrayList;
+import java.util.List;
 
 import java.util.stream.Stream;
 
@@ -69,39 +78,79 @@ class CollectionLabelTest {
         return s.repeat(n);
     }
 
-    static Stream<String> legalLabels() {
-        return Stream.of(
-            repeat("a", 100), "My Notes", "notes 50%: café", "日本語のノート", "ab", "a", "-leading-hyphen", "trailing_",
-            "a.b", "code__myrepo", "docs__1-1__voyage-context-3__v1", "c", "C1", "c1a", "cc1", "c-1", "ac1",
-            "c\u0661",                      // c + ARABIC-INDIC DIGIT ONE: not an ASCII digit
-            repeat("é", 127),                // 254 bytes
-            repeat("é", 127) + "a",          // exactly 255 bytes
-            repeat("a", 255),
-            "x\u200dy",                     // ZERO WIDTH JOINER (Cf) is allowed
-            "a b", "inner space",
-            "a\ud83d\ude00b");             // a supplementary character, a valid surrogate pair
+    /**
+     * The case table the client's tests/test_rdr229_label_rule.py reads too (nexus-mrmqw): {@code rules} is the clause
+     * order both halves check in, and each case names the first clause its label breaks ({@code null}: legal). The
+     * engine's verdict is {@link CollectionLabel#shapeBreach}, then the minted form ({@code not_minted}), which is
+     * {@link CollectionLabel#validateUserLabel}'s order.
+     */
+    private static final JsonNode CASES = readCases();
+
+    private static JsonNode readCases() {
+        try (InputStream in = CollectionLabelTest.class.getResourceAsStream("/label-rule-cases.json")) {
+            if (in == null) {
+                throw new IllegalStateException("resource label-rule-cases.json is missing");
+            }
+            return new ObjectMapper().readTree(in);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
     }
 
-    static Stream<String> refusedLabels() {
-        return Stream.of(
-            "", "a\u0000b", "a\nb", "a\tb", "a\u001fb", "a\u007fb", "a\u0085b", "a\u2028b", "a\u2029b",
-            "a\ud800b",                     // a lone high surrogate: not valid UTF-8
-            "a\udc00b",                     // a lone low surrogate
-            repeat("a", 256), repeat("é", 128), repeat("é", 127) + "ab",
-            "c1", "c0", "c007", "c1234567890123456789",
-            "a/b", "/");
+    private static String labelOf(JsonNode c) {
+        if (c.has("label")) {
+            return c.get("label").asText();
+        }
+        StringBuilder sb = new StringBuilder();
+        for (JsonNode part : c.get("parts")) {
+            sb.append(repeat(part.get(0).asText(), part.get(1).asInt()));
+        }
+        return sb.toString();
+    }
+
+    static Stream<Arguments> cases() {
+        List<Arguments> out = new ArrayList<>();
+        for (JsonNode c : CASES.get("cases")) {
+            out.add(Arguments.of(labelOf(c), c.get("rule").isNull() ? null : c.get("rule").asText()));
+        }
+        return out.stream();
+    }
+
+    private static String engineRule(String label) {
+        return CollectionLabel.shapeBreach(label).map(CollectionLabel.Breach::rule)
+            .orElse(CollectionLabel.isMintedForm(label) ? "not_minted" : null);
+    }
+
+    @Test
+    void theCaseTableIsNotEmptyAndCoversEveryRule() {
+        assertThat(CASES.get("cases").size()).isGreaterThanOrEqualTo(60);
+        java.util.Set<String> named = new java.util.HashSet<>();
+        CASES.get("cases").forEach(c -> named.add(c.get("rule").isNull() ? "legal" : c.get("rule").asText()));
+        java.util.Set<String> expected = new java.util.HashSet<>(CollectionLabel.shapeRules());
+        expected.add("not_minted");
+        expected.add("legal");
+        assertThat(named).isEqualTo(expected);
+    }
+
+    /** nexus-pqirj: the engine checks the clauses in the table's order, as the client's LABEL_RULES does. */
+    @Test
+    void theEngineChecksTheClausesInTheTablesOrder() {
+        List<String> order = new ArrayList<>(CollectionLabel.shapeRules());
+        order.add("not_minted");
+        List<String> table = new ArrayList<>();
+        CASES.get("rules").forEach(r -> table.add(r.asText()));
+        assertThat(order).isEqualTo(table);
     }
 
     @ParameterizedTest
-    @MethodSource("legalLabels")
-    void aLabelTheRuleAllowsIsAccepted(String label) {
-        CollectionLabel.validateUserLabel(label);
-    }
-
-    @ParameterizedTest
-    @MethodSource("refusedLabels")
-    void aLabelTheRuleRefusesRaisesIllegalArgument(String label) {
-        assertThatThrownBy(() -> CollectionLabel.validateUserLabel(label)).isInstanceOf(IllegalArgumentException.class);
+    @MethodSource("cases")
+    void eachCaseBreaksTheRuleTheTableNames(String label, String rule) {
+        assertThat(engineRule(label)).isEqualTo(rule);
+        if (rule == null) {
+            CollectionLabel.validateUserLabel(label);
+        } else {
+            assertThatThrownBy(() -> CollectionLabel.validateUserLabel(label)).isInstanceOf(IllegalArgumentException.class);
+        }
     }
 
     @Test
@@ -120,7 +169,7 @@ class CollectionLabelTest {
      * The '/' clause is Sam's ruling (T2 nexus/sam-ruling-rdr229-label-slash-2026-11-21): NoteUri.collectionOf ends a
      * collection at the first '/', and file paths are built from a label. A later ruling flips
      * CollectionLabel.REFUSE_SLASH (and the client's LABEL_REFUSES_SLASH) and changes this test and "a/b" and "/" in
-     * refusedLabels.
+     * label-rule-cases.json.
      */
     @Test
     void aLabelHoldingASlashIsRefused() {
