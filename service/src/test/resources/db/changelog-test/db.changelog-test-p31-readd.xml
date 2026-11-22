@@ -2,8 +2,9 @@
 <!--
     RDR-229 P3.1 (nexus-p2m1x.17; Sam's rule nexus-zrcj7: no SQL strings in Java, tests included): runs the operator's generated re-add,
     docs/runbooks/rdr-229-p31-readd.sql (generated from db/rdr229/p31-checks.tsv by scripts/rdr229_p31_downstep.py), through Liquibase, so the
-    test executes the operator's own file and carries no SQL text. The file is under docs/, not on the classpath: the caller's resource accessor
-    reads it from the repository root (Rdr229P31RegistryStampRoundTripIntegrationTest). runAlways, bookkeeping in its own table; one transaction,
+    test executes the operator's own text and carries no SQL. It reads the generator's classpath copy, db/rdr229/p31-readd.sql, which
+    the generator's check holds byte-equal to the runbook file: a changelog reference stays under the hashed db/ tree
+    (tests/test_service_jooq_codegen_skip_lint.py, ChangelogBulkGrantConformanceTest). runAlways, bookkeeping in its own table; one transaction,
     as the runbook runs it (psql in single-transaction mode).
 -->
 <databaseChangeLog
@@ -13,6 +14,6 @@
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
 
     <changeSet id="p31-readd" author="nexus-p2m1x.17" runAlways="true">
-        <sqlFile path="docs/runbooks/rdr-229-p31-readd.sql" relativeToChangelogFile="false" splitStatements="false" stripComments="false"/>
+        <sqlFile path="db/rdr229/p31-readd.sql" relativeToChangelogFile="false" splitStatements="false" stripComments="false"/>
     </changeSet>
 </databaseChangeLog>

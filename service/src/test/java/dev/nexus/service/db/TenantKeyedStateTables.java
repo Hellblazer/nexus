@@ -868,6 +868,9 @@ final class TenantKeyedStateTables {
             + "to their own id, by content type, summed over every tenant as byContentType is; no tenant id or name");
         notKeyed.put("CompletionBootWork.TableWait.constraints", RESULT + "; the CHECK constraint names (fixed by the "
             + "changesets) of one table whose VALIDATE waits, merged across its name columns by byTable; no tenant's");
+        notKeyed.put("CompletionTenantCounts.Counts.tables", "a component of one tenant's counts record, built by one "
+            + "GET /v1/catalog/rdr229_completion_counts request inside that tenant's own scoped transaction, returned and "
+            + "dropped with the response; never held across requests, so a tenant's reset has nothing to clear");
         notKeyed.put("BootWorkRegistry.rdr229Completion", "the supplier of /v1/status's rdr229_completion, bound once at "
             + "boot: it renders the completion check's last read from memory, which is engine-wide counts and labels summed "
             + "over every tenant (CompletionBootWork.latest), and holds no tenant data itself");

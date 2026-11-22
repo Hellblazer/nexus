@@ -14,8 +14,6 @@ import liquibase.database.Database;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
-import liquibase.resource.CompositeResourceAccessor;
-import liquibase.resource.DirectoryResourceAccessor;
 import org.jooq.Field;
 import org.jooq.Record;
 import org.jooq.SQLDialect;
@@ -25,8 +23,6 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.sql.Connection;
 import java.time.Clock;
 import java.time.OffsetDateTime;
@@ -144,17 +140,12 @@ class Rdr229P31RegistryStampRoundTripIntegrationTest extends DataMoveIntegration
         PgContainerHelper.runSuperuserTestChangelog(su, DOWN_STEP, "databasechangelog_test_p31_downstep", Map.of());
     }
 
-    /** The generated re-add, read from docs/runbooks as the operator runs it, in one transaction. */
+    /** The generated re-add (the classpath copy of docs/runbooks/rdr-229-p31-readd.sql), in one transaction. */
     private void runReAdd() throws Exception {
-        Path root = Path.of("").toAbsolutePath();
-        while (root != null && !Files.isDirectory(root.resolve("docs/runbooks"))) {
-            root = root.getParent();
-        }
-        assertThat(root).as("the repository root above the working directory").isNotNull();
         Database db = DatabaseFactory.getInstance().findCorrectDatabaseImplementation(new JdbcConnection(su));
         db.setDatabaseChangeLogTableName("databasechangelog_test_p31_readd");
         db.setDatabaseChangeLogLockTableName("databasechangelog_test_p31_readd_lock");
-        var accessor = new CompositeResourceAccessor(new ClassLoaderResourceAccessor(), new DirectoryResourceAccessor(root));
+        var accessor = new ClassLoaderResourceAccessor();
         new Liquibase(READD, accessor, db).update(new Contexts());
         su.setAutoCommit(true);
     }

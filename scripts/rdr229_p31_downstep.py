@@ -22,8 +22,10 @@ completion check and this script share, so a table added to it is added to both.
 Usage: rdr229_p31_downstep.py [--root DIR] (--print | --print-readd | --write | --check)
   --print        the down-step SQL on stdout
   --print-readd  the re-add SQL on stdout
-  --write        rewrite service/src/main/resources/db/rdr229/p31-downstep.sql and docs/runbooks/rdr-229-p31-readd.sql
-  --check        exit 1 when either committed SQL file, or the down-step, the re-add, the verification query, the pause and
+  --write        rewrite service/src/main/resources/db/rdr229/p31-downstep.sql, docs/runbooks/rdr-229-p31-readd.sql and
+                 its classpath copy service/src/main/resources/db/rdr229/p31-readd.sql (the engine test runs the copy: a
+                 changelog reference must stay under the hashed db/ tree)
+  --check        exit 1 when any committed SQL file, or the down-step, the re-add, the verification query, the pause and
                  the unpause embedded in the runbook, differ from a fresh run (a drift check)
 """
 from __future__ import annotations
@@ -36,6 +38,7 @@ from pathlib import Path
 LIST_REL = "service/src/main/resources/db/rdr229/p31-checks.tsv"
 SQL_REL = "service/src/main/resources/db/rdr229/p31-downstep.sql"
 READD_REL = "docs/runbooks/rdr-229-p31-readd.sql"
+READD_DB_REL = "service/src/main/resources/db/rdr229/p31-readd.sql"
 RUNBOOK_REL = "docs/runbooks/rdr-229-p31-rollback.md"
 
 DOWN_BEGIN = "<!-- p31-downstep:begin -->"
@@ -241,8 +244,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.write:
         (root / SQL_REL).write_text(sql, encoding="utf-8")
         (root / READD_REL).write_text(readd, encoding="utf-8")
+        (root / READD_DB_REL).write_text(readd, encoding="utf-8")
         sys.stdout.write(f"wrote {SQL_REL}: {sql.count('DROP CONSTRAINT')} statements\n")
-        sys.stdout.write(f"wrote {READD_REL}: {readd.count('ADD CONSTRAINT')} statements\n")
+        sys.stdout.write(f"wrote {READD_REL} and {READD_DB_REL}: {readd.count('ADD CONSTRAINT')} statements\n")
         return 0
     problems = []
     committed = root / SQL_REL
@@ -250,11 +254,12 @@ def main(argv: list[str] | None = None) -> int:
         problems.append(f"{SQL_REL} is missing: run with --write")
     elif committed.read_text(encoding="utf-8") != sql:
         problems.append(f"{SQL_REL} differs from a fresh run: run with --write")
-    committed_readd = root / READD_REL
-    if not committed_readd.exists():
-        problems.append(f"{READD_REL} is missing: run with --write")
-    elif committed_readd.read_text(encoding="utf-8") != readd:
-        problems.append(f"{READD_REL} differs from a fresh run: run with --write")
+    for rel in (READD_REL, READD_DB_REL):
+        committed_readd = root / rel
+        if not committed_readd.exists():
+            problems.append(f"{rel} is missing: run with --write")
+        elif committed_readd.read_text(encoding="utf-8") != readd:
+            problems.append(f"{rel} differs from a fresh run: run with --write")
     runbook = root / RUNBOOK_REL
     if not runbook.exists():
         problems.append(f"{RUNBOOK_REL} is missing")
