@@ -136,3 +136,25 @@ def test_the_restart_needed_status_the_engine_publishes_is_idle_for_both_rules(m
     assert _busy(monkeypatch, tmp_path, status) is None
     assert _harness.boot_work_settled(status)
     assert _harness.status_says_idle(200, status)
+
+
+def test_the_restart_needed_fixture_follows_the_engines_arithmetic():
+    """CompletionCheck.Result#renameMissing answers NONE until gate 3 is latched (or the drop move completed), so a status that says
+    ``restart`` has gate 3 holding or latched: the fixture holds all three gates and lists the restart entry as the one piece of work."""
+    c = _fixture("restart_needed")["rdr229_completion"]
+    assert c["rename_missing"] == "restart"
+    assert c["gate3"] is True and c["gates_holding"] == 3 and c["gate3_why"] == ""
+
+
+def test_the_restart_entry_id_is_the_engines_in_both_idle_rules():
+    """The id the engine publishes (CompletionBootWork.RESTART_ENTRY_ID) is the one both idle rules skip: a rename of it on one side only
+    would put the restart notice back into the work count and defer the swap it is waiting for."""
+    java = (_REPO / "service" / "src" / "main" / "java" / "dev" / "nexus" / "service" / "datamove" / "CompletionBootWork.java").read_text()
+    import re
+
+    m = re.search(r'RESTART_ENTRY_ID\s*=\s*"([^"]+)"', java)
+    assert m, "non-vacuity: the engine's constant was found"
+    assert pg_bundle_refresh.RESTART_NOTICE_ID == m.group(1)
+    assert _harness.RESTART_NOTICE_ID == m.group(1)
+    assert _RESTART_ENTRY["id"] == m.group(1)
+
