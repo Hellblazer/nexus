@@ -165,6 +165,11 @@ def test_the_runbook_pauses_the_open_stamp_moves_before_the_down_step_and_says_w
     mod = _load()
     assert mod.runbook_problems(text, LIST.read_text(encoding="utf-8")) == []
     assert "paused_by = 'rdr229 down-step'" in mod.generate_pause() + mod.generate_unpause()
+    # P3.3a's validation moves run the same re-stamp, so the pause, its release and the window query hold them too
+    for statement in (mod.generate_pause(), mod.generate_unpause()):
+        assert "label LIKE 'rdr229-fkvalidate-%'" in statement
+    window = text[text.index("Check the window first"):text.index("Zero rows means")]
+    assert "label LIKE 'rdr229-fkvalidate-%'" in window
     drifted = text.replace("paused_at IS NULL;", "paused_at IS NOT NULL;", 1)
     assert mod.runbook_problems(drifted, LIST.read_text(encoding="utf-8")), "a drifted pause statement is reported"
 
