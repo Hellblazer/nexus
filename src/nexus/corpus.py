@@ -102,18 +102,35 @@ def _label_is_not_minted_form(name: str) -> None:
         )
 
 
-#: The label rule's clauses, in the order they are checked. Adding a clause is adding one function above and one
-#: entry here (the engine's twin is ``CollectionLabel.SHAPE_CLAUSES`` and ``requireNotMinted``).
-_LABEL_CLAUSES: tuple[Callable[[str], None], ...] = (
-    _label_not_empty,
-    _label_is_utf8,
-    _label_within_byte_limit,
-    _label_has_no_control_character,
-    _label_has_no_slash,
-    _label_has_no_comma,
-    _label_has_no_edge_whitespace,
-    _label_is_not_minted_form,
+#: The label rule's clauses, in the order they are checked, each under the rule name the engine gives it
+#: (``CollectionLabel.SHAPE_CLAUSES``, then ``requireNotMinted``; the name is the import report's ``rule`` on the
+#: wire). The order is the engine's, so a label that breaks two clauses gets the same refusal from both sides
+#: (nexus-pqirj). Adding a clause is one function above, one entry here and one in the engine; the shared case
+#: table ``service/src/test/resources/label-rule-cases.json`` pins the names, the order and the verdicts for both
+#: (nexus-mrmqw).
+_LABEL_CLAUSES: tuple[tuple[str, Callable[[str], None]], ...] = (
+    ("non_empty", _label_not_empty),
+    ("valid_utf8", _label_is_utf8),
+    ("no_control_character", _label_has_no_control_character),
+    ("within_byte_limit", _label_within_byte_limit),
+    ("no_slash", _label_has_no_slash),
+    ("no_comma", _label_has_no_comma),
+    ("no_edge_whitespace", _label_has_no_edge_whitespace),
+    ("not_minted", _label_is_not_minted_form),
 )
+
+#: The rule names of :data:`_LABEL_CLAUSES`, in order.
+LABEL_RULES: tuple[str, ...] = tuple(rule for rule, _ in _LABEL_CLAUSES)
+
+
+def label_breach(name: str) -> tuple[str, str] | None:
+    """The first clause of the label rule *name* breaks, as ``(rule, message)``, or ``None`` when it is a legal label."""
+    for rule, clause in _LABEL_CLAUSES:
+        try:
+            clause(name)
+        except ValueError as exc:
+            return rule, str(exc)
+    return None
 
 
 def validate_collection_name(name: str) -> None:
@@ -139,7 +156,7 @@ def validate_collection_name(name: str) -> None:
     keeps its label whatever it is; the engine enforces the same rule on a NEW registration, a rename target, a
     re-embed target and a new imported row (``CollectionLabel``).
     """
-    for clause in _LABEL_CLAUSES:
+    for _rule, clause in _LABEL_CLAUSES:
         clause(name)
 
 
