@@ -270,7 +270,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-251](rdr-251-taxonomy-compute-on-the-engine.md) | Taxonomy Compute on the Engine: Discover, Labels and Cross-Links Without Downloading the Collection (RDR-193 Part B) | Architecture | Deferred | 2026-11-16 |
 | [RDR-252](rdr-252-aura-relevance-and-one-responder.md) | Groups, Relevance and One Responder: Raid-Style Coordination for Sessions, with Auras That Load by Membership and Act by Assignment | Architecture | Closed | 2026-11-16 |
 | [RDR-253](rdr-253-session-identity.md) | Session Identity: Named Seats That Outlive Sessions, a Binding Log, One Resolver, and Fenced Identity State | Architecture | Accepted | 2026-11-16 |
-| [RDR-254](rdr-254-identity-when-a-path-moves.md) | Identity When a Path Moves: Repo Owners and Curator Documents Keep Their Identity Across a Move | Architecture | Accepted | 2026-11-19 |
+| [RDR-254](rdr-254-identity-when-a-path-moves.md) | Identity When a Path Moves: Repo Owners and Curator Documents Keep Their Identity Across a Move | Architecture | Closed | 2026-11-19 |
 
 > RDR-216 is unused on `develop`: drafted, gated BLOCKED, then abandoned 2026-09-19 without landing. Its measurements survive in T2 as `nexus_rdr/216-research-1` through `-19` and in `nexus/manticore-auto-chunking-analysis-2026-09-19`; the record itself never merged.
 

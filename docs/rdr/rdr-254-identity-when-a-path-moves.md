@@ -2,7 +2,8 @@
 title: "Identity When a Path Moves: Repo Owners and Curator Documents Keep Their Identity Across a Move"
 id: RDR-254
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-11-22
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
@@ -974,7 +975,7 @@ What each test file covers:
   collect it; it runs by hand. Its first recorded run, with the other five
   RDR-254 real-engine files (move hints, the GH #1571 MVV, the owners-move
   journey, the curator hint, the repo hints), was 34 passed, 0 skipped, 0
-  failed on 9b801e0ff2's gate jar (T2 `nexus_rdr/254-close-real-engine-run`).
+  failed on the close branch's gate jar, before its last rebase (T2 `nexus_rdr/254-close-real-engine-run`).
 - `tests/test_rdr232_lifecycle_stream.py`: a second clone's owner reads the
   `<repo basename>_rdr` project from its recorded root.
 
@@ -1094,6 +1095,6 @@ else.
 - 2026-11-19: Gate round 2 — PASSED (0 Critical, 3 Significant, 0 ship-blocker(s)); blob `c2ff1151086d`; critique `nexus_rdr/254-gate-critique-2026-11-19-r2`.
 - 2026-11-20: Move hints wording matched to the reviewed Phase 3 code (grant 3; reviews `nexus_rdr/254-p3-review-r1`, `nexus/confirm-afba69e8d-none-2026-11-20-r3`): alias rows excluded, per-run bounds and the closing note, fail-open and `ClickException` printing, the engine's outside-root rule, the two-hash minimum, the census move line for healthy owners only, and the `nx catalog search` lookup.
 - 2026-11-21: Wording matched to the reviewed code (grant 3; reviews `nexus_rdr/254-aspect-race-fix-review`, `nexus/review-2dcd8ae85-none-2026-11-21`, `nexus/review-d26105450-rdr254-aspect-deadlock-retry-2026-11-21-r1`): the move floor is engine 0.1.199 (1274c4ea5f), the aspect-queue race fix covers trashed and alias documents (41a4edd0ae, d26ac3fcc2, 348cef2712), the deadlock edge it opens is accepted by Sam with a retry follow-up that is built as `DeadlockRetry` around the aspect upsert (97a0676f57, 53e1f30709, 44813b9c12), and the minimum viable validation ran (8c70440a7b, fed4c979f8). No decision or criterion changed.
-- 2026-11-21: Phase 4 (Gap 4) landed: a second live clone with the same folder name registers under `<folder>-<repo hash>` through one rule, `repo_owner_name`, called by `ensure_owner_for_repo` and the two direct `register_owner` sites (tests first in 9521b4b874, the rule and its docs in 5e4f49f726); the Phase 4 step records what was built. No decision or criterion changed.
+- 2026-11-21: Phase 4 (Gap 4) landed: a second live clone with the same folder name registers under `<folder>-<repo hash>` through one rule, `repo_owner_name`, called by `ensure_owner_for_repo` and the two direct `register_owner` sites (tests first in 01d45f7e43, the rule and its docs in 1da5e4940e); the Phase 4 step records what was built. No decision or criterion changed.
 - 2026-11-21: Phase 4 wording matched to the reviewed code (grant 3; reviews `nexus_rdr/254-phase4-review`, `nexus_rdr/254-phase4-critique`): an owner two clones already share gives the other clone its own owner and collection on its next registration; a root another machine recorded, a container path or an unmounted volume reads as gone; first registrations that race can both claim the plain name (named residual, engine refusal not built); only a permission error reads a root as unreadable; a suffix another owner holds grows to the full root hash; the lifecycle project comes from the root basename; `differently cased` holds on a case-insensitive filesystem; the Built step says what each test file covers. No decision or criterion changed.
 - 2026-11-21: Close critique (partial: 0 Critical, 3 Significant, 0 ship-blockers) fixed under grant 3: the owner-fold report and Undo say the fold counts its folded owner and trashed rows without naming them, the dry run's last line, the 300 s move timeout and the client modules are named, the Phase 4 real-engine file's first run is recorded (34 passed with the other five real-engine files), the 0.1.200 prerequisite is in the past tense, and the first-registration race cites Sam's ruling; stale line anchors in Key Discoveries are updated and "four sites" reads three. No decision or criterion changed.
