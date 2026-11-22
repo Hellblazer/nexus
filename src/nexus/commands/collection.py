@@ -2742,7 +2742,7 @@ def reembed_cmd(
             f"{stored - processed} of {stored} stored chunk(s) were not "
             f"re-embedded and keep their old vectors: the skipped rows above, "
             f"and chunks with no live catalog document (`nx collection info "
-            f"{name}` shows live and stored counts)."
+            f"{shlex.quote(name)}` shows live and stored counts)."
         )
 
 

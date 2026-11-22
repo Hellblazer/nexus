@@ -12,6 +12,7 @@ single command. Migration: ``nx enrich <coll>`` → ``nx enrich bib
 """
 from __future__ import annotations
 
+import shlex
 import contextlib
 import json
 import os
@@ -3860,7 +3861,7 @@ def aspects_show_cmd(tumbler_or_title: str, as_json: bool, field: str) -> None:
             click.echo(
                 f"No aspect record extracted yet for tumbler "
                 f"{entry.tumbler} ({entry.title!r}). Run "
-                f"'nx enrich aspects {entry.physical_collection}' to extract."
+                f"`nx enrich aspects {shlex.quote(entry.physical_collection)}` to extract."
             )
         return
 
@@ -4028,7 +4029,7 @@ def aspects_list_cmd(
     if not records:
         click.echo(
             f"No aspect records in '{collection}'. Run "
-            f"'nx enrich aspects {collection}' to extract."
+            f"`nx enrich aspects {shlex.quote(collection)}` to extract."
         )
         return
 
