@@ -1284,8 +1284,10 @@ class TestETLFidelity:
         cat.register_collection(
             label, content_type="knowledge", owner_id="p213-field-notes",
             embedding_model="bge-base-en-v15-768", model_version="v1",
-        )  # legacy_grandfathered is derived: True for a non-conformant name
-        assert cat.get_collection(label)["legacy_grandfathered"] is True, "guard: the row is flagged"
+        )
+        # RDR-229 item 11 (D5): Phase 3 stops writing legacy_grandfathered (P3.8's register_collection derives nothing
+        # from the name), so a label registered now is unflagged; the seeded flagged row is the test below.
+        assert cat.get_collection(label)["legacy_grandfathered"] is False, "D5: a new registration writes no flag"
 
         found = cat.find_collection("knowledge", "p213-field-notes", "bge-base-en-v15-768")
 
