@@ -394,7 +394,7 @@ class Rdr229SwapMovesAfterTheSwapIntegrationTest extends Rdr229SwapMovesFixtures
      * chunk delete reads the whole child table. EXPLAIN shows no trigger plan, so this EXPLAINs the lookup the foreign key's trigger issues
      * (ON DELETE CASCADE: a DELETE on the child by the four key columns; NO ACTION: a SELECT ... FOR KEY SHARE by them), with enable_seqscan off so a
      * table this small names the index it would use. chunk_orphaned_at has only its name primary key (tenant_id, collection, chash) and gets
-     * vectors-074's (tenant_id, chash); the manifest uses idx_catalog_chunks_chash and topic_assignments idx_ta_tenant_doc_id.
+     * vectors-075's (tenant_id, chash); the manifest uses idx_catalog_chunks_chash and topic_assignments idx_ta_tenant_doc_id.
      */
     @Test
     void theChildLookupsOfTheChunkIdKeyEachUseAnIndexOnceTheSwapIsDone() throws Exception {
@@ -456,7 +456,7 @@ class Rdr229SwapMovesAfterTheSwapIntegrationTest extends Rdr229SwapMovesFixtures
     // ── 15: the chunks swap waits for the child index (transient, never a wedge) ────────────────────────────
 
     /**
-     * The chunks swap's on_complete first checks that {@code idx_chunk_orphaned_at_tenant_chash} (vectors-074-1) is built and valid, and with
+     * The chunks swap's on_complete first checks that {@code idx_chunk_orphaned_at_tenant_chash} (vectors-075-1) is built and valid, and with
      * it absent raises 55P03: a TRANSIENT blocked state (failed_at stays NULL, last_transient is set), the completion rolls back whole so
      * nothing is added to a child table. A verification arm would have been permanent and wedged the swap. Once a boot has built the index
      * the same move completes on its next pass (the backoff is moved into the past, as the clock would).
@@ -467,7 +467,7 @@ class Rdr229SwapMovesAfterTheSwapIntegrationTest extends Rdr229SwapMovesFixtures
         registerSwaps();
         try (Connection c = pg.createConnection("")) {
             c.setAutoCommit(true);
-            PgContainerHelper.replayChangesetRollback(c, "db/changelog/vectors-074-chunk-orphaned-at-chash-index.xml", "vectors-074-1");
+            PgContainerHelper.replayChangesetRollback(c, "db/changelog/vectors-075-chunk-orphaned-at-chash-index.xml", "vectors-075-1");
         }
         try {
             runSwaps(new VerifyingFinisher());
@@ -484,7 +484,7 @@ class Rdr229SwapMovesAfterTheSwapIntegrationTest extends Rdr229SwapMovesFixtures
             assertThat(compositeOnId()).as("nor the composite").isEmpty();
             assertThat(registeredBySwap()).as("nor a validation move").isEmpty();
         } finally {
-            // a boot builds the index (vectors-074-1 does; a plain build here: no concurrency in a test)
+            // a boot builds the index (vectors-075-1 does; a plain build here: no concurrency in a test)
             ctx().createIndexIfNotExists(Rdr229SwapMove.CHILD_INDEX).on(DSL.table(DSL.name("nexus", "chunk_orphaned_at")),
                 DSL.field(DSL.name("tenant_id")), DSL.field(DSL.name("chash"))).execute();
         }
