@@ -859,6 +859,9 @@ public final class Main {
         }
         if (completionCheck == null) {
             log.error("event=leaf_index_pass_not_started reason=no_completion_check");
+            // No boot_work entry, on purpose (review r2, O6): one would read as work in progress to nx upgrade for as long as the engine
+            // runs, and nx doctor has no row for this id. The signal that is read is the ABSENT rdr229_completion status field, which
+            // startCompletionBootWork's own error (event=rdr229_completion_not_started) accompanies.
             return null;
         }
         try {
