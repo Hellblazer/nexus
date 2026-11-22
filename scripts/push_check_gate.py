@@ -526,14 +526,17 @@ def docs_reader_files(tree: Path, python: str) -> list[str]:
 
 
 def proof_commands(leg: str, files: list[str], tip: str) -> str:
-    """How to produce the proof of *leg*, in a clean checkout of *tip*."""
+    """How to produce the proof of *leg*: the same two steps for both legs, on a pool host, in a clean checkout of *tip*. The
+    jar is its own step (``scripts/build-gate-jar.sh --lab-run <class>``) and pytest a second, neither wrapped in lab-run
+    (AGENTS.md rule 13: an engine build is never inside lab-run, and lab-remote runs its command under lab-run). Both legs need
+    the jar on the host that runs pytest: the write-seam boots it, the docs readers use the engine substrate."""
     if leg == "docs-readers":
-        return (f"lab-remote --fetch docs.json -- sh -c 'scripts/build-gate-jar.sh && python3 scripts/watched_pytest.py --status "
-                f"docs.json -- uv run pytest -o addopts= -m \"{FAST_MARKERS}\" {' '.join(files)}'   (a clean checkout of "
-                f"{tip[:12]}; the readers need the engine substrate)")
-    return (f"on a pool host, in a clean checkout of {tip[:12]} with Docker, two steps and neither wrapped in lab-run (AGENTS.md "
-            "rule 13): 1) scripts/build-gate-jar.sh --lab-run lab-m   2) NX_REQUIRE_SERVICE_JAR=1 python3 scripts/watched_pytest.py "
-            f"--status seam.json -- uv run pytest -o addopts= -m integration {' '.join(WRITE_SEAM_TESTS)}   (copy seam.json back)")
+        status, env, pytest = "docs.json", "", f"-o addopts= -m \"{FAST_MARKERS}\" {' '.join(files)}"
+    else:
+        status, env, pytest = "seam.json", "NX_REQUIRE_SERVICE_JAR=1 ", f"-o addopts= -m integration {' '.join(WRITE_SEAM_TESTS)}"
+    return (f"on a pool host, in a clean checkout of {tip[:12]} (with Docker for the jar), two steps and neither wrapped in "
+            f"lab-run (AGENTS.md rule 13): 1) scripts/build-gate-jar.sh --lab-run lab-m   2) {env}python3 scripts/watched_pytest.py "
+            f"--status {status} -- uv run pytest {pytest}   (copy {status} back)")
 
 
 _PROOF_FILES = {"docs-readers": "docs.json", "write-seam": "seam.json"}

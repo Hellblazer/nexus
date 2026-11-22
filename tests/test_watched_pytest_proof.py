@@ -58,8 +58,32 @@ def test_an_uncommitted_change_to_a_tracked_file_marks_the_run_dirty(repo: Path)
     assert "3 passed" in status["summary"]
 
 
-def test_an_untracked_file_the_run_could_collect_marks_it_dirty(repo: Path) -> None:
-    (repo / "test_other.py").write_text("def test_o():\n    pass\n")
+def _dirty_after_adding(repo: Path, rel: str) -> bool:
+    target = repo / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("x = 1\n")
+    _code, status = _watch(repo, repo / "status.json")
+    return status["tree_dirty"]
+
+
+@pytest.mark.parametrize("rel", ["tests/test_x.py", "tests/sub/helper.py", "tests/data.json", "src/pkg/mod.py", "conftest.py",
+                                 "pkg/conftest.py", "pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini"])
+def test_an_untracked_file_where_pytest_would_collect_or_import_it_marks_the_run_dirty(repo: Path, rel: str) -> None:
+    assert _dirty_after_adding(repo, rel) is True
+
+
+@pytest.mark.parametrize("rel", ["old-run.log", "targeted.status.json", "docs.json", "output/run.log", "output/deep/status.json", "notes.txt",
+                                 "docs/pytest.ini", "scripts/helper.py"])
+def test_an_untracked_log_status_or_other_file_outside_what_pytest_reads_is_clean(repo: Path, rel: str) -> None:
+    """A reused lab-remote copy keeps the logs and status files of earlier runs; they are not the tree."""
+    assert _dirty_after_adding(repo, rel) is False
+
+
+def test_a_tracked_file_that_differs_is_dirty_wherever_it_is(repo: Path) -> None:
+    (repo / "notes.txt").write_text("v1\n")
+    _vcs("add", "notes.txt", cwd=repo)
+    _vcs("commit", "-q", "-m", "notes", cwd=repo)
+    (repo / "notes.txt").write_text("v2\n")
     _code, status = _watch(repo, repo / "status.json")
     assert status["tree_dirty"] is True
 

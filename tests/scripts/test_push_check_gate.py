@@ -206,11 +206,23 @@ def test_the_repush_line_carries_every_missing_proof_between_the_flags_and_the_s
     assert line == "scripts/git-push-develop.sh --source HEAD --proof docs.json --proof seam.json abc123 def456"
 
 
-def test_the_write_seam_proof_command_builds_the_jar_with_lab_run_and_never_wraps_pytest_in_it() -> None:
-    text = gate.proof_commands("write-seam", list(gate.WRITE_SEAM_TESTS), "a" * 40)
-    assert "scripts/build-gate-jar.sh --lab-run lab-m" in text
-    assert "lab-run -c" not in text.replace("--lab-run", "") and "lab-remote" not in text
-    assert "NX_REQUIRE_SERVICE_JAR=1" in text and "watched_pytest.py --status seam.json" in text and "-m integration" in text
+@pytest.mark.parametrize("leg", ["docs-readers", "write-seam"])
+def test_both_proof_commands_build_the_jar_as_their_own_step_and_never_wrap_anything_in_lab_run(leg: str) -> None:
+    """AGENTS.md rule 13: an engine build goes through `build-gate-jar.sh --lab-run <class>`, never inside lab-run (and
+    lab-remote runs its command under lab-run), so the jar is step 1 and pytest is step 2, on the pool host itself."""
+    text = gate.proof_commands(leg, _files(leg), "a" * 40)
+    assert "1) scripts/build-gate-jar.sh --lab-run lab-m" in text and "2) " in text
+    assert text.index("1) scripts/build-gate-jar.sh") < text.index("2) ")
+    assert "lab-run -c" not in text.replace("--lab-run", "") and "lab-remote" not in text and "sh -c" not in text
+    assert "python3 scripts/watched_pytest.py --status" in text and f"--status {'docs' if leg == 'docs-readers' else 'seam'}.json" in text
+    assert "pool host" in text and "clean checkout" in text
+
+
+def test_the_write_seam_proof_runs_integration_tests_with_the_jar_required_and_the_docs_one_with_ci_s_marker() -> None:
+    seam = gate.proof_commands("write-seam", list(gate.WRITE_SEAM_TESTS), "a" * 40)
+    assert "NX_REQUIRE_SERVICE_JAR=1" in seam and "-m integration" in seam
+    docs = gate.proof_commands("docs-readers", DOCS_FILES, "a" * 40)
+    assert f'-m "{gate.FAST_MARKERS}"' in docs and " ".join(DOCS_FILES) in docs and "NX_REQUIRE_SERVICE_JAR" not in docs
 
 
 def test_the_floors_are_below_what_a_real_run_collects_and_well_above_a_mass_skip() -> None:
