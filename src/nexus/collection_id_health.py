@@ -56,12 +56,18 @@ _HISTORY_SENTENCE = (
     "Unstamped by design and not counted (old rows keep NULL, no CHECK): " + ", ".join(HISTORY_TABLES) + ".")
 
 
+def _lists_ids(rows: list[dict[str, Any]] | None) -> bool:
+    """Whether the engine lists registry ids at all. ``HttpCatalogClient.list_collections`` sets ``collection_id`` to None on
+    every row of an engine that sends no id (every engine before P3.5a's read half), so a listing in which no row carries an
+    integer id says nothing about the ids; one in which some do is an engine that lists them, and a None there is a real null."""
+    return rows is not None and any(isinstance(r.get("collection_id"), int) for r in rows)
+
+
 def _null_id_labels(rows: list[dict[str, Any]] | None) -> list[str]:
-    """Labels of the registry rows whose ``collection_id`` is NULL. A row without the key (an engine that does not list the
-    id) is not a null one."""
-    if rows is None:
+    """Labels of the registry rows whose ``collection_id`` is NULL, on an engine that lists ids (see :func:`_lists_ids`)."""
+    if not _lists_ids(rows):
         return []
-    return sorted(str(r.get("name") or "") for r in rows if "collection_id" in r and r["collection_id"] is None)
+    return sorted(str(r.get("name") or "") for r in rows if r.get("collection_id") is None)
 
 
 def _named(labels: list[str]) -> str:
@@ -120,8 +126,10 @@ def _ids_row(counts: dict[str, Any] | None, why: str, retry: bool, rows: list[di
         fix.insert(0, (
             "The registry's id is an identity column (vectors-068-1), so a row without one means that default was removed or "
             "bypassed. Do not stamp it by hand: read the engine's boot log for changeset vectors-068-1 and report the labels named here"))
-    if rows is not None:
+    if _lists_ids(rows):
         sentences.append(f"{len(rows)} registry row(s) checked for a null collection_id")
+    elif rows is not None:
+        sentences.append("registry ids not checked: this engine does not list collection_id")
     else:
         sentences.append(f"registry ids not checked: {rows_why}")
     detail = ". ".join(sentences) + ". " + _HISTORY_SENTENCE

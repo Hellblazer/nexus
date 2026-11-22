@@ -165,7 +165,7 @@ def test_a_registry_row_with_a_null_collection_id_fails_and_names_its_label() ->
 
 
 def test_a_null_registry_id_outranks_a_wait_and_survives_unread_counts() -> None:
-    rows = [_live("x", None)]
+    rows = [_live("x", None), _live("y", 5)]  # an engine that lists ids (one row carries one), with one null
     waiting = _ids(_counts(("catalog_documents", 0, 3)), rows)
     assert waiting.ok is False and waiting.warn is False, waiting
     assert "'x'" in waiting.detail and "3 unstamped row(s)" in waiting.detail
@@ -174,10 +174,29 @@ def test_a_null_registry_id_outranks_a_wait_and_survives_unread_counts() -> None
     assert "'x'" in unread.detail and "counts not read" in unread.detail, unread.detail
 
 
-def test_a_listing_that_carries_no_id_is_not_a_null_id() -> None:
-    # an engine that does not list collection_id: the key is absent, which says nothing about the id
-    r = _ids(_counts(), [{"name": "a", "superseded_by": ""}])
-    assert r.ok is True and not r.warn and "no collection_id" not in r.detail, r
+def _listed(raw_rows: list[dict]) -> list[dict]:
+    """Rows as the doctor reads them: through the real HttpCatalogClient.list_collections over a stubbed GET."""
+    from nexus.catalog.http_catalog_client import HttpCatalogClient  # noqa: PLC0415 — test-local
+
+    client = HttpCatalogClient(base_url="http://127.0.0.1:9", _token="t")
+    client._get = lambda path, **_kw: {"collections": raw_rows}  # type: ignore[method-assign]
+    return client.list_collections()
+
+
+def test_an_engine_that_lists_no_ids_is_not_checked_never_a_failure() -> None:
+    # every released engine before P3.5a's read half: no collection_id key; the client reads it as None on every row
+    rows = _listed([{"name": "docs__a__m__v1", "superseded_by": ""}, {"name": "c9", "superseded_by": ""}])
+    assert all(r["collection_id"] is None for r in rows), "the client fills the key"
+    r = _ids(_counts(), rows)
+    assert r.ok is True and not r.warn, r
+    assert "no collection_id:" not in r.detail and "this engine does not list collection_id" in r.detail, r.detail
+
+
+def test_a_listing_with_ids_and_one_null_fails_naming_it() -> None:
+    rows = _listed([{"name": "a", "superseded_by": "", "collection_id": 7}, {"name": "b", "superseded_by": "", "collection_id": None}])
+    r = _ids(_counts(), rows)
+    assert r.ok is False and not r.warn and "1 registry row(s) with no collection_id: 'b'" in r.detail, r.detail
+    assert "2 registry row(s) checked for a null collection_id" in r.detail, r.detail
 
 
 def test_an_unread_listing_is_said_in_the_ids_row_and_the_counts_still_report() -> None:
