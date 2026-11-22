@@ -193,7 +193,7 @@ def _echo_relabelled(entries: object, total: object = None) -> None:
     """One line per collection the restore relabelled (RDR-229 item 10): a label of the minted form (``c<digits>``) is the
     backup's installation's own, so the restored collection took the label minted for its new id. *total* is the engine's
     count when the list is the marker's, which is bounded."""
-    listed = [e for e in entries if isinstance(e, dict)] if isinstance(entries, list) else []
+    listed = [e for e in entries if isinstance(e, dict) and e.get("label") and e.get("target_label")] if isinstance(entries, list) else []
     for e in listed:
         click.echo(f"  Collection relabelled: {e.get('label')} -> {e.get('target_label')}")
     if isinstance(total, int) and total > len(listed):
