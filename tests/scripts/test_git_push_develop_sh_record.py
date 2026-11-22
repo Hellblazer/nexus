@@ -59,6 +59,16 @@ elif argv[:2] == ["ci", "check-hold"]:
     if out:
         print(out)
     sys.exit(int(env("FAKE_NX_GATE_EXIT", "0")))
+elif argv[:3] == ["tuple", "out", "board/ci/nexus-develop--push"]:
+    # the legacy record write an nx with no `ci record-push` is asked to do ($FAKE_NX_LEGACY_SLEEP/_OUT/_EXIT)
+    time.sleep(float(env("FAKE_NX_LEGACY_SLEEP", "0")))
+    out = env("FAKE_NX_LEGACY_OUT", "")
+    if out:
+        print(out, file=sys.stderr)
+    code = int(env("FAKE_NX_LEGACY_EXIT", "0"))
+    if code == 0:
+        print("tuple-id-0123456789abcdef")  # the real `nx tuple out` echoes the id only on success
+    sys.exit(code)
 elif argv[:2] == ["ci", "record-push"]:
     origin = env("FAKE_NX_ORIGIN")
     if origin:
@@ -455,7 +465,10 @@ def test_a_real_nx_writes_the_record_the_engine_serves_back(repos, tmp_path) -> 
     proc = h._run(work, a, env=env)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert proc.stdout.splitlines()[0] == f"PUSH_OK n=1 tip={a}"  # a failed record adds its own line below (nexus-igea9 S3)
-    assert "PUSH_RECORD_" not in proc.stderr, proc.stderr
+    # The record landed: no FAILED, FALLBACK or LEGACY line. A throwaway env with no session token and no identity token has
+    # nothing to stamp it with, and the command says so (PUSH_RECORD_UNSTAMPED); inside a Claude session it is stamped, silent.
+    assert not any(w in proc.stderr for w in ("PUSH_RECORD_FAILED", "PUSH_RECORD_FALLBACK", "PUSH_RECORD_LEGACY", "PUSH_RECORD_SKIPPED")), proc.stderr
+    assert all(ln.startswith("PUSH_RECORD_UNSTAMPED ") for ln in proc.stderr.splitlines() if ln.startswith("PUSH_RECORD_")), proc.stderr
     rd = subprocess.run(["nx", "tuple", "rd", RECORD_SUBSPACE, "--json"], env={**os.environ, **env},
                         capture_output=True, text=True, timeout=30)
     assert rd.returncode == 0, rd.stdout + rd.stderr

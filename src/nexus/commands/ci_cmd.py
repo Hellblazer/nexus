@@ -4,15 +4,13 @@ from __future__ import annotations
 
 import math
 import re
-import subprocess
 import time
 import uuid
 from typing import Any, NoReturn
 
 import click
 
-from nexus import ci_ack, ci_reds, ci_wait
-from nexus.bounded_subprocess import run_bounded
+from nexus import ci_ack, ci_base, ci_reds, ci_wait
 
 _SHA = re.compile(r"[0-9a-fA-F]{7,40}")
 _GH_REPO = re.compile(r"[\w.-]+/[\w.-]+")
@@ -54,9 +52,11 @@ def ci_group() -> None:
 @click.option("--repo", default=None,
               help="Repository part of the board topic [default: the repository name of the origin remote; "
                    "the wait refuses when there is none].")
-@click.option("--branch", default="develop", show_default=True,
+@click.option("--branch", default=None,
               help="Branch part of the board topic. Only develop and main have one; any other branch "
-                   "(a release or feature branch) is waited on through GitHub's check-runs, not the board.")
+                   "(a release or feature branch) is waited on through GitHub's check-runs, not the board. "
+                   "[default: develop when refs/remotes/origin/develop exists, else the branch "
+                   "refs/remotes/origin/HEAD points at; the wait refuses when there is neither.]")
 @click.option("--gh-repo", default=None,
               help="owner/name for the GitHub reads (a row with no conclusions, a row capped by the "
                    "board's size limit, the one read at the deadline, and every read in GitHub-only mode) "
@@ -64,7 +64,7 @@ def ci_group() -> None:
 @click.option("--park-s", type=click.IntRange(1, ci_wait.PARK_CAP_S), default=ci_wait.PARK_CAP_S,
               hidden=True, help="Seconds per park (tests).")
 def ci_wait_cmd(
-    sha: str, timeout_min: float, fresh: bool, latest_attempt: bool, repo: str | None, branch: str, gh_repo: str | None,
+    sha: str, timeout_min: float, fresh: bool, latest_attempt: bool, repo: str | None, branch: str | None, gh_repo: str | None,
     park_s: int,
 ) -> None:
     """Wait for SHA's CI runs to complete and print one line with the result.
@@ -130,11 +130,11 @@ def ci_wait_cmd(
             click.echo(f"{sha[:12]} unusable: cannot tell which repo's board to wait on: no origin remote with a repo "
                        "name here; give --repo")
             raise SystemExit(ci_wait.EXIT_UNUSABLE)
-        repo = origin[1]
+        repo = origin[1].lower()   # the adapter writes the board topic with the repo name lower-cased
     if gh_repo is not None:
         gh = gh_repo
-    elif origin is not None and origin[1] == repo:
-        gh = f"{origin[0]}/{repo}"
+    elif origin is not None and origin[1].lower() == repo.lower():
+        gh = f"{origin[0]}/{origin[1]}"
     else:
         click.echo(f"{sha[:12]} unusable: cannot tell the GitHub owner of {repo}: it is not the origin remote's "
                    "repository; give --gh-repo OWNER/NAME")
@@ -142,6 +142,13 @@ def ci_wait_cmd(
     if not _GH_REPO.fullmatch(gh) or any(set(part) <= {"."} for part in gh.split("/")):
         click.echo(f"{sha[:12]} unusable: the GitHub repository must be OWNER/NAME, got {gh!r}")
         raise SystemExit(ci_wait.EXIT_UNUSABLE)
+    if branch is None:
+        # No default branch either: develop when origin has one, else the branch origin's HEAD names, else the flag is named.
+        branch = _default_branch()
+        if branch is None:
+            click.echo(f"{sha[:12]} unusable: cannot tell which branch to wait on: no refs/remotes/origin/develop and no "
+                       "refs/remotes/origin/HEAD here; give --branch")
+            raise SystemExit(ci_wait.EXIT_UNUSABLE)
     from nexus.identity.work import Label  # noqa: PLC0415 — deferred: CLI startup cost
 
     # RDR-253 Step 6 part 1: the wait is background work the session owns, so a checkpoint and the restart report list
@@ -268,29 +275,26 @@ def _current_red(store: Any, subspace: str, topic: str) -> ci_reds.Episode | Non
 
 def _origin_url(cwd: Any = None) -> str:
     """The URL of the ``origin`` remote of the repository *cwd* (default: the current directory) is in, or "" when there
-    is none, no git, or no repository. A seam: a test replaces it."""
-    try:
-        done = run_bounded(["git", "remote", "get-url", "origin"], cwd=cwd, timeout=10)
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    return done.stdout.strip() if done.returncode == 0 else ""
+    is none, no git, or no repository. A seam: a test replaces it. Read by :mod:`nexus.ci_base`, which every ``nx ci``
+    command shares."""
+    return ci_base.remote_url("origin", cwd=cwd)
 
 
 def _slug_from_origin(url: str) -> tuple[str, str] | None:
-    """The ``(owner, repo)`` an origin URL ends in: its last two path segments, ``.git`` and a trailing slash dropped.
-    None for a URL with no usable pair. Works for ``git@host:owner/repo.git``, ``https://host/owner/repo`` and
-    ``ssh://`` forms."""
-    match = re.search(r"[/:]([^/:@\s]+)/([^/:@\s]+?)(?:\.git)?/?$", url.strip())
-    if match is None or any(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", g) is None for g in match.groups()):
-        return None
-    return match.group(1), match.group(2)
+    """The ``(owner, repo)`` an origin URL ends in, as written (:func:`nexus.ci_base.slug_from_url`, the one parser)."""
+    return ci_base.slug_from_url(url)
 
 
 def _repo_from_origin(url: str) -> str | None:
-    """The repository name an origin URL ends in, as the board names it (``board/ci/<repo>-<branch>--...``, the repo
-    part of ``nx ci wait --repo``). None for a URL with no usable name."""
-    slug = _slug_from_origin(url)
-    return slug[1] if slug else None
+    """The repository name an origin URL ends in, as the board names it: lower-cased, as the CI adapter writes the topic
+    (:func:`nexus.ci_base.repo_from_url`). The repo part of ``nx ci wait --repo`` and the board of ``nx ci ack``."""
+    return ci_base.repo_from_url(url)
+
+
+def _default_branch() -> str | None:
+    """The branch ``nx ci wait`` waits on when it is not given (:func:`nexus.ci_base.default_branch`). A seam: a test
+    replaces it."""
+    return ci_base.default_branch("origin")
 
 
 def _board_of_origin(store: Any, repo: str) -> str:
@@ -417,11 +421,9 @@ CHECK_HOLD_REFUSED = 13
 def _push_base(base: str | None, remote: str, branch: str | None) -> str:
     """The board base of a push: *base* as given, else ``<repo>-<branch>`` from *remote*'s URL (:mod:`nexus.ci_base`); a base
     that cannot be derived is a usage error that names ``--base``."""
-    from nexus import ci_base  # noqa: PLC0415 -- deferred: CLI startup cost
-
     if base:
         if not ci_base.BASE.fullmatch(base):
-            raise click.UsageError(f"--base {base!r} is not a board topic base: use <repo>-<branch>, as in nexus-develop")
+            raise click.UsageError(f"--base {base!r} is not a board topic base: use <repo>-<branch>, as in <repo>-develop")
         return base
     try:
         return ci_base.derive(remote, branch)
@@ -430,7 +432,7 @@ def _push_base(base: str | None, remote: str, branch: str | None) -> str:
 
 
 _BASE_OPTIONS = (
-    click.option("--base", default=None, help="The board topic base, <repo>-<branch> (nexus-develop): board/ci/<BASE>--owner and "
+    click.option("--base", default=None, help="The board topic base, <repo>-<branch> (as in <repo>-develop): board/ci/<BASE>--owner and "
                  "--push. Without it the base is derived from the --remote URL's repo name and --branch; when that cannot be "
                  "done the command refuses and names this flag."),
     click.option("--remote", default="origin", show_default=True, help="The remote whose URL names the repo when --base is not given."),
@@ -447,45 +449,64 @@ def _base_options(fn: Any) -> Any:
 @ci_group.command(name="check-hold")
 @_base_options
 @click.option("--tip", "tips", multiple=True, help="A commit of the push, or the sha the push ends at (repeatable); named in the refusal.")
-@click.option("--red-fix", default=None, help="Push past the hold, on the record: the reason, printed as PUSH_RED_FIX.")
+@click.option("--red-fix", default=None, help="Push past the hold, on the record: the reason. An override is printed as one "
+              "PUSH_RED_FIX_APPLIED line, a flag nothing needed as PUSH_RED_FIX_UNNEEDED.")
 def ci_check_hold_cmd(base: str | None, remote: str, branch: str | None, tips: tuple[str, ...], red_fix: str | None) -> None:
     """Whether this session may push now (RDR-252, the push script's hold-your-pushes check).
 
     While a red is open on board/ci/<BASE>--owner, only its owner and the pusher of one of its suspects may push (a suspect's
-    pusher is the identity its push record's sender-session stamp maps to; `from` is never read; a caller with no identity is
-    held like any other). Anyone else is refused: PUSH_REFUSED_DEVELOP_RED on standard output and exit code 13. `--red-fix
-    <reason>` pushes past it and prints PUSH_RED_FIX with the reason (the push script writes it into the push record). A
-    failed read of the red, or of the records, warns (PUSH_GATE_UNCHECKED on standard error) and exits 0.
+    pusher is the identity its push record's sender-session stamp maps to; `from` is never read). Anyone else is refused:
+    PUSH_REFUSED_DEVELOP_RED on standard output and exit code 13. A caller that holds no identity is held like any other
+    (`nx identity show` says whether it does), and a suspect with no attributable push record is named in the refusal. `--red-fix
+    <reason>` pushes past it: one PUSH_RED_FIX_APPLIED line carries the reason, which the push script then writes into the push
+    record; a flag nothing needed prints PUSH_RED_FIX_UNNEEDED. A failed read of the red or of the records, or an identity that
+    could not be read, warns (PUSH_GATE_UNCHECKED on standard error) and exits 0.
     """
-    from nexus import ci_push_gate  # noqa: PLC0415 -- deferred: CLI startup cost
+    from nexus import ci_push_gate, ci_push_record  # noqa: PLC0415 -- deferred: CLI startup cost
 
     base = _push_base(base, remote, branch)
+    reason = (ci_push_record.clean_reason(red_fix) or "(no reason given)") if red_fix is not None else ""
+    identity_error: Exception | None = None
     try:
         identity = ci_ack.counted_identity()
-    except ValueError:
-        identity = ""
+    except Exception as exc:  # noqa: BLE001 -- an identity that could not be READ is not a caller with none: never a refusal
+        identity, identity_error = "", exc
     try:
         verdict = ci_push_gate.check(_store(), base, identity)
     except Exception as exc:  # noqa: BLE001 -- CLI boundary: a read that failed holds nobody
         click.echo(f"PUSH_GATE_UNCHECKED could not read board/ci/{base}--owner: {type(exc).__name__}: {exc}", err=True)
-        if red_fix:
-            click.echo(f"PUSH_RED_FIX reason={red_fix} (not needed: the red could not be read)")
+        if red_fix is not None:
+            click.echo(f"{ci_push_gate.RED_FIX_UNNEEDED} {reason} (not needed: the red could not be read)")
         return
     who = f"{verdict.owner or 'no owner'}" + (f" ({verdict.owner_alias})" if verdict.owner_alias else "")
-    if verdict.refuse and red_fix:
-        click.echo(f"PUSH_RED_FIX reason={red_fix} ({base} is red at {verdict.sha}, owned by {who}; the hold was overridden)")
+    if verdict.refuse and identity_error is not None:
+        seen = (f"{type(identity_error).__name__}: {identity_error}".splitlines() or [""])[0][:300]
+        click.echo(f"PUSH_GATE_UNCHECKED {base} is red at {verdict.sha} (owned by {who}) but the caller's identity could not be read "
+                   f"({seen}); the hold was not applied. `nx identity show` says what this process holds", err=True)
+        if red_fix is not None:
+            click.echo(f"{ci_push_gate.RED_FIX_UNNEEDED} {reason} (not needed: the caller's identity could not be read)")
+        return
+    if verdict.refuse and red_fix is not None:
+        click.echo(f"{ci_push_gate.RED_FIX_APPLIED} {reason} ({base} is red at {verdict.sha}, owned by {who}; the hold was overridden)")
         return
     if verdict.refuse:
         ending = f" ({tips[-1][:12]})" if tips else ""
         click.echo(f"PUSH_REFUSED_DEVELOP_RED {base} is red at {verdict.sha} and owned by {who}; this push{ending} is from neither the "
                    "owner nor the pusher of one of its suspects.")
+        if not identity:
+            click.echo("This process holds no identity, so it cannot be the red's owner or a suspect's pusher: `nx identity show` "
+                       "says whether it holds one.")
+        if verdict.unattributed:
+            shown = ", ".join(s[:12] for s in verdict.unattributed[:5]) + (f" (+{len(verdict.unattributed) - 5} more)" if len(verdict.unattributed) > 5 else "")
+            click.echo(f"Suspect(s) unattributed (no push record, or one with no stamp the session index maps): {shown}. Their pusher "
+                       "cannot be told, so none of them lets this push through: if this push is the fix, use --red-fix '<reason>'.")
         click.echo("Hold your pushes until the red clears, or hand the fix to the owner. A push that is the fix: "
                    "--red-fix '<reason>', on the record.")
         raise SystemExit(CHECK_HOLD_REFUSED)
     if verdict.unchecked:
         click.echo(f"PUSH_GATE_UNCHECKED {verdict.detail}", err=True)
-    if red_fix:
-        click.echo(f"PUSH_RED_FIX reason={red_fix} (not needed: {verdict.detail})")
+    if red_fix is not None:
+        click.echo(f"{ci_push_gate.RED_FIX_UNNEEDED} {reason} (not needed: {verdict.detail})")
 
 
 @ci_group.command(name="record-push")
@@ -500,9 +521,11 @@ def ci_record_push_cmd(base: str | None, remote: str, branch: str | None, from_s
 
     The record's dims are from=<your identity id, or unknown>, kind=push, sha=<TO_SHA>; its body {base: FROM_SHA, n, red_fix}.
     The owner stamper links base to tip to order the branch's tips and maps the record's sender-session stamp to the pusher.
-    A failed stamped write is retried once as a minimal unstamped record (base, tip, from), so the chain keeps its link. One
-    status line on standard output: PUSH_RECORD_OK, PUSH_RECORD_FALLBACK or PUSH_RECORD_FAILED. Exit 0 whatever it says: the
-    push has landed and the record never fails it (only a base that cannot be derived is refused).
+    A failed stamped write is retried once as a minimal unstamped record (base, tip, from), so the chain keeps its link. The
+    red_fix reason (the push script passes it when --red-fix overrode the hold) is cleaned to one line and cut so the whole body
+    fits the template's 1024 bytes. One status line on standard output: PUSH_RECORD_OK (stamped), PUSH_RECORD_UNSTAMPED (written
+    with no session stamp), PUSH_RECORD_FALLBACK or PUSH_RECORD_FAILED. Exit 0 whatever it says: the push has landed and the
+    record never fails it (only a base that cannot be derived is refused).
     """
     from nexus import ci_push_record  # noqa: PLC0415 -- deferred: CLI startup cost
 

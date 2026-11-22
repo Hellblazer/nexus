@@ -619,3 +619,58 @@ class TestDefaultReplyFrom:
         monkeypatch.setattr(core, "resolve_default_from", _raise)
         reply = {"subspace": "mailbox/x", "keys": {"to": "x"}, "dims": {"kind": "ack"}}
         assert self._fill(reply) is reply
+
+
+class TestStampHints:
+    """``would_stamp`` and ``headerless_retries``: what ``nx ci record-push`` asks to say whether a record carries a stamp
+    (RDR-252 review r1). The stamp is the T1 session header or the RDR-253 identity token; the engine's own answer is not
+    in the write's response, so the client reports what it sent."""
+
+    @staticmethod
+    def _no_identity(monkeypatch) -> None:
+        monkeypatch.setattr("nexus.identity.token_header.identity_headers", lambda: {})
+
+    def test_no_session_env_and_no_identity_token_means_nothing_stamps(self, monkeypatch) -> None:
+        self._no_identity(monkeypatch)
+        assert _store(_ok).would_stamp() is False
+
+    def test_a_usable_session_token_would_stamp(self, monkeypatch) -> None:
+        self._no_identity(monkeypatch)
+        monkeypatch.setenv("NX_T1_SESSION", TOKEN)
+        assert _store(_ok).would_stamp() is True
+
+    def test_an_unusable_session_token_does_not(self, monkeypatch) -> None:
+        self._no_identity(monkeypatch)
+        monkeypatch.setenv("NX_T1_SESSION", "has a space")
+        assert _store(_ok).would_stamp() is False
+
+    def test_an_identity_token_alone_would_stamp_and_is_said_to(self, monkeypatch) -> None:
+        monkeypatch.setattr("nexus.identity.token_header.identity_headers", lambda: {"X-Nexus-Identity": "t"})
+        store = _store(_ok)
+        assert store.would_stamp() is True and store.identity_stamps() is True
+
+    def test_a_rejected_session_token_would_not_stamp_until_it_changes(self, monkeypatch) -> None:
+        self._no_identity(monkeypatch)
+        monkeypatch.setenv("NX_T1_SESSION", TOKEN)
+        seen: list[httpx.Request] = []
+        store = _store(TestStaleTokenFallback._gated(seen))
+        store.out("mailbox/x", {"to": "x"}, {"from": "y"}, nonce="n")
+        assert store.would_stamp() is False
+        monkeypatch.setenv("NX_T1_SESSION", "fresh")
+        assert store.would_stamp() is True
+
+    def test_the_headerless_retry_is_counted_once_per_resend(self, monkeypatch) -> None:
+        self._no_identity(monkeypatch)
+        monkeypatch.setenv("NX_T1_SESSION", TOKEN)
+        store = _store(TestStaleTokenFallback._gated([]))
+        assert store.headerless_retries == 0
+        store.out("mailbox/x", {"to": "x"}, {"from": "y"}, nonce="n")
+        assert store.headerless_retries == 1
+        store.out("mailbox/x", {"to": "x"}, {"from": "y"}, nonce="n2")  # the memo now keeps the token off: no second retry
+        assert store.headerless_retries == 1
+
+    def test_a_clean_write_counts_no_retry(self, monkeypatch) -> None:
+        monkeypatch.setenv("NX_T1_SESSION", TOKEN)
+        store = _store(_ok)
+        store.out("mailbox/x", {"to": "x"}, {"from": "y"}, nonce="n")
+        assert store.headerless_retries == 0

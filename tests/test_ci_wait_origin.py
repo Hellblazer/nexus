@@ -56,6 +56,7 @@ def test_with_no_repo_flag_the_board_and_the_github_repo_come_from_the_origin_re
     monkeypatch: pytest.MonkeyPatch, board: _Store, github: list[str],
 ) -> None:
     monkeypatch.setattr(ci_cmd, "_origin_url", lambda: "git@github.com:acme/halcyon.git")
+    monkeypatch.setattr(ci_cmd, "_default_branch", lambda: "develop")  # no --branch: the default is the repo's, not this checkout's refs
     result = _wait()
     assert result.exit_code == 0, result.output
     assert set(board.reads) == {"board/ci/halcyon-develop--done"}, "the repo is the origin's, never nexus"
@@ -66,6 +67,7 @@ def test_with_no_origin_the_wait_refuses_naming_repo_and_reads_nothing(
     monkeypatch: pytest.MonkeyPatch, board: _Store, github: list[str],
 ) -> None:
     monkeypatch.setattr(ci_cmd, "_origin_url", lambda: "")
+    monkeypatch.setattr(ci_cmd, "_default_branch", lambda: "develop")  # no --branch: the default is the repo's, not this checkout's refs
     result = _wait()
     assert result.exit_code == ci_wait.EXIT_UNUSABLE, result.output
     assert "--repo" in result.output and "origin" in result.output
@@ -76,6 +78,7 @@ def test_a_repo_flag_that_is_not_the_origins_needs_gh_repo_for_the_github_owner(
     monkeypatch: pytest.MonkeyPatch, board: _Store, github: list[str],
 ) -> None:
     monkeypatch.setattr(ci_cmd, "_origin_url", lambda: "git@github.com:acme/halcyon.git")
+    monkeypatch.setattr(ci_cmd, "_default_branch", lambda: "develop")  # no --branch: the default is the repo's, not this checkout's refs
     refused = _wait("--repo", "other")
     assert refused.exit_code == ci_wait.EXIT_UNUSABLE and "--gh-repo" in refused.output
     assert board.reads == []
@@ -86,6 +89,7 @@ def test_a_repo_flag_that_is_not_the_origins_needs_gh_repo_for_the_github_owner(
 
 def test_a_repo_flag_with_no_origin_still_needs_gh_repo(monkeypatch: pytest.MonkeyPatch, board: _Store, github: list[str]) -> None:
     monkeypatch.setattr(ci_cmd, "_origin_url", lambda: "")
+    monkeypatch.setattr(ci_cmd, "_default_branch", lambda: "develop")  # no --branch: the default is the repo's, not this checkout's refs
     assert _wait("--repo", "x").exit_code == ci_wait.EXIT_UNUSABLE
     assert _wait("--repo", "x", "--gh-repo", "o/x").exit_code == 0
     assert set(github) == {"o/x"}

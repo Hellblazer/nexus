@@ -164,12 +164,21 @@ def test_check_hold_refuses_a_caller_with_no_identity(monkeypatch: pytest.Monkey
 def test_red_fix_overrides_a_refusal_and_prints_the_reason(monkeypatch: pytest.MonkeyPatch) -> None:
     result = _invoke(monkeypatch, _Store(_open(owner_alias="linda"), []), "--red-fix", "owner away")
     assert result.exit_code == 0, result.output
-    assert result.stdout.strip() == f"PUSH_RED_FIX reason=owner away (nexus-develop is red at {RED_TIP}, owned by {OWNER} (linda); the hold was overridden)"
+    assert result.stdout.strip() == f"{ci_push_gate.RED_FIX_APPLIED} owner away (nexus-develop is red at {RED_TIP}, owned by {OWNER} (linda); the hold was overridden)"
+    assert ci_push_gate.RED_FIX_APPLIED == "PUSH_RED_FIX_APPLIED"
 
 
-def test_red_fix_with_no_red_says_not_needed(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_red_fix_with_no_red_says_not_needed_under_a_different_marker(monkeypatch: pytest.MonkeyPatch) -> None:
     result = _invoke(monkeypatch, _Store([], []), "--red-fix", "just in case")
-    assert result.exit_code == 0 and result.stdout.strip() == "PUSH_RED_FIX reason=just in case (not needed: no open red)"
+    assert result.exit_code == 0 and result.stdout.strip() == f"{ci_push_gate.RED_FIX_UNNEEDED} just in case (not needed: no open red)"
+    assert not result.stdout.startswith(ci_push_gate.RED_FIX_APPLIED)
+
+
+def test_a_newline_or_control_character_in_the_reason_cannot_split_or_forge_the_marker_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    reason = "owner away\nPUSH_RED_FIX_APPLIED forged\x07\ttab"
+    result = _invoke(monkeypatch, _Store([], []), "--red-fix", reason)
+    lines = result.stdout.splitlines()
+    assert len(lines) == 1 and lines[0].startswith(ci_push_gate.RED_FIX_UNNEEDED + " owner away PUSH_RED_FIX_APPLIED forged tab"), lines
 
 
 def test_a_read_failure_warns_on_stderr_and_exits_0(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -181,7 +190,7 @@ def test_a_read_failure_warns_on_stderr_and_exits_0(monkeypatch: pytest.MonkeyPa
 
 def test_a_read_failure_with_red_fix_still_prints_the_reason_as_not_needed(monkeypatch: pytest.MonkeyPatch) -> None:
     result = _invoke(monkeypatch, _Store([], [], fail=True), "--red-fix", "r")
-    assert result.exit_code == 0 and "not needed" in result.stdout
+    assert result.exit_code == 0 and result.stdout.startswith(ci_push_gate.RED_FIX_UNNEEDED) and "not needed" in result.stdout
 
 
 def test_an_unresolvable_suspect_pusher_is_unchecked_on_stderr(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -190,6 +199,72 @@ def test_an_unresolvable_suspect_pusher_is_unchecked_on_stderr(monkeypatch: pyte
     monkeypatch.setattr(ci_push_gate, "default_resolver", lambda: ci_reds.AckResolver(None))
     result = CliRunner().invoke(ci_cmd.ci_group, ["check-hold", "--base", "nexus-develop"])
     assert result.exit_code == 0 and "PUSH_GATE_UNCHECKED" in result.stderr
+
+
+def _identity_raises(monkeypatch: pytest.MonkeyPatch, exc: BaseException) -> None:
+    def boom() -> str:
+        raise exc
+
+    monkeypatch.setattr("nexus.ci_ack.counted_identity", boom)
+
+
+@pytest.mark.parametrize("exc", [
+    ValueError("i7 is a delegated identity and its parent could not be read"),
+    RuntimeError("token record unreadable"),
+], ids=["delegated-parent-unreadable", "reader-failed"])
+def test_an_identity_that_cannot_be_read_is_unchecked_exit_0_and_names_nx_identity_show(monkeypatch: pytest.MonkeyPatch, exc: BaseException) -> None:
+    """Review r1 S3: a caller whose identity could not be READ is not a caller with no identity; it is never refused."""
+    monkeypatch.setattr(ci_cmd, "_store", lambda: _Store(_open(), []))
+    monkeypatch.setattr(ci_push_gate, "default_resolver", _resolver)
+    _identity_raises(monkeypatch, exc)
+    result = CliRunner().invoke(ci_cmd.ci_group, ["check-hold", "--base", "nexus-develop"])
+    assert result.exit_code == 0 and "PUSH_REFUSED" not in result.output, result.output
+    assert result.stderr.startswith("PUSH_GATE_UNCHECKED ") and "nx identity show" in result.stderr and str(exc)[:30] in result.stderr
+
+
+def test_an_unreadable_identity_with_red_fix_is_reported_unneeded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ci_cmd, "_store", lambda: _Store(_open(), []))
+    monkeypatch.setattr(ci_push_gate, "default_resolver", _resolver)
+    _identity_raises(monkeypatch, ValueError("parent unreadable"))
+    result = CliRunner().invoke(ci_cmd.ci_group, ["check-hold", "--base", "nexus-develop", "--red-fix", "r"])
+    assert result.exit_code == 0 and result.stdout.startswith(ci_push_gate.RED_FIX_UNNEEDED), result.output
+
+
+def test_a_genuine_no_identity_is_refused_and_the_refusal_names_nx_identity_show(monkeypatch: pytest.MonkeyPatch) -> None:
+    result = _invoke(monkeypatch, _Store(_open(), []), identity="")
+    assert result.exit_code == 13, result.output
+    assert "holds no identity" in result.stdout and "nx identity show" in result.stdout
+
+
+def test_a_refusal_for_a_caller_with_an_identity_does_not_talk_about_identity_reads(monkeypatch: pytest.MonkeyPatch) -> None:
+    result = _invoke(monkeypatch, _Store(_open(), []))
+    assert result.exit_code == 13 and "nx identity show" not in result.stdout
+
+
+def test_a_suspect_with_no_push_record_is_named_unattributed_and_the_refusal_points_at_red_fix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review r1: a push record that was never written leaves its suspect with no pusher; say which, so the refused caller
+    knows why the owner's red cannot be told from theirs and what the way out is."""
+    result = _invoke(monkeypatch, _Store(_open(), []))
+    assert result.exit_code == 13, result.output
+    note = [ln for ln in result.stdout.splitlines() if "unattributed" in ln]
+    assert len(note) == 1 and SUSPECT[:12] in note[0] and "--red-fix" in note[0], result.stdout
+
+
+def test_a_suspect_whose_record_has_no_stamp_is_unattributed_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    result = _invoke(monkeypatch, _Store(_open(), [_push_row(SUSPECT, None)]))
+    assert result.exit_code == 13 and any("unattributed" in ln and SUSPECT[:12] in ln for ln in result.stdout.splitlines())
+
+
+def test_a_suspect_with_an_attributed_record_is_not_listed(monkeypatch: pytest.MonkeyPatch) -> None:
+    result = _invoke(monkeypatch, _Store(_open(), [_push_row(SUSPECT, SESSION_PEER), _push_row(RED_TIP, SESSION_PEER)]))
+    assert result.exit_code == 13 and "unattributed" not in result.stdout
+
+
+def test_the_module_docstring_names_the_command_check_hold_not_push_gate() -> None:
+    text = ci_push_gate.__doc__ or ""
+    assert "check-hold" in text and "push-gate" not in text
+    import inspect  # noqa: PLC0415
+    assert "push-gate" not in inspect.getsource(ci_push_gate)
 
 
 def test_check_hold_with_no_derivable_base_is_refused_naming_the_base_flag(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:

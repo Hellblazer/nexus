@@ -201,3 +201,15 @@ class AckResolver:
         elif who is None:
             self.ignored += 1
         return who
+
+    def identity_of(self, row: Any) -> tuple[str | None, bool]:
+        """``(identity, known)``: the identity *row*'s sender-session stamp maps to (a delegated child to its parent), and
+        whether that could be told. ``(None, True)`` for a row with no stamp or one the index maps to nobody; ``(None, False)``
+        when the lookup failed. Unlike :meth:`poster` it counts nothing in :attr:`ignored` or :attr:`unresolved`: for a row
+        that is shown, not one the ack-times figures are built from."""
+        sender = getattr(row, "sender_session", None)
+        if not sender:
+            return None, True
+        failures = self._failures
+        who = self.session(str(sender))
+        return (None, False) if self._failures > failures else (who, True)

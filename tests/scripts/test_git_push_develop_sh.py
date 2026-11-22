@@ -845,7 +845,10 @@ class TestPushLock:
         sha = _commit(work, "mine.txt")
         proc = _run(work, sha, env=env)
         assert proc.returncode == 0, proc.stdout + proc.stderr
-        assert proc.stdout.strip() == f"PUSH_OK n=1 tip={sha}"
+        # The first line is the PUSH_OK contract; a real nx in this throwaway env has no session to stamp the record with and
+        # says so (PUSH_RECORD_UNSTAMPED, the push summary's only other line).
+        assert proc.stdout.splitlines()[0] == f"PUSH_OK n=1 tip={sha}"
+        assert all(ln.startswith("PUSH_RECORD_UNSTAMPED ") for ln in proc.stdout.splitlines()[1:]), proc.stdout
         assert _remote_tip(origin) == sha
         # Review finding 1: the claimed/released diagnostics go to stderr
         # (stdout stays the PUSH_OK machine-readable contract) and name

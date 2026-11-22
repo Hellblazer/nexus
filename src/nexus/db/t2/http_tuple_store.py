@@ -771,14 +771,38 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         headers = super()._auth_headers()
         if _drop_session_header.get():
             return headers
-        token = os.environ.get(_SESSION_ENV, "").strip()
-        if (
-            token
-            and _HEADER_TOKEN_RE.fullmatch(token)
-            and _token_hash(token) != self._current_rejected_hash()
-        ):
+        token = self._session_token()
+        if token:
             headers[_HEADER_T1_SESSION] = token
         return headers
+
+    def _session_token(self) -> str:
+        """The ``NX_T1_SESSION`` token a request would send now: set, printable ASCII without whitespace, and not the token the
+        engine last rejected; "" otherwise."""
+        token = os.environ.get(_SESSION_ENV, "").strip()
+        if token and _HEADER_TOKEN_RE.fullmatch(token) and _token_hash(token) != self._current_rejected_hash():
+            return token
+        return ""
+
+    #: How many requests this store resent without the session header after a 401 (see :meth:`_request_once`). A caller that
+    #: writes a row it wants stamped compares it before and after the write to learn whether the stamp was lost on the way.
+    headerless_retries: int = 0
+
+    def would_stamp(self) -> bool:
+        """Whether a write made now carries something the engine stamps a sender session from: a usable ``NX_T1_SESSION``
+        token, or the RDR-253 identity token. A hint from what the client would send; the write's response does not say what
+        the engine stamped."""
+        return bool(self._session_token()) or self.identity_stamps()
+
+    def identity_stamps(self) -> bool:
+        """Whether an RDR-253 identity token rides this process's requests (so a write is stamped with that identity's session
+        even when the session header is dropped)."""
+        from nexus.identity import token_header  # noqa: PLC0415 -- deferred: leaf import cost
+
+        try:
+            return bool(token_header.identity_headers())
+        except Exception:  # noqa: BLE001 -- a hint about the stamp never fails a caller
+            return False
 
     def _rejected_memo_key(self) -> tuple[str, str]:
         """The memo's scope: this store's endpoint and a hash of its data token."""
@@ -813,6 +837,7 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                 result = super()._request_once(method, path, **kwargs)
             finally:
                 _drop_session_header.reset(reset)
+            self.headerless_retries += 1
             # The retry proves the session token was the culprit only if it went
             # out under the same data token as the failed request: a concurrent
             # re-mint between the two would make a live session token look

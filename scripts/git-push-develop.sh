@@ -793,9 +793,9 @@ fi
 # holds the logic (so any repo's push script can call it; this script is its first caller and passes the board
 # base, nexus-<branch>, explicitly): it reads the open red on board/ci/nexus-develop--owner and the suspects'
 # push records. A refusal is PUSH_REFUSED_DEVELOP_RED on stdout and exit 13, which this script passes on.
-# --red-fix '<reason>' (env NX_PUSH_RED_FIX) pushes past it, on the record: the command prints PUSH_RED_FIX
-# with the reason, and this script passes the reason to `nx ci record-push`, which writes it into the push
-# record body. A check that cannot be made (no installed nx, a read that failed, an nx that has no such
+# --red-fix '<reason>' (env NX_PUSH_RED_FIX) pushes past it, on the record: the command prints one
+# PUSH_RED_FIX_APPLIED line (PUSH_RED_FIX_UNNEEDED when nothing held the push), and this script passes the
+# reason to `nx ci record-push`, which writes it into the push record body. A check that cannot be made (no installed nx, a read that failed, an nx that has no such
 # command or crashes, or one past NX_PUSH_GATE_TIMEOUT_S, default 20 s) is one PUSH_GATE_UNCHECKED line on
 # stderr and the push goes on: the gate holds a push for a red it can name, not for its own fault.
 # Develop only.
@@ -847,7 +847,9 @@ if [[ "$branch" == "develop" ]]; then
             echo "$_gate_line" >&2
           else
             echo "$_gate_line"
-            if [[ "$_gate_line" == PUSH_RED_FIX*"the hold was overridden)" ]]; then _red_fix_escape="${NX_PUSH_RED_FIX:-}"; fi
+            # The marker nx ci check-hold prints for an override (nexus.ci_push_gate.RED_FIX_APPLIED), matched as a line
+            # prefix and nothing else: the reason after it is free text. The flag nothing needed prints another marker.
+            if [[ "$_gate_line" == "PUSH_RED_FIX_APPLIED "* ]]; then _red_fix_escape="${NX_PUSH_RED_FIX:-}"; fi
           fi
         done < "$_gate_file"
       elif (( _gate_code == 124 )); then
@@ -977,10 +979,11 @@ _lock_claim_id=""
 # passes the base, nexus-<branch>, explicitly). RDR-252's owner stamper reads the record: its body's base linked to
 # the tip orders develop's tips, and the record's session stamp maps the push to the pushing identity; it never reads
 # `from`, a label (the identity id, or "unknown"). The command writes the stamped record, retries once as a minimal
-# unstamped one when that fails, and prints one status line: PUSH_RECORD_OK (nothing is added to the summary),
-# PUSH_RECORD_FALLBACK or PUSH_RECORD_FAILED (each goes in the push summary on stdout, after PUSH_OK, and on stderr:
-# nexus-igea9 audit S3, 2 of 9 pushes in an evening had no record and nobody saw it). A skipped record (no installed
-# nx) is PUSH_RECORD_SKIPPED, the same way; an nx that has no such command, crashes or runs past
+# unstamped one when that fails, and prints one status line: PUSH_RECORD_OK (stamped; nothing is added to the summary),
+# PUSH_RECORD_UNSTAMPED, PUSH_RECORD_FALLBACK or PUSH_RECORD_FAILED (each goes in the push summary on stdout, after
+# PUSH_OK, and on stderr: nexus-igea9 audit S3, 2 of 9 pushes in an evening had no record and nobody saw it). A skipped
+# record (no installed nx) is PUSH_RECORD_SKIPPED, the same way. An nx with no `ci record-push` (exit 2, "No such
+# command") gets the legacy `nx tuple out` write, reported as PUSH_RECORD_LEGACY; one that crashes or runs past
 # NX_PUSH_RECORD_TIMEOUT_S seconds (default 20) is PUSH_RECORD_FAILED. Nothing here can fail the push that just
 # landed: the exit code stays the push's. A push that overrode the develop-red hold passes its --red-fix reason to the
 # command, which writes it into the record body.
@@ -989,9 +992,32 @@ _record_report() {
   echo "$1" >&2
 }
 
+# A mixed fleet: an installed nx that predates `nx ci record-push` answers "No such command" (exit 2). The record is then
+# written the way this script wrote it before the command existed, with `nx tuple out` (from=unknown, body base and n), so
+# the chain keeps its link. It is one bounded attempt, reported as PUSH_RECORD_LEGACY (written) or PUSH_RECORD_FAILED. An nx
+# too old for the record is too old for `nx ci check-hold` too, so no --red-fix override reaches this path.
+_write_legacy_record() {
+  local nxbin="$1" limit="$2" outfile code=0 last
+  outfile="$(mktemp "${TMPDIR:-/tmp}/push-record.XXXXXX")" || { _record_report "PUSH_RECORD_FAILED this nx has no 'nx ci record-push' and no temp file for the legacy write (the push stands)"; return 0; }
+  _record_tmp="$outfile"
+  _bounded "$limit" "$outfile" "$nxbin" tuple out "board/ci/nexus-$branch--push" --key "topic=nexus-$branch--push" \
+    --nonce "push-$tip" --dim "from=unknown" --dim "kind=push" --dim "sha=$tip" \
+    --body "{\"base\": \"${_record_base}\", \"n\": ${#range[@]}}" || code=$?
+  last="$(grep -v '^[[:space:]]*$' "$outfile" | tail -n 1 || true)"
+  rm -f "$outfile"
+  _record_tmp=""
+  if (( code == 124 )); then
+    _record_report "PUSH_RECORD_FAILED this nx has no 'nx ci record-push' and the legacy 'nx tuple out' write ran past ${limit}s and was stopped (the push stands)"
+  elif (( code != 0 )); then
+    _record_report "PUSH_RECORD_FAILED this nx has no 'nx ci record-push' and the legacy 'nx tuple out' write failed too (exit $code: ${last:0:300}) (the push stands, no record was written)"
+  else
+    _record_report "PUSH_RECORD_LEGACY this nx has no 'nx ci record-push'; the record was written with 'nx tuple out' (from=unknown, no retry or stamp check): upgrade nx (scripts/reinstall-tool.sh) so the record names its pusher"
+  fi
+}
+
 _write_push_record() {
   [[ "$branch" == "develop" ]] || return 0
-  local nxbin="${_nx_bin:-}" limit="${NX_PUSH_RECORD_TIMEOUT_S:-20}" outfile code=0 last status
+  local nxbin="${_nx_bin:-}" limit="${NX_PUSH_RECORD_TIMEOUT_S:-20}" outfile code=0 last status legacy=0
   [[ "$limit" =~ ^[0-9]+$ ]] && limit=$(( 10#$limit )) || limit=20   # base 10: a leading zero (08) is not octal
   (( limit > 0 )) || limit=20
   # The lock path already resolved the installed nx; --skip-lock resolves it here, the same way.
@@ -1008,9 +1034,13 @@ _write_push_record() {
   # The last non-empty line: nx prints its own log lines first, its status or error last.
   last="$(grep -v '^[[:space:]]*$' "$outfile" | tail -n 1 || true)"
   status="$(grep '^PUSH_RECORD_' "$outfile" | tail -n 1 || true)"
+  # Exit 2 is click's usage error: an old nx ("No such command") and a refused base look alike but for the words.
+  if (( code == 2 )) && grep -q "No such command" "$outfile"; then legacy=1; fi
   rm -f "$outfile"
   _record_tmp=""
-  if (( code == 124 )); then
+  if (( legacy )); then
+    _write_legacy_record "$nxbin" "$limit"
+  elif (( code == 124 )); then
     _record_report "PUSH_RECORD_FAILED the write ran past ${limit}s and was stopped (the push stands)"
   elif (( code != 0 )) || [[ -z "$status" ]]; then
     _record_report "PUSH_RECORD_FAILED exit $code: ${last:0:400} (the push stands)"

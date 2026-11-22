@@ -31,13 +31,27 @@ class _Store:
     """Records every ``out``; fails the first ``fail_stamped`` calls made with the session header, and the first
     ``fail_unstamped`` calls made without it."""
 
-    def __init__(self, fail_stamped: int = 0, fail_unstamped: int = 0) -> None:
+    def __init__(self, fail_stamped: int = 0, fail_unstamped: int = 0, *, session_header: bool = True,
+                 drops_header_on_write: bool = False, identity_token: bool = False) -> None:
         self.calls: list[dict[str, Any]] = []
         self.fail_stamped, self.fail_unstamped = fail_stamped, fail_unstamped
+        self.session_header = session_header          # whether a write would carry the session header at all
+        self.drops_header_on_write = drops_header_on_write  # the 401 headerless retry: the write lands without the session header
+        self.identity_token = identity_token          # an RDR-253 identity token stamps the write whatever happens to the header
+        self.headerless_retries = 0
+
+    def would_stamp(self) -> bool:
+        return self.session_header or self.identity_token
+
+    def identity_stamps(self) -> bool:
+        return self.identity_token
 
     def out(self, subspace: str, keys: dict[str, str], dims: dict[str, str], body: str | None = None, *, nonce: str | None = None) -> str:
         stamped = not http_tuple_store._drop_session_header.get()
-        self.calls.append({"subspace": subspace, "keys": keys, "dims": dims, "body": json.loads(body or "{}"), "nonce": nonce, "stamped": stamped})
+        if stamped and self.drops_header_on_write:
+            self.headerless_retries += 1
+        self.calls.append({"subspace": subspace, "keys": keys, "dims": dims, "body": json.loads(body or "{}"), "raw_body": body or "",
+                           "nonce": nonce, "stamped": stamped})
         if stamped and self.fail_stamped:
             self.fail_stamped -= 1
             raise ConnectionError("stamped write refused")
@@ -68,6 +82,56 @@ def test_the_stamped_record_has_the_chain_fields_and_the_identity_id(monkeypatch
     assert call["dims"] == {"from": "i5", "kind": "push", "sha": TO_SHA} and call["nonce"] == f"push-{TO_SHA}"
     assert call["body"] == {"base": FROM_SHA, "n": 2} and call["stamped"] is True
     assert result.stdout.startswith("PUSH_RECORD_OK ") and "from=i5" in result.stdout
+
+
+def test_the_ok_line_says_the_record_is_stamped(monkeypatch: pytest.MonkeyPatch) -> None:
+    result = _run(monkeypatch, _Store())
+    assert result.stdout.strip().endswith(" stamped"), result.stdout
+    assert "unstamped" not in result.stdout.lower()
+
+
+def test_a_write_with_no_session_header_to_send_is_reported_unstamped_not_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review r1: no session env, so the engine stamps no sender and the record serves the chain only."""
+    store = _Store(session_header=False)
+    result = _run(monkeypatch, store)
+    assert result.exit_code == 0, result.output
+    assert len(store.calls) == 1, "the write itself stands; it is not retried"
+    line = result.stdout.strip()
+    assert line.startswith("PUSH_RECORD_UNSTAMPED ") and "no session" in line and "no pusher" in line, line
+    assert "PUSH_RECORD_OK" not in line
+
+
+def test_a_write_the_client_had_to_resend_headerless_is_reported_unstamped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The 401 retry (a stale session token): the write landed, without the header."""
+    store = _Store(drops_header_on_write=True)
+    result = _run(monkeypatch, store)
+    assert result.exit_code == 0 and result.stdout.startswith("PUSH_RECORD_UNSTAMPED "), result.output
+    assert "rejected" in result.stdout or "headerless" in result.stdout
+
+
+def test_a_headerless_resend_is_still_stamped_when_an_identity_token_rides_the_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The 401 retry drops the T1 session header only; the RDR-253 identity token still names the sender."""
+    result = _run(monkeypatch, _Store(drops_header_on_write=True, identity_token=True))
+    assert result.stdout.startswith("PUSH_RECORD_OK ") and result.stdout.strip().endswith(" stamped"), result.stdout
+
+
+def test_no_session_header_but_an_identity_token_is_stamped(monkeypatch: pytest.MonkeyPatch) -> None:
+    result = _run(monkeypatch, _Store(session_header=False, identity_token=True))
+    assert result.stdout.startswith("PUSH_RECORD_OK "), result.stdout
+
+
+def test_a_store_that_cannot_say_whether_it_stamps_is_taken_at_its_word(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A store with no would_stamp / headerless_retries (an older client object) reports as it always did."""
+    class Plain:
+        def __init__(self) -> None:
+            self.calls: list[Any] = []
+
+        def out(self, *args: Any, **kw: Any) -> str:
+            self.calls.append(args)
+            return "t" * 64
+
+    result = _run(monkeypatch, Plain())
+    assert result.stdout.startswith("PUSH_RECORD_OK ")
 
 
 def test_from_is_unknown_when_the_caller_holds_no_identity(monkeypatch: pytest.MonkeyPatch, _identity: list[str]) -> None:
@@ -141,6 +205,52 @@ def test_an_over_long_red_fix_reason_is_cut_so_the_record_fits(monkeypatch: pyte
     store = _Store()
     assert _run(monkeypatch, store, "--red-fix", "r" * 5000).exit_code == 0
     assert len(store.calls[0]["body"]["red_fix"]) == 500
+
+
+BODY_CAP = 1024  # service/src/main/resources/tuples/templates/board-ci.yaml max_body_bytes
+
+
+def test_the_body_cap_in_the_module_is_the_templates() -> None:
+    from nexus import ci_push_record  # noqa: PLC0415
+
+    template = (Path(__file__).resolve().parents[1] / "service" / "src" / "main" / "resources" / "tuples" / "templates" / "board-ci.yaml").read_text()
+    assert f"max_body_bytes: {BODY_CAP}" in template
+    assert ci_push_record.BODY_MAX_BYTES == BODY_CAP
+    assert "4096" not in (ci_push_record.__doc__ or "")
+
+
+@pytest.mark.parametrize("reason", ["界" * 2000, "é" * 2000, "😀" * 2000, 'q"\\' * 700], ids=["cjk", "latin1", "emoji", "escapes"])
+def test_a_2000_character_non_ascii_reason_fits_both_writes_under_the_template_cap(monkeypatch: pytest.MonkeyPatch, reason: str) -> None:
+    """Review r1 S4: the cut is by serialized UTF-8 bytes, not characters; json.dumps with ensure_ascii escapes a non-ASCII
+    character to six bytes, so a character cut left both writes over 1024 and the escape unrecorded."""
+    store = _Store(fail_stamped=1)
+    result = _run(monkeypatch, store, "--count", "3", "--red-fix", reason)
+    assert result.exit_code == 0, result.output
+    assert result.stdout.startswith("PUSH_RECORD_FALLBACK "), result.stdout
+    stamped, minimal = store.calls
+    for call in (stamped, minimal):
+        assert len(call["raw_body"].encode("utf-8")) <= BODY_CAP, (call["stamped"], len(call["raw_body"].encode("utf-8")))
+        cut = call["body"]["red_fix"]
+        assert cut and reason.startswith(cut), "a cut prefix of the reason, never a mangled one"
+    assert stamped["body"]["n"] == 3 and minimal["body"].keys() == {"base", "red_fix"}
+
+
+def test_non_ascii_is_written_as_itself_not_as_a_six_byte_escape(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = _Store()
+    assert _run(monkeypatch, store, "--red-fix", "owner away: 界").exit_code == 0
+    assert "界" in store.calls[0]["raw_body"] and "\\u" not in store.calls[0]["raw_body"]
+
+
+def test_a_newline_or_control_character_in_the_reason_becomes_a_space(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = _Store()
+    assert _run(monkeypatch, store, "--red-fix", "owner\naway\r\n\t back\x07\x1b[0m").exit_code == 0
+    assert store.calls[0]["body"]["red_fix"] == "owner away back [0m"
+
+
+def test_a_reason_of_only_whitespace_is_no_reason_and_writes_no_field(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = _Store()
+    assert _run(monkeypatch, store, "--red-fix", " \n\t ").exit_code == 0
+    assert "red_fix" not in store.calls[0]["body"]
 
 
 def test_the_base_decides_the_subspace_and_is_never_nexus_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
