@@ -578,3 +578,14 @@ def test_a_found_bge_sibling_is_noted_registered_so_the_later_gate_reads_it_as_l
     assert sw.bge_sibling("c416") == "c417"
     assert [(label, row.get("embedding_model"), row.get("owner_id")) for label, row in noted] == [
         ("c417", BGE, "rfvyy-ext")]
+
+
+def test_a_legacy_name_is_external_without_a_registry_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only a label of the engine's minted form (``c`` + digits) is read from its row. A legacy name keeps the
+    conservative answer with no read: ``is_external_embedder`` runs on every index, sensitive or not, so a read
+    there would put a registry round trip (and, with no endpoint, a storage touch) on each legacy write."""
+    reads: list[str] = []
+    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda name, **kw: reads.append(name))
+    assert sw.is_external_embedder("knowledge__legacy") is True
+    assert sw.bge_sibling("code__test") is None
+    assert reads == []
