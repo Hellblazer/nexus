@@ -67,7 +67,7 @@ public final class CollectionLabel {
 
     /**
      * The shape clauses, in the order they are checked. Adding a clause to the rule is adding one method below and
-     * one entry here (the client's twin is {@code _LABEL_CLAUSES} in {@code nexus.corpus}).
+     * one entry here (the client's twin is {@code _LABEL_CLAUSES} in {@code nexus.corpus}, in this order).
      */
     private static final java.util.List<NamedClause> SHAPE_CLAUSES = java.util.List.of(
         new NamedClause("non_empty", CollectionLabel::nonEmpty),
@@ -77,6 +77,14 @@ public final class CollectionLabel {
         new NamedClause("no_slash", CollectionLabel::noSlash),
         new NamedClause("no_comma", CollectionLabel::noComma),
         new NamedClause("no_edge_whitespace", CollectionLabel::noEdgeWhitespace));
+
+    /**
+     * The rule names of {@code SHAPE_CLAUSES}, in the order they are checked. The client checks the same order, and
+     * the case table both halves' tests read ({@code label-rule-cases.json}) pins it (nexus-pqirj).
+     */
+    static java.util.List<String> shapeRules() {
+        return SHAPE_CLAUSES.stream().map(NamedClause::rule).toList();
+    }
 
     /** The clauses {@link #requireStorable} runs, under the names {@code SHAPE_CLAUSES} gives the same two refusals. */
     private static final java.util.List<NamedClause> STORABLE_CLAUSES = java.util.List.of(
