@@ -322,7 +322,9 @@ class JooqRecordReflectionFeatureTest {
     // one generated record type (IdentityTokensRecord), +1. memory-006-identity-stamp.xml added a column, no record type.
     // 149 -> 150: nexus-igea9.5 (RDR-252 Step 1), group-001-records.xml added the table nexus.group_records, one generated
     // record type (GroupRecordsRecord), +1.
-    private static final int EXPECTED_RECORD_TYPES = 150;
+    // 150 -> 151: nexus-p2m1x.22 (RDR-229 P3.4), vectors-080-rdr229-gate-latch.xml added the table nexus.rdr229_gate_latch, one generated
+    // record type (Rdr229GateLatchRecord), +1.
+    private static final int EXPECTED_RECORD_TYPES = 151;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {
