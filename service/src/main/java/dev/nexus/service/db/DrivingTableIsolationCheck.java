@@ -123,13 +123,15 @@ public final class DrivingTableIsolationCheck {
      * (the backstop for a tenant the list missed) runs as the migrating role with no tenant, which under FORCE row level
      * security sees no collection without it. RDR-229 owner-is-source: the re-own move's verification reads
      * {@code nexus.catalog_owners} (the curator test, the repo owners) and {@code nexus.gc_audit} (the skip reports), whose
-     * policies are {@code vectors-067-2} and {@code vectors-067-3}. Each policy is as exposed as a driving table's, so it gets the
+     * policies are {@code vectors-067-2} and {@code vectors-067-3}. RDR-229 P3.3c: the chunks swap's verification reads
+     * {@code nexus.catalog_collections} (the anti-join of the composite foreign key's validation, the warm-up), whose policy is {@code vectors-065}'s. Each policy is as exposed as a driving table's, so it gets the
      * same boot question while any of those moves is registered, in any state.
      */
     static final java.util.List<SupportTable> SUPPORT_TABLES = java.util.List.of(
         new SupportTable("rdr229-residue-", new Table("nexus", "catalog_collections")),
         new SupportTable("rdr229-reown-", new Table("nexus", "catalog_owners")),
-        new SupportTable("rdr229-reown-", new Table("nexus", "gc_audit")));
+        new SupportTable("rdr229-reown-", new Table("nexus", "gc_audit")),
+        new SupportTable("rdr229-swap-", new Table("nexus", "catalog_collections")));
 
     /**
      * {@code nexus.chunks}: {@link ChunksIsolationCheck#violations(DSLContext)} asks the policy question of it alone. Its
