@@ -86,3 +86,41 @@ def test_the_blocked_state_carries_a_parked_move_the_idle_rules_discount():
     status = _fixture("stamps_blocked")
     parked = _harness.parked_moves(status)
     assert len(parked) == 1 and parked[0]["id"].startswith("data-move:rdr229-stamp-")
+
+
+# ---- the restart notice (RDR-229 P3.7, nexus-p2m1x.27; linda 2026-11-22) -------------------------------------------------
+# Unlike the three gates, the engine does publish the restart entry (CompletionBootWork.RESTART_ENTRY_ID): the stamps are done and a
+# P3.5b changeset waits for one restart. It stays in boot_work, safe to stop and visible to nx doctor, but it is not work for either
+# idle rule: nx upgrade's bundle swap and engine replacement are the restart that clears it, and the harness boots once.
+
+_RESTART_ENTRY = {
+    "id": "rdr229-restart",
+    "what": "restart the engine once: it applies the P3.5b changesets that a collection rename waits for (2 of 2 not applied yet)",
+    "started_at": "2026-11-22T12:00:00Z", "done": None, "total": None, "unit": None, "safe_to_stop": True,
+    "on_stop": "nothing is lost: the restart is the step that applies them", "step": None,
+}
+
+
+@pytest.mark.parametrize("state", _STATES)
+def test_the_restart_notice_does_not_defer_the_bundle_swap_and_does_not_hold_the_harness(state, monkeypatch, tmp_path):
+    status = json.loads(json.dumps(_fixture(state)))
+    status["boot_work"].append(dict(_RESTART_ENTRY))
+    assert [e for e in status["boot_work"] if e["id"] == "rdr229-restart"], "non-vacuity: the notice is in boot_work"
+    assert _busy(monkeypatch, tmp_path, status) is None
+    assert _harness.boot_work_settled(status)
+    assert _harness.status_says_idle(200, status)
+
+
+def test_the_restart_notice_is_still_visible_and_never_renders_as_bare_safe_to_stop():
+    from nexus.progress.boot_work import render
+
+    lines = render([dict(_RESTART_ENTRY)], now=1_800_000_000.0)
+    assert any("restart the engine once" in line for line in lines)
+    assert any("nothing is lost" in line for line in lines)
+
+
+def test_control_other_work_beside_the_restart_notice_still_defers_the_swap_and_holds_the_harness(monkeypatch, tmp_path):
+    status = json.loads(json.dumps(_fixture("all_stamps_done_gate3_waiting")))
+    status["boot_work"] += [dict(_RESTART_ENTRY), {**_OLD_ENTRY, "id": "pci-build:x", "what": "building an index"}]
+    assert _busy(monkeypatch, tmp_path, status) is not None
+    assert not _harness.boot_work_settled(status)

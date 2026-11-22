@@ -515,11 +515,21 @@ def failed_moves(status: dict | None) -> list[dict]:
     return [e for e in ((status or {}).get("boot_work") or []) if _move_state(e) == "failed"]
 
 
+#: The engine's boot_work id of the RDR-229 restart notice (``CompletionBootWork.RESTART_ENTRY_ID``): the stamps are complete and a
+#: P3.5b changeset waits for one restart. It is safe to stop and stays visible, but it is not work, and the harness boots the new
+#: jar once: counting it would hold the idle rule open for a restart the harness never takes (linda 2026-11-22, nexus-p2m1x.27).
+RESTART_NOTICE_ID = "rdr229-restart"
+
+
+def _is_restart_notice(entry: dict) -> bool:
+    return isinstance(entry, dict) and str(entry.get("id") or "") == RESTART_NOTICE_ID
+
+
 def boot_work_settled(status: dict | None) -> bool:
-    """Every boot_work entry is a parked move (or there is none): nothing in it is still working."""
+    """Every boot_work entry is a parked move or the restart notice (or there is none): nothing in it is still working."""
     if boot_work_empty(status):
         return True
-    return all(_is_parked(e) for e in status["boot_work"])
+    return all(_is_parked(e) or _is_restart_notice(e) for e in status["boot_work"])
 
 
 def status_says_idle(code: int, status: dict | None) -> bool:
