@@ -25,9 +25,9 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * RDR-229 P3.4 (nexus-p2m1x.22): {@code vectors-075}, the supporting indexes of P3.3a's id twins. vectors-075-1..6 are shaped like
+ * RDR-229 P3.4 (nexus-p2m1x.22): {@code vectors-076}, the supporting indexes of P3.3a's id twins. vectors-076-1..6 are shaped like
  * vectors-074-1 (ChunkOrphanedAtIndexChangesetIntegrationTest holds that shape's lock-wait path); this class shows each builds on a fresh
- * walk with the definition the census reads, and that an INVALID leftover (what a killed build leaves) heals on the next walk. vectors-075-7,
+ * walk with the definition the census reads, and that an INVALID leftover (what a killed build leaves) heals on the next walk. vectors-076-7,
  * the retired queue's, is recorded on a fresh walk where the table is gone, builds where the table is back with its id column, and is
  * skipped unrecorded where the table is back without it.
  *
@@ -39,21 +39,21 @@ class FkTwinIndexesChangesetIntegrationTest {
 
     private static final String ADMIN_ROLE = "nexus_admin_twinidx";
     private static final String ADMIN_PASS = "nexus_admin_twinidx_pass";
-    private static final String CHANGELOG = "db/changelog/vectors-075-collection-id-fk-twin-indexes.xml";
+    private static final String CHANGELOG = "db/changelog/vectors-076-collection-id-fk-twin-indexes.xml";
     /** The self-retrying changeset a fresh install always carries (it waits for a data move): the count the walk reports apart. */
     private static final int WAITING_ON_ITS_OWN = 1;
 
     /** Changeset id, then its index and the definition's column list. */
     private static final Map<String, String[]> CONCURRENT = new LinkedHashMap<>();
     static {
-        CONCURRENT.put("vectors-075-1", new String[] {"idx_ta_tenant_source_collection_id", "topic_assignments", "(tenant_id, source_collection_id)"});
-        CONCURRENT.put("vectors-075-2", new String[] {"idx_doc_aspects_collection_id", "document_aspects", "(tenant_id, collection_id)"});
-        CONCURRENT.put("vectors-075-3", new String[] {"idx_topics_tenant_collection_id", "topics", "(tenant_id, collection_id)"});
-        CONCURRENT.put("vectors-075-4", new String[] {"idx_taxonomy_meta_tenant_collection_id", "taxonomy_meta", "(tenant_id, collection_id)"});
-        CONCURRENT.put("vectors-075-5", new String[] {"idx_doc_highlights_collection_id", "document_highlights", "(tenant_id, collection_id)"});
-        CONCURRENT.put("vectors-075-6", new String[] {"idx_canary_query_ring_collection_id", "canary_query_ring", "(tenant_id, collection_id)"});
+        CONCURRENT.put("vectors-076-1", new String[] {"idx_ta_tenant_source_collection_id", "topic_assignments", "(tenant_id, source_collection_id)"});
+        CONCURRENT.put("vectors-076-2", new String[] {"idx_doc_aspects_collection_id", "document_aspects", "(tenant_id, collection_id)"});
+        CONCURRENT.put("vectors-076-3", new String[] {"idx_topics_tenant_collection_id", "topics", "(tenant_id, collection_id)"});
+        CONCURRENT.put("vectors-076-4", new String[] {"idx_taxonomy_meta_tenant_collection_id", "taxonomy_meta", "(tenant_id, collection_id)"});
+        CONCURRENT.put("vectors-076-5", new String[] {"idx_doc_highlights_collection_id", "document_highlights", "(tenant_id, collection_id)"});
+        CONCURRENT.put("vectors-076-6", new String[] {"idx_canary_query_ring_collection_id", "canary_query_ring", "(tenant_id, collection_id)"});
     }
-    private static final String QUEUE_CHANGESET = "vectors-075-7";
+    private static final String QUEUE_CHANGESET = "vectors-076-7";
     private static final String QUEUE_INDEX = "idx_aspect_queue_collection_id";
 
     private PostgreSQLContainer<?> pg;
@@ -148,15 +148,15 @@ class FkTwinIndexesChangesetIntegrationTest {
     @Test
     @Order(2)
     void anInvalidLeftoverIsDroppedAndRebuiltOnTheNextWalk() throws Exception {
-        String index = CONCURRENT.get("vectors-075-1")[0];
-        forget("vectors-075-1");
+        String index = CONCURRENT.get("vectors-076-1")[0];
+        forget("vectors-076-1");
         su(ctx -> ctx.execute("UPDATE pg_catalog.pg_index SET indisvalid = false WHERE indexrelid = 'nexus." + index + "'::regclass"));
         assertThat(indexValid(index)).as("precondition: an INVALID leftover").isFalse();
 
         var healed = SchemaMigrator.migrate(adminDs);
 
         assertThat(indexValid(index)).as("dropped and built again, VALID").isTrue();
-        assertThat(recorded("vectors-075-1")).as("and recorded").isTrue();
+        assertThat(recorded("vectors-076-1")).as("and recorded").isTrue();
         assertThat(healed.skippedRetryingChangesets()).isEqualTo(WAITING_ON_ITS_OWN);
     }
 

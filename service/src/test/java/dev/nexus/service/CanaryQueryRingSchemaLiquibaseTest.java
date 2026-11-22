@@ -213,7 +213,7 @@ class CanaryQueryRingSchemaLiquibaseTest {
             assertThat(PgCatalogProbes.foreignKeyDeleteActions(ctx, "nexus", "canary_query_ring"))
                 .as("both foreign keys, the name key and its id twin, cascade on delete ('c')").containsExactly("c", "c");
             assertThat(PgCatalogProbes.indexDefs(ctx, "nexus", "canary_query_ring"))
-                .as("the primary key's and, since RDR-229 P3.4 (vectors-075-6), the id twin's supporting index: nothing on the vectors")
+                .as("the primary key's and, since RDR-229 P3.4 (vectors-076-6), the id twin's supporting index: nothing on the vectors")
                 .containsExactlyInAnyOrder(
                     "CREATE UNIQUE INDEX canary_query_ring_pk ON nexus.canary_query_ring USING btree (tenant_id, collection, vector_digest)",
                     "CREATE INDEX idx_canary_query_ring_collection_id ON nexus.canary_query_ring USING btree (tenant_id, collection_id)");

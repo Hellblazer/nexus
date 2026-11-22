@@ -12,7 +12,7 @@ import java.util.List;
 
 /**
  * RDR-229 P3.4 (nexus-p2m1x.22, linda's ruling 2026-11-22): every id key has a supporting index ({@link IdKeyIndexCensus}). Run after
- * P3.3c's swaps, so the census sees all three families: P3.3a's twins to the registry (vectors-072, indexed by vectors-075), P3.3c's
+ * P3.3c's swaps, so the census sees all three families: P3.3a's twins to the registry (vectors-072, indexed by vectors-076), P3.3c's
  * three child keys into the chunks id key and its composite from chunks to the registry.
  *
  * <p>Why a key into chunks passes on (tenant_id, chash) or (tenant_id, doc_id) and not (tenant_id, &lt;id column&gt;): chash is
