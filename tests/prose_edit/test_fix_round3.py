@@ -363,20 +363,25 @@ def test_a_promote_dry_run_sweeps_stale_tmp_files_as_well_as_stale_records(prose
 # ---------------------------------------------------------------------------
 
 
-def test_the_rdr_body_keeps_its_accepted_qualifier_text_and_the_history_says_the_ruling_is_in_effect() -> None:
+def test_the_rdr_body_states_the_shipped_qualifier_ruling_and_the_close_amendment_records_it() -> None:
+    # Until the close the body kept the accepted rule and the 2026-10-03 entry said the
+    # deviation would be recorded at close. The 2026-11-22 close amendment (Sam's ruling,
+    # T2 nexus/sam-ruling-rdr221-close-2026-11-22) now states the shipped rule in the body.
     text = RDR.read_text(encoding="utf-8")
     technical = text[text.index("is this qualifier justified by a"):text.index("A construction that matches a device")]
-    assert "Unjustified qualifiers are proposed for cutting; justified\nones stay; unclear ones become queries." in technical
-    assert "Filler qualifiers" not in text and "(Sam, 2026-09-30)" not in text
-    assert ("- **Scenario**: A sentence with one justified and one unjustified qualifier. — **Verify**: only the "
-            "unjustified one is proposed for cutting.") in text
-    history = text[text.index("- 2026-10-03: Phase 1"):]
-    items = [ln for ln in history.splitlines() if "qualifier" in ln.lower()]
-    assert len(items) == 1, items
-    line = items[0]
-    assert "2026-09-30" in line and "in effect" in line and "post-mortem" in line
-    assert "amended" not in line  # the body is not amended: the deviation is recorded at close
-    assert "Phase 1 (Steps 1.2 to 1.5)" in history  # the entry itself is still there
+    assert "only filler words are proposed for cutting" in technical
+    assert "every other qualifier or intensifier becomes a query" in technical
+    assert "2026-09-30" in technical and "replaces the accepted rule" in technical
+    assert '"Cut only filler words;\nevery other qualifier or intensifier is a query."' in technical
+    assert ("- **Scenario**: A sentence with a filler word and a qualifier that is not filler. — **Verify**: only "
+            "the filler word is proposed for cutting; the other qualifier comes back as a query") in text
+    assert "only the unjustified one is proposed for cutting" not in text
+    history = text[text.index("## Revision History"):]
+    old = history[history.index("- 2026-10-03: Phase 1"):]
+    assert any("2026-09-30" in ln and "in effect" in ln for ln in old.splitlines())  # the 2026-10-03 entry stands
+    assert "Phase 1 (Steps 1.2 to 1.5)" in old
+    close = [ln for ln in history.splitlines() if "Test Plan scenario 4 follow Sam's 2026-09-30 ruling" in ln]
+    assert len(close) == 1, close  # the close amendment records the deviation the 2026-10-03 entry promised
 
 
 def test_the_line_editor_states_the_qualifier_ruling_once_and_has_no_keep_it_class() -> None:
