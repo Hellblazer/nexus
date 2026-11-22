@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-p2m1x.21 (RDR-229 P3.3c, linda's ruling 2026-11-22): idx_chunk_orphaned_at_tenant_chash, an index on nexus.chunk_orphaned_at (tenant_id, chash).
+
+    WHY. The chunks swap adds chunk_orphaned_at_chunk_id_fk, a foreign key from chunk_orphaned_at (tenant_id, collection_id, chash, embedding_model) to the
+    chunks id key with ON DELETE CASCADE ON UPDATE CASCADE. Every delete or update of a chunk row then looks up the child rows by that key, and the only index
+    chunk_orphaned_at has is its name primary key (tenant_id, collection, chash), which cannot seek past collection_id: a chunk delete would read every
+    orphan-clock row of the tenant. The other two children already carry an index the lookup can use (catalog_document_chunks: idx_catalog_chunks_chash
+    (tenant_id, chash), catalog-001; topic_assignments: idx_ta_tenant_doc_id (tenant_id, doc_id), taxonomy-001); Rdr229SwapMovesAfterTheSwapIntegrationTest
+    shows the lookup of all three on its index.
+
+    HOW. CREATE INDEX CONCURRENTLY IF NOT EXISTS, in a changeset of its own with runInTransaction="false" (CONCURRENTLY cannot run inside a transaction):
+    no lock a writer waits on, though the build reads the table twice. nexus.chunk_orphaned_at holds one row per chunk that lost its last owner, so it is
+    small. A leftover INVALID index of this name (a build that died: the failed changeset halts that boot, and the next boot's IF NOT EXISTS would skip
+    the leftover and record the changeset as run, with an index no query can use) is not replaced: the precondition counts INVALID indexes of the name and,
+    with onFail="HALT" as vectors-003's collision does, keeps halting until the operator drops the leftover (DROP INDEX CONCURRENTLY, then the next boot builds
+    it), so the failure the first halt reported is never silently recorded as done. onFail="CONTINUE" is not an option here: a CONTINUE changeset must not name
+    a table with a foreign key into nexus.chunks (tests/test_changelog_continue_precondition_chunks_lint.py). A manually pre-built VALID index satisfies IF NOT
+    EXISTS and the changeset is recorded.
+
+    DATA EFFECT: none. The index is built over existing rows and changes no row; its maintenance cost on writes is one more btree entry per orphan-clock row.
+    The number follows vectors-073 and is provisional until the final rebase. After vectors-073, before the grants-nexus-svc.xml runAlways block.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-074-1" author="nexus-p2m1x.21" runInTransaction="false">
+        <preConditions onFail="HALT">
+            <sqlCheck expectedResult="0">SELECT COUNT(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'nexus' AND c.relname = 'idx_chunk_orphaned_at_tenant_chash' AND NOT i.indisvalid</sqlCheck>
+        </preConditions>
+        <comment>nexus.chunk_orphaned_at (tenant_id, chash): the child-side lookup of the chunk's id key, chunk_orphaned_at_chunk_id_fk (RDR-229 P3.3c). CREATE INDEX CONCURRENTLY IF NOT EXISTS, outside a transaction. DATA EFFECT: none. The rollback drops the index.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_chunk_orphaned_at_tenant_chash
+    ON nexus.chunk_orphaned_at (tenant_id, chash);
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+DROP INDEX CONCURRENTLY IF EXISTS nexus.idx_chunk_orphaned_at_tenant_chash;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>
