@@ -176,6 +176,45 @@ class ReembedJobRepositoryTest {
         }
     }
 
+    /**
+     * RDR-229 P3.4 (nexus-p2m1x.22, bob's coverage census): once the id twin of the source lock exists
+     * ({@code idx_reembed_jobs_source_id_lock}, built by IdUniqueIndexPass), a start under a collection's new label after P3.7's one-row
+     * rename collides with the old-label holder on the TWIN, not the name lock. It must still be the typed refusal naming the holder,
+     * never the raw unique violation. The rename is made directly (the registry row's name changed, the holder's row keeps the old one,
+     * with session_replication_role replica so no cascade rewrites it); the twin is built as the pass builds it.
+     */
+    @Test
+    void aStartUnderARenamedLabel_collidingOnTheIdTwin_isRefusedNamingTheHolder() throws Exception {
+        String t = tenant();
+        Job holder = repo.start(t, SRC, TGT, null, false, false);
+        String renamed = "docs__owner__renamed__v1";
+        try (Connection su = pg.createConnection("")) {
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.set(DSL.name("session_replication_role"), DSL.inline("replica")).execute();
+            ctx.update(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+                .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME, renamed)
+                .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(t))
+                .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(SRC)).execute();
+            ctx.createUniqueIndexIfNotExists("idx_reembed_jobs_source_id_lock").on(dev.nexus.service.jooq.nexus.Tables.REEMBED_JOBS,
+                    dev.nexus.service.jooq.nexus.Tables.REEMBED_JOBS.TENANT_ID, dev.nexus.service.jooq.nexus.Tables.REEMBED_JOBS.SOURCE_COLLECTION_ID)
+                .where(dev.nexus.service.jooq.nexus.Tables.REEMBED_JOBS.STATE.in(dev.nexus.service.datamove.ArbiterTwins.REEMBED_ACTIVE_STATES))
+                .execute();
+        }
+        try {
+            assertThatThrownBy(() -> repo.start(t, renamed, TGT, null, false, false))
+                .as("the twin refuses the second active job for the collection, and the refusal names the holder")
+                .isInstanceOfSatisfying(JobLockHeld.class, e -> assertThat(e.existingJobId()).isEqualTo(holder.jobId()));
+            assertThat(repo.listByStates(t, List.of(PLANNED, RUNNING, PAUSED, CUTOVER, FAILED)))
+                .as("the refused start wrote nothing").containsExactly(holder);
+        } finally {
+            try (Connection su = pg.createConnection("")) {
+                var ctx = DSL.using(su, SQLDialect.POSTGRES);
+                ctx.set(DSL.name("search_path"), DSL.inline("nexus")).execute();   // jOOQ renders the drop without its schema
+                ctx.dropIndexIfExists(DSL.name("idx_reembed_jobs_source_id_lock")).execute();
+            }
+        }
+    }
+
     @Test
     void secondStart_whileTheFirstJobIsFailed_isRefusedNamingIt() {
         String t = tenant();

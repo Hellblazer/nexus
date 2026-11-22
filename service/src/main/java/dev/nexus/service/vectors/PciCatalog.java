@@ -366,10 +366,16 @@ public final class PciCatalog {
      *                     set on a valid index (the constructor refuses both)
      */
     public record Index(String name, boolean valid, String collection, String leftoverOf, String comment,
-                        String leafLeftoverOf, Long collectionId) {
+                        String leafLeftoverOf, Long collectionId, Long leftoverOfId) {
         public Index {
             if (collectionId != null && (collection != null || leftoverOf != null || leafLeftoverOf != null)) {
                 throw new IllegalArgumentException("an id index is neither a name index nor a leftover: " + name);
+            }
+            if (leftoverOfId != null && (collection != null || leftoverOf != null || leafLeftoverOf != null || collectionId != null)) {
+                throw new IllegalArgumentException("an id leftover is only an id leftover: " + name);
+            }
+            if (valid && leftoverOfId != null) {
+                throw new IllegalArgumentException("a valid index is never a REINDEX CONCURRENTLY leftover: " + name);
             }
             if (collection != null && leftoverOf != null) {
                 throw new IllegalArgumentException("an index is parsed or a leftover, not both: " + name);
@@ -388,10 +394,16 @@ public final class PciCatalog {
             }
         }
 
+        /** An id-predicate index, or none: not an id leftover. */
+        public Index(String name, boolean valid, String collection, String leftoverOf, String comment,
+                     String leafLeftoverOf, Long collectionId) {
+            this(name, valid, collection, leftoverOf, comment, leafLeftoverOf, collectionId, null);
+        }
+
         /** A leaf leftover or a name or unparsed index: no id. */
         public Index(String name, boolean valid, String collection, String leftoverOf, String comment,
                      String leafLeftoverOf) {
-            this(name, valid, collection, leftoverOf, comment, leafLeftoverOf, null);
+            this(name, valid, collection, leftoverOf, comment, leafLeftoverOf, null, null);
         }
 
         /** An index that is not a leaf leftover. */
@@ -432,9 +444,12 @@ public final class PciCatalog {
             return collectionId != null;
         }
 
-        /** True for a REINDEX CONCURRENTLY leftover, the one kind of non-parsed index the reconciler drops. */
+        /**
+         * True for a REINDEX CONCURRENTLY leftover of a per-collection index (the name predicate's, or, RDR-229 P3.4, the id predicate's:
+         * {@link #leftoverOfId()}), the one kind of non-parsed index the reconciler drops.
+         */
         public boolean leftover() {
-            return leftoverOf != null;
+            return leftoverOf != null || leftoverOfId != null;
         }
 
         /**
@@ -569,6 +584,10 @@ public final class PciCatalog {
                             .add(idKey(leaf.model(), leaf.tenant(), index.collectionId()));
                     } else if (index.leftover()) {
                         leftoverIndexes++;
+                        if (index.leftoverOfId() != null) {
+                            // The leftover of an id index is an INVALID id-predicate index: gate 3's invalid count and id_index_invalid see it.
+                            invalidIdKeys.add(idKey(leaf.model(), leaf.tenant(), index.leftoverOfId()));
+                        }
                     } else if (!index.parsed()) {
                         unparsedIndexes++;
                     } else if (index.valid()) {
@@ -900,6 +919,20 @@ public final class PciCatalog {
         return parseCollection(deparsedPredicate);
     }
 
+    /**
+     * {@link #leftoverCollection} for the id predicate (RDR-229 P3.4, N2): the collection id a REINDEX CONCURRENTLY leftover of an id index was
+     * made from, or empty. The same conditions: INVALID, a builder name plus {@code _ccnew}/{@code _ccold} and a counter, hnsw, a parsing
+     * predicate, both leaf bounds parsed and {@code standard_conforming_strings} on.
+     */
+    static Optional<Long> leftoverCollectionId(String indexName, String accessMethod, String deparsedPredicate,
+                                               boolean leafBoundsParsed, String standardConformingStrings, boolean valid) {
+        if (valid || indexName == null || !isLeftoverName(indexName)
+            || !"on".equals(standardConformingStrings) || !leafBoundsParsed || !ACCESS_METHOD.equals(accessMethod)) {
+            return Optional.empty();
+        }
+        return parseCollectionId(deparsedPredicate);
+    }
+
     private static Optional<String> unquote(Pattern shape, String text) {
         if (text == null) {
             return Optional.empty();
@@ -1088,7 +1121,10 @@ public final class PciCatalog {
             String leftoverOf = collection != null || collectionId != null ? null
                 : leftoverCollection(indexName, method, predicate, model != null && tenant != null, stringsSetting,
                     isValid).orElse(null);
-            indexes.add(new Index(indexName, isValid, collection, leftoverOf, comment, null, collectionId));
+            Long leftoverOfId = collection != null || collectionId != null || leftoverOf != null ? null
+                : leftoverCollectionId(indexName, method, predicate, model != null && tenant != null, stringsSetting,
+                    isValid).orElse(null);
+            indexes.add(new Index(indexName, isValid, collection, leftoverOf, comment, null, collectionId, leftoverOfId));
         }
 
         Leaf build() {

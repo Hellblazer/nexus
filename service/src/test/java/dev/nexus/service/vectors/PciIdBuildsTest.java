@@ -9,28 +9,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 /** RDR-229 P3.4 (linda, 2026-11-22): the name family retires only when gate 3 has latched AND the id readers are present. */
 class PciIdBuildsTest {
 
-    /** A class with the shape P3.5's {@code IdReaders} has, readers present. */
-    static final class ReadersPresent {
-        public static final boolean PRESENT = true;
-    }
-
-    /** The same, readers absent. */
-    static final class ReadersAbsent {
-        public static final boolean PRESENT = false;
-    }
-
-    /** No {@code PRESENT} field at all. */
-    static final class NoField { }
-
-    @Test
-    void theReadersAreReadByReflection_andAbsenceOrAnyFailureIsFalse() {
-        assertThat(PciIdBuilds.readersPresent(ReadersPresent.class.getName())).isTrue();
-        assertThat(PciIdBuilds.readersPresent(ReadersAbsent.class.getName())).isFalse();
-        assertThat(PciIdBuilds.readersPresent(NoField.class.getName())).as("no PRESENT field").isFalse();
-        assertThat(PciIdBuilds.readersPresent("dev.nexus.service.vectors.NoSuchReaders")).as("no such class").isFalse();
-        assertThat(PciIdBuilds.ID_READERS_CLASS).isEqualTo("dev.nexus.service.vectors.IdReaders");
-    }
-
     @Test
     void theRetireNeedsTheLatchedGate3AndThePresentReaders_andAnInjectedSupplierControlsBoth() {
         var b = new PciIdBuilds();
@@ -48,13 +26,20 @@ class PciIdBuildsTest {
 
         b.gate3(() -> { throw new IllegalStateException("boom"); });
         assertThat(b.gate3Holds()).as("unknown is not holds").isFalse();
+        b.gate3(() -> true);
+        b.readers(() -> { throw new IllegalStateException("boom"); });
+        assertThat(b.gate3Holds()).as("unknown readers is not holds").isFalse();
     }
 
     @Test
-    void theDefaultReadersSupplierIsTheReflectiveOne_soABranchWithoutIdReadersDropsNothing() {
+    void theProductionDefaultIsIdReadersPresent_falseOnThisBranch_soTheRetireNeverRunsUntilP35cFlipsIt() {
         var b = new PciIdBuilds();
         b.gate3(() -> true);
-        // The default supplier reads dev.nexus.service.vectors.IdReaders.PRESENT: false until P3.5 defines the class.
-        assertThat(b.gate3Holds()).isEqualTo(PciIdBuilds.idReadersPresent());
+
+        // The default supplier reads IdReaders.present(), a method, so a flip of the constant is never held inlined by a caller.
+        assertThat(b.gate3Holds()).as("latched gate 3, production readers default").isEqualTo(IdReaders.present());
+        // P3.5c flips IdReaders.PRESENT to true; this assertion is the one it changes with it.
+        assertThat(IdReaders.present()).as("false on the P3.4 branch").isFalse();
+        assertThat(b.gate3Holds()).isFalse();
     }
 }

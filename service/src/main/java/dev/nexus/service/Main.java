@@ -699,8 +699,7 @@ public final class Main {
             var latest = completionCheck == null ? null : completionCheck.latest();
             return latest != null && latest.gate2();
         });
-        // linda, 2026-11-22: once gate 3 has LATCHED (the check's cached read of the latch row, never the live gate 3) and the id readers are present (IdReaders.PRESENT, by
-        // reflection) the name-predicate indexes retire: a name index is dropped where its collection's id index is VALID, and none is built.
+        // linda, 2026-11-22: once gate 3 has LATCHED (the check's cached read of the latch row, never the live gate 3) and the id readers are present (IdReaders.PRESENT, a constant P3.5c flips) the name-predicate indexes retire: a name index is dropped where its collection's id index is VALID, and none is built.
         pciReconciler.retireNameIndexesWhen(() -> completionCheck != null && completionCheck.gate3Latched());
         // nexus-p2m1x.20 (RDR-229 P3.3b): the per-leaf id unique-index pass, after the engine serves. Not the PCI reconciler's: it runs whether
         // NX_SEARCH_PCI is on or off and starts only when gate 1 of the completion check holds (its latest read; no check, no pass).
@@ -843,7 +842,7 @@ public final class Main {
 
     /**
      * RDR-229 P3.1, P3.3a: the completion check's reporter (the boot read set, CompletionCheck.ReadSet.boot()), or null when it cannot start; never throws. Gate 3 reads P3.4's id-index
-     * coverage from the PCI reconciler ({@code PciReconciler#gate3Source}): it holds once every collection the planner would index has a VALID id-predicate index.
+     * coverage from the PCI reconciler ({@code PciReconciler#gate3Source}): it holds once every collection that requires one has a VALID id-predicate index.
      */
     private static dev.nexus.service.datamove.CompletionBootWork startCompletionBootWork(BootWorkRegistry bootWork,
             dev.nexus.service.db.AdminConnection admin, dev.nexus.service.datamove.CompletionCheck.Gate3Source gate3) {

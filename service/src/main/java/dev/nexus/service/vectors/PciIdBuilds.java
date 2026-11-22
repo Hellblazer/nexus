@@ -55,7 +55,7 @@ final class PciIdBuilds {
         this.gate3 = gate3 == null ? () -> false : gate3;
     }
 
-    private volatile BooleanSupplier readers = PciIdBuilds::idReadersPresent;
+    private volatile BooleanSupplier readers = IdReaders::present;
 
     void readers(BooleanSupplier readers) {
         this.readers = readers == null ? () -> false : readers;
@@ -63,30 +63,13 @@ final class PciIdBuilds {
 
     /**
      * Whether the name family retires this pass: gate 3 has LATCHED (the engine's cached read of {@code nexus.rdr229_gate_latch}, never the live
-     * gate 3) AND the id readers are present in this engine ({@link #idReadersPresent}). Dropping a name index while the readers still select by
+     * gate 3) AND the id readers are present in this engine ({@link IdReaders#PRESENT}). Dropping a name index while the readers still select by
      * name would leave search without its index. Unknown is not "holds".
      */
     boolean gate3Holds() {
         try {
             return gate3.getAsBoolean() && readers.getAsBoolean();
         } catch (RuntimeException e) {
-            return false;
-        }
-    }
-
-    /** The class P3.5 defines to say this engine's readers select by id; read by reflection, as it does not exist before that release. */
-    static final String ID_READERS_CLASS = "dev.nexus.service.vectors.IdReaders";
-
-    /** {@link #readersPresent} for {@link #ID_READERS_CLASS}'s {@code PRESENT}: false while the class is absent or its field unreadable. */
-    static boolean idReadersPresent() {
-        return readersPresent(ID_READERS_CLASS);
-    }
-
-    /** True when {@code className} loads and its static boolean field {@code PRESENT} is true; absence or any failure counts as false. */
-    static boolean readersPresent(String className) {
-        try {
-            return Class.forName(className).getField("PRESENT").getBoolean(null);
-        } catch (ReflectiveOperationException | RuntimeException | LinkageError e) {
             return false;
         }
     }

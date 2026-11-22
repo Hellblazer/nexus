@@ -35,6 +35,16 @@ public record ArbiterTwins(String table, String nameColumns, String idColumns, S
     /** The topics arbiter's predicate: only a root topic has a label key (the upsert's {@code WHERE parent_id IS NULL}). */
     public static final String TOPICS_ROOT = "parent_id IS NULL";
 
+    /**
+     * A twin index whose table's writer a later changeset replaces (P3.5b's form A, which applies at the first boot after the stamps complete)
+     * is not built until that changeset is recorded in databasechangelog: built earlier, two writers racing on one key under the old body,
+     * whose ON CONFLICT names the name key, can raise a plain 23505 on the twin (linda 2026-11-22). Twin index name to the changeset ids it
+     * waits for. Gate 3 still requires the twin, so gate 3 waits too. elsinore scanned vectors-078's form-A changesets against these tables
+     * (2026-11-22): only vectors-078-8, canary_query_ring_upsert, writes one.
+     */
+    public static final java.util.Map<String, List<String>> WAITS_FOR_CHANGESETS = java.util.Map.of(
+        "idx_canary_query_ring_id_digest_uq", List.of("vectors-078-8"));
+
     public static final List<ArbiterTwins> ALL = List.of(
         // the P3.3b/c parent UNIQUE on the id key, attached once both swaps complete (gate 2)
         new ArbiterTwins("chunks", "tenant_id, collection, chash, embedding_model", "tenant_id, collection_id, chash, embedding_model", null, null),
@@ -53,7 +63,9 @@ public record ArbiterTwins(String table, String nameColumns, String idColumns, S
             "idx_chunk_orphaned_at_id_chash_uq"),
         new ArbiterTwins("canary_query_ring", "tenant_id, collection, vector_digest", "tenant_id, collection_id, vector_digest", null,
             "idx_canary_query_ring_id_digest_uq"),
-        // target-less ON CONFLICT DO NOTHING (PipelineRepository, ReembedJobRepository): every unique index arbitrates
+        // pdf_pipeline: PipelineRepository's target-less ON CONFLICT DO NOTHING, which every unique index arbitrates. reembed_jobs:
+        // ReembedJobRepository#start's plain INSERT under reembed_jobs_source_lock; its retryingOnLock maps a violation of the lock or this twin
+        // to the typed refusal naming the holder (bob's coverage census, 2026-11-22)
         new ArbiterTwins("pdf_pipeline", "tenant_id, content_hash, collection, pdf_path", "tenant_id, content_hash, collection_id, pdf_path", null,
             "idx_pdf_pipeline_id_uq"),
         new ArbiterTwins("reembed_jobs", "tenant_id, source_collection", "tenant_id, source_collection_id", REEMBED_ACTIVE,

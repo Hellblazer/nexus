@@ -43,8 +43,14 @@ class IdUniqueIndexPassIntegrationTest extends DataMoveIntegrationBase {
         return DSL.field(DSL.name(name));
     }
 
+    @org.junit.jupiter.api.BeforeEach
+    void theWaitedChangesetsHaveRun() {
+        IdIndexCatalogReads.recordWaitedChangesets(ctx());   // the state after P3.5b's form-A boot: every twin may be built
+    }
+
     @AfterEach
     void dropTheIndexesAndRows() throws Exception {
+        IdIndexCatalogReads.forgetWaitedChangesets(ctx());
         asReplica(d -> {
             // jOOQ renders DROP INDEX without the schema of its name (an index is dropped by its own name), so the schema goes on the path
             d.set(DSL.name("search_path"), DSL.inline("nexus")).execute();
@@ -137,7 +143,11 @@ class IdUniqueIndexPassIntegrationTest extends DataMoveIntegrationBase {
         assertThat(ctx().fetchCount(DSL.selectOne().from(REEMBED_JOBS).where(TENANT_ID.eq(TENANT)))).isEqualTo(1);
     }
 
-    /** ReembedJobRepository's insert: ON CONFLICT DO NOTHING with no target. Rows written: 0 or 1. */
+    /**
+     * A second active job for one collection id, as a target-less ON CONFLICT DO NOTHING insert: it shows the twin refusing the row at the
+     * index. ReembedJobRepository#start itself is a plain INSERT whose 23505 on either lock becomes the typed refusal
+     * (ReembedJobRepositoryTest#aStartUnderARenamedLabel_collidingOnTheIdTwin_isRefusedNamingTheHolder). Rows written: 0 or 1.
+     */
     private int reembedJob(String sourceLabel) throws Exception {
         return asReplica(d -> d.insertInto(REEMBED_JOBS)
             .columns(column("tenant_id"), column("job_id"), column("source_collection"), column("target_collection"), column("state"),
@@ -155,6 +165,28 @@ class IdUniqueIndexPassIntegrationTest extends DataMoveIntegrationBase {
 
     private IdUniqueIndexPass pass(BootWorkRegistry registry, boolean gate2) {
         return new IdUniqueIndexPass(adminConnection, registry, () -> gate2);
+    }
+
+    /**
+     * linda 2026-11-22: the canary twin waits for vectors-078-8, the form-A redefinition of canary_query_ring_upsert, to be recorded; built
+     * before it, two writers racing on one digest under the old body (ON CONFLICT on the name key) can raise a plain 23505 on the twin.
+     * Until it is recorded the twin is not built, every other index is, and gate 3's read stays false; once recorded, the next pass builds it.
+     */
+    @Test
+    void theCanaryTwinWaitsForItsWritersChangeset_andGate3WithIt() {
+        IdIndexCatalogReads.forgetWaitedChangesets(ctx());
+        String canary = "idx_canary_query_ring_id_digest_uq";
+        assertThat(ArbiterTwins.WAITS_FOR_CHANGESETS).as("the checked map names the canary twin").containsKey(canary);
+
+        var first = pass(new BootWorkRegistry(Clock.systemUTC()), true).runOnce();
+        assertThat(PgCatalogProbes.indexExists(ctx(), "nexus", canary)).as("not built before vectors-078-8 is recorded").isFalse();
+        assertThat(first.built()).as("every other applicable index is").isEqualTo(applicable() - 1);
+        assertThat(IdUniqueIndexPass.allValid(ctx())).as("gate 3 waits with it").isFalse();
+
+        IdIndexCatalogReads.recordWaitedChangesets(ctx());
+        var second = pass(new BootWorkRegistry(Clock.systemUTC()), true).runOnce();
+        assertThat(second.built()).as("once recorded, the next pass builds the canary twin").isEqualTo(1);
+        assertThat(IdUniqueIndexPass.allValid(ctx())).isTrue();
     }
 
     @Test
