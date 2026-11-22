@@ -213,6 +213,23 @@ def test_an_agent_whose_task_notification_says_it_ended_is_reaped_inside_a_live_
     assert (i1, "agent", "agent:aresumed") in box.engine.work, "written again after its notification: resumed"
 
 
+def test_the_end_is_the_enqueue_not_the_later_dequeue(tmp_path) -> None:
+    """r2 (code-review-expert): every notification is written as enqueue and again as remove when the main session takes
+    it, up to ~48 min later. An agent resumed in between must not read as ended at the dequeue time."""
+    import json as _json
+
+    from nexus.identity.holder import epoch_seconds
+    from nexus.identity.reap import ended_agents
+
+    root = _transcript(tmp_path, "sid-1", [("a1", "completed", "2026-11-17T10:00:05Z")])
+    path = next(root.glob("*/sid-1.jsonl"))
+    body = "<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n</task-notification>"
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(_json.dumps({"type": "queue-operation", "operation": "remove", "timestamp": "2026-11-17T10:00:40Z",
+                              "content": body}) + "\n")
+    assert ended_agents("sid-1", root) == {"a1": epoch_seconds("2026-11-17T10:00:05Z")}
+
+
 def test_ended_agents_reads_nothing_for_no_session_or_no_transcript(tmp_path) -> None:
     from nexus.identity.reap import ended_agents
 
@@ -317,3 +334,68 @@ def test_done_and_forget_can_name_the_identity_for_a_process_that_lost_its_sessi
     assert box.run("work", "forget", "--kind", "agent", "--ref", "agent:a1", "--identity", i1).exit_code == 0
     assert (i1, "agent", "agent:a1") not in box.engine.work
     assert "nothing to mark done" in box.run("work", "done", "--kind", "labrun", "--ref", "h:9:9", "--identity", i1).output
+
+
+def test_an_agent_that_ended_before_a_clear_is_found_in_the_earlier_transcript(box: Box, tmp_path) -> None:
+    """r2 (critic): /clear starts a new session id in the same process, so the ghost rule never fires and the agent's
+    notification sits in the earlier session's transcript. The reap reads the holder's project directory for it."""
+    from nexus.identity import reap as work_reap
+
+    i1 = box.running_seat("alpha", 100)
+    box.engine.sessions["sid-new"] = (i1, 1)
+    box.engine.records[i1]["holder"]["session_id"] = "sid-new"
+    box.engine.work[(i1, "agent", "agent:abefore")] = ("running", 500.0)
+    root = _transcript(tmp_path, "sid-old", [("abefore", "completed", "1970-01-01T00:10:00Z")])
+    (next(root.glob("*/sid-old.jsonl")).parent / "sid-new.jsonl").write_text("", encoding="utf-8")
+    closed = {r["ref"] for r in work_reap.reap(box.env(), i1, projects=root)}
+    assert closed == {"agent:abefore"}
+
+
+def test_a_label_whose_start_failed_forgets_a_row_that_may_have_landed(monkeypatch) -> None:
+    """r2 (critic): a registration that timed out client-side can still land, leaving a running row nothing ends."""
+    from nexus.identity import work
+
+    monkeypatch.setattr(work, "caller_identity", lambda: "i1")
+    monkeypatch.setattr(work, "register_own", lambda *a, **k: False)
+    forgot: list[tuple] = []
+    monkeypatch.setattr(work, "forget_own", lambda kind, ref, **k: forgot.append((kind, ref, k["identity"])) or True)
+    monkeypatch.setattr(work, "finish_own", lambda *a, **k: pytest.fail("no done for a row this process never saw"))
+    label = work.Label("wait", "ci:develop@abc")
+    assert label.start() is False
+    label.finish()
+    label.finish()
+    assert forgot == [("wait", "ci:develop@abc", "i1")]
+    skipped = work.Label("wait", "ci:develop@def")
+    skipped.start()
+    skipped.finish(skip=True)
+    assert len(forgot) == 1, "a superseded wait's successor owns the row"
+
+
+def test_work_run_retries_its_end_and_forgets_a_registration_that_failed(box: Box) -> None:
+    """r2 (critic): the docs said run retries its end once; it made one attempt."""
+    from nexus.identity import work
+    from nexus.identity.bind_client import IdentityUnavailableError
+
+    i1 = box.running_seat("alpha", 100)
+    real_put = box.engine.put_work
+    fails = {"n": 1}
+
+    def flaky(identity, kind, ref, state="running"):
+        if state == "done" and fails["n"]:
+            fails["n"] -= 1
+            raise IdentityUnavailableError("cold")
+        return real_put(identity, kind, ref, state)
+
+    box.engine.put_work = flaky                                       # type: ignore[method-assign]
+    assert work.run_command(box.env(), "watcher", "w1", ["x"], who=lambda: i1, runner=lambda argv: 0) == 0
+    assert box.engine.work[(i1, "watcher", "w1")][0] == "done"
+
+    def refuse_running(identity, kind, ref, state="running"):
+        if state == "running":
+            box.engine.work[(identity, kind, ref)] = ("running", 500.0)   # it landed, but the caller saw a timeout
+            raise IdentityUnavailableError("timed out")
+        return real_put(identity, kind, ref, state)
+
+    box.engine.put_work = refuse_running                              # type: ignore[method-assign]
+    assert work.run_command(box.env(), "watcher", "w2", ["x"], who=lambda: i1, runner=lambda argv: 3) == 3
+    assert (i1, "watcher", "w2") not in box.engine.work

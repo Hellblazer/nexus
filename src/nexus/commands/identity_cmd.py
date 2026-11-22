@@ -238,6 +238,19 @@ _OWNER = click.option(
          "a lab-remote whose shell ended before the run did. Default: the caller's own.")
 
 
+def _owner_of(owner: str | None) -> Callable[[], str | None] | None:
+    """The ``who`` for ``--identity``: the named identity, with one stderr line when it is not the caller's own (a wrong id
+    ends another session's work, and nothing in the engine refuses it)."""
+    if not owner:
+        return None
+    from nexus.identity import work  # noqa: PLC0415
+
+    mine = work.caller_identity()
+    if mine is not None and mine != owner:
+        click.echo(f"note: --identity {owner} is not this process's identity ({mine})", err=True)
+    return lambda: owner
+
+
 @work_group.command("done")
 @_KIND
 @_REF
@@ -247,7 +260,7 @@ def work_done_cmd(ctx: click.Context, kind: str, ref: str, owner: str | None) ->
     """Mark work this session owns finished (state done)."""
     from nexus.identity import work  # noqa: PLC0415
 
-    _run(ctx, lambda env: work.register_lines(env, kind, ref, work.DONE, who=(lambda: owner) if owner else None))
+    _run(ctx, lambda env: work.register_lines(env, kind, ref, work.DONE, who=_owner_of(owner)))
 
 
 @work_group.command("forget")
@@ -259,7 +272,7 @@ def work_forget_cmd(ctx: click.Context, kind: str, ref: str, owner: str | None) 
     """Drop a work row of this session."""
     from nexus.identity import work  # noqa: PLC0415
 
-    _run(ctx, lambda env: work.forget_lines(env, kind, ref, who=(lambda: owner) if owner else None))
+    _run(ctx, lambda env: work.forget_lines(env, kind, ref, who=_owner_of(owner)))
 
 
 @work_group.command("list")

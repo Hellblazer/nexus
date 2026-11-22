@@ -592,6 +592,13 @@ class Label:
         return self._started
 
     def finish(self, *, skip: bool = False) -> None:
+        if not self._started and self.identity and not self._finished and not skip:
+            # The registration failed as far as this process knows, but a write that timed out may still have landed: a
+            # running row nothing ends and no process vouches for. Forget is idempotent and never creates a row.
+            self._finished = True
+            self._disarm()
+            forget_own(self.kind, self.ref, identity=self.identity, timeout=FINISH_RETRY_TIMEOUT_S)
+            return
         if not self._started or self._finished:
             return
         self._finished = True
@@ -829,25 +836,39 @@ def run_command(env: IdentityEnv | Callable[[], IdentityEnv], kind: str, ref: st
         raise IdentityCommandError("give the command to run after --")
     engine: IdentityEnv | None = None
     identity: str | None = None
+    registered = False
     try:
         identity = (who or caller_identity)()
         if identity is not None:
             engine = env() if callable(env) else env
             register(engine.client, identity, kind, ref, RUNNING, probe=engine)
+            registered = True
             _own_record(engine.identity_dir, identity, kind, ref, RUNNING, engine.procs)
     except Exception as exc:  # noqa: BLE001 — a label never fails its work
         _log.warning("identity_work_run_not_registered", kind=kind, ref=ref, error=f"{type(exc).__name__}: {exc}")
-        engine = None
     try:
         code = (runner or _spawn)(list(argv))
     finally:
         if engine is not None and identity is not None:
-            try:
+            _end_run(engine, identity, kind, ref, registered)
+    return code
+
+
+def _end_run(engine: IdentityEnv, identity: str, kind: str, ref: str, registered: bool) -> None:
+    """``run``'s end: ``done``, retried once (nexus-hczdo: the end is the write a reader cannot replace), and the owner record
+    closed. When the registration failed as far as this process knows, a write that timed out may still have landed:
+    forget the row instead (idempotent, it never creates one)."""
+    for attempt in (1, 2):
+        try:
+            if registered:
                 mark_done(engine.client, identity, kind, ref)
                 _own_record(engine.identity_dir, identity, kind, ref, DONE, engine.procs)
-            except Exception as exc:  # noqa: BLE001 — as above
+            else:
+                forget(engine.client, identity, kind, ref)
+            return
+        except Exception as exc:  # noqa: BLE001 — a label never fails its work
+            if attempt == 2:
                 _log.warning("identity_work_run_not_marked_done", kind=kind, ref=ref, error=f"{type(exc).__name__}: {exc}")
-    return code
 
 
 _FORWARDED = tuple(getattr(signal, n) for n in ("SIGTERM", "SIGINT", "SIGHUP") if hasattr(signal, n))

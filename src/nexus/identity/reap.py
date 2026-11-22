@@ -49,7 +49,7 @@ from nexus.identity.work import (
     wait_superseded,
 )
 
-__all__ = ["FORGOTTEN_AT_END", "REAPED_KINDS", "ended_agents", "reap", "reap_why"]
+__all__ = ["FORGOTTEN_AT_END", "REAPED_KINDS", "ended_agents", "ended_in_siblings", "reap", "reap_why"]
 
 _log = structlog.get_logger(__name__)
 
@@ -72,18 +72,7 @@ def _claude_projects() -> Path:
     return (Path(base) if base else Path.home() / ".claude") / "projects"
 
 
-def ended_agents(session_id: str | None, projects: Path | None = None) -> dict[str, float]:
-    """``{agent id: epoch seconds of its latest terminal task-notification}`` from the transcript of *session_id*
-    (``<projects>/*/<session id>.jsonl``). Empty when there is no session, no transcript, or it cannot be read: no witness,
-    never an error. Only lines that carry a task notification are parsed."""
-    if not session_id:
-        return {}
-    root = projects if projects is not None else _claude_projects()
-    out: dict[str, float] = {}
-    try:
-        paths = list(root.glob(f"*/{session_id}.jsonl"))
-    except OSError:
-        return {}
+def _scan(paths: list[Path], out: dict[str, float]) -> None:
     for path in paths:
         try:
             with path.open("r", encoding="utf-8", errors="replace") as fh:
@@ -94,15 +83,59 @@ def ended_agents(session_id: str | None, projects: Path | None = None) -> dict[s
                         entry = json.loads(line)
                     except ValueError:
                         continue
-                    at = _epoch(entry.get("timestamp")) if isinstance(entry, Mapping) else None
-                    text = json.dumps(entry.get("content", "")) if isinstance(entry, Mapping) else ""
-                    text = text.replace("\\n", "\n")
+                    if not isinstance(entry, Mapping):
+                        continue
+                    if entry.get("operation") not in (None, "enqueue"):
+                        # Each notification is written twice, as ``enqueue`` when the agent ends and as ``remove`` when the
+                        # main session takes it (8115 real pairs: median 8 s later, p99 about 48 min). Only the enqueue is
+                        # the end; a dequeue time could postdate a resume and close the resumed agent's row.
+                        continue
+                    at = _epoch(entry.get("timestamp"))
+                    text = json.dumps(entry.get("content", "")).replace("\\n", "\n")
                     for m in _NOTICE.finditer(text):
                         if m["status"] in TERMINAL_STATUSES and at is not None:
                             out[m["id"]] = max(out.get(m["id"], 0.0), at)
         except OSError:
             continue
+
+
+def ended_in_siblings(session_id: str | None, since: float, projects: Path | None = None) -> dict[str, float]:
+    """:func:`ended_agents` over the other transcripts of the holder's project directories modified after *since*: an
+    agent that ended in the session before a ``/clear`` (same process, new session id) has its notification there. Agent
+    ids are unique, so a notification in any transcript is that agent's. Only the reap calls this, and only for an agent
+    row the current transcript did not settle: the directory holds gigabytes."""
+    if not session_id:
+        return {}
+    root = projects if projects is not None else _claude_projects()
+    out: dict[str, float] = {}
+    try:
+        dirs = {p.parent for p in root.glob(f"*/{session_id}.jsonl")}
+        paths = [p for d in dirs for p in d.glob("*.jsonl") if p.name != f"{session_id}.jsonl" and p.stat().st_mtime >= since]
+    except OSError:
+        return {}
+    _scan(paths, out)
     return out
+
+
+def ended_agents(session_id: str | None, projects: Path | None = None) -> dict[str, float]:
+    """``{agent id: epoch seconds of its latest terminal task-notification}`` from the transcript of *session_id*
+    (``<projects>/*/<session id>.jsonl``), read from the ``enqueue`` entry, the moment the agent ended. Empty when there is
+    no session, no transcript, or it cannot be read: no witness, never an error. Only lines that carry a task notification
+    are parsed."""
+    if not session_id:
+        return {}
+    root = projects if projects is not None else _claude_projects()
+    out: dict[str, float] = {}
+    try:
+        paths = list(root.glob(f"*/{session_id}.jsonl"))
+    except OSError:
+        return {}
+    _scan(paths, out)
+    return out
+
+
+def _agent_id(ref: str) -> str:
+    return ref.split(":", 1)[1] if ref.startswith("agent:") else ref
 
 
 def reap_why(env: Any, identity: str, w: Work, *, session: str | None, holder_started: float | None,
@@ -116,8 +149,7 @@ def reap_why(env: Any, identity: str, w: Work, *, session: str | None, holder_st
         # session lagging the registry): only a wait nothing vouches for is closed for naming an earlier session.
         return "a wait from an earlier session"
     if w.kind == "agent" and ended:
-        agent_id = w.ref.split(":", 1)[1] if w.ref.startswith("agent:") else w.ref
-        at, written = ended.get(agent_id), _epoch(w.updated_at)
+        at, written = ended.get(_agent_id(w.ref)), _epoch(w.updated_at)
         if at is not None and (written is None or at >= written):
             return "its task notification says it ended"
     return process_stale_why(env, identity, w, holder_started=holder_started)
@@ -154,7 +186,13 @@ def reap(env: Any, identity: str, *, projects: Path | None = None, deadline_s: f
     until = time.monotonic() + deadline_s if deadline_s is not None else None
     session, started = holder_facts(env.client, identity)
     rows = of(env.client, identity)
-    ended = ended_agents(session, projects) if any(w.kind == "agent" and w.state == RUNNING for w in rows) else {}
+    agents = [w for w in rows if w.kind == "agent" and w.state == RUNNING]
+    ended = ended_agents(session, projects) if agents else {}
+    unsettled = [w for w in agents if _agent_id(w.ref) not in ended
+                 and process_stale_why(env, identity, w, holder_started=started) is None]
+    if unsettled:
+        since = min((_epoch(w.updated_at) or 0.0) for w in unsettled)
+        ended = {**ended_in_siblings(session, since, projects), **ended}
     judged = [(w, why) for w in rows
               if (why := reap_why(env, identity, w, session=session, holder_started=started, ended=ended)) is not None]
     closed: list[dict[str, str]] = []
