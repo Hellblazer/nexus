@@ -3,13 +3,17 @@
 package dev.nexus.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import dev.nexus.service.CollectionRouteCensus.StoreRename;
 import dev.nexus.service.CollectionRouteFixture.Resp;
 import dev.nexus.service.datamove.RenameReadiness.Missing;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
+
+import java.util.List;
 
 import static dev.nexus.service.CollectionRouteFixture.json;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -206,6 +210,169 @@ class CollectionRenameRefusalTest {
         assertThat(j.path("ids_stable").isBoolean()).as("ids_stable is present: %s", r.body()).isTrue();
         assertThat(j.path("ids_stable").asBoolean()).as("the id is not stable before the drop move completes").isFalse();
         assertThat(j.has("renamed")).as("the existing per-table counts stay (additive): %s", r.body()).isTrue();
+    }
+
+    /**
+     * linda's ruling 5 (2026-11-22): "every response carrying {@code ids_stable} also carries {@code catalog_epoch}", from
+     * baton's {@code CatalogEpoch.of(ctx, tenant)} (the first 16 hex characters of a sha256 over the cluster's system
+     * identifier, timeline and the tenant's restore marker). On a stock cluster the engine role can read the pg_control
+     * functions, so the epoch is there, beside {@code ids_stable}, in the two states a rename answers 200 in: gate 3 not
+     * holding and the drop move missing, and gate 3 holding with the window closed. The value is a function of the cluster and
+     * the tenant, so two renames with nothing changed between them answer the same one. The test reads the epoch only through
+     * the response, so it needs no production symbol.
+     */
+    @Test
+    void theRenameResponseCarriesCatalogEpochBesideIdsStable_whenTheEpochIsAvailable() {
+        String first = null;
+        for (boolean gate3 : new boolean[] {false, true}) {
+            fx.gate3.set(gate3);
+            fx.renameWindow.set(gate3 ? Missing.NONE : Missing.NAME_KEY_DROP_MOVE);
+            String from = registered("epoch-g" + gate3);
+            String to = CollectionRouteFixture.label("rr-epoch-to-g" + gate3 + "-" + (n++));
+            Resp r = renameByLabel(from, to);
+            assertThat(r.status()).as(r.body()).isEqualTo(200);
+            JsonNode j = r.json();
+            assertThat(j.path("ids_stable").isBoolean()).as("ids_stable is present: %s", r.body()).isTrue();
+            assertThat(j.has("catalog_epoch")).as("catalog_epoch rides with ids_stable: %s", r.body()).isTrue();
+            assertThat(j.path("catalog_epoch").isTextual()).as("a string, never null: %s", r.body()).isTrue();
+            assertThat(j.path("catalog_epoch").asText()).as("the first 16 hex characters of a sha256")
+                .matches("[0-9a-f]{16}");
+            if (first == null) {
+                first = j.path("catalog_epoch").asText();
+            } else {
+                assertThat(j.path("catalog_epoch").asText()).as("nothing changed between the two renames").isEqualTo(first);
+            }
+        }
+    }
+
+    /**
+     * linda's ruling 5, and the P3.7 acceptance she added 2026-11-22: "if the engine role cannot read
+     * {@code pg_control_system}/{@code pg_control_checkpoint}, no epoch is reported (reads unstable), tested with the privilege
+     * revoked". With EXECUTE revoked on both from PUBLIC and from the engine's role the rename still answers 200, with
+     * {@code ids_stable} and with the {@code catalog_epoch} KEY OMITTED: {@code has()} is false, which is not the same as a
+     * present null. Non-vacuity: the same engine answers with an epoch before the revoke; the privilege is given back to PUBLIC
+     * after, the state a stock cluster starts in.
+     */
+    @Test
+    void theRenameResponseOmitsCatalogEpoch_neverNull_whenTheEngineRoleCannotReadTheCluster() {
+        fx.gate3.set(false);
+        fx.renameWindow.set(Missing.NAME_KEY_DROP_MOVE);
+        Resp before = renameByLabel(registered("noepoch-a"), CollectionRouteFixture.label("rr-noepoch-a2-" + (n++)));
+        assertThat(before.status()).as(before.body()).isEqualTo(200);
+        assertThat(before.json().path("catalog_epoch").isTextual()).as("non-vacuity: there is an epoch before the revoke: %s",
+            before.body()).isTrue();
+
+        List<String> fns = List.of("pg_catalog.pg_control_system()", "pg_catalog.pg_control_checkpoint()");
+        try {
+            fx.asSuperuser(ctx -> {
+                for (String fn : fns) {
+                    ctx.revoke(DSL.privilege("EXECUTE")).on(DSL.table("FUNCTION " + fn))
+                        .from(DSL.role(DSL.unquotedName("PUBLIC"))).execute();
+                    ctx.revoke(DSL.privilege("EXECUTE")).on(DSL.table("FUNCTION " + fn))
+                        .from(DSL.role(PgContainerHelper.SVC_USERNAME)).execute();
+                }
+                return null;
+            });
+            assertThat(fx.asSuperuser(ctx -> ctx.select(DSL.function("has_function_privilege", Boolean.class,
+                    DSL.inline(PgContainerHelper.SVC_USERNAME), DSL.inline(fns.get(0)), DSL.inline("EXECUTE")))
+                .fetchOne(0, Boolean.class))).as("the revoke took: the engine role cannot execute pg_control_system()")
+                .isFalse();
+
+            Resp r = renameByLabel(registered("noepoch-b"), CollectionRouteFixture.label("rr-noepoch-b2-" + (n++)));
+            assertThat(r.status()).as("the rename still succeeds: %s", r.body()).isEqualTo(200);
+            JsonNode j = r.json();
+            assertThat(j.path("ids_stable").isBoolean()).as("ids_stable stays: %s", r.body()).isTrue();
+            assertThat(j.has("catalog_epoch")).as("the key is omitted, not null: %s", r.body()).isFalse();
+        } finally {
+            fx.asSuperuser(ctx -> {
+                for (String fn : fns) {
+                    ctx.grant(DSL.privilege("EXECUTE")).on(DSL.table("FUNCTION " + fn))
+                        .to(DSL.role(DSL.unquotedName("PUBLIC"))).execute();
+                }
+                return null;
+            });
+        }
+    }
+
+    // ---- the per-store rename routes (linda's ruling 3) ----------------------------------------------------------------
+
+    /** One state of the two seams in which a rename is not refused. */
+    record State(boolean gate3, Missing window) { }
+
+    static final List<State> OPEN_STATES = List.of(new State(false, Missing.NONE),
+        new State(false, Missing.NAME_KEY_DROP_MOVE), new State(false, Missing.P35B_RESTART), new State(true, Missing.NONE));
+
+    private Resp storeRename(StoreRename route, String from, String to) {
+        return fx.post(route.path(), "{\"old\":" + json(from) + ",\"new\":" + json(to) + "}");
+    }
+
+    /**
+     * linda's ruling 3 (2026-11-22): "the rename refusal lives in the shared rename primitive so every entry point, per-store
+     * rename_collection routes included, gets it". Each of the five per-store routes ({@link
+     * CollectionRouteCensus#STORE_RENAMES}) rewrites a collection name in one store; from gate 3, in either window, each is
+     * refused with the same typed 409 as the catalog rename, naming the same missing condition, and rewrites nothing. The
+     * routes need the new label registered (they re-point rows at its registry row), so both ends are registered here: the
+     * refusal is not an unregistered-target answer. The taxonomy route is also checked on its data, a topic filed under the old
+     * label stays there.
+     */
+    @Test
+    void everyPerStoreRenameRoute_fromGate3_isRefusedLikeTheCatalogRename_andRewritesNothing() {
+        assertThat(CollectionRouteCensus.STORE_RENAMES).as("non-vacuity: the five routes").hasSize(5);
+        for (StoreRename route : CollectionRouteCensus.STORE_RENAMES) {
+            for (Missing window : new Missing[] {Missing.NAME_KEY_DROP_MOVE, Missing.P35B_RESTART}) {
+                fx.gate3.set(false);
+                fx.renameWindow.set(window);
+                String from = registered("store-from");
+                String to = registered("store-to");
+                long fromId = fx.idOf(from);
+                long toId = fx.idOf(to);
+                assertThat(fx.post("/v1/taxonomy/topics/insert",
+                    "{\"collection\":" + json(from) + ",\"label\":\"p35a-store-topic\",\"doc_count\":1}").status())
+                    .as("setup: a topic filed under the old label").isEqualTo(200);
+
+                fx.gate3.set(true);
+                Resp r = storeRename(route, from, to);
+
+                String what = route.path() + " in window " + window + ": " + r.body();
+                assertThat(r.status()).as(what).isEqualTo(409);
+                JsonNode j = r.json();
+                assertThat(j.path("reason").asText()).as("typed: %s", what).isEqualTo(REASON);
+                assertThat(j.path("missing").asText()).as("names the missing condition: %s", what)
+                    .isEqualTo(window == Missing.NAME_KEY_DROP_MOVE ? MISSING_MOVE : MISSING_RESTART);
+                assertThat(j.path("error").asText()).as("and says it in words").isNotBlank();
+                assertThat(fx.idOf(from)).as("nothing renamed: %s", route.path()).isEqualTo(fromId);
+                assertThat(fx.idOf(to)).isEqualTo(toId);
+                assertThat(fx.supersededBy(from)).isEqualTo("");
+                fx.gate3.set(false);
+                assertThat(fx.get("/v1/taxonomy/topics?collection=" + java.net.URLEncoder.encode(from,
+                    java.nio.charset.StandardCharsets.UTF_8)).body()).as("the topic is still filed under the old label (%s)",
+                    what).contains("p35a-store-topic");
+                assertThat(fx.get("/v1/taxonomy/topics?collection=" + java.net.URLEncoder.encode(to,
+                    java.nio.charset.StandardCharsets.UTF_8)).body()).as("and none under the new one (%s)", what)
+                    .doesNotContain("p35a-store-topic");
+            }
+        }
+    }
+
+    /**
+     * The refusal's own conditions, on the same five routes: with gate 3 not holding (any window) or with gate 3 holding and
+     * the window closed, a per-store rename is the name path as before and answers 200. Without this the test above could pass
+     * on a route that refuses everything.
+     */
+    @Test
+    void everyPerStoreRenameRoute_isNotRefusedBeforeGate3_orWithTheWindowClosed() {
+        for (StoreRename route : CollectionRouteCensus.STORE_RENAMES) {
+            for (State st : OPEN_STATES) {
+                fx.gate3.set(st.gate3());
+                fx.renameWindow.set(st.window());
+                String from = registered("store-open-from");
+                String to = registered("store-open-to");
+                Resp r = storeRename(route, from, to);
+                String what = route.path() + " in " + st + ": " + r.body();
+                assertThat(r.reason()).as(what).isNotEqualTo(REASON);
+                assertThat(r.status()).as(what).isEqualTo(200);
+            }
+        }
     }
 
     // ---- the window closed ---------------------------------------------------------------------------------------------

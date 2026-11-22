@@ -674,16 +674,16 @@ class NexusServiceTupleSweepTest {
 
     @Test
     void resolveTupleSweepBatchSize_defaultsAndParses() {
-        assertThat(NexusService.resolveTupleSweepBatchSize(null))
+        assertThat(TupleSweepSettings.batchSize(null))
                 .isEqualTo(NexusService.DEFAULT_TUPLE_SWEEP_BATCH_SIZE);
-        assertThat(NexusService.resolveTupleSweepBatchSize("42")).isEqualTo(42);
+        assertThat(TupleSweepSettings.batchSize("42")).isEqualTo(42);
     }
 
     @Test
     void resolveTupleSweepMaxBatchesPerTenant_defaultsAndParses() {
-        assertThat(NexusService.resolveTupleSweepMaxBatchesPerTenant(null))
+        assertThat(TupleSweepSettings.maxBatchesPerTenant(null))
                 .isEqualTo(NexusService.DEFAULT_TUPLE_SWEEP_MAX_BATCHES_PER_TENANT);
-        assertThat(NexusService.resolveTupleSweepMaxBatchesPerTenant("7")).isEqualTo(7);
+        assertThat(TupleSweepSettings.maxBatchesPerTenant("7")).isEqualTo(7);
     }
 
     // ── tupleSweepArmBatchShare: the per-arm split (nexus-em75s.34) ──────────────
@@ -725,8 +725,8 @@ class NexusServiceTupleSweepTest {
 
     @Test
     void resolveTupleSweepWallClockBudgetSeconds_defaultsAndParses() {
-        assertThat(NexusService.resolveTupleSweepWallClockBudgetSeconds(null))
+        assertThat(TupleSweepSettings.wallClockBudgetSeconds(null))
                 .isEqualTo(NexusService.DEFAULT_TUPLE_SWEEP_WALL_CLOCK_BUDGET_SECONDS);
-        assertThat(NexusService.resolveTupleSweepWallClockBudgetSeconds("99")).isEqualTo(99L);
+        assertThat(TupleSweepSettings.wallClockBudgetSeconds("99")).isEqualTo(99L);
     }
 }
