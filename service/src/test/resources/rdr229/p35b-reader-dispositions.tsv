@@ -8,6 +8,7 @@
 #   writer-kept    left on the name only to stamp an id on a write P3.1 made (form A, the object is a SQL writer in p31-writer-census.tsv); P4.1 redefines the writers
 #   name-kept      a form-B search function P3.5b leaves on its last definer's name path until P4.1, so its plans, per-collection index use and
 #                  sensitive anti join stay as they are; its id path is the twin named in the reason (<object>_by_id), which P3.5c calls after gate 3 (linda 2026-11-22)
+#   no-caller      a form B function with no engine caller: kept on its name path, no id twin, dropped at P4.1
 #   id-twin        an id-path twin <object>_by_id vectors-077 adds: it matches by collection_id only; the name column it reads is its RETURNS name, as the
 #                  original's; the original is name-kept
 # A NULL id is no collection: an id or both reader never falls back to a '' name (linda 2026-11-20).
@@ -73,12 +74,9 @@ function	nexus.gc_restore_rereferenced	catalog_collections.name	label-kept	L1865
 function	nexus.gc_restore_rereferenced	collection	both	L1791: matched by id (registry id of the label argument) and by name
 function	nexus.gc_restore_rereferenced_bounded	catalog_collections.name	label-kept	L2251: resolves the caller's collection label to its registry row (attribute read, guard, or id for an audit/insert); the signature keeps the label
 function	nexus.gc_restore_rereferenced_bounded	collection	both	L2187: matched by id (registry id of the label argument) and by name
-function	nexus.hybrid_search_1024	collection	name-kept	last definer kept until P4.1 (a both-shapes match proves no per-collection partial index); the id path is nexus.hybrid_search_1024_by_id (vectors-077-100)
-function	nexus.hybrid_search_1024_by_id	collection	id-twin	vectors-077-100: id twin of nexus.hybrid_search_1024; matches by collection_id only (no name arm, no registry lookup); RETURNS collection stays the name, as the original's
-function	nexus.hybrid_search_384	collection	name-kept	last definer kept until P4.1 (a both-shapes match proves no per-collection partial index); the id path is nexus.hybrid_search_384_by_id (vectors-077-101)
-function	nexus.hybrid_search_384_by_id	collection	id-twin	vectors-077-101: id twin of nexus.hybrid_search_384; matches by collection_id only (no name arm, no registry lookup); RETURNS collection stays the name, as the original's
-function	nexus.hybrid_search_768	collection	name-kept	last definer kept until P4.1 (a both-shapes match proves no per-collection partial index); the id path is nexus.hybrid_search_768_by_id (vectors-077-102)
-function	nexus.hybrid_search_768_by_id	collection	id-twin	vectors-077-102: id twin of nexus.hybrid_search_768; matches by collection_id only (no name arm, no registry lookup); RETURNS collection stays the name, as the original's
+function	nexus.hybrid_search_1024	collection	no-caller	no engine caller (vectors-055: never granted, no Java call site): kept on its name path, no id twin, dropped at P4.1 (linda 2026-11-22)
+function	nexus.hybrid_search_384	collection	no-caller	no engine caller (vectors-055: never granted, no Java call site): kept on its name path, no id twin, dropped at P4.1 (linda 2026-11-22)
+function	nexus.hybrid_search_768	collection	no-caller	no engine caller (vectors-055: never granted, no Java call site): kept on its name path, no id twin, dropped at P4.1 (linda 2026-11-22)
 function	nexus.manifest_admits_chunk	collection	both	manifest row against the label: id arm via the registry id, name arm when the row id is NULL
 function	nexus.manifest_qualifying_hits	collection	name-kept	last definer kept until P4.1 (a both-shapes match proves no per-collection partial index); the id path is nexus.manifest_qualifying_hits_by_id (vectors-077-103)
 function	nexus.manifest_qualifying_hits_by_id	collection	id-twin	vectors-077-103: id twin of nexus.manifest_qualifying_hits; matches by collection_id only (no name arm, no registry lookup); RETURNS collection stays the name, as the original's

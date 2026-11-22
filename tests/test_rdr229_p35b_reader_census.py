@@ -58,7 +58,7 @@ def test_a_write_is_not_a_read():
 
 
 _DISPOSITIONS = _REPO / "service" / "src" / "test" / "resources" / "rdr229" / "p35b-reader-dispositions.tsv"
-_VOCABULARY = {"id", "both", "label-kept", "parse-removed", "writer-kept", "name-kept", "id-twin"}
+_VOCABULARY = {"id", "both", "label-kept", "parse-removed", "writer-kept", "name-kept", "id-twin", "no-caller"}
 _TWIN = "_by_id"  # the id-path twin of a name-kept search function (linda 2026-11-22)
 # P4.1 (nexus-p2m1x.35) redefines these views without their name arm, then drops the name columns with RESTRICT (linda 2026-11-22)
 _P41_REDEFINE_VIEWS = {"nexus.collection_vector_stats", "nexus.live_chunks"}
@@ -116,6 +116,8 @@ def _rule_breaches(dispositions, forms, parses, writers=frozenset()) -> list[str
             out.append(f"{where}: writer-kept needs a one-line reason")
         elif disposition == "name-kept" and (forms.get((kind, obj)) != "B" or f"{obj}{_TWIN}" not in reason):
             out.append(f"{where}: name-kept is for a form-B function whose reason names its twin {obj}{_TWIN}")
+        elif disposition == "no-caller" and (forms.get((kind, obj)) != "B" or kind != "function" or not reason):
+            out.append(f"{where}: no-caller is for a form B function with no engine caller, with its reason")
         elif disposition == "id-twin" and (not obj.endswith(_TWIN) or kind != "function"
                                            or dispositions.get((kind, obj[:-len(_TWIN)], col), ("", ""))[0] != "name-kept"):
             out.append(f"{where}: id-twin is for a function <name>{_TWIN} whose original <name> is name-kept")
