@@ -4842,6 +4842,15 @@ def _check_rdr229_completion(engine_status: object = _ENGINE_STATUS_UNSET) -> li
     return check_rdr229_completion(engine_status)
 
 
+def _check_collection_ids(engine_status: object = _ENGINE_STATUS_UNSET) -> list[HealthResult]:
+    """RDR-229 P3.12's collection-identity rows (nexus-p2m1x.32): ``nexus.collection_id_health.check_collection_ids``, the
+    unstamped-row summary, the live-label clash and the live-label index. Named ``_check_*`` here for the same reason as
+    :func:`_check_data_moves`."""
+    from nexus.collection_id_health import check_collection_ids  # noqa: PLC0415 — deferred: that module imports this one
+
+    return check_collection_ids(engine_status)
+
+
 def _check_recall_canary(engine_status: object = _ENGINE_STATUS_UNSET) -> list[HealthResult]:
     """RDR-230 recall canary (nexus-4lnn1.1.10): ``nexus.recall_canary_health.check_recall_canary``. Named ``_check_*``
     here for the same reason as :func:`_check_data_moves`."""
@@ -13694,6 +13703,7 @@ def run_health_checks(
     results.extend(_step("_check_data_moves", lambda: _check_data_moves(engine_status)))  # nexus-f3yqd.2.17 (RDR-246)
     results.extend(_step("_check_pg_bundle", _check_pg_bundle))  # nexus-f3yqd.2.23: a bundle without pg_background
     results.extend(_step("_check_rdr229_completion", lambda: _check_rdr229_completion(engine_status)))  # nexus-p2m1x.17 (RDR-229 P3.1)
+    results.extend(_step("_check_collection_ids", lambda: _check_collection_ids(engine_status)))  # nexus-p2m1x.32 (RDR-229 P3.12)
     results.extend(_step("_check_collection_tuples", lambda: _check_collection_tuples(engine_status)))  # nexus-p2m1x.28 (RDR-229 P3.8)
     results.extend(_step("_check_engine_reaper", lambda: _check_engine_reaper(engine_status)))  # nexus-wbfpw.56
     results.extend(_step("_check_per_collection_indexes", lambda: _check_per_collection_indexes(engine_status)))  # nexus-43ulx.24

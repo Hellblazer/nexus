@@ -362,6 +362,7 @@ final class TenantKeyedStateTables {
             + "per-run tally that dies with the run");
         notKeyed.put("StatusHandler.aspectQueue", "a supplier of the install-wide drain result; not keyed by tenant");
         notKeyed.put("StatusHandler.collectionTupleIndex", "a supplier of whether the install-wide live-tuple index exists (RDR-229 P3.8); not keyed by tenant");
+        notKeyed.put("StatusHandler.liveLabelIndex", "a supplier of whether the install-wide live-label index exists and is valid (RDR-229 P3.12); not keyed by tenant");
         notKeyed.put("AspectQueueDrain.TENANT", "the tenant_id column of the retired queue table, a jOOQ field "
             + "constant; no state");
         notKeyed.put("AspectQueueDrain.Snapshot.rowsByTenant", "one census read of the retired queue table, "
