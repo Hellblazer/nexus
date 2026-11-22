@@ -96,8 +96,13 @@ def test_a_renamed_note_keeps_one_identity_under_the_new_name(t2_service_env, tm
             return CliRunner().invoke(main, ["store", "put", str(note), "-c", subject, "-t", "rn-note"])
 
     assert (r := _put("sis0m3-src")).exit_code == 0, r.output
-    old = t3_collection_name("sis0m3-src", t3=client)
-    new = old.replace("sis0m3-src", "sis0m3-dst")
+    # RDR-229 P3.8: the subject's collection is a label the engine minted (c<id>), found by its row through the process
+    # client (a client built under the minted tenant's name answers no row, nexus-fryrd); the target is the conformant
+    # name of the new subject in the row's model, so the rename moves the subject as before.
+    from nexus.db.http_vector_client import get_http_vector_client
+
+    old = t3_collection_name("sis0m3-src", t3=get_http_vector_client())
+    new = f"knowledge__sis0m3-dst__{make_catalog_reader().get_collection(old)['embedding_model']}__v1"
     with patch("nexus.commands.collection._t3", return_value=client):
         renamed = CliRunner().invoke(main, ["collection", "rename", old, new])
     assert renamed.exit_code == 0, renamed.output

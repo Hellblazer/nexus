@@ -976,6 +976,15 @@ def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
 
     old_prefix = split_candidate_collection_name(old)[0]
     new_prefix = split_candidate_collection_name(new)[0]
+    if not old_prefix:
+        # RDR-229 P3.8: a label the engine minted (c<id>), or any prefix-free label, names no content type; its
+        # row holds it, so renaming such a collection to a conformant name of its own type is not a prefix change.
+        try:
+            from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+            old_prefix = (get_collection_row(old) or {}).get("content_type") or ""
+        except Exception:  # noqa: BLE001 — an unreadable row keeps the name-only comparison, as before
+            old_prefix = ""
     if old_prefix != new_prefix and not force_prefix_change:
         raise click.ClickException(
             f"prefix mismatch: {old_prefix!r} → {new_prefix!r} would change "
