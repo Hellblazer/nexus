@@ -321,15 +321,106 @@ def upload(
     return 0
 
 
+#: A published asset set a client could not use (exit 1) vs one this run could not read (exit 2).
+PUBLISHED_ABSENT, PUBLISHED_UNREADABLE = 1, 2
+
+
+def published_base_url() -> str:
+    """The release tag's public download URL: what a client fetches when no mirror is set.
+    :data:`nexus.mineru_weights.BASE_URL_ENV` is ignored on purpose: the check is about the real tag."""
+    from nexus.db.service_bge_model import _ASSET_DOWNLOAD_BASE  # noqa: PLC0415 — one release base
+
+    return f"{_ASSET_DOWNLOAD_BASE}/{mw.WEIGHTS_ASSET_TAG}"
+
+
+Getter = Callable[[str], tuple[int, bytes]]
+Header = Callable[[str], tuple[int, int | None]]
+
+
+def _http_get(url: str) -> tuple[int, bytes]:
+    import httpx  # noqa: PLC0415 — deferred: only the check needs it
+
+    r = httpx.get(url, follow_redirects=True, timeout=30.0)
+    return r.status_code, r.content
+
+
+def _http_head(url: str) -> tuple[int, int | None]:
+    import httpx  # noqa: PLC0415 — deferred: only the check needs it
+
+    r = httpx.head(url, follow_redirects=True, timeout=30.0)
+    length = r.headers.get("content-length")
+    return r.status_code, int(length) if length and length.isdigit() else None
+
+
+def check_published(*, get: Getter = _http_get, head: Header = _http_head) -> tuple[int, list[str]]:
+    """Whether the release tag serves what this checkout's client pins: ``MANIFEST.tsv`` byte for byte, and
+    every weight asset at its pinned size. Returns ``(0, [])``, ``(PUBLISHED_ABSENT, problems)`` when the tag
+    or an asset is missing or differs (a client cut from this tree would fail its fresh installs), or
+    ``(PUBLISHED_UNREADABLE, problems)`` when the network gave no answer (could not check is not fine)."""
+    base = published_base_url()
+    try:
+        status, body = get(f"{base}/{MANIFEST_ASSET}")
+    except Exception as exc:  # noqa: BLE001 — any transport failure is "could not check"
+        return PUBLISHED_UNREADABLE, [f"could not read {base}/{MANIFEST_ASSET}: {type(exc).__name__}: {exc}"]
+    if status == 404:
+        return PUBLISHED_ABSENT, [f"release tag {mw.WEIGHTS_ASSET_TAG} is absent or carries no {MANIFEST_ASSET} (HTTP 404)"]
+    if status != 200:
+        return PUBLISHED_UNREADABLE, [f"{base}/{MANIFEST_ASSET} answered HTTP {status}"]
+    if body.decode("utf-8", "replace") != manifest_tsv():
+        return PUBLISHED_ABSENT, [f"the published {MANIFEST_ASSET} on {mw.WEIGHTS_ASSET_TAG} does not match this client's pins"]
+    problems: list[str] = []
+    unreadable = False
+    for entry in mw.MANIFEST:
+        try:
+            status, length = head(f"{base}/{entry.asset}")
+        except Exception as exc:  # noqa: BLE001
+            unreadable = True
+            problems.append(f"could not read {entry.asset}: {type(exc).__name__}: {exc}")
+            continue
+        if status == 404:
+            problems.append(f"{entry.asset} is not on {mw.WEIGHTS_ASSET_TAG} (HTTP 404)")
+        elif status != 200:
+            unreadable = True
+            problems.append(f"{entry.asset} answered HTTP {status}")
+        elif length is not None and length != entry.size:
+            problems.append(f"{entry.asset} is {length} bytes on the tag, pinned {entry.size}")
+    if not problems:
+        return 0, []
+    absent = any("HTTP 404" in p or "bytes on the tag" in p for p in problems)
+    return (PUBLISHED_ABSENT if absent or not unreadable else PUBLISHED_UNREADABLE), problems
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--stage-dir", required=True, type=Path)
+    ap.add_argument("--stage-dir", type=Path, help="required except with --check-published")
+    ap.add_argument(
+        "--check-published", action="store_true",
+        help="read-only: exit 0 when the release tag serves this client's pinned manifest and every asset, 1 when it does not, 2 when unreadable",
+    )
     ap.add_argument("--verify-only", action="store_true", help="check an already staged dir; source nothing")
     ap.add_argument("--upload", action="store_true", help="upload to the release tag where absent (the cut, under the go)")
     ap.add_argument("--dry-run", action="store_true", help="with --upload: print the plan, upload nothing")
     ap.add_argument("--repo", default=DEFAULT_REPO)
     ap.add_argument("--target", default=DEFAULT_TARGET, help="the branch a newly created release's tag points at")
     args = ap.parse_args(argv)
+    if args.check_published:
+        if args.upload or args.verify_only or args.dry_run:
+            ap.error("--check-published takes no other mode")
+        rc, problems = check_published()
+        for line in problems:
+            print(f"FAIL: {line}" if rc == PUBLISHED_ABSENT else f"UNVERIFIED: {line}", file=sys.stderr)
+        if rc == PUBLISHED_ABSENT:
+            print(
+                f"MINERU WEIGHTS NOT PUBLISHED: a client cut from this tree fails fresh installs (404, exit 75). "
+                f"Fix: scripts/publish-mineru-weights.py --stage-dir <dir> --upload (release skill step 8b), "
+                f"under the release's go.",
+                file=sys.stderr,
+            )
+        elif rc == 0:
+            print(f"OK: {mw.WEIGHTS_ASSET_TAG} serves {MANIFEST_ASSET} and all {len(mw.MANIFEST)} pinned assets")
+        return rc
+    if args.stage_dir is None:
+        ap.error("--stage-dir is required")
     if args.dry_run and not args.upload:
         ap.error("--dry-run needs --upload")
     if "#" in str(args.stage_dir):

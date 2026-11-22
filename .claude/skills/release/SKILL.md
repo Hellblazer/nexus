@@ -878,6 +878,11 @@ Tradeoff: extra commit on main, but guards against the case where someone could 
 
 ### 8b. Publish the MinerU weights assets (F35, nexus-7t3w1; BEFORE the tag, under the release's go)
 
+The preflight's `mineru-weights-published` leg (step 0c) fails every cut, plugin-only lane included, until this
+has run once: a client cut from develop without the tag would ship broken fresh installs. When it is red, run this
+step first (dry run, then the upload under the release's go) and re-run the preflight. Once the tag carries every
+asset the leg passes and this step is a no-op.
+
 A fresh install fetches MinerU's pipeline weights (about 1.2 GB) from the release assets of the immutable tag
 `mineru-pipeline-ed6b654c` (`WEIGHTS_ASSET_TAG` in `src/nexus/mineru_weights.py`), never from Hugging Face. The
 wheel Step 9 publishes needs those assets to exist, so they go up first. Run it from the release commit; the pinned

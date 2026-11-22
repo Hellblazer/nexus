@@ -270,3 +270,71 @@ def test_verify_only_with_upload_refuses_a_stale_static_asset_and_uploads_nothin
     # staging again refreshes it, and the same upload then proceeds
     assert publish.main(["--stage-dir", str(stage), "--upload"]) == 0
     assert len(reached) == 1
+
+
+# ── --check-published: the release-preflight leg ───────────────────────────────────────────────────
+
+
+def _served(publish, *, manifest: bytes | None = None, missing: str | None = None, sizes: dict[str, int] | None = None):
+    body = publish.manifest_tsv().encode() if manifest is None else manifest
+
+    def get(url: str):
+        assert url == f"{publish.published_base_url()}/{publish.MANIFEST_ASSET}"
+        return 200, body
+
+    def head(url: str):
+        name = url.rsplit("/", 1)[1]
+        if name == missing:
+            return 404, None
+        entry = next(f for f in mw.MANIFEST if f.asset == name)
+        return 200, (sizes or {}).get(name, entry.size)
+
+    return get, head
+
+
+def test_check_published_passes_when_the_tag_serves_the_pinned_manifest_and_every_asset(publish):
+    get, head = _served(publish)
+    assert publish.check_published(get=get, head=head) == (0, [])
+
+
+def test_check_published_fails_when_the_tag_is_absent(publish):
+    rc, problems = publish.check_published(get=lambda url: (404, b"Not Found"), head=lambda url: (404, None))
+    assert rc == publish.PUBLISHED_ABSENT and mw.WEIGHTS_ASSET_TAG in problems[0]
+
+
+def test_check_published_fails_on_another_manifest(publish):
+    get, head = _served(publish, manifest=publish.manifest_tsv().replace(mw.MANIFEST[0].sha256, "0" * 64).encode())
+    rc, problems = publish.check_published(get=get, head=head)
+    assert rc == publish.PUBLISHED_ABSENT and "does not match" in problems[0]
+
+
+def test_check_published_fails_on_a_missing_or_wrong_size_asset(publish):
+    last = mw.MANIFEST[-1].asset
+    get, head = _served(publish, missing=last)
+    rc, problems = publish.check_published(get=get, head=head)
+    assert rc == publish.PUBLISHED_ABSENT and problems == [f"{last} is not on {mw.WEIGHTS_ASSET_TAG} (HTTP 404)"]
+    first = mw.MANIFEST[0]
+    get, head = _served(publish, sizes={first.asset: first.size - 1})
+    rc, problems = publish.check_published(get=get, head=head)
+    assert rc == publish.PUBLISHED_ABSENT and "pinned" in problems[0]
+
+
+def test_check_published_is_unverified_when_the_network_gives_no_answer(publish):
+    def boom(url):
+        raise OSError("network is unreachable")
+
+    rc, problems = publish.check_published(get=boom, head=boom)
+    assert rc == publish.PUBLISHED_UNREADABLE and "network is unreachable" in problems[0]
+
+
+def test_check_published_ignores_the_mirror_override(publish, monkeypatch):
+    monkeypatch.setenv(mw.BASE_URL_ENV, "http://127.0.0.1:1/mirror")
+    assert publish.published_base_url().endswith(f"/releases/download/{mw.WEIGHTS_ASSET_TAG}")
+
+
+def test_the_release_preflight_runs_the_check_and_reads_exit_2_as_unverified():
+    text = (REPO_ROOT / "tests" / "e2e" / "release-preflight.sh").read_text()
+    leg = text[text.index("mineru_weights_published_leg () {"):text.index("\nmineru_weights_published_leg\n")]
+    assert "scripts/publish-mineru-weights.py --check-published" in leg
+    assert 'record SKIP "mineru-weights-published"' in leg and "2)" in leg
+    assert "--upload" in leg  # the FAIL line names the fix
