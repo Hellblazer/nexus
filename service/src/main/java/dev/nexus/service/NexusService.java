@@ -162,7 +162,7 @@ public final class NexusService {
 
     private final HttpServer server;
     private final TenantScope tenantScope;
-    /** RDR-229 P3.5a (nexus-p2m1x.23): the gate-3 signal and the rename readiness, read per call. STUB: held, not read yet. */
+    /** RDR-229 P3.5a (nexus-p2m1x.23): the gate-3 signal and the rename readiness, read per call; the catalog's rename reads them (RenameGuard, P3.7). */
     private final dev.nexus.service.datamove.Gate3 gate3;
     private final dev.nexus.service.datamove.RenameReadiness renameReadiness;
     /**
@@ -687,7 +687,7 @@ public final class NexusService {
 
     /**
      * RDR-229 P3.5a (nexus-p2m1x.23): the gate-3 signal and what a rename from gate 3 waits for, each read per call. The
-     * constructors above pass {@code Gate3.never()} and {@code RenameReadiness.ready()}. Package-private. STUB: held, unread.
+     * constructors above pass {@code Gate3.never()} and {@code RenameReadiness.ready()}. Package-private.
      */
     NexusService(int port, String token, DataSource dataSource,
                         EmbedderRouter docEmbedderRouter,
@@ -734,7 +734,7 @@ public final class NexusService {
         var remapRepo     = new RemapRepository(tenantScope);
         var ladderRepo    = new LadderRepository(tenantScope);
         var pipelineRepo  = new PipelineRepository(tenantScope);
-        this.catalogRepo  = new CatalogRepository(tenantScope);
+        this.catalogRepo  = new CatalogRepository(tenantScope, new dev.nexus.service.db.RenameGuard(gate3, renameReadiness));
         this.identityRepo = new dev.nexus.service.db.IdentityRepository(tenantScope, java.time.Clock.systemUTC());
         var identityFence = new dev.nexus.service.http.IdentityFence(new dev.nexus.service.db.IdentityFenceReads(tenantScope)); // RDR-253
 
