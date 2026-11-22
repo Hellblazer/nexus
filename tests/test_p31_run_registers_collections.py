@@ -25,7 +25,7 @@ _TOPOLOGIES = [pytest.param("service", id="vectors-on-engine"), pytest.param("lo
 
 def _run_once(tmp_path, monkeypatch, backend: str, *, register, files=("main.py",)):
     """One ``_run_index`` over a tiny repo with *register* as the registrar and a hook that records its call."""
-    from nexus.indexer import _run_index
+    from nexus.indexer import _run_index  # noqa: PLC0415 — deferred so the monkeypatches below land first
 
     # Local mode is the only posture that survives the opt-out, and it is harmless with the engine as backend.
     monkeypatch.setenv("NX_LOCAL", "1")
@@ -79,38 +79,27 @@ def test_a_content_type_with_no_files_registers_nothing(tmp_path, monkeypatch, b
         f"a deferred (docs / rdr) collection was registered when no such file exists: {events!r}")
 
 
-def test_a_registry_that_cannot_be_reached_is_left_to_the_hook_on_a_double(tmp_path, monkeypatch):
-    """The hook's own writer reports a catalog it cannot reach per file, so a double's registration does not raise
-    a second time: the run goes on to the hook."""
+@pytest.mark.parametrize("backend", _TOPOLOGIES)
+def test_an_unreachable_registry_stops_the_run_in_either_topology(tmp_path, monkeypatch, backend):
+    """linda 2026-11-22: no lenient path for the test-only double topology; the hook never runs on a run whose
+    collections did not register."""
 
-    def _unreachable(name, kwargs):
-        raise RuntimeError("catalog unreachable")
-
-    events = _run_once(tmp_path, monkeypatch, "local", register=_unreachable)
-
-    assert ("hook", "") in events, f"the hook did not run after a registration that failed: {events!r}"
-
-
-def test_a_profile_refusal_is_left_to_the_hook_on_a_double_and_is_not_swallowed_silently(tmp_path, monkeypatch, capsys):
-    """The profile check itself is untouched (``ensure_collection_registered`` raises it); the double topology logs the
-    refusal and the hook, whose write the engine refuses the same way, reports it."""
-
-    def _refused(name, kwargs):
-        raise EmbeddingProfileMismatchError("code", "minilm-l6-v2-384", "bge-base-en-v15-768")
-
-    events = _run_once(tmp_path, monkeypatch, "local", register=_refused)
-
-    assert ("hook", "") in events
-    out = capsys.readouterr()
-    assert "run_collection_registration_failed" in out.out + out.err, "the refusal was swallowed without a trace"
-
-
-def test_a_failed_registration_stops_a_run_whose_vectors_are_on_the_engine(tmp_path, monkeypatch):
     def _unreachable(name, kwargs):
         raise RuntimeError("catalog unreachable")
 
     with pytest.raises(RuntimeError, match="catalog unreachable"):
-        _run_once(tmp_path, monkeypatch, "service", register=_unreachable)
+        _run_once(tmp_path, monkeypatch, backend, register=_unreachable)
+
+
+@pytest.mark.parametrize("backend", _TOPOLOGIES)
+def test_a_profile_refusal_stops_the_run_in_either_topology(tmp_path, monkeypatch, backend):
+    """The profile check is untouched (``ensure_collection_registered`` raises it) and nothing downstream absorbs it."""
+
+    def _refused(name, kwargs):
+        raise EmbeddingProfileMismatchError("code", "minilm-l6-v2-384", "bge-base-en-v15-768")
+
+    with pytest.raises(EmbeddingProfileMismatchError):
+        _run_once(tmp_path, monkeypatch, backend, register=_refused)
 
 
 @pytest.mark.parametrize("backend", _TOPOLOGIES)

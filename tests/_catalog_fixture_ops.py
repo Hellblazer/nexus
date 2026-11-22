@@ -84,7 +84,9 @@ def register_seed_collections(*names: str) -> None:
     for name in absent:
         try:
             ensure_collection_registered(name)
-        except Exception:  # noqa: BLE001 — the engine's profile refused the model the name carries; seed the row directly
+        except Exception as exc:  # noqa: BLE001 — narrowed below: only the profile refusal seeds the row
+            if not is_profile_refusal(exc):
+                raise
             _register_collection_row(name)
 
 
@@ -122,11 +124,41 @@ def registered_or_seeded(real: Any) -> Any:
     def wrapper(name: str, *args: Any, **kwargs: Any) -> Any:
         try:
             return real(name, *args, **kwargs)
-        except Exception:  # noqa: BLE001 — the substrate's profile refused the model the name carries; seed the row directly
+        except Exception as exc:  # noqa: BLE001 — narrowed below: only the profile refusal seeds the row
+            if not is_profile_refusal(exc):
+                raise
             _register_collection_row(name)
             return None
 
     return wrapper
+
+
+#: The engine's text for a registration its embedding profile refuses (``CollectionRegistration``: an
+#: ``EmbeddingProfileConflictException``, sent as a 422 with no typed reason, so the message is the only marker).
+_PROFILE_REFUSAL_MARKER = "refusing to register"
+
+
+def is_profile_refusal(exc: BaseException) -> bool:
+    """True only for the embedding-profile refusal of a registration: the client's own check
+    (:class:`nexus.corpus.EmbeddingProfileMismatchError`) or the engine's 422 carrying its refusal text.
+
+    RDR-229 P3.1 (nexus-p2m1x.17, linda 2026-11-22): the raw-row fallback in :func:`register_seed_collections` and
+    :func:`registered_or_seeded` exists ONLY for fixtures named for an off-profile model (a ``voyage-context-3`` or
+    ``minilm-l6-v2-384`` name on the bge-profile substrate). Any other failure of a registration (an unreachable
+    registry, a bad name, a server error) is a real one and raises, so a registration bug cannot hide behind the
+    fallback. Removing the fallback entirely means renaming the voyage fixtures; that is noted on nexus-p2m1x.17.
+    """
+    import httpx  # noqa: PLC0415 — deferred, as this module's other imports are
+
+    from nexus.corpus import EmbeddingProfileMismatchError  # noqa: PLC0415 — deferred: nexus.corpus is heavy
+
+    if isinstance(exc, EmbeddingProfileMismatchError):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        response = exc.response
+        status = response.status_code if response is not None else None
+        return status == 422 and _PROFILE_REFUSAL_MARKER in str(exc)
+    return False
 
 
 def catalog_markdown_hook_seeded(*args: Any, **kwargs: Any) -> Any:
