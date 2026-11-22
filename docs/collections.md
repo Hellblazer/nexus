@@ -21,8 +21,8 @@ for you. Where it does not, prefer the broad, boring choice.
 | `knowledge` | Everything else: papers, notes, agent findings, imported documents | You, by naming a subject |
 
 `code`, `docs`, and `rdr` collections are owned by a repository. The
-catalog assigns their owner from the repo's tumbler and renders their full
-name. You do not name them, and you do not write into them directly; you
+catalog assigns their owner from the repo's tumbler and gives each one its
+four-segment name. You do not name them, and you do not write into them directly; you
 re-index the repo.
 
 `knowledge` is the only content type a person or agent names. Everything
@@ -92,31 +92,38 @@ collection has a `collection_id`, a number the engine assigns and never
 reuses, and every table that belongs to a collection points at that id. The
 row also holds the attributes: content type, owner, embedding model, model
 version, dimension and lifecycle state. The name is only a label: the string
-you type and read in a command. Nothing is decided from it. Which model
-embeds a collection, which content type it is and whether it is quarantined
-are read from the row, never from the label.
+you type and read in a command. Routing, the embedding model, the content
+type and the lifecycle state are read from the row, never from the label.
+Two checks still read a model token from a four-segment name: `nx collection
+rename` compares a new name's token with the source row's model, and the
+re-embed job's foreign-origin check falls back to a source's name when that
+source has no row.
 
-**New collections get a minted label.** When `nx` registers a collection,
-the engine sets its label to `c` followed by its id (`c4812`). The label
-says nothing about the collection; listings show the attributes beside it
-(`nx collection list`, `nx catalog show`). Collections created before this
-change keep their old four-segment names
-(`knowledge__distributed-systems__voyage-context-3__v1`) as labels; those
-names are no longer parsed for meaning either.
+**New knowledge subjects get a minted label.** When `nx` registers a new
+knowledge subject, the engine sets its label to `c` followed by its id
+(`c4812`). The label says nothing about the collection. `nx collection list`
+shows its owner, model and state beside it; `nx catalog show` prints only the
+document's type and collection label. `nx index repo` does not mint: the
+`code`, `docs` and `rdr` collections it creates are still named in the
+four-segment form, for example `code__1-15__voyage-code-3__v1`. Those names
+are not parsed for meaning either.
 
 **A label is unique among a tenant's live collections.** Two live
 collections cannot answer to one label, so a label in a command names one
-collection. A superseded collection keeps its label for history and
-releases it for reuse. To give a collection a readable label, rename it:
+collection. A superseded collection keeps its label, and that label stays
+taken: a new collection cannot be given it, because the label is still the
+key the collection is stored under. To give a collection a readable label,
+rename it:
 
 ```bash
 nx collection rename c4812 distributed-systems-papers
 ```
 
 A rename changes one row; the collection's id, chunks and catalog documents
-stay where they are. A label may be any non-empty UTF-8 string without
-control characters, up to 255 bytes, except the minted form `c<digits>`,
-which only the engine assigns.
+stay where they are. A label must be non-empty UTF-8 with no control
+characters, at most 255 bytes, and not the minted form `c<digits>`, which
+only the engine assigns. It may not contain `/` or `,`, and it may not begin
+or end with whitespace.
 
 Never type a four-segment name, a model token or a version to create a
 collection. A name that encoded a model the install did not use is how local

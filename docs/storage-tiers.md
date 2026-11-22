@@ -270,10 +270,11 @@ model embeds a collection, and whether it is live or quarantined, is read
 from its attributes (RDR-229).
 
 The collection's name is a label, unique among a tenant's live collections.
-A new collection gets a minted label, `c` followed by its id (`c4812`), and
-can be renamed to anything readable. Collections created earlier keep their
-names as labels, in one of two older shapes, neither of which is parsed for
-meaning:
+A new knowledge subject gets a minted label, `c` followed by its id (`c4812`).
+`nx index repo` does not mint: the `code`, `docs` and `rdr` collections it
+creates are labelled in the four-segment shape below. Any collection can be
+renamed to anything readable. Existing labels stay as they are, and names in
+these shapes are not parsed for meaning:
 
 - the four-segment RDR-103 shape, `<content_type>__<owner_id>__<embedding_model>__v<n>`, for example `knowledge__nexus-1-1__voyage-context-3__v1`;
 - the pre-RDR-103 two-segment shape, `<content_type>__<repo>-<hash>`, for example `code__myrepo-a1b2c3`.
