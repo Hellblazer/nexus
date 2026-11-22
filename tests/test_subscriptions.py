@@ -92,7 +92,7 @@ class TestSubscribeValidation:
 class TestMailboxSubscribeIsRefused:
     """RDR-253 Phase 2: no ``mailbox/<name>`` is subscribable; a refusal makes no engine call and writes no file."""
 
-    @pytest.mark.parametrize("subspace", ["mailbox/nexus-23", "mailbox/evil\nname", "mailbox/evil/name", "mailbox/" + str(uuid.uuid4())])
+    @pytest.mark.parametrize("subspace", ["mailbox/nexus-23", "mailbox/evil\nname", "mailbox/evil/name", "mailbox/00552b58-87e2-4a8b-a69c-6ed0963a62ec"])
     def test_a_mailbox_that_is_not_the_identitys_is_refused_with_no_engine_call_or_file(self, tmp_path, subspace):
         s = SubscriptionSet(session_id=str(uuid.uuid4()), identity=IDENT)
         with pytest.raises(SchemaViolationError, match="not subscribable.*identity mailbox"):
