@@ -9,8 +9,6 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
-import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 /**
@@ -23,8 +21,7 @@ import java.util.List;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class Rdr229P37ChildNameMismatchTest {
 
-    private static final String CHANGESET = "db/changelog/vectors-079-child-row-name-from-chunk.xml";
-    private static final String FUNCTION = "catalog_document_chunks_name_from_chunk";
+    private static final String FUNCTION = Vectors079Text.MANIFEST;
     private static final String STEP2_TENANT = "c.tenant_id = NEW.tenant_id AND c.collection_id = NEW.collection_id";
     private static final String STEP2_MODEL = "AND c.chash = NEW.chash AND c.embedding_model = NEW.embedding_model\n     LIMIT 1";
 
@@ -45,15 +42,8 @@ class Rdr229P37ChildNameMismatchTest {
         }
     }
 
-    /** The manifest function's CREATE OR REPLACE statement, as the changeset defines it. */
     private static String functionSql() throws Exception {
-        try (InputStream in = Rdr229P37ChildNameMismatchTest.class.getClassLoader().getResourceAsStream(CHANGESET)) {
-            String xml = new String(in.readAllBytes(), StandardCharsets.UTF_8);
-            int a = xml.indexOf("CREATE OR REPLACE FUNCTION nexus." + FUNCTION + "()");
-            int b = xml.indexOf("$function$;", xml.indexOf("AS $function$", a)) + "$function$;".length();
-            assertThat(a).as("the function is in the changeset").isNotNegative();
-            return xml.substring(a, b);
-        }
+        return Vectors079Text.function(FUNCTION);
     }
 
     private void install(String sql) {
