@@ -10,6 +10,8 @@ import dev.nexus.service.datamove.CompletionBootWork;
 import dev.nexus.service.datamove.CompletionCheck;
 import dev.nexus.service.datamove.DataMoveWorker;
 import dev.nexus.service.datamove.Gate3;
+import dev.nexus.service.datamove.NameKeyDropMove;
+import dev.nexus.service.datamove.P35bChangesets;
 import dev.nexus.service.datamove.RenameReadiness;
 import dev.nexus.service.db.AdminConnection;
 import dev.nexus.service.db.BackendReaper;
@@ -51,6 +53,15 @@ import java.util.function.Function;
  * name-key drop move run through the real worker, and the completion check reads the real registry, CHECKs and databasechangelog.
  * {@link #gate3(boolean)} closes and opens that input, so a test can stand before gate 3.
  *
+ * <p><b>Two more inputs are stood in for, each until the code that owns it is on this branch.</b>
+ * (1) The name-key drop move is registered by an engine pass after the engine serves (stage 2 of P3.7); until it exists a registrar
+ * thread of this harness plays that pass: every 100 ms it hands the check's latest result and an admin connection to
+ * {@link NameKeyDropMove#registerIfAbsent}, the one operation the pass will call, which registers nothing before gate 3 and one row
+ * after it. The move itself is the real one and runs through the real worker. (2) P3.5b's CONTINUE changesets and its list
+ * ({@value #P35B_LIST}) are not on this branch. While the resource is absent the engine's list is {@link #P35B_FIXTURE_ID}, a changeset
+ * that no walk applies, and {@link #restart} records it in {@code databasechangelog} as P3.5b's second walk will record the real ones; when
+ * P3.5b's list exists the harness reads it and records nothing.
+ *
  * <p>The engine is built through {@code NexusService}'s package-private constructor that takes {@link Gate3} and
  * {@link RenameReadiness} (both read per call), fed from {@link CompletionBootWork#gate3()} and
  * {@link CompletionBootWork#renameReadiness()}. Until P3.7 the readiness is a stub that always says ready, so the rename stays the
@@ -63,7 +74,9 @@ final class Rdr229RenameEngine implements AutoCloseable {
     /** The name-key drop move's label (P3.7). */
     static final String DROP_LABEL = "rdr229-name-key-drop";
     /** The resource P3.5b's code commit writes: the CONTINUE changesets the completion check waits to see applied. */
-    static final String P35B_LIST = "db/rdr229/p35b-continue-changesets.txt";
+    static final String P35B_LIST = P35bChangesets.RESOURCE;
+    /** The changeset id the harness lists while P3.5b's list is absent (see the class comment). */
+    static final String P35B_FIXTURE_ID = "p37-harness-p35b-continue-fixture";
 
     final PostgreSQLContainer<?> pg;
     final AdminConnection admin;
@@ -80,6 +93,8 @@ final class Rdr229RenameEngine implements AutoCloseable {
     private CompletionBootWork check;
     private TenantScope scope;
     private RenameReadiness readiness;
+    private Thread registrar;
+    private volatile boolean registrarStop;
 
     /** A database on the pg_background image with the roles and libraries a data-move engine needs; nothing is walked yet. */
     Rdr229RenameEngine() throws Exception {
@@ -118,7 +133,8 @@ final class Rdr229RenameEngine implements AutoCloseable {
         ds = pool(12, "rename-engine-service");
         scope = new TenantScope(ds);
         bootWork = new BootWorkRegistry(Clock.systemUTC());
-        check = new CompletionBootWork(bootWork, admin, CompletionCheck.ReadSet.boot(), this::simulatedGate3);
+        check = new CompletionBootWork(bootWork, admin, CompletionCheck.ReadSet.boot(), this::simulatedGate3,
+            Rdr229RenameEngine::p35bIds);
         readiness = check.renameReadiness();
         service = new NexusService(0, ROOT, ds, null, null, null, null, null, null, System::getenv,
             () -> dev.nexus.service.db.PgSession.startupPciSettings().enabled(), null, null, check.gate3(), readiness);
@@ -126,11 +142,66 @@ final class Rdr229RenameEngine implements AutoCloseable {
         service.start();
         startWorker();
         check.start();
+        startRegistrar();
+    }
+
+    /** The P3.5b changeset ids the engine waits for: the real list when it exists, else the harness's one fixture id. */
+    static java.util.Set<String> p35bIds() {
+        java.util.Set<String> real = P35bChangesets.fromResource();
+        return real.isEmpty() ? java.util.Set.of(P35B_FIXTURE_ID) : real;
+    }
+
+    /** True while P3.5b's list is absent and {@link #P35B_FIXTURE_ID} stands in for it. */
+    static boolean usingFixtureList() {
+        return P35bChangesets.fromResource().isEmpty();
+    }
+
+    /** What P3.5b's second walk does to {@code databasechangelog}, for the fixture id only: one EXECUTED row. */
+    private void recordFixtureChangeset() {
+        su(ctx -> {
+            var log = DSL.table(DSL.name("public", "databasechangelog"));
+            var id = DSL.field(DSL.name("id"), String.class);
+            if (!ctx.fetchExists(log, id.eq(P35B_FIXTURE_ID))) {
+                Integer next = ctx.select(DSL.coalesce(DSL.max(DSL.field(DSL.name("orderexecuted"), Integer.class)), 0).plus(1))
+                    .from(log).fetchOne(0, Integer.class);
+                ctx.insertInto(log, id, DSL.field(DSL.name("author"), String.class), DSL.field(DSL.name("filename"), String.class),
+                        DSL.field(DSL.name("dateexecuted"), java.time.OffsetDateTime.class),
+                        DSL.field(DSL.name("orderexecuted"), Integer.class), DSL.field(DSL.name("exectype"), String.class))
+                    .values(P35B_FIXTURE_ID, "p37-harness", "p37-harness-fixture.xml", java.time.OffsetDateTime.now(), next, "EXECUTED")
+                    .execute();
+            }
+            return null;
+        });
+    }
+
+    /** The harness's stand-in for the registration pass: see the class comment. Stops with the engine. */
+    private void startRegistrar() {
+        registrarStop = false;
+        CompletionBootWork watched = check;
+        registrar = new Thread(() -> {
+            while (!registrarStop) {
+                try (DSLContext ctx = DSL.using(admin.url(), admin.user(), admin.password())) {
+                    NameKeyDropMove.registerIfAbsent(watched.latest(), ctx);
+                } catch (RuntimeException e) {
+                    // a tick that cannot reach the database is retried on the next one
+                }
+                try {
+                    Thread.sleep(100);
+                } catch (InterruptedException e) {
+                    return;
+                }
+            }
+        }, "rdr229-rename-engine-registrar");
+        registrar.setDaemon(true);
+        registrar.start();
     }
 
     /** Stops the engine, the worker and the check, and boots again on the same database (the engine's restart). */
     void restart() throws Exception {
         stopEngine();
+        if (usingFixtureList()) {
+            recordFixtureChangeset();
+        }
         boot();
     }
 
@@ -157,6 +228,11 @@ final class Rdr229RenameEngine implements AutoCloseable {
     }
 
     private void stopEngine() {
+        registrarStop = true;
+        if (registrar != null) {
+            registrar.interrupt();
+            registrar = null;
+        }
         if (worker != null) {
             worker.close();
             worker = null;

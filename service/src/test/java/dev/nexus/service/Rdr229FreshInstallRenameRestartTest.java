@@ -8,12 +8,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import dev.nexus.service.datamove.RenameReadiness.Missing;
 import org.junit.jupiter.api.Test;
 
-import java.io.BufferedReader;
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.nio.charset.StandardCharsets;
 import java.util.Set;
-import java.util.TreeSet;
 
 /**
  * RDR-229 residual R9 (nexus-p2m1x.48), step 1: a fresh install refuses a rename until its second boot. Boot 1 on an empty
@@ -31,22 +26,9 @@ class Rdr229FreshInstallRenameRestartTest {
         return "knowledge__" + owner + "__minilm-l6-v2-384__v" + version;
     }
 
-    /** The ids in the resource, one per line, {@code #} comments and blanks skipped. */
-    private static Set<String> p35bIds() throws Exception {
-        try (InputStream in = Thread.currentThread().getContextClassLoader().getResourceAsStream(Rdr229RenameEngine.P35B_LIST)) {
-            assertThat(in).as("the resource " + Rdr229RenameEngine.P35B_LIST + " (P3.5b's code commit writes it) exists").isNotNull();
-            Set<String> ids = new TreeSet<>();
-            try (var r = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8))) {
-                String line;
-                while ((line = r.readLine()) != null) {
-                    String t = line.strip();
-                    if (!t.isEmpty() && !t.startsWith("#")) {
-                        ids.add(t);
-                    }
-                }
-            }
-            return ids;
-        }
+    /** The P3.5b changeset ids the engine waits for: P3.5b's list, or the harness's fixture while that list is absent. */
+    private static Set<String> p35bIds() {
+        return Rdr229RenameEngine.p35bIds();
     }
 
     @Test
