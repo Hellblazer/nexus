@@ -7,28 +7,42 @@
 
 labrun's ``lab-remote`` runs this in the host copy after the sync (10 s cap) and
 skips the dispatch on a non-zero exit, so a hand grant is not spent queueing for a
-run that exits 75 within seconds (labrun-0uy.2.4: 151 hand grants ended rc=75
-since 10-18, 20,466 s of queue time). A timeout or a missing script dispatches as
-usual, so every doubt here resolves to exit 0.
+run that exits 75 within seconds. labrun-0uy.2.4: 151 hand grants on chas have ended
+rc=75 since 10-18; of the 9 whose cause was read, 6 were "service jar not built"
+(a lab-remote copy has no ``service/target/``), 2 a held service build lease and 1 a
+held suite lease. This script stops the jar case; the lease refusals remain (a lease
+can be gone by the time the run leaves the queue, so they only warn).
 
 Exit 75, one stderr line naming the remedy, when BOTH hold:
 
-  1. The argv is a pytest run that gets as far as ``tests/conftest.py``'s session
-     start: it names ``pytest`` (or ``watched_pytest.py``) and is not a bare
-     ``--help`` / ``--version``, and ``NX_TEST_T2_SUBSTRATE`` can boot the engine
-     (``tests/conftest.py`` ``_selected_t2_substrate_boots_engine``: anything but
-     ``none`` and the retired values ``_RETIRED_T2_SUBSTRATES``; unset boots).
-     ``-m lint`` and ``--collect-only`` do NOT exempt a run: the engine preflight
-     (``_preflight_engine_substrate``) reads only that variable, measured
-     2026-11-22 (both exit 75 on a checkout with no jar).
+  1. The argv is, as one simple command, a pytest run that gets as far as
+     ``tests/conftest.py``'s session start, and ``NX_TEST_T2_SUBSTRATE`` can boot the
+     engine (``_selected_t2_substrate_boots_engine``: anything but ``none`` and the
+     retired values ``_RETIRED_T2_SUBSTRATES``; unset boots). The command word, after
+     leading ``NAME=value`` words, ``env``, ``export``, ``uv run``, ``python -m`` and
+     ``watched_pytest.py`` with its options up to ``--``, must itself be ``pytest`` or
+     ``py.test``: ``uv pip install pytest``, ``echo pytest`` and ``grep pytest`` are not.
+     A ``NX_TEST_T2_SUBSTRATE=<v>`` word before it (also after the wrapper's ``--``)
+     wins over the environment, because ``lab-remote`` does not carry the environment.
+     ``--help``, ``-h``, ``--version``, ``-V`` and ``--markers`` print and exit before
+     any session starts, so they need no engine. ``-m lint`` and ``--collect-only`` do
+     NOT exempt a run: the engine preflight (``_preflight_engine_substrate``) reads only
+     that variable (measured 2026-11-22: both exit 75 on a checkout with no jar).
   2. The gate jar ``service/target/nexus-service-1.0-SNAPSHOT.jar`` is absent
      (``tests/db/_service_fixture.py`` ``_SERVICE_JAR``; ``jar_freshness_skip_reason``
-     returns "service jar not built" on ``not jar.exists()``). Staleness and
-     completeness are left to the conftest: a synced copy's mtimes say nothing.
+     returns "service jar not built" on ``not jar.exists()``).
 
-Otherwise exit 0. A held suite lease (``tests/_suite_lease.py`` ``holder``) or a held
-service build lease (``_service_fixture.build_in_progress_reason``) only warns on
-stderr, because either can be gone by the time the run leaves the queue.
+Otherwise exit 0. Fail open: a compound command (``&&``, ``||``, ``;``, ``|``, ``&``, a
+newline, anywhere in the argv, a ``sh -c`` payload included) is not judged, because
+the shell may build the jar first; and any error of this script's own exits 0, so a bug
+here costs a wasted grant, never a refused good run.
+
+Out of scope, so the conftest still refuses these after dispatch: a STALE or corrupt
+jar (a synced copy's mtimes say nothing), the PG bundle, and a lease held by another
+copy (the lease root lives in each copy's own git dir unless ``NX_BUILD_LEASE_ROOT``
+is shared). A held suite lease (``tests/_suite_lease.py`` ``holder``) or a held service
+build lease (``_service_fixture.build_in_progress_reason``) in THIS copy only warns on
+stderr, exit 0.
 
 Stdlib only, no network, no engine. The constants below are copies of the ones in
 those two modules (this script must run where ``tests/`` cannot be imported with
@@ -58,9 +72,12 @@ POPULATE_GRACE_DEFAULT_S = 10.0
 EXIT_REFUSED = 75
 GIT_TIMEOUT_S = 1.5
 
-_PYTEST_NAMES = frozenset({"pytest", "py.test", "watched_pytest.py"})
-_NO_SESSION_FLAGS = frozenset({"--help", "-h", "--version", "-V"})
-_ASSIGNMENT = re.compile(rf"^{SUBSTRATE_ENV}=(.*)$", re.DOTALL)
+_PYTEST_WORDS = frozenset({"pytest", "py.test"})
+_WRAPPER = "watched_pytest.py"
+_NO_SESSION_FLAGS = frozenset({"--help", "-h", "--version", "-V", "--markers"})
+_COMPOUND_MARKS = ("&&", "||", ";", "|", "\n", "\r")
+_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_PYTHON = re.compile(r"^python[0-9.]*$")
 
 
 def flatten(argv: list[str]) -> list[str]:
@@ -77,10 +94,48 @@ def flatten(argv: list[str]) -> list[str]:
     return out
 
 
-def _pytest_index(tokens: list[str]) -> int | None:
-    for i, tok in enumerate(tokens):
-        if os.path.basename(tok) in _PYTEST_NAMES:
-            return i
+def is_compound(words: list[str]) -> bool:
+    """A shell list, pipe, background or newline anywhere: the command may build the jar first."""
+    return any(mark in w for w in words for mark in _COMPOUND_MARKS) or "&" in words
+
+
+def locate_pytest(tokens: list[str]) -> tuple[list[str], str | None] | None:
+    """``(words after the pytest command word, NX_TEST_T2_SUBSTRATE assigned before it)``, or ``None``.
+
+    Walks the words that only prefix a command (``NAME=value``, ``env``, ``export``, ``uv run``,
+    ``python -m``, ``watched_pytest.py`` and its options up to ``--``) and answers only when the
+    command word reached is ``pytest`` or ``py.test`` itself.
+    """
+    selected: str | None = None
+    i, n = 0, len(tokens)
+    while i < n:
+        tok = tokens[i]
+        base = os.path.basename(tok)
+        if _ASSIGNMENT.match(tok):
+            name, _, value = tok.partition("=")
+            if name == SUBSTRATE_ENV:
+                selected = value.strip("'\"")
+            i += 1
+        elif base in ("env", "export"):
+            i += 1
+            while base == "env" and i < n and tokens[i].startswith("-"):
+                i += 2 if tokens[i] == "-u" else 1
+        elif base == "uv" and tokens[i + 1 : i + 2] == ["run"]:
+            i += 2
+            while i < n and tokens[i].startswith("-"):
+                i += 1
+        elif _PYTHON.match(base):
+            i += 1
+            if i < n and tokens[i] == "-m":
+                i += 1
+        elif base == _WRAPPER:
+            if "--" not in tokens[i + 1 :]:
+                return None
+            i = tokens.index("--", i + 1) + 1
+        elif base in _PYTEST_WORDS:
+            return tokens[i + 1 :], selected
+        else:
+            return None
     return None
 
 
@@ -90,27 +145,29 @@ def substrate_boots_engine(selected: str | None) -> bool:
 
 
 def needs_engine(argv: list[str], env: dict[str, str]) -> bool:
-    """True when *argv* is a pytest run that reaches the conftest's engine preflight.
-
-    A ``NX_TEST_T2_SUBSTRATE=<v>`` word before the pytest word wins over the environment:
-    ``lab-remote`` does not carry the caller's environment, so a value in the command is
-    the one the run will see.
-    """
+    """True when *argv* is one simple pytest command that reaches the conftest's engine preflight."""
     tokens = flatten(argv)
-    idx = _pytest_index(tokens)
-    if idx is None:
+    if is_compound(argv) or is_compound(tokens):
         return False
-    if any(tok in _NO_SESSION_FLAGS for tok in tokens[idx + 1 :]):
-        return False  # prints help or a version before any session starts
-    selected = env.get(SUBSTRATE_ENV)
-    for tok in tokens[:idx]:
-        if m := _ASSIGNMENT.match(tok):
-            selected = m.group(1)
-    return substrate_boots_engine(selected)
+    found = locate_pytest(tokens)
+    if found is None:
+        return False
+    rest, assigned = found
+    if any(tok in _NO_SESSION_FLAGS for tok in rest):
+        return False  # prints help, a version or the marker list before any session starts
+    return substrate_boots_engine(assigned if assigned is not None else env.get(SUBSTRATE_ENV))
 
 
 def jar_path(repo_root: Path) -> Path:
     return repo_root.joinpath(*SERVICE_JAR)
+
+
+def jar_present(repo_root: Path) -> bool:
+    """``Path.exists``, so a dangling link is absent as for the conftest; a stat that fails otherwise (EACCES) is not proof of absence."""
+    try:
+        return jar_path(repo_root).exists()
+    except OSError:
+        return True
 
 
 def _pid_alive(pid: int) -> bool:
@@ -207,7 +264,7 @@ def build_lease_held(root: Path, repo_root: Path, env: dict[str, str]) -> str | 
             except (OSError, ValueError, RuntimeError):
                 pass  # unreadable proves nothing: count it as this checkout's
         return f"pid {raw_pid or '<being populated>'} ({_field(lease / 'label') or 'unknown'})"
-    except (OSError, ValueError):
+    except (OSError, ValueError, OverflowError):
         return None
 
 
@@ -215,12 +272,11 @@ def check(argv: list[str], env: dict[str, str], repo_root: Path) -> tuple[int, l
     """Exit code and the stderr lines."""
     if not needs_engine(argv, env):
         return 0, []
-    jar = jar_path(repo_root)
-    if not jar.exists():
+    if not jar_present(repo_root):
         return EXIT_REFUSED, [
             f"lab-preflight: {'/'.join(SERVICE_JAR)} is not built, so this run would exit 75 at session start "
-            f"(engine substrate preflight); prepend scripts/build-gate-jar.sh to the command, "
-            f"or set {SUBSTRATE_ENV}=none for a run that needs no engine"
+            "(engine substrate preflight); first run scripts/build-gate-jar.sh --lab-run <class> in the copy as its own step "
+            f"(an engine build is not wrapped in lab-run), or set {SUBSTRATE_ENV}=none for a run that needs no engine"
         ]
     lines: list[str] = []
     root = lease_root(repo_root, env)
@@ -232,14 +288,18 @@ def check(argv: list[str], env: dict[str, str], repo_root: Path) -> tuple[int, l
 
 
 def main(argv: list[str] | None = None, env: dict[str, str] | None = None, repo_root: Path | None = None) -> int:
-    args = list(sys.argv[1:] if argv is None else argv)
-    if args and args[0] == "--":
-        args = args[1:]
-    code, lines = check(
-        args,
-        dict(os.environ) if env is None else env,
-        Path(__file__).resolve().parents[1] if repo_root is None else repo_root,
-    )
+    try:
+        args = list(sys.argv[1:] if argv is None else argv)
+        if args and args[0] == "--":
+            args = args[1:]
+        code, lines = check(
+            args,
+            dict(os.environ) if env is None else env,
+            Path(__file__).resolve().parents[1] if repo_root is None else repo_root,
+        )
+    except Exception as exc:  # noqa: BLE001 — fail open: a bug here must cost a wasted grant, never a refused good run
+        sys.stderr.write(f"lab-preflight: skipped on its own error: {exc!r}\n")
+        return 0
     for line in lines:
         sys.stderr.write(line + "\n")
     return code

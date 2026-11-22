@@ -21,6 +21,7 @@ from types import ModuleType
 import pytest
 
 from tests import _suite_lease as suite_lease_module
+from tests import _substrate_preflight
 from tests import conftest as root_conftest
 from tests.db import _service_fixture
 
@@ -71,7 +72,8 @@ def test_missing_jar_with_a_pytest_engine_argv_exits_75_with_one_remedy_line(lp,
     code, lines = _run(lp, PYTEST_ARGV, _repo(tmp_path, jar=False), tmp_path)
     assert code == 75
     assert len(lines) == 1
-    assert "scripts/build-gate-jar.sh" in lines[0] and "prepend" in lines[0]
+    assert "scripts/build-gate-jar.sh --lab-run <class>" in lines[0] and "own step" in lines[0]
+    assert "NX_TEST_T2_SUBSTRATE=none" in lines[0]
     assert "service/target/nexus-service-1.0-SNAPSHOT.jar" in lines[0]
 
 
@@ -139,6 +141,60 @@ def test_a_command_that_starts_no_pytest_session_needs_no_engine(lp, tmp_path, a
     assert _run(lp, argv, _repo(tmp_path, jar=False), tmp_path) == (0, [])
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        # a compound command may build the jar first: fail open
+        ["scripts/build-gate-jar.sh", "&&", "uv", "run", "pytest", "-n", "auto"],
+        ["scripts/build-gate-jar.sh --lab-run lab-l && uv run pytest -n auto"],
+        ["bash", "-c", "scripts/build-gate-jar.sh && uv run pytest tests/a.py"],
+        ["sh", "-c", "scripts/build-gate-jar.sh; uv run pytest"],
+        ["./mvnw", "-f", "service/pom.xml", "package", ";", "uv", "run", "pytest"],
+        ["scripts/mvnw-leased.sh", "--lab-run", "lab-s", "package", "&&", "uv", "run", "pytest"],
+        ["export", "NX_FOO=1;", "uv", "run", "pytest"],
+        ["export NX_TEST_T2_SUBSTRATE=optin; uv run pytest"],
+        ["true", "||", "uv", "run", "pytest"],
+        ["uv", "run", "pytest", "|", "tee", "out.txt"],
+        ["uv", "run", "pytest", "&"],
+        ["uv run pytest\nuv run pytest"],
+        # the word pytest is an argument, not the command
+        ["uv", "pip", "install", "pytest"],
+        ["echo", "pytest"],
+        ["grep", "pytest", "pyproject.toml"],
+        ["pip", "install", "pytest-xdist"],
+        ["cat", "tests/test_pytest.py"],
+        # prints and exits before any session starts
+        ["uv", "run", "pytest", "--markers"],
+        ["python3", "-m", "pytest", "-h"],
+        # a wrapper with nothing after its `--`
+        ["python3", "scripts/watched_pytest.py", "--stall", "180"],
+        # the substrate named after the wrapper's `--`
+        ["python3", "scripts/watched_pytest.py", "--stall", "180", "--", "env", "NX_TEST_T2_SUBSTRATE=none", "uv", "run", "pytest"],
+        ["python3", "scripts/watched_pytest.py", "--", "NX_TEST_T2_SUBSTRATE=none", "uv", "run", "pytest"],
+        ["env", "-i", "NX_TEST_T2_SUBSTRATE=none", "uv", "run", "pytest"],
+    ],
+    ids=lambda argv: " ".join(argv)[:70].replace("\n", "\\n"),
+)
+def test_a_command_that_is_compound_or_only_mentions_pytest_is_not_judged(lp, tmp_path, argv):
+    assert _run(lp, argv, _repo(tmp_path, jar=False), tmp_path) == (0, [])
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["env", "NX_TEST_T2_SUBSTRATE=optin", "uv", "run", "pytest"],
+        ["export", "NX_TEST_T2_SUBSTRATE=optin", "uv", "run", "pytest"],
+        ["python3", "scripts/watched_pytest.py", "--stall", "180", "--", "env", "NX_TEST_T2_SUBSTRATE=optin", "uv", "run", "pytest"],
+        ["uv", "run", "--no-sync", "pytest", "tests/a.py"],
+        ["/usr/bin/env", "-i", "uv", "run", "python3.12", "-m", "pytest"],
+        ["uv", "run", "py.test"],
+    ],
+    ids=lambda argv: " ".join(argv)[:70],
+)
+def test_the_command_word_is_found_through_its_wrappers(lp, tmp_path, argv):
+    assert _run(lp, argv, _repo(tmp_path, jar=False), tmp_path)[0] == 75
+
+
 def test_the_jar_present_exits_0_without_output(lp, tmp_path):
     assert _run(lp, PYTEST_ARGV, _repo(tmp_path, jar=True), tmp_path) == (0, [])
 
@@ -148,6 +204,43 @@ def test_a_dangling_jar_link_counts_as_missing_like_the_conftest_check(lp, tmp_p
     (root / JAR_REL).parent.mkdir(parents=True)
     (root / JAR_REL).symlink_to(tmp_path / "gone.jar")
     assert _run(lp, PYTEST_ARGV, root, tmp_path)[0] == 75
+
+
+def test_an_unreadable_service_target_counts_as_a_present_jar(lp, tmp_path):
+    root = _repo(tmp_path, jar=True)
+    target = root / "service" / "target"
+    target.chmod(0)
+    try:
+        try:
+            (target / "nexus-service-1.0-SNAPSHOT.jar").exists()
+            pytest.skip("this user can stat through a mode-0 directory (root): no EACCES to fail open on")
+        except OSError:
+            pass
+        assert lp.jar_present(root) is True
+        assert _run(lp, PYTEST_ARGV, root, tmp_path) == (0, [])
+    finally:
+        target.chmod(0o755)
+
+
+def test_a_huge_pgid_in_the_build_lease_does_not_crash_the_check(lp, tmp_path):
+    root = _repo(tmp_path, jar=True)
+    lease = tmp_path / "leases" / "service"
+    lease.mkdir(parents=True)
+    (lease / "pgid").write_text("9" * 40)  # os.killpg raises OverflowError, not OSError
+    assert lp.build_lease_held(tmp_path / "leases", root, {}) is None
+    assert _run(lp, PYTEST_ARGV, root, tmp_path) == (0, [])
+
+
+def test_a_huge_pid_in_the_suite_lease_does_not_crash_the_check(lp, tmp_path):
+    root = _repo(tmp_path, jar=True)
+    _hold_suite_lease(tmp_path, "9" * 40)
+    assert _run(lp, PYTEST_ARGV, root, tmp_path) == (0, [])
+
+
+def test_main_fails_open_on_its_own_error(lp, capsys):
+    # a repo root of the wrong type makes check() raise AttributeError; main must say so and exit 0
+    assert lp.main(PYTEST_ARGV, {}, 123) == 0  # type: ignore[arg-type]
+    assert "skipped on its own error" in capsys.readouterr().err
 
 
 # --- (c) leases only warn ---------------------------------------------------------------------
@@ -221,6 +314,18 @@ def test_a_held_lease_does_not_hide_a_missing_jar(lp, tmp_path):
 def test_drift_the_jar_path_is_the_conftest_fixtures_jar(lp):
     assert Path(*lp.SERVICE_JAR) == _service_fixture._SERVICE_JAR.relative_to(_service_fixture._REPO_ROOT)
     assert lp.jar_path(REPO) == _service_fixture._SERVICE_JAR
+
+
+def test_drift_the_jar_the_script_checks_is_the_one_the_conftests_preflight_asks_about(lp, monkeypatch):
+    """The conftest's session start refuses through ``_substrate_preflight.refusal`` -> ``_service_fixture.jar_freshness_skip_reason``.
+
+    Replace that function with a sentinel: the preflight must carry the sentinel, i.e. it reaches the very function whose
+    ``not jar.exists()`` branch this script copies. A rename or a second jar check in front of it breaks this.
+    """
+    monkeypatch.setattr(_service_fixture, "jar_freshness_skip_reason", lambda *a, **k: "SENTINEL-JAR-REASON")
+    assert "SENTINEL-JAR-REASON" in (_substrate_preflight.refusal() or "")
+    assert (_substrate_preflight.refusal() or "").startswith(_substrate_preflight.PREFIX)
+    assert "_preflight_engine_substrate" in Path(root_conftest.__file__).read_text()  # the gate that calls it
 
 
 def test_drift_a_missing_jar_is_what_the_fixtures_freshness_check_calls_not_built(lp, tmp_path, monkeypatch):
@@ -320,7 +425,11 @@ def test_drift_the_build_lease_verdict_matches_the_fixture_on_real_lease_files(l
     assert _service_fixture.build_in_progress_reason(root, repo_root=checkout) is None
 
 
-# --- (d) the real command line: exit code, `--`, and the time --------------------------------
+# --- (d) the real command line: exit code, `--`, and the cap -----------------------------------
+
+#: lab-remote kills the script at 10 s; the timeout below sits well under it, so a script that grew slow fails here
+#: instead of silently becoming a no-op in production. No wall-clock assertion: a loaded box must not make this flaky.
+CAP_S = 5
 
 
 def _installed_copy(tmp_path: Path, *, jar: bool) -> Path:
@@ -330,24 +439,21 @@ def _installed_copy(tmp_path: Path, *, jar: bool) -> Path:
     return root
 
 
-def _cli(root: Path, tmp_path: Path, *argv: str, **env: str) -> tuple[subprocess.CompletedProcess[str], float]:
+def _cli(root: Path, tmp_path: Path, *argv: str, **env: str) -> subprocess.CompletedProcess[str]:
     clean = {k: v for k, v in os.environ.items() if k != "NX_TEST_T2_SUBSTRATE"}
     clean.update({"NX_BUILD_LEASE_ROOT": str(tmp_path / "leases"), **env})
-    start = time.monotonic()
-    done = subprocess.run(
+    return subprocess.run(
         [sys.executable, str(root / "scripts" / "lab-preflight"), *argv],
-        capture_output=True, text=True, env=clean, cwd=root, timeout=10,
+        capture_output=True, text=True, env=clean, cwd=root, timeout=CAP_S,
     )
-    return done, time.monotonic() - start
 
 
-def test_cli_exits_75_with_one_stderr_line_in_well_under_two_seconds(tmp_path):
+def test_cli_exits_75_with_one_stderr_line(tmp_path):
     root = _installed_copy(tmp_path, jar=False)
-    done, took = _cli(root, tmp_path, "--", "uv", "run", "pytest", "-n", "auto")
+    done = _cli(root, tmp_path, "--", "uv", "run", "pytest", "-n", "auto")
     assert done.returncode == 75
     assert done.stdout == ""
-    assert len(done.stderr.splitlines()) == 1 and "scripts/build-gate-jar.sh" in done.stderr
-    assert took < 2.0
+    assert len(done.stderr.splitlines()) == 1 and "scripts/build-gate-jar.sh --lab-run" in done.stderr
 
 
 def test_cli_exits_0_for_no_engine_and_for_a_present_jar_and_reads_the_environment(tmp_path):
@@ -356,10 +462,58 @@ def test_cli_exits_0_for_no_engine_and_for_a_present_jar_and_reads_the_environme
     for root, argv, env in [
         (missing, ("--", "uv", "run", "pytest"), {"NX_TEST_T2_SUBSTRATE": "none"}),
         (missing, ("--", "ls"), {}),
+        (missing, ("--", "scripts/build-gate-jar.sh", "&&", "uv", "run", "pytest"), {}),
         (present, ("--", "uv", "run", "pytest"), {}),
     ]:
-        done, took = _cli(root, tmp_path, *argv, **env)
+        done = _cli(root, tmp_path, *argv, **env)
         assert (done.returncode, done.stderr) == (0, ""), argv
-        assert took < 2.0
-    done, _ = _cli(missing, tmp_path, "--", "uv", "run", "pytest")
-    assert done.returncode == 75
+    assert _cli(missing, tmp_path, "--", "uv", "run", "pytest").returncode == 75
+
+
+# A plugin for a child pytest: aim the fixture's jar at a path that does not exist, the state of every lab-remote copy
+# (patching the fixture's own default, as tests/test_substrate_preflight.py does), so the child's real session start runs.
+_JARLESS_SEAM = """
+import functools, os
+from pathlib import Path
+import tests.db._service_fixture as sf
+sf.jar_freshness_skip_reason = functools.partial(sf.jar_freshness_skip_reason, Path(os.environ["SEAM_JAR"]))
+"""
+
+
+def _child_pytest(tmp_path: Path, args: list[str], **extra: str) -> subprocess.CompletedProcess[str]:
+    (tmp_path / "_jarless_seam.py").write_text(_JARLESS_SEAM)
+    drop = {
+        "NX_TEST_T2_SUBSTRATE", "NX_BUILD_LEASE_WAIT", "NX_SUITE_LEASE_HELD_BY", "NX_SUITE_LEASE_WAIT",
+        "NX_SUITE_LEASE_UNGUARDED", "NEXUS_PG_BIN", "NX_TEST_SUBSTRATE_CACHE",
+        "LAB_CPUS", "LAB_MEM_MB", "LAB_REMOTE", "NX_LOCAL_HEAVY",  # a grant makes the child's suite lease step aside
+    }
+    env = {k: v for k, v in os.environ.items() if k not in drop}
+    env.update(
+        NX_BUILD_LEASE_ROOT=str(tmp_path / "leases"),
+        XDG_CACHE_HOME=str(tmp_path / "cache"),
+        PYTHONPATH=str(tmp_path),
+        PYTEST_ADDOPTS="",
+        SEAM_JAR=str(tmp_path / "service" / "target" / "nexus-service-1.0-SNAPSHOT.jar"),
+        **extra,
+    )
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "_jarless_seam", "-p", "no:cacheprovider", "-q",
+         *args, "tests/test_arg_grouping.py"],
+        cwd=REPO, env=env, capture_output=True, text=True, timeout=240,
+    )
+
+
+@pytest.mark.parametrize("flags", [["--collect-only"], ["-m", "lint"], []], ids=["collect-only", "m-lint", "plain"])
+def test_end_to_end_the_conftest_refuses_what_the_script_refuses_collect_only_and_m_lint_included(lp, tmp_path, flags):
+    """Pins the rule the script applies to ``--collect-only`` and ``-m lint``: the conftest exits 75 on them too."""
+    child = _child_pytest(tmp_path, flags)
+    out = child.stdout + child.stderr
+    assert child.returncode == 75, out
+    assert "service jar not built" in out
+    assert lp.check(["uv", "run", "pytest", *flags], {}, tmp_path)[0] == 75  # the same absence, the same verdict
+
+
+def test_end_to_end_a_no_engine_substrate_goes_ahead_where_the_script_exits_0(lp, tmp_path):
+    child = _child_pytest(tmp_path, ["--collect-only"], NX_TEST_T2_SUBSTRATE="none")
+    assert child.returncode == 0, child.stdout + child.stderr
+    assert lp.check(["uv", "run", "pytest", "--collect-only"], {"NX_TEST_T2_SUBSTRATE": "none"}, tmp_path) == (0, [])
