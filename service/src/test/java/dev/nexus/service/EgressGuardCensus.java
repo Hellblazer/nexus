@@ -189,6 +189,10 @@ final class EgressGuardCensus {
         m.put("dev/nexus/service/vectors/LeafIndexPass.java", Allow.pinned(JDBC_SITE,
             "JDBC to the engine's own database (NX_DB_ADMIN_*): the RDR-229 P3.3b per-leaf unique-index pass's dedicated autocommit"
                 + " connection (nexus-p2m1x.20). CREATE UNIQUE INDEX CONCURRENTLY cannot run in a pool's transaction or in a function."));
+        m.put("dev/nexus/service/datamove/IdUniqueIndexPass.java", Allow.pinned(JDBC_SITE,
+            "JDBC to the engine's own database (NX_DB_ADMIN_*): the RDR-229 P3.4 id-keyed index pass's dedicated autocommit"
+                + " connection (nexus-p2m1x.22), its url from AdminConnection.url() as LeafIndexPass's is. CREATE INDEX"
+                + " CONCURRENTLY cannot run in a pool's transaction or in a function."));
         m.put("dev/nexus/service/datamove/CallConnection.java", Allow.pinned(JDBC_SITE,
             "JDBC to the engine's own database (NX_DB_ADMIN_*): the data-move worker's dedicated autocommit connection"
                 + " (nexus-f3yqd.2.13), on which one run's CALL of dml_utils' committing entry point runs under a tenant"

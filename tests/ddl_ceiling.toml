@@ -255,7 +255,11 @@ migration_wal_bytes_per_worker = 12143000
 # Measured: chas lab-m via lab-remote, 2026-11-22, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued: ddl: migration=2838 on 2f455cd718 (P3.3a's tip, before) and migration=2839 with vectors-073 (after).
 # 2839 -> 2841 (2026-11-22, nexus-p2m1x.21, RDR-229 P3.3c, under Sam's 2860 cap; linda's rulings): vectors-075-1 is one self-retrying changeset with two DDL statements, DROP INDEX CONCURRENTLY IF EXISTS (the heal of an INVALID leftover; a no-op on a fresh walk, which the server log still counts) and CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_chunk_orphaned_at_tenant_chash on nexus.chunk_orphaned_at (tenant_id, chash), the child-side lookup of chunk_orphaned_at_chunk_id_fk, which the name primary key cannot serve; SET and RESET lock_timeout are not DDL, and its rollback is not counted. linda's ledger said 2840 for one statement; the heal's DROP makes it 2841. The swap's own on_complete DDL (Rdr229SwapMove) runs at run time and does not count.
 # Measured: chas lab-m via lab-remote, 2026-11-22, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued with vectors-075 on this branch: ddl: migration=2841 (2839 before it, on P3.3b's tip).
-migration_ddl_per_worker = 2841
+# 2841 -> 2843 (2026-11-22, nexus-p2m1x.22, RDR-229 P3.4): vectors-080-1 creates nexus.rdr229_gate_latch, the install-wide gate 3 latch
+# (linda's allocation): the CREATE TABLE and its primary key's index, +2. No row changed. P3.4's id indexes are runtime DDL after gate 2 and are not counted here.
+# Measured: chas lab-m via lab-remote, 2026-11-22, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on
+# 9712dd4513 (bob's 3bdb8a5b72 + P3.4; gate jar rebuilt in the same command): ddl: migration=2843. Under Sam's 2860 cap.
+migration_ddl_per_worker = 2843
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]

@@ -30,8 +30,8 @@ import org.slf4j.LoggerFactory;
  * P3.5c's switch (name key before, id key after), so nothing here guesses it. A {@code DO NOTHING} site needs none of this: it drops its
  * conflict target, and a target-less {@code DO NOTHING} arbitrates every unique index.
  *
- * <p><b>The pairs.</b> {@link #pairs()} is the one checked list: P3.3b's two leaf keys ({@code LeafIndexPass.KEYS}) here, and P3.4's
- * arbiters when {@code IdUniqueIndexPass.arbiters()} lands (marlowe). {@code TwinKeyUpsertIntegrationTest#pairsMatchTheMigratedSchema} pins each pair against
+ * <p><b>The pairs.</b> {@link #pairs()} is the one checked list: {@link dev.nexus.service.datamove.ArbiterTwins#ALL}
+ * (P3.4): P3.3b's two leaf keys and the eight id-keyed arbiters IdUniqueIndexPass builds at run time after gate 2. {@code TwinKeyUpsertIntegrationTest#pairsMatchTheMigratedSchema} pins each pair against
  * the migrated schema: both members are unique indexes of the table with exactly these columns.
  */
 public final class TwinKeyUpsert {
@@ -54,11 +54,10 @@ public final class TwinKeyUpsert {
         }
     }
 
-    private static final List<Pair> PAIRS = List.of(
-        new Pair("chunks", List.of("tenant_id", "collection", "chash", "embedding_model"),
-                 List.of("tenant_id", "collection_id", "chash", "embedding_model")),
-        new Pair("taxonomy_centroids", List.of("tenant_id", "collection", "topic_id", "embedding_model"),
-                 List.of("tenant_id", "collection_id", "topic_id", "embedding_model")));
+    /** {@link dev.nexus.service.datamove.ArbiterTwins#ALL}, the one checked list, as ordered column lists (RDR-229 P3.4). */
+    private static final List<Pair> PAIRS = dev.nexus.service.datamove.ArbiterTwins.ALL.stream()
+        .map(a -> new Pair(a.table(), List.of(a.nameColumns().split(",\\s*")), List.of(a.idColumns().split(",\\s*"))))
+        .toList();
 
     private TwinKeyUpsert() {
     }

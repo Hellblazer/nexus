@@ -122,7 +122,7 @@ final class PciAnchorLedger {
             }
             Optional<PciCatalog.Anchor> anchor = PciCatalog.parseAnchor(facts.comment());
             if (anchor.isEmpty()) {
-                long rows = PciAnchorReads.countRows(tx, dim, leaf.model(), leaf.tenant(), index.collection());
+                long rows = rowsOf(tx, dim, leaf, index);
                 writes.add(new Write(index, Kind.ADOPT, facts.comment() == null ? "missing" : "unparsable", rows,
                     facts.bytes(), null, null, null));
                 continue;
@@ -132,7 +132,7 @@ final class PciAnchorLedger {
             if (!mine && a.rebuiltSince(facts.relfilenode())) {
                 // Rebuilt by someone else (a hand REINDEX CONCURRENTLY keeps the comment): anchored as built now. It is
                 // no reading this pass: the next one reads the new anchor.
-                long rows = PciAnchorReads.countRows(tx, dim, leaf.model(), leaf.tenant(), index.collection());
+                long rows = rowsOf(tx, dim, leaf, index);
                 writes.add(new Write(index, Kind.REBUILT, "rebuilt", rows, facts.bytes(), null, a.relfilenode(),
                     facts.relfilenode()));
                 continue;
@@ -151,9 +151,10 @@ final class PciAnchorLedger {
                         reference.apply(dim))))
                 || Duration.between(last.countedAt(), now).compareTo(PciReconciler.RECOUNT_AFTER) > 0;
             if (count) {
-                long rows = PciAnchorReads.countRows(tx, dim, leaf.model(), leaf.tenant(), index.collection());
-                long written = PciAnchorReads.writtenSince(tx, dim, leaf.model(), leaf.tenant(), index.collection(),
-                    a.builtAt());
+                long rows = rowsOf(tx, dim, leaf, index);
+                long written = index.idParsed()
+                    ? PciAnchorReads.writtenSinceById(tx, leaf.model(), leaf.tenant(), index.collectionId(), a.builtAt())
+                    : PciAnchorReads.writtenSince(tx, dim, leaf.model(), leaf.tenant(), index.collection(), a.builtAt());
                 read.put(index.name(), new IndexReading(a, facts.bytes(), rows, written, now));
             } else {
                 read.put(index.name(), new IndexReading(a, facts.bytes(), last.rows(), last.writtenSince(),
@@ -161,6 +162,13 @@ final class PciAnchorLedger {
             }
         }
         return new Reads(stats, read, writes);
+    }
+
+    /** The rows the index's predicate selects on the leaf: by name, or (RDR-229 P3.4) by collection id. */
+    private static long rowsOf(DSLContext tx, int dim, Leaf leaf, Index index) {
+        return index.idParsed()
+            ? PciAnchorReads.countRowsById(tx, leaf.model(), leaf.tenant(), index.collectionId())
+            : PciAnchorReads.countRows(tx, dim, leaf.model(), leaf.tenant(), index.collection());
     }
 
     /** Make a committed transaction's reads the engine's last look at the leaf. */
