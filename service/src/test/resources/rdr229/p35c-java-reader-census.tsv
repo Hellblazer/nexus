@@ -436,12 +436,12 @@ service/src/main/java/dev/nexus/service/db/RemapRepository.java	343	catalog_coll
 service/src/main/java/dev/nexus/service/db/RenameGuard.java	223	catalog_collections	name	select	jooq	-
 service/src/main/java/dev/nexus/service/db/RenameGuard.java	226	catalog_collections	name	where	jooq	-
 service/src/main/java/dev/nexus/service/db/RenameGuard.java	228	catalog_collections	name	result	jooq	-
-service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	454	catalog_collections	name	select	alias	-
-service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	475	?	superseded_by	expr	literal	0 candidate tables in the statement
-service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	534	catalog_collections	superseded_by	where	alias	-
-service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	540	catalog_collections	name	where	alias	-
-service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	540	catalog_collections	superseded_by	where	alias	-
-service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	542	catalog_collections	superseded_by	where	alias	-
+service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	470	catalog_collections	name	select	alias	-
+service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	491	?	superseded_by	expr	literal	0 candidate tables in the statement
+service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	561	catalog_collections	superseded_by	where	alias	-
+service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	567	catalog_collections	name	where	alias	-
+service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	567	catalog_collections	superseded_by	where	alias	-
+service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	569	catalog_collections	superseded_by	where	alias	-
 service/src/main/java/dev/nexus/service/db/TaxonomyAnalytics.java	35	topic_assignments	source_collection	expr	jooq	-
 service/src/main/java/dev/nexus/service/db/TaxonomyAnalytics.java	114	topic_assignments	source_collection	expr	jooq	-
 service/src/main/java/dev/nexus/service/db/TaxonomyAnalytics.java	119	topics	collection	select	jooq	-
