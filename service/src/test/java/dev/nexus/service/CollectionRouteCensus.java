@@ -334,7 +334,7 @@ final class CollectionRouteCensus {
         r.add(post(a + "/salient_sentences/set_by_key", coll(), "\"source_path\":\"p35a.md\"", Tier.GENERIC, ASPECT,
             "handleSetSalientByKey"));
         r.add(withRepo(post(a + "/upsert", coll(), "\"source_path\":\"p35a.md\"", Tier.HEAVY, ASPECT, "handleUpsert"),
-            ASPECT_REPO + "#validateUpsert"));
+            ASPECT_REPO + "#validateUpsert,upsertAspect"));
         r.add(withRepo(post(a + "/highlights/upsert", coll(), "\"doc_id\":\"p35a-doc\",\"ingested_at\":\"2026-01-01T00:00:00Z\","
             + "\"highlights_md\":\"p35a\"", Tier.HEAVY, ASPECT, "handleHighlightUpsert"), ASPECT_REPO + "#upsertHighlight"));
 
@@ -592,8 +592,14 @@ final class CollectionRouteCensus {
      */
     static final java.util.Set<String> ID_NAMES_OTHER_THAN_SLOTS = java.util.Set.of(
         "collection_id", "collection_ids",
-        // response and reason names, never read from a request
-        "unknown_collection_id");
+        // response and reason names, never read from a request. Each is a name the engine WRITES; none is a request parameter.
+        "unknown_collection_id",
+        // CollectionSelectorFilter: the 500 collection_id_mismatch body's field naming the id the registry answered with
+        "resolved_collection_id",
+        // CollectionSupersededBody: the 409 collection_superseded body's field naming the live successor's id
+        "successor_collection_id",
+        // HttpUtil.COLLECTION_ID_MISMATCH_REASON: the "reason" string of that 500 body (and its log event), a value, not a field
+        "collection_id_mismatch");
 
     /** The id a probe uses for a collection that does not exist: far above any identity value a test run reaches. */
     static final long UNKNOWN_ID = 987_654_321_012L;
