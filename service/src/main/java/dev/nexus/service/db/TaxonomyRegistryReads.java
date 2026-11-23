@@ -326,7 +326,7 @@ final class TaxonomyRegistryReads {
      * The registry rows of every collection whose label starts with {@code prefix}, live or retired, read {@code FOR KEY SHARE} in one
      * id-ordered statement (a collection registered meanwhile is not among the rows the write reaches: it deletes by the held ids). Retired
      * rows are included, so a child stamped to a tombstone that bears the label is pruned as it was when the prefix matched the name column
-     * (a same-named tombstone is the label's own: no other collection's row is reached). Returns each row.
+     * (a tombstone's label is its own, so a row is reached only by a label that starts with the prefix; until P4.1 a tombstone keeps its label taken). Returns each row.
      */
     static List<CollectionRow> registryFirstOfPrefix(DSLContext ctx, String tenant, String prefix) {
         List<String> labels = labelsStarting(ctx, tenant, prefix);
