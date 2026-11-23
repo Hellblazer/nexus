@@ -9,6 +9,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import dev.nexus.service.TestHttp;
 import dev.nexus.service.db.CollectionRow;
+import dev.nexus.service.db.CollectionSuccessor;
 import dev.nexus.service.db.UnknownCollectionIdException;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -25,15 +26,17 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.OptionalLong;
+import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * RDR-229 P3.5a (nexus-p2m1x.23): the route boundary ({@link CollectionSelectorFilter}) over a registry stub, so the answers that
- * need a row the registry never hands out (F5) or a state a database makes awkward (a retired row whose successor is gone) are
- * pinned without a database, and the F13 edge cases and F8 are pinned beside them. The engine-backed twins are
- * {@code CollectionRetiredIdRoutesTest} and {@code CollectionRoutesByIdTest}.
+ * need a state a database makes awkward (a retired row whose successor is gone) are pinned without a database, a retired id is
+ * swept over EVERY route of the table, and the F13 edge cases and F8 are pinned beside them. The registry-inconsistency 500 is
+ * pinned on the one arm a stub can reach; the real gap between the boundary and the handler (an id freed and its label taken
+ * again) is {@code CollectionRetiredIdRoutesTest}'s, on the engine. That class and {@code CollectionRoutesByIdTest} are the
+ * engine-backed twins.
  *
  * <p>The filter runs in front of a handler that echoes what reached it, so each test says both the status the client sees and
  * what the handler was (not) given.
@@ -46,7 +49,7 @@ class CollectionSelectorFilterRowsTest {
 
     /** The rows the stub knows, by id; a lying entry maps an id to a row of another id. */
     private final Map<Long, CollectionRow> byId = new HashMap<>();
-    private final Map<String, Long> liveByLabel = new HashMap<>();
+    private final Map<Long, CollectionSuccessor.Successor> successors = new HashMap<>();
 
     private HttpServer server;
     private HttpClient http;
@@ -63,8 +66,7 @@ class CollectionSelectorFilterRowsTest {
         byId.put(7L, row(7, "retired-seven", "successor-nine"));
         byId.put(8L, row(8, "retired-eight", "successor-gone"));
         byId.put(6L, row(99, "liar", ""));       // the registry answers id 6 with the row of id 99
-        byId.put(10L, row(10, "", ""));           // a row without a label
-        liveByLabel.put("successor-nine", 9L);
+        successors.put(7L, new CollectionSuccessor.Successor(9, "successor-nine"));
 
         CollectionSelectorFilter.Rows rows = new CollectionSelectorFilter.Rows() {
             @Override public CollectionRow byId(String tenant, long id) {
@@ -75,14 +77,12 @@ class CollectionSelectorFilterRowsTest {
                 return r;
             }
 
-            @Override public OptionalLong liveIdOf(String tenant, String label) {
-                Long id = liveByLabel.get(label);
-                return id == null ? OptionalLong.empty() : OptionalLong.of(id);
+            @Override public Optional<CollectionSuccessor.Successor> successorOf(String tenant, long retiredId) {
+                return Optional.ofNullable(successors.get(retiredId));
             }
         };
         server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
-        for (String path : new String[] {"/v1/catalog/collections/get", "/v1/catalog/collections/delete", "/v1/vectors/search",
-                "/v1/taxonomy/centroids/upsert", "/v1/vectors/store-get"}) {
+        for (String path : CollectionSelectors.ROUTES.keySet()) {
             var context = server.createContext(path, exchange -> {
                 handlerCalls++;
                 byte[] in = exchange.getRequestBody().readAllBytes();
@@ -167,29 +167,25 @@ class CollectionSelectorFilterRowsTest {
         assertThat(unknown.status()).as(unknown.body()).isEqualTo(404);
     }
 
-    // ---- F5: the registry's row must be the row of the id asked for ------------------------------------------------------
+    // ---- the registry-inconsistency 500 -------------------------------------------------------------------------------------------
 
+    /**
+     * The one arm a stub can reach: a registry that answers an id with a row of another id is an engine defect, answered with a
+     * typed 500 and never a 409; the handler does not run. (The real registry cannot emit such a row, since a read by id selects on the
+     * key; the gap between the boundary and the handler is the engine test's.)
+     */
     @Test
-    void f5_aRowOfAnotherIdIsRefusedWithATyped500_andTheHandlerNeverRuns() throws Exception {
+    void aRegistryRowOfAnotherIdIsATyped500_andTheHandlerNeverRuns() throws Exception {
         int before = handlerCalls;
         Resp r = post("/v1/vectors/store-get", "{\"collection_id\":6}");
         assertThat(r.status()).as(r.body()).isEqualTo(500);
         assertThat(r.json().path("reason").asText()).isEqualTo("collection_id_mismatch");
         assertThat(r.json().path("collection_id").asLong()).isEqualTo(6);
         assertThat(r.json().path("resolved_collection_id").asLong()).isEqualTo(99);
-        assertThat(handlerCalls).as("nothing was written to the other collection").isEqualTo(before);
+        assertThat(handlerCalls).isEqualTo(before);
 
         Resp q = get("/v1/catalog/collections/get?collection_id=6");
         assertThat(q.status()).isEqualTo(500);
-        assertThat(handlerCalls).isEqualTo(before);
-    }
-
-    @Test
-    void f5_aRowWithNoLabelIsRefusedToo() throws Exception {
-        int before = handlerCalls;
-        Resp r = post("/v1/vectors/store-get", "{\"collection_id\":10}");
-        assertThat(r.status()).as(r.body()).isEqualTo(500);
-        assertThat(r.json().path("reason").asText()).isEqualTo("collection_id_mismatch");
         assertThat(handlerCalls).isEqualTo(before);
     }
 
@@ -282,5 +278,75 @@ class CollectionSelectorFilterRowsTest {
         assertThat(get("/v1/catalog/collections/get?collection_id=5&collection_id=5").status()).isEqualTo(400);
         assertThat(get("/v1/catalog/collections/get?collection_id=5&collection_id=424242").status()).isEqualTo(400);
         assertThat(handlerCalls).isEqualTo(before);
+    }
+
+    // ---- D3 over the whole table --------------------------------------------------------------------------------------------------
+
+    /** Every slot of every route of {@link CollectionSelectors#ROUTES}, alone, with the retired id: 409, and no handler runs. */
+    @Test
+    void d3_aRetiredIdIs409OnEveryRouteAndSlotOfTheTable_andNoHandlerRuns() throws Exception {
+        int before = handlerCalls;
+        int slots = 0;
+        for (Map.Entry<String, CollectionSelectors.Route> e : CollectionSelectors.ROUTES.entrySet()) {
+            for (CollectionSelectors.Slot slot : e.getValue().slots()) {
+                slots++;
+                Resp r;
+                if (e.getValue().where() == CollectionSelectors.Where.QUERY) {
+                    r = get(e.getKey() + "?" + slot.idField() + "=7");
+                } else if (slot.nested()) {
+                    r = post(e.getKey(), "{\"" + slot.nestedIn() + "\":[{\"" + slot.idField() + "\":7}]}");
+                } else if (slot.list()) {
+                    r = post(e.getKey(), "{\"" + slot.idField() + "\":[7]}");
+                } else {
+                    r = post(e.getKey(), "{\"" + slot.idField() + "\":7}");
+                }
+                assertThat(r.status()).as("%s slot %s: %s", e.getKey(), slot.idField(), r.body()).isEqualTo(409);
+                assertThat(r.json().path("reason").asText()).as(e.getKey()).isEqualTo("collection_superseded");
+                assertThat(r.json().path("superseded_by").asText()).as(e.getKey()).isEqualTo("successor-nine");
+            }
+        }
+        assertThat(slots).as("non-vacuity: the table has its routes").isGreaterThanOrEqualTo(86);
+        assertThat(handlerCalls).as("a refused request reaches no handler").isEqualTo(before);
+    }
+
+    // ---- F13 parity between a query and a body --------------------------------------------------------------------------------------
+
+    @Test
+    void f13_theSmallestLongIsRefusedAsALongIdIs_inAQueryAndInABody() throws Exception {
+        // Math.abs(Long.MIN_VALUE) is negative, so a bound written with abs() let this through to a 404
+        String min = "-9223372036854775808";
+        assertThat(get("/v1/catalog/collections/get?collection_id=" + min).status()).isEqualTo(400);
+        Resp b = post("/v1/vectors/store-get", "{\"collection_id\":" + min + "}");
+        assertThat(b.status()).as(b.body()).isEqualTo(400);
+        assertThat(post("/v1/vectors/store-get", "{\"collection_id\":-999999999999999999}").status()).as("the bound itself is an id").isEqualTo(404);
+    }
+
+    @Test
+    void f13_anIdKeyGivenTwiceInABodyIs400_asInAQuery_andIsNotSwallowedByThePassThroughOfAnInvalidBody() throws Exception {
+        int before = handlerCalls;
+        assertThat(post("/v1/vectors/store-get", "{\"collection_id\":5,\"collection_id\":5}").status()).isEqualTo(400);
+        assertThat(post("/v1/vectors/store-get", "{\"collection_id\":5,\"collection_id\":424242}").status()).isEqualTo(400);
+        // the second key is the same key once decoded
+        assertThat(post("/v1/vectors/store-get", "{\"collection_id\":5,\"collection\\u005fid\":5}").status()).isEqualTo(400);
+        // in a nested record, and the duplicate is seen even though the body is cut off after it
+        assertThat(post("/v1/taxonomy/centroids/upsert", "{\"records\":[{\"collection_id\":5,\"collection_id\":6}]}").status())
+            .isEqualTo(400);
+        assertThat(post("/v1/vectors/store-get", "{\"collection_id\":5,\"collection_id\":5,\"x\":").status()).isEqualTo(400);
+        assertThat(handlerCalls).isEqualTo(before);
+
+        // a body that is not JSON still goes to the handler, which refuses it in its own words
+        Resp notJson = post("/v1/vectors/store-get", "not json");
+        assertThat(notJson.status()).isEqualTo(200);
+        assertThat(handlerCalls).isEqualTo(before + 1);
+    }
+
+    // ---- F8: a body with no id field is not turned into a tree ---------------------------------------------------------------------
+
+    @Test
+    void aBodyThatNamesNoIdReachesTheHandlerAsTheBytesThatCame() throws Exception {
+        String body = "{ \"collection\" : \"live-five\", \"big\" : [1, 2, {\"collection_id\": 5}] }";   // an id key one level down is not an id field
+        Resp r = post("/v1/vectors/store-get", body);
+        assertThat(r.status()).isEqualTo(200);
+        assertThat(r.body()).as("the bytes untouched, spacing included").endsWith(body);
     }
 }
