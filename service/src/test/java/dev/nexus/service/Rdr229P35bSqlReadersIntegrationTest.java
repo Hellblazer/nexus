@@ -242,6 +242,38 @@ class Rdr229P35bSqlReadersIntegrationTest {
         }
     }
 
+    /**
+     * linda 2026-11-23 (the confirmation round): a sensitivity miss is the one wrong answer of a form B reader that leaks, so
+     * chunk_sensitive_many is pinned on the half-stamped collection: h1 and h2 match by the id arm, h3 and h4 by the name arm
+     * (their manifest rows carry no id). Each one's owner is made sensitive here and put back after (its id stays: the CHECK
+     * holds every row written after the expand to one).
+     */
+    @Test
+    @Order(3)
+    void halfStamped_chunkSensitiveMany_seesEverySensitiveOwner_byTheIdArmAndTheNameArm() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            var ownersOfHalf = DSL.select(CATALOG_DOCUMENT_CHUNKS.DOC_ID).from(CATALOG_DOCUMENT_CHUNKS)
+                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT)).and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(HALF));
+            // a row written after the expand's NOT VALID CHECK must carry its id, so the owners are stamped as they are marked
+            int marked = ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.SENSITIVE, true)
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, registryId(ctx, HALF))
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT)).and(CATALOG_DOCUMENTS.TUMBLER.in(ownersOfHalf)).execute();
+            try {
+                assertThat(marked).as("non-vacuity: the half-stamped collection's owners were marked sensitive").isPositive();
+                assertThat(ctx.fetchCount(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT)
+                        .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(HALF)).and(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID.isNull())))
+                    .as("non-vacuity: two of the four manifest rows carry no id, so the name arm is exercised").isEqualTo(2);
+                assertThat(dev.nexus.service.vectors.ChunkSensitivity.sensitiveChashes(ctx, TENANT, HALF, HALF_CHASHES))
+                    .as("every chunk with a live sensitive owner reads sensitive, whichever arm matches its manifest row")
+                    .containsExactlyInAnyOrderElementsOf(HALF_CHASHES);
+            } finally {
+                ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.SENSITIVE, false)
+                    .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT)).and(CATALOG_DOCUMENTS.TUMBLER.in(ownersOfHalf)).execute();
+            }
+        }
+    }
+
     // ---- T2: form A is CONTINUE-gated on the stamp moves ---------------------------------------------------------------
 
     /** Guard (passes today): with a stamp move incomplete the form A objects stay on the name. */

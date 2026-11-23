@@ -1,5 +1,33 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- fix2-formA: the new file header comment (replaces the existing first comment of vectors-078, between the XML declaration and <databaseChangeLog>), then the 12 complete changeSet elements to splice by id. -->
+<!--
+    Bead nexus-p2m1x.24 (RDR-229 P3.5b, item 6 "Readers during the stamp", SQL readers): every live SQL reader whose body names no
+    chunk-family table reads the id only, behind a CONTINUE precondition, so it is skipped unrecorded and retried at each boot until
+    the stamp is complete as THE GATE below defines it, and applies at the first boot after (RDR-246 lines 937-940). A view's output label comes from
+    nexus.catalog_collections.name joined on the id, so no form A object depends on a name column and P4.1's RESTRICT drop meets
+    none of them. The catalog-044 owner trigger fires on physical_collection_id.
+
+    THE GATE (on every changeset, verbatim; one sqlCheck that returns 0 only then): the completion check's own rule for a stamp label
+    (CompletionCheck), read from pg_catalog and nexus.data_moves alone. Every CHECK of db/rdr229/p31-checks.tsv (twenty, among them
+    catalog_collections_superseded_by_id_check) must be present on its table and validated (pg_constraint.convalidated), and the stamp
+    move of its table (rdr229-stamp-<table>) must be complete: it has completed_at, or the move that supersedes it (a
+    nexus.rdr229_restamp -rerun-N row, followed down the chain) is complete, or it failed and its driving table is gone. A stamp label
+    with no move row is incomplete. The one exception is aspect_extraction_queue, which is not applicable (its CHECK and move are not
+    required) while its table or its collection_id column is absent and it has no move row or a failed one; a queue move that completed
+    on an install whose table was dropped since counts complete. The twelve ids are the CONTINUE changesets named below. This is not
+    "every move has completed_at": a stamp whose on_complete found an orphan row leaves its CHECK NOT VALID, and these changesets wait.
+
+    The gate does not read P3.3a's id-twin or P3.3c's swap and child labels, which the completion check's later gates add: those
+    concern the id foreign keys and indexes, not what these readers read.
+
+    P3.7's one-row rename must wait until every changeset of this file is recorded in databasechangelog: they are listed in
+    db/rdr229/p35b-continue-changesets.txt, and tests/test_rdr229_p35b_continue_list.py keeps the list equal to this file. Neither P3.7's
+    check nor a restart request on the completion check reads the list yet (P3.7 is not in this tree). Each is in the
+    _CONTINUE_ALLOWLIST of tests/test_changelog_continue_precondition_chunks_lint.py with its lock argument.
+
+    Built on each object's LAST DEFINER; the rollback restores it verbatim; P3.1's id writes are kept word for word (reads only
+    change). Ids 5, 6 and 12 are unused: document_trash, document_restore and topics_recount_doc_count read a name only to stamp
+    an id on write, so their bodies are unchanged and need no changeset. DATA EFFECT: none (definitions and one trigger).
+-->
 <databaseChangeLog
     xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
