@@ -157,10 +157,39 @@ class PciReconcilerIntegrationTest {
         PgSession.resetSearchExactMaxRowsForTests();
     }
 
+    /**
+     * Drops the tenant's leaves, rerunning the drop while it gives up on a lock (55P03), for up to {@link #DROP_RETRY_FOR}.
+     * The holder is usually an autovacuum of a table around the leaves or of the tenant's own leaf, started by the test's
+     * own seeding (pg_locks, nexus-p2m1x.25: an autovacuum worker held SHARE UPDATE EXCLUSIVE on catalog_document_chunks and
+     * then on the tenant's chunks leaf). The function's per-attempt budget is half of deadlock_timeout, so it never waits
+     * long enough for PostgreSQL to cancel an autovacuum, and gives up after about 4.5 s. Each call is one transaction on
+     * an autocommit connection, so a call that gives up changes nothing, and the function is idempotent.
+     */
     @SuppressWarnings("deprecation")
     static void dropLeaves(DSLContext ctx, String tenant) {
-        dev.nexus.service.jooq.nexus.Routines.dropTenantPartitions(ctx.configuration(), tenant);
+        long deadline = System.nanoTime() + DROP_RETRY_FOR.toNanos();
+        for (int attempt = 1; ; attempt++) {
+            try {
+                dev.nexus.service.jooq.nexus.Routines.dropTenantPartitions(ctx.configuration(), tenant);
+                return;
+            } catch (org.jooq.exception.DataAccessException e) {
+                if (!"55P03".equals(e.sqlState()) || System.nanoTime() > deadline) {
+                    throw e;
+                }
+                LoggerFactory.getLogger(PciReconcilerIntegrationTest.class)
+                    .warn("event=test_tenant_drop_retry tenant={} attempt={} cause=lock_not_available", tenant, attempt);
+                try {
+                    Thread.sleep(DROP_RETRY_PAUSE.toMillis());
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw e;
+                }
+            }
+        }
     }
+
+    static final Duration DROP_RETRY_FOR = Duration.ofSeconds(30);
+    static final Duration DROP_RETRY_PAUSE = Duration.ofMillis(500);
 
     List<String> logs() {
         return appender.list.stream().map(ILoggingEvent::getFormattedMessage).toList();
