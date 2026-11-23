@@ -187,12 +187,16 @@ public final class RemapRepository {
     public int clearLeg(String tenant, String sourceCollection, String targetCollection) {
         requireNonBlank(sourceCollection, "source_collection");
         requireNonBlank(targetCollection, "target_collection");
-        int deleted = tenantScope.withTenant(tenant, ctx ->
-            ctx.deleteFrom(CHASH_REMAP)
+        int deleted = tenantScope.withTenant(tenant, ctx -> {
+            // P3.5a: a request naming either leg by id reads that id first, FOR KEY SHARE, in this transaction
+            RequestedCollectionRead.require(ctx, tenant, sourceCollection);
+            RequestedCollectionRead.require(ctx, tenant, targetCollection);
+            return ctx.deleteFrom(CHASH_REMAP)
                .where(CHASH_REMAP.TENANT_ID.eq(tenant)
                        .and(CHASH_REMAP.SOURCE_COLLECTION.eq(sourceCollection))
                        .and(CHASH_REMAP.TARGET_COLLECTION.eq(targetCollection)))
-               .execute());
+               .execute();
+        });
         log.info("event=remap_clear_leg tenant={} source={} target={} deleted={}",
                 tenant, sourceCollection, targetCollection, deleted);
         return deleted;

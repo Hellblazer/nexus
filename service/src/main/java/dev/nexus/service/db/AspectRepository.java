@@ -545,11 +545,13 @@ public final class AspectRepository {
      * Delete an aspect by (collection, source_path). Returns deleted count.
      */
     public int deleteAspect(String tenant, String collection, String sourcePath) {
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.deleteFrom(DOCUMENT_ASPECTS)
+        return tenantScope.withTenant(tenant, ctx -> {
+            RequestedCollectionRead.require(ctx, tenant, collection);   // P3.5a: a request by id reads that id first
+            return ctx.deleteFrom(DOCUMENT_ASPECTS)
                .where(DOCUMENT_ASPECTS.COLLECTION.eq(collection)
                    .and(DOCUMENT_ASPECTS.SOURCE_PATH.eq(sourcePath)))
-               .execute());
+               .execute();
+        });
     }
 
     /**
@@ -600,13 +602,15 @@ public final class AspectRepository {
      * Set salient_sentences by (collection, source_path) — pre-migration fallback.
      */
     public int setSalientSentencesByKey(String tenant, String collection, String sourcePath, String sentencesJson) {
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.update(DOCUMENT_ASPECTS)
+        return tenantScope.withTenant(tenant, ctx -> {
+            RequestedCollectionRead.require(ctx, tenant, collection);   // P3.5a: a request by id reads that id first
+            return ctx.update(DOCUMENT_ASPECTS)
                .set(DOCUMENT_ASPECTS.SALIENT_SENTENCES, jsonbOrNull(sentencesJson))
                .set(DOCUMENT_ASPECTS.COLLECTION_ID, ASPECT_OWN_ID)
                .where(DOCUMENT_ASPECTS.COLLECTION.eq(collection)
                    .and(DOCUMENT_ASPECTS.SOURCE_PATH.eq(sourcePath)))
-               .execute());
+               .execute();
+        });
     }
 
     /**
