@@ -4,7 +4,6 @@ package dev.nexus.service;
 
 import dev.nexus.service.CollectionRouteFixture.Resp;
 import dev.nexus.service.db.Chash;
-import dev.nexus.service.http.CollectionSelectorFilter;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -12,7 +11,11 @@ import org.junit.jupiter.api.TestInstance;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 
 import static dev.nexus.service.CollectionRouteFixture.json;
 import static dev.nexus.service.CollectionRouteFixture.label;
@@ -51,7 +54,10 @@ class CollectionRetiredIdRoutesTest {
     }
 
     private void seedChunk(String collection) {
-        String hex = Chash.ofText(collection + "/chunk").toHex();
+        seedChunk(collection, Chash.ofText(collection + "/chunk").toHex());
+    }
+
+    private void seedChunk(String collection, String hex) {
         fx.asSuperuser(ctx -> {
             PgContainerHelper.insertChunks(ctx, fx.tenant, collection, List.of(hex), List.of("retired text"),
                 List.of(new float[384]), List.of(Map.<String, Object>of()));
@@ -171,6 +177,28 @@ class CollectionRetiredIdRoutesTest {
 
     // ---- the write by id survives the gap between the boundary and the handler (linda's ruling on the route boundary) -------------------
 
+    private void hooks(Runnable afterResolve, Runnable beforeTransactionRead, Runnable afterTransactionRead) {
+        fx.service.collectionSelectorFilter().testHooks(afterResolve, beforeTransactionRead, afterTransactionRead, null);
+    }
+
+    private void noHooks() {
+        hooks(null, null, null);
+    }
+
+    /** What the hook does in the gap: frees the id by deleting {@code a}, takes the label again as a new row, and files {@code hex} in it. */
+    private Runnable freeTheIdAndTakeTheLabel(String a, String hex, AtomicInteger deleteStatus) {
+        return () -> {
+            deleteStatus.set(fx.post(DELETE, "{\"name\":" + json(a) + "}").status());
+            fx.register(a);
+            seedChunk(a, hex);
+        };
+    }
+
+    private int chunksOf(String collection, String hex) {
+        byte[] chash = java.util.HexFormat.of().parseHex(hex);
+        return fx.asSuperuser(ctx -> (int) ctx.fetchCount(CHUNKS, CHUNKS.COLLECTION.eq(collection).and(CHUNKS.CHASH.eq(chash))));
+    }
+
     /** A write by id with the id live all the way through: the handler's by-id read (FOR KEY SHARE) answers, and the row lands. */
     @Test
     void aWriteByIdWhoseRowStaysLiveLandsUnderItsLabel() {
@@ -194,17 +222,17 @@ class CollectionRetiredIdRoutesTest {
         long x = fx.idOf(a);
         AtomicInteger fired = new AtomicInteger();
         AtomicInteger deleteStatus = new AtomicInteger();
-        CollectionSelectorFilter.afterResolveForTests = () -> {
+        hooks(() -> {
             if (fired.getAndIncrement() == 0) {   // the delete below passes through the boundary too: only the first call acts
                 deleteStatus.set(fx.post(DELETE, "{\"name\":" + json(a) + "}").status());
                 fx.register(a);
             }
-        };
+        }, null, null);
         Resp r;
         try {
             r = fx.post("/v1/taxonomy/topics/insert", "{\"collection_id\":" + x + ",\"label\":\"gap-topic\",\"doc_count\":1}");
         } finally {
-            CollectionSelectorFilter.afterResolveForTests = null;
+            noHooks();
         }
 
         assertThat(deleteStatus.get()).as("setup: the hook freed the id").isEqualTo(200);
@@ -213,8 +241,8 @@ class CollectionRetiredIdRoutesTest {
         assertThat(r.status()).as(r.body()).isEqualTo(404);
         assertThat(r.reason()).isEqualTo("unknown_collection_id");
         assertThat(r.json().path("collection_id").asLong(-1)).isEqualTo(x);
-        assertThat((int) (Integer) fx.asSuperuser(ctx -> ctx.fetchCount(TOPICS, TOPICS.COLLECTION.eq(a)))).as("nothing landed in the new holder of the label")
-            .isZero();
+        assertThat((int) (Integer) fx.asSuperuser(ctx -> ctx.fetchCount(TOPICS, TOPICS.COLLECTION.eq(a))))
+            .as("nothing landed in the new holder of the label").isZero();
     }
 
     /** The same gap, with the id retired (not freed) in it: the handler's by-id read answers the retired row's 409. */
@@ -225,17 +253,17 @@ class CollectionRetiredIdRoutesTest {
         long x = fx.idOf(a);
         AtomicInteger fired = new AtomicInteger();
         AtomicInteger supersedeStatus = new AtomicInteger();
-        CollectionSelectorFilter.afterResolveForTests = () -> {
+        hooks(() -> {
             if (fired.getAndIncrement() == 0) {
                 supersedeStatus.set(fx.post("/v1/catalog/collections/supersede",
                     "{\"name\":" + json(a) + ",\"superseded_by\":" + json(b) + "}").status());
             }
-        };
+        }, null, null);
         Resp r;
         try {
             r = fx.post("/v1/taxonomy/topics/insert", "{\"collection_id\":" + x + ",\"label\":\"gap-topic\",\"doc_count\":1}");
         } finally {
-            CollectionSelectorFilter.afterResolveForTests = null;
+            noHooks();
         }
         assertThat(supersedeStatus.get()).as("setup").isEqualTo(200);
         assertThat(r.status()).as(r.body()).isEqualTo(409);
@@ -245,55 +273,204 @@ class CollectionRetiredIdRoutesTest {
         assertThat((int) (Integer) fx.asSuperuser(ctx -> ctx.fetchCount(TOPICS, TOPICS.COLLECTION.eq(a)))).isZero();
     }
 
-    @Test
-    void d3_anIdWithNoRowIsStillThe404() {
-        Resp r = fx.get("/v1/catalog/collections/get?collection_id=" + CollectionRouteCensus.UNKNOWN_ID);
-        assertThat(r.status()).isEqualTo(404);
-        assertThat(r.reason()).isEqualTo("unknown_collection_id");
-    }
-
-    // ---- F6: a3ebfe6605, the boundary reads the process-wide cache ----------------------------------------------------------------
+    // ---- the four routes whose write used to go on by label, and a lookup(scope) route -----------------------------------------------
 
     /**
-     * a3ebfe6605 made the route boundary read the registry cache every evict reaches, not a cache of its own. Revert it and a
-     * request by id keeps a row the delete evicted: this fails on the last GET, which answers 200 with the re-registered row's
-     * label for an id that row never had. The sequence: GET by id fills the cache; delete X by label; register X again (a new
-     * row, a new id); GET by the old id must not return the new row.
+     * The window the first hook cannot see: every outside-a-transaction lookup of the handler has PASSED (the id was live), and
+     * the id is freed and its label taken again just before the write's own transaction reads the id. The second hook runs there.
+     * A write that went on by label from the lookups would land in the new holder; each of these must answer 404 and leave the new
+     * holder's rows as they were.
      */
-    @Test
-    void f6_afterADeleteAndAReRegistration_theOldIdDoesNotReturnTheNewRow() {
-        String x = registered("f6-del");
-        long oldId = fx.idOf(x);
-        Resp first = fx.get("/v1/catalog/collections/get?collection_id=" + oldId);
-        assertThat(first.status()).as("setup: the GET by id fills the cache: %s", first.body()).isEqualTo(200);
-
-        assertThat(fx.post(DELETE, "{\"name\":" + json(x) + "}").status()).isEqualTo(200);
-        fx.register(x);
-        long newId = fx.idOf(x);
-        assertThat(newId).as("setup: the re-registration is a new row").isNotEqualTo(oldId);
-
-        Resp stale = fx.get("/v1/catalog/collections/get?collection_id=" + oldId);
-        assertThat(stale.status()).as("the old id has no row: %s", stale.body()).isEqualTo(404);
-        assertThat(stale.reason()).isEqualTo("unknown_collection_id");
-        Resp fresh = fx.get("/v1/catalog/collections/get?collection_id=" + newId);
-        assertThat(fresh.status()).as(fresh.body()).isEqualTo(200);
-        assertThat(fresh.json().path("name").asText()).isEqualTo(x);
+    private Resp withTheLabelTakenBeforeTheWritesRead(String a, String hex, Supplier<Resp> request) {
+        AtomicInteger deleteStatus = new AtomicInteger();
+        hooks(null, freeTheIdAndTakeTheLabel(a, hex, deleteStatus), null);
+        try {
+            Resp r = request.get();
+            assertThat(deleteStatus.get()).as("setup: the hook ran, freeing the id").isEqualTo(200);
+            return r;
+        } finally {
+            noHooks();
+        }
     }
 
-    /** The same revert, by a rename: the cached row of the old id must not outlive the rename that retired it. */
+    private void assertUnknownId(Resp r, long x) {
+        assertThat(r.status()).as(r.body()).isEqualTo(404);
+        assertThat(r.reason()).isEqualTo("unknown_collection_id");
+        assertThat(r.json().path("collection_id").asLong(-1)).isEqualTo(x);
+    }
+
     @Test
-    void f6_afterARename_theOldIdIsTheRetiredRowAndNotTheCachedLiveOne() {
-        String from = registered("f6-ren");
-        String to = label("retired-f6-ren-to-" + (n++));
-        long oldId = fx.idOf(from);
-        assertThat(fx.get("/v1/catalog/collections/get?collection_id=" + oldId).status()).as("setup: fills the cache").isEqualTo(200);
+    void upsertChunks_byAnIdFreedAfterTheLookupsLandsNothingInTheNewHolder() {
+        String a = registered("gap-upsert");
+        long x = fx.idOf(a);
+        String sentinel = Chash.ofText("gap-upsert-sentinel-" + a).toHex();
+        String fresh = Chash.ofText("gap-upsert-fresh-" + a).toHex();
+        // control: the same request by id, with nothing in the way, lands
+        Resp control = fx.post("/v1/vectors/upsert-chunks",
+            "{\"collection_id\":" + x + ",\"ids\":[\"" + fresh + "\"],\"documents\":[\"control text\"]}");
+        assertThat(control.status()).as("control: %s", control.body()).isEqualTo(200);
+        assertThat(chunksOf(a, fresh)).as("control: the chunk landed").isEqualTo(1);
 
-        Resp ren = fx.post("/v1/catalog/collections/rename", "{\"old_name\":" + json(from) + ",\"new_name\":" + json(to) + "}");
-        assertThat(ren.status()).as("setup: " + ren.body()).isEqualTo(200);
-        assertThat(fx.idOf(to)).as("setup: the name path gives the collection a new id").isNotEqualTo(oldId);
+        String hex = Chash.ofText("gap-upsert-gap-" + a).toHex();
+        Resp r = withTheLabelTakenBeforeTheWritesRead(a, sentinel, () -> fx.post("/v1/vectors/upsert-chunks",
+            "{\"collection_id\":" + x + ",\"ids\":[\"" + hex + "\"],\"documents\":[\"gap text\"]}"));
 
-        Resp r = fx.get("/v1/catalog/collections/get?collection_id=" + oldId);
-        assertThat(r.status()).as("a cached live row would answer 200: %s", r.body()).isEqualTo(409);
-        assertThat(r.json().path("superseded_by").asText()).isEqualTo(to);
+        assertUnknownId(r, x);
+        assertThat(chunksOf(a, hex)).as("the new holder of the label got no chunk").isZero();
+        assertThat(chunksOf(a, sentinel)).as("and kept the one the hook filed").isEqualTo(1);
+    }
+
+    @Test
+    void storeDelete_byAnIdFreedAfterTheLookupsDeletesNothingOfTheNewHolder() {
+        String a = registered("gap-sdel");
+        long x = fx.idOf(a);
+        String hex = Chash.ofText("gap-sdel-" + a).toHex();
+        seedChunk(a, hex);
+        Resp r = withTheLabelTakenBeforeTheWritesRead(a, hex, () -> fx.post("/v1/vectors/store-delete",
+            "{\"collection_id\":" + x + ",\"ids\":[\"" + hex + "\"]}"));
+        assertUnknownId(r, x);
+        assertThat(chunksOf(a, hex)).as("the chunk the new holder of the label holds is still there").isEqualTo(1);
+    }
+
+    @Test
+    void updateMetadata_byAnIdFreedAfterTheLookupsChangesNothingOfTheNewHolder() {
+        String a = registered("gap-meta");
+        long x = fx.idOf(a);
+        String hex = Chash.ofText("gap-meta-" + a).toHex();
+        seedChunk(a, hex);
+        Resp r = withTheLabelTakenBeforeTheWritesRead(a, hex, () -> fx.post("/v1/vectors/update-metadata",
+            "{\"collection_id\":" + x + ",\"ids\":[\"" + hex + "\"],\"metadatas\":[{\"gap_key\":\"gap\"}]}"));
+        assertUnknownId(r, x);
+        byte[] chash = java.util.HexFormat.of().parseHex(hex);
+        String metadata = fx.asSuperuser(ctx -> ctx.select(CHUNKS.METADATA).from(CHUNKS)
+            .where(CHUNKS.COLLECTION.eq(a).and(CHUNKS.CHASH.eq(chash))).fetchOne(CHUNKS.METADATA).data());
+        assertThat(metadata).as("the new holder's chunk was not touched").doesNotContain("gap_key");
+    }
+
+    @Test
+    void assignFromChashes_byAnIdFreedAfterTheLookupsAnswers404() {
+        String a = registered("gap-assign");
+        long x = fx.idOf(a);
+        String hex = Chash.ofText("gap-assign-" + a).toHex();
+        Resp r = withTheLabelTakenBeforeTheWritesRead(a, hex, () -> fx.post("/v1/taxonomy/assignments/assign_from_chashes",
+            "{\"collection_id\":" + x + ",\"chashes\":[\"" + hex + "\"],\"cross_collection\":false}"));
+        assertUnknownId(r, x);
+    }
+
+    /** A route that reads the collection through the outside-a-transaction lookup first: the id freed before the handler runs. */
+    @Test
+    void aRouteWhoseLookupIsOutsideATransaction_answers404ForAnIdFreedBeforeTheHandler() {
+        String a = registered("gap-lookup");
+        long x = fx.idOf(a);
+        String hex = Chash.ofText("gap-lookup-" + a).toHex();
+        AtomicInteger fired = new AtomicInteger();
+        AtomicInteger deleteStatus = new AtomicInteger();
+        hooks(() -> {
+            if (fired.getAndIncrement() == 0) {
+                deleteStatus.set(fx.post(DELETE, "{\"name\":" + json(a) + "}").status());
+                fx.register(a);
+                seedChunk(a, hex);
+            }
+        }, null, null);
+        Resp r;
+        try {
+            r = fx.post("/v1/vectors/store-delete", "{\"collection_id\":" + x + ",\"ids\":[\"" + hex + "\"]}");
+        } finally {
+            noHooks();
+        }
+        assertThat(deleteStatus.get()).as("setup").isEqualTo(200);
+        assertUnknownId(r, x);
+        assertThat(chunksOf(a, hex)).as("the new holder's chunk is still there").isEqualTo(1);
+    }
+
+    // ---- write_many and append_many answer the typed 404 and 409, not a 200 with every document failed ---------------------------
+
+    private String writeManyBody(long id) {
+        String hex = Chash.ofText("gap-write-many").toHex();
+        return "{\"collection_id\":" + id + ",\"chunks\":[{\"chash\":\"" + hex + "\",\"text\":\"t\",\"metadata\":{}}],"
+            + "\"docs\":[{\"doc_id\":\"1.1.1\",\"rows\":[{\"position\":0,\"chash\":\"" + hex + "\",\"chunk_index\":0}]}]}";
+    }
+
+    @Test
+    void writeMany_byAnIdFreedAfterTheBoundaryAnswers404_andByAnIdRetiredThere409() {
+        String a = registered("gap-wm-free");
+        long x = fx.idOf(a);
+        AtomicInteger fired = new AtomicInteger();
+        hooks(() -> {
+            if (fired.getAndIncrement() == 0) {
+                fx.post(DELETE, "{\"name\":" + json(a) + "}");
+                fx.register(a);
+            }
+        }, null, null);
+        Resp freed;
+        try {
+            freed = fx.post("/v1/catalog/manifest/write_many", writeManyBody(x));
+        } finally {
+            noHooks();
+        }
+        assertUnknownId(freed, x);
+
+        String b = registered("gap-wm-ret-a");
+        String c = registered("gap-wm-ret-b");
+        long y = fx.idOf(b);
+        AtomicInteger fired2 = new AtomicInteger();
+        hooks(() -> {
+            if (fired2.getAndIncrement() == 0) {
+                fx.post("/v1/catalog/collections/supersede", "{\"name\":" + json(b) + ",\"superseded_by\":" + json(c) + "}");
+            }
+        }, null, null);
+        Resp retired;
+        try {
+            retired = fx.post("/v1/catalog/manifest/write_many", writeManyBody(y));
+        } finally {
+            noHooks();
+        }
+        assertThat(retired.status()).as(retired.body()).isEqualTo(409);
+        assertThat(retired.reason()).isEqualTo("collection_superseded");
+        assertThat(retired.json().path("superseded_by").asText()).isEqualTo(c);
+    }
+
+    // ---- FOR KEY SHARE ----------------------------------------------------------------------------------------------------------------
+
+    /**
+     * The lock itself: the write's by-id read holds FOR KEY SHARE on the row until the write commits, so a delete of the row waits.
+     * The hook runs with the read done and the transaction open; it starts a delete of the collection from another thread and waits
+     * until PostgreSQL shows an ungranted lock (pg_locks), then lets the write finish. The write answers 200 and the delete, which
+     * could not take the row while the write held it, answers 200 after it. The route is update-metadata on an empty collection, so
+     * the write touches no row the delete also needs.
+     */
+    @Test
+    void aWritesByIdReadHoldsTheRowAgainstADeleteUntilTheWriteCommits() throws Exception {
+        String a = registered("keyshare");
+        long x = fx.idOf(a);
+        AtomicBoolean waited = new AtomicBoolean();
+        CompletableFuture<Resp>[] delete = new CompletableFuture[1];
+        hooks(null, null, () -> {
+            delete[0] = CompletableFuture.supplyAsync(() -> fx.post(DELETE, "{\"name\":" + json(a) + "}"));
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+            while (System.nanoTime() < deadline) {
+                int ungranted = fx.asSuperuser(ctx -> ctx.selectCount()
+                    .from(org.jooq.impl.DSL.table(org.jooq.impl.DSL.name("pg_catalog", "pg_locks")))
+                    .where(org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("granted"), Boolean.class).isFalse())
+                    .fetchOne(0, int.class));
+                if (ungranted > 0) {
+                    waited.set(true);
+                    return;
+                }
+                Thread.onSpinWait();
+            }
+        });
+        Resp write;
+        try {
+            write = fx.post("/v1/vectors/update-metadata", "{\"collection_id\":" + x + ",\"ids\":[\""
+                + Chash.ofText("keyshare-" + a).toHex() + "\"],\"metadatas\":[{}]}");
+        } finally {
+            noHooks();
+        }
+        assertThat(waited.get()).as("the delete of the row was waiting while the write's transaction was open (pg_locks)").isTrue();
+        assertThat(write.status()).as(write.body()).isEqualTo(200);
+        Resp deleted = delete[0].get(30, TimeUnit.SECONDS);
+        assertThat(deleted.status()).as("the delete went through once the write had committed: %s", deleted.body()).isEqualTo(200);
+        assertThat(fx.exists(a)).isFalse();
     }
 }

@@ -241,7 +241,8 @@ class CollectionLabelResolutionOrderTest {
         });
         assertThat(successorOf(cycle[0])).as("a cycle").isEmpty();
 
-        for (int length : new int[] {CollectionSuccessor.MAX_HOPS - 1, CollectionSuccessor.MAX_HOPS + 8}) {
+        // the boundary itself: a chain of MAX_HOPS hops has its live end at hop 32 and is found; one more hop is past the cap
+        for (int length : new int[] {CollectionSuccessor.MAX_HOPS, CollectionSuccessor.MAX_HOPS + 1}) {
             long[] chain = asSuperuser(ctx -> {
                 long[] rows = new long[length + 1];
                 for (int i = 0; i <= length; i++) {
@@ -253,7 +254,7 @@ class CollectionLabelResolutionOrderTest {
                 }
                 return rows;
             });
-            if (length < CollectionSuccessor.MAX_HOPS) {
+            if (length <= CollectionSuccessor.MAX_HOPS) {
                 assertThat(successorOf(chain[0])).as("a chain of %d hops", length).map(CollectionSuccessor.Successor::id)
                     .contains(chain[length]);
             } else {

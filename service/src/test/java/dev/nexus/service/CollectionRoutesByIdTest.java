@@ -80,7 +80,19 @@ class CollectionRoutesByIdTest {
     void startAll() throws Exception {
         fx = new CollectionRouteFixture();
         fxLocal = new CollectionRouteFixture(true);
+        fx.service.collectionSelectorFilter().testHooks(null, null, null, unconsumed::add);
+        fxLocal.service.collectionSelectorFilter().testHooks(null, null, null, unconsumed::add);
     }
+
+    /** What the route boundary reported: a write route that answered 2xx without reading a named id in its own transaction. */
+    private final java.util.concurrent.ConcurrentLinkedQueue<String> unconsumed = new java.util.concurrent.ConcurrentLinkedQueue<>();
+
+    /**
+     * The routes whose by-id request this class sees answered 200 on the standard engine, so the consumption check below is not
+     * vacuous for them: each must read the named id in its own transaction (RDR-229 P3.5a, linda's ruling on the route boundary).
+     */
+    private static final java.util.Set<String> MUST_CONSUME = java.util.Set.of("/v1/taxonomy/topics/insert", "/v1/vectors/store-delete",
+        "/v1/vectors/update-metadata", "/v1/taxonomy/centroids/upsert");
 
     @AfterAll
     void stopAll() {
@@ -242,7 +254,15 @@ class CollectionRoutesByIdTest {
         // is only ever dirty while the behaviour is missing; a clean pair makes the check independent of that.
         Prepared p = new Prepared(route, shared.stem + "q");
         Resp byLabel = call(route, Mode.LABEL, p);
+        unconsumed.clear();
         Resp byId = call(route, Mode.ID, p);
+        // the consumption census: a write route that answers 2xx for an id must have read that id in its own transaction
+        // (the filter reports one that did not); the four named routes must answer 200, so this cannot pass by never running
+        assertThat(unconsumed).as("%s answered %d by id without reading the id in its own transaction", route.label(), byId.status())
+            .isEmpty();
+        if (MUST_CONSUME.contains(route.path())) {
+            assertThat(byId.status()).as("non-vacuity: %s by id: %s", route.label(), byId.body()).isEqualTo(200);
+        }
         if (route.tier() != Tier.HEAVY) {
             assertThat(byLabel.status()).as("setup: %s by its labels reaches the route: %s", route.label(), byLabel.body())
                 .isIn(route.tier() == Tier.GENERIC ? List.of(200, 404) : List.of(200));
