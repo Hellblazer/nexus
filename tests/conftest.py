@@ -397,6 +397,42 @@ def _xdist_worker_count(config) -> int | None:
     return None
 
 
+# Options whose next argument is their value, so that value is not a path or node id.
+_PYTEST_VALUE_OPTIONS: frozenset[str] = frozenset({
+    "-n", "-p", "-c", "-o", "-W", "--numprocesses", "--maxfail", "--rootdir", "--ignore", "--ignore-glob",
+    "--deselect", "--junitxml", "--durations", "--durations-min", "--tb", "--basetemp", "--dist",
+    "--timeout", "--confcutdir", "--import-mode", "--color", "--capture", "--override-ini",
+    "--log-level", "--maxprocesses", "--max-worker-restart", "--reruns",
+})
+
+
+def _is_full_suite(args) -> bool:
+    """True when ``args`` select the whole suite: no ``-k``/``-m``, no node id, no path but ``tests``.
+
+    Picks the ``lab-remote`` class the laptop refusal names: ``lab-l`` is for a full suite only;
+    a lint bucket, a targeted file or a single module takes ``lab-m``.
+    """
+    args = [str(a) for a in args]
+    skip = False
+    for arg in args:
+        if skip:
+            skip = False
+            continue
+        if arg == "--":
+            continue
+        if arg.startswith("--"):
+            skip = "=" not in arg and arg in _PYTEST_VALUE_OPTIONS
+            continue
+        if arg.startswith("-") and arg != "-":
+            if arg[:2] in ("-k", "-m"):
+                return False  # -k expr, -k=expr, -kexpr, and the -m forms
+            skip = arg in _PYTEST_VALUE_OPTIONS
+            continue
+        if "::" in arg or arg.rstrip("/") != "tests":
+            return False
+    return True
+
+
 def _refuse_heavy_laptop_run(config, *, platform: str | None = None, env=None) -> None:
     """Refuse an xdist run whose engine substrate can boot, on a Mac laptop outside a lab-run grant.
 
@@ -471,7 +507,8 @@ def _refuse_heavy_laptop_run(config, *, platform: str | None = None, env=None) -
         f"(NX_TEST_T2_SUBSTRATE is not none); several sessions share "
         f"this laptop. {_LOCAL_HEAVY_ENV}=1 runs it here anyway (for a run that needs claude, bd or "
         "this laptop's credentials); NX_TEST_T2_SUBSTRATE=none needs no engine. Run it on chas: "
-        f"lab-remote -c lab-l -- uv run pytest {shlex.join(str(a) for a in args)}",
+        f"lab-remote -c {'lab-l' if _is_full_suite(args) else 'lab-m'} -- "
+        f"uv run pytest {shlex.join(str(a) for a in args)}",
         returncode=75,
     )
 
