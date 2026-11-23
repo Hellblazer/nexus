@@ -605,12 +605,16 @@ public final class AspectRepository {
      */
     public int setSalientSentences(String tenant, String docId, String sentencesJson) {
         if (docId == null || docId.isBlank()) return 0;
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.update(DOCUMENT_ASPECTS)
+        return tenantScope.withTenant(tenant, ctx -> {
+            var held = AspectDocCollectionLocks.requireForWriteDocAspects(ctx, tenant, docId);   // RDR-229 P3.5a: the doc's collections FOR KEY SHARE first
+            if (held.isEmpty()) return 0;
+            return ctx.update(DOCUMENT_ASPECTS)
                .set(DOCUMENT_ASPECTS.SALIENT_SENTENCES, jsonbOrNull(sentencesJson))
-               .set(DOCUMENT_ASPECTS.COLLECTION_ID, ASPECT_OWN_ID)
-               .where(DOCUMENT_ASPECTS.DOC_ID.eq(docId))
-               .execute());
+               .set(DOCUMENT_ASPECTS.COLLECTION_ID, ASPECT_OWN_ID)   // each row keeps its own id and label
+               .where(DOCUMENT_ASPECTS.DOC_ID.eq(docId)
+                   .and(held.owns(DOCUMENT_ASPECTS.COLLECTION_ID, DOCUMENT_ASPECTS.COLLECTION)))
+               .execute();
+        });
     }
 
     /**
@@ -973,10 +977,14 @@ public final class AspectRepository {
      * Delete a highlight by doc_id. Returns true if deleted.
      */
     public boolean deleteHighlight(String tenant, String docId) {
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.deleteFrom(DOCUMENT_HIGHLIGHTS)
-               .where(DOCUMENT_HIGHLIGHTS.DOC_ID.eq(docId))
-               .execute() > 0);
+        return tenantScope.withTenant(tenant, ctx -> {
+            var held = AspectDocCollectionLocks.requireForWriteDocHighlight(ctx, tenant, docId);   // RDR-229 P3.5a: the row's collection FOR KEY SHARE first
+            if (held.isEmpty()) return false;
+            return ctx.deleteFrom(DOCUMENT_HIGHLIGHTS)
+               .where(DOCUMENT_HIGHLIGHTS.DOC_ID.eq(docId)
+                   .and(held.owns(DOCUMENT_HIGHLIGHTS.COLLECTION_ID, DOCUMENT_HIGHLIGHTS.COLLECTION)))
+               .execute() > 0;
+        });
     }
 
     /**
