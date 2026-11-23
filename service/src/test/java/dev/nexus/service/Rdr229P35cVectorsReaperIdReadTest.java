@@ -509,12 +509,12 @@ class Rdr229P35cVectorsReaperIdReadTest extends AtomicWriteTestBase {
         // (vectors-079 stamps a manifest row's name from its chunk until P4.1, so the diverged name, the state after P4.1, is written with triggers off,
         // on this session only)
         su(ctx -> {
-            ctx.set(DSL.name("session_replication_role"), DSL.inline("replica"));
+            ctx.set(DSL.name("session_replication_role"), DSL.inline("replica")).execute();
             try {
                 ctx.update(CATALOG_DOCUMENT_CHUNKS).set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, "another-name")
                     .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)).execute();
             } finally {
-                ctx.set(DSL.name("session_replication_role"), DSL.inline("origin"));
+                ctx.set(DSL.name("session_replication_role"), DSL.inline("origin")).execute();
             }
         });
 
