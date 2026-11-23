@@ -27,7 +27,6 @@ class WriterCensusUnprovenPinTest {
 
     /** The unproven write sites at the time of the pin: file|method|table. */
     private static final List<String> PINNED = List.of(
-        "AspectRepository.java|setSalientSentences|document_aspects",
         "CatalogIdStamps.java|repairCascadedIdsFrom|chunk_orphaned_at",
         "CatalogIdStamps.java|repairCascadedIdsFrom|topic_assignments",
         "CatalogIdStamps.java|repairCascadedIds|chunk_orphaned_at",
