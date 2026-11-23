@@ -453,15 +453,16 @@ class CollectionRetiredIdRoutesTest {
         assertThat(chunksOf(a, hex)).as("the new holder's chunk is still there").isEqualTo(1);
     }
 
-    // ---- the RENAME variant of the gap: the id's row is renamed and its old label taken by a new row (linda, census pass 2) -----------
+    // ---- the RENAME variant of the gap: the id is the identity (linda's ruling) -----------------------------------------------------
 
     /**
-     * The request names B by id X. Just before the write transaction's registry read (the hook, on another thread) a one-row rename
-     * gives X's row the label C (the registry row keeps its id, which is what P3.7's rename does and what the scoped-delete test simulates
-     * in place), and a NEW row takes the label B. The registry cache holds B as X's row (warmed before the request, so a known cache hit
-     * exists and a handler that went back to the label would write under the new B). The write reads the row of X by id, finds another
-     * label than B, and is refused: 409 {@code collection_renamed} naming X, B and C (an ordinary race after P3.7's one-row rename, not an engine defect, so
-     * never a 5xx). Nothing lands under X or under the new B's id.
+     * The request names B by id X, and the id alone: the route boundary resolves it to the label B. Just before the write transaction's
+     * registry read (the hook, on another thread) a one-row rename gives X's row the label C (the registry row keeps its id, which is
+     * what P3.7's rename does and what the scoped-delete test simulates in place), and a NEW row takes the label B. The registry cache
+     * holds B as X's row (warmed before the request, so a known cache hit exists and a writer that went back to the label would write
+     * under the new B). The write reads the row of X by id FOR KEY SHARE and the row is live, so the write LANDS in the renamed
+     * collection under its CURRENT label C, with X's id; nothing lands under the new B's id. No refusal: a rename in the gap changes
+     * nothing about where an id-only write goes.
      */
     private Resp withTheRowRenamedAndTheLabelTaken(CollectionRouteFixture f, String b, long x, String c, Supplier<Resp> request) {
         // warm the process-wide cache for the label: a by-label lookup fills B -> X's row, and the rename below does not evict it
@@ -488,33 +489,34 @@ class CollectionRetiredIdRoutesTest {
         }
     }
 
-    private void assertRenamedUnderTheRequest(Resp r, long x, String b, String c) {
-        assertThat(r.status()).as(r.body()).isEqualTo(409);
-        assertThat(r.reason()).as("typed: %s", r.body()).isEqualTo("collection_renamed");
-        assertThat(r.json().path("collection_id").asLong(-1)).as("names the id: %s", r.body()).isEqualTo(x);
-        assertThat(r.json().path("requested_label").asText()).as("the label the request resolved: %s", r.body()).isEqualTo(b);
-        assertThat(r.json().path("current_label").asText()).as("the row's label now: %s", r.body()).isEqualTo(c);
+    /** The chunk rows with {@code collection_id} X: each is stored under label {@code c}, X's current one. */
+    private void assertChunkLandedUnderTheCurrentLabel(CollectionRouteFixture f, long x, String c, String hex) {
+        byte[] chash = java.util.HexFormat.of().parseHex(hex);
+        java.util.List<String> labels = f.asSuperuser(ctx -> ctx.select(CHUNKS.COLLECTION).from(CHUNKS)
+            .where(CHUNKS.COLLECTION_ID.eq(x)).and(CHUNKS.CHASH.eq(chash)).fetch(CHUNKS.COLLECTION));
+        assertThat(labels).as("the chunk landed in the renamed collection, under its new label").containsExactly(c);
     }
 
-    /** Rows of the chunks table under either id or either label: nothing may have landed under the renamed row or the new holder. */
-    private int chunkRowsUnder(CollectionRouteFixture f, long x, Long newId, String b, String c) {
-        return f.asSuperuser(ctx -> ctx.fetchCount(CHUNKS, CHUNKS.COLLECTION_ID.in(x, newId).or(CHUNKS.COLLECTION.in(b, c))));
+    private int chunkRowsOfTheNewHolder(CollectionRouteFixture f, String b) {
+        Long newId = f.idOf(b);
+        return f.asSuperuser(ctx -> ctx.fetchCount(CHUNKS, CHUNKS.COLLECTION_ID.eq(newId)));
     }
 
     @Test
-    void upsertChunks_byAnIdWhoseRowWasRenamedAndItsLabelTaken_isRefused_withTheCacheWarm_andLandsNothing() {
+    void upsertChunks_byAnIdWhoseRowWasRenamedAndItsLabelTaken_landsInTheRenamedCollection_withTheCacheWarm() {
         String b = registered("rn-gap-b");
         String c = label("retired-rn-gap-c-" + (n++));
         long x = fx.idOf(b);
         String hex = Chash.ofText("rn-gap-upsert-" + b).toHex();
         Resp r = withTheRowRenamedAndTheLabelTaken(fx, b, x, c, () -> fx.post("/v1/vectors/upsert-chunks",
             "{\"collection_id\":" + x + ",\"ids\":[\"" + hex + "\"],\"documents\":[\"rename gap text\"]}"));
-        assertRenamedUnderTheRequest(r, x, b, c);
-        assertThat(chunkRowsUnder(fx, x, fx.idOf(b), b, c)).as("nothing under X, under the new holder, or under either label").isZero();
+        assertThat(r.status()).as("an id-only write follows the rename: %s", r.body()).isEqualTo(200);
+        assertChunkLandedUnderTheCurrentLabel(fx, x, c, hex);
+        assertThat(chunkRowsOfTheNewHolder(fx, b)).as("nothing under the new holder of the old label").isZero();
     }
 
     @Test
-    void writeMany_byAnIdWhoseRowWasRenamedAndItsLabelTaken_isRefused_andLandsNothing() {
+    void writeMany_byAnIdWhoseRowWasRenamedAndItsLabelTaken_landsInTheRenamedCollection() {
         String b = label("retired-rn-wm-b-" + (n++));
         String c = label("retired-rn-wm-c-" + (n++));
         String host = label("retired-rn-wm-host-" + (n++));
@@ -525,17 +527,20 @@ class CollectionRetiredIdRoutesTest {
         Resp r = withTheRowRenamedAndTheLabelTaken(fxLocal, b, x, c, () -> fxLocal.post("/v1/catalog/manifest/write_many",
             "{\"collection_id\":" + x + ",\"chunks\":[{\"chash\":\"" + hex + "\",\"text\":\"rename gap text\",\"metadata\":{}}],"
                 + "\"docs\":[" + docJson + "]}"));
-        assertRenamedUnderTheRequest(r, x, b, c);
-        assertThat(chunkRowsUnder(fxLocal, x, fxLocal.idOf(b), b, c)).as("nothing under X, under the new holder, or under either label").isZero();
+        assertThat(r.status()).as("an id-only write follows the rename: %s", r.body()).isEqualTo(200);
+        assertThat(r.json().path("failed_doc_ids").size()).as("no document failed: %s", r.body()).isZero();
+        assertChunkLandedUnderTheCurrentLabel(fxLocal, x, c, hex);
+        assertThat(chunkRowsOfTheNewHolder(fxLocal, b)).as("nothing under the new holder of the old label").isZero();
     }
 
     /**
      * The manifest-only {@code write_many} (no {@code chunks} key) has no metadata refresh transaction: its first write transaction is
-     * the per-document one, which reads the registry row after the document's advisory locks. The document belongs to another
-     * collection (the rename is of B, which holds nothing), so only the registry read can refuse it.
+     * the per-document one, which reads the registry row after the document's advisory locks. Its chunk was never stored, so the
+     * document is the per-document failure it would be without any rename; what the test pins is that the rename in the gap is not a
+     * refusal of the request and that nothing lands under the new holder of the old label.
      */
     @Test
-    void writeManyWithDocsOnly_byAnIdWhoseRowWasRenamedAndItsLabelTaken_isRefused_andWritesNoManifestRow() {
+    void writeManyWithDocsOnly_byAnIdWhoseRowWasRenamedAndItsLabelTaken_isNotRefused_andWritesNothingUnderTheNewHolder() {
         String b = label("retired-rn-wmd-b-" + (n++));
         String c = label("retired-rn-wmd-c-" + (n++));
         String host = label("retired-rn-wmd-host-" + (n++));
@@ -550,26 +555,37 @@ class CollectionRetiredIdRoutesTest {
         Resp r = withTheRowRenamedAndTheLabelTaken(fxLocal, b, x, c, () -> fxLocal.post("/v1/catalog/manifest/write_many",
             "{\"collection_id\":" + x + ",\"docs\":[{\"doc_id\":" + json(doc) + ",\"rows\":[{\"position\":0,\"chash\":\"" + hex
                 + "\",\"chunk_index\":0}]}]}"));
-        assertRenamedUnderTheRequest(r, x, b, c);
-        int rows = fxLocal.asSuperuser(ctx -> ctx.fetchCount(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS,
-            dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(doc)));
-        assertThat(rows).as("no manifest row was written").isZero();
+        assertThat(r.status()).as("not refused for the rename: %s", r.body()).isEqualTo(200);
+        Long newId = fxLocal.idOf(b);
+        int underTheNewHolder = fxLocal.asSuperuser(ctx -> ctx.fetchCount(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS,
+            dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID.eq(newId)));
+        assertThat(underTheNewHolder).as("no manifest row under the new holder").isZero();
     }
 
     @Test
-    void aspectUpsert_byAnIdWhoseRowWasRenamedAndItsLabelTaken_isRefused_andLandsNothing() {
+    void aspectUpsert_byAnIdWhoseRowWasRenamedAndItsLabelTaken_landsInTheRenamedCollection() {
         String b = registered("rn-gap-aspect-b");
         String c = label("retired-rn-gap-aspect-c-" + (n++));
+        String host = registered("rn-gap-aspect-host");
         long x = fx.idOf(b);
+        String doc = "rn-gap-aspect-doc-" + b;
+        fx.asSuperuser(ctx -> {
+            CollectionIdSeeds.ownerDocument(ctx, fx.tenant, doc, host);
+            return null;
+        });
         Resp r = withTheRowRenamedAndTheLabelTaken(fx, b, x, c, () -> fx.post("/v1/aspects/upsert", "{\"collection_id\":" + x
-            + ",\"source_path\":\"rn-gap.md\",\"doc_id\":\"rn-gap-doc\",\"confidence\":0.9,"
+            + ",\"source_path\":\"rn-gap.md\",\"doc_id\":" + json(doc) + ",\"confidence\":0.9,"
             + "\"extracted_at\":\"2026-01-01T00:00:00Z\",\"model_version\":\"v1\",\"extractor_name\":\"ex\"}"));
-        assertRenamedUnderTheRequest(r, x, b, c);
+        assertThat(r.status()).as("an id-only write follows the rename: %s", r.body()).isEqualTo(200);
+        java.util.List<String> labels = fx.asSuperuser(ctx -> ctx.select(dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS.COLLECTION)
+            .from(dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS)
+            .where(dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS.COLLECTION_ID.eq(x))
+            .fetch(dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS.COLLECTION));
+        assertThat(labels).as("the aspect row is the renamed collection's, under its new label").containsExactly(c);
         Long newId = fx.idOf(b);
-        int aspects = fx.asSuperuser(ctx -> ctx.fetchCount(dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS,
-            dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS.COLLECTION_ID.in(x, newId)
-                .or(dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS.COLLECTION.in(b, c))));
-        assertThat(aspects).as("no aspect row under X, under the new holder, or under either label").isZero();
+        int underTheNewHolder = fx.asSuperuser(ctx -> ctx.fetchCount(dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS,
+            dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS.COLLECTION_ID.eq(newId)));
+        assertThat(underTheNewHolder).as("nothing under the new holder of the old label").isZero();
     }
 
     // ---- W1 (review F1, C1, C2, F5): the writes that used to go on by label before any registry read -----------------------------

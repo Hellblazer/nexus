@@ -108,11 +108,9 @@ final class DocumentCollectionRef {
     }
 
     private static CollectionRow resolve(DSLContext ctx, String tenant, long id) {
-        CollectionRow row = CollectionRegistry.shared().resolveId(ctx, tenant, id);
-        if (row.isSuperseded()) {
-            throw new CollectionRetiredIdException(tenant, id, row.label(), CollectionSuccessor.of(ctx, tenant, id));
-        }
-        return row;
+        // RDR-229 P3.5a (review: document writes by id were not live at commit): the row is read FOR KEY SHARE in the write's own
+        // transaction, never from the cache (a cache hit holds no lock, and says "live" for a row a supersede has since retired)
+        return CollectionRegistry.requireIdForWrite(ctx, tenant, id);
     }
 
     /**

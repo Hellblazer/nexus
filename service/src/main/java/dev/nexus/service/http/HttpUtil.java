@@ -614,20 +614,20 @@ public final class HttpUtil {
             send(exchange, 409, CollectionSupersededBody.of(retiredId.collectionId(), retiredId.label(), retiredId.successor()));
             return true;
         }
-        // a one-row rename landed between the route boundary and the write's registry read: an ordinary race, not a defect
-        var renamed = causeOf(e, dev.nexus.service.db.CollectionRenamedUnderRequestException.class);
-        if (renamed != null) {
-            log.warn("event={}_collection_renamed {} tenant={} collection_id={} requested_label={} current_label={}", event, context,
-                renamed.tenant(), renamed.collectionId(), LogText.escapeControl(renamed.requestedLabel()),
-                LogText.escapeControl(renamed.currentLabel()));
-            send(exchange, 409, "{\"error\":" + jsonString(renamed.getMessage())
-                + ",\"reason\":\"" + COLLECTION_RENAMED_REASON + "\""
-                + ",\"collection_id\":" + renamed.collectionId()
-                + ",\"requested_label\":" + jsonString(renamed.requestedLabel())
-                + ",\"current_label\":" + jsonString(renamed.currentLabel()) + "}");
+        var idMismatch = causeOf(e, dev.nexus.service.db.CollectionIdMismatchException.class);
+        if (idMismatch != null && idMismatch.labelDisagreement()) {
+            // the request sent an id AND a label, and by the time of the write they no longer named one collection: the client's own
+            // statement contradicts itself, a 409 that names both and writes nothing
+            log.warn("event={}_collection_id_mismatch_label {} tenant={} collection_id={} requested_label={} current_label={}", event, context,
+                RequestContext.tenant(), idMismatch.requested(), LogText.escapeControl(idMismatch.requestedLabel()),
+                LogText.escapeControl(idMismatch.currentLabel()));
+            send(exchange, 409, "{\"error\":" + jsonString(idMismatch.getMessage())
+                + ",\"reason\":\"" + COLLECTION_ID_MISMATCH_REASON + "\""
+                + ",\"collection_id\":" + idMismatch.requested()
+                + ",\"requested_label\":" + jsonString(idMismatch.requestedLabel())
+                + ",\"current_label\":" + jsonString(idMismatch.currentLabel()) + "}");
             return true;
         }
-        var idMismatch = causeOf(e, dev.nexus.service.db.CollectionIdMismatchException.class);
         if (idMismatch != null) {
             log.error("event={}_collection_id_mismatch {} requested={} resolved={}", event, context, idMismatch.requested(),
                 idMismatch.resolved());
@@ -946,16 +946,11 @@ public final class HttpUtil {
 
     /**
      * {@code reason} of the 500 for a registry row that is not the row of the {@code collection_id} asked for (RDR-229 P3.5a):
-     * a registry inconsistency, an engine defect and never a caller mistake. Wire contract.
+     * a registry inconsistency, an engine defect and never a caller mistake. Wire contract. It is also the {@code reason} of the 409 for a
+     * request that sent both an id and a label which no longer name one collection (the 409 body names {@code requested_label} and
+     * {@code current_label}; a request by id alone follows a rename and is never refused for its label).
      */
     static final String COLLECTION_ID_MISMATCH_REASON = "collection_id_mismatch";
-
-    /**
-     * {@code reason} of the 409 for a {@code collection_id} whose row carries another label than the one the request resolved at the
-     * route boundary (RDR-229 P3.5a): a one-row rename landed in the gap, an ordinary race. Also carries {@code collection_id},
-     * {@code requested_label} and {@code current_label}. The client may read the collection again and retry. Wire contract.
-     */
-    static final String COLLECTION_RENAMED_REASON = "collection_renamed";
 
     /** {@code reason} of the 409 for a rename refused from gate 3 until the one-row rename can run (RDR-229 P3.5a). Wire contract. */
     static final String RENAME_REFUSED_REASON = "rename_refused";

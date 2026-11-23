@@ -203,4 +203,45 @@ class WriteRegistryMemoTest {
         assertThat(free[0]).as("a history stamp takes no lock: a verb's FOR UPDATE NOWAIT goes through").isTrue();
         assertThat(reads).as("and is not a write-transaction registry read").isEmpty();
     }
+
+    @Test
+    void aRequestByIdAloneFollowsAOneRowRename_andOneThatSentALabelBesideItsIdIsRefusedWhenTheyNoLongerAgree() throws Exception {
+        String b = seeded("rename-b");
+        String c = "docs__rename-c-" + (n++) + "__minilm-l6-v2-384__v1";
+        long x;
+        try (Connection su = pg.createConnection("")) {
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            x = ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(b)).fetchOne(CATALOG_COLLECTIONS.COLLECTION_ID);
+            ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.NAME, c)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(x)).execute();
+        }
+        final long id = x;
+        // the boundary resolved the id to B, and a one-row rename made the row C: an id-only write goes to the row, under C
+        ExpectedCollectionIds.set(java.util.Map.of(b, id), null, null);
+        try {
+            String landedUnder = scope.withTenant(TENANT, ctx -> CollectionRegistry.requireForWrite(ctx, TENANT, b).label());
+            assertThat(landedUnder).as("the id is the identity: the row's current label").isEqualTo(c);
+            String again = scope.withTenant(TENANT, ctx -> {
+                CollectionRegistry.requireForWrite(ctx, TENANT, b);
+                return CollectionRegistry.requireForWrite(ctx, TENANT, c).label();   // a writer that stamps the current label asks by it
+            });
+            assertThat(again).isEqualTo(c);
+        } finally {
+            ExpectedCollectionIds.clear();
+        }
+        // the client sent the label B beside the id: the two no longer name one collection
+        ExpectedCollectionIds.set(java.util.Map.of(b, id), java.util.Set.of(b), null, null);
+        try {
+            assertThatThrownBy(() -> scope.withTenant(TENANT, ctx -> CollectionRegistry.requireForWrite(ctx, TENANT, b)))
+                .isInstanceOfSatisfying(CollectionIdMismatchException.class, e -> {
+                    assertThat(e.labelDisagreement()).as("the 409 form, not the registry-inconsistency 500").isTrue();
+                    assertThat(e.requested()).isEqualTo(id);
+                    assertThat(e.requestedLabel()).isEqualTo(b);
+                    assertThat(e.currentLabel()).isEqualTo(c);
+                });
+        } finally {
+            ExpectedCollectionIds.clear();
+        }
+    }
 }

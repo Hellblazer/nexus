@@ -524,6 +524,10 @@ public final class TaxonomyRepository {
                 .fetch();
             if (rows.isEmpty()) return Optional.<String>empty();
             String collection = rows.get(0).get(TOPICS.COLLECTION);
+            // RDR-229 P3.5a (review): the topic's collection is read FOR KEY SHARE before any assignment row is written, so a verb that
+            // retires it waits for this merge (registry first, then the child rows); a collection with no row (the leftovers of a
+            // deleted one) is merged as it always was
+            CollectionRegistry.requireForWriteIfPresent(ctx, tenant, collection);
 
             // Move assignments: prefer higher similarity on conflict.
             // GREATEST(COALESCE(...), COALESCE(...)) + CASE WHEN expressions referencing
@@ -550,9 +554,11 @@ public final class TaxonomyRepository {
                         TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
                         // RDR-225: the moved row keeps the model of the chunk it points at.
                         TOPIC_ASSIGNMENTS.EMBEDDING_MODEL,
-                        // RDR-229 P3.1 stage 2b: and the id of its source collection, resolved from the name (the
-                        // moved row may itself be unstamped).
-                        CollectionIds.idOf(TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION))
+                        // RDR-229 P3.1 stage 2b: and the id of its source collection, COPIED from the row it moves (the id the row was
+                        // written with, never re-resolved from the name by an unlocked read); only a row that is itself unstamped
+                        // falls back to the name, which is the stamp-move's own repair and not a new registration
+                        coalesce(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID,
+                            CollectionIds.idOf(TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)))
                     .from(TOPIC_ASSIGNMENTS)
                     .where(TOPIC_ASSIGNMENTS.TOPIC_ID.eq(sourceId)))
                .onConflict(

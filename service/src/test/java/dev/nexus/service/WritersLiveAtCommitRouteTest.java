@@ -221,6 +221,37 @@ class WritersLiveAtCommitRouteTest {
         assertThat(aspectRows).as("no aspect row was written").isZero();
     }
 
+    /**
+     * {@code mergeTopics} moves assignment rows keyed by topic ids, so it names no collection on the wire, but the topics belong to
+     * one: it reads that collection's registry row FOR KEY SHARE before any assignment row (review of 449d5d8b03), so it waits for a
+     * supersede that holds the row. It is not refused for the retirement (a merge of a tombstone's own topics is a clean-up the
+     * registry has no objection to): it waits, then completes.
+     */
+    @Timeout(180)
+    @Test
+    void aTopicMergeArrivingWhileASupersedeHoldsTheCollectionsRow_waits_thenCompletes() throws Exception {
+        String x = registered("merge-x");
+        String y = registered("merge-y");
+        Resp a = fx.post("/v1/taxonomy/topics/insert", "{\"collection\":" + json(x) + ",\"label\":\"merge-a\",\"doc_count\":1}");
+        Resp b = fx.post("/v1/taxonomy/topics/insert", "{\"collection\":" + json(x) + ",\"label\":\"merge-b\",\"doc_count\":1}");
+        long sourceId = a.json().path("id").asLong(-1);
+        long targetId = b.json().path("id").asLong(-1);
+        assertThat(sourceId).as("setup: " + a.body()).isPositive();
+        assertThat(targetId).as("setup: " + b.body()).isPositive();
+        Future<Resp> supersede;
+        Future<Resp> merge;
+        try (Connection park = fx.pg.createConnection("")) {
+            supersede = parkedSupersede(park, x, y);
+            merge = pool.submit(() -> fx.post("/v1/taxonomy/topics/merge", "{\"source_id\":" + sourceId + ",\"target_id\":" + targetId + "}"));
+            awaitWaiting(2, merge, "the merge waits for the registry row of " + x);
+            assertThat(merge.isDone()).as("the merge waits for the verb").isFalse();
+            park.rollback();
+        }
+        assertThat(supersede.get(60, TimeUnit.SECONDS).status()).isEqualTo(200);
+        Resp m = merge.get(60, TimeUnit.SECONDS);
+        assertThat(m.status()).as(m.body()).isEqualTo(200);
+    }
+
     // ---- history writes are exempt: they stamp the id without a lock and do not wait for the verb -----------------------------
 
     @Timeout(180)

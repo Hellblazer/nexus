@@ -202,17 +202,19 @@ public final class CollectionRegistry {
      * caller's transaction with {@code FOR KEY SHARE} (a delete of the row waits for that transaction, so the id cannot be freed
      * and its label taken again underneath the write). Never from the cache, which cannot hold a lock, and never by the label. No
      * row is {@link UnknownCollectionIdException}; a retired row is {@link CollectionRetiredIdException} naming its successor by
-     * {@code superseded_by_id}; a row now bearing another label is {@link CollectionRenamedUnderRequestException}; a row of
-     * another id is {@link CollectionIdMismatchException}; a live row is returned.
+     * {@code superseded_by_id}; a row of another id is {@link CollectionIdMismatchException}; a live row is returned, under its
+     * CURRENT label, whatever label the route boundary resolved: the id is the identity (linda's ruling), so a one-row rename that
+     * landed between the boundary and this read changes nothing about where the write goes, and the write stamps the row's current
+     * label ({@link CollectionRow#label()}). The one refusal on a label is for a request that carried a label of its own beside the id
+     * ({@link ExpectedCollectionIds#clientNamed}) which the row no longer bears: {@link CollectionIdMismatchException}, 409.
      *
      * <p>The one place every in-transaction by-id read goes through ({@link #resolveLabel}, {@link CollectionIds#require}). A
      * second read of the same label in one transaction answers from the transaction's memo: the lock is already held.
      *
      * @param consume true for a read in the WRITE's own transaction, which marks the id consumed ({@link ExpectedCollectionIds});
      *        false for an outside-a-transaction lookup's short read, which must not count
-     * @throws CollectionIdMismatchException if the row the read returns is not the row of that id (a registry defect)
-     * @throws CollectionRenamedUnderRequestException if the row of the id carries another label than the one the request resolved
-     *         (a one-row rename, P3.7, landed in the gap: an ordinary race, 409 {@code collection_renamed})
+     * @throws CollectionIdMismatchException if the row the read returns is not the row of that id (a registry defect, 500), or the
+     *         request carried a label of its own that the row no longer bears (409)
      */
     CollectionRow readRequested(DSLContext ctx, String tenant, String label, long collectionId, boolean consume) {
         CollectionRow memo = WriteRegistryMemo.get(ctx, tenant, label);
@@ -234,14 +236,15 @@ public final class CollectionRegistry {
         if (row.collectionId() != collectionId) {
             throw new CollectionIdMismatchException(collectionId, row.collectionId());
         }
-        if (!row.label().equals(label)) {
-            throw new CollectionRenamedUnderRequestException(tenant, collectionId, label, row.label());
+        if (!row.label().equals(label) && ExpectedCollectionIds.clientNamed(label)) {
+            throw new CollectionIdMismatchException(collectionId, label, row.label());
         }
         if (row.isSuperseded()) {
             throw new CollectionRetiredIdException(tenant, collectionId, row.label(),
                 CollectionSuccessor.of(ctx, tenant, collectionId));
         }
         WriteRegistryMemo.put(ctx, tenant, label, row);
+        WriteRegistryMemo.put(ctx, tenant, row.label(), row);   // a writer that stamps the current label asks for it by that name
         if (consume) {
             ExpectedCollectionIds.consumed(ctx, label);
             ExpectedCollectionIds.afterTransactionRead();
@@ -301,7 +304,7 @@ public final class CollectionRegistry {
      * follow answer from the memo. Locking one row after another in the request's order instead would let a writer holding the key
      * share of the higher id and waiting for the lower one meet a verb that holds the lower and waits for the higher: a cycle. Names
      * a request gave by id read that id ({@link #readRequested}'s refusals: no row 404, a retired row 409, a row renamed under the request
-     * {@link CollectionRenamedUnderRequestException}); a label no row has is simply not memoised, and the per-label check that follows raises
+     * {@link CollectionIdMismatchException} for a label the client sent); a label no row has is simply not memoised, and the per-label check that follows raises
      * its own answer. Call it before any row work of the transaction.
      */
     void lockAllForWrite(DSLContext ctx, String tenant, java.util.Collection<String> labels) {
@@ -364,8 +367,8 @@ public final class CollectionRegistry {
                 long id = named.getAsLong();
                 chosen = rows.stream().filter(r -> r.collectionId() == id).findFirst()
                     .orElseThrow(() -> new UnknownCollectionIdException(tenant, id));
-                if (!chosen.label().equals(label)) {
-                    throw new CollectionRenamedUnderRequestException(tenant, id, label, chosen.label());
+                if (!chosen.label().equals(label) && ExpectedCollectionIds.clientNamed(label)) {
+                    throw new CollectionIdMismatchException(id, label, chosen.label());
                 }
                 if (chosen.isSuperseded()) {
                     throw new CollectionRetiredIdException(tenant, id, chosen.label(), CollectionSuccessor.of(ctx, tenant, id));
@@ -385,6 +388,7 @@ public final class CollectionRegistry {
             if (chosen != null) {
                 WriteRegistryMemo.put(ctx, tenant, label, chosen);
                 if (named.isPresent()) {
+                    WriteRegistryMemo.put(ctx, tenant, chosen.label(), chosen);
                     ExpectedCollectionIds.consumed(ctx, label);
                 }
             }
@@ -397,6 +401,37 @@ public final class CollectionRegistry {
     /** {@link #lockAllForWrite} on the process-wide registry. */
     public static void requireAllForWrite(DSLContext ctx, String tenant, java.util.Collection<String> labels) {
         SHARED.lockAllForWrite(ctx, tenant, labels);
+    }
+
+    /**
+     * The registry row of {@code collectionId}, read {@code FOR KEY SHARE} in {@code ctx}'s write transaction, for a write whose request
+     * names the collection by id in its BODY and not at the route boundary (the document routes: {@code physical_collection_id}, in
+     * the transaction that writes). The same read, lock, refusals and memo as a request by id at the boundary: no row is
+     * {@link UnknownCollectionIdException}, a retired row {@link CollectionRetiredIdException}, a row of another id
+     * {@link CollectionIdMismatchException}; a live row is memoised under its current label and returned, and the id counts as
+     * consumed for the per-transaction census ({@code #<id>}, the key the filter named it by). Never from the cache, which holds no
+     * lock: a row the cache calls live can be retired by a supersede that commits before the write does.
+     */
+    public static CollectionRow requireIdForWrite(DSLContext ctx, String tenant, long collectionId) {
+        return SHARED.lockIdForWrite(ctx, tenant, collectionId);
+    }
+
+    CollectionRow lockIdForWrite(DSLContext ctx, String tenant, long collectionId) {
+        String key = "#" + collectionId;
+        noteWriteRead(tenant, key);
+        CollectionRow row = fillOrNull(ctx, tenant, CATALOG_COLLECTIONS.COLLECTION_ID.eq(collectionId), List.of(), true, false);
+        if (row == null) {
+            throw new UnknownCollectionIdException(tenant, collectionId);
+        }
+        if (row.collectionId() != collectionId) {
+            throw new CollectionIdMismatchException(collectionId, row.collectionId());
+        }
+        if (row.isSuperseded()) {
+            throw new CollectionRetiredIdException(tenant, collectionId, row.label(), CollectionSuccessor.of(ctx, tenant, collectionId));
+        }
+        WriteRegistryMemo.put(ctx, tenant, row.label(), row);
+        ExpectedCollectionIds.consumed(ctx, key);
+        return row;
     }
 
     /** Test seam: called with {@code tenant|label} before every {@code FOR KEY SHARE} read of a write transaction; null in production. */

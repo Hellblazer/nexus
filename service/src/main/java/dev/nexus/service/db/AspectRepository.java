@@ -304,14 +304,15 @@ public final class AspectRepository {
     }
 
     private long writeAspect(DSLContext ctx, String tenant, Map<String, Object> body, ValidUpsert v) {
-        String collection = v.collection();
+        // the id is the identity (linda's ruling): the row is written under the registry row's CURRENT label, from the locked read
+        // (a name the request carried that a one-row rename has since changed is the same collection)
+        String collection = CollectionRegistry.requireWritable(ctx, tenant, v.collection()).label();
         String sourcePath = v.sourcePath();
         String modelVersion = v.modelVersion();
         String extractorName = v.extractorName();
         String docId = v.docId();
         double confidence = v.confidence();
         OffsetDateTime extractedAtTs = v.extractedAt();
-        ensureCollectionRegistered(ctx, tenant, collection);
         // RDR-254: a doc_id naming a trashed or alias document never replaces the row's doc_id (AspectDocIdAttribution).
         Field<String> docIdOnConflict = AspectDocIdAttribution.onConflict(ctx, tenant, docId, EX_DOC_ID_COALESCE);
         var result = ctx.insertInto(DOCUMENT_ASPECTS,

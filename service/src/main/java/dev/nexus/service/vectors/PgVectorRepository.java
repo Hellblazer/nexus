@@ -8,6 +8,7 @@ import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.ChashHex;
 import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.CollectionRegistry;
+import dev.nexus.service.db.CollectionRow;
 import dev.nexus.service.db.ModelPartitions;
 import dev.nexus.service.db.DeadlockRetry;
 import dev.nexus.service.db.PgSession;
@@ -1262,7 +1263,12 @@ public final class PgVectorRepository {
                         // a queued sweep while holding the registry key share could close a cycle with a verb that holds the gate
                         CatalogRepository.acquireSweepGateShared(ctx, tenant, collection);
                     }
-                    CollectionRegistry.requireWritable(ctx, tenant, collection);
+                    final CollectionRow registered = CollectionRegistry.requireWritable(ctx, tenant, collection);
+                    // the id is the identity: the rows are written under the row's CURRENT label (see resolveNeedEmbedIdx)
+                    final String coll = registered.label();
+                    if (!coll.equals(collection)) {
+                        CatalogRepository.acquireSweepGateShared(ctx, tenant, coll);
+                    }
                     racedThisWrite.set(0);
                     racedChashSampleHolder[0] = new ArrayList<>();
                     inTxUnownedHolder[0] = List.of();
@@ -1270,7 +1276,7 @@ public final class PgVectorRepository {
                     // write's own transaction, under the shared sweep gate, ahead of the insert.
                     if (recheckInTransaction) {
                         inTxUnownedHolder[0] = recheckOwnershipInWriteTransaction(
-                                ctx, tenant, collection, insertChashes, ids, metadatas, guard);
+                                ctx, tenant, coll, insertChashes, ids, metadatas, guard);
                     }
                     // Bead nexus-h8rf6.2 (reduce per-request connection hold time): ONE
                     // multi-row INSERT ... ON CONFLICT instead of dedupIds.size() sequential
@@ -1298,13 +1304,13 @@ public final class PgVectorRepository {
                     // every row and on the conflict arm. chunks carries CHECK (collection_id IS NOT NULL) NOT VALID,
                     // so a row without it is refused (23514); the conflict arm also stamps a chunk the stamp has not
                     // reached, whose update the CHECK would otherwise refuse. An unregistered name refuses here, 422.
-                    final Long collectionId = CollectionIds.require(ctx, tenant, collection);
+                    final Long collectionId = registered.collectionId();
                     var insert = ctx.insertInto(ch.table())
                         .columns(ch.tenantId(), ch.collection(), ch.chash(), ch.embeddingModel(),
                                  ch.chunkText(), ch.embedding(), ch.metadata(), CHUNKS.COLLECTION_ID);
                     for (int k = 0; k < finalInsertIdx.size(); k++) {
                         int idx = finalInsertIdx.get(k);
-                        insert = insert.values(tenant, collection, dedupIds.get(idx), embeddingModel,
+                        insert = insert.values(tenant, coll, dedupIds.get(idx), embeddingModel,
                                 dedupDocs.get(idx),
                                 Vector.of(embeddings.get(k)),
                                 JSONB.jsonb(toJson(dedupMetas.get(idx))),
@@ -6785,7 +6791,8 @@ FROM scope s
         }
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         return tenantScope.withTenant(tenant, ctx -> {
-            CollectionRegistry.requireForWrite(ctx, tenant, collection);   // RDR-229 P3.5a: the id or the label's row FOR KEY SHARE, before any chunk row
+            // RDR-229 P3.5a: the id or the label's row FOR KEY SHARE, before any chunk row; the rows are the row's CURRENT label's
+            final String coll = CollectionRegistry.requireForWrite(ctx, tenant, collection).label();
             // RDR-191 GATE-2 (nexus-mmkqe): NO deleted_at predicate on the join —
             // a manifest row protects its chunk whether its owning document is
             // live (class a) or tombstoned (class b, soft-tombstone contract
@@ -6800,7 +6807,7 @@ FROM scope s
                           .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(ch.collection()))
                           .and(ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH).eq(ch.chash()))));
             return ctx.deleteFrom(ch.table())
-               .where(ch.collection().eq(collection).and(ch.chash().in(ids)).andNot(stillReferenced))
+               .where(ch.collection().eq(coll).and(ch.chash().in(ids)).andNot(stillReferenced))
                .execute();
         });
     }
@@ -8273,11 +8280,12 @@ FROM scope s
         }
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         return tenantScope.withTenant(tenant, ctx -> {
-            CollectionRegistry.requireForWrite(ctx, tenant, collection);   // RDR-229 P3.5a: the id or the label's row FOR KEY SHARE, before any chunk row
+            // RDR-229 P3.5a: the id or the label's row FOR KEY SHARE, before any chunk row; the rows are the row's CURRENT label's
+            final String coll = CollectionRegistry.requireForWrite(ctx, tenant, collection).label();
             int affected = 0;
             List<String> missing = new ArrayList<>();
             for (int i = 0; i < ids.size(); i++) {
-                int rows = updateMetadataOneRow(ctx, ch, collection, ids.get(i), metadatas.get(i), deleteKeys);
+                int rows = updateMetadataOneRow(ctx, ch, coll, ids.get(i), metadatas.get(i), deleteKeys);
                 affected += rows;
                 if (rows == 0) missing.add(ids.get(i));
             }
@@ -8716,8 +8724,6 @@ FROM scope s
         existenceSelectCalls.incrementAndGet();
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         try {
-            // RDR-225: the (model, tenant, collection) scope, resolved before the transaction opens.
-            final org.jooq.Condition scope = chunkScope(ch, tenant, collection);
             return tenantScope.withTenant(tenant, ctx -> {
                 // nexus-hxrcm residual: the have-vector metadata-only UPDATE below touches
                 // rows the superseded-chunk sweep DELETEs and gc_quarantine_orphans moves,
@@ -8733,7 +8739,16 @@ FROM scope s
                 // before any row is read or written (the lock order of RenameGuard#runRename): the have-vector UPDATE below writes
                 // chunks BY LABEL, and a label freed and re-taken while this transaction waited for the gate would land them in the
                 // new row. A retired or unknown id answers its typed 409/404 here, not after the UPDATE.
-                CollectionRegistry.requireWritable(ctx, tenant, collection);
+                CollectionRow registered = CollectionRegistry.requireWritable(ctx, tenant, collection);
+                // the id is the identity (linda's ruling): a request by id follows a one-row rename that landed after the route
+                // boundary, so the rows are found and written under the row's CURRENT label, from this locked read (a rename lands
+                // after the gate above, which was taken by the label the boundary resolved: the gate of the current label is taken too)
+                final String coll = registered.label();
+                if (!coll.equals(collection)) {
+                    CatalogRepository.acquireSweepGateShared(ctx, tenant, coll);
+                }
+                // RDR-225: the (model, tenant, collection) scope, of the registered row
+                final org.jooq.Condition scope = chunkScope(ch, tenant, registered.embeddingModel(), coll);
                 Map<String, String> existingText = selectExistingChashTextCtx(ctx, ch, scope, dedupIds);
                 ExistencePartition partition = partitionByExistence(dedupIds, existingText.keySet());
                 // Test-only interleaving seam (bead nexus-f0r8p.4) — see
@@ -8786,7 +8801,7 @@ FROM scope s
                 // behavior-preserving; see CatalogRepository-sibling PgVectorMetadata
                 // BatchParityTest for the exact-row-state parity this must hold instead.
                 needEmbedIdx.addAll(
-                    batchUpdateMetadata(ctx, ch, collection, dedupIds, dedupMetas, unchangedIdx,
+                    batchUpdateMetadata(ctx, ch, coll, dedupIds, dedupMetas, unchangedIdx,
                             deleteKeys == null ? List.of() : deleteKeys));
                 return new NeedEmbedResolution(needEmbedIdx, originalAbsentIdx);
             });

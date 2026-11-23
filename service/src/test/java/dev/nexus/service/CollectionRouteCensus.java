@@ -539,7 +539,7 @@ final class CollectionRouteCensus {
     record Resolving(int sites, String serves) { }
 
     static final java.util.Map<String, Resolving> RESOLVING = java.util.Map.ofEntries(
-        java.util.Map.entry("db/AspectRepository.java", new Resolving(11, "the /v1/aspects rows and the aspect ETL")),
+        java.util.Map.entry("db/AspectRepository.java", new Resolving(12, "the /v1/aspects rows and the aspect ETL; the aspect upsert's write stamps the registry row's current label (requireWritable)")),
         java.util.Map.entry("db/CatalogIdStamps.java", new Resolving(1, "the catalog writers' memoized label lookup")),
         java.util.Map.entry("db/CatalogMoves.java", new Resolving(1, "/v1/catalog/documents/move, the owners move")),
         java.util.Map.entry("db/CatalogRepository.java", new Resolving(27, "the document routes (DocumentCollectionRef), the collection routes (set_aspects_enabled reads its row in its write) and the catalog writers, and registryFirst, the manifest writers' registry check after their advisory locks")),
@@ -549,7 +549,7 @@ final class CollectionRouteCensus {
         java.util.Map.entry("db/CollectionTombstones.java", new Resolving(2, "the collection delete and supersede routes")),
         java.util.Map.entry("db/CombinedWriteService.java", new Resolving(6, "the manifest write, append and write_many routes; the metadata refresh transaction's registry check (requireWritable) is the sixth")),
         java.util.Map.entry("db/DepartedWriterSpans.java", new Resolving(1, "the manifest write routes' departed-writer fill")),
-        java.util.Map.entry("db/DocumentCollectionRef.java", new Resolving(3, "the document routes: the one resolver of physical_collection_id")),
+        java.util.Map.entry("db/DocumentCollectionRef.java", new Resolving(4, "the document routes: the one resolver of physical_collection_id; a document request's id is read FOR KEY SHARE in the write's transaction (requireIdForWrite)")),
         java.util.Map.entry("db/GcCollectionReads.java", new Resolving(2, "the four /v1/vectors/gc writes: the origin and a by-id sibling, read in the write's transaction")),
         java.util.Map.entry("db/ManifestReplace.java", new Resolving(3, "the manifest write routes; an empty manifest reads the registry row too (requireForWriteIfPresent)")),
         java.util.Map.entry("db/PipelineRepository.java", new Resolving(2, "the /v1/pipeline create and delete_collection rows")),
@@ -559,14 +559,14 @@ final class CollectionRouteCensus {
         java.util.Map.entry("db/RequestedCollectionRead.java", new Resolving(1, "the by-id read of the aspect delete, salient-sentences write, pipeline delete and remap leg clear")),
         java.util.Map.entry("db/RestoreIdFill.java", new Resolving(1, "the gc quarantine restore route")),
         java.util.Map.entry("db/TaxonomyCoverage.java", new Resolving(1, "the taxonomy coverage read of the vector search routes")),
-        java.util.Map.entry("db/TaxonomyRepository.java", new Resolving(25, "the /v1/taxonomy rows and the taxonomy ETL; assign_many reads its source collections at once (requireAllForWrite)")),
+        java.util.Map.entry("db/TaxonomyRepository.java", new Resolving(26, "the /v1/taxonomy rows and the taxonomy ETL; assign_many reads its source collections at once (requireAllForWrite); mergeTopics reads the topic's collection FOR KEY SHARE first")),
         java.util.Map.entry("db/TaxonomyCollectionLock.java", new Resolving(1, "the taxonomy persist routes (split, rebuild, discovered): the advisory lock keyed by id, then the registry check")),
         java.util.Map.entry("db/TelemetryRepository.java", new Resolving(6, "the /v1/telemetry rows, the rename route and the telemetry ETL")),
         java.util.Map.entry("db/TupleRepository.java", new Resolving(3, "the tuple space's collection-keyed tuples; no collection route")),
         java.util.Map.entry("http/CollectionSelectorFilter.java", new Resolving(1, "the route boundary: the one resolver of collection_id")),
         java.util.Map.entry("vectors/ChunkKeySweep.java", new Resolving(1, "the chunk-key sweep (excluded: ChunkKeysAdminHandler#handleSweep)")),
         java.util.Map.entry("vectors/EmbedderRouter.java", new Resolving(1, "the embed route and the vector writes' model dispatch")),
-        java.util.Map.entry("vectors/PgVectorRepository.java", new Resolving(20, "the /v1/vectors rows; resolveNeedEmbedIdx's metadata transaction reads the registry row (requireWritable) after the sweep gate")),
+        java.util.Map.entry("vectors/PgVectorRepository.java", new Resolving(19, "the /v1/vectors rows; resolveNeedEmbedIdx's metadata transaction reads the registry row (requireWritable) after the sweep gate")),
         java.util.Map.entry("vectors/TaxonomyCentroidRepository.java", new Resolving(3, "the /v1/taxonomy centroid rows")));
 
     /**

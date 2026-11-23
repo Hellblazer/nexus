@@ -26,7 +26,7 @@ import java.util.TreeSet;
  *   <li>{@link CollectionRegistry#resolveLabel} and {@link CollectionIds#require}, inside the handler's transaction, read the row
  *       of the id {@code FOR KEY SHARE} (a concurrent delete of the row waits for the write): no row is
  *       {@link UnknownCollectionIdException}, a retired row {@link CollectionRetiredIdException}, a row of another label
- *       {@link CollectionRenamedUnderRequestException}, a live row answers under its own label;</li>
+ *       {@link CollectionIdMismatchException} for a label the client sent that the row no longer bears, a live row answers under its own label;</li>
  *   <li>{@link CollectionIds#idOf(String, String)} gives a subselect on the id as well as the label, so a statement carrying it
  *       writes NULL (the P3.1 CHECK refuses it) when the label is no longer the id's. It takes no lock and records no
  *       consumption: it is the stamp of a history row (a log, never a decision), and the write that must be live at commit reads
@@ -56,6 +56,8 @@ public final class ExpectedCollectionIds {
     /** One request's named ids, what has consumed them, and the test hook of the write transaction's first read. */
     private static final class Carrier {
         final Map<String, Long> ids;
+        /** The labels the client sent beside their id; every other label of {@link #ids} was resolved by the route boundary. */
+        final Set<String> clientLabels;
         final Set<String> consumed = new HashSet<>();
         Runnable beforeTransactionRead;
         Runnable afterTransactionRead;
@@ -65,12 +67,15 @@ public final class ExpectedCollectionIds {
         final Set<Object> historyTransactions = Collections.newSetFromMap(new IdentityHashMap<>());
         /** Census only: the transactions that wrote, with what each read, as the findings and the counts are built from them. */
         final List<String> findings = new ArrayList<>();
+        /** A document request: the request-level report applies, the per-transaction finding does not. */
+        boolean requestLevelOnly;
         int writeTransactions;
         int exemptTransactions;
         int unknownTransactions;
 
-        Carrier(Map<String, Long> ids, Runnable beforeTransactionRead, Runnable afterTransactionRead) {
+        Carrier(Map<String, Long> ids, Set<String> clientLabels, Runnable beforeTransactionRead, Runnable afterTransactionRead) {
             this.ids = Map.copyOf(ids);
+            this.clientLabels = Set.copyOf(clientLabels);
             this.beforeTransactionRead = beforeTransactionRead;
             this.afterTransactionRead = afterTransactionRead;
         }
@@ -93,11 +98,48 @@ public final class ExpectedCollectionIds {
      *        production
      */
     public static void set(Map<String, Long> idsByLabel, Runnable beforeTransactionRead, Runnable afterTransactionRead) {
+        set(idsByLabel, Set.of(), beforeTransactionRead, afterTransactionRead);
+    }
+
+    /**
+     * {@link #set(Map, Runnable, Runnable)} with the labels the CLIENT sent beside their id ({@code clientLabels}, a subset of the
+     * keys of {@code idsByLabel}); every other label was resolved from the id by the route boundary. The id is the identity: a request
+     * by id alone follows a rename, so only a label the client itself sent can disagree with the row ({@link #clientNamed}). The
+     * boundary refuses a request that gives both an id and a label for one slot (400), so no route sends a non-empty set today.
+     */
+    public static void set(Map<String, Long> idsByLabel, Set<String> clientLabels, Runnable beforeTransactionRead,
+                           Runnable afterTransactionRead) {
         if (idsByLabel.isEmpty()) {
             CURRENT.remove();
         } else {
-            CURRENT.set(new Carrier(idsByLabel, beforeTransactionRead, afterTransactionRead));
+            CURRENT.set(new Carrier(idsByLabel, clientLabels, beforeTransactionRead, afterTransactionRead));
         }
+    }
+
+    /**
+     * Names the ids a document write carries in its BODY ({@code physical_collection_id}), by the key {@code #<id>} that
+     * {@link CollectionRegistry#requireIdForWrite} consumes. Census only (the document routes are not rows of the route table); the
+     * per-transaction finding does not apply to them ({@code Carrier.requestLevelOnly}).
+     */
+    public static void setDocumentIds(Map<String, Long> idsByKey) {
+        if (idsByKey.isEmpty()) {
+            CURRENT.remove();
+        } else {
+            Carrier c = new Carrier(idsByKey, Set.of(), null, null);
+            c.requestLevelOnly = true;
+            CURRENT.set(c);
+        }
+    }
+
+    /** True while a test has the census on. */
+    public static boolean censusOn() {
+        return census;
+    }
+
+    /** True when the request itself sent {@code label} beside its id (and so asked for exactly that label), not the boundary. */
+    static boolean clientNamed(String label) {
+        Carrier c = CURRENT.get();
+        return c != null && label != null && c.clientLabels.contains(label);
     }
 
     public static void clear() {
@@ -198,7 +240,7 @@ public final class ExpectedCollectionIds {
             return;
         }
         c.writeTransactions++;
-        if (c.readByTransaction.getOrDefault(tx, Set.of()).isEmpty()) {
+        if (!c.requestLevelOnly && c.readByTransaction.getOrDefault(tx, Set.of()).isEmpty()) {
             c.findings.add("a write transaction read none of " + new TreeSet<>(c.ids.keySet()));
         }
     }

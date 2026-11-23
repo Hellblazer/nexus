@@ -88,7 +88,7 @@ public final class CollectionIds {
      * {@code null} for {@code ''} or {@code null} (unset, no read). Never cached. For a name the request named by
      * {@code collection_id} ({@link ExpectedCollectionIds}) it is the row of THAT id, read {@code FOR KEY SHARE}: no row is
      * {@link UnknownCollectionIdException}, a retired row {@link CollectionRetiredIdException}, another label
-     * {@link CollectionRenamedUnderRequestException}.
+     * {@link CollectionIdMismatchException} (a label the client sent beside the id).
      *
      * @throws UnregisteredCollectionException when the name is not empty and has no registry row for the tenant
      */

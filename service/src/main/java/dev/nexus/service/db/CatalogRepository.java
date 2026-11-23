@@ -6138,8 +6138,9 @@ public final class CatalogRepository {
      * refusal of its own: a request by id whose id is gone or retired is refused here, and a label no row has or a retired label keeps
      * the answer of the writer that follows ({@code requireWritable} for rows, none for an empty manifest).
      */
-    private static void registryFirst(DSLContext ctx, String tenant, String collection) {
-        CollectionRegistry.requireForWriteIfPresent(ctx, tenant, collection);
+    private static String registryFirst(DSLContext ctx, String tenant, String collection) {
+        // the id is the identity (linda's ruling): the write goes under the row's CURRENT label, which the caller uses from here on
+        return CollectionRegistry.requireForWriteIfPresent(ctx, tenant, collection).map(CollectionRow::label).orElse(collection);
     }
 
     /** Which {@code ON CONFLICT} shape {@link #insertManifestChunkRows} applies. */
@@ -6423,7 +6424,7 @@ public final class CatalogRepository {
         // so a concurrent completeIndexRun for the same doc either runs entirely
         // before or entirely after this manifest mutation, never interleaved.
         acquireIndexRunLock(ctx, tenant, docId);
-        registryFirst(ctx, tenant, collection);
+        collection = registryFirst(ctx, tenant, collection);   // the row's current label, from the locked read
         // nexus-kl2z6 increment 1 (design memo §0): the chunk-vector UPSERT
         // runs BEFORE the manifest rows are replaced below — a chash lands in
         // chunks_<dim> before (in this same, still-open transaction) the
@@ -7081,12 +7082,14 @@ public final class CatalogRepository {
                 // refusal twice.
                 List<Map<String, Object>> docRefused = new ArrayList<>();
                 RacedEmbeds docRaced = new RacedEmbeds();
+                final String[] docCollection = {collection};   // the registry row's current label, set by the write transaction's locked read
                 try {
                     if (docId == null || docId.isBlank()) {
                         throw new IllegalArgumentException("'doc_id' required");
                     }
                     // (chunk_count folds inside writeManifestRows — nexus-b6enc
                     // F5 unified the fold for the single-doc and batch paths.)
+                    docCollection[0] = collection;   // the row's current label once the write transaction has read it
                     manifestWriteTxn(tenant, "catalog.writeManifestMany " + collection, ctx -> {
                         sweepOutcome[0] = null;
                         beforeHolder[0] = null;
@@ -7109,7 +7112,7 @@ public final class CatalogRepository {
                         requireDocumentExists(ctx, tenant, docId);
                         acquireSweepGateShared(ctx, tenant, collection);
                         acquireIndexRunLock(ctx, tenant, docId);
-                        registryFirst(ctx, tenant, collection);   // before requireMovePrecondition's document row locks
+                        docCollection[0] = registryFirst(ctx, tenant, collection);   // before requireMovePrecondition's document row locks
                         // RDR-210 Phase 6 Step 1: under the document's write locks, so a client write that
                         // committed before them is seen and one that comes after waits for this commit.
                         if (move != null) {
@@ -7165,12 +7168,12 @@ public final class CatalogRepository {
                         boolean beforeReadFailed = sweep && beforeRead == null;
                         long tWriteStart = tBeforeReadEnd;
                         try {
-                            writeManifestRows(ctx, tenant, docId, collection, rows,
+                            writeManifestRows(ctx, tenant, docId, docCollection[0], rows,
                                     resolvedChunks, chunksWrittenHolder,
                                     requestWrittenChashes, newlyWrittenChashesHolder, docRaced,
                                     beforeRows == null ? PRIOR_ROWS_UNREAD : beforeRows);
                             if (move != null) {
-                                completeMove(ctx, tenant, docId, collection, move.sourceCollection(), moveSatelliteHolder);
+                                completeMove(ctx, tenant, docId, docCollection[0], move.sourceCollection(), moveSatelliteHolder);
                                 // The job's record of this move, in the same transaction. Lock order for a job's
                                 // move: the sweep gate (shared) and the index-run lock above, then the job row.
                                 if (move.jobId() != null) {
@@ -7246,7 +7249,7 @@ public final class CatalogRepository {
                         droppedByDoc.put(docId, dropped);
                         if (sweep && !dropped.isEmpty()) {
                             long tSweepStart = System.nanoTime();
-                            sweepOutcome[0] = runSweepTransaction(tenant, docId, collection, dropped);
+                            sweepOutcome[0] = runSweepTransaction(tenant, docId, docCollection[0], dropped);
                             sweepNanosTotal[0] += (System.nanoTime() - tSweepStart);
                         }
                     }

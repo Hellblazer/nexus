@@ -863,9 +863,12 @@ public final class CombinedWriteService {
                 // and before any row is read or written (RenameGuard#runRename's lock order). The metadata UPDATE below writes chunks
                 // BY LABEL; without the read, a label freed and re-taken while this transaction waited for the gate would take
                 // the request's metadata into the new row, and the later per-document transactions would answer 404 after it committed.
-                CollectionRegistry.requireWritable(ctx, tenant, collection);
+                final String coll = CollectionRegistry.requireWritable(ctx, tenant, collection).label();   // the row's CURRENT label
+                if (!coll.equals(collection)) {
+                    CatalogRepository.acquireSweepGateShared(ctx, tenant, coll);   // a rename landed after the gate above
+                }
                 Map<String, String> existingText =
-                    selectExistingText(ctx, ch, tenant, collection, dedupChashes);
+                    selectExistingText(ctx, ch, tenant, coll, dedupChashes);
                 // RDR-222 Phase 0: reset per DeadlockRetry attempt (a retried attempt
                 // re-runs this whole transaction from scratch — see
                 // PgVectorRepository.upsertChunksInternal's identical racedThisWrite
@@ -912,7 +915,7 @@ public final class CombinedWriteService {
                 if (!existingWithSupplied.isEmpty()) {
                     List<String> hexes = new ArrayList<>(existingWithSupplied.size());
                     for (int i : existingWithSupplied) hexes.add(dedupChashes.get(i));
-                    Map<String, float[]> storedVectors = selectStoredVectors(ctx, ch, tenant, collection, hexes);
+                    Map<String, float[]> storedVectors = selectStoredVectors(ctx, ch, tenant, coll, hexes);
                     for (int i : existingWithSupplied) {
                         float[] stored = storedVectors.get(dedupChashes.get(i));
                         // A chash whose vector cannot be read back (concurrently deleted) is
@@ -937,7 +940,7 @@ public final class CombinedWriteService {
                     // Merge mode passes the caller's delete keys (non-null list = MERGE in
                     // SQL: (stored - delete_keys) || incoming); replace mode passes null.
                     need.addAll(PgVectorRepository.batchUpdateMetadata(
-                        ctx, ch, collection, dedupChashes, dedupMetas, metadataOnly,
+                        ctx, ch, coll, dedupChashes, dedupMetas, metadataOnly,
                         metadataMode.merge() ? metadataMode.deleteKeys() : null));
                 }
                 return need;

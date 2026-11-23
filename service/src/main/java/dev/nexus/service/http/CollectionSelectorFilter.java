@@ -61,10 +61,11 @@ import java.util.regex.Pattern;
  *       {@code successor_collection_id} its id. A tombstone that names no live successor (the successor was deleted, even if its
  *       label was taken again) answers 409 with neither field. A retired LABEL is not this filter's: it is not an id, and the
  *       delete keeps its 200 for it;</li>
- *   <li>409 {@code collection_renamed}: the id's row carries another label than the one this filter resolved (a one-row rename landed
- *       between this filter and the write's registry read, raised in the write's own transaction as
- *       {@code CollectionRenamedUnderRequestException}); body {@code collection_id}, {@code requested_label}, {@code current_label}.
- *       An ordinary race and not a defect: nothing was written and the client may read the collection again and retry;</li>
+ *   <li>(A request by id alone is never refused for its label: the id is the identity. A one-row rename that lands between this
+ *       filter and the write's registry read changes nothing about where the write goes, and the write stamps the row's current
+ *       label from its locked read. A request that sent BOTH an id and a label is a 400 here, so none reaches the engine's 409
+ *       {@code collection_id_mismatch} for an id and a label that no longer agree, which {@link ExpectedCollectionIds#set} is ready
+ *       for.)</li>
  *   <li>500 {@code collection_id_mismatch}: the registry answered an id with a row of another id. A registry inconsistency, an
  *       engine defect and not a caller mistake, so a 500 and never a 409; nothing is retried or guessed. No request reaches it
  *       today, since a read by id selects on the key.</li>
@@ -184,6 +185,11 @@ public final class CollectionSelectorFilter extends Filter {
         CollectionSelectors.Route route = CollectionSelectors.ROUTES.get(exchange.getRequestURI().getPath());
         String tenant = RequestContext.tenant();
         if (route == null || tenant == null) {
+            if (route == null && ExpectedCollectionIds.censusOn() && hasBody(exchange.getRequestMethod())
+                && exchange.getRequestURI().getPath().startsWith("/v1/catalog/")) {
+                documentIdCensus(exchange, chain);
+                return;
+            }
             chain.doFilter(exchange);
             return;
         }
@@ -223,6 +229,51 @@ public final class CollectionSelectorFilter extends Filter {
                 reportUnconsumed(next);
             }
             ExpectedCollectionIds.clear();
+        }
+    }
+
+    /**
+     * The document routes name their collection by {@code physical_collection_id} in the body, in the transaction that writes (they
+     * are not rows of the route table), so this filter names nothing for them and the census would not see them. With the census on, a
+     * catalog write whose body carries that field anywhere is given a carrier that names each id as {@code #<id>}, the key
+     * {@code CollectionRegistry#requireIdForWrite} consumes, and the request-level report applies as for any write route: a 2xx that no
+     * transaction read the id for is reported. The per-transaction finding is not applied to them: a document write also writes owner and
+     * link rows in transactions of their own that name no collection. Test only: nothing here runs with the census off.
+     */
+    private void documentIdCensus(HttpExchange exchange, Chain chain) throws IOException {
+        byte[] in = exchange.getRequestBody().readAllBytes();
+        exchange.setStreams(new ByteArrayInputStream(in), null);
+        Map<String, Long> named = new LinkedHashMap<>();
+        try {
+            collectDocumentIds(MAPPER.readTree(in), named);
+        } catch (IOException notJson) {
+            // the handler refuses a body that is not JSON in its own words
+        }
+        if (named.isEmpty()) {
+            chain.doFilter(exchange);
+            return;
+        }
+        try {
+            ExpectedCollectionIds.setDocumentIds(named);
+            chain.doFilter(exchange);
+        } finally {
+            reportUnconsumed(exchange);
+            ExpectedCollectionIds.clear();
+        }
+    }
+
+    private static void collectDocumentIds(JsonNode node, Map<String, Long> out) {
+        if (node == null) {
+            return;
+        }
+        if (node instanceof ObjectNode object) {
+            JsonNode id = object.get("physical_collection_id");
+            if (id != null && id.isIntegralNumber()) {
+                out.put("#" + id.asLong(), id.asLong());
+            }
+        }
+        for (JsonNode child : node) {
+            collectDocumentIds(child, out);
         }
     }
 

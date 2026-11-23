@@ -12,11 +12,10 @@ public final class CollectionIdRefusals {
     private CollectionIdRefusals() {
     }
 
-    /** True for the registry's typed refusals of a write: an id no row has, a retired id or name, an id whose row was renamed under the request, a row of another id. */
+    /** True for the registry's typed refusals of a write: an id no row has, a retired id or name, an id and a client label that no longer agree, a row of another id. */
     public static boolean isRefusal(Throwable e) {
         return e instanceof UnknownCollectionIdException || e instanceof CollectionRetiredIdException
-            || e instanceof CollectionIdMismatchException || e instanceof CollectionRenamedUnderRequestException
-            || e instanceof CollectionSupersededException;
+            || e instanceof CollectionIdMismatchException || e instanceof CollectionSupersededException;
     }
 
     /** Rethrows {@code e} when it is one of the registry's typed refusals; returns for anything else. */
