@@ -41,6 +41,8 @@ class TestNoAutomaticTrigger:
         # reads the engine's null_span_rows through the dry run (nothing is written) to compare it with the span-fill rung's summary
         "tests/upgrade/test_legacy_rows_walk_substrate.py",
         "service/src/test/java/dev/nexus/service/ChunkKeysTestBase.java",
+        # names the operator verb in nx doctor's and the version-change callout's not-applicable text; calls nothing
+        "src/nexus/upgrade_ladder/auto_guard.py",
         "service/src/test/java/dev/nexus/service/ChunkKeySweepIntegrationTest.java",
         "service/src/test/java/dev/nexus/service/ChunkKeySweepRootTargetIntegrationTest.java",
         "service/src/test/java/dev/nexus/service/ChunkConstraintRoutesIntegrationTest.java",
