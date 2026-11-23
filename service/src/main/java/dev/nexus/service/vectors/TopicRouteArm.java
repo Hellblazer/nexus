@@ -248,7 +248,7 @@ final class TopicRouteArm {
         if ("57014".equals(state)) {
             return !stageBounded && run.limiter != PgVectorRepository.Limiter.SEARCH;
         }
-        return PgVectorRepository.isTransientSqlState(state);
+        return SearchFanoutFailures.isTransientSqlState(state);
     }
 
     /** Half of what the arm's bound has left, for a routing read; at least 1 ms (Postgres reads 0 as disabled). */
