@@ -37,8 +37,9 @@ _SQL_FORBIDDEN = re.compile(
 # jOOQ calls that would change or remove rows of the table, through the LATCH constant or a DSL.table naming it.
 _JOOQ_FORBIDDEN = re.compile(r"\.(?:update|deleteFrom|delete|truncate|mergeInto|dropTable|dropTableIfExists)\s*\(\s*(?:LATCH\b|[^;]*\"" + TABLE + "\")")
 
-# The code that may name the table: the writer and its read (CompletionCheck), and the latch session's settings (CompletionBootWork).
-_MAY_NAME = {"CompletionCheck.java", "CompletionBootWork.java"}
+# The code that may name the table: the writer and its read (CompletionCheck), the latch session's settings (CompletionBootWork), and the
+# boot read before the engine serves (Gate3Latch, a read-only session's settings; linda's pre-review 2026-11-23).
+_MAY_NAME = {"CompletionCheck.java", "CompletionBootWork.java", "Gate3Latch.java"}
 
 
 def _strip_java_comments(src: str) -> str:
