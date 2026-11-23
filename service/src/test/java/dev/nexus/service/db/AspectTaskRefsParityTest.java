@@ -90,7 +90,9 @@ class AspectTaskRefsParityTest {
     private static final Pattern ASPECTS_COLLECTION = Pattern.compile(
         "DOCUMENT_ASPECTS\\s*\\.\\s*COLLECTION\\s*\\.\\s*eq\\s*\\("
             + "|\\.set\\s*\\(\\s*DOCUMENT_ASPECTS\\s*\\.\\s*COLLECTION\\b"
-            + "|\\.where\\s*\\(\\s*scope\\s*\\.\\s*aspects\\s*\\(\\s*\\)");
+            + "|\\.where\\s*\\(\\s*scope\\s*\\.\\s*aspects\\s*\\(\\s*\\)"
+            // RDR-229 P3.5c: the id-keyed read, CollectionKey.eq over the name and id columns (the name column before gate 3, the id from it)
+            + "|\\bk\\s*\\.\\s*eq\\s*\\(\\s*tenant\\s*,\\s*DOCUMENT_ASPECTS\\s*\\.\\s*COLLECTION\\b");
     private static final Pattern ASPECTS_ROW_KEY = Pattern.compile(
         "DOCUMENT_ASPECTS\\s*\\.\\s*SOURCE_PATH\\s*\\.\\s*eq\\s*\\(");
     private static final Pattern REGISTRY_LOOP = Pattern.compile(

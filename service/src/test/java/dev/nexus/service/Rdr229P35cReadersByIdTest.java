@@ -119,8 +119,9 @@ class Rdr229P35cReadersByIdTest extends AtomicWriteTestBase {
         // gate 3 not holding: the name path, unchanged
         assertThat(byName.getAllTopics(TENANT, old)).hasSize(1);
         assertThat(byName.getAllTopics(TENANT, neu)).isEmpty();
-        assertThat(byName.getLastDiscoverDocCount(TENANT, old)).contains(7);
-        assertThat(byName.getLastDiscoverDocCount(TENANT, neu)).isEmpty();
+        // (getLastDiscoverDocCount is P3.5a W1's: it matches the collection by the registry row of the label, gate 3 or not)
+        assertThat(byName.getLastDiscoverDocCount(TENANT, old)).isEmpty();
+        assertThat(byName.getLastDiscoverDocCount(TENANT, neu)).contains(7);
         assertThat(byName.getProjectionCountsByCollection(TENANT)).extracting(m -> m.get("source_collection")).contains(old);
         assertThat(byName.topTopicsForCollection(TENANT, old, 5)).hasSize(1);
         assertThat(byName.topTopicsForCollection(TENANT, neu, 5)).isEmpty();

@@ -158,6 +158,14 @@ class Rdr229P35cUpsertConflictKeyTest extends AtomicWriteTestBase {
 
         /** True when a write the id unique refuses throws it; false when the path counts it as a failed row and returns. */
         abstract boolean refusalThrows();
+
+        /**
+         * True for a write that deletes the collection's own stale-named row of the same key before it inserts (the centroid upsert, P3.5a W1:
+         * the id owns the row, whatever name it bears), so the write replaces it and nothing is refused.
+         */
+        boolean replacesAStaleRow() {
+            return false;
+        }
     }
 
     private class Chunks extends Upsert {
@@ -240,6 +248,11 @@ class Rdr229P35cUpsertConflictKeyTest extends AtomicWriteTestBase {
     private class Centroids extends Upsert {
         @Override
         boolean refusalThrows() {
+            return true;
+        }
+
+        @Override
+        boolean replacesAStaleRow() {
             return true;
         }
 
@@ -327,6 +340,12 @@ class Rdr229P35cUpsertConflictKeyTest extends AtomicWriteTestBase {
         try {
             Throwable thrown = org.assertj.core.api.Assertions.catchThrowable(() -> u.write(Gate3.never(), b, key, "replacement"));
 
+            if (u.replacesAStaleRow()) {
+                assertThat(thrown).as("the write deletes the id's stale-named row first, so the id unique has nothing to refuse").isNull();
+                assertThat(u.rowsOfId(registryId(b), key)).as("one row for the id, the replacement under B's own name")
+                    .containsExactly(Map.entry(b, "replacement"));
+                return;
+            }
             if (u.refusalThrows()) {
                 assertThat(thrown).as("the id unique refuses the second row for the id").isNotNull();
                 Throwable root = thrown;
