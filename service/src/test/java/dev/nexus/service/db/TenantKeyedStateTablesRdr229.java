@@ -134,6 +134,16 @@ final class TenantKeyedStateTablesRdr229 {
             + "(CompletionBootWork::onReconcilerPassEnded), run when a pass ends; a callback, no data");
     }
 
+    /** RDR-229 P3.5c: one statement's selector and two process-wide counters of the id-keyed readers. */
+    static void fillP35c(Map<String, String> notKeyed) {
+        notKeyed.put("CollectionSelector.names", RESULT);   // the labels one statement's selector was built from, dropped with the call
+        notKeyed.put("CollectionSelector.ids", RESULT);   // their resolved ids, dropped with the call
+        notKeyed.put("DepartedWriterSpans.UNRESOLVED", "a process-wide count of manifest spans whose collection id could not be "
+            + "resolved from gate 3 (a number, no tenant, collection or row); read by tests and the status surface, never reset for a tenant");
+        notKeyed.put("AspectQueueDrain.SKIPPED_NO_LIVE_COLLECTION", "a process-wide count of retired-queue rows skipped because their "
+            + "stored name resolves to no live registry row (a number, no tenant or row); read by tests, never reset for a tenant");
+    }
+
     private static final String DATA_MOVE_REPORT_SESSION_COMPLETION = "the completion check's own read-only admin "
         + "connection (default_transaction_read_only on), kept between samples and replaced after a failure; it reads the "
         + "global registry and the catalog and carries no tenant setting";
