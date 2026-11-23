@@ -4,7 +4,7 @@
 
 One entry point over three selectors that already exist, plus the two rules they lack::
 
-    pytest $(scripts/select_affected_tests.py --base origin/develop)
+    pytest -n auto $(scripts/select_affected_tests.py --base origin/develop)
     scripts/select_affected_tests.py --range <before>..<after> --explain
     git diff --name-only A B | scripts/select_affected_tests.py --files-from -
 
