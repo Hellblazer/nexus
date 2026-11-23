@@ -3271,7 +3271,10 @@ public final class TaxonomyRepository {
     @SuppressWarnings("unchecked")
     public List<Long> persistDiscoveredTopics(String tenant, String collection,
                                                List<Map<String, Object>> specs) {
-        if (specs == null || specs.isEmpty()) return List.of();
+        if (specs == null || specs.isEmpty()) {
+            ExpectedCollectionIds.nothingToWrite(collection);
+            return List.of();
+        }
         return tenantScope.withTenant(tenant, ctx -> {
             // nexus-n2ls1: serialize per-collection BEFORE the guard — the guard
             // alone is a TOCTOU race under concurrent discovery (both count 0,

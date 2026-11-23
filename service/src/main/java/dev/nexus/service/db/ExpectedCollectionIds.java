@@ -101,7 +101,7 @@ public final class ExpectedCollectionIds {
      * Records that a write route had nothing to write under {@code label} (an empty batch, a document with no rows), so no
      * transaction read its id and none needed to: there is nothing for the id to protect. The one other way an id is consumed.
      */
-    static void nothingToWrite(String label) {
+    public static void nothingToWrite(String label) {
         consumed(label);
     }
 
