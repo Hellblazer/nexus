@@ -80,12 +80,12 @@ catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/Collectio
 catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	159	update	jooq	-	superseded_by_id	yes		verb	apply
 catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	172	update	jooq	superseded_by	superseded_by_id	yes		verb	apply
 catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionRename.java	183	insert	jooq	superseded_by	superseded_by_id	yes		unproven	writeSuccessor
-catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionTombstones.java	232	update	jooq	superseded_by	superseded_by_id	yes		unproven	casSupersede
-catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionTombstones.java	267	update	jooq	superseded_by	superseded_by_id	yes		unproven	stampTombstone
-catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionTombstones.java	295	update	jooq	-	superseded_by_id	yes		unproven	repointTombstonesNaming
-catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionTombstones.java	324	update	jooq	superseded_by	superseded_by_id	yes		require	repointTombstones
-catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionTombstones.java	373	update	jooq	-	superseded_by_id	yes		unproven	deleteRegistryRows
-catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionTombstones.java	395	update	jooq	-	superseded_by_id	yes		verb	deleteRegistryRowById
+catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionTombstones.java	262	update	jooq	superseded_by	superseded_by_id	yes		unproven	casSupersede
+catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionTombstones.java	297	update	jooq	superseded_by	superseded_by_id	yes		unproven	stampTombstone
+catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionTombstones.java	325	update	jooq	-	superseded_by_id	yes		unproven	repointTombstonesNaming
+catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionTombstones.java	354	update	jooq	superseded_by	superseded_by_id	yes		require	repointTombstones
+catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionTombstones.java	403	update	jooq	-	superseded_by_id	yes		unproven	deleteRegistryRows
+catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionTombstones.java	425	update	jooq	-	superseded_by_id	yes		verb	deleteRegistryRowById
 catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/TenantImportLoad.java	349	insert	by-name	superseded_by	superseded_by_id	yes	TenantImportLoad by-name INSERT ... SELECT over TenantExport.TABLES	unproven	
 catalog	catalog_document_chunks	nexus.quarantine_restore_chunks [vectors-083-restore-by-origin-id.xml:1185]	879	insert	sql_function	collection	collection_id	yes		sql	
 catalog	catalog_document_chunks	rdr229-stamp-catalog_document_chunks [vectors-070-collection-id-stamp-moves.xml:288]	285	update	data_move	-	collection_id	yes	sets collection_id	move	
