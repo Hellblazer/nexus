@@ -224,6 +224,42 @@ class Rdr229P35cCatalogReadersIntegrationTest extends AtomicWriteTestBase {
         assertThat(gated.resolveSpan(TENANT, renamed, chash, true)).as("exclude: a miss").isNull();
     }
 
+    // ---- under exclude, the by-address reads follow the id, not the chunk's stored name (invariant census) ----------
+
+    @Test
+    void underExclude_aStaleChunkNameAfterAOneRowRename_stillServesTheOpenChunkAndExcludesTheSensitiveOne() throws Exception {
+        latched.set(false);
+        Fx open = fixture("exo");
+        Fx other = fixture("exother");
+        String sensDoc = "aw.exs." + seq.incrementAndGet();
+        gated.upsertDocument(TENANT, Map.of("tumbler", sensDoc, "title", "sensitive doc", "content_type", "code", "corpus", "code",
+            "physical_collection", open.collection(), "chunk_count", 0, "sensitive", true));
+        String chOpen = ch("p35c exclude open " + seq.incrementAndGet());
+        String chSens = ch("p35c exclude sensitive " + seq.incrementAndGet());
+        gatedSvc.writeManyCombined(TENANT, open.collection(),
+            List.of(chunk(chOpen, "open " + chOpen), chunk(chSens, "secret " + chSens)),
+            List.of(doc(open.docId(), List.of(row(0, chOpen))), doc(sensDoc, List.of(row(0, chSens)))), null, false, true);
+        String renamed = "code__awexo" + "new" + seq.incrementAndGet() + "__minilm-l6-v2-384__v1";
+        renameRegistryRow(open.collection(), renamed);
+        // The chunk rows' own name drifts from the manifest's (both stale after a one-row rename; here they also disagree), the id stays:
+        // a read that matches the chunk to its owner by stored name finds no owner and drops the open chunk from an exclude read.
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.dropCatalogChunksFk(su);
+            int n = DSL.using(su, SQLDialect.POSTGRES).update(CHUNKS).set(CHUNKS.COLLECTION, other.collection())
+                .where(CHUNKS.TENANT_ID.eq(TENANT)).and(CHUNKS.COLLECTION.eq(open.collection())).execute();
+            assertThat(n).as("fixture: both chunk rows carry a name that is not their manifest's").isEqualTo(2);
+        }
+
+        latched.set(true);
+
+        assertThat(gated.resolveSpan(TENANT, renamed, chOpen, true)).as("span, exclude: the open chunk is served by id").isNotNull();
+        assertThat(gated.resolveChash(TENANT, chOpen, renamed, true)).as("chash, exclude: the open chunk is served by id").isNotNull();
+        assertThat(gated.resolveSpan(TENANT, renamed, chSens, true)).as("span, exclude: the sensitive chunk is excluded").isNull();
+        assertThat(gated.resolveChash(TENANT, chSens, renamed, true)).as("chash, exclude: the sensitive chunk is excluded").isNull();
+        assertThat(gated.resolveSpan(TENANT, renamed, chSens, false).get("sensitive")).as("and without exclude it reads sensitive").isEqualTo(true);
+    }
+
     // ---- by-title lookups show the registry's label (review F2) ------------------------------------------------------
 
     @Test
