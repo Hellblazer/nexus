@@ -64,6 +64,19 @@ class CollectionDeleteFenceTest {
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
         }
+        // the in-place rename test renames one registry row, which the name-keyed foreign keys (chunks, documents, ...) refuse while a row
+        // still names the old label; after P4.1 they are gone. This class's container is its own, so the keys are dropped here, as
+        // HeavyRoutesRenameGapTest.prepared does on its throwaway database. The primary key stays (nothing here needs it gone).
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            for (var key : CATALOG_COLLECTIONS.getKeys()) {
+                if (!key.getFields().contains(CATALOG_COLLECTIONS.NAME)) continue;
+                for (var fk : key.getReferences()) {
+                    ctx.alterTable(fk.getTable()).dropConstraintIfExists(fk.getName()).execute();
+                }
+            }
+        }
         var cfg = new HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());
         cfg.setUsername(SVC_ROLE);
