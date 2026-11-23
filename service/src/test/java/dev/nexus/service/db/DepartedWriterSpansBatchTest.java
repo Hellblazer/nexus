@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import dev.nexus.service.datamove.Gate3;
 import dev.nexus.service.db.CollectionIds;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
@@ -186,7 +187,7 @@ class DepartedWriterSpansBatchTest {
 
         int cleared = tenantScope.withTenant(TENANT, ctx ->
             DepartedWriterSpans.clear(ctx.configuration().derive(new DefaultExecuteListenerProvider(statements)).dsl(),
-                TENANT, gone));
+                TENANT, gone, Gate3.never()));
 
         assertThat(cleared).as("chunk rows updated").isEqualTo(n);
         assertThat(statements.updatesOfChunks()).as("one UPDATE per batch of %d chashes", DepartedWriterSpans.BATCH)
@@ -215,7 +216,7 @@ class DepartedWriterSpansBatchTest {
 
         int cleared = tenantScope.withTenant(TENANT, ctx ->
             DepartedWriterSpans.clear(ctx.configuration().derive(new DefaultExecuteListenerProvider(statements)).dsl(),
-                TENANT, gone));
+                TENANT, gone, Gate3.never()));
 
         assertThat(cleared).isEqualTo(chashes);
         assertThat(statements.updatesOfChunks()).as("1200 tuples do not fit one statement").isEqualTo(2);
@@ -237,7 +238,7 @@ class DepartedWriterSpansBatchTest {
         assertThatThrownBy(() -> {
             try (Connection conn = svcDs.getConnection()) {
                 assertThat(conn.getAutoCommit()).isTrue();
-                DepartedWriterSpans.clear(DSL.using(conn, SQLDialect.POSTGRES), TENANT, gone);
+                DepartedWriterSpans.clear(DSL.using(conn, SQLDialect.POSTGRES), TENANT, gone, Gate3.never());
             }
         }).isInstanceOf(IllegalStateException.class).hasMessageContaining("open transaction");
 
@@ -295,7 +296,7 @@ class DepartedWriterSpansBatchTest {
 
         int cleared = tenantScope.withTenant(TENANT, ctx ->
             DepartedWriterSpans.clearBeforeTrashPurge(
-                ctx.configuration().derive(new DefaultExecuteListenerProvider(statements)).dsl(), TENANT, threshold));
+                ctx.configuration().derive(new DefaultExecuteListenerProvider(statements)).dsl(), TENANT, threshold, Gate3.never()));
 
         assertThat(cleared).isEqualTo(n);
         assertThat(statements.updatesOfChunks()).as("one UPDATE per batch of %d chashes", DepartedWriterSpans.BATCH)
@@ -347,7 +348,7 @@ class DepartedWriterSpansBatchTest {
 
         int cleared = tenantScope.withTenant(TENANT, ctx ->
             DepartedWriterSpans.clearBeforeTrashPurge(
-                ctx.configuration().derive(new DefaultExecuteListenerProvider(statements)).dsl(), TENANT, threshold));
+                ctx.configuration().derive(new DefaultExecuteListenerProvider(statements)).dsl(), TENANT, threshold, Gate3.never()));
 
         assertThat(cleared).as("chunk rows updated in both collections").isEqualTo(6);
         assertThat(statements.updatesOfChunks()).as("one UPDATE per collection").isEqualTo(2);
