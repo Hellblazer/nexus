@@ -7732,7 +7732,6 @@ FROM scope s
     private static List<String> siblingNames(DSLContext ctx, String tenant, String originCollection, Gate3 gate3) {
         final boolean byId = gate3.holds();   // RDR-229 P3.5c: read once; from gate 3 the registry row joins its chunk rows by id
         String reaperName = dev.nexus.service.db.QuarantineOrigin.PREFIX + originCollection;
-        Field<String> originTag = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "origin_collection");
         List<String> found =
             ctx.select(CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS)
                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
@@ -7742,7 +7741,8 @@ FROM scope s
                           .where(CHUNKS.TENANT_ID.eq(CATALOG_COLLECTIONS.TENANT_ID)
                               .and(byId ? CHUNKS.COLLECTION_ID.eq(CATALOG_COLLECTIONS.COLLECTION_ID)
                                         : CHUNKS.COLLECTION.eq(CATALOG_COLLECTIONS.NAME))
-                              .and(originTag.eq(originCollection)))))))
+                              // the origin by its id from the latch, the label tag before it (QuarantineOrigin's one definition)
+                              .and(dev.nexus.service.db.QuarantineOrigin.taggedWith(byId, tenant, originCollection)))))))
                .fetch(CATALOG_COLLECTIONS.NAME);
         var ordered = new ArrayList<String>(found.size());
         if (found.contains(reaperName)) ordered.add(reaperName);
