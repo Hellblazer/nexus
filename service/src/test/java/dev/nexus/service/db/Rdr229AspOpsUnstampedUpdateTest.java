@@ -317,7 +317,7 @@ class Rdr229AspOpsUnstampedUpdateTest {
     }
 
     @Test
-    void reembedReenterAndMarkRevived_stampAnUnstampedRow() throws Exception {
+    void reembedReenterAndTheRevivedMark_stampAnUnstampedRow() throws Exception {
         String src = "docs__aspopsu-esrc__bge-base-en-v15-768__v1";
         String tgt = "docs__aspopsu-etgt__minilm-l6-v2-384__v1";
         var repo = new ReembedJobRepository(scope);
@@ -327,10 +327,10 @@ class Rdr229AspOpsUnstampedUpdateTest {
             ReembedJobRepository.Transition.disposition("kept_tombstoned"));
 
         unstamp(id);
-        assertThat(repo.markRevived(T, src, tgt)).isPresent();
-        assertStamped(id, "markRevived", src, tgt);
+        assertThat(repo.startMarking(T, tgt, src, null, false, false, true).revived()).isPresent();   // the way back marks the earlier job
+        assertStamped(id, "markRevivedIn", src, tgt);
 
-        // markRevived took the disposition; put kept_tombstoned back (the repository's own transition, from done)
+        // the mark took the disposition; put kept_tombstoned back (the repository's own transition, from done)
         // to reach reenter from a done job.
         var again = unstampedJob("docs__aspopsu-e2src__bge-base-en-v15-768__v1", "docs__aspopsu-e2tgt__minilm-l6-v2-384__v1");
         repo.applyTransition(T, again.jobId(), ReembedJobRepository.PLANNED, null, ReembedJobRepository.DONE,

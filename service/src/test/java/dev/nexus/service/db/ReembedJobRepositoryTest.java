@@ -601,60 +601,73 @@ class ReembedJobRepositoryTest {
     }
 
     // ── revived ──────────────────────────────────────────────────────────────
+    // The mark is written by the way-back start, in its own transaction: {@code startMarking(t, earlierTarget, earlierSource, ..., true)} marks
+    // the earlier job that went earlierSource -> earlierTarget and starts the job that goes back.
+
+    /** The way back of an earlier {@code earlierSource -> earlierTarget} job, with the mark: the job it marked, if any. */
+    private Optional<Job> wayBackMarking(String t, String earlierSource, String earlierTarget) {
+        return repo.startMarking(t, earlierTarget, earlierSource, null, false, false, true).revived();
+    }
 
     @Test
-    void markRevived_marksTheMostRecentFinishedJobTheOtherWay() {
+    void startMarking_marksTheMostRecentFinishedJobTheOtherWay() {
         String t = tenant();
         // an earlier job went SRC -> TGT and finished kept_by_flag; a later one goes TGT -> SRC
         Job earlier = repo.start(t, SRC, TGT, null, true, false);
         repo.applyTransition(t, earlier.jobId(), PLANNED, null, DONE, Transition.disposition("kept_by_flag"))
             .orElseThrow();
 
-        Optional<Job> revived = repo.markRevived(t, SRC, TGT);
+        Optional<Job> revived = wayBackMarking(t, SRC, TGT);
         assertThat(revived).isPresent();
         assertThat(revived.get().jobId()).isEqualTo(earlier.jobId());
         assertThat(revived.get().disposition()).isEqualTo("revived");
         assertThat(revived.get().state()).as("state is left as it stands").isEqualTo(DONE);
 
-        assertThat(repo.markRevived(t, TGT, SRC)).as("no job went the other way").isEmpty();
-        Job live = repo.start(t, "docs__owner__x__v1", TGT, null, false, false);
-        assertThat(repo.markRevived(t, "docs__owner__x__v1", TGT))
-            .as("a job still in a lock state is not a finished one").isEmpty();
-        assertThat(repo.get(t, live.jobId()).orElseThrow().disposition()).isNull();
+        String other = tenant();   // a tenant where no job ever went the other way
+        assertThat(wayBackMarking(other, TGT, SRC)).as("no job went the other way").isEmpty();
+        Job live = repo.start(other, "docs__owner__x__v1", TGT, null, false, false);
+        assertThatThrownBy(() -> wayBackMarking(other, "docs__owner__x__v1", TGT))
+            .as("a job still in a lock state is not a finished one: its way back is refused before any mark")
+            .isInstanceOf(JobLockHeld.class);
+        assertThat(repo.get(other, live.jobId()).orElseThrow().disposition()).isNull();
     }
 
     @Test
-    void markRevived_isIdempotent_aJobAlreadyRevivedIsNotMarkedAgainNorTouched() {
+    void startMarking_isIdempotent_aJobAlreadyRevivedIsNotMarkedAgainNorTouched() {
         String t = tenant();
         Job earlier = repo.start(t, SRC, TGT, null, true, false);
         repo.applyTransition(t, earlier.jobId(), PLANNED, null, DONE, Transition.disposition("kept_by_flag"))
             .orElseThrow();
-        Job first = repo.markRevived(t, SRC, TGT).orElseThrow();
+        repo.startMarking(t, TGT, SRC, null, false, false, true).revived().orElseThrow();
+        Job first = repo.get(t, earlier.jobId()).orElseThrow();
+        // the way back finishes, so the same way can be started again
+        Job back = repo.listByStates(t, List.of(PLANNED)).get(0);
+        repo.applyTransition(t, back.jobId(), PLANNED, null, ABORTED, Transition.NONE).orElseThrow();
 
-        assertThat(repo.markRevived(t, SRC, TGT)).as("already revived: nothing to mark").isEmpty();
+        assertThat(wayBackMarking(t, SRC, TGT)).as("already revived: nothing to mark").isEmpty();
         Job after = repo.get(t, earlier.jobId()).orElseThrow();
         assertThat(after.disposition()).isEqualTo("revived");
-        assertThat(after.updatedAt()).as("the second call wrote nothing").isEqualTo(first.updatedAt());
+        assertThat(after.updatedAt()).as("the second start wrote nothing to it").isEqualTo(first.updatedAt());
     }
 
     @Test
-    void markRevived_marksAnAbortedJob_andLeavesItAborted() {
+    void startMarking_marksAnAbortedJob_andLeavesItAborted() {
         String t = tenant();
         Job earlier = repo.start(t, SRC, TGT, null, false, false);
         repo.applyTransition(t, earlier.jobId(), PLANNED, null, ABORTED, Transition.NONE).orElseThrow();
 
-        Job revived = repo.markRevived(t, SRC, TGT).orElseThrow();
+        Job revived = wayBackMarking(t, SRC, TGT).orElseThrow();
         assertThat(revived.jobId()).isEqualTo(earlier.jobId());
         assertThat(revived.disposition()).isEqualTo("revived");
         assertThat(revived.state()).isEqualTo(ABORTED);
     }
 
     @Test
-    void markRevived_doesNotMarkAFailedJob_itHoldsTheLockSoTheStartRefusesTheReviveFirst() {
+    void startMarking_doesNotMarkAFailedJob_itHoldsTheLockSoTheStartRefusesTheReviveFirst() {
         String t = tenant();
         Job failed = inState(t, FAILED);
 
-        assertThat(repo.markRevived(t, SRC, TGT)).isEmpty();
+        assertThatThrownBy(() -> wayBackMarking(t, SRC, TGT)).isInstanceOf(JobLockHeld.class);
         Job after = repo.get(t, failed.jobId()).orElseThrow();
         assertThat(after.disposition()).isNull();
         assertThat(after.state()).isEqualTo(FAILED);
@@ -663,11 +676,11 @@ class ReembedJobRepositoryTest {
     }
 
     @Test
-    void markRevived_doesNotMarkADoneWithSkipsJob_itNeverSupersededItsSource() {
+    void startMarking_doesNotMarkADoneWithSkipsJob_itNeverSupersededItsSource() {
         String t = tenant();
         Job job = apply(t, apply(t, repo.start(t, SRC, TGT, null, false, false), RUNNING), DONE_WITH_SKIPS);
 
-        assertThat(repo.markRevived(t, SRC, TGT)).isEmpty();
+        assertThat(wayBackMarking(t, SRC, TGT)).isEmpty();
         assertThat(repo.get(t, job.jobId()).orElseThrow().disposition()).isNull();
     }
 
