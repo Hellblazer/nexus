@@ -291,7 +291,7 @@ public final class PciReconcilePlanner {
     /**
      * What the id half of a pass needs beyond the name half (RDR-229 P3.4).
      *
-     * @param gate2   gate 2 of the completion check holds: both swaps and every validation move are complete, so a chunk-family
+     * @param gate2   gate 2 of the completion check holds: both swaps, every validation move and the quarantine-origin backfill are complete, so a chunk-family
      *                {@code on_complete} cannot end an id build. Until it does no id build is planned.
      * @param reads   the database reads of the id half ({@link IdReads}); asked only once gate 2 holds
      * @param gate3   gate 3 of the completion check holds: the name family retires. No name index is built, and each VALID name index whose
