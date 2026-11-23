@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-p2m1x.21 (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included): REVOKE USAGE ON SCHEMA ${schema} FROM ${role}.
+    The undo of db.changelog-test-schema-usage.xml: a role that holds a privilege on a schema cannot be dropped until it is revoked.
+    jOOQ's revoke(..).on(..) resolves its target to a Table, so it can never name a schema. Run through PgContainerHelper#revokeSchemaUsage,
+    which validates both names; runAlways, bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="schema-usage-revoke" author="nexus-p2m1x.21" runAlways="true">
+        <sql>REVOKE USAGE ON SCHEMA ${schema} FROM ${role}</sql>
+    </changeSet>
+</databaseChangeLog>
