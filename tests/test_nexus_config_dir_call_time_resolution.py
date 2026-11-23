@@ -53,6 +53,23 @@ from unittest.mock import patch
 import pytest
 
 
+#: Each reloaded module's namespace as it was before the poisoned reload. A reload re-runs the module in place, so its
+#: classes are new objects afterwards; a reload in ``finally`` would leave a third set, and a test elsewhere in the same
+#: worker that imported the original class (``tests/migration/test_state.py``'s ``MigrationState``) then compares
+#: unequal to what the module now builds. Putting the saved namespace back restores the original objects.
+_SAVED_NAMESPACES: dict[str, dict[str, object]] = {}
+
+
+def _restore_namespace(module: ModuleType) -> None:
+    """Put *module*'s namespace back as it was before ``_poisoned_then_reloaded`` reloaded it."""
+    saved = _SAVED_NAMESPACES.pop(module.__name__, None)
+    if saved is None:
+        return
+    namespace = vars(module)
+    namespace.clear()
+    namespace.update(saved)
+
+
 @contextmanager
 def _poisoned_then_reloaded(module: ModuleType, poisoned: Path) -> Iterator[None]:
     """Replace ``nexus.config.nexus_config_dir`` with a lambda returning
@@ -62,6 +79,7 @@ def _poisoned_then_reloaded(module: ModuleType, poisoned: Path) -> Iterator[None
     module level, its own namespace stays bound to the lambda after this
     context manager exits -- exactly the ``gc_purge_marker.py`` bug class.
     """
+    _SAVED_NAMESPACES.setdefault(module.__name__, dict(vars(module)))
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("nexus.config.nexus_config_dir", lambda: poisoned)
         importlib.reload(module)
@@ -91,7 +109,7 @@ def test_aspect_worker_lock_path_resolves_at_call_time_not_import_time(
             f"(still pinned to poisoned dir {poisoned}?)"
         )
     finally:
-        importlib.reload(aw)
+        _restore_namespace(aw)
 
 
 def test_daemon_restart_stale_config_dir_resolves_at_call_time_not_import_time(
@@ -133,7 +151,7 @@ def test_daemon_restart_stale_config_dir_resolves_at_call_time_not_import_time(
         assert result.exit_code == 0, result.output
         converge.assert_called_once_with(live, dry_run=False)
     finally:
-        importlib.reload(daemon_mod)
+        _restore_namespace(daemon_mod)
 
 
 def test_migration_state_path_resolves_at_call_time_not_import_time(
@@ -157,7 +175,7 @@ def test_migration_state_path_resolves_at_call_time_not_import_time(
             f"(still pinned to poisoned dir {poisoned}?)"
         )
     finally:
-        importlib.reload(m)
+        _restore_namespace(m)
 
 
 @pytest.mark.t2_tenant
@@ -193,4 +211,4 @@ def test_health_sessions_config_dir_resolves_at_call_time_not_import_time(
             health_mod._collect_health_data()
         scan.assert_called_once_with(live)
     finally:
-        importlib.reload(health_mod)
+        _restore_namespace(health_mod)
