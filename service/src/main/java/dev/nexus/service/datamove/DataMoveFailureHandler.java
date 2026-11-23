@@ -38,7 +38,7 @@ public final class DataMoveFailureHandler implements FailureHandler {
     private final String applicationName;
     private final Clock clock;
     private final Duration recorderWait;
-    /** Per move, the run of {@code on_complete} bounds this process has seen; in memory (the row keeps no stage). */
+    /** Per move, the run of {@code on_complete} bounds and its latch, as this process has seen them (the row keeps no stage). */
     private final MoveRetryPolicy.OnCompleteRuns runs = new MoveRetryPolicy.OnCompleteRuns();
 
     public DataMoveFailureHandler(AdminConnection admin, String applicationName, Clock clock) {
@@ -115,17 +115,25 @@ public final class DataMoveFailureHandler implements FailureHandler {
         }
         int count = retries.getAsInt();
         var run = runs.record(f.move().label(), count, MoveRetryPolicy.isOnCompleteBound(f.stage(), verdict.sqlstate()));
-        boolean indexBuilds = run.run() >= MoveRetryPolicy.NEEDS_OPERATOR_AT_ON_COMPLETE && ChunkFamily.touches(f.move());
-        if (MoveRetryPolicy.entersNeedsOperator(count - 1, run.before(), count, run.run())) {
-            // the count is bumped by one UPDATE and the run by one thread per move, so exactly one failure enters the state:
-            // the page fires once per transition
-            MoveEvents.needsOperator(f.move().label(), MoveRetryPolicy.step(f.stage()), verdict.sqlstate(),
-                MoveRetryPolicy.boundMs(f.stage(), f.move(), verdict.sqlstate()), count, indexBuilds,
-                indexBuilds ? "each retry ends in-flight index builds (PCI, leaf, id-unique)"
-                    : "the move has failed transiently " + count + " times in a row and keeps retrying");
-        }
-        return Disposition.blocked(MoveRetryPolicy.blockedReason(count, run.run(), indexBuilds, now, reason),
-            verdict.sqlstate(), count);
+        boolean needs = MoveRetryPolicy.needsOperator(count, run.latched());
+        // exactly one failure enters the state (the count is bumped by one UPDATE and the run by one thread per move); the
+        // worker logs the page on it, through the announce set it shares with the status sampler
+        boolean entered = MoveRetryPolicy.entersNeedsOperator(count - 1, run.latchedBefore(), count, run.latched());
+        // ended by the finisher, at the point it does (terminateOrThrow), not guessed from the stage or the run
+        var page = new PageInfo(needs, entered, MoveRetryPolicy.step(f.stage()),
+            MoveRetryPolicy.boundMs(f.stage(), f.move(), verdict.sqlstate()), f.indexBuildsEnded());
+        return Disposition.blocked(MoveRetryPolicy.blockedReason(count, run.latched(), page.terminatesIndexBuilds(), now,
+            reason), verdict.sqlstate(), count, page);
+    }
+
+    @Override
+    public void forget(String label) {
+        runs.forget(label);
+    }
+
+    @Override
+    public void retainOnly(java.util.Collection<String> openLabels) {
+        runs.retainOnly(openLabels);
     }
 
     /** Runs {@code write} on the pass's admin connection, or on a short one of its own when the pass has none. */

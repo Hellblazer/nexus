@@ -84,7 +84,7 @@ public interface FailureHandler {
      * after this failure, or {@link #NOT_COUNTED} when the handler counted none. Both are for the engine log
      * ({@link MoveEvents}) and change nothing the worker does.
      */
-    record Disposition(Kind kind, String reason, String sqlstate, int retries) {
+    record Disposition(Kind kind, String reason, String sqlstate, int retries, PageInfo page) {
         /** A reason never carries a credential, whoever built it (a handler, a test, a finisher). */
         public Disposition {
             reason = SecretMask.mask(reason);
@@ -94,20 +94,40 @@ public interface FailureHandler {
         public static final int NOT_COUNTED = -1;
 
         public static Disposition blocked(String reason) {
-            return new Disposition(Kind.BLOCKED, reason, null, NOT_COUNTED);
+            return new Disposition(Kind.BLOCKED, reason, null, NOT_COUNTED, null);
         }
 
         public static Disposition blocked(String reason, String sqlstate, int retries) {
-            return new Disposition(Kind.BLOCKED, reason, sqlstate, retries);
+            return new Disposition(Kind.BLOCKED, reason, sqlstate, retries, null);
+        }
+
+        /** A transient decision that also says what it means for the needs-an-operator state ({@link PageInfo}). */
+        public static Disposition blocked(String reason, String sqlstate, int retries, PageInfo page) {
+            return new Disposition(Kind.BLOCKED, reason, sqlstate, retries, page);
         }
 
         public static Disposition failed(String reason) {
-            return new Disposition(Kind.FAILED, reason, null, NOT_COUNTED);
+            return new Disposition(Kind.FAILED, reason, null, NOT_COUNTED, null);
         }
 
         public static Disposition failed(String reason, String sqlstate) {
-            return new Disposition(Kind.FAILED, reason, sqlstate, NOT_COUNTED);
+            return new Disposition(Kind.FAILED, reason, sqlstate, NOT_COUNTED, null);
         }
+    }
+
+    /**
+     * What a counted transient failure means for the needs-an-operator state (RDR-246, {@link MoveRetryPolicy#needsOperator}).
+     *
+     * @param needsOperator        the move is in the state after this failure
+     * @param entered              this failure is the one that put it there; the worker logs the page on it, once
+     * @param step                 the stage the failure arose in ({@code on_complete}), as {@link MoveRetryPolicy#step} names it
+     * @param boundMs              the bound the step missed, or {@link #NO_BOUND}: only a timeout (55P03, 57014) has one
+     * @param terminatesIndexBuilds whether the failed attempt ended the in-flight index builds
+     *                             ({@link Failure#indexBuildsEnded}, set by the finisher at the point it does)
+     */
+    record PageInfo(boolean needsOperator, boolean entered, String step, int boundMs, boolean terminatesIndexBuilds) {
+        /** {@code boundMs} of a failure that missed no bound. */
+        public static final int NO_BOUND = -1;
     }
 
     /**
@@ -127,18 +147,35 @@ public interface FailureHandler {
      * @param detail        the worker's own account of the failure, one line
      * @param admin         the admin connection of the pass, to read {@code migration_error} with; null when the pass
      *                      could not open one
+     * @param indexBuildsEnded whether the attempt that failed had already ended the in-flight index builds
+     *                      ({@code PciBuilders.terminateOrThrow}): only the finisher's {@code on_complete} transaction does, and
+     *                      only after its completion UPDATE and re-check, so a failure before that point reports false
      */
     record Failure(DataMove move, Stage stage, String runLabel, String drivingSchema, String drivingTable,
-                   String tenant, long errorMark, SQLException raised, String detail, DSLContext admin) {
+                   String tenant, long errorMark, SQLException raised, String detail, DSLContext admin,
+                   boolean indexBuildsEnded) {
+        /** A failure that ended no index build (every stage but a late {@code on_complete}). */
+        public Failure(DataMove move, Stage stage, String runLabel, String drivingSchema, String drivingTable,
+                String tenant, long errorMark, SQLException raised, String detail, DSLContext admin) {
+            this(move, stage, runLabel, drivingSchema, drivingTable, tenant, errorMark, raised, detail, admin, false);
+        }
+
         /** This failure with the engine's credentials removed from its text; the same instance when it holds none. */
         Failure masked() {
             String clean = SecretMask.mask(detail);
             return Objects.equals(clean, detail) ? this
-                : new Failure(move, stage, runLabel, drivingSchema, drivingTable, tenant, errorMark, raised, clean, admin);
+                : new Failure(move, stage, runLabel, drivingSchema, drivingTable, tenant, errorMark, raised, clean, admin,
+                    indexBuildsEnded);
         }
     }
 
     Disposition onFailure(Failure failure);
+
+    /** The move is no longer open (completed, superseded, gone): drop anything kept about it. Default: nothing is kept. */
+    default void forget(String label) { }
+
+    /** The labels of the moves open now: drop what is kept for every other. Default: nothing is kept. */
+    default void retainOnly(java.util.Collection<String> openLabels) { }
 
     /** Reports every failure as {@code blocked:} with the error text; nothing is made permanent. */
     FailureHandler BLOCK_ALWAYS = failure -> failure.stage() == Stage.CALL

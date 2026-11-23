@@ -245,6 +245,8 @@ final class VerifyingFinisher implements MoveFinisher {
         int statementMs = move.statementTimeoutMs();
         int lockMs = lockTimeoutMs(statementMs);
         boolean completed;
+        // set once terminateOrThrow has run in this transaction: a failure after it reports that the builds are already ended
+        boolean[] buildsEnded = {false};
         try {
             completed = admin.transactionResult(cfg -> {
                 DSLContext tx = cfg.dsl();
@@ -275,6 +277,7 @@ final class VerifyingFinisher implements MoveFinisher {
                         try {
                             tx.transaction(nested -> PciBuilders.terminateOrThrow(nested.dsl(),
                                 "reason=data_move_on_complete move=" + move.label(), log));
+                            buildsEnded[0] = true;
                         } catch (DataAccessException e) {
                             log.error("event=pci_builders_terminate_failed cause=\"{}\"", FailureHandler.oneLine(e.toString()));
                         }
@@ -287,10 +290,11 @@ final class VerifyingFinisher implements MoveFinisher {
             return Result.report(failure(admin, move, e.stage, null, e.raised, e.detail));
         } catch (DataAccessException e) {
             SQLException raised = e.getCause(SQLException.class);
-            return Result.report(failure(admin, move, FailureHandler.Stage.ON_COMPLETE, null, raised,
+            return Result.report(new FailureHandler.Failure(move, FailureHandler.Stage.ON_COMPLETE, null,
+                move.drivingSchema(), move.drivingTable(), null, 0, raised,
                 "on_complete of " + move.label() + " did not complete: "
                     + FailureHandler.oneLine(raised != null ? "sqlstate=" + raised.getSQLState() + " " + raised.getMessage()
-                        : e.getMessage())));
+                        : e.getMessage()), admin, buildsEnded[0]));
         }
         if (!completed) {
             Optional<DataMove> now = DataMoveRegistry.reload(admin, move.label());
