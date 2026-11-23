@@ -80,8 +80,9 @@ class PciIdRingIntegrationTest extends PciIdIndexSupport {
     }
 
     /**
-     * The production binding: {@code PciReconciler.create} hands the canary, its ring reader and the ring's admission one latch that follows the
-     * reconciler's own retire gate (latched gate 3 and the id readers present), read at each call. Deleting the binding leaves it false for ever.
+     * The production binding: {@code PciReconciler.create} hands the canary and (through {@code Main}) the ring's admission one latch that follows the
+     * reconciler's own retire gate (latched gate 3 and the id readers present), read at each call. Deleting the binding leaves it false for ever. The
+     * ring reader is not on this latch: it reads by id on gate 3 itself (P3.5c), pinned by the test below.
      */
     @Test
     void theLatchCreateHandsOut_followsTheReconcilersOwnGate3AndReaders() throws Exception {
@@ -103,6 +104,41 @@ class PciIdRingIntegrationTest extends PciIdIndexSupport {
         assertThat(PciReconciler.create(svcDs, new AdminConnection(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS), NONCE,
             PciIndexSweep.create(svcDs, s), s, tenants -> 0, new PgVectorRepository(new TenantScope(svcDs), none, none),
             new TenantScope(svcDs)).canaryLatch()).as("each reconciler has its own").isNotSameAs(latch);
+    }
+
+    /**
+     * elsinore (P3.5c): the ring reader reads by id on gate 3 alone, whether or not the id index pass has built the leaf's id index, because the index
+     * only shapes the plan. Between gate 3 latching and the id index existing, a by-id read returns the very rows the by-name read does. A reader that
+     * required a valid id index would read nothing here and fail.
+     */
+    @Test
+    void gate3LatchedBeforeTheIdIndexIsBuilt_theByIdReadReturnsTheByNameRows() throws Exception {
+        String tenant = newTenant("noidx");
+        String coll = name("noidx");
+        collection(tenant, coll, 300);
+        var s = settings(16);
+        PciIndexSweep sweep = PciIndexSweep.create(svcDs, s);
+        TenantScope scope = new TenantScope(svcDs);
+        reconciler(s).reconcileOnce();                       // gate 2 off: the name index only
+        sweep.refresh();
+        assertThat(validNameIndexed(tenant)).containsExactly(coll);
+        assertThat(validIdIndexed(tenant)).as("the id index pass has not built this leaf's id index").isEmpty();
+
+        var ring = new PciQueryRing(scope, sweep, 16, 1, Duration.ofMillis(50));
+        ring.start();
+        try {
+            ring.admit(tenant, QueryVector.alone(M384, vector(), coll));
+            var byName = new PciQueryRingReader(scope);
+            await(() -> byName.load(tenant, coll).size() == 1, "the admitted vector, read by name");
+        } finally {
+            ring.stop();
+        }
+        var byName = new PciQueryRingReader(scope).load(tenant, coll);
+        var byId = new PciQueryRingReader(scope, () -> true).load(tenant, coll);   // gate 3 latched for reads
+        assertThat(byId).as("by id, with no id index anywhere").hasSize(byName.size());
+        assertThat(byId.get(0).model()).isEqualTo(byName.get(0).model());
+        assertThat(byId.get(0).addedAt()).isEqualTo(byName.get(0).addedAt());
+        assertThat(byId.get(0).vector()).containsExactly(byName.get(0).vector());
     }
 
     /**
