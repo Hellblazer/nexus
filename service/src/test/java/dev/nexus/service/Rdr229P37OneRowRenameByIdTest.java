@@ -137,9 +137,8 @@ class Rdr229P37OneRowRenameByIdTest {
 
         var r = engine.renameById(w.token(), w.idA(), target, Map.of());
 
-        assertThat(staged[0]).as("non-vacuity: the seam ran, and the label A has a new holder beside A2").hasSize(2);
-        long newHolder = engine.su(ctx -> Rdr229RenameChecks.registryId(ctx, w.tenant(), w.a()));
-        assertThat(newHolder).as("non-vacuity: the new A is a different row").isNotEqualTo(w.idA());
+        assertThat(staged[0]).as("non-vacuity: the seam ran: the first collection was renamed away and the label A has a new holder")
+            .hasSize(2).anyMatch(row -> row.startsWith(w.idA() + "|" + a2 + "|")).anyMatch(row -> row.contains("|" + w.a() + "|") && !row.startsWith(w.idA() + "|"));
         assertThat(r.status()).as("a request by id 1 for the label A, which id 1 no longer bears: " + r).isEqualTo(409);
         assertThat(r.reason()).as(r.toString()).isEqualTo("collection_id_mismatch");
         var body = MAPPER.readTree(r.body());
