@@ -4,9 +4,9 @@
 # (jooq constant, alias, helper ch/ct, literal, sql string). table ? is UNRESOLVED (named in the script's output). Writes are P3.1's.
 # The two upserts the RDR names are the on_conflict rows of PgVectorRepository (chunks) and TaxonomyCentroidRepository (taxonomy_centroids).
 file	line	table	name_column	op	via	note
-service/src/main/java/dev/nexus/service/datamove/CompletionCheck.java	1032	catalog_collections	superseded_by	expr	literal	-
-service/src/main/java/dev/nexus/service/datamove/CompletionCheck.java	1049	catalog_collections	superseded_by	expr	literal	-
-service/src/main/java/dev/nexus/service/datamove/CompletionCheck.java	1064	catalog_collections	superseded_by	expr	literal	-
+service/src/main/java/dev/nexus/service/datamove/CompletionCheck.java	1039	catalog_collections	superseded_by	expr	literal	-
+service/src/main/java/dev/nexus/service/datamove/CompletionCheck.java	1056	catalog_collections	superseded_by	expr	literal	-
+service/src/main/java/dev/nexus/service/datamove/CompletionCheck.java	1071	catalog_collections	superseded_by	expr	literal	-
 service/src/main/java/dev/nexus/service/db/AspectQueueDrain.java	323	?	collection	expr	literal	0 candidate tables in the statement
 service/src/main/java/dev/nexus/service/db/AspectQueueDrain.java	335	catalog_documents	physical_collection	expr	alias	-
 service/src/main/java/dev/nexus/service/db/AspectQueueDrain.java	346	catalog_documents	physical_collection	select	alias	-

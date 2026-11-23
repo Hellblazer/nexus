@@ -785,13 +785,20 @@ public final class CompletionCheck {
             Set<String> listed = p35b.get();
             return ctx.transactionResult(cfg -> {
                 DSLContext tx = cfg.dsl();
-                tx.select(DSL.function("set_config", String.class, DSL.val("statement_timeout"), DSL.val(Long.toString(READINESS_READ_TIMEOUT_MS)), DSL.val(true)))
-                    .fetch();
+                // PgSession.setLocal binds the matching network timeout with the statement bound (nexus-u9zkn)
+                PgSession.setLocal(tx, "statement_timeout", Long.toString(READINESS_READ_TIMEOUT_MS));
                 return renameState(tx, moves, listed);
             });
         } catch (RuntimeException e) {
             log.warn("event=rdr229_rename_readiness_unreadable cause=\"{}\"", e.toString());
             return RenameState.UNREADABLE;
+        } finally {
+            // the session outlives this read (CompletionBootWork keeps it between samples): its short read bound does not
+            try {
+                ctx.connection(c -> PgSession.restoreNetworkTimeout(c, 0));
+            } catch (DataAccessException e) {
+                // a connection that cannot be reached fails its next read on its own
+            }
         }
     }
 
