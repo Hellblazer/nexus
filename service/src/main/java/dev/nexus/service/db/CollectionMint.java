@@ -163,7 +163,9 @@ public final class CollectionMint {
             () -> ctx.fetchValue(DSL.function("nextval", Long.class, SEQUENCE)),
             id -> idTaken(ctx, id),
             label -> ctx.fetchExists(ctx.selectOne().from(CATALOG_COLLECTIONS)
-                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(label)))),
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(label))))
+                // linda 2026-11-23, addendum 8: a reserved label is taken, so the draw moves on to the next id
+                || LabelReserved.isReserved(ctx, tenant, label, null),
             colliding -> healSequence(ctx, tenant, colliding));
 
         // built afresh for each attempt: a jOOQ insert is mutable, and the ON CONFLICT arm must not leak into the plain one

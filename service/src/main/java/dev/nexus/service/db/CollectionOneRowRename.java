@@ -67,6 +67,8 @@ final class CollectionOneRowRename {
                 + " is not a live registered collection (it was retired or removed while this one ran); nothing was renamed");
         }
         long id = own.value1();
+        // linda 2026-11-23, addendum 8: a label a collection was renamed away from is reserved until P4.1, unless this very collection takes it back
+        LabelReserved.requireFree(ctx, tenant, newName, id);
         String contentType = newContentType != null ? newContentType : own.value2();
         // The owner a settled collection holds is not replaced by a client's slug: see ownerTheRenameMayChange.
         newOwnerId = ownerTheRenameMayChange(contentType, own.value3(), newOwnerId);

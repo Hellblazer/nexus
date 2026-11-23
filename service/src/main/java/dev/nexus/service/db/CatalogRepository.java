@@ -9940,6 +9940,9 @@ public final class CatalogRepository {
                 // row ends up on the tuple computed here: a live one another collection holds is refused naming both, in both
                 // index states, as it is for a new row. A no-op re-registration of a live row is not checked.
                 String postOwner = existingOwner != null && existingOwner.equals(tenant) ? nne(incomingOwner) : nne(existingOwner);
+                if (!"".equals(existingRow.value5())) {
+                    LabelReserved.requireFree(ctx, tenant, name);   // a revived tombstone makes the label live again
+                }
                 if (!"".equals(existingRow.value5()) || !contentType.equals(existingRow.value6()) || !postOwner.equals(nne(existingOwner))) {
                     CollectionMint.remember(tuple, name, contentType, postOwner, effectiveModel, nne(existingRow.value3()));
                     CollectionMint.refuseHeldTuple(ctx, tenant, name, contentType, postOwner, effectiveModel,
@@ -9965,6 +9968,8 @@ public final class CatalogRepository {
                 }
                 modelVersion = CollectionRegistration.requiredModelVersion(coll);
                 CollectionRegistration.requireNameAgreesWithState(name, requestedState != null ? requestedState : "live");
+                // linda 2026-11-23, addendum 8: a label a collection was renamed away from is reserved until P4.1 (LabelReserved).
+                LabelReserved.requireFree(ctx, tenant, name);
                 // The profile/model/dimension rule is shared with the minting registration (CollectionRegistration).
                 var newModel = CollectionRegistration.resolveNewRowModel(ctx, tenant, contentType, requestedModel, name);
                 effectiveModel     = newModel.model();
@@ -10652,6 +10657,9 @@ public final class CatalogRepository {
         // RDR-229 P3.1 (R7): the statement, its CAS conjunct and the successor-id resolution live in
         // CollectionTombstones.supersede; an unregistered target is refused there with UnregisteredCollectionException.
         int updated = tenantScope.withTenant(tenant, ctx -> {
+            if (supersededBy != null && !supersededBy.isEmpty()) {
+                LabelReserved.requireFree(ctx, tenant, supersededBy);   // linda 2026-11-23, addendum 8: the successor's label becomes live
+            }
             int n = CollectionTombstones.supersede(ctx, tenant, name, supersededBy, stampedAt);
             // catalog-051-2 (RDR-229): the retired row no longer holds its tuple, so a slug-owned successor whose documents
             // name that owner (a re-home moves them while the source stays live) can take it now. The same no-op write
