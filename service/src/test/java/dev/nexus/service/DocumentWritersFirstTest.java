@@ -145,10 +145,17 @@ class DocumentWritersFirstTest {
                 }
                 Resp r = writer.get(60, TimeUnit.SECONDS);
                 assertThat(r.status()).as("%s completes once released: %s", route.label(), r.body()).isEqualTo(200);
+                // The census line is added by the route boundary's filter AFTER the handler has sent its answer, so the client can have the
+                // answer a moment before the line exists (the lightest route, register, loses that race): wait for the line, then count.
+                long lineDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+                while (censusLines.stream().noneMatch(l -> l.startsWith(route.path() + " ")) && System.nanoTime() < lineDeadline) {
+                    Thread.sleep(10);
+                }
                 assertThat(censusLines.stream().filter(l -> l.startsWith(route.path() + " ")).mapToInt(l -> {
                     String examined = l.replaceAll(".*examined=(\\d+).*", "$1");
                     return Integer.parseInt(examined);
-                }).sum()).as("%s: the per-transaction census examined a write transaction (a positive count)", route.label()).isPositive();
+                }).sum()).as("%s: the per-transaction census examined a write transaction (a positive count); lines seen: %s", route.label(),
+                    censusLines).isPositive();
             }));
         }
         nodes.add(DynamicTest.dynamicTest("non-vacuity: the document routes", () ->
