@@ -55,9 +55,11 @@ final class CollectionSelectors {
     /**
      * @param where       where the fields travel
      * @param slots       the collection fields, in request order
-     * @param passesResolvedId the route's handler reads the id the boundary resolved ({@link CollectionSelectorFilter#RESOLVED_ID}),
-     *                    not only the label: the delete, which must remove the one row of an id when a label is held by several.
-     *                    Every route answers a retired row's id 409 {@code collection_superseded}, this one included
+     * @param passesResolvedId the route's handler reads the id the boundary resolved for its FIRST slot ({@link CollectionSelectorFilter#RESOLVED_ID}),
+     *                    not only the label: the retiring verbs, which read and lock the source by that id in their own transaction
+     *                    ({@link dev.nexus.service.db.CollectionRefusals#requireSourceById}), the delete also to remove the one row of
+     *                    an id when a label is held by several. Every route answers a retired row's id 409 {@code collection_superseded},
+     *                    these included
      * @param writes      the route writes under the collection it names, so a request by id must read that id in the write's own
      *                    transaction ({@link dev.nexus.service.db.ExpectedCollectionIds}); the filter reports a 2xx answer that did not
      */
@@ -101,8 +103,8 @@ final class CollectionSelectors {
         "/v1/taxonomy/assignments/cross-preview", "/v1/taxonomy/assignments/unassigned",
         "/v1/taxonomy/meta/last_discover_batch", "/v1/taxonomy/centroids/query");
 
-    private static final String VERB = "a retiring verb: it takes the row's lock itself (FOR UPDATE, behind the sweep gates), which is the "
-        + "retire's, not a writer's FOR KEY SHARE read";
+    private static final String VERB = "a retiring verb: it reads and locks its source row by the named id in its own transaction "
+        + "(CollectionRefusals.requireSourceById, FOR UPDATE, behind the sweep gates), which is the retire's lock, not a writer's FOR KEY SHARE read";
     private static final String HISTORY = "a history-table write (T1 852f4c0f): the id is stamped with an unlocked read and a row that "
         + "resolves to nothing is written with a NULL id, never refused";
     private static final String PIPELINE = "a pipeline-run write: it lands on the pdf_pipeline row it resolves by pipeline id or content hash "
@@ -166,6 +168,11 @@ final class CollectionSelectors {
         t.put(path, new Route(Where.BODY, List.of(slots), false, WRITES.contains(path)));
     }
 
+    /** A retiring verb that reads its source by the id the boundary resolved (supersede, rename); the delete is {@link #delete}. */
+    private static void retire(Map<String, Route> t, String path, Slot... slots) {
+        t.put(path, new Route(Where.BODY, List.of(slots), true, false));
+    }
+
     private static void either(Map<String, Route> t, String path, Slot... slots) {
         t.put(path, new Route(Where.EITHER, List.of(slots), false, WRITES.contains(path)));
     }
@@ -180,10 +187,10 @@ final class CollectionSelectors {
         get(t, "/v1/catalog/collections/health", coll());
         get(t, "/v1/catalog/collections/owner-root", name());
         post(t, "/v1/catalog/collections/set_aspects_enabled", name());
-        post(t, "/v1/catalog/collections/supersede", name(), one("superseded_by", "superseded_by_id"));
+        retire(t, "/v1/catalog/collections/supersede", name(), one("superseded_by", "superseded_by_id"));
         post(t, "/v1/catalog/collections/rehome", one("source", "source_id"), one("target", "target_id"));
         post(t, "/v1/catalog/collections/rehome/status", one("source", "source_id"), one("target", "target_id"));
-        post(t, "/v1/catalog/collections/rename", aliased(one("old_name", "collection_id"), "old"));
+        retire(t, "/v1/catalog/collections/rename", aliased(one("old_name", "collection_id"), "old"));
         delete(t, "/v1/catalog/collections/delete", aliased(name(), "collection"));
         get(t, "/v1/catalog/list", coll());
         get(t, "/v1/catalog/resolve", coll());
