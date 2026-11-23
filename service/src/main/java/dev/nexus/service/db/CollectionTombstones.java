@@ -24,6 +24,22 @@ public final class CollectionTombstones {
     private CollectionTombstones() {}
 
     /**
+     * The lock step of every verb that RETIRES (or revives) a registry row, taken before any chunk, manifest or child-row work
+     * (linda's "live at commit" ruling): the registry rows of {@code names} that exist, {@code SELECT ... FOR UPDATE} in
+     * {@code collection_id} order, so two verbs sharing an endpoint lock in one order. A writer holds {@code FOR KEY SHARE} on the row it
+     * writes under (the foreign key takes it, and the by-id read takes it explicitly), and {@code FOR UPDATE} conflicts with that: the
+     * verb waits for the writers in flight on the row, so its re-home includes their rows, and a writer that arrives after it waits and
+     * then reads the retired row (409 {@code collection_superseded}) instead of filing rows into it. The full order of a verb is: the
+     * rename lock shared ({@link RenameLatchLock}; {@code RenameGuard.runRename} takes it for a rename), this, then the work.
+     */
+    static void lockRows(DSLContext ctx, String tenant, String... names) {
+        ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.in(names))
+            .orderBy(CATALOG_COLLECTIONS.COLLECTION_ID)
+            .forUpdate().fetch();
+    }
+
+    /**
      * Supersede {@code name} by {@code supersededBy}: the CAS UPDATE of {@code CatalogRepository.supersedeCollection}
      * with the successor's id set in the same statement.
      *
@@ -35,6 +51,9 @@ public final class CollectionTombstones {
      * @return the number of rows updated (0 means no {@code (tenant, name)} row, or a different target already set)
      */
     static int supersede(DSLContext ctx, String tenant, String name, String supersededBy, Field<OffsetDateTime> stampedAt) {
+        // The retiring order (linda's "live at commit" ruling): the rename lock shared, then the old row FOR UPDATE, then the work.
+        RenameLatchLock.shared(ctx);
+        lockRows(ctx, tenant, name);
         CollectionIds.require(ctx, tenant, supersededBy);
         return casSupersede(ctx, tenant, name, supersededBy, CollectionIds.idOf(tenant, supersededBy), stampedAt);
     }
