@@ -84,8 +84,12 @@ class RenameGuardLatchRecheckTest {
     /** Runs once, inside the entry check's {@code Gate3} read: the point after method entry and before the transaction. */
     final AtomicReference<Runnable> atEntry = new AtomicReference<>();
 
-    /** One rename primitive, by its public method. */
-    private record Prim(String name, BiConsumer<String, String> rename) { }
+    /**
+     * One rename primitive, by its public method. {@code registeredTarget}: the primitive refuses a target the registry has no row
+     * for (chash, taxonomy, aspects, highlights re-point rows at the registry's row, as their callers register it first); the catalog
+     * rename makes the target itself, and telemetry needs no row.
+     */
+    private record Prim(String name, boolean registeredTarget, BiConsumer<String, String> rename) { }
 
     private List<Prim> prims;
 
@@ -123,12 +127,12 @@ class RenameGuardLatchRecheckTest {
         telemetry = new TelemetryRepository(scope, guard);
         aspects = new AspectRepository(scope, guard);
         prims = List.of(
-            new Prim("catalog.renameCollection", (o, nw) -> catalog.renameCollection(TENANT, o, nw)),
-            new Prim("chash.renameCollection", (o, nw) -> chash.renameCollection(TENANT, o, nw)),
-            new Prim("taxonomy.renameCollection", (o, nw) -> taxonomy.renameCollection(TENANT, o, nw)),
-            new Prim("telemetry.renameCollection", (o, nw) -> telemetry.renameCollection(TENANT, o, nw)),
-            new Prim("aspects.renameAspectCollection", (o, nw) -> aspects.renameAspectCollection(TENANT, o, nw)),
-            new Prim("aspects.renameHighlightsCollection", (o, nw) -> aspects.renameHighlightsCollection(TENANT, o, nw)));
+            new Prim("catalog.renameCollection", false, (o, nw) -> catalog.renameCollection(TENANT, o, nw)),
+            new Prim("chash.renameCollection", true, (o, nw) -> chash.renameCollection(TENANT, o, nw)),
+            new Prim("taxonomy.renameCollection", true, (o, nw) -> taxonomy.renameCollection(TENANT, o, nw)),
+            new Prim("telemetry.renameCollection", false, (o, nw) -> telemetry.renameCollection(TENANT, o, nw)),
+            new Prim("aspects.renameAspectCollection", true, (o, nw) -> aspects.renameAspectCollection(TENANT, o, nw)),
+            new Prim("aspects.renameHighlightsCollection", true, (o, nw) -> aspects.renameHighlightsCollection(TENANT, o, nw)));
     }
 
     @AfterAll
@@ -157,7 +161,10 @@ class RenameGuardLatchRecheckTest {
     }
 
     private String register(String stem) {
-        String name = "lr-" + stem + "-" + n.incrementAndGet();
+        return registerNamed("lr-" + stem + "-" + n.incrementAndGet());
+    }
+
+    private String registerNamed(String name) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("name", name);
         m.put("content_type", "knowledge");
@@ -303,7 +310,7 @@ class RenameGuardLatchRecheckTest {
     void aRenameThatCommitsBeforeTheLatchStands_andTheNextOneIsRefusedByTheRow() {
         for (Prim p : prims) {
             String from = register("after");
-            String to = fresh("after");
+            String to = p.registeredTarget() ? register("after-to") : fresh("after");
             p.rename().accept(from, to);   // no latch: the name path
             if (p.name().startsWith("catalog")) {
                 assertThat(supersededBy(from)).as("the catalog rename stands: the source names its successor").isEqualTo(to);
@@ -314,7 +321,7 @@ class RenameGuardLatchRecheckTest {
             assertThat(latchRow()).as("%s: the latch write follows the committed rename", p.name()).isTrue();
 
             String from2 = register("after2");
-            String to2 = fresh("after2");
+            String to2 = p.registeredTarget() ? register("after2-to") : fresh("after2");
             assertRefused(p.name(), () -> p.rename().accept(from2, to2));
             su(ctx -> ctx.deleteFrom(LATCH).execute());
         }
