@@ -4,6 +4,7 @@ package dev.nexus.service;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.nexus.service.db.CollectionRegistry;
 import dev.nexus.service.db.TenantConstants;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
@@ -114,6 +115,10 @@ class CatalogCollectionIdReadTest {
                 .where(CATALOG_COLLECTIONS.NAME.eq(DEFENSIVE_NULL)).execute();
             assertThat(n).as("guard: exactly one row's id is nulled").isEqualTo(1);
         }
+        // The registry's id index is process-wide and keyed tenant|collection_id; a class that ran earlier in this fork left rows under the
+        // same default tenant and low ids (every container's identity restarts at 1), and a get by id would resolve to that stale label and
+        // answer 404. This class owns its container, so it starts from an empty cache (first seen red in the full engine run on qwent).
+        CollectionRegistry.evictAll();
     }
 
     @AfterAll
