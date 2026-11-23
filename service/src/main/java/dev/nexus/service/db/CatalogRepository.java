@@ -6100,8 +6100,13 @@ public final class CatalogRepository {
                .fetch();
         } catch (org.jooq.exception.DataAccessException e) {
             if (SqlConstraints.isLockNotAvailable(e)) {
-                throw new org.jooq.exception.DataAccessException("timed out acquiring the RDR-191 sweep gate for tenant=" + tenant
-                    + ", collection=" + collection + " -- a manifest writer is holding it; retry", e);
+                // the function's own error is a SQLException of SQLSTATE 55P03 whose OWN message names the gate: the keyed routes'
+                // matcher (KeyedSweep.isSweepGateBusy) reads exactly that, so the cause the wrapper carries is such a SQLException,
+                // itself caused by the server's lock-timeout error
+                String message = "timed out acquiring the RDR-191 sweep gate for tenant=" + tenant + ", collection=" + collection
+                    + " -- a manifest writer is holding it; retry";
+                java.sql.SQLException gate = new java.sql.SQLException(message, "55P03", e);
+                throw new org.jooq.exception.DataAccessException(message, gate);
             }
             throw e;
         }
