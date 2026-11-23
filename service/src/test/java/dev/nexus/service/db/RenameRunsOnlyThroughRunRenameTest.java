@@ -260,7 +260,7 @@ class RenameRunsOnlyThroughRunRenameTest {
         assertThat(retag.inside()).as("TelemetryRepository.retag is called by the rename's two tables, inside its runRename call").isEqualTo(2);
         assertThat(retag.outside().keySet()).as("and nowhere else: the one text outside runRename is its own declaration")
             .hasSize(1).allMatch(site -> site.contains("DSLContext ctx"));
-        assertThat(outside.values().stream().mapToInt(Integer::intValue).sum()).as("sites outside runRename: exact").isEqualTo(32);
+        assertThat(outside.values().stream().mapToInt(Integer::intValue).sum()).as("sites outside runRename: exact").isEqualTo(36);
         assertThat(unlisted(outside, allowed)).as("a name-column write outside runRename that is not on the allowlist").isEmpty();
     }
 

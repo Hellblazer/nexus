@@ -18,6 +18,7 @@ CatalogRepository.java | 1 | .set(GC_AUDIT.COLLECTION, auditLabel) | the gc audi
 CatalogRepository.java | 1 | .set(ch.collection(), DSL.excluded(ch.collection())) | a latched upsert arbitrates on the collection id, so on a conflict it updates the row it found and refreshes that row's stored label to the incoming one: the row's own collection, written by the writer that owns it, and no rename of any collection (RDR-229 P3.5c)
 CatalogRepository.java | 1 | .set(t.collection(), target) | rehomeCollection's per-table re-home by name: slice D (R-B) owns it; it moves rows between live collections and changes no label
 CatalogRepository.java | 1 | .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, tgt) | the collection re-home moves the manifest rows of the chunks it moved to the target, by the target's label and id (a move, not a rename: no row changes the label it bears)
+CatalogMoves.java | 1 | .set(DOCUMENT_HIGHLIGHTS.COLLECTION, label) | rekeyHighlights from gate 3 writes the locked registry row's current label beside its id (a label copy, no rename)
 CollectionMint.java | 1 | .set(CATALOG_COLLECTIONS.NAME, choice.label()) | a mint names a NEW registry row (an insert), not a rename of an existing one
 ManifestReplace.java | 1 | .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, v.field("", String.class)) | the manifest replace writes each row's own collection
 ReembedJobRepository.java | 1 | .set(REEMBED_JOBS.SOURCE_COLLECTION, sourceRow.label()) | a re-embed job row records its source collection on insert, by the current label of the registry row the start locked
