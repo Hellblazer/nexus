@@ -77,97 +77,159 @@ class Rdr229P35cGateOverloadLintTest {
         assertThat(seen).containsExactly("QuarantineOrigin.countRowsOf(ctx, t, o);");
     }
 
-    // ---- every method or constructor in main whose body hands Gate3.never() to the overload it delegates to (linda 2026-11-23) ----------
+    // ---- every method or constructor in main whose body hands Gate3.never() to the overload it delegates to (folio, linda 2026-11-23) --------
 
-    /** A statement {@code return f(..., Gate3.never());} or {@code this(..., Gate3.never(), ...);}: the overload that delegates. */
-    private static final Pattern DELEGATE = Pattern.compile(
-        "(?:return\\s+(?:[\\w.]+\\.)?(\\w+)|\\b(this))\\s*\\(([^;{}]*?\\bGate3\\.never\\(\\)[^;{}]*?)\\)\\s*;", Pattern.DOTALL);
+    private static final Set<String> NEVER_ALLOWED = Set.of("Gate3.java");
 
-    private static List<String> splitArgs(String list) {
-        List<String> out = new ArrayList<>();
-        int depth = 0;
-        StringBuilder cur = new StringBuilder();
-        for (char c : list.toCharArray()) {
-            if (c == '(' || c == '[' || c == '<') depth++;
-            else if (c == ')' || c == ']' || c == '>') depth--;
-            if (c == ',' && depth == 0) {
-                out.add(cur.toString().trim());
-                cur.setLength(0);
-            } else {
-                cur.append(c);
+    private static java.util.Map<String, String> mainSources() throws IOException {
+        Path root = Path.of("src", "main", "java", "dev", "nexus", "service");
+        java.util.Map<String, String> sources = new java.util.LinkedHashMap<>();
+        try (Stream<Path> files = Files.walk(root)) {
+            for (Path p : files.filter(f -> f.toString().endsWith(".java")).sorted().toList()) {
+                sources.put(root.relativize(p).toString().replace('\\', '/'), Files.readString(p));
             }
         }
-        if (!cur.toString().isBlank()) out.add(cur.toString().trim());
-        return out;
-    }
-
-    /** A call's argument text starting after its opening parenthesis at {@code from}; null when unbalanced. */
-    private static String argText(String text, int from) {
-        int depth = 1;
-        for (int j = from; j < text.length(); j++) {
-            char c = text.charAt(j);
-            if (c == '(') depth++;
-            else if (c == ')' && --depth == 0) return text.substring(from, j);
-        }
-        return null;
-    }
-
-    /** A declaration's parameter list reads {@code Type name, Type name}: every parameter is two tokens and none holds a parenthesis. */
-    private static boolean looksLikeParameters(List<String> args) {
-        return !args.isEmpty() && args.stream().allMatch(a -> a.matches("(?:final\\s+)?[\\w.<>\\[\\]?, ]+\\s+\\w+"));
+        return sources;
     }
 
     /**
-     * The delegating overloads of production code, and the calls of them in production code that name no gate. A call counts when its argument
-     * count equals the overload's (the overload's own call minus the Gate3.never() argument), it is in the class itself or qualified by it, and
-     * no argument mentions a gate (a call that passes {@code gate3} reaches the gated form). Production code reaches a name-path read by a
-     * one-argument shortfall like this one only by mistake (resolveNeedEmbedIdx called the four-argument chunkScope, so after the latch and a
-     * one-row rename every flush re-embedded).
+     * Production code reaches a name-path read by a one-argument shortfall only by mistake (resolveNeedEmbedIdx called the four-argument
+     * chunkScope, so after the latch and a one-row rename every flush re-embedded). {@link GateNeverLint} finds the delegating overloads of main
+     * and every call of one that names no gate, and every other use of {@code Gate3.never()}.
      */
     @Test
     void noProductionCallReachesAnOverloadThatDelegatesWithGate3Never() throws IOException {
-        Path root = Path.of("src", "main", "java", "dev", "nexus", "service");
-        java.util.Map<Path, String> sources = new java.util.LinkedHashMap<>();
-        try (Stream<Path> files = Files.walk(root)) {
-            for (Path p : files.filter(f -> f.toString().endsWith(".java")).toList()) sources.put(p, Files.readString(p));
-        }
-        record Overload(String owner, String name, int arity, Path file) { }
-        List<Overload> overloads = new ArrayList<>();
-        for (var e : sources.entrySet()) {
-            String owner = e.getKey().getFileName().toString().replace(".java", "");
-            Matcher m = DELEGATE.matcher(e.getValue());
-            while (m.find()) {
-                List<String> args = splitArgs(m.group(3));
-                if (args.stream().noneMatch(a -> a.endsWith("Gate3.never()"))) continue;
-                overloads.add(new Overload(owner, m.group(2) != null ? "<init>" : m.group(1), args.size() - 1, e.getKey()));
+        var result = GateNeverLint.scan(mainSources(), NEVER_ALLOWED);
+        assertThat(result.overloads()).as("non-vacuity: the scan finds the delegating overloads of main").isGreaterThan(40);
+        assertThat(result.neverUses()).as("non-vacuity: and the uses of Gate3.never()").isGreaterThan(50);
+        assertThat(result.offenders()).as("production calls of an overload that delegates with Gate3.never(), or other uses of it: pass the "
+            + "gate the caller holds").isEmpty();
+    }
+
+    // The planted new production callers, one per shape the lint must see. Each source set holds an owner with a gateless overload that
+    // delegates and the gated form, and ONE consumer; the control consumer passes a gate and must pass.
+    private static final String OWNER = """
+        package p;
+        final class PlantedRepo {
+            PlantedRepo() {
+            }
+            static int read(int a) {
+                return read(a, Gate3.never());
+            }
+            static int read(int a, Gate3 gate3) {
+                return a;
+            }
+            static int read2(int a) {
+                int r = read2(a, Gate3.never());
+                return r;
+            }
+            static int read2(int a, Gate3 gate3) {
+                return a;
+            }
+            int viaThis(int a) {
+                return a;
             }
         }
-        assertThat(overloads.size()).as("non-vacuity: the scan finds the delegating overloads of main").isGreaterThan(30);
-        Set<String> offenders = new TreeSet<>();
-        for (Overload o : overloads) {
-            for (var e : sources.entrySet()) {
-                String text = e.getValue();
-                boolean sameFile = e.getKey().equals(o.file());
-                Pattern call = o.name().equals("<init>")
-                    ? Pattern.compile("new\\s+(?:[\\w.]*\\.)?" + o.owner() + "\\s*\\(")
-                    : Pattern.compile("(?<![\\w])(?:(?:[\\w.]*\\.)?" + o.owner() + "\\.)?" + o.name() + "\\s*\\(");
-                Matcher m = call.matcher(text);
-                while (m.find()) {
-                    boolean qualified = m.group().contains(o.owner() + ".");
-                    if (!o.name().equals("<init>") && !sameFile && !qualified) continue;
-                    int lineStart = text.lastIndexOf('\n', m.start()) + 1;
-                    String before = text.substring(lineStart, m.start());
-                    if (before.strip().startsWith("*") || before.strip().startsWith("//")) continue;
-                    String argsText = argText(text, m.end());
-                    if (argsText == null) continue;
-                    List<String> args = splitArgs(argsText);
-                    if (args.size() != o.arity() || looksLikeParameters(args)) continue;   // another overload, or the declaration itself
-                    if (args.stream().anyMatch(a -> a.toLowerCase().contains("gate") || a.endsWith("Gate3.never()"))) continue;
-                    int line = (int) text.substring(0, m.start()).chars().filter(c -> c == '\n').count() + 1;
-                    offenders.add(e.getKey().getFileName() + ":" + line + " calls " + o.owner() + "." + o.name() + "/" + o.arity());
+        """;
+
+    private static java.util.Map<String, String> planted(String consumer) {
+        java.util.Map<String, String> m = new java.util.LinkedHashMap<>();
+        m.put("p/PlantedRepo.java", OWNER);
+        m.put("p/Consumer.java", consumer);
+        return m;
+    }
+
+    private static Set<String> offendersOf(String consumer) {
+        return GateNeverLint.scan(planted(consumer), Set.of()).offenders();
+    }
+
+    @Test
+    void theLintFailsOnANewProductionCallerInEachShape() {
+        assertThat(offendersOf("""
+            package p;
+            final class Consumer {
+                void f() {
+                    PlantedRepo.read(1);
                 }
             }
-        }
-        assertThat(offenders).as("production calls of an overload that delegates with Gate3.never(): pass the gate the caller holds").isEmpty();
+            """)).as("a qualified static call").hasSize(1);
+        assertThat(offendersOf("""
+            package p;
+            final class Consumer {
+                void f(PlantedRepo r) {
+                    r.read(1);
+                }
+            }
+            """)).as("a call qualified by a variable of the owner's type").hasSize(1);
+        assertThat(offendersOf("""
+            package p;
+            final class Consumer {
+                void f() {
+                    var r = new PlantedRepo();
+                    r.read(1);
+                }
+            }
+            """)).as("a call qualified by a var assigned the owner").hasSize(1);
+        assertThat(offendersOf("""
+            package p;
+            import static p.PlantedRepo.read;
+            final class Consumer {
+                int f() {
+                    return read(2);
+                }
+            }
+            """)).as("a call through a static import").hasSize(1);
+        assertThat(offendersOf("""
+            package p;
+            final class Consumer {
+                void f(String gate) {
+                    PlantedRepo.read(gate.length());
+                }
+            }
+            """)).as("an argument that only contains the word gate").hasSize(1);
+        assertThat(offendersOf("""
+            package p;
+            final class Consumer {
+                void f(String gateName) {
+                    PlantedRepo.read2(gateName.length());
+                }
+            }
+            """)).as("a call of an overload whose delegation is not a return or this(").hasSize(1);
+    }
+
+    @Test
+    void theLintAcceptsAGatedCallAChainAndADeclaration_andFailsOnAStrayNever() {
+        assertThat(offendersOf("""
+            package p;
+            final class Consumer {
+                void f(Gate3 gate3) {
+                    PlantedRepo.read(1, gate3);
+                    PlantedRepo.read(gate3);
+                }
+            }
+            """)).as("a call that names a Gate3, and a gated overload").isEmpty();
+        // a chain: read3 is a shorter gateless form that calls read(int) (a delegating overload) with no gate; its own caller is what counts
+        java.util.Map<String, String> chain = new java.util.LinkedHashMap<>();
+        chain.put("p/PlantedRepo.java", OWNER.replace("static int read2(int a, Gate3 gate3) {",
+            "static int read(int a, int b) {\n        return read(a);\n    }\n    static int read2(int a, Gate3 gate3) {"));
+        chain.put("p/Consumer.java", "package p;\nfinal class Consumer {\n}\n");
+        assertThat(GateNeverLint.scan(chain, Set.of()).offenders())
+            .as("a call inside a gateless chain member is a chain: it counts only through its callers").isEmpty();
+        chain.put("p/Consumer.java", "package p;\nfinal class Consumer {\n    void f() {\n        PlantedRepo.read(1, 2);\n    }\n}\n");
+        assertThat(GateNeverLint.scan(chain, Set.of()).offenders()).as("and the chain member's own caller is flagged").hasSize(1);
+        assertThat(offendersOf("""
+            package p;
+            final class Consumer {
+                private final Gate3 g = Gate3.never();
+            }
+            """)).as("Gate3.never() as a field").hasSize(1);
+        assertThat(offendersOf("""
+            package p;
+            final class Consumer {
+                void f() {
+                    other(Gate3.never());
+                }
+            }
+            """)).as("Gate3.never() handed to a call that is not a delegation").hasSize(1);
     }
 }
