@@ -445,6 +445,38 @@ class PciIdGate3IntegrationTest extends PciIdIndexSupport {
         }
     }
 
+    /**
+     * The probe behind the quarantine clause, measured (RDR-229 P3.5c): a fixture of many tenants and collections of live chunks beside two
+     * quarantine collections whose chunks lack the key. The plan (EXPLAIN ANALYZE, BUFFERS) is printed; the probe counts exactly the quarantine
+     * rows, and stops at its cap.
+     */
+    @Test
+    void theQuarantineProbeCountsOnlyQuarantineChunksAndItsPlanIsPrinted() throws Exception {
+        for (int t = 0; t < 25; t++) {
+            String tenant = newTenant("qprobe-live-" + t);
+            for (int c = 0; c < 3; c++) {
+                collection(tenant, name("qprobe-live-" + t + "-" + c), 120);
+            }
+        }
+        String tenant = newTenant("qprobe-q");
+        long q1 = collection(tenant, name("qprobe-q1"), 400);
+        long q2 = collection(tenant, name("qprobe-q2"), 300);
+        for (long id : new long[] {q1, q2}) {
+            asSuperuser(su -> su.update(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+                .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.LIFECYCLE_STATE, "quarantine")
+                .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+                .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.COLLECTION_ID.eq(id)).execute());
+        }
+        asSuperuser(su -> {
+            su.connection(conn -> dev.nexus.service.PgContainerHelper.analyzeTable(conn, CHUNKS));
+            var statement = CompletionCheck.quarantineProbe(su);
+            System.out.println("PLAN quarantine probe (ANALYZE, BUFFERS):\n"
+                + dev.nexus.service.PgContainerHelper.explainPlanWith(su, statement, dev.nexus.service.PgContainerHelper.ExplainOptions.ANALYZE_BUFFERS));
+            assertThat(su.fetchCount(statement)).as("exactly the two quarantine collections' chunks lack the key").isEqualTo(700);
+            return null;
+        });
+    }
+
     // -- N2: a killed REINDEX of an id index leaves an INVALID leftover that the next pass drops --------------------
 
     boolean hasIdLeftover(String tenant) {
