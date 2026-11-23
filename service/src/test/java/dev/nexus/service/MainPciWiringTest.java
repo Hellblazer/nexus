@@ -523,6 +523,9 @@ class MainPciWiringTest {
         assertThat(failure).contains("rdr229_gate3_latch_boot_read_failed").contains("System.exit(1)");
         assertThat(src).as("a latch the check never read is never guessed: the reporter is handed the one read at boot")
             .contains("CompletionCheck.Gate3LatchWriter.IMMEDIATE, gate3Latch");
+        assertThat(src).as("the query ring admits on the id index once the reconciler's latch holds: the ring follows it, bound before the reconciler starts")
+            .contains("pciQueryRing.followLatch(pciReconciler.canaryLatch());");
+        assertThat(src.indexOf("pciQueryRing.followLatch(")).isLessThan(src.indexOf("pciReconciler.start();"));
         assertThat(src).as("a latch written while PCI was off makes the reconciler build the id indexes first")
             .contains("pciReconciler.buildIdIndexesFirstWhen(() -> gate3Latch.pciOff() || completionCheck != null && completionCheck.gate3LatchedPciOff())");
         int gate = src.indexOf("pciReconciler.idBuildGate(");

@@ -675,6 +675,8 @@ public final class Main {
         var pciReconciler = dev.nexus.service.vectors.PciReconciler.create(ds, adminConnection, pciBootNonce, pciSweep,
                 dev.nexus.service.db.PgSession.startupPciSettings(), pciQueryRingExpiry::expireAll, pgVectorRepo,
                 tenantScope, gate3).bootWork(bootWork);
+        // RDR-229 P3.4: the query ring admits on the id index once the reconciler's latch holds (the name indexes retire), read at each admission.
+        pciQueryRing.followLatch(pciReconciler.canaryLatch());
         pciReconciler.start();
         // nexus-43ulx.23: GET /v1/status's per_collection_indexes, served from what the two halves already hold (the
         // sweep's last read, the reconciler's cached status): no catalog query per request. Bound here because the

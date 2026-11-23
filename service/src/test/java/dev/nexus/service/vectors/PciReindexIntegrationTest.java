@@ -183,6 +183,8 @@ class PciReindexIntegrationTest {
         final List<String> triggers = new java.util.concurrent.CopyOnWriteArrayList<>();
         final List<List<float[]>> remeasuredWith = new java.util.concurrent.CopyOnWriteArrayList<>();
         final List<float[]> sample = List.of(new float[] {1f, 2f, 3f});
+        /** The targets of the re-measures, in order. */
+        final List<Target> remeasuredTargets = new java.util.concurrent.CopyOnWriteArrayList<>();
 
         private Result result(Target target, String trigger) {
             boolean red = state == State.RED;
@@ -198,6 +200,7 @@ class PciReindexIntegrationTest {
         @Override public Result remeasure(Target target, String trigger, List<float[]> sameQueries) {
             triggers.add(trigger);
             remeasuredWith.add(sameQueries);
+            remeasuredTargets.add(target);
             return result(target, trigger);
         }
     }
@@ -946,5 +949,51 @@ class PciReindexIntegrationTest {
                 assertThat(state.redAfterReindex(idx.name(), Instant.now())).isFalse();
             }
         }
+    }
+
+    /** RDR-229 P3.4 (critic S2): an id index's REINDEX is re-measured with an id target once the canary follows the latch (not before); a still-red one is reported and marked. */
+    @Test
+    @Timeout(value = 300, unit = TimeUnit.SECONDS)
+    void anIdIndexReindex_isReMeasuredWithAnIdTarget_onceTheCanaryFollowsTheLatch_andAStillRedOneIsReportedAndMarked() throws Exception {
+        String tenant = newTenant("idremeasure");
+        String coll = name("idremeasure");
+        collection(tenant, coll, 300);
+        long id = asSuperuser(su -> CollectionIds.require(su, tenant, coll));
+        var canary = new ScriptedCanary();
+        canary.state = State.RED;
+        var schedule = new PciCanarySchedule(canary, Clock.systemUTC(), System::nanoTime);
+        try (var pass = new PciBuilderSession(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS, NONCE, ON).open()) {
+            assertThat(pass.buildById(leaf(tenant), 384, id)).isEqualTo(PciBuilderSession.DdlOutcome.DONE);
+        }
+        PciCatalog.Leaf leaf = leaf(tenant);
+        var idx = leaf.indexes().stream().filter(i -> i.idParsed() && i.valid()).findFirst().orElseThrow();
+        var target = new PciCanary.Target(PciReconciler.leafId(leaf), tenant, M384, coll, idx.name(), id);
+        schedule.remeasure(target, null);   // the canary's latest result for the index: red on ten queries
+        var reindex = new PciReconcilePlanner.Reindex(idx.name(), coll, PciReconcilePlanner.Trigger.RED_CANARY, 1000);
+        var subject = new PciReindexState.Subject(leaf, 384, idx, new PciReconciler.IndexReading(null, 1000, 300, 0, Instant.now()));
+        var marked = new java.util.concurrent.atomic.AtomicInteger();
+        PciReindexPhase.RedMarker marker = (pass, l, index, collection, at, queries) -> marked.incrementAndGet() > 0;
+        int before = canary.remeasuredTargets.size();
+
+        // control: before the latch (the canary does not measure id indexes) the REINDEX is not re-measured
+        var phase = new PciReindexPhase(new PciReindexState(), schedule, Clock.systemUTC(), (pass, l, dim, build, after) -> true, marker);
+        phase.idCanaryWhen(() -> false);
+        try (PciBuilderSession.Pass pass = new PciBuilderSession(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS, NONCE, ON).open()) {
+            assertThat(phase.reindexOne(pass, subject, reindex)).isTrue();
+        }
+        assertThat(canary.remeasuredTargets).as("not re-measured before the latch").hasSize(before);
+        assertThat(marked).hasValue(0);
+
+        // latched: re-measured with the id target; still red, so reported and marked
+        long reported = logged("event=pci_red_after_reindex");   // latched next
+        phase.idCanaryWhen(() -> true);
+        try (PciBuilderSession.Pass pass = new PciBuilderSession(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS, NONCE, ON).open()) {
+            assertThat(phase.reindexOne(pass, subject, reindex)).isTrue();
+        }
+        assertThat(canary.remeasuredTargets).hasSize(before + 1);
+        assertThat(canary.remeasuredTargets.get(before)).as("an id target on the id index").extracting(PciCanary.Target::collectionId,
+            PciCanary.Target::index).containsExactly(id, idx.name());
+        assertThat(logged("event=pci_red_after_reindex")).as("the still-red re-measure of an id index is reported").isEqualTo(reported + 1);
+        assertThat(marked).as("and marked red_unfixed").hasValue(1);
     }
 }
