@@ -1874,14 +1874,8 @@ public final class PgVectorRepository {
      * The RDR-225 walk is one transaction and ends with ANALYZE only, so every leaf starts in that unvacuumed state;
      * the deploy runbook has the operator run VACUUM (ANALYZE) after boot, and {@code NX_SEARCH_EXACT_MAX_ROWS=0}
      * turns this probe off meanwhile. {@code RouterProbeShapeIntegrationTest} pins the VACUUMED case only.
-     */
-    static org.jooq.Select<? extends org.jooq.Record1<Integer>> probeSelectedRowsQuery(
-            DSLContext ctx, int dim, String[] colls, String model, String tenant, int limit) {
-        return probeSelectedRowsQuery(ctx, dim, CollectionSelector.byName(java.util.Arrays.asList(colls)), model, tenant, limit);
-    }
-
-    /**
-     * The probe of {@link #probeSelectedRowsQuery(DSLContext, int, String[], String, String, int)} over a selection: the name
+     *
+     * <p>Over a selection: the name
      * predicate before gate 3, {@code collection_id = ANY(ids)} from it (RDR-229 P3.5c), the same shape either way. A selection
      * that resolved no id counts no row.
      */

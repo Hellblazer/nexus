@@ -639,7 +639,7 @@ public final class PciReconciler {
      * answers it the same, a standby included; it needs this reconciler only for the catalog, the settings and the clock.
      */
     public dev.nexus.service.datamove.CompletionCheck.Gate3Source gate3Source() {
-        return new PciGate3Coverage(catalog, settings, clock);
+        return new PciGate3Coverage(catalog, settings, clock, readGate);
     }
 
     /**

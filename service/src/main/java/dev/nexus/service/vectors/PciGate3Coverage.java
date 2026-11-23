@@ -3,6 +3,7 @@
 package dev.nexus.service.vectors;
 
 import dev.nexus.service.datamove.CompletionCheck;
+import dev.nexus.service.datamove.Gate3;
 import dev.nexus.service.db.PgSession.PciSettings;
 import dev.nexus.service.vectors.PciCatalog.Index;
 import dev.nexus.service.vectors.PciCatalog.Leaf;
@@ -94,10 +95,19 @@ final class PciGate3Coverage implements CompletionCheck.Gate3Source {
     /** The last scan's unindexed-collection keys (model, tenant, id), while any: kept {@link #SCAN_TTL}; never an empty or unknown answer. */
     private volatile Found unindexed;
 
+    /** The one latched gate-3 signal the near-latch scan's probe and recount read the collection by id from (RDR-229 P3.5c). */
+    private final Gate3 readGate;
+
+    /** Gate 3 never holds: the scan reads by name (tests). Production passes the reconciler's signal ({@link PciReconciler#gate3Source}). */
     PciGate3Coverage(Supplier<PciCatalog.Snapshot> catalog, PciSettings settings, Clock clock) {
+        this(catalog, settings, clock, Gate3.never());
+    }
+
+    PciGate3Coverage(Supplier<PciCatalog.Snapshot> catalog, PciSettings settings, Clock clock, Gate3 readGate) {
         this.catalog = catalog;
         this.settings = settings;
         this.clock = clock;
+        this.readGate = java.util.Objects.requireNonNull(readGate, "readGate");
     }
 
     @Override
@@ -271,7 +281,8 @@ final class PciGate3Coverage implements CompletionCheck.Gate3Source {
                     if (!clock.instant().isBefore(until)) {
                         throw new IllegalStateException("the near-latch scan ran out of its budget of " + SCAN_BUDGET + ": unknown");
                     }
-                    Integer n = PgVectorRepository.probeSelectedRowsQuery(tx, dim, new String[] {r.name()},
+                    // the probe by the collection's id from the latch (the selection resolves the label live-first), by name before it
+                    Integer n = PgVectorRepository.probeSelectedRowsQuery(tx, dim, CollectionSelector.of(readGate, tx, leaf.tenant(), r.name()),
                             leaf.model(), leaf.tenant(), b).fetchOne(0, Integer.class);
                     if (n != null && n >= b) {
                         qualifying.add(r);
@@ -286,7 +297,7 @@ final class PciGate3Coverage implements CompletionCheck.Gate3Source {
                         if (!clock.instant().isBefore(until)) {
                             throw new IllegalStateException("the near-latch scan ran out of its budget of " + SCAN_BUDGET + ": unknown");
                         }
-                        counted.put(r.name(), PciLeafCounting.count(tx, dim, r.name(), leaf.model(), leaf.tenant(), rankCap));
+                        counted.put(r.name(), PciLeafCounting.count(tx, dim, r.name(), leaf.model(), leaf.tenant(), rankCap, readGate));
                     }
                     qualifying.sort(java.util.Comparator.<Reg>comparingInt(r -> counted.get(r.name())).reversed()
                         .thenComparing(Reg::name));
