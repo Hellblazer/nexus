@@ -1101,12 +1101,12 @@ The key moves table by table in strangler order:
   `collection_id` or a label. The route boundary replaces an id with its
   label once, before the handler runs, so a handler reads the label; the
   delete's handler also reads the resolved id, to remove the one row of an
-  id when a label is held by several (`CollectionSelectors.java:20-21`,
+  id when a label is held by several (`CollectionSelectors.java:21-22`,
   `:58-61`). A route that writes under the collection it names reads a
   named id inside the write's own transaction; the retiring verbs
-  (supersede, rename, delete) lock the row instead, and the routes listed
-  as exempt have nothing to guard (`CollectionSelectors.java:62-72`,
-  `:110-121`; T2 `229-research-309`, `229-research-311`).
+  (supersede, rename, delete) lock the row instead, the read-only routes
+  need no guard, and the code's exempt routes have nothing to guard (`CollectionSelectors.java:62-72`,
+  `:89-102`, `:110-128`; T2 `229-research-311`).
   `CollectionRegistry` is keyed by id with a label index beside it and has
   no gate of its own (`CollectionRegistry.java:99-104`; T2
   `229-research-308`). The rename answer carries the label and, when it is
@@ -1552,7 +1552,8 @@ while the engine serves:
        set, and the check registers P4.1's drop move once P4.1's release
        is installed.
     Until gate 3, the readers that hold a `Gate3` take the name key from
-    it (in this tree `CatalogRepository`'s four purge and re-home reads,
+    it (in this tree `CatalogRepository`'s four reads: the graph walk's
+    scope, the purge, the re-home and its status,
     `:5366`, `:10424`, `:11961`, `:12030`; the registry holds no gate; T2
     `229-research-300`, `229-research-308`, `229-research-314`), the jOOQ
     readers read the name columns, and
@@ -1570,8 +1571,9 @@ while the engine serves:
     that have not applied (`RenameRefusedException.java:44-53`,
     `HttpUtil.java:643-647`; T2 `229-research-301`, `229-research-303`).
     A third value, `latch_row_missing`, is the guard's own refusal outside
-    that window: the move reads complete but the install has no latch row,
-    an inconsistency such as a partial restore (`RenameReadiness.java:34-38`,
+    that window: readiness is complete (the move done and every P3.5b
+    changeset applied) but the install has no latch row,
+    an inconsistency such as a partial restore (`RenameReadiness.java:35-39`,
     `RenameGuard.java:156-164`; T2 `229-research-313`).
     The latch row decides the path, not the in-process signal
     (`RenameGuard.java:74-76`; T2 `229-research-302`). The
@@ -2882,10 +2884,12 @@ its acceptance is that test green plus the census pin it lowers.
     label index; every collection-taking route in the census accepts
     `collection_id` or a label, and a request carrying both for one
     collection is a 400 (`CollectionSelectorFilter.java:50-53`; T2
-    `229-research-312`); the rename answer carries both
-    (`CatalogHandler.java:2989-3001`; T2 `229-research-306`). Client caches keyed by id, which they
+    `229-research-312`); the rename answer carries the label and, when it
+    is above 0, the id (`CatalogHandler.java:2989-3001`; T2
+    `229-research-306`). Client caches keyed by id, which they
     trust as stable only once P3.7's name-key drop move has `completed_at`
-    set on the install (item 6): until then a rename gives the collection a
+    set on the install and the rename answer's `ids_stable` says so (item
+    6; `http_catalog_client.py:518-524`): until then a rename gives the collection a
     new id, and from gate 3 until P3.7's one-row rename can run (that move
     complete and every P3.5b changeset applied) the engine refuses a
     rename, with a typed error that names the missing condition, the move
@@ -3739,4 +3743,4 @@ large, and moved under a ratchet.
 - 2026-11-22: Phase 3 wording, matching reviewed stacked code and linda's rulings (grant 3; nexus-p2m1x.20, .21, .31, .35): P3.3b's pass adds the id key and P3.3c's `on_complete` checks it and adds the child keys, the manifest child key is DEFERRABLE INITIALLY DEFERRED, the chunk_orphaned_at index is vectors-075's self-healing boot changeset, and TwinKeyUpsert is the retry rule for name/id unique pairs until P4.1; item 10 and P3.11: the by-id restore ships in the P3.5+P3.7 cut, not P4.1, with the minted-label relabel, the stripped unmapped quarantine origin id, catalog_epoch's derivation and the booted-schema parity; P4.1's design notes (G1, G7, views first, RESTRICT drops, the deferral and trigger notes). P3.R: the rest of Phase 3 is one engine cut (Sam's ruling, T2 `nexus/sam-ruling-rdr229-compress-phase3-2026-11-22`). P3.4, P3.5 and P3.7 follow when their code is reviewed and stacked. Two decisions moved on linda's rulings: the by-id restore from P4.1 to the P3.5+P3.7 cut, and the catalog epoch placed in the P3.5+P3.7 cut (it replaces the 11-20 cut-C1 timing; the RDR had placed it nowhere) (bead nexus-p2m1x.31, comments 08:24 and 08:49; bead nexus-p2m1x.35, comment 17:42; T2 `229-research-116`). No test criterion changed in this entry.
 - 2026-11-22: test lists (Sam's ruling, T2 `nexus/sam-ruling-rdr229-test-lists-and-stack-wal-2026-11-23`, answering linda's ask rdr229-rdr-test-lists): the P3.3b, P3.3c and P3.11 Test sentences gain the tests the reviewed code carries (an unattached parent key, a new leaf, `NX_SEARCH_PCI=0`, moves blocked; a swap refused without the id key, the EXPLAIN of a chunk DELETE; the booted-schema parity, the rename and minted-label restores), and the parity test is green at P3.3, not P3.1 (T2 `229-research-113`; tests `LeafIndexPassIntegrationTest`, `Rdr229SwapMovesIntegrationTest`, `Rdr229SwapMovesAfterTheSwapIntegrationTest`, `TenantExportRegistryParityTest`, `Rdr229RestoreByIdTest`, `Rdr229RestoreMintedRelabelTest`).
 - 2026-11-23: P3.4 folded from the stacked code (grant 3, nexus-p2m1x.22): the gate 3 latch row (`vectors-080-1`) and its boot read, the PCI clause read from the database with the PCI-off case and the B-row coverage, the runtime id arbiters after gate 2 and not in the boot walk, the name-index retire behind the latch, `IdReaders.PRESENT` and the singleton lock, the held entries (`id-unique-index-held`), gate 3 implying gate 2, the PCI clause's B-row cap per leaf, the latch's hold for P3.5's readers and P3.7's one-row rename and its refusal, the per-leaf budget with its bound, the canary twin's wait for `vectors-078-8`, and linda's rulings on nexus-p2m1x.22. Builds run beside the name index, not as rebuilds. P3.4's Test sentence gains "before the latch" (Sam, ask rdr229-p34-test-latch, 2026-11-23).
-- 2026-11-23: P3.5a folded from the stacked code (grant 3, nexus-p2m1x.23): the refusal's wire values (`rename_refused` with `name_key_drop_move`, `restart`, or the guard's own `latch_row_missing`), the latch row deciding the path, the registry keyed by id with no gate, the route boundary's id-to-label turn and the delete's resolved id, the boundary's typed 400, 404 and 409 answers, the unreachable 409 `collection_id_mismatch`, the 503 `rename_busy`, `ids_stable` false in this tree, and the citations moved by the stack. Not changed: the P3.5 Test sentence's "the check sees gate 3 hold", which is shared with P3.5b and P3.5c (T2 `229-research-300` to `-314`; fix check `229-fix-check-27fcc5dbb5`).
+- 2026-11-23: P3.5a folded from the stacked code (grant 3, nexus-p2m1x.23): the refusal's wire values (`rename_refused` with `name_key_drop_move`, `restart`, or the guard's own `latch_row_missing`), the latch row deciding the path, the registry keyed by id with no gate, the route boundary's id-to-label turn and the delete's resolved id, the boundary's typed 400, 404 and 409 answers, the unreachable 409 `collection_id_mismatch`, the 503 `rename_busy`, the four readers that hold a `Gate3`, the client's id trust waiting on both the drop move and `ids_stable`, the incremental-adoption refusal also waiting on P3.5b, `ids_stable` false in this tree, and the citations moved by the stack. Not changed: the P3.5 Test sentence's "the check sees gate 3 hold", which is shared with P3.5b and P3.5c (T2 `229-research-300` to `-314`; fix checks `229-fix-check-27fcc5dbb5`, `229-fix-check-f0562ed03e`).
