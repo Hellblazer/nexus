@@ -64,19 +64,20 @@ class CollectionRouteCensusTest {
      * Sites per handler file and field, on this tree. A count that moves means a handler gained or lost a read of a
      * collection field: add or remove the census row (or exclusion) and change the number here.
      */
-    private static final Map<String, Map<String, Integer>> PINNED = Map.of(
-        "AspectHandler.java", Map.of("collection", 4),
-        "CatalogHandler.java", Map.of("collection", 10, "prefer_collection", 1),
-        "ChashHandler.java", Map.of("collection", 2),
-        "ChunkKeysAdminHandler.java", Map.of("collection", 3),
-        "PipelineHandler.java", Map.of("collection", 4),
-        "ReembedHandler.java", Map.of("source_collection", 2, "target_collection", 2),
-        "RemapHandler.java", Map.of("source_collection", 4, "target_collection", 2),
-        "TaxonomyHandler.java", Map.of("collection", 24, "source_collection", 3, "cross_collection", 2,
-            "source_collection_prefix", 1, "collections", 1, "collection_name", 1),
-        "TelemetryHandler.java", Map.of("collection", 6),
-        "VectorHandler.java", Map.of("collection", 14, "collections", 6, "quarantine_collection", 3,
-            "origin_collection", 3));
+    private static final Map<String, Map<String, Integer>> PINNED = Map.ofEntries(
+        Map.entry("AspectHandler.java", Map.of("collection", 4)),
+        Map.entry("CatalogHandler.java", Map.of("collection", 10, "prefer_collection", 1)),
+        Map.entry("ChashHandler.java", Map.of("collection", 2)),
+        Map.entry("ChunkKeysAdminHandler.java", Map.of("collection", 3)),
+        Map.entry("CollectionSelectorFilter.java", Map.of("physical_collection_id", 1)),
+        Map.entry("PipelineHandler.java", Map.of("collection", 4)),
+        Map.entry("ReembedHandler.java", Map.of("source_collection", 2, "target_collection", 2)),
+        Map.entry("RemapHandler.java", Map.of("source_collection", 4, "target_collection", 2)),
+        Map.entry("TaxonomyHandler.java", Map.of("collection", 24, "source_collection", 3, "cross_collection", 2,
+            "source_collection_prefix", 1, "collections", 1, "collection_name", 1)),
+        Map.entry("TelemetryHandler.java", Map.of("collection", 6)),
+        Map.entry("VectorHandler.java", Map.of("collection", 14, "collections", 6, "quarantine_collection", 3,
+            "origin_collection", 3)));
 
     /** {@code src} with its comments blanked. A comment marker inside a string literal is not one (the earlier regex took it for one). */
     static String blank(String src) {

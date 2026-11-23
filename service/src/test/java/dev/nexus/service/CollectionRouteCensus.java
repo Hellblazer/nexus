@@ -475,6 +475,11 @@ final class CollectionRouteCensus {
      * by a row, a helper or this list, and each entry's evidence to still be in the source it names.
      */
     static final List<Excluded> EXCLUDED = List.of(
+        new Excluded("CollectionSelectorFilter.java", "collectDocumentIds", "physical_collection_id",
+            "the consumption census's own read of a document write's body, with the census on only (tests): it names each id for "
+                + "the request-level report and resolves nothing; the document routes resolve the id in the write's own "
+                + "transaction (CollectionRegistry.requireIdForWrite)",
+            "CollectionSelectorFilter.java", "Test only: nothing here runs with the census off"),
         new Excluded("ChunkKeysAdminHandler.java", "handleSweep", "collection",
             "an operator sweep of the chunk-key migration. The body names the tenant swept (a root credential may name any), and the "
                 + "route boundary resolves an id in the CALLER's tenant, so an id here would be resolved in the wrong tenant: a "

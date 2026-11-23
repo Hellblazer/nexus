@@ -784,6 +784,11 @@ final class TenantKeyedStateTables {
         // every leaf (and dropped to unknown by one that did not); the gate and the per-pass plan values are not kept.
         notKeyed.put("PciIdBuilds.readers", "whether this engine's id readers are present (IdReaders.PRESENT, which P3.5c flips) as a supplier, bound once at boot; a callback, no data");
         notKeyed.put("PciIdBuilds.pciOffLatch", "whether the gate 3 latch row says it latched while PCI was off, as a supplier bound once at boot; a callback, no data");
+        // RDR-229 P3.5a: W2's route classification and gc seam, W1's client-label carrier.
+        notKeyed.put("CollectionSelectors.EXEMPT", "the route table's exempt routes and the reason for each, a constant built once; no tenant");
+        notKeyed.put("GcCollectionReads.beforeMoveForTests", "a test seam run before a gc move, null in production; a callback, no data");
+        notKeyed.put("ExpectedCollectionIds.Carrier.clientLabels", "the labels one request itself sent beside its ids, held for that "
+            + "request's thread only and cleared at its end; no tenant state");
         notKeyed.put("CompletionBootWork.DbReader.coverage", TenantKeyedStateTablesRdr229.COMPLETION_ENGINE_WIDE + "the last PCI coverage read, reused for at most ten minutes once gate 3 has latched "
             + "(it holds id keys: model, tenant and collection id), in memory only and replaced by the next read");
         notKeyed.put("CompletionBootWork.DbReader.coverageAt", "when that coverage was read (a time); no tenant state");
