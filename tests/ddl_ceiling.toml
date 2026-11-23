@@ -265,7 +265,8 @@ migration_wal_bytes_per_worker = 12143000
 # search_topic_set): 38 + 38 + 18 = 94. vectors-078 (12 CONTINUE-gated changesets) adds 0 here: a fresh walk skips them until the stamp moves complete.
 # Measured: chas lab-m via lab-remote, 2026-11-23, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on
 # P3.5b rebased onto b7e58b6c5f (gate jar rebuilt): ddl: migration=2935.
-# 2843 + 94 = 2937 when P3.4 (vectors-080) and P3.5b (vectors-077) are both present (merged locally by P3.5c vectors, not measured).
+# 2843 + 94 = 2937 with P3.4 (vectors-080) under P3.5b on integration/rdr229-phase3-stack-r2 8e7aa44ad7. Measured: chas lab-m via lab-remote,
+# 2026-11-23, the same scoped run on P3.5b e7209d102c (gate jar rebuilt): ddl: migration=2937.
 migration_ddl_per_worker = 2937
 migration_ddl_per_worker_tolerance = 0.0
 
