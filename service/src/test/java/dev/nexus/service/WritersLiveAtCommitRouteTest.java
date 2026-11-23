@@ -56,6 +56,22 @@ class WritersLiveAtCommitRouteTest {
     ExecutorService pool;
     int n;
 
+    /** Every retry {@code DeadlockRetry} made while a test ran: the belt turns a 40P01 into a clean answer, so each test asserts none. */
+    private final java.util.concurrent.ConcurrentLinkedQueue<String> retries = new java.util.concurrent.ConcurrentLinkedQueue<>();
+
+    @org.junit.jupiter.api.BeforeEach
+    void listenForRetries() {
+        retries.clear();
+        dev.nexus.service.db.DeadlockRetry.setRetryListenerForTests(retries::add);
+    }
+
+    @org.junit.jupiter.api.AfterEach
+    void noDeadlockWasAbsorbed() {
+        dev.nexus.service.db.DeadlockRetry.setRetryListenerForTests(null);
+        assertThat(retries).as("the lock order prevents a deadlock: DeadlockRetry absorbed none (a retried 40P01 ends in a clean answer)")
+            .isEmpty();
+    }
+
     @BeforeAll
     void startAll() throws Exception {
         fx = new CollectionRouteFixture();

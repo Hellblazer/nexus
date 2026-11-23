@@ -368,6 +368,7 @@ final class TenantKeyedStateTables {
         notKeyed.put("ExpectedCollectionIds.Carrier.historyTransactions", "census only: the transactions of the request that declared a history write; dies with the request's carrier (RDR-229 P3.5a)");
         notKeyed.put("ExpectedCollectionIds.Carrier.findings", "census only: the write transactions of the request that read none of its named ids; dies with the request's carrier (RDR-229 P3.5a)");
         notKeyed.put("CollectionRegistry.writeReadHookForTests", TEST_HOOK);
+        notKeyed.put("DeadlockRetry.retryListenerForTests", TEST_HOOK);
         notKeyed.put("CollectionSelectorFilter.censusSink", TEST_HOOK);
         notKeyed.put("CollectionRetiredIdException.tenant", "payload of an exception thrown to one caller (RDR-229 P3.5a)");
         notKeyed.put("ReembedRunner.tenantSource", "a supplier of the tenant list, re-read from service_tokens at "
