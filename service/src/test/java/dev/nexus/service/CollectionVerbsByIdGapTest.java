@@ -166,6 +166,11 @@ class CollectionVerbsByIdGapTest {
 
     // ---- rename ---------------------------------------------------------------------------------------------------------------------
 
+    /**
+     * The by-id check runs at the ordered registry lock, after renameCollectionTxn's by-label pre-reads (model mismatch, a re-embed job,
+     * the blocking tables). In this race one of those may refuse first with its own 409, before the 404 this test pins; either way nothing
+     * is written to the new holder (linda, 2026-11-23: an honest answer, accepted). This test's new holder trips none of them.
+     */
     @Test
     void aRenameByAnIdFreedBetweenTheBoundaryAndTheHandlerIsRefused_andTheNewHolderOfTheLabelIsNotRenamed() {
         String a = registered("rename-a");
