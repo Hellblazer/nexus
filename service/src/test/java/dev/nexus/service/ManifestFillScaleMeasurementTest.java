@@ -155,10 +155,10 @@ class ManifestFillScaleMeasurementTest extends ManifestFillTestBase {
             ManifestFill.pinWindow(ctx, false);
             var end = rows.get(rows.size() - 1);
             var last = new ManifestFill.Cursor(end.value1(), end.value2());
-            var count = ManifestFill.fillableByCollection(ctx, TENANT, kind, null, last);
+            var count = ManifestFill.fillableByCollection(ctx, TENANT, kind, null, last, dev.nexus.service.datamove.Gate3.never());
             System.out.println("F3YQD " + shape + " " + kind.wire() + " COUNT plan (analyze, buffers):\n"
                 + PgContainerHelper.explainPlanWith(ctx, count, PgContainerHelper.ExplainOptions.ANALYZE_BUFFERS));
-            var update = ManifestFill.updateStatement(ctx, TENANT, kind, null, last, false);
+            var update = ManifestFill.updateStatement(ctx, TENANT, kind, null, last, false, dev.nexus.service.datamove.Gate3.never());
             System.out.println("F3YQD " + shape + " " + kind.wire() + " UPDATE plan (analyze, buffers, rolled back):\n"
                 + PgContainerHelper.explainPlanWith(ctx, update, PgContainerHelper.ExplainOptions.ANALYZE_BUFFERS));
             su.rollback();

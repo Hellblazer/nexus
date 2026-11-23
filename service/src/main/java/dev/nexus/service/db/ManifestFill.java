@@ -163,11 +163,11 @@ public final class ManifestFill {
             var end = window.get(window.size() - 1);
             Cursor last = new Cursor(end.value1(), end.value2());
             // one read: the fillable rows of the window per collection, whose sum is the pick and whose keys are the gates
-            var perCollection = fillableByCollection(ctx, tenant, kind, after, last).fetch();
+            var perCollection = fillableByCollection(ctx, tenant, kind, after, last, repo.gate3()).fetch();
             int picked = 0;
             for (var r : perCollection) picked += r.value3();
             int filled = dryRun || picked == 0 ? 0
-                : apply(ctx, tenant, kind, after, last, gateLabels(ctx, tenant, perCollection), skipLocked);
+                : apply(ctx, tenant, kind, after, last, gateLabels(ctx, tenant, perCollection), skipLocked, repo.gate3());
             return new Batch(window.size(), picked, filled, last);
         }));
     }
@@ -259,11 +259,12 @@ public final class ManifestFill {
      * plan-shape test can explain the exact statement.
      */
     public static Select<Record3<String, Long, Integer>> fillableByCollection(DSLContext ctx, String tenant, Kind kind,
-                                                                              Cursor after, Cursor last) {
+                                                                              Cursor after, Cursor last,
+                                                                              dev.nexus.service.datamove.Gate3 gate3) {
         var row = CATALOG_DOCUMENT_CHUNKS;
         var doc = CATALOG_DOCUMENTS;
         return ctx.select(row.COLLECTION, row.COLLECTION_ID, DSL.count())
-            .from(ManifestFillableCount.joined(row, doc))
+            .from(ManifestFillableCount.joined(row, doc, gate3))
             .where(ManifestFillableCount.candidates(ctx, tenant, kind, row, doc)
                 .and(ManifestFillableCount.strict(kind, doc))
                 .and(after(row, after)).and(through(row, last)))
@@ -308,7 +309,7 @@ public final class ManifestFill {
      * ({@link #updateStatement}) under the lock timeout.
      */
     private static int apply(DSLContext ctx, String tenant, Kind kind, Cursor after, Cursor last,
-                             List<String> collections, boolean skipLocked) {
+                             List<String> collections, boolean skipLocked, dev.nexus.service.datamove.Gate3 gate3) {
         // Every manifest writer holds the sweep gate SHARED for each collection it writes, before its row locks (the
         // retire-orphans sweep takes it EXCLUSIVE; ManifestInsertGateTest). This UPDATE re-points and re-homes nothing, but
         // it joins the rule instead of arguing an exemption. The collections are those of the rows the pick found, in
@@ -324,7 +325,7 @@ public final class ManifestFill {
         WriteRegistryMemo.exempt(ctx, "manifest fill: names no collection in its write, reads no registry row");
         // After the gates, so a gate wait keeps the statement timeout; 0 turns the limit off in skip mode, which waits on no row.
         PgSession.setLocal(ctx, "lock_timeout", Long.toString(skipLocked ? 0L : lockTimeoutMs()));
-        return updateStatement(ctx, tenant, kind, after, last, skipLocked).execute();
+        return updateStatement(ctx, tenant, kind, after, last, skipLocked, gate3).execute();
     }
 
     /**
@@ -334,7 +335,7 @@ public final class ManifestFill {
      * out of {@code b} and not written. Public so a measurement can explain the exact statement.
      */
     public static Update<?> updateStatement(DSLContext ctx, String tenant, Kind kind, Cursor after, Cursor last,
-                                            boolean skipLocked) {
+                                            boolean skipLocked, dev.nexus.service.datamove.Gate3 gate3) {
         var cand = CATALOG_DOCUMENT_CHUNKS.as("cand");
         CatalogDocuments candDoc = CATALOG_DOCUMENTS.as("cand_doc");
         var t = CATALOG_DOCUMENT_CHUNKS;
@@ -344,7 +345,7 @@ public final class ManifestFill {
         Condition inRange = after(cand, after).and(through(cand, last));
         Condition fillable = ManifestFillableCount.candidates(ctx, tenant, kind, cand, candDoc)
             .and(ManifestFillableCount.strict(kind, candDoc)).and(inRange);
-        Table<?> from = ManifestFillableCount.joined(cand, candDoc);
+        Table<?> from = ManifestFillableCount.joined(cand, candDoc, gate3);
         return kind == Kind.LABELS
             ? applyLabels(ctx, tenant, t, from, fillable, cand, skipLocked, bDoc, bPos, bChash)
             : applySpans(ctx, tenant, t, from, fillable, cand, skipLocked, bDoc, bPos, bChash);
