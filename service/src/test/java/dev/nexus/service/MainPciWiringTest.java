@@ -30,7 +30,9 @@ class MainPciWiringTest {
      */
     @Test
     void productionBuildsTheReadinessOnIdReadersPresentAlone_noMainSourceCallsTheInjectingSeam() throws Exception {
-        try (var files = Files.walk(Path.of("src/main/java"))) {
+        // the seam is package-private, so the compiler already confines its callers to this package; PciReconciler has a public method of the same name
+        // that is its own (the reconciler's signal), so the scan is of the package that can reach the check's
+        try (var files = Files.walk(Path.of("src/main/java/dev/nexus/service/datamove"))) {
             for (Path f : (Iterable<Path>) files.filter(p -> p.toString().endsWith(".java"))::iterator) {
                 if (f.endsWith("CompletionBootWork.java")) {
                     continue;
