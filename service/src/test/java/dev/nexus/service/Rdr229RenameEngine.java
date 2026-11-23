@@ -11,6 +11,7 @@ import dev.nexus.service.datamove.CompletionCheck;
 import dev.nexus.service.datamove.DataMoveWorker;
 import dev.nexus.service.datamove.Gate3;
 import dev.nexus.service.datamove.NameKeyDropMove;
+import dev.nexus.service.datamove.NameKeyDropPass;
 import dev.nexus.service.datamove.P35bChangesets;
 import dev.nexus.service.datamove.RenameReadiness;
 import dev.nexus.service.db.AdminConnection;
@@ -53,14 +54,11 @@ import java.util.function.Function;
  * name-key drop move run through the real worker, and the completion check reads the real registry, CHECKs and databasechangelog.
  * {@link #gate3(boolean)} closes and opens that input, so a test can stand before gate 3.
  *
- * <p><b>Two more inputs are stood in for, each until the code that owns it is on this branch.</b>
- * (1) The name-key drop move is registered by an engine pass after the engine serves (stage 2 of P3.7); until it exists a registrar
- * thread of this harness plays that pass: every 100 ms it hands the check's latest result and an admin connection to
- * {@link NameKeyDropMove#registerIfAbsent}, the one operation the pass will call, which registers nothing before gate 3 and one row
- * after it. The move itself is the real one and runs through the real worker. (2) P3.5b's CONTINUE changesets and its list
+ * <p><b>One more input is stood in for until the code that owns it is on this branch:</b> P3.5b's CONTINUE changesets and its list
  * ({@value #P35B_LIST}) are not on this branch. While the resource is absent the engine's list is {@link #P35B_FIXTURE_ID}, a changeset
  * that no walk applies, and {@link #restart} records it in {@code databasechangelog} as P3.5b's second walk will record the real ones; when
- * P3.5b's list exists the harness reads it and records nothing.
+ * P3.5b's list exists the harness reads it and records nothing. The name-key drop move is registered by the production {@link NameKeyDropPass},
+ * every 100 ms, and runs through the real worker; the engine's LeafIndexPass registers the swaps gate 2 waits for.
  *
  * <p>The engine is built through {@code NexusService}'s package-private constructor that takes {@link Gate3} and
  * {@link RenameReadiness} (both read per call), fed from {@link CompletionBootWork#gate3()} and
@@ -93,8 +91,7 @@ final class Rdr229RenameEngine implements AutoCloseable {
     private CompletionBootWork check;
     private TenantScope scope;
     private RenameReadiness readiness;
-    private Thread registrar;
-    private volatile boolean registrarStop;
+    private NameKeyDropPass registrar;
 
     /** The version the harness's registrar passes, as the stage-2 pass passes the engine's own: it lands in the drop move's changeset_id. */
     static final String ENGINE_VERSION = "9.9.9-rename-harness";
@@ -265,26 +262,11 @@ final class Rdr229RenameEngine implements AutoCloseable {
         return p35bOverride != null ? p35bOverride : p35bIds();
     }
 
-    /** The harness's stand-in for the registration pass: see the class comment. Stops with the engine. */
+    /** The production registration pass ({@link NameKeyDropPass}), run every 100 ms; it stops with the engine. */
     private void startRegistrar() {
-        registrarStop = false;
         CompletionBootWork watched = check;
-        registrar = new Thread(() -> {
-            while (!registrarStop) {
-                try (var ctx = DSL.using(admin.url(), admin.user(), admin.password())) {
-                    NameKeyDropMove.registerIfAbsent(watched.latest(), ctx, ENGINE_VERSION);
-                } catch (RuntimeException e) {
-                    // a tick that cannot reach the database is retried on the next one
-                }
-                try {
-                    Thread.sleep(100);
-                } catch (InterruptedException e) {
-                    return;
-                }
-            }
-        }, "rdr229-rename-engine-registrar");
-        registrar.setDaemon(true);
-        registrar.start();
+        registrar = new NameKeyDropPass(admin, watched::latest, ENGINE_VERSION);
+        registrar.start(Duration.ofMillis(100), Duration.ofMillis(100));
     }
 
     /** Stops the engine, the worker and the check, and boots again on the same database (the engine's restart). */
@@ -323,9 +305,8 @@ final class Rdr229RenameEngine implements AutoCloseable {
             leafPass.close();
             leafPass = null;
         }
-        registrarStop = true;
         if (registrar != null) {
-            registrar.interrupt();
+            registrar.close();
             registrar = null;
         }
         if (worker != null) {

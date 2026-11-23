@@ -542,6 +542,38 @@ class MainPciWiringTest {
     }
 
     /**
+     * RDR-229 P3.7 (nexus-p2m1x.27): the name-key drop move's registration pass starts once, at main's top level, after the completion check it
+     * reads, handed that check's latest read, and closes in the shutdown steps; its method returns null without a completion check.
+     */
+    @Test
+    void theNameKeyDropPassStartsAfterTheCompletionCheck_readsItsLatest_closesInTheShutdownSteps_andNeedsACompletionCheck() throws Exception {
+        String src = code(main());
+        int check = src.indexOf("var completionCheck = startCompletionBootWork(");
+        int start = src.indexOf("var nameKeyDropPass = startNameKeyDropPass(");
+        int hook = shutdownSteps(src);
+        int close = src.indexOf("nameKeyDropPass.close();", hook);
+
+        assertThat(check).isPositive();
+        assertThat(start).as("started after the completion check it reads").isGreaterThan(check);
+        assertThat(src.indexOf("var nameKeyDropPass = startNameKeyDropPass(", start + 1)).as("started once").isNegative();
+        int mainDepth = depthAt(src, src.indexOf("var ds = new HikariDataSource(hikari);"));
+        assertThat(depthAt(src, start)).as("a top-level statement of main").isEqualTo(mainDepth);
+        assertThat(src).as("handed the check the engine built").contains("startNameKeyDropPass(adminConnection, completionCheck)");
+        assertThat(close).as("closed in the shared shutdown steps").isGreaterThan(hook);
+        assertThat(src.substring(src.lastIndexOf("if (nameKeyDropPass != null)", close), close)).doesNotContain("else");
+
+        int method = src.indexOf("static dev.nexus.service.datamove.NameKeyDropPass startNameKeyDropPass(");
+        assertThat(method).isPositive();
+        int body = src.indexOf('{', src.indexOf(')', src.indexOf("completionCheck)", method)));
+        String text = src.substring(body, matchingClose(src, body));
+        int noCheck = text.indexOf("if (completionCheck == null) {");
+        assertThat(noCheck).as("no completion check, no pass: and said so").isNotNegative();
+        assertThat(text.substring(noCheck, text.indexOf('}', noCheck))).contains("name_key_drop_pass_not_started").contains("return null;");
+        assertThat(text.indexOf("new dev.nexus.service.datamove.NameKeyDropPass(")).as("the pass is built after the guard").isGreaterThan(noCheck);
+        assertThat(text).as("reads the check's latest read, not a snapshot held here").contains("completionCheck::latest");
+    }
+
+    /**
      * RDR-229 P3.3b (nexus-p2m1x.20): the per-leaf id unique-index pass is started once, at main's top level, after the completion check
      * it reads, handed that check's LATEST read of gate 1 (a null read holds nothing), and closed in the shutdown steps; and its method
      * returns null without a completion check, before it builds the pass. P3.3c (nexus-p2m1x.21) deleted the placeholder constant and its
