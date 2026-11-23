@@ -88,12 +88,17 @@ final class AdoptionBuilders {
             Field<String> relkind = DSL.field(DSL.name("c", "relkind"), String.class);
             Field<Boolean> ours = DSL.field(DSL.field(DSL.name("a", "datname"), String.class).eq(DSL.function("current_database", org.jooq.impl.SQLDataType.VARCHAR))
                 .and(DSL.field(DSL.name("a", "usename"), String.class).eq(DSL.currentUser()))).as("ours");
+            // pg_locks holds the locks of every database of the cluster, and a relation oid means nothing outside its own: only this database's rows
+            var thisDatabase = DSL.field(DSL.name("l", "database")).eq(DSL.field(DSL.select(DSL.field(DSL.name("d", "oid")))
+                .from(DSL.table(DSL.name("pg_catalog", "pg_database")).as("d"))
+                .where(DSL.field(DSL.name("d", "datname"), String.class).eq(DSL.function("current_database", org.jooq.impl.SQLDataType.VARCHAR)))));
             var rows = admin.select(pid, application, relname, relkind, ours)
                 .from(l)
                 .join(c).on(DSL.field(DSL.name("c", "oid")).eq(DSL.field(DSL.name("l", "relation"))))
                 .join(n).on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("c", "relnamespace"))))
                 .join(a).on(DSL.field(DSL.name("a", "pid")).eq(DSL.field(DSL.name("l", "pid"))))
                 .where(DSL.field(DSL.name("n", "nspname"), String.class).eq("nexus"))
+                .and(thisDatabase)
                 .and(relname.eq("chunks").or(relname.like("chunks\\_%", '\\')))
                 .and(DSL.field(DSL.name("l", "granted"), Boolean.class).isTrue())
                 .and(DSL.field(DSL.name("l", "mode"), String.class).in(CONFLICTING))
@@ -118,7 +123,7 @@ final class AdoptionBuilders {
             Set<String> indexes = new LinkedHashSet<>();
             for (var r : admin.select(DSL.field(DSL.name("c", "relname"), String.class))
                     .from(l).join(c).on(DSL.field(DSL.name("c", "oid")).eq(DSL.field(DSL.name("l", "relation"))))
-                    .where(DSL.field(DSL.name("c", "relkind"), String.class).eq("i")).and(pid.in(leavesOf.keySet())).fetch()) {
+                    .where(DSL.field(DSL.name("c", "relkind"), String.class).eq("i")).and(pid.in(leavesOf.keySet())).and(thisDatabase).fetch()) {
                 indexes.add(r.value1());
             }
             List<String> leaves = new ArrayList<>();
