@@ -62,8 +62,11 @@ public final class DataMoveOrphans {
             new AdminDdlSession.Settings(PREFIX + purpose, 0L, "data move " + purpose, "nexus", "data_moves", "none"), false, socketSeconds);
         try {
             // the session's own bounds, so a statement behind a lock, or a server that stalls, ends with an error and not with the network timeout
-            session.ctx().set(DSL.name("lock_timeout"), DSL.inline(lockMs + "ms")).execute();
-            session.ctx().set(DSL.name("statement_timeout"), DSL.inline(statementMs + "ms")).execute();
+            // SET takes no bind, so set_config(name, value, false) with real bind parameters: the session-scoped form of SET (PgSession's idiom)
+            for (var bound : java.util.List.of(java.util.Map.entry("lock_timeout", lockMs), java.util.Map.entry("statement_timeout", statementMs))) {
+                session.ctx().select(DSL.function("set_config", SQLDataType.VARCHAR, DSL.val(bound.getKey()), DSL.val(bound.getValue() + "ms"), DSL.val(false)))
+                    .fetch();
+            }
             return session;
         } catch (RuntimeException e) {
             session.close();
