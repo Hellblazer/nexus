@@ -115,4 +115,48 @@ class CompletionBootWorkReadinessTest {
         assertThat(work.renameReadiness().missing()).as("a read that says something is missing is believed")
             .isEqualTo(RenameReadiness.Missing.NAME_KEY_DROP_MOVE);
     }
+
+    /**
+     * linda's Q3 ruling on folio's r3 critique (F3), the first half: BEFORE any sample read NONE, a read error is never NONE. An unreadable sample (its own
+     * readiness read failed or timed out) and an error while the readiness is computed (the catch arm) both answer readiness_unreadable.
+     */
+    @Test
+    void beforeTheFirstReadySample_aReadErrorIsReadinessUnreadable_neverNone() {
+        var reader = new Scripted();
+        var work = work(reader);
+        CompletionBootWorkTestSupport.idReadersPresent(work, () -> true);
+        reader.next.set(result(CompletionCheck.RenameState.UNREADABLE));
+        work.publish();
+        assertThat(work.latest()).as("non-vacuity: a sample was published").isNotNull();
+        assertThat(work.renameReadiness().missing()).as("an unreadable sample before any NONE").isEqualTo(RenameReadiness.Missing.READINESS_UNREADABLE);
+
+        CompletionBootWorkTestSupport.idReadersPresent(work, () -> {
+            throw new IllegalStateException("the readiness cannot be computed");
+        });
+        assertThat(work.renameReadiness().missing()).as("an error while the readiness is computed, before any NONE")
+            .isEqualTo(RenameReadiness.Missing.READINESS_UNREADABLE);
+    }
+
+    /**
+     * linda's Q3 ruling, the second half: AFTER a sample read NONE, a read error keeps NONE (the facts behind it are monotone), whether the error is an
+     * unreadable sample or an error while the readiness is computed (the catch arm).
+     */
+    @Test
+    void afterTheFirstReadySample_aReadErrorKeepsNone() {
+        var reader = new Scripted();
+        var work = work(reader);
+        CompletionBootWorkTestSupport.idReadersPresent(work, () -> true);
+        reader.next.set(result(new CompletionCheck.RenameState(true, 1, List.of())));
+        work.publish();
+        assertThat(work.renameReadiness().missing()).as("non-vacuity: ready").isEqualTo(RenameReadiness.Missing.NONE);
+
+        reader.next.set(result(CompletionCheck.RenameState.UNREADABLE));
+        work.publish();
+        assertThat(work.renameReadiness().missing()).as("an unreadable sample after a NONE").isEqualTo(RenameReadiness.Missing.NONE);
+
+        CompletionBootWorkTestSupport.idReadersPresent(work, () -> {
+            throw new IllegalStateException("the readiness cannot be computed");
+        });
+        assertThat(work.renameReadiness().missing()).as("an error while the readiness is computed, after a NONE").isEqualTo(RenameReadiness.Missing.NONE);
+    }
 }
