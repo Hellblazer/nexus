@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._module_seam import setattr_in
+
 from tests import _shard_collection as sc
 
 REPO = Path(__file__).resolve().parents[2]
@@ -149,7 +151,7 @@ def test_a_check_that_cannot_start_is_a_failure_and_the_rest_still_run(tmp_path:
     def cannot_exec(argv, **kwargs):  # what subprocess raises for a missing or non-executable interpreter
         raise FileNotFoundError(2, "No such file or directory", argv[0])
 
-    monkeypatch.setattr(gate.subprocess, "run", cannot_exec)
+    setattr_in(monkeypatch, gate, "subprocess.run", cannot_exec)
     code = gate.main(["--reports-dir", str(tmp_path), "--suite", "python_unit", "--shards", "1"])
     out = capsys.readouterr().out
     assert code == 1
@@ -233,7 +235,7 @@ def test_a_check_that_runs_too_long_is_failed_and_the_rest_still_run(tmp_path: P
     sleeper = tmp_path / "sleeper"
     sleeper.write_text("#!/bin/sh\nexec sleep 30\n")
     sleeper.chmod(0o755)
-    monkeypatch.setattr(gate.sys, "executable", str(sleeper))
+    setattr_in(monkeypatch, gate, "sys.executable", str(sleeper))
     monkeypatch.setattr(gate, "CHECK_TIMEOUT_S", 0.3)
     code = gate.main(["--reports-dir", str(tmp_path), "--suite", "python_unit", "--shards", "1"])
     out = capsys.readouterr().out
