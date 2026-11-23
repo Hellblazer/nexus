@@ -446,8 +446,11 @@ public final class TaxonomyCentroidRepository {
      */
     public int deleteByIds(String tenant, String collection, List<Long> topicIds) {
         if (topicIds == null || topicIds.isEmpty()) {
-            dev.nexus.service.db.ExpectedCollectionIds.nothingToWrite(collection);
-            return 0;
+            // linda's ruling: the row is read even with nothing to delete, so a 200 holds only for a live row (a freed id is 404)
+            return tenantScope.withTenant(tenant, ctx -> {
+                dev.nexus.service.db.TaxonomyRepository.consumeRequestedId(ctx, tenant, collection);
+                return 0;
+            });
         }
         return tenantScope.withTenant(tenant, ctx -> {
             // RDR-229 P3.5a (nexus-p2m1x.23): the id the request named is read first, before any centroid row is touched

@@ -260,7 +260,9 @@ class HeavyRoutesRenameGapTest {
                 });
         }),
         new Case("/v1/vectors/reembed/jobs", true, (t, route) -> {
-            return new Plan("{\"source_collection_id\":" + t.x + "}", 201, null, Set.of(), true, o -> {
+            // the profile model has no registered collection for this owner yet: the request names the target it registers
+            String target = "docs__" + t.stem + "__" + BGE + "__v1";
+            return new Plan("{\"source_collection_id\":" + t.x + ",\"target_collection\":" + json(target) + "}", 201, null, Set.of(), true, o -> {
                 var jobs = t.rows("reembed_jobs", List.of("source_collection", "source_collection_id"), "tenant_id", o.f().tenant, "source_collection_id", o.id());
                 assertThat(jobs).as("the job was filed: " + o.resp().body()).hasSize(1);
                 assertThat(jobs.get(0).get("source_collection")).as("under the renamed row's current label").isEqualTo(o.current());
@@ -405,7 +407,7 @@ class HeavyRoutesRenameGapTest {
             nodes.add(DynamicTest.dynamicTest(cs.path(), () -> run(cs)));
         }
         nodes.add(DynamicTest.dynamicTest("non-vacuity: one case per route, none repeated", () -> {
-            assertThat(CASES).as("the cases").hasSize(13);
+            assertThat(CASES).as("the cases: one per HEAVY writes route this class covers").hasSize(14);
             assertThat(COVERED_PATHS).as("one case per route").hasSize(CASES.size());
         }));
         return nodes.stream();

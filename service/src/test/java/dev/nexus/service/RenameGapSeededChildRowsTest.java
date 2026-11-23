@@ -78,6 +78,15 @@ class RenameGapSeededChildRowsTest {
         return r.json().path("id").asLong(-1);
     }
 
+    /** A stored chunk under {@code collection}: a manual assignment names its source collection (NOT NULL) and its chunk (topic_assignments_chunk_fk). */
+    private void seedChunk(String collection, String hex) {
+        fx.asSuperuser(ctx -> {
+            PgContainerHelper.insertChunks(ctx, fx.tenant, collection, List.of(hex), List.of("seed"), List.of(new float[384]),
+                List.of(java.util.Map.<String, Object>of()));
+            return null;
+        });
+    }
+
     private List<String> topicLabelsOf(long id) {
         return fx.asSuperuser(ctx -> ctx.select(TOPICS.LABEL).from(TOPICS).where(TOPICS.COLLECTION_ID.eq(id)).orderBy(TOPICS.LABEL).fetch(TOPICS.LABEL));
     }
@@ -146,8 +155,9 @@ class RenameGapSeededChildRowsTest {
         long x = fx.idOf(b);
         long topic = seedTopic(b, "seed-topic");
         String doc = dev.nexus.service.db.Chash.ofText("rgs-manual-" + b).toHex();
+        seedChunk(b, doc);
         Resp assigned = fx.post("/v1/taxonomy/assignments/assign",
-            "{\"doc_id\":\"" + doc + "\",\"topic_id\":" + topic + ",\"assigned_by\":\"manual\"}");
+            "{\"doc_id\":\"" + doc + "\",\"topic_id\":" + topic + ",\"assigned_by\":\"manual\",\"source_collection\":" + json(b) + "}");
         assertThat(assigned.status()).as("setup: " + assigned.body()).isEqualTo(200);
         oneRowRename(b);
 
@@ -166,8 +176,9 @@ class RenameGapSeededChildRowsTest {
         String b = registered("oldstate-old");
         long topic = seedTopic(b, "seed-topic");
         String doc = dev.nexus.service.db.Chash.ofText("rgs-manual-old-" + b).toHex();
+        seedChunk(b, doc);
         Resp assigned = fx.post("/v1/taxonomy/assignments/assign",
-            "{\"doc_id\":\"" + doc + "\",\"topic_id\":" + topic + ",\"assigned_by\":\"manual\"}");
+            "{\"doc_id\":\"" + doc + "\",\"topic_id\":" + topic + ",\"assigned_by\":\"manual\",\"source_collection\":" + json(b) + "}");
         assertThat(assigned.status()).as("setup: " + assigned.body()).isEqualTo(200);
         oneRowRename(b);   // b is held by no row now
         assertThat(fx.exists(b)).as("setup: no row holds the old label").isFalse();

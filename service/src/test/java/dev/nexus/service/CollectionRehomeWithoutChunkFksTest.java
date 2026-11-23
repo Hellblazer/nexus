@@ -73,8 +73,8 @@ class CollectionRehomeWithoutChunkFksTest {
         assertThat(assigned.status()).as("setup: " + assigned.body()).isEqualTo(200);
         java.time.OffsetDateTime orphanedAt = java.time.OffsetDateTime.now();
         fx.asSuperuser(ctx -> ctx.insertInto(CHUNK_ORPHANED_AT, CHUNK_ORPHANED_AT.TENANT_ID, CHUNK_ORPHANED_AT.COLLECTION, CHUNK_ORPHANED_AT.COLLECTION_ID,
-                CHUNK_ORPHANED_AT.CHASH, CHUNK_ORPHANED_AT.ORPHANED_AT)
-            .values(fx.tenant, source, sid, Chash.fromHex(hex).toBytes(), orphanedAt)
+                CHUNK_ORPHANED_AT.CHASH, CHUNK_ORPHANED_AT.ORPHANED_AT, CHUNK_ORPHANED_AT.EMBEDDING_MODEL)   // embedding_model is NOT NULL since vectors-030
+            .values(fx.tenant, source, sid, Chash.fromHex(hex).toBytes(), orphanedAt, "minilm-l6-v2-384")
             .onConflict(CHUNK_ORPHANED_AT.TENANT_ID, CHUNK_ORPHANED_AT.COLLECTION, CHUNK_ORPHANED_AT.CHASH)
             .doUpdate().set(CHUNK_ORPHANED_AT.ORPHANED_AT, orphanedAt).execute());
 

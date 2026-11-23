@@ -77,6 +77,8 @@ class GcRegistryRowHeldByVerbTest {
                 List.of(new float[384]), List.of(Map.<String, Object>of()));
             return null;
         });
+        // the gc functions select orphans with reapable(c), which honours the 30 day grace: this chunk stands for one orphaned long ago
+        ReapableFixtures.agePastGrace(fx.pg, fx.tenant, collection);
     }
 
     /** Runs {@code request} while a hand session holds {@code collection}'s registry row FOR UPDATE; returns the answer. */
@@ -138,8 +140,11 @@ class GcRegistryRowHeldByVerbTest {
         Resp moved = fx.post("/v1/vectors/gc/quarantine-orphans", "{\"collection_id\":" + x + ",\"quarantine_collection\":"
             + json("quarantine-" + a) + ",\"quarantined_at\":\"" + STAMP + "\"}");
         assertThat(moved.status()).as("setup: the orphan moved to its quarantine sibling: %s", moved.body()).isEqualTo(200);
+        assertThat(moved.json().path("moved").asLong(-1)).as("setup: one aged orphan is in the sibling, so the restore finds a sibling and opens a transaction: %s", moved.body()).isEqualTo(1);
         String body = "{\"origin_collection_id\":" + x + ",\"chashes\":[\"" + hex + "\"]}";
         assertBusy(whileAVerbHoldsTheRow(a, () -> fx.post("/v1/vectors/gc/quarantine-restore", body)), "quarantine_restore_busy");
-        assertThat(fx.post("/v1/vectors/gc/quarantine-restore", body).status()).as("retried after the verb let go").isEqualTo(200);
+        Resp afterTheVerb = fx.post("/v1/vectors/gc/quarantine-restore", body);
+        assertThat(afterTheVerb.status()).as("retried after the verb let go").isEqualTo(200);
+        assertThat(afterTheVerb.json().path("restored").asInt(-1)).as("the busy answer did not outlive the hold: the retry restored the chunk: %s", afterTheVerb.body()).isEqualTo(1);
     }
 }

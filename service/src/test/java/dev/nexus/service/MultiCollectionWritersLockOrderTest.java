@@ -164,12 +164,13 @@ class MultiCollectionWritersLockOrderTest {
         long hiId = fx.idOf(hi);
         assertThat(fx.idOf(lo)).as("setup: lo was registered first").isLessThan(hiId);
         String seq = "p35a-mixed-" + (n++);
+        int ownerSeq = n++;   // the owner prefix is a tumbler prefix (word.number), the 400 of any other shape answered before a lock was taken
         boolean[] verbGot40P01 = new boolean[1];
         Future<Resp> writer;
         try (Connection verb = fx.pg.createConnection("")) {
             verb.setAutoCommit(false);
             lockRow(verb, lo);   // the verb holds the lower row first
-            writer = pool.submit(() -> fx.post("/v1/catalog/doc/register_many", "{\"owner_prefix\":\"" + seq + "\",\"docs\":["
+            writer = pool.submit(() -> fx.post("/v1/catalog/doc/register_many", "{\"owner_prefix\":\"p35a." + ownerSeq + "\",\"docs\":["
                 + "{\"title\":\"" + seq + "-a\",\"content_type\":\"knowledge\",\"corpus\":\"knowledge\",\"file_path\":\"" + seq + "-a.md\",\"physical_collection_id\":" + hiId + "},"
                 + "{\"title\":\"" + seq + "-b\",\"content_type\":\"knowledge\",\"corpus\":\"knowledge\",\"file_path\":\"" + seq + "-b.md\",\"physical_collection\":" + json(lo) + "}]}"));
             try {

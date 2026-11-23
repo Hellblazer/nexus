@@ -5,6 +5,8 @@
 # and the DimTables / CollectionScopedTable accessor form .set(<t>.collection(), ...), and fails when a file's count for a site differs
 # from this list. A label-changing site belongs inside runRename, not here. Out of scope for the scan: writes built with DSL.field(name) and raw SQL in string literals.
 # Format: <file> | <count> | <site text> | <reason>
+CatalogIdStamps.java | 1 | .set(CHUNK_ORPHANED_AT.COLLECTION, targetLabel) | the re-home carries the orphan marks of the chunks it moved to the target, by the target's label and id (a move, not a rename)
+CatalogIdStamps.java | 1 | .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, targetLabel) | the re-home carries the topic assignments of the chunks it moved to the target, by the target's label and id (a move, not a rename)
 AspectRepository.java | 3 | .set(DOCUMENT_HIGHLIGHTS.COLLECTION, EX_HL_COLLECTION) | highlight upserts and imports: the row's own collection on insert or conflict, not a rename
 CatalogMoves.java | 1 | .set(DOCUMENT_HIGHLIGHTS.COLLECTION, collection) | the document move's re-key of highlights to the target collection (a move, not a label change)
 CatalogRepository.java | 3 | .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, EX_DOC_PCOLL) | document upserts and imports: the document's own collection
@@ -12,14 +14,17 @@ CatalogRepository.java | 1 | .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, target)
 CatalogRepository.java | 2 | .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, EX_CHK_COLL) | manifest upserts: each row's own collection
 CatalogRepository.java | 1 | .set(DOCUMENT_ASPECTS.COLLECTION, target) | the document move re-homes the document's aspects (a move, not a label change)
 CatalogRepository.java | 1 | .set(DOCUMENT_HIGHLIGHTS.COLLECTION, target) | the document move re-homes the document's highlights (a move, not a label change)
-CatalogRepository.java | 1 | .set(GC_AUDIT.COLLECTION, collection == null ? "" : collection) | the gc audit row names the collection it audited
+CatalogRepository.java | 1 | .set(GC_AUDIT.COLLECTION, auditLabel) | the gc audit row names the collection it audited, by the current label of the registry row the delete locked
 CatalogRepository.java | 1 | .set(t.collection(), target) | rehomeCollection's per-table re-home by name: slice D (R-B) owns it; it moves rows between live collections and changes no label
+CatalogRepository.java | 1 | .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, tgt) | the collection re-home moves the manifest rows of the chunks it moved to the target, by the target's label and id (a move, not a rename: no row changes the label it bears)
 CollectionMint.java | 1 | .set(CATALOG_COLLECTIONS.NAME, choice.label()) | a mint names a NEW registry row (an insert), not a rename of an existing one
 ManifestReplace.java | 1 | .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, v.field("", String.class)) | the manifest replace writes each row's own collection
-ReembedJobRepository.java | 1 | .set(REEMBED_JOBS.SOURCE_COLLECTION, source) | a re-embed job row records its source collection on insert
-TaxonomyRepository.java | 1 | .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, collection) | purge or persist path: the assignment's own source collection
+ReembedJobRepository.java | 1 | .set(REEMBED_JOBS.SOURCE_COLLECTION, sourceRow.label()) | a re-embed job row records its source collection on insert, by the current label of the registry row the start locked
+TaxonomyRepository.java | 1 | .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, coll) | the assignment's own source collection, by the current label of the registry row the write locked
 TaxonomyRepository.java | 2 | .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, field("" + "" + "" + "", String.class)) | topic assignment upserts and imports: the row's own source collection
 TaxonomyRepository.java | 2 | .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, field("", String.class)) | topic assignment upserts and imports: the row's own source collection
-TelemetryRepository.java | 2 | .set(HOOK_FAILURES.COLLECTION, str(collection)) | hook failure inserts and imports carry their own collection
-TelemetryRepository.java | 2 | .set(RELEVANCE_LOG.COLLECTION, str(collection)) | relevance log inserts and imports carry their own collection
+TelemetryRepository.java | 1 | .set(HOOK_FAILURES.COLLECTION, str(collection)) | hook failure imports carry their own collection
+TelemetryRepository.java | 1 | .set(HOOK_FAILURES.COLLECTION, CollectionIds.historyLabel(ctx, tenant, str(collection))) | a hook failure row names the collection by the current label of the row its id names (a history write, never locked)
+TelemetryRepository.java | 1 | .set(RELEVANCE_LOG.COLLECTION, str(collection)) | relevance log imports carry their own collection
+TelemetryRepository.java | 1 | .set(RELEVANCE_LOG.COLLECTION, CollectionIds.historyLabel(ctx, tenant, str(collection))) | a relevance log row names the collection by the current label of the row its id names (a history write, never locked)
 TelemetryRepository.java | 2 | .set(SEARCH_TELEMETRY.COLLECTION, collection) | search telemetry inserts and imports carry their own collection

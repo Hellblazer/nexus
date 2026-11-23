@@ -3032,8 +3032,12 @@ public final class TaxonomyRepository {
     public List<Long> persistDiscoveredTopics(String tenant, String collection,
                                                List<Map<String, Object>> specs) {
         if (specs == null || specs.isEmpty()) {
-            ExpectedCollectionIds.nothingToWrite(collection);
-            return List.of();
+            // linda's ruling (RDR-229 P3.5a): every writer reads its collection's row FOR KEY SHARE first, with nothing to write too, so a 200
+            // holds only for a live row (a freed id is 404, a retired one 409)
+            return tenantScope.withTenant(tenant, ctx -> {
+                TaxonomyCollectionLock.lockAndRequireWritable(ctx, tenant, collection);
+                return List.<Long>of();
+            });
         }
         return tenantScope.withTenant(tenant, ctx -> {
             // nexus-n2ls1: serialize per-collection BEFORE the guard — the guard

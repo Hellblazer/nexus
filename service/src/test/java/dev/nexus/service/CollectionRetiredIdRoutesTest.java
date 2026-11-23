@@ -367,6 +367,36 @@ class CollectionRetiredIdRoutesTest {
         assertThat(r.json().path("collection_id").asLong(-1)).isEqualTo(x);
     }
 
+    /**
+     * linda's ruling: a writer reads its collection's row FOR KEY SHARE first, with nothing to write too, so a 200 holds only for a live row.
+     * An EMPTY persist_discovered and an EMPTY centroid delete used to return before any transaction, and answered 200 for an id the
+     * collection's delete freed after the route resolved it.
+     */
+    @Test
+    void anEmptyPersistDiscoveredAndAnEmptyCentroidDelete_byAnIdFreedAfterTheLookups_answer404() {
+        for (String[] route : new String[][] {{"/v1/taxonomy/topics/persist_discovered", "\"specs\":[]"},
+                                              {"/v1/taxonomy/centroids/delete", "\"topic_ids\":[]"}}) {
+            String a = registered("gap-empty");
+            long x = fx.idOf(a);
+            AtomicInteger deleteStatus = new AtomicInteger();
+            AtomicInteger fired = new AtomicInteger();
+            hooks(() -> {
+                if (fired.getAndIncrement() == 0) {
+                    elsewhere(() -> deleteStatus.set(fx.post(DELETE, "{\"name\":" + json(a) + "}").status()));
+                }
+            }, null, null);
+            Resp r;
+            try {
+                r = fx.post(route[0], "{\"collection_id\":" + x + "," + route[1] + "}");
+            } finally {
+                noHooks();
+            }
+            assertThat(deleteStatus.get()).as("setup: the hook freed the id").isEqualTo(200);
+            assertThat(r.status()).as(route[0] + ": " + r.body()).isEqualTo(404);
+            assertThat(r.reason()).isEqualTo("unknown_collection_id");
+        }
+    }
+
     @Test
     void upsertChunks_byAnIdFreedAfterTheLookupsLandsNothingInTheNewHolder() {
         String a = registered("gap-upsert");
