@@ -148,18 +148,21 @@ class MultiCollectionWritersLockOrderTest {
 
     /**
      * A document batch that names one collection by ID and another by LABEL (the review's mixed batch): its registry rows are read in ONE
-     * statement in id order. Read in two runs (labels, then ids) a batch whose label names the HIGHER id and whose id names the LOWER would hold
-     * the key share of the higher row and wait for the lower, against a verb that holds the lower and wants the higher: a cycle.
+     * statement in id order. The batch here names the HIGHER row by id and the LOWER by label. The code this replaced read the ids first (the
+     * labels only came with the per-document check, or in a run of their own when there were two), so it took the key share of the higher row
+     * and then waited for the lower one, against a verb that holds the lower and wants the higher: a cycle (the verb's wait for the higher row
+     * is behind the writer's share, the writer's wait for the lower is behind the verb). Read in id order the batch waits for the lower row
+     * first, holding nothing, and the verb gets the higher one.
      */
     @Timeout(180)
     @Test
-    void aDocumentBatchNamingTheLowerIdByIdAndTheHigherByLabel_readsBothRowsInIdOrder_andMeetsAVerbWithoutACycle() throws Exception {
+    void aDocumentBatchNamingTheHigherRowByIdAndTheLowerByLabel_readsBothRowsInIdOrder_andMeetsAVerbWithoutACycle() throws Exception {
         String lo = label("w1-mixed-lo-" + (n++));
         fx.register(lo);
         String hi = label("w1-mixed-hi-" + (n++));
         fx.register(hi);
-        long loId = fx.idOf(lo);
-        assertThat(loId).as("setup: lo was registered first").isLessThan(fx.idOf(hi));
+        long hiId = fx.idOf(hi);
+        assertThat(fx.idOf(lo)).as("setup: lo was registered first").isLessThan(hiId);
         String seq = "p35a-mixed-" + (n++);
         boolean[] verbGot40P01 = new boolean[1];
         Future<Resp> writer;
@@ -167,8 +170,8 @@ class MultiCollectionWritersLockOrderTest {
             verb.setAutoCommit(false);
             lockRow(verb, lo);   // the verb holds the lower row first
             writer = pool.submit(() -> fx.post("/v1/catalog/doc/register_many", "{\"owner_prefix\":\"" + seq + "\",\"docs\":["
-                + "{\"title\":\"" + seq + "-a\",\"content_type\":\"knowledge\",\"corpus\":\"knowledge\",\"file_path\":\"" + seq + "-a.md\",\"physical_collection_id\":" + loId + "},"
-                + "{\"title\":\"" + seq + "-b\",\"content_type\":\"knowledge\",\"corpus\":\"knowledge\",\"file_path\":\"" + seq + "-b.md\",\"physical_collection\":" + json(hi) + "}]}"));
+                + "{\"title\":\"" + seq + "-a\",\"content_type\":\"knowledge\",\"corpus\":\"knowledge\",\"file_path\":\"" + seq + "-a.md\",\"physical_collection_id\":" + hiId + "},"
+                + "{\"title\":\"" + seq + "-b\",\"content_type\":\"knowledge\",\"corpus\":\"knowledge\",\"file_path\":\"" + seq + "-b.md\",\"physical_collection\":" + json(lo) + "}]}"));
             try {
                 awaitWaiting(writer, "the batch waits for the lower row the verb holds");
                 try {
