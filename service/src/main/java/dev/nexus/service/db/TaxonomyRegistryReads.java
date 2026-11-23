@@ -36,8 +36,10 @@ import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
  * label, which a missing row does not refuse (the leftovers of a deleted collection are still the caller's to clear).
  *
  * <p>The sets are read WITHOUT a lock first, because the lock names what to lock. After the lock they are read again; a collection a
- * concurrent writer added in between is locked in a further statement ({@link #STABLE_PASSES} passes). A row retired meanwhile is refused
- * typed by the registry read ({@code CollectionRetiredIdException}), never written under.
+ * concurrent writer added in between is locked in a further statement ({@link #STABLE_PASSES} passes). The reads are TOLERANT
+ * ({@link RegistryRowLocks#keyShareIfPresent}): a child row stamped to a collection that is retired or gone is not refused (no 409, no
+ * 404, as before these reads existed), because supersede does not re-home children. The collection the REQUEST names stays refused where
+ * it was.
  */
 final class TaxonomyRegistryReads {
 
@@ -91,12 +93,17 @@ final class TaxonomyRegistryReads {
          * the old one), else the column as it is (a topic in no collection, or whose label no row holds).
          */
         org.jooq.Field<String> nameToWrite() {
-            return row.<org.jooq.Field<String>>map(r -> org.jooq.impl.DSL.val(r.label())).orElse(TOPICS.COLLECTION);
+            return liveRow().<org.jooq.Field<String>>map(r -> org.jooq.impl.DSL.val(r.label())).orElse(TOPICS.COLLECTION);
         }
 
         /** The home's CURRENT label: the locked row's, else the name the topic bears. */
         String currentLabel() {
-            return row.map(CollectionRow::label).orElse(label);
+            return liveRow().map(CollectionRow::label).orElse(label);
+        }
+
+        /** The locked row when it is live: a retired row's label is a tombstone's, never what a topic is restamped to. */
+        private Optional<CollectionRow> liveRow() {
+            return row.filter(r -> !r.isSuperseded());
         }
     }
 
@@ -126,13 +133,15 @@ final class TaxonomyRegistryReads {
      * the collection of each topic in {@code topicIds}, and with {@code withSources} the source collections of every assignment of those
      * topics. Returns the home of the FIRST topic (empty when it does not exist), its row as locked.
      *
-     * @throws CollectionRetiredIdException for a row the topic or an assignment is filed under that was retired
+     * A row the topic or an assignment is filed under that is retired or gone is not refused.
      */
     static Optional<TopicHome> registryFirstOfTopics(DSLContext ctx, String tenant, boolean withSources, List<Long> topicIds) {
         lockStable(ctx, tenant, () -> namesOf(ctx, tenant, withSources, topicIds));
         return homeOf(ctx, topicIds.get(0)).map(h -> {
             if (h.collectionId() != null) {
-                return new TopicHome(h.collectionId(), h.label(), Optional.of(CollectionRegistry.requireIdForWrite(ctx, tenant, h.collectionId())));
+                // tolerant: a topic stamped to a retired or gone collection is still written, as before this read existed
+                return new TopicHome(h.collectionId(), h.label(),
+                    RegistryRowLocks.keyShareIfPresent(ctx, tenant, List.of(h.collectionId()), List.of()).stream().findFirst());
             }
             return new TopicHome(null, h.label(), h.label().isBlank() ? Optional.empty()
                 : CollectionRegistry.requireForWriteIfPresent(ctx, tenant, h.label()));
@@ -181,13 +190,24 @@ final class TaxonomyRegistryReads {
      * no collection of its own.
      */
     static Optional<CollectionRow> registryFirstAround(DSLContext ctx, String tenant, String own, Supplier<Names> others) {
+        return registryFirstAround(ctx, tenant, own, others, locked -> others.get());
+    }
+
+    /**
+     * {@link #registryFirstAround(DSLContext, String, String, Supplier)} for a write whose other collections are named through the rows of
+     * {@code own} (the topics of the collection): {@code beforeOwn} judges them from an unlocked guess, for ordering only, and {@code afterOwn}
+     * judges them again from the row as locked, which is what the write itself acts on. A rename in the gap between the guess and the lock
+     * (it changes the name column, which a key share does not stop) cannot leave the locked row's topics' sources unread.
+     */
+    static Optional<CollectionRow> registryFirstAround(DSLContext ctx, String tenant, String own, Supplier<Names> beforeOwn,
+                                                       java.util.function.Function<Optional<CollectionRow>, Names> afterOwn) {
         Long ownId = own == null ? null : unlockedId(ctx, tenant, own);
         Set<Long> heldIds = new HashSet<>();
         Set<String> heldLabels = new HashSet<>();
-        lockBelow(ctx, tenant, ownId, others, heldIds);
+        lockBelow(ctx, tenant, ownId, beforeOwn, heldIds);
         Optional<CollectionRow> row = own == null ? Optional.empty() : CollectionRegistry.requireForWriteIfPresent(ctx, tenant, own);
         row.ifPresent(r -> heldIds.add(r.collectionId()));
-        lockRest(ctx, tenant, others, heldIds, heldLabels);
+        lockRest(ctx, tenant, () -> afterOwn.apply(row), heldIds, heldLabels);
         return row;
     }
 
@@ -207,7 +227,7 @@ final class TaxonomyRegistryReads {
         Names n = others.get();
         List<String> labels = new ArrayList<>(n.labels());
         labels.add(own);
-        CollectionRegistry.requireIdsAndLabelsForWrite(ctx, tenant, n.ids(), labels);
+        RegistryRowLocks.keyShareIfPresent(ctx, tenant, n.ids(), labels);   // tolerant for the children's ids; own is refused by the lock that follows
         held.addAll(n.ids());
         return held;
     }
@@ -232,11 +252,18 @@ final class TaxonomyRegistryReads {
             }
         }
         if (!below.isEmpty()) {
-            CollectionRegistry.requireIdsAndLabelsForWrite(ctx, tenant, below, List.of());
+            RegistryRowLocks.keyShareIfPresent(ctx, tenant, below, List.of());
             heldIds.addAll(below);
         }
     }
 
+    /**
+     * Locks, in passes, the ids and labels {@code others} names that are not held yet. The first pass reads every id in ONE statement in
+     * {@code collection_id} order. A later pass exists only for a collection a concurrent writer added in between, which the first statement
+     * could not name; it may take an id BELOW one already held. That is the one order inversion left: it can close a cycle with a verb that
+     * holds the lower id and waits for the higher, the database detects it (40P01) and the transaction is retried from the top, so the
+     * cost is a retry, never a hang. {@link #STABLE_PASSES} bounds the passes.
+     */
     private static void lockRest(DSLContext ctx, String tenant, Supplier<Names> others, Set<Long> heldIds, Set<String> heldLabels) {
         for (int pass = 0; pass < STABLE_PASSES; pass++) {
             Names n = others.get();
@@ -245,7 +272,7 @@ final class TaxonomyRegistryReads {
             if (ids.isEmpty() && labels.isEmpty()) {
                 return;
             }
-            CollectionRegistry.requireIdsAndLabelsForWrite(ctx, tenant, ids, labels);
+            RegistryRowLocks.keyShareIfPresent(ctx, tenant, ids, labels);
             heldIds.addAll(ids);
             heldLabels.addAll(labels);
         }
@@ -296,20 +323,17 @@ final class TaxonomyRegistryReads {
     }
 
     /**
-     * The registry rows of every collection whose label starts with {@code prefix}, read {@code FOR KEY SHARE} in one id-ordered statement
-     * (a collection registered meanwhile is not among the rows the write reaches: it deletes by the held ids). Returns each row.
+     * The registry rows of every collection whose label starts with {@code prefix}, live or retired, read {@code FOR KEY SHARE} in one
+     * id-ordered statement (a collection registered meanwhile is not among the rows the write reaches: it deletes by the held ids). Retired
+     * rows are included, so a child stamped to a tombstone that bears the label is pruned as it was when the prefix matched the name column
+     * (a same-named tombstone is the label's own: no other collection's row is reached). Returns each row.
      */
     static List<CollectionRow> registryFirstOfPrefix(DSLContext ctx, String tenant, String prefix) {
         List<String> labels = labelsStarting(ctx, tenant, prefix);
         if (labels.isEmpty()) {
             return List.of();
         }
-        CollectionRegistry.requireAllForWrite(ctx, tenant, labels);
-        List<CollectionRow> rows = new ArrayList<>();
-        for (String label : labels) {
-            CollectionRegistry.requireForWriteIfPresent(ctx, tenant, label).ifPresent(rows::add);
-        }
-        return rows;
+        return RegistryRowLocks.keyShareIfPresent(ctx, tenant, List.of(), labels);
     }
 
     /** Every collection id of {@code rows}, for a statement that deletes by them. */
