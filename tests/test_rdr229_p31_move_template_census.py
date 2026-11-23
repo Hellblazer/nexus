@@ -150,7 +150,8 @@ def test_the_committed_census_lists_every_registered_template_the_scan_finds(gua
     got = set()
     for line in CENSUS.read_text().splitlines():
         f = line.split("\t")
-        if len(f) == 10 and f[5] == "data_move":
-            got.add(tuple(f[:2]) + (f[2].split(" [")[0],) + tuple(f[4:]))
+        # the writer census appends its own kind column ("move") after the ten this census emits
+        if len(f) == 11 and f[5] == "data_move":
+            got.add(tuple(f[:2]) + (f[2].split(" [")[0],) + tuple(f[4:10]))
     assert want, "non-vacuity: the scan produced census rows"
     assert got == want, "regenerate: scripts/rdr229_p31_writer_census.py <root> --write"
