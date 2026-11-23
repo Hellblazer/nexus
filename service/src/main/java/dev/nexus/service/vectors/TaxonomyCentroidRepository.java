@@ -381,8 +381,8 @@ public final class TaxonomyCentroidRepository {
      * shape the rebuild/project paths index into.
      */
     public List<CentroidRecord> getByCollection(String tenant, String collection) {
-        return fetchCentroids(tenant, (ctx, fixed, ct) ->
-            CollectionSelector.of(fixed, ctx, tenant, collection).eq(ct.collection(), ct.collectionId()));
+        return fetchCentroids(tenant, (ctx, held, ct) ->
+            CollectionSelector.of(held, ctx, tenant, collection).eq(ct.collection(), ct.collectionId()));
     }
 
     /**
@@ -407,12 +407,12 @@ public final class TaxonomyCentroidRepository {
      * by name through {@link #getByCollection}.
      */
     public List<CentroidRecord> getForeignCentroids(String tenant, String collection) {
-        return fetchCentroids(tenant, (ctx, fixed, ct) -> {
+        return fetchCentroids(tenant, (ctx, held, ct) -> {
             // The registry label's rule, id-side from gate 3: a tombstone is the row that names a successor by id; its
             // centroids are not foreign. A collection that resolves to no id has no centroids of its own, so every
             // other centroid is foreign.
-            if (fixed.holds()) {
-                Long own = CollectionSelector.of(fixed, ctx, tenant, collection).idOf(collection);
+            if (held.holds()) {
+                Long own = CollectionSelector.of(held, ctx, tenant, collection).idOf(collection);
                 return (own == null ? DSL.trueCondition() : ct.collectionId().ne(own)).and(DSL.notExists(
                     DSL.selectOne().from(CATALOG_COLLECTIONS)
                        .where(CATALOG_COLLECTIONS.TENANT_ID.eq(ct.tenantId()))
@@ -440,9 +440,8 @@ public final class TaxonomyCentroidRepository {
     private List<CentroidRecord> fetchCentroids(String tenant, CentroidPredicate predicate) {
         return tenantScope.withTenant(tenant, ctx -> {
             List<CentroidRecord> out = new ArrayList<>();
-            // RDR-229 P3.5c: gate 3 is read once for the whole fetch (every dim, the predicate and the label), then fixed.
+            // RDR-229 P3.5c: gate 3 is read for the whole fetch (every dim, the predicate and the label); it is the latched value, which never goes back.
             final boolean byId = gate3.holds();
-            final Gate3 fixed = () -> byId;
             for (int dim : DIMS) {
                 DimTables.CentroidTable ct = DimTables.CENTROIDS.get(dim);
                 // From gate 3 a row's collection is the registry's label of its id (a one-row rename leaves the row's name stale).
@@ -450,7 +449,7 @@ public final class TaxonomyCentroidRepository {
                 var rows = ctx.select(label, ct.topicId(), ct.embedding(),
                                       ct.label(), ct.docCount())
                               .from(ct.table())
-                              .where(predicate.apply(ctx, fixed, ct).and(ct.embedding().isNotNull()))
+                              .where(predicate.apply(ctx, gate3, ct).and(ct.embedding().isNotNull()))
                               .orderBy(label.asc(), ct.topicId().asc())
                               .fetch();
                 for (var rec : rows) {
@@ -470,7 +469,7 @@ public final class TaxonomyCentroidRepository {
     /** A centroid read's collection predicate, built in the fetch's transaction over the one fixed gate-3 reading. */
     @FunctionalInterface
     private interface CentroidPredicate {
-        org.jooq.Condition apply(org.jooq.DSLContext ctx, Gate3 fixed, DimTables.CentroidTable ct);
+        org.jooq.Condition apply(org.jooq.DSLContext ctx, Gate3 held, DimTables.CentroidTable ct);
     }
 
     /** The registry's label of the centroid row's collection id: what a reader returns from gate 3, never the row's own name. */

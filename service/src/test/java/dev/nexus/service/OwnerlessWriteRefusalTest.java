@@ -587,9 +587,9 @@ class OwnerlessWriteRefusalTest {
         String h = owned("owr-tenant-predicate");
         try (Connection su = pg.createConnection("")) {
             var dsl = DSL.using(su, SQLDialect.POSTGRES);
-            assertThat(PgVectorRepository.liveOwnedChashes(dsl, TENANT, COLLECTION, List.of(h)))
+            assertThat(PgVectorRepository.liveOwnedChashes(dsl, TENANT, COLLECTION, List.of(h), dev.nexus.service.datamove.Gate3.never()))
                 .as("the owning tenant sees its chash").containsExactly(h);
-            assertThat(PgVectorRepository.liveOwnedChashes(dsl, TENANT_2, COLLECTION, List.of(h)))
+            assertThat(PgVectorRepository.liveOwnedChashes(dsl, TENANT_2, COLLECTION, List.of(h), dev.nexus.service.datamove.Gate3.never()))
                 .as("another tenant, same collection name, same chash: not owned").isEmpty();
         }
     }
