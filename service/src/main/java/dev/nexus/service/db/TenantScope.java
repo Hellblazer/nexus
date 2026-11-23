@@ -306,6 +306,7 @@ public final class TenantScope {
 
             // Hand stamped context to caller — the ONLY DSLContext path
             DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+            StrictWriterCensus.install(ctx);   // off unless -Dnexus.writer.census is set (RDR-229 P3.5a)
 
             // Stamp the GUC via the set_config(...) FUNCTION (nexus-4okz4 increment 4):
             // unlike the `SET LOCAL x = y` STATEMENT syntax (which cannot bind the
