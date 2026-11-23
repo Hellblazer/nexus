@@ -299,6 +299,10 @@ public final class ChashRepository {
             // RDR-210 Phase 6 Step 2 (bead nexus-f98bg): a name a re-embed job is moving documents out of or into
             // is not re-homed underneath it; 409 naming the job (HttpUtil.sendTypedDbError).
             CatalogRepository.refuseUnderReembedJob(ctx, tenant, "rename", oldCollection, newCollection);
+            // RDR-229 P3.5a row 14 (nexus-p2m1x.23): the verb's own registry lock, FOR UPDATE in id order (the canonical order's
+            // step 3, as CollectionRename takes it), so a writer of either name in flight, which holds its row FOR KEY SHARE, finishes
+            // before this re-home reads the chunk rows and one that arrives later reads the renamed row. A name with no row is skipped.
+            CollectionTombstones.lockRows(ctx, tenant, oldCollection, newCollection);
             // nexus-i15oc: plain registration check on purpose. A rename onto an EMPTY tombstone revives it
             // (renaming B back onto A, the round trip that undoes a rename, lands on A's tombstone), so the
             // target may be superseded. The source needs no check, it is only read.

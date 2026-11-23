@@ -219,6 +219,9 @@ public final class ReembedHandler implements HttpHandler {
             HttpUtil.send(exchange, 400, error(e.getMessage()));
         } catch (JobLockHeld e) {
             HttpUtil.send(exchange, 409, held(e.getMessage(), e.existingJobId(), e.existingState()));
+        } catch (ReembedJobRepository.EndRefused e) {
+            HttpUtil.send(exchange, 409, MAPPER.writeValueAsString(orderedMap(
+                "error", e.getMessage(), "job_id", e.jobId().toString())));
         } catch (LockContention e) {
             exchange.getResponseHeaders().set("Retry-After", "1");
             HttpUtil.send(exchange, 409, MAPPER.writeValueAsString(orderedMap(
@@ -544,14 +547,14 @@ public final class ReembedHandler implements HttpHandler {
             action = "registered";
         }
 
-        // The earlier job is marked before the start, and also on the live branch: the revive is the upsert that
-        // cleared the supersession, so the mark follows it, not the start. A start that then loses (a lock, a crash)
-        // leaves the target live and the earlier job marked; a failure of the mark itself leaves it unmarked, and
-        // the retry arrives here as a live target. markRevived is idempotent. A registered target is new, so no
-        // earlier job went target to source.
-        Optional<Job> earlier = "registered".equals(action)
-            ? Optional.empty() : jobs.markRevived(tenant, target, source);
-        Job job = jobs.start(tenant, source, target, tokenCap, keepSource, forceDelete);
+        // The earlier job is marked in the start's own transaction (RDR-229 P3.5a row 14), on the live branch as on the revived one: the
+        // revive is the upsert that cleared the supersession, so the mark follows it. A start that then loses (a lock, a crash) leaves the
+        // target live and the earlier job unmarked; the retry arrives here as a live target and marks it (idempotent). A registered target
+        // is new, so no earlier job went target to source.
+        ReembedJobRepository.Started started = jobs.startMarking(tenant, source, target, tokenCap, keepSource, forceDelete,
+            !"registered".equals(action));
+        Job job = started.job();
+        Optional<Job> earlier = started.revived();
         log.info("event=reembed_job_started tenant={} job={} source={} target={} target_action={} token_cap={} "
                 + "keep_source={} force_delete={} earlier_job_revived={}", tenant, job.jobId(), source, target,
             action, tokenCap, keepSource, forceDelete, earlier.map(j -> j.jobId().toString()).orElse("none"));
