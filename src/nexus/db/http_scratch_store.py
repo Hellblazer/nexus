@@ -288,6 +288,10 @@ class HttpScratchStore:
         # slot's resolution lock, ``mcp_infra._default_t2_slot``,
         # nexus-w1ip) for exactly this close()-under-a-live-caller class.
         self._refresh_lock = threading.Lock()
+        # Replaced clients still open for requests in flight (see _replace_client), and their lock. Both are
+        # set here, before any send: built lazily, a second thread could take the lock and find no list.
+        self._parked: list[tuple[float, httpx.Client]] = []
+        self._parked_lock = threading.Lock()
         # nexus-r0d37 defect 2: set when a data-token re-mint healed the
         # bearer and the retry still 401'd; cleared by the next non-401
         # response. See _remint_data_token_and_rebuild.
@@ -758,10 +762,10 @@ class HttpScratchStore:
             self._parked.append((time.monotonic(), old))
 
     def _parked_guard(self) -> Any:
-        """The lock over ``self._parked`` (created lazily: a store built with ``__new__`` has neither)."""
-        if getattr(self, "_parked_lock", None) is None:
+        """The lock over ``self._parked``; ``__init__`` sets both, and a store built with ``__new__`` gets them here."""
+        if getattr(self, "_parked_lock", None) is None:  # a store built with __new__ (test seam) only
+            self._parked = []  # the list before the lock: a thread that sees the lock always finds the list
             self._parked_lock = threading.Lock()
-            self._parked: list[tuple[float, httpx.Client]] = []
         return self._parked_lock
 
     def _close_parked(self, *, everything: bool = False) -> None:

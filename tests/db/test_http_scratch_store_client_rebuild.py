@@ -336,3 +336,10 @@ def test_a_corrupt_bundle_stays_an_ssl_error_and_names_the_path(ca_file):
         shared_ssl.get_shared_ssl_context()
 
     assert any(str(ca_file) in note for note in getattr(excinfo.value, "__notes__", [])), excinfo.value
+
+
+def test_the_parked_list_and_its_lock_exist_from_construction(store):
+    """Round-2 review F1: both were created lazily, the lock first, so a second thread could take the lock
+    and find no list (AttributeError out of _send). They are set in __init__, before any send."""
+    assert store.__dict__.get("_parked") == []
+    assert store.__dict__.get("_parked_lock") is not None

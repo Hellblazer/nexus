@@ -209,8 +209,9 @@ def _stream_once(url: str, dest: Path, headers: dict[str, str] | None = None) ->
         from nexus.progress.download_meter import meter_for  # noqa: PLC0415 — stdlib-only, deferred
 
         meter = None
+        from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — deferred: read once per process, not per call (2026-11-21)
         with httpx.stream(
-            "GET", url, headers=headers, follow_redirects=True, timeout=timeout
+            "GET", url, headers=headers, follow_redirects=True, timeout=timeout, verify=get_shared_ssl_context()
         ) as resp:
             resp.raise_for_status()
             # nexus-mjmjl: the model is the largest first-run download; size,

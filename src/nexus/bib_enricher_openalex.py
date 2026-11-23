@@ -284,7 +284,8 @@ def _direct_lookup(url: str, *, expected_title: str = "") -> dict[str, Any]:
 
     for attempt in range(_MAX_RETRIES + 1):
         try:
-            resp = httpx.get(url, params=params, timeout=_TIMEOUT)
+            from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — deferred: read once per process, not per call (2026-11-21)
+            resp = httpx.get(url, params=params, timeout=_TIMEOUT, verify=get_shared_ssl_context())
             if resp.status_code == 429 and attempt < _MAX_RETRIES:
                 wait = _BACKOFF_BASE * (2 ** attempt)
                 time.sleep(wait)
@@ -378,7 +379,8 @@ def enrich(title: str) -> dict[str, Any]:
     params = _params(title)
     for attempt in range(_MAX_RETRIES + 1):
         try:
-            resp = httpx.get(_BASE_URL, params=params, timeout=_TIMEOUT)
+            from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — deferred: read once per process, not per call (2026-11-21)
+            resp = httpx.get(_BASE_URL, params=params, timeout=_TIMEOUT, verify=get_shared_ssl_context())
             if resp.status_code == 429 and attempt < _MAX_RETRIES:
                 wait = _BACKOFF_BASE * (2 ** attempt)
                 _log.debug(

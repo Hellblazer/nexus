@@ -205,7 +205,15 @@ class HttpTokenStore:
 
     def _replace_client(self) -> None:
         """Build the new client FIRST and close the old one after, so a failed build leaves the store on an
-        open client rather than a closed one (the HttpScratchStore incident, 2026-11-21)."""
+        open client rather than a closed one (the HttpScratchStore incident, 2026-11-21).
+
+        Unlike HttpScratchStore, this closes the old client at once and its heal paths set the token or URL
+        before the build, with no rollback and no lock. That is sound because every caller owns its store
+        for one ``with HttpTokenStore(...) as store:`` block in one thread (the MCP lifespan's session-token
+        refresh, t1's mint, operator dispatch, ``nx service``/``nx tenant``, backup, doctor): no other thread
+        can have a request in flight on the old client, and a build that raises takes the whole store out of
+        its ``with`` block. tests/test_http_token_store_single_owner.py pins that every construction in src
+        is such a block; a long-lived or shared store needs the scratch store's parking and rollback first."""
         fresh = self._build_client()
         old, self._client = self._client, fresh
         try:
