@@ -35,6 +35,20 @@ import java.util.function.Function;
  * commits (ruling D2), so none exists. {@link #open()} runs the name body with no lock and no read: what a repository built without a
  * guard gets, for the callers and tests that predate P3.5a.
  *
+ * <p><b>The canonical lock order</b> (linda, "live at commit"), for every verb that retires or revives a registry row and every writer
+ * that files rows under one; this is the one statement of it:
+ * <ol>
+ * <li>{@link RenameLatchLock}, shared: verbs only (a writer never takes it);</li>
+ * <li>the sweep gate(s), shared, one per label the acquirer covers, in sorted order;</li>
+ * <li>the registry rows, in {@code collection_id} order: {@code FOR UPDATE} for a verb ({@code CollectionTombstones#lockRows}),
+ *     {@code FOR KEY SHARE} for a writer (the foreign key takes it on insert, and the by-id read takes it explicitly);</li>
+ * <li>only then the chunk, manifest and child-row work.</li>
+ * </ol>
+ * {@code FOR UPDATE} conflicts with {@code FOR KEY SHARE}, so a verb waits for the writers in flight on its rows and its re-home
+ * includes their rows, and a writer that arrives after it waits, then reads the retired row (409 {@code collection_superseded}) instead of
+ * filing rows into it. Both sides take the gate before the row, so a sweep queued for the exclusive gate waits on both shared holders and
+ * neither waits on it once it holds its gate: no cycle. The supersede takes no sweep gate, so it takes steps 1 and 3 only.
+ *
  * <p>The in-process gate 3 signal plays no part: it is seeded from the row at boot and set after the row commits, so it can only
  * lag the row, and the one-row window opens only once the row is committed.
  *

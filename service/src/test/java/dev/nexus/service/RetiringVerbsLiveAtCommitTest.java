@@ -276,6 +276,101 @@ class RetiringVerbsLiveAtCommitTest {
         assertThat(chunksNamed(x)).as("nothing was written into the retired row").isZero();
     }
 
+    /** The advisory lock a writer (or a rename) takes SHARED on a collection's sweep gate, and a sweep takes EXCLUSIVE. */
+    private static void sweepGate(DSLContext ctx, String collection, boolean shared) {
+        ctx.select(DSL.function(shared ? "pg_advisory_xact_lock_shared" : "pg_advisory_xact_lock", Object.class,
+            DSL.function("hashtext", Integer.class, DSL.val("sweepgate:" + TENANT + "/" + collection)))).fetch();
+    }
+
+    // ---- the canonical lock order: gate, then row, on both sides (no cycle with a sweep) -----------------------------------
+
+    /**
+     * The cycle the order closes: a writer holds the shared gate of X and has not yet taken its key share; a sweep queues for the
+     * exclusive gate behind it; then the rename. With the row locked before the gates the rename would take X {@code FOR UPDATE} and
+     * queue for its gate behind the sweep, and the writer's key share would wait for the rename: writer, rename and sweep in a cycle,
+     * which Postgres breaks with a deadlock and {@code DeadlockRetry} retries. In the canonical order the rename waits at the gate
+     * with no row locked, the writer's key share goes through and it commits, the sweep takes and drops the gate, and the rename then
+     * completes with the writer's row in its repoint. The test asserts no retry fired.
+     */
+    @Timeout(120)
+    @Test
+    void aSweepQueuedForTheExclusiveGate_closesNoCycleBetweenAWriterAndARename() throws Exception {
+        String x = registered("cy-x");
+        String y = label("cy-y");
+        long retriesBefore = dev.nexus.service.db.DeadlockRetry.retryAttemptCount();
+        Future<?> sweep;
+        Future<?> rename;
+        try (Connection w = pg.createConnection("")) {
+            w.setAutoCommit(false);
+            DSLContext wc = DSL.using(w, SQLDialect.POSTGRES);
+            sweepGate(wc, x, true);   // the writer's gate, shared; its key share comes after
+            sweep = pool.submit(() -> {
+                try (Connection c = pg.createConnection("")) {
+                    c.setAutoCommit(false);
+                    sweepGate(DSL.using(c, SQLDialect.POSTGRES), x, false);   // queues behind the writer
+                    c.commit();
+                }
+                return null;
+            });
+            awaitWaiters(1, sweep, "the sweep queues for the exclusive gate of " + x);
+            rename = pool.submit(() -> repo.renameCollection(TENANT, x, y));
+            awaitWaiters(2, rename, "the rename queues for the gate behind the sweep");
+
+            keyShare(wc, x);   // in the canonical order the rename holds no row yet, so this does not wait
+            writeChunk(wc, x);
+            w.commit();
+        }
+        sweep.get(60, TimeUnit.SECONDS);
+        rename.get(60, TimeUnit.SECONDS);
+
+        assertThat(dev.nexus.service.db.DeadlockRetry.retryAttemptCount()).as("no deadlock, so no retry fired").isEqualTo(retriesBefore);
+        assertThat(chunksNamed(y)).as("the rename's repoint includes the writer's row").isEqualTo(1);
+        assertThat(supersededBy(x)).isEqualTo(y);
+    }
+
+    // ---- a rename onto a tombstone locks both rows, in collection_id order, and revives the target ------------------------
+
+    /**
+     * X is retired by a rename to Y, so Y has the higher id; renaming Y back onto X revives the tombstone X (the lower id). A writer
+     * holds Y's key share, so the rename takes X {@code FOR UPDATE} first (the lower id) and then waits on Y; a second reader of X's key
+     * share then waits too, which shows X was locked while the rename waited on Y. When the writer commits the rename completes and
+     * X is live again.
+     */
+    @Timeout(120)
+    @Test
+    void aRenameOntoATombstoneLocksBothRowsInIdOrder_andRevivesTheTarget() throws Exception {
+        String x = registered("rv-x");
+        String y = label("rv-y");
+        repo.renameCollection(TENANT, x, y);   // X is now the tombstone of Y; Y was minted after X, so it has the higher id
+        assertThat(supersededBy(x)).isEqualTo(y);
+        long idX = su(ctx -> ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(x)).fetchOne(CATALOG_COLLECTIONS.COLLECTION_ID));
+        long idY = su(ctx -> ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(y)).fetchOne(CATALOG_COLLECTIONS.COLLECTION_ID));
+        assertThat(idX).as("guard: the tombstone has the lower id").isLessThan(idY);
+
+        Future<?> rename;
+        Future<String> reader;
+        try (Connection w = pg.createConnection("")) {
+            w.setAutoCommit(false);
+            keyShare(DSL.using(w, SQLDialect.POSTGRES), y);   // a writer in flight on the source
+            rename = pool.submit(() -> repo.renameCollection(TENANT, y, x));
+            try {
+                awaitWaiters(1, rename, "the rename waits for the writer on " + y);
+                reader = pool.submit(writerSeeing(x));
+                awaitWaiters(2, reader, "a key share on the tombstone waits: the rename holds it while it waits on " + y);
+                assertThat(reader.isDone()).isFalse();
+            } finally {
+                w.commit();
+            }
+        }
+        rename.get(60, TimeUnit.SECONDS);
+
+        assertThat(reader.get(60, TimeUnit.SECONDS)).as("the reader saw X after the revive: live").isEmpty();
+        assertThat(supersededBy(x)).as("the tombstone is revived").isEmpty();
+        assertThat(supersededBy(y)).as("the source is retired onto it").isEqualTo(x);
+    }
+
     /** A writer: key share on the row first, and a row written only when the row is still live. */
     private Callable<String> writerSeeing(String x) {
         return () -> {
