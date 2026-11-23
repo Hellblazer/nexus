@@ -159,9 +159,10 @@ class CollectionRenameRefusalTest {
     // ---- gate 3 is read on each request -------------------------------------------------------------------------------
 
     /**
-     * RDR line 2656: "reads by the id once the check sees gate 3 hold, with no restart". Item 6 (Gate3's javadoc): gate 3
-     * "can drop back to false (an id index going INVALID makes gate 3 fail again)". One running service: refused while gate 3
-     * holds, allowed when it does not, refused again when it holds again.
+     * RDR line 2656: "reads by the id once the check sees gate 3 hold, with no restart". The signal is the LATCHED gate 3 (linda
+     * 2026-11-23, review SB1; Gate3's javadoc): after P3.7's first one-row rename the name columns are stale, so a rename must
+     * never be let through by a gate that dropped back. One running service: allowed before the latch, refused once the check's
+     * sample latches it, and still refused after a later sample in which the live gate 3 fails (an id index goes INVALID).
      */
     @Test
     void theRefusalFollowsGate3WithNoRestart() {
@@ -176,14 +177,13 @@ class CollectionRenameRefusalTest {
         String b2 = CollectionRouteFixture.label("rr-flip-b2-" + (n++));
         String c2 = CollectionRouteFixture.label("rr-flip-c2-" + (n++));
 
-        fx.gate3.set(true);
+        Resp allowed = renameByLabel(b, b2);
+        assertThat(allowed.status()).as("before the latch: the name path: %s", allowed.body()).isEqualTo(200);
+
+        fx.gate3.sample(true);
         assertRefused(renameByLabel(a, a2), MISSING_MOVE, a, idA, a2);
 
-        fx.gate3.set(false);
-        Resp allowed = renameByLabel(b, b2);
-        assertThat(allowed.status()).as("gate 3 dropped back: the name path again: %s", allowed.body()).isEqualTo(200);
-
-        fx.gate3.set(true);
+        fx.gate3.sample(false);
         assertRefused(renameByLabel(c, c2), MISSING_MOVE, c, idC, c2);
     }
 
