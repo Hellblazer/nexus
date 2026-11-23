@@ -23,6 +23,28 @@ class MainPciWiringTest {
         return Files.readString(Path.of("src/main/java/dev/nexus/service/Main.java"));
     }
 
+    /**
+     * linda's census of 19d19081dc, item 1: production builds the rename readiness on {@code IdReaders.present()} and nothing else. The only way to replace the
+     * id-readers signal is {@code CompletionBootWork#idReadersPresent(BooleanSupplier)}, which is package-private and used by test support only: no main source
+     * calls it, so an injected {@code () -> true} can never reach production; and Main builds the check through the one factory that has no such parameter.
+     */
+    @Test
+    void productionBuildsTheReadinessOnIdReadersPresentAlone_noMainSourceCallsTheInjectingSeam() throws Exception {
+        try (var files = Files.walk(Path.of("src/main/java"))) {
+            for (Path f : (Iterable<Path>) files.filter(p -> p.toString().endsWith(".java"))::iterator) {
+                if (f.endsWith("CompletionBootWork.java")) {
+                    continue;
+                }
+                assertThat(code(Files.readString(f))).as(f + " does not call the test-only id-readers seam").doesNotContain("idReadersPresent(");
+            }
+        }
+        String own = code(Files.readString(Path.of("src/main/java/dev/nexus/service/datamove/CompletionBootWork.java")));
+        assertThat(own).as("the default is IdReaders::present").contains("BooleanSupplier idReadersPresent = dev.nexus.service.vectors.IdReaders::present;");
+        assertThat(own).as("the seam is package-private").contains("\n    void idReadersPresent(java.util.function.BooleanSupplier present)");
+        assertThat(own).as("and only the field and that seam assign it").containsPattern("this\\.idReadersPresent = Objects\\.requireNonNull\\(present");
+        assertThat(code(main())).as("Main starts the check through atBoot, which has no id-readers parameter").contains("CompletionBootWork.atBoot(");
+    }
+
     @Test
     void theProductionRepositoryIsHandedTheRealSweep_notNone() throws Exception {
         String src = code(main());   // code only: the right text in a trailing comment must not satisfy the pin
@@ -582,9 +604,55 @@ class MainPciWiringTest {
         String service2 = code(Files.readString(Path.of("src/main/java/dev/nexus/service/NexusService.java")));
         assertThat(service2).as("one guard, built once, over the readiness and the fail-closed one-row catalog rename (P3.7 replaces it here)")
             .containsOnlyOnce("new dev.nexus.service.db.RenameGuard(")
-            .contains("new dev.nexus.service.db.RenameGuard(renameReadiness, dev.nexus.service.db.OneRowRename.failClosed())")
+            .contains("new dev.nexus.service.db.RenameGuard(renameReadiness, new dev.nexus.service.db.CollectionOneRowRename())")
             .contains("new CatalogRepository(tenantScope, gate3, renameGuard)")
             .as("the registry takes no Gate3").contains("CollectionRegistry.shared()").doesNotContain("CollectionRegistry.shared(gate3)");
+    }
+
+    /**
+     * RDR-229 P3.7 (linda 2026-11-23, stage-2 item 1): production refuses a rename before completion. The engine {@code Main} builds hands the rename
+     * readiness to the {@code NexusService} as a lambda over the completion check, and until the check exists that lambda answers the drop move is missing,
+     * so a rename on a latched install is refused (fails closed); once it exists it answers the check's own readiness.
+     */
+    @Test
+    void productionMainBuildsTheServiceWithTheCompletionChecksReadiness_andRefusesARenameBeforeCompletion() throws Exception {
+        String src = code(main());
+        assertThat(src).as("the readiness is the check's, read per call").contains("c.renameReadiness().missing()");
+        assertThat(src).as("and unset it says the drop move is missing: a rename on a latched install is refused")
+            .contains("c == null ? dev.nexus.service.datamove.RenameReadiness.Missing.NAME_KEY_DROP_MOVE");
+        assertThat(src).as("the service is built with the one signal and the readiness").containsPattern("gate3,\\s*renameReadiness\\)");
+    }
+
+    /**
+     * RDR-229 P3.7 (nexus-p2m1x.27): the name-key drop move's registration pass starts once, at main's top level, after the completion check it
+     * reads, handed that check's latest read, and closes in the shutdown steps; its method returns null without a completion check.
+     */
+    @Test
+    void theNameKeyDropPassStartsAfterTheCompletionCheck_readsItsLatest_closesInTheShutdownSteps_andNeedsACompletionCheck() throws Exception {
+        String src = code(main());
+        int check = src.indexOf("var completionCheck = startCompletionBootWork(");
+        int start = src.indexOf("var nameKeyDropPass = startNameKeyDropPass(");
+        int hook = shutdownSteps(src);
+        int close = src.indexOf("nameKeyDropPass.close();", hook);
+
+        assertThat(check).isPositive();
+        assertThat(start).as("started after the completion check it reads").isGreaterThan(check);
+        assertThat(src.indexOf("var nameKeyDropPass = startNameKeyDropPass(", start + 1)).as("started once").isNegative();
+        int mainDepth = depthAt(src, src.indexOf("var ds = new HikariDataSource(hikari);"));
+        assertThat(depthAt(src, start)).as("a top-level statement of main").isEqualTo(mainDepth);
+        assertThat(src).as("handed the check the engine built").contains("startNameKeyDropPass(adminConnection, completionCheck)");
+        assertThat(close).as("closed in the shared shutdown steps").isGreaterThan(hook);
+        assertThat(src.substring(src.lastIndexOf("if (nameKeyDropPass != null)", close), close)).doesNotContain("else");
+
+        int method = src.indexOf("static dev.nexus.service.datamove.NameKeyDropPass startNameKeyDropPass(");
+        assertThat(method).isPositive();
+        int body = src.indexOf('{', src.indexOf(')', src.indexOf("completionCheck)", method)));
+        String text = src.substring(body, matchingClose(src, body));
+        int noCheck = text.indexOf("if (completionCheck == null) {");
+        assertThat(noCheck).as("no completion check, no pass: and said so").isNotNegative();
+        assertThat(text.substring(noCheck, text.indexOf('}', noCheck))).contains("name_key_drop_pass_not_started").contains("return null;");
+        assertThat(text.indexOf("new dev.nexus.service.datamove.NameKeyDropPass(")).as("the pass is built after the guard").isGreaterThan(noCheck);
+        assertThat(text).as("reads the check's latest read, not a snapshot held here").contains("completionCheck::latest");
     }
 
     /**
