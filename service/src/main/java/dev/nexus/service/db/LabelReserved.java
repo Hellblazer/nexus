@@ -29,9 +29,12 @@ import java.util.Map;
  * </ol>
  *
  * <p>The probed tables are the name-keyed unique tables of {@link ArbiterTwins#ALL} that arbitrate a write, {@code pdf_pipeline} included (its primary key leads
- * with {@code tenant_id}, and a registration is rare). The history tables ({@link #HISTORY_NOT_PROBED}: {@code chash_remap}, {@code reembed_jobs}) are never
- * probed: their name does not arbitrate a write, so a leftover row there blocks nothing. The check is one statement of {@code EXISTS}es, each joined to the
- * registry by id; the tables' existing unique indexes answer the name probe and no index is added ({@code LabelReservedPlanTest} shows the plans).
+ * with {@code tenant_id}, and a registration is rare) and {@code chash_remap} included (linda's census pass 2: its name key, the primary key
+ * {@code (tenant_id, source_collection, old_id)}, survives the name-key drop, so a new collection at a renamed-away label that remaps the same {@code old_id}
+ * would meet the renamed collection's row there with a 23505). {@code reembed_jobs} ({@link #HISTORY_NOT_PROBED}) is never probed: an active job blocks the
+ * rename itself ({@code ReembedJobHold}), and a finished one names a collection no write of a new collection meets. The check is one statement of
+ * {@code EXISTS}es, each joined to the registry by id; the tables' existing unique indexes answer the name probe and no index is added
+ * ({@code LabelReservedPlanTest} shows the plans).
  * {@code pdf_pipeline} has no index led by {@code (tenant_id, collection)}: its probe is bounded to one tenant's rows by a tenant-led index, accepted
  * because a registration is rare (linda 2026-11-23). If registration latency shows it, the index goes in P3.4's runtime index pass, not a changeset.
  *
@@ -47,10 +50,10 @@ import java.util.Map;
  */
 public final class LabelReserved {
 
-    /** Name-keyed tables of {@link ArbiterTwins#ALL} the check never reads, with why: their name does not arbitrate a write. Pinned against the list by a test. */
+    /** Name-keyed tables of {@link ArbiterTwins#ALL} the check never reads, with why. Pinned against the list by a test. */
     public static final Map<String, String> HISTORY_NOT_PROBED = Map.of(
-        "chash_remap", "a history table: its name column records a past remap and arbitrates no write, so a leftover row blocks nothing",
-        "reembed_jobs", "a history table: a finished or failed job names a collection it no longer holds, and no write of a new collection meets it");
+        "reembed_jobs", "an active job blocks the rename itself (ReembedJobHold); a finished or failed job names a collection it no longer holds, and no "
+            + "write of a new collection meets it");
 
     /** One table the check reads: its name column, its id column and the arbiter's partial predicate as a typed condition. */
     record Probe(String table, String nameColumn, String idColumn, Condition predicate) { }
