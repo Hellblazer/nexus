@@ -150,6 +150,20 @@ class Rdr229P35cIdAddressedRenameRaceTest {
         assertThat(rowsOfTheNewHolder).as("I7: the new holder of the old label got none").isZero();
     }
 
+    /**
+     * {@link #assertStored} for the rows of {@code topic_assignments}. Until P4.1 drops the name columns, vectors-079's BEFORE INSERT trigger stamps a
+     * topic_assignments row's {@code source_collection} from the chunk it references, and a one-row rename rewrites no chunk: the chunk keeps the label it
+     * was written under ({@code chunkLabel}, B), so the row is stored under B whatever label the writer handed it, and the stored name can no longer show
+     * which label that was. What the row can still show is the id it is filed under (X, never the new holder's) and that it names the chunk's own collection.
+     * The writer's label for the other tables is pinned by {@link #assertStored} above; here the trigger owns the stored name.
+     */
+    private void assertStoredUnderTheChunksName(Gap g, List<String> storedUnderX, String chunkLabel, int rowsOfTheNewHolder) {
+        assertThat(storedUnderX).as("non-vacuity: rows were filed for id %d", g.x()).isNotEmpty();
+        assertThat(storedUnderX).as("vectors-079: a child row takes its chunk's stored name %s until P4.1; the chunk keeps its label across the rename", chunkLabel)
+            .allMatch(chunkLabel::equals);
+        assertThat(rowsOfTheNewHolder).as("I7: the new holder of the old label got none").isZero();
+    }
+
     private int topicsOf(long id) {
         Integer v = fx.asSuperuser(ctx -> ctx.fetchCount(TOPICS, TOPICS.TENANT_ID.eq(fx.tenant).and(TOPICS.COLLECTION_ID.eq(id))));
         return v;
@@ -281,8 +295,8 @@ class Rdr229P35cIdAddressedRenameRaceTest {
                 "{\"collection_id\":" + id + ",\"chashes\":[\"" + hex + "\"],\"cross_collection\":false}"));
         assertOk(g);
         assertThat(g.resp().json().path("assigned").asInt()).as("the chunk is found by its id and assigned: %s", g.resp().body()).isEqualTo(1);
-        assertStored(g, names(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, TOPIC_ASSIGNMENTS,
-            TOPIC_ASSIGNMENTS.TENANT_ID, g.x()), assignmentsOf(g.y()));
+        assertStoredUnderTheChunksName(g, names(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, TOPIC_ASSIGNMENTS,
+            TOPIC_ASSIGNMENTS.TENANT_ID, g.x()), b, assignmentsOf(g.y()));
     }
 
     /**
@@ -310,7 +324,8 @@ class Rdr229P35cIdAddressedRenameRaceTest {
         List<String> crossRows = fx.asSuperuser(ctx -> ctx.select(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION).from(TOPIC_ASSIGNMENTS)
             .where(TOPIC_ASSIGNMENTS.TENANT_ID.eq(fx.tenant).and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID.eq(g.x())).and(TOPIC_ASSIGNMENTS.TOPIC_ID.ne(xTopic)))
             .fetch(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION));
-        assertThat(crossRows).as("non-vacuity: the cross pass filed a row for X under a foreign topic").isNotEmpty().allMatch(g.c()::equals);
+        assertThat(crossRows).as("non-vacuity: the cross pass filed a row for X under a foreign topic").isNotEmpty()
+            .as("vectors-079: a child row takes its chunk's stored name (%s) until P4.1; the chunk keeps its label across the rename", b).allMatch(b::equals);
         assertThat(assignmentsOf(g.y())).as("I7: the new holder of the old label got none").isZero();
     }
 
