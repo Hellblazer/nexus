@@ -76,7 +76,8 @@ class Rdr229P37RenameLatchRowTest {
         config.setMaximumPoolSize(4);
         config.setAutoCommit(true);
         svcDs = new HikariDataSource(config);
-        repo = new CatalogRepository(new TenantScope(svcDs), flag::get, new RenameGuard(readiness::get, new CollectionOneRowRename()));
+        // the one-row body's own gate is the latched one (it runs only past the latch row), not the readers' flag this test sets against the row
+        repo = new CatalogRepository(new TenantScope(svcDs), flag::get, new RenameGuard(readiness::get, new CollectionOneRowRename(() -> true)));
     }
 
     @AfterAll

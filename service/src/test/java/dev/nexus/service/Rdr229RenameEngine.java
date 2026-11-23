@@ -334,7 +334,7 @@ final class Rdr229RenameEngine implements AutoCloseable {
 
     /** A rename guard over the engine's readiness and latched Gate3, as the services build one (read per call; it follows restarts only through a new call). */
     dev.nexus.service.db.RenameGuard guard() {
-        return new dev.nexus.service.db.RenameGuard(readiness, new dev.nexus.service.db.CollectionOneRowRename());
+        return new dev.nexus.service.db.RenameGuard(readiness, new dev.nexus.service.db.CollectionOneRowRename(this::gate3Holds));
     }
 
     /** The engine's service-role connection pool, for a test that wraps it ({@code CommitThenThrowDataSource}) under its own repository. */
