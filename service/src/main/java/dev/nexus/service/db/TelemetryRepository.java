@@ -178,7 +178,8 @@ public final class TelemetryRepository {
                 .set(RELEVANCE_LOG.ACTION, action)
                 .set(RELEVANCE_LOG.SESSION_ID, str(sessionId))
                 .set(RELEVANCE_LOG.COLLECTION, str(collection))
-                .set(RELEVANCE_LOG.COLLECTION_ID, CollectionIds.idOf(tenant, str(collection)))   // RDR-229 P3.1: NULL when unknown
+                // RDR-229 P3.5a: a history row stamps the id unlocked and never refuses (CollectionIds#stampHistory): NULL when unknown
+                .set(RELEVANCE_LOG.COLLECTION_ID, CollectionIds.stampHistory(ctx, tenant, str(collection)))
                 .set(RELEVANCE_LOG.TIMESTAMP, now)
                 .onConflictDoNothing()
                 .returningResult(RELEVANCE_LOG.ID)
@@ -1798,7 +1799,7 @@ public final class TelemetryRepository {
                 .set(HOOK_FAILURES.TENANT_ID, tenant)
                 .set(HOOK_FAILURES.DOC_ID, str(docId))
                 .set(HOOK_FAILURES.COLLECTION, str(collection))
-                .set(HOOK_FAILURES.COLLECTION_ID, CollectionIds.idOf(tenant, str(collection)))
+                .set(HOOK_FAILURES.COLLECTION_ID, CollectionIds.stampHistory(ctx, tenant, str(collection)))   // P3.5a: unlocked, never refuses
                 .set(HOOK_FAILURES.HOOK_NAME, hookName)
                 .set(HOOK_FAILURES.ERROR, str(error))
                 .set(HOOK_FAILURES.OCCURRED_AT, occurredAt)

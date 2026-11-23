@@ -119,6 +119,13 @@ final class ManifestReplace {
         // RDR-229 P3.1: the registry's id, read in this transaction; a stored row that lacks it (the stamp has not
         // reached it) differs from the incoming one and is rewritten with it.
         final Long collectionId = rows.isEmpty() ? null : CollectionIds.require(ctx, tenant, collection);
+        if (rows.isEmpty()) {
+            // RDR-229 P3.5a (review C2): an empty manifest is not a no-op. It deletes the document's stored manifest rows below and
+            // clears the departed-writer spans of their chunks, by label, so it takes the write transaction's registry check
+            // too: a request by id whose id is gone is 404 and a retired id 409, and a label request locks the row it resolves to.
+            // It never refused an unregistered label or a retired name (it removes rows and files none), and still does not.
+            CollectionRegistry.requireForWriteIfPresent(ctx, tenant, collection);
+        }
 
         List<Stored> stored = new ArrayList<>();
         for (Record r : ctx.select(CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,

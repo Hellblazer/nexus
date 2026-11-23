@@ -44,22 +44,26 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
  * guard gets, for the callers and tests that predate P3.5a.
  *
  * <p><b>The canonical lock order</b> (linda, "live at commit"), for every verb that retires or revives a registry row and every writer
- * that files rows under one; this is the one statement of it:
+ * that files rows under one; this is the one statement of it. In one sentence, for verbs and writers both: advisory locks first (the
+ * sweep gates, the tuple locks, the taxonomy collection lock keyed by the collection id), then the registry row ({@code FOR UPDATE}
+ * for a verb, {@code FOR KEY SHARE} for a writer), then the child rows; "registry first" means before any ROW lock.
  * <ol>
  * <li>{@link RenameLatchLock}, shared: verbs only (a writer never takes it);</li>
  * <li>the sweep gate(s), shared, one per label the acquirer covers, in sorted order;</li>
  * <li>the collection tuple lock(s) ({@code CollectionTupleLock}, taken only while the live-tuple unique index is absent), in their
- *     existing order;</li>
+ *     existing order, and the taxonomy collection lock ({@code TaxonomyCollectionLock}, advisory, keyed by the collection id);</li>
  * <li>the registry rows, in {@code collection_id} order: {@code FOR UPDATE} for a verb ({@code CollectionTombstones#lockRows}, called
  *     in {@code CollectionRename#retireAndRegister} right after the tuple locks and before the first row write),
- *     {@code FOR KEY SHARE} for a writer: the registry check every write transaction runs first takes it (by id through the request
- *     carrier, by label through the memoised in-transaction read; the label read lands with slice A at assembly), and the foreign key
- *     takes it again on the first child insert;</li>
- * <li>only then the chunk, manifest and child-row work.</li>
+ *     {@code FOR KEY SHARE} for a writer: the registry check every write transaction runs, before any child-row lock, takes it
+ *     ({@link CollectionRegistry#requireForWrite}: one read of the collection's row per transaction, memoised on the transaction's
+ *     configuration, by id when the request named an id and by label otherwise), and the foreign key takes it again on the first
+ *     child insert. A history write (a log or failure row) is exempt: it stamps the id without a lock
+ *     ({@link CollectionIds#stampHistory});</li>
+ * <li>only then the chunk, manifest and child-row work (catalog documents, tuple rows, chunk rows).</li>
  * </ol>
- * The writers that take advisory locks follow it: a manifest or chunk writer takes its sweep gate shared and then, on insert, its key
- * share; a registration or mint takes the tuple lock and then writes the registry row (the catalog-051 triggers take the same tuple
- * lock); none takes a tuple lock and then a gate.
+ * The writers that take advisory locks follow it: a manifest or chunk writer takes its sweep gate shared (and the index-run lock) and
+ * then its key share; a registration or mint takes the tuple lock and then writes the registry row (the catalog-051 triggers take the
+ * same tuple lock); none takes a tuple lock and then a gate, and none takes a row lock before its key share.
  * {@code FOR UPDATE} conflicts with {@code FOR KEY SHARE}, so a verb waits for the writers in flight on its rows and its re-home
  * includes their rows, and a writer that arrives after it waits, then reads the retired row (409 {@code collection_superseded}) instead of
  * filing rows into it: the bar is "live at commit" for EVERY writer, each of which takes the registry key share first, in its own

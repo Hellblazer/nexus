@@ -9,13 +9,21 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 import static dev.nexus.service.CollectionRouteFixture.json;
 import static dev.nexus.service.CollectionRouteFixture.label;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNK_ORPHANED_AT;
+import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
+import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_META;
 import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -130,6 +138,130 @@ class CollectionDeleteScopeByIdTest {
         assertThat(byNew.json().path("deleted").path("chunks").asInt(-1)).as(byNew.body()).isEqualTo(1);
         assertThat(heldById(id)).isEqualTo(new Held(0, 0, 0));
         assertThat(fx.exists(y)).isFalse();
+    }
+
+    // ---- (i-b) every table CollectionPurgeScope covers ---------------------------------------------------------------------
+
+    private static final String EMBEDDING_384 = "[" + String.join(",", java.util.Collections.nCopies(384, "0.1")) + "]";
+
+    /**
+     * Content under {@code collection} in every table the purge scope covers, by the engine's own writers where a route exists and by
+     * the shared seeds where one does not, all carrying the name {@code collection}. {@code tag} keeps the keys of two collections that
+     * share the label apart (a decoy). {@code host} is another collection whose topic the projection assignment (topic_assignments,
+     * keyed by {@code source_collection}) points at. Returns the chunk's hash.
+     */
+    private String seedEveryTable(String collection, String host, long hostTopic, String tag, boolean meta) {
+        String hex = Chash.ofText(collection + "/every/" + tag).toHex();
+        String docId = "every-" + tag + "-" + collection;
+        fx.asSuperuser(ctx -> {
+            dev.nexus.service.PgContainerHelper.insertChunks(ctx, fx.tenant, collection, List.of(hex), List.of("every text " + tag),
+                List.of(new float[384]), List.of(Map.<String, Object>of()));
+            CollectionIdSeeds.ownerDocument(ctx, fx.tenant, docId, collection);
+            CollectionIdSeeds.manifestRows(ctx, fx.tenant, docId, collection, 0, hex);
+            return null;
+        });
+        Resp aspect = fx.post("/v1/aspects/upsert", "{\"collection\":" + json(collection) + ",\"source_path\":\"every-" + tag
+            + ".md\",\"doc_id\":" + json(docId) + ",\"confidence\":0.9,\"extracted_at\":\"2026-01-01T00:00:00Z\","
+            + "\"model_version\":\"v1\",\"extractor_name\":\"ex\"}");
+        assertThat(aspect.status()).as("setup: aspect " + aspect.body()).isEqualTo(200);
+        Resp highlight = fx.post("/v1/aspects/highlights/upsert", "{\"collection\":" + json(collection) + ",\"doc_id\":" + json(docId)
+            + ",\"highlights_md\":\"## key\\nfinding\",\"ingested_at\":\"2026-10-22T00:00:00.000000Z\"}");
+        assertThat(highlight.status()).as("setup: highlight " + highlight.body()).isEqualTo(200);
+        Resp topic = fx.post("/v1/taxonomy/topics/insert",
+            "{\"collection\":" + json(collection) + ",\"label\":\"every-topic-" + tag + "\",\"doc_count\":1}");
+        assertThat(topic.status()).as("setup: topic " + topic.body()).isEqualTo(200);
+        Resp assign = fx.post("/v1/taxonomy/assignments/assign", "{\"doc_id\":\"" + hex + "\",\"topic_id\":" + hostTopic
+            + ",\"assigned_by\":\"projection\",\"similarity\":0.9,\"source_collection\":" + json(collection) + "}");
+        assertThat(assign.status()).as("setup: assignment sourced from the collection " + assign.body()).isEqualTo(200);
+        Resp centroid = fx.post("/v1/taxonomy/centroids/upsert", "{\"records\":[{\"collection\":" + json(collection)
+            + ",\"topic_id\":" + (900 + tag.hashCode() % 50 + 50) + ",\"label\":\"every-centroid-" + tag + "\",\"doc_count\":1,"
+            + "\"embedding\":" + EMBEDDING_384 + "}]}");
+        assertThat(centroid.status()).as("setup: centroid " + centroid.body()).isEqualTo(200);
+        if (meta) {
+            assertThat(fx.post("/v1/taxonomy/meta/record",
+                "{\"collection\":" + json(collection) + ",\"doc_count\":3}").status()).as("setup: taxonomy_meta").isEqualTo(200);
+        }
+        return hex;
+    }
+
+    /** The rows each covered table holds under the registry id {@code id}, by table. */
+    private Map<String, Integer> coveredRows(long id) {
+        return fx.asSuperuser(ctx -> {
+            Map<String, Integer> rows = new LinkedHashMap<>();
+            rows.put("chunks", ctx.fetchCount(CHUNKS, CHUNKS.COLLECTION_ID.eq(id)));
+            rows.put("catalog_documents", ctx.fetchCount(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID.eq(id)));
+            rows.put("catalog_document_chunks", ctx.fetchCount(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID.eq(id)));
+            rows.put("document_aspects", ctx.fetchCount(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.COLLECTION_ID.eq(id)));
+            rows.put("document_highlights", ctx.fetchCount(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.COLLECTION_ID.eq(id)));
+            rows.put("topics", ctx.fetchCount(TOPICS, TOPICS.COLLECTION_ID.eq(id)));
+            rows.put("topic_assignments", ctx.fetchCount(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID.eq(id)));
+            rows.put("taxonomy_centroids", ctx.fetchCount(TAXONOMY_CENTROIDS, TAXONOMY_CENTROIDS.COLLECTION_ID.eq(id)));
+            rows.put("taxonomy_meta", ctx.fetchCount(TAXONOMY_META, TAXONOMY_META.COLLECTION_ID.eq(id)));
+            return rows;
+        });
+    }
+
+    private int orphanRecords(long id) {
+        return fx.asSuperuser(ctx -> ctx.fetchCount(CHUNK_ORPHANED_AT, CHUNK_ORPHANED_AT.COLLECTION_ID.eq(id)));
+    }
+
+    /**
+     * Review prerequisite for stacking (folio, wren): after a one-row rename the delete of the NEW label purges, by its id, every table
+     * the purge scope covers, though their name columns still say the old label, and the {@code chunk_orphaned_at} records go with the
+     * chunks. A decoy registered under the old label afterwards (a different id) keeps all its rows: the purge by id never reaches a row
+     * that merely carries the old name. The decoy has no taxonomy_meta row, which is keyed by the name and would be the renamed
+     * collection's own.
+     */
+    @Test
+    void afterAOneRowRename_aDeleteOfTheNewLabelPurgesTheOldNamedChildRowsByItsId() {
+        // Gate 3 is latched for the whole class (startAll). The fixture's id-twin build, fx.buildIdTwins(), does not exist on this
+        // base; the merge that brings it calls it here, before the latch, so the id columns this test reads are the built ones.
+        String x = registered("every-x");
+        String host = registered("every-host");
+        Resp hostTopic = fx.post("/v1/taxonomy/topics/insert", "{\"collection\":" + json(host) + ",\"label\":\"every-host-topic\",\"doc_count\":1}");
+        assertThat(hostTopic.status()).as("setup: " + hostTopic.body()).isEqualTo(200);
+        long hostTopicId = hostTopic.json().path("id").asLong(-1);
+        assertThat(hostTopicId).as("setup: the host topic id").isPositive();
+        seedEveryTable(x, host, hostTopicId, "renamed", true);
+        long id = fx.idOf(x);
+        Map<String, Integer> before = coveredRows(id);
+        assertThat(before).as("setup: every covered table holds a row of the collection").allSatisfy((table, rows) ->
+            assertThat(rows).as(table).isPositive());
+        int orphansBefore = orphanRecords(id);
+
+        // the one-row rename (the registry label changes, the id stays, the child rows keep the name x), as test (i) simulates it
+        String y = label("scope-every-y-" + (n++));
+        fx.asSuperuser(ctx -> ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.NAME, y)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(fx.tenant)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(id)).execute());
+        assertThat(fx.idOf(y)).as("setup: y is the same row").isEqualTo(id);
+
+        // the decoy: a registry row that now bears the free label x, with a different id, and rows of its own
+        Long decoyId = null;
+        Map<String, Integer> decoyBefore = null;
+        try {
+            fx.register(x);
+            decoyId = fx.idOf(x);
+            seedEveryTable(x, host, hostTopicId, "decoy", false);
+        } catch (RuntimeException staging) {
+            decoyId = null;   // the decoy could not be staged on this schema: the main assertions stand, and the message says so
+        }
+        if (decoyId != null) {
+            assertThat(decoyId).as("setup: the decoy is another row").isNotEqualTo(id);
+            decoyBefore = coveredRows(decoyId);
+        }
+
+        Resp byNew = fx.post(DELETE, "{\"name\":" + json(y) + "}");
+
+        assertThat(byNew.status()).as(byNew.body()).isEqualTo(200);
+        Map<String, Integer> after = coveredRows(id);
+        assertThat(after).as("no covered table holds a row of the collection after the delete of its new label (before: %s)", before)
+            .allSatisfy((table, rows) -> assertThat(rows).as(table).isZero());
+        assertThat(orphanRecords(id)).as("the chunk_orphaned_at records went with the chunks (there were %d)", orphansBefore).isZero();
+        assertThat(fx.exists(y)).as("and the registry row of y").isFalse();
+        if (decoyId != null) {
+            assertThat(coveredRows(decoyId)).as("the decoy named x, another id, keeps every row").isEqualTo(decoyBefore);
+            assertThat(fx.exists(x)).as("and its registry row").isTrue();
+        }
     }
 
     // ---- (ii) -------------------------------------------------------------------------------------------------------

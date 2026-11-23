@@ -175,7 +175,7 @@ public final class AspectRepository {
     private static void ensureCollectionRegisteredAllowingSuperseded(DSLContext ctx, String tenant,
                                                                      String collection) {
         if (collection == null) return;
-        CollectionRegistry.requireRegistered(ctx, tenant, collection);
+        CollectionRegistry.requireForWrite(ctx, tenant, collection);   // RDR-229 P3.5a: a write's check takes the key share, a tombstone allowed
     }
 
     /**
@@ -183,9 +183,9 @@ public final class AspectRepository {
      *
      * <p>{@code claim_id} and {@code claimant} come together or not at all: one without the other is an
      * {@link IllegalArgumentException} (400) naming both fields, thrown before a transaction opens. Both
-     * absent is today's write, unchanged. Both present, the FIRST statement of the upsert's transaction is
-     * {@link TupleRepository#lockLiveClaimRow}, which locks the claim's tuples row, and the write follows in
-     * the same transaction. The order is fixed: the claim lookup, then {@link #ensureCollectionRegistered}
+     * absent is today's write, unchanged. Both present, the transaction reads the collection's registry row
+     * {@code FOR KEY SHARE} (see the lock order below), then {@link TupleRepository#lockLiveClaimRow} locks the claim's
+     * tuples row, and the write follows in the same transaction. The order is fixed: the claim lookup, then {@link #ensureCollectionRegistered}
      * (a retired name answers 409), then the {@code document_aspects} insert. So a 409 means the claim was
      * live at that instant, and a lapsed claim on a retired name answers 404.
      *
@@ -203,19 +203,20 @@ public final class AspectRepository {
      * inside the transaction, after the lock, so the claim is locked for the (short) time they take; a
      * claim-less write has no lock and runs the gates first, as ever. Nothing is written on any refusal.
      *
-     * <p>Lock order, shared with the rename helper (bead nexus-5r2sc.2.6): the tuples row lock FIRST, so a
-     * rename that rewrites task bodies before its registry loop cannot deadlock against a fenced persist of the
-     * same document. After it come the catalog row of {@code doc_id} ({@code FOR SHARE}, RDR-254) and then
-     * {@code document_aspects}; the catalog-first order is the reverse of the rename's and the collection
-     * delete's, so an UNFENCED upsert during a rename or delete of its collection can deadlock and PostgreSQL
-     * aborts one (see {@link AspectDocIdAttribution}). Each side's whole transaction runs under
-     * {@link DeadlockRetry}: this one here, the rename and the delete through {@code manifestWriteTxn}. The
-     * retried body is only the database transaction (nothing leaves it; the handler answers after it returns), so
-     * a rerun repeats no side effect. {@link DeadlockRetry} makes at most four attempts; after them the 40P01
-     * propagates and the handler answers 500. A retried upsert reads the collection through the in-process
-     * {@code CollectionRegistry}, which a rename or delete evicts only after its commit, so a retry that checks the
-     * name before that eviction can still write under the retired name (an orphan row; the same window as an
-     * upsert that started just before the rename committed). It is not a 409 or 422 in that case.
+     * <p>Lock order (RDR-229 P3.5a, linda's ruling; {@link RenameGuard#runRename}): the registry row of the collection
+     * {@code FOR KEY SHARE} FIRST (a fenced write names no advisory lock), so a verb that retires the collection waits for
+     * this write; then the tuples row of the claim, so a rename of the claim's task bodies (tuple row locks, before its
+     * document_aspects update, bead nexus-5r2sc.2.6) cannot deadlock against a fenced persist of the same document; then the
+     * catalog row of {@code doc_id} ({@code FOR SHARE}, RDR-254) and {@code document_aspects}. The registry read refuses nothing
+     * of its own on a label (a retired or unregistered name is answered after the claim, as ever); a request by id whose id is
+     * gone or retired answers its typed 404 or 409 there. The catalog-first order is the reverse of the rename's and the
+     * collection delete's, so an UNFENCED upsert during a rename or delete of its collection can deadlock and PostgreSQL aborts
+     * one (see {@link AspectDocIdAttribution}). Each side's whole transaction runs under {@link DeadlockRetry}: this one here,
+     * the rename and the delete through {@code manifestWriteTxn}. The retried body is only the database transaction (nothing
+     * leaves it; the handler answers after it returns), so a rerun repeats no side effect. {@link DeadlockRetry} makes at most
+     * four attempts; after them the 40P01 propagates and the handler answers 500. A retried upsert reads the registry row
+     * again, in its new transaction, so a retry after a rename or delete commit sees the retired row (409) and not a cached
+     * live one.
      */
     public long upsertAspect(String tenant, Map<String, Object> body) {
         // Before everything else: a malformed pair is a caller bug whatever the payload or the claim is.
@@ -243,18 +244,15 @@ public final class AspectRepository {
         // Fenced: the claim is looked up and locked FIRST, so a lapsed or foreign claim answers 404 or 403
         // whatever the payload is (nexus-eyynd M1); the payload gates run after it, in the same transaction.
         return DeadlockRetry.run("aspect.upsert fenced", () -> tenantScope.withTenant(tenant, ctx -> {
-            // Lock order (shared with the rename helper, nexus-5r2sc.2.6): the tuples row lock FIRST, then the
-            // catalog row (RDR-254) and document_aspects. This lookup takes the first lock; the write the rest.
-            // A rename rewrites task bodies (tuple row locks) before its registry loop updates
-            // document_aspects, so a claim on a task of the collection being renamed serializes with it. The claim
-            // check reads only doc_id, not the body's collection, so that is the usual case, not a guarantee: the
-            // DeadlockRetry around this transaction covers the rest.
+            // Lock order (the javadoc above): the registry row FOR KEY SHARE first, then the tuples row (shared with the
+            // rename helper, nexus-5r2sc.2.6: it rewrites task bodies before its document_aspects update), then the catalog
+            // row (RDR-254) and document_aspects; the DeadlockRetry around this transaction covers the rest.
+            if (body.get("collection") instanceof String c && !c.isEmpty()) RequestedCollectionRead.require(ctx, tenant, c);
             var claimRow = TupleRepository.lockLiveClaimRow(ctx, tenant, claimId, claimant);
             requireClaimOnTaskFor(claimRow, claimId, body.get("doc_id") instanceof String d ? d : null);
             ValidUpsert valid = validateUpsert(body);
             if (valid == null) {
-                ExpectedCollectionIds.nothingToWrite(body.get("collection") instanceof String c ? c : null);
-                return -1L;
+                return -1L;   // nothing to write; the registry read at the head of this transaction already consumed a named id
             }
             return writeAspect(ctx, tenant, body, valid);
         }));
