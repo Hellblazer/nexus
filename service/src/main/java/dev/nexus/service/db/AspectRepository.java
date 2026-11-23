@@ -552,7 +552,6 @@ public final class AspectRepository {
      */
     public int renameAspectCollection(String tenant, String oldColl, String newColl) {
         return tenantScope.withTenant(tenant, ctx -> {
-            renameGuard.requireRenameAllowed(ctx);   // RDR-229 P3.5a D2: first, under the rename lock the latch write takes
             // RDR-210 Phase 6 Step 2 (bead nexus-f98bg): refused while a re-embed job holds either name.
             CatalogRepository.refuseUnderReembedJob(ctx, tenant, "rename", oldColl, newColl);
             // RDR-164 P1a: register the new collection before re-pointing the denorm column
@@ -1082,7 +1081,6 @@ public final class AspectRepository {
      */
     public int renameHighlightsCollection(String tenant, String oldColl, String newColl) {
         return tenantScope.withTenant(tenant, ctx -> {
-            renameGuard.requireRenameAllowed(ctx);   // RDR-229 P3.5a D2: first, under the rename lock the latch write takes
             CatalogRepository.refuseUnderReembedJob(ctx, tenant, "rename", oldColl, newColl);
             ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, newColl);
             return ctx.update(DOCUMENT_HIGHLIGHTS)
