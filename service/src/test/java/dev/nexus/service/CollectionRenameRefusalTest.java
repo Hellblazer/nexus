@@ -217,19 +217,20 @@ class CollectionRenameRefusalTest {
      * baton's {@code CatalogEpoch.of(ctx, tenant)} (the first 16 hex characters of a sha256 over the cluster's system
      * identifier, timeline, postmaster start time and the tenant's restore marker; empty unless read inside the rename's
      * {@code withTenant} scope). On a stock cluster the engine role can read the pg_control
-     * functions, so the epoch is there, beside {@code ids_stable}, in the two states a rename answers 200 in: gate 3 not
-     * holding and the drop move missing, and gate 3 holding with the window closed. The value is a function of the cluster and
+     * functions, so the epoch is there, beside {@code ids_stable}, in the states a catalog rename answers 200 in: no latch row, with
+     * the drop move missing or with the window closed (from the row with the window closed the catalog rename fails closed until
+     * P3.7 supplies its one-row rename: linda's R-A ruling, {@link #fromTheRow_withTheWindowClosed_theCatalogRenameFailsClosed}). The value is a function of the cluster and
      * the tenant, so two renames with nothing changed between them answer the same one. The test reads the epoch only through
      * the response, so it needs no production symbol.
      */
     @Test
     void theRenameResponseCarriesCatalogEpochBesideIdsStable_whenTheEpochIsAvailable() {
         String first = null;
-        for (boolean gate3 : new boolean[] {false, true}) {
-            fx.gate3.set(gate3);
-            fx.renameWindow.set(gate3 ? Missing.NONE : Missing.NAME_KEY_DROP_MOVE);
-            String from = registered("epoch-g" + gate3);
-            String to = CollectionRouteFixture.label("rr-epoch-to-g" + gate3 + "-" + (n++));
+        for (boolean windowClosed : new boolean[] {false, true}) {
+            fx.gate3.set(false);
+            fx.renameWindow.set(windowClosed ? Missing.NONE : Missing.NAME_KEY_DROP_MOVE);
+            String from = registered("epoch-w" + windowClosed);
+            String to = CollectionRouteFixture.label("rr-epoch-to-w" + windowClosed + "-" + (n++));
             Resp r = renameByLabel(from, to);
             assertThat(r.status()).as(r.body()).isEqualTo(200);
             JsonNode j = r.json();
@@ -352,8 +353,9 @@ class CollectionRenameRefusalTest {
     }
 
     /**
-     * The refusal's own conditions, on the same five routes: with gate 3 not holding (any window) or with gate 3 holding and
-     * the window closed, a per-store rename is the name path as before and answers 200. Without this the test above could pass
+     * The refusal's own conditions, on the same five routes: with no latch row (any window) a per-store rename is the name path as
+     * before and answers 200; with the row and the window closed it answers 200 too, as the one-row regime's no-op (linda's R-A
+     * ruling; {@code RenameNoOpOneRowTest} holds that the rows stay untouched). Without this the test above could pass
      * on a route that refuses everything.
      */
     @Test
@@ -375,21 +377,26 @@ class CollectionRenameRefusalTest {
     // ---- the window closed ---------------------------------------------------------------------------------------------
 
     /**
-     * RDR line 2656 (the P3.5 test), second clause: from gate 3 a rename is refused "until P3.7's one-row rename can run".
-     * With gate 3 holding, the drop move complete and every P3.5b changeset applied, the refusal does not apply. The rename
-     * that then runs is P3.7's one-row rename, which keeps the id; this test asserts only that the refusal is gone and the
-     * rename succeeds, and it passes with P3.5a alone (the name path still works). The id-keeping half is P3.7's own test.
-     * Residual R8 (nexus-p2m1x.47): the P3.5 test is closed with P3.7 on the same branch.
+     * RDR line 2656 (the P3.5 test), second clause, as linda's R-A ruling (2026-11-23) leaves it on this base: from the latch row
+     * with the drop move complete and every P3.5b changeset applied, the {@code rename_refused} refusal does not apply, and the
+     * rename that runs is P3.7's one-row rename. P3.7 is not on this base, so the catalog rename's one-row body is the fail-closed
+     * default: 409 {@code rename_path_mismatch}, nothing renamed (running the name path would rewrite name columns the one-row
+     * regime's keys depend on). This replaces the earlier assertion that this state answered 200 on the name path (a spec change from
+     * the ruling); P3.7's acceptance test covers the real one-row rename.
      */
     @Test
-    void fromGate3_withTheMoveCompleteAndEveryChangesetApplied_theRefusalDoesNotApply() {
+    void fromTheRow_withTheWindowClosed_theCatalogRenameFailsClosed() {
         fx.gate3.set(true);
         fx.renameWindow.set(Missing.NONE);
         String from = registered("open");
+        long id = fx.idOf(from);
         String to = CollectionRouteFixture.label("rr-open-to-" + (n++));
         Resp r = renameByLabel(from, to);
-        assertThat(r.reason()).as(r.body()).isNotEqualTo(REASON);
-        assertThat(r.status()).as(r.body()).isEqualTo(200);
-        assertThat(fx.exists(to)).isTrue();
+        assertThat(r.status()).as(r.body()).isEqualTo(409);
+        assertThat(r.reason()).as("not the window refusal: %s", r.body()).isEqualTo("rename_path_mismatch");
+        assertThat(r.json().path("error").asText()).isNotBlank();
+        assertThat(fx.idOf(from)).as("nothing renamed").isEqualTo(id);
+        assertThat(fx.supersededBy(from)).isEqualTo("");
+        assertThat(fx.exists(to)).isFalse();
     }
 }

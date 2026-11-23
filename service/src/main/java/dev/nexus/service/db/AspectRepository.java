@@ -558,9 +558,7 @@ public final class AspectRepository {
      * {@code /queue/rename_collection}, which was the standalone caller's way of re-homing them).
      */
     public int renameAspectCollection(String tenant, String oldColl, String newColl) {
-        renameGuard.requireRenameAllowed();   // RDR-229 P3.5a: refused from gate 3 until the one-row rename can run
-        return tenantScope.withTenant(tenant, ctx -> {
-            renameGuard.requireRenameAllowed(ctx);   // RDR-229 P3.5a D2: first, under the rename lock the latch write takes
+        return renameGuard.runRename(tenantScope, tenant, ctx -> {
             // RDR-210 Phase 6 Step 2 (bead nexus-f98bg): refused while a re-embed job holds either name.
             CatalogRepository.refuseUnderReembedJob(ctx, tenant, "rename", oldColl, newColl);
             // RDR-164 P1a: register the new collection before re-pointing the denorm column
@@ -581,6 +579,9 @@ public final class AspectRepository {
                 .set(DOCUMENT_ASPECTS.COLLECTION_ID, CollectionIds.idOf(tenant, newColl))
                 .where(DOCUMENT_ASPECTS.COLLECTION.eq(oldColl))
                 .execute();
+        }, ctx -> {
+            RenameNoOpActivity.record("aspects", oldColl, newColl);   // the registry rename moved the label: nothing to rewrite
+            return 0;
         });
     }
 
@@ -1089,9 +1090,7 @@ public final class AspectRepository {
      * and no collision-defense DELETE is needed — a plain UPDATE suffices.
      */
     public int renameHighlightsCollection(String tenant, String oldColl, String newColl) {
-        renameGuard.requireRenameAllowed();   // RDR-229 P3.5a: refused from gate 3 until the one-row rename can run
-        return tenantScope.withTenant(tenant, ctx -> {
-            renameGuard.requireRenameAllowed(ctx);   // RDR-229 P3.5a D2: first, under the rename lock the latch write takes
+        return renameGuard.runRename(tenantScope, tenant, ctx -> {
             CatalogRepository.refuseUnderReembedJob(ctx, tenant, "rename", oldColl, newColl);
             ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, newColl);
             return ctx.update(DOCUMENT_HIGHLIGHTS)
@@ -1099,6 +1098,9 @@ public final class AspectRepository {
                 .set(DOCUMENT_HIGHLIGHTS.COLLECTION_ID, CollectionIds.idOf(tenant, newColl))
                 .where(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(oldColl))
                 .execute();
+        }, ctx -> {
+            RenameNoOpActivity.record("highlights", oldColl, newColl);   // the registry rename moved the label: nothing to rewrite
+            return 0;
         });
     }
 

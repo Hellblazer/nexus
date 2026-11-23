@@ -70,6 +70,11 @@ final class CollectionRouteFixture implements AutoCloseable {
      */
     static final class Gate3Signal implements Gate3 {
         private final AtomicBoolean latched = new AtomicBoolean(false);
+        /**
+         * Writes (true) or removes (false) the gate 3 latch row, which is what the engine's rename decides from (RDR-229 P3.5a, R-A):
+         * the signal above only ever follows the row, so a state this fixture puts the signal in puts the row there first.
+         */
+        volatile java.util.function.Consumer<Boolean> row = present -> { };
 
         @Override public boolean holds() {
             return latched.get();
@@ -77,11 +82,13 @@ final class CollectionRouteFixture implements AutoCloseable {
 
         void sample(boolean liveGate3) {
             if (liveGate3) {
+                row.accept(true);
                 latched.set(true);
             }
         }
 
         void newBoot(boolean latchedAtBoot) {
+            row.accept(latchedAtBoot);
             latched.set(latchedAtBoot);
         }
 
@@ -182,6 +189,14 @@ final class CollectionRouteFixture implements AutoCloseable {
         cfg.setMaximumPoolSize(8);
         cfg.setAutoCommit(true);
         svcDs = new HikariDataSource(cfg);
+        gate3.row = present -> asSuperuser(ctx -> {
+            if (present) {
+                dev.nexus.service.datamove.CompletionCheck.insertLatch(ctx, dev.nexus.service.datamove.CompletionCheck.GATE3, "fixture", false);
+            } else {
+                ctx.deleteFrom(DSL.table(DSL.name("nexus", "rdr229_gate_latch"))).execute();
+            }
+            return null;
+        });
         var embedder = new PgVectorRepositoryContractTest.FakeEmbedder(384);
         var repo = new PgVectorRepository(new TenantScope(svcDs), embedder, embedder);
         Gate3 gate = gate3;
