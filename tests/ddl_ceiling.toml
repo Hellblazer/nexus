@@ -259,9 +259,9 @@ migration_wal_bytes_per_worker = 12143000
 # (linda's allocation): the CREATE TABLE and its primary key's index, +2. No row changed. P3.4's id indexes are runtime DDL after gate 2 and are not counted here.
 # Measured: chas lab-m via lab-remote, 2026-11-22, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on
 # 4b0d995718 (P3.4 on the Phase 3 stack b7e58b6c5f; gate jar rebuilt in the same command): ddl: migration=2843, as on 9712dd4513 before the rebase. Under Sam's 2860 cap.
-# 2843 -> 2857 (2026-11-22, nexus-p2m1x.27, RDR-229 P3.7): vectors-079-1 creates the child-row name triggers: 4 CREATE OR REPLACE FUNCTION (the three BEFORE row functions and the shared statement log function), 4 REVOKE EXECUTE FROM PUBLIC and 6 CREATE TRIGGER (a BEFORE INSERT OR UPDATE row trigger and an AFTER INSERT OR UPDATE statement trigger on each of catalog_document_chunks, chunk_orphaned_at and topic_assignments) = 14. No table, so no runAlways grant.
-# Counted from the changeset's statements (14) on top of P3.4's 2843 base; REMEASURE; measured on this branch's tree below (a stack's own base moves the total, Sam's cap for the P3.5+P3.7 cut is 2960).
-migration_ddl_per_worker = 2857
+# 2843 -> 2852 (2026-11-23, nexus-p2m1x.27, RDR-229 P3.7): vectors-079-1 creates the child-row name triggers: 3 CREATE OR REPLACE FUNCTION (one BEFORE INSERT OR UPDATE row function each for catalog_document_chunks, chunk_orphaned_at and topic_assignments, logging once per transaction), 3 REVOKE EXECUTE FROM PUBLIC and 3 CREATE OR REPLACE TRIGGER = 9. No table, so no runAlways grant. Sam's cap for the P3.5+P3.7 cut is 2960.
+# Measured: chas lab-m via lab-run, 2026-11-23, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued, gate jar rebuilt in the same run: ddl: migration=2843 on f814087246 (P3.4 and P3.5c's tests, before) and migration=2852 on a77b26b741 (P3.7 on it, after).
+migration_ddl_per_worker = 2852
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]
