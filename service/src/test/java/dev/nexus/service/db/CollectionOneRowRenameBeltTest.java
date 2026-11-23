@@ -90,7 +90,7 @@ class CollectionOneRowRenameBeltTest {
     }
 
     private void renameWithNoRefusalFromTheCallersChecks(String tenant, String source, String target) {
-        CollectionOneRowRename.apply(ctx, tenant, source, target, null, null, null, locked -> true, new String[5]);
+        CollectionOneRowRename.apply(ctx, () -> true, tenant, source, target, null, null, null, locked -> true, new String[5]);
     }
 
     /** A LIVE row at the new label: the caller's checks said nothing, so only the belt stands between the rename and a delete of a live collection. */

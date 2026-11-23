@@ -41,22 +41,27 @@ import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
  */
 public final class CollectionOneRowRename implements OneRowRename {
 
-    /** Gate 3 for the helpers this body calls: it runs only on the one-row path, which {@link RenameGuard#runRename} takes only once the latch row exists. */
-    private static final dev.nexus.service.datamove.Gate3 LATCHED = () -> true;
+    /**
+     * Gate 3 for the helpers this body calls, the service's own signal ({@code NexusService} passes the one it gives every repository): this body runs
+     * only on the one-row path, which {@link RenameGuard#runRename} takes only once the latch row exists, and the signal is the latched one, so it holds here.
+     */
+    private final dev.nexus.service.datamove.Gate3 gate3;
 
-    /** The seam implementation {@code NexusService} wires into the one {@link RenameGuard}. */
-    public CollectionOneRowRename() {
+    /** The seam implementation {@code NexusService} wires into the one {@link RenameGuard}, over the service's {@code gate3}. */
+    public CollectionOneRowRename(dev.nexus.service.datamove.Gate3 gate3) {
+        this.gate3 = java.util.Objects.requireNonNull(gate3, "gate3");
     }
 
     @Override
     public RenameOutcome rename(DSLContext ctx, String tenant, String oldLabel, String newLabel, Request request) {
-        Outcome o = apply(ctx, tenant, oldLabel, newLabel, request.sourceId(), request.newContentType(), request.newOwnerId(),
+        Outcome o = apply(ctx, gate3, tenant, oldLabel, newLabel, request.sourceId(), request.newContentType(), request.newOwnerId(),
             request.targetUnderLock(), request.tupleOut());
         // read here, inside the rename's own tenant scope (CatalogEpoch.of is empty outside it); the id survived, so ids are stable
         return new RenameOutcome(o.counts(), o.collectionId(), CatalogEpoch.of(ctx, tenant).orElse(null), true);
     }
 
     /**
+     * @param gate3          the service's gate-3 signal, handed to the helpers below that read by id once it holds
      * @param sourceId       the id the request named the source by, or null for a request by label (see {@link OneRowRename.Request})
      * @param newContentType the client's content type for the new label, or null to keep the row's
      * @param newOwnerId     the client's owner, or null to keep the row's
@@ -73,7 +78,7 @@ public final class CollectionOneRowRename implements OneRowRename {
     /** What the one-row rename answers: the renamed collection's id (slice C's {@code RenameOutcome} carries it) and the counts the route reports. */
     record Outcome(long collectionId, Map<String, Integer> counts) { }
 
-    static Outcome apply(DSLContext ctx, String tenant, String oldName, String newName, Long sourceId, String newContentType,
+    static Outcome apply(DSLContext ctx, dev.nexus.service.datamove.Gate3 gate3, String tenant, String oldName, String newName, Long sourceId, String newContentType,
                                       String newOwnerId, OneRowRename.TargetCheck targetUnderLock, String[] tuple) {
         // LOCK ORDER (linda's canonical order, via tamsin; runRename's javadoc on slice C states it once): the rename lock (RenameLatchLock SHARED, taken by the
         // caller), then the sweep gate(s) SHARED (the shared checks the caller runs before this body), then the collection tuple lock(s), then the registry rows
@@ -133,7 +138,7 @@ public final class CollectionOneRowRename implements OneRowRename {
         String owner = peekOwner;
         Map<String, Integer> counts = new LinkedHashMap<>();
         if (targetRowExists) {
-            deleteRetiredTarget(ctx, tenant, oldName, newName);
+            deleteRetiredTarget(ctx, gate3, tenant, oldName, newName);
         }
         // remembered BEFORE the UPDATE (folio's r3 review F5): a 23505 the UPDATE raises on the live-tuple index then finds the tuple, and the caller's race
         // recheck (CollectionMint#recheckOf) names the holder instead of a generic 409
@@ -156,7 +161,7 @@ public final class CollectionOneRowRename implements OneRowRename {
         }
         counts.put("catalog_collections_renamed", renamed);
         // the row's tuple after the rename: refused, naming both, when another live collection holds it (the index raises 23505 first, and the recheck names both)
-        CollectionMint.refuseHeldTuple(ctx, tenant, newName, contentType, owner, own.value4(), own.value5(), own.value6(), "", LATCHED);
+        CollectionMint.refuseHeldTuple(ctx, tenant, newName, contentType, owner, own.value4(), own.value5(), own.value6(), "", gate3);
 
         ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, newName)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(oldName))
@@ -189,7 +194,7 @@ public final class CollectionOneRowRename implements OneRowRename {
         // the latched gate (this body runs only past the latch): quarantine rows found by the collection's id and siblings by the registry's label, as every
         // other gate-3 reader (linda's census pass 2; the 4-argument form passes Gate3.never()); the origin is named by id, because its registry row already
         // carries the new label, so an attribute-derived sibling is found through it (folio's r3 review F4)
-        QuarantineOrigin.retagRowsOf(ctx, tenant, oldName, newName, LATCHED, id);
+        QuarantineOrigin.retagRowsOf(ctx, tenant, oldName, newName, gate3, id);
         return new Outcome(id, counts);
     }
 
@@ -198,7 +203,7 @@ public final class CollectionOneRowRename implements OneRowRename {
      * label. A belt under the caller's checks: a live row of the label, a row under one of those ids in any collection-scoped child table, or a queued
      * aspect task naming the label is refused and nothing is deleted.
      */
-    private static void deleteRetiredTarget(DSLContext ctx, String tenant, String oldName, String newName) {
+    private static void deleteRetiredTarget(DSLContext ctx, dev.nexus.service.datamove.Gate3 gate3, String tenant, String oldName, String newName) {
         var rows = ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID, CATALOG_COLLECTIONS.SUPERSEDED_BY).from(CATALOG_COLLECTIONS)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(newName)))
             .orderBy(CATALOG_COLLECTIONS.COLLECTION_ID).fetch();
@@ -220,7 +225,7 @@ public final class CollectionOneRowRename implements OneRowRename {
                 + newName + "; renaming onto it would merge two collections, so nothing was renamed");
         }
         for (long targetId : ids) {
-            CollectionTombstones.deleteRegistryRowById(ctx, tenant, newName, targetId, List.of(), LATCHED);
+            CollectionTombstones.deleteRegistryRowById(ctx, tenant, newName, targetId, List.of(), gate3);
         }
     }
 
