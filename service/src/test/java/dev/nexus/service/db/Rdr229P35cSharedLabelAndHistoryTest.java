@@ -321,10 +321,11 @@ class Rdr229P35cSharedLabelAndHistoryTest extends AtomicWriteTestBase {
     }
 
     /**
-     * folio review F4: repointTombstones takes the tombstone rows FOR UPDATE in collection_id order before it updates them, the order of a
-     * retiring verb's lockRows. The UPDATE alone meets the rows in physical order, and a tuple that was rewritten sits behind the others:
-     * here x1 (the lower id) is rewritten so it sits behind x2. A session holds x2; the re-point must wait on it HOLDING x1 (taken first, in id
-     * order), which a third session sees as a refused FOR UPDATE NOWAIT on x1. Without the ordered lock the re-point holds nothing while it waits.
+     * folio review F4: repointTombstones takes the tombstone rows FOR UPDATE in collection_id order (a retiring verb's lockRows order) before it
+     * updates them. A session holds the HIGHER id x2; the re-point must wait on it HOLDING the lower x1, which a third session sees as a refused
+     * FOR UPDATE NOWAIT on x1. It pins the ORDER: with the rows locked in descending order the re-point would block on x2 first, holding nothing,
+     * and the probe would take x1 (the order-reversed mutation turns this red; removing the lock does not, because on this data the UPDATE's own
+     * scan already meets the rows in id order, so the test says nothing about the lock's existence).
      */
     @Test
     void repointTombstonesLocksTheTombstoneRowsInIdOrderBeforeUpdatingThem() throws Exception {
