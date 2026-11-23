@@ -13,7 +13,6 @@ import java.util.Map;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
-import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
 
@@ -240,7 +239,8 @@ public final class CollectionOneRowRename implements OneRowRename {
 
     /**
      * Deletes the retired row(s) of the new label BY ID (linda's ruling on folio's r3 F1): the ids of the rows this rename holds FOR UPDATE, never a delete by
-     * label. A belt under the caller's checks: a live row of the label, or one that still holds chunks, is refused and nothing is deleted.
+     * label. A belt under the caller's checks: a live row of the label, a row under one of those ids in any collection-scoped child table, or a queued
+     * aspect task naming the label is refused and nothing is deleted.
      */
     private static void deleteRetiredTarget(DSLContext ctx, String tenant, String oldName, String newName) {
         var rows = ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID, CATALOG_COLLECTIONS.SUPERSEDED_BY).from(CATALOG_COLLECTIONS)
@@ -251,9 +251,17 @@ public final class CollectionOneRowRename implements OneRowRename {
                 + " (it became live while this rename ran); nothing was renamed");
         }
         List<Long> ids = rows.map(r -> r.value1());
-        if (ctx.fetchExists(ctx.selectOne().from(CHUNKS).where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION_ID.in(ids))))) {
-            throw new CatalogRepository.CollectionMergeRefused("renaming " + oldName + " to " + newName + ": the retired target " + newName
-                + " holds chunks; renaming onto it would merge two collections, so nothing was renamed");
+        // every collection-scoped child table, by the locked rows' ids (whatever a row's name column says), and the queued aspect tasks naming the label: the
+        // tables the caller's blockingTable walks (folio on 6eb8000e0d: chunks alone left a manifest, a document or an aspect unchecked)
+        for (CatalogRepository.CollectionScopedTable t : CatalogRepository.COLLECTION_SCOPED_TABLES) {
+            if (ctx.fetchExists(ctx.selectOne().from(t.table()).where(t.collectionId().in(ids)))) {
+                throw new CatalogRepository.CollectionMergeRefused("renaming " + oldName + " to " + newName + ": the retired target " + newName
+                    + " holds rows in " + t.countKey() + "; renaming onto it would merge two collections, so nothing was renamed");
+            }
+        }
+        if (AspectTaskRefs.countNaming(ctx, tenant, newName) > 0) {
+            throw new CatalogRepository.CollectionMergeRefused("renaming " + oldName + " to " + newName + ": queued aspect tasks name the retired target "
+                + newName + "; renaming onto it would merge two collections, so nothing was renamed");
         }
         for (long targetId : ids) {
             CollectionTombstones.deleteRegistryRowById(ctx, tenant, newName, targetId, List.of(), LATCHED);
