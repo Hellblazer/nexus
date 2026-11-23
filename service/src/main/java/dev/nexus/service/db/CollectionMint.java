@@ -461,7 +461,7 @@ public final class CollectionMint {
      * {@link CollectionTupleLock}, the key catalog-051's triggers also take, held to the end of the caller's transaction.
      */
     static void lockTuple(DSLContext ctx, String tenant, String contentType, String owner, String model, String version) {
-        CollectionTupleLock.lockTuple(ctx, new CollectionTupleLock.Tuple(tenant, contentType, owner, model, version));
+        CollectionTupleLock.lockTupleAfterRegistryRead(ctx, new CollectionTupleLock.Tuple(tenant, contentType, owner, model, version));   // the stated exception: see there
     }
 
     /** The name of another live collection of this tuple (the lowest {@code collection_id}), or null. */

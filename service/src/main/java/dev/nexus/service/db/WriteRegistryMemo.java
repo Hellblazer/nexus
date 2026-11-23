@@ -49,22 +49,76 @@ final class WriteRegistryMemo {
         map(ctx).put(key(tenant, label), row);
     }
 
+    private static final String TAKEN = "nexus.collection-registry.advisory-taken";
+
+    @SuppressWarnings("unchecked")
+    private static java.util.Set<String> taken(DSLContext ctx) {
+        return (java.util.Set<String>) ctx.configuration().data().computeIfAbsent(TAKEN, k -> new java.util.HashSet<String>());
+    }
+
+    /** Records an advisory lock taken without the order check (a stated exception), so a later check of the same lock is a re-entry. */
+    static void noteTaken(DSLContext ctx, String lock) {
+        if (ExpectedCollectionIds.censusOn()) {
+            taken(ctx).add(lock);
+        }
+    }
+
+    private static boolean holdsRegistryRow(DSLContext ctx) {
+        Object m = ctx.configuration().data().get(KEY);
+        return m != null && !((Map<?, ?>) m).isEmpty();
+    }
+
     /**
-     * Lock order's first half, checked (RDR-229 P3.5a, linda 6(c)): an advisory lock (a sweep gate, the index-run lock, the taxonomy
-     * collection lock, a tuple lock, the re-embed start guard) is taken BEFORE the registry row, never after. A transaction that
+     * Lock order's first half, checked (RDR-229 P3.5a, linda 6(c)): an advisory lock (the index-run lock, the taxonomy collection lock, a
+     * tuple lock, the re-embed start guard, the sweep's exclusive gate) is taken BEFORE the registry row, never after. A transaction that
      * already holds a registry key share and then waits for an advisory lock can close a cycle with a verb that holds the lock and wants
-     * the row. It fails only while the census is on ({@link ExpectedCollectionIds#censusOn}, the engine suites), where it is the
-     * assertion that every transaction of every writer honours the order; a production transaction pays nothing.
+     * the row. A key this transaction already took is let through: advisory locks are re-entrant within a transaction, so taking one again
+     * waits for nothing ({@code writeManifestRows} takes again the locks {@code writeManifestMany} took). It fails only while the census
+     * is on ({@link ExpectedCollectionIds#censusOn}, the engine suites); a production transaction pays one flag read.
      */
     static void assertNoneHeld(DSLContext ctx, String lock) {
         if (!ExpectedCollectionIds.censusOn()) {
             return;
         }
-        Object m = ctx.configuration().data().get(KEY);
-        if (m != null && !((Map<?, ?>) m).isEmpty()) {
-            throw new IllegalStateException("lock order: " + lock + " is taken after this transaction read a registry row ("
-                + ((Map<?, ?>) m).keySet() + "); advisory locks come first, then the registry row");
+        if (!taken(ctx).add(lock) || !holdsRegistryRow(ctx)) {
+            return;
         }
+        throw new IllegalStateException("lock order: " + lock + " is taken after this transaction read a registry row ("
+            + ((Map<?, ?>) ctx.configuration().data().get(KEY)).keySet() + "); advisory locks come first, then the registry row");
+    }
+
+    /**
+     * {@link #assertNoneHeld} for the shared sweep gate of {@code collection}, with its one stated exception: the gate of the label a
+     * RENAME moved the write onto. A write by id reads the registry row after the gate of the label the route named; if the row's current
+     * label is another, the gate of that label is taken next, and it is let through when the memo holds the same row (same
+     * {@code collection_id}) under a label whose gate this transaction already took. A gate for a label whose row is not in the memo, or whose
+     * row is the same as no gate taken so far, is a violation. No cycle: the exclusive half is taken by the sweep's own transaction, which
+     * reads no registry row.
+     */
+    static void assertGateFirst(DSLContext ctx, String tenant, String collection) {
+        if (!ExpectedCollectionIds.censusOn()) {
+            return;
+        }
+        String key = "the sweep gate of " + collection;
+        java.util.Set<String> taken = taken(ctx);
+        if (taken.contains(key) || !holdsRegistryRow(ctx)) {
+            taken.add(key);
+            return;
+        }
+        CollectionRow target = get(ctx, tenant, collection);
+        if (target != null) {
+            for (String other : taken) {
+                if (other.startsWith("the sweep gate of ")) {
+                    CollectionRow row = get(ctx, tenant, other.substring("the sweep gate of ".length()));
+                    if (row != null && row.collectionId() == target.collectionId()) {
+                        taken.add(key);
+                        return;
+                    }
+                }
+            }
+        }
+        throw new IllegalStateException("lock order: " + key + " is taken after this transaction read a registry row ("
+            + ((Map<?, ?>) ctx.configuration().data().get(KEY)).keySet() + "); advisory locks come first, then the registry row");
     }
 
     private static final String EXEMPT = "nexus.collection-registry.write-exempt";

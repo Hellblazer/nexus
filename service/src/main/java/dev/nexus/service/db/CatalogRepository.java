@@ -6073,20 +6073,7 @@ public final class CatalogRepository {
      * #acquireIndexRunLock}'s raw {@code ctx.execute}.
      */
     public static void acquireSweepGateShared(DSLContext ctx, String tenant, String collection) {
-        WriteRegistryMemo.assertNoneHeld(ctx, "the sweep gate of " + collection);
-        takeSweepGateShared(ctx, tenant, collection);
-    }
-
-    /**
-     * The shared sweep gate of a collection a RENAME moved the write onto, taken after the registry read that found the move. The
-     * only call that may follow a registry read: the exclusive half is taken by the sweep's own transaction, which reads no
-     * registry row under a lock, so a shared holder with a key share is no link of a cycle.
-     */
-    static void acquireSweepGateSharedAfterRename(DSLContext ctx, String tenant, String collection) {
-        takeSweepGateShared(ctx, tenant, collection);
-    }
-
-    private static void takeSweepGateShared(DSLContext ctx, String tenant, String collection) {
+        WriteRegistryMemo.assertGateFirst(ctx, tenant, collection);
         ctx.select(DSL.function("pg_advisory_xact_lock_shared", Object.class,
                    DSL.function("hashtext", Integer.class, DSL.val("sweepgate:" + tenant + "/" + collection))))
            .fetch();

@@ -52,7 +52,17 @@ public final class CollectionTupleLock {
 
     /** Take {@code pg_advisory_xact_lock} for one tuple. @return its key */
     public static long lockTuple(DSLContext ctx, Tuple tuple) {
-        return lock(ctx, List.of(tuple)).get(0);
+        return lock(ctx, List.of(tuple), true).get(0);
+    }
+
+    /**
+     * {@link #lockTuple} for a mint or a named registration, which can run after the transaction read other collections' registry rows (a
+     * batch that registers some of its names): the stated exception to "advisory locks first". It runs only while the live-tuple unique
+     * index is absent or not inferable (a boot window before the re-own move completes, or an operator's index), and a deadlock it closes
+     * with a verb is the 40P01 the writers' retry absorbs. Not proven never; see the P3.5a round 2 hand-back.
+     */
+    static long lockTupleAfterRegistryRead(DSLContext ctx, Tuple tuple) {
+        return lock(ctx, List.of(tuple), false).get(0);
     }
 
     /**
@@ -62,12 +72,20 @@ public final class CollectionTupleLock {
      * @return the keys in the order they were locked (ascending, no duplicates); empty when {@code tuples} is empty
      */
     public static List<Long> lock(DSLContext ctx, Collection<Tuple> tuples) {
+        return lock(ctx, tuples, true);
+    }
+
+    private static List<Long> lock(DSLContext ctx, Collection<Tuple> tuples, boolean registryFirst) {
         if (tuples.isEmpty()) {
             return List.of();
         }
-        WriteRegistryMemo.assertNoneHeld(ctx, "a tuple lock");
         List<Long> locked = new ArrayList<>(new TreeSet<>(keys(ctx, tuples)));
         for (long k : locked) {
+            if (registryFirst) {
+                WriteRegistryMemo.assertNoneHeld(ctx, "the tuple lock " + k);
+            } else {
+                WriteRegistryMemo.noteTaken(ctx, "the tuple lock " + k);
+            }
             ctx.select(DSL.function("pg_advisory_xact_lock", SQLDataType.VARCHAR, DSL.val(k))).fetch();
         }
         return locked;
