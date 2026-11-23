@@ -130,12 +130,11 @@ class CollectionTaxonomyByIdGapTest {
     }
 
     @Test
-    void purgeCollection_byLabelStillClearsLeftoversWithNoRegistryRow() {
-        String a = registered("purge-orphan");
-        seedTaxonomy(a);
-        fx.asSuperuser(ctx -> ctx.deleteFrom(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
-            .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(fx.tenant)
-                .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(a))).execute());
+    void purgeCollection_byALabelWithNoRegistryRowStillAnswers200() {
+        // topics_collection_fk keeps a topic from outliving its registry row, so "leftovers with no row" cannot be staged;
+        // what the helper's catch keeps is the label path's answer for a label the registry does not hold (the client's
+        // purge of a collection already gone, corpus.py): a 200 with nothing to purge, never the 422 a by-id read would give.
+        String a = label("purge-orphan-" + (n++));
         Resp r = fx.post("/v1/taxonomy/purge_collection", "{\"collection\":" + json(a) + "}");
         assertThat(r.status()).as("by label, a purge never needed a registry row: %s", r.body()).isEqualTo(200);
         assertThat(topicsOf(a)).isZero();
