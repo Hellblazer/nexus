@@ -18,7 +18,12 @@ A test file is selected when ANY of these holds (over-selecting is fine, under-s
    console-script entry modules in pyproject.toml.
 2. **File reads.** It names a changed non-Python file (toml, ledger, doc, workflow yml, fixture, shell script)
    by path, by basename, by a pathlib chain (``ROOT / "docs" / "x.md"``), by a directory literal that holds it
-   or by a glob that matches it. A non-test source module that names the file is treated as changed.
+   or by a glob that matches it. Only code counts: a comment or docstring names nothing. A non-test module
+   that names the file is treated as changed (so its importers are selected) only when the name is a whole
+   string or a joined path the code can open; a file named inside a sentence (an error message) selects the
+   test file that says it and nothing more. A glob must pick files by name
+   (``docs/*.md``, ``rdr-*.md``); a bare extension glob (``*.py``) counts only in a test that walks the tree
+   (``rglob``, ``**``), which is a lint over every file of that type; a regex is not a glob.
 3. **Meta-tests.** ``scripts/meta_tests.py``'s selection (the lint and census tests the diff reaches), and
    ``scripts/select_docs_reader_tests.py``'s (the tests that read ``docs/``) when a docs path changed.
 4. **Run-everything.** A change to ``tests/conftest.py``, ``pyproject.toml`` or ``uv.lock``, or to a helper that
@@ -58,7 +63,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 SCAN_ROOTS = ("src/nexus", "tests", "scripts", "conexus")
 SKIP_DIRS = {"__pycache__", ".venv", "node_modules", ".git", "output", ".pytest_cache", "fixtures_big"}
 CACHE_REL = ".pytest_cache/select_affected_index.json"
-CACHE_VERSION = 6
+CACHE_VERSION = 9
 #: Paths whose change selects every test.
 RUN_EVERYTHING = ("tests/conftest.py", "pyproject.toml", "uv.lock", "pytest.ini", "tox.ini", "setup.cfg")
 #: A single-segment directory literal selects only for these (a bare ``"docs"`` or ``"src"`` is a collection
@@ -125,13 +130,36 @@ def _package_of(rel: str) -> str:
     return dotted.rsplit(".", 1)[0] if "." in dotted else ""
 
 
+def _is_path_literal(text: str) -> bool:
+    """True when the whole string is one path-like token (``"docs/x.md"``), not a sentence that mentions one."""
+    return len(text) <= 300 and not any(c.isspace() for c in text)
+
+
 def _tokens_of(text: str) -> list[str]:
-    out: list[str] = []
-    if len(text) <= 300 and not any(c.isspace() for c in text):
-        out.append(text)
-    else:
-        out.extend(_TOKEN_RE.findall(text[:20000]))
-    return out
+    if _is_path_literal(text):
+        return [text]
+    return _TOKEN_RE.findall(text[:20000])
+
+
+_GLOB_CHARS_RE = re.compile(r"[\w.\-*/]+")
+_BARE_EXT_GLOB_RE = re.compile(r"(?:\*\*/)?\*+\.\w+")
+_GLOB_LEAF_RE = re.compile(r"[\w\-*]*\*[\w\-*]*\.\w+$|[\w\-]+\.\w+$|\*$")
+
+
+def _names_something(glob: str) -> bool:
+    """True for a glob that picks out files by name: path characters and ``*`` only (a regex or a URL query
+    is not a glob), whose last segment is ``stem*.ext``, ``name.ext`` or a bare ``*`` under a directory, and is
+    not only wildcards and an extension. ``*.py`` and ``**/*.md`` name no file in particular: any changed file
+    of that type would select every test that globs it."""
+    if not _GLOB_CHARS_RE.fullmatch(glob) or "?" in glob:
+        return False
+    head, _, leaf = glob.rpartition("/")
+    if not _GLOB_LEAF_RE.fullmatch(leaf):
+        return False
+    if leaf == "*":
+        return bool(head.replace("*", "").replace("/", ""))
+    stem = re.sub(r"\.\w+$", "", leaf)
+    return bool(stem.replace("*", "")) or bool(head.replace("*", "").replace("/", ""))
 
 
 def _clean_token(tok: str) -> str | None:
@@ -158,31 +186,36 @@ def _docstring_ids(tree: ast.AST) -> set[int]:
     return ids
 
 
-def _runs(parts: list[str | None]) -> list[str]:
-    out: list[str] = []
-    cur: list[str] = []
+def _runs(parts: list[ast.Constant | None]) -> list[tuple[str, list[int]]]:
+    """Joined runs of two or more adjacent string parts, each with the ids of the constants it joins."""
+    out: list[tuple[str, list[int]]] = []
+    cur: list[ast.Constant] = []
     for p in [*parts, None]:
         if p is not None:
-            cur.append(p.strip("/"))
+            cur.append(p)
         else:
             if len(cur) >= 2:
-                out.append("/".join(cur))
+                out.append(("/".join(c.value.strip("/") for c in cur), [id(c) for c in cur]))
             cur = []
     return out
 
 
-def _div_parts(node: ast.AST, acc: list[str | None], skip: set[int]) -> None:
+def _const_str(node: ast.AST) -> ast.Constant | None:
+    return node if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
+
+
+def _div_parts(node: ast.AST, acc: list[ast.Constant | None], skip: set[int]) -> None:
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
         skip.add(id(node))
         _div_parts(node.left, acc, skip)
         _div_parts(node.right, acc, skip)
     else:
-        acc.append(node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None)
+        acc.append(_const_str(node))
 
 
 def extract_facts(text: str, rel: str) -> dict:
     """Imports, dotted-module strings and path-ish tokens of one Python file."""
-    facts: dict = {"imports": [], "modrefs": [], "tokens": [], "spawns_nx": False, "words": [], "registrar": {}, "substrate": False}
+    facts: dict = {"imports": [], "modrefs": [], "tokens": [], "mentions": [], "scans": False, "spawns_nx": False, "words": [], "registrar": {}, "substrate": False}
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -193,8 +226,13 @@ def extract_facts(text: str, rel: str) -> dict:
     imports: set[str] = set()
     modrefs: set[str] = set()
     tokens: set[str] = set()
+    prose: set[str] = set()  # tokens fished out of a sentence (an error message)
+    literal_tokens: set[str] = set()  # tokens that are a whole string or a joined path: what the code can open
     doc = _docstring_ids(tree)
     skip: set[int] = set()
+    # constants a joined path (``ROOT / "scripts" / "x.py"``) is made of: the run names the file, so a lone
+    # "scripts" in it is a path segment, not a literal naming the whole directory
+    in_run: set[int] = set()
     words: set[str] = set()
     is_test = rel.startswith("tests/")
     symmod: dict[str, str] = {}
@@ -223,17 +261,21 @@ def extract_facts(text: str, rel: str) -> dict:
                 facts["spawns_nx"] = True
             if _DOTTED_RE.match(s) and s.split(".", 1)[0] in ("nexus", "tests", "conexus"):
                 modrefs.add(s)
-            for tok in _tokens_of(s):
+            literal = _is_path_literal(s)
+            for tok in () if id(node) in in_run else _tokens_of(s):
                 ct = _clean_token(tok)
                 if ct:
                     tokens.add(ct)
+                    (literal_tokens if literal else prose).add(ct)
         elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div) and id(node) not in skip:
-            parts: list[str | None] = []
+            parts: list[ast.Constant | None] = []
             _div_parts(node, parts, skip)
-            for run in _runs(parts):
+            for run, ids in _runs(parts):
                 ct = _clean_token(run)
                 if ct:
                     tokens.add(ct)
+                    literal_tokens.add(ct)
+                    in_run.update(ids)
         elif isinstance(node, ast.Call):
             fn = node.func
             name = fn.attr if isinstance(fn, ast.Attribute) else fn.id if isinstance(fn, ast.Name) else ""
@@ -241,11 +283,12 @@ def extract_facts(text: str, rel: str) -> dict:
                 kw = next((k.value.value for k in node.keywords if k.arg == "name" and isinstance(k.value, ast.Constant)), None)
                 adds.append((node.args[0].id, kw if isinstance(kw, str) else None))
             if name in _JOIN_FUNCS:
-                args = [a.value if isinstance(a, ast.Constant) and isinstance(a.value, str) else None for a in node.args]
-                for run in _runs(args):
+                for run, ids in _runs([_const_str(a) for a in node.args]):
                     ct = _clean_token(run)
                     if ct:
                         tokens.add(ct)
+                        literal_tokens.add(ct)
+                        in_run.update(ids)
     if len(adds) >= REGISTRAR_MIN:
         reg: dict[str, set[str]] = {}
         for sym, cmd in adds:
@@ -258,6 +301,10 @@ def extract_facts(text: str, rel: str) -> dict:
     facts["imports"] = sorted(imports)
     facts["modrefs"] = sorted(modrefs)
     facts["tokens"] = sorted(tokens)[:600]
+    # a token seen only inside sentences: it selects a test file that names it, but a helper that merely mentions
+    # a file reads nothing, so it must not count as changed and drag in every importer
+    facts["mentions"] = sorted(prose - literal_tokens)
+    facts["scans"] = "rglob(" in text or "**" in text
     return facts
 
 
@@ -305,7 +352,9 @@ class Index:
                     self.importers.setdefault(p, set()).add(rel)
             for tok in f["tokens"]:
                 if "*" in tok or "?" in tok:
-                    if tok.strip("*/.") and tok not in ("*", "**", "**/*"):
+                    # a bare extension glob (``*.py``) names no file, but a test that walks the whole tree for
+                    # that extension (rglob, ``**``) is a lint over every such file: any of them can break it
+                    if _names_something(tok) or (f.get("scans") and _BARE_EXT_GLOB_RE.fullmatch(tok)):
                         self.globs.append((tok, rel))
                 else:
                     self.by_token.setdefault(tok, set()).add(rel)
@@ -611,7 +660,7 @@ def select(
             why = f'names "{tok}" ({c} changed)'
             if is_test_file(f):
                 sel.add(f, why)
-            elif _specific(tok) and ("/" in tok or c.startswith(f.rsplit("/", 1)[0] + "/")):
+            elif _specific(tok) and tok not in idx.files[f].get("mentions", ()) and ("/" in tok or c.startswith(f.rsplit("/", 1)[0] + "/")):
                 # A module that reads the exact file (by path, or by basename from its own directory tree) is
                 # itself changed. One that scans a directory, a glob or a bare "README.md" is not: that would
                 # seed its whole import closure on every docs or plugin edit.

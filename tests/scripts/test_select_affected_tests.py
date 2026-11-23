@@ -187,6 +187,77 @@ class TestFileReferences:
         _write(tree, "tests/test_tool2.py", "import tool2\n")
         assert "tests/test_tool2.py" in _sel(tree, ["scripts/tool2.py"]).files
 
+    def test_a_comment_or_docstring_naming_a_file_is_not_a_reference(self, tree: pathlib.Path) -> None:
+        _write(tree, "tests/test_comment.py",
+               '"""See docs/notes.md for why."""\n# docs/notes.md explains this\nimport json\n')
+        assert "tests/test_comment.py" not in _sel(tree, ["docs/notes.md"]).files
+
+    def test_a_test_file_naming_a_file_in_a_message_selects_itself(self, tree: pathlib.Path) -> None:
+        # over-selecting the referencing test is cheap; only its importers are the cost
+        _write(tree, "tests/test_msg.py", "MSG = 'update the table in docs/notes.md before retrying'\n")
+        assert "tests/test_msg.py" in _sel(tree, ["docs/notes.md"]).files
+
+    def test_a_helper_mentioning_a_file_in_a_message_does_not_reach_its_importers(self, tree: pathlib.Path) -> None:
+        # tests/_signal_fence.py names tests/AGENTS.md in an error message and reads nothing
+        _write(tree, "tests/_msg.py", "MSG = 'name the target as the session (docs/notes.md) and retry'\n")
+        _write(tree, "tests/test_uses_msg.py", "from tests._msg import MSG\n")
+        got = _sel(tree, ["docs/notes.md"])
+        assert "tests/test_uses_msg.py" not in got.files
+        assert got.files == {}
+
+    def test_a_helper_mentioning_a_file_does_not_select_everything_through_a_conftest(self, tree: pathlib.Path) -> None:
+        _write(tree, "tests/_plug.py", "MSG = 'see the notes (docs/notes.md) for the rule'\n")
+        got = _sel(tree, ["docs/notes.md"])
+        assert got.everything is None
+
+    def test_a_helper_that_reads_a_file_by_a_pathlib_chain_reaches_its_importers(self, tree: pathlib.Path) -> None:
+        _write(tree, "tests/_reader.py", "import pathlib\nROOT = pathlib.Path('.')\nTEXT = (ROOT / 'docs' / 'notes.md').read_text()\n")
+        _write(tree, "tests/test_uses_reader.py", "from tests._reader import TEXT\n")
+        assert "tests/test_uses_reader.py" in _sel(tree, ["docs/notes.md"]).files
+
+    def test_a_helper_that_opens_a_file_by_a_path_literal_reaches_its_importers(self, tree: pathlib.Path) -> None:
+        _write(tree, "tests/_opener.py", "TEXT = open('docs/notes.md').read()\n")
+        _write(tree, "tests/test_uses_opener.py", "from tests._opener import TEXT\n")
+        assert "tests/test_uses_opener.py" in _sel(tree, ["docs/notes.md"]).files
+
+    @pytest.mark.parametrize("pattern", ["*.py", "*.md"])
+    def test_a_bare_extension_glob_names_no_particular_file(self, tree: pathlib.Path, pattern: str) -> None:
+        _write(tree, "tests/test_globby.py", f"import pathlib\nL = list(pathlib.Path('.').glob('{pattern}'))\n")
+        got = _sel(tree, ["scripts/tool.py", "docs/notes.md", "src/nexus/d.py"])
+        assert "tests/test_globby.py" not in got.files
+
+    @pytest.mark.parametrize("call", ["rglob('*.py')", "glob('**/*.py')"])
+    def test_a_tree_walk_for_an_extension_is_a_lint_over_every_such_file(self, tree: pathlib.Path, call: str) -> None:
+        _write(tree, "tests/test_walker.py", f"import pathlib\nL = list(pathlib.Path('src').{call})\n")
+        assert "tests/test_walker.py" in _sel(tree, ["src/nexus/d.py"]).files
+        assert "tests/test_walker.py" not in _sel(tree, ["docs/notes.md"]).files
+
+    def test_a_regex_in_a_string_is_not_a_glob(self, tree: pathlib.Path) -> None:
+        _write(tree, "tests/test_rx.py", "import re\nR = re.compile('[a-z_][a-z0-9_]*')\n")
+        assert "tests/test_rx.py" not in _sel(tree, ["scripts/tool.py", "src/nexus/d.py", "docs/notes.md"]).files
+
+    def test_a_route_in_a_helper_is_a_read_even_when_a_message_repeats_it(self, tree: pathlib.Path) -> None:
+        _write(tree, "service/src/main/java/dev/nexus/service/Who.java", 'class Who { static final String R = "/v1/whoami"; }\n')
+        _write(tree, "tests/_probe.py", "URL = base + '/v1/whoami'\nERR = 'engine does not answer GET /v1/whoami'\n")
+        _write(tree, "tests/test_uses_probe.py", "from tests._probe import URL\n")
+        got = _sel(tree, ["service/src/main/java/dev/nexus/service/Who.java"])
+        assert "tests/test_uses_probe.py" in got.files
+
+    def test_a_path_to_one_file_does_not_name_its_whole_directory(self, tree: pathlib.Path) -> None:
+        # ROOT / "scripts" / "one.py" reads one.py; a change to another script is not a reason to run it
+        _write(tree, "tests/test_one.py", "import pathlib\nP = pathlib.Path('.') / 'scripts' / 'one.py'\n")
+        got = _sel(tree, ["scripts/two.py"])
+        assert "tests/test_one.py" not in got.files
+        assert "tests/test_one.py" in _sel(tree, ["scripts/one.py"]).files
+
+    def test_a_bare_directory_literal_still_names_the_directory(self, tree: pathlib.Path) -> None:
+        _write(tree, "tests/test_scan.py", "import pathlib\nL = sorted(pathlib.Path('.').joinpath('scripts').rglob('x'))\nN = 'scripts'\n")
+        assert "tests/test_scan.py" in _sel(tree, ["scripts/two.py"]).files
+
+    def test_a_glob_with_a_directory_part_still_selects(self, tree: pathlib.Path) -> None:
+        _write(tree, "tests/test_dirglob.py", "import pathlib\nL = list(pathlib.Path('.').glob('docs/rdr/*.md'))\n")
+        assert "tests/test_dirglob.py" in _sel(tree, ["docs/rdr/rdr-258.md"]).files
+
 
 class TestSelectsEverything:
     @pytest.mark.parametrize("changed", ["tests/conftest.py", "pyproject.toml", "uv.lock"])
