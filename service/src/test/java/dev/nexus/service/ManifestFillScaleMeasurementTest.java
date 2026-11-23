@@ -66,17 +66,19 @@ class ManifestFillScaleMeasurementTest extends ManifestFillTestBase {
             DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
             PgContainerHelper.insertCollection(seed, TENANT, COLL);
             String model = PgContainerHelper.collectionModel(seed, TENANT, COLL);
+            Long cid = dev.nexus.service.db.CollectionIds.require(seed, TENANT, COLL);   // P3.1: every seeded row carries the collection id
 
             int docs = (N - 1) / POSITIONS_PER_DOC + 1;
             var docSeries = DSL.generateSeries(0, docs - 1).as("d", "n");
             Field<Integer> n = docSeries.field("n", Integer.class);
             seed.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
                     CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.CONTENT_TYPE,
-                    CATALOG_DOCUMENTS.INDEXED_AT, CATALOG_DOCUMENTS.METADATA)
+                    CATALOG_DOCUMENTS.INDEXED_AT, CATALOG_DOCUMENTS.METADATA, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
                 .select(seed.select(DSL.inline(TENANT), DSL.concat(DSL.inline("9."), DSL.cast(n, SQLDataType.VARCHAR), DSL.inline(".1")),
                         DSL.concat(DSL.inline("doc "), DSL.cast(n, SQLDataType.VARCHAR)), DSL.inline(COLL),
                         DSL.inline("prose"), DSL.val(OffsetDateTime.parse(DOC_AT), CATALOG_DOCUMENTS.INDEXED_AT),
-                        DSL.val(JSONB.valueOf("{}"), CATALOG_DOCUMENTS.METADATA))
+                        DSL.val(JSONB.valueOf("{}"), CATALOG_DOCUMENTS.METADATA),
+                        DSL.val(cid, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID))
                     .from(docSeries))
                 .execute();
 
@@ -98,11 +100,11 @@ class ManifestFillScaleMeasurementTest extends ManifestFillTestBase {
                 Field<String> meta = DSL.concat(DSL.inline("{\"indexed_at\":\"" + OK_AT + "\",\"section_title\":\"S\""),
                     DSL.when(prose, DSL.inline("")).otherwise(spanKeys), DSL.inline("}"));
                 seed.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.EMBEDDING_MODEL, CHUNKS.CHASH,
-                        CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_768, CHUNKS.METADATA)
+                        CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_768, CHUNKS.METADATA, CHUNKS.COLLECTION_ID)
                     .select(seed.select(DSL.val(TENANT, CHUNKS.TENANT_ID), DSL.val(COLL, CHUNKS.COLLECTION),
                             DSL.val(model, CHUNKS.EMBEDDING_MODEL), chash, DSL.inline("stub"),
                             DSL.val(VectorSeeds.vec(768, 0.1f), CHUNKS.EMBEDDING_768),
-                            DSL.cast(meta, SQLDataType.JSONB))
+                            DSL.cast(meta, SQLDataType.JSONB), DSL.val(cid, CHUNKS.COLLECTION_ID))
                         .from(series))
                     .execute();
                 // manifest: pending rows are legacy (labels unwritten, spans NULL); the others are filled, but prose rows' spans
@@ -112,7 +114,8 @@ class ManifestFillScaleMeasurementTest extends ManifestFillTestBase {
                         CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, CATALOG_DOCUMENT_CHUNKS.CHASH,
                         CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
                         CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN, CATALOG_DOCUMENT_CHUNKS.LINE_START,
-                        CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END)
+                        CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END,
+                        CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID)
                     .select(seed.select(DSL.val(TENANT, CATALOG_DOCUMENT_CHUNKS.TENANT_ID),
                             DSL.concat(DSL.inline("9."), DSL.cast(i.minus(1).div(POSITIONS_PER_DOC), SQLDataType.VARCHAR),
                                 DSL.inline(".1")),
@@ -123,7 +126,8 @@ class ManifestFillScaleMeasurementTest extends ManifestFillTestBase {
                             DSL.when(legacy.or(prose), nullSpan).otherwise(ls),
                             DSL.when(legacy.or(prose), nullSpan).otherwise(ls.plus(4)),
                             DSL.when(legacy.or(prose), nullSpan).otherwise(DSL.inline(0)),
-                            DSL.when(legacy.or(prose), nullSpan).otherwise(DSL.inline(100)))
+                            DSL.when(legacy.or(prose), nullSpan).otherwise(DSL.inline(100)),
+                            DSL.val(cid, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID))
                         .from(series))
                     .execute();
                 System.out.println("F3YQD seeded " + shape + " through row " + hi + " of " + N);
