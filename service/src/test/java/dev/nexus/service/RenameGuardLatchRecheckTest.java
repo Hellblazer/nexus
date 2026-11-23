@@ -369,6 +369,28 @@ class RenameGuardLatchRecheckTest {
         }).as("after the latch, the next rename is refused").satisfies(t -> assertThat(refusalIn(t)).isNotNull());
     }
 
+    /**
+     * P3.7's dispatcher decision branches on the latch row only: no row is the name path, even with the in-process gate 3 true;
+     * the row with readiness complete is the one-row rename; the row with readiness missing is the same refusal.
+     */
+    @Test
+    void decideRenamePath_branchesOnTheLatchRowOnly() {
+        var liveGateNoRow = new RenameGuard(() -> true, () -> Missing.NONE);
+        var ready = new RenameGuard(() -> false, () -> Missing.NONE);
+        var notReady = new RenameGuard(() -> false, () -> Missing.NAME_KEY_DROP_MOVE);
+        java.util.function.Function<RenameGuard, RenameGuard.RenamePath> decide = g -> su(ctx ->
+            ctx.transactionResult(cfg -> g.decideRenamePath(cfg.dsl())));
+
+        assertThat(decide.apply(liveGateNoRow)).as("no row: the name path, whatever the in-process gate says")
+            .isEqualTo(RenameGuard.RenamePath.NAME_PATH);
+        assertThat(decide.apply(RenameGuard.open())).isEqualTo(RenameGuard.RenamePath.NAME_PATH);
+
+        writeLatch();
+        assertThat(latchRow()).as("setup: the row is committed").isTrue();
+        assertThat(decide.apply(ready)).as("the row and readiness complete").isEqualTo(RenameGuard.RenamePath.ONE_ROW);
+        assertRefused("decideRenamePath", () -> decide.apply(notReady));
+    }
+
     /** The open guard never takes the lock nor reads the latch: what a repository built without a guard gets. */
     @Test
     void theOpenGuardTakesNoLockAndReadsNoRow() throws Exception {
