@@ -82,7 +82,8 @@ class Rdr229P37ReadinessFailClosedTest {
         assertThat(r.readinessMissing()).as("never NONE from an error").isEqualTo(Missing.READINESS_UNREADABLE);
         assertThat(RenameRefusedException.wireValue(r.readinessMissing())).isEqualTo("readiness_unreadable");
 
-        // before the latch: the rename is the name path, the answer is not consulted, nothing refuses
+        // before the latch: the rename is the name path, the answer is not consulted, nothing refuses. (The "name-path rename proceeds" half is pinned here
+        // against RenameGuard#pinned; it is re-pinned against slice C's runRename at the replay rebase.)
         var before = new RenameGuard(() -> false, readinessOver(r, false));
         assertThat(before.<Boolean>pinned(oneRow -> oneRow)).as("a name-path rename proceeds before the latch").isFalse();
         assertThat(r.renameMissing(false)).as("and /v1/status keeps saying none before the latch").isEqualTo(Missing.NONE);

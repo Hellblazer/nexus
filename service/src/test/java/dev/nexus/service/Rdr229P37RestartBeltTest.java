@@ -51,7 +51,10 @@ class Rdr229P37RestartBeltTest {
     }
 
     /**
-     * linda 2026-11-23: the belt is removed. A latch row that is gone (a partial restore) with the drop move complete does NOT keep the one-row regime:
+     * NOTE (linda Q-B): when slice C's {@code runRename} lands, a lost latch row with a completed drop move is no longer the name path: the answer flips to the
+     * fail-closed {@code latch_row_missing} refusal, and the final assertion below is re-pinned against {@code runRename} at the replay rebase.
+     *
+     * <p>linda 2026-11-23: the belt is removed. A latch row that is gone (a partial restore) with the drop move complete does NOT keep the one-row regime:
      * the latch row alone decides, so such an install is back at the name path until gate 3 latches again.
      */
     @Test
