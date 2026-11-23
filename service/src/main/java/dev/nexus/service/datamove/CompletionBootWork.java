@@ -221,9 +221,12 @@ public final class CompletionBootWork implements AutoCloseable {
      * What a rename from gate 3 still waits for, read per call ({@link RenameReadiness}), from the latest sample:
      * {@link CompletionCheck.Result#readinessMissing(boolean)}, which does not depend on the latch (NONE implies the latch row exists, since the
      * drop move is registered only once it is latched). Total, cheap and fail closed (linda 2026-11-23): it answers from the last sample (no read
-     * of its own), never throws, and any error or the absence of a sample is {@code readiness_unreadable}, never NONE. Whether a rename consults
-     * it is {@link dev.nexus.service.db.RenameGuard}'s business: it reads the latch row in its own transaction, and before the latch the rename
-     * is the name path and the answer is not read.
+     * of its own) and never throws. Monotone (linda's Q3 ruling on folio's r3 critique): BEFORE the first sample that read NONE, no sample, an
+     * unreadable sample or a read error is {@code readiness_unreadable}, never NONE; AFTER it, an unreadable sample or a read error keeps NONE,
+     * because the facts behind NONE are monotone (a drop move that completed stays complete, a changeset that applied stays applied), while a
+     * sample that reads something missing is believed. Either way {@link dev.nexus.service.db.RenameGuard#runRename} reads the latch row in the
+     * rename's own transaction and refuses {@code latch_row_missing} on every rename without it; before the latch the rename is the name path and
+     * this answer is not read.
      */
     public RenameReadiness renameReadiness() {
         return this::readinessOrUnreadable;
