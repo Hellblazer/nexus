@@ -92,4 +92,29 @@ class Rdr229P35cTelemetryRenameByIdTest extends AtomicWriteTestBase {
             assertThat(counts.get("search_telemetry")).as("two rows retagged").isEqualTo(2);
         }
     }
+
+    @Test
+    void statsOfADeletedCollectionAreStillFoundByItsName_andAPreIdRowIsOnlyInPreIdRowCount() throws Exception {
+        TelemetryRepository tel = new TelemetryRepository(tenantScope, latched::get, RenameGuard.open());
+        latched.set(true);
+        String gone = "code__p35cstat" + seq.incrementAndGet() + "__minilm-l6-v2-384__v1";
+        registerCollection(gone);
+        String s1 = "st1-" + seq.incrementAndGet(), s2 = "st2-" + seq.incrementAndGet(), pre = "stpre-" + seq.incrementAndGet();
+        tel.importSearchRow(TENANT, ts(3), s1, gone, 1, 1, 0.4, 0.9);
+        tel.importSearchRow(TENANT, ts(4), s2, gone, 1, 0, 0.6, 0.9);
+        tel.importSearchRow(TENANT, ts(5), pre, gone, 1, 1, 0.5, 0.9);
+        try (Connection su = pg.createConnection("")) {
+            var d = DSL.using(su, SQLDialect.POSTGRES);
+            d.update(SEARCH_TELEMETRY).setNull(SEARCH_TELEMETRY.COLLECTION_ID)
+                .where(SEARCH_TELEMETRY.TENANT_ID.eq(TENANT)).and(SEARCH_TELEMETRY.QUERY_HASH.eq(pre)).execute();
+            assertThat(d.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT))
+                .and(CATALOG_COLLECTIONS.NAME.eq(gone)).execute()).as("the registry row is deleted").isEqualTo(1);
+        }
+
+        var stats = tel.queryCollectionStats(TENANT, gone, 3650);
+
+        assertThat(((Number) stats.get("row_count")).longValue()).as("the two stamped rows of the deleted collection, found by its name").isEqualTo(2L);
+        assertThat(((Number) stats.get("pre_id_row_count")).longValue()).as("the pre-id row is reported apart").isEqualTo(1L);
+        assertThat((Double) stats.get("zero_hit_rate")).as("one of the two stamped rows had no hit; the pre-id row is not in the rate").isEqualTo(0.5);
+    }
 }
