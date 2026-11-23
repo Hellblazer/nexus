@@ -5576,10 +5576,10 @@ public final class CatalogRepository {
      */
     public void writeManifest(String tenant, String docId, String collection, List<Map<String, Object>> rows) {
         requireNonBlank(collection, "collection");
-        manifestWriteTxn(tenant, "catalog.writeManifest " + collection, ctx -> {
-            writeManifestRows(ctx, tenant, docId, collection, rows);
+        RenameFollow.run(collection, gate -> manifestWriteTxn(tenant, "catalog.writeManifest " + collection, ctx -> {
+            writeManifestRows(ctx, tenant, docId, collection, gate, rows);
             return null;
-        });
+        }));
     }
 
     /**
@@ -6156,9 +6156,13 @@ public final class CatalogRepository {
      * refusal of its own: a request by id whose id is gone or retired is refused here, and a label no row has or a retired label keeps
      * the answer of the writer that follows ({@code requireWritable} for rows, none for an empty manifest).
      */
-    private static String registryFirst(DSLContext ctx, String tenant, String collection) {
-        // the id is the identity (linda's ruling): the write goes under the row's CURRENT label, which the caller uses from here on
-        return CollectionRegistry.requireForWriteIfPresent(ctx, tenant, collection).map(CollectionRow::label).orElse(collection);
+    private static String registryFirst(DSLContext ctx, String tenant, String collection, String gate) {
+        // the id is the identity (linda's ruling): the write goes under the row's CURRENT label, which the caller uses from here on.
+        // The gate this attempt took is the one of the label it was GIVEN (RenameFollow); a row that now bears another label sends the
+        // attempt round again, with that label's gate first, instead of taking the second gate after this read.
+        java.util.Optional<CollectionRow> row = CollectionRegistry.requireForWriteIfPresent(ctx, tenant, collection);
+        row.ifPresent(r -> RenameFollow.check(gate, r));
+        return row.map(CollectionRow::label).orElse(collection);
     }
 
     /** Which {@code ON CONFLICT} shape {@link #insertManifestChunkRows} applies. */
@@ -6352,8 +6356,8 @@ public final class CatalogRepository {
     }
 
     private static String writeManifestRows(DSLContext ctx, String tenant, String docId,
-                                          String collection, List<Map<String, Object>> rows) {
-        return writeManifestRows(ctx, tenant, docId, collection, rows, null, null, null, null, null, null);
+                                          String collection, String gate, List<Map<String, Object>> rows) {
+        return writeManifestRows(ctx, tenant, docId, collection, gate, rows, null, null, null, null, null, null);
     }
 
     /**
@@ -6415,7 +6419,7 @@ public final class CatalogRepository {
      *         dropped chashes from without threading a second parameter.
      */
     private static String writeManifestRows(DSLContext ctx, String tenant, String docId,
-                                          String collection, List<Map<String, Object>> rows,
+                                          String collection, String gate, List<Map<String, Object>> rows,
                                           Map<String, ResolvedChunk> resolvedChunks,
                                           int[] chunksWrittenOut,
                                           Set<String> writtenThisRequest,
@@ -6435,14 +6439,14 @@ public final class CatalogRepository {
         // sweep is a wait-sink, so no deadlock is possible either order).
         // ONE collection for the whole call now (RDR-191) -- ONE gate
         // acquisition, not a per-row resolved set.
-        acquireSweepGateShared(ctx, tenant, collection);
+        acquireSweepGateShared(ctx, tenant, gate);   // the label this attempt was given (RenameFollow); a re-entry when writeManifestMany took it
         // nexus-5xn3k.2 (stacked-review item 1): the WRITE side of the
         // completeIndexRun/writeManifestRows advisory-lock pair — see
         // acquireIndexRunLock's javadoc. Acquired BEFORE the manifest rows are replaced below
         // so a concurrent completeIndexRun for the same doc either runs entirely
         // before or entirely after this manifest mutation, never interleaved.
         acquireIndexRunLock(ctx, tenant, docId);
-        collection = registryFirst(ctx, tenant, collection);   // the row's current label, from the locked read
+        collection = registryFirst(ctx, tenant, collection, gate);   // the row's current label, from the locked read (Moved when it is not the gate's)
         // nexus-kl2z6 increment 1 (design memo §0): the chunk-vector UPSERT
         // runs BEFORE the manifest rows are replaced below — a chash lands in
         // chunks_<dim> before (in this same, still-open transaction) the
@@ -7108,7 +7112,7 @@ public final class CatalogRepository {
                     // (chunk_count folds inside writeManifestRows — nexus-b6enc
                     // F5 unified the fold for the single-doc and batch paths.)
                     docCollection[0] = collection;   // the row's current label once the write transaction has read it
-                    manifestWriteTxn(tenant, "catalog.writeManifestMany " + collection, ctx -> {
+                    RenameFollow.run(collection, gate -> manifestWriteTxn(tenant, "catalog.writeManifestMany " + collection, ctx -> {
                         sweepOutcome[0] = null;
                         beforeHolder[0] = null;
                         chunksWrittenHolder[0] = 0;
@@ -7128,9 +7132,9 @@ public final class CatalogRepository {
                         // first's manifest and drops (and, with sweep on, sweeps) its chunks.
                         requireNonBlank(collection, "collection");
                         requireDocumentExists(ctx, tenant, docId);
-                        acquireSweepGateShared(ctx, tenant, collection);
+                        acquireSweepGateShared(ctx, tenant, gate);   // the label this attempt was given (RenameFollow)
                         acquireIndexRunLock(ctx, tenant, docId);
-                        docCollection[0] = registryFirst(ctx, tenant, collection);   // before requireMovePrecondition's document row locks
+                        docCollection[0] = registryFirst(ctx, tenant, collection, gate);   // before requireMovePrecondition's document row locks
                         // RDR-210 Phase 6 Step 1: under the document's write locks, so a client write that
                         // committed before them is seen and one that comes after waits for this commit.
                         if (move != null) {
@@ -7186,7 +7190,7 @@ public final class CatalogRepository {
                         boolean beforeReadFailed = sweep && beforeRead == null;
                         long tWriteStart = tBeforeReadEnd;
                         try {
-                            writeManifestRows(ctx, tenant, docId, docCollection[0], rows,
+                            writeManifestRows(ctx, tenant, docId, docCollection[0], docCollection[0], rows,
                                     resolvedChunks, chunksWrittenHolder,
                                     requestWrittenChashes, newlyWrittenChashesHolder, docRaced,
                                     beforeRows == null ? PRIOR_ROWS_UNREAD : beforeRows);
@@ -7229,7 +7233,7 @@ public final class CatalogRepository {
                             writeNanosTotal[0] += (System.nanoTime() - tWriteStart);
                         }
                         return null;
-                    });
+                    }));
                     // RDR-222 Phase 0 fix round (bead nexus-ulrjq): merge THIS doc's
                     // newly-written chashes into the request-scoped set only NOW that
                     // its transaction has committed (tenantScope.withTenant returned
@@ -8183,7 +8187,7 @@ public final class CatalogRepository {
         List<Map<String, Object>> attemptRefused = new ArrayList<>();
         List<Map<String, Object>> attemptExpectedRefused = new ArrayList<>();
         RacedEmbeds raced = new RacedEmbeds();
-        manifestWriteTxn(tenant, "catalog.appendManifestChunks " + collection, ctx -> {
+        RenameFollow.run(collection, gate -> manifestWriteTxn(tenant, "catalog.appendManifestChunks " + collection, ctx -> {
             chunksWritten[0] = 0;
             attemptRefused.clear();
             attemptExpectedRefused.clear();
@@ -8196,13 +8200,13 @@ public final class CatalogRepository {
             // acquireSweepGateShared's javadoc (writer-site table) and
             // writeManifestRows for the identical ordering rationale. ONE
             // collection for the whole call now (RDR-191).
-            acquireSweepGateShared(ctx, tenant, collection);
+            acquireSweepGateShared(ctx, tenant, gate);   // the label this attempt was given (RenameFollow)
             // Same manifest-mutation class as writeManifestRows: serialize
             // against completeIndexRun's verify-then-stamp (see
             // acquireIndexRunLock's javadoc) — this was the one mutation path
             // left outside the lock when it landed.
             acquireIndexRunLock(ctx, tenant, docId);
-            final String coll = registryFirst(ctx, tenant, collection);   // the id is the identity: the row's CURRENT label, from the locked read
+            final String coll = registryFirst(ctx, tenant, collection, gate);   // the id is the identity: the row's CURRENT label, from the locked read
             // An append with rows learns of a tombstone at its chunk_count fold below; a sweep-only
             // append (empty rows) has no fold, so check here: it must be refused 409 like any
             // other append to a tombstoned document, not sweep on its behalf.
@@ -8279,7 +8283,7 @@ public final class CatalogRepository {
                         ((Number) complete.get("chunk_count")).intValue(), attemptRefused);
             }
             return null;
-        });
+        }));
         if (completeRefusedOut != null) {
             completeRefusedOut.addAll(attemptRefused);
         }
@@ -13669,10 +13673,10 @@ public final class CatalogRepository {
      */
     public void importChunk(String tenant, String docId, String collection, Map<String, Object> row) {
         requireNonBlank(collection, "collection");
-        manifestWriteTxn(tenant, "catalog.importChunk " + collection, ctx -> {
-            doImportChunk(ctx, tenant, docId, collection, row);
+        RenameFollow.run(collection, gate -> manifestWriteTxn(tenant, "catalog.importChunk " + collection, ctx -> {
+            doImportChunk(ctx, tenant, docId, collection, gate, row);
             return null;
-        });
+        }));
     }
 
     /**
@@ -13687,7 +13691,7 @@ public final class CatalogRepository {
     public int importChunksBatch(String tenant, String docId, String collection, List<Map<String, Object>> rows) {
         requireNonBlank(collection, "collection");
         if (rows == null || rows.isEmpty()) { ExpectedCollectionIds.nothingToWrite(collection); return 0; }
-        return manifestWriteTxn(tenant, "catalog.importChunksBatch " + collection, ctx -> {
+        return RenameFollow.run(collection, gate -> manifestWriteTxn(tenant, "catalog.importChunksBatch " + collection, ctx -> {
             // Conflict key: (tenant_id, doc_id, position). doc_id is constant for
             // this call (the {doc_id, rows} import envelope is per-document).
             var unique = new java.util.LinkedHashMap<Integer, Map<String, Object>>(rows.size());
@@ -13701,12 +13705,12 @@ public final class CatalogRepository {
             // is re-entrant within a transaction; the index-run lock follows it
             // below, as in writeManifestRows). ONE collection for
             // the whole call now (RDR-191).
-            acquireSweepGateShared(ctx, tenant, collection);
+            acquireSweepGateShared(ctx, tenant, gate);   // the label this attempt was given (RenameFollow)
             // RDR-210 Phase 6 Step 1: this leg writes manifest rows (UPSERT_IMPORT), so it takes the
             // document's index-run lock after the gate, in writeManifestRows's order; a document move
             // for the same document then either precedes it or waits for it.
             acquireIndexRunLock(ctx, tenant, docId);
-            final String coll = registryFirst(ctx, tenant, collection);   // the id is the identity: the row's CURRENT label
+            final String coll = registryFirst(ctx, tenant, collection, gate);   // the id is the identity: the row's CURRENT label
 
             final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / 10);
             for (int start = 0; start < deduped.size(); start += chunkSize) {
@@ -13724,15 +13728,15 @@ public final class CatalogRepository {
                 DepartedWriterSpans.clearDisplaced(ctx, tenant, docId, coll, priorAt, writtenAt);
             }
             return rows.size();
-        });
+        }));
     }
 
-    private void doImportChunk(DSLContext ctx, String tenant, String docId, String collection,
+    private void doImportChunk(DSLContext ctx, String tenant, String docId, String collection, String gate,
                                 Map<String, Object> row) {
         requireDocumentExists(ctx, tenant, docId);
-        acquireSweepGateShared(ctx, tenant, collection);
+        acquireSweepGateShared(ctx, tenant, gate);   // the label this attempt was given (RenameFollow)
         acquireIndexRunLock(ctx, tenant, docId);
-        collection = registryFirst(ctx, tenant, collection);   // the id is the identity: the row's CURRENT label
+        collection = registryFirst(ctx, tenant, collection, gate);   // the id is the identity: the row's CURRENT label
         Map<Integer, String> writtenAt = chashesByPosition(List.of(row));
         Map<Integer, DepartedWriterSpans.Gone> priorAt = DepartedWriterSpans.rowsAt(ctx, tenant, docId, writtenAt.keySet());
         insertManifestChunkRows(ctx, tenant, docId, collection, List.of(row), ManifestInsertMode.UPSERT_IMPORT);

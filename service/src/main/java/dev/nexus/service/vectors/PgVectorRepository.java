@@ -13,6 +13,7 @@ import dev.nexus.service.db.ModelPartitions;
 import dev.nexus.service.db.DeadlockRetry;
 import dev.nexus.service.db.GcCollectionReads;
 import dev.nexus.service.db.PgSession;
+import dev.nexus.service.db.RenameFollow;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.db.UnregisteredCollectionException;
@@ -1258,17 +1259,20 @@ public final class PgVectorRepository {
             // so reporting from inside it counted a 40P01-retried request once per attempt.
             final List<String>[] inTxUnownedHolder = new List[]{List.of()};
             try {
-                DeadlockRetry.run(collection, () -> tenantScope.withTenant(tenant, ctx -> {
+                RenameFollow.run(collection, gate -> DeadlockRetry.run(collection, () -> tenantScope.withTenant(tenant, ctx -> {
                     if (recheckInTransaction) {
                         // advisory lock first (RenameGuard#runRename): the recheck below takes this same gate, and a gate wait behind
-                        // a queued sweep while holding the registry key share could close a cycle with a verb that holds the gate
-                        CatalogRepository.acquireSweepGateShared(ctx, tenant, collection);
+                        // a queued sweep while holding the registry key share could close a cycle with a verb that holds the gate.
+                        // The gate is the label this attempt was GIVEN (RenameFollow): the row's current label, once a rename was seen
+                        CatalogRepository.acquireSweepGateShared(ctx, tenant, gate);
                     }
                     final CollectionRow registered = CollectionRegistry.requireWritable(ctx, tenant, collection);
-                    // the id is the identity: the rows are written under the row's CURRENT label (see resolveNeedEmbedIdx)
+                    // the id is the identity: the rows are written under the row's CURRENT label (see resolveNeedEmbedIdx). A rename that
+                    // landed after the gate above is followed by running the attempt again from the top with the new label's gate first,
+                    // never by taking that gate after this registry read (a gate-then-row inversion)
                     final String coll = registered.label();
-                    if (!coll.equals(collection)) {
-                        CatalogRepository.acquireSweepGateShared(ctx, tenant, coll);
+                    if (recheckInTransaction) {
+                        RenameFollow.check(gate, registered);
                     }
                     racedThisWrite.set(0);
                     racedChashSampleHolder[0] = new ArrayList<>();
@@ -1375,7 +1379,7 @@ public final class PgVectorRepository {
                               }
                           });
                     return null;
-                }));
+                })));
             } finally {
                 // Log-only would_refuse, once per request: after the commit, or after the last attempt
                 // failed. Enforce never gets here with a list (it threw inside the attempt and counted
@@ -8743,7 +8747,7 @@ FROM scope s
         existenceSelectCalls.incrementAndGet();
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         try {
-            return tenantScope.withTenant(tenant, ctx -> {
+            return RenameFollow.run(collection, gate -> tenantScope.withTenant(tenant, ctx -> {
                 // nexus-hxrcm residual: the have-vector metadata-only UPDATE below touches
                 // rows the superseded-chunk sweep DELETEs and gc_quarantine_orphans moves,
                 // both under the EXCLUSIVE half of this key. SHARED here means we wait for a
@@ -8753,19 +8757,18 @@ FROM scope s
                 // flush_concurrency) times SWEEP_STATEMENT_TIMEOUT_MS each, not a flat 5 s;
                 // see acquireSweepGateShared's javadoc for the formula and why the writer
                 // side deliberately has no lock_timeout.
-                CatalogRepository.acquireSweepGateShared(ctx, tenant, collection);
+                CatalogRepository.acquireSweepGateShared(ctx, tenant, gate);
                 // RDR-229 P3.5a (linda's option (b)): the registry check of a write transaction, right after the advisory gate and
                 // before any row is read or written (the lock order of RenameGuard#runRename): the have-vector UPDATE below writes
                 // chunks BY LABEL, and a label freed and re-taken while this transaction waited for the gate would land them in the
                 // new row. A retired or unknown id answers its typed 409/404 here, not after the UPDATE.
                 CollectionRow registered = CollectionRegistry.requireWritable(ctx, tenant, collection);
                 // the id is the identity (linda's ruling): a request by id follows a one-row rename that landed after the route
-                // boundary, so the rows are found and written under the row's CURRENT label, from this locked read (a rename lands
-                // after the gate above, which was taken by the label the boundary resolved: the gate of the current label is taken too)
+                // boundary, so the rows are found and written under the row's CURRENT label, from this locked read. The gate above was
+                // taken by the label this attempt was given; when the row now bears another, the attempt runs again from the top with
+                // that label's gate first (RenameFollow), never taking a second gate after the registry read
                 final String coll = registered.label();
-                if (!coll.equals(collection)) {
-                    CatalogRepository.acquireSweepGateShared(ctx, tenant, coll);
-                }
+                RenameFollow.check(gate, registered);
                 // RDR-225: the (model, tenant, collection) scope, of the registered row
                 final org.jooq.Condition scope = chunkScope(ch, tenant, registered.embeddingModel(), coll);
                 Map<String, String> existingText = selectExistingChashTextCtx(ctx, ch, scope, dedupIds);
@@ -8823,7 +8826,7 @@ FROM scope s
                     batchUpdateMetadata(ctx, ch, coll, dedupIds, dedupMetas, unchangedIdx,
                             deleteKeys == null ? List.of() : deleteKeys));
                 return new NeedEmbedResolution(needEmbedIdx, originalAbsentIdx);
-            });
+            }));
         } catch (RuntimeException e) {
             // a request by id whose id is gone or retired, or a retired name, answers its typed refusal: embedding everything
             // for a write that cannot land would only spend the embed
