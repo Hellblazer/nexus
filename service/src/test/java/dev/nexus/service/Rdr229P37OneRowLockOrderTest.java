@@ -200,6 +200,83 @@ class Rdr229P37OneRowLockOrderTest {
         }
     }
 
+    /** The registry rows of {@code tenant} as id, label, successor and xmin (a rewritten row changes its xmin), by id. */
+    private static List<String> registryRows(DSLContext ctx, String tenant) {
+        var cc = CATALOG_COLLECTIONS;
+        return ctx.select(cc.COLLECTION_ID, cc.NAME, cc.SUPERSEDED_BY, DSL.field(DSL.name("xmin"), String.class)).from(cc)
+            .where(cc.TENANT_ID.eq(tenant)).orderBy(cc.COLLECTION_ID)
+            .fetch(r -> r.value1() + "|" + r.value2() + "|" + r.value3() + "|" + r.value4());
+    }
+
+    /**
+     * A holder has the source row FOR UPDATE; a rename NAMING THE SOURCE BY ID starts (its route boundary and its peek read the row without a lock) and parks in
+     * the rename's ordered FOR UPDATE select (asserted by its statement, bounded waits). The holder then changes what the id names ({@code change}) and commits;
+     * the rename, which took the lock only now, finds the row no longer what the request meant and refuses typed ({@code CollectionRefusals.requireSourceById}),
+     * writing nothing: the registry is exactly as the holder left it, and no row bears the target.
+     */
+    private void renameByIdWaitsAtTheOrderedLockWhileTheHolderChangesTheSource(String tag, java.util.function.BiConsumer<DSLContext, long[]> change,
+                                                                               int status, String reason) throws Exception {
+        String tenant = "p37-lo-f" + tag;
+        String token = engine.newTenant(tenant);
+        String a = coll("p37lof" + tag + "a");
+        String target = coll("p37lof" + tag + "t");
+        String other = coll("p37lof" + tag + "o");
+        engine.su(ctx -> {
+            PgContainerHelper.insertCollection(ctx, tenant, a);
+            PgContainerHelper.insertCollection(ctx, tenant, other);   // the successor of a retire (and a bystander otherwise)
+            return null;
+        });
+        long id = engine.su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, a));
+        long otherId = engine.su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, other));
+        var pool = Executors.newFixedThreadPool(1);
+        try (Connection h = engine.pg.createConnection("")) {
+            h.setAutoCommit(false);
+            DSLContext hc = DSL.using(h, SQLDialect.POSTGRES);
+            hc.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(id))).forUpdate().fetch();   // the source row, held
+            int base = lockWaiters();
+            Future<Rdr229RenameEngine.Renamed> rename = pool.submit(() -> engine.renameById(token, id, target, Map.of()));
+
+            assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(30), () -> lockWaiters() > base))
+                .as("the rename by id parks on the source row the holder has FOR UPDATE").isTrue();
+            assertThat(waitingQueries()).as("and the parked backend is the rename's ordered FOR UPDATE select of the registry rows")
+                .anyMatch(q -> q.contains("for update") && q.contains("order by") && q.contains("catalog_collections"));
+            assertThat(rename.isDone()).as("it has not answered under the holder").isFalse();
+
+            change.accept(hc, new long[] {id, otherId});
+            List<String> asTheHolderLeavesIt = registryRows(hc, tenant);   // read in the holder's own transaction: its rewritten row carries its xmin
+            assertThat(asTheHolderLeavesIt).as("non-vacuity: the holder changed what the id names").isNotEmpty();
+            h.commit();   // the id no longer names what the request meant; the rename takes the lock now
+
+            var r = rename.get(60, TimeUnit.SECONDS);
+            assertThat(r.status()).as("the typed refusal, not a rename of whatever bears the label: " + r).isEqualTo(status);
+            assertThat(r.body()).as(r.toString()).contains(reason);
+            assertThat(engine.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, target))).as("nothing was written: no row bears the target").isNull();
+            // the registry is what the holder committed: the rename's refusal rewrote no row (no xmin moved since the holder's commit)
+            assertThat(engine.<List<String>>su(ctx -> registryRows(ctx, tenant))).as("and no registry row was rewritten by the refused rename")
+                .isEqualTo(asTheHolderLeavesIt);
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void aRenameByIdParkedAtTheOrderedLock_whileTheHolderRetiresTheSource_refusesTypedAsRetired_andWritesNothing() throws Exception {
+        renameByIdWaitsAtTheOrderedLockWhileTheHolderChangesTheSource("r", (hc, ids) ->
+            hc.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, coll("p37lofro"))
+                .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, ids[1]).set(CATALOG_COLLECTIONS.SUPERSEDED_AT, java.time.OffsetDateTime.now())
+                .where(CATALOG_COLLECTIONS.COLLECTION_ID.eq(ids[0])).and(CATALOG_COLLECTIONS.TENANT_ID.eq("p37-lo-fr")).execute(),
+            409, "collection_superseded");
+    }
+
+    @Test
+    void aRenameByIdParkedAtTheOrderedLock_whileTheHolderRenamesTheSourceAway_refusesTypedAsMismatch_andWritesNothing() throws Exception {
+        renameByIdWaitsAtTheOrderedLockWhileTheHolderChangesTheSource("m", (hc, ids) ->
+            hc.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.NAME, coll("p37lofmaway")).set(CATALOG_COLLECTIONS.OWNER_ID, "p37lofmaway")
+                .where(CATALOG_COLLECTIONS.COLLECTION_ID.eq(ids[0])).and(CATALOG_COLLECTIONS.TENANT_ID.eq("p37-lo-fm")).execute(),
+            409, "collection_id_mismatch");
+    }
+
     private static org.jooq.Select<org.jooq.Record1<Object>> gate(DSLContext ctx, String function, String tenant, String label) {
         return ctx.select(DSL.function(function, Object.class, DSL.function("hashtext", Integer.class, DSL.val("sweepgate:" + tenant + "/" + label))));
     }
