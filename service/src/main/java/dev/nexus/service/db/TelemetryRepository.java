@@ -286,14 +286,6 @@ public final class TelemetryRepository {
     }
 
     /**
-     * The rename arm's row filter: from gate 3 only rows that carry an id are rewritten (a pre-id row is label history and is
-     * never stamped with the new collection's id, which would attribute it by name); before gate 3 every row, as it was.
-     */
-    private Condition stamped(Field<Long> id) {
-        return CollectionKey.of(gate3).byId() ? id.isNotNull() : noCondition();
-    }
-
-    /**
      * A history row's collection for a listing. Before gate 3 the row's own name column, as it was. From gate 3 the registry's
      * CURRENT label of the row's id ({@code label}); a row that carries no id is pre-id label history and says so ({@code pre_id:
      * true}, the name it recorded, never a registry label); a row whose id the registry no longer has says {@code gone: true}
@@ -725,16 +717,21 @@ public final class TelemetryRepository {
         Map<String, Integer> answer = renameGuard.runRename(tenantScope, tenant, ctx -> {
             noop[0] = false;
             CatalogRepository.refuseUnderReembedJob(ctx, tenant, "rename", oldName, newName);
-            int searchCount = ctx.update(SEARCH_TELEMETRY)
-                .set(SEARCH_TELEMETRY.COLLECTION, newName)
-                .set(SEARCH_TELEMETRY.COLLECTION_ID, CollectionIds.idOf(tenant, newName))
-                .where(SEARCH_TELEMETRY.COLLECTION.eq(oldName).and(stamped(SEARCH_TELEMETRY.COLLECTION_ID)))
-                .execute();
-            int hookCount = ctx.update(HOOK_FAILURES)
-                .set(HOOK_FAILURES.COLLECTION, newName)
-                .set(HOOK_FAILURES.COLLECTION_ID, CollectionIds.idOf(tenant, newName))
-                .where(HOOK_FAILURES.COLLECTION.eq(oldName).and(stamped(HOOK_FAILURES.COLLECTION_ID)))
-                .execute();
+            // linda 2026-11-23: a row that carries an id is retagged by that id (oldId), never by its stored name, so a stamped row that
+            // happens to carry oldName under ANOTHER collection's id is not re-pointed; a row with no id (telemetry is a history table, rows
+            // are never stamped after the fact) is retagged by name. The new id is the renamed registry row's own: the successor the old
+            // row names, or the old row itself when it was renamed in place, never idOf(newName), which a label shared with another
+            // collection would answer with that collection's id.
+            Field<Long> oldId = CollectionIds.idOf(tenant, oldName);
+            var reg = CATALOG_COLLECTIONS.as("tlrn");
+            Field<Long> successor = field(select(reg.SUPERSEDED_BY_ID).from(reg)
+                .where(reg.TENANT_ID.eq(tenant)).and(reg.COLLECTION_ID.eq(oldId)).and(reg.SUPERSEDED_BY_ID.ne(reg.COLLECTION_ID)));
+            Field<Long> newId = coalesce(successor, oldId);
+            boolean byId = CollectionKey.of(gate3).byId();
+            int searchCount = retag(ctx, SEARCH_TELEMETRY, SEARCH_TELEMETRY.COLLECTION, SEARCH_TELEMETRY.COLLECTION_ID,
+                oldName, newName, oldId, newId, byId);
+            int hookCount = retag(ctx, HOOK_FAILURES, HOOK_FAILURES.COLLECTION, HOOK_FAILURES.COLLECTION_ID,
+                oldName, newName, oldId, newId, byId);
             return Map.of("search_telemetry", searchCount, "hook_failures", hookCount);
         }, ctx -> {
             RenameGuard.requireRegistryRenamed(ctx, tenant, oldName, newName);   // the registry rename moved the label: nothing to rewrite
@@ -743,6 +740,20 @@ public final class TelemetryRepository {
         });
         if (noop[0]) RenameNoOpActivity.record("telemetry", oldName, newName);   // counted once committed
         return answer;
+    }
+
+    /**
+     * One history table's rename: the rows that carry {@code oldId} are retagged to {@code newName} and {@code newId}; the rows with no id
+     * and the stored name {@code oldName} are retagged by name, and take {@code newId} only before gate 3 (from it a pre-id row is
+     * label history and is never stamped with a collection's id after the fact).
+     */
+    private static <R extends org.jooq.Record> int retag(DSLContext ctx, org.jooq.Table<R> table, Field<String> name, Field<Long> id,
+                                                         String oldName, String newName, Field<Long> oldId, Field<Long> newId,
+                                                         boolean byId) {
+        int stamped = ctx.update(table).set(name, newName).set(id, newId).where(id.eq(oldId)).execute();
+        var unstamped = ctx.update(table).set(name, newName);
+        int pre = (byId ? unstamped : unstamped.set(id, newId)).where(name.eq(oldName).and(id.isNull())).execute();
+        return stamped + pre;
     }
 
     /**
