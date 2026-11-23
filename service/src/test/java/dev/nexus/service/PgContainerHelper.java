@@ -476,7 +476,16 @@ public final class PgContainerHelper {
             return startDedicated();
         }
         try {
-            return SharedCluster.acquireDatabase();
+            PostgreSQLContainer<?> clone = SharedCluster.acquireDatabase();
+            if (Rdr229CompleteStamps.formAApplied()) { // -Dnexus.test.formA.applied=true: the clone with the vectors-078 form A bodies applied
+                try (Connection su = clone.createConnection("")) {
+                    Rdr229CompleteStamps.completeAndApplyFormA(su);
+                } catch (Exception e) {
+                    clone.stop();
+                    throw new IllegalStateException("RDR-229 P3.5b form A variant of the clone failed: " + e.getMessage(), e);
+                }
+            }
+            return clone;
         } catch (SQLException e) {
             throw new IllegalStateException("nexus-yhmav shared-cluster acquire failed", e);
         }
