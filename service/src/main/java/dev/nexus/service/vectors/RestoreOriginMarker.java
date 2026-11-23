@@ -35,6 +35,11 @@ final class RestoreOriginMarker {
     private RestoreOriginMarker() {
     }
 
+    /** The row's {@code origin_collection_id} is the JSON null marker (an origin that had no registry row when it was quarantined); false when the key is absent or a number. */
+    static Condition isNullMarker() {
+        return ID_KEY_TYPE.eq("null");
+    }
+
     /**
      * Refuses a restore into {@code origin} that would skip marker rows. {@code chashes} (hex) limits the check to the chunks a caller named; null (the gc
      * restores, which take every chunk the origin's manifest owns) limits it to the marker rows the origin's manifest owns, the rows the function would
