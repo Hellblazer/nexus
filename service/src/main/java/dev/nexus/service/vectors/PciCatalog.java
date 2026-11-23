@@ -556,11 +556,13 @@ public final class PciCatalog {
         private final List<Leaf> leaves;
         private final Map<Key, String> valid;
         private final Map<Key, Anchor> anchors;
+        private final Map<String, Anchor> idAnchors;
         private final int validCount;
         private final int invalidCount;
         private final int unparsedCount;
         private final int reindexLeftoverCount;
         private final int leafLeftoverCount;
+        private final int validIdCount;
         private final Set<String> validIds;
         private final Set<String> invalidIds;
 
@@ -568,8 +570,10 @@ public final class PciCatalog {
             this.leaves = List.copyOf(leaves);
             Map<Key, String> validKeys = new LinkedHashMap<>();
             Map<Key, Anchor> validAnchors = new LinkedHashMap<>();
+            Map<String, Anchor> validIdAnchors = new LinkedHashMap<>();
             int validIndexes = 0;
             int invalidIndexes = 0;
+            int validIdIndexes = 0;
             int unparsedIndexes = 0;
             int leftoverIndexes = 0;
             int leafLeftoverIndexes = 0;
@@ -582,6 +586,10 @@ public final class PciCatalog {
                         // Not in the name-keyed router maps or in validCount (the name count): from the latch the serving path selects by id, and validIdCount counts these.
                         (index.valid() ? validIdKeys : invalidIdKeys)
                             .add(idKey(leaf.model(), leaf.tenant(), index.collectionId()));
+                        if (index.valid()) {
+                            validIdIndexes++;   // indexes, as validCount counts them, so the two counts and validIdEntries agree
+                            index.anchor().ifPresent(a -> validIdAnchors.putIfAbsent(idKey(leaf.model(), leaf.tenant(), index.collectionId()), a));
+                        }
                     } else if (index.leftover()) {
                         leftoverIndexes++;
                         if (index.leftoverOfId() != null) {
@@ -604,11 +612,13 @@ public final class PciCatalog {
             }
             this.valid = Collections.unmodifiableMap(validKeys);
             this.anchors = Collections.unmodifiableMap(validAnchors);
+            this.idAnchors = Collections.unmodifiableMap(validIdAnchors);
             this.validCount = validIndexes;
             this.invalidCount = invalidIndexes;
             this.unparsedCount = unparsedIndexes;
             this.reindexLeftoverCount = leftoverIndexes;
             this.leafLeftoverCount = leafLeftoverIndexes;
+            this.validIdCount = validIdIndexes;
             this.validIds = Collections.unmodifiableSet(validIdKeys);
             this.invalidIds = Collections.unmodifiableSet(invalidIdKeys);
         }
@@ -629,12 +639,12 @@ public final class PciCatalog {
             return invalidIds;
         }
 
-        /** Id-predicate indexes with {@code indisvalid} true. */
+        /** Id-predicate indexes with {@code indisvalid} true, counted as indexes (the way {@link #validCount} counts); one per entry of {@code validIdEntries}. */
         public int validIdCount() {
-            return validIds.size();
+            return validIdCount;
         }
 
-        /** Id-predicate indexes with {@code indisvalid} false. */
+        /** Id-predicate indexes with {@code indisvalid} false, by (model, tenant, id) key; an INVALID leftover of an id index counts under its id. */
         public int invalidIdCount() {
             return invalidIds.size();
         }
@@ -667,6 +677,12 @@ public final class PciCatalog {
         @Override
         public Optional<Anchor> anchor(String model, String tenant, String collection) {
             return Optional.ofNullable(anchors.get(new Key(model, tenant, collection)));
+        }
+
+        /** The anchor of the valid id-predicate index of this collection id, or empty (none, or it has no parseable anchor). */
+        @Override
+        public Optional<Anchor> anchorById(String model, String tenant, long collectionId) {
+            return Optional.ofNullable(idAnchors.get(idKey(model, tenant, collectionId)));
         }
 
         /** The keys that have a valid parsed index, for the sweep's history. */

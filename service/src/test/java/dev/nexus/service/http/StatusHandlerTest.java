@@ -596,6 +596,8 @@ class StatusHandlerTest {
         assertThat(o.get("unparsed").asInt()).isEqualTo(2);
         assertThat(o.get("reindex_leftover").asInt()).as("its own counter, next to unparsed (nexus-rn1yd)")
             .isEqualTo(3);
+        assertThat(o.get("valid_id").asInt()).as("additive, next to the name counts: the id indexes that serve once latched").isZero();
+        assertThat(o.get("invalid_id").asInt()).isZero();
         assertThat(o.get("last_read_at").asText()).isEqualTo("2026-10-10T08:00:00Z");
         assertThat(o.get("expired").asBoolean()).isFalse();
         JsonNode me = o.get("this_engine");
@@ -860,7 +862,7 @@ class StatusHandlerTest {
         JsonNode o = get().get("per_collection_indexes");
         var top = new java.util.ArrayList<String>();
         o.fieldNames().forEachRemaining(top::add);
-        assertThat(top).containsExactly("valid", "invalid", "unparsed", "reindex_leftover", "last_read_at", "expired",
+        assertThat(top).containsExactly("valid", "invalid", "unparsed", "reindex_leftover", "valid_id", "invalid_id", "last_read_at", "expired",
             "sweep_seconds", "this_engine");
         var inner = new java.util.ArrayList<String>();
         o.get("this_engine").fieldNames().forEachRemaining(inner::add);
@@ -887,6 +889,9 @@ class StatusHandlerTest {
             true)));
         cases.put("first_pass_in_flight", pci(read(0, 1, 0, false), new PciReconciler.DdlStatus(
             PciBuilderSession.BuilderState.OK, 1, 0, null, java.time.Instant.parse("2026-10-10T07:58:30.500Z"), true)));
+        // RDR-229 P3.4 (additive valid_id / invalid_id): a latched engine, name indexes retired, three id indexes serving.
+        cases.put("latched_id_only", pci(new PciIndexSweep.Status(true, 0, 0, 0, 0, READ_AT, null, 0, false, 3, 0),
+            new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.OK, 0, 0, DDL_AT)));
         cases.put("standby", pci(read(4, 0, 0, false),
             new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.STANDBY, null, null, null)));
         cases.put("auth_failed", pci(read(2, 0, 0, false),
