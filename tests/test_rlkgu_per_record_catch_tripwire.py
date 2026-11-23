@@ -359,6 +359,13 @@ _RECORD_LEVEL: frozenset[str] = frozenset({
 #: tripwire; the fix is a deliberate classification decision, not a
 #: blanket exemption.
 _COMMAND_LEVEL_REASONS: dict[str, str] = {
+    "RecoveryBundleFormatTooNewError": (
+        "RDR-229 P3.9 (nexus-p2m1x.29): raised by recovery_bundle.read_bundle / read_bundle_header when a "
+        "bundle's format_version is newer than this client reads. It is a property of the whole bundle, "
+        "read from its header before any record is parsed or any write is made: nx catalog import checks "
+        "the header before it connects and refuses the command with one message. No per-record loop "
+        "raises it."
+    ),
     "NoteUriEngineTooOldError": (
         "RDR-231 (nexus-bivz3.13): raised by require_note_uri_engine when the serving engine is "
         "older than NOTE_URI_MIN_ENGINE_VERSION. It is a property of the engine, not of a record: "
