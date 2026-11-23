@@ -35,7 +35,7 @@ import java.util.regex.Pattern;
  * rdr229-fkvalidate-&lt;child&gt;-chunk-fk (x3)       1 x VALIDATE CONSTRAINT                       no              SHARE UPDATE EXCLUSIVE on the child, ROW SHARE on chunks                     none, 5 s lock wait
  * rdr229-fkvalidate-chunks-leaf-&lt;leaf&gt;         1 x VALIDATE CONSTRAINT                       no              SHARE UPDATE EXCLUSIVE on the leaf, ROW SHARE on the registry                none, 5 s lock wait
  * rdr229-fkadopt-chunks on_complete            1 x ADD CONSTRAINT (parent, adopts leaf keys) yes             SHARE ROW EXCLUSIVE on chunks and every leaf, ACCESS EXCLUSIVE on the registry   1400 ms, 700 ms lock
- * rdr229-fkadopt-chunks on_complete            1 x ADD CONSTRAINT .. NOT VALID (late leaf)   yes             SHARE ROW EXCLUSIVE on the leaf and on the registry, for an instant          1400 ms
+ * rdr229-fkadopt-chunks on_complete            2 x ADD CONSTRAINT .. NOT VALID (late leaf)   yes             SHARE ROW EXCLUSIVE on the leaf and on the registry, for an instant          1400 ms
  * rdr229-stamp-&lt;table&gt; (booted rows)            VALIDATE CONSTRAINT (P3.1 CHECKs)             no              SHARE UPDATE EXCLUSIVE on the table (and its leaves)                         none, 5 s lock wait
  * rdr229-fkvalidate-&lt;table&gt; (booted rows)       VALIDATE CONSTRAINT (P3.3a id twins)          no              SHARE UPDATE EXCLUSIVE on the table, ROW SHARE on the registry               none, 5 s lock wait
  * </pre>
@@ -137,8 +137,9 @@ class Rdr229ValidationBoundsCensusIntegrationTest extends DataMoveIntegrationBas
         List<String> adopts = bodies("aoc", swap);
         assertThat(adopts).as("one adoption move").hasSize(1);
         String adopt = adopts.get(0);
-        rule(new Text("rdr229-fkadopt-chunks", DOLLAR_BODY.matcher(adopt).replaceAll("''"), bounds.get("catalog_collections").get(1)), 2, 0);
-        assertThat(count("NOT VALID", DOLLAR_BODY.matcher(adopt).replaceAll("''"))).as("only the late leaf's key is NOT VALID").isEqualTo(1);
+        rule(new Text("rdr229-fkadopt-chunks", DOLLAR_BODY.matcher(adopt).replaceAll("''"), bounds.get("catalog_collections").get(1)), 3, 0);
+        assertThat(count("NOT VALID", DOLLAR_BODY.matcher(adopt).replaceAll("''"))).as("only a late leaf's key is NOT VALID (the reconcile runs twice: before the lock and under it)")
+            .isEqualTo(2);
         assertThat(adopt).as("the parent key is added with the one definition the leaves use")
             .contains("ADD CONSTRAINT " + Rdr229ChunksFk.PARENT_CONSTRAINT + " " + Rdr229ChunksFk.FK_DEFINITION + ";");
         assertThat(adopt).as("and a leaf key too").contains(Rdr229ChunksFk.FK_DEFINITION + " NOT VALID");
@@ -151,7 +152,7 @@ class Rdr229ValidationBoundsCensusIntegrationTest extends DataMoveIntegrationBas
         String swap = Rdr229SwapMove.spec("chunks").onComplete();
         // the leaf key (in the swap and in the adoption move) and the parent key spell FK_DEFINITION, so PostgreSQL adopts the leaf keys
         assertThat(count(Rdr229ChunksFk.FK_DEFINITION, DOLLAR_BODY.matcher(swap).replaceAll("''"))).as("the swap's leaf key").isEqualTo(1);
-        assertThat(count(Rdr229ChunksFk.FK_DEFINITION, bodies("aoc", swap).get(0))).as("the adoption move's leaf key and parent key").isEqualTo(2);
+        assertThat(count(Rdr229ChunksFk.FK_DEFINITION, bodies("aoc", swap).get(0))).as("the adoption move's leaf key (reconciled twice) and parent key").isEqualTo(3);
         assertThat(Rdr229ChunksFk.FK_DEFINITION).as("RESTRICT on delete, the default on update: what the match check reads")
             .contains("ON DELETE RESTRICT").doesNotContain("ON UPDATE").doesNotContain("DEFERRABLE").doesNotContain("MATCH");
         assertThat(Rdr229ChunksFk.hasValidatedMatch("x")).as("the match check compares the adopted key's actions the same way")

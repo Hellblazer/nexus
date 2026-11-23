@@ -22,6 +22,7 @@ import org.jooq.JSONB;
 import org.jooq.Record;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -385,5 +386,120 @@ abstract class Rdr229SwapMovesFixtures extends DataMoveIntegrationBase {
         }
         assertThat(PgCatalogProbes.foreignKey(ctx(), "nexus", "chunks_collection_fk"))
             .as("chunks_collection_fk stays until P3.7's name-key drop move").isNotNull();
+    }
+
+    // ── shared by the per-leaf test classes (nexus-p2m1x.21) ───────────────────────────────────────────────
+
+    /**
+     * The tenant's leaves the way the service creates them: {@code nexus.create_tenant_partitions} called as {@code nexus_svc} (when the role
+     * exists in the fixture; the migrating role otherwise). The function is SECURITY DEFINER, so the leaves belong to its owner, the migrating role.
+     */
+    void createTenantLeaves(String tenant) throws Exception {
+        try (Connection c = pg.createConnection("")) {
+            boolean svc = DSL.using(c, SQLDialect.POSTGRES).fetchExists(DSL.table(DSL.name("pg_catalog", "pg_roles")),
+                DSL.field(DSL.name("rolname"), String.class).eq("nexus_svc"));
+            if (svc) {
+                MoveSql.runOnComplete(c, "SET ROLE nexus_svc");
+            }
+            var regclass = new org.jooq.impl.DefaultDataType<>(SQLDialect.POSTGRES, Object.class, "regclass");
+            DSL.using(c, SQLDialect.POSTGRES).select(DSL.function(DSL.name("nexus", "create_tenant_partitions"), SQLDataType.INTEGER,
+                DSL.val("nexus.chunks").cast(regclass), DSL.val(tenant), DSL.val(true))).fetchOne();
+        }
+    }
+    static void sleepMs(long ms) {
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(e);
+        }
+    }
+    /** Runs {@code sql} (a registry on_complete) in one transaction on a session of its own, closed on return so its statistics are flushed. */
+    void runOnCompleteOnOwnSession(String sql) throws Exception {
+        try (Connection c = pg.createConnection("")) {
+            c.setAutoCommit(false);
+            try {
+                MoveSql.runOnComplete(c, sql);
+                c.commit();
+            } catch (SQLException | RuntimeException e) {
+                c.rollback();
+                throw e;
+            }
+        }
+    }
+    static String sqlState(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof SQLException se) {
+                return se.getSQLState();
+            }
+        }
+        return null;
+    }
+    record Held(Connection connection, String leaf, String label, DataMoveWorker worker) { }
+    /** Connections a test parks a lock on: released after each test whatever happened. */
+    final List<Connection> parked = new java.util.ArrayList<>();
+
+    /** Releases every parked lock and asserts no data-move backend is left running a statement; a test class calls it from its own @AfterEach. */
+    void releaseWhatTheTestParked() throws Exception {
+        for (Connection c : parked) {
+            try {
+                c.rollback();
+                c.close();
+            } catch (SQLException ignored) {
+                // closing a connection that is already gone is what this is for
+            }
+        }
+        parked.clear();
+        // no data-move or holder backend survives the test with a statement running (a parked VALIDATE would hold a leaf for the next migration)
+        Field<String> application = DSL.field(DSL.name("application_name"), String.class);
+        Field<String> state = DSL.field(DSL.name("state"), String.class);
+        Field<Integer> pid = DSL.field(DSL.name("pid"), Integer.class);
+        long deadline = System.nanoTime() + 10_000L * 1_000_000L;
+        List<Integer> running;
+        do {
+            running = ctx().select(pid).from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
+                .where(application.like("nexus-data-move-%")).and(state.eq("active")).and(pid.ne(pid(su))).fetch(pid);
+            if (!running.isEmpty()) {
+                for (int p : running) {
+                    ctx().select(DSL.function("pg_cancel_backend", SQLDataType.BOOLEAN, DSL.val(p))).fetch();
+                }
+                sleepMs(200);
+            }
+        } while (!running.isEmpty() && System.nanoTime() < deadline);
+        assertThat(running).as("no nexus-data-move- backend is still running a statement after the test").isEmpty();
+    }
+    /** Pauses every move but one leaf validation, and holds ACCESS EXCLUSIVE on that leaf from a session of the test's own. */
+    Held holdOneLeaf() throws Exception {
+        seed("held");
+        registerSwaps();
+        runSwaps(new VerifyingFinisher());
+        String leaf = chunkLeaves().get(0);
+        String label = Rdr229ChunksFk.LEAF_LABEL_PREFIX + leaf;
+        pause("rdr229-%");
+        resume(label);
+        // the worker first: building one re-runs the migration, whose ALTERs on the leaves would wait on the lock taken next
+        var worker = productionWorker(new VerifyingFinisher());
+        Connection c = pg.createConnection("");
+        parked.add(c);
+        c.setAutoCommit(false);
+        MoveSql.runOnComplete(c, "LOCK TABLE nexus." + quote(leaf) + " IN ACCESS EXCLUSIVE MODE");
+        return new Held(c, leaf, label, worker);
+    }
+    static int completionPid(DataMoveWorker w, String label, long timeoutMs) {
+        long end = System.nanoTime() + timeoutMs * 1_000_000L;
+        while (System.nanoTime() < end) {
+            var call = w.states().call(label);
+            if (call.isPresent() && VerifyingFinisher.COMPLETION_RUN.equals(call.get().runLabel())) {
+                return call.get().pid();
+            }
+            sleepMs(50);
+        }
+        return -1;
+    }
+    static String quote(String ident) {
+        return "\"" + ident.replace("\"", "\"\"") + "\"";
+    }
+    static int pid(Connection c) {
+        return DSL.using(c, SQLDialect.POSTGRES).select(DSL.function("pg_backend_pid", SQLDataType.INTEGER)).fetchOne(0, Integer.class);
     }
 }
