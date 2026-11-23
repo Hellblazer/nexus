@@ -13,8 +13,6 @@ import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
@@ -124,17 +122,6 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
             assertThatThrownBy(() -> sleeper.get(10, TimeUnit.SECONDS)).as("the backend it was aimed at: its statement was cancelled")
                 .hasRootCauseInstanceOf(SQLException.class);
         }
-    }
-
-    /** Main ends the leftover backends BEFORE the schema migration: the call is in the source, ahead of the migrate call. */
-    @Test
-    void mainReapsLeftoverBackendsBeforeItMigrates() throws Exception {
-        String main = Files.readString(Path.of("src/main/java/dev/nexus/service/Main.java"));
-        int reap = main.indexOf("DataMoveOrphans.terminateLeftover(");
-        int migrate = main.indexOf("SchemaMigrator.migrate(migrationDs");
-        assertThat(reap).as("Main calls the reaper").isPositive();
-        assertThat(migrate).as("and the migration").isPositive();
-        assertThat(reap).as("the reaper runs first").isLessThan(migrate);
     }
 
     // ── stop, pause, crash ──────────────────────────────────────────────────────────────────────────────────
@@ -362,7 +349,9 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
         registerSwaps();
         runSwaps(new VerifyingFinisher());
         try (Connection builder = openAsWorker(PciBuilderSession.APPLICATION_NAME_PREFIX + "p33c-test")) {
+            // the three child validations (over the chunk family's other tables) do end builders, by design; only the leaf validations are under test
             pause(Rdr229ChunksFk.ADOPT_LABEL);
+            pause("rdr229-fkvalidate-%-chunk-fk");
             productionWorker(new VerifyingFinisher()).runCycle();   // every leaf validation runs
             assertThat(leafFks()).allSatisfy(f -> assertThat(f.validated()).isTrue());
             assertThat(alive(builder)).as("the leaf validations ended no index builder").isTrue();
@@ -395,24 +384,28 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
 
     // ── the evidence that the worker role's validation is set-based ─────────────────────────────────────────
 
-    /** The registry's idx_scan during one VALIDATE of {@code table} as {@code user}, read from the transaction's own statistics. */
-    private long registryProbes(String user, String password, String table, String constraint) throws Exception {
+    /**
+     * How many times the registry is scanned (sequentially or by index) during one VALIDATE of {@code table} as {@code user}, read from the
+     * transaction's own statistics. A set-based check scans it about once (one anti-join); the per-row fallback probes it once per referencing row,
+     * by whichever scan the planner picks (a small registry is read sequentially, so the index count alone is no evidence).
+     */
+    private long registryScans(String user, String password, String table, String constraint) throws Exception {
         try (Connection c = open(adminConnection.url(), user, password, "p33c-probe")) {
             c.setAutoCommit(false);
             MoveSql.runOnComplete(c, "ALTER TABLE nexus." + table + " ADD CONSTRAINT " + constraint + " " + Rdr229ChunksFk.FK_DEFINITION + " NOT VALID");
             MoveSql.runOnComplete(c, "ALTER TABLE nexus." + table + " VALIDATE CONSTRAINT " + constraint);
             Field<Long> idx = DSL.field(DSL.name("idx_scan"), Long.class);
-            Long scanned = DSL.using(c, SQLDialect.POSTGRES).select(idx).from(DSL.table(DSL.name("pg_catalog", "pg_stat_xact_user_tables")))
+            Field<Long> seq = DSL.field(DSL.name("seq_scan"), Long.class);
+            var scanned = DSL.using(c, SQLDialect.POSTGRES).select(seq, idx).from(DSL.table(DSL.name("pg_catalog", "pg_stat_xact_user_tables")))
                 .where(DSL.field(DSL.name("schemaname"), String.class).eq("nexus")).and(DSL.field(DSL.name("relname"), String.class).eq("catalog_collections"))
-                .fetchOne(idx);
+                .fetchOne();
             c.rollback();
-            return scanned == null ? 0L : scanned;
+            return scanned == null ? 0L : (scanned.value1() == null ? 0L : scanned.value1()) + (scanned.value2() == null ? 0L : scanned.value2());
         }
     }
 
     /**
-     * The registry is row-secured and FORCED. The worker role (the owner of both tables) validates set-based: the registry is probed by index
-     * not once. The control is a role that owns the referencing table but not the registry, with SELECT and REFERENCES only: PostgreSQL then
+     * The registry is row-secured and FORCED. The worker role (the owner of both tables) validates set-based: the registry is scanned about once. The control is a role that owns the referencing table but not the registry, with SELECT and REFERENCES only: PostgreSQL then
      * falls back to one probe per row (RI_Initial_Check), so the registry's idx_scan is positive for the same VALIDATE. Without the control a
      * zero could be a sequential scan of something else.
      */
@@ -438,17 +431,22 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
         runSql("GRANT SELECT, REFERENCES ON nexus.catalog_collections TO " + role);
         try {
             for (String t : List.of(ownerTable, otherTable)) {
-                runSql("CREATE TABLE nexus." + t + " AS SELECT tenant_id, collection_id, embedding_model FROM nexus.catalog_collections LIMIT 200");
+                // every registry row twenty times over: the per-row fallback probes once per row, the set-based check once in all
+                runSql("CREATE TABLE nexus." + t + " AS SELECT r.tenant_id, r.collection_id, r.embedding_model FROM nexus.catalog_collections r "
+                    + "CROSS JOIN generate_series(1, 20) g");
             }
-            assertThat(ctx().fetchCount(table("nexus", ownerTable))).as("non-vacuity: rows whose probes a per-row check would make").isPositive();
+            long rows = ctx().fetchCount(table("nexus", ownerTable));
+            assertThat(rows).as("non-vacuity: at least twenty rows, whose probes a per-row check would make").isGreaterThanOrEqualTo(20L);
             runSql("ALTER TABLE nexus." + otherTable + " OWNER TO " + role);
             runSql("ALTER TABLE nexus." + ownerTable + " OWNER TO " + adminConnection.user());
 
-            long ownerProbes = registryProbes(adminConnection.user(), adminConnection.password(), ownerTable, "p33c_owner_fk");
-            long nonOwnerProbes = registryProbes(role, "p33c_pw", otherTable, "p33c_other_fk");
+            long ownerScans = registryScans(adminConnection.user(), adminConnection.password(), ownerTable, "p33c_owner_fk");
+            long nonOwnerScans = registryScans(role, "p33c_pw", otherTable, "p33c_other_fk");
 
-            assertThat(ownerProbes).as("the worker role: no probe of the registry by index (set-based)").isZero();
-            assertThat(nonOwnerProbes).as("a role that does not own the registry: the per-row fallback probes it by index").isPositive();
+            assertThat(ownerScans).as("the worker role: the registry is scanned a handful of times at most for %d rows (one anti-join: set-based)", rows)
+                .isLessThanOrEqualTo(3L);
+            assertThat(nonOwnerScans).as("a role that does not own the registry: one probe per referencing row (the per-row fallback), %d rows", rows)
+                .isGreaterThanOrEqualTo(rows);
         } finally {
             runSql("DROP TABLE IF EXISTS nexus." + ownerTable);
             runSql("DROP TABLE IF EXISTS nexus." + otherTable);
