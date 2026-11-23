@@ -97,6 +97,9 @@ class NoteUriRouteGateTest {
     private static final String PGV = "PgVectorRepository.java";
     private static final String MLS = "ManifestLabelStage.java";
     private static final String LNK = "CatalogLinksRepository.java";
+    // P3.5c moved these two bodies out of the repositories (the file-size ceiling); the routes stay in CAT/ASP as one-line delegates, so the gate scans the files that hold the code now
+    private static final String ACF = "AspectConfidence.java";
+    private static final String CDR = "CatalogDocRow.java";
 
     static final List<Entry> ENTRIES = List.of(
         // ── LISTED: CatalogRepository ─────────────────────────────────────
@@ -130,6 +133,7 @@ class NoteUriRouteGateTest {
         listed(ASP, "getHighlightBySourceUri", "highlights/get_by_source_uri: matches on the canonical form"),
         listed(ASP, "filterBySourceUris", "aspects/operator-query filter: the source_uris list is canonicalized once"),
         listed(ASP, "groupByField", "aspects/operator-query groupby: the source_uris list is canonicalized once"),
+        listed(ACF, "aggregate", "aspects/operator-query aggregate (AspectRepository.confidenceAggregate delegates here): the source_uris list is canonicalized once"),
         // ── MERGE ─────────────────────────────────────────────────────────
         exempt(CAT, "mergeDocuments", Cls.MERGE,
             "moves a stored URI from the duplicate row to the canonical row (the dup is blanked first so "
@@ -171,6 +175,7 @@ class NoteUriRouteGateTest {
         exempt(CAT, "mostRecentTombstoned", Cls.PASS_THROUGH, "RDR-243 sensitivity inheritance (nexus-rfvyy.6.24): reads the latest tombstoned row holding the URI; receives the already-canonical URI from register (deriveSourceUri), takes none from the caller"),
         exempt(CAT, "mostRecentTombstonedMany", Cls.PASS_THROUGH, "RDR-243 sensitivity inheritance (nexus-rfvyy.6.24): the batch form of mostRecentTombstoned; its URIs are the already-canonical ones register_many derived"),
         exempt(CAT, "documentFields", Cls.PASS_THROUGH, "column list of a document read; returns the stored value"),
+        exempt(CDR, "of", Cls.PASS_THROUGH, "renders a stored row (CatalogRepository.docRowFromRecord delegates here); RDR-231 forbids response rewriting"),
         // ── PASS_THROUGH: CatalogLinksRepository ──────────────────────────
         exempt(LNK, "documentsByOwnerContentTypes", Cls.PASS_THROUGH,
             "list?source_uri_prefix= with an owner or content_type (RDR-193 Step 3, nexus-u5m5g.4): the prefix is a file: URI prefix matched "
@@ -358,6 +363,8 @@ class NoteUriRouteGateTest {
         files.put(CAT, MAIN.resolve("db").resolve(CAT));
         files.put(ASP, MAIN.resolve("db").resolve(ASP));
         files.put(LNK, MAIN.resolve("db").resolve(LNK));
+        files.put(ACF, MAIN.resolve("db").resolve(ACF));
+        files.put(CDR, MAIN.resolve("db").resolve(CDR));
         try (Stream<Path> s = Files.walk(MAIN.resolve("vectors"))) {
             s.filter(p -> p.toString().endsWith(".java")).sorted()
                 .forEach(p -> files.put(p.getFileName().toString(), p));
