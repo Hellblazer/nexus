@@ -16,6 +16,7 @@ CatalogRepository.java	registerDocumentWithOutcome	CATALOG_OWNERS	forUpdate	1	af
 CatalogRepository.java	rewriteStaleNotes	CATALOG_COLLECTIONS	forShare	1	registry	the registry row itself: the verb FOR UPDATE, the writer FOR KEY SHARE, the stale-note repair FOR SHARE (registry first)
 CatalogRepository.java	sweepOneOwner	CATALOG_OWNERS	forUpdate	1	no-registry-lock	ghost sweep of one owner: owner row, no collection named
 ChunkKeySweep.java	oneBatch	CHUNKS	forUpdate	1	no-registry-lock	background chunk-key sweep: chunk rows FOR UPDATE SKIP LOCKED, which never waits for a row lock, so it cannot be a link of a cycle
+CollectionOneRowRename.java	readOwn	CATALOG_COLLECTIONS	forUpdate	1	registry	the registry row itself: the one-row rename re-reads the old label's row FOR UPDATE after CollectionTombstones.lockRowsOfOneRowRename took it in collection_id order
 CollectionRefusals.java	requireSourceById	CATALOG_COLLECTIONS	forUpdate	1	registry	the registry row itself: a retiring verb reads its named source FOR UPDATE by id, a second lock of a row the ordered lockRows took (registry first)
 CollectionRegistry.java	fillOrNull	CATALOG_COLLECTIONS	forKeyShare	1	registry	the registry row itself: the verb FOR UPDATE, the writer FOR KEY SHARE, the stale-note repair FOR SHARE (registry first)
 CollectionRegistry.java	lockAllForWrite	CATALOG_COLLECTIONS	forKeyShare	1	registry	the registry row itself: the verb FOR UPDATE, the writer FOR KEY SHARE, the stale-note repair FOR SHARE (registry first)
@@ -28,8 +29,8 @@ GroupRules.java	onLeave	GROUP_RECORDS	forShare	1	no-registry-lock	identity group
 IdentityRetention.java	run	IDENTITY_RECORDS	forUpdate	1	no-registry-lock	identity rows, no collection
 IdentityRows.java	lock	IDENTITY_RECORDS	forUpdate	1	no-registry-lock	identity rows, no collection
 ManifestFill.java	picked	?	forUpdate	1	no-registry-lock	background manifest fill: picks documents, takes no registry lock (it reads the registry unlocked); listed for review with the multi-collection writers
-ManifestReplace.java	clearRecordsById	CHUNK_ORPHANED_AT	forUpdate	1	no-registry-lock	called from ManifestReplace.replace from gate 3, after its registry read (the id-keyed twin of clearRecords; RDR-229 P3.5c)
 ManifestReplace.java	clearRecords	CHUNK_ORPHANED_AT	forUpdate	1	no-registry-lock	called from ManifestReplace.replace, after its registry read
+ManifestReplace.java	clearRecordsById	CHUNK_ORPHANED_AT	forUpdate	1	no-registry-lock	called from ManifestReplace.replace from gate 3, after its registry read (the id-keyed twin of clearRecords; RDR-229 P3.5c)
 ManifestReplace.java	replace	CATALOG_DOCUMENT_CHUNKS	forUpdate	1	after-registry	a registry read (requireWritable, registryFirst or normalize) precedes the lock in the same method
 ManifestReplace.java	replace	CHUNKS	forNoKeyUpdate	1	after-registry	a registry read (requireWritable, registryFirst or normalize) precedes the lock in the same method
 MemoryRepository.java	replaceMemory	MEMORY	forUpdate	2	no-registry-lock	T2 memory rows, no collection
