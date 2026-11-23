@@ -174,6 +174,16 @@ final class Rdr229RenameEngine implements AutoCloseable {
             }
 
             @Override
+            public boolean gate3LatchedUnderLock() {
+                return inner.gate3LatchedUnderLock();   // the row, read in the rename (review SB3): the route tests decide from it, not the flag
+            }
+
+            @Override
+            public Missing missingLatched() {
+                return inner.missingLatched();
+            }
+
+            @Override
             public <T> T pinned(java.util.function.Supplier<T> rename) {
                 pinnedRenames.incrementAndGet();
                 return inner.pinned(rename);
@@ -362,6 +372,11 @@ final class Rdr229RenameEngine implements AutoCloseable {
     }
 
     // ---- state the engine reports ---------------------------------------------------------------------------------------
+
+    /** A rename guard over the engine's readiness and latched Gate3, as the services build one (read per call; it follows restarts only through a new call). */
+    dev.nexus.service.db.RenameGuard guard() {
+        return new dev.nexus.service.db.RenameGuard(check.gate3(), readiness);
+    }
 
     /** The completion check itself (its durable latch accessor is what the tests read at construction, before any sample). */
     CompletionBootWork completionCheck() {

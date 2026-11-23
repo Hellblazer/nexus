@@ -122,13 +122,38 @@ public final class RenameGuard {
         return RenamePath.ONE_ROW;
     }
 
+    /** A rename's body, told which path it takes. P3.7's local dispatch until {@code runRename} (P3.5a slice C) replaces it. */
+    @FunctionalInterface
+    public interface OnPath<T> {
+        /** @param oneRow true for the one-row update that keeps the collection's id, false for the name path */
+        T run(boolean oneRow);
+    }
+
     /**
-     * Whether a collection's id survives a rename on this install (R6's {@code ids_stable}, the key P3.5a's rename response
-     * carries). Always false in this tree: the rename it runs is the name path, which gives the collection a new id, whatever
-     * gate 3 says. P3.7's one-row rename keeps the id and is what makes this true (gate 3 holding, the drop move complete, every
-     * P3.5b changeset applied, {@link #requireRenameAllowed()} passing); it changes this one method.
+     * RDR-229 P3.7 (O-5), kept until P3.5a's {@code runRename} lands: the whole rename inside {@link RenameReadiness#pinned}, the path decided
+     * ONCE from a fresh read of the latch row ({@link RenameReadiness#gate3LatchedUnderLock()}), the refusal and the path following that one decision.
+     *
+     * @throws RenameRefusedException when the one-row regime is in force and the one-row rename cannot run yet; nothing was run
+     */
+    public <T> T pinned(OnPath<T> rename) {
+        return readiness.pinned(() -> {
+            boolean oneRow = readiness.gate3LatchedUnderLock();
+            if (oneRow) {
+                RenameReadiness.Missing missing = readiness.missingLatched();
+                if (missing != RenameReadiness.Missing.NONE) {
+                    throw new RenameRefusedException(missing);
+                }
+            }
+            return rename.run(oneRow);
+        });
+    }
+
+    /**
+     * Whether a collection's id survives a rename on this install (R6/S-7's {@code ids_stable}, the key P3.5a's rename response carries): gate 3
+     * is latched and nothing is missing (the name-key drop move completed and every P3.5b changeset applied), the state in which the rename is the
+     * one-row update that keeps the id. Read per call from the readiness's fast hint; the live gate 3 dropping back does not make ids unstable.
      */
     public boolean idsStable() {
-        return false;
+        return readiness.gate3Latched() && readiness.missing() == RenameReadiness.Missing.NONE;
     }
 }

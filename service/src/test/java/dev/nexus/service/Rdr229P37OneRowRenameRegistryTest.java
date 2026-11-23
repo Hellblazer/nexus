@@ -290,8 +290,12 @@ class Rdr229P37OneRowRenameRegistryTest {
         assertThat(dev.nexus.service.db.CollectionRegistry.isKnown(tenant, oldName)).as("the old label's cache key was evicted").isFalse();
         org.assertj.core.api.Assertions.assertThatThrownBy(() -> dev.nexus.service.db.CollectionRegistry.lookup(engine.scope(), tenant, oldName))
             .as("a lookup by the old label misses: the row is under the new label").isInstanceOf(RuntimeException.class);
-        assertThat(dev.nexus.service.db.CollectionRegistry.lookup(engine.scope(), tenant, newName))
-            .as("a lookup by the new label resolves to the same collection (its row carries what the old one did)").isEqualTo(before);
+        var resolved = dev.nexus.service.db.CollectionRegistry.lookup(engine.scope(), tenant, newName);
+        assertThat(engine.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, newName))).as("a lookup by the new label resolves to the same collection id").isEqualTo(id);
+        assertThat(resolved.embeddingModel()).as("its row carries what the old one did").isEqualTo(before.embeddingModel());
+        assertThat(resolved.contentType()).isEqualTo(before.contentType());
+        assertThat(resolved.ownerId()).isEqualTo(before.ownerId());
+        assertThat(resolved.dimension()).isEqualTo(before.dimension());
         assertThat(engine.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, newName))).isEqualTo(id);
     }
 

@@ -542,6 +542,19 @@ class MainPciWiringTest {
     }
 
     /**
+     * RDR-229 P3.7 (linda 2026-11-23, stage-2 item 1): production refuses a rename before completion. The engine {@code Main} builds hands the completion
+     * check's readiness and its latched Gate3 to the {@code NexusService} (so the rename guard is closed in production), and fails closed when there is no
+     * check. That wiring is P3.5a's (tamsin, 1089ec73a3, Main:635-641); this test is enabled at the replay rebase.
+     */
+    @org.junit.jupiter.api.Disabled("waits for P3.5a Main wiring 1089ec73a3")
+    @Test
+    void productionMainBuildsTheServiceWithTheCompletionChecksReadiness_andRefusesARenameBeforeCompletion() throws Exception {
+        String src = code(main());
+        assertThat(src).as("the service is built with the check's readiness").contains("renameReadiness()");
+        assertThat(src).as("and its latched Gate3").contains("completionCheck.gate3()");
+    }
+
+    /**
      * RDR-229 P3.7 (nexus-p2m1x.27): the name-key drop move's registration pass starts once, at main's top level, after the completion check it
      * reads, handed that check's latest read, and closes in the shutdown steps; its method returns null without a completion check.
      */

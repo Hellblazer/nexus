@@ -43,15 +43,16 @@ public interface RenameReadiness {
      * The latch decision of a rename, taken inside {@link #pinned} (linda 2026-11-23): a FRESH read of the latch row
      * ({@code nexus.rdr229_gate_latch}), never the in-process regime or the last sample, which stay a fast-path hint for {@link #gate3Latched()}
      * and the status. A regime that says "not latched" with the row present reads latched here, and the reverse. A read that fails throws: unknown is
-     * neither latched nor not latched. The default is {@link #gate3Latched()} (a readiness with no database, a test's lambda).
+     * neither latched nor not latched. No default: a readiness that cannot read the row must say so, never answer from the hint
+     * (review SB3), so the default throws.
      */
     default boolean gate3LatchedUnderLock() {
-        return gate3Latched();
+        throw new UnsupportedOperationException("this readiness cannot read the latch row inside a rename; implement gate3LatchedUnderLock");
     }
 
-    /** What a rename waits for once the latch decision says latched: {@link #missing()} with the latch taken as true. The default is {@link #missing()}. */
+    /** What a rename waits for once the latch decision says latched: {@link #missing()} with the latch taken as true. No default (see {@link #gate3LatchedUnderLock()}). */
     default Missing missingLatched() {
-        return missing();
+        throw new UnsupportedOperationException("this readiness cannot answer what a latched rename waits for; implement missingLatched");
     }
 
     /** What a rename from gate 3 (or, once the move completed, from then on) waits for; the wire value is {@code missing} on the 409 {@code rename_refused}. */
@@ -69,8 +70,23 @@ public interface RenameReadiness {
         P35B_RESTART
     }
 
-    /** A readiness that never waits, for tests and for a store gate 3 never reaches. */
+    /** A readiness that never waits and never latches, for tests and for a store gate 3 never reaches. */
     static RenameReadiness ready() {
-        return () -> Missing.NONE;
+        return new RenameReadiness() {
+            @Override
+            public Missing missing() {
+                return Missing.NONE;
+            }
+
+            @Override
+            public boolean gate3LatchedUnderLock() {
+                return false;
+            }
+
+            @Override
+            public Missing missingLatched() {
+                return Missing.NONE;
+            }
+        };
     }
 }

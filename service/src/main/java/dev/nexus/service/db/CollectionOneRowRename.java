@@ -105,7 +105,10 @@ final class CollectionOneRowRename {
         CollectionMint.refuseHeldTuple(ctx, tenant, newName, contentType, owner, own.value4(), own.value5(), own.value6(), "");
 
         ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, newName)
-            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(oldName))).execute();
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(oldName))
+                // only the tombstones that point at THIS collection: a tombstone that names the old label but another id (a tombstone of an
+                // older collection of that label) is not this rename's to repoint (review comment 4)
+                .and(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.isNull().or(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.eq(id)))).execute();
         CollectionTombstones.repointTombstonesNaming(ctx, tenant, List.of(newName));
 
         requireUrisFree(ctx, tenant, id, oldName, newName);

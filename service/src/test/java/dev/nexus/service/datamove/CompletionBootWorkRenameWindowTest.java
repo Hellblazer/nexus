@@ -199,7 +199,8 @@ class CompletionBootWorkRenameWindowTest {
             int result = work.publish();   // the latch exists: the writer is not called, so nothing waits for the pinned rename
 
             assertThat(result).isNotEqualTo(-1);
-            assertThat(work.gate3().holds()).as("the live gate 3 dropped").isFalse();
+            assertThat(work.latest().gate3()).as("the live gate 3 of the sample dropped (an id index went INVALID)").isFalse();
+            assertThat(work.gate3().holds()).as("the readers' Gate3 is the sticky latch: it stays true after the live dip (review SB2)").isTrue();
             assertThat(work.gate3Latched()).as("the latch stays").isTrue();
             assertThat(work.renameReadiness().gate3Latched()).isTrue();
             release.countDown();

@@ -30,6 +30,16 @@ class RenameGuardTest {
             public boolean gate3Latched() {
                 return latched;
             }
+
+            @Override
+            public boolean gate3LatchedUnderLock() {
+                return latched;
+            }
+
+            @Override
+            public Missing missingLatched() {
+                return missing;
+            }
         };
     }
 
@@ -44,6 +54,16 @@ class RenameGuardTest {
             @Override
             public boolean gate3Latched() {
                 return latched.getAsBoolean();
+            }
+
+            @Override
+            public boolean gate3LatchedUnderLock() {
+                return latched.getAsBoolean();
+            }
+
+            @Override
+            public Missing missingLatched() {
+                return missing;
             }
         };
     }

@@ -273,14 +273,13 @@ public final class CompletionBootWork implements AutoCloseable {
     }
 
     /**
-     * RDR-229 item 6, "Readers during the stamp": whether gate 3 of the latest sample holds, read per call, never cached. False before
-     * the first sample. {@code Main} hands it to each reader that switches to the id ({@link Gate3}).
+     * RDR-229 item 6, "Readers during the stamp": whether gate 3 has LATCHED on this install, read per call, never cached: the sticky
+     * {@link #gate3Latched()} (the boot read of the latch row, any sample that saw it, or a rename that read it). It is NOT the live gate 3 of the
+     * latest sample, which drops back when an id index goes INVALID: after the latch the readers have switched to the id and, once the name-key
+     * drop move has run, the name keys are gone, so no reader returns to names. {@code Main} hands it to each reader that switches to the id ({@link Gate3}).
      */
     public Gate3 gate3() {
-        return () -> {
-            var r = latest();
-            return r != null && r.gate3();
-        };
+        return this::gate3Latched;
     }
 
     /**

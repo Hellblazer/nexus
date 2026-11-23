@@ -226,7 +226,7 @@ final class Rdr229RenameSeeds {
     /** Genuine 64-lowercase-hex sha256 chash — required for topic_assignments.doc_id
      *  (bytea since nexus-tk070.p3c), unlike {@link #chashBytes} above which is a
      *  32-char synthetic id used only for the chunks/manifest {@code chash} column. */
-    private static String hexChash(String seed) {
+    static String hexChash(String seed) {
         try {
             byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
                 .digest(seed.getBytes(java.nio.charset.StandardCharsets.UTF_8));
