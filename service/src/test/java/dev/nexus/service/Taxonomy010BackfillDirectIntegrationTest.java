@@ -160,6 +160,10 @@ class Taxonomy010BackfillDirectIntegrationTest {
             // alone (never touches taxonomy-011/012's own logic) and the whole
             // container is stopped in @AfterAll.
             DSL.using(su, SQLDialect.POSTGRES).alterTable(TOPIC_ASSIGNMENTS).dropConstraintIfExists("topic_assignments_chunk_fk").execute();
+            // RDR-229 P3.7: vectors-079's BEFORE INSERT OR UPDATE trigger compares chunks.chash (bytea) with doc_id, which this throwaway
+            // database has reverted to TEXT, so every seed and replayed UPDATE would raise "bytea = text". Disabled here in the same
+            // test-only way (disabled, never re-enabled: the container is stopped in @AfterAll); the product keeps it (doc_id is bytea on every install that runs the changeset).
+            PgContainerHelper.disableTrigger(su, "topic_assignments", "trg_topic_assignments_name_from_chunk");
             PgContainerHelper.revertTopicAssignmentsDocIdToText(su);
 
             // RDR-225: a collection holds one embedding model, so one width. code__x holds the 384-wide chunks
