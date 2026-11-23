@@ -1,0 +1,11 @@
+# RDR-229 P3.5a (linda R-A): every jOOQ write of a collection-name column in src/main that is NOT inside a RenameGuard.runRename call.
+# RenameRunsOnlyThroughRunRenameTest counts, per file, the sites matching .set(<T>.COLLECTION | PHYSICAL_COLLECTION | SOURCE_COLLECTION, ...)
+# outside a runRename span, and fails when a file's count differs from this list: a new site must be added here with its reason (and a
+# label-changing one must go through runRename instead). Format: <file> | <count> | <reason>
+AspectRepository.java | 3 | highlight upserts and imports: the row's own collection, on insert or conflict, not a rename
+CatalogMoves.java | 1 | the document move's re-key of highlights to the target collection (a move, not a label change)
+CatalogRepository.java | 9 | document, manifest and audit upserts; the document move's re-home of docs, aspects and highlights (a move, not a label change); rehome is slice D / R-B
+ManifestReplace.java | 1 | the manifest replace writes each row's own collection
+ReembedJobRepository.java | 1 | a re-embed job row records its source collection on insert
+TaxonomyRepository.java | 5 | topic assignment upserts and imports carry their own source collection; purge and persist paths
+TelemetryRepository.java | 6 | relevance, search telemetry and hook failure inserts and imports carry their own collection
