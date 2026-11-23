@@ -208,4 +208,85 @@ class CatalogMovesLockOrderTest {
         move.get(60, TimeUnit.SECONDS);
         assertThat(sourceUriOf(t, s)).as("the move completed once the document row was free").isEqualTo(NEW_URI);
     }
+
+    // ---- the owner move: the same two orders -----------------------------------------------------------------------------------
+
+    /** A tenant with a registered collection, a REPO owner 1.1 rooted at /old/proj and one repository file in the collection; {tenant, tumbler}. */
+    private String[] seedRepoOwner() throws Exception {
+        String t = "moves-lock-owner-" + (++tenantSeq);
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), t, COLL);
+        }
+        Map<String, Object> o = new LinkedHashMap<>();
+        o.put("tumbler_prefix", "1.1");
+        o.put("name", "proj");
+        o.put("owner_type", "repo");
+        o.put("repo_hash", "aaaa0001");
+        o.put("repo_root", "/old/proj");
+        repo.upsertOwner(t, o);
+        Map<String, Object> f = new LinkedHashMap<>();
+        f.put("title", "src/a.py");
+        f.put("file_path", "src/a.py");
+        f.put("content_type", "code");
+        f.put("corpus", "code");
+        f.put("physical_collection", COLL);
+        return new String[] {t, repo.registerDocument(t, "1.1", f)};
+    }
+
+    @Timeout(180)
+    @Test
+    void anOwnerMoveArrivingWhileAVerbHoldsTheRegistryRow_waitsForItBeforeItLocksTheDocumentRows() throws Exception {
+        String[] seed = seedRepoOwner();
+        String t = seed[0];
+        String s = seed[1];
+        Future<?> move;
+        try (Connection verb = pg.createConnection("")) {
+            verb.setAutoCommit(false);
+            lockRegistryRow(verb, t, false);
+            move = pool.submit(() -> moves.moveOwner(t, "1.1", "/new/proj", "bbbb0002", false));
+            awaitWaiting(move, "the owner move waits for the registry row the verb holds");
+            try (Connection probe = pg.createConnection("")) {
+                probe.setAutoCommit(false);
+                try {
+                    lockDocumentRow(probe, t, s, true);   // the owner move has locked the OWNER row only: the document rows are free
+                } catch (DataAccessException e) {
+                    throw new AssertionError("the owner move holds a document row while it waits for the registry row: " + e.sqlState(), e);
+                } finally {
+                    probe.rollback();
+                }
+            }
+            verb.rollback();
+        }
+        move.get(60, TimeUnit.SECONDS);
+        assertThat(sourceUriOf(t, s)).as("the owner move completed once the verb let go").startsWith("file:///new/proj");
+    }
+
+    @Timeout(180)
+    @Test
+    void anOwnerMoveInFlightHoldsTheRegistryRowWhileItWaitsForADocumentRow_soAVerbCannotStartBetween() throws Exception {
+        String[] seed = seedRepoOwner();
+        String t = seed[0];
+        String s = seed[1];
+        Future<?> move;
+        try (Connection holder = pg.createConnection("")) {
+            holder.setAutoCommit(false);
+            lockDocumentRow(holder, t, s, false);
+            move = pool.submit(() -> moves.moveOwner(t, "1.1", "/new/proj", "bbbb0002", false));
+            awaitWaiting(move, "the owner move waits for the document row the other session holds");
+            try (Connection verb = pg.createConnection("")) {
+                verb.setAutoCommit(false);
+                try {
+                    lockRegistryRow(verb, t, true);
+                    throw new AssertionError("a verb's FOR UPDATE got the registry row while the owner move was in flight");
+                } catch (DataAccessException e) {
+                    assertThat(e.sqlState()).as("the verb is refused: the owner move holds the row FOR KEY SHARE").isEqualTo("55P03");
+                } finally {
+                    verb.rollback();
+                }
+            }
+            holder.rollback();
+        }
+        move.get(60, TimeUnit.SECONDS);
+        assertThat(sourceUriOf(t, s)).as("the owner move completed once the document row was free").startsWith("file:///new/proj");
+    }
 }
