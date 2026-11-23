@@ -278,12 +278,7 @@ migration_wal_bytes_per_worker = 13411126
 # Measured: chas lab-m via lab-remote, 2026-11-23, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on
 # P3.5b rebased onto b7e58b6c5f (gate jar rebuilt): ddl: migration=2935.
 # 2844 + 94 = 2938 for the replay with P3.5b (computed; the assembly re-measures it).
-# 2938 -> 2947 (2026-11-23, nexus-p2m1x.27, RDR-229 P3.7, under Sam's 2960 cap for the P3.5+P3.7 cut): vectors-079 (linda's allocation) adds three CREATE FUNCTIONs, a
-# REVOKE EXECUTE FROM PUBLIC on each, and three BEFORE INSERT OR UPDATE row triggers (catalog_document_chunks, chunk_orphaned_at, topic_assignments): 9 statements
-# in all. No table, no index, no GRANT.
-# Measured: qwent (lab-4c8g via lab-run), 2026-11-23, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued:
-# ddl: migration=2938 on the base 32c6bc9568 and migration=2947 on the P3.7 tip (gate jar rebuilt for each).
-migration_ddl_per_worker = 2947
+migration_ddl_per_worker = 2938
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]
