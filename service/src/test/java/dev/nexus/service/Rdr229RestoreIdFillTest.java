@@ -9,6 +9,7 @@ import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.CollectionTombstones;
 import dev.nexus.service.db.TenantExport;
 import org.jooq.DSLContext;
+import org.jooq.Condition;
 import org.jooq.Field;
 import org.jooq.Record;
 import org.jooq.impl.DSL;
@@ -316,6 +317,52 @@ class Rdr229RestoreIdFillTest {
         assertThat(num(ctx -> ctx.fetchCount(chunks, text("c", "tenant_id").eq(tenant),
             DSL.function("jsonb_extract_path_text", SQLDataType.VARCHAR, metadata, DSL.val("origin_collection")).eq(origin))))
             .as("the name tag is kept as it was").isEqualTo(1);
+    }
+
+    /**
+     * A quarantine chunk of an older backup carries the origin LABEL tag and no id key. The import fills the key (marlowe's reviewers, linda
+     * 2026-11-23): the id this restore drew for the FILE's registry row of that label, when there is one; JSON null when the file has none. Never
+     * the live registry (after the latch that label may belong to another collection). Either way the key is present, so the gate-3 clause
+     * (key presence) is satisfied. The origin here is the chunk's own collection, so the mapped id is the restored collection id of that row.
+     */
+    @Test
+    void aTagOnlyQuarantineChunkGetsTheIdTheRestoreDrewForItsOriginInTheFile_orJsonNullWhenTheFileHasNone() throws Exception {
+        ImportTestEnv.BackupFile file = fixture();
+        int metadataAt = file.columnIndex("chunks", "metadata");
+        int collectionAt = file.columnIndex("chunks", "collection");
+        List<BinaryCopyTestSupport.Row> chunkRows = allRows(file, "chunks");
+        assertThat(chunkRows.size()).as("non-vacuity: the fixture holds chunks").isGreaterThanOrEqualTo(2);
+        String origin = fieldText(chunkRows.get(0), collectionAt);
+        String[] tags = {
+            "{\"origin_collection\": \"" + origin + "\", \"keep\": \"tagonly-in\"}",
+            "{\"origin_collection\": \"ghost-origin-tagonly\", \"keep\": \"tagonly-out\"}"};
+        int[] seen = {0};
+        ImportTestEnv.BackupFile tagged = editRows(file, "chunks", rows -> rows.stream().map(r -> {
+            int n = seen[0]++;
+            if (n >= tags.length) return r;
+            byte[] json = utf8(tags[n]);
+            byte[] jsonb = new byte[json.length + 1];
+            jsonb[0] = 1;
+            System.arraycopy(json, 0, jsonb, 1, json.length);
+            return withField(r, metadataAt, jsonb);
+        }).toList());
+
+        String tenant = "t-p31-fill-origin-tagonly";
+        JsonNode end = env.restore(env.newTenant(tenant), tagged);
+        assertThat(status(end)).as(end.toString()).isEqualTo("committed");
+
+        Field<org.jooq.JSONB> metadata = DSL.field(DSL.name("c", "metadata"), SQLDataType.JSONB);
+        var chunks = DSL.table(DSL.name("nexus", "chunks")).as("c");
+        Field<String> keep = DSL.function("jsonb_extract_path_text", SQLDataType.VARCHAR, metadata, DSL.val("keep"));
+        Field<String> originId = DSL.function("jsonb_extract_path_text", SQLDataType.VARCHAR, metadata, DSL.val("origin_collection_id"));
+        Condition hasKey = DSL.condition(DSL.function("jsonb_exists", Boolean.class, metadata, DSL.val("origin_collection_id")));
+        assertThat(num(ctx -> ctx.fetchCount(chunks, text("c", "tenant_id").eq(tenant), keep.in("tagonly-in", "tagonly-out"), hasKey)))
+            .as("both tag-only rows now carry the key (present), so the gate-3 clause is satisfied").isEqualTo(2);
+        assertThat(num(ctx -> ctx.fetchCount(chunks, text("c", "tenant_id").eq(tenant), keep.eq("tagonly-in"),
+            originId.eq(DSL.field(DSL.name("c", "collection_id"), Long.class).cast(SQLDataType.VARCHAR)))))
+            .as("the one whose origin is in the file gets the id the restore drew for it (its own collection's)").isEqualTo(1);
+        assertThat(num(ctx -> ctx.fetchCount(chunks, text("c", "tenant_id").eq(tenant), keep.eq("tagonly-out"), originId.isNull(), hasKey)))
+            .as("the one whose origin the file does not hold gets JSON null: present, no value").isEqualTo(1);
     }
 
     @Test
