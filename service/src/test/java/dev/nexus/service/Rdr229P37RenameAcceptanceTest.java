@@ -133,6 +133,11 @@ class Rdr229P37RenameAcceptanceTest {
         assertThat(r.statusCode()).as("200, not 409 rename_path_mismatch: " + r.body()).isEqualTo(200);
         assertThat(r.body()).doesNotContain("rename_path_mismatch");
         assertThat(env.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, b))).as("the one-row path: the same collection_id under the new label").isEqualTo(id);
+        // folio's r3 critique F4: the route omits collection_id when the outcome's id is not positive, so a 0 or a wrong id would pass a has() check silently
+        var answer = new com.fasterxml.jackson.databind.ObjectMapper().readTree(r.body());
+        assertThat(answer.has("collection_id")).as("the answer carries the renamed row's id: " + r.body()).isTrue();
+        assertThat(answer.path("collection_id").asLong()).as("and it is the registry's id of the renamed row").isEqualTo(id);
+        assertThat(answer.path("ids_stable").asBoolean()).as("one-row: ids survive").isTrue();
     }
 
     /**
