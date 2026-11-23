@@ -265,10 +265,13 @@ stamp (a plain `mvnw package`).
 
 - **Leg A** is the normal upgrade, from the release users are on now, then a
   plain same-version reboot. `--ceiling-boot` bounds the upgrade boot's migrate
-  and ready, and `--ceiling-reboot` the reboot's migrate
-  and ready (measured 0.45-0.59 MB). Every index is valid before the reboot, so
-  nothing legitimate writes in it, and an engine that rewrites data on every
-  boot fails here even if its first boot passes.
+  and ready, and `--ceiling-reboot` the reboot's migrate and ready. The reboot
+  follows an upgrade whose data moves have run to completion, so an engine that
+  rewrites data on every boot fails here even if its first boot passes. The
+  earlier figure of 0.45-0.59 MB was measured before any stamp move completed
+  and is no reference for it: the first leg A run with the completed stamps sets
+  one. A vacuum of the moves' dead tuples that starts after idle can land in the
+  reboot's migrate and ready; read `boots[1].phases` before trusting a red or a green.
 - **Leg B** starts from 7.76.0, the newest release before per-collection
   indexes (`--no-pci-wait`: the old engine builds none), with rows left in the
   retired aspect queue, and restarts the engine while the third index build
@@ -287,18 +290,27 @@ Data moves (Sam, T2 `nexus/sam-ruling-upgrade-gate-move-pacing-2026-11-23`). The
 harness sets `NX_DATA_MOVE_SLEEP_MS` for every boot of the new engine (`--data-move-sleep-ms`,
 default 0, recorded as `data_move_sleep_ms`), so the registered moves, the RDR-229 stamps
 included, run to completion inside `--max-wait` instead of at production pacing (about 4.8 h
-for the fixture's chunks stamp). Before it waits for idle it adds up the pauses of the open
-moves and exits 2 when they cannot fit `--max-wait`. Every leg's byte bound covers migrate and
-ready (`--ceiling-boot`) and the reboot (`--ceiling-reboot`) and nothing after ready: the WAL
-the moves write after ready (about 2.1 GB for the chunks stamp) is reported as
-`move_wal_bytes`, never gated. Do not add `--ceiling` back to a leg: it gates the total less
-that figure, so the settle phase's other writes and the autovacuum the moves leave still count.
+for the fixture's chunks stamp). A green leg proves the moves complete and the engine
+settles at that pause, and nothing about production pacing, which rests on the
+`DataMoveWorker*IntegrationTest` suites; the harness prints the same note in its output
+(`pacing_note`). Every leg's byte bound covers migrate and ready (`--ceiling-boot`) and the
+reboot (`--ceiling-reboot`) and nothing after ready. `--ceiling`, the old total through
+settle, is retired: the harness refuses it, so never put it on a leg. Reported, never gated:
+`pre_move_wal_bytes` (ready to the first status that shows a move working) and
+`move_wal_bytes` (from that status until idle: the moves, plus whatever else wrote in that
+window, an autovacuum included if it started before idle; about 2.1 GB for the chunks
+stamp). Once ready, the upgrade boot sizes the open moves: ceil(rows / chunk_size) times
+the pause, summed, against the time left before `--max-wait`. It is a lower bound on the
+pauses alone (no compute time; rows counted for the whole table, not per tenant leaf;
+moves parked on a missing prerequisite left out), so it can stop a leg that cannot finish
+(exit 2) and never prove one will. An unreadable registry or count also exits 2. A move
+still working when `--max-wait` runs out is red (exit 1, `data-move-never-finished`).
 
 Every leg must exit 0. Exit 1 is a red (a bound tripped, a boot failed, or the
 restart rule failed): do not tag. Exit 2 is a harness failure with no measurement: fix the
 run and repeat it, never tag on it. Paste each fetched `output/gate/*.json`'s
-`verdict`, `boot_wal_bytes`, `reboot_wal_bytes` (Leg A), `total_wal_bytes`, `move_wal_bytes`,
-`data_move_sleep_ms`,
+`verdict`, `boot_wal_bytes`, `reboot_wal_bytes` (Leg A), `total_wal_bytes`, `pre_move_wal_bytes`,
+`move_wal_bytes`, `data_move_sleep_ms`, `pacing_note`,
 `ceilings_tripped`, `new_jar_sha256`, `new_jar_commit`, `new_jar_identity` and the
 `resume` block on the cut bead, and check that `new_jar_identity` shows the jar's
 engine tree equals the tag commit's. Not covered by this step: background work
