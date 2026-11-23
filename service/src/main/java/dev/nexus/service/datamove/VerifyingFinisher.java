@@ -317,6 +317,12 @@ final class VerifyingFinisher implements MoveFinisher {
             return Result.report(failure(admin, move, e.stage, null, e.raised, e.detail));
         } catch (DataAccessException e) {
             SQLException raised = e.getCause(SQLException.class);
+            if (isAdoption(move) && raised != null && "55P03".equals(raised.getSQLState())
+                    && raised.getMessage() != null && raised.getMessage().contains(dev.nexus.service.vectors.Rdr229ChunksFk.LOCK_FAILED_MARKER)) {
+                // the adoption's lock on chunks timed out: end the index builders that blocked it, and only if every blocker is one (the failure stays the
+                // 55P03 it is, so the retry after the backoff takes the lock)
+                AdoptionBuilders.endBlockingBuilders(admin);
+            }
             if (isAdoption(move) && raised != null && "57014".equals(raised.getSQLState())) {
                 // the parent ADD outgrew its tight bound (about 2000 leaves): a transient like any 57014 from on_complete (the move stays open, writes
                 // proceed after each timeout, and the retry count reaches "needs an operator"), with the reason that says what to do
