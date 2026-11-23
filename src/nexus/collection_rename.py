@@ -6,8 +6,8 @@ nexus-8g79.10 (V5): hosted at the package root (peer to ``indexer``,
 RDR-103 Phase 5 conformant-shape migrator at ``indexer.py:435`` — can
 invoke without reaching up into ``nexus.commands.collection``.
 
-The function raises ``ClickException`` at T2-cascade-failure as part
-of its documented contract (CG-1, nexus-nhyh). That keeps the CLI
+The function raises ``ClickException`` when the server-side rename fails
+as part of its documented contract (CG-1, nexus-nhyh). That keeps the CLI
 surface usable; non-CLI callers can catch ``click.ClickException``
 or any other exception type as they prefer.
 """
@@ -88,33 +88,26 @@ def rename_collection_data_plane(
     on_warn: Callable[[str], None] | None = None,
     check_model_token: bool = True,
 ) -> dict[str, int]:
-    """Rename a collection across T2 + T3 + catalog cascades.
+    """Rename a collection in one atomic server-side re-home.
 
-    Ordering (SIG-8 / nexus-nhyh): T2 cascade runs FIRST, T3 rename
-    runs LAST. Rationale: T2 SQL UPDATEs are reversible (operator can
-    run the inverse UPDATE or re-run rename); ChromaDB collection rename
-    is irrevocable in a single call. Running T2 first minimises
-    irrecoverable drift: if T3 fails after T2 succeeds the operator can
-    reverse T2 manually; if T2 fails no T3 rename was attempted so the
-    system is still consistent.
-
-    T2 cascade failure (nexus-nhyh / CG-1): raises ``ClickException``
-    with a non-zero exit code and an actionable error message. T2
-    cascade failures are NOT fail-open — an incomplete T2 cascade
-    leaves collection references orphaned across six indexed columns.
-    The operator must see the failure.
-
-    Catalog cascade failure: fail-open (warn + continue). The catalog is
-    a derived view; a failed catalog cascade can be repaired via
-    ``nx catalog rebuild`` without touching T3 or T2.
+    The engine's ``rename_collection_cascade`` is a single transaction
+    (``CatalogRepository.renameCollection``) over the T3 chunks, the chash
+    index, taxonomy, the aspect family, telemetry, and the catalog documents
+    and registry row. A failure leaves the collection fully unchanged and
+    raises ``ClickException`` with a non-zero exit code and an actionable
+    message: it is not fail-open. (nexus-i711w removed the client-side
+    fan-out, T2 cascade first and T3 last, that this function used to run.)
+    The engine decides the rename's path inside that transaction from its
+    gate 3 latch row (RDR-229 P3.5a), and may answer a typed 409
+    (``rename_refused``, ``rename_path_mismatch``); the client reads it as a
+    failed rename.
 
     Returns a dict with counts per cascade table so callers can render
     their own summaries.
 
-    ``on_warn`` is invoked with a string message when the catalog
-    cascade fails open. The CLI default routes it to
-    ``click.echo(..., err=True)``; callers in non-CLI contexts can
-    pass their own.
+    ``on_warn`` is the warning sink (the CLI default routes it to
+    ``click.echo(..., err=True)``); the server-side rename has no fail-open
+    leg today, so nothing calls it.
 
     nexus-8g79.10 (V5): ``t3_db`` is now required (no ``_t3()`` default).
     CLI callers pass ``_t3()`` explicitly; library callers (the
