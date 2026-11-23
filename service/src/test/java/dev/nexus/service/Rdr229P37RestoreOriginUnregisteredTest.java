@@ -51,8 +51,13 @@ class Rdr229P37RestoreOriginUnregisteredTest {
         }
     }
 
-    /** A tenant with a live origin and its quarantine sibling holding one id-tagged chunk and one marker chunk, both owned by the origin's manifest. */
-    private record World(String tenant, String token, String origin, String quarantine, long originId, long quarantineId, String idTagged, String marker) { }
+    /**
+     * A tenant with a live origin and its quarantine sibling holding one id-tagged chunk and one marker chunk, both owned by the origin's manifest. The origin
+     * holds a stub chunk row for each (the shape the restore sweeps meet in production: a manifest row needs its chunk, so the row the owner wrote is
+     * already there), counted in {@code originChunks}.
+     */
+    private record World(String tenant, String token, String origin, String quarantine, long originId, long quarantineId, String idTagged, String marker,
+                         long originChunks) { }
 
     private World world(String tag, boolean withMarker) throws Exception {
         int n = SEQ.incrementAndGet();
@@ -77,14 +82,17 @@ class Rdr229P37RestoreOriginUnregisteredTest {
         tagMarker.put("origin_collection_id", null);   // JSON null: the origin had no registry row when the chunk was quarantined
         engine.su(ctx -> {
             PgContainerHelper.insertChunks(ctx, tenant, quarantine, List.of(idTagged), List.of("id tagged"), List.of(new float[384]), List.of(tagById));
+            PgContainerHelper.insertChunks(ctx, tenant, origin, List.of(idTagged), List.of("stub"), List.of(new float[384]), List.of(Map.of()));
             PgContainerHelper.ownChunks(ctx, tenant, origin, idTagged);
             if (withMarker) {
                 PgContainerHelper.insertChunks(ctx, tenant, quarantine, List.of(marker), List.of("marker"), List.of(new float[384]), List.of(tagMarker));
+                PgContainerHelper.insertChunks(ctx, tenant, origin, List.of(marker), List.of("stub"), List.of(new float[384]), List.of(Map.of()));
                 PgContainerHelper.ownChunks(ctx, tenant, origin, marker);
             }
             return null;
         });
-        return new World(tenant, token, origin, quarantine, originId, quarantineId, idTagged, marker);
+        long originChunks = engine.su(ctx -> (long) ctx.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION_ID.eq(originId))));
+        return new World(tenant, token, origin, quarantine, originId, quarantineId, idTagged, marker, originChunks);
     }
 
     private long chunksIn(World w, long collectionId) {
@@ -103,7 +111,7 @@ class Rdr229P37RestoreOriginUnregisteredTest {
         assertThat(body.path("label").asText()).as("it names the label").isEqualTo(w.origin());
         assertThat(body.path("rows").asLong()).as("and how many rows carry the marker").isEqualTo(1L);
         assertThat(chunksIn(w, w.quarantineId())).as("both chunks stay quarantined, none was deleted").isEqualTo(2L);
-        assertThat(chunksIn(w, w.originId())).as("nothing was restored, the id-matched chunk included").isZero();
+        assertThat(chunksIn(w, w.originId())).as("the origin holds what it held, the id-matched chunk's restore included").isEqualTo(w.originChunks());
         assertThat(manifestRows(w)).as("the manifest is as it was").isEqualTo(manifestBefore);
     }
 
@@ -149,11 +157,11 @@ class Rdr229P37RestoreOriginUnregisteredTest {
             "{\"origin_collection\":\"" + w.origin() + "\",\"chashes\":[\"" + w.idTagged() + "\"],\"reattach\":false}");
 
         assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
-        assertThat(chunksIn(w, w.originId())).as("the id-matched chunk is restored").isEqualTo(1L);
-        assertThat(chunksIn(w, w.quarantineId())).as("the marker chunk stays").isEqualTo(1L);
+        assertThat(Rdr229RenameEngine.MAPPER.readTree(r.body()).path("rows").get(0).path("outcome").asText())
+            .as("the origin already holds the chunk's stub row: present, found by the origin's id").isEqualTo("present");
     }
 
-    /** Control: with no marker row, the same gc restore by id runs. */
+    /** Control: with no marker row, the same gc restore by id runs, and takes the chunk out of quarantine. */
     @Test
     void gcRestoreRereferenced_withNoMarkerRow_restoresById() throws Exception {
         var w = world("gn", false);
@@ -163,6 +171,6 @@ class Rdr229P37RestoreOriginUnregisteredTest {
 
         assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
         assertThat(Rdr229RenameEngine.MAPPER.readTree(r.body()).path("restored").asLong()).isEqualTo(1L);
-        assertThat(chunksIn(w, w.originId())).as("restored under the origin's id").isEqualTo(1L);
+        assertThat(chunksIn(w, w.quarantineId())).as("the chunk left quarantine").isZero();
     }
 }
