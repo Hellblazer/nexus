@@ -230,6 +230,9 @@ class TenantResetLeakCanaryTest {
     private static final Map<String, String> KIND_BY_TAIL = Map.of(
         ".map[].tenantId", "TokenCache.map",
         "CollectionRegistry.KNOWN", "CollectionRegistry.KNOWN",
+        // RDR-229 P3.5a: the registry is an instance over the shared maps; a walk reaches them through whichever holder it meets
+        // first (the import wiring's captured registry, say), as the `known` or `knownById` field, not as the static KNOWN.
+        ".known", "CollectionRegistry.KNOWN",
         ".ghostSweepCheckedTenants[]", "ghostSweepCheckedTenants",
         ".dataSweepFailuresByTenant", "dataSweepFailuresByTenant",
         ".groups", "TupleWaitRegistry.groups",
