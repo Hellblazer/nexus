@@ -289,6 +289,111 @@ public final class CollectionRegistry {
         return Optional.ofNullable(row);
     }
 
+    /**
+     * The registry check of a write transaction that touches SEVERAL collections (a remap batch's sources and targets, an assign
+     * batch's source collections): one statement reads every row it names {@code FOR KEY SHARE} in {@code collection_id} order, the
+     * order a retiring verb locks its rows in ({@code CollectionTombstones#lockRows}), and memoises each, so the per-label checks that
+     * follow answer from the memo. Locking one row after another in the request's order instead would let a writer holding the key
+     * share of the higher id and waiting for the lower one meet a verb that holds the lower and waits for the higher: a cycle. Names
+     * a request gave by id read that id ({@link #readRequested}'s refusals: no row 404, a retired row 409, another label's row
+     * {@link CollectionIdMismatchException}); a label no row has is simply not memoised, and the per-label check that follows raises
+     * its own answer. Call it before any row work of the transaction.
+     */
+    void lockAllForWrite(DSLContext ctx, String tenant, java.util.Collection<String> labels) {
+        java.util.Set<String> todo = new java.util.LinkedHashSet<>();
+        for (String label : labels) {
+            if (label == null || label.isEmpty()) {
+                continue;
+            }
+            if (WriteRegistryMemo.get(ctx, tenant, label) != null) {
+                if (ExpectedCollectionIds.of(label).isPresent()) {
+                    ExpectedCollectionIds.consumed(ctx, label);
+                }
+                continue;
+            }
+            todo.add(label);
+        }
+        if (todo.size() < 2) {
+            todo.forEach(label -> lockForWrite(ctx, tenant, label));
+            return;
+        }
+        List<Long> namedIds = new java.util.ArrayList<>();
+        List<String> unnamed = new java.util.ArrayList<>();
+        for (String label : todo) {
+            OptionalLong id = ExpectedCollectionIds.of(label);
+            if (id.isPresent()) {
+                namedIds.add(id.getAsLong());
+            } else {
+                unnamed.add(label);
+            }
+        }
+        if (!namedIds.isEmpty()) {
+            ExpectedCollectionIds.beforeTransactionRead();
+        }
+        noteWriteRead(tenant, String.join(",", todo));
+        Condition match = DSL.falseCondition();
+        if (!namedIds.isEmpty()) {
+            match = match.or(CATALOG_COLLECTIONS.COLLECTION_ID.in(namedIds));
+        }
+        if (!unnamed.isEmpty()) {
+            match = match.or(CATALOG_COLLECTIONS.NAME.in(unnamed));
+        }
+        Field<Integer> modelDimension = EMBEDDING_MODELS.DIMENSION.as("model_dimension");
+        List<CollectionRow> rows = ctx.select(
+                CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.COLLECTION_ID,
+                CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.DIMENSION,
+                CATALOG_COLLECTIONS.LIFECYCLE_STATE, modelDimension,
+                CATALOG_COLLECTIONS.SUPERSEDED_BY)
+            .from(CATALOG_COLLECTIONS)
+            .leftJoin(EMBEDDING_MODELS)
+                .on(EMBEDDING_MODELS.EMBEDDING_MODEL.eq(CATALOG_COLLECTIONS.EMBEDDING_MODEL))
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(match))
+            .orderBy(CATALOG_COLLECTIONS.COLLECTION_ID)
+            .forKeyShare().of(CATALOG_COLLECTIONS)
+            .fetch(r -> rowOf(r, modelDimension, tenant));
+        for (String label : todo) {
+            OptionalLong named = ExpectedCollectionIds.of(label);
+            CollectionRow chosen = null;
+            if (named.isPresent()) {
+                long id = named.getAsLong();
+                chosen = rows.stream().filter(r -> r.collectionId() == id).findFirst()
+                    .orElseThrow(() -> new UnknownCollectionIdException(tenant, id));
+                if (!chosen.label().equals(label)) {
+                    throw new CollectionIdMismatchException(id, label, chosen.label());
+                }
+                if (chosen.isSuperseded()) {
+                    throw new CollectionRetiredIdException(tenant, id, chosen.label(), CollectionSuccessor.of(ctx, tenant, id));
+                }
+            } else {
+                // the live row of the label first, else the newest tombstone: labelResolutionOrder
+                for (CollectionRow candidate : rows) {
+                    if (!candidate.label().equals(label)) {
+                        continue;
+                    }
+                    if (chosen == null || (chosen.isSuperseded() && !candidate.isSuperseded())
+                        || (chosen.isSuperseded() == candidate.isSuperseded() && candidate.collectionId() > chosen.collectionId())) {
+                        chosen = candidate;
+                    }
+                }
+            }
+            if (chosen != null) {
+                WriteRegistryMemo.put(ctx, tenant, label, chosen);
+                if (named.isPresent()) {
+                    ExpectedCollectionIds.consumed(ctx, label);
+                }
+            }
+        }
+        if (!namedIds.isEmpty()) {
+            ExpectedCollectionIds.afterTransactionRead();
+        }
+    }
+
+    /** {@link #lockAllForWrite} on the process-wide registry. */
+    public static void requireAllForWrite(DSLContext ctx, String tenant, java.util.Collection<String> labels) {
+        SHARED.lockAllForWrite(ctx, tenant, labels);
+    }
+
     /** Test seam: called with {@code tenant|label} before every {@code FOR KEY SHARE} read of a write transaction; null in production. */
     private static volatile java.util.function.Consumer<String> writeReadHookForTests;
 
@@ -476,6 +581,22 @@ public final class CollectionRegistry {
         if (r == null) {
             return null;
         }
+        CollectionRow row = rowOf(r, modelDimension, tenant);
+        String label = row.label();
+        Runnable seam = afterMissReadForTests;
+        if (seam != null) {
+            seam.run();
+        }
+        synchronized (fillLock) {
+            if (evictions[0] == evictionsBeforeRead) {
+                mark(tenant, label, row);
+            }
+        }
+        return row;
+    }
+
+    /** The {@link CollectionRow} of one registry record, with the model's dimension where the row's own is NULL. */
+    private static CollectionRow rowOf(Record r, Field<Integer> modelDimension, String tenant) {
         String label = r.get(CATALOG_COLLECTIONS.NAME);
         // RDR-204 Phase 2 follow-up (bead nexus-ft04v.16, hygiene-002 finding):
         // catalog_collections.dimension is NULL BY DESIGN for a walked zero-chunk row
@@ -492,19 +613,9 @@ public final class CollectionRegistry {
                 + r.get(CATALOG_COLLECTIONS.EMBEDDING_MODEL) + "' has no nexus.embedding_models row to fall back to");
         }
         Long id = r.get(CATALOG_COLLECTIONS.COLLECTION_ID);
-        CollectionRow row = new CollectionRow(r.get(CATALOG_COLLECTIONS.CONTENT_TYPE), r.get(CATALOG_COLLECTIONS.OWNER_ID),
+        return new CollectionRow(r.get(CATALOG_COLLECTIONS.CONTENT_TYPE), r.get(CATALOG_COLLECTIONS.OWNER_ID),
             r.get(CATALOG_COLLECTIONS.EMBEDDING_MODEL), dimension, r.get(CATALOG_COLLECTIONS.LIFECYCLE_STATE),
             r.get(CATALOG_COLLECTIONS.SUPERSEDED_BY), id == null ? 0L : id, label);
-        Runnable seam = afterMissReadForTests;
-        if (seam != null) {
-            seam.run();
-        }
-        synchronized (fillLock) {
-            if (evictions[0] == evictionsBeforeRead) {
-                mark(tenant, label, row);
-            }
-        }
-        return row;
     }
 
     // ---- the process-wide registry, as static methods (every caller that predates the id) ---------------------------------

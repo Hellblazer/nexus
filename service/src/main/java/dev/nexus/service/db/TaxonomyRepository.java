@@ -696,11 +696,13 @@ public final class TaxonomyRepository {
             // (mirrors P3a's plpgsql centroid-branch fix), so ANY row
             // carrying a non-blank source_collection needs the same
             // auto-stub, not just "assigned_by": "projection" rows.
-            ordered.stream()
+            List<String> sources = ordered.stream()
                 .map(r -> optS(r, "source_collection"))
                 .filter(c -> c != null && !c.isBlank())
                 .distinct()
-                .forEach(c -> ensureCollectionRegistered(ctx, tenant, c));
+                .toList();
+            CollectionRegistry.requireAllForWrite(ctx, tenant, sources);   // RDR-229 P3.5a: every source's key share at once, in id order
+            sources.forEach(c -> ensureCollectionRegistered(ctx, tenant, c));
             java.util.Set<Long> retired = supersededTopicIds(ctx, tenant, ordered.stream()
                 .filter(r -> "projection".equals(reqS(r, "assigned_by")))
                 .map(r -> reqL(r, "topic_id"))
