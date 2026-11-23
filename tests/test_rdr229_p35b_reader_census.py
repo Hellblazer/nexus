@@ -59,7 +59,11 @@ def test_a_write_is_not_a_read():
 
 
 _DISPOSITIONS = _REPO / "service" / "src" / "test" / "resources" / "rdr229" / "p35b-reader-dispositions.tsv"
-_VOCABULARY = {"id", "both", "label-kept", "parse-removed", "writer-kept", "name-kept", "id-twin", "no-caller", "unchanged-fallback"}
+_VOCABULARY = {"id", "both", "label-kept", "parse-removed", "writer-kept", "name-kept", "id-twin", "no-caller", "unchanged-fallback",
+               "child-name-stamp"}
+#: RDR-229 P3.7 (nexus-p2m1x.27, linda 2026-11-23): vectors-079's child-row name triggers, the only child-name-stamp objects.
+_CHILD_NAME_STAMPS = {"nexus.catalog_document_chunks_name_from_chunk", "nexus.chunk_orphaned_at_name_from_chunk",
+                      "nexus.topic_assignments_name_from_chunk"}
 _TWIN = "_by_id"  # the id-path twin of a name-kept search function (linda 2026-11-22)
 # P4.1 (nexus-p2m1x.35) redefines these views without their name arm, then drops the name columns with RESTRICT (linda 2026-11-22)
 _P41_REDEFINE_VIEWS = {"nexus.collection_vector_stats", "nexus.live_chunks"}
@@ -122,6 +126,8 @@ def _rule_breaches(dispositions, forms, parses, writers=frozenset()) -> list[str
         elif disposition == "id-twin" and (not obj.endswith(_TWIN) or kind != "function"
                                            or dispositions.get((kind, obj[:-len(_TWIN)], col), ("", ""))[0] != "name-kept"):
             out.append(f"{where}: id-twin is for a function <name>{_TWIN} whose original <name> is name-kept")
+        elif disposition == "child-name-stamp" and (kind != "function" or obj not in _CHILD_NAME_STAMPS or not reason):
+            out.append(f"{where}: child-name-stamp is for one of vectors-079's three child-row name triggers, with its reason")
     return out
 
 
@@ -221,7 +227,10 @@ def test_a_both_or_id_disposition_names_an_object_p35b_redefines():
 # critique S5 (2026-11-23): the live SQL objects that still read a collection name column after P3.5b (form B's name arm, the
 # name-kept search functions, writer stamp resolves, registry label reads). P4.1 removes the name columns, so it lowers this
 # to 0; any other change to the number is a reader added or removed and must be read, then the pin moved in the same commit.
-_LIVE_NAME_READERS_PIN = 129
+# 129 -> 132 (RDR-229 P3.7, nexus-p2m1x.27; linda 2026-11-23): vectors-079's three child-row trigger functions (on
+# catalog_document_chunks, chunk_orphaned_at and topic_assignments) read chunks.collection to stamp the child's name, by
+# design until P4.1 drops the name keys. P4.1's checklist: drop those three triggers and their functions with the name keys.
+_LIVE_NAME_READERS_PIN = 132
 
 
 def test_the_live_name_readers_are_pinned_for_p41_to_lower():
