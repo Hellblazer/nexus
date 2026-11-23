@@ -52,10 +52,11 @@ final class CollectionSelectors {
     /**
      * @param where       where the fields travel
      * @param slots       the collection fields, in request order
-     * @param tombstoneOk the route can act on a retired row, so an id that names one resolves to it (the delete, which refuses it
-     *                    with a typed 409 naming the successor); every other route answers a retired row's id as unknown
+     * @param passesResolvedId the route's handler reads the id the boundary resolved ({@link CollectionSelectorFilter#RESOLVED_ID}),
+     *                    not only the label: the delete, which must remove the one row of an id when a label is held by several.
+     *                    Every route answers a retired row's id 409 {@code collection_superseded}, this one included
      */
-    record Route(Where where, List<Slot> slots, boolean tombstoneOk) {
+    record Route(Where where, List<Slot> slots, boolean passesResolvedId) {
     }
 
     /** The routes by full path. */

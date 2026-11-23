@@ -155,10 +155,16 @@ class CollectionDeleteScopeByIdTest {
         assertThat(heldById(yId)).as("and so does its content").isEqualTo(new Held(1, 1, 1));
     }
 
+    /**
+     * linda's D3 ruling (2026-11-23), which replaces this case's earlier "a retired row's id deletes the tombstone": a retired ID
+     * answers 409 {@code collection_superseded} naming the successor's label and id, on the delete route as on every other, and
+     * deletes nothing. A retired LABEL keeps the 200 ({@link #aRetiredLabelIsDeletedWithItsOwnRows_andItsSuccessorAndItsContentStay}).
+     */
     @Test
-    void aRetiredRowsIdDeletesItToo() {
+    void aRetiredRowsIdIsRefused409NamingTheSuccessor_andDeletesNothing() {
         String x = registered("sup-id-x");
         String y = registered("sup-id-y");
+        seedContent(x);
         seedContent(y);
         long xId = fx.idOf(x);
         long yId = fx.idOf(y);
@@ -167,9 +173,14 @@ class CollectionDeleteScopeByIdTest {
 
         Resp r = fx.post(DELETE, "{\"collection_id\":" + xId + "}");
 
-        assertThat(r.status()).as(r.body()).isEqualTo(200);
+        assertThat(r.status()).as(r.body()).isEqualTo(409);
+        assertThat(r.reason()).isEqualTo("collection_superseded");
+        assertThat(r.json().path("collection").asText()).isEqualTo(x);
         assertThat(r.json().path("collection_id").asLong(-1)).isEqualTo(xId);
-        assertThat(fx.exists(x)).isFalse();
+        assertThat(r.json().path("superseded_by").asText()).as("the successor's label: %s", r.body()).isEqualTo(y);
+        assertThat(r.json().path("successor_collection_id").asLong(-1)).as("and its id").isEqualTo(yId);
+        assertThat(fx.exists(x)).as("the tombstone is still there").isTrue();
+        assertThat(heldById(xId)).as("and so is its content").isEqualTo(new Held(1, 1, 1));
         assertThat(fx.exists(y)).isTrue();
         assertThat(heldById(yId)).isEqualTo(new Held(1, 1, 1));
     }

@@ -13,6 +13,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpPrincipal;
 import dev.nexus.service.db.CollectionRegistry;
 import dev.nexus.service.db.CollectionRow;
+import dev.nexus.service.db.LiveCollectionId;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.db.UnknownCollectionIdException;
 import org.slf4j.Logger;
@@ -31,6 +32,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalLong;
 import java.util.regex.Pattern;
 
 /**
@@ -44,16 +46,25 @@ import java.util.regex.Pattern;
  * <ul>
  *   <li>400: a label and an id for one collection, or an id that is not an integer (a JSON integer in a body, a decimal in a
  *       query string; in a list, every element);</li>
- *   <li>404 {@code unknown_collection_id}, naming the id: the tenant has no row with that id, or the row is retired (a rename's
- *       or supersede's tombstone: the id of a collection that no longer answers to it). The delete route alone resolves a
- *       retired row, because it refuses it with its own typed 409 naming the successor.</li>
+ *   <li>404 {@code unknown_collection_id}, naming the id: the tenant has no row with that id, and only then (linda's D3 ruling,
+ *       2026-11-23);</li>
+ *   <li>409 {@code collection_superseded} on EVERY route, the delete included, when the id names a retired row (a rename's or
+ *       supersede's tombstone, the id of a collection that no longer answers to it). The body names the retired row
+ *       ({@code collection}, {@code collection_id}) and its successor: {@code superseded_by} is the successor's label, which is
+ *       the key the client's {@code superseded_write_error_from_body} reads, and {@code successor_collection_id} its id. A retired
+ *       row whose successor has no live row (the successor was deleted) answers 409 with no successor fields. A retired LABEL
+ *       is not this filter's: it is not an id, and the delete keeps its 200 for it;</li>
+ *   <li>500 {@code collection_id_mismatch}: the registry answered an id with a row of another id (or one without a label). An
+ *       engine invariant, so a 500 and never a 409, which tells a client its own request conflicts. The request is refused so
+ *       that no write can land in another collection; nothing is retried or guessed.</li>
  * </ul>
  * A label that no row has keeps the handler's own answer (422 {@code unregistered_collection} on the routes that refuse one).
  *
  * <p><b>The delete route gets the id as well as the label.</b> A label can be held by more than one live row only in a state
  * P4.1 forbids and an operator may still need to clear, and a delete by id must remove that one row; so on the delete route the
  * filter also writes {@value #RESOLVED_ID}, which the handler reads. A client-supplied {@value #RESOLVED_ID} is removed
- * from every body of that route first, so only this filter can set it.
+ * from every body of that route first, so only this filter can set it. Every body is parsed (never a byte search for the id
+ * field, which an escaped key defeats); a body that is not JSON goes to the handler as it came.
  *
  * <p>A body is rewritten through {@link HttpExchange#setStreams}, which keeps the exchange object (the before-send hooks of the
  * vector routes are keyed by it); only a query string needs a wrapper, because the request URI cannot be replaced otherwise.
@@ -66,14 +77,38 @@ public final class CollectionSelectorFilter extends Filter {
     /** The id the filter resolved on the delete route, a JSON integer in the body; never accepted from a client. */
     static final String RESOLVED_ID = "resolved_id";
 
+    /** An id has at most 18 decimal digits, in a query string and in a body alike (the same bound, so both answer 400 above it). */
     private static final Pattern DECIMAL = Pattern.compile("-?[0-9]{1,18}");
+    private static final long MAX_ID = 999_999_999_999_999_999L;
 
-    private final CollectionRegistry registry;
-    private final TenantScope scope;
+    /** {@code reason} of the 500 for a registry row that is not the row of the id asked for. Wire contract. */
+    static final String COLLECTION_ID_MISMATCH_REASON = HttpUtil.COLLECTION_ID_MISMATCH_REASON;
+
+    /** How the filter reads rows: a seam, so a test can hand it a row the registry never would. */
+    interface Rows {
+        /** The row of {@code id}, retired or not. @throws UnknownCollectionIdException when the tenant has none */
+        CollectionRow byId(String tenant, long id);
+
+        /** The id of the live row a label names, if any. */
+        OptionalLong liveIdOf(String tenant, String label);
+    }
+
+    private final Rows rows;
 
     public CollectionSelectorFilter(CollectionRegistry registry, TenantScope scope) {
-        this.registry = registry;
-        this.scope = scope;
+        this(new Rows() {
+            @Override public CollectionRow byId(String tenant, long id) {
+                return registry.lookupId(scope, tenant, id);
+            }
+
+            @Override public OptionalLong liveIdOf(String tenant, String label) {
+                return LiveCollectionId.of(scope, tenant, label);
+            }
+        });
+    }
+
+    CollectionSelectorFilter(Rows rows) {
+        this.rows = rows;
     }
 
     @Override
@@ -103,7 +138,7 @@ public final class CollectionSelectorFilter extends Filter {
         }
         HttpExchange next = exchange;
         try {
-            Resolver resolver = new Resolver(tenant, route);
+            Resolver resolver = new Resolver(tenant);
             if (route.where() == CollectionSelectors.Where.QUERY) {
                 String rewritten = rewriteQuery(route, resolver, exchange.getRequestURI().getRawQuery());
                 if (rewritten != null) {
@@ -137,25 +172,64 @@ public final class CollectionSelectorFilter extends Filter {
     /** Resolves ids through the registry for one request. */
     private final class Resolver {
         private final String tenant;
-        private final CollectionSelectors.Route route;
 
-        Resolver(String tenant, CollectionSelectors.Route route) {
+        Resolver(String tenant) {
             this.tenant = tenant;
-            this.route = route;
         }
 
         CollectionRow resolve(long id) {
             CollectionRow row;
             try {
-                row = registry.lookupId(scope, tenant, id);
+                row = rows.byId(tenant, id);
             } catch (UnknownCollectionIdException e) {
                 throw unknown(id);
             }
-            if (row.isSuperseded() && !route.tombstoneOk()) {
-                throw unknown(id);
+            if (row.collectionId() != id || row.label().isEmpty()) {
+                log.error("event=collection_id_mismatch tenant={} requested={} resolved={} label={}", tenant, id,
+                    row.collectionId(), LogText.escapeControl(row.label()));
+                throw mismatch(id, row.collectionId());
+            }
+            if (row.isSuperseded()) {
+                throw superseded(tenant, row);
             }
             return row;
         }
+    }
+
+    private static Refusal mismatch(long requested, long resolved) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("error", "collection_id " + requested + " resolved to a row of another id");
+        body.put("reason", COLLECTION_ID_MISMATCH_REASON);
+        body.put("collection_id", requested);
+        body.put("resolved_collection_id", resolved);
+        return new Refusal(500, json(body));
+    }
+
+    /**
+     * The 409 for the id of a retired row, in the shape of the engine's other {@code collection_superseded} bodies
+     * ({@code HttpUtil#sendTypedDbError}): {@code error} and {@code reason} the same value, then {@code message}, {@code collection}
+     * (the retired label) and {@code superseded_by} (the successor's label); and the ids, {@code collection_id} and
+     * {@code successor_collection_id}. The successor fields are present only when a live row bears the label the tombstone names
+     * ({@link LiveCollectionId}).
+     */
+    private Refusal superseded(String tenant, CollectionRow retired) {
+        OptionalLong successorId = retired.supersededBy().isEmpty()
+            ? OptionalLong.empty() : rows.liveIdOf(tenant, retired.supersededBy());
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("error", HttpUtil.COLLECTION_SUPERSEDED_REASON);
+        body.put("reason", HttpUtil.COLLECTION_SUPERSEDED_REASON);
+        body.put("message", successorId.isPresent()
+            ? "collection_id " + retired.collectionId() + " ('" + retired.label() + "') was superseded by '"
+                + retired.supersededBy() + "' (collection_id " + successorId.getAsLong() + "), so a request that names it is refused"
+            : "collection_id " + retired.collectionId() + " ('" + retired.label()
+                + "') is retired and names no live successor, so a request that names it is refused");
+        body.put("collection", retired.label());
+        body.put("collection_id", retired.collectionId());
+        if (successorId.isPresent()) {
+            body.put("superseded_by", retired.supersededBy());
+            body.put("successor_collection_id", successorId.getAsLong());
+        }
+        return new Refusal(409, json(body));
     }
 
     private static Refusal unknown(long id) {
@@ -199,21 +273,25 @@ public final class CollectionSelectorFilter extends Filter {
             String idValue = null;
             boolean labelGiven = false;
             List<String> kept = new ArrayList<>(pairs.size());
-            boolean idSeen = false;
+            int idCount = 0;
             for (String pair : pairs) {
                 String[] kv = pair.split("=", 2);
                 String key = URLDecoder.decode(kv[0], StandardCharsets.UTF_8);
                 String value = kv.length > 1 ? URLDecoder.decode(kv[1], StandardCharsets.UTF_8) : "";
                 if (key.equals(slot.idField())) {
-                    idSeen = true;
+                    idCount++;
                     idValue = idValue == null ? value : idValue;
                     continue;
                 }
-                labelGiven |= slot.labelFields().contains(key) && !value.isBlank();
+                // a label field that is present counts, empty or not: a body's "" is non-null and is "both" there too
+                labelGiven |= slot.labelFields().contains(key);
                 kept.add(pair);
             }
-            if (!idSeen) {
+            if (idCount == 0) {
                 continue;
+            }
+            if (idCount > 1) {
+                throw bad(slot.idField() + " must be given once");
             }
             if (!DECIMAL.matcher(idValue).matches()) {
                 throw bad(slot.idField() + " must be a decimal integer");
@@ -232,11 +310,8 @@ public final class CollectionSelectorFilter extends Filter {
     // ── a JSON body ────────────────────────────────────────────────────────────────────────────────────
 
     private byte[] rewriteBody(CollectionSelectors.Route route, Resolver resolver, byte[] in) throws IOException {
-        // The delete route's bodies are tiny and are always read, so a client's resolved_id never gets past an escaped key;
-        // every other route's body is parsed only when it mentions one of the route's id fields.
-        if (!route.tombstoneOk() && !mentionsAnIdField(route, in)) {
-            return in;
-        }
+        // Every body is parsed: a search of the bytes for the id field is defeated by an escaped key, and the delete route's
+        // resolved_id must never get past one. An unchanged body goes on as the bytes that came.
         JsonNode root;
         try {
             root = MAPPER.readTree(in);
@@ -246,7 +321,7 @@ public final class CollectionSelectorFilter extends Filter {
         if (!(root instanceof ObjectNode body)) {
             return in;
         }
-        boolean changed = route.tombstoneOk() && body.remove(RESOLVED_ID) != null;
+        boolean changed = route.passesResolvedId() && body.remove(RESOLVED_ID) != null;
         for (CollectionSelectors.Slot slot : route.slots()) {
             if (slot.nested()) {
                 if (body.get(slot.nestedIn()) instanceof ArrayNode elements) {
@@ -263,28 +338,6 @@ public final class CollectionSelectorFilter extends Filter {
         return changed ? MAPPER.writeValueAsBytes(body) : in;
     }
 
-    private static boolean mentionsAnIdField(CollectionSelectors.Route route, byte[] body) {
-        for (CollectionSelectors.Slot slot : route.slots()) {
-            if (contains(body, ("\"" + slot.idField() + "\"").getBytes(StandardCharsets.UTF_8))) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private static boolean contains(byte[] haystack, byte[] needle) {
-        outer:
-        for (int i = 0; i + needle.length <= haystack.length; i++) {
-            for (int j = 0; j < needle.length; j++) {
-                if (haystack[i + j] != needle[j]) {
-                    continue outer;
-                }
-            }
-            return true;
-        }
-        return false;
-    }
-
     /** Replaces {@code slot}'s id in {@code node} by its label; true when it changed {@code node}. */
     private boolean rewriteField(CollectionSelectors.Slot slot, Resolver resolver, ObjectNode node,
                                  CollectionSelectors.Route route) {
@@ -293,7 +346,9 @@ public final class CollectionSelectorFilter extends Filter {
         }
         JsonNode idNode = node.remove(slot.idField());
         if (idNode == null || idNode.isNull()) {
-            return true;   // an explicit null names nothing; the id field itself must not reach the handler
+            // an explicit null is not an id, and silently reading it as "no id" would let the label path run on a request that
+            // named a collection field it did not mean
+            throw bad(slot.idField() + (slot.list() ? " must be an array of integers" : " must be a JSON integer"));
         }
         for (String labelField : slot.labelFields()) {
             if (node.hasNonNull(labelField)) {
@@ -313,7 +368,7 @@ public final class CollectionSelectorFilter extends Filter {
         }
         long id = integer(slot, idNode);
         node.put(slot.labelField(), resolver.resolve(id).label());
-        if (route.tombstoneOk()) {
+        if (route.passesResolvedId()) {
             node.put(RESOLVED_ID, id);
         }
         return true;
@@ -323,7 +378,11 @@ public final class CollectionSelectorFilter extends Filter {
         if (!value.isIntegralNumber() || !value.canConvertToLong()) {
             throw bad(slot.idField() + " must be a JSON integer");
         }
-        return value.longValue();
+        long id = value.longValue();
+        if (Math.abs(id) > MAX_ID) {
+            throw bad(slot.idField() + " must be a decimal integer of at most 18 digits");   // as a query string answers
+        }
+        return id;
     }
 
     // ── the request URI cannot be replaced on the exchange, so a rewritten query string is served by a wrapper ───────
