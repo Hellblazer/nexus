@@ -47,14 +47,10 @@ final class CollectionIdReads {
      * for {@code ''}, {@code null} or a label with no row. Uncorrelated, so the planner runs it once.
      */
     static Field<Long> idOfLabel(String tenant, String label) {
-        if (label == null || label.isEmpty()) {
-            return DSL.castNull(Long.class);
-        }
-        var c = CATALOG_COLLECTIONS.as("cir");
-        return DSL.field(DSL.select(c.COLLECTION_ID).from(c)
-            .where(c.TENANT_ID.eq(tenant).and(c.NAME.eq(label)))
-            .orderBy(liveFirst(c))
-            .limit(1));
+        // CollectionIds.idOf is the one resolver of a label to an id in a statement: for a label the request named by id (P3.5a's
+        // ExpectedCollectionIds) it matches THAT id and the label together, so a write under an id-addressed request never lands on
+        // whichever row holds the label now (RDR-229 P3.5c, I7); otherwise it is the live row's id, else the newest tombstone's.
+        return CollectionIds.idOf(tenant, label);
     }
 
     /** The order that picks one registry row of a label: the live one, else the newest tombstone (use with {@code limit(1)}). */
