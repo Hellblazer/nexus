@@ -197,16 +197,16 @@ ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.j
 ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	683	update	jooq	-	collection_id	yes	
 ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	754	update	jooq	-	collection_id	yes	
 ops	reembed_jobs	rdr229-stamp-reembed_jobs [vectors-070-collection-id-stamp-moves.xml:152]	149	update	data_move	-	source_collection_id,target_collection_id	yes	sets source_collection_id,target_collection_id
-ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	300	insert	jooq	source_collection,target_collection	source_collection_id,target_collection_id	yes	
-ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	417	update	jooq	-	source_collection_id,target_collection_id	yes	
-ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	487	update	jooq	-	source_collection_id,target_collection_id	yes	
-ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	518	update	jooq	-	source_collection_id,target_collection_id	yes	
-ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	624	update	jooq	-	source_collection_id,target_collection_id	yes	
-ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	662	update	jooq	-	source_collection_id,target_collection_id	yes	
-ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	713	update	jooq	-	source_collection_id,target_collection_id	yes	
-ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	747	update	jooq	-	source_collection_id,target_collection_id	yes	
-ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	795	update	jooq	-	source_collection_id,target_collection_id	yes	
-ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	858	update	jooq	-	source_collection_id,target_collection_id	yes	
+ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	307	insert	jooq	source_collection,target_collection	source_collection_id,target_collection_id	yes	
+ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	424	update	jooq	-	source_collection_id,target_collection_id	yes	
+ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	494	update	jooq	-	source_collection_id,target_collection_id	yes	
+ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	525	update	jooq	-	source_collection_id,target_collection_id	yes	
+ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	631	update	jooq	-	source_collection_id,target_collection_id	yes	
+ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	669	update	jooq	-	source_collection_id,target_collection_id	yes	
+ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	720	update	jooq	-	source_collection_id,target_collection_id	yes	
+ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	754	update	jooq	-	source_collection_id,target_collection_id	yes	
+ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	802	update	jooq	-	source_collection_id,target_collection_id	yes	
+ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	865	update	jooq	-	source_collection_id,target_collection_id	yes	
 ops	relevance_log	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11597	update	helper	collection	collection_id	no	COLLECTION_SCOPED_TABLES loop (rename/re-home)
 ops	relevance_log	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12048	update	helper	collection	collection_id	no	COLLECTION_SCOPED_TABLES loop (rename/re-home)
 ops	relevance_log	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	167	insert	jooq	collection	collection_id	no	
