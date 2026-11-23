@@ -40,9 +40,10 @@ import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
  *
  * <p><b>The retire</b> ({@link #gate3Holds}, read once at the start of a pass): once gate 3 has LATCHED and the id readers are present
  * ({@link IdReaders#PRESENT}) the planner retires the name family (no name builds, {@code REPLACED_BY_ID} drops). Gate 3's own PCI clause is
- * {@link PciGate3Coverage}, read from the database. {@code REPLACED_BY_ID} is safe because {@code EngineSingletonLock} (nexus-5tykh) allows one
+ * {@link PciGate3Coverage}, read from the database. {@code REPLACED_BY_ID} is safe when {@code EngineSingletonLock} (nexus-5tykh) allows one
  * engine per database: the engine that drops a name index is the one that serves, so {@code IdReaders.PRESENT} is the serving engine's own value,
- * never a peer's.
+ * never a peer's. That lock is skipped under {@code NX_ENGINE_SINGLETON_LOCK=off} and behind a connection pooler, where a peer could still serve
+ * name-predicate reads: so {@code Main} wires the retire only for an engine that took the lock.
  */
 final class PciIdBuilds {
 
