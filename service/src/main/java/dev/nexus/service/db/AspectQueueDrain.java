@@ -29,6 +29,7 @@ import java.util.Properties;
 import java.util.TreeMap;
 import java.util.function.Supplier;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 
 /**
@@ -327,6 +328,8 @@ public final class AspectQueueDrain {
         Field<OffsetDateTime> qNext = DSL.field(DSL.name("q", "next_retry_at"), OffsetDateTime.class);
         var d = CATALOG_DOCUMENTS;
         List<Row> out = new ArrayList<>();
+        // rows from gate 3 that name no collection by an id (no home, no queue collection_id): their stored name must resolve to a LIVE registry row
+        Map<Long, String> nameOnly = new java.util.LinkedHashMap<>();
         // the document's home: its own name column before gate 3; the registry's current label of its id after (NULL for none)
         Field<String> homeOf = k.label(tenant, d.PHYSICAL_COLLECTION, d.PHYSICAL_COLLECTION_ID).as("home");
         // the retired queue's own collection as a fallback: from gate 3 the registry's current label of the queue row's
@@ -355,8 +358,45 @@ public final class AspectQueueDrain {
             String home = r.get(k.byId() ? homeOf : d.PHYSICAL_COLLECTION);
             String queueName = r.get(queueLabel);
             String collection = home == null || home.isEmpty() ? queueName : home;
+            if (k.byId() && (home == null || home.isEmpty()) && !(queueHasId && r.get(qCollectionId) != null)) {
+                nameOnly.put(r.get(qId), queueName);
+            }
             out.add(new Row(r.get(qId), collection, r.get(qSourcePath), nz(r.get(qDocId)),
                 nz(r.get(qHash)), r.get(qStatus), delay));
+        }
+        return nameOnly.isEmpty() ? out : dispatchable(ctx, tenant, out, nameOnly);
+    }
+
+    /** Queued rows from gate 3 whose name no live registry row holds, skipped (left in the table) and counted, never dispatched. */
+    private static final java.util.concurrent.atomic.AtomicLong SKIPPED_NO_LIVE_COLLECTION = new java.util.concurrent.atomic.AtomicLong();
+
+    /** The number of queued rows skipped so far because their stored name resolves to no live registry row (for tests and the log). */
+    public static long skippedNoLiveCollection() {
+        return SKIPPED_NO_LIVE_COLLECTION.get();
+    }
+
+    /**
+     * From gate 3 a queued row that carries no collection id (no home document, no queue collection_id) resolves its stored name to a
+     * LIVE registry row; if one exists it is dispatched under that name, if none does the row is skipped with a WARN and counted and stays
+     * in the table: a task is never dispatched under a label nothing holds (linda 2026-11-23).
+     */
+    private static List<Row> dispatchable(DSLContext ctx, String tenant, List<Row> rows, Map<Long, String> nameOnly) {
+        var c = CATALOG_COLLECTIONS;
+        java.util.Set<String> live = new java.util.HashSet<>(ctx.select(c.NAME).from(c)
+            .where(c.TENANT_ID.eq(tenant)).and(CollectionIds.live(c)).and(c.NAME.in(nameOnly.values())).fetch(c.NAME));
+        List<Row> out = new ArrayList<>(rows.size());
+        int skipped = 0;
+        for (Row row : rows) {
+            String name = nameOnly.get(row.id());
+            if (name != null && !live.contains(name)) {
+                skipped++;
+                continue;
+            }
+            out.add(row);
+        }
+        if (skipped > 0) {
+            SKIPPED_NO_LIVE_COLLECTION.addAndGet(skipped);
+            log.warn("event=aspect_queue_rows_skipped tenant={} rows={} reason=no_live_collection", tenant, skipped);
         }
         return out;
     }
