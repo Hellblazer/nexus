@@ -5,6 +5,7 @@ package dev.nexus.service.db;
 import org.jooq.DSLContext;
 import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -183,7 +184,7 @@ public final class ExpectedCollectionIds {
         Object tx = ctx.configuration();
         boolean wrote;
         try {
-            wrote = Boolean.TRUE.equals(ctx.select(DSL.field("txid_current_if_assigned() IS NOT NULL", Boolean.class))
+            wrote = Boolean.TRUE.equals(ctx.select(DSL.field(DSL.function("txid_current_if_assigned", SQLDataType.BIGINT).isNotNull()))
                 .fetchOne(0, Boolean.class));
         } catch (DataAccessException e) {
             c.unknownTransactions++;

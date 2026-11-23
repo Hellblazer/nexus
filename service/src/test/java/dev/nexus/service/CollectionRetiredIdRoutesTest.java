@@ -517,11 +517,14 @@ class CollectionRetiredIdRoutesTest {
     void writeMany_byAnIdWhoseRowWasRenamedAndItsLabelTaken_isRefused_andLandsNothing() {
         String b = label("retired-rn-wm-b-" + (n++));
         String c = label("retired-rn-wm-c-" + (n++));
-        fxLocal.register(b);
+        String host = label("retired-rn-wm-host-" + (n++));
+        fxLocal.register(b, host);
         long x = fxLocal.idOf(b);
         String hex = Chash.ofText("rn-gap-write-many-" + b).toHex();
+        String docJson = docReferencing(fxLocal, host, b, hex);
         Resp r = withTheRowRenamedAndTheLabelTaken(fxLocal, b, x, c, () -> fxLocal.post("/v1/catalog/manifest/write_many",
-            "{\"collection_id\":" + x + ",\"chunks\":[{\"chash\":\"" + hex + "\",\"text\":\"rename gap text\",\"metadata\":{}}],\"docs\":[]}"));
+            "{\"collection_id\":" + x + ",\"chunks\":[{\"chash\":\"" + hex + "\",\"text\":\"rename gap text\",\"metadata\":{}}],"
+                + "\"docs\":[" + docJson + "]}"));
         assertRenamedUnderTheRequest(r, x, b, c);
         assertThat(chunkRowsUnder(fxLocal, x, fxLocal.idOf(b), b, c)).as("nothing under X, under the new holder, or under either label").isZero();
     }
@@ -694,6 +697,20 @@ class CollectionRetiredIdRoutesTest {
         assertThat(retired.json().path("superseded_by").asText()).isEqualTo(c);
     }
 
+    /**
+     * A document of a HOST collection (a collection the test never frees or renames) whose one row references {@code hex}. A
+     * {@code write_many} resolves only the chunks that the rows of a REGISTERED document reference, so a request with chunks and no such
+     * document runs no refresh transaction at all and the hook never fires.
+     */
+    private String docReferencing(CollectionRouteFixture f, String host, String stem, String hex) {
+        String doc = "w1-ref-doc-" + stem;
+        f.asSuperuser(ctx -> {
+            CollectionIdSeeds.ownerDocument(ctx, f.tenant, doc, host);
+            return null;
+        });
+        return "{\"doc_id\":" + json(doc) + ",\"rows\":[{\"position\":0,\"chash\":\"" + hex + "\",\"chunk_index\":0}]}";
+    }
+
     private void seedChunkIn(CollectionRouteFixture f, String collection, String hex) {
         f.asSuperuser(ctx -> {
             PgContainerHelper.insertChunks(ctx, f.tenant, collection, List.of(hex), List.of("retired text"),
@@ -714,6 +731,9 @@ class CollectionRetiredIdRoutesTest {
         fxLocal.register(a);
         long x = fxLocal.idOf(a);
         String hex = Chash.ofText("w1-wm-refresh-" + a).toHex();
+        String host = label("retired-wm-refresh-host-" + (n++));
+        fxLocal.register(host);
+        String docJson = docReferencing(fxLocal, host, a, hex);
         seedChunkIn(fxLocal, a, hex);
         AtomicInteger deleteStatus = new AtomicInteger();
         fxLocal.service.collectionSelectorFilter().testHooks(null, () -> elsewhere(() -> {
@@ -724,7 +744,7 @@ class CollectionRetiredIdRoutesTest {
         Resp r;
         try {
             r = fxLocal.post("/v1/catalog/manifest/write_many", "{\"collection_id\":" + x + ",\"chunks\":[{\"chash\":\"" + hex
-                + "\",\"text\":\"retired text\",\"metadata\":{\"w1_key\":\"merged\"}}],\"docs\":[]}");
+                + "\",\"text\":\"retired text\",\"metadata\":{\"w1_key\":\"merged\"}}],\"docs\":[" + docJson + "]}");
         } finally {
             fxLocal.service.collectionSelectorFilter().testHooks(null, null, null, null);
         }
