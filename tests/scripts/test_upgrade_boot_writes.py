@@ -743,3 +743,84 @@ def test_leg_a_no_longer_gates_the_total_in_the_skill() -> None:
         assert word in skill, word
     assert "Do not add `--ceiling` back" not in skill and "autovacuum the moves leave still count" not in skill
     assert "nothing legitimate writes in it" not in skill
+
+
+# ── red means stuck, and a failed status read is not "no move" ──
+
+_CHUNKS = "data-move:rdr229-stamp-chunks"
+
+
+def _read(t: float, done: int | None, total: int = 860, *, ok: bool = True) -> object:
+    """A sample whose status read succeeded (``ok``) and showed the chunks stamp at ``done``, or showed nothing."""
+    x = _s(t, int(t) * 10)
+    x.status_read = ok
+    if ok and done is not None:
+        x.moves_active = True
+        x.moves_progress = ((_CHUNKS, done, total),)
+    return x
+
+
+def test_progress_is_read_from_boot_work_done_and_total() -> None:
+    status = {"boot_work": [{"id": _CHUNKS, "what": "working: rdr229-stamp-chunks", "done": 12, "total": 860},
+                            _BLOCKED, _FAILED, {"kind": "pci_build", "done": 3}]}
+    assert _mod.moves_progress(status) == ((_CHUNKS, 12, 860),)
+    assert _mod.moves_progress(None) == ()
+
+
+def test_a_move_that_stopped_advancing_over_the_window_is_red() -> None:
+    samples = [_read(t, 5) for t in range(0, 301, 10)]
+    err = _mod.deadline_error(samples, "new engine (upgrade)")
+    assert type(err) is _mod.DataMoveNeverFinished
+    assert "rdr229-stamp-chunks 5/860" in str(err) and "advanced in the last 150 s" in str(err)
+
+
+def test_a_move_still_advancing_at_the_deadline_is_a_slow_run_not_a_red() -> None:
+    samples = [_read(t, 5 + t // 50) for t in range(0, 301, 10)]   # 5 -> 11 chunks over the window
+    err = _mod.deadline_error(samples, "new engine (upgrade)")
+    assert type(err) is _mod.HarnessError          # not the red subclass: exit 2
+    assert "still progressing at --max-wait; raise --max-wait or lower --data-move-sleep-ms" in str(err)
+    assert "rdr229-stamp-chunks 11/860" in str(err)
+
+
+def test_progress_made_before_the_window_does_not_save_a_stuck_move() -> None:
+    samples = [_read(t, t // 10) for t in range(0, 100, 10)] + [_read(t, 9) for t in range(100, 401, 10)]
+    assert type(_mod.deadline_error(samples, "w")) is _mod.DataMoveNeverFinished
+
+
+def test_one_advancing_move_among_stuck_ones_makes_it_a_slow_run() -> None:
+    def two(t: float, a: int, b: int) -> object:
+        x = _read(t, a)
+        x.moves_progress = ((_CHUNKS, a, 860), ("data-move:rdr229-stamp-catalog_documents", b, 90))
+        return x
+
+    samples = [two(t, 5, 40 + t // 20) for t in range(0, 301, 10)]
+    err = _mod.deadline_error(samples, "w")
+    assert type(err) is _mod.HarnessError and "rdr229-stamp-catalog_documents 55/90" in str(err)
+
+
+def test_no_move_working_is_the_plain_exit_2_error() -> None:
+    err = _mod.deadline_error([_read(t, None) for t in range(0, 100, 10)], "w")
+    assert type(err) is _mod.HarnessError and "never reached idle within the max wait" in str(err)
+
+
+def test_a_failed_last_status_read_carries_the_last_good_state_and_says_so() -> None:
+    samples = [_read(t, 5) for t in range(0, 301, 10)] + [_read(310, None, ok=False)]
+    assert samples[-1].moves_active is False       # the failed read is "unknown", which is not "no move"
+    err = _mod.deadline_error(samples, "new engine (upgrade)")
+    assert type(err) is _mod.DataMoveNeverFinished
+    assert "the last /v1/status read failed; the state is that of the read at 300 s" in str(err)
+    only_failed = [_read(t, None, ok=False) for t in range(0, 50, 10)]
+    err = _mod.deadline_error(only_failed, "w")
+    assert type(err) is _mod.HarnessError and "never reached idle" in str(err)
+
+
+def test_wait_idle_records_progress_and_survives_a_failed_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clock(monkeypatch, 10.0)
+    answers = iter([(200, {"boot_work": [{"id": _CHUNKS, "what": "working: x", "done": 5, "total": 860}]}), (500, None)])
+    monkeypatch.setattr(_mod, "sample", lambda _i, _t0: _mod.Sample(1.0, 100, None, None, 0, 0, ()))
+    monkeypatch.setattr(_mod, "http_status", lambda _p, _path: next(answers))
+    samples: list = []
+    with pytest.raises(_mod.DataMoveNeverFinished, match="status read failed"):
+        _mod.wait_idle(object(), lambda: 1, 0.0, samples, _mod.IdleRule(60.0, 1 << 20), 25.0, "new engine (upgrade)")
+    assert [(x.status_read, x.moves_active) for x in samples] == [(True, True), (False, False)]
+    assert samples[0].moves_progress == ((_CHUNKS, 5, 860),)

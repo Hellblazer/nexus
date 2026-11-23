@@ -68,7 +68,9 @@ autovacuum included when it started before idle) and ``move_pacing`` (the sizing
 upgrade boot adds up each open move's ceil(rows / chunk_size) x pause and exits 2 when that exceeds the time left
 before ``--max-wait``: a lower bound on the pauses alone (no compute time, rows counted for the whole table, not
 per tenant leaf), so it can catch a leg that cannot finish and never prove one will. A move still working when
-``--max-wait`` runs out is red (exit 1, ``data-move-never-finished``).
+``--max-wait`` runs out is red (exit 1, ``data-move-never-finished``) only when it is stuck: no active move's ``done``
+advanced over the last ``PROGRESS_WINDOW_S`` seconds of status reads. One that is still advancing is a leg that ran out
+of time (exit 2: raise ``--max-wait`` or lower ``--data-move-sleep-ms``).
 TODO(idle rule, Sam's call): the idle window (60 s) is no longer than ``autovacuum_naptime`` (60 s), so idle can come
 before the vacuum of the moves' dead tuples starts, and that vacuum can land in the reboot's migrate + ready. Whether
 idle wants a second quiet window of at least ``autovacuum_naptime``, or an ``n_dead_tup`` check on the moves'
@@ -77,9 +79,9 @@ reported for the same reason.
 
 Exit: 0 within every bound given (or none given) with the restart rule met; 1 above a bound
 (``boot-over-ceiling`` or ``reboot-over-ceiling``, with ``ceilings_tripped``), a boot that never reached ready
-(``boot-failed``), a data move still working when ``--max-wait`` ran out (``data-move-never-finished``) or a broken
+(``boot-failed``), a data move stuck when ``--max-wait`` ran out (``data-move-never-finished``) or a broken
 restart rule (``restart-red``); 2 when the run itself failed (a fixture that did not take, a boot that never reached
-idle within ``--max-wait`` with no move working, a sizing check or registry read that could not run, a step that
+idle within ``--max-wait`` with no move working or only slow ones, a sizing check or registry read that could not run, a step that
 errored). Prints the figures as one JSON object on stdout, and to ``--json`` when given.
 
 Heavy: run it on a lab host (``lab-remote -c lab-m -- uv run python scripts/upgrade_boot_writes.py
@@ -350,6 +352,8 @@ class Sample:
     vacuuming: int
     pci_building: tuple[tuple[str, int], ...] = ()  # (index name, building backend pid)
     moves_active: bool = False   # a data move was still working when /v1/status was read with this sample
+    status_read: bool = False    # that read succeeded (200); False leaves moves_active meaning "unknown", not "none"
+    moves_progress: tuple[tuple[str, int, int | None], ...] = ()   # (move id, done, total) of each working move
 
 
 def sample(inst: Install, t0: float) -> Sample | None:
@@ -546,6 +550,40 @@ def moves_working(status: dict | None) -> bool:
                for e in ((status or {}).get("boot_work") or []))
 
 
+#: A move that has not advanced its ``done`` over this many seconds of status reads, at the deadline, is stuck.
+PROGRESS_WINDOW_S = 150.0
+
+
+def moves_progress(status: dict | None) -> tuple[tuple[str, int, int | None], ...]:
+    """(id, done, total) of each data move that is neither parked nor failed in ``/v1/status`` boot_work."""
+    return tuple((str(e.get("id")), int(e.get("done") or 0), None if e.get("total") is None else int(e["total"]))
+                 for e in ((status or {}).get("boot_work") or [])
+                 if _move_state(e) not in (None, "failed") and not _is_parked(e))
+
+
+def deadline_error(samples: list["Sample"], what: str, window_s: float = PROGRESS_WINDOW_S) -> HarnessError:
+    """The error for a boot that did not reach idle by the deadline. The state is that of the most recent sample whose
+    status read SUCCEEDED (a failed read says nothing about the moves, and the message says so). With a move working:
+    ``DataMoveNeverFinished`` (red) when none of the working moves advanced ``done`` over the last ``window_s``
+    seconds, a plain ``HarnessError`` (exit 2) when one did (the leg only ran out of time)."""
+    read = [x for x in samples if x.status_read]
+    last = read[-1] if read else None
+    failed_read = (" (the last /v1/status read failed; the state is that of the read at "
+                   f"{last.t:.0f} s)" if last is not None and samples[-1] is not last else "")
+    if last is None or not last.moves_active:
+        return HarnessError(f"{what} never reached idle within the max wait{failed_read}")
+    window = [x for x in read if x.moves_active and x.t >= last.t - window_s]
+    first_done = {i: d for i, d, _t in window[0].moves_progress}
+    now = {i: (d, t) for i, d, t in last.moves_progress}
+    named = ", ".join(f"{i.removeprefix(MOVE_ID_PREFIX)} {d}/{'?' if t is None else t}" for i, (d, t) in now.items())
+    advanced = [i for i, (d, _t) in now.items() if d > first_done.get(i, d)]
+    if advanced:
+        return HarnessError(f"{what}: data moves still progressing at --max-wait; raise --max-wait or lower "
+                            f"--data-move-sleep-ms ({named}){failed_read}")
+    return DataMoveNeverFinished(f"{what}: a data move was stuck when the max wait ran out: none of {named} advanced "
+                                 f"in the last {min(window_s, last.t - window[0].t):.0f} s{failed_read}")
+
+
 def _first_active(samples: list["Sample"]) -> "Sample | None":
     return next((x for x in samples if x.moves_active), None)
 
@@ -660,9 +698,7 @@ def wait_idle(inst: Install, port_fn, t0: float, samples: list[Sample], rule: Id
     while True:
         now = time.monotonic()
         if now > deadline:
-            if samples and samples[-1].moves_active:
-                raise DataMoveNeverFinished(f"{what}: a data move was still working when the max wait ran out")
-            raise HarnessError(f"{what} never reached idle within the max wait")
+            raise deadline_error(samples, what)
         s = sample(inst, t0)
         if s is not None:
             samples.append(s)
@@ -670,7 +706,9 @@ def wait_idle(inst: Install, port_fn, t0: float, samples: list[Sample], rule: Id
                 on_sample(samples)
             port = port_fn()
             code, status = http_status(port, "/v1/status") if port else (0, None)
+            s.status_read = code == 200
             s.moves_active = code == 200 and moves_working(status)
+            s.moves_progress = moves_progress(status) if s.moves_active else ()
             if code == 200 and (failed := failed_moves(status)):
                 raise HarnessError(f"{what}: data move failed: {failed}")
             older = [x for x in samples if x.t <= s.t - rule.window_s]

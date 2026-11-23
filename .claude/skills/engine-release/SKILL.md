@@ -304,7 +304,10 @@ the pause, summed, against the time left before `--max-wait`. It is a lower boun
 pauses alone (no compute time; rows counted for the whole table, not per tenant leaf;
 moves parked on a missing prerequisite left out), so it can stop a leg that cannot finish
 (exit 2) and never prove one will. An unreadable registry or count also exits 2. A move
-still working when `--max-wait` runs out is red (exit 1, `data-move-never-finished`).
+still working when `--max-wait` runs out is red (exit 1, `data-move-never-finished`) only
+when it is stuck: no working move's done count advanced over the last 150 s of status reads.
+One that is still advancing is exit 2 ("still progressing"): raise `--max-wait` or lower
+`--data-move-sleep-ms`, and rerun. The state comes from the last status read that succeeded.
 
 Every leg must exit 0. Exit 1 is a red (a bound tripped, a boot failed, or the
 restart rule failed): do not tag. Exit 2 is a harness failure with no measurement: fix the
