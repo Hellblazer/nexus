@@ -68,6 +68,10 @@ RENAME_REFUSED_REASON: str = "rename_refused"
 #: on. Nothing was renamed.
 RENAME_PATH_MISMATCH_REASON: str = "rename_path_mismatch"
 
+#: A catalog rename or a collection supersede could not lock its registry row within 10 s because writers still held it (HTTP 503,
+#: RDR-229 P3.5a), with ``Retry-After`` and ``retry_after_seconds``. Nothing was changed; retry shortly. Writers have no such bound.
+RENAME_BUSY_REASON: str = "rename_busy"
+
 #: A per-store ``rename_collection`` route (chash, taxonomy, telemetry, aspects, highlights) in the one-row regime, where it is a
 #: no-op because the registry rename has moved the label, found that the registry did not (HTTP 409, RDR-229 P3.5a): the new
 #: label is not a live registry row, or the old one still is. Rename the collection in the registry first. Nothing was changed.
