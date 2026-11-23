@@ -2624,6 +2624,11 @@ public final class CatalogHandler implements HttpHandler {
         return body.get(CollectionSelectorFilter.RESOLVED_ID) instanceof Number n ? n.longValue() : null;
     }
 
+    /** The id the route boundary resolved a supersede's SUCCESSOR to ({@link CollectionSelectorFilter#RESOLVED_SUCCESSOR_ID}), or null for a successor named by label. */
+    private static Long resolvedSuccessorId(Map<String, Object> body) {
+        return body.get(CollectionSelectorFilter.RESOLVED_SUCCESSOR_ID) instanceof Number n ? n.longValue() : null;
+    }
+
     private void handleCollectionSupersede(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
@@ -2718,7 +2723,9 @@ public final class CatalogHandler implements HttpHandler {
         }
         // row 16: a request by collection_id has its source read and locked by that id in the verb's own transaction (the route boundary
         // left the id it resolved in the body)
-        int updated = repo.supersedeCollection(tenant, name, resolvedSourceId(body), supersededBy, supersededAt != null ? supersededAt : "");
+        // (and a successor named by id is read and locked by that id there too, in the same ordered statement as the source)
+        int updated = repo.supersedeCollection(tenant, name, resolvedSourceId(body), supersededBy, resolvedSuccessorId(body),
+            supersededAt != null ? supersededAt : "");
         if (updated == 0) {
             // The UPDATE carries guard 2's precondition in its WHERE, so zero rows here
             // means the row we just read has already changed. That precondition rules out

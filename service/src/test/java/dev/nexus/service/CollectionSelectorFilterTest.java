@@ -58,6 +58,33 @@ class CollectionSelectorFilterTest {
         }
     }
 
+    /**
+     * Supersede and rename read the ids the boundary resolved from private body fields ({@code resolved_id}, and a supersede's
+     * {@code resolved_successor_id}). A client that sends them gets them removed: the request is by label, and the verb never reads
+     * the row of an id the client chose. (Kept, either field would make the verb read another collection's row and refuse 409.)
+     */
+    @Test
+    void aClientSuppliedResolvedIdOnTheSupersedeAndRenameRoutesIsIgnored() {
+        for (String key : new String[] {"resolved_id", "resolved\\u005fsuccessor\\u005fid", "resolved_successor_id"}) {
+            String from = label("sel-strip-from-" + key.length());
+            String to = label("sel-strip-to-" + key.length());
+            String other = label("sel-strip-other-" + key.length());
+            String renamed = label("sel-strip-renamed-" + key.length());
+            fx.register(from, to, other);
+            long otherId = fx.idOf(other);
+
+            Resp sup = fx.post("/v1/catalog/collections/supersede",
+                "{\"name\":" + json(from) + ",\"superseded_by\":" + json(to) + ",\"" + key + "\":" + otherId + "}");
+            assertThat(sup.status()).as("supersede, key %s: %s", key, sup.body()).isEqualTo(200);
+            assertThat(fx.supersededBy(from)).isEqualTo(to);
+
+            Resp ren = fx.post("/v1/catalog/collections/rename",
+                "{\"old_name\":" + json(other) + ",\"new_name\":" + json(renamed) + ",\"" + key + "\":" + fx.idOf(to) + "}");
+            assertThat(ren.status()).as("rename, key %s: %s", key, ren.body()).isEqualTo(200);
+            assertThat(fx.supersededBy(other)).isEqualTo(renamed);
+        }
+    }
+
     /** An id in a query string is replaced by the label and the other parameters stay, in the handler's own reading of them. */
     @Test
     void anIdInAQueryStringKeepsTheOtherParameters() {
