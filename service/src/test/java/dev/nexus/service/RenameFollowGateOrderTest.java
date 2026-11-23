@@ -134,4 +134,60 @@ class RenameFollowGateOrderTest {
             .where(CHUNKS.COLLECTION_ID.eq(x)).and(CHUNKS.CHASH.eq(chash)).fetch(CHUNKS.COLLECTION));
         assertThat(labels).as("the chunk landed under the row's current label").containsExactly(c);
     }
+
+    /**
+     * The re-home reads two rows by id and gates two labels (sorted), so a rename of its SOURCE found at the read runs the whole transaction
+     * again with the source's new label's gate (and the target's) first. Same shape as the upsert test: the new label's gate is held by a hand
+     * session, the row is renamed in place in the window before the read, the real re-home by {@code source_id} runs; while it waits for
+     * that gate it holds no registry row (FOR UPDATE NOWAIT succeeds), and released it completes 200. Nothing is stored in the collection
+     * (a chunk would block the in-place rename), so it moves zero rows: the order is what is under test.
+     */
+    @Timeout(180)
+    @Test
+    void aRehomeByASourceIdThatFindsItsRowRenamed_runsAgainWithTheNewLabelsGateFirst_holdingNoRowLockWhileItWaits() throws Exception {
+        String b = label("rf-rehome-b-" + (n++));
+        String target = label("rf-rehome-t-" + (n++));
+        fx.register(b, target);
+        long x = fx.idOf(b);
+        String c = label("rf-rehome-c-" + (n++));
+        AtomicBoolean renamed = new AtomicBoolean();
+        Future<Resp> writer;
+        try (Connection gateHolder = fx.pg.createConnection("")) {
+            gateHolder.setAutoCommit(false);
+            DSL.using(gateHolder, SQLDialect.POSTGRES).select(DSL.function("pg_advisory_xact_lock", Object.class,
+                DSL.function("hashtext", Integer.class, DSL.val("sweepgate:" + fx.tenant + "/" + c)))).fetch();
+            fx.service.collectionSelectorFilter().testHooks(null, () -> {
+                if (renamed.compareAndSet(false, true)) {
+                    CompletableFuture.runAsync(() -> fx.asSuperuser(ctx -> ctx.update(CATALOG_COLLECTIONS)
+                        .set(CATALOG_COLLECTIONS.NAME, c)
+                        .where(CATALOG_COLLECTIONS.TENANT_ID.eq(fx.tenant)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(x)).execute())).join();
+                }
+            }, null, null);
+            writer = pool.submit(() -> fx.post("/v1/catalog/collections/rehome",
+                "{\"source_id\":" + x + ",\"target\":\"" + target + "\"}"));
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
+            while (waitingAdvisory() < 1) {
+                if (writer.isDone() || System.nanoTime() > deadline) {
+                    throw new AssertionError("the re-home never waited for the new label's gate (done: " + writer.isDone() + ")");
+                }
+                LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(5));
+            }
+            assertThat(renamed.get()).as("setup: the row was renamed in the window").isTrue();
+            try (Connection probe = fx.pg.createConnection("")) {
+                probe.setAutoCommit(false);
+                try {
+                    DSL.using(probe, SQLDialect.POSTGRES).select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                        .where(CATALOG_COLLECTIONS.TENANT_ID.eq(fx.tenant)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(x))
+                        .forUpdate().noWait().fetch();
+                } catch (DataAccessException e) {
+                    throw new AssertionError("the re-home waits for the new label's gate while holding the registry row (" + e.sqlState() + ")", e);
+                } finally {
+                    probe.rollback();
+                }
+            }
+            gateHolder.rollback();
+        }
+        Resp r = writer.get(120, TimeUnit.SECONDS);
+        assertThat(r.status()).as(r.body()).isEqualTo(200);
+    }
 }

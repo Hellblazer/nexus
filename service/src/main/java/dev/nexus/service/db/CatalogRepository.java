@@ -11972,19 +11972,24 @@ public final class CatalogRepository {
         // fk_catalog_chunks_chunk ON UPDATE CASCADE, so this transaction writes manifest rows (and fires
         // vectors-021-3's chunk-locking trigger) without naming the table; whole transaction retried on
         // 40P01. `moved` and `leftBehind` are built inside the lambda, so each attempt starts empty.
+        // RDR-229 P3.5a (RenameFollow, for two collections): the gates are keyed by label and the rows are read by id, so a rename of either
+        // end that the read finds sends the transaction round again with the CURRENT labels' gates first, never a gate after the rows
+        final String[] gateLabels = {source, target};
+        for (int follows = 0; ; follows++) {
+          try {
         return manifestWriteTxn(tenant, "catalog.rehomeCollection " + source, ctx -> {
             // Same gate, same order, same reason as renameCollectionTxn: this
             // bulk-repoints the manifest's collection (via the cascade) and so shares
             // the manifest-INSERT hazard class against a concurrent sweep of either
             // endpoint. Sorted so two concurrent operations sharing an endpoint acquire
             // in one consistent global order.
-            for (String c : java.util.stream.Stream.of(source, target).sorted().distinct().toList()) {
+            for (String c : java.util.stream.Stream.of(gateLabels[0], gateLabels[1]).sorted().distinct().toList()) {
                 acquireSweepGateShared(ctx, tenant, c);
             }
             // RDR-210 Phase 6 Step 2 (bead nexus-f98bg): a re-home files the source's rows under the target, so it
             // moves a collection a re-embed job is draining or filling out from under the job. Refused, 409 naming
             // the job, whichever role the held name has (the source being moved out, the target being moved onto).
-            refuseUnderReembedJob(ctx, tenant, "rehome", source, target);
+            refuseUnderReembedJob(ctx, tenant, "rehome", gateLabels[0], gateLabels[1]);
             // RDR-229 P3.5a (a re-home is a WRITER, not a retiring verb: it retires nothing): both registry rows FOR KEY SHARE in one
             // statement in id order (a retiring verb's order), AFTER the gates above and before any row work. The scope is built from
             // these locked rows, never from a name lookup, so a request by id whose id was freed and its label taken again in the gap
@@ -12005,6 +12010,12 @@ public final class CatalogRepository {
             // the id is the identity: the rows are read and written under the locked rows' CURRENT labels
             final String src = sourceRow.label();
             final String tgt = targetRow.label();
+            if (!src.equals(gateLabels[0]) || !tgt.equals(gateLabels[1])) {
+                // a rename landed since the gates were taken: the gates of the labels the rows bear now come first on the next attempt
+                gateLabels[0] = src;
+                gateLabels[1] = tgt;
+                throw new RenameFollow.Moved(src);
+            }
             // RDR-229 P3.5a (linda's ruling R-B): before gate 3 the name columns scope every read and write of this
             // re-home; from it the ids of the locked rows do (a one-row rename leaves the names stale).
             CollectionRehomeScope scope = CollectionRehomeScope.ofLocked(gate3.holds(), sourceRow, targetRow);
@@ -12062,6 +12073,12 @@ public final class CatalogRepository {
                 moved.getOrDefault("catalog_documents", 0),
                 moved, leftBehind, rehomeStatus(ctx, tenant, scope));
         });
+          } catch (RenameFollow.Moved moved) {
+              if (follows >= 5) {
+                  throw RenameBusyException.renamedRepeatedly(follows + 1);
+              }
+          }
+        }
     }
 
     /**
