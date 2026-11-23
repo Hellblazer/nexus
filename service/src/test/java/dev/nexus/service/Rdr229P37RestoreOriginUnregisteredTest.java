@@ -11,7 +11,6 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
-import java.sql.Connection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -38,10 +37,6 @@ class Rdr229P37RestoreOriginUnregisteredTest {
     void boot() throws Exception {
         engine = new Rdr229RenameEngine();
         Rdr229RenameRestartPrecondition.reach(engine).reached().require();
-        try (Connection su = engine.pg.createConnection("")) {
-            su.setAutoCommit(true);
-            PgContainerHelper.dropCatalogChunksFk(su);   // the manifest key onto the chunk name, as the name-key drop leaves it
-        }
     }
 
     @AfterAll
