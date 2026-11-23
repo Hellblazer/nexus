@@ -38,6 +38,11 @@ final class Rdr229RenameSeeds {
         PgContainerHelper.insertCollection(ctx, tenant, coll);
         insertChunk384(ctx, tenant, coll, chashBytes("ring384a"), vector(384));
         insertChunk384(ctx, tenant, coll, chashBytes("ring384b"), vector(384));
+        ring(ctx, tenant, coll);
+    }
+
+    /** One canary_query_ring row of the registered, 384-wide {@code coll}. */
+    static void ring(DSLContext ctx, String tenant, String coll) {
         String model = PgContainerHelper.collectionModel(ctx, tenant, coll);
         byte[] digest = new byte[32];
         ctx.insertInto(CANARY_QUERY_RING)
