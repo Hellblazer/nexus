@@ -13105,7 +13105,8 @@ public final class CatalogRepository {
                        .on(exact.or(DSL.replace(CATALOG_OWNERS.TUMBLER_PREFIX, ".", "-")
                            .eq(CATALOG_COLLECTIONS.OWNER_ID)))
                        .where(CATALOG_COLLECTIONS.NAME.eq(name))
-                       .orderBy(DSL.when(exact, 0).otherwise(1))
+                       // a label may name a live row and tombstones: the live row first, then the owner expression
+                       .orderBy(CollectionIdReads.liveFirst().get(0), DSL.when(exact, 0).otherwise(1), CATALOG_COLLECTIONS.COLLECTION_ID.desc())
                        .limit(1)
                        .fetchOne();
             if (r == null) return null;
