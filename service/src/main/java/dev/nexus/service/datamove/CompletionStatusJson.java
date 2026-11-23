@@ -29,7 +29,8 @@ import dev.nexus.service.http.HttpUtil;
  * {@code missing}: {@code none} before gate 3 (the rename is the name path) and once the one-row rename can run, {@code name_key_drop_move}
  * from gate 3 until that move has {@code completed_at}, then {@code p35b_list_missing} while this build ships no P3.5b changeset list (a restart
  * does not fix it) or {@code restart} until every changeset of the list has applied. Once gate 3 is latched the value no longer follows
- * the live gate 3: a dip of gate 3 leaves it as it is.
+ * the live gate 3: a dip of gate 3 leaves it as it is. It is the readiness the rename path itself reads ({@link CompletionBootWork#renameReadiness()}),
+ * monotone: once a sample has read the readiness as {@code none}, an unreadable sample later still reports {@code none}, because renames keep running.
  * {@code labels_total} and {@code gates_holding} count the engine's own moves and gates, not any tenant's data. {@code labels_incomplete}
  * lists each stamp label whose move is not complete (a label the queue allowlist marks not applicable is not listed).
  * {@code validate_waits[].what} is the operator text: it names the {@code nexus.rdr229_restamp} step.
@@ -44,6 +45,14 @@ final class CompletionStatusJson {
 
     /** As above with whether this engine's id readers are present, which the {@code rename_missing} field reports ({@code p35c_readers_absent}). */
     static String render(CompletionCheck.Result r, boolean idReadersPresent) {
+        return render(r, r.renameMissing(r.gate3Latched(), idReadersPresent));
+    }
+
+    /**
+     * As above with the {@code rename_missing} value the caller decided: the engine passes the readiness the rename itself waits on
+     * ({@link CompletionBootWork#renameReadiness()}, monotone across an unreadable sample), not this sample's own reading of it.
+     */
+    static String render(CompletionCheck.Result r, RenameReadiness.Missing missing) {
         long holding = (r.gate1() ? 1 : 0) + (r.gate2() ? 1 : 0) + (r.gate3() ? 1 : 0);
         StringBuilder b = new StringBuilder(512);
         b.append("{\"gate1\":").append(r.gate1()).append(",\"gate2\":").append(r.gate2()).append(",\"gate3\":").append(r.gate3())
@@ -83,7 +92,6 @@ final class CompletionStatusJson {
             b.append("],\"what\":").append(HttpUtil.jsonString(CompletionBootWork.validateWaits(w))).append('}');
             first = false;
         }
-        RenameReadiness.Missing missing = r.renameMissing(r.gate3Latched(), idReadersPresent);
         return b.append("],\"rename_missing\":").append(HttpUtil.jsonString(missing == RenameReadiness.Missing.NONE ? "none"
             : dev.nexus.service.db.RenameRefusedException.wireValue(missing))).append('}').toString();
     }
