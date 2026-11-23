@@ -84,6 +84,12 @@ class CollectionRehomeByIdTest {
         }
     }
 
+    /** The chunk rows matching {@code where}, as a plain int (a typed local, so AssertJ's assertThat is not ambiguous). */
+    private int chunkCount(org.jooq.Condition where) {
+        int count = fx.asSuperuser(ctx -> ctx.fetchCount(CHUNKS, where));
+        return count;
+    }
+
     private record Held(int chunks, int topics, int meta) {
     }
 
@@ -121,9 +127,9 @@ class CollectionRehomeByIdTest {
         long tId = fx.idOf(t);
         assertThat(heldById(aId)).as("setup").isEqualTo(new Held(1, 1, 1));
         String a2 = oneRowRename(a, "i-a2");
-        assertThat(fx.asSuperuser(ctx -> ctx.fetchCount(CHUNKS, CHUNKS.COLLECTION.eq(a))))
+        assertThat(chunkCount(CHUNKS.COLLECTION.eq(a)))
             .as("setup: the content still carries the old name").isEqualTo(1);
-        assertThat(fx.asSuperuser(ctx -> ctx.fetchCount(CHUNKS, CHUNKS.COLLECTION.eq(a2))))
+        assertThat(chunkCount(CHUNKS.COLLECTION.eq(a2)))
             .as("setup: nothing carries the new label").isZero();
 
         Resp before = fx.post(STATUS, body(a2, t));
@@ -145,7 +151,7 @@ class CollectionRehomeByIdTest {
         assertThat(r.json().path("done").asBoolean()).as(r.body()).isTrue();
         assertThat(heldById(aId)).as("nothing is left under the source's id").isEqualTo(new Held(0, 0, 0));
         assertThat(heldById(tId)).as("it all carries the target's id").isEqualTo(new Held(1, 1, 1));
-        assertThat(fx.asSuperuser(ctx -> ctx.fetchCount(CHUNKS, CHUNKS.COLLECTION_ID.eq(tId).and(CHUNKS.COLLECTION.eq(t)))))
+        assertThat(chunkCount(CHUNKS.COLLECTION_ID.eq(tId).and(CHUNKS.COLLECTION.eq(t))))
             .as("and the target's label in the name column, as a re-home always wrote it").isEqualTo(1);
         Resp after = fx.post(STATUS, body(a2, t));
         assertThat(after.json().path("remaining_rows").asInt(-1)).as(after.body()).isZero();
@@ -187,7 +193,7 @@ class CollectionRehomeByIdTest {
         assertThat(fx.idOf(t2)).as("the target's id is unchanged").isEqualTo(tId);
         assertThat(heldById(sId)).isEqualTo(new Held(0, 0, 0));
         assertThat(heldById(tId)).as("its own chunk and topic and the moved ones, all under its one id").isEqualTo(new Held(2, 2, 0));
-        assertThat(fx.asSuperuser(ctx -> ctx.fetchCount(CHUNKS, CHUNKS.COLLECTION_ID.eq(tId).and(CHUNKS.COLLECTION.eq(t2)))))
+        assertThat(chunkCount(CHUNKS.COLLECTION_ID.eq(tId).and(CHUNKS.COLLECTION.eq(t2))))
             .as("the moved chunk names the target's current label").isEqualTo(1);
     }
 
