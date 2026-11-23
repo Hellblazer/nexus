@@ -312,7 +312,7 @@ _REPO_PROSE_COLLECTION_TYPES: frozenset[str] = frozenset({"docs", "rdr"})
 def repo_prose_collections(reader: Any) -> dict[str, str]:
     """``{collection name: owner_id}`` for every ``docs`` / ``rdr`` collection row of the catalog. The owner is the
     row's ``owner_id`` column, which for these types the engine sets from the tumbler of the documents in the
-    collection (docs/collections.md, nexus-6pbwx), never the name's segment. Empty when the reader cannot list them."""
+    collection (catalog-044, nexus-6pbwx), never the name's segment. Empty when the reader cannot list them."""
     lister = getattr(reader, "list_collections", None)
     if lister is None:
         return {}
