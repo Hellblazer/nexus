@@ -414,12 +414,30 @@ public final class PciReconciler {
                                        PgVectorRepository repository,
                                        dev.nexus.service.db.TenantScope scope) {
         var ring = new PciQueryRingReader(Objects.requireNonNull(scope, "scope"));
-        var runner = new PciCanary(ring::load, Objects.requireNonNull(repository, "repository").canaryStatements());
-        return new PciReconciler(new PciCatalog(ds)::read,
+        // The canary's id statements follow the latch this reconciler's retire reads (gate 3 latched, the id readers present), bound below.
+        var latch = new CanaryLatch();
+        var runner = new PciCanary(ring::load, Objects.requireNonNull(repository, "repository").canaryStatements(latch));
+        var reconciler = new PciReconciler(new PciCatalog(ds)::read,
             new PciBuilderSession(admin.url(), admin.user(), admin.password(), bootNonce, settings), sweep, settings,
             Clock.systemUTC(), SET_LOCAL_TENANT, COUNT_TIMEOUT,
             Duration.ofSeconds(Objects.requireNonNull(settings, "settings").sweepSeconds()),
             RandomGenerator.getDefault(), ringExpiry, new PciCanarySchedule(runner));
+        latch.follow(reconciler.idBuilds::gate3Holds);
+        return reconciler;
+    }
+
+    /** The latch an id canary statement reads: the reconciler's own {@code idBuilds.gate3Holds()}, bound once the reconciler exists. Never true before. */
+    static final class CanaryLatch implements dev.nexus.service.datamove.Gate3 {
+        private volatile java.util.function.BooleanSupplier source = () -> false;
+
+        void follow(java.util.function.BooleanSupplier latched) {
+            this.source = Objects.requireNonNull(latched, "latched");
+        }
+
+        @Override
+        public boolean holds() {
+            return source.getAsBoolean();
+        }
     }
 
     /** The canary's latest result for every index it has run on, by index name (empty without a canary). */
@@ -772,9 +790,20 @@ public final class PciReconciler {
                     continue;
                 }
                 for (Index index : leaf.indexes()) {
-                    if (index.parsed() && index.valid() && !tally.droppedIndexes.contains(index.name())) {
+                    if (!index.valid() || tally.droppedIndexes.contains(index.name())) {
+                        continue;
+                    }
+                    if (!tally.gate3 && index.parsed()) {
                         targets.put(index.name(), new PciCanary.Target(leafId(leaf), leaf.tenant(), leaf.model(),
                             index.collection(), index.name()));
+                    } else if (tally.gate3 && index.idParsed()) {
+                        // Latched: the name family retires, the serving statement selects by id, so the canary follows it. The label is the
+                        // registry's current one for the id, read by this pass's counting transaction; an id it did not read is not measured.
+                        String label = tally.idLabels.get(PciCatalog.idKey(leaf.model(), leaf.tenant(), index.collectionId()));
+                        if (label != null) {
+                            targets.put(index.name(), new PciCanary.Target(leafId(leaf), leaf.tenant(), leaf.model(), label,
+                                index.name(), index.collectionId()));
+                        }
                     }
                 }
             }
@@ -862,6 +891,8 @@ public final class PciReconciler {
         /** Indexes this pass dropped, and those it built (for the canary, which runs after both). */
         final Set<String> droppedIndexes = new HashSet<>();
         final List<PciCanary.Target> builtTargets = new java.util.ArrayList<>();
+        /** The registry's label of each live, unsuperseded collection with an id, by (model, tenant, id): the id canary's ring key. */
+        final Map<String, String> idLabels = new java.util.HashMap<>();
     }
 
     /** The last leaf with a parsed model and tenant: the one whose plan completes the pass's count of builds. */
@@ -932,6 +963,7 @@ public final class PciReconciler {
         tally.sumCountMillis += planned.countMillis();
         tally.maxCountMillis = Math.max(tally.maxCountMillis, planned.countMillis());
         ledger.apply(leaf, planned.anchors());
+        planned.idLabels().forEach((id, name) -> tally.idLabels.put(PciCatalog.idKey(leaf.model(), leaf.tenant(), id), name));
         tally.looks.add(new PciReindexState.Look(leaf, planned.dimension(), planned.anchors().readings()));
         observeForCanary(leaf, planned);
         noteLeaf(leaf, tally, (int) planned.actions().stream().filter(a -> a instanceof Build).count());
@@ -941,7 +973,8 @@ public final class PciReconciler {
 
     // -- counting and planning, inside the transaction ---------------------------------------------------------
 
-    private record Planned(List<Action> actions, int dimension, long countMillis, PciAnchorLedger.Reads anchors) { }
+    private record Planned(List<Action> actions, int dimension, long countMillis, PciAnchorLedger.Reads anchors,
+                           Map<Long, String> idLabels) { }
 
     /** The body of the counting transaction for one leaf; {@code null} means skip the leaf. */
     private Planned countAndPlan(DSLContext tx, Leaf leaf, boolean gate2, boolean gate3) {
@@ -1012,7 +1045,13 @@ public final class PciReconciler {
         long tookMs = (System.nanoTime() - startedNanos) / 1_000_000;
         log.debug("event=pci_count_done leaf={} counted={} recounted={} actions={} took_ms={}", leafId(leaf),
             counts.size(), recounted ? candidates.size() : 0, actions.size(), tookMs);
-        return new Planned(actions, dimension, tookMs, anchors);
+        Map<Long, String> labels = new java.util.HashMap<>();
+        for (RegistryRow row : registry) {
+            if (row.collectionId() != null && row.live() && !row.superseded()) {
+                labels.put(row.collectionId(), row.name());
+            }
+        }
+        return new Planned(actions, dimension, tookMs, anchors, labels);
     }
 
     /** The anchor reads of {@link PciAnchorLedger#read} for the valid parsed indexes the plan does not drop. */
@@ -1353,10 +1392,11 @@ public final class PciReconciler {
             case DONE -> {
                 tally.builds++;
                 failures.remove(key);
-                if (canary != null && !build.byId()) {   // the canary runs the serving statement, which selects by name until P3.5: none for an id index yet
+                // The canary measures the family the serving statement selects by: the name indexes before the latch, the id indexes after it.
+                if (canary != null && build.byId() == tally.gate3) {
                     canary.built(build.name());
                     tally.builtTargets.add(new PciCanary.Target(leafId(leaf), leaf.tenant(), leaf.model(),
-                        build.collection(), build.name()));
+                        build.collection(), build.name(), build.byId() ? build.collectionId() : null));
                 }
                 log.info("event=pci_index_built leaf={} index={} collection={}", leafId(leaf), build.name(),
                     build.collection());
