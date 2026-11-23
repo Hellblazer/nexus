@@ -84,9 +84,13 @@ class AspectTaskRefsParityTest {
     // on DOCUMENT_ASPECTS now.
     private static final Pattern ASPECTS_VERB = Pattern.compile(
         "\\b(deleteFrom|update|fetchCount|fetchExists)\\s*\\(\\s*DOCUMENT_ASPECTS\\b");
+    // RDR-229 P3.5a (nexus-p2m1x.23): the collection delete scopes document_aspects through CollectionPurgeScope's
+    // aspects() condition (the name column before gate 3, collection_id from it), which is collection-keyed by
+    // construction; only that one named condition counts, so a site keyed by anything else still goes unseen.
     private static final Pattern ASPECTS_COLLECTION = Pattern.compile(
         "DOCUMENT_ASPECTS\\s*\\.\\s*COLLECTION\\s*\\.\\s*eq\\s*\\("
-            + "|\\.set\\s*\\(\\s*DOCUMENT_ASPECTS\\s*\\.\\s*COLLECTION\\b");
+            + "|\\.set\\s*\\(\\s*DOCUMENT_ASPECTS\\s*\\.\\s*COLLECTION\\b"
+            + "|\\.where\\s*\\(\\s*scope\\s*\\.\\s*aspects\\s*\\(\\s*\\)");
     private static final Pattern ASPECTS_ROW_KEY = Pattern.compile(
         "DOCUMENT_ASPECTS\\s*\\.\\s*SOURCE_PATH\\s*\\.\\s*eq\\s*\\(");
     private static final Pattern REGISTRY_LOOP = Pattern.compile(
