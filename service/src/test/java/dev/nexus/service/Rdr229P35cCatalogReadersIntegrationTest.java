@@ -395,4 +395,32 @@ class Rdr229P35cCatalogReadersIntegrationTest extends AtomicWriteTestBase {
         assertThat(response).as("the existing chunk keeps its vector, and its disagreement with the supplied one is counted")
             .containsEntry("vector_mismatches", 1);
     }
+
+    /**
+     * RDR-229 P3.5c (census verification): the foreign-collection listing compares the document's collection with the manifest row's by id from
+     * the latch. A manifest row written after a one-row rename carries the new label and the document still the old one; both name the SAME
+     * collection (one id), so it is no finding. By name the same rows are a finding (non-vacuity: the unlatched listing names the document).
+     */
+    @Test
+    void theForeignCollectionListingComparesByIdFromTheLatch_aRenamedCollectionsOwnRowsAreNotForeign() throws Exception {
+        Renamed r = renamedCollection();
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.dropCatalogChunksFk(su);
+            int n = DSL.using(su, SQLDialect.POSTGRES).update(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS)
+                .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.COLLECTION, r.newLabel())
+                .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT))
+                .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(r.doc())).execute();
+            assertThat(n).as("setup: a manifest row is written under the new label").isEqualTo(1);
+        }
+        var byName = new dev.nexus.service.db.ManifestForeignCollectionReads(
+            new CatalogRepository(tenantScope, () -> false, dev.nexus.service.db.RenameGuard.open()));
+        var byId = new dev.nexus.service.db.ManifestForeignCollectionReads(gated);
+        latched.set(true);
+
+        assertThat(byName.list(TENANT, 10).documents()).as("before gate 3 the two names differ: the document is listed")
+            .extracting(d -> d.tumbler()).contains(r.doc());
+        assertThat(byId.list(TENANT, 10).documents()).as("from gate 3 both rows are the one collection: not listed")
+            .extracting(d -> d.tumbler()).doesNotContain(r.doc());
+    }
 }

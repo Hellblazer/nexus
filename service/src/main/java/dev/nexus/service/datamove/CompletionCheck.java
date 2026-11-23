@@ -576,11 +576,8 @@ public final class CompletionCheck {
      * PRESENCE, not a non-null value: a dangling tag is backfilled to the key present with JSON null, which passes. Read-only; scoped to the
      * quarantine collections through the registry join and the chunks' (tenant_id, collection_id) key, never a scan of every chunk.
      */
-    static long quarantineChunksLackingOriginId(DSLContext ctx, Set<String> tables) {
-        if (!tables.contains("chunks") || !tables.contains("catalog_collections")
-            || !columnExists(ctx, "catalog_collections", "lifecycle_state") || !columnExists(ctx, "chunks", "collection_id")) {
-            return 0;
-        }
+    /** The probe's statement, unexecuted, so a plan test can explain the exact text. */
+    public static org.jooq.Select<? extends org.jooq.Record1<Integer>> quarantineProbe(DSLContext ctx) {
         Table<?> cc = DSL.table(DSL.name("nexus", "catalog_collections")).as("qcc");
         Table<?> ch = DSL.table(DSL.name("nexus", "chunks")).as("qch");
         Field<String> chTenant = DSL.field(DSL.name("qch", "tenant_id"), String.class);
@@ -588,12 +585,20 @@ public final class CompletionCheck {
         Field<org.jooq.JSONB> metadata = DSL.field(DSL.name("qch", "metadata"), org.jooq.JSONB.class);
         Condition hasKey = DSL.condition(DSL.function("jsonb_exists", Boolean.class,
             DSL.coalesce(metadata, DSL.val(org.jooq.JSONB.jsonb("{}"))), DSL.val("origin_collection_id")));
-        var probe = ctx.selectOne().from(cc).join(ch)
+        return ctx.selectOne().from(cc).join(ch)
             .on(chTenant.eq(DSL.field(DSL.name("qcc", "tenant_id"), String.class))
                 .and(chColl.eq(DSL.field(DSL.name("qcc", "collection_id"), Long.class))))
             .where(DSL.field(DSL.name("qcc", "lifecycle_state"), String.class).eq("quarantine"))
             .and(DSL.not(hasKey))
             .limit(QUARANTINE_PROBE_CAP + 1);
+    }
+
+    static long quarantineChunksLackingOriginId(DSLContext ctx, Set<String> tables) {
+        if (!tables.contains("chunks") || !tables.contains("catalog_collections")
+            || !columnExists(ctx, "catalog_collections", "lifecycle_state") || !columnExists(ctx, "chunks", "collection_id")) {
+            return 0;
+        }
+        var probe = quarantineProbe(ctx);
         try {
             return ctx.fetchCount(probe);
         } catch (DataAccessException e) {   // unknown is not "none": a probe that cannot read keeps the gate shut
