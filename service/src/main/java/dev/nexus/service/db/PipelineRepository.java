@@ -277,12 +277,17 @@ public final class PipelineRepository {
         return tenantScope.withTenant(tenant, ctx -> {
             // RDR-229 P3.1/P3.5a: the collection's registry id, typed 422 when unregistered, read FOR KEY SHARE first (before the
             // pipeline rows resolveIn reads and the insert locks), as every writer's registry check
-            final Long collectionId = CollectionIds.require(ctx, tenant, collection);
+            final CollectionRow registered = CollectionRegistry.requireForWrite(ctx, tenant, collection);
+            final Long collectionId = registered.collectionId();
+            // the id is the identity: a request by id after a one-row rename files its row under the collection's CURRENT label, and the
+            // run is found under it too, so no row carries id X beside the name another collection now has
+            final String current = registered.label();
+            final PipelineRef refNow = !documentIdentity ? ref : PipelineRef.byDocument(contentHash, current, pdfPath);
             for (int attempt = 0; attempt < 2; attempt++) {
-                Long existing = resolveIn(ctx, tenant, ref);
+                Long existing = resolveIn(ctx, tenant, refNow);
                 if (existing == null && !documentIdentity) {
                     // No legacy row: the same document's document row, if any.
-                    existing = resolveIn(ctx, tenant, PipelineRef.byDocument(contentHash, collection, pdfPath));
+                    existing = resolveIn(ctx, tenant, PipelineRef.byDocument(contentHash, current, pdfPath));
                 }
                 if (existing == null) {
                     var inserted = ctx.insertInto(PDF_PIPELINE,
@@ -291,7 +296,7 @@ public final class PipelineRepository {
                             PDF_PIPELINE.KEYED_BY,
                             PDF_PIPELINE.STATUS, PDF_PIPELINE.STARTED_AT, PDF_PIPELINE.UPDATED_AT,
                             PDF_PIPELINE.COLLECTION_ID)
-                       .values(tenant, contentHash, pdfPath, collection, keyedBy, "running", now, now,
+                       .values(tenant, contentHash, pdfPath, current, keyedBy, "running", now, now,
                                collectionId)
                        .onConflictDoNothing()
                        .returning(PDF_PIPELINE.PIPELINE_ID, PDF_PIPELINE.RUN_EPOCH)

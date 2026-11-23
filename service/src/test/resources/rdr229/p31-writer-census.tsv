@@ -192,15 +192,15 @@ ops	hook_failures	service/src/main/java/dev/nexus/service/db/TelemetryRepository
 ops	hook_failures	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	1833	insert	jooq	collection	collection_id	no		history
 ops	hook_failures	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	2374	insert	jooq	collection	collection_id	no		history
 ops	pdf_pipeline	rdr229-stamp-pdf_pipeline [vectors-070-collection-id-stamp-moves.xml:135]	132	update	data_move	-	collection_id	yes	sets collection_id	move
-ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	288	insert	jooq	collection	collection_id	yes		require
-ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	335	update	jooq	-	collection_id	yes		require
-ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	367	update	jooq	-	collection_id	yes		unproven
-ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	424	update	jooq	-	collection_id	yes		unproven
-ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	440	update	jooq	-	collection_id	yes		unproven
-ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	455	update	jooq	-	collection_id	yes		unproven
-ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	461	update	jooq	-	collection_id	yes		unproven
-ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	686	update	jooq	-	collection_id	yes		unproven
-ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	757	update	jooq	-	collection_id	yes		unproven
+ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	293	insert	jooq	collection	collection_id	yes		require
+ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	340	update	jooq	-	collection_id	yes		require
+ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	372	update	jooq	-	collection_id	yes		unproven
+ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	429	update	jooq	-	collection_id	yes		unproven
+ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	445	update	jooq	-	collection_id	yes		unproven
+ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	460	update	jooq	-	collection_id	yes		unproven
+ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	466	update	jooq	-	collection_id	yes		unproven
+ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	691	update	jooq	-	collection_id	yes		unproven
+ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	762	update	jooq	-	collection_id	yes		unproven
 ops	reembed_jobs	rdr229-stamp-reembed_jobs [vectors-070-collection-id-stamp-moves.xml:152]	149	update	data_move	-	source_collection_id,target_collection_id	yes	sets source_collection_id,target_collection_id	move
 ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	310	insert	jooq	source_collection,target_collection	source_collection_id,target_collection_id	yes		require
 ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	428	update	jooq	-	source_collection_id,target_collection_id	yes		unproven
