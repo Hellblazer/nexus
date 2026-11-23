@@ -7,7 +7,10 @@ import org.jooq.DSLContext;
 import static org.jooq.impl.DSL.function;
 import static org.jooq.impl.DSL.val;
 
-/** The per-(tenant, collection) advisory lock of {@link TaxonomyRepository}'s persist paths (moved out of it to keep it under its size ceiling, RDR-229 P3.5c). */
+/** The per-(tenant, collection) advisory lock of {@link TaxonomyRepository}'s persist paths (moved out of it to keep it under its size ceiling, RDR-229 P3.5c).
+ * The lock key is the tenant and the collection NAME, while the readers now name a collection by its id: after P3.7's one-row rename a
+ * persist under the old label and one under the new label take different keys and are not serialized by this lock (the id arbiter's
+ * DO NOTHING absorbs the root-topic case). P3.7 re-keys it on the id. */
 final class TaxonomyCollectionLock {
 
     private TaxonomyCollectionLock() {}

@@ -76,12 +76,15 @@ public class ReaperRepository {   // not final: ChunkReaperIntegrationTest raise
     public List<String> collectionsWithChunks(String tenant, Duration statementTimeout) {
         return tenantScope.withTenant(tenant, ctx -> {
             PgSession.setStatementAndLockBounds(ctx, (int) statementTimeout.toMillis(), 2_000);
-            var raw = CollectionKey.of(gate3).label(tenant, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID);
-            var lbl = raw.as("collection");
-            return ctx.selectDistinct(lbl).from(CHUNKS)
-                .where(CHUNKS.TENANT_ID.eq(tenant).and(raw.isNotNull()))
-                .orderBy(lbl)
-                .fetch(lbl);
+            if (CollectionKey.of(gate3).byId()) {
+                // DISTINCT collection_id first, then each id's label once: a correlated label per chunk row would run one registry
+                // probe per row under this statement bound
+                return CollectionKey.distinctLabels(ctx, tenant, CHUNKS, CHUNKS.TENANT_ID.eq(tenant), CHUNKS.COLLECTION_ID);
+            }
+            return ctx.selectDistinct(CHUNKS.COLLECTION).from(CHUNKS)
+                .where(CHUNKS.TENANT_ID.eq(tenant))
+                .orderBy(CHUNKS.COLLECTION)
+                .fetch(CHUNKS.COLLECTION);
         });
     }
 

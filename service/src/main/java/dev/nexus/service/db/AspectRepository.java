@@ -96,10 +96,11 @@ public final class AspectRepository {
     private static final Field<String>          EX_HL_MENTIONS     = excluded(DOCUMENT_HIGHLIGHTS.MENTIONS_MD);
     private static final Field<OffsetDateTime>  EX_HL_INGESTED_AT  = excluded(DOCUMENT_HIGHLIGHTS.INGESTED_AT);
 
+    // the conflict keys are ArbiterTwins' name and id columns for the table, not retyped here
     private static final Field<?>[] ASPECT_NAME_KEY =
-        {DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION, DOCUMENT_ASPECTS.SOURCE_PATH};
+        CollectionKey.fields(DOCUMENT_ASPECTS, TwinKeyUpsert.pair("document_aspects").orElseThrow().nameKey());
     private static final Field<?>[] ASPECT_ID_KEY =
-        {DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION_ID, DOCUMENT_ASPECTS.SOURCE_PATH};
+        CollectionKey.fields(DOCUMENT_ASPECTS, TwinKeyUpsert.pair("document_aspects").orElseThrow().idKey());
 
     private final TenantScope tenantScope;
     private final Gate3 gate3;

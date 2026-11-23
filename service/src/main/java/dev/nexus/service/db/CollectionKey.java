@@ -4,10 +4,13 @@ package dev.nexus.service.db;
 
 import dev.nexus.service.datamove.Gate3;
 import org.jooq.Condition;
+import org.jooq.DSLContext;
 import org.jooq.Field;
+import org.jooq.Table;
 import org.jooq.impl.DSL;
 
 import java.util.Collection;
+import java.util.List;
 import java.util.Objects;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
@@ -18,10 +21,10 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
  * instead of writing {@code T.COLLECTION.eq(name)}; before gate 3 each method returns exactly the name expression the
  * reader had, so the name path is unchanged.
  *
- * <p><b>One reading of gate 3 per instance.</b> {@link #of(Gate3)} reads {@link Gate3#holds()} once and the instance keeps
- * that answer, so a query that uses {@link #key} in a GROUP BY and {@link #label} in its select list cannot see the gate
- * flip between the two (a flip would leave a selected label ungrouped). A reader takes a fresh instance per call, so the
- * gate is never cached past one call (Gate3's contract).
+ * <p><b>The gate is the latched value.</b> {@link Gate3#holds()} is the persisted, monotone gate 3 of the install (linda
+ * 2026-11-23): once true it stays true, so a reader never goes back to a name after it has read an id. It is read once per
+ * instance by {@link #of(Gate3)}. A method that uses a key in more than one clause of one statement (a GROUP BY and the select
+ * list, a count and its HAVING) takes one instance and uses it for the whole statement, so the clauses cannot disagree.
  *
  * <p><b>A NULL id is no collection.</b> The id arm compares the id column with the registry's id of the name. A name that
  * is {@code ''}, {@code null} or unregistered resolves to NULL, {@code id = NULL} matches nothing, and a row whose id is NULL
@@ -116,5 +119,60 @@ public final class CollectionKey {
     /** The registry row is a tombstone: a non-empty {@code superseded_by} before gate 3, a {@code superseded_by_id} after. */
     public Condition retired(Field<String> supersededBy, Field<Long> supersededById) {
         return byId ? supersededById.isNotNull() : DSL.coalesce(supersededBy, "").ne("");
+    }
+
+    /** {@code name <> value} before gate 3; after, true also for a row whose id is NULL or that names another collection (NULL-safe, unlike {@code eq(..).not()}). */
+    public Condition ne(String tenant, Field<String> name, Field<Long> id, String value) {
+        return byId ? id.isNull().or(id.isDistinctFrom(CollectionIds.idOf(tenant, value))) : name.ne(value);
+    }
+
+    /** Two rows name different collections: {@code a.name <> b.name} before gate 3, a NULL-safe id difference after. */
+    public Condition differ(Field<String> aName, Field<Long> aId, Field<String> bName, Field<Long> bId) {
+        return byId ? aId.isDistinctFrom(bId) : aName.ne(bName);
+    }
+
+    // ---- the FK-less ledgers (chash_remap, reembed_jobs): history, linda 2026-11-23 ------------------------------------
+
+    private static Condition noRegistryRow(String tenant, Field<Long> id) {
+        var c = CATALOG_COLLECTIONS.as("ckgone");
+        return DSL.notExists(DSL.selectOne().from(c).where(c.TENANT_ID.eq(tenant)).and(c.COLLECTION_ID.eq(id)));
+    }
+
+    /**
+     * A caller's value {@code v} against a ledger row that carries both a stored name and an id but no registry foreign key: {@code
+     * id = idOf(v)}, or {@code name = v} when no registry row has the row's id (the collection is gone, and its stored name is its
+     * last label). The id arm finds a renamed collection under its new label; the name arm reaches only gone history, so a stale name
+     * never matches a different live collection that now holds the label. Before gate 3: {@code name = v}.
+     */
+    public Condition eqHistory(String tenant, Field<String> name, Field<Long> id, String value) {
+        return byId ? id.eq(CollectionIds.idOf(tenant, value)).or(name.eq(value).and(noRegistryRow(tenant, id))) : name.eq(value);
+    }
+
+    /** A ledger row's collection as an output: the live registry label of its id, else its stored name (its last label); the name before gate 3. */
+    public Field<String> labelOrName(String tenant, Field<String> name, Field<Long> id) {
+        return byId ? DSL.coalesce(label(tenant, name, id), name) : name;
+    }
+
+    /** True when no registry row has the ledger row's id (the collection no longer exists); false before gate 3, where nothing is read by id. */
+    public Field<Boolean> gone(String tenant, Field<Long> id) {
+        return byId ? DSL.field(noRegistryRow(tenant, id)) : DSL.inline(false);
+    }
+
+    /**
+     * The distinct labels of the collections a table holds rows for, in label order: {@code DISTINCT collection_id} first, then the
+     * registry label of each id once (a join), never a correlated label per row. Before gate 3 it is the caller's name query, so
+     * this is for the id arm only. A NULL id is no collection and is left out.
+     */
+    public static List<String> distinctLabels(DSLContext ctx, String tenant, Table<?> table, Condition tenantRows, Field<Long> id) {
+        var ids = ctx.selectDistinct(id.as("cid")).from(table).where(tenantRows).and(id.isNotNull()).asTable("ckids");
+        var c = CATALOG_COLLECTIONS.as("ckdl");
+        return ctx.select(c.NAME).from(ids).join(c)
+            .on(c.TENANT_ID.eq(tenant).and(c.COLLECTION_ID.eq(ids.field("cid", Long.class))))
+            .orderBy(c.NAME).fetch(c.NAME);
+    }
+
+    /** The jOOQ fields of {@code table} named by {@code columns} (a key column list of ArbiterTwins, as TwinKeyUpsert.Pair carries it), in order. */
+    public static Field<?>[] fields(Table<?> table, List<String> columns) {
+        return columns.stream().map(n -> Objects.requireNonNull(table.field(n), n + " is not a column of " + table)).toArray(Field<?>[]::new);
     }
 }

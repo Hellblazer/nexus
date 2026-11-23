@@ -18,6 +18,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CHASH_REMAP;
 
 /**
@@ -64,8 +65,9 @@ public final class RemapRepository {
             String targetCollection,
             String provenance) {}
 
-    private static final Field<?>[] NAME_KEY = {CHASH_REMAP.TENANT_ID, CHASH_REMAP.SOURCE_COLLECTION, CHASH_REMAP.OLD_ID};
-    private static final Field<?>[] ID_KEY = {CHASH_REMAP.TENANT_ID, CHASH_REMAP.SOURCE_COLLECTION_ID, CHASH_REMAP.OLD_ID};
+    // the conflict keys are ArbiterTwins' name and id columns for the table, not retyped here
+    private static final Field<?>[] NAME_KEY = CollectionKey.fields(CHASH_REMAP, TwinKeyUpsert.pair("chash_remap").orElseThrow().nameKey());
+    private static final Field<?>[] ID_KEY = CollectionKey.fields(CHASH_REMAP, TwinKeyUpsert.pair("chash_remap").orElseThrow().idKey());
 
     private final TenantScope tenantScope;
     private final Gate3 gate3;
@@ -84,12 +86,14 @@ public final class RemapRepository {
         return CollectionKey.of(gate3);
     }
 
+    // chash_remap is history with no registry foreign key (linda 2026-11-23): a value matches the row's id, or its stored name when its
+    // collection is gone ({@link CollectionKey#eqHistory})
     private Condition sourceIs(String tenant, String c) {
-        return ck().eq(tenant, CHASH_REMAP.SOURCE_COLLECTION, CHASH_REMAP.SOURCE_COLLECTION_ID, c);
+        return ck().eqHistory(tenant, CHASH_REMAP.SOURCE_COLLECTION, CHASH_REMAP.SOURCE_COLLECTION_ID, c);
     }
 
     private Condition targetIs(String tenant, String c) {
-        return ck().eq(tenant, CHASH_REMAP.TARGET_COLLECTION, CHASH_REMAP.TARGET_COLLECTION_ID, c);
+        return ck().eqHistory(tenant, CHASH_REMAP.TARGET_COLLECTION, CHASH_REMAP.TARGET_COLLECTION_ID, c);
     }
 
     /** The batch upsert under {@link TwinKeyUpsert}: the id key arbitrates from gate 3, the name key before. */
@@ -239,17 +243,31 @@ public final class RemapRepository {
      */
     public List<Map<String, String>> entriesForCollection(String tenant, String sourceCollection) {
         requireNonBlank(sourceCollection, "source_collection");
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(CHASH_REMAP.OLD_ID, CHASH_REMAP.NEW_CHASH,
-                       ck().label(tenant, CHASH_REMAP.TARGET_COLLECTION, CHASH_REMAP.TARGET_COLLECTION_ID))
+        return tenantScope.withTenant(tenant, ctx -> {
+            var k = ck();
+            // the target as a label (the live registry label of its id, else its stored name: a gone target keeps its last label), with
+            // its id and whether it is gone, from gate 3; before it, the stored name alone
+            var target = k.labelOrName(tenant, CHASH_REMAP.TARGET_COLLECTION, CHASH_REMAP.TARGET_COLLECTION_ID);
+            var gone = k.gone(tenant, CHASH_REMAP.TARGET_COLLECTION_ID);
+            return ctx.select(CHASH_REMAP.OLD_ID, CHASH_REMAP.NEW_CHASH, target, CHASH_REMAP.TARGET_COLLECTION_ID, gone)
                .from(CHASH_REMAP)
                .where(CHASH_REMAP.TENANT_ID.eq(tenant)
                        .and(sourceIs(tenant, sourceCollection)))
                .orderBy(CHASH_REMAP.OLD_ID)
-               .fetch(r -> Map.of(
-                       "old_id", r.value1(),
-                       "new_chash", newChashHex(r.value2()),
-                       "target_collection", r.value3())));
+               .fetch(r -> {
+                   var m = new LinkedHashMap<String, String>();
+                   m.put("old_id", r.value1());
+                   m.put("new_chash", newChashHex(r.value2()));
+                   m.put("target_collection", r.value3());
+                   if (k.byId()) {
+                       if (r.value4() != null) {
+                           m.put("target_collection_id", String.valueOf(r.value4()));
+                       }
+                       m.put("target_gone", String.valueOf(r.value5()));
+                   }
+                   return m;
+               });
+        });
     }
 
     /** Page-size ceiling for {@link #pairs} (mirrors the store-list paging shape). */
@@ -295,15 +313,25 @@ public final class RemapRepository {
         });
     }
 
-    /** Distinct source collections — the prior-collections (source-gone) probe input. */
+    /** Distinct source collections, the live label of each (its stored name when it is gone) from gate 3. The prior-collections (source-gone) probe input. */
     public List<String> sourceCollections(String tenant) {
         return tenantScope.withTenant(tenant, ctx -> {
-            var raw = ck().label(tenant, CHASH_REMAP.SOURCE_COLLECTION, CHASH_REMAP.SOURCE_COLLECTION_ID);
-            var lbl = raw.as("source_collection");
-            return ctx.selectDistinct(lbl).from(CHASH_REMAP)
-               .where(CHASH_REMAP.TENANT_ID.eq(tenant).and(raw.isNotNull()))
-               .orderBy(lbl)
-               .fetch(lbl);
+            if (!ck().byId()) {
+                return ctx.selectDistinct(CHASH_REMAP.SOURCE_COLLECTION)
+                   .from(CHASH_REMAP)
+                   .where(CHASH_REMAP.TENANT_ID.eq(tenant))
+                   .orderBy(CHASH_REMAP.SOURCE_COLLECTION)
+                   .fetch(CHASH_REMAP.SOURCE_COLLECTION);
+            }
+            // the distinct (id, stored name) pairs first (few), then the registry label of each id once; a gone source keeps its name
+            var pairs = ctx.selectDistinct(CHASH_REMAP.SOURCE_COLLECTION_ID.as("cid"), CHASH_REMAP.SOURCE_COLLECTION.as("nm"))
+                .from(CHASH_REMAP).where(CHASH_REMAP.TENANT_ID.eq(tenant)).asTable("ckpairs");
+            var cc = CATALOG_COLLECTIONS.as("ckrl");
+            Field<String> shown = DSL.coalesce(cc.NAME, pairs.field("nm", String.class));
+            return new java.util.ArrayList<>(new java.util.LinkedHashSet<>(
+                ctx.select(shown).from(pairs).leftJoin(cc)
+                   .on(cc.TENANT_ID.eq(tenant).and(cc.COLLECTION_ID.eq(pairs.field("cid", Long.class))))
+                   .orderBy(shown).fetch(shown)));
         });
     }
 

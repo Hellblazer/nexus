@@ -188,6 +188,26 @@ class ChashProbePlanShapeTest {
         }
     }
 
+    /**
+     * RDR-229 P3.5c: from gate 3 {@code lookup} runs {@link ChashRepository#idProbe}, a different statement from {@link ChashRepository#PROBE_SQL}
+     * (a join of the chunk's {@code collection_id} to the registry label). Its plan keeps the same tenant-chash index at the same scale, and
+     * answers the same two collections.
+     */
+    @Test
+    void idArmProbeKeepsTenantChashIndexUnderRlsAtScale() {
+        byte[] bytes = Chash.fromHex(liveChash(768, 42)).toBytes();
+        String plan = tenantScope.withTenant(TENANT, ctx -> PgContainerHelper.explainPlan(ctx, ChashRepository.idProbe(ctx, TENANT, bytes)));
+        for (int dim : new int[] {384, 768, 1024}) {
+            String leaf = leafName(modelFor(dim), TENANT);
+            assertThat(plan).as("the id arm must use an index on the seeded leaf %s at 255k-row scale", leaf).contains(leaf + "_tenant_id_chash_idx");
+            assertThat(plan).as("the id arm may not degrade to a sequential scan of the seeded leaf %s", leaf)
+                .doesNotContainPattern("Seq Scan on (nexus\\.)?" + leaf);
+        }
+        var latched = new ChashRepository(tenantScope, () -> true);
+        assertThat(latched.lookup(TENANT, Chash.fromHex(liveChash(768, 42)))).extracting(r -> r.get("collection"))
+            .containsExactlyInAnyOrder("plan-384", "plan-768");
+    }
+
     @Test
     void lookupAnswersMultiCollectionMembershipAtScale() {
         var rows = repo.lookup(TENANT, Chash.fromHex(liveChash(768, 42)));

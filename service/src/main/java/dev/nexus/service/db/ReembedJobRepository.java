@@ -85,14 +85,34 @@ public final class ReembedJobRepository {
                       long documentsMoved, long documentsSkipped, long chunksEmbedded, long chunksReused,
                       long tokensBilled, Long tokenCap, boolean keepSource, boolean forceDelete,
                       OffsetDateTime startedAt, OffsetDateTime updatedAt, OffsetDateTime finishedAt,
-                      String failureReason, String lastError) {
+                      String failureReason, String lastError,
+                      Long sourceCollectionId, Long targetCollectionId, boolean sourceGone, boolean targetGone) {
 
+        /** The job as it was before the collection ids and gone flags were reported (the 21 original components). */
+        public Job(UUID jobId, String sourceCollection, String targetCollection, String state,
+                   String disposition, String docCursor, int passNumber, String cutoverStep,
+                   long documentsMoved, long documentsSkipped, long chunksEmbedded, long chunksReused,
+                   long tokensBilled, Long tokenCap, boolean keepSource, boolean forceDelete,
+                   OffsetDateTime startedAt, OffsetDateTime updatedAt, OffsetDateTime finishedAt,
+                   String failureReason, String lastError) {
+            this(jobId, sourceCollection, targetCollection, state, disposition, docCursor, passNumber, cutoverStep,
+                documentsMoved, documentsSkipped, chunksEmbedded, chunksReused, tokensBilled, tokenCap, keepSource,
+                forceDelete, startedAt, updatedAt, finishedAt, failureReason, lastError, null, null, false, false);
+        }
+
+        /** The job with its stored names, as before gate 3. */
         static Job from(ReembedJobsRecord r) {
-            return new Job(r.getJobId(), r.getSourceCollection(), r.getTargetCollection(), r.getState(),
+            return from(r, r.getSourceCollection(), r.getTargetCollection(), false, false);
+        }
+
+        /** The job with {@code source} and {@code target} as its collections: from gate 3 the live registry label of each id, else the stored name. */
+        static Job from(ReembedJobsRecord r, String source, String target, boolean sourceGone, boolean targetGone) {
+            return new Job(r.getJobId(), source, target, r.getState(),
                 r.getDisposition(), r.getDocCursor(), r.getPassNumber(), r.getCutoverStep(),
                 r.getDocumentsMoved(), r.getDocumentsSkipped(), r.getChunksEmbedded(), r.getChunksReused(),
                 r.getTokensBilled(), r.getTokenCap(), r.getKeepSource(), r.getForceDelete(),
-                r.getStartedAt(), r.getUpdatedAt(), r.getFinishedAt(), r.getFailureReason(), r.getLastError());
+                r.getStartedAt(), r.getUpdatedAt(), r.getFinishedAt(), r.getFailureReason(), r.getLastError(),
+                r.getSourceCollectionId(), r.getTargetCollectionId(), sourceGone, targetGone);
         }
     }
 
@@ -345,7 +365,7 @@ public final class ReembedJobRepository {
     private void requireNotHeldFromTheOtherSide(DSLContext ctx, String tenant, String source, String target) {
         var intoSource = ctx.select(REEMBED_JOBS.JOB_ID, REEMBED_JOBS.STATE).from(REEMBED_JOBS)
             .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
-            .and(ck().eq(tenant, REEMBED_JOBS.TARGET_COLLECTION, REEMBED_JOBS.TARGET_COLLECTION_ID, source))
+            .and(ck().eqHistory(tenant, REEMBED_JOBS.TARGET_COLLECTION, REEMBED_JOBS.TARGET_COLLECTION_ID, source))
             .and(REEMBED_JOBS.STATE.in(LOCK_STATES))
             .orderBy(REEMBED_JOBS.STARTED_AT, REEMBED_JOBS.JOB_ID)
             .limit(1)
@@ -355,7 +375,7 @@ public final class ReembedJobRepository {
         }
         var outOfTarget = ctx.select(REEMBED_JOBS.JOB_ID, REEMBED_JOBS.STATE).from(REEMBED_JOBS)
             .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
-            .and(ck().eq(tenant, REEMBED_JOBS.SOURCE_COLLECTION, REEMBED_JOBS.SOURCE_COLLECTION_ID, target))
+            .and(ck().eqHistory(tenant, REEMBED_JOBS.SOURCE_COLLECTION, REEMBED_JOBS.SOURCE_COLLECTION_ID, target))
             .and(REEMBED_JOBS.STATE.in(LOCK_STATES))
             .orderBy(REEMBED_JOBS.STARTED_AT, REEMBED_JOBS.JOB_ID)
             .limit(1)
@@ -393,15 +413,15 @@ public final class ReembedJobRepository {
             .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
             .and(REEMBED_JOBS.JOB_ID.eq(jobId))
             .fetchOptional()
-            .map(Job::from));
+            .map(r -> job(ctx, tenant, r)));
     }
 
     /** Every job row of the tenant, newest first (the status route; the table is a job log and stays small). */
     public List<Job> listAll(String tenant) {
-        return scope.withTenant(tenant, ctx -> ctx.selectFrom(REEMBED_JOBS)
+        return scope.withTenant(tenant, ctx -> jobs(ctx, tenant, ctx.selectFrom(REEMBED_JOBS)
             .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
             .orderBy(REEMBED_JOBS.STARTED_AT.desc(), REEMBED_JOBS.JOB_ID.desc())
-            .fetch(Job::from));
+            .fetch()));
     }
 
     /** The tenant's jobs in any of {@code states}, oldest first. */
@@ -409,11 +429,11 @@ public final class ReembedJobRepository {
         if (states.isEmpty()) {
             return List.of();
         }
-        return scope.withTenant(tenant, ctx -> ctx.selectFrom(REEMBED_JOBS)
+        return scope.withTenant(tenant, ctx -> jobs(ctx, tenant, ctx.selectFrom(REEMBED_JOBS)
             .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
             .and(REEMBED_JOBS.STATE.in(states))
             .orderBy(REEMBED_JOBS.STARTED_AT, REEMBED_JOBS.JOB_ID)
-            .fetch(Job::from));
+            .fetch()));
     }
 
     /**
@@ -463,7 +483,7 @@ public final class ReembedJobRepository {
                     .and(REEMBED_JOBS.CUTOVER_STEP.isNotDistinctFrom(expectedCutoverStep))
                     .returning()
                     .fetchOptional()
-                    .map(Job::from);
+                    .map(r -> job(ctx, tenant, r));
             }));
     }
 
@@ -491,8 +511,8 @@ public final class ReembedJobRepository {
         return retryingOnLock(tenant, jobId, () -> sourceOf(tenant, jobId), () ->
             scope.withTenant(tenant, ctx -> {
                 var k = ck();
-                var row = ctx.select(k.label(tenant, REEMBED_JOBS.SOURCE_COLLECTION, REEMBED_JOBS.SOURCE_COLLECTION_ID),
-                                     k.label(tenant, REEMBED_JOBS.TARGET_COLLECTION, REEMBED_JOBS.TARGET_COLLECTION_ID))
+                var row = ctx.select(k.labelOrName(tenant, REEMBED_JOBS.SOURCE_COLLECTION, REEMBED_JOBS.SOURCE_COLLECTION_ID),
+                                     k.labelOrName(tenant, REEMBED_JOBS.TARGET_COLLECTION, REEMBED_JOBS.TARGET_COLLECTION_ID))
                     .from(REEMBED_JOBS)
                     .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
                     .and(REEMBED_JOBS.JOB_ID.eq(jobId))
@@ -506,7 +526,7 @@ public final class ReembedJobRepository {
                 // lock state as the other end of another job. The source-lock index covers only same-source jobs.
                 takeStartGuard(ctx, tenant, row.value1());
                 requireNotHeldFromTheOtherSide(ctx, tenant, row.value1(), row.value2());
-                return ctx.update(REEMBED_JOBS)
+                var update = ctx.update(REEMBED_JOBS)
                     .set(REEMBED_JOBS.STATE, to)
                     .set(REEMBED_JOBS.PASS_NUMBER, (short) 1)
                     .set(REEMBED_JOBS.DOC_CURSOR, "")
@@ -516,14 +536,19 @@ public final class ReembedJobRepository {
                     .setNull(REEMBED_JOBS.FINISHED_AT)
                     .set(REEMBED_JOBS.UPDATED_AT, clock())
                     .set(REEMBED_JOBS.SOURCE_COLLECTION_ID, sourceOwnId())
-                    .set(REEMBED_JOBS.TARGET_COLLECTION_ID, targetOwnId())
+                    .set(REEMBED_JOBS.TARGET_COLLECTION_ID, targetOwnId());
+                if (k.byId()) {
+                    // the resumed job runs under the labels its ids carry now: a runner finds its source by this name (RDR-229 P3.5c)
+                    update = update.set(REEMBED_JOBS.SOURCE_COLLECTION, row.value1()).set(REEMBED_JOBS.TARGET_COLLECTION, row.value2());
+                }
+                return update
                     .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
                     .and(REEMBED_JOBS.JOB_ID.eq(jobId))
                     .and(REEMBED_JOBS.STATE.eq(DONE))
                     .and(REEMBED_JOBS.DISPOSITION.eq("kept_tombstoned"))
                     .returning()
                     .fetchOptional()
-                    .map(Job::from);
+                    .map(r -> job(ctx, tenant, r));
             }));
     }
 
@@ -551,7 +576,7 @@ public final class ReembedJobRepository {
             .and(REEMBED_JOBS.CUTOVER_STEP.isNotDistinctFrom(expectedCutoverStep))
             .returning()
             .fetchOptional()
-            .map(Job::from));
+            .map(r -> job(ctx, tenant, r)));
     }
 
     /**
@@ -664,7 +689,7 @@ public final class ReembedJobRepository {
                 .and(REEMBED_JOBS.JOB_ID.eq(jobId))
                 .returning()
                 .fetchOptional()
-                .map(Job::from);
+                .map(r -> job(ctx, tenant, r));
         });
     }
 
@@ -693,7 +718,7 @@ public final class ReembedJobRepository {
             .and(REEMBED_JOBS.PASS_NUMBER.eq((short) fromPass))
             .returning()
             .fetchOptional()
-            .map(Job::from));
+            .map(r -> job(ctx, tenant, r)));
     }
 
     /**
@@ -804,8 +829,8 @@ public final class ReembedJobRepository {
         return scope.withTenant(tenant, ctx -> {
             var latest = ctx.select(REEMBED_JOBS.JOB_ID, REEMBED_JOBS.DISPOSITION).from(REEMBED_JOBS)
                 .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
-                .and(ck().eq(tenant, REEMBED_JOBS.SOURCE_COLLECTION, REEMBED_JOBS.SOURCE_COLLECTION_ID, earlierSource))
-                .and(ck().eq(tenant, REEMBED_JOBS.TARGET_COLLECTION, REEMBED_JOBS.TARGET_COLLECTION_ID, earlierTarget))
+                .and(ck().eqHistory(tenant, REEMBED_JOBS.SOURCE_COLLECTION, REEMBED_JOBS.SOURCE_COLLECTION_ID, earlierSource))
+                .and(ck().eqHistory(tenant, REEMBED_JOBS.TARGET_COLLECTION, REEMBED_JOBS.TARGET_COLLECTION_ID, earlierTarget))
                 .and(REEMBED_JOBS.STATE.in(DONE, ABORTED))
                 .orderBy(REEMBED_JOBS.FINISHED_AT.desc().nullsLast(), REEMBED_JOBS.STARTED_AT.desc())
                 .limit(1)
@@ -823,7 +848,7 @@ public final class ReembedJobRepository {
                 .and(REEMBED_JOBS.JOB_ID.eq(latest.get().get(REEMBED_JOBS.JOB_ID)))
                 .returning()
                 .fetchOptional()
-                .map(Job::from);
+                .map(r -> job(ctx, tenant, r));
         });
     }
 
@@ -914,10 +939,41 @@ public final class ReembedJobRepository {
         return DSL.function("clock_timestamp", SQLDataType.TIMESTAMPWITHTIMEZONE);
     }
 
+    private Job job(DSLContext ctx, String tenant, ReembedJobsRecord r) {
+        return jobs(ctx, tenant, List.of(r)).get(0);
+    }
+
+    /**
+     * The jobs of {@code rows} as callers read them. reembed_jobs is history with no registry foreign key (linda 2026-11-23): from
+     * gate 3 a job's source and target are the live registry label of its ids, which a one-row rename moves, else the name stored
+     * at write time (its last label) when the collection is gone, with the ids and a gone flag for each end. Before gate 3 the
+     * stored names. One registry read for all the rows.
+     */
+    private List<Job> jobs(DSLContext ctx, String tenant, List<ReembedJobsRecord> rows) {
+        if (!ck().byId()) {
+            return rows.stream().map(Job::from).toList();
+        }
+        var ids = new java.util.HashSet<Long>();
+        for (var r : rows) {
+            if (r.getSourceCollectionId() != null) ids.add(r.getSourceCollectionId());
+            if (r.getTargetCollectionId() != null) ids.add(r.getTargetCollectionId());
+        }
+        var labels = new java.util.HashMap<Long, String>();
+        if (!ids.isEmpty()) {
+            var c = dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+            ctx.select(c.COLLECTION_ID, c.NAME).from(c).where(c.TENANT_ID.eq(tenant)).and(c.COLLECTION_ID.in(ids))
+                .forEach(x -> labels.put(x.value1(), x.value2()));
+        }
+        return rows.stream().map(r -> {
+            String s = labels.get(r.getSourceCollectionId()), t = labels.get(r.getTargetCollectionId());
+            return Job.from(r, s != null ? s : r.getSourceCollection(), t != null ? t : r.getTargetCollection(), s == null, t == null);
+        }).toList();
+    }
+
     /** The job's source, or null when the job row is absent. */
     private String sourceOf(String tenant, UUID jobId) {
         return scope.withTenant(tenant, ctx -> {
-            var lbl = ck().label(tenant, REEMBED_JOBS.SOURCE_COLLECTION, REEMBED_JOBS.SOURCE_COLLECTION_ID);
+            var lbl = ck().labelOrName(tenant, REEMBED_JOBS.SOURCE_COLLECTION, REEMBED_JOBS.SOURCE_COLLECTION_ID);
             return ctx.select(lbl).from(REEMBED_JOBS)
                 .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
                 .and(REEMBED_JOBS.JOB_ID.eq(jobId))
@@ -971,7 +1027,7 @@ public final class ReembedJobRepository {
                 .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
                 // by its name, or by its registry id: after a one-row rename the holder still carries the old label (RDR-229 P3.4)
                 .and(ck().byId()
-                    ? ck().eq(tenant, REEMBED_JOBS.SOURCE_COLLECTION, REEMBED_JOBS.SOURCE_COLLECTION_ID, source)
+                    ? ck().eqHistory(tenant, REEMBED_JOBS.SOURCE_COLLECTION, REEMBED_JOBS.SOURCE_COLLECTION_ID, source)
                     : REEMBED_JOBS.SOURCE_COLLECTION.eq(source).or(REEMBED_JOBS.SOURCE_COLLECTION_ID.eq(CollectionIds.idOf(tenant, source))))
                 .and(REEMBED_JOBS.STATE.in(LOCK_STATES))
                 .and(REEMBED_JOBS.JOB_ID.ne(self))
