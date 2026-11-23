@@ -192,7 +192,10 @@ class Rdr229P37LabelReservedTest {
         assertThat(revive.statusCode()).as("the revive is not refused label_reserved: " + revive.body()).isEqualTo(200);
     }
 
-    /** Delete a collection and recreate its label: history rows (chash_remap, a failed re-embed job) and a dangling id reserve nothing. */
+    /**
+     * Delete a collection and recreate its label: rows left naming it (chash_remap, which is probed, and a failed re-embed job, which is not) hold an id that
+     * resolves to no registry row, and a dangling id reserves nothing.
+     */
     @Test
     void deletingACollectionAndRecreatingItsLabelSucceeds_withChashRemapAndReembedHistoryLeft() throws Exception {
         int n = SEQ.incrementAndGet();
@@ -264,6 +267,45 @@ class Rdr229P37LabelReservedTest {
 
         assertThat(refused.statusCode()).as("pdf_pipeline is probed: " + refused.body()).isEqualTo(409);
         assertThat(refused.body()).contains("label_reserved");
+    }
+
+    /**
+     * linda's census pass 2: a chash_remap row that carries the old label under the renamed collection reserves it. Its name key (the primary key
+     * {@code (tenant_id, source_collection, old_id)}) survives the name-key drop, so a new A remapping the same old id would meet it with a 23505.
+     */
+    @Test
+    void aOneRowRenameWhereBHasAChashRemapRow_thenRegisteringAIsRefused() throws Exception {
+        int n = SEQ.incrementAndGet();
+        String tenant = "p37-lr-cr" + n;
+        String token = engine.newTenant(tenant);
+        String a = coll("p37lrcra" + n, 1);
+        String b = coll("p37lrcrb" + n, 1);
+        engine.su(ctx -> {
+            PgContainerHelper.insertCollection(ctx, tenant, a);   // no chunk, no canary row: only the chash_remap row carries the label
+            long id = Rdr229RenameChecks.registryId(ctx, tenant, a);
+            ctx.insertInto(org.jooq.impl.DSL.table(org.jooq.impl.DSL.name("nexus", "chash_remap")),
+                    org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("tenant_id"), String.class),
+                    org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("source_collection"), String.class),
+                    org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("source_collection_id"), Long.class),
+                    org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("old_id"), String.class),
+                    org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("new_chash"), byte[].class),
+                    org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("target_collection"), String.class),
+                    org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("target_collection_id"), Long.class),
+                    org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("created_at"), java.time.OffsetDateTime.class),
+                    org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("provenance"), String.class))
+                .values(tenant, a, id, "old1", new byte[32], a, id, java.time.OffsetDateTime.now(), "p").execute();
+            return null;
+        });
+        var r = engine.rename(token, a, b);
+        assertThat(r.status()).as("the one-row rename: " + r).isEqualTo(200);
+        assertThat(engine.<Long>su(ctx -> Rdr229RenameChecks.naming(ctx, tenant, "chash_remap", "source_collection", a)))
+            .as("non-vacuity: the chash_remap row still carries the name A").isEqualTo(1L);
+
+        var refused = upsert(new World(tenant, token, a, b, 0L, ""), a, "someone-else");
+
+        assertThat(refused.statusCode()).as("chash_remap is probed: " + refused.body()).isEqualTo(409);
+        assertThat(refused.body()).contains("label_reserved");
+        assertThat(engine.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, a))).as("nothing was registered under A").isNull();
     }
 
     /** The pre-latch control: no latch row, no reservation, whatever rows carry a stale name. With the row written, the same rows reserve the label. */
