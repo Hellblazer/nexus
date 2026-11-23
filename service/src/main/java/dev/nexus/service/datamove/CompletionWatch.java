@@ -35,9 +35,14 @@ final class CompletionWatch implements AutoCloseable {
     private final OffsetDateTime backendStart;
     private volatile boolean closed;
     private volatile boolean fired;
+    private volatile boolean ended;
     private final Thread thread;
+    /** Test seam: runs in the watch's thread after it has read the move's row and before it acts on what it read, where a close can slip in. */
+    private final Runnable afterRead;
 
-    private CompletionWatch(AdminConnection admin, String label, int pid, String applicationName, OffsetDateTime backendStart) {
+    private CompletionWatch(AdminConnection admin, String label, int pid, String applicationName, OffsetDateTime backendStart,
+                            Runnable afterRead) {
+        this.afterRead = afterRead;
         this.admin = admin;
         this.label = label;
         this.pid = pid;
@@ -48,7 +53,12 @@ final class CompletionWatch implements AutoCloseable {
     }
 
     static CompletionWatch start(AdminConnection admin, String label, int pid, String applicationName, OffsetDateTime backendStart) {
-        CompletionWatch w = new CompletionWatch(admin, label, pid, applicationName, backendStart);
+        return start(admin, label, pid, applicationName, backendStart, null);
+    }
+
+    static CompletionWatch start(AdminConnection admin, String label, int pid, String applicationName, OffsetDateTime backendStart,
+                                 Runnable afterRead) {
+        CompletionWatch w = new CompletionWatch(admin, label, pid, applicationName, backendStart, afterRead);
         w.thread.start();
         return w;
     }
@@ -58,7 +68,20 @@ final class CompletionWatch implements AutoCloseable {
         return fired;
     }
 
+    /** True once the watch's thread has left its loop. */
+    boolean ended() {
+        return ended;
+    }
+
     private void run() {
+        try {
+            loop();
+        } finally {
+            ended = true;
+        }
+    }
+
+    private void loop() {
         while (!closed) {
             try {
                 Thread.sleep(INTERVAL_MS);
@@ -93,11 +116,13 @@ final class CompletionWatch implements AutoCloseable {
         try (Connection c = DriverManager.getConnection(admin.url(), props)) {
             var ctx = DSL.using(c, SQLDialect.POSTGRES);
             var row = DataMoveRegistry.reload(ctx, label);
-            if (row.isEmpty() || row.get().paused()) {
-                return true;
+            boolean held = row.isEmpty() || row.get().paused()
+                || ctx.fetchExists(DSL.table(DSL.name("nexus", "data_moves")), DSL.field(DSL.name("supersedes"), String.class).eq(label));
+            Runnable seam = afterRead;
+            if (seam != null) {
+                seam.run();
             }
-            return ctx.fetchExists(DSL.table(DSL.name("nexus", "data_moves")),
-                DSL.field(DSL.name("supersedes"), String.class).eq(label));
+            return held;
         }
     }
 
