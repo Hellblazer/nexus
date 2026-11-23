@@ -138,6 +138,8 @@ class Rdr229P37OneRowRenameByIdTest {
         assertThat(MAPPER.readTree(r.body()).path("ids_stable").asBoolean()).as("the one-row outcome reports ids stable: " + r).isTrue();
     }
 
+    // Both pairs, (b)/(c) through the route and (d)/(e) through the body, stay if the two requireSourceById call sites in CollectionOneRowRename
+    // (the not-live branch, :96, and after the ordered lock, :119) are ever merged: (b)/(c) reach the lock-then-check site, (d)/(e) the not-live one.
     // ---- (b) ---------------------------------------------------------------------------------------------------------------
 
     @Test
