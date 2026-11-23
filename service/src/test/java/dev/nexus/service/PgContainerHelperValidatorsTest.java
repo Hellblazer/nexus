@@ -5,6 +5,8 @@ import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -73,6 +75,24 @@ class PgContainerHelperValidatorsTest {
         }
         assertThatThrownBy(() -> PgContainerHelper.requireTestIdentifier(null))
             .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    // ── addFkNotValidColumns (nexus-p2m1x.21): refused before the connection is touched ───────────
+
+    @Test
+    void addFkNotValidColumns_refusesAnUnevenOrUnsafeKey_beforeItTouchesTheConnection() {
+        var t = DSL.table(DSL.name("nexus", "chunks"));
+        var restrict = PgContainerHelper.DeleteAction.RESTRICT;
+        assertThatThrownBy(() -> PgContainerHelper.addFkNotValidColumns(null, t, "k", List.of("a", "b"), t, List.of("a"), restrict, false))
+            .as("uneven column lists").isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> PgContainerHelper.addFkNotValidColumns(null, t, "k", List.of(), t, List.of(), restrict, false))
+            .as("no columns").isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> PgContainerHelper.addFkNotValidColumns(null, t, "k", List.of("a;b"), t, List.of("a"), restrict, false))
+            .as("a column that is not a plain identifier").isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> PgContainerHelper.addFkNotValidColumns(null, t, "k", List.of("a"), t, List.of("A"), restrict, false))
+            .as("a referenced column that is not").isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> PgContainerHelper.addFkNotValidColumns(null, t, "k\" x", List.of("a"), t, List.of("a"), restrict, false))
+            .as("a constraint name that is not").isInstanceOf(IllegalArgumentException.class);
     }
 
     // ── renderTableParam: a Table<?> that reaches a changelog parameter ──────────────────────

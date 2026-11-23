@@ -44,6 +44,7 @@ import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
@@ -1098,6 +1099,14 @@ public final class PgContainerHelper {
         requireTestIdentifier(role);
         runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-schema-usage.xml",
             "databasechangelog_test_schema_usage", Map.of("schema", schema, "role", role));
+    }
+
+    /** {@code REVOKE USAGE ON SCHEMA schema FROM role} (nexus-p2m1x.21), through {@code db.changelog-test-schema-usage-revoke.xml}: the undo of {@link #grantSchemaUsage}. */
+    public static void revokeSchemaUsage(Connection su, String schema, String role) throws Exception {
+        requireTestIdentifier(schema);
+        requireTestIdentifier(role);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-schema-usage-revoke.xml",
+            "databasechangelog_test_schema_usage_revoke", Map.of("schema", schema, "role", role));
     }
 
     /**
@@ -3132,6 +3141,30 @@ public final class PgContainerHelper {
         DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
         Routines.addFkNotValidComposite3(ctx.configuration(), ctx.render(table), constraintName, column2, column3,
             ctx.render(refTable), refColumn2, refColumn3, extraClause);
+    }
+
+    /** The delete actions of a foreign key, for {@link #addFkNotValidColumns}; the constant's name with underscores as spaces is the keyword form. */
+    public enum DeleteAction { NO_ACTION, RESTRICT, CASCADE, SET_NULL, SET_DEFAULT }
+
+    /**
+     * {@code ALTER TABLE table ADD CONSTRAINT name FOREIGN KEY (columns) REFERENCES refTable (refColumns) ON DELETE action [DEFERRABLE] NOT VALID}
+     * (nexus-p2m1x.21) through {@code nexus_test.add_fk_not_valid_columns}: jOOQ renders NOT ENFORCED, which PostgreSQL 17 refuses, and the
+     * other wrappers fix the column count or add {@code embedding_model} themselves. Every column and the constraint name goes through
+     * {@link #requireTestIdentifier} and the lists must be the same length, in key order; the action is the enum. NOT VALID: the caller
+     * runs {@link #validateConstraint} for a validated key. The ALTER runs in the connection's open transaction as that connection's role.
+     */
+    public static void addFkNotValidColumns(Connection conn, Table<?> table, String constraintName, List<String> columns,
+                                            Table<?> refTable, List<String> refColumns, DeleteAction onDelete, boolean deferrable) {
+        if (columns.isEmpty() || columns.size() != refColumns.size()) {
+            throw new IllegalArgumentException("a key needs as many referenced columns as columns: " + columns + " -> " + refColumns);
+        }
+        requireTestIdentifier(constraintName);
+        Stream.concat(columns.stream(), refColumns.stream()).forEach(PgContainerHelper::requireTestIdentifier);
+        DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+        ctx.select(DSL.function(DSL.name("nexus_test", "add_fk_not_valid_columns"), SQLDataType.BOOLEAN, DSL.val(ctx.render(table)),
+                DSL.val(constraintName), DSL.val(String.join(",", columns)), DSL.val(ctx.render(refTable)), DSL.val(String.join(",", refColumns)),
+                DSL.val(onDelete.name().replace('_', ' ')), DSL.val(deferrable)))
+            .fetch();
     }
 
     /**
