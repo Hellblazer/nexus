@@ -265,9 +265,10 @@ final class CollectionRouteCensus {
             "handlePersistDiscovered"));
         // The one nested selector: the handler reads "collection" from each element of "records", so the request carries
         // the label or the id inside the record, and the extras (topic_id, a 384-wide embedding) are the record's other
-        // fields. GENERIC: the label request must write (the test also counts the centroid, so a no-op cannot pass).
+        // fields (taxonomy_centroids.label is NOT NULL, hygiene-001). GENERIC: the label request must write (the test also counts the centroid, so a no-op cannot pass).
         r.add(post(t + "/centroids/upsert", nested("records", "collection", "collection_id"),
-            "\"topic_id\":1,\"embedding\":" + EMBEDDING_384, Tier.GENERIC, TAXONOMY, "handleCentroidUpsert"));
+            "\"topic_id\":1,\"label\":\"p35a-centroid\",\"doc_count\":1,\"embedding\":" + EMBEDDING_384, Tier.GENERIC, TAXONOMY,
+            "handleCentroidUpsert"));
         r.add(post(t + "/centroids/query", coll(), "\"embedding\":[0.1]", Tier.HEAVY, TAXONOMY, "handleCentroidQuery"));
         r.add(get(t + "/centroids/count", coll(), "", Tier.GENERIC, TAXONOMY, "handleCentroidCount"));
         r.add(get(t + "/centroids/by_collection", coll(), "", Tier.GENERIC, TAXONOMY, "handleCentroidByCollection"));
