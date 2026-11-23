@@ -641,7 +641,10 @@ path still works, so each of those steps ships on its own and can stop.
 P3.5 and P3.7 ship in one engine cut, because P3.5a's rename refusal
 ends only when the name-key drop move that P3.7 ships and registers has
 completed and every P3.5b changeset has applied, which needs a restart
-(`RenameReadiness.java:28-39`; T2 `229-research-301`; P3.7);
+(`RenameReadiness.java:28-39`; the changesets are the twelve that
+`p35b-continue-changesets.txt` lists, each to be in `databasechangelog`,
+`p35b-continue-changesets.txt:1-3`; T2 `229-research-301`,
+`229-research-320`; P3.7);
 P3.6 ships on its own. From P3.7 the referencing tables' name columns are dead until P4.1 drops
 them (item 7), so an engine downgraded past P3.7 reads stale names; the
 safe downgrade point is still open (Contradiction Check). On each install, readers leave the name path only once every
@@ -1140,8 +1143,10 @@ The key moves table by table in strangler order:
   floor, because a release reaches an install whatever its moves have
   done: it serves migration-only until gate 3 of the completion check
   holds on the install, P3.7's name-key drop move has `completed_at`
-  set and every P3.5b changeset has applied, the state in which P3.7's
-  one-row rename runs (T2 `229-research-59`, `229-research-64`).
+  set and every P3.5b changeset has applied (each id of
+  `p35b-continue-changesets.txt` in `databasechangelog`, item 6), the state in which P3.7's
+  one-row rename runs (T2 `229-research-59`, `229-research-64`,
+  `229-research-320`).
 
 **How each Phase 3 step runs (RDR-246).** No Phase 3 step rewrites the rows
 of, or builds an index on, a table that grows with user data inside the
@@ -1430,7 +1435,12 @@ while the engine serves:
     precondition on `nexus.data_moves.completed_at` for that label with
     `onFail="CONTINUE"`, so it is skipped and retried on each boot until the
     move completes" (RDR-246 lines 937-940), and joins the lint's CONTINUE
-    allowlist. That form is refused for a body that names `nexus.chunks`, a
+    allowlist. In the code that precondition is one `sqlCheck` on each of
+    `vectors-078`'s twelve changesets, `onFail` and `onError` `CONTINUE`,
+    and it applies the completion check's rule for a stamp label: every
+    stamp label's CHECKs present and validated and its move complete, so a
+    stamp whose `on_complete` left a CHECK `NOT VALID` also holds them
+    (`vectors-078:9-17`, `:38`; T2 `229-research-315`). That form is refused for a body that names `nexus.chunks`, a
     leaf, `catalog_document_chunks`, `topic_assignments` or
     `chunk_orphaned_at`: "a later-release changeset that waits with
     `onFail="CONTINUE"` is refused there" (RDR-246 lines 902-906). Both
@@ -1441,11 +1451,25 @@ while the engine serves:
     chunk-family table takes the rule's other option, read both shapes:
     P3.5b redefines it to match a row by `collection_id` where both sides
     carry one and by the name where either does not, and P4.1 removes the
-    name arm with the name columns. Inferred, not read: that match is right
+    name arm with the name columns. A NULL id never matches through an
+    empty name (`vectors-077:7-12`). The search functions are not
+    redefined: they keep their name bodies until P4.1, and gain
+    `<name>_by_id` twins that match by `collection_id` only, which P3.5c's
+    Java calls once gate 3 has latched (`vectors-077:28-34`); `hybrid_search`,
+    with no engine caller, has none (T2 `229-research-316`). Inferred, not read: that match is right
     at every point of the stamp, because a rename keeps rewriting the name
-    columns until the check below passes (P3.7). Inferred, not read: a
-    two-key match can lose an index, so P3.5b measures each such reader's
-    plan on a large store.
+    columns until the check below passes (P3.7). A two-key match can lose
+    an index: P3.5b measured the plans of `live_chunks`,
+    `collection_vector_stats`, `chunk_is_reapable`,
+    `assign_from_chashes_384` and four search twins on a store of five
+    collections of 80k chunks, before and after, and its first bodies of
+    `live_chunks` and `chunk_is_reapable` regressed and were replaced
+    before stacking; linda accepted the remaining differences as P3.5b's
+    acceptance item 3 (bead `nexus-p2m1x.24` notes, 2026-11-23; T2
+    `229-research-317`). The ghost sweep reads `collection_vector_stats`
+    by the registry row's `collection_id`, before the latch too, since the
+    view gives an unstamped chunk its registry row's id
+    (`CatalogRepository.java:12470-12472`; T2 `229-research-318`).
   - *Java readers (P3.5c), the registry (P3.5a), P3.4's builds and P3.7's
     rename.* These wait on a completion check that the engine makes at
     boot. Only the admin connection may read the registry: "on the admin
@@ -1543,8 +1567,11 @@ while the engine serves:
        (`IdUniqueIndexPass.allValid`, T2 `229-research-267`). The canary twin
        waits for changeset `vectors-078-8`, and gate 3 waits with it
        (`ArbiterTwins.java:45-46`; T2 `229-research-268`). That changeset is
-       not in this tree: `ArbiterTwins.java:39-41` ties the replacing writer to
-       P3.5b's form A, and vectors-078 comes with P3.5b (T2 `229-research-269`). Then
+       P3.5b's form A body of `canary_query_ring_upsert`, CONTINUE-gated on
+       the stamps (`vectors-078:573-574`, `:604`), and the pass builds the
+       twin only once `databasechangelog` records it
+       (`IdUniqueIndexPass.java:243-251`; T2 `229-research-269`,
+       `229-research-319`). Then
        the readers move to the id: `CollectionRegistry` is keyed by id
        (P3.5a; T2 `229-research-308`), and the jOOQ readers switch with the
        latched gate 3 (P3.5c). The check registers P3.7's name-key drop move (Switch), the
@@ -1560,7 +1587,8 @@ while the engine serves:
     `renameCollectionTxn` keeps
     rewriting the fourteen `COLLECTION_SCOPED_TABLES`. From gate 3 until
     the one-row rename can run, that is until P3.7's name-key drop move
-    has `completed_at` set and every P3.5b changeset has applied (below),
+    has `completed_at` set and every P3.5b changeset has applied (below;
+    `p35b-continue-changesets.txt:1-3`, T2 `229-research-320`),
     readers are on the
     id while the rename is still the name path, which gives the collection
     a new id that its index on the old id does not select (T2
@@ -1633,11 +1661,19 @@ while the engine serves:
     outside the chunk family, and P4.1's changesets. Until P3.5b's apply,
     those readers read the name columns, which a one-row rename no longer
     rewrites, so the one-row rename also waits for every P3.5b changeset
-    to be recorded as applied (inferred, not read: read from Liquibase's
-    `databasechangelog`). When every stamp move is complete and a P3.5b
+    to be recorded as applied: the twelve CONTINUE changesets of
+    `vectors-078`, listed in `db/rdr229/p35b-continue-changesets.txt`, each
+    with a row in `databasechangelog` (`p35b-continue-changesets.txt:1-3`);
+    `vectors-077`'s changesets are plain and apply at once
+    (`vectors-077:3-5`). No code reads the list in this tree: the
+    readiness the rename guard reads answers `name_key_drop_move` until
+    P3.7 replaces it with that read (`CompletionBootWork.java:182-191`; T2
+    `229-research-320`). When every stamp move is complete and a P3.5b
     changeset is not yet applied, the check asks for a restart in its
     `rdr229_completion` field, which nx doctor shows, and not in `boot_work`
-    (inferred, not read: P3.5b ships that text). That is the one restart the
+    (not in this tree: P3.5b ships no restart text, and no restart
+    request on the completion check reads the list yet,
+    `vectors-078:22-24`; T2 `229-research-320`). That is the one restart the
     chain from a half-stamped store needs. A client cache
     keyed by id holds a stable id only from the name-key drop move's
     `completed_at` on the install, when the
@@ -2913,7 +2949,15 @@ its acceptance is that test green plus the census pin it lowers.
     (`collection_vector_stats`, `live_chunks`) and triggers that fire on a
     name column (`catalog-044`'s `AFTER INSERT OR UPDATE OF
     physical_collection, deleted_at ON nexus.catalog_documents`) read the
-    id (T2 `229-research-37`).
+    id (T2 `229-research-37`). `vectors-077` redefines thirty-eight
+    functions and views that read a chunk-family table, these two views
+    among them, to read both shapes, and adds thirty-eight `<name>_by_id`
+    twins, of search functions and `chunk_live_owners`, whose originals
+    keep their name bodies; `vectors-078`'s twelve CONTINUE changesets
+    redefine readers outside the chunk family by id, and the
+    `catalog-044` trigger fires on `physical_collection_id`
+    (`vectors-078:496-497`; T2
+    `229-research-315`, `229-research-316`).
   - P3.5c Java readers: the jOOQ queries on the name columns read the id,
     and the two upserts (`PgVectorRepository.java:1324`,
     `TaxonomyCentroidRepository.java:172`) take the id key as their
@@ -2943,8 +2987,11 @@ its acceptance is that test green plus the census pin it lowers.
   the seven name foreign keys that refuse a one-row rename and the queue's
   key where that table exists, and the
   one-row rename waits for its `completed_at` as well, and for every
-  P3.5b changeset to have applied (item 6, Switch; T2
-  `229-research-58`, `229-research-61`, `229-research-64`). From gate 3
+  P3.5b changeset to have applied, each id of
+  `db/rdr229/p35b-continue-changesets.txt` in `databasechangelog` (item 6, Switch;
+  `p35b-continue-changesets.txt:1-3`; T2
+  `229-research-58`, `229-research-61`, `229-research-64`,
+  `229-research-320`). From gate 3
   until the one-row rename can run, that is while the move has no
   `completed_at` or a P3.5b changeset has not applied, the engine refuses
   a rename with a typed error that names the missing condition, the move
@@ -3177,8 +3224,10 @@ one-row rename and P4.1's
 drop move wait also for P3.4 on that install; the one-row rename waits
 also for the name-key drop move's `completed_at` and for every P3.5b
 changeset to have applied, and from gate 3 until then the engine refuses
-a rename. P3.5b's SQL readers wait for
-the stamp moves, and apply at the first boot after them. P4.0's engine
+a rename. P3.5b's SQL readers outside the chunk family wait for
+the stamp moves, and apply at the first boot after them
+(`vectors-078:3-5`); those on the chunk family read both shapes and
+apply at once (`vectors-077:3-5`; T2 `229-research-315`). P4.0's engine
 serves migration-only until gate 3, the
 name-key drop move's `completed_at` and P3.5b's changesets hold on the
 install (P4.0). Every other gate takes effect in the running engine when
@@ -3530,8 +3579,9 @@ re-read of the check and P4.0's one restart (item 6, P4.0), the
 backfill verb (P2.10), the repair moves' sizing and order (P2.10), and
 the repair against P3.1's CHECK (P3.1). The seven DISCOVER residuals,
 S-2 to S-8, go to beads at accept (Contradiction Check).
-Still without one: P3.5b's plan measurement of each both-shapes reader
-has no bead of its own beyond P3.5b's acceptance; the history tables' nullable `collection_id` (item 6)
+P3.5b's plan measurement of both-shapes readers (item 6) ran as P3.5b's
+acceptance item 3 (bead `nexus-p2m1x.24` notes, 2026-11-23; T2
+`229-research-317`). Still without one: the history tables' nullable `collection_id` (item 6)
 names no consumer; P1.2 measures the two production tenants, not local
 stores, apart from its residue count, which runs on every install; and no repair covers
 the two residue shapes item 12 leaves unrepaired (P1.2 counts them).
@@ -3744,3 +3794,4 @@ large, and moved under a ratchet.
 - 2026-11-22: test lists (Sam's ruling, T2 `nexus/sam-ruling-rdr229-test-lists-and-stack-wal-2026-11-23`, answering linda's ask rdr229-rdr-test-lists): the P3.3b, P3.3c and P3.11 Test sentences gain the tests the reviewed code carries (an unattached parent key, a new leaf, `NX_SEARCH_PCI=0`, moves blocked; a swap refused without the id key, the EXPLAIN of a chunk DELETE; the booted-schema parity, the rename and minted-label restores), and the parity test is green at P3.3, not P3.1 (T2 `229-research-113`; tests `LeafIndexPassIntegrationTest`, `Rdr229SwapMovesIntegrationTest`, `Rdr229SwapMovesAfterTheSwapIntegrationTest`, `TenantExportRegistryParityTest`, `Rdr229RestoreByIdTest`, `Rdr229RestoreMintedRelabelTest`).
 - 2026-11-23: P3.4 folded from the stacked code (grant 3, nexus-p2m1x.22): the gate 3 latch row (`vectors-080-1`) and its boot read, the PCI clause read from the database with the PCI-off case and the B-row coverage, the runtime id arbiters after gate 2 and not in the boot walk, the name-index retire behind the latch, `IdReaders.PRESENT` and the singleton lock, the held entries (`id-unique-index-held`), gate 3 implying gate 2, the PCI clause's B-row cap per leaf, the latch's hold for P3.5's readers and P3.7's one-row rename and its refusal, the per-leaf budget with its bound, the canary twin's wait for `vectors-078-8`, and linda's rulings on nexus-p2m1x.22. Builds run beside the name index, not as rebuilds. P3.4's Test sentence gains "before the latch" (Sam, ask rdr229-p34-test-latch, 2026-11-23).
 - 2026-11-23: P3.5a folded from the stacked code (grant 3, nexus-p2m1x.23): the refusal's wire values (`rename_refused` with `name_key_drop_move`, `restart`, or the guard's own `latch_row_missing`), the latch row deciding the path, the registry keyed by id with no gate, the route boundary's id-to-label turn and the delete's resolved id, the boundary's typed 400, 404 and 409 answers, the unreachable 409 `collection_id_mismatch`, the 503 `rename_busy`, the four readers that hold a `Gate3`, the client's id trust waiting on both the drop move and `ids_stable`, the incremental-adoption refusal also waiting on P3.5b, `ids_stable` false in this tree, and the citations moved by the stack. P3.5's Test sentence and its Verify line now read "before gate 3 has latched" and "once gate 3 has latched" and its rename clause reads "from the latch a rename is refused" (Sam, asks rdr229-p35-test-latch and rdr229-p35-test-before-latch, option 1 each, and option 1 on the rename clause in session) (T2 `229-research-300` to `-314`; fix checks `229-fix-check-27fcc5dbb5`, `229-fix-check-f0562ed03e`).
+- 2026-11-23: P3.5b folded from the stacked code (grant 3, nexus-p2m1x.24): the CONTINUE gate as one `sqlCheck` applying the completion check's stamp-label rule, the empty-name rule of the both-shapes match, the search functions kept on names with `_by_id` twins, the plan measurement done as acceptance item 3, the ghost sweep's by-id stats read, `vectors-078-8` now in the tree, "every P3.5b changeset" named as the twelve ids of `p35b-continue-changesets.txt` in `databasechangelog` (no code reads the list before P3.7), the restart text not shipped, and the trigger on `physical_collection_id` (T2 `229-research-315` to `-320`).
