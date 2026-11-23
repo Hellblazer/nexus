@@ -183,7 +183,9 @@ public final class CompletionBootWork implements AutoCloseable {
      * What a rename from gate 3 still waits for, read per call ({@link RenameReadiness}). Until P3.7 registers the name-key drop move
      * there is no move whose {@code completed_at} could be set, so the answer is true as well as safe: the move is missing. P3.7's code
      * replaces this with the move's row and the {@code databasechangelog} reads (the P3.5b changesets), from the same snapshot as
-     * {@link #gate3()}. It is only consulted while gate 3 holds, which no release can yet make true.
+     * {@link #gate3()}. Total, cheap and fail-closed (it never throws, and a failed read answers a non-{@code NONE} value). The rename
+     * guard reads it beside the latch row: the row decides, except that no row with this answering {@code NONE} is the
+     * {@code latch_row_missing} refusal, which the drop move being gated on the latched gate 3 makes a real inconsistency.
      */
     public RenameReadiness renameReadiness() {
         return () -> RenameReadiness.Missing.NAME_KEY_DROP_MOVE;

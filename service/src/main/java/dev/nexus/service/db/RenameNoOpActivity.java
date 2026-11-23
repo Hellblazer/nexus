@@ -29,7 +29,7 @@ public final class RenameNoOpActivity {
             store, oldLabel, newLabel);
     }
 
-    /** @return the no-op renames since boot, all stores. */
+    /** @return the no-op renames since boot, all stores. A test hook: nothing in {@code src/main} reads it, and no route surfaces it. */
     public static long total() {
         return NOOPS.get();
     }

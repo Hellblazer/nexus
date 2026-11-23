@@ -630,8 +630,9 @@ public final class Main {
         final var bootLatch = gate3Latch;
         var completionRef = new java.util.concurrent.atomic.AtomicReference<dev.nexus.service.datamove.CompletionBootWork>();
         dev.nexus.service.datamove.Gate3 gate3 = () -> { var c = completionRef.get(); return c != null ? c.gate3Latched() : bootLatch.latched(); };
-        // What a rename from gate 3 waits for (P3.7's code answers; the check's stub says ready until then). Unset, before the completion check exists,
-        // it answers the drop move is missing: a rename on a latched install is refused until the check can say otherwise (fails closed).
+        // What a rename still waits for (P3.7's code answers; the check's stub says the name-key drop move is missing until then). The latch row decides the
+        // rename's path, except that no row with this readiness complete is latch_row_missing. Unset, before the completion check exists, it answers the
+        // drop move is missing: a rename on a latched install is refused until the check can say otherwise (fails closed).
         dev.nexus.service.datamove.RenameReadiness renameReadiness = () -> {
             var c = completionRef.get();
             return c == null ? dev.nexus.service.datamove.RenameReadiness.Missing.NAME_KEY_DROP_MOVE : c.renameReadiness().missing();
