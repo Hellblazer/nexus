@@ -9,6 +9,11 @@ The engine's move worker reports each open or failed data move as a ``/v1/status
   waits for the install and an engine restart and nothing is wrong with the data, so it is a warning until the engine's
   retry cap (about four hours), when the engine drops the class and the row is red. The class is the engine's field,
   never read from the words; an engine that predates it sends none, and its blocked move stays red.
+* A move listed in the status's ``data_moves_need_operator_moves`` (its worker has failed it transiently 20 times in a row,
+  or hit a lock or statement timeout at ``on_complete`` 3 times in a row; the engine decides, ``MoveRetryPolicy``) is a red
+  row whatever state its entry shows, naming the label, the bound it missed, its last attempt and its next retry. The
+  move keeps retrying; the row says a person should look. An engine without the field shows such a move as the plain
+  ``blocked:`` row it always did.
 * ``stalled:``: a CALL that has completed no chunk for a long time; a warning, since a slow chunk looks the same.
 * ``paused:``: an operator holds the move; a note, never red.
 * ``working:``, ``queued:``, ``runs complete:``: no row of their own; the summary row counts them.
@@ -88,6 +93,49 @@ def _entries(status: dict[str, Any]) -> list[dict[str, Any]] | None:
     ]
 
 
+def _needs_operator(status: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """The moves ``/v1/status`` lists as needing an operator, by label; empty when the engine predates the field."""
+    listed = status.get("data_moves_need_operator_moves")
+    if not isinstance(listed, list):
+        return {}
+    return {
+        m["label"]: m for m in listed
+        if isinstance(m, dict) and isinstance(m.get("label"), str) and m["label"]
+    }
+
+
+def _needs_operator_row(label: str, info: dict[str, Any], entry: dict[str, Any]) -> HealthResult:
+    """The red row for a move in the needs-an-operator state: the label, the bound, when it last ran and when it runs next."""
+    retries, bound = info.get("retries"), info.get("statement_timeout_ms")
+    sqlstate = info.get("sqlstate") if isinstance(info.get("sqlstate"), str) else None
+    builds = info.get("terminates_index_builds") is True
+    parts = [f"needs an operator: {label} has failed {retries if isinstance(retries, int) else 'many'} times in a row"]
+    if sqlstate:
+        parts.append(f"sqlstate {sqlstate}")
+    if isinstance(bound, int) and not isinstance(bound, bool):
+        parts.append(f"bound missed: statement_timeout_ms {bound} ms")
+    last, nxt = info.get("last_attempt_at"), info.get("next_retry_at")
+    parts.append(f"last attempt {last if isinstance(last, str) else 'unknown'}")
+    parts.append(f"next retry {nxt if isinstance(nxt, str) else 'unknown'}")
+    if builds:
+        parts.append("each retry ends in-flight index builds")
+    return HealthResult(
+        label=f"Data move {label}", ok=False, detail="; ".join(parts) + _counts(entry),
+        fix_suggestions=[
+            "The engine keeps retrying this move by itself, and nothing committed is lost, but the retries are not "
+            "getting anywhere. "
+            + (
+                "Each retry re-runs the warm-up and ends the in-flight index builds (PCI, leaf, id-unique), so waiting "
+                "costs those builds. " if builds else ""
+            )
+            + "The engine log has the page: event=data_move_needs_operator (label, step, SQLSTATE and the bound that "
+            "step missed), and event=data_move_blocked has the full reason of each retry. Fix what it names (a lock "
+            "holder, a bound too short for the table); the next retry time above says whether to wait or act",
+            _RETRY_NOW.format(label=label),
+        ],
+    )
+
+
 def _state(what: str) -> str:
     """The word before the first colon of ``what`` (``blocked``, ``failed``, ``paused``, ...), or ``''``."""
     head, sep, _ = what.partition(":")
@@ -136,6 +184,10 @@ def check_data_moves(engine_status: object = _ENGINE_STATUS_UNSET) -> list[Healt
         return [HealthResult(
             label=SUMMARY_LABEL, ok=True, detail="not applicable: this engine does not report its work (boot_work)",
         )]
+    paged = _needs_operator(status)
+    listed = {e["id"][len(ID_PREFIX):] for e in moves}
+    # a listed move whose entry is gone (it finished between the engine's two reads) is still the engine's page
+    moves = moves + [{"id": ID_PREFIX + lbl, "what": "blocked: needs an operator"} for lbl in paged if lbl not in listed]
     rows: list[HealthResult] = []
     for entry in entries or []:
         if entry["id"] in _ENGINE_STATE_ROWS:
@@ -156,7 +208,9 @@ def check_data_moves(engine_status: object = _ENGINE_STATUS_UNSET) -> list[Healt
         tally[state or "unknown"] = tally.get(state or "unknown", 0) + 1
         text = _after_state(what)
         row_label = f"Data move {label}"
-        if state == "blocked" and entry.get("reason_class") == MISSING_PREREQUISITE:
+        if label in paged and state != "failed":
+            rows.append(_needs_operator_row(label, paged[label], entry))
+        elif state == "blocked" and entry.get("reason_class") == MISSING_PREREQUISITE:
             rows.append(HealthResult(
                 label=row_label, ok=False, warn=True, detail=f"blocked: {text}{_counts(entry)}",
                 fix_suggestions=[
