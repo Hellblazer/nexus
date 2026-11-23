@@ -471,6 +471,22 @@ final class Rdr229RenameEngine implements AutoCloseable {
     Renamed rename(String token, String oldName, String newName, Map<String, String> extra) throws Exception {
         var req = MAPPER.createObjectNode().put("old_name", oldName).put("new_name", newName);
         extra.forEach(req::put);
+        return post(token, req);
+    }
+
+    /** The same route, naming the source by {@code collection_id} (the route boundary resolves it to its label, RDR-229 P3.5a). */
+    Renamed renameById(String token, long collectionId, String newName, Map<String, String> extra) throws Exception {
+        var req = MAPPER.createObjectNode().put("collection_id", collectionId).put("new_name", newName);
+        extra.forEach(req::put);
+        return post(token, req);
+    }
+
+    /** The engine under test, for a test that sets the route boundary's seams ({@code collectionSelectorFilter().testHooks}). */
+    NexusService service() {
+        return service;
+    }
+
+    private Renamed post(String token, com.fasterxml.jackson.databind.node.ObjectNode req) throws Exception {
         HttpResponse<String> r = call("POST", "/v1/catalog/collections/rename", token, MAPPER.writeValueAsString(req));
         String reason = null;
         String missing = null;

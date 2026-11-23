@@ -77,15 +77,21 @@ public final class CollectionTombstones {
      * label (the rename repoints them) and every row whose {@code superseded_by_id} is the id of a row named {@code newName} (repointed after that row's delete),
      * whatever id the tombstone carries: a self-pointing or unstamped one is updated too. All of them are taken in the one statement in {@code collection_id}
      * order, so none is locked later out of order (linda's census, items 3 and pass 2).
+     *
+     * <p>{@code sourceId}, when the request named the source by id, adds the row of that id to the same statement (an OR in the predicate, no second lock
+     * statement), so the row the request meant is taken in {@code collection_id} order with the rest even when its label is no longer {@code oldName};
+     * null for a request by label.
      */
-    static void lockRowsOfOneRowRename(DSLContext ctx, String tenant, String oldName, String newName) {
+    static void lockRowsOfOneRowRename(DSLContext ctx, String tenant, String oldName, String newName, Long sourceId) {
         var target = CATALOG_COLLECTIONS.as("target");
-        lockRowsWhere(ctx, tenant,
-            CATALOG_COLLECTIONS.NAME.in(oldName, newName)
-                .or(CATALOG_COLLECTIONS.SUPERSEDED_BY.in(oldName, newName))
-                .or(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.in(ctx.select(target.COLLECTION_ID).from(target)
-                    .where(target.TENANT_ID.eq(tenant).and(target.NAME.eq(newName))))),
-            oldName + "," + newName);
+        org.jooq.Condition rows = CATALOG_COLLECTIONS.NAME.in(oldName, newName)
+            .or(CATALOG_COLLECTIONS.SUPERSEDED_BY.in(oldName, newName))
+            .or(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.in(ctx.select(target.COLLECTION_ID).from(target)
+                .where(target.TENANT_ID.eq(tenant).and(target.NAME.eq(newName)))));
+        if (sourceId != null) {
+            rows = rows.or(CATALOG_COLLECTIONS.COLLECTION_ID.eq(sourceId));
+        }
+        lockRowsWhere(ctx, tenant, rows, (sourceId == null ? "" : "#" + sourceId + ",") + oldName + "," + newName);
     }
 
     private static void lockRowsWhere(DSLContext ctx, String tenant, org.jooq.Condition which, String described) {
