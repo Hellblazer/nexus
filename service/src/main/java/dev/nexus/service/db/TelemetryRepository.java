@@ -652,12 +652,10 @@ public final class TelemetryRepository {
      * collection, so the check is the rule, not a lookup.
      */
     public Map<String, Integer> renameCollection(String tenant, String oldName, String newName) {
-        renameGuard.requireRenameAllowed();   // RDR-229 P3.5a: refused from gate 3 until the one-row rename can run
         CollectionLabel.validateUserLabel(newName);
         // RDR-210 Phase 6 Step 2 (bead nexus-f98bg): one transaction for the guard and both updates, so a
         // refusal leaves neither table touched. Refused while a re-embed job holds either name.
-        return tenantScope.withTenant(tenant, ctx -> {
-            renameGuard.requireRenameAllowed(ctx);   // RDR-229 P3.5a D2: first, under the rename lock the latch write takes
+        return renameGuard.runRename(tenantScope, tenant, ctx -> {
             CatalogRepository.refuseUnderReembedJob(ctx, tenant, "rename", oldName, newName);
             int searchCount = ctx.update(SEARCH_TELEMETRY)
                 .set(SEARCH_TELEMETRY.COLLECTION, newName)
@@ -670,6 +668,9 @@ public final class TelemetryRepository {
                 .where(HOOK_FAILURES.COLLECTION.eq(oldName))
                 .execute();
             return Map.of("search_telemetry", searchCount, "hook_failures", hookCount);
+        }, ctx -> {
+            RenameNoOpActivity.record("telemetry", oldName, newName);   // the registry rename moved the label: nothing to rewrite
+            return Map.of("search_telemetry", 0, "hook_failures", 0);
         });
     }
 

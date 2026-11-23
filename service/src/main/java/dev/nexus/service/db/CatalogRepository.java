@@ -10908,12 +10908,11 @@ public final class CatalogRepository {
 
     /**
      * {@link #renameCollection(String, String, String, String, String, String, String)}, answering the renamed row ({@link RenameOutcome}) too.
-     * The one rename primitive: refused from gate 3 until the one-row rename can run ({@link RenameRefusedException}, at entry and again in the transaction).
+     * The one rename primitive: {@link RenameGuard#runRename} decides its path in its transaction ({@link RenameRefusedException} from gate 3 until the one-row rename can run).
      */
     public RenameOutcome renameCollectionOutcome(String tenant, String oldName, String newName,
                                                  String expectedTargetSupersededBy, String newContentType,
                                                  String newOwnerId, String newNameEmbeddingModel) {
-        renameGuard.requireRenameAllowed();
         // nexus-wbfpw.71: a rename re-homes chunks and registry rows with no audit row, so it is refused on a
         // quarantine collection, as source or as target (the sanctioned verbs are restore and expiry).
         // RDR-229 P2.5: each end is judged by its row (registry cache, else one single-column read); an end with
@@ -11424,8 +11423,7 @@ public final class CatalogRepository {
         // nexus-wbfpw.66: UPDATEs catalog_document_chunks.collection, which fires
         // vectors-021-3's chunk-locking trigger; whole transaction retried on 40P01. `counts` is
         // built inside the lambda, so each attempt starts from an empty map.
-        return manifestWriteTxn(tenant, "catalog.renameCollection " + oldName, ctx -> {
-            renameGuard.requireRenameAllowed(ctx);   // RDR-229 P3.5a D2: first, under the rename lock the latch write takes
+        return renameGuard.runRename(work -> manifestWriteTxn(tenant, "catalog.renameCollection " + oldName, work), ctx -> {
             Map<String, Integer> counts = new LinkedHashMap<>();
             // nexus-11gh6 rev 2 §3.2 (Hal Q1: gate the Java collection-move
             // paths in this bead). The rename below bulk-repoints
@@ -11727,7 +11725,7 @@ public final class CatalogRepository {
             // it), and carried out with the result; a retried attempt overwrites it.
             epochOut[0] = CatalogEpoch.of(ctx, tenant).orElse(null);
             return counts;
-        });
+        }, ctx -> renameGuard.oneRowCounts(ctx, tenant, oldName, newName, epochOut));   // P3.7's OneRowRename; fail-closed until it is wired
     }
 
     // ══════════════════════════════════════════════════════════════════════════

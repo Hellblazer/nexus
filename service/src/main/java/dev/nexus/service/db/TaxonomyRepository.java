@@ -1674,10 +1674,8 @@ public final class TaxonomyRepository {
      * (n3hhc's class: a route that writes its target with no label check).
      */
     public Map<String, Integer> renameCollection(String tenant, String oldCol, String newCol) {
-        renameGuard.requireRenameAllowed();   // RDR-229 P3.5a: refused from gate 3 until the one-row rename can run
         CollectionLabel.validateUserLabel(newCol);
-        return tenantScope.withTenant(tenant, ctx -> {
-            renameGuard.requireRenameAllowed(ctx);   // RDR-229 P3.5a D2: first, under the rename lock the latch write takes
+        return renameGuard.runRename(tenantScope, tenant, ctx -> {
             // RDR-210 Phase 6 Step 2 (bead nexus-f98bg): refused while a re-embed job holds either name.
             CatalogRepository.refuseUnderReembedJob(ctx, tenant, "rename", oldCol, newCol);
             // RDR-164 P1a: the new collection name must be registered before the denorm
@@ -1708,6 +1706,9 @@ public final class TaxonomyRepository {
                 .where(TAXONOMY_META.COLLECTION.eq(oldCol))
                 .execute();
             return Map.of("topics", topics, "assignments", assignments, "meta", meta);
+        }, ctx -> {
+            RenameNoOpActivity.record("taxonomy", oldCol, newCol);   // the registry rename moved the label: nothing to rewrite
+            return Map.of("topics", 0, "assignments", 0, "meta", 0);
         });
     }
 

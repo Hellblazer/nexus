@@ -677,8 +677,8 @@ public final class NexusService {
                         dev.nexus.service.reembed.ReembedRunner.Settings reembedSettings,
                         dev.nexus.service.datamove.Gate3 gate3,
                         dev.nexus.service.datamove.RenameReadiness renameReadiness) throws IOException {
-        // RDR-229 P3.5a: the one rename refusal, over the gate-3 signal and the rename readiness (each read per call).
-        var renameGuard = new dev.nexus.service.db.RenameGuard(gate3, renameReadiness);
+        // RDR-229 P3.5a: the one rename entry point (RenameGuard.runRename), over the rename readiness and the catalog's one-row rename (P3.7 supplies its own here).
+        var renameGuard = new dev.nexus.service.db.RenameGuard(renameReadiness, dev.nexus.service.db.OneRowRename.failClosed());
         // Before anything binds or touches the database: a refused configuration must not half-start.
         verifyTenantResetRouteBind(env);
         final boolean tenantResetRoute = tenantResetRouteEnabled(env);

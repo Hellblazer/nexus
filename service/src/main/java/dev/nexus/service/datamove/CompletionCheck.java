@@ -376,11 +376,12 @@ public final class CompletionCheck {
     }
 
     /**
-     * The seam the latch write goes through (P3.7, wren's critic): {@code writeRow} is the row write alone. The default runs it at once
-     * ({@link #IMMEDIATE}); P3.7 passes one that takes its rename write lock, waits for in-flight renames, runs {@code writeRow}, then flips its
-     * own regime, all under the lock. The in-process latched flag ({@code CompletionBootWork#gate3Latched}) is set only after this returns
-     * without throwing. A writer that throws leaves the row (unless {@code writeRow} had already run) and the flag unlatched, and the next
-     * evaluation tries again. It must be safe to call again after a failure: a row that exists is not written twice ({@code ON CONFLICT DO NOTHING}).
+     * The seam the latch write goes through: {@code writeRow} is the row write alone, and the default runs it at once
+     * ({@link #IMMEDIATE}). The row write itself takes {@code RenameLatchLock} exclusive ({@link #insertLatch}), the one lock that
+     * orders it against every collection rename (linda's R-A ruling), so a writer given here needs no lock of its own. The in-process
+     * latched flag ({@code CompletionBootWork#gate3Latched}) is set only after this returns without throwing. A writer that throws
+     * leaves the row (unless {@code writeRow} had already run) and the flag unlatched, and the next evaluation tries again. It must be
+     * safe to call again after a failure: a row that exists is not written twice ({@code ON CONFLICT DO NOTHING}).
      */
     @FunctionalInterface
     public interface Gate3LatchWriter {
@@ -407,14 +408,31 @@ public final class CompletionCheck {
      * {@code INSERT INTO nexus.rdr229_gate_latch ... ON CONFLICT DO NOTHING}, typed. The first writer's row stands, {@code pci_off} included:
      * it records the posture the gate latched in (no per-collection index was required because {@code NX_SEARCH_PCI=0}).
      *
-     * <p>One transaction under {@link RenameLatchLock#exclusive} (RDR-229 P3.5a, ruling D2): the write waits for every collection rename in
-     * flight, and a rename that starts after it reads the row, so no rename commits after the latch unseen. The wait is bounded
-     * ({@link #LATCH_LOCK_TIMEOUT_MS}); a timeout throws, the row is not written, and the next evaluation tries again.
+     * <p>One transaction under {@link dev.nexus.service.db.RenameLatchLock#exclusive} (RDR-229 P3.5a, ruling D2): the write waits for every
+     * collection rename in flight, and a rename that starts after it reads the row, so no rename commits after the latch unseen. The
+     * wait is bounded by {@link #LATCH_LOCK_TIMEOUT_MS}; on a timeout this throws ({@code 55P03}), the row is not written, and the next
+     * evaluation of the completion check tries again.
+     *
+     * <p><b>Starvation.</b> PostgreSQL queues a waiting exclusive request ahead of every shared request that arrives after it, so the
+     * write waits only for the renames that were in flight when it queued, and a rename that starts while it waits queues behind it
+     * (a stall of at most the bound, for renames, not an unbounded one). It can therefore starve only if, on every attempt, some rename
+     * that began before the attempt is still running when the bound passes: a rename longer than the bound, overlapping each pass. Gate
+     * 3 latches once per install and attempts are a pass apart, so that needs a long rename at the same point on each pass; until the
+     * row is written every rename is the name path, so none is ever blocked for more than the bound. The bound is 10 s so a stuck
+     * rename costs the others at most that, and is not tuned to the longest rename.
+     *
+     * <p><b>The {@code ctx} must not be inside an outer transaction</b> ({@code latchOnCtx} included): the transaction here would be a
+     * savepoint, and the advisory lock, taken in it, would outlive it until the outer one ends, holding every rename behind it.
      */
     public static void insertLatch(DSLContext ctx, String gate, String engineVersion, boolean pciOff) {
+        insertLatch(ctx, gate, engineVersion, pciOff, LATCH_LOCK_TIMEOUT_MS);
+    }
+
+    /** {@link #insertLatch(DSLContext, String, String, boolean)} with the lock wait bound given, in milliseconds as the GUC text. */
+    public static void insertLatch(DSLContext ctx, String gate, String engineVersion, boolean pciOff, String lockTimeoutMs) {
         ctx.transaction(cfg -> {
             DSLContext tx = cfg.dsl();
-            tx.select(DSL.function("set_config", String.class, DSL.val("lock_timeout"), DSL.val(LATCH_LOCK_TIMEOUT_MS), DSL.val(true))).fetch();
+            tx.select(DSL.function("set_config", String.class, DSL.val("lock_timeout"), DSL.val(lockTimeoutMs), DSL.val(true))).fetch();
             dev.nexus.service.db.RenameLatchLock.exclusive(tx);
             tx.insertInto(LATCH, LATCH_GATE, DSL.field(DSL.name("latched_at"), OffsetDateTime.class),
                     DSL.field(DSL.name("engine_version"), String.class), LATCH_PCI_OFF)
@@ -423,15 +441,18 @@ public final class CompletionCheck {
         });
     }
 
-    /** How long the latch write waits for in-flight renames (and for their commit), in milliseconds, as the GUC text. */
-    static final String LATCH_LOCK_TIMEOUT_MS = "60000";
+    /** How long the latch write waits for in-flight renames, in milliseconds, as the GUC text (see the starvation note above). */
+    static final String LATCH_LOCK_TIMEOUT_MS = "10000";
 
     /**
      * The latch row of {@code gate}: empty when there is none (or the table does not exist yet), else its {@code pci_off}. A failed read throws:
      * unknown is never "not latched".
      */
     public static Optional<Boolean> readLatch(DSLContext ctx, String gate) {
-        return readLatch(ctx, tablesPresent(ctx), gate);
+        // one regclass lookup, not the listing of every table of the schema: a rename reads this on each call
+        boolean present = Boolean.TRUE.equals(ctx.select(DSL.field(DSL.function("to_regclass", Object.class,
+            DSL.val("nexus.rdr229_gate_latch")).isNotNull())).fetchOne(0, Boolean.class));
+        return readLatch(ctx, present ? Set.of("rdr229_gate_latch") : Set.of(), gate);
     }
 
     static Optional<Boolean> readLatch(DSLContext ctx, Set<String> tables, String gate) {

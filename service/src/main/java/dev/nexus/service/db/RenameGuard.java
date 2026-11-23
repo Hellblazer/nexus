@@ -3,116 +3,106 @@
 package dev.nexus.service.db;
 
 import dev.nexus.service.datamove.CompletionCheck;
-import dev.nexus.service.datamove.Gate3;
 import dev.nexus.service.datamove.RenameReadiness;
 import org.jooq.DSLContext;
+import org.jooq.impl.DSL;
+
+import java.util.Map;
+import java.util.Objects;
+import java.util.function.Function;
 
 /**
- * The rename refusal of RDR-229 P3.5a (bead nexus-p2m1x.23), the one object every collection-rename primitive takes by
- * constructor: {@code CatalogRepository.renameCollection} and the rename of each per-store repository (chash, taxonomy,
- * telemetry, aspects, highlights). Linda's ruling 3 (2026-11-22): the refusal lives in the shared primitive, so each entry
- * point that rewrites a collection name has it, an internal caller included.
+ * The one entry point of every collection rename, RDR-229 P3.5a (bead nexus-p2m1x.23; linda's rulings 3, D2 and R-A): the object
+ * {@code CatalogRepository.renameCollectionTxn} and the rename of each per-store repository (chash, taxonomy, telemetry, aspects,
+ * highlights) take by constructor, and the only way any of them reaches the rename it runs.
  *
- * <p>From gate 3 ({@link Gate3}) until the one-row rename can run ({@link RenameReadiness}: the name-key drop move complete and
- * every P3.5b changeset applied) a rename is refused with {@link RenameRefusedException}, naming the move or the restart.
- * Before gate 3 it is the name path and nothing here is consulted. Both inputs are read on each call, never cached, so the
- * refusal follows gate 3 with no restart.
+ * <p>{@link #runRename} opens the rename's transaction (the caller's tenant stamp), and as the first statements of it takes
+ * {@link RenameLatchLock} shared, asserts the transaction runs at READ COMMITTED, and reads the gate 3 latch row. The row alone
+ * decides, and the matching body runs in that same transaction:
+ * <ul>
+ * <li>no row: the name path ({@code nameBody}, today's rename, which gives the collection a new id);</li>
+ * <li>the row and {@link RenameReadiness} complete: the one-row regime ({@code oneRowBody});</li>
+ * <li>the row and readiness not complete: {@link RenameRefusedException}, 409 {@code rename_refused} naming the missing condition.</li>
+ * </ul>
+ * The latch write takes the same lock exclusive ({@code CompletionCheck#insertLatch}), so a rename either committed before the row was
+ * written or reads it. There is no check outside the transaction: a decision made before the lock can be stale by the time the rename
+ * commits (ruling D2), so none exists. {@link #open()} runs the name body with no lock and no read: what a repository built without a
+ * guard gets, for the callers and tests that predate P3.5a.
  *
- * <p>Two checks, because the first cannot be the last (linda's ruling D2): {@link #requireRenameAllowed()} runs at method entry,
- * outside the rename's transaction, so a rename that passed it could commit after the latch row was written.
- * {@link #requireRenameAllowed(DSLContext)} runs inside the rename's transaction under {@link RenameLatchLock}, which the latch write
- * takes exclusive: a rename either committed before the row was written or reads the row and is refused the same way. Every rename
- * primitive calls both; the first is the early answer, the second the authority.
+ * <p>The in-process gate 3 signal plays no part: it is seeded from the row at boot and set after the row commits, so it can only
+ * lag the row, and the one-row window opens only once the row is committed.
  *
- * <p>{@link #open()} never refuses: what a repository built without a guard gets, so the callers and tests that predate P3.5a
- * are unchanged.
+ * <p>One public constructor, {@code (readiness, oneRowRename)}: P3.7 supplies its catalog rename ({@link OneRowRename}) where
+ * {@code NexusService} builds the guard.
  */
 public final class RenameGuard {
 
-    private static final RenameGuard OPEN = new RenameGuard(Gate3.never(), RenameReadiness.ready(), false);
+    private static final RenameGuard OPEN = new RenameGuard(RenameReadiness.ready(), OneRowRename.failClosed(), false);
 
-    private final Gate3 gate3;
     private final RenameReadiness readiness;
+    private final OneRowRename oneRowRename;
     /** False for {@link #open()}: it never refuses, so its transactions take no lock and read no latch row. */
-    private final boolean recheckInTransaction;
+    private final boolean enforcing;
 
-    public RenameGuard(Gate3 gate3, RenameReadiness readiness) {
-        this(gate3, readiness, true);
+    public RenameGuard(RenameReadiness readiness, OneRowRename oneRowRename) {
+        this(readiness, oneRowRename, true);
     }
 
-    private RenameGuard(Gate3 gate3, RenameReadiness readiness, boolean recheckInTransaction) {
-        this.gate3 = java.util.Objects.requireNonNull(gate3, "gate3");
-        this.readiness = java.util.Objects.requireNonNull(readiness, "readiness");
-        this.recheckInTransaction = recheckInTransaction;
+    private RenameGuard(RenameReadiness readiness, OneRowRename oneRowRename, boolean enforcing) {
+        this.readiness = Objects.requireNonNull(readiness, "readiness");
+        this.oneRowRename = Objects.requireNonNull(oneRowRename, "oneRowRename");
+        this.enforcing = enforcing;
     }
 
-    /** A guard that never refuses. */
+    /** A guard that never refuses and has no one-row regime. */
     public static RenameGuard open() {
         return OPEN;
     }
 
-    /**
-     * @throws RenameRefusedException when gate 3 holds and the one-row rename cannot run yet
-     */
-    public void requireRenameAllowed() {
-        if (!gate3.holds()) {
-            return;
-        }
-        RenameReadiness.Missing missing = readiness.missing();
-        if (missing != RenameReadiness.Missing.NONE) {
-            throw new RenameRefusedException(missing);
-        }
-    }
-
-    /**
-     * The check inside the rename's own transaction ({@code ctx} is that transaction's context): call it FIRST there, before any other
-     * lock or write. It takes {@link RenameLatchLock} shared, then reads the latch row of gate 3, so the answer is the committed
-     * state after any latch write that was in flight, never a read from before it. Refused when gate 3 holds (the in-process latch or
-     * the row) and the one-row rename cannot run yet, with the same {@link RenameRefusedException} as the entry check; the transaction
-     * rolls back with nothing written.
-     *
-     * @throws RenameRefusedException when gate 3 holds and the one-row rename cannot run yet
-     */
-    public void requireRenameAllowed(DSLContext ctx) {
-        if (!recheckInTransaction) {
-            return;
-        }
-        RenameLatchLock.shared(ctx);
-        if (!gate3.holds() && CompletionCheck.readLatch(ctx, CompletionCheck.GATE3).isEmpty()) {
-            return;
-        }
-        RenameReadiness.Missing missing = readiness.missing();
-        if (missing != RenameReadiness.Missing.NONE) {
-            throw new RenameRefusedException(missing);
-        }
-    }
-
-    /** Which rename a transaction may run, as {@link #decideRenamePath(DSLContext)} decides it under {@link RenameLatchLock}. */
+    /** Which rename a transaction runs, as decided from the latch row. */
     public enum RenamePath {
-        /** No latch row: the name path (today's rename, a new id). */
+        /** No latch row: the name path. */
         NAME_PATH,
-        /** The latch row exists and readiness is complete: P3.7's one-row rename, which keeps the id. */
+        /** The latch row exists and readiness is complete: the one-row regime. */
         ONE_ROW
     }
 
     /**
-     * P3.7's dispatcher decision (wren, 2026-11-23), made as the FIRST statement of the caller's transaction: take
-     * {@link RenameLatchLock} shared, then read the gate 3 latch row. No row: {@link RenamePath#NAME_PATH}. The row and readiness
-     * {@code NONE}: {@link RenamePath#ONE_ROW}. The row and readiness not {@code NONE}: refused with the same
-     * {@link RenameRefusedException} as {@link #requireRenameAllowed(DSLContext)}. It branches on the row only, never on the
-     * in-process {@link Gate3}, so the one-row window opens only once the row is committed; in production the two agree, since the
-     * latched Gate3 is seeded from the row at boot and set after the row's commit. {@link #open()} answers the name path and takes
-     * no lock. Taking the shared lock again later in the same transaction (the name path's own
-     * {@link #requireRenameAllowed(DSLContext)}) is harmless.
+     * Runs a rename. {@code transaction} opens the transaction and runs the work it is given in it, with the tenant stamped (for
+     * example {@code work -> tenantScope.withTenant(tenant, work)}, or a retrying wrapper around that); each call of it is one
+     * attempt, and the decision is made afresh in each.
      *
      * @throws RenameRefusedException when the latch row exists and the one-row rename cannot run yet
+     * @throws IllegalStateException  when the transaction is not READ COMMITTED (the read of the row would be stale)
      */
-    public RenamePath decideRenamePath(DSLContext ctx) {
-        if (!recheckInTransaction) {
-            return RenamePath.NAME_PATH;
+    public <T> T runRename(Function<Function<DSLContext, T>, T> transaction, Function<DSLContext, T> nameBody,
+                           Function<DSLContext, T> oneRowBody) {
+        if (!enforcing) {
+            return transaction.apply(nameBody);
         }
-        RenameLatchLock.shared(ctx);
-        if (CompletionCheck.readLatch(ctx, CompletionCheck.GATE3).isEmpty()) {
+        return transaction.apply(ctx -> {
+            RenameLatchLock.shared(ctx);
+            requireReadCommitted(ctx);
+            boolean latched = CompletionCheck.readLatch(ctx, CompletionCheck.GATE3).isPresent();
+            return switch (decide(latched, readiness)) {
+                case NAME_PATH -> nameBody.apply(ctx);
+                case ONE_ROW -> oneRowBody.apply(ctx);
+            };
+        });
+    }
+
+    /** {@link #runRename(Function, Function, Function)} in a plain tenant transaction of {@code scope}. */
+    public <T> T runRename(TenantScope scope, String tenant, Function<DSLContext, T> nameBody, Function<DSLContext, T> oneRowBody) {
+        return runRename(work -> scope.withTenant(tenant, work), nameBody, oneRowBody);
+    }
+
+    /**
+     * The decision, from the latch row and the readiness alone.
+     *
+     * @throws RenameRefusedException when the row exists and readiness is not complete
+     */
+    static RenamePath decide(boolean latchRow, RenameReadiness readiness) {
+        if (!latchRow) {
             return RenamePath.NAME_PATH;
         }
         RenameReadiness.Missing missing = readiness.missing();
@@ -122,11 +112,26 @@ public final class RenameGuard {
         return RenamePath.ONE_ROW;
     }
 
+    /** Fails closed: under REPEATABLE READ the snapshot is taken before the lock wait, so the read of the row could predate the latch write. */
+    private static void requireReadCommitted(DSLContext ctx) {
+        String level = ctx.select(DSL.function("current_setting", String.class, DSL.val("transaction_isolation"))).fetchOne(0, String.class);
+        if (!"read committed".equals(level)) {
+            throw new IllegalStateException("a collection rename needs a READ COMMITTED transaction to read the gate 3 latch row after "
+                + "the rename lock; this one is '" + level + "'");
+        }
+    }
+
+    /** The catalog's one-row body: P3.7's {@link OneRowRename}, its epoch recorded for the route, its counts answered. */
+    public Map<String, Integer> oneRowCounts(DSLContext ctx, String tenant, String oldLabel, String newLabel, String[] epochOut) {
+        RenameOutcome outcome = oneRowRename.rename(ctx, tenant, oldLabel, newLabel);
+        epochOut[0] = outcome.catalogEpoch();
+        return outcome.counts();
+    }
+
     /**
      * Whether a collection's id survives a rename on this install (R6's {@code ids_stable}, the key P3.5a's rename response
-     * carries). Always false in this tree: the rename it runs is the name path, which gives the collection a new id, whatever
-     * gate 3 says. P3.7's one-row rename keeps the id and is what makes this true (gate 3 holding, the drop move complete, every
-     * P3.5b changeset applied, {@link #requireRenameAllowed()} passing); it changes this one method.
+     * carries). Always false in this tree: the rename it runs is the name path, which gives the collection a new id. P3.7's one-row
+     * rename keeps the id and is what makes this true; it changes this one method.
      */
     public boolean idsStable() {
         return false;
