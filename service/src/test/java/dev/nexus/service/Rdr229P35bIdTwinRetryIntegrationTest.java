@@ -27,6 +27,7 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -79,7 +80,7 @@ class Rdr229P35bIdTwinRetryIntegrationTest {
     private static final String CHUNK_OTHER_KEY = "idx_p35b_chunks_other_uq";
     private static final Pattern VIOLATED = Pattern.compile("unique constraint \"([^\"]+)\"");
 
-    private enum Mode { RETRY_SUCCEEDS, RACER_STAYS, OTHER_INDEX }
+    private enum Mode { RETRY_SUCCEEDS, RACER_STAYS, OTHER_INDEX, TRIGGER_ON }
 
     private enum MoveFn { GC_BOUNDED, REAPER, GC }
 
@@ -186,6 +187,24 @@ class Rdr229P35bIdTwinRetryIntegrationTest {
     @Test
     void stampOnManifestUpdate_aConflictOnOtherColumnsIsRaisedAtOnce() throws Exception {
         orphanRace("up-ot", Trigger.MANIFEST_UPDATE, Mode.OTHER_INDEX);
+    }
+
+    // ---- the same race in production, with vectors-079's trigger on --------------------------------------------------------
+
+    /**
+     * Production runs with the child-row name trigger on, so a stale-name writer's record is stored under the chunk's own name and no longer
+     * holds a name of its own: the race of the cases above (a record of another name and the same id key) cannot be set up. Its record meets the
+     * trigger's upsert on the NAME key, the {@code ON CONFLICT} arbiter, which updates it in place: no 23505 for the retry to catch or to miss,
+     * and no attempt beyond the first.
+     */
+    @Test
+    void stampOnManifestDelete_withTheNameTriggerOn_aStaleNameRecordIsTakenByTheNameKey() throws Exception {
+        orphanRace("dl-on", Trigger.MANIFEST_DELETE, Mode.TRIGGER_ON);
+    }
+
+    @Test
+    void stampOnManifestUpdate_withTheNameTriggerOn_aStaleNameRecordIsTakenByTheNameKey() throws Exception {
+        orphanRace("up-on", Trigger.MANIFEST_UPDATE, Mode.TRIGGER_ON);
     }
 
     // ---- the rename rule of the manifest UPDATE trigger ---------------------------------------------------------------------
@@ -352,10 +371,20 @@ class Rdr229P35bIdTwinRetryIntegrationTest {
             String model = PgContainerHelper.collectionModel(ctx, tenant, live);
             // vectors-079's trigger would store the racer's record under the chunk's own name (the live collection's), so the racer would
             // not hold the stale name the race needs; it is written with that trigger off, the state of a record written before P3.7
-            withTriggerOff(ctx, "chunk_orphaned_at", "trg_chunk_orphaned_at_name_from_chunk", () -> ctx.insertInto(CHUNK_ORPHANED_AT)
+            Supplier<Integer> racerInsert = () -> ctx.insertInto(CHUNK_ORPHANED_AT)
                 .set(CHUNK_ORPHANED_AT.TENANT_ID, tenant).set(CHUNK_ORPHANED_AT.COLLECTION, racer).set(CHUNK_ORPHANED_AT.COLLECTION_ID, ids[0])
                 .set(CHUNK_ORPHANED_AT.CHASH, bytes(x)).set(CHUNK_ORPHANED_AT.ORPHANED_AT, OffsetDateTime.now().minusDays(2))
-                .set(CHUNK_ORPHANED_AT.EMBEDDING_MODEL, model).execute());
+                .set(CHUNK_ORPHANED_AT.EMBEDDING_MODEL, model).execute();
+            if (mode == Mode.TRIGGER_ON) {
+                racerInsert.get();   // production: the trigger stores the record under the chunk's name
+                assertThat(ctx.fetchCount(CHUNK_ORPHANED_AT, CHUNK_ORPHANED_AT.TENANT_ID.eq(tenant).and(CHUNK_ORPHANED_AT.COLLECTION.eq(racer))))
+                    .as("non-vacuity: the trigger took the stale name off the racer's record").isZero();
+                assertThat(ctx.fetchCount(CHUNK_ORPHANED_AT, CHUNK_ORPHANED_AT.TENANT_ID.eq(tenant).and(CHUNK_ORPHANED_AT.COLLECTION.eq(live))
+                        .and(CHUNK_ORPHANED_AT.COLLECTION_ID.eq(ids[0])).and(CHUNK_ORPHANED_AT.CHASH.eq(bytes(x)))))
+                    .as("non-vacuity: it is now the record of the chunk's own name and id, two days old").isEqualTo(1);
+            } else {
+                withTriggerOff(ctx, "chunk_orphaned_at", "trg_chunk_orphaned_at_name_from_chunk", racerInsert);
+            }
             if (mode == Mode.OTHER_INDEX) {
                 ctx.createUniqueIndexIfNotExists(DSL.name(indexName)).on(CHUNK_ORPHANED_AT, CHUNK_ORPHANED_AT.TENANT_ID,
                     CHUNK_ORPHANED_AT.COLLECTION_ID, CHUNK_ORPHANED_AT.CHASH, CHUNK_ORPHANED_AT.EMBEDDING_MODEL).execute();
@@ -363,6 +392,9 @@ class Rdr229P35bIdTwinRetryIntegrationTest {
                 // P3.4's id key, made here when P3.4 is not on this base
                 ctx.createUniqueIndexIfNotExists(DSL.name(indexName)).on(CHUNK_ORPHANED_AT, CHUNK_ORPHANED_AT.TENANT_ID,
                     CHUNK_ORPHANED_AT.COLLECTION_ID, CHUNK_ORPHANED_AT.CHASH).execute();
+            }
+            if (mode == Mode.TRIGGER_ON) {
+                return;   // no probe: with the trigger on the racer's row already holds the name the probe would insert
             }
             String probe = violatedBy(() -> ctx.insertInto(CHUNK_ORPHANED_AT)
                 .set(CHUNK_ORPHANED_AT.TENANT_ID, tenant).set(CHUNK_ORPHANED_AT.COLLECTION, live).set(CHUNK_ORPHANED_AT.COLLECTION_ID, ids[0])
@@ -404,6 +436,16 @@ class Rdr229P35bIdTwinRetryIntegrationTest {
                         assertThat(attempts(ctx)).as("at the first attempt, with no retry").isEqualTo(1L);
                         assertThat(record).isZero();
                         assertThat(own).isEqualTo(1);
+                    }
+                    case TRIGGER_ON -> {
+                        assertThat(refusal).as("the name key's arbiter takes the record: nothing is raised").isNull();
+                        assertThat(attempts(ctx)).as("one insert, no retry").isEqualTo(1L);
+                        assertThat(record).as("one record of the chunk's name and id").isEqualTo(1);
+                        assertThat(racerRows).isZero();
+                        assertThat(own).as("the statement took effect").isEqualTo(0);
+                        assertThat(ctx.fetchCount(CHUNK_ORPHANED_AT, CHUNK_ORPHANED_AT.TENANT_ID.eq(tenant).and(CHUNK_ORPHANED_AT.COLLECTION.eq(live))
+                                .and(CHUNK_ORPHANED_AT.CHASH.eq(bytes(x))).and(CHUNK_ORPHANED_AT.ORPHANED_AT.gt(OffsetDateTime.now().minusHours(1)))))
+                            .as("the old record was refreshed in place (it was two days old)").isEqualTo(1);
                     }
                 }
             });
