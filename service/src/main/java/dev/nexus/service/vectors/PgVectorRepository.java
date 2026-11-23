@@ -3371,7 +3371,7 @@ public final class PgVectorRepository {
         }
         Throwable failed = failure.get();
         if (failed != null) {
-            throw fanoutFailure(failed);
+            throw SearchFanoutFailures.of(failed);
         }
         // Arms the budget stopped from launching: reported per collection, never silently empty.
         for (int slot : runnable) {
@@ -3766,51 +3766,6 @@ public final class PgVectorRepository {
                 RequestDeadlineExceededException.DEFAULT_RETRY_AFTER_SECONDS);
         }
         throw new FanoutBudgetSpentException("fan-out budget spent waiting for a search fan-out arm slot");
-    }
-
-    /**
-     * SQLSTATEs that mean "try again", for the failures that are NOT isolated per collection: a
-     * statement timeout (57014) is settled per arm before it gets here. Class 08 connection
-     * exceptions, 57P operator intervention (shutdown, cannot-connect-now), 40001 and 40P01
-     * (serialization and deadlock, retryable by definition), class 53 insufficient resources
-     * (53100 disk full, 53200 out of memory, 53300 too many connections) and 55P03 (lock not
-     * available).
-     */
-    static boolean isTransientSqlState(String state) {
-        return state != null && (state.startsWith("57P") || state.startsWith("08") || state.startsWith("53")
-            || state.equals("40001") || state.equals("40P01") || state.equals("55P03"));
-    }
-
-    /**
-     * Classify the failure that stopped a fan-out. Pool or admission exhaustion and an expired
-     * request budget already carry the typed shapes the handler maps to 503, so they pass through
-     * unchanged; any other transient SQL failure becomes a {@link SearchFanoutTransientException},
-     * also 503. Anything else is a request-level failure and propagates as it is.
-     */
-    private static RuntimeException fanoutFailure(Throwable failed) {
-        if (failed instanceof Error err) {
-            throw err;
-        }
-        RuntimeException re = failed instanceof RuntimeException r ? r : new RuntimeException(failed);
-        if (re instanceof RequestDeadlineExceededException) {
-            return re;
-        }
-        String sqlState = null;
-        int depth = 0;
-        for (Throwable c = re; c != null && depth < 32; c = c.getCause(), depth++) {
-            if (c instanceof java.sql.SQLTransientConnectionException) {
-                return re;
-            }
-            if (sqlState == null && c instanceof java.sql.SQLException sql) {
-                sqlState = sql.getSQLState();
-            }
-        }
-        if (isTransientSqlState(sqlState)) {
-            return new SearchFanoutTransientException(
-                "a per-collection search statement failed transiently (SQLSTATE " + sqlState
-                + "); no partial results are returned, retry", sqlState, re);
-        }
-        return re;
     }
 
     /**
