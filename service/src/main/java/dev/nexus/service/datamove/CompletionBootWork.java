@@ -89,30 +89,13 @@ public final class CompletionBootWork implements AutoCloseable {
     private ScheduledExecutorService scheduler;
 
     /**
-     * @param gate3 P3.4's id-index coverage ({@link CompletionCheck.Gate3Source#NOT_INSTALLED} until it ships)
-     */
-    public CompletionBootWork(BootWorkRegistry registry, AdminConnection admin, CompletionCheck.ReadSet readSet,
-                              CompletionCheck.Gate3Source gate3) {
-        this(registry, admin, readSet, gate3, java.util.List.of());
-    }
-
-    /** As above with the further conditions gate 3 needs ({@link CompletionCheck#evaluate(DSLContext, CompletionCheck.ReadSet, CompletionCheck.Gate3Source, CompletionCheck.ViolatorCounter, java.util.List)}). */
-    public CompletionBootWork(BootWorkRegistry registry, AdminConnection admin, CompletionCheck.ReadSet readSet,
-                              CompletionCheck.Gate3Source gate3, java.util.List<java.util.function.Predicate<DSLContext>> gate3Extras) {
-        this(registry, admin, readSet, gate3, gate3Extras, CompletionCheck.Gate3LatchWriter.IMMEDIATE);
-    }
-
-    /** As above with the seam the latch row write goes through ({@link CompletionCheck.Gate3LatchWriter}); P3.7 puts it under its rename write lock. */
-    public CompletionBootWork(BootWorkRegistry registry, AdminConnection admin, CompletionCheck.ReadSet readSet,
-                              CompletionCheck.Gate3Source gate3, java.util.List<java.util.function.Predicate<DSLContext>> gate3Extras,
-                              CompletionCheck.Gate3LatchWriter latchWriter) {
-        this(registry, admin, readSet, gate3, gate3Extras, latchWriter, Gate3Latch.readAtBoot(admin));
-    }
-
-    /**
-     * As above with the latch as the engine already read it at boot ({@link Gate3Latch#readAtBoot}, before the listener binds). The accessors
-     * {@link #gate3Latched} and {@link #gate3LatchedPciOff} answer from it at once, before any sample; the constructors without it read it themselves,
-     * synchronously, and throw when the database cannot answer.
+     * No constructor reads the database for the latch: the caller hands in the latch state it read ({@link Gate3Latch#readAtBoot}, which {@code Main}
+     * calls before the listener binds, or {@link Gate3Latch#of} in a test), so building a reporter never blocks and never defaults to "not latched"
+     * on its own. {@link #gate3Latched} and {@link #gate3LatchedPciOff} answer from it at once, before any sample.
+     *
+     * @param gate3 P3.4's id-index coverage ({@link CompletionCheck.Gate3Source#NOT_INSTALLED} when none)
+     * @param gate3Extras the further conditions gate 3 needs ({@link CompletionCheck#evaluate(DSLContext, CompletionCheck.ReadSet, CompletionCheck.Gate3Source, CompletionCheck.ViolatorCounter, java.util.List)})
+     * @param latchWriter the seam the latch row write goes through ({@link CompletionCheck.Gate3LatchWriter}); P3.7 puts it under its rename write lock
      */
     public CompletionBootWork(BootWorkRegistry registry, AdminConnection admin, CompletionCheck.ReadSet readSet,
                               CompletionCheck.Gate3Source gate3, java.util.List<java.util.function.Predicate<DSLContext>> gate3Extras,
@@ -131,36 +114,21 @@ public final class CompletionBootWork implements AutoCloseable {
     }
 
     /**
-     * The reporter a running engine starts: the boot read set ({@link CompletionCheck.ReadSet#boot()}); gate 3 is not installed unless the caller gives a source (P3.4).
-     * {@code Main} builds it only through here, so a test of this factory (and of {@code Main}'s one call to it) pins what boot reads.
+     * The reporter a running engine starts: the boot read set ({@link CompletionCheck.ReadSet#boot()}). {@code Main} builds it only through here, so
+     * a test of this factory (and of {@code Main}'s one call to it) pins what boot reads. It reads nothing from the database itself.
+     *
+     * @param bootLatch the latch {@code Main} read before the listener bound ({@link Gate3Latch#readAtBoot})
      */
-    public static CompletionBootWork atBoot(BootWorkRegistry registry, AdminConnection admin) {
-        return atBoot(registry, admin, CompletionCheck.Gate3Source.NOT_INSTALLED);
-    }
-
-    /** As above with gate 3's source: the PCI reconciler's id-index coverage (RDR-229 P3.4, {@code PciReconciler#gate3Source}). */
-    public static CompletionBootWork atBoot(BootWorkRegistry registry, AdminConnection admin, CompletionCheck.Gate3Source gate3) {
-        return atBoot(registry, admin, gate3, java.util.List.of());
-    }
-
-    /** As above with the further gate 3 conditions: the seam for {@code IdUniqueIndexPass.allValid} (linda 2026-11-22). */
-    public static CompletionBootWork atBoot(BootWorkRegistry registry, AdminConnection admin, CompletionCheck.Gate3Source gate3,
-                                            java.util.List<java.util.function.Predicate<DSLContext>> gate3Extras) {
-        return atBoot(registry, admin, gate3, gate3Extras, CompletionCheck.Gate3LatchWriter.IMMEDIATE);
-    }
-
-    /** As above with the latch write seam (RDR-229 P3.7): the writer receives the row write and runs it when it holds its lock. */
-    public static CompletionBootWork atBoot(BootWorkRegistry registry, AdminConnection admin, CompletionCheck.Gate3Source gate3,
-                                            java.util.List<java.util.function.Predicate<DSLContext>> gate3Extras,
-                                            CompletionCheck.Gate3LatchWriter latchWriter) {
-        return new CompletionBootWork(registry, admin, CompletionCheck.ReadSet.boot(), gate3, gate3Extras, latchWriter);
-    }
-
-    /** As above with the latch {@code Main} read before the listener bound ({@link Gate3Latch#readAtBoot}). */
     public static CompletionBootWork atBoot(BootWorkRegistry registry, AdminConnection admin, CompletionCheck.Gate3Source gate3,
                                             java.util.List<java.util.function.Predicate<DSLContext>> gate3Extras,
                                             CompletionCheck.Gate3LatchWriter latchWriter, Gate3Latch bootLatch) {
         return new CompletionBootWork(registry, admin, CompletionCheck.ReadSet.boot(), gate3, gate3Extras, latchWriter, bootLatch);
+    }
+
+    /** {@link #atBoot} with no gate 3 source (it cannot hold), no further conditions and the immediate latch writer: what a test of the boot wiring needs. */
+    public static CompletionBootWork atBoot(BootWorkRegistry registry, AdminConnection admin, Gate3Latch bootLatch) {
+        return atBoot(registry, admin, CompletionCheck.Gate3Source.NOT_INSTALLED, java.util.List.of(),
+            CompletionCheck.Gate3LatchWriter.IMMEDIATE, bootLatch);
     }
 
     /** The read set a database-backed reporter reads, or null for a test's injected reader. */
@@ -471,10 +439,6 @@ public final class CompletionBootWork implements AutoCloseable {
         }
 
         /**
-         * The latch write, on a session of its own: the check's session is read only at the server. One short session when gate 3 first holds
-         * ({@code INSERT ... ON CONFLICT DO NOTHING}); a failure is the check's to log, and the next read tries again.
-         */
-        /**
          * Once gate 3 has latched the latched value is all the readers go by, but {@code id_index_invalid} still comes from the coverage read: so it
          * is repeated at most every {@link #LATCHED_COVERAGE_PERIOD}, and an earlier answer (never an unknown one) is reused between. Before the
          * latch every sample reads.
@@ -494,6 +458,10 @@ public final class CompletionBootWork implements AutoCloseable {
             return read;
         }
 
+        /**
+         * The latch write, on a session of its own: the check's session is read only at the server. One short session when gate 3 first holds
+         * ({@code INSERT ... ON CONFLICT DO NOTHING}); a failure is the check's to log, and the next read tries again.
+         */
         private void writeLatch(DSLContext readCtx, String gate, boolean pciOff) {
             latchWriter.latch(() -> {
                 String version = dev.nexus.service.http.VersionHandler.resolveReleaseVersion();

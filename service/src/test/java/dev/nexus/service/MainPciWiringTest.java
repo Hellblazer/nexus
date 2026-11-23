@@ -524,7 +524,7 @@ class MainPciWiringTest {
         assertThat(src).as("a latch the check never read is never guessed: the reporter is handed the one read at boot")
             .contains("CompletionCheck.Gate3LatchWriter.IMMEDIATE, gate3Latch");
         assertThat(src).as("a latch written while PCI was off makes the reconciler build the id indexes first")
-            .contains("pciReconciler.buildIdIndexesFirstWhen(() -> completionCheck != null && completionCheck.gate3LatchedPciOff())");
+            .contains("pciReconciler.buildIdIndexesFirstWhen(() -> gate3Latch.pciOff() || completionCheck != null && completionCheck.gate3LatchedPciOff())");
         int gate = src.indexOf("pciReconciler.idBuildGate(");
         assertThat(gate).as("the id-build gate is wired").isPositive();
         assertThat(src.indexOf("var completionCheck = startCompletionBootWork(")).isLessThan(gate);
@@ -537,6 +537,10 @@ class MainPciWiringTest {
         assertThat(retireLambda.length()).as("bounded to the call").isLessThan(200);
         assertThat(retireLambda).as("the LATCHED value, never the live gate 3").contains("completionCheck.gate3Latched()")
             .doesNotContain(".gate3()");
+        assertThat(retireLambda).as("and the latch read at boot answers before the check exists (or when it never started)")
+            .contains("gate3Latch.latched() ||");
+        assertThat(retireLambda).as("and only an engine that took the singleton lock retires: with NX_ENGINE_SINGLETON_LOCK=off or a pooler a peer may serve names")
+            .contains("singletonLock != null &&");
     }
 
     /**
