@@ -46,7 +46,10 @@ class Rdr229P37OneRowDutiesTest {
             PgContainerHelper.insertCollection(ctx, tenant, sibling);
             long siblingId = Rdr229RenameChecks.registryId(ctx, tenant, sibling);
             Rdr229ChildNameWorld.chunk(ctx, tenant, sibling, siblingId, "minilm-l6-v2-384", 384, "held");
-            ctx.update(CHUNKS).set(CHUNKS.METADATA, org.jooq.JSONB.valueOf("{\"origin_collection\": \"" + a + "\", \"quarantined_at\": \"2026-01-01T00:00:00Z\"}"))
+            // from the latch the tag names the origin by id too (a row with no id is no sibling of the label's holder, linda 2026-11-23)
+            long originId = Rdr229RenameChecks.registryId(ctx, tenant, a);
+            ctx.update(CHUNKS).set(CHUNKS.METADATA, org.jooq.JSONB.valueOf("{\"origin_collection\": \"" + a + "\", \"origin_collection_id\": " + originId
+                    + ", \"quarantined_at\": \"2026-01-01T00:00:00Z\"}"))
                 .where(CHUNKS.TENANT_ID.eq(tenant)).and(CHUNKS.COLLECTION.eq(sibling)).execute();
             return null;
         });
