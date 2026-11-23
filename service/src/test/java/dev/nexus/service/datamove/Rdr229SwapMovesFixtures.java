@@ -141,10 +141,11 @@ abstract class Rdr229SwapMovesFixtures extends DataMoveIntegrationBase {
             }
         }
         // the per-leaf keys the swap adds to the leaves of chunks (nexus-p2m1x.21), named <leaf>_cid_fk and not adopted by a parent key
-        ctx().execute("DO $d$ DECLARE r record; BEGIN FOR r IN SELECT k.conrelid::pg_catalog.regclass AS rel, k.conname "
-            + "FROM pg_catalog.pg_constraint k JOIN pg_catalog.pg_partition_tree('nexus.chunks'::pg_catalog.regclass) pt ON pt.relid = k.conrelid "
-            + "WHERE pt.isleaf AND k.contype = 'f' AND k.conname LIKE '%" + Rdr229ChunksFk.LEAF_CONSTRAINT_SUFFIX + "' LOOP "
-            + "EXECUTE 'ALTER TABLE ' || r.rel || ' DROP CONSTRAINT ' || pg_catalog.quote_ident(r.conname); END LOOP; END $d$");
+        for (LeafFk f : leafFks()) {
+            if (f.name().endsWith(Rdr229ChunksFk.LEAF_CONSTRAINT_SUFFIX)) {
+                ctx().alterTable(table("nexus", f.leaf())).dropConstraintIfExists(DSL.name(f.name())).execute();
+            }
+        }
         IdKeyIndexProbe.reset(ctx());
     }
 
@@ -234,26 +235,73 @@ abstract class Rdr229SwapMovesFixtures extends DataMoveIntegrationBase {
         return moves(LABEL_F.eq(Rdr229ChunksFk.ADOPT_LABEL));
     }
 
+    /** The relation name of a {@code schema.name} the probes return. */
+    static String bare(String qualified) {
+        return qualified.substring(qualified.indexOf('.') + 1);
+    }
+
     /** The relation names of the leaves of nexus.chunks, sorted. */
     List<String> chunkLeaves() {
-        return ctx().resultQuery("SELECT c.relname FROM pg_catalog.pg_partition_tree('nexus.chunks'::pg_catalog.regclass) pt "
-            + "JOIN pg_catalog.pg_class c ON c.oid = pt.relid WHERE pt.isleaf ORDER BY c.relname").fetch(0, String.class);
+        return IdKeyIndexProbe.leaves(ctx(), IdKeyIndexProbe.CHUNKS).stream().map(Rdr229SwapMovesFixtures::bare).toList();
+    }
+
+    /** The relation names of the model partitions of nexus.chunks, between the parent and its leaves, sorted. */
+    List<String> chunkModelPartitions() {
+        return IdKeyIndexProbe.modelPartitions(ctx(), IdKeyIndexProbe.CHUNKS).stream().map(Rdr229SwapMovesFixtures::bare).toList();
     }
 
     /** The foreign keys of the leaves of chunks to the registry: leaf, name, validated, conparentid (0 when no parent key adopted it). */
     record LeafFk(String leaf, String name, boolean validated, long parentId) { }
 
     List<LeafFk> leafFks() {
-        return ctx().resultQuery("SELECT c.relname, k.conname, k.convalidated, k.conparentid::bigint "
-                + "FROM pg_catalog.pg_partition_tree('nexus.chunks'::pg_catalog.regclass) pt "
-                + "JOIN pg_catalog.pg_class c ON c.oid = pt.relid "
-                + "JOIN pg_catalog.pg_constraint k ON k.conrelid = pt.relid AND k.contype = 'f' "
-                + "AND k.confrelid = 'nexus.catalog_collections'::pg_catalog.regclass "
-                + "AND k.conkey = ARRAY[(SELECT a.attnum FROM pg_catalog.pg_attribute a WHERE a.attrelid = pt.relid AND a.attname = 'tenant_id'), "
-                + "(SELECT a.attnum FROM pg_catalog.pg_attribute a WHERE a.attrelid = pt.relid AND a.attname = 'collection_id'), "
-                + "(SELECT a.attnum FROM pg_catalog.pg_attribute a WHERE a.attrelid = pt.relid AND a.attname = 'embedding_model')]::pg_catalog.int2[] "
-                + "WHERE pt.isleaf ORDER BY c.relname, k.conname")
-            .fetch(r -> new LeafFk(r.get(0, String.class), r.get(1, String.class), r.get(2, Boolean.class), r.get(3, Long.class)));
+        return compositeKeysOn(chunkLeaves());
+    }
+
+    /** The foreign keys of the named nexus relations to the registry that are keyed on the composite's three columns, whatever their actions. */
+    List<LeafFk> compositeKeysOn(java.util.Collection<String> relations) {
+        var k = DSL.table(DSL.name("pg_catalog", "pg_constraint")).as("k");
+        var c = DSL.table(DSL.name("pg_catalog", "pg_class")).as("c");
+        var n = DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n");
+        var r = DSL.table(DSL.name("pg_catalog", "pg_class")).as("r");
+        Field<String> relname = DSL.field(DSL.name("c", "relname"), String.class);
+        Field<String> conname = DSL.field(DSL.name("k", "conname"), String.class);
+        Field<Boolean> validated = DSL.field(DSL.name("k", "convalidated"), Boolean.class);
+        Field<Long> parent = DSL.field(DSL.name("k", "conparentid"), Long.class);
+        Field<String> def = DSL.function(DSL.name("pg_catalog", "pg_get_constraintdef"), String.class, DSL.field(DSL.name("k", "oid")));
+        return ctx().select(relname, conname, validated, parent, def).from(k)
+            .join(c).on(DSL.field(DSL.name("c", "oid")).eq(DSL.field(DSL.name("k", "conrelid"))))
+            .join(n).on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("c", "relnamespace"))))
+            .join(r).on(DSL.field(DSL.name("r", "oid")).eq(DSL.field(DSL.name("k", "confrelid"))))
+            .where(DSL.field(DSL.name("n", "nspname"), String.class).eq("nexus"))
+            .and(relname.in(relations))
+            .and(DSL.field(DSL.name("k", "contype"), String.class).eq("f"))
+            .and(DSL.field(DSL.name("r", "relname"), String.class).eq("catalog_collections"))
+            .orderBy(relname, conname).fetch().stream()
+            .filter(rec -> rec.value5().replace("nexus.", "").startsWith(COMPOSITE_ON_ID))
+            .map(rec -> new LeafFk(rec.value1(), rec.value2(), rec.value3(), rec.value4())).toList();
+    }
+
+    void pause(String labelLike) {
+        ctx().update(table("nexus", "data_moves")).set(DSL.field(DSL.name("paused_at"), OffsetDateTime.class), OffsetDateTime.now())
+            .set(DSL.field(DSL.name("paused_by"), String.class), "p33c-test").where(LABEL_F.like(labelLike)).execute();
+    }
+
+    void resume(String labelLike) {
+        ctx().update(table("nexus", "data_moves")).set(DSL.field(DSL.name("paused_at"), OffsetDateTime.class), (OffsetDateTime) null)
+            .set(DSL.field(DSL.name("paused_by"), String.class), (String) null).where(LABEL_F.like(labelLike)).execute();
+    }
+
+    /** The on_complete text of a registered move, as the registry holds it. */
+    String onCompleteOf(String label) {
+        return ctx().select(DSL.field(DSL.name("on_complete"), String.class)).from(table("nexus", "data_moves")).where(LABEL_F.eq(label))
+            .fetchOne(0, String.class);
+    }
+
+    /** Runs {@code sql} (DDL, SET, LOCK: no typed jOOQ form) on a session of its own through the engine's one sanctioned sink for SQL text. */
+    void runSql(String sql) throws SQLException {
+        try (Connection c = pg.createConnection("")) {
+            MoveSql.runOnComplete(c, sql);
+        }
     }
 
     /**
