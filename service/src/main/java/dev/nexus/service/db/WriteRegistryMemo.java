@@ -56,13 +56,6 @@ final class WriteRegistryMemo {
         return (java.util.Set<String>) ctx.configuration().data().computeIfAbsent(TAKEN, k -> new java.util.HashSet<String>());
     }
 
-    /** Records an advisory lock taken without the order check (a stated exception), so a later check of the same lock is a re-entry. */
-    static void noteTaken(DSLContext ctx, String lock) {
-        if (ExpectedCollectionIds.censusOn()) {
-            taken(ctx).add(lock);
-        }
-    }
-
     private static boolean holdsRegistryRow(DSLContext ctx) {
         Object m = ctx.configuration().data().get(KEY);
         return m != null && !((Map<?, ?>) m).isEmpty();
