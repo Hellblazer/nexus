@@ -232,6 +232,16 @@ public final class TaxonomyRepository {
         return coalesce(winnerId, CollectionIds.idOf(TOPIC_ASSIGNMENTS.TENANT_ID, winner));
     }
 
+    /**
+     * nexus-p2m1x.23: the CURRENT label of the registry row {@code id} names, for a statement that writes a {@code topic_assignments} name
+     * column beside a kept id (a one-row rename leaves a row's name column at the old label); {@code fallback} for a row with no id (the
+     * unstamped) or whose id no row holds. Correlated on the row's own tenant.
+     */
+    private static Field<String> currentNameOf(Field<Long> id, Field<String> fallback) {
+        var c = CATALOG_COLLECTIONS.as("curname");
+        return coalesce(field(select(c.NAME).from(c).where(c.TENANT_ID.eq(TOPIC_ASSIGNMENTS.TENANT_ID).and(c.COLLECTION_ID.eq(id)))), fallback);
+    }
+
     /** The registry id of each distinct name, read in this transaction ({@code null} for none), for a batch INSERT. */
     private static Map<String, Long> idsOf(DSLContext ctx, String tenant, java.util.Collection<String> names) {
         Map<String, Long> ids = new HashMap<>();
@@ -426,6 +436,7 @@ public final class TaxonomyRepository {
             ctx.update(TOPICS)
                .set(TOPICS.LABEL, newLabel)
                .set(TOPICS.COLLECTION_ID, topicRowCollectionId())
+               .set(TOPICS.COLLECTION, home.get().nameToWrite())
                .where(TOPICS.ID.eq(topicId).and(home.get().ownsTopic()))
                .execute();
             return null;
@@ -441,6 +452,7 @@ public final class TaxonomyRepository {
                .set(TOPICS.LABEL, newLabel)
                .set(TOPICS.REVIEW_STATUS, "accepted")
                .set(TOPICS.COLLECTION_ID, topicRowCollectionId())
+               .set(TOPICS.COLLECTION, home.get().nameToWrite())
                .where(TOPICS.ID.eq(topicId).and(home.get().ownsTopic()))
                .execute();
             return null;
@@ -455,6 +467,7 @@ public final class TaxonomyRepository {
             ctx.update(TOPICS)
                .set(TOPICS.REVIEW_STATUS, status)
                .set(TOPICS.COLLECTION_ID, topicRowCollectionId())
+               .set(TOPICS.COLLECTION, home.get().nameToWrite())
                .where(TOPICS.ID.eq(topicId).and(home.get().ownsTopic()))
                .execute();
             return null;
@@ -595,7 +608,8 @@ public final class TaxonomyRepository {
                         TOPIC_ASSIGNMENTS.ASSIGNED_BY,
                         TOPIC_ASSIGNMENTS.SIMILARITY,
                         TOPIC_ASSIGNMENTS.ASSIGNED_AT,
-                        TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                        // nexus-p2m1x.23: the moved row is filed under its source collection's CURRENT label, beside the id it keeps
+                        currentNameOf(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION),
                         // RDR-225: the moved row keeps the model of the chunk it points at.
                         TOPIC_ASSIGNMENTS.EMBEDDING_MODEL,
                         // RDR-229 P3.1 stage 2b: and the id of its source collection, COPIED from the row it moves (the id the row was
@@ -619,10 +633,11 @@ public final class TaxonomyRepository {
                         + " THEN EXCLUDED.assigned_at"
                         + " ELSE nexus.topic_assignments.assigned_at END", OffsetDateTime.class))
                .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
-                    field("CASE WHEN COALESCE(EXCLUDED.similarity, -1.0)"
-                        + " > COALESCE(nexus.topic_assignments.similarity, -1.0)"
-                        + " THEN EXCLUDED.source_collection"
-                        + " ELSE nexus.topic_assignments.source_collection END", String.class))
+                    // nexus-p2m1x.23: the winner's name is its collection's CURRENT label (the incoming row carries it; the existing row's
+                    // column may be stale after a one-row rename, so it is read from the registry by the id the row keeps)
+                    when(coalesce(org.jooq.impl.DSL.excluded(TOPIC_ASSIGNMENTS.SIMILARITY), -1.0).gt(coalesce(TOPIC_ASSIGNMENTS.SIMILARITY, -1.0)),
+                            org.jooq.impl.DSL.excluded(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION))
+                        .otherwise(currentNameOf(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)))
                .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL,
                     modelFollowing(coalesce(org.jooq.impl.DSL.excluded(TOPIC_ASSIGNMENTS.SIMILARITY), -1.0)
                         .gt(coalesce(TOPIC_ASSIGNMENTS.SIMILARITY, -1.0))))
@@ -2823,14 +2838,18 @@ public final class TaxonomyRepository {
             // children escape the taxonomy-004 partial index (parent_id NOT
             // NULL) so a race here duplicates children rather than 409ing —
             // the same per-collection lock closes both.
-            final CollectionRow locked = TaxonomyCollectionLock.lockAndRequireWritable(ctx, tenant, collectionName);   // advisory lock keyed by id, then the key share
-            final String coll = TaxonomyCollectionLock.currentLabel(locked, collectionName);
             // RDR-229 P3.5a (nexus-p2m1x.23): the parent's assignments carry the source collections of documents projected onto it, and the
-            // delete below removes them: those rows are read FOR KEY SHARE in one id-ordered statement before it, and the parent must be a
-            // topic of this collection
+            // delete below removes them. After the advisory lock (which comes first) the registry rows are read FOR KEY SHARE in ONE
+            // collection_id-ordered statement, the collection's own among them, so the split holds no row while it waits for a lower one (a verb
+            // that locks a lower source and then wants this collection's row meets no cycle); the parent must be a topic of this collection
+            final java.util.concurrent.atomic.AtomicReference<java.util.Set<Long>> held = new java.util.concurrent.atomic.AtomicReference<>(java.util.Set.of());
+            final java.util.function.Supplier<TaxonomyRegistryReads.Names> parentSources = () -> TaxonomyRegistryReads.sourcesOf(ctx, tenant,
+                TOPIC_ASSIGNMENTS.TOPIC_ID.eq(topicId));
+            final CollectionRow locked = TaxonomyCollectionLock.lockAndRequireWritable(ctx, tenant, collectionName,
+                keyed -> held.set(TaxonomyRegistryReads.registryFirstBeforeOwn(ctx, tenant, collectionName, keyed, parentSources)));   // advisory lock keyed by id, then the key share
+            final String coll = TaxonomyCollectionLock.currentLabel(locked, collectionName);
             if (locked != null) {
-                TaxonomyRegistryReads.registryFirstRest(ctx, tenant, () -> TaxonomyRegistryReads.sourcesOf(ctx, tenant,
-                    TOPIC_ASSIGNMENTS.TOPIC_ID.eq(topicId)), java.util.Set.of(), locked);
+                TaxonomyRegistryReads.registryFirstRest(ctx, tenant, parentSources, held.get(), locked);   // a source that appeared meanwhile
                 TaxonomyRegistryReads.requireTopicIn(ctx, topicId, locked);
             }
             // RDR-229 P3.1 stage 2b: the collection's registry id for every child topic written below.
