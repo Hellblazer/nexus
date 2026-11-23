@@ -7961,6 +7961,7 @@ FROM scope s
                 return outcome;
             });
         } catch (RuntimeException e) {
+            refuseByIdIfGone(tenant, originCollection, e);
             throw asRestoreBusy(e);
         }
     }
@@ -8025,7 +8026,25 @@ FROM scope s
                 return restored;
             });
         } catch (RuntimeException e) {
+            refuseByIdIfGone(tenant, originCollection, e);
             throw asRestoreBusy(e);
+        }
+    }
+
+    /**
+     * RDR-229 P3.5a: {@code quarantine_restore_chunks} refuses (22023, invalid_parameter_value) an origin or sibling that is not
+     * a registered collection, and that is also what it says when a request by {@code collection_id} meets an id freed in the
+     * window before the function ran (the label's registry row, or its quarantine sibling, gone). The by-id read cannot answer
+     * first without holding the row before the function's sweep gate, so it answers here, in a new transaction, once the
+     * refused one has rolled back: an id that names no row is the typed 404, a retired one the 409, thrown in place of the 22023.
+     * A request by label, or by an id that is still live, keeps the function's own refusal.
+     */
+    private void refuseByIdIfGone(String tenant, String originCollection, RuntimeException refused) {
+        if ("22023".equals(sqlState(refused))) {
+            tenantScope.withTenant(tenant, ctx -> {
+                dev.nexus.service.db.GcCollectionReads.readIfNamedById(ctx, tenant, originCollection);
+                return null;
+            });
         }
     }
 
