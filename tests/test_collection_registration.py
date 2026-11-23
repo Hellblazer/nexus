@@ -329,7 +329,6 @@ class _WriteOnlyWriter:
         pass
 
 
-@pytest.mark.t2_tenant
 @pytest.mark.parametrize("read_back", [None, {"name": "knowledge__ensure-409-ambient", "superseded_by": "knowledge__x"}],
                          ids=["no-row", "superseded-row"])
 def test_a_409_on_the_ambient_writer_reads_back_through_the_reader_and_a_missing_or_retired_row_is_raised(
