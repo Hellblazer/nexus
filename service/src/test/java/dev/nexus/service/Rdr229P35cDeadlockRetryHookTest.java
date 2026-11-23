@@ -60,11 +60,11 @@ class Rdr229P35cDeadlockRetryHookTest extends AtomicWriteTestBase {
             waitUntilALockWaitOnTopicLinksExists();
 
             CompletableFuture<Integer> outsideSecond = CompletableFuture.supplyAsync(() -> lock(o, t1, t2), pool);
+            assertThat(outsideSecond.get(60, TimeUnit.SECONDS)).as("the outside transaction got (t1,t2) once the victim rolled back")
+                .isEqualTo(1);
+            outside.commit();   // the victim's retry waits on the outside rows, so they are released before it is awaited
             assertThat(importing.get(60, TimeUnit.SECONDS)).as("the import ends in a clean answer, as every victim of a wrapped path does")
                 .isEqualTo(2);
-            assertThat(outsideSecond.get(60, TimeUnit.SECONDS)).as("and the outside transaction got (t1,t2) once the victim rolled back")
-                .isEqualTo(1);
-            outside.commit();
         } finally {
             pool.shutdownNow();
         }

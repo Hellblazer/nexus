@@ -13,6 +13,7 @@ CatalogRepository.java | 2 | .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, EX_CHK_COL
 CatalogRepository.java | 1 | .set(DOCUMENT_ASPECTS.COLLECTION, target) | the document move re-homes the document's aspects (a move, not a label change)
 CatalogRepository.java | 1 | .set(DOCUMENT_HIGHLIGHTS.COLLECTION, target) | the document move re-homes the document's highlights (a move, not a label change)
 CatalogRepository.java | 1 | .set(GC_AUDIT.COLLECTION, collection == null ? "" : collection) | the gc audit row names the collection it audited
+CatalogRepository.java | 1 | .set(ch.collection(), DSL.excluded(ch.collection())) | a latched upsert arbitrates on the collection id, so on a conflict it updates the row it found and refreshes that row's stored label to the incoming one: the row's own collection, written by the writer that owns it, and no rename of any collection (RDR-229 P3.5c)
 CatalogRepository.java | 1 | .set(t.collection(), target) | rehomeCollection's per-table re-home by name: slice D (R-B) owns it; it moves rows between live collections and changes no label
 CollectionMint.java | 1 | .set(CATALOG_COLLECTIONS.NAME, choice.label()) | a mint names a NEW registry row (an insert), not a rename of an existing one
 ManifestReplace.java | 1 | .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, v.field("", String.class)) | the manifest replace writes each row's own collection
@@ -24,3 +25,5 @@ TaxonomyRepository.java | 2 | .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, field(""
 TelemetryRepository.java | 2 | .set(HOOK_FAILURES.COLLECTION, str(collection)) | hook failure inserts and imports carry their own collection
 TelemetryRepository.java | 2 | .set(RELEVANCE_LOG.COLLECTION, str(collection)) | relevance log inserts and imports carry their own collection
 TelemetryRepository.java | 2 | .set(SEARCH_TELEMETRY.COLLECTION, collection) | search telemetry inserts and imports carry their own collection
+PgVectorRepository.java | 1 | .set(ch.collection(), DSL.excluded(ch.collection())) | a latched upsert arbitrates on the collection id, so on a conflict it updates the row it found and refreshes that row's stored label to the incoming one: the row's own collection, written by the writer that owns it, and no rename of any collection (RDR-229 P3.5c)
+TaxonomyCentroidRepository.java | 1 | .set(ct.collection(), DSL.excluded(ct.collection())) | a latched upsert arbitrates on the collection id, so on a conflict it updates the row it found and refreshes that row's stored label to the incoming one: the row's own collection, written by the writer that owns it, and no rename of any collection (RDR-229 P3.5c)
