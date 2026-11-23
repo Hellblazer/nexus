@@ -74,7 +74,7 @@ final class PciLeafCounting {
                 .from(ch.table())
                 .where(ch.embeddingModel().eq(model))
                 .and(ch.tenantId().eq(tenant))
-                .and(CollectionSelector.collectionIs(() -> true, tenant, ch.collection(), ch.collectionId(), collection))
+                .and(CollectionSelector.collectionIs(gate3, tenant, ch.collection(), ch.collectionId(), collection))
                 .limit(cap + 1)
                 .asTable("probe"))
             .fetchOne(0, Integer.class);

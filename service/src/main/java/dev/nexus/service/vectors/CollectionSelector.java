@@ -92,14 +92,16 @@ public final class CollectionSelector {
         if (nonEmpty.isEmpty()) {
             return out;
         }
+        // live first, then the newest tombstone (linda Q3): the first row seen per label in that order is its id
         ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.COLLECTION_ID)
            .from(CATALOG_COLLECTIONS)
            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
            .and(CATALOG_COLLECTIONS.NAME.in(nonEmpty))
+           .orderBy(liveFirst(), CATALOG_COLLECTIONS.COLLECTION_ID.desc())
            .fetch()
            .forEach(r -> {
                if (r.value2() != null) {
-                   out.put(r.value1(), r.value2());
+                   out.putIfAbsent(r.value1(), r.value2());
                }
            });
         // keep the caller's order, so the ids line up with the labels that resolved
@@ -128,7 +130,29 @@ public final class CollectionSelector {
      */
     public static Condition collectionIs(Gate3 gate3, String tenant, Field<String> nameCol, Field<Long> idCol, String name) {
         Objects.requireNonNull(gate3, "gate3");
-        return gate3.holds() ? idCol.eq(dev.nexus.service.db.CollectionIds.idOf(tenant, name)) : nameCol.eq(name);
+        if (!gate3.holds()) {
+            return nameCol.eq(name);
+        }
+        if (name == null || name.isEmpty()) {
+            return DSL.falseCondition();   // the empty label is no collection
+        }
+        return idCol.eq(DSL.field(DSL.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(name))
+            .orderBy(liveFirst(), CATALOG_COLLECTIONS.COLLECTION_ID.desc()).limit(1)));
+    }
+
+    /** {@code ORDER BY} key that puts the row holding its label first: linda's live-first, then the newest tombstone (collection_id DESC). */
+    public static org.jooq.SortField<Integer> liveFirst() {
+        return DSL.when(live(), 1).otherwise(0).desc();
+    }
+
+    /**
+     * The registry row that holds its label now: not a tombstone ({@code superseded_by} empty and {@code superseded_by_id} NULL, the
+     * predicate of the live-label unique index). A label resolves live first, then to the newest tombstone (linda Q3, {@link
+     * #liveFirst}): a collection retired with data in it still has readers and writers by its label until P4.1.
+     */
+    static Condition live() {
+        return DSL.coalesce(CATALOG_COLLECTIONS.SUPERSEDED_BY, "").eq("").and(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.isNull());
     }
 
     /** {@link #collectionIs} for several labels: {@code idCol IN (SELECT collection_id ... WHERE name IN (...))}; none selects nothing. */
@@ -142,8 +166,11 @@ public final class CollectionSelector {
         if (nonEmpty.isEmpty()) {
             return DSL.falseCondition();
         }
-        return idCol.in(DSL.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
-            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.in(nonEmpty)));
+        // one id per label: live first, then the newest tombstone (DISTINCT ON the label)
+        return idCol.in(DSL.select(CATALOG_COLLECTIONS.COLLECTION_ID).distinctOn(CATALOG_COLLECTIONS.NAME)
+            .from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.in(nonEmpty))
+            .orderBy(CATALOG_COLLECTIONS.NAME, liveFirst(), CATALOG_COLLECTIONS.COLLECTION_ID.desc()));
     }
 
     /**

@@ -70,3 +70,8 @@ java	vectors/TaxonomyCentroidRepository.java taxonomy_centroids set_value	collec
 java	vectors/TaxonomyCentroidRepository.java taxonomy_centroids where	collection	id	count, getByCollection, deleteByIds, purgeByCollection and the dim-transition delete select collection_id from gate 3
 java	vectors/TopicRouteArm.java chunks expr	collection	id	attachMetadata keys the routed rows by the resolved collection id from gate 3
 java	vectors/TopicRouteArm.java chunks where	collection	id	attachMetadata selects the routed chunks by collection_id from gate 3
+java	vectors/ChunkKeySweep.java catalog_collections result	name	label-kept	the continuation adds the current registry label of the cursor's collection id to the sweep set: the label the sweep then selects and reports by
+java	vectors/ChunkKeySweep.java catalog_collections select	name	label-kept	reads the registry's current label of the cursor's collection id (a rename between batches); the label is output
+java	vectors/CollectionSelector.java catalog_collections expr	superseded_by	id	live() keeps the row that holds its label: superseded_by empty and superseded_by_id NULL, the live-label index's own predicate
+java	vectors/CollectionSelector.java catalog_collections distinct_on	name	label-kept	one id per label, live first then the newest tombstone (linda Q3): the label resolution
+java	vectors/CollectionSelector.java catalog_collections order_by	name	label-kept	the live-first, newest-tombstone ordering of the label resolution

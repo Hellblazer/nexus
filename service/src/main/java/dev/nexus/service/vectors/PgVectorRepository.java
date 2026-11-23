@@ -851,14 +851,9 @@ public final class PgVectorRepository {
      * dropped tenant predicate. Not part of the engine's surface; nothing in main calls it from
      * outside this class.
      */
-    public static Set<String> liveOwnedChashes(DSLContext ctx, String tenant, String collection,
-                                                List<String> distinctHex) {
-        return liveOwnedChashes(ctx, tenant, collection, distinctHex, Gate3.never());
-    }
-
     /**
-     * {@link #liveOwnedChashes(DSLContext, String, String, List)} that matches the manifest by the collection's id once
-     * {@code gate3} holds (RDR-229 P3.5c, item 6); a label that resolves to no id owns nothing.
+     * (RDR-229 P3.5c, item 6) The manifest is matched by the collection's id once {@code gate3} holds; a label that resolves to no id
+     * owns nothing. There is no default-gate overload: a caller passes the gate it holds ({@code Gate3.never()} in a test).
      */
     public static Set<String> liveOwnedChashes(DSLContext ctx, String tenant, String collection,
                                                 List<String> distinctHex, Gate3 gate3) {
@@ -3590,14 +3585,13 @@ public final class PgVectorRepository {
         // RDR-229 P3.5c: gate 3 read once. From it the chunk rows are found by the registry id of the labels the search rows
         // carry, and keyed by the registry label of the row's id (the row's own name is stale after a one-row rename).
         final boolean byId = gate3.holds();
-        final Gate3 fixed = () -> byId;
         var found = tenantScope.withTenant(tenant, ctx ->
             ctx.select(byId ? CollectionSelector.labelOf(ch.tenantId(), ch.collectionId()) : ch.collection(),
                        ch.chash(), ch.embedding())
                .from(ch.table())
                .where(ch.embeddingModel().eq(model))
                .and(ch.tenantId().eq(tenant))
-               .and(CollectionSelector.collectionIn(fixed, tenant, ch.collection(), ch.collectionId(), colls))
+               .and(CollectionSelector.collectionIn(gate3, tenant, ch.collection(), ch.collectionId(), colls))
                .and(ch.chash().in(chashes))
                .and(ch.embedding().isNotNull())
                .and(liveChunksCondition(ctx, ch, byId))
@@ -5863,8 +5857,8 @@ public final class PgVectorRepository {
      */
     public List<Map<String, Object>> collectionStats(String tenant, String lifecycleFilter) {
         // RDR-229 P3.5c: gate 3 read once; from it the view joins the registry by the id its trailing collection_id column carries
-        // (vectors-077-82: the view's collection is already the registry's label of that id) and the tombstone's successor is
-        // the registry's label of superseded_by_id.
+        // (vectors-077-82: the view's collection is already the registry's label of that id) and the wire stays byte-identical
+        // (linda Q4): superseded_by is the stored text, so a retired tombstone with no successor reports what it always did.
         final boolean byId = gate3.holds();
         org.jooq.Condition lifecycleCond = lifecycleCondition(lifecycleFilter, byId);
         long statsStartNanos = System.nanoTime();
@@ -5877,8 +5871,7 @@ public final class PgVectorRepository {
                        CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
                        CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.LIFECYCLE_STATE,
                        COLLECTION_VECTOR_STATS.STORED_COUNT,
-                       byId ? CollectionSelector.labelOf(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.SUPERSEDED_BY_ID)
-                            : CATALOG_COLLECTIONS.SUPERSEDED_BY)
+                       CATALOG_COLLECTIONS.SUPERSEDED_BY)
                .from(COLLECTION_VECTOR_STATS)
                .leftJoin(CATALOG_COLLECTIONS)
                .on(CATALOG_COLLECTIONS.TENANT_ID.eq(COLLECTION_VECTOR_STATS.TENANT_ID)
@@ -5983,8 +5976,7 @@ public final class PgVectorRepository {
         var result = tenantScope.withTenant(tenant, ctx ->
             ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
                        CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.LIFECYCLE_STATE,
-                       byId ? CollectionSelector.labelOf(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.SUPERSEDED_BY_ID)
-                            : CATALOG_COLLECTIONS.SUPERSEDED_BY)
+                       CATALOG_COLLECTIONS.SUPERSEDED_BY)
                .from(CATALOG_COLLECTIONS)
                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
                .and(DSL.exists(ctx.selectOne().from(CHUNKS)
@@ -6485,7 +6477,7 @@ FROM scope s
             // (derived from the published text at class load, see MANIFEST_LESS_CENSUS_BY_ID_SQL); the collection's registry id
             // replaces the name in the two binds. A label with no id binds NULL, which selects no row: no collection.
             if (gate3.holds()) {
-                Long id = CollectionSelector.of(() -> true, ctx, tenant, collection).idOf(collection);
+                Long id = CollectionSelector.of(gate3, ctx, tenant, collection).idOf(collection);
                 return ctx.resultQuery(MANIFEST_LESS_CENSUS_BY_ID_SQL, tenant, id, tenant, id, limit, offset).fetch();
             }
             return ctx.resultQuery(MANIFEST_LESS_CENSUS_SQL, tenant, collection, tenant, collection, limit, offset)
@@ -6580,8 +6572,7 @@ FROM scope s
         // by id, the collection is selected by id, and chunk_is_reapable gets the request's label (a constant) for the name it
         // resolves, in place of the chunk row's own name, which a one-row rename leaves stale.
         final boolean byId = gate3.holds();
-        final Gate3 fixed = () -> byId;
-        org.jooq.Table<?> owner = ChunkOwnerLabel.ownerLateral(fixed);
+        org.jooq.Table<?> owner = ChunkOwnerLabel.ownerLateral(gate3);
         // The instant the grace counts from: the later of the last write and the orphaning record. A
         // scalar subquery on the primary key, tenant-scoped explicitly as well as by RLS; GREATEST
         // skips a NULL, so a chunk with no record reads its last_written_at. Display only: the
@@ -6601,7 +6592,7 @@ FROM scope s
                .from(CHUNKS)
                .leftJoin(owner).on(DSL.trueCondition())
                .where(CHUNKS.TENANT_ID.eq(tenant)
-                   .and(CollectionSelector.collectionIs(fixed, tenant, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, collection)))
+                   .and(CollectionSelector.collectionIs(gate3, tenant, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, collection)))
                .and(after)
                .and(DSL.exists(DSL.selectFrom(CHUNK_IS_REAPABLE.call(
                    CHUNKS.TENANT_ID, byId ? DSL.val(collection) : CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.LAST_WRITTEN_AT,
@@ -6798,7 +6789,6 @@ FROM scope s
         if (ids == null || ids.isEmpty()) return 0;
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         final boolean byId = gate3.holds();   // RDR-229 P3.5c: read once; from gate 3 the manifest guard and the delete select by id
-        final Gate3 fixed = () -> byId;
         return tenantScope.withTenant(tenant, ctx -> {
             // RDR-191 GATE-2 (nexus-mmkqe): NO deleted_at predicate on the join —
             // a manifest row protects its chunk whether its owning document is
@@ -6815,7 +6805,7 @@ FROM scope s
                                     : CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(ch.collection()))
                           .and(ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH).eq(ch.chash()))));
             return ctx.deleteFrom(ch.table())
-               .where(CollectionSelector.collectionIs(fixed, tenant, ch.collection(), ch.collectionId(), collection)
+               .where(CollectionSelector.collectionIs(gate3, tenant, ch.collection(), ch.collectionId(), collection)
                    .and(ch.chash().in(ids)).andNot(stillReferenced))
                .execute();
         });
@@ -7446,11 +7436,22 @@ FROM scope s
                 + new java.util.TreeSet<>(QUARANTINING_OPERATIONS) + ")");
         }
         // RDR-229 P3.5c: from gate 3 the audit row names its collection by the id it was written with (the name is history, and
-        // a one-row rename leaves it stale); a row with no id names no collection and is refused, never matched by its name.
+        // a one-row rename leaves it stale). One narrow exception (linda R2): a row recorded before collection ids (NULL id) is
+        // compared by its stored name, and the restore goes ahead only if a live collection holds that label now; nothing else acts
+        // on pre-id history.
         final boolean auditById = gate3.holds();
         final Long originId = auditById
-            ? CollectionSelector.of(() -> true, tenantScope, tenant, originCollection).idOf(originCollection) : null;
-        if (auditById ? row.value6() == null || !row.value6().equals(originId) : !originCollection.equals(row.value2())) {
+            ? CollectionSelector.of(gate3, tenantScope, tenant, originCollection).idOf(originCollection) : null;
+        if (auditById && row.value6() == null) {
+            if (!originCollection.equals(row.value2())) {
+                throw new IllegalArgumentException("gc_audit row " + auditId + " is for collection " + row.value2()
+                    + ", not " + originCollection);
+            }
+            if (originId == null) {
+                throw new IllegalArgumentException("gc_audit row " + auditId + ": recorded before collection ids, under label "
+                    + row.value2() + "; no live collection holds " + row.value2());
+            }
+        } else if (auditById ? !row.value6().equals(originId) : !originCollection.equals(row.value2())) {
             throw new IllegalArgumentException("gc_audit row " + auditId + " is for collection " + row.value2()
                 + ", not " + originCollection);
         }
@@ -8363,7 +8364,6 @@ FROM scope s
                                              Map<String, Object> metadata,
                                              List<String> deleteKeys, Gate3 gate3) {
         final boolean byId = gate3.holds();   // RDR-229 P3.5c: read once; from gate 3 the row is selected by id and keeps its id
-        final Gate3 fixed = () -> byId;
         // Same NUL defense as upsertChunks: jsonb rejects NUL just like text does
         // (nexus-rvfwj, dual-review M2).
         org.jooq.Field<JSONB> incoming = DSL.val(JSONB.jsonb(toJson(sanitizeNulDeep(metadata))));
@@ -8375,7 +8375,7 @@ FROM scope s
         return ctx.update(ch.table())
                   .set(ch.metadata(), mergeMetadata(ch.metadata(), incoming, deleteKeys))
                   .set(CHUNKS.COLLECTION_ID, rowCollectionId(ch, byId))
-                  .where(CollectionSelector.collectionIs(fixed, tenant, ch.collection(), ch.collectionId(), collection)
+                  .where(CollectionSelector.collectionIs(gate3, tenant, ch.collection(), ch.collectionId(), collection)
                       .and(ch.chash().eq(chash)))
                   .execute();
     }
@@ -8445,40 +8445,16 @@ FROM scope s
      * both write paths keeps the "identical text -> metadata-only UPDATE,
      * concurrent-delete reroutes to need-embed" contract in exactly one
      * place.
-     */
-    public static List<Integer> batchUpdateMetadata(DSLContext ctx, DimTables.ChunkTable ch,
-                                                       String collection, List<String> ids,
-                                                       List<Map<String, Object>> metadatas,
-                                                       List<Integer> idxToUpdate) {
-        return batchUpdateMetadata(ctx, ch, collection, ids, metadatas, idxToUpdate, null);
-    }
-
-    /**
-     * {@link #batchUpdateMetadata(DSLContext, DimTables.ChunkTable, String, List, List, List)}
-     * with a write mode (nexus-w94eo / nexus-y8xjh). {@code deleteKeys == null} REPLACES
-     * each row's metadata wholesale, the pre-nexus-w94eo semantics: that is the
-     * combined-write caller ({@code CombinedWriteService}) by default, whose insert branch
-     * ({@code CatalogRepository.upsertManifestChunkVectors}) also replaces, so its
-     * metadata-only branch must too or a clean re-index could not clear a sparse key
-     * through that endpoint. A non-null list (possibly empty) MERGES via {@link
-     * #mergeMetadata}, stripping the named keys from the stored value first: that is
-     * {@link #resolveNeedEmbedIdx}'s have-vector branch of {@code upsert-chunks}, which
-     * carries the request's {@code delete_keys}, and the combined write under its
-     * {@code metadata_merge} mode (RDR-223, nexus-z0o2p.13), whose insert branch then
-     * merges with the same list in its own ON CONFLICT.
-     */
-    public static List<Integer> batchUpdateMetadata(DSLContext ctx, DimTables.ChunkTable ch,
-                                                       String collection, List<String> ids,
-                                                       List<Map<String, Object>> metadatas,
-                                                       List<Integer> idxToUpdate,
-                                                       List<String> deleteKeys) {
-        return batchUpdateMetadata(ctx, ch, null, collection, ids, metadatas, idxToUpdate, deleteKeys, Gate3.never());
-    }
-
-    /**
-     * {@link #batchUpdateMetadata(DSLContext, DimTables.ChunkTable, String, List, List, List, List)} that selects each row by
-     * the collection's id once {@code gate3} holds (RDR-229 P3.5c, item 6) and keeps the row's own id on the SET; {@code tenant}
-     * (the one the {@code ctx} is stamped for) names the registry rows the label resolves in, and is unused before gate 3.
+     *
+     * <p>Write mode (nexus-w94eo / nexus-y8xjh): {@code deleteKeys == null} REPLACES each row's metadata wholesale, the pre-nexus-w94eo
+     * semantics: that is the combined-write caller ({@code CombinedWriteService}) by default, whose insert branch also replaces. A
+     * non-null list (possibly empty) MERGES via {@link #mergeMetadata}, stripping the named keys from the stored value first: that is
+     * {@link #resolveNeedEmbedIdx}'s have-vector branch of {@code upsert-chunks} and the combined write under its {@code
+     * metadata_merge} mode (RDR-223, nexus-z0o2p.13).
+     *
+     * <p>RDR-229 P3.5c, item 6: each row is selected by the collection's id once {@code gate3} holds and keeps its own id on the SET;
+     * {@code tenant} (the one the {@code ctx} is stamped for) names the registry rows the label resolves in, and is unused before
+     * gate 3. The gate is a parameter, not a default: the 6- and 7-argument forms that read the name path are gone.
      */
     public static List<Integer> batchUpdateMetadata(DSLContext ctx, DimTables.ChunkTable ch, String tenant,
                                                        String collection, List<String> ids,
@@ -8486,7 +8462,6 @@ FROM scope s
                                                        List<Integer> idxToUpdate,
                                                        List<String> deleteKeys, Gate3 gate3) {
         final boolean byId = gate3.holds();
-        final Gate3 fixed = () -> byId;
         List<Integer> zeroAffected = new ArrayList<>();
         // nexus-hxrcm: one global lock order — sort the indices by the chash they
         // update (see javadoc). Copy: idxToUpdate may be an unmodifiable view.
@@ -8517,7 +8492,7 @@ FROM scope s
                                .set(ch.metadata(), value)
                                .set(ch.lastWrittenAt(), DimTables.lastWrittenNow())
                                .set(CHUNKS.COLLECTION_ID, rowCollectionId(ch, byId))
-                               .where(CollectionSelector.collectionIs(fixed, tenant, ch.collection(), ch.collectionId(),
+                               .where(CollectionSelector.collectionIs(gate3, tenant, ch.collection(), ch.collectionId(),
                                                                       collection)
                                    .and(ch.chash().eq(ids.get(idx)))));
             }

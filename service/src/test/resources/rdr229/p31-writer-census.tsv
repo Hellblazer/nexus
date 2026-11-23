@@ -161,10 +161,10 @@ chunks	chunks	service/src/main/java/dev/nexus/service/db/ChashRepository.java	31
 chunks	chunks	service/src/main/java/dev/nexus/service/db/DepartedWriterSpans.java	561	update	jooq	collection	collection_id	yes	
 chunks	chunks	service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	314	update	jooq	-	collection_id	yes	
 chunks	chunks	service/src/main/java/dev/nexus/service/db/TenantImportLoad.java	335	insert	by-name	collection	collection_id	yes	TenantImportLoad by-name INSERT ... SELECT over TenantExport.TABLES
-chunks	chunks	service/src/main/java/dev/nexus/service/vectors/ChunkKeySweep.java	988	update	jooq	-	collection_id	yes	
-chunks	chunks	service/src/main/java/dev/nexus/service/vectors/PgVectorRepository.java	1337	insert	helper	collection	collection_id	yes	ch.table() helper
+chunks	chunks	service/src/main/java/dev/nexus/service/vectors/ChunkKeySweep.java	1014	update	jooq	-	collection_id	yes	
+chunks	chunks	service/src/main/java/dev/nexus/service/vectors/PgVectorRepository.java	1332	insert	helper	collection	collection_id	yes	ch.table() helper
 chunks	chunks	service/src/main/java/dev/nexus/service/vectors/PgVectorRepository.java	8375	update	helper	-	collection_id	yes	ch.table() helper
-chunks	chunks	service/src/main/java/dev/nexus/service/vectors/PgVectorRepository.java	8516	update	helper	-	collection_id	yes	ch.table() helper
+chunks	chunks	service/src/main/java/dev/nexus/service/vectors/PgVectorRepository.java	8491	update	helper	-	collection_id	yes	ch.table() helper
 ops	chash_remap	rdr229-stamp-chash_remap [vectors-070-collection-id-stamp-moves.xml:118]	115	update	data_move	-	source_collection_id,target_collection_id	yes	sets source_collection_id,target_collection_id
 ops	chash_remap	service/src/main/java/dev/nexus/service/db/RemapRepository.java	135	insert	jooq	source_collection,target_collection	source_collection_id,target_collection_id	yes	
 ops	gc_audit	nexus.gc_expire_quarantine [vectors-077-rdr229-p35b-readers-both.xml:2915]	2824	insert	sql_function	collection	collection_id	no	

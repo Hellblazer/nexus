@@ -277,7 +277,7 @@ final class TopicRouteArm {
         Result<? extends Record> result = tenantScope.withTenant(tenant, ctx -> {
             org.jooq.Table<?> fn;
             if (byId) {
-                Long id = CollectionSelector.of(() -> true, ctx, tenant, collection).idOf(collection);
+                Long id = CollectionSelector.of(gate3, ctx, tenant, collection).idOf(collection);
                 if (id == null) {
                     return null;
                 }
