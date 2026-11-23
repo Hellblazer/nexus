@@ -66,6 +66,9 @@ public final class Gate3Latch {
         return pciOff;
     }
 
+    /** Each attempt's own {@code lock_timeout} and {@code statement_timeout}, in milliseconds (10 s): far under {@link #BOOT_DEADLINE}, so a hung attempt fails and is retried. */
+    static final String ATTEMPT_TIMEOUT_MS = "10000";
+
     /**
      * The production read: the latch row on a short read-only admin session of its own, retried with backoff until it answers or
      * {@link #BOOT_DEADLINE} passes.
@@ -73,14 +76,22 @@ public final class Gate3Latch {
      * @throws IllegalStateException when the database could not answer within the deadline: the caller must not serve
      */
     public static Gate3Latch readAtBoot(AdminConnection admin) {
+        return readAtBoot(admin, ATTEMPT_TIMEOUT_MS, BOOT_DEADLINE);
+    }
+
+    /** {@link #readAtBoot(AdminConnection)} with each attempt's timeouts (milliseconds, as the GUC text) and the deadline given: a test shortens them. */
+    static Gate3Latch readAtBoot(AdminConnection admin, String attemptTimeoutMs, Duration deadline) {
         Objects.requireNonNull(admin, "admin");
         return readBlocking(() -> {
             try (AdminDdlSession s = AdminDdlSession.open(admin, new AdminDdlSession.Settings("nexus-rdr229-gate-latch-boot", 0L,
                     "rdr229 gate latch boot read", "nexus", "rdr229_gate_latch", "none"), false)) {
                 s.setSession("default_transaction_read_only", "on");
+                // one hung attempt (a lock held by a migration, a stalled statement) must not outlive the deadline: the server ends it first
+                s.setSession("lock_timeout", attemptTimeoutMs);
+                s.setSession("statement_timeout", attemptTimeoutMs);
                 return CompletionCheck.readLatch(s.ctx(), CompletionCheck.GATE3);
             }
-        }, FIRST_BACKOFF, MAX_BACKOFF, BOOT_DEADLINE, d -> Thread.sleep(d.toMillis()), Clock.systemUTC());
+        }, FIRST_BACKOFF, MAX_BACKOFF, deadline, d -> Thread.sleep(d.toMillis()), Clock.systemUTC());
     }
 
     /** {@link #readAtBoot} with the source, backoff, deadline, sleeper and clock injected. */

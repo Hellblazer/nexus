@@ -3,6 +3,7 @@
 package dev.nexus.service;
 
 import dev.nexus.service.datamove.CompletionBootWork;
+import dev.nexus.service.datamove.Gate3Latch;
 import dev.nexus.service.db.AdminConnection;
 import dev.nexus.service.vectors.LeafIndexPass;
 import dev.nexus.service.vectors.Rdr229SwapMove;
@@ -26,7 +27,7 @@ class MainLeafIndexPassGuardTest {
     @Test
     void withACompletionCheckThePassStarts_andReportsNothingAsInProgressYet() {
         var registry = new BootWorkRegistry(Clock.systemUTC());
-        var check = CompletionBootWork.atBoot(registry, UNREACHABLE);   // built, not started: no connection is made
+        var check = CompletionBootWork.atBoot(registry, UNREACHABLE, Gate3Latch.of(false, false));   // built, not started: no connection is made
         LeafIndexPass pass = Main.startLeafIndexPass(registry, UNREACHABLE, check);
         try {
             assertThat(pass).as("P3.3c deleted the placeholder guard: the pass starts").isNotNull();

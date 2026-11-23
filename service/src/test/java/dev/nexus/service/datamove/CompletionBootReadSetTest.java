@@ -39,7 +39,8 @@ class CompletionBootReadSetTest {
 
     @Test
     void theReporterAnEngineStartsReadsTheBootReadSet() {
-        var work = CompletionBootWork.atBoot(new BootWorkRegistry(java.time.Clock.systemUTC()), new AdminConnection("jdbc:postgresql://localhost:1/none", "u", "p"));
+        var work = CompletionBootWork.atBoot(new BootWorkRegistry(java.time.Clock.systemUTC()), new AdminConnection("jdbc:postgresql://localhost:1/none", "u", "p"),
+            Gate3Latch.of(false, false));   // explicit: a reporter never reads the database to build itself
         assertThat(work.readSet()).as("the database-backed reporter's read set").isEqualTo(CompletionCheck.ReadSet.boot());
     }
 

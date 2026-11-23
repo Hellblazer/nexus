@@ -849,4 +849,31 @@ class CompletionCheckIntegrationTest {
             unswap();
         }
     }
+
+    /**
+     * The boot read bounds each attempt ({@code lock_timeout} and {@code statement_timeout}): a lock held on the latch table fails the attempt at its
+     * bound and the read retries, until the deadline ends it with the boot's named failure. Without the bounds the read would wait on the lock for the
+     * socket's 35 minutes, past the five-minute deadline. Released, the same call answers.
+     */
+    @Test
+    @org.junit.jupiter.api.Timeout(60)
+    void theBootReadBoundsEachAttempt_aHeldLockFailsItAtTheBound_andTheDeadlineEndsTheRead() throws Exception {
+        var admin = new dev.nexus.service.db.AdminConnection(pg.getJdbcUrl(), pg.getUsername(), pg.getPassword());
+        Table<?> latch = DSL.table(DSL.name("nexus", "rdr229_gate_latch"));
+        try (Connection holder = pg.createConnection("")) {
+            holder.setAutoCommit(false);
+            try {
+                // an ALTER takes ACCESS EXCLUSIVE and keeps it until the rollback: every read of the table waits
+                DSL.using(holder, SQLDialect.POSTGRES).alterTable(latch).add(DSL.field(DSL.name("probe_col"), SQLDataType.INTEGER)).execute();
+                long started = System.nanoTime();
+                org.assertj.core.api.Assertions.assertThatThrownBy(() -> Gate3Latch.readAtBoot(admin, "300", java.time.Duration.ofSeconds(3)))
+                    .isInstanceOf(IllegalStateException.class).hasMessageContaining("could not be read").hasMessageContaining("attempts");
+                assertThat(java.time.Duration.ofNanos(System.nanoTime() - started)).as("ended by the deadline, not by the 35 minute socket")
+                    .isLessThan(java.time.Duration.ofSeconds(30));
+            } finally {
+                holder.rollback();
+            }
+        }
+        assertThat(Gate3Latch.readAtBoot(admin, "300", java.time.Duration.ofSeconds(3))).as("released, it answers").isNotNull();
+    }
 }
