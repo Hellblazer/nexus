@@ -868,6 +868,11 @@ public final class CombinedWriteService {
                 // see that javadoc), not a flat 5 s; the writer side has no lock_timeout
                 // by design, the same trade every manifest writer already makes.
                 CatalogRepository.acquireSweepGateShared(ctx, tenant, collection);
+                // RDR-229 P3.5a (linda's option (b)): the registry check of this write transaction, right after the advisory gate
+                // and before any row is read or written (RenameGuard#runRename's lock order). The metadata UPDATE below writes chunks
+                // BY LABEL; without the read, a label freed and re-taken while this transaction waited for the gate would take
+                // the request's metadata into the new row, and the later per-document transactions would answer 404 after it committed.
+                CollectionRegistry.requireWritable(ctx, tenant, collection);
                 Map<String, String> existingText =
                     selectExistingText(ctx, ch, tenant, collection, dedupChashes, gate3);
                 // RDR-222 Phase 0: reset per DeadlockRetry attempt (a retried attempt
@@ -1055,11 +1060,11 @@ public final class CombinedWriteService {
      * of ever writing a row.
      */
     private void ensureCollectionRegistered(String tenant, String collection) {
-        if (CollectionRegistry.isKnown(tenant, collection)) return;
-        tenantScope.withTenant(tenant, ctx -> {
-            CollectionRegistry.requireRegistered(ctx, tenant, collection);
-            return null;
-        });
+        // RDR-229 P3.5a: a lookup, not a write transaction's check. It answers from the cache or one short read and never counts as the
+        // write's read of a named id; the refresh transaction and every per-document transaction below take the FOR KEY SHARE read
+        // (an earlier form ran requireRegistered in its own short transaction, which consumed the id by accident and fired the test
+        // seam before the transaction whose first statement is the one that matters).
+        CollectionRegistry.lookup(tenantScope, tenant, collection);
     }
 
     /** The stored vector of each of {@code chashes} that exists in the collection (RDR-223 P1.5). */

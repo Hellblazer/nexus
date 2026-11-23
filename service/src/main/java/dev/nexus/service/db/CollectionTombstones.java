@@ -118,6 +118,7 @@ public final class CollectionTombstones {
         Condition live = CollectionIdReads.live(gate3, CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.SUPERSEDED_BY_ID);
         Condition alreadyThis = gate3.holds() ? CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.eq(successorId)
             : CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(supersededBy);
+        WriteRegistryMemo.forget(ctx);   // P3.5a: the transaction retires the row itself
         return ctx.update(CATALOG_COLLECTIONS)
             .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, supersededBy)
             .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, successorId)
@@ -145,6 +146,7 @@ public final class CollectionTombstones {
      */
     static void stampTombstone(DSLContext ctx, String tenant, String name, String supersededBy) {
         if (supersededBy == null || supersededBy.isEmpty()) return;
+        WriteRegistryMemo.forget(ctx);
         var s = CATALOG_COLLECTIONS.as("succ");
         Field<Long> successor = DSL.field(DSL.select(s.COLLECTION_ID).from(s)
             .where(s.TENANT_ID.eq(tenant)).and(s.NAME.eq(supersededBy))
@@ -171,6 +173,7 @@ public final class CollectionTombstones {
      */
     static int repointTombstonesNaming(DSLContext ctx, String tenant, java.util.Collection<String> names) {
         if (names.isEmpty()) return 0;
+        WriteRegistryMemo.forget(ctx);
         var s = CATALOG_COLLECTIONS.as("reg");
         Field<Long> registered = DSL.field(DSL.select(s.COLLECTION_ID).from(s)
             .where(s.TENANT_ID.eq(CATALOG_COLLECTIONS.TENANT_ID)).and(s.NAME.eq(CATALOG_COLLECTIONS.SUPERSEDED_BY))
@@ -238,6 +241,7 @@ public final class CollectionTombstones {
      */
     static int deleteRegistryRows(DSLContext ctx, String tenant, List<String> names, Gate3 gate3) {
         if (names.isEmpty()) return 0;
+        WriteRegistryMemo.forget(ctx);
         var d = CATALOG_COLLECTIONS.as("gone");
         Field<Long> goneId = d.COLLECTION_ID;
         Condition byId = CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.in(
@@ -262,6 +266,7 @@ public final class CollectionTombstones {
      * @return the number of registry rows deleted for {@code id}: 0 or 1, the predecessors not counted
      */
     static int deleteRegistryRowById(DSLContext ctx, String tenant, String name, long id, List<String> predecessors, Gate3 gate3) {
+        WriteRegistryMemo.forget(ctx);
         deleteRegistryRows(ctx, tenant, predecessors, gate3);
         ctx.update(CATALOG_COLLECTIONS)
             .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, CATALOG_COLLECTIONS.COLLECTION_ID)

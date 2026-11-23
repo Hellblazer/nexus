@@ -297,6 +297,9 @@ public final class PipelineRepository {
                 : PipelineRef.byHash(contentHash);
         String keyedBy = documentIdentity ? KEYED_BY_DOCUMENT : KEYED_BY_CONTENT_HASH;
         return tenantScope.withTenant(tenant, ctx -> {
+            // RDR-229 P3.1/P3.5a: the collection's registry id, typed 422 when unregistered, read FOR KEY SHARE first (before the
+            // pipeline rows resolveIn reads and the insert locks), as every writer's registry check
+            final Long collectionId = CollectionIds.require(ctx, tenant, collection);
             for (int attempt = 0; attempt < 2; attempt++) {
                 Long existing = resolveIn(ctx, tenant, ref);
                 if (existing == null && !documentIdentity) {
@@ -311,7 +314,7 @@ public final class PipelineRepository {
                             PDF_PIPELINE.STATUS, PDF_PIPELINE.STARTED_AT, PDF_PIPELINE.UPDATED_AT,
                             PDF_PIPELINE.COLLECTION_ID)
                        .values(tenant, contentHash, pdfPath, collection, keyedBy, "running", now, now,
-                               CollectionIds.require(ctx, tenant, collection))   // RDR-229 P3.1: typed 422 when unregistered
+                               collectionId)
                        .onConflictDoNothing()
                        .returning(PDF_PIPELINE.PIPELINE_ID, PDF_PIPELINE.RUN_EPOCH)
                        .fetchOne();

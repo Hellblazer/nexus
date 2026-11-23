@@ -1278,6 +1278,11 @@ public final class PgVectorRepository {
             final List<String>[] inTxUnownedHolder = new List[]{List.of()};
             try {
                 DeadlockRetry.run(collection, () -> tenantScope.withTenant(tenant, ctx -> {
+                    if (recheckInTransaction) {
+                        // advisory lock first (RenameGuard#runRename): the recheck below takes this same gate, and a gate wait behind
+                        // a queued sweep while holding the registry key share could close a cycle with a verb that holds the gate
+                        CatalogRepository.acquireSweepGateShared(ctx, tenant, collection);
+                    }
                     CollectionRegistry.requireWritable(ctx, tenant, collection);
                     racedThisWrite.set(0);
                     racedChashSampleHolder[0] = new ArrayList<>();
@@ -6767,11 +6772,14 @@ FROM scope s
         // judged by its prefix. dimForCollection below then fills the cache for the rows it admits.
         dev.nexus.service.db.QuarantineOrigin.requireNotQuarantine(tenantScope, tenant, "store-delete", collection);
         int dim = dimForCollection(tenant, collection);
-        if (ids == null || ids.isEmpty()) return 0;
+        if (ids == null || ids.isEmpty()) {
+            dev.nexus.service.db.ExpectedCollectionIds.nothingToWrite(collection);   // an early return before any transaction
+            return 0;
+        }
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         final boolean byId = gate3.holds();   // RDR-229 P3.5c: read once; from gate 3 the manifest guard and the delete select by id
         return tenantScope.withTenant(tenant, ctx -> {
-            CollectionRegistry.require(ctx, tenant, collection);   // RDR-229 P3.5a: a request by id reads that id here, FOR KEY SHARE
+            CollectionRegistry.requireForWrite(ctx, tenant, collection);   // RDR-229 P3.5a: the id or the label's row FOR KEY SHARE, before any chunk row
             // RDR-191 GATE-2 (nexus-mmkqe): NO deleted_at predicate on the join —
             // a manifest row protects its chunk whether its owning document is
             // live (class a) or tombstoned (class b, soft-tombstone contract
@@ -8244,7 +8252,10 @@ FROM scope s
                                                             List<Map<String, Object>> metadatas,
                                                             List<String> deleteKeys) {
         int dim = dimForCollection(tenant, collection);
-        if (ids == null || ids.isEmpty()) return new MetadataUpdateOutcome(0, List.of());
+        if (ids == null || ids.isEmpty()) {
+            dev.nexus.service.db.ExpectedCollectionIds.nothingToWrite(collection);   // an early return before any transaction
+            return new MetadataUpdateOutcome(0, List.of());
+        }
         if (ids.size() != metadatas.size()) {
             throw new IllegalArgumentException(
                 "ids (" + ids.size() + ") and metadatas (" + metadatas.size()
@@ -8252,7 +8263,7 @@ FROM scope s
         }
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         return tenantScope.withTenant(tenant, ctx -> {
-            CollectionRegistry.require(ctx, tenant, collection);   // RDR-229 P3.5a: a request by id reads that id here, FOR KEY SHARE
+            CollectionRegistry.requireForWrite(ctx, tenant, collection);   // RDR-229 P3.5a: the id or the label's row FOR KEY SHARE, before any chunk row
             int affected = 0;
             List<String> missing = new ArrayList<>();
             for (int i = 0; i < ids.size(); i++) {
@@ -8707,6 +8718,11 @@ FROM scope s
                 // see acquireSweepGateShared's javadoc for the formula and why the writer
                 // side deliberately has no lock_timeout.
                 CatalogRepository.acquireSweepGateShared(ctx, tenant, collection);
+                // RDR-229 P3.5a (linda's option (b)): the registry check of a write transaction, right after the advisory gate and
+                // before any row is read or written (the lock order of RenameGuard#runRename): the have-vector UPDATE below writes
+                // chunks BY LABEL, and a label freed and re-taken while this transaction waited for the gate would land them in the
+                // new row. A retired or unknown id answers its typed 409/404 here, not after the UPDATE.
+                CollectionRegistry.requireWritable(ctx, tenant, collection);
                 Map<String, String> existingText = selectExistingChashTextCtx(ctx, ch, scope, dedupIds);
                 ExistencePartition partition = partitionByExistence(dedupIds, existingText.keySet());
                 // Test-only interleaving seam (bead nexus-f0r8p.4) — see
@@ -8764,6 +8780,9 @@ FROM scope s
                 return new NeedEmbedResolution(needEmbedIdx, originalAbsentIdx);
             });
         } catch (RuntimeException e) {
+            // a request by id whose id is gone or retired, or a retired name, answers its typed refusal: embedding everything
+            // for a write that cannot land would only spend the embed
+            dev.nexus.service.db.CollectionIdRefusals.rethrowIfRefusal(e);
             log.warn("event=existence_partition_failed collection={} count={} fail_safe=embed_all err={}",
                     collection, dedupIds.size(), e.toString());
             return null;
@@ -9081,6 +9100,7 @@ FROM scope s
             try {
                 ctx.connection(conn -> {
                     conn.rollback(taken[0]);
+                    CollectionRegistry.forgetWriteMemo(ctx);
                     conn.releaseSavepoint(taken[0]);
                 });
             } catch (RuntimeException rollbackFailure) {
@@ -9149,6 +9169,7 @@ FROM scope s
                      tenant, collection, cap, String.valueOf(e.getMessage()).replace('\n', ' '));
             try {
                 ctx.connection(conn -> conn.rollback(taken));
+                CollectionRegistry.forgetWriteMemo(ctx);
             } catch (RuntimeException rollbackFailure) {
                 // The transaction is unusable and this failure escapes; the count's failure rides along as suppressed.
                 rollbackFailure.addSuppressed(e);

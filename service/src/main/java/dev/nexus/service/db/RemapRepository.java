@@ -157,6 +157,14 @@ public final class RemapRepository {
         tenantScope.withTenant(tenant, ctx -> {
             // RDR-229 P3.1: the id of each name in this write, read in this transaction. An unregistered name is
             // refused typed (the 422 every collection-scoped writer raises) instead of by the CHECK's 23514.
+            // RDR-229 P3.5a: every collection of the batch read FOR KEY SHARE at once, in id order (the order a verb locks in), before
+            // any row work; the per-name reads below answer from the memo
+            java.util.List<String> touched = new java.util.ArrayList<>();
+            for (RemapEntry e : deduped) {
+                touched.add(e.sourceCollection());
+                touched.add(e.targetCollection());
+            }
+            CollectionRegistry.requireAllForWrite(ctx, tenant, touched);
             var ids = new HashMap<String, Long>();
             for (RemapEntry e : deduped) {
                 ids.computeIfAbsent(e.sourceCollection(), n -> CollectionIds.require(ctx, tenant, n));
@@ -222,6 +230,7 @@ public final class RemapRepository {
         requireNonBlank(targetCollection, "target_collection");
         int deleted = tenantScope.withTenant(tenant, ctx -> {
             // P3.5a: a request naming either leg by id reads that id first, FOR KEY SHARE, in this transaction
+            CollectionRegistry.requireAllForWrite(ctx, tenant, java.util.List.of(sourceCollection, targetCollection));   // both legs, id order
             RequestedCollectionRead.require(ctx, tenant, sourceCollection);
             RequestedCollectionRead.require(ctx, tenant, targetCollection);
             return ctx.deleteFrom(CHASH_REMAP)

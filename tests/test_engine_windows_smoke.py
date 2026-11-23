@@ -809,6 +809,21 @@ def test_every_fresh_boot_pending_entry_is_a_changeset_of_the_real_changelog() -
     assert "collections-001-2" in es.FRESH_BOOT_PENDING
 
 
+def test_continue_list_ids_reads_ids_and_skips_comments_blanks_and_an_absent_file(tmp_path: Path) -> None:
+    listing = tmp_path / "list.txt"
+    listing.write_text("# header\n\nvectors-078-1\n  vectors-078-2  \n# trailing\n", encoding="utf-8")
+    assert es.continue_list_ids(listing) == ["vectors-078-1", "vectors-078-2"]
+    assert es.continue_list_ids(tmp_path / "absent.txt") == []
+
+
+def test_the_p35b_continue_list_is_allowed_pending_on_a_fresh_boot_when_the_tree_has_it() -> None:
+    """Every id of P3.5b's CONTINUE list is an allowed fresh-boot deferral; on a tree without the list there are none
+    to allow, and the planted case shows the merge is not vacuous."""
+    ids = es.continue_list_ids(es.P35B_CONTINUE_LIST)
+    assert set(ids) <= set(es.FRESH_BOOT_PENDING)
+    assert es.P35B_CONTINUE_LIST.is_file() == bool(ids)
+
+
 def test_check_applied_passes_only_an_allowed_deferral_and_names_it() -> None:
     declared = {"a", "b", "c"}
     assert es.check_applied({"a", "b", "c"}, declared, {"c": "why"}) == "applied 3/3"

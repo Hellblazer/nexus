@@ -57,6 +57,7 @@ def test_the_quarantine_restore_busy_reason_equals_the_engines() -> None:
         "COLLECTION_SUPERSEDED_REASON",
         "UNKNOWN_COLLECTION_ID_REASON",
         "COLLECTION_ID_MISMATCH_REASON",
+        "COLLECTION_RENAMED_REASON",
         "RENAME_REFUSED_REASON",
         "RENAME_PATH_MISMATCH_REASON",
         "RENAME_NOT_IN_REGISTRY_REASON",
@@ -86,3 +87,22 @@ def test_error_reason_reads_only_a_non_empty_string() -> None:
     assert error_reason({"reason": "x"}) == "x"
     for body in ({}, {"reason": ""}, {"reason": 3}, None, "reason", ["reason"]):
         assert error_reason(body) is None
+
+
+def test_a_collection_renamed_409_is_not_a_superseded_write() -> None:
+    """The engine's 409 ``collection_renamed`` (a one-row rename landed under the request) is no retired collection: the client's
+    typed superseded error must not claim it, so it reaches the caller as the generic 409 it is."""
+    from nexus.collection_errors import superseded_write_error_from_body  # noqa: PLC0415 — test-local import
+    from nexus.db.engine_reasons import COLLECTION_RENAMED_REASON  # noqa: PLC0415 — test-local import
+
+    body = {
+        "error": "collection_id 7 is now named 'c', not 'b'",
+        "reason": COLLECTION_RENAMED_REASON,
+        "collection_id": 7,
+        "requested_label": "b",
+        "current_label": "c",
+        # the fields a superseded body carries, so the test fails if the reader ever matches on them instead of the reason
+        "collection": "b",
+        "superseded_by": "c",
+    }
+    assert superseded_write_error_from_body(409, body) is None

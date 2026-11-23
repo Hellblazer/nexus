@@ -361,17 +361,43 @@ class CollectionSelectorFilterRowsTest {
      * handler that went on by label would); a route that is not a write route is not. A request by label names no id, so there is
      * nothing to consume and nothing to report.
      */
+    /**
+     * The report runs on the server thread AFTER the stub handler has closed the exchange, so a client that has its 200 can look at
+     * {@code reports} before the filter's {@code finally} has run (a loaded machine shows it). The positive case therefore waits for
+     * the report, and the negative case gives a late one a moment to arrive, so "nothing reported" is read after the server threads have
+     * had their turn.
+     */
+    private void awaitReports(int count) throws InterruptedException {
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10);
+        while (reports.size() < count && System.nanoTime() < deadline) {
+            Thread.sleep(5);
+        }
+    }
+
     @Test
     void aWriteRouteThatAnswers2xxWithoutReadingTheIdIsReported_otherRoutesAreNot() throws Exception {
         reports.clear();
         assertThat(post("/v1/taxonomy/topics/insert", "{\"collection_id\":5,\"label\":\"x\"}").status()).isEqualTo(200);
+        awaitReports(1);
         assertThat(reports).as("a write route, 2xx, id never read in a transaction").hasSize(1);
         assertThat(reports.peek()).contains("/v1/taxonomy/topics/insert").contains("live-five");
+
+        // the request-level report does not depend on the per-transaction census: with it off the same request is reported
+        dev.nexus.service.db.ExpectedCollectionIds.setCensus(false);
+        try {
+            reports.clear();
+            assertThat(post("/v1/taxonomy/topics/insert", "{\"collection_id\":5,\"label\":\"x\"}").status()).isEqualTo(200);
+            awaitReports(1);
+            assertThat(reports).as("the same write route with the per-transaction census off").hasSize(1);
+        } finally {
+            dev.nexus.service.db.ExpectedCollectionIds.setCensus(true);
+        }
 
         reports.clear();
         assertThat(post("/v1/vectors/store-get", "{\"collection_id\":5}").status()).isEqualTo(200);
         assertThat(get("/v1/catalog/collections/get?collection_id=5").status()).isEqualTo(200);
         assertThat(post("/v1/taxonomy/topics/insert", "{\"collection\":\"live-five\",\"label\":\"x\"}").status()).isEqualTo(200);
+        Thread.sleep(300);   // a late report of the three requests above would have arrived by now
         assertThat(reports).as("a read route, and a request by label").isEmpty();
     }
 }

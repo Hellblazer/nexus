@@ -614,6 +614,19 @@ public final class HttpUtil {
             send(exchange, 409, CollectionSupersededBody.of(retiredId.collectionId(), retiredId.label(), retiredId.successor()));
             return true;
         }
+        // a one-row rename landed between the route boundary and the write's registry read: an ordinary race, not a defect
+        var renamed = causeOf(e, dev.nexus.service.db.CollectionRenamedUnderRequestException.class);
+        if (renamed != null) {
+            log.warn("event={}_collection_renamed {} tenant={} collection_id={} requested_label={} current_label={}", event, context,
+                renamed.tenant(), renamed.collectionId(), LogText.escapeControl(renamed.requestedLabel()),
+                LogText.escapeControl(renamed.currentLabel()));
+            send(exchange, 409, "{\"error\":" + jsonString(renamed.getMessage())
+                + ",\"reason\":\"" + COLLECTION_RENAMED_REASON + "\""
+                + ",\"collection_id\":" + renamed.collectionId()
+                + ",\"requested_label\":" + jsonString(renamed.requestedLabel())
+                + ",\"current_label\":" + jsonString(renamed.currentLabel()) + "}");
+            return true;
+        }
         var idMismatch = causeOf(e, dev.nexus.service.db.CollectionIdMismatchException.class);
         if (idMismatch != null) {
             log.error("event={}_collection_id_mismatch {} requested={} resolved={}", event, context, idMismatch.requested(),
@@ -936,6 +949,13 @@ public final class HttpUtil {
      * a registry inconsistency, an engine defect and never a caller mistake. Wire contract.
      */
     static final String COLLECTION_ID_MISMATCH_REASON = "collection_id_mismatch";
+
+    /**
+     * {@code reason} of the 409 for a {@code collection_id} whose row carries another label than the one the request resolved at the
+     * route boundary (RDR-229 P3.5a): a one-row rename landed in the gap, an ordinary race. Also carries {@code collection_id},
+     * {@code requested_label} and {@code current_label}. The client may read the collection again and retry. Wire contract.
+     */
+    static final String COLLECTION_RENAMED_REASON = "collection_renamed";
 
     /** {@code reason} of the 409 for a rename refused from gate 3 until the one-row rename can run (RDR-229 P3.5a). Wire contract. */
     static final String RENAME_REFUSED_REASON = "rename_refused";

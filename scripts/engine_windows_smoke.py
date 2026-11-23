@@ -137,9 +137,25 @@ _CHANGESET_ID_RE = re.compile(r'<changeSet\b[^>]*?\bid="([^"]+)"')
 #: onFail="CONTINUE" (a skip records nothing, so the changeset is retried at every boot) and waits for state a fresh
 #: install reaches only after its first boot. ``check_applied`` passes a missing id only when it is listed here, and
 #: fails on an entry the changelog no longer has, so the list cannot go stale (RDR-229 Phase 3 reland, linda's ruling).
+#: RDR-229 P3.5b's CONTINUE-gated changesets (vectors-078), one id a line, kept equal to the changelog by
+#: tests/test_rdr229_p35b_continue_list.py. Absent on a tree without P3.5b, where it adds nothing.
+P35B_CONTINUE_LIST: Path = Path(__file__).resolve().parents[1] / "service" / "src" / "main" / "resources" / "db" / "rdr229" / "p35b-continue-changesets.txt"
+
+
+def continue_list_ids(path: Path) -> list[str]:
+    """The changeset ids of a CONTINUE list file: its non-blank lines that are not ``#`` comments; none when the file
+    does not exist."""
+    if not path.is_file():
+        return []
+    lines = (line.strip() for line in path.read_text(encoding="utf-8").splitlines())
+    return [line for line in lines if line and not line.startswith("#")]
+
+
 FRESH_BOOT_PENDING: dict[str, str] = {
     "collections-001-2": "the live-tuple unique index waits for the rdr229-reown-repo-stems-from-curator move "
                          "(RDR-229 P3.8), which runs after the first boot; applied on a later boot",
+    **{cid: "P3.5b: CONTINUE-gated on the gate 3 state a fresh install reaches after its first boot; retried at every boot"
+       for cid in continue_list_ids(P35B_CONTINUE_LIST)},
 }
 
 

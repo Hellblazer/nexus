@@ -193,7 +193,7 @@ public final class TaxonomyRepository {
     private static void ensureCollectionRegisteredAllowingSuperseded(DSLContext ctx, String tenant,
                                                                      String collection) {
         if (collection == null || collection.isBlank()) return;
-        CollectionRegistry.requireRegistered(ctx, tenant, collection);
+        CollectionRegistry.requireForWrite(ctx, tenant, collection);   // RDR-229 P3.5a: a write's check takes the key share, a tombstone allowed
     }
 
     /**
@@ -206,7 +206,7 @@ public final class TaxonomyRepository {
      */
     private static String modelOf(DSLContext ctx, String tenant, String collection) {
         if (collection == null || collection.isBlank()) return null;
-        return CollectionRegistry.require(ctx, tenant, collection).embeddingModel();
+        return CollectionRegistry.requireForWrite(ctx, tenant, collection).embeddingModel();
     }
 
     /**
@@ -746,11 +746,13 @@ public final class TaxonomyRepository {
             // (mirrors P3a's plpgsql centroid-branch fix), so ANY row
             // carrying a non-blank source_collection needs the same
             // auto-stub, not just "assigned_by": "projection" rows.
-            ordered.stream()
+            List<String> sources = ordered.stream()
                 .map(r -> optS(r, "source_collection"))
                 .filter(c -> c != null && !c.isBlank())
                 .distinct()
-                .forEach(c -> ensureCollectionRegistered(ctx, tenant, c));
+                .toList();
+            CollectionRegistry.requireAllForWrite(ctx, tenant, sources);   // RDR-229 P3.5a: every source's key share at once, in id order
+            sources.forEach(c -> ensureCollectionRegistered(ctx, tenant, c));
             java.util.Set<Long> retired = supersededTopicIds(ctx, tenant, ordered.stream()
                 .filter(r -> "projection".equals(reqS(r, "assigned_by")))
                 .map(r -> reqL(r, "topic_id"))
@@ -1615,8 +1617,9 @@ public final class TaxonomyRepository {
      * purge, a delete of centroids: they may clear the leftovers of a collection whose registry row is already gone). When
      * the request named {@code collection} by id ({@link ExpectedCollectionIds}), reads that id in {@code ctx}'s
      * transaction, {@code FOR KEY SHARE}, as the first collection-keyed statement: no row is a 404, a retired row a 409,
-     * and the write after it is by that id's row, never by a label another row has taken. By label it reads the row and
-     * ignores a missing one, which is the behaviour of these writes before the id existed.
+     * and the write after it is by that id's row, never by a label another row has taken. By label it reads the row it
+     * resolves to, {@code FOR KEY SHARE} too (linda's option (b)), and ignores a missing one, which is the behaviour of these
+     * writes before the id existed.
      */
     public static void consumeRequestedId(DSLContext ctx, String tenant, String collection) {
         try {
@@ -2029,7 +2032,7 @@ public final class TaxonomyRepository {
     // not ETL) are NOT in scope: they never supply an explicit id (server-generated,
     // exempt), and they already arbitrate the ONLY key they can hit
     // (TOPICS.TENANT_ID, TOPICS.COLLECTION, TOPICS.LABEL) WHERE PARENT_ID IS NULL) —
-    // plus lockTaxonomyCollection serializes per-collection writers, a stronger belt
+    // plus TaxonomyCollectionLock serializes per-collection writers, a stronger belt
     // than the retry this class's import siblings use. Non-root topics (parent_id NOT
     // NULL) are outside the partial index's predicate entirely — no identity key to
     // guard.
@@ -3032,8 +3035,7 @@ public final class TaxonomyRepository {
             // children escape the taxonomy-004 partial index (parent_id NOT
             // NULL) so a race here duplicates children rather than 409ing —
             // the same per-collection lock closes both.
-            lockTaxonomyCollection(ctx, tenant, collectionName);
-            ensureCollectionRegistered(ctx, tenant, collectionName);
+            TaxonomyCollectionLock.lockAndRequireWritable(ctx, tenant, collectionName);   // advisory lock keyed by id, then the key share
             // RDR-229 P3.1 stage 2b: the collection's registry id for every child topic written below.
             final Long collectionId = CollectionIds.require(ctx, tenant, collectionName);
             // Delete parent assignments
@@ -3157,8 +3159,7 @@ public final class TaxonomyRepository {
         return tenantScope.withTenant(tenant, ctx -> {
             // nexus-n2ls1: same guard-then-write shape as persistDiscoveredTopics
             // (delete-then-insert here) — serialize per-collection first.
-            lockTaxonomyCollection(ctx, tenant, collection);
-            ensureCollectionRegistered(ctx, tenant, collection);
+            TaxonomyCollectionLock.lockAndRequireWritable(ctx, tenant, collection);   // advisory lock keyed by id, then the key share
             // RDR-229 P3.1 stage 2b: the collection's registry id for every topic and assignment written below.
             final Long collectionId = CollectionIds.require(ctx, tenant, collection);
             // REPLACE semantics — clear old rows even when there are no new specs.
@@ -3290,8 +3291,7 @@ public final class TaxonomyRepository {
             // nexus-n2ls1: serialize per-collection BEFORE the guard — the guard
             // alone is a TOCTOU race under concurrent discovery (both count 0,
             // both insert, loser 23505 → 409).
-            lockTaxonomyCollection(ctx, tenant, collection);
-            ensureCollectionRegistered(ctx, tenant, collection);
+            TaxonomyCollectionLock.lockAndRequireWritable(ctx, tenant, collection);   // advisory lock keyed by id, then the key share
             // RDR-229 P3.1 stage 2b: the collection's registry id for every topic written below.
             final Long collectionId = CollectionIds.require(ctx, tenant, collection);
             int existing = ctx.selectCount()

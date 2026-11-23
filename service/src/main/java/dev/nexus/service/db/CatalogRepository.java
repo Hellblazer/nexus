@@ -6122,7 +6122,9 @@ public final class CatalogRepository {
      */
     private void refuseRowsUnderSupersededCollection(String tenant, String collection,
                                                       List<Map<String, Object>> docs) {
-        if (docs == null) return;
+        // no document, so no transaction: an early return before any withTenant (the only kind of nothingToWrite; a document with no
+        // rows still opens one, deletes the stored manifest rows and clears their spans, and its transaction reads the id)
+        if (docs == null || docs.isEmpty()) { ExpectedCollectionIds.nothingToWrite(collection); return; }
         boolean anyRows = false;
         for (Map<String, Object> d : docs) {
             if (d != null && d.get("rows") instanceof List<?> l && !l.isEmpty()) {
@@ -6130,14 +6132,24 @@ public final class CatalogRepository {
                 break;
             }
         }
-        if (!anyRows) { ExpectedCollectionIds.nothingToWrite(collection); return; }   // no row is filed under the name: nothing to protect
+        if (!anyRows) return;   // no row is filed under the name, but each document's transaction still reads the id (registryFirst)
         try {
             CollectionRegistry.lookupWritable(tenantScope, tenant, collection);
-        } catch (CollectionSupersededException | CollectionRetiredIdException | UnknownCollectionIdException e) {
-            throw e;   // a request by id answers its typed 409 or 404 (RDR-229 P3.5a), not a 200 with every document failed
         } catch (RuntimeException e) {
+            CollectionIdRefusals.rethrowIfRefusal(e);   // a request by id answers its typed 409 or 404 (RDR-229 P3.5a), not a 200 with every document failed
             // Unregistered, or a row the registry cannot resolve: each document reports it as it always did.
         }
+    }
+
+    /**
+     * RDR-229 P3.5a (linda's option (b)): the registry check of a manifest write, taken right after the advisory locks (sweep gate,
+     * index-run lock) and before the first row lock of the transaction (the document's manifest rows, the chunk rows): the row of
+     * {@code collection} {@code FOR KEY SHARE}, once per transaction ({@link CollectionRegistry#requireForWriteIfPresent}). It adds no
+     * refusal of its own: a request by id whose id is gone or retired is refused here, and a label no row has or a retired label keeps
+     * the answer of the writer that follows ({@code requireWritable} for rows, none for an empty manifest).
+     */
+    private static void registryFirst(DSLContext ctx, String tenant, String collection) {
+        CollectionRegistry.requireForWriteIfPresent(ctx, tenant, collection);
     }
 
     /** Which {@code ON CONFLICT} shape {@link #insertManifestChunkRows} applies. */
@@ -6218,7 +6230,7 @@ public final class CatalogRepository {
         // append_many) and are refused. UPSERT_IMPORT is the fidelity-preserving collection import, which
         // legitimately carries tombstoned collections and keeps the plain registration check.
         final String embeddingModel = (mode == ManifestInsertMode.UPSERT_IMPORT
-                ? CollectionRegistry.require(ctx, tenant, coll)
+                ? CollectionRegistry.requireForWrite(ctx, tenant, coll)
                 : CollectionRegistry.requireWritable(ctx, tenant, coll)).embeddingModel();
         // RDR-229 P3.1: the registry's id, read in this transaction (never cached), for every row of the call.
         final Long collectionId = CollectionIds.require(ctx, tenant, coll);
@@ -6426,6 +6438,7 @@ public final class CatalogRepository {
         // so a concurrent completeIndexRun for the same doc either runs entirely
         // before or entirely after this manifest mutation, never interleaved.
         acquireIndexRunLock(ctx, tenant, docId);
+        registryFirst(ctx, tenant, collection);
         // nexus-kl2z6 increment 1 (design memo §0): the chunk-vector UPSERT
         // runs BEFORE the manifest rows are replaced below — a chash lands in
         // chunks_<dim> before (in this same, still-open transaction) the
@@ -6690,7 +6703,7 @@ public final class CatalogRepository {
         // through insertManifestChunkRows' requireWritable, so a retire that lands in the embed window rolls
         // the chunk rows back with the refusal; the up-front lookupWritable in CombinedWriteService is the
         // first line.
-        CollectionRow collectionRow = CollectionRegistry.require(ctx, tenant, collection);
+        CollectionRow collectionRow = CollectionRegistry.requireForWrite(ctx, tenant, collection);
         int dim = collectionRow.dimension();
         // RDR-225 (nexus-3wh8d.13): the chunk rows carry the collection's model; a model with no
         // partition is refused before the insert, naming the model.
@@ -7116,6 +7129,7 @@ public final class CatalogRepository {
                         requireDocumentExists(ctx, tenant, docId);
                         acquireSweepGateShared(ctx, tenant, collection);
                         acquireIndexRunLock(ctx, tenant, docId);
+                        registryFirst(ctx, tenant, collection);   // before requireMovePrecondition's document row locks
                         // RDR-210 Phase 6 Step 1: under the document's write locks, so a client write that
                         // committed before them is seen and one that comes after waits for this commit.
                         if (move != null) {
@@ -7257,6 +7271,9 @@ public final class CatalogRepository {
                         }
                     }
                 } catch (Exception e) {
+                    // RDR-229 P3.5a (review F5): the registry's typed refusals are the answer of the request, not of this document: an
+                    // id freed or retired after the pre-check answers 404/409, never a 200 with the document in failed_doc_ids
+                    if (CollectionIdRefusals.isRefusal(e)) throw (RuntimeException) e;
                     // nexus-fhhwf: the per-doc swallow used to discard the
                     // CAUSE — a chash CHECK violation surfaced as a bare id
                     // in failed_doc_ids and took 3 deploy-gate iterations to
@@ -8185,6 +8202,7 @@ public final class CatalogRepository {
             // acquireIndexRunLock's javadoc) — this was the one mutation path
             // left outside the lock when it landed.
             acquireIndexRunLock(ctx, tenant, docId);
+            registryFirst(ctx, tenant, collection);
             // An append with rows learns of a tombstone at its chunk_count fold below; a sweep-only
             // append (empty rows) has no fold, so check here: it must be refused 409 like any
             // other append to a tombstoned document, not sweep on its behalf.
@@ -8465,6 +8483,7 @@ public final class CatalogRepository {
                     pendingSweeps.add(new Object[] {r, docId, toSweep});
                 }
             } catch (Exception e) {
+                if (CollectionIdRefusals.isRefusal(e)) throw (RuntimeException) e;   // F5: the request's answer, not this document's
                 Map<String, Object> detail = failureDetail(docId, e);
                 log.debug("event=append_many_doc_failed tenant={} doc_id={} reason={} sqlstate={}",
                           tenant, docId, detail.get("reason"), detail.get("sqlstate"));
@@ -13677,6 +13696,7 @@ public final class CatalogRepository {
             // document's index-run lock after the gate, in writeManifestRows's order; a document move
             // for the same document then either precedes it or waits for it.
             acquireIndexRunLock(ctx, tenant, docId);
+            registryFirst(ctx, tenant, collection);
 
             final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / 10);
             for (int start = 0; start < deduped.size(); start += chunkSize) {
@@ -13702,6 +13722,7 @@ public final class CatalogRepository {
         requireDocumentExists(ctx, tenant, docId);
         acquireSweepGateShared(ctx, tenant, collection);
         acquireIndexRunLock(ctx, tenant, docId);
+        registryFirst(ctx, tenant, collection);
         Map<Integer, String> writtenAt = chashesByPosition(List.of(row));
         Map<Integer, DepartedWriterSpans.Gone> priorAt = DepartedWriterSpans.rowsAt(ctx, tenant, docId, writtenAt.keySet(), gate3);
         insertManifestChunkRows(ctx, tenant, docId, collection, List.of(row), ManifestInsertMode.UPSERT_IMPORT, gate3);

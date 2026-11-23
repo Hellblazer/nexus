@@ -367,8 +367,14 @@ final class TenantKeyedStateTables {
         notKeyed.put("CollectionSelectorFilter.unconsumedSink", TEST_HOOK);
         notKeyed.put("ExpectedCollectionIds.Carrier.ids", "the ids the request on this thread named, by label: set by the route boundary just before the handler and removed in a finally, so no request outlives it and nothing is keyed by tenant (RDR-229 P3.5a)");
         notKeyed.put("ExpectedCollectionIds.Carrier.consumed", "the labels the request on this thread has read by id in its own transaction; dies with the request's carrier (RDR-229 P3.5a)");
-        notKeyed.put("ExpectedCollectionIds.Carrier.memo", "the rows the request's by-id read returned in one transaction; dies with the request's carrier (RDR-229 P3.5a)");
+        notKeyed.put("ExpectedCollectionIds.Carrier.readByTransaction", "census only (a test turns it on): the labels each transaction of the request read, by the transaction's jOOQ configuration; dies with the request's carrier (RDR-229 P3.5a)");
+        notKeyed.put("ExpectedCollectionIds.Carrier.historyTransactions", "census only: the transactions of the request that declared a history write; dies with the request's carrier (RDR-229 P3.5a)");
+        notKeyed.put("ExpectedCollectionIds.Carrier.findings", "census only: the write transactions of the request that read none of its named ids; dies with the request's carrier (RDR-229 P3.5a)");
+        notKeyed.put("CollectionRegistry.writeReadHookForTests", TEST_HOOK);
+        notKeyed.put("DeadlockRetry.retryListenerForTests", TEST_HOOK);
+        notKeyed.put("CollectionSelectorFilter.censusSink", TEST_HOOK);
         notKeyed.put("CollectionRetiredIdException.tenant", "payload of an exception thrown to one caller (RDR-229 P3.5a)");
+        notKeyed.put("CollectionRenamedUnderRequestException.tenant", "payload of an exception thrown to one caller (RDR-229 P3.5a)");
         notKeyed.put("ReembedRunner.tenantSource", "a supplier of the tenant list, re-read from service_tokens at "
             + "the start of every runner pass; the runner keeps nothing per tenant between passes");
         notKeyed.put("ReembedHandler.servedModels", "a supplier of the models the embedder router serves, an "
