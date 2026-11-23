@@ -17,7 +17,11 @@ package dev.nexus.service.datamove;
 @FunctionalInterface
 public interface Gate3 {
 
-    /** Whether gate 3 holds now. Read on each call; an implementation must not cache the answer. */
+    /**
+     * Whether gate 3 has latched on this install. Monotone: once it answers true it answers true for the life of the install,
+     * whatever the live gate 3 does later. Read on each call, because a false can turn true at any call (the latch is written
+     * while the engine runs); an implementation may remember a true, never a false.
+     */
     boolean holds();
 
     /** Gate 3 never holds: the name key for every read, as before P3.5. */
