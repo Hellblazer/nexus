@@ -49,7 +49,7 @@ class ProductionGate3WiringTest {
         "db/ChashConstraintValidator.java", "db/ChashRepository.java", "db/CombinedWriteService.java",
         "db/IndexRunCensusReads.java", "db/LegacyChunkSurvey.java", "db/PdfStubMetadataReads.java", "db/PipelineRepository.java",
         "db/QuarantineOrigin.java", "db/ReembedJobRepository.java", "db/ReembedSourceReader.java", "db/RemapRepository.java",
-        "db/RenameGuard.java", "db/TaxonomyRepository.java", "db/TelemetryRepository.java", "db/UriSegmentCensusReads.java",
+        "db/TaxonomyRepository.java", "db/TelemetryRepository.java", "db/UriSegmentCensusReads.java",
         "http/ChashConformanceHandler.java", "vectors/ChunkConstraintAdmin.java", "vectors/ChunkKeySweep.java",
         "vectors/ChunkOwnerLabel.java", "vectors/ManifestLabelStage.java",
         "vectors/PciIdBuilds.java", "vectors/PciQueryRingReader.java",
