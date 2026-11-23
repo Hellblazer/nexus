@@ -40,6 +40,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 @org.junit.jupiter.api.TestMethodOrder(org.junit.jupiter.api.MethodOrderer.MethodName.class)   // the re-home test needs fk_catalog_chunks_chunk, which underExclude_... drops: it sorts last
 class Rdr229P35cCatalogReadersIntegrationTest extends AtomicWriteTestBase {
 
+    /** Set by the one test that drops {@code fk_catalog_chunks_chunk} (the class shares one database). */
+    private boolean chunkFkDropped;
+
     private final AtomicBoolean latched = new AtomicBoolean();
     private CatalogRepository gated;
     private CombinedWriteService gatedSvc;
@@ -247,6 +250,7 @@ class Rdr229P35cCatalogReadersIntegrationTest extends AtomicWriteTestBase {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             PgContainerHelper.dropCatalogChunksFk(su);
+            chunkFkDropped = true;   // the re-home test below needs the foreign key: it runs before this method (class order by method name)
             int n = DSL.using(su, SQLDialect.POSTGRES).update(CHUNKS).set(CHUNKS.COLLECTION, other.collection())
                 .where(CHUNKS.TENANT_ID.eq(TENANT)).and(CHUNKS.COLLECTION.eq(open.collection())).execute();
             assertThat(n).as("fixture: both chunk rows carry a name that is not their manifest's").isEqualTo(2);
@@ -281,6 +285,7 @@ class Rdr229P35cCatalogReadersIntegrationTest extends AtomicWriteTestBase {
 
     @Test
     void aRehomeOntoALabelAnotherCollectionRenamedAwayLeavesThatCollectionsRowsItsOwnId() throws Exception {
+        assertThat(chunkFkDropped).as("precondition: fk_catalog_chunks_chunk is still there (underExclude_aStaleChunkNameAfterAOneRowRename_... drops it for the rest of this class)").isFalse();
         Renamed a = renamedCollection();            // A (id1) is now B; its manifest and chunk rows still name A
         Renamed c = renamedCollection();            // C (id2) ...
         String reusedLabel = a.oldLabel();          // ... is renamed to A's old label, which the rows of id1 still carry
