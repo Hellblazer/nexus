@@ -109,6 +109,13 @@ java	db/LegacyChunkSurvey.java ? join_on	collection	id
 java	db/LegacyChunkSurvey.java catalog_document_chunks expr	collection	id	
 java	db/LegacyChunkSurvey.java catalog_document_chunks join_on	collection	id	
 java	db/LegacyChunkSurvey.java catalog_documents expr	physical_collection	id	
+java	db/ManifestReplace.java catalog_document_chunks result	collection	id	from gate 3 the stored row is compared and cleared by its id; the label shown is the caller's
+java	db/ManifestReplace.java catalog_document_chunks select	collection	id	from gate 3 the stored row is compared and cleared by its id; the label shown is the caller's
+java	db/ManifestReplace.java catalog_document_chunks set_value	collection	both	keys the chunk rows and orphan records by their stored name columns, which a rename leaves equal on both sides until P4.1 drops them; the write sets the name beside the id
+java	db/ManifestReplace.java chunk_orphaned_at expr	collection	both	keys the chunk rows and orphan records by their stored name columns, which a rename leaves equal on both sides until P4.1 drops them; the write sets the name beside the id
+java	db/ManifestReplace.java chunk_orphaned_at order_by	collection	both	keys the chunk rows and orphan records by their stored name columns, which a rename leaves equal on both sides until P4.1 drops them; the write sets the name beside the id
+java	db/ManifestReplace.java chunks order_by	collection	both	keys the chunk rows and orphan records by their stored name columns, which a rename leaves equal on both sides until P4.1 drops them; the write sets the name beside the id
+java	db/ManifestReplace.java chunks where	collection	both	keys the chunk rows and orphan records by their stored name columns, which a rename leaves equal on both sides until P4.1 drops them; the write sets the name beside the id
 java	db/PdfStubMetadataReads.java ? expr	collection	id	the per-collection statement's manifest filter: by the registry id carried from the list from gate 3, by the label before
 java	db/PdfStubMetadataReads.java ? expr	physical_collection	id	the per-collection statement's document filter: by the registry id carried from the list from gate 3, by the label before
 java	db/PdfStubMetadataReads.java catalog_collections order_by	name	label-kept	lists the registry's own labels of the examined collections, the names the report is keyed by; each is then read by its id
