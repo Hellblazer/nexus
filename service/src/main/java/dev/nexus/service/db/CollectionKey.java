@@ -79,6 +79,11 @@ public final class CollectionKey {
      * client deletes the registry row first): {@code name = value} before gate 3; after, {@code id = registry id of value OR (name =
      * value AND no LIVE registry row holds the row's id)}, so a row whose collection is gone is still found by the name it recorded,
      * and a label that has passed to another live collection never reaches the old rows.
+     *
+     * <p>The name arm only ever sees a dangling id, never a NULL one (linda 2026-11-23): chash_remap (source and target), pdf_pipeline and
+     * reembed_jobs (source and target) are all {@code NAME_ID} in {@code db/rdr229/p31-checks.tsv} (rows 28 to 32: the check is
+     * {@code (NULLIF(name,'') IS NULL) = (id IS NULL)}), and gate 3 latches only with those checks validated, so from the latch no row of
+     * these tables has a NULL id beside a non-empty name. A row the name arm reaches carries an id no LIVE registry row holds.
      */
     public Condition eqLedger(String tenant, Field<String> name, Field<Long> id, String value) {
         if (!byId) {
@@ -186,6 +191,11 @@ public final class CollectionKey {
      * id = idOf(v)}, or {@code name = v} when no LIVE registry row has the row's id (the collection is gone or retired to a tombstone, and its stored name is its
      * last label). The id arm finds a renamed collection under its new label; the name arm reaches only gone history, so a stale name
      * never matches a different live collection that now holds the label. Before gate 3: {@code name = v}.
+     *
+     * <p>The name arm only ever sees a dangling id, never a NULL one (linda 2026-11-23): chash_remap (source and target), pdf_pipeline and
+     * reembed_jobs (source and target) are all {@code NAME_ID} in {@code db/rdr229/p31-checks.tsv} (rows 28 to 32: the check is
+     * {@code (NULLIF(name,'') IS NULL) = (id IS NULL)}), and gate 3 latches only with those checks validated, so from the latch no row of
+     * these tables has a NULL id beside a non-empty name. A row the name arm reaches carries an id no LIVE registry row holds.
      */
     public Condition eqHistory(String tenant, Field<String> name, Field<Long> id, String value) {
         return byId ? id.eq(CollectionIds.idOf(tenant, value)).or(name.eq(value).and(noRegistryRow(tenant, id))) : name.eq(value);
