@@ -179,9 +179,6 @@ final class TenantKeyedStateTables {
         notKeyed.put("CatalogDocReads.Page.documents", RESULT);
         notKeyed.put("CatalogMoves.Counts.absorbedTumblers", RESULT);   // RDR-254: one move's absorbed rows
         notKeyed.put("CatalogMoves.Report.asMap", RESULT);              // RDR-254: one move's report
-        // RDR-229 P3.5c: one statement's selector, the labels it was built from and their resolved ids, dropped with the call
-        notKeyed.put("CollectionSelector.names", RESULT);
-        notKeyed.put("CollectionSelector.ids", RESULT);
         notKeyed.put("CatalogMoves.lockOrderHookForTests", TEST_HOOK);
         notKeyed.put("CatalogMoves.afterWritesHookForTests", TEST_HOOK);
         notKeyed.put("CatalogMoves.FoldPlan.pairsT", RESULT);   // RDR-254: the fold read for one owner move
@@ -213,6 +210,7 @@ final class TenantKeyedStateTables {
         TenantKeyedStateTablesRdr229.fillCompletionCheck(notKeyed);   // RDR-229 P3.1 (nexus-p2m1x.17): the boot-time completion check is engine-wide
         TenantKeyedStateTablesRdr229.fillLeafIndexPass(notKeyed);   // RDR-229 P3.3b (nexus-p2m1x.20): the per-leaf id unique-index pass is engine-wide
         TenantKeyedStateTablesRdr229.fillIdUniqueIndexPass(notKeyed);   // RDR-229 P3.4 (nexus-p2m1x.22): the id-keyed index pass is engine-wide
+        TenantKeyedStateTablesRdr229.fillP35c(notKeyed);   // RDR-229 P3.5c (nexus-p2m1x.25): the id-keyed readers' per-call state and two counters
         // nexus-f3yqd.2.18: the engine's own database passwords, set once at startup; the engine's, so no tenant's
         notKeyed.put("SecretMask.SECRETS", "the engine's own database passwords (the admin and the application role), added once "
             + "at startup; process-wide credentials of the engine, never a tenant's, and nothing a tenant's reset has to clear");
@@ -423,9 +421,8 @@ final class TenantKeyedStateTables {
         notKeyed.put("NexusService.TENANT_RESET_TUPLE_BOUND", CONSTANT);
         // nexus-4lnn1.1.3 (RDR-230): the recall canary's query ring. Its rows are in nexus.canary_query_ring (FORCE RLS,
         // cascading foreign key to the collection registry); what the engine holds in memory is a short queue.
-        notKeyed.put("DepartedWriterSpans.UNRESOLVED", "a process-wide count of manifest spans whose collection id could not be resolved from gate 3 (a number, " + "no tenant, collection or row); read by tests and the status surface, never reset for a tenant");
-        notKeyed.put("AspectQueueDrain.SKIPPED_NO_LIVE_COLLECTION", "a process-wide count of retired-queue rows skipped because their stored name resolves to no " + "live registry row (a number, no tenant or row); read by tests, never reset for a tenant");
-        notKeyed.put("PciQueryRing.queue", "a bounded in-memory queue (1,024 entries) drained every 30 seconds; an " + "entry for a reset tenant is skipped by the function's foreign key, so nothing outlives the reset");
+        notKeyed.put("PciQueryRing.queue", "a bounded in-memory queue (1,024 entries) drained every 30 seconds; an "
+            + "entry for a reset tenant is skipped by the function's foreign key, so nothing outlives the reset");
         notKeyed.put("PciQueryRing.Entry.tenant", "the tenant of one queued ring entry, immutable; dies when the "
             + "queue is drained at the next flush");
         notKeyed.put("PciQueryRing.validIndexes", "the router's valid-index set, shared with the repository; "
