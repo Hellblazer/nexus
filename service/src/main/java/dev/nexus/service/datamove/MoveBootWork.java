@@ -233,6 +233,7 @@ public final class MoveBootWork implements AutoCloseable {
                 registry.finish(id);
             }
             published.clear();
+            registry.dataMovesNeedOperator(List.of());
         }
         try {
             reader.abort();   // a read hung on a silent connection must not outlive the engine's shutdown
@@ -299,7 +300,31 @@ public final class MoveBootWork implements AutoCloseable {
         }
         highestDone.keySet().retainAll(desired.keySet());
         lastAdvance.keySet().retainAll(desired.keySet());
+        registry.dataMovesNeedOperator(needOperator(snapshot.open()));
         return published.size();
+    }
+
+    /**
+     * The open moves in the needs-an-operator state, for {@code /v1/status}: the row says it ({@link MoveRetryPolicy#needsOperator(DataMove)},
+     * 20 consecutive transients, so a restart brings it back) or the worker's state does (the reason its handler built said
+     * "needs an operator", which is the {@code on_complete} run of lock or statement timeouts; kept while the move is
+     * retried). The list is empty again the sample after the move completes or its retry count is reset.
+     */
+    private List<BootWorkRegistry.NeedsOperator> needOperator(List<DataMove> open) {
+        List<BootWorkRegistry.NeedsOperator> out = new java.util.ArrayList<>();
+        for (DataMove m : open) {
+            var state = states.state(m.label());
+            boolean held = !m.paused() && m.transientRetries() > 0 && m.lastTransientAt() != null
+                && state.map(MoveStates.State::needsOperator).orElse(false);
+            if (!MoveRetryPolicy.needsOperator(m) && !held) {
+                continue;
+            }
+            Instant last = m.lastTransientAt().toInstant();
+            out.add(new BootWorkRegistry.NeedsOperator(m.label(), m.transientRetries(), last,
+                last.plus(MoveRetryPolicy.backoff(m.transientRetries())), MoveReasons.sqlstateOf(m.lastTransient()),
+                m.statementTimeoutMs(), state.map(MoveStates.State::terminatesIndexBuilds).orElse(false)));
+        }
+        return List.copyOf(out);
     }
 
     private record Desired(String what, Long done, Long total, BootWorkRegistry.Step step, String reasonClass) {

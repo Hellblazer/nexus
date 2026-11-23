@@ -28,10 +28,13 @@ public final class MoveStates implements MoveReporter {
      * worker reported the move, which is what a retry waits from. {@code firstBlockedAt} is when the move was first
      * blocked in the run of blocked passes and retries it is in (a retry in flight is {@link Kind#WORKING}, so
      * {@code since} restarts with it); null until the move has been blocked, and cleared when it is paused, failed or its
-     * runs complete.
+     * runs complete. {@code needsOperator} is whether the last blocked reason said "needs an operator"
+     * ({@link MoveRetryPolicy#blockedReason}: the retry policy's one rule), and {@code terminatesIndexBuilds} whether it also
+     * said each retry ends in-flight index builds; both are kept while the move is retried ({@link Kind#WORKING}) and cleared
+     * by a blocked reason without them, and by a failed, paused or runs-complete report.
      */
     public record State(String label, Kind kind, String reason, String pausedBy, Instant since, Instant updatedAt,
-                        Instant firstBlockedAt) { }
+                        Instant firstBlockedAt, boolean needsOperator, boolean terminatesIndexBuilds) { }
 
     /** A CALL in flight for a move: the run, the server backend that holds it, and when it began. */
     public record CallInFlight(String runLabel, int pid, Instant startedAt) { }
@@ -57,7 +60,17 @@ public final class MoveStates implements MoveReporter {
             case WORKING -> old != null ? old.firstBlockedAt() : null;
             case FAILED, PAUSED, RUNS_COMPLETE -> null;
         };
-        byLabel.put(label, new State(label, kind, reason, pausedBy, since, now, firstBlocked));
+        boolean needs = switch (kind) {
+            case BLOCKED -> MoveReasons.needsOperator(reason);
+            case WORKING -> old != null && old.needsOperator();
+            case FAILED, PAUSED, RUNS_COMPLETE -> false;
+        };
+        boolean builds = switch (kind) {
+            case BLOCKED -> MoveReasons.terminatesIndexBuilds(reason);
+            case WORKING -> old != null && old.terminatesIndexBuilds();
+            case FAILED, PAUSED, RUNS_COMPLETE -> false;
+        };
+        byLabel.put(label, new State(label, kind, reason, pausedBy, since, now, firstBlocked, needs, builds));
     }
 
     @Override
