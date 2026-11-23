@@ -609,13 +609,15 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
             c.setAutoCommit(false);
             MoveSql.runOnComplete(c, text);
             Field<Long> idxScan = DSL.field(DSL.name("idx_scan"), Long.class);
-            Long scanned = DSL.using(c, SQLDialect.POSTGRES).select(idxScan).from(DSL.table(DSL.name("pg_catalog", "pg_stat_xact_user_tables")))
+            Field<Long> seqScan = DSL.field(DSL.name("seq_scan"), Long.class);
+            var scanned = DSL.using(c, SQLDialect.POSTGRES).select(seqScan, idxScan).from(DSL.table(DSL.name("pg_catalog", "pg_stat_xact_user_tables")))
                 .where(DSL.field(DSL.name("schemaname"), String.class).eq("nexus")).and(DSL.field(DSL.name("relname"), String.class).eq("catalog_collections"))
-                .fetchOne(idxScan);
-            long probes = scanned == null ? 0L : scanned;
+                .fetchOne();
+            long probes = scanned == null ? 0L : (scanned.value1() == null ? 0L : scanned.value1()) + (scanned.value2() == null ? 0L : scanned.value2());
             c.rollback();
-            assertThat(probes).as("the VALIDATE as %s probed the registry by index %d times for %d rows: 0 is the set-based check", worker, probes, rows)
-                .isZero();
+            assertThat(probes).as("the VALIDATE as %s scanned the registry %d times for %d rows: a handful at most is the set-based check (the per-row fallback "
+                + "scans it about once per row; the control in Rdr229ChunksFkHardeningIntegrationTest shows it)", worker, probes, rows)
+                .isLessThanOrEqualTo(3L);
         }
     }
 
