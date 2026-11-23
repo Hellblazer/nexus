@@ -25,6 +25,17 @@ How an occurrence is found and given its table:
   sql      a string literal (or the literals of one statement, joined) that holds SQL and a name column: the SQL is read by
            P3.5b's reads() rules, the clause by the keyword before it; the table from `nexus.<t>` or FROM/JOIN, else UNRESOLVED.
 
+METADATA KEYS (nexus-p2m1x.25, the second reader class). A collection label can also be read through a key of a jsonb column, with no
+name column in sight. The name_column of such a row is "metadata.<key>". The keys are LABEL_KEYS below, each with the writer that proves it
+carries a label; ID_KEYS are the id twins (read and counted in the output, never a row). The forms found: DSL.jsonbGetAttributeAsText /
+jsonbGetAttribute (key literal or a static final String constant), DSL.function("jsonb_extract_path_text" | "jsonb_extract_path" |
+"jsonb_exists" | "jsonb_object_field_text" | "jsonb_object_field", ..., metadata, key), and -> / ->> / #>> / #> / jsonb_extract_path_text /
+jsonb_exists / ? over a metadata column inside a string literal. A Field bound to one of these (`Field<String> origin = ...;`, a
+local or a class constant) is an accessor_def row, and every later use of the variable in its scope is a row in the clause it sits in
+(via "bound"): `ORIGIN_TAG.eq(origin)` is a where row though the key is named once. A read whose key is not a literal or a constant (a
+user-supplied key: StoreGetProjection, a metadata filter) is counted in the output ("variable-key"), never a row, because no key is
+read; a bound Field that a method returns or a non-private constant that another file uses is noted in the output, not followed.
+
 An UNRESOLVED occurrence is a row with table "?" (so it needs a disposition, and the drift check sees it) and an UNRESOLVED line
 in this script's output. Nothing is dropped. What the scan cannot see: a name column reached through a Field<String> parameter
 handed to a helper (the helper's own use of the parameter is a bare expression with no table), and SQL a changeset holds (P3.5b's).
@@ -211,6 +222,164 @@ def line_of(text, pos):
     return text.count("\n", 0, pos) + 1
 
 
+
+# ---------------------------------------------------------------- metadata keys
+# jsonb keys that carry a collection LABEL, each with the writer that proves it (a key counted here is one a writer fills with a label):
+#   origin_collection  chunks.metadata: the quarantine move writes it into every chunk it takes (vectors-077 gc_quarantine_orphans,
+#                      gc_quarantine_orphans_bounded and reaper_quarantine_chunks as jsonb_build_object('origin_collection', ...);
+#                      QuarantineOrigin.retagRowsOf's tag merge; RestoreIdFill.relabelOriginTag's jsonb_set on an import).
+# Not labels: quarantined_at / quarantine_expires_at / reaper_quarantined_at (timestamps), quarantined_by (the actor 'engine-reaper'),
+# co_discovered_by (a catalog_links actor); gc_audit.details carries an origin_collection too, but it is only written (QuarantineOrigin
+# details.put, the gc_* audit producers) and no statement reads it back by key.
+LABEL_KEYS = ("origin_collection",)
+ID_KEYS = ("origin_collection_id",)       # the id twin of origin_collection: noted in the output, not a label read
+JSONB_READ_FNS = {"jsonb_extract_path_text", "jsonb_extract_path", "jsonb_exists", "jsonb_object_field_text", "jsonb_object_field"}
+STRING_CONSTS = {}                        # static final String NAME = "literal"; over every scanned file (the key often is one)
+variable_key_reads = []                   # (file, line): a jsonb read whose key is neither a literal nor a known constant
+id_key_reads = []                         # (file, line): a read of an ID_KEYS key
+unfollowed_bindings = []                  # (file, line, var): a Field bound to a label read that a method returns or another file may use
+for _p in sorted(JAVA.rglob("*.java")):
+    for _mm in re.finditer(r"\bstatic\s+final\s+String\s+(\w+)\s*=\s*\"([^\"]*)\"\s*;", _p.read_text()):
+        STRING_CONSTS[_mm.group(1)] = _mm.group(2)
+
+
+def arg_spans(m, call):
+    """(start, end) of each top-level argument of a call, in the masked text."""
+    spans, depth, start = [], 0, call.open + 1
+    for i in range(call.open + 1, call.close):
+        c = m[i]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif c == "," and depth == 0:
+            spans.append((start, i))
+            start = i + 1
+    if m[start:call.close].strip():
+        spans.append((start, call.close))
+    return spans
+
+
+def key_of(text):
+    """The key a jsonb accessor's key argument names: a literal, a bare or qualified static final String constant, or None."""
+    t = re.sub(r"^(?:DSL\.)?(?:val|inline)\(\s*(.*?)\s*\)$", r"\1", text.strip(), flags=re.S)
+    mm = re.fullmatch(r"\"([^\"]*)\"", t)
+    if mm:
+        return mm.group(1)
+    mm = re.fullmatch(r"(?:[\w.]*\.)?([A-Z][A-Z0-9_]*)", t)
+    return STRING_CONSTS.get(mm.group(1)) if mm else None
+
+
+def block_pairs(m):
+    """[(open, close)] of every {...} of masked code."""
+    out, stack = [], []
+    for i, c in enumerate(m):
+        if c == "{":
+            stack.append(i)
+        elif c == "}" and stack:
+            out.append((stack.pop(), i))
+    out += [(o, len(m)) for o in stack]
+    return out
+
+
+def scan_metadata_keys(p, f, code, m, calls, binds, bound):
+    """The jsonb key reads of a file: accessor calls, the Fields they are bound to, and their uses (see the module docstring)."""
+    blocks = block_pairs(m)
+    reads_found = []   # (call, key, jsonb_arg_text)
+    for c in calls:
+        spans = arg_spans(m, c)
+        if c.name in ("jsonbGetAttributeAsText", "jsonbGetAttribute") and len(spans) == 2:
+            reads_found.append((c, key_of(code[spans[1][0]:spans[1][1]]), code[spans[0][0]:spans[0][1]]))
+        elif c.name == "function" and len(spans) >= 4:
+            fn = re.fullmatch(r"\s*\"([a-z_]+)\"\s*", code[spans[0][0]:spans[0][1]])
+            if fn and fn.group(1) in JSONB_READ_FNS:
+                reads_found.append((c, key_of(code[spans[3][0]:spans[3][1]]), code[spans[2][0]:spans[2][1]]))
+    for c, key, jarg in reads_found:
+        line = line_of(code, c.open)
+        if key is None:
+            variable_key_reads.append((f, line))
+            continue
+        if key in ID_KEYS:
+            id_key_reads.append((f, line))
+            continue
+        if key not in LABEL_KEYS:
+            continue
+        table, note = "?", "the jsonb column is not bound to a table in this file"
+        mm = re.fullmatch(r"\s*(?:[\w.]*\.)?([A-Za-z_]\w*)\.METADATA\s*", jarg)
+        if mm:
+            var = mm.group(1)
+            b = None if var.isupper() else bound(var, c.open)
+            if var.isupper() and var.lower() in LISTED:
+                table, note = var.lower(), ""
+            elif var.isupper():
+                table, note = var.lower(), "not in p31-checks"
+            elif b and b[1] == "alias":
+                table, note = b[0], ""
+        name_start = c.open
+        while name_start > 0 and m[name_start - 1] in " \t\r\n":
+            name_start -= 1
+        name_start -= len(c.name)
+        st_start = max(code.rfind(";", 0, name_start), code.rfind("{", 0, name_start), code.rfind("}", 0, name_start)) + 1
+        # `Type var = [DSL.]accessor(...)[.chained(...)];`: the accessor sits at the top level of the declaration's right-hand side,
+        # so var holds the key's value (or a cast / test of it); an accessor nested in a call's arguments does not bind the result
+        head = m[st_start:name_start]
+        decl = re.match(r"\s*(?:(?:final|static|private|public|protected)\s+)*[\w<>\[\].?, ]+?\s(\w+)\s*=(?!=)\s*(?:[\w$.]*\.)?$", head)
+        col = "metadata." + key
+        if decl:
+            var = decl.group(1)
+            vpos = st_start + decl.start(1)
+            add(f, line, table, col, "accessor_def", "metadata_key", note)
+            # the variable's scope: the whole class body for a class-level field, else from the declaration to the end of its block
+            enc = min((b for b in blocks if b[0] < vpos < b[1]), key=lambda b: b[1] - b[0], default=(0, len(m)))
+            header = m[max(0, max(m.rfind(";", 0, enc[0]), m.rfind("{", 0, enc[0]), m.rfind("}", 0, enc[0])) + 1):enc[0]]
+            field_level = bool(re.search(r"\b(class|interface|record|enum)\b", header))
+            if field_level and not re.search(r"\bprivate\b", m[st_start:vpos]):
+                unfollowed_bindings.append((f, line, var))
+            lo, hi = (enc[0], enc[1]) if field_level else (vpos, enc[1])
+            for um in re.finditer(rf"(?<![\w$.]){re.escape(var)}(?![\w$(])", m[lo:hi]):
+                upos = lo + um.start()
+                if upos == vpos:
+                    continue
+                op = op_of(m, calls, upos)
+                if op is not None:
+                    add(f, line_of(code, upos), table, col, op, "bound", note)
+        else:
+            op = op_of(m, calls, c.open)
+            if op is not None:
+                if re.match(r"\s*return\b", m[st_start:name_start]) or re.search(r"\breturn\s*(?:DSL\.)?\s*$", m[st_start:name_start]):
+                    unfollowed_bindings.append((f, line, "<returned>"))
+                add(f, line, table, col, op, "metadata_key", note)
+
+
+META_SQL = r"(?:(\w+)\.)?\w*metadata\w*"
+META_SQL_FORMS = (
+    rf"{META_SQL}\s*(?:->>|->)\s*'(\w+)'",
+    rf"{META_SQL}\s*#>>?\s*'\{{(\w+)[,}}]",
+    rf"jsonb_(?:extract_path(?:_text)?|exists|object_field(?:_text)?)\(\s*{META_SQL}\s*,\s*'(\w+)'",
+    rf"{META_SQL}\s*\?\??\s*'(\w+)'",
+)
+
+
+def scan_metadata_sql_literals(f, code, lits):
+    """A metadata key read written as SQL text inside a Java string literal (the literals of one statement joined, as the name-column scan does)."""
+    for x, y, t in lits:
+        for form in META_SQL_FORMS:
+            for mm in re.finditer(form, t):
+                key = mm.group(2)
+                if key in ID_KEYS:
+                    id_key_reads.append((f, line_of(code, x + 1 + mm.start())))
+                    continue
+                if key not in LABEL_KEYS:
+                    continue
+                aliases = sql_aliases(t)
+                named = {tt.lower() for tt in re.findall(r"\bnexus\.([a-z_][a-z0-9_]*)", t, re.I)} | set(aliases.values())
+                qual = (mm.group(1) or "").lower()
+                cand = [aliases[qual]] if qual in aliases else sorted(named)
+                ks = list(KW.finditer(t[:mm.start()]))
+                op = KW_OP[re.sub(r"\s+", " ", ks[-1].group(1).upper())] if ks else "expr"
+                add(f, line_of(code, x + 1 + mm.start()), cand[0] if len(cand) == 1 else "?", "metadata." + key, op, "sql_metadata_key",
+                    "" if len(cand) == 1 else f"{len(cand)} candidate tables in the SQL text")
+
 # ---------------------------------------------------------------- Java occurrences
 rows = {}          # (file, line, table, column, op) -> set of via
 notes = {}         # same key -> note
@@ -351,6 +520,8 @@ def scan_java(p):
                 tabs = {near[-1]}
         add(f, line_of(code, pos), next(iter(tabs)) if len(tabs) == 1 else "?", col, op, "literal",
             "" if len(tabs) == 1 else f"{len(tabs)} candidate tables in the statement")
+    scan_metadata_keys(p, f, code, m, calls, binds, bound)
+    scan_metadata_sql_literals(f, code, lits)
     scan_sql_strings(f, code, lits)
 
 
@@ -480,6 +651,10 @@ if __name__ == "__main__":
     print("on_conflict rows", [(k[0].split("/")[-1], k[1], k[2]) for k in body if k[4] == "on_conflict"])
     print("record accessors skipped (x.collection() with no ChunkTable/CentroidTable binding)", sum(skipped_accessors.values()),
           dict(skipped_accessors.most_common(8)))
+    print("metadata keys", {k: sum(1 for r in body if r[3] == "metadata." + k) for k in LABEL_KEYS}, "id-key reads (not rows)", len(set(id_key_reads)),
+          "variable-key reads (not rows)", len(set(variable_key_reads)), sorted({f.split("/")[-1] for f, _ in variable_key_reads}))
+    for f, line, var in sorted(set(unfollowed_bindings)):
+        print("NOT FOLLOWED", f, line, var)
     for f, line, col, op, via in sorted(set(unresolved)):
         print("UNRESOLVED", f, line, col, op, via)
     print("unresolved", len(set(unresolved)))
