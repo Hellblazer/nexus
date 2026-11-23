@@ -124,6 +124,36 @@ else:
     raise SystemExit("match=bogus was accepted: the engine ignores the match field, or the edge strips it")
 """
 
+GC_QUARANTINE_ORPHANS = r"""
+from nexus.db import make_t3
+from nexus.db.http_vector_client import VectorServiceError
+# RDR-229 P3.5a: the gc moves answer a registry row a retiring verb holds as a typed 503 rename_busy. A move cannot be
+# probed on a real collection, so this one is probed so that it cannot move anything: the NAME is registered nowhere,
+# and the engine reads the origin's registry row before it runs the move, so it refuses with a typed 4xx and no
+# chunk is touched. An engine without the route answers a bare 404, which carries no reason and fails the probe.
+try:
+    make_t3().gc_quarantine_orphans("@label@-gc-probe", "quarantine-@label@-gc-probe", "2026-01-01T00:00:00Z")
+except VectorServiceError as exc:
+    assert exc.code in (400, 404, 409, 422) and exc.reason, f"gc quarantine-orphans answered {exc.code} with no typed reason: {exc}"
+    print("quarantine-orphans refused", exc.code, exc.reason)
+else:
+    raise SystemExit("gc quarantine-orphans accepted a collection nothing registers")
+"""
+
+GC_QUARANTINE_RESTORE = r"""
+from nexus.db import make_t3
+from nexus.db.http_vector_client import VectorServiceError
+# RDR-229 P3.5a: as GC_QUARANTINE_ORPHANS, for the restore (which keeps its own 503, quarantine_restore_busy): a dry run
+# for an origin nothing registers, refused before any sibling is looked at, so it cannot move or write anything.
+try:
+    make_t3().gc_quarantine_restore("@label@-gc-probe", chashes=["00" * 32], dry_run=True)
+except VectorServiceError as exc:
+    assert exc.code in (400, 404, 409, 422) and exc.reason, f"gc quarantine-restore answered {exc.code} with no typed reason: {exc}"
+    print("quarantine-restore refused", exc.code, exc.reason)
+else:
+    raise SystemExit("gc quarantine-restore accepted an origin nothing registers")
+"""
+
 TELEMETRY_RENAME = r"""
 import httpx
 from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
@@ -263,3 +293,10 @@ except Exception as exc:  # noqa: BLE001 - narrowed below to the one typed refus
 else:
     raise SystemExit("doc/register accepted a document under an unregistered collection: the engine does not refuse it")
 """
+
+#: RDR-229 P3.5a: the gc routes' registry-row wait answers 503 rename_busy (quarantine-restore keeps quarantine_restore_busy);
+#: route -> (step name, snippet, stdout the probe prints). Each is probed by a name nothing registers, so it cannot move anything.
+GC_PROBES = {
+    "POST /v1/vectors/gc/quarantine-orphans": ("route-gc-quarantine-orphans", GC_QUARANTINE_ORPHANS, "quarantine-orphans refused"),
+    "POST /v1/vectors/gc/quarantine-restore": ("route-gc-quarantine-restore", GC_QUARANTINE_RESTORE, "quarantine-restore refused"),
+}
