@@ -51,8 +51,9 @@ import java.util.function.Consumer;
  * {@code on_complete} in the transaction above. {@link #validateBeforeClaim} runs it first, in a transaction of its own under
  * {@code lock_timeout} 5 s and {@code statement_timeout} 0 (so no network timeout), holding no row of {@code nexus.data_moves} and no other
  * move's state; its backend pid and start go to the reporter (status), a stop cancels the statement ({@link #cancelInFlight}), and a boot ends
- * the backend if the engine died ({@link DataMoveOrphans}). Only then does the claim transaction run, with the cheap re-check and the UPDATE
- * of {@code completed_at} and no {@code on_complete}. {@code on_complete} is idempotent for these moves (it validates what is not validated yet), so a
+ * the backend if the engine died ({@link DataMoveOrphans}). Only then does the claim transaction run: the move's re-check (a registry read for a
+ * leaf validation, which also reads its leaf key and refuses to complete unless it is validated; for the other moves the move's own verification,
+ * a scan per tenant under the row lock) and the UPDATE of {@code completed_at}, with no {@code on_complete}. {@code on_complete} is idempotent for these moves (it validates what is not validated yet), so a
  * restart between the two finds nothing left to do and claims. A move whose {@code on_complete} puts itself back
  * ({@code completed_at} NULL again, the adoption move) ends as {@link MoveFinisher.Outcome#REOPENED}: no completed event, no listener, no retry reset.
  *
@@ -292,8 +293,13 @@ final class VerifyingFinisher implements MoveFinisher {
                 // the verification again, warm now, under the completion's own bound: a write since the first pass cannot slip
                 // past, and a non-empty or failed re-check rolls this transaction back with the UPDATE above
                 tx.connection(c -> recheck(tx, c, move, tenants));
+                if (move.unbounded() && isLeafValidation(move)) {
+                    // the claim of a leaf validation reads its leaf key: missing or NOT VALID is 55P03, the claim does not complete and the move
+                    // validates again (the adoption's reconcile is the backstop, not the guarantee; linda, 2026-11-23)
+                    tx.connection(c -> MoveSql.runOnComplete(c, dev.nexus.service.vectors.Rdr229ChunksFk.leafClaimCheck(move.label())));
+                }
                 if (onComplete != null && !move.unbounded()) {
-                    if (ChunkFamily.touches(move)) {
+                    if (ChunkFamily.touches(move) && !isAdoption(move)) {   // the adoption ends builders itself, once it holds its lock and is about to add
                         // only now: the move is known to complete, so no pause or supersede ends a build for nothing
                         // best effort: a savepoint keeps a refused signal from aborting the transaction
                         try {
@@ -338,29 +344,49 @@ final class VerifyingFinisher implements MoveFinisher {
             DSL.field(DSL.name("completed_at"), SQLDataType.TIMESTAMPWITHTIMEZONE).isNull());
     }
 
-    /** The backend of the completion in flight and the admin values to reach it with, so {@link #cancelInFlight} can end it from the thread that stops the engine. */
-    private record InFlight(dev.nexus.service.db.AdminConnection admin, int pid) { }
+    /** A completion in flight: its backend, whose identity (start and name) a cancel checks again, and the admin values to reach it with. */
+    private record InFlight(dev.nexus.service.db.AdminConnection admin, int pid, java.time.OffsetDateTime backendStart, String applicationName) { }
 
     private volatile InFlight inFlight;
 
+    /** Test seam: runs once the completion's backend is published and before the stop flag is read again, where a stop can slip in. */
+    Runnable afterPublishHook;
+
+    /** Test seam: runs after a validation has committed and before its claim, where an engine can die. */
+    Runnable afterValidateHook;
+
+    /**
+     * Cancels the completion in flight with {@code pg_cancel_backend}, after checking in the same statement that the pid is still that backend
+     * (same database, same role, same name and start). A cancel, not a terminate: it ends the running statement and leaves the session, so
+     * between two statements it does nothing and cannot kill a session that has moved on to another move; the window is closed by reading the
+     * stop flag again after publishing, not by a harder signal.
+     */
     @Override
     public void cancelInFlight() {
         InFlight running = inFlight;
         if (running != null) {
-            DataMoveOrphans.cancelBackend(running.admin(), running.pid());
+            DataMoveOrphans.cancelBackend(running.admin(), running.pid(), running.applicationName(), running.backendStart());
         }
     }
 
     /**
      * A move with no statement bound runs its on_complete here, in a transaction of its own under lock_timeout only and statement_timeout
-     * 0, before the claim. The backend's pid and start go to the reporter (status shows how long it has run), and a stop cancels the
-     * statement. PCI builders are ended first for a move over the chunk family, except a per-leaf validation (it only conflicts with a
-     * build on its own leaf, and the lock wait answers that with 55P03).
+     * 0, before the claim. The backend's pid and start go to the reporter (status shows how long it has run), a stop cancels the statement,
+     * and so does a pause or a supersede set while it runs ({@link CompletionWatch}). PCI builders are ended first for a move over the chunk
+     * family, except a per-leaf validation (it only conflicts with a build on its own leaf, and the lock wait answers that with 55P03), and
+     * only after the move has been read again for a pause.
      *
      * @return null on success, otherwise the result that ends the finish
      */
     private Result validateBeforeClaim(DSLContext admin, DataMove move, Context context) {
         if (ChunkFamily.touches(move) && !isLeafValidation(move)) {
+            Optional<DataMove> now = DataMoveRegistry.reload(admin, move.label());
+            if (now.isEmpty()) {
+                return Result.gone();
+            }
+            if (now.get().paused()) {
+                return Result.paused(now.get());
+            }
             try {
                 admin.transaction(cfg -> PciBuilders.terminateOrThrow(cfg.dsl(), "reason=data_move_on_complete move=" + move.label(), log));
             } catch (DataAccessException e) {
@@ -368,40 +394,77 @@ final class VerifyingFinisher implements MoveFinisher {
             }
         }
         MoveReporter reporter = context.reporter();
+        CompletionWatch[] watch = new CompletionWatch[1];
         try {
+            boolean[] stoppedBefore = new boolean[1];
             admin.transaction(cfg -> {
                 DSLContext tx = cfg.dsl();
                 PgSession.setStatementAndLockBounds(tx, 0, DataMove.UNBOUNDED_LOCK_TIMEOUT_MS);
-                Integer pid = tx.select(DSL.function("pg_backend_pid", SQLDataType.INTEGER)).fetchOne(0, Integer.class);
+                var start = tx.select(DSL.field(DSL.name("pid"), Integer.class), DSL.field(DSL.name("backend_start"), java.time.OffsetDateTime.class))
+                    .from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
+                    .where(DSL.field(DSL.name("pid"), Integer.class).eq(DSL.function("pg_backend_pid", SQLDataType.INTEGER))).fetchOne();
+                Integer pid = start == null ? null : start.value1();
                 log.info("event=data_move_completion label={} pid={}", move.label(), pid);
                 if (reporter != null && pid != null) {
                     reporter.callStarted(move, COMPLETION_RUN, pid);
                 }
                 if (pid != null) {
-                    inFlight = new InFlight(context.adminConnection(), pid);
+                    InFlight flight = new InFlight(context.adminConnection(), pid, start.value2(), context.applicationName());
+                    inFlight = flight;
+                    watch[0] = CompletionWatch.start(flight.admin(), move.label(), pid, flight.applicationName(), flight.backendStart());
+                }
+                Runnable seam = afterPublishHook;
+                if (seam != null) {
+                    seam.run();
+                }
+                if (context.stopped().getAsBoolean()) {   // a stop that came before the backend was published reached nobody: do not start
+                    stoppedBefore[0] = true;
+                    return;
                 }
                 tx.connection(c -> MoveSql.runOnComplete(c, move.onComplete()));
             });
+            if (stoppedBefore[0]) {
+                return Result.leftOpen();
+            }
         } catch (DataAccessException e) {
             SQLException raised = e.getCause(SQLException.class);
-            if (context.stopped().getAsBoolean() && raised != null && "57014".equals(raised.getSQLState())) {
+            boolean cancelled = raised != null && "57014".equals(raised.getSQLState());
+            if (cancelled && context.stopped().getAsBoolean()) {
                 return Result.leftOpen();   // the engine stopped it; the next boot validates again
+            }
+            if (cancelled && watch[0] != null && watch[0].fired()) {
+                Optional<DataMove> now = DataMoveRegistry.reload(admin, move.label());
+                return now.isPresent() && now.get().paused() ? Result.paused(now.get()) : now.isEmpty() ? Result.gone() : Result.leftOpen();
             }
             return Result.report(failure(admin, move, FailureHandler.Stage.ON_COMPLETE, null, raised,
                 "on_complete of " + move.label() + " did not complete: "
                     + FailureHandler.oneLine(raised != null ? "sqlstate=" + raised.getSQLState() + " " + raised.getMessage()
                         : e.getMessage())));
         } finally {
+            if (watch[0] != null) {
+                watch[0].close();
+            }
             inFlight = null;
             if (reporter != null) {
                 reporter.callEnded(move);
             }
+        }
+        Runnable crash = afterValidateHook;
+        if (crash != null) {
+            crash.run();
+        }
+        if (context.stopped().getAsBoolean()) {
+            return Result.leftOpen();   // validated; the claim is the next pass's, and finds nothing left to validate
         }
         return null;
     }
 
     /** The run label the reporter shows for a completion statement. */
     static final String COMPLETION_RUN = "completion";
+
+    private static boolean isAdoption(DataMove move) {
+        return move.label().equals(dev.nexus.service.vectors.Rdr229ChunksFk.ADOPT_LABEL);
+    }
 
     private static boolean isLeafValidation(DataMove move) {
         return move.label().startsWith(dev.nexus.service.vectors.Rdr229ChunksFk.LEAF_LABEL_PREFIX);
