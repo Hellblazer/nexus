@@ -360,7 +360,8 @@ class Rdr229P37OneRowLockOrderTest {
      * linda's census pass 2: {@code repointTombstonesNaming(newName)} updates EVERY tombstone whose superseded_by names the new label, a self-pointing one (a
      * delete of the row it named leaves its own id) or one carrying another collection's id included, so those rows are in the rename's one ordered FOR UPDATE.
      * Held FOR SHARE by another transaction, such a tombstone makes the rename wait at that select, not at the later repoint UPDATE (where it waited when the
-     * lock set left it out); once released, the rename repoints it onto the renamed row's id, and no deadlock retry was spent.
+     * lock set left it out); once released, the rename repoints the self-pointing one onto the renamed row's id (the foreign one names a live collection, which P3.5c's repoint rule
+     * leaves where it is), and no deadlock retry was spent.
      */
     @Test
     void aTombstoneNamingTheNewLabelUnderItsOwnOrAForeignId_isLockedInTheOneOrderedStatement() throws Exception {
@@ -405,7 +406,9 @@ class Rdr229P37OneRowLockOrderTest {
             }
             assertThat(engine.<Long>su(ctx -> ctx.select(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID).from(CATALOG_COLLECTIONS)
                 .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(sid))).fetchOne(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID)))
-                .as(shape + ": S now points at the renamed row").isEqualTo(id);
+                .as(shape + (shape.equals("self") ? ": S now points at the renamed row"
+                    : ": S keeps the live foreign Z it names (P3.5c's repoint rule, af30a9473b: a tombstone whose id names a live collection already has its successor)"))
+                .isEqualTo(shape.equals("self") ? id : pointsAt);
         }
     }
 
