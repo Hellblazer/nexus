@@ -575,7 +575,7 @@ final class DepartedWriterSpans {
      */
     private static Table<?> writers(DSLContext ctx, String tenant, Table<?> dep, boolean byId) {
         var chunk = CHUNKS.as("writer_chunk");
-        Field<Object> depCollection = asObject(dep.field("collection", byId ? Long.class : String.class));
+        Field<Object> depCollection = asObject(byId ? dep.field("collection", Long.class) : dep.field("collection", String.class));
         Field<byte[]> depChash = dep.field("chash", byte[].class);
         List<SelectField<?>> columns = new ArrayList<>(List.of(depCollection.as("collection"),
             depChash.as("chash"), chunk.EMBEDDING_MODEL.as("model")));
@@ -599,7 +599,7 @@ final class DepartedWriterSpans {
      */
     private static int update(DSLContext ctx, String tenant, Table<?> dep, Table<?> holders, boolean byId) {
         Table<?> writers = writers(ctx, tenant, dep, byId);
-        Field<Object> collection = asObject(holders.field("collection", byId ? Long.class : String.class));
+        Field<Object> collection = asObject(byId ? holders.field("collection", Long.class) : holders.field("collection", String.class));
         Field<byte[]> chash = holders.field("chash", byte[].class);
         Field<String> model = holders.field("model", String.class);
         // jsonb_delete(jsonb, text) and jsonb_exists(jsonb, text) are the functions behind the "-" and "?"
@@ -632,7 +632,7 @@ final class DepartedWriterSpans {
             .set(CHUNKS.METADATA, stripped)
             .set(CHUNKS.COLLECTION_ID, byId ? CHUNKS.COLLECTION_ID : CollectionIds.idOf(DSL.val(tenant), CHUNKS.COLLECTION))
             .from(holders.join(writers)
-                .on(asObject(writers.field("collection", byId ? Long.class : String.class)).eq(collection)
+                .on(asObject(byId ? writers.field("collection", Long.class) : writers.field("collection", String.class)).eq(collection)
                     .and(writers.field("chash", byte[].class).eq(chash))
                     .and(writers.field("model", String.class).eq(model))))
             .where(CHUNKS.TENANT_ID.eq(tenant)

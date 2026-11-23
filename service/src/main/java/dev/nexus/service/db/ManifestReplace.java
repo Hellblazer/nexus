@@ -95,7 +95,7 @@ final class ManifestReplace {
      *         insert, which refuses a bad row exactly as it always did
      */
     static List<DepartedWriterSpans.Gone> replace(DSLContext ctx, String tenant, String docId, String collection,
-                                                  List<Map<String, Object>> rows) {
+                                                  List<Map<String, Object>> rows, dev.nexus.service.datamove.Gate3 gate3) {
         if (declineForTests) return null;
         List<Incoming> incoming = new ArrayList<>(rows.size());
         Map<Integer, Incoming> byPosition = new HashMap<>(Math.max(16, rows.size() * 2));
@@ -151,7 +151,7 @@ final class ManifestReplace {
             Incoming in = byPosition.get(old.position());
             if (in == null) {
                 toDelete.add(old);
-            } else if (!same(old, in, collection, collectionId, embeddingModel)) {
+            } else if (!same(old, in, collection, collectionId, embeddingModel, gate3)) {
                 toUpdate.add(in);
                 updatedFrom.add(old);
             }
@@ -165,8 +165,11 @@ final class ManifestReplace {
 
         List<DepartedWriterSpans.Gone> before = new ArrayList<>(stored.size());
         for (Stored old : stored) {
-            before.add(new DepartedWriterSpans.Gone(old.collection(), old.chash(), old.lineStart(), old.lineEnd(),
-                old.charStart(), old.charEnd()));
+            // RDR-229 P3.5c: from gate 3 a stored row of this collection is shown under the caller's label (a rename leaves its own
+            // name stale) and carries its id, so the departed-span clear keys by id
+            String label = gate3.holds() && Objects.equals(old.collectionId(), collectionId) ? collection : old.collection();
+            before.add(new DepartedWriterSpans.Gone(label, old.chash(), old.lineStart(), old.lineEnd(),
+                old.charStart(), old.charEnd(), old.collectionId()));
         }
 
         // The chunk rows of every row about to be deleted or rewritten, locked in key order in one pass, before
@@ -197,7 +200,7 @@ final class ManifestReplace {
         }
         if (!toInsert.isEmpty()) {
             CatalogRepository.insertManifestChunkRows(ctx, tenant, docId, collection, toInsert,
-                CatalogRepository.ManifestInsertMode.PLAIN);
+                CatalogRepository.ManifestInsertMode.PLAIN, gate3);
         }
 
         // The record of every chunk key the new set lists, in this document's collection: what the old path's INSERT
@@ -217,12 +220,13 @@ final class ManifestReplace {
         return before;
     }
 
-    private static boolean same(Stored old, Incoming in, String collection, Long collectionId, String embeddingModel) {
+    private static boolean same(Stored old, Incoming in, String collection, Long collectionId, String embeddingModel,
+                                dev.nexus.service.datamove.Gate3 gate3) {
         return old.hex().equals(in.chashHex())
             && Objects.equals(old.chunkIndex(), in.chunkIndex())
             && Objects.equals(old.lineStart(), in.lineStart()) && Objects.equals(old.lineEnd(), in.lineEnd())
             && Objects.equals(old.charStart(), in.charStart()) && Objects.equals(old.charEnd(), in.charEnd())
-            && Objects.equals(old.collection(), collection) && Objects.equals(old.collectionId(), collectionId)
+            && (gate3.holds() || Objects.equals(old.collection(), collection)) && Objects.equals(old.collectionId(), collectionId)
             && Objects.equals(old.embeddingModel(), embeddingModel)
             && Objects.equals(old.sectionTitle(), in.sectionTitle())
             && Objects.equals(old.sectionType(), in.sectionType())
