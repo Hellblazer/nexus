@@ -78,6 +78,13 @@ class LabelReservedPlanTest {
             var def = DSL.field(DSL.name("indexdef"), String.class);
             for (var p : LabelReserved.probes()) {
                 var defs = ctx.select(def).from(DSL.table(DSL.name("pg_catalog", "pg_indexes"))).where(schema.eq("nexus").and(table.eq(p.table()))).fetch(def);
+                if (p.table().equals("pdf_pipeline")) {
+                    // linda 2026-11-23, option (a): pdf_pipeline has no index led by (tenant_id, collection); the probe runs only at a
+                    // registration, which is rare, and a tenant-led index bounds it to one tenant's rows. No index is added for it.
+                    assertThat(defs).as("pdf_pipeline: the probe is bounded by a tenant-led index; its indexes: " + defs)
+                        .anyMatch(d -> d.contains("(tenant_id,"));
+                    continue;
+                }
                 assertThat(defs).as(p.table() + ": an index led by (tenant_id, " + p.nameColumn() + "); its indexes: " + defs)
                     .anyMatch(d -> d.contains("(tenant_id, " + p.nameColumn() + ",") || d.contains("(tenant_id, " + p.nameColumn() + ")"));
             }
