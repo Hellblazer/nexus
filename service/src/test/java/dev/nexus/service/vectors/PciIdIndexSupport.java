@@ -76,6 +76,8 @@ abstract class PciIdIndexSupport {
     volatile boolean gate3;
     /** Whether this engine's id readers are present (P3.5's IdReaders.PRESENT); the retire needs it as well as the latched gate 3. */
     volatile boolean readers = true;
+    /** Whether the gate 3 latch row says it latched while PCI was off (pci_off): the id builds then do not wait for gate 2. */
+    volatile boolean pciOffLatch;
 
     @BeforeAll
     void startAll() throws Exception {
@@ -123,6 +125,7 @@ abstract class PciIdIndexSupport {
         gate2 = false;
         gate3 = false;
         readers = true;
+        pciOffLatch = false;
     }
 
     // -- fixtures --------------------------------------------------------------------------------------------
@@ -137,6 +140,7 @@ abstract class PciIdIndexSupport {
             PciReconciler.SET_LOCAL_TENANT, PciReconciler.COUNT_TIMEOUT, Duration.ofSeconds(60));
         r.idBuildGate(() -> gate2);
         r.retireNameIndexesWhen(() -> gate3);
+        r.buildIdIndexesFirstWhen(() -> pciOffLatch);
         r.idReadersPresent(() -> readers);
         return r;
     }

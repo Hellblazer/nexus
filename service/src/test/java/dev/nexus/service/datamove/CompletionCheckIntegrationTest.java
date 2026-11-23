@@ -591,7 +591,7 @@ class CompletionCheckIntegrationTest {
                 CompletionCheck.DIRECT, List.of(), CompletionCheck.LatchWriter.NONE).gate3Latched()).isFalse();
 
             // A writer that fails leaves it unlatched and the result intact: the next read tries again.
-            var failed = CompletionCheck.evaluate(ctx, rs, everyIndexValid(), CompletionCheck.DIRECT, List.of(), (c, gate) -> {
+            var failed = CompletionCheck.evaluate(ctx, rs, everyIndexValid(), CompletionCheck.DIRECT, List.of(), (c, gate, pciOff) -> {
                 throw new IllegalStateException("read only");
             });
             assertThat(failed.gate3()).isTrue();
@@ -599,6 +599,49 @@ class CompletionCheckIntegrationTest {
         } finally {
             clearLatch();
         }
+    }
+
+    /** linda 2026-11-23: the latch records the posture (pci_off) it latched in, and the check reports it. */
+    @Test
+    void theLatchRecordsPciOff_whenTheClauseDidNotApply_andNotOtherwise() {
+        CompletionCheck.ReadSet rs = new CompletionCheck.ReadSet(List.of(), List.of());
+        clearLatch();
+        try {
+            var off = CompletionCheck.evaluate(ctx, rs, c -> Optional.of(CompletionCheck.IdIndexCoverage.pciOff()), CompletionCheck.DIRECT,
+                List.of(), CompletionCheck.latchOnCtx("engine-1"));
+            assertThat(off.gate3()).as("non-vacuity: gate 3 holds with the clause not applicable").isTrue();
+            assertThat(off.gate3Latched()).isTrue();
+            assertThat(off.gate3LatchPciOff()).as("the row says PCI was off").isTrue();
+            assertThat(ctx.select(DSL.field(DSL.name("pci_off"), Boolean.class)).from(LATCH).fetchOne(0, Boolean.class)).isTrue();
+            assertThat(CompletionStatusJson.render(off)).contains("\"gate3_latched\":true").contains("\"gate3_latch_pci_off\":true");
+            // A later read of the same row, with PCI on, still reports the posture it latched in.
+            var later = CompletionCheck.evaluate(ctx, rs, everyIndexValid(), CompletionCheck.DIRECT, List.of(), CompletionCheck.LatchWriter.NONE);
+            assertThat(later.gate3LatchPciOff()).isTrue();
+
+            clearLatch();
+            var on = CompletionCheck.evaluate(ctx, rs, everyIndexValid(), CompletionCheck.DIRECT, List.of(), CompletionCheck.latchOnCtx("engine-1"));
+            assertThat(on.gate3Latched()).isTrue();
+            assertThat(on.gate3LatchPciOff()).as("PCI on: the id indexes were required").isFalse();
+            assertThat(CompletionStatusJson.render(on)).contains("\"gate3_latch_pci_off\":false");
+        } finally {
+            clearLatch();
+        }
+    }
+
+    /** linda 2026-11-23: gate3_why names the changeset a twin of the runtime-built id unique indexes still waits for. */
+    @Test
+    void gate3WhyNamesTheChangesetTheIdTwinsWaitFor() {
+        IdIndexCatalogReads.forgetWaitedChangesets(ctx);
+        List<String> waiting = IdUniqueIndexPass.waitingChangesets(ctx);
+        assertThat(waiting).as("non-vacuity: a twin waits for a changeset that is not recorded").isNotEmpty();
+
+        var refused = CompletionCheck.evaluate(ctx, new CompletionCheck.ReadSet(List.of(), List.of()), everyIndexValid(), CompletionCheck.DIRECT,
+            List.of(c -> false));
+
+        assertThat(refused.gate3()).isFalse();
+        assertThat(refused.gate3Why()).contains("a further gate 3 condition does not hold");
+        waiting.forEach(id -> assertThat(refused.gate3Why()).contains(id));
+        assertThat(refused.gate3Why()).as("ids only: no tenant or collection on the unauthenticated status").doesNotContain("canary_query_ring");
     }
 
     @Test

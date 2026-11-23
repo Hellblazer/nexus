@@ -178,15 +178,93 @@ class IdUniqueIndexPassIntegrationTest extends DataMoveIntegrationBase {
         String canary = "idx_canary_query_ring_id_digest_uq";
         assertThat(ArbiterTwins.WAITS_FOR_CHANGESETS).as("the checked map names the canary twin").containsKey(canary);
 
-        var first = pass(new BootWorkRegistry(Clock.systemUTC()), true).runOnce();
+        var registry = new BootWorkRegistry(Clock.systemUTC());
+        var first = pass(registry, true).runOnce();
         assertThat(PgCatalogProbes.indexExists(ctx(), "nexus", canary)).as("not built before vectors-078-8 is recorded").isFalse();
         assertThat(first.built()).as("every other applicable index is").isEqualTo(applicable() - 1);
         assertThat(IdUniqueIndexPass.allValid(ctx())).as("gate 3 waits with it").isFalse();
+        assertThat(IdUniqueIndexPass.waitingChangesets(ctx())).as("the wait is named, for gate3_why").containsExactly("vectors-078-8");
+        assertThat(registry.snapshot()).as("and reported in boot_work, not finished")
+            .filteredOn(e -> e.id().equals(IdUniqueIndexPass.BOOT_WORK_ID)).singleElement()
+            .satisfies(e -> assertThat(e.what()).contains(canary).contains("vectors-078-8"));
 
         IdIndexCatalogReads.recordWaitedChangesets(ctx());
         var second = pass(new BootWorkRegistry(Clock.systemUTC()), true).runOnce();
         assertThat(second.built()).as("once recorded, the next pass builds the canary twin").isEqualTo(1);
         assertThat(IdUniqueIndexPass.allValid(ctx())).isTrue();
+        assertThat(IdUniqueIndexPass.waitingChangesets(ctx())).as("nothing waits once built").isEmpty();
+    }
+
+    /**
+     * An index of the pass's name that stands VALID with another definition (an operator's, or an older engine's) is a named failure: the
+     * pass reports it in boot_work, never drops it, never tries CREATE over it (no 42P07 every tick), and gate 3's read stays false.
+     */
+    @Test
+    void anIndexOfOurNameWithAnotherDefinition_isReportedAndNeverRebuilt() throws Exception {
+        String index = "idx_taxonomy_meta_id_uq";
+        asSuperuser(d -> d.createIndex(index).on(TAXONOMY_META, DSL.field(DSL.name("tenant_id"))).execute());
+        var registry = new BootWorkRegistry(Clock.systemUTC());
+        var pass = pass(registry, true);
+        List<String> sent = new ArrayList<>();
+        pass.beforeStatement(sent::add);
+
+        pass.runOnce();
+        assertThat(sent).as("no CREATE over it, no DROP of it").noneMatch(q -> q.contains(index));
+        assertThat(PgCatalogProbes.indexExists(ctx(), "nexus", index)).as("left standing").isTrue();
+        assertThat(IdUniqueIndexPass.allValid(ctx())).as("gate 3 stays false").isFalse();
+        assertThat(registry.snapshot()).filteredOn(e -> e.id().equals(IdUniqueIndexPass.BOOT_WORK_ID)).singleElement()
+            .satisfies(e -> assertThat(e.what()).contains(index).contains("different definition"));
+        sent.clear();
+        pass.runOnce();
+        assertThat(sent).as("and not on the next tick either").noneMatch(q -> q.contains(index));
+    }
+
+    /**
+     * A build that hits its statement bound (57014) backs off instead of rebuilding on every tick. The bound is made short and a writer holds an
+     * open transaction on the table, which CREATE INDEX CONCURRENTLY waits for, so the build times out; the next tick does not send it again.
+     */
+    @Test
+    void aBuildThatTimesOut_backsOff_andIsNotRebuiltOnTheNextTick() throws Exception {
+        String index = "idx_taxonomy_meta_id_uq";
+        var pass = pass(new BootWorkRegistry(Clock.systemUTC()), true);
+        pass.buildTimeout(java.time.Duration.ofSeconds(2));
+        List<String> sent = new ArrayList<>();
+        pass.beforeStatement(sent::add);
+        try (java.sql.Connection writer = pg.createConnection("")) {
+            writer.setAutoCommit(false);
+            DSL.using(writer, SQLDialect.POSTGRES).update(TAXONOMY_META).set(TENANT_ID, TENANT_ID).where(DSL.falseCondition()).execute();
+            pass.runOnce();
+            writer.rollback();
+        }
+        assertThat(sent).as("the build was tried once").anyMatch(q -> q.contains("INDEX CONCURRENTLY " + index));
+        assertThat(PgCatalogProbes.indexExists(ctx(), "nexus", index) && IdUniqueIndexPass.valid(ctx(), spec(index)))
+            .as("and did not finish").isFalse();
+        sent.clear();
+        pass.runOnce();
+        assertThat(sent).as("backed off: not sent again on the next tick").noneMatch(q -> q.contains("INDEX CONCURRENTLY " + index));
+        assertThat(IdUniqueIndexPass.backoffAfter(1)).isEqualTo(java.time.Duration.ofHours(1));
+        assertThat(IdUniqueIndexPass.backoffAfter(3)).isEqualTo(java.time.Duration.ofHours(4));
+        assertThat(IdUniqueIndexPass.backoffAfter(10)).isEqualTo(java.time.Duration.ofHours(24));
+    }
+
+    /** A finished pass looks again after its recheck period, so an index dropped or invalidated later is built again. */
+    @Test
+    void aFinishedPassLooksAgain_andRebuildsAnIndexLostLater() throws Exception {
+        var pass = pass(new BootWorkRegistry(Clock.systemUTC()), true);
+        pass.recheckEvery(java.time.Duration.ZERO);
+        pass.runOnce();
+        assertThat(IdUniqueIndexPass.allValid(ctx())).isTrue();
+        asSuperuser(d -> {
+            d.set(DSL.name("search_path"), DSL.inline("nexus")).execute();
+            return d.dropIndex(DSL.name("idx_pdf_pipeline_id_uq")).execute();
+        });
+        assertThat(IdUniqueIndexPass.allValid(ctx())).isFalse();
+        assertThat(pass.runOnce().built()).as("the same pass, finished, rebuilds it on its next look").isEqualTo(1);
+        assertThat(IdUniqueIndexPass.allValid(ctx())).isTrue();
+    }
+
+    private static IdUniqueIndexPass.Spec spec(String index) {
+        return IdUniqueIndexPass.SPECS.stream().filter(s -> s.index().equals(index)).findFirst().orElseThrow();
     }
 
     @Test

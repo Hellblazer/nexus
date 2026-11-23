@@ -513,7 +513,18 @@ class MainPciWiringTest {
         String src = code(main());
 
         assertThat(src).as("gate 3's source is the reconciler's, not NOT_INSTALLED")
-            .contains("startCompletionBootWork(bootWork, adminConnection, pciReconciler.gate3Source())");
+            .contains("startCompletionBootWork(bootWork, adminConnection, pciReconciler.gate3Source(), gate3Latch)");
+        // linda 2026-11-23: the latch is read synchronously BEFORE the listener binds, and a read that cannot answer ends the boot.
+        int latchRead = src.indexOf("Gate3Latch.readAtBoot(adminConnection)");
+        int listener = src.indexOf("service.start();");
+        assertThat(latchRead).as("the latch is read at boot").isPositive();
+        assertThat(latchRead).as("before the listener binds").isLessThan(listener);
+        String failure = src.substring(latchRead, listener);
+        assertThat(failure).contains("rdr229_gate3_latch_boot_read_failed").contains("System.exit(1)");
+        assertThat(src).as("a latch the check never read is never guessed: the reporter is handed the one read at boot")
+            .contains("CompletionCheck.Gate3LatchWriter.IMMEDIATE, gate3Latch");
+        assertThat(src).as("a latch written while PCI was off makes the reconciler build the id indexes first")
+            .contains("pciReconciler.buildIdIndexesFirstWhen(() -> completionCheck != null && completionCheck.gate3LatchedPciOff())");
         int gate = src.indexOf("pciReconciler.idBuildGate(");
         assertThat(gate).as("the id-build gate is wired").isPositive();
         assertThat(src.indexOf("var completionCheck = startCompletionBootWork(")).isLessThan(gate);

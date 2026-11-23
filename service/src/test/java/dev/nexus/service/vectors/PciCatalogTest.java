@@ -523,6 +523,25 @@ class PciCatalogTest {
         assertThat(PciCatalog.idKey("m", "t", 42L)).isNotEqualTo(PciCatalog.idKey("m", "t", 43L));
     }
 
+    // ---- M4: the id attribution checks the name hash, as the builder's ownership does ----
+
+    @Test
+    void idOfBuilderIndex_acceptsOnlyTheNameTheBuilderGivesThatId() {
+        String name = PciCatalog.indexNameById("m", "t", 42L);
+
+        assertThat(PciCatalog.idOfBuilderIndex("m", "t", name, "hnsw", ID_PREDICATE, "on", false, true)).contains(42L);
+        assertThat(PciCatalog.idOfBuilderIndex("m", "t", GOOD_NAME, "hnsw", ID_PREDICATE, "on", false, true))
+            .as("an operator's pci_ index that reads an id predicate is not the builder's").isEmpty();
+        assertThat(PciCatalog.idOfBuilderIndex("m", "t", PciCatalog.indexNameById("m", "t", 43L), "hnsw", ID_PREDICATE, "on", false, true))
+            .as("another id's name").isEmpty();
+        assertThat(PciCatalog.idOfBuilderIndex("m", "other", name, "hnsw", ID_PREDICATE, "on", false, true)).as("another tenant's").isEmpty();
+        assertThat(PciCatalog.idOfBuilderIndex(null, "t", name, "hnsw", ID_PREDICATE, "on", false, true)).isEmpty();
+        // The leftover of the builder's id index: its base name is checked.
+        assertThat(PciCatalog.idOfBuilderIndex("m", "t", name + "_ccnew", "hnsw", ID_PREDICATE, "on", true, false)).contains(42L);
+        assertThat(PciCatalog.idOfBuilderIndex("m", "t", GOOD_NAME + "_ccnew", "hnsw", ID_PREDICATE, "on", true, false)).isEmpty();
+        assertThat(PciCatalog.idOfBuilderIndex("m", "t", name + "_ccnew", "hnsw", ID_PREDICATE, "on", true, true)).as("valid: not a leftover").isEmpty();
+    }
+
     // ---- N2: the leftover of an id index's REINDEX CONCURRENTLY ----
 
     @Test

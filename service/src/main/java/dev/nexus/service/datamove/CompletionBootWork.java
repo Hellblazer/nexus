@@ -57,6 +57,8 @@ public final class CompletionBootWork implements AutoCloseable {
     public static final Duration SAFETY_POLL = Duration.ofSeconds(60);
     /** How often the schedule asks whether the safety poll is due; the read itself is at most once per {@link #SAFETY_POLL}. */
     private static final Duration TICK = Duration.ofSeconds(1);
+    /** Once gate 3 has latched, how often the coverage read is repeated (it keeps {@code id_index_invalid} current within this period). */
+    public static final Duration LATCHED_COVERAGE_PERIOD = Duration.ofMinutes(10);
     /** How long a table's violating-row count is kept: the scan is bounded, not free. */
     public static final Duration VIOLATOR_TTL = Duration.ofMinutes(10);
 
@@ -81,6 +83,7 @@ public final class CompletionBootWork implements AutoCloseable {
     private volatile Duration safetyPoll = SAFETY_POLL;
     private volatile CompletionCheck.Result latest;
     private volatile boolean gate3Latched;
+    private volatile boolean gate3LatchPciOff;
     private volatile boolean closed;
     private String lastError;
     private ScheduledExecutorService scheduler;
@@ -103,7 +106,28 @@ public final class CompletionBootWork implements AutoCloseable {
     public CompletionBootWork(BootWorkRegistry registry, AdminConnection admin, CompletionCheck.ReadSet readSet,
                               CompletionCheck.Gate3Source gate3, java.util.List<java.util.function.Predicate<DSLContext>> gate3Extras,
                               CompletionCheck.Gate3LatchWriter latchWriter) {
-        this(registry, new DbReader(admin, readSet, gate3, gate3Extras, latchWriter, Clock.systemUTC()));
+        this(registry, admin, readSet, gate3, gate3Extras, latchWriter, Gate3Latch.readAtBoot(admin));
+    }
+
+    /**
+     * As above with the latch as the engine already read it at boot ({@link Gate3Latch#readAtBoot}, before the listener binds). The accessors
+     * {@link #gate3Latched} and {@link #gate3LatchedPciOff} answer from it at once, before any sample; the constructors without it read it themselves,
+     * synchronously, and throw when the database cannot answer.
+     */
+    public CompletionBootWork(BootWorkRegistry registry, AdminConnection admin, CompletionCheck.ReadSet readSet,
+                              CompletionCheck.Gate3Source gate3, java.util.List<java.util.function.Predicate<DSLContext>> gate3Extras,
+                              CompletionCheck.Gate3LatchWriter latchWriter, Gate3Latch bootLatch) {
+        this(registry, admin, readSet, gate3, gate3Extras, latchWriter, bootLatch, LATCHED_COVERAGE_PERIOD);
+    }
+
+    /** As above with the period at which, once gate 3 has latched, the coverage read is repeated (a test passes {@link Duration#ZERO}: read every sample). */
+    public CompletionBootWork(BootWorkRegistry registry, AdminConnection admin, CompletionCheck.ReadSet readSet,
+                              CompletionCheck.Gate3Source gate3, java.util.List<java.util.function.Predicate<DSLContext>> gate3Extras,
+                              CompletionCheck.Gate3LatchWriter latchWriter, Gate3Latch bootLatch, Duration latchedCoveragePeriod) {
+        this(registry, new DbReader(admin, readSet, gate3, gate3Extras, latchWriter, Clock.systemUTC(),
+            Objects.requireNonNull(bootLatch, "bootLatch").latched(), Objects.requireNonNull(latchedCoveragePeriod, "latchedCoveragePeriod")));
+        this.gate3Latched = bootLatch.latched();
+        this.gate3LatchPciOff = bootLatch.pciOff();
     }
 
     /**
@@ -130,6 +154,13 @@ public final class CompletionBootWork implements AutoCloseable {
                                             java.util.List<java.util.function.Predicate<DSLContext>> gate3Extras,
                                             CompletionCheck.Gate3LatchWriter latchWriter) {
         return new CompletionBootWork(registry, admin, CompletionCheck.ReadSet.boot(), gate3, gate3Extras, latchWriter);
+    }
+
+    /** As above with the latch {@code Main} read before the listener bound ({@link Gate3Latch#readAtBoot}). */
+    public static CompletionBootWork atBoot(BootWorkRegistry registry, AdminConnection admin, CompletionCheck.Gate3Source gate3,
+                                            java.util.List<java.util.function.Predicate<DSLContext>> gate3Extras,
+                                            CompletionCheck.Gate3LatchWriter latchWriter, Gate3Latch bootLatch) {
+        return new CompletionBootWork(registry, admin, CompletionCheck.ReadSet.boot(), gate3, gate3Extras, latchWriter, bootLatch);
     }
 
     /** The read set a database-backed reporter reads, or null for a test's injected reader. */
@@ -160,13 +191,19 @@ public final class CompletionBootWork implements AutoCloseable {
     }
 
     /**
-     * Whether gate 3 has latched on this install ({@code nexus.rdr229_gate_latch} holds its row), as this engine last read it. Sticky: once a
-     * sample saw the row, this stays true for the life of this reporter, whatever a later read says (a read that fails, or a row deleted under
-     * a running engine). A new reporter reads the database afresh, so a restore that lost the row reads not latched. The name-index retirement and
-     * the engine's id readers go by this value, never by the live gate 3, which an INVALID id index can turn false.
+     * Whether gate 3 has latched on this install ({@code nexus.rdr229_gate_latch} holds its row). Known from construction: the reporter reads the
+     * row synchronously ({@link Gate3Latch}), so this is right before any sample and after a restart, and never "false until the first read".
+     * Sticky: once the row was seen, this stays true for the life of this reporter, whatever a later read says (a read that fails, or a row deleted
+     * under a running engine). A new reporter reads the database afresh, so a restore that lost the row reads not latched. The name-index retirement
+     * and the engine's id readers go by this value, never by the live gate 3, which an INVALID id index can turn false.
      */
     public boolean gate3Latched() {
         return gate3Latched;
+    }
+
+    /** Whether the latch row says gate 3 latched while per-collection indexing was off: with PCI on the engine then builds the id indexes first. Sticky like {@link #gate3Latched}. */
+    public boolean gate3LatchedPciOff() {
+        return gate3LatchPciOff;
     }
 
     /** The result of the last sample, or null before the first one. */
@@ -310,6 +347,7 @@ public final class CompletionBootWork implements AutoCloseable {
             latest = result;
             if (result.gate3Latched()) {
                 gate3Latched = true;
+                gate3LatchPciOff = gate3LatchPciOff || result.gate3LatchPciOff();
             }
             long holding = (result.gate1() ? 1 : 0) + (result.gate2() ? 1 : 0) + (result.gate3() ? 1 : 0);
             return (holding < 3 ? 1 : 0) + (int) result.checks().stream().filter(c -> !c.present()).count()
@@ -389,14 +427,24 @@ public final class CompletionBootWork implements AutoCloseable {
         private final java.util.List<java.util.function.Predicate<DSLContext>> gate3Extras;
         private final CompletionCheck.Gate3LatchWriter latchWriter;
         private final CompletionCheck.ViolatorCounter counter;
+        private final Clock clock;
         private volatile AdminDdlSession session;
+        /** Once the latch is seen, the coverage read (a catalog walk and registry reads over every leaf) is repeated only this often. */
+        private volatile boolean latchedSeen;
+        private final Duration latchedCoveragePeriod;
+        private volatile java.time.Instant coverageAt;
+        private volatile java.util.Optional<CompletionCheck.IdIndexCoverage> coverage;
 
         DbReader(AdminConnection admin, CompletionCheck.ReadSet readSet, CompletionCheck.Gate3Source gate3,
                  java.util.List<java.util.function.Predicate<DSLContext>> gate3Extras, CompletionCheck.Gate3LatchWriter latchWriter,
-                 Clock clock) {
+                 Clock clock, boolean latchedAtBoot, Duration latchedCoveragePeriod) {
             this.admin = Objects.requireNonNull(admin, "admin");
             this.readSet = Objects.requireNonNull(readSet, "readSet");
-            this.gate3 = Objects.requireNonNull(gate3, "gate3");
+            this.clock = Objects.requireNonNull(clock, "clock");
+            this.latchedSeen = latchedAtBoot;
+            this.latchedCoveragePeriod = latchedCoveragePeriod;
+            CompletionCheck.Gate3Source source = Objects.requireNonNull(gate3, "gate3");
+            this.gate3 = ctx -> throttled(source, ctx);
             this.gate3Extras = java.util.List.copyOf(gate3Extras);
             this.latchWriter = Objects.requireNonNull(latchWriter, "latchWriter");
             this.counter = new CachedCounter(CompletionCheck.DIRECT, clock, VIOLATOR_TTL);
@@ -413,7 +461,9 @@ public final class CompletionBootWork implements AutoCloseable {
                     s.setSession("default_transaction_read_only", "on");
                     session = s;
                 }
-                return CompletionCheck.evaluate(s.ctx(), readSet, gate3, counter, gate3Extras, this::writeLatch);
+                CompletionCheck.Result result = CompletionCheck.evaluate(s.ctx(), readSet, gate3, counter, gate3Extras, this::writeLatch);
+                latchedSeen = latchedSeen || result.gate3Latched();
+                return result;
             } catch (RuntimeException e) {
                 close();   // a failed session is replaced on the next sample
                 throw e;
@@ -424,12 +474,32 @@ public final class CompletionBootWork implements AutoCloseable {
          * The latch write, on a session of its own: the check's session is read only at the server. One short session when gate 3 first holds
          * ({@code INSERT ... ON CONFLICT DO NOTHING}); a failure is the check's to log, and the next read tries again.
          */
-        private void writeLatch(DSLContext readCtx, String gate) {
+        /**
+         * Once gate 3 has latched the latched value is all the readers go by, but {@code id_index_invalid} still comes from the coverage read: so it
+         * is repeated at most every {@link #LATCHED_COVERAGE_PERIOD}, and an earlier answer (never an unknown one) is reused between. Before the
+         * latch every sample reads.
+         */
+        private java.util.Optional<CompletionCheck.IdIndexCoverage> throttled(CompletionCheck.Gate3Source source, DSLContext ctx) {
+            var kept = coverage;
+            var at = coverageAt;
+            if (latchedSeen && kept != null && kept.isPresent() && at != null
+                && Duration.between(at, clock.instant()).compareTo(latchedCoveragePeriod) < 0) {
+                return kept;
+            }
+            var read = source.read(ctx);
+            if (read.isPresent()) {
+                coverage = read;
+                coverageAt = clock.instant();
+            }
+            return read;
+        }
+
+        private void writeLatch(DSLContext readCtx, String gate, boolean pciOff) {
             latchWriter.latch(() -> {
                 String version = dev.nexus.service.http.VersionHandler.resolveReleaseVersion();
                 try (AdminDdlSession w = AdminDdlSession.open(admin, new AdminDdlSession.Settings("nexus-rdr229-gate-latch", 0L,
                         "rdr229 gate latch", "nexus", "rdr229_gate_latch", "none"), false)) {
-                    CompletionCheck.insertLatch(w.ctx(), gate, version == null ? "dev" : version);
+                    CompletionCheck.insertLatch(w.ctx(), gate, version == null ? "dev" : version, pciOff);
                 }
             });
         }
