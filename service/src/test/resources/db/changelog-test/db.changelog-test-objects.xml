@@ -859,4 +859,38 @@ $$;
         <rollback>SELECT 1</rollback>
     </changeSet>
 
+    <changeSet id="test-objects-add-fk-not-valid-columns" author="nexus-p2m1x.21">
+        <comment>nexus_test.add_fk_not_valid_columns(text, text, text, text, text, text, boolean): plpgsql wrapper for ALTER TABLE .. ADD
+        CONSTRAINT .. FOREIGN KEY (cols) REFERENCES .. (ref cols) ON DELETE action [DEFERRABLE] NOT VALID (nexus-p2m1x.21), for
+        PgContainerHelper#addFkNotValidColumns: the per-leaf key of RDR-229 P3.3c has three columns, tenant_id first and embedding_model last,
+        which neither add_fk_not_valid (two) nor add_fk_not_valid_composite3 (adds embedding_model by itself) can spell; jOOQ renders NOT
+        ENFORCED, which PostgreSQL 17 refuses. The column lists are comma-separated identifiers in key order, each %I-quoted; the tables are
+        text cast to regclass inside the body, so PostgreSQL resolves them; the delete action is checked against the five PostgreSQL actions before it reaches format().
+        The key is added NOT VALID and the caller validates it (nexus_test.validate_constraint) when it needs a validated key. SECURITY
+        INVOKER so the caller's own privilege authorizes the ALTER TABLE.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus_test.add_fk_not_valid_columns(
+    p_table text, p_name text, p_cols text, p_ref text, p_ref_cols text, p_on_delete text, p_deferrable boolean
+) RETURNS boolean
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+DECLARE
+    v_cols     text;
+    v_ref_cols text;
+BEGIN
+    IF p_on_delete IS NULL OR p_on_delete NOT IN ('NO ACTION', 'RESTRICT', 'CASCADE', 'SET NULL', 'SET DEFAULT') THEN
+        RAISE EXCEPTION 'nexus_test.add_fk_not_valid_columns: not a delete action: %', p_on_delete;
+    END IF;
+    SELECT string_agg(format('%I', c), ', ' ORDER BY n) INTO v_cols FROM unnest(string_to_array(p_cols, ',')) WITH ORDINALITY AS t(c, n);
+    SELECT string_agg(format('%I', c), ', ' ORDER BY n) INTO v_ref_cols FROM unnest(string_to_array(p_ref_cols, ',')) WITH ORDINALITY AS t(c, n);
+    EXECUTE format('ALTER TABLE %s ADD CONSTRAINT %I FOREIGN KEY (%s) REFERENCES %s (%s) ON DELETE %s%s NOT VALID',
+        p_table::regclass, p_name, v_cols, p_ref::regclass, v_ref_cols, p_on_delete, CASE WHEN p_deferrable THEN ' DEFERRABLE' ELSE '' END);
+    RETURN true;
+END;
+$$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus_test.add_fk_not_valid_columns(text, text, text, text, text, text, boolean)</rollback>
+    </changeSet>
+
 </databaseChangeLog>
