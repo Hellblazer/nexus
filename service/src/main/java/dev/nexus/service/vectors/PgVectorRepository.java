@@ -1260,20 +1260,17 @@ public final class PgVectorRepository {
             final List<String>[] inTxUnownedHolder = new List[]{List.of()};
             try {
                 RenameFollow.run(collection, gate -> DeadlockRetry.run(collection, () -> tenantScope.withTenant(tenant, ctx -> {
-                    if (recheckInTransaction) {
-                        // advisory lock first (RenameGuard#runRename): the recheck below takes this same gate, and a gate wait behind
-                        // a queued sweep while holding the registry key share could close a cycle with a verb that holds the gate.
-                        // The gate is the label this attempt was GIVEN (RenameFollow): the row's current label, once a rename was seen
-                        CatalogRepository.acquireSweepGateShared(ctx, tenant, gate);
-                    }
+                    // advisory lock first (RenameGuard#runRename): the recheck below takes this same gate, and a gate wait behind
+                    // a queued sweep while holding the registry key share could close a cycle with a verb that holds the gate.
+                    // The gate is the label this attempt was GIVEN (RenameFollow): the row's current label, once a rename was seen.
+                    // Taken whether or not the ownership recheck runs: the write is a manifest-class writer of the collection either way
+                    CatalogRepository.acquireSweepGateShared(ctx, tenant, gate);
                     final CollectionRow registered = CollectionRegistry.requireWritable(ctx, tenant, collection);
                     // the id is the identity: the rows are written under the row's CURRENT label (see resolveNeedEmbedIdx). A rename that
                     // landed after the gate above is followed by running the attempt again from the top with the new label's gate first,
                     // never by taking that gate after this registry read (a gate-then-row inversion)
                     final String coll = registered.label();
-                    if (recheckInTransaction) {
-                        RenameFollow.check(gate, registered);
-                    }
+                    RenameFollow.check(gate, registered);
                     racedThisWrite.set(0);
                     racedChashSampleHolder[0] = new ArrayList<>();
                     inTxUnownedHolder[0] = List.of();
