@@ -157,7 +157,7 @@ chunks	chunks	nexus.gc_restore_rereferenced [vectors-077-rdr229-p35b-readers-bot
 chunks	chunks	nexus.gc_restore_rereferenced_bounded [vectors-077-rdr229-p35b-readers-both.xml:4781]	4637	insert	sql_function	collection	collection_id	yes		sql	
 chunks	chunks	nexus.quarantine_restore_chunks [vectors-077-rdr229-p35b-readers-both.xml:5313]	5066	insert	sql_function	collection	collection_id	yes		sql	
 chunks	chunks	nexus.reaper_quarantine_chunks [vectors-077-rdr229-p35b-readers-both.xml:6656]	6481	insert	sql_function	collection	collection_id	yes		sql	
-chunks	chunks	rdr229-quarantine-origin-id [vectors-082-quarantine-origin-id-backfill.xml:55]	52	update	data_move	-	collection_id	yes	sets collection_id	move	
+chunks	chunks	rdr229-quarantine-origin-id [vectors-082-quarantine-origin-id-backfill.xml:56]	53	update	data_move	-	collection_id	yes	sets collection_id	move	
 chunks	chunks	rdr229-stamp-chunks [vectors-070-collection-id-stamp-moves.xml:350]	347	update	data_move	-	collection_id	yes	sets collection_id	move	
 chunks	chunks	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	6800	insert	helper	collection	collection_id	yes	ch.table() helper	require	upsertManifestChunkVectors
 chunks	chunks	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11735	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	verb	renameCollectionTxn
