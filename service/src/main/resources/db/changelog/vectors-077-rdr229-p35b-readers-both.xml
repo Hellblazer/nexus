@@ -7462,8 +7462,9 @@ STABLE
 SECURITY INVOKER
 AS $$
     -- Fix round (linda 2026-11-23, the 5x80k EXPLAIN): the registry id of p_collection is read once per call (k.cid), and each
-    -- id-or-name match is two probes, the id arm and the name arm apart, each on its own key ((tenant_id, collection_id, chash),
-    -- the primary key), so no OR and no per-row registry read stands between the probe and its index. Each orphaned_at probe takes
+    -- id-or-name match is two probes, the id arm and the name arm apart: the id arm on (tenant_id, chash) (P3.3c's child index on
+    -- chunk_orphaned_at; the manifest's (tenant_id, chash) index), the name arm on the primary key (tenant_id, collection, chash)
+    -- and the manifest's (tenant_id, chash), so no OR and no per-row registry read stands between a probe and its index. Each orphaned_at probe takes
     -- the latest record by ORDER BY ... LIMIT 1, and GREATEST ignores a NULL, so the latest of both arms is the answer as before.
     SELECT true
       FROM (SELECT (SELECT cc.collection_id
@@ -10118,13 +10119,15 @@ SELECT s.tenant_id,
            END AS dim,
            c.chash, c.created_at, (mn.chash IS NOT NULL) AS live
       FROM nexus.chunks c
+      LEFT JOIN nexus.catalog_collections r
+        ON r.tenant_id = c.tenant_id AND r.name = c.collection
       LEFT JOIN (nexus.catalog_document_chunks mn
                  JOIN nexus.catalog_documents dn
                    ON dn.tenant_id = mn.tenant_id AND dn.tumbler = mn.doc_id AND dn.deleted_at IS NULL)
              ON mn.tenant_id = c.tenant_id AND mn.chash = c.chash AND mn.collection = c.collection AND c.collection <> ''
+     -- an anti-join by LEFT JOIN, not NOT EXISTS under an OR (which plans as a SubPlan, nexus-mz9jv)
      WHERE c.collection_id IS NULL
-       AND (c.collection = ''
-            OR NOT EXISTS (SELECT 1 FROM nexus.catalog_collections r WHERE r.tenant_id = c.tenant_id AND r.name = c.collection))
+       AND (c.collection = '' OR r.collection_id IS NULL)
   ) s
  GROUP BY s.tenant_id, s.collection, s.collection_id, s.dim;
 ]]></sql>
