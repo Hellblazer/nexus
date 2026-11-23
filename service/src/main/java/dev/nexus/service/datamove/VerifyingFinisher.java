@@ -70,6 +70,9 @@ final class VerifyingFinisher implements MoveFinisher {
     /** The longest {@code lock_timeout} of {@code on_complete}, in milliseconds; a move with a shorter statement bound gets half of it. */
     static final int LOCK_TIMEOUT_CEILING_MS = 5_000;
 
+    /** The re-check's deadline of a move with no statement bound ({@link DataMove#unbounded}): none, each run is set to statement_timeout 0. */
+    private static final long NO_DEADLINE = Long.MAX_VALUE;
+
     private static final Table<?> MOVES = DSL.table(DSL.name("nexus", "data_moves"));
 
     /** The {@code lock_timeout} of {@code on_complete}: half the statement bound, at most 5 s, at least 1 ms. */
@@ -242,8 +245,10 @@ final class VerifyingFinisher implements MoveFinisher {
 
     private Result complete(DSLContext admin, DataMove move, List<String> tenants) {
         String onComplete = move.onComplete();
-        int statementMs = move.statementTimeoutMs();
-        int lockMs = lockTimeoutMs(statementMs);
+        // a move with no statement bound (a validation that blocks no writer) gets statement_timeout 0, so no network timeout either,
+        // and the lock wait the ceiling gives any move
+        int statementMs = move.unbounded() ? 0 : move.statementTimeoutMs();
+        int lockMs = move.unbounded() ? DataMove.UNBOUNDED_LOCK_TIMEOUT_MS : lockTimeoutMs(statementMs);
         boolean completed;
         // set once terminateOrThrow has run in this transaction: a failure after it reports that the builds are already ended
         boolean[] buildsEnded = {false};
@@ -371,7 +376,7 @@ final class VerifyingFinisher implements MoveFinisher {
                 seam.accept(tx);
             }
             requireNoTenant(tx, move, "before the re-check");
-            long deadline = System.nanoTime() + move.statementTimeoutMs() * 1_000_000L;
+            long deadline = move.unbounded() ? NO_DEADLINE : System.nanoTime() + move.statementTimeoutMs() * 1_000_000L;
             // a move over a table that is not tenant-scoped has no tenant list, and keeps none; the catalog reads of the re-read
             // are bounded by what is left of the budget when they start
             clampToBudget(tx, deadline);
@@ -387,7 +392,11 @@ final class VerifyingFinisher implements MoveFinisher {
                 setTenant(tx, "");
             }
             requireNoTenant(tx, move, "after the re-check");
-            PgSession.setStatementAndLockBounds(tx, move.statementTimeoutMs(), lockTimeoutMs(move.statementTimeoutMs()));
+            if (move.unbounded()) {
+                PgSession.setStatementAndLockBounds(tx, 0, DataMove.UNBOUNDED_LOCK_TIMEOUT_MS);
+            } else {
+                PgSession.setStatementAndLockBounds(tx, move.statementTimeoutMs(), lockTimeoutMs(move.statementTimeoutMs()));
+            }
             if (!found.isEmpty()) {
                 List<String> parts = new ArrayList<>();
                 found.forEach((who, n) -> parts.add(who + "=" + (n > COUNT_CAP ? COUNT_CAP + "+" : n)));
@@ -412,19 +421,20 @@ final class VerifyingFinisher implements MoveFinisher {
 
     /** The statement timeout for what follows, the budget that is left (at least 1 ms). */
     private static void clampToBudget(DSLContext tx, long deadline) {
-        PgSession.setLocal(tx, "statement_timeout", Long.toString(Math.max(1L, (deadline - System.nanoTime()) / 1_000_000L)));
+        PgSession.setLocal(tx, "statement_timeout",
+            deadline == NO_DEADLINE ? "0" : Long.toString(Math.max(1L, (deadline - System.nanoTime()) / 1_000_000L)));
     }
 
     /** One re-check run, under what is left of the budget; a tenant of {@code null} is the table-wide run. */
     private static void runWithinBudget(DSLContext tx, Connection c, DataMove move, String tenant, long deadline,
                                         Map<String, Long> found) throws SQLException {
-        long leftMs = (deadline - System.nanoTime()) / 1_000_000L;
+        long leftMs = deadline == NO_DEADLINE ? Long.MAX_VALUE : (deadline - System.nanoTime()) / 1_000_000L;
         if (leftMs <= 0) {
             throw new RecheckFailed(FailureHandler.Stage.RECHECK, new SQLException("statement_timeout_ms spent", "57014"),
                 "the verification in the completion transaction of " + move.label() + " used all of statement_timeout_ms="
                     + move.statementTimeoutMs() + " before " + (tenant == null ? "the table-wide run" : "tenant " + tenant));
         }
-        PgSession.setLocal(tx, "statement_timeout", Long.toString(leftMs));
+        PgSession.setLocal(tx, "statement_timeout", deadline == NO_DEADLINE ? "0" : Long.toString(leftMs));
         long rows = MoveSql.countRows(c, move.verification(), tenant, COUNT_CAP);
         if (rows > 0) {
             found.put(tenant == null ? "table-wide" : "tenant " + tenant, rows);
