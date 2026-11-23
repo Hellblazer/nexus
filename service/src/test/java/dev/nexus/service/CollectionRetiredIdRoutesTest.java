@@ -35,16 +35,20 @@ class CollectionRetiredIdRoutesTest {
     private static final String DELETE = "/v1/catalog/collections/delete";
 
     CollectionRouteFixture fx;
+    /** The LOCAL_EMBED engine: the one with an embedder router, so the combined write service (write_many) is wired. */
+    CollectionRouteFixture fxLocal;
     int n;
 
     @BeforeAll
     void startAll() throws Exception {
         fx = new CollectionRouteFixture();
+        fxLocal = new CollectionRouteFixture(true);
     }
 
     @AfterAll
     void stopAll() {
         if (fx != null) fx.close();
+        if (fxLocal != null) fxLocal.close();
     }
 
     private String registered(String stem) {
@@ -185,13 +189,23 @@ class CollectionRetiredIdRoutesTest {
         hooks(null, null, null);
     }
 
+    /**
+     * Runs {@code work} on another thread and waits. A hook runs on the REQUEST's own thread, where the route boundary's named ids
+     * are set, and a seed that goes through {@code CollectionIds.require} (the chunk seeds do) would read the named id there and
+     * answer its 404 out of the hook, which looks like the engine refusing the write and files nothing. The seeds belong to the
+     * test's own thread of work.
+     */
+    private static void elsewhere(Runnable work) {
+        CompletableFuture.runAsync(work).join();
+    }
+
     /** What the hook does in the gap: frees the id by deleting {@code a}, takes the label again as a new row, and files {@code hex} in it. */
     private Runnable freeTheIdAndTakeTheLabel(String a, String hex, AtomicInteger deleteStatus) {
-        return () -> {
+        return () -> elsewhere(() -> {
             deleteStatus.set(fx.post(DELETE, "{\"name\":" + json(a) + "}").status());
             fx.register(a);
             seedChunk(a, hex);
-        };
+        });
     }
 
     private int chunksOf(String collection, String hex) {
@@ -224,8 +238,10 @@ class CollectionRetiredIdRoutesTest {
         AtomicInteger deleteStatus = new AtomicInteger();
         hooks(() -> {
             if (fired.getAndIncrement() == 0) {   // the delete below passes through the boundary too: only the first call acts
-                deleteStatus.set(fx.post(DELETE, "{\"name\":" + json(a) + "}").status());
-                fx.register(a);
+                elsewhere(() -> {
+                    deleteStatus.set(fx.post(DELETE, "{\"name\":" + json(a) + "}").status());
+                    fx.register(a);
+                });
             }
         }, null, null);
         Resp r;
@@ -367,9 +383,11 @@ class CollectionRetiredIdRoutesTest {
         AtomicInteger deleteStatus = new AtomicInteger();
         hooks(() -> {
             if (fired.getAndIncrement() == 0) {
-                deleteStatus.set(fx.post(DELETE, "{\"name\":" + json(a) + "}").status());
-                fx.register(a);
-                seedChunk(a, hex);
+                elsewhere(() -> {
+                    deleteStatus.set(fx.post(DELETE, "{\"name\":" + json(a) + "}").status());
+                    fx.register(a);
+                    seedChunk(a, hex);
+                });
             }
         }, null, null);
         Resp r;
@@ -391,39 +409,50 @@ class CollectionRetiredIdRoutesTest {
             + "\"docs\":[{\"doc_id\":\"1.1.1\",\"rows\":[{\"position\":0,\"chash\":\"" + hex + "\",\"chunk_index\":0}]}]}";
     }
 
+    /**
+     * write_many needs the combined write service, which the engine builds only with an embedder router: the LOCAL_EMBED fixture
+     * (an {@code EmbedderRouter} over a minilm embedder), as the census builds it for the embed routes. The refusal sits in
+     * {@code refuseRowsUnderSupersededCollection}, which used to swallow every refusal but the by-label one into a per-document
+     * failure and a 200.
+     */
     @Test
     void writeMany_byAnIdFreedAfterTheBoundaryAnswers404_andByAnIdRetiredThere409() {
-        String a = registered("gap-wm-free");
-        long x = fx.idOf(a);
+        String a = label("retired-wm-free-" + (n++));
+        fxLocal.register(a);
+        long x = fxLocal.idOf(a);
         AtomicInteger fired = new AtomicInteger();
-        hooks(() -> {
+        fxLocal.service.collectionSelectorFilter().testHooks(() -> {
             if (fired.getAndIncrement() == 0) {
-                fx.post(DELETE, "{\"name\":" + json(a) + "}");
-                fx.register(a);
+                elsewhere(() -> {
+                    fxLocal.post(DELETE, "{\"name\":" + json(a) + "}");
+                    fxLocal.register(a);
+                });
             }
-        }, null, null);
+        }, null, null, null);
         Resp freed;
         try {
-            freed = fx.post("/v1/catalog/manifest/write_many", writeManyBody(x));
+            freed = fxLocal.post("/v1/catalog/manifest/write_many", writeManyBody(x));
         } finally {
-            noHooks();
+            fxLocal.service.collectionSelectorFilter().testHooks(null, null, null, null);
         }
         assertUnknownId(freed, x);
 
-        String b = registered("gap-wm-ret-a");
-        String c = registered("gap-wm-ret-b");
-        long y = fx.idOf(b);
+        String b = label("retired-wm-ret-a-" + (n++));
+        String c = label("retired-wm-ret-b-" + (n++));
+        fxLocal.register(b, c);
+        long y = fxLocal.idOf(b);
         AtomicInteger fired2 = new AtomicInteger();
-        hooks(() -> {
+        fxLocal.service.collectionSelectorFilter().testHooks(() -> {
             if (fired2.getAndIncrement() == 0) {
-                fx.post("/v1/catalog/collections/supersede", "{\"name\":" + json(b) + ",\"superseded_by\":" + json(c) + "}");
+                elsewhere(() -> fxLocal.post("/v1/catalog/collections/supersede",
+                    "{\"name\":" + json(b) + ",\"superseded_by\":" + json(c) + "}"));
             }
-        }, null, null);
+        }, null, null, null);
         Resp retired;
         try {
-            retired = fx.post("/v1/catalog/manifest/write_many", writeManyBody(y));
+            retired = fxLocal.post("/v1/catalog/manifest/write_many", writeManyBody(y));
         } finally {
-            noHooks();
+            fxLocal.service.collectionSelectorFilter().testHooks(null, null, null, null);
         }
         assertThat(retired.status()).as(retired.body()).isEqualTo(409);
         assertThat(retired.reason()).isEqualTo("collection_superseded");
