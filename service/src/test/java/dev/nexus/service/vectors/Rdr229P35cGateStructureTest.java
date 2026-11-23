@@ -107,7 +107,7 @@ class Rdr229P35cGateStructureTest {
         Pattern literal = Pattern.compile("(?:Gate3|CollectionSelector|collectionIs|collectionIn|ownerLateral|batchUpdateMetadata"
             + "|liveOwnedChashes)[^;]*\\(\\)\\s*->\\s*(?:true|byId)\\b"
             // a Gate3 variable bound to a lambda is the production signal only when it reads the LATCHED accessor (Main's one instance)
-            + "|\\bGate3\\s+\\w+\\s*=\\s*\\(\\)\\s*->(?![^;]*\\bgate3Latched\\(\\))");
+            + "|\\bGate3\\s+\\w+\\s*=\\s*\\(\\)\\s*->(?!.*\\bgate3Latched\\(\\))");
         List<String> offenders = new ArrayList<>();
         int scanned = 0;
         for (Path file : mainFiles()) {
