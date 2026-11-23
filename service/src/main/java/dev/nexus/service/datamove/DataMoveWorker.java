@@ -223,6 +223,7 @@ public final class DataMoveWorker implements AutoCloseable {
         if (c != null) {
             c.cancel();
         }
+        finisher.cancelInFlight();   // a completion statement (a validation with no statement bound) ends too; the next boot redoes it
     }
 
     /** Waits for the worker thread to end after {@link #stop}; true when it has (or was never started). */
@@ -579,7 +580,7 @@ public final class DataMoveWorker implements AutoCloseable {
             return;
         }
         MoveFinisher.Result result = finisher.finish(new MoveFinisher.Context(move, tenants, ctx, admin, applicationName,
-            () -> stopped));
+            () -> stopped, states));
         switch (result.outcome()) {
             case COMPLETED -> {
                 forgetMove(move.label());
@@ -597,6 +598,8 @@ public final class DataMoveWorker implements AutoCloseable {
             case REPORT -> report(result.failure());
             case PAUSED -> states.paused(result.move());
             case GONE -> forgetMove(move.label());
+            // on_complete re-opened the move (completed_at back to NULL): no completion event, no listener, no retry reset; the next pass takes it
+            case REOPENED -> forgetMove(move.label());
         }
         if (result.outcome() == MoveFinisher.Outcome.COMPLETED || result.outcome() == MoveFinisher.Outcome.LEFT_OPEN) {
             clearRetries(move, ctx);   // a clean pass resets the count; no failure reached the handler to do it

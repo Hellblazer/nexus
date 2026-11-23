@@ -281,6 +281,11 @@ public final class Main {
         // nexus-f3yqd.2.11 (RDR-246): the vendored ddl_utils and dml_utils changelogs apply first, as dml_utils_owner,
         // when the engine has a separate admin role; the installer keeps why they did not, for the data-move worker.
         final var dmlUtilsInstaller = dev.nexus.service.db.DmlUtilsInstaller.forEngine(adminConnection.user(), dbUser);
+        // nexus-p2m1x.21: a validation with no statement bound outlives the engine that started it (closing the socket does not stop it) and
+        // would hold a lock the migration waits on. The singleton lock is ours, so every nexus-data-move-* backend left is an orphan.
+        if (singletonLock != null) {
+            dev.nexus.service.datamove.DataMoveOrphans.terminateLeftover(adminConnection);
+        }
         try {
             SchemaMigrator.migrate(migrationDs, dmlUtilsInstaller);
         } catch (SchemaMigrator.MigrationException e) {

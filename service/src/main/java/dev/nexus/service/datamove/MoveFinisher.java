@@ -29,16 +29,19 @@ public interface MoveFinisher {
      * worker has been stopped, which a finisher reads between its steps and answers with {@link Outcome#LEFT_OPEN}.
      */
     record Context(DataMove move, List<String> tenants, DSLContext admin, AdminConnection adminConnection,
-                   String applicationName, BooleanSupplier stopped) {
+                   String applicationName, BooleanSupplier stopped, MoveReporter reporter) {
 
-        /** A context whose worker is never stopped (a test, or a finisher run on its own). */
+        public Context(DataMove move, List<String> tenants, DSLContext admin, AdminConnection adminConnection,
+                       String applicationName, BooleanSupplier stopped) {
+            this(move, tenants, admin, adminConnection, applicationName, stopped, null);
+        }
+
         public Context(DataMove move, List<String> tenants, DSLContext admin, AdminConnection adminConnection,
                        String applicationName) {
-            this(move, tenants, admin, adminConnection, applicationName, () -> false);
+            this(move, tenants, admin, adminConnection, applicationName, () -> false, null);
         }
     }
 
-    /** How the finish ended. */
     enum Outcome {
         /** The move is complete in the registry ({@code completed_at} set). */
         COMPLETED,
@@ -53,7 +56,9 @@ public interface MoveFinisher {
         /** A pause was set before verification or before {@code on_complete}: nothing ran past it; {@link Result#move} is the paused row. */
         PAUSED,
         /** The move is no longer open (superseded, failed or completed meanwhile): the worker forgets it. */
-        GONE
+        GONE,
+        /** The move completed and its {@code on_complete} put it back ({@code completed_at} NULL again): not a completion, no event; the worker comes back to it. */
+        REOPENED
     }
 
     /**
@@ -88,10 +93,17 @@ public interface MoveFinisher {
         public static Result gone() {
             return new Result(Outcome.GONE, null, null, null);
         }
+
+        public static Result reopened() {
+            return new Result(Outcome.REOPENED, null, null, null);
+        }
     }
 
     Result finish(Context context);
 
     /** Does nothing: the runs are done and the move stays open. */
+    /** Cancels a completion statement in flight (the engine is stopping); a finisher with none does nothing. */
+    default void cancelInFlight() { }
+
     MoveFinisher RUNS_ONLY = context -> Result.leftOpen();
 }
