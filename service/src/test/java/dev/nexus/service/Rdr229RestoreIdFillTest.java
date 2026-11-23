@@ -266,12 +266,12 @@ class Rdr229RestoreIdFillTest {
     /**
      * Code review F6, and P3.11's rule: a quarantined chunk's metadata carries the origin collection by name and, since P3.1, by id
      * ({@code QuarantineOrigin.ORIGIN_ID_KEY}, {@code origin_collection_id}). The id is the SOURCE installation's: a restore mints new
-     * ids, so one the file's registry does not hold (this file has no ids at all) is stripped, whatever name sits beside it (a name
-     * may be stale from P3.7). Every other key of the metadata is kept. A tag with the id key mapped is
+     * ids, so one the file's registry does not hold (this file has no ids at all) becomes the key present with JSON null (never absent: an
+     * absent key keeps gate 3 shut, CompletionCheck's quarantine clause), whatever name sits beside it (a name may be stale from P3.7). Every other key of the metadata is kept. A tag with the id key mapped is
      * {@code Rdr229RestoreByIdTest#t1_aRenamedCollectionsRowsStayOnItWhenAnotherCollectionTookTheOldLabel}.
      */
     @Test
-    void aChunksOriginIdTagThatTheFilesRegistryDoesNotHoldIsStripped_neverLeftAsTheSourcesId() throws Exception {
+    void aChunksOriginIdTagThatTheFilesRegistryDoesNotHoldIsMarkedJsonNull_neverLeftAsTheSourcesId_andNeverAbsent() throws Exception {
         ImportTestEnv.BackupFile file = fixture();
         int metadataAt = file.columnIndex("chunks", "metadata");
         int collectionAt = file.columnIndex("chunks", "collection");
@@ -308,7 +308,11 @@ class Rdr229RestoreIdFillTest {
             .as("no row keeps the backup's foreign origin id").isZero();
         assertThat(num(ctx -> ctx.fetchCount(chunks, text("c", "tenant_id").eq(tenant),
             DSL.function("jsonb_extract_path_text", SQLDataType.VARCHAR, metadata, DSL.val("keep")).eq("yes"),
-            originId.isNull()))).as("every tagged row lost the id key, the one whose name resolves included").isEqualTo(3);
+            originId.isNull()))).as("every tagged row lost the id value, the one whose name resolves included").isEqualTo(3);
+        assertThat(num(ctx -> ctx.fetchCount(chunks, text("c", "tenant_id").eq(tenant),
+            DSL.function("jsonb_extract_path_text", SQLDataType.VARCHAR, metadata, DSL.val("keep")).eq("yes"),
+            DSL.condition(DSL.function("jsonb_exists", Boolean.class, metadata, DSL.val("origin_collection_id"))))))
+            .as("and the key is still there, as JSON null: the backfill's mark of a dangling tag, which passes the gate-3 clause").isEqualTo(3);
         assertThat(num(ctx -> ctx.fetchCount(chunks, text("c", "tenant_id").eq(tenant),
             DSL.function("jsonb_extract_path_text", SQLDataType.VARCHAR, metadata, DSL.val("origin_collection")).eq(origin))))
             .as("the name tag is kept as it was").isEqualTo(1);
