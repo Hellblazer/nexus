@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-229 P3.3c (nexus-p2m1x.21; Sam's ruling, T2 nexus/sam-ruling-validate-bounds-lock-wait-only-2026-11-23): the validations that block no
+    writer lose their fixed statement bound and keep a lock wait only. A move with statement_timeout_ms 2147483647 (DataMove.NO_STATEMENT_BOUND_MS,
+    the largest int4: the column's CHECK refuses 0) completes with statement_timeout 0, so no network timeout either, and lock_timeout 5 s
+    (VerifyingFinisher). A step that blocks writers keeps its tight bound.
+
+    WHICH ROWS. The registered stamp moves of vectors-070 (rdr229-stamp-<table>, 16 rows): their on_complete validates P3.1's CHECK constraints
+    (VALIDATE CONSTRAINT: SHARE UPDATE EXCLUSIVE, no DML waits) after a read-only orphan probe. And the P3.3a id-twin validation moves of
+    vectors-072 (rdr229-fkvalidate-<table>, 7 rows): VALIDATE CONSTRAINT of a foreign key, the same lock. The chunks swap's own
+    on_complete is NOT among them: it keeps 1400 ms. The rows the swap registers at run time (the three child validation moves, the per-leaf
+    validation moves) are written with the new value by the swap itself.
+
+    ONLY OPEN OR FAILED ROWS. A completed move is left as it is. A row that is open or failed gets the new bound; a failed one stays failed
+    (nothing here re-opens it), the new bound applies when an operator re-arms it.
+
+    DATA EFFECT: at most 23 rows of the global registry nexus.data_moves have statement_timeout_ms set; no row of any other table changes and no
+    DDL runs. Idempotent: a row already at the value is not written. Reversible: the rollback restores 60000 on the same rows.
+    data-move-exempt: data_moves: the registry's own column, not a table that grows with user data.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-081-1" author="nexus-p2m1x.21">
+        <comment>Drop the fixed statement bound from the registered stamp moves and P3.3a id-twin validation moves that are not complete (nexus-p2m1x.21; Sam's ruling, T2 nexus/sam-ruling-validate-bounds-lock-wait-only-2026-11-23): statement_timeout_ms 60000 becomes 2147483647, which the finisher reads as no statement bound and a 5 s lock wait. Their on_completes are VALIDATE CONSTRAINT (SHARE UPDATE EXCLUSIVE), which blocks no writer. data-move-exempt: data_moves: the registry's own column, not a table that grows with user data. DATA EFFECT: at most 23 rows of the global registry nexus.data_moves have statement_timeout_ms set; no row of any other table changes; no DDL; reversible: the rollback restores 60000.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+DO $s$
+BEGIN
+    UPDATE nexus.data_moves
+       SET statement_timeout_ms = 2147483647
+     WHERE (label LIKE 'rdr229-stamp-%' OR label LIKE 'rdr229-fkvalidate-%')
+       AND statement_timeout_ms = 60000
+       AND completed_at IS NULL;
+END
+$s$;
+]]></sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+DO $s$
+BEGIN
+    UPDATE nexus.data_moves
+       SET statement_timeout_ms = 60000
+     WHERE (label LIKE 'rdr229-stamp-%' OR label LIKE 'rdr229-fkvalidate-%')
+       AND statement_timeout_ms = 2147483647;
+END
+$s$;
+]]></sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>
