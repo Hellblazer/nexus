@@ -9983,10 +9983,8 @@ public final class CatalogRepository {
         try {
             upsertCollectionTxn(tenant, coll, clientRoute, tuple);
         } finally {
-            // Post-commit (nexus-afkjy): the SET arm of the transaction may have changed the row's content_type, owner or tombstone, and
-            // CollectionRegistry.require answers a cached KNOWN entry with no read, so the next require would see the old row
-            // until restart. Same post-commit discipline as delete, rename and supersede; see CollectionRegistry.evict. In a
-            // finally (row 15 addendum): a COMMIT that reached the client as an exception may still have been applied.
+            // Post-commit (nexus-afkjy): the SET arm may have changed content_type, owner or tombstone, which a cached KNOWN entry
+            // would hide until restart. In a finally (row 15 addendum): a COMMIT seen as an exception may have been applied.
             CollectionRegistry.evict(tenant, s(coll, "name"));
         }
     }
@@ -10474,17 +10472,21 @@ public final class CatalogRepository {
 
     private Map<String, Integer> deleteCollection(String tenant, String name, boolean keepQuarantine, Long onlyId) {
         DeleteOutcome outcome = null;
+        boolean refused = false;
         try {
             outcome = deleteCollectionTxn(tenant, name, keepQuarantine, onlyId);
+        } catch (RuntimeException e) {
+            refused = !CommitUncertainty.mayFollowACommit(e);   // a typed 404/409/503 refusal rolled back before any write
+            throw e;
         } finally {
-            // Post-commit (nexus-h8rf6 wave review): the registry row is gone; a stale
-            // CollectionRegistry entry would make later writers silently skip
-            // re-registration if the name is reused. Same post-commit discipline as
-            // markKnown — see CollectionRegistry.evict. In a finally (row 15 addendum): a COMMIT that reached the client as an
-            // exception may still have been applied. The siblings and predecessors it removed are known only from an
-            // outcome that came back, so a delete that threw empties this tenant's cache instead (evicting is always safe).
+            // Post-commit (nexus-h8rf6): a stale cached row would let a writer skip re-registering a reused name (CollectionRegistry.evict).
+            // In a finally (row 15 addendum): a COMMIT that reached the client as an exception may still have been applied. The siblings
+            // and predecessors it removed are known only from an outcome that came back, so a delete that threw without a typed refusal
+            // empties this tenant's cache (evicting is always safe); a typed refusal evicts nothing (a stale-id caller must not flush it).
             if (outcome == null) {
-                CollectionRegistry.shared().evictTenant(tenant);
+                if (!refused) {
+                    CollectionRegistry.shared().evictTenant(tenant);
+                }
             } else {
                 // A quarantine sibling this delete emptied and unregistered: same post-commit eviction as the name itself.
                 for (String sibling : outcome.unregisteredSiblings()) {
@@ -10542,7 +10544,8 @@ public final class CatalogRepository {
         return manifestWriteTxn(tenant, "catalog.deleteCollection " + name, ctx -> {
             // RDR-229 P3.5a, row 16: a delete by id reads and locks the row of that id first (the registry row before any child row,
             // the canonical lock order), in this transaction, so a row that is gone, retired, or no longer bears `name` since the
-            // verdict read is refused (404 / 409) before anything is purged, and the purge below is of THAT row's id.
+            // verdict read is refused (404 / 409) before anything is purged. From gate 3 the purge below is of THAT row's id; before it the
+            // purge is by name (CollectionPurgeScope), so the lock above is what keeps a label's new holder out of it.
             Long lockedId = onlyId == null ? null : CollectionRefusals.requireSourceById(ctx, tenant, onlyId, name).collectionId();
             deferManifestChunkFk(ctx);
             // RDR-229 P3.5a: before gate 3 the name columns scope the purge; from it the row's id does, and a label with no row purges nothing
@@ -10819,7 +10822,7 @@ public final class CatalogRepository {
      * nexus-gaou3 409). Inside, it takes the rename lock shared and both rows FOR UPDATE ({@link CollectionTombstones#supersede}).
      */
     public int supersedeCollection(String tenant, String name, String supersededBy, String supersededAt) {
-        return supersedeCollection(tenant, name, null, supersededBy, supersededAt);
+        return supersedeCollection(tenant, name, null, supersededBy, null, supersededAt);
     }
 
     /**
@@ -10828,8 +10831,11 @@ public final class CatalogRepository {
      * that id, and a row that is gone (404 {@code unknown_collection_id}), retired (409 {@code collection_superseded}) or no longer
      * bearing {@code name} (409 {@code collection_id_mismatch}) is refused before anything is written ({@link CollectionRefusals}).
      * The route boundary resolved the id to {@code name} in an earlier read, and the label can have been taken by another row since.
+     * A successor named by id ({@code requestedSuccessorId}, else null) is locked and read by that id in the same ordered statement, with
+     * the same three refusals ({@link CollectionTombstones#supersede}).
      */
-    public int supersedeCollection(String tenant, String name, Long requestedSourceId, String supersededBy, String supersededAt) {
+    public int supersedeCollection(String tenant, String name, Long requestedSourceId, String supersededBy,
+                                   Long requestedSuccessorId, String supersededAt) {
         // superseded_at is timestamptz NULL after catalog-002-1-temporal-typing;
         // nexus-xtmtf: typed OffsetDateTime bind (blank -> NULL), no cast.
         Field<java.time.OffsetDateTime> stampedAt = supersededAt == null || supersededAt.isBlank()
@@ -10843,7 +10849,7 @@ public final class CatalogRepository {
                 if (supersededBy != null && !supersededBy.isEmpty()) {
                     LabelReserved.requireFree(ctx, tenant, supersededBy);   // linda 2026-11-23, addendum 8: the successor's label becomes live
                 }
-                int n = CollectionTombstones.supersede(ctx, tenant, name, requestedSourceId, supersededBy, stampedAt, gate3);
+                int n = CollectionTombstones.supersede(ctx, tenant, name, requestedSourceId, supersededBy, requestedSuccessorId, stampedAt, gate3);
                 // catalog-051-2 (RDR-229): the retired row no longer holds its tuple, so a slug-owned successor whose documents
                 // name that owner (a re-home moves them while the source stays live) can take it now. The same no-op write
                 // as renameCollectionTxn's: it fires catalog-044's BEFORE trigger on UPDATE OF owner_id.
@@ -10853,11 +10859,8 @@ public final class CatalogRepository {
                 return n;
             }));
         } finally {
-            // nexus-mp8ys: post-commit, like every evict (see CollectionRegistry.evict), and in a finally (row 15 addendum): a COMMIT
-            // that reached the client as an exception may still have been applied, and evicting is always safe. The cached row
-            // names no successor; left in place it would let an implicit chunk write to the retired
-            // name pass the registry check, which is the stranding this refusal exists to stop. The
-            // next write re-reads the row, finds the successor and is refused.
+            // nexus-mp8ys: post-commit, in a finally (row 15 addendum: a COMMIT seen as an exception may have been applied). A cached
+            // row naming no successor would let an implicit chunk write to the retired name pass the registry check (the stranding).
             CollectionRegistry.evict(tenant, name);
             // nexus-afkjy: rederiveOwner above may have changed the successor's owner_id, which its cached row also holds.
             if (supersededBy != null && !supersededBy.isEmpty()) {
