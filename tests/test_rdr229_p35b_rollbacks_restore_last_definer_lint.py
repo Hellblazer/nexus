@@ -29,9 +29,9 @@ pytestmark = pytest.mark.lint
 
 _RES = Path(__file__).resolve().parents[1] / "service" / "src" / "main" / "resources"
 OWN = ("db/changelog/vectors-077-rdr229-p35b-readers-both.xml", "db/changelog/vectors-078-rdr229-p35b-readers-continue.xml")
-# Changelogs after P3.5b that redefine objects P3.5b redefined (vectors-082, RDR-229 P3.7, nexus-p2m1x.27): not "before P3.5b", so they are not a last
+# Changelogs after P3.5b that redefine objects P3.5b redefined (vectors-083, RDR-229 P3.7, nexus-p2m1x.27): not "before P3.5b", so they are not a last
 # definer here. Their own rollbacks restore the vectors-077 text, which this test does not judge.
-LATER = ("db/changelog/vectors-082-restore-by-origin-id.xml",)
+LATER = ("db/changelog/vectors-083-restore-by-origin-id.xml",)
 _OBJ = re.compile(r"CREATE\s+(?:OR\s+REPLACE\s+)?(FUNCTION|VIEW|TRIGGER)\s+(?:IF\s+NOT\s+EXISTS\s+)?((?:nexus\.)?\w+)", re.I)
 _DOLLAR = re.compile(r"\$[A-Za-z_]*\$")
 
