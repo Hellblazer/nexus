@@ -115,7 +115,10 @@ final class StrictWriterCensus {
             // The transaction holds some registry row. When the statement binds the collection it writes (its label or id), that row must be one
             // of those held; a statement that binds none is not judged (a write keyed by a document or a pipeline id names no collection).
             java.util.List<Object> binds = c.query() == null ? java.util.List.of() : c.query().getBindValues();
-            boolean namesACollection = binds.stream().anyMatch(b -> b instanceof String || b instanceof Long);
+            // A bind names a collection only when the statement binds it to a collection label or id COLUMN (collection, source_collection,
+            // physical_collection, ..._collection_id): the tenant, a tumbler or a row id is a String or a Long too, and judging those against the
+            // held labels flagged every statement keyed by a document or a job.
+            boolean namesACollection = bindsACollection(sql) && binds.stream().anyMatch(b -> b instanceof String || b instanceof Long);
             if (namesACollection && !WriteRegistryMemo.holdsOneOf(c.configuration(), binds)) {
                 String finding = m.group(1) + " @ " + where + " [holds another collection's row, or the statement binds no held collection]";
                 FOUND.add(finding);
@@ -123,6 +126,19 @@ final class StrictWriterCensus {
                 log.warn("event=writer_census_other_collection table={} at={}", m.group(1), where);
             }
         }
+    }
+
+    private static final Pattern COLLECTION_COLUMN_BOUND = Pattern.compile(
+        "\\b[a-z_]*collection[a-z_]*\"?\\s*(?:=|<>|!=|in\\s*\\()\\s*\\?", Pattern.CASE_INSENSITIVE);
+    private static final Pattern INSERT_COLUMNS = Pattern.compile("^\\s*insert\\s+into\\s+[^(]+\\(([^)]*)\\)", Pattern.CASE_INSENSITIVE);
+
+    /** Whether {@code sql} binds a value to a collection label or id column: {@code <x>collection<y> = ?} (or {@code in (?...)}), or an INSERT whose column list has one. */
+    static boolean bindsACollection(String sql) {
+        if (COLLECTION_COLUMN_BOUND.matcher(sql).find()) {
+            return true;
+        }
+        Matcher m = INSERT_COLUMNS.matcher(sql);
+        return m.find() && m.group(1).toLowerCase().contains("collection");
     }
 
     /**
