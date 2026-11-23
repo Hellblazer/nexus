@@ -194,7 +194,8 @@ class Rdr229FkTwinsIntegrationTest extends DataMoveIntegrationBase {
             assertThat(move).as("%s: the walk registers the move", r.table()).isNotNull();
             assertThat(move).containsEntry("driving_schema", "nexus").containsEntry("driving_table", r.table())
                 .containsEntry("chunk_size", FkTwinSpecs.chunkSize(r.table())).containsEntry("sleep_ms", FkTwinSpecs.sleepMs(r.table()))
-                .containsEntry("statement_timeout_ms", FkTwinSpecs.STATEMENT_TIMEOUT_MS)
+                // registered at FkTwinSpecs.STATEMENT_TIMEOUT_MS (vectors-072); vectors-081-1 then drops the bound of a validation that blocks no writer
+                .containsEntry("statement_timeout_ms", DataMove.NO_STATEMENT_BOUND_MS)
                 .containsEntry("completed_at", null).containsEntry("failed_at", null).containsEntry("paused_at", null).containsEntry("supersedes", null);
             assertThat((OffsetDateTime) move.get("registered_at")).as("%s: registered after the stamp moves, so the worker takes it after", r.table())
                 .isAfterOrEqualTo(lastStampRegisteredAt);
