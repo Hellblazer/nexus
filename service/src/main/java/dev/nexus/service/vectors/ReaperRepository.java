@@ -83,12 +83,19 @@ public class ReaperRepository {   // not final: ChunkReaperIntegrationTest raise
         return tenantScope.withTenant(tenant, ctx -> {
             PgSession.setStatementAndLockBounds(ctx, (int) statementTimeout.toMillis(), 2_000);
             if (gateNow().holds()) {
-                // From gate 3: the registry's current label of each row's id. A NULL id is no collection, never a '' name.
-                Field<String> label = CollectionSelector.labelOf(CHUNKS.TENANT_ID, CHUNKS.COLLECTION_ID).as("label");
-                return ctx.selectDistinct(label).from(CHUNKS)
+                // From gate 3: every distinct collection_id the tenant's chunks hold, each under the registry row's current name
+                // (by id, no live filter: an id to its label), or, for an id no registry row holds (dangling), under the stored
+                // chunks.collection of that id's rows (one per id: min). A NULL id is no collection, never a '' name. One registry
+                // probe per id (GROUP BY), not per chunk row, under this statement bound. Two ids that share a label list it once.
+                var c = CATALOG_COLLECTIONS.as("lbl");
+                Field<String> label = DSL.coalesce(
+                    DSL.field(DSL.select(c.NAME).from(c).where(c.TENANT_ID.eq(tenant)).and(c.COLLECTION_ID.eq(CHUNKS.COLLECTION_ID))),
+                    DSL.min(CHUNKS.COLLECTION)).as("label");
+                return ctx.select(label).from(CHUNKS)
                     .where(CHUNKS.TENANT_ID.eq(tenant)).and(CHUNKS.COLLECTION_ID.isNotNull())
+                    .groupBy(CHUNKS.COLLECTION_ID)
                     .orderBy(label)
-                    .fetch(label);
+                    .fetch(label).stream().distinct().toList();
             }
             return ctx.selectDistinct(CHUNKS.COLLECTION).from(CHUNKS)
                 .where(CHUNKS.TENANT_ID.eq(tenant))
@@ -149,12 +156,13 @@ public class ReaperRepository {   // not final: ChunkReaperIntegrationTest raise
     public List<ChunkLabel> describe(String tenant, String collection, List<String> chashHex) {
         if (chashHex.isEmpty()) return List.of();
         List<byte[]> keys = chashHex.stream().map(h -> dev.nexus.service.db.Chash.fromHex(h).toBytes()).toList();
+        Gate3 g = gateNow();   // one reading for the whole statement: the owner ranking and the filter agree
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(CHUNKS.CHASH, ChunkOwnerLabel.title(), ChunkOwnerLabel.filePath(), ChunkOwnerLabel.textPrefix())
                .from(CHUNKS)
-               .leftJoin(ChunkOwnerLabel.ownerLateral()).on(DSL.trueCondition())
+               .leftJoin(ChunkOwnerLabel.ownerLateral(g)).on(DSL.trueCondition())
                .where(CHUNKS.TENANT_ID.eq(tenant)
-                   .and(CollectionSelector.collectionIs(gateNow(), tenant, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, collection))
+                   .and(CollectionSelector.collectionIs(g, tenant, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, collection))
                    .and(CHUNKS.CHASH.in(keys)))
                .orderBy(CHUNKS.CHASH)
                .fetch(r -> new ChunkLabel(HexFormat.of().formatHex(r.value1()),
