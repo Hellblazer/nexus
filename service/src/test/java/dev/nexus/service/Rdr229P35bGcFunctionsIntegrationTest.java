@@ -285,12 +285,16 @@ class Rdr229P35bGcFunctionsIntegrationTest {
     }
 
     /** Gate 3 is latched for the duration of {@code work} (the latch is install-wide and this class shares one database, so it is removed after). */
+    private static final org.jooq.Table<?> LATCH = DSL.table(DSL.name("nexus", "rdr229_gate_latch"));
+    private static final org.jooq.Field<String> LATCH_GATE = DSL.field(DSL.name("nexus", "rdr229_gate_latch", "gate"), String.class);
+
     private void whileGate3Latched(Consumer<DSLContext> work) throws Exception {
-        su(ctx -> ctx.execute("INSERT INTO nexus.rdr229_gate_latch (gate, latched_at, engine_version) VALUES ('gate3', now(), 'p37-test') ON CONFLICT DO NOTHING"));
+        su(ctx -> ctx.insertInto(LATCH).columns(LATCH_GATE, DSL.field(DSL.name("latched_at"), OffsetDateTime.class), DSL.field(DSL.name("engine_version"), String.class))
+            .values("gate3", OffsetDateTime.now(), "p37-test").onConflictDoNothing().execute());
         try {
             su(work);
         } finally {
-            su(ctx -> ctx.execute("DELETE FROM nexus.rdr229_gate_latch WHERE gate = 'gate3'"));
+            su(ctx -> ctx.deleteFrom(LATCH).where(LATCH_GATE.eq("gate3")).execute());
         }
     }
 

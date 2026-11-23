@@ -19,8 +19,8 @@
     changes (the four bodies differ from vectors-077-51, -52, -53 and -91 only in the origin match and one DECLARE or CTE column).
 
     DATA EFFECT: none. Four function definitions, no row read or written at migration time. The rollback of each restores the vectors-077
-    definition verbatim. Plain changesets (the chunk family takes no CONTINUE wait, RDR-246 lines 902-906). The number follows linda's ledger
-    (T2 nexus/rdr229-phase3-changeset-numbers, next free vectors-082). After vectors-078, before the grants-nexus-svc.xml runAlways block.
+    definition verbatim. Plain changesets (the chunk family takes no CONTINUE wait, RDR-246 lines 902-906). The number is linda's allotment (vectors-083; first built as vectors-082)
+    (T2 nexus/rdr229-phase3-changeset-numbers). After vectors-078, before the grants-nexus-svc.xml runAlways block.
 -->
 <databaseChangeLog
     xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
@@ -28,7 +28,7 @@
     xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
 
-    <changeSet id="vectors-082-1" author="nexus-p2m1x.27">
+    <changeSet id="vectors-083-1" author="nexus-p2m1x.27">
         <comment>RDR-229 P3.7 (nexus-p2m1x.27): nexus.gc_restore_rereferenced finds a quarantined chunk of the origin by the origin's registry id from gate 3 (the install's rdr229_gate_latch row for gate3 exists, read at the top of the call), and by the metadata origin_collection label tag before it, as before. Replaces the definition in vectors-077-51 of vectors-077-rdr229-p35b-readers-both.xml, the last definer; signature, attributes and grants are kept. DATA EFFECT: none, a function definition only. Rollback restores that definition.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE OR REPLACE FUNCTION nexus.gc_restore_rereferenced(dim integer, p_tenant_id text, p_quarantine_collection text, p_origin_collection text)
@@ -38,7 +38,7 @@ AS $function$
 DECLARE
     v_origin_id bigint;
     v_quar_id bigint;
-    -- RDR-229 P3.7 (vectors-082): read once, at the top of the call; from gate 3 a quarantined chunk is the origin's by the origin's id
+    -- RDR-229 P3.7 (vectors-083): read once, at the top of the call; from gate 3 a quarantined chunk is the origin's by the origin's id
     v_latched boolean := EXISTS (SELECT 1 FROM nexus.rdr229_gate_latch WHERE gate = 'gate3');
     v_chashes                 bytea[];
     v_restored                bigint := 0;
@@ -423,7 +423,7 @@ $function$;
         </rollback>
     </changeSet>
 
-    <changeSet id="vectors-082-2" author="nexus-p2m1x.27">
+    <changeSet id="vectors-083-2" author="nexus-p2m1x.27">
         <comment>RDR-229 P3.7 (nexus-p2m1x.27): nexus.gc_restore_rereferenced_bounded finds a quarantined chunk of the origin by the origin's registry id from gate 3 (the install's rdr229_gate_latch row for gate3 exists, read at the top of the call), and by the metadata origin_collection label tag before it, as before. Replaces the definition in vectors-077-52 of vectors-077-rdr229-p35b-readers-both.xml, the last definer; signature, attributes and grants are kept. DATA EFFECT: none, a function definition only. Rollback restores that definition.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE OR REPLACE FUNCTION nexus.gc_restore_rereferenced_bounded(dim integer, p_tenant_id text, p_quarantine_collection text, p_origin_collection text, p_row_limit integer)
@@ -433,7 +433,7 @@ AS $function$
 DECLARE
     v_origin_id bigint;
     v_quar_id bigint;
-    -- RDR-229 P3.7 (vectors-082): read once, at the top of the call; from gate 3 a quarantined chunk is the origin's by the origin's id
+    -- RDR-229 P3.7 (vectors-083): read once, at the top of the call; from gate 3 a quarantined chunk is the origin's by the origin's id
     v_latched boolean := EXISTS (SELECT 1 FROM nexus.rdr229_gate_latch WHERE gate = 'gate3');
     v_chashes                 bytea[];
     v_restored                bigint := 0;
@@ -865,7 +865,7 @@ $function$;
         </rollback>
     </changeSet>
 
-    <changeSet id="vectors-082-3" author="nexus-p2m1x.27">
+    <changeSet id="vectors-083-3" author="nexus-p2m1x.27">
         <comment>RDR-229 P3.7 (nexus-p2m1x.27): nexus.quarantine_restore_chunks finds a quarantined chunk of the origin by the origin's registry id from gate 3 (the install's rdr229_gate_latch row for gate3 exists, read at the top of the call), and by the metadata origin_collection label tag before it, as before. Replaces the definition in vectors-077-53 of vectors-077-rdr229-p35b-readers-both.xml, the last definer; signature, attributes and grants are kept. DATA EFFECT: none, a function definition only. Rollback restores that definition.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE OR REPLACE FUNCTION nexus.quarantine_restore_chunks(p_tenant_id text, p_origin_collection text, p_quarantine_collection text, p_chashes text[], p_actor text, p_source_audit_id bigint, p_dry_run boolean, p_reattach boolean)
@@ -875,7 +875,7 @@ AS $function$
 DECLARE
     v_origin_id bigint;
     v_quar_id bigint;
-    -- RDR-229 P3.7 (vectors-082): read once, at the top of the call; from gate 3 a quarantined chunk is the origin's by the origin's id
+    -- RDR-229 P3.7 (vectors-083): read once, at the top of the call; from gate 3 a quarantined chunk is the origin's by the origin's id
     v_latched boolean := EXISTS (SELECT 1 FROM nexus.rdr229_gate_latch WHERE gate = 'gate3');
     -- The default grace of the reapable predicate (vectors-021-2), for the report only; see the header.
     v_default_grace  CONSTANT interval := interval '30 days';
@@ -1731,7 +1731,7 @@ $function$;
         </rollback>
     </changeSet>
 
-    <changeSet id="vectors-082-4" author="nexus-p2m1x.27">
+    <changeSet id="vectors-083-4" author="nexus-p2m1x.27">
         <comment>RDR-229 P3.7 (nexus-p2m1x.27): nexus.quarantine_reattach_plan finds a quarantined chunk of the origin by the origin's registry id from gate 3 (the install's rdr229_gate_latch row for gate3 exists, read at the top of the call), and by the metadata origin_collection label tag before it, as before. Replaces the definition in vectors-077-91 of vectors-077-rdr229-p35b-readers-both.xml, the last definer; signature, attributes and grants are kept. DATA EFFECT: none, a function definition only. Rollback restores that definition.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE OR REPLACE FUNCTION nexus.quarantine_reattach_plan(
@@ -1750,7 +1750,7 @@ WITH reg AS (
     -- RDR-229 P3.5b: the registry ids of the two labels the caller passes, read once (label-kept registry reads).
     SELECT (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_origin_collection) AS o_id,
            (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_quarantine_collection) AS q_id,
-           -- RDR-229 P3.7 (vectors-082): from gate 3 a quarantined chunk is the origin's by the origin's id, not by the label tag
+           -- RDR-229 P3.7 (vectors-083): from gate 3 a quarantined chunk is the origin's by the origin's id, not by the label tag
            EXISTS (SELECT 1 FROM nexus.rdr229_gate_latch WHERE gate = 'gate3') AS latched
 ),
 cand AS (

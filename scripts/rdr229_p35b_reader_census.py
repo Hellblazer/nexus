@@ -226,10 +226,10 @@ includes = re.findall(r'<include\s+file="([^"]+)"', master)
 # P3.5b's own redefinitions: left out of the baseline (the surface it disposes), read by --live. An object P3.5b's files
 # create that no earlier changeset defines (the id twins <name>_by_id, linda 2026-11-22) is in the baseline all the same:
 # it is a live reader the dispositions must name, and it has no earlier text to be disposed instead of.
-# vectors-082 (RDR-229 P3.7, nexus-p2m1x.27) redefines four of those objects again (the restore functions and the reattach plan find a quarantined chunk's
+# vectors-083 (RDR-229 P3.7, nexus-p2m1x.27) redefines four of those objects again (the restore functions and the reattach plan find a quarantined chunk's
 # origin by id from gate 3); it is a later definer of objects P3.5b already redefined, so the baseline stays at the definer before P3.5b.
 P35B_OWN = {"db/changelog/vectors-077-rdr229-p35b-readers-both.xml", "db/changelog/vectors-078-rdr229-p35b-readers-continue.xml",
-            "db/changelog/vectors-082-restore-by-origin-id.xml"}
+            "db/changelog/vectors-083-restore-by-origin-id.xml"}
 BASELINE = "--live" not in sys.argv
 FN_RE = re.compile(r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(nexus\.[a-z0-9_]+)\s*\(", re.I)
 FN_DROP = re.compile(r"DROP\s+FUNCTION\s+(?:IF\s+EXISTS\s+)?(nexus\.[a-z0-9_]+)", re.I)
