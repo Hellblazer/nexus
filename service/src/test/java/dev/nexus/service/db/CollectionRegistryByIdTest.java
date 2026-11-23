@@ -15,7 +15,6 @@ import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -30,11 +29,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * on the id". The bead's own test list (nexus-p2m1x.23 notes, Tests 1): "The registry resolves a label and an id to the same
  * row. A rename's evict drops both index entries. The evict race still holds for both keys."
  *
- * <p><b>Missing production symbols</b> (the tests need exactly these): the registry takes {@link Gate3} by constructor (linda's
- * ruling, bead comment 2026-11-22), which makes it an instance; the existing static {@code cached/evict/require} keep their
+ * <p><b>Missing production symbols</b> (the tests need exactly these): the registry is an instance over the shared cache (linda's
+ * rulings, bead comment 2026-11-22, and 2026-11-23: no {@link Gate3} dependency); the existing static {@code cached/evict/require} keep their
  * names on the static class today and cannot share a signature with an instance method, so the instance API here uses new
  * names: {@code resolveLabel(ctx, tenant, label)}, {@code resolveId(ctx, tenant, id)}, {@code cachedByLabel},
- * {@code cachedById}, {@code evictLabel(tenant, label)}, {@code evictTenant}, {@code readerKey(row)}; {@link CollectionRow}
+ * {@code cachedById}, {@code evictLabel(tenant, label)}, {@code evictTenant}; {@link CollectionRow}
  * gains {@code collectionId()} and {@code label()}; an id with no row raises {@code UnknownCollectionIdException}. The
  * nexus-hkh1y seam {@code afterMissReadForTests} keeps its static name here; the implementation may make it an instance
  * field and this test follows.
@@ -104,24 +103,22 @@ class CollectionRegistryByIdTest {
     /** Bead test list 1, clause 1: "The registry resolves a label and an id to the same row." */
     @Test
     void aLabelAndAnIdResolveToTheSameRow() throws Exception {
-        for (boolean gate : new boolean[] {false, true}) {
-            var reg = new CollectionRegistry(() -> gate);
-            String label = seeded(TENANT, "same" + gate);
-            long id = idOf(TENANT, label);
+        var reg = new CollectionRegistry();
+        String label = seeded(TENANT, "same");
+        long id = idOf(TENANT, label);
 
-            CollectionRow viaLabel = byLabel(reg, TENANT, label);
-            CollectionRow viaId = byId(new CollectionRegistry(() -> gate), TENANT, id);
+        CollectionRow viaLabel = byLabel(reg, TENANT, label);
+        CollectionRow viaId = byId(new CollectionRegistry(), TENANT, id);
 
-            assertThat(viaLabel.collectionId()).as("gate3=%s", gate).isEqualTo(id);
-            assertThat(viaLabel.label()).isEqualTo(label);
-            assertThat(viaId).as("the same row by the other key").isEqualTo(viaLabel);
-        }
+        assertThat(viaLabel.collectionId()).isEqualTo(id);
+        assertThat(viaLabel.label()).isEqualTo(label);
+        assertThat(viaId).as("the same row by the other key").isEqualTo(viaLabel);
     }
 
     /** One resolution by either key fills both index entries (RDR: "keyed by id with a label index beside it"). */
     @Test
     void oneResolutionFillsTheIdEntryAndTheLabelEntry() throws Exception {
-        var reg = new CollectionRegistry(Gate3.never());
+        var reg = new CollectionRegistry();
         String label = seeded(TENANT, "fill");
         long id = idOf(TENANT, label);
         assertThat(reg.cachedById(TENANT, id)).isEmpty();
@@ -140,7 +137,7 @@ class CollectionRegistryByIdTest {
      */
     @Test
     void aHitOnEitherKeyDoesNotReadTheDatabase() throws Exception {
-        var reg = new CollectionRegistry(Gate3.never());
+        var reg = new CollectionRegistry();
         String label = seeded(TENANT, "hit");
         long id = idOf(TENANT, label);
         CollectionRow first = byLabel(reg, TENANT, label);
@@ -157,7 +154,7 @@ class CollectionRegistryByIdTest {
     /** The id is per tenant: another tenant's registry rows are not reachable by an id they do not own. */
     @Test
     void anIdOfAnotherTenantDoesNotResolve() throws Exception {
-        var reg = new CollectionRegistry(Gate3.never());
+        var reg = new CollectionRegistry();
         String label = seeded(TENANT, "tenant");
         long id = idOf(TENANT, label);
         seeded(OTHER_TENANT, "tenant");
@@ -168,7 +165,7 @@ class CollectionRegistryByIdTest {
     /** Typed refusal for an id with no row (the registry-level twin of the routes' typed 404, contract point 3). */
     @Test
     void anUnknownIdRaisesTheTypedException_notAnUnregisteredLabel() {
-        var reg = new CollectionRegistry(Gate3.never());
+        var reg = new CollectionRegistry();
         assertThatThrownBy(() -> byId(reg, TENANT, 987_654_321_012L))
             .isInstanceOf(UnknownCollectionIdException.class)
             .isNotInstanceOf(UnregisteredCollectionException.class)
@@ -183,7 +180,7 @@ class CollectionRegistryByIdTest {
      */
     @Test
     void evictingByLabelDropsBothIndexEntries() throws Exception {
-        var reg = new CollectionRegistry(Gate3.never());
+        var reg = new CollectionRegistry();
         String label = seeded(TENANT, "evict");
         long id = idOf(TENANT, label);
         byLabel(reg, TENANT, label);
@@ -197,7 +194,7 @@ class CollectionRegistryByIdTest {
     /** {@code evictTenant} (a profile write, the tenant reset route) clears both indexes for that tenant only. */
     @Test
     void evictingATenantDropsBothIndexesForThatTenantOnly() throws Exception {
-        var reg = new CollectionRegistry(Gate3.never());
+        var reg = new CollectionRegistry();
         String mine = seeded(TENANT, "evt-mine");
         String theirs = seeded(OTHER_TENANT, "evt-theirs");
         long mineId = idOf(TENANT, mine);
@@ -221,7 +218,7 @@ class CollectionRegistryByIdTest {
      */
     @Test
     void theEvictRaceGuardHoldsForBothKeys() throws Exception {
-        var reg = new CollectionRegistry(Gate3.never());
+        var reg = new CollectionRegistry();
         String viaId = seeded(TENANT, "race-id");
         long id = idOf(TENANT, viaId);
         CollectionRegistry.afterMissReadForTests = () -> reg.evictLabel(TENANT, viaId);
@@ -256,7 +253,7 @@ class CollectionRegistryByIdTest {
      */
     @Test
     void aSupersededRowIsNeverCachedUnderEitherKey() throws Exception {
-        var reg = new CollectionRegistry(Gate3.never());
+        var reg = new CollectionRegistry();
         String old = seeded(TENANT, "sup-old");
         String successor = seeded(TENANT, "sup-new");
         long oldId = idOf(TENANT, old);
@@ -283,7 +280,7 @@ class CollectionRegistryByIdTest {
         long oldId = idOf(TENANT, from);
         catalog.renameCollection(TENANT, from, to);
 
-        var reg = new CollectionRegistry(Gate3.never());
+        var reg = new CollectionRegistry();
         CollectionRow tomb = byId(reg, TENANT, oldId);
         CollectionRow renamed = byLabel(reg, TENANT, to);
 
@@ -293,31 +290,27 @@ class CollectionRegistryByIdTest {
         assertThat(renamed.isSuperseded()).isFalse();
     }
 
-    // ---- what readers are handed --------------------------------------------------------------------------------------
+    // ---- what the registry does not decide --------------------------------------------------------------------------------
 
     /**
-     * RDR line ~1448: "Until gate 3, {@code CollectionRegistry} hands readers the name, the jOOQ readers read the name
-     * columns"; from gate 3 "readers are on the id". {@code readerKey} is the one value a reader keys its query on: the
-     * label while gate 3 does not hold, the id once it does, decided per call from the injected {@link Gate3} so the switch
-     * needs no restart, and dropping back when gate 3 does.
+     * linda 2026-11-23 (P3.5a review): the registry serves both keys and decides nothing about which one a reader uses; that choice
+     * is the reader's, from the one {@link Gate3} its repository is given. A registry that held its own gate-3 reading could
+     * drop back to names after a one-row rename, so it has none: no {@link Gate3} field, no constructor taking one, no method
+     * taking or returning one, and no {@code readerKey}. Reflection, so the dependency cannot creep back.
      */
     @Test
-    void readersAreHandedTheNameUntilGate3_andTheIdFromIt_withNoRestart() throws Exception {
-        var gate = new AtomicBoolean(false);
-        var reg = new CollectionRegistry(gate::get);
-        String label = seeded(TENANT, "reader");
-        long id = idOf(TENANT, label);
-        CollectionRow row = byLabel(reg, TENANT, label);
-
-        assertThat(reg.readerKey(row)).as("gate 3 does not hold").isEqualTo(label);
-        gate.set(true);
-        assertThat(reg.readerKey(row)).as("gate 3 holds: the same cached row, no restart").isEqualTo(id);
-        gate.set(false);
-        assertThat(reg.readerKey(row)).as("gate 3 dropped back (an id index went INVALID)").isEqualTo(label);
-
-        var never = new CollectionRegistry(Gate3.never());
-        assertThat(never.readerKey(row)).isEqualTo(label);
-        var always = new CollectionRegistry(() -> true);
-        assertThat(always.readerKey(row)).isEqualTo(id);
+    void theRegistryHasNoGate3Dependency() {
+        Class<?> c = CollectionRegistry.class;
+        for (var f : c.getDeclaredFields()) {
+            assertThat(f.getType()).as("field %s", f.getName()).isNotEqualTo(Gate3.class);
+        }
+        for (var k : c.getDeclaredConstructors()) {
+            assertThat(k.getParameterTypes()).as("constructor %s", k).doesNotContain(Gate3.class);
+        }
+        for (var m : c.getDeclaredMethods()) {
+            assertThat(m.getParameterTypes()).as("method %s", m.getName()).doesNotContain(Gate3.class);
+            assertThat(m.getReturnType()).as("method %s", m.getName()).isNotEqualTo(Gate3.class);
+            assertThat(m.getName()).as("the reader-key choice is not the registry's").isNotEqualTo("readerKey");
+        }
     }
 }

@@ -609,22 +609,6 @@ public final class Main {
         // nexus-wym0l: fix and log the fan-out arm cap against the pool this process runs with.
         pgVectorRepo.startupFanoutArmPermits();
 
-        // RDR-229 P3.5a: the gate-3 signal the registry and the rename refusal read, and what a rename from gate 3 waits for.
-        // Both read the completion check, which starts after the service (it needs the admin connection and the boot-work
-        // registry), so they go through this holder and read false (not consulted) until it is set. One read per call, no cache.
-        var completionRef = new java.util.concurrent.atomic.AtomicReference<dev.nexus.service.datamove.CompletionBootWork>();
-        dev.nexus.service.datamove.Gate3 gate3 = () -> completionRef.get() != null && completionRef.get().gate3().holds();
-        dev.nexus.service.datamove.RenameReadiness renameReadiness = () -> completionRef.get() == null
-                ? dev.nexus.service.datamove.RenameReadiness.Missing.NONE : completionRef.get().renameReadiness().missing();
-        var service = new NexusService(port, token, ds, docEmbedRouter, pgVectorRepo, reranker,
-                localEmbedActivitySupplier, tupleTemplateRegistry, null, System::getenv,
-                () -> dev.nexus.service.db.PgSession.startupPciSettings().enabled(), null, null, gate3, renameReadiness);
-        // RDR-210 Step 4 (nexus-un7vj): /version and /v1/status report the profile, the reranker and any
-        // degraded-boot description beside the embedding mode. Bound before the listener starts.
-        service.embedPosture(dev.nexus.service.http.EmbedPosture.of(plan, reranker));
-        // nexus-csayy.6 (RDR-248): the import routes open a session only on an engine that holds the singleton lock
-        // (null: NX_ENGINE_SINGLETON_LOCK=off, or a pooler, where the lock is skipped).
-        service.importWiring().declareSingletonLockHeld(singletonLock != null);
         // RDR-229 P3.4: the gate 3 latch, read here, synchronously, BEFORE the listener binds. The completion check's own sample is asynchronous
         // and can fail, so a reader that went by it could route to stale names after a one-row rename on the first requests of a restart.
         // A read that fails is retried with backoff, and when the database cannot answer in the deadline the engine does not serve (the same
@@ -639,8 +623,30 @@ public final class Main {
             return;
         }
         log.info("event=rdr229_gate3_latch_read latched={} pci_off={}", gate3Latch.latched(), gate3Latch.pciOff());
-        // Which accessor a reader uses (P3.5 wires its readers here or later): code that runs before the completion check below exists reads THIS
-        // Gate3Latch (latched(), pciOff()), already read, never a guess; code wired after it reads completionCheck.gate3Latched(), which is seeded
+        // RDR-229 P3.5a and P3.5c: the ONE gate 3 signal (linda 2026-11-23: the latched value, never the live gate 3). The route boundary, the rename guard,
+        // the CollectionRegistry instances and the repositories all take this same instance; there is no second lambda. The boot latch is read above, before
+        // anything that reads or writes a collection is built or scheduled, so the signal has no unset state: it answers that latch until the completion
+        // check starts, then the check's latch (seeded from the same read), which never returns to false.
+        final var bootLatch = gate3Latch;
+        var completionRef = new java.util.concurrent.atomic.AtomicReference<dev.nexus.service.datamove.CompletionBootWork>();
+        dev.nexus.service.datamove.Gate3 gate3 = () -> { var c = completionRef.get(); return c != null ? c.gate3Latched() : bootLatch.latched(); };
+        // What a rename from gate 3 waits for (P3.7's code answers; the check's stub says ready until then). Unset, before the completion check exists,
+        // it answers the drop move is missing: a rename on a latched install is refused until the check can say otherwise (fails closed).
+        dev.nexus.service.datamove.RenameReadiness renameReadiness = () -> {
+            var c = completionRef.get();
+            return c == null ? dev.nexus.service.datamove.RenameReadiness.Missing.NAME_KEY_DROP_MOVE : c.renameReadiness().missing();
+        };
+        var service = new NexusService(port, token, ds, docEmbedRouter, pgVectorRepo, reranker,
+                localEmbedActivitySupplier, tupleTemplateRegistry, null, System::getenv,
+                () -> dev.nexus.service.db.PgSession.startupPciSettings().enabled(), null, null, gate3, renameReadiness);
+        // RDR-210 Step 4 (nexus-un7vj): /version and /v1/status report the profile, the reranker and any
+        // degraded-boot description beside the embedding mode. Bound before the listener starts.
+        service.embedPosture(dev.nexus.service.http.EmbedPosture.of(plan, reranker));
+        // nexus-csayy.6 (RDR-248): the import routes open a session only on an engine that holds the singleton lock
+        // (null: NX_ENGINE_SINGLETON_LOCK=off, or a pooler, where the lock is skipped).
+        service.importWiring().declareSingletonLockHeld(singletonLock != null);
+        // Which accessor a reader uses: code that runs before the completion check below exists reads THIS
+        // Gate3Latch (latched(), pciOff()), already read, never a guess (the gate3 adapter above does, then reads the check); code wired after it reads completionCheck.gate3Latched(), which is seeded
         // from this same object and sticky once true. The two agree from the first request of the engine, so no reader sees a window.
         service.start();
         // The read half runs in every engine, whatever NX_SEARCH_PCI says: one read now, then one per
