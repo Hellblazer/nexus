@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import dev.nexus.service.datamove.Gate3;
 import org.jooq.Field;
 import org.jooq.Table;
 import org.jooq.impl.DSL;
@@ -80,6 +81,15 @@ final class ChunkOwnerLabel {
      * query. Join it with {@code leftJoin(ownerLateral()).on(DSL.trueCondition())}.
      */
     static Table<?> ownerLateral() {
+        return ownerLateral(Gate3.never());
+    }
+
+    /**
+     * {@link #ownerLateral()} that ranks the chunk's OWN collection's manifest row first by id once {@code gate3} holds (RDR-229
+     * P3.5c, item 6): {@code m.collection_id = chunks.collection_id}, so a one-row rename that leaves the chunk's own name stale
+     * still prefers its own collection. A chunk whose id is NULL has no own collection and takes the lowest doc id.
+     */
+    static Table<?> ownerLateral(Gate3 gate3) {
         var m = CATALOG_DOCUMENT_CHUNKS;
         var d = CATALOG_DOCUMENTS;
         return DSL.lateral(
@@ -90,7 +100,8 @@ final class ChunkOwnerLabel {
                .and(m.CHASH.eq(CHUNKS.CHASH))
                .and(m.EMBEDDING_MODEL.eq(CHUNKS.EMBEDDING_MODEL))
                .and(d.DELETED_AT.isNull())
-               .orderBy(DSL.case_().when(m.COLLECTION.eq(CHUNKS.COLLECTION), 0).otherwise(1), m.DOC_ID)
+               .orderBy(DSL.case_().when(gate3.holds() ? m.COLLECTION_ID.eq(CHUNKS.COLLECTION_ID)
+                                                        : m.COLLECTION.eq(CHUNKS.COLLECTION), 0).otherwise(1), m.DOC_ID)
                .limit(1)).as(ALIAS);
     }
 
