@@ -2719,7 +2719,11 @@ public final class CatalogHandler implements HttpHandler {
             // its CollectionSuperseded message on a non-zero count) but do NOT re-run the
             // UPDATE — re-stamping superseded_at would move the supersession's recorded
             // instant every time the operation is retried.
-            HttpUtil.send(exchange, 200, "{\"updated\":1}"); return;
+            // A request that named a source or a successor by id skips this label read: the row read above is the label's holder now,
+            // which may not be the row of the id, so the verb decides under the lock, by id (row 16).
+            if (resolvedSourceId(body) == null && resolvedSuccessorId(body) == null) {
+                HttpUtil.send(exchange, 200, "{\"updated\":1}"); return;
+            }
         }
         // row 16: a request by collection_id has its source read and locked by that id in the verb's own transaction (the route boundary
         // left the id it resolved in the body)
