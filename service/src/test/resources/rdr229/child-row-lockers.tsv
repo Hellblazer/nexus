@@ -21,6 +21,7 @@ CollectionRegistry.java	lockIdsAndLabelsForWrite	CATALOG_COLLECTIONS	forKeyShare
 CollectionRegistry.java	readLocked	CATALOG_COLLECTIONS	forKeyShare	1	registry	the registry row itself: the verb FOR UPDATE, the writer FOR KEY SHARE, the stale-note repair FOR SHARE (registry first)
 CollectionRegistry.java	readLocked	CATALOG_COLLECTIONS	forShare	1	registry	the registry row itself: the verb FOR UPDATE, the writer FOR KEY SHARE, the stale-note repair FOR SHARE (registry first)
 CollectionTombstones.java	lockRows	CATALOG_COLLECTIONS	forUpdate	1	registry	the registry row itself: the verb FOR UPDATE, the writer FOR KEY SHARE, the stale-note repair FOR SHARE (registry first)
+RegistryRowLocks.java	keyShareIfPresent	CATALOG_COLLECTIONS	forKeyShare	1	registry	the registry row itself: the verb FOR UPDATE, the writer FOR KEY SHARE, the stale-note repair FOR SHARE (registry first)
 GroupRules.java	lock	GROUP_RECORDS	forUpdate	1	no-registry-lock	identity group rows, no collection
 GroupRules.java	onJoin	GROUP_RECORDS	forShare	1	no-registry-lock	identity group rows, no collection
 GroupRules.java	onLeave	GROUP_RECORDS	forShare	1	no-registry-lock	identity group rows, no collection
@@ -34,7 +35,7 @@ MemoryRepository.java	replaceMemory	MEMORY	forUpdate	2	no-registry-lock	T2 memor
 PipelineRepository.java	lockRun	PDF_PIPELINE	forUpdate	1	no-registry-lock	the pdf_pipeline row of a run; create takes the key share first, the other run routes name no collection write
 ReembedJobRepository.java	advanceAfterBatch	REEMBED_JOBS	forUpdate	1	no-registry-lock	re-embed job rows; the job start reads the collections first (round 2 item: requireAllForWrite)
 ReembedJobRepository.java	advanceAfterBatch	REEMBED_JOB_MOVES	forUpdate	1	no-registry-lock	re-embed job rows; the job start reads the collections first (round 2 item: requireAllForWrite)
-ReembedJobRepository.java	markRevived	REEMBED_JOBS	forUpdate	1	no-registry-lock	re-embed job rows
+ReembedJobRepository.java	markRevivedIn	REEMBED_JOBS	forUpdate	1	no-registry-lock	re-embed job rows, inside a transaction that already read both ends' registry rows (start after requireAllForWrite, markRevived after requireAllForWrite)
 ReembedJobRepository.java	recordMoveInTxn	REEMBED_JOBS	forUpdate	1	no-registry-lock	re-embed job rows, inside the per-document move transaction that read the registry (writeManifestMany)
 ReembedJobRepository.java	recordMoveInTxn	REEMBED_JOB_MOVES	forUpdate	1	no-registry-lock	re-embed job rows, inside the per-document move transaction that read the registry (writeManifestMany)
 RequestLedger.java	read	?	forUpdate	1	no-registry-lock	request ledger rows, no collection

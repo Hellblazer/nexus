@@ -89,8 +89,8 @@ catalog	catalog_document_chunks	service/src/main/java/dev/nexus/service/db/Catal
 catalog	catalog_document_chunks	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11770	update	jooq	-	collection_id	yes		verb	renameCollectionTxn
 catalog	catalog_document_chunks	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12099	update	jooq	collection	collection_id	yes		require	rehomeCollection
 catalog	catalog_document_chunks	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12230	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	unproven	moveScopedTable
-catalog	catalog_document_chunks	service/src/main/java/dev/nexus/service/db/ChashRepository.java	330	update	jooq	collection	collection_id	yes		verb	renameCollection
-catalog	catalog_document_chunks	service/src/main/java/dev/nexus/service/db/ChashRepository.java	338	update	jooq	-	collection_id	yes		verb	renameCollection
+catalog	catalog_document_chunks	service/src/main/java/dev/nexus/service/db/ChashRepository.java	334	update	jooq	collection	collection_id	yes		verb	renameCollection
+catalog	catalog_document_chunks	service/src/main/java/dev/nexus/service/db/ChashRepository.java	342	update	jooq	-	collection_id	yes		verb	renameCollection
 catalog	catalog_document_chunks	service/src/main/java/dev/nexus/service/db/ManifestFill.java	381	update	jooq	-	collection_id	yes		unproven	applyLabels
 catalog	catalog_document_chunks	service/src/main/java/dev/nexus/service/db/ManifestFill.java	408	update	jooq	-	collection_id	yes		unproven	applySpans
 catalog	catalog_document_chunks	service/src/main/java/dev/nexus/service/db/ManifestReplace.java	271	update	jooq	collection	collection_id	yes		unproven	update
@@ -161,8 +161,8 @@ chunks	chunks	rdr229-stamp-chunks [vectors-070-collection-id-stamp-moves.xml:350
 chunks	chunks	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	6806	insert	helper	collection	collection_id	yes	ch.table() helper	require	upsertManifestChunkVectors
 chunks	chunks	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11766	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	verb	renameCollectionTxn
 chunks	chunks	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12230	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	unproven	moveScopedTable
-chunks	chunks	service/src/main/java/dev/nexus/service/db/ChashRepository.java	320	update	helper	collection	collection_id	yes	ch.table() helper	verb	renameCollection
-chunks	chunks	service/src/main/java/dev/nexus/service/db/DepartedWriterSpans.java	561	update	jooq	collection	collection_id	yes		unproven	update
+chunks	chunks	service/src/main/java/dev/nexus/service/db/ChashRepository.java	324	update	helper	collection	collection_id	yes	ch.table() helper	verb	renameCollection
+chunks	chunks	service/src/main/java/dev/nexus/service/db/DepartedWriterSpans.java	588	update	jooq	collection	collection_id	yes		unproven	update
 chunks	chunks	service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	314	update	jooq	-	collection_id	yes		unproven	retagRowsOf
 chunks	chunks	service/src/main/java/dev/nexus/service/db/TenantImportLoad.java	335	insert	by-name	collection	collection_id	yes	TenantImportLoad by-name INSERT ... SELECT over TenantExport.TABLES	unproven	
 chunks	chunks	service/src/main/java/dev/nexus/service/vectors/ChunkKeySweep.java	937	update	jooq	-	collection_id	yes		unproven	oneBatch
@@ -203,16 +203,16 @@ ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.j
 ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	691	update	jooq	-	collection_id	yes		unproven	resetUploaded
 ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	762	update	jooq	-	collection_id	yes		unproven	clearOrphanWal
 ops	reembed_jobs	rdr229-stamp-reembed_jobs [vectors-070-collection-id-stamp-moves.xml:152]	149	update	data_move	-	source_collection_id,target_collection_id	yes	sets source_collection_id,target_collection_id	move	
-ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	313	insert	jooq	source_collection,target_collection	source_collection_id,target_collection_id	yes		require	start
-ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	431	update	jooq	-	source_collection_id,target_collection_id	yes		unproven	applyTransition
-ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	501	update	jooq	-	source_collection_id,target_collection_id	yes		unproven	reenter
-ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	532	update	jooq	-	source_collection_id,target_collection_id	yes		unproven	rescan
-ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	638	update	jooq	-	source_collection_id,target_collection_id	yes		unproven	advanceAfterBatch
-ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	676	update	jooq	-	source_collection_id,target_collection_id	yes		unproven	startNextPass
-ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	727	update	jooq	-	source_collection_id,target_collection_id	yes		unproven	setCutoverStep
-ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	761	update	jooq	-	source_collection_id,target_collection_id	yes		unproven	setLastError
-ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	809	update	jooq	-	source_collection_id,target_collection_id	yes		unproven	markRevived
-ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	872	update	jooq	-	source_collection_id,target_collection_id	yes		unproven	recordMoveInTxn
+ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	350	insert	jooq	source_collection,target_collection	source_collection_id,target_collection_id	yes		require	startMarking
+ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	468	update	jooq	-	source_collection_id,target_collection_id	yes		unproven	applyTransition
+ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	542	update	jooq	source_collection,target_collection	source_collection_id,target_collection_id	yes		unproven	reenter
+ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	575	update	jooq	-	source_collection_id,target_collection_id	yes		unproven	rescan
+ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	681	update	jooq	-	source_collection_id,target_collection_id	yes		unproven	advanceAfterBatch
+ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	719	update	jooq	-	source_collection_id,target_collection_id	yes		unproven	startNextPass
+ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	770	update	jooq	-	source_collection_id,target_collection_id	yes		unproven	setCutoverStep
+ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	804	update	jooq	-	source_collection_id,target_collection_id	yes		unproven	setLastError
+ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	867	update	jooq	-	source_collection_id,target_collection_id	yes		unproven	markRevivedIn
+ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	929	update	jooq	-	source_collection_id,target_collection_id	yes		unproven	recordMoveInTxn
 ops	relevance_log	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11766	update	helper	collection	collection_id	no	COLLECTION_SCOPED_TABLES loop (rename/re-home)	history	
 ops	relevance_log	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12230	update	helper	collection	collection_id	no	COLLECTION_SCOPED_TABLES loop (rename/re-home)	history	
 ops	relevance_log	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	174	insert	jooq	collection	collection_id	no		history	
