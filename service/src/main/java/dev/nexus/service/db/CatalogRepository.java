@@ -10316,6 +10316,7 @@ public final class CatalogRepository {
      * {@link #deleteCollection(String, String, boolean)} for the collection the route named by {@code collectionId}
      * (RDR-229 P3.5a): the same purge of what names {@code name}, but the registry row it removes is the one with that id, so a
      * label held by more than one live row loses only the row the operator named. {@code name} is that row's label.
+     * Its label-scoped purge and its two transactions are described in {@link CollectionDeletes}.
      */
     public Map<String, Integer> deleteCollectionById(String tenant, String name, long collectionId, boolean keepQuarantine) {
         return deleteCollection(tenant, name, keepQuarantine, collectionId);

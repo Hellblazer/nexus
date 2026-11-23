@@ -15,9 +15,11 @@ import java.util.Map;
  * The delete of {@code POST /v1/catalog/collections/delete}, by label or by {@code collection_id} (RDR-229 P3.5a, bead
  * nexus-p2m1x.23), the contract agreed with bob for P3.12: the 200 carries {@code collection_id} and {@code name} (the label the
  * client's pipeline purge keys on); an id no row has is a typed 404 {@code unknown_collection_id} (the route boundary's, see
- * {@link CollectionSelectorFilter}); a retired row, asked for by its label or its id, is deleted with the 200 it always got (the
- * purge is scoped by the row's id from gate 3, so it never reaches the successor's rows; the 409 naming the successor moves to
- * the paired client release, P3.12); a label held by more than one live row
+ * {@link CollectionSelectorFilter}); the id of a retired row is the boundary's 409 {@code collection_superseded} naming the
+ * successor's label ({@code superseded_by}) and id ({@code successor_collection_id}), and nothing is deleted (linda's D3 ruling,
+ * 2026-11-23); a retired LABEL is deleted with the 200 it always got (the purge is scoped by the row's id from gate 3, so it never
+ * reaches the successor's rows; with several rows under the label, the live one first, else the newest tombstone); a label held by
+ * more than one live row
  * is refused 409 {@code collection_label_ambiguous} naming the ids, and the id path is how one of them is removed.
  *
  * <p>Moved out of {@code CatalogHandler} (over its size ceiling). The handler still reads the label and

@@ -168,10 +168,12 @@ public final class CollectionRegistry {
      * written once and a change to what "live" means is a change here. A by-id read selects one row by its key and needs no order.
      */
     public static List<SortField<?>> labelResolutionOrder() {
-        return List.of(
-            DSL.when(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("").and(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.isNull()), 1)
-                .otherwise(0).desc(),
-            CATALOG_COLLECTIONS.COLLECTION_ID.desc());
+        return List.of(DSL.when(notSuperseded(), 1).otherwise(0).desc(), CATALOG_COLLECTIONS.COLLECTION_ID.desc());
+    }
+
+    /** The one definition of "live" for a label read: the row names no successor ({@link #labelResolutionOrder}). */
+    public static Condition notSuperseded() {
+        return CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("").and(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.isNull());
     }
 
     // ---- the id-keyed API (RDR-229 P3.5a) -------------------------------------------------------------------------------
