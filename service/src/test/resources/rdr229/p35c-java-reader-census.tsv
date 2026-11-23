@@ -310,7 +310,10 @@ service/src/main/java/dev/nexus/service/db/LegacyChunkSurvey.java	269	?	collecti
 service/src/main/java/dev/nexus/service/db/LegacyChunkSurvey.java	269	catalog_document_chunks	collection	join_on	alias	-
 service/src/main/java/dev/nexus/service/db/LegacyChunkSurvey.java	398	catalog_document_chunks	collection	expr	alias	-
 service/src/main/java/dev/nexus/service/db/LegacyChunkSurvey.java	399	catalog_documents	physical_collection	expr	alias	-
-service/src/main/java/dev/nexus/service/db/ManifestChunkNames.java	37	chunks	collection	select	jooq	-
+service/src/main/java/dev/nexus/service/db/ManifestChunkNames.java	46	catalog_collections	name	select	jooq	-
+service/src/main/java/dev/nexus/service/db/ManifestChunkNames.java	48	catalog_collections	name	result	jooq	-
+service/src/main/java/dev/nexus/service/db/ManifestChunkNames.java	52	chunks	collection	select	jooq	-
+service/src/main/java/dev/nexus/service/db/ManifestChunkNames.java	55	chunks	collection	order_by	jooq	-
 service/src/main/java/dev/nexus/service/db/ManifestFill.java	265	catalog_document_chunks	collection	select	alias	-
 service/src/main/java/dev/nexus/service/db/ManifestFill.java	270	catalog_document_chunks	collection	group_by	alias	-
 service/src/main/java/dev/nexus/service/db/ManifestFill.java	271	catalog_document_chunks	collection	order_by	alias	-
