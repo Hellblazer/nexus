@@ -677,7 +677,10 @@ public final class CompletionCheck {
         return true;
     }
 
-    /** The bound on the readiness reads (the databasechangelog read), as {@code SET LOCAL statement_timeout}: the readiness runs on every pre-latch rename's path. */
+    /**
+     * The bound on the readiness reads (the databasechangelog read), as {@code SET LOCAL statement_timeout}, per completion SAMPLE and not per rename: a
+     * rename answers from the last sample and reads nothing of its own.
+     */
     public static final long READINESS_READ_TIMEOUT_MS = 2000L;
 
     /**

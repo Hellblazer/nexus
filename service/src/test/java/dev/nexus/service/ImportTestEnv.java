@@ -91,6 +91,10 @@ final class ImportTestEnv implements AutoCloseable {
                 for (var k : keys) {
                     dsl.alterTableIfExists(DSL.table(DSL.name("nexus", k.table()))).dropConstraintIfExists(DSL.name(k.constraint())).execute();
                 }
+                // readiness NONE implies the latch row exists (linda 2026-11-23, ruling a): the row is written, and asserted, before the readiness says NONE
+                dev.nexus.service.datamove.CompletionCheck.insertLatch(dsl, dev.nexus.service.datamove.CompletionCheck.GATE3, "one-row-env", false);
+                assertThat(dev.nexus.service.datamove.CompletionCheck.readLatch(dsl, dev.nexus.service.datamove.CompletionCheck.GATE3))
+                    .as("the latch row exists whenever the readiness says NONE").isPresent();
             }
         }
         try (Connection su = pg.createConnection("")) {

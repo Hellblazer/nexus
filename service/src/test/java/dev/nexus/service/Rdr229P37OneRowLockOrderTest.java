@@ -27,12 +27,17 @@ import java.util.concurrent.TimeUnit;
  * touches in ascending collection_id order, then everything else. The id writers hold FOR KEY SHARE on the registry row; once the name key is gone the
  * name UPDATE is a non-key update, so without FOR UPDATE a writer could commit into the row the rename just retired. On a real engine:
  * (a) an id write in flight (FOR KEY SHARE) makes the rename wait, and after the writer commits the rename proceeds and the write is visible under the
- * new label; (b) the reverse: with the rename in flight, a writer asking for the retired label waits and then finds no row, while by id it finds the row
- * under the new label, never a row under the retired label.
+ * new label; the waiting backend is the rename's {@code FOR UPDATE} select, which the test asserts by its statement (without that lock the rename would wait at
+ * its name UPDATE instead: while {@code (tenant_id, name, embedding_model)} is a unique key the name UPDATE is a key update and conflicts with KEY SHARE
+ * anyway, so the outcome alone cannot tell the two apart). (b) the reverse: with the rename in flight, a writer asking for the retired label waits and then finds
+ * no row, while by id it finds the row under the new label, never a row under the retired label; (b) holds with or without {@code forUpdate()} for the same
+ * reason and is not the pin of the lock. (c) the three-way case the canonical order exists for, pinned by pg_locks: it goes red (40P01) if the rename takes
+ * the registry row before its sweep gates (the mutant run is recorded on the bead).
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class Rdr229P37OneRowLockOrderTest {
 
+    private static final String MODEL = "minilm-l6-v2-384";
     private static final org.jooq.Table<?> ACTIVITY = DSL.table(DSL.name("pg_catalog", "pg_stat_activity"));
 
     private Rdr229RenameEngine engine;
@@ -60,6 +65,20 @@ class Rdr229P37OneRowLockOrderTest {
             .and(DSL.field(DSL.name("datname"), String.class).eq(DSL.function("current_database", String.class)))));
     }
 
+    /** The (lower-cased) statements of the backends of this database waiting on a lock. */
+    private List<String> waitingQueries() {
+        return engine.su(ctx -> ctx.select(DSL.field(DSL.name("query"), String.class)).from(ACTIVITY)
+            .where(DSL.field(DSL.name("wait_event_type"), String.class).eq("Lock")
+                .and(DSL.field(DSL.name("datname"), String.class).eq(DSL.function("current_database", String.class))))
+            .fetch(0, String.class).stream().map(q -> q == null ? "" : q.toLowerCase()).toList());
+    }
+
+    /** Backends of this database waiting for an ADVISORY lock (pg_locks, not granted). */
+    private int advisoryWaiters() {
+        return engine.su(ctx -> ctx.fetchCount(DSL.table(DSL.name("pg_catalog", "pg_locks")),
+            DSL.field(DSL.name("locktype"), String.class).eq("advisory").and(DSL.field(DSL.name("granted"), Boolean.class).isFalse())));
+    }
+
     @Test
     void anIdWriteInFlightMakesTheRenameWait_andAfterItCommitsTheRenameProceedsAndTheWriteIsVisibleUnderTheNewLabel() throws Exception {
         String tenant = "p37-lo-a";
@@ -84,6 +103,8 @@ class Rdr229P37OneRowLockOrderTest {
 
             assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(30), () -> lockWaiters() > waitersBefore))
                 .as("the rename waits on the registry row the writer holds FOR KEY SHARE").isTrue();
+            assertThat(waitingQueries()).as("and the waiting backend is the rename's FOR UPDATE select of the registry rows, not a later UPDATE")
+                .anyMatch(q -> q.contains("for update") && q.contains("catalog_collections"));
             assertThat(rename.isDone()).as("and has not renamed under the writer").isFalse();
             PgContainerHelper.insertChunks(wc, tenant, a, List.of(chash), List.of("written by the in-flight writer"), List.of(new float[384]), List.of(Map.of()));
             w.commit();
@@ -149,9 +170,11 @@ class Rdr229P37OneRowLockOrderTest {
     }
 
     /**
-     * The three-way case the canonical order exists for (every advisory lock before any row lock): a queued EXCLUSIVE sweep, a writer holding the SHARED
-     * sweep gate and an id write in flight, and the rename. The rename takes its sweep gates before it locks the registry row, so it queues behind the
-     * sweep without holding the row the writer needs; the writer commits, the sweep runs, the rename proceeds. With the row taken first this is a deadlock.
+     * The three-way case the canonical order exists for (every advisory lock before any row lock): a writer holding only the SHARED sweep gate, a queued
+     * EXCLUSIVE sweep, and the rename, started after the sweep queued; THEN the writer takes its FOR KEY SHARE on the registry row and writes. In the canonical
+     * order the rename queues on the gate holding no row lock, so the writer's key share is granted at once, it commits, the sweep runs and the rename proceeds.
+     * With the row taken first the rename holds it FOR UPDATE while it waits for the gate: the writer waits for the rename, the sweep for the writer, the
+     * rename for the sweep, and PostgreSQL ends the cycle with 40P01. The queue is shown by pg_locks: two advisory waiters.
      */
     @Test
     void aQueuedExclusiveSweep_aWriterHoldingTheSharedGate_andTheRename_allFinishWithoutADeadlock() throws Exception {
@@ -169,29 +192,77 @@ class Rdr229P37OneRowLockOrderTest {
         try (Connection w = engine.pg.createConnection(""); Connection s = engine.pg.createConnection("")) {
             w.setAutoCommit(false);
             DSLContext wc = DSL.using(w, SQLDialect.POSTGRES);
-            gate(wc, "pg_advisory_xact_lock_shared", tenant, a).fetch();   // the writer holds the shared gate
-            wc.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
-                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(a))).forKeyShare().fetch();   // and an id write in flight
-            int base = lockWaiters();
+            gate(wc, "pg_advisory_xact_lock_shared", tenant, a).fetch();   // the writer holds only the shared gate
+            int advisoryBase = advisoryWaiters();
 
             s.setAutoCommit(false);
             Future<?> sweep = pool.submit(() -> {
-                gate(DSL.using(s, SQLDialect.POSTGRES), "pg_advisory_xact_lock", tenant, a).fetch();   // the sweep queues EXCLUSIVE
+                gate(DSL.using(s, SQLDialect.POSTGRES), "pg_advisory_xact_lock", tenant, a).fetch();   // the sweep queues EXCLUSIVE behind the writer
                 s.commit();
                 return null;
             });
-            assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(30), () -> lockWaiters() > base)).as("the sweep is queued behind the writer").isTrue();
+            assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(30), () -> advisoryWaiters() > advisoryBase)).as("the sweep is queued behind the writer").isTrue();
             Future<Rdr229RenameEngine.Renamed> rename = pool.submit(() -> engine.rename(token, a, b));
-            assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(30), () -> lockWaiters() > base + 1)).as("the rename queues behind the sweep, on the gate").isTrue();
+            assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(30), () -> advisoryWaiters() > advisoryBase + 1))
+                .as("the rename queues behind the sweep, on the ADVISORY gate (pg_locks)").isTrue();
 
+            // only now does the writer take its registry row lock and write: with the rename holding no row, this is granted at once
+            wc.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(a))).forKeyShare().fetch();
             PgContainerHelper.insertChunks(wc, tenant, a, List.of(chash), List.of("the writer finishes"), List.of(new float[384]), List.of(Map.of()));
-            w.commit();   // the writer is done: nothing it needs is held by the queued rename
+            w.commit();
 
             sweep.get(60, TimeUnit.SECONDS);
-            assertThat(rename.get(60, TimeUnit.SECONDS).status()).as("the rename finishes after the sweep").isEqualTo(200);
+            assertThat(rename.get(60, TimeUnit.SECONDS).status()).as("the rename finishes after the sweep, no 40P01").isEqualTo(200);
         } finally {
             pool.shutdownNow();
         }
         assertThat(engine.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, b))).isEqualTo(id);
+    }
+
+    /**
+     * folio's SB3 interleaving: the rename holds its registry rows FOR UPDATE and is stalled (a tombstone's row held by another transaction), a registration of the
+     * old label arrives and waits on the renamed row; the rename commits; the registration, now a fresh INSERT of a label whose rows sit under the renamed
+     * collection's id, is refused {@code label_reserved}: the check runs after the INSERT, on a new statement snapshot.
+     */
+    @Test
+    void aRegistrationWaitingOnARenameInFlight_isRefusedLabelReservedOnceTheRenameCommits() throws Exception {
+        String tenant = "p37-lo-d";
+        String token = engine.newTenant(tenant);
+        String a = coll("p37lodaa");
+        String b = coll("p37lodab");
+        String t = coll("p37lodat");
+        engine.su(ctx -> {
+            Rdr229RenameSeeds.chunksAndRing(ctx, tenant, a);
+            PgContainerHelper.insertCollection(ctx, tenant, t);
+            return null;
+        });
+        var sup = engine.call("POST", "/v1/catalog/collections/supersede", token, "{\"name\":\"" + t + "\",\"superseded_by\":\"" + a + "\"}");
+        assertThat(sup.statusCode()).as("non-vacuity: a tombstone naming A: " + sup.body()).isEqualTo(200);
+        var pool = Executors.newFixedThreadPool(2);
+        try (Connection h = engine.pg.createConnection("")) {
+            h.setAutoCommit(false);
+            DSL.using(h, SQLDialect.POSTGRES).select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(t))).forUpdate().fetch();   // stalls the rename after its name UPDATE
+            int base = lockWaiters();
+            Future<Rdr229RenameEngine.Renamed> rename = pool.submit(() -> engine.rename(token, a, b));
+            assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(30), () -> lockWaiters() > base)).as("the rename is in flight, holding A's row").isTrue();
+
+            Future<java.net.http.HttpResponse<String>> register = pool.submit(() -> engine.call("POST", "/v1/catalog/collections/upsert", token,
+                "{\"name\":\"" + a + "\",\"content_type\":\"knowledge\",\"owner_id\":\"someone-else\",\"embedding_model\":\"" + MODEL
+                    + "\",\"model_version\":\"v1\"}"));
+            assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(30), () -> lockWaiters() > base + 1)).as("the registration waits on the renamed row").isTrue();
+            assertThat(register.isDone()).isFalse();
+
+            h.commit();   // the rename finishes
+
+            assertThat(rename.get(60, TimeUnit.SECONDS).status()).isEqualTo(200);
+            var r = register.get(60, TimeUnit.SECONDS);
+            assertThat(r.statusCode()).as("refused once the rename committed: " + r.body()).isEqualTo(409);
+            assertThat(r.body()).contains("label_reserved");
+        } finally {
+            pool.shutdownNow();
+        }
+        assertThat(engine.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, a))).as("nothing was registered under A: the INSERT rolled back").isNull();
     }
 }

@@ -9940,9 +9940,6 @@ public final class CatalogRepository {
                 // row ends up on the tuple computed here: a live one another collection holds is refused naming both, in both
                 // index states, as it is for a new row. A no-op re-registration of a live row is not checked.
                 String postOwner = existingOwner != null && existingOwner.equals(tenant) ? nne(incomingOwner) : nne(existingOwner);
-                if (!"".equals(existingRow.value5())) {
-                    LabelReserved.requireFree(ctx, tenant, name);   // a revived tombstone makes the label live again
-                }
                 if (!"".equals(existingRow.value5()) || !contentType.equals(existingRow.value6()) || !postOwner.equals(nne(existingOwner))) {
                     CollectionMint.remember(tuple, name, contentType, postOwner, effectiveModel, nne(existingRow.value3()));
                     CollectionMint.refuseHeldTuple(ctx, tenant, name, contentType, postOwner, effectiveModel,
@@ -9968,8 +9965,6 @@ public final class CatalogRepository {
                 }
                 modelVersion = CollectionRegistration.requiredModelVersion(coll);
                 CollectionRegistration.requireNameAgreesWithState(name, requestedState != null ? requestedState : "live");
-                // linda 2026-11-23, addendum 8: a label a collection was renamed away from is reserved until P4.1 (LabelReserved).
-                LabelReserved.requireFree(ctx, tenant, name);
                 // The profile/model/dimension rule is shared with the minting registration (CollectionRegistration).
                 var newModel = CollectionRegistration.resolveNewRowModel(ctx, tenant, contentType, requestedModel, name);
                 effectiveModel     = newModel.model();
@@ -10077,6 +10072,10 @@ public final class CatalogRepository {
             // was revived by the arm above, as before.
             String requestedSupersededBy = nne(s(coll, "superseded_by"));
             boolean fresh = Boolean.TRUE.equals(inserted.get(0).value1());
+            // linda 2026-11-23, addendum 8, and folio's review (SB3): a label a collection was renamed away from is reserved until P4.1. Checked AFTER
+            // the INSERT, in every branch (live, revived, new), on a new statement snapshot: a rename-away that landed between the read above and the
+            // INSERT turns it into a fresh registration, and the row's own id is then visible to the check. The exception rolls the INSERT back.
+            LabelReserved.requireFree(ctx, tenant, name);
             if (!requestedSupersededBy.isEmpty() && fresh) {
                 CollectionTombstones.stampTombstone(ctx, tenant, name, requestedSupersededBy);
             }
@@ -11554,7 +11553,7 @@ public final class CatalogRepository {
             // anything moves, so the refusal leaves X untouched.
             if (oneRow) {   // RDR-229 P3.7: from gate 3 the registry row is updated in place (CollectionOneRowRename)
                 return CollectionOneRowRename.apply(ctx, tenant, oldName, newName, newContentTypeOrNull, newOwnerIdOrNull,
-                    targetRowExists, tupleOut);
+                    targetRowExists, tupleOut).counts();
             }
             requireCollectionUrisFree(ctx, tenant, oldName, newName, "renaming " + oldName + " to " + newName);
             // nexus-sis0m.3: Y's content_type and owner_id are the client's, derived from Y's
@@ -13752,7 +13751,7 @@ public final class CatalogRepository {
             // RDR-229 P3.6 and item 10: the label rule's shape on a NEW row, which is refused alone, never the
             // minted-form clause (an import carries another install's labels, engine-minted ones included) and never
             // an existing row (skipped here). A row refused for its label is judged by no later check.
-            List<Map<String, Object>> fresh = refusals.keepShaped(
+            List<Map<String, Object>> shaped = refusals.keepShaped(
                 deduped.stream().filter(c -> !existing.contains(s(c, "name"))).toList(), c -> s(c, "name"));
             // nexus-3fsyx: validate the WHOLE deduped batch before any chunk's INSERT
             // executes, mirroring doImportCollection's single-row guard -- a row with no
@@ -13768,6 +13767,8 @@ public final class CatalogRepository {
                 }
             }
 
+            // linda 2026-11-23, folio's review SB2: a label reserved until P4.1 is refused as a row of the report, the batch goes on
+            List<Map<String, Object>> fresh = refusals.keepUnreserved(shaped, c -> s(c, "name"), label -> LabelReserved.isReserved(ctx, tenant, label, null));
             CollectionRegistration.requireStatesAgreeWithNames(fresh);
             freshRows.set(fresh);
             CollectionMint.refuseLiveTupleConflicts(ctx, tenant, fresh);
@@ -13871,6 +13872,7 @@ public final class CatalogRepository {
         // RDR-229 P3.6: a new row's shape. One row is one collection, so refusing the call IS refusing that collection
         // (item 10); the batch report names a refused row instead because it has others to carry on with.
         CollectionLabel.validateShape(s(coll, "name"));
+        LabelReserved.requireFree(ctx, tenant, s(coll, "name"));   // linda 2026-11-23, folio's review SB2: 409 label_reserved
         CollectionMint.refuseLiveTupleConflicts(ctx, tenant, List.of(coll));
         var insert = ctx.insertInto(CATALOG_COLLECTIONS,
                 CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,

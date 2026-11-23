@@ -104,6 +104,8 @@ public final class CompletionBootWork implements AutoCloseable {
     private volatile CompletionCheck.Result latest;
     private volatile boolean gate3Latched;
     private volatile boolean gate3LatchPciOff;
+    /** True once any sample read the readiness as NONE: its facts are monotone, so a later unreadable sample keeps answering NONE. */
+    private volatile boolean readyOnce;
     private volatile boolean closed;
     private String lastError;
     private ScheduledExecutorService scheduler;
@@ -323,9 +325,12 @@ public final class CompletionBootWork implements AutoCloseable {
             private Missing readinessOrUnreadable() {
                 try {
                     var r = latest();
-                    return r == null ? Missing.READINESS_UNREADABLE : r.readinessMissing();
+                    Missing m = r == null ? Missing.READINESS_UNREADABLE : r.readinessMissing();
+                    // The facts behind NONE are monotone (a drop move that completed stays complete, a changeset that applied stays applied), so a
+                    // sample that timed out after a NONE does not take it back: the last NONE stands until a read says otherwise.
+                    return m == Missing.READINESS_UNREADABLE && readyOnce ? Missing.NONE : m;
                 } catch (RuntimeException e) {
-                    return Missing.READINESS_UNREADABLE;
+                    return readyOnce ? Missing.NONE : Missing.READINESS_UNREADABLE;
                 }
             }
 
@@ -496,6 +501,9 @@ public final class CompletionBootWork implements AutoCloseable {
                 return -1;
             }
             latest = result;
+            if (result.readinessMissing() == RenameReadiness.Missing.NONE) {
+                readyOnce = true;   // see the readiness: NONE is monotone
+            }
             if (result.gate3Latched()) {
                 gate3Latched = true;
                 gate3LatchPciOff = gate3LatchPciOff || result.gate3LatchPciOff();

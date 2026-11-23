@@ -50,10 +50,17 @@ final class CollectionOneRowRename {
      * @param newOwnerId     the client's owner, or null to keep the row's
      * @param targetRowExists a row of the new label exists (the caller established it is an empty tombstone)
      * @param tuple          receives the row's tuple for the caller's race recheck ({@link CollectionMint#recheckOf})
+     *
+     * <p>The CALLER takes the sweep gates (SHARED, sorted, keyed by the old and the new label) and runs the shared checks before this body, in the same
+     * transaction and after the rename lock; this body then takes the tuple locks and the registry row locks (see the lock order in the code), so every advisory
+     * lock precedes any row lock.
      * @return the counts the rename route answers: {@code catalog_collections_renamed}, a zero for each table the name path rewrites (nothing
      *         is), the URI counts and the queued tasks
      */
-    static Map<String, Integer> apply(DSLContext ctx, String tenant, String oldName, String newName, String newContentType,
+    /** What the one-row rename answers: the renamed collection's id (slice C's {@code RenameOutcome} carries it) and the counts the route reports. */
+    record Outcome(long collectionId, Map<String, Integer> counts) { }
+
+    static Outcome apply(DSLContext ctx, String tenant, String oldName, String newName, String newContentType,
                                       String newOwnerId, boolean targetRowExists, String[] tuple) {
         // LOCK ORDER (linda's canonical order, via tamsin; runRename's javadoc on slice C states it once): the rename lock (RenameLatchLock SHARED, taken by the
         // caller), then the sweep gate(s) SHARED (the shared checks the caller runs before this body), then the collection tuple lock(s), then the registry rows
@@ -146,7 +153,7 @@ final class CollectionOneRowRename {
             .where(DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant).and(DOCUMENT_HIGHLIGHTS.COLLECTION_ID.eq(id)))
             .and(NoteUri.namesCollection(DOCUMENT_HIGHLIGHTS.SOURCE_URI, oldName)).execute());
         QuarantineOrigin.retagRowsOf(ctx, tenant, oldName, newName);
-        return counts;
+        return new Outcome(id, counts);
     }
 
     private static Record6<Long, String, String, String, String, String> readOwn(DSLContext ctx, String tenant, String oldName, boolean forUpdate) {

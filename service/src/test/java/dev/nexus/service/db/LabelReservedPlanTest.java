@@ -47,49 +47,33 @@ class LabelReservedPlanTest {
     }
 
     @Test
-    void everyNameKeyedTableOfTheArbiterListIsProbedOrNamedWithItsReason() {
+    void everyNameKeyedTableOfTheArbiterListIsProbedOrIsAHistoryTableNamedWithItsReason() {
         Set<String> probed = new HashSet<>();
         LabelReserved.probes().forEach(p -> probed.add(p.table()));
         Set<String> all = new HashSet<>();
         ArbiterTwins.ALL.forEach(a -> all.add(a.table()));
         Set<String> accounted = new HashSet<>(probed);
-        accounted.addAll(LabelReserved.NOT_CHECKED.keySet());
-        assertThat(accounted).as("every ArbiterTwins entry is probed or listed in NOT_CHECKED with a reason").isEqualTo(all);
-        assertThat(probed).as("non-vacuity: the two partitioned name keys are probed").contains("chunks", "taxonomy_centroids");
-        LabelReserved.NOT_CHECKED.values().forEach(reason -> assertThat(reason).isNotBlank());
+        accounted.addAll(LabelReserved.HISTORY_NOT_PROBED.keySet());
+        assertThat(accounted).as("every ArbiterTwins entry is probed or listed in HISTORY_NOT_PROBED with a reason").isEqualTo(all);
+        assertThat(probed).as("non-vacuity: the partitioned name keys and pdf_pipeline (linda's ruling) are probed").contains("chunks", "taxonomy_centroids", "pdf_pipeline");
+        assertThat(probed).as("the history tables are never probed").doesNotContain("chash_remap", "reembed_jobs");
+        LabelReserved.HISTORY_NOT_PROBED.values().forEach(reason -> assertThat(reason).isNotBlank());
     }
 
     @Test
-    void theExistsOfEachTableUsesAnIndexOnTheNameKeysLeadingColumns() throws Exception {
-        try (Connection c = pg.createConnection("")) {
-            c.setAutoCommit(true);
-            DSLContext ctx = DSL.using(c, SQLDialect.POSTGRES);
-            ctx.set(DSL.name("enable_seqscan"), DSL.inline("off"));
-            for (var p : LabelReserved.probes()) {
-                var table = DSL.table(DSL.name("nexus", p.table()));
-                var query = ctx.selectOne().from(table)
-                    .where(DSL.field(DSL.name("tenant_id"), String.class).eq("tenant"))
-                    .and(DSL.field(DSL.name(p.nameColumn()), String.class).eq("label"))
-                    .and(p.predicate())
-                    .and(DSL.field(DSL.name(p.idColumn()), Long.class).isDistinctFrom(7L));
-                String plan = ctx.explain(query).plan();
-                log.info("event=label_reserved_plan table={} plan=\n{}", p.table(), plan);
-                assertThat(plan).as(p.table() + " is answered by an index, not a scan of the table:\n" + plan).containsIgnoringCase("Index");
-                assertThat(plan).as(p.table() + " takes no sequential scan:\n" + plan).doesNotContain("Seq Scan");
-            }
-        }
-    }
-
-    @Test
-    void theStatementItselfPlansWithoutASequentialScanOfAnyNameKeyedTable() throws Exception {
+    void theStatementPlansWithoutASequentialScanOfAProbedTable_theExistingNameKeysAnswerIt() throws Exception {
         try (Connection c = pg.createConnection("")) {
             c.setAutoCommit(true);
             DSLContext ctx = DSL.using(c, SQLDialect.POSTGRES);
             ctx.set(DSL.name("enable_seqscan"), DSL.inline("off"));
             String plan = ctx.explain(LabelReserved.query(ctx, "tenant", "label", null)).plan();
-            log.info("event=label_reserved_plan table=* plan=\n{}", plan);
-            assertThat(plan).as("the one statement the check sends").doesNotContain("Seq Scan on chunks").doesNotContain("Seq Scan on taxonomy_centroids");
-            assertThat(plan).contains("Index");
+            log.info("event=label_reserved_plan plan=\n{}", plan);
+            for (var p : LabelReserved.probes()) {
+                assertThat(plan).as(p.table() + " is not scanned sequentially:\n" + plan).doesNotContain("Seq Scan on " + p.table());
+            }
+            assertThat(plan).as("an index answers the probes:\n" + plan).contains("Index");
+            assertThat(plan).as("on the name key's leading columns, the tenant and the name column:\n" + plan).contains("Index Cond").contains("tenant_id")
+                .contains("collection");
         }
     }
 }

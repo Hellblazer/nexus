@@ -126,6 +126,16 @@ class NameKeyDropPassIntegrationTest {
     }
 
     @Test
+    void anUnreachableDatabaseIsFailed_nothingIsRegisteredAndTheNextTickTriesAgain() {
+        var pass = new NameKeyDropPass(new AdminConnection("jdbc:postgresql://127.0.0.1:1/none", "u", "p"), () -> snapshot(true, true), VERSION);
+
+        assertThat(pass.runOnce()).as("the connection is refused: FAILED, logged, not thrown").isEqualTo(NameKeyDropPass.Outcome.FAILED);
+
+        assertThat(rows()).isZero();
+        assertThat(pass.runOnce()).as("a failed tick does not finish the pass: the next tick tries again").isEqualTo(NameKeyDropPass.Outcome.FAILED);
+    }
+
+    @Test
     void aBlankVersionIsAWiringDefect_refusedAtConstruction() {
         org.assertj.core.api.Assertions.assertThatThrownBy(() -> new NameKeyDropPass(admin, () -> snapshot(true, true), " "))
             .isInstanceOf(IllegalArgumentException.class);
