@@ -22,7 +22,8 @@ from tests._module_seam import setattr_in
 
 WIN = "win32"
 RECEIPT = "nexus-install.json"
-EMPTY_PS = ""
+#: A process table that names no generation. Not "": an empty table is a failed census, and gc then reaps nothing.
+EMPTY_PS = "999 C:/Windows/notepad.exe\n"
 
 
 @pytest.fixture(autouse=True)

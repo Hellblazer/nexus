@@ -1099,7 +1099,8 @@ class TestReap:
             os.utime(gen, (1_000_000_000, 1_000_000_000))
             for sub in gen.rglob("*"):
                 os.utime(sub, (1_000_000_000, 1_000_000_000))
-        monkeypatch.setattr(gc_core._census(), "ps_snapshot", lambda **_k: "")
+        # A process table naming none of them (an empty one is a failed census, which reaps nothing).
+        monkeypatch.setattr(gc_core._census(), "ps_snapshot", lambda **_k: "999 C:/Windows/notepad.exe\n")
         lines = gen_core.reap(tools, keep=1, self_generation=gens[0], dry_run=True, platform=WIN)
         would = {Path(line.split(" ", 2)[2]).name for line in lines if line.startswith("would reap")}
         assert would == {"gen-B", "gen-C"}, lines

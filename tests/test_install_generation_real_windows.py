@@ -116,7 +116,7 @@ class TestRealWindows:
         gen_core.flip_current(gens["C"], tools)  # current -> C, previous -> B, both junctions
         assert lc.is_link(tools / "current") and lc.is_link(tools / "previous")
         plan = {entry.name: (action, detail) for action, entry, detail in gc_core.plan(
-            tools, keep=1, snapshot="",
+            tools, keep=1, snapshot="999 C:/Windows/notepad.exe\n",  # a table that names none of them
         )}
         assert plan["gen-C"] == ("skip", "protected pointer"), plan
         assert plan["gen-B"] == ("skip", "protected pointer"), plan

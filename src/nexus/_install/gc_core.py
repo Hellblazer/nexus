@@ -245,6 +245,17 @@ def plan(
     # a per-generation re-read could reap against a state that never existed at
     # any instant.
     view = census.ps_snapshot() if snapshot is None else snapshot
+    # AN EMPTY VIEW IS A FAILED CENSUS, NOT AN EMPTY BOX. ps_snapshot answers ""
+    # when ps fails, times out or is not on PATH, and a real table always lists
+    # ps itself. Read as "no holders", that reaped every complete generation
+    # outside the window and the pointers, live MCP servers' included
+    # (2026-11-21/22: four servers lost the generation they ran from, and their
+    # next HTTP client build failed on its vanished CA bundle). Complete
+    # generations are kept instead and said so; receipt-less wreckage, which
+    # nothing runs from, still goes.
+    census_failed = not any(
+        (head := line.split(maxsplit=1)) and head[0].isdigit() for line in view.splitlines()
+    )
 
     out: list[tuple[str, Path, str]] = []
     index = 0
@@ -272,6 +283,10 @@ def plan(
 
         if key(str(entry)) in protected:
             out.append(("skip", entry, "protected pointer"))
+            continue
+
+        if census_failed and ((entry / receipt).is_file() or layout.is_link(entry, platform=platform)):
+            out.append(("keep", entry, "process census unavailable (ps gave no process table); not reaped"))
             continue
 
         holders = census.generation_holder_pids(entry, snapshot=view, platform=platform)
