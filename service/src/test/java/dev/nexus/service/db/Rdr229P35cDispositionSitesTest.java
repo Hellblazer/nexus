@@ -18,8 +18,9 @@ import java.util.Set;
 /**
  * RDR-229 P3.5c (nexus-p2m1x.25): a disposition row covers every census line of its (file, table, op) group, so one switched site
  * could bless an unswitched one beside it (review of d036a60d49, F2: a by-title select left on the name column under a
- * {@code catalog_documents select} row). Here every census line of this group's files whose group is disposed {@code id} with no
- * reason must read through the gate: its source line, or one within three lines of it, names {@code gate3}, {@code byId},
+ * {@code catalog_documents select} row). Here every census line of this group's files whose group is named in
+ * {@code p35c-id-groups-gate-checked.tsv} (the id groups that were disposed with no reason; the set is named, so a reason added to a row does not
+ * drop it from the check) and is still disposed {@code id} must read through the gate: its source line, or one within three lines of it, names {@code gate3}, {@code byId},
  * {@code CollectionIdReads} or {@code Gate3}. A group that is not wholly switched is {@code both} with a reason that says why.
  */
 class Rdr229P35cDispositionSitesTest {
@@ -39,6 +40,11 @@ class Rdr229P35cDispositionSitesTest {
 
     @Test
     void everyCensusLineOfAnIdGroupWithNoReasonReadsThroughTheGate() throws IOException {
+        Set<String> named = new java.util.HashSet<>();
+        for (String l : Files.readAllLines(RES.resolve("p35c-id-groups-gate-checked.tsv"))) {
+            if (l.startsWith("#") || l.startsWith("object\t") || l.isBlank()) continue;
+            named.add(l);
+        }
         Map<String, String[]> disposition = new HashMap<>();
         for (String l : Files.readAllLines(RES.resolve("p35c-java-reader-dispositions.tsv"))) {
             if (l.startsWith("java\t")) {
@@ -56,7 +62,7 @@ class Rdr229P35cDispositionSitesTest {
             if (!FILES.contains(file)) continue;
             String[] d = disposition.get("db/" + file + ".java " + c[2] + " " + c[4] + "\t" + c[3]);
             assertThat(d).as("a disposition for " + l).isNotNull();
-            if (!d[3].equals("id") || !d[4].isEmpty()) continue;
+            if (!d[3].equals("id") || !named.contains("db/" + file + ".java " + c[2] + " " + c[4] + "\t" + c[3])) continue;
             List<String> lines = sources.computeIfAbsent(file, f -> {
                 try {
                     return Files.readAllLines(SRC.resolve("db").resolve(f + ".java"));
@@ -67,7 +73,8 @@ class Rdr229P35cDispositionSitesTest {
             checked++;
             if (!readsThroughTheGate(lines, Integer.parseInt(c[1]))) unswitched.add(file + ":" + c[1] + " " + c[2] + " " + c[3] + " " + c[4]);
         }
-        assertThat(checked).as("non-vacuity: the id groups were examined").isGreaterThan(30);
+        // 28 lines at this tip: the named set held 31 while every row was id; two of its groups became both (a reason beside the id arm)
+        assertThat(checked).as("non-vacuity: the id groups were examined").isGreaterThan(25);
         assertThat(unswitched).as("census lines of an id group that do not read through the gate").isEmpty();
     }
 }
