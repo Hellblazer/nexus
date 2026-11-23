@@ -266,7 +266,7 @@ class Rdr229P37RenameAcceptanceTest {
             return null;
         });
         var repo = new dev.nexus.service.db.CatalogRepository(new dev.nexus.service.db.TenantScope(env.ds), () -> true,
-            new dev.nexus.service.db.RenameGuard(dev.nexus.service.datamove.RenameReadiness.ready(), new dev.nexus.service.db.CollectionOneRowRename()));
+            new dev.nexus.service.db.RenameGuard(dev.nexus.service.datamove.RenameReadiness.ready(), new dev.nexus.service.db.CollectionOneRowRename(() -> true)));
 
         assertThatThrownBy(() -> repo.renameCollectionOutcome(w.tenant(), w.a(), w.b(), null, null, null, null))
             .as("the repository's own live-target refusal")

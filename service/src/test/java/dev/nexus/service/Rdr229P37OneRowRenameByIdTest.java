@@ -182,7 +182,7 @@ class Rdr229P37OneRowRenameByIdTest {
         List<String> before = registry(w.tenant());
         RuntimeException thrown = null;
         try {
-            engine.scope().withTenant(w.tenant(), ctx -> new CollectionOneRowRename().rename(ctx, w.tenant(), label, target,
+            engine.scope().withTenant(w.tenant(), ctx -> new CollectionOneRowRename(engine::gate3Holds).rename(ctx, w.tenant(), label, target,
                 new OneRowRename.Request(id, null, null, new String[5], c -> false)));
         } catch (RuntimeException e) {
             thrown = e;
