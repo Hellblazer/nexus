@@ -46,7 +46,11 @@ public final class CollectionRefusals {
             .from(CATALOG_COLLECTIONS)
             .leftJoin(EMBEDDING_MODELS).on(EMBEDDING_MODELS.EMBEDDING_MODEL.eq(CATALOG_COLLECTIONS.EMBEDDING_MODEL))
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(id))
-            .forUpdate().of(CATALOG_COLLECTIONS)   // the registry row alone: PostgreSQL refuses a row lock on the nullable side of the join
+            // the registry row alone: PostgreSQL refuses a row lock on the nullable side of the join. Unbounded here (linda and tamsin,
+            // 2026-11-23): rename and supersede call this after their own bounded ordered lock has taken the row, and delete waits as
+            // the final DELETE it replaces always did. A bound on delete would be a new wire answer, the label verbs' 503 rename_busy
+            // with a ledger line, not row 14's collection_busy (that 409 means a re-embed job holds the collection).
+            .forUpdate().of(CATALOG_COLLECTIONS)
             .fetchOne();
         if (r == null) {
             throw new UnknownCollectionIdException(tenant, id);
