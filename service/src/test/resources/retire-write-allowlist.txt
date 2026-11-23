@@ -15,5 +15,7 @@ CollectionTombstones.java | 2 | .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, CATAL
 CollectionTombstones.java | 1 | .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, DSL.coalesce(successor, CATALOG_COLLECTIONS.COLLECTION_ID)) | stampTombstone: the successor's id, or the row's own
 CollectionTombstones.java | 1 | .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, registered) | repointTombstonesNaming: a tombstone takes its successor's id once that row is registered
 CollectionTombstones.java | 1 | .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, successorId) | casSupersede: the successor's id, in the same statement as the name
+CollectionTombstones.java | 1 | .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, toId) | repointTombstones: the tombstones that named a collection's id take its successor's id, in one statement that touches no other row or column (P3.7's one-row rename; RDR-229 P3.5c). It retires and revives nothing
+CollectionTombstones.java | 1 | .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, label) | repointTombstones: the same statement's label of the new successor id, kept equal to it by the CHECK
 RestoreIdFill.java | 1 | .set(t.SUPERSEDED_BY_ID, mapped) | the restore's id fill: an import path maps ids, it retires nothing
 RestoreIdFill.java | 1 | .set(t.SUPERSEDED_BY_ID, registered) | the restore's id fill
