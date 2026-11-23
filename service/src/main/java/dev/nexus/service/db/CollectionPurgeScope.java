@@ -55,7 +55,7 @@ final class CollectionPurgeScope {
     /**
      * The scope of one delete attempt: the name columns while {@code gate3Holds} is false; from gate 3 the id of the row the
      * delete acts on, which is {@code onlyId} when the request named the row by its id, else the registry row of {@code name}
-     * (the live one, or the retired one a retired label names; the lowest id when several share it).
+     * (the live one first, else the newest tombstone: {@link CollectionRegistry#labelResolutionOrder()}).
      */
     static CollectionPurgeScope resolve(DSLContext ctx, boolean gate3Holds, String tenant, String name, Long onlyId) {
         if (!gate3Holds) {
@@ -66,7 +66,7 @@ final class CollectionPurgeScope {
         }
         Long id = ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(name))
-            .orderBy(DSL.when(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(""), 0).otherwise(1), CATALOG_COLLECTIONS.COLLECTION_ID)
+            .orderBy(CollectionRegistry.labelResolutionOrder())
             .limit(1)
             .fetchOne(CATALOG_COLLECTIONS.COLLECTION_ID);
         return byId(name, id);
