@@ -255,6 +255,11 @@ public final class CompletionBootWork implements AutoCloseable {
         }
     }
 
+    /** The context of the session the reader keeps between samples; null with none open or with a reader that keeps none. For a test. */
+    DSLContext keptSessionCtxForTests() {
+        return reader instanceof DbReader d ? d.keptSessionCtx() : null;
+    }
+
     /** Reads now, outside the schedule, for a consumer that must not wait for the next sample. */
     public CompletionCheck.Result refresh() {
         publish();
@@ -550,6 +555,12 @@ public final class CompletionBootWork implements AutoCloseable {
             this.gate3Extras = java.util.List.copyOf(gate3Extras);
             this.latchWriter = Objects.requireNonNull(latchWriter, "latchWriter");
             this.counter = new CachedCounter(CompletionCheck.DIRECT, clock, VIOLATOR_TTL);
+        }
+
+        /** The kept session's context, or null when none is open (a test reads what a sample left on the session). */
+        DSLContext keptSessionCtx() {
+            AdminDdlSession s = session;
+            return s == null ? null : s.ctx();
         }
 
         @Override
