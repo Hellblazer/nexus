@@ -28,8 +28,9 @@ import java.util.Map;
  *   <li>a label and an id for one collection is {@link IllegalArgumentException}, the ladder's 400 (an empty label counts as a
  *       label), and so is an id that is not a JSON integer, an explicit {@code null} included;</li>
  *   <li>an id no row has is {@link UnknownCollectionIdException}, the typed 404 {@code unknown_collection_id};</li>
- *   <li>a retired row's id is {@link CollectionSupersededException}, the typed 409 {@code collection_superseded}, the same refusal a
- *       retired id gets on the collection routes (ruling D3);</li>
+ *   <li>a retired row's id is {@link CollectionRetiredIdException}, the typed 409 {@code collection_superseded}, the same refusal a
+ *       retired id gets on the collection routes (ruling D3), naming the successor by {@code superseded_by_id}
+ *       ({@link CollectionSuccessor}) in the body {@code CollectionSupersededBody} builds for every retired id;</li>
  *   <li>a label with no row keeps the typed 422 {@code unregistered_collection}, raised by {@link CollectionIds#require}.</li>
  * </ul>
  *
@@ -76,7 +77,7 @@ final class DocumentCollectionRef {
      *
      * @throws IllegalArgumentException      both fields, or an id that is not a JSON integer
      * @throws UnknownCollectionIdException  no row of the tenant has the id
-     * @throws CollectionSupersededException the row is retired
+     * @throws CollectionRetiredIdException  the row is retired
      */
     static Map<String, Object> normalize(DSLContext ctx, String tenant, Map<String, Object> request) {
         return normalize(ctx, tenant, request, null);
@@ -109,7 +110,7 @@ final class DocumentCollectionRef {
     private static CollectionRow resolve(DSLContext ctx, String tenant, long id) {
         CollectionRow row = CollectionRegistry.shared().resolveId(ctx, tenant, id);
         if (row.isSuperseded()) {
-            throw new CollectionSupersededException(tenant, row.label(), row.supersededBy());
+            throw new CollectionRetiredIdException(tenant, id, row.label(), CollectionSuccessor.of(ctx, tenant, id));
         }
         return row;
     }
