@@ -159,4 +159,35 @@ class CompletionBootWorkReadinessTest {
         });
         assertThat(work.renameReadiness().missing()).as("an error while the readiness is computed, after a NONE").isEqualTo(RenameReadiness.Missing.NONE);
     }
+
+    /**
+     * folio's r3 confirmation review S6: the status field {@code rename_missing} (what {@code nx doctor} shows) says what the rename path says. After a
+     * sample read the readiness as NONE, an unreadable sample still reports {@code none}, because renames keep running on the monotone NONE; before any
+     * NONE, an unreadable sample reports {@code readiness_unreadable}; a sample that reads something missing is believed.
+     */
+    @Test
+    void theStatusFieldReportsTheReadinessTheRenamePathReads_monotoneAcrossAnUnreadableSample() {
+        var reader = new Scripted();
+        var work = work(reader);
+        CompletionBootWorkTestSupport.idReadersPresent(work, () -> true);
+
+        reader.next.set(result(CompletionCheck.RenameState.UNREADABLE));
+        work.publish();
+        assertThat(work.statusJson()).as("an unreadable sample before any NONE: the rename path refuses, and so does the field")
+            .contains("\"rename_missing\":\"readiness_unreadable\"");
+
+        reader.next.set(result(new CompletionCheck.RenameState(true, 1, List.of())));
+        work.publish();
+        assertThat(work.statusJson()).as("non-vacuity: ready").contains("\"rename_missing\":\"none\"");
+
+        reader.next.set(result(CompletionCheck.RenameState.UNREADABLE));
+        work.publish();
+        assertThat(work.renameReadiness().missing()).as("the rename path still runs").isEqualTo(RenameReadiness.Missing.NONE);
+        assertThat(work.statusJson()).as("so the status field says none, not refused").contains("\"rename_missing\":\"none\"");
+
+        reader.next.set(result(new CompletionCheck.RenameState(false, 1, List.of())));
+        work.publish();
+        assertThat(work.statusJson()).as("a sample that reads something missing is believed, in the field as in the rename path")
+            .contains("\"rename_missing\":\"name_key_drop_move\"");
+    }
 }
