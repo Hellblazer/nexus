@@ -268,7 +268,7 @@ class LatchedInstallNeverRunsANameBodyTest {
         Map<String, List<String>> before = footprint();
         latchRow(true);
         AtomicInteger ran = new AtomicInteger();
-        OneRowRename stub = (ctx, tenant, o, nw) -> {
+        OneRowRename stub = (ctx, tenant, o, nw, request) -> {
             ran.incrementAndGet();
             return new RenameOutcome(Map.of("stub_rows", 0), 1L, "e", true);
         };
