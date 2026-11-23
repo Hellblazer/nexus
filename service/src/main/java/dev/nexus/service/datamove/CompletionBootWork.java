@@ -244,6 +244,22 @@ public final class CompletionBootWork implements AutoCloseable {
 
     /** The readiness over {@code r} (null: no sample), monotone and fail closed as {@link #renameReadiness()} says; never throws. */
     private RenameReadiness.Missing readinessOf(CompletionCheck.Result r) {
+        RenameReadiness.Missing m = readinessSampled(r);
+        if (m == RenameReadiness.Missing.NONE && !gate3Latched) {
+            // The one-row body's helpers follow the service's Gate3 signal (the flag), and the readers take the id forms only once it holds: a rename must
+            // not take the one-row path before it does. publish sets the flag before the sample, so this is a belt (a hand-built result, a reordering); the
+            // wire enum has no value for it, so the rename waits as for an unreadable readiness.
+            if (signalWaitLogged.compareAndSet(false, true)) {
+                log.warn("event=rename_waits_gate3_signal detail=\"the readiness reads none but the service's gate 3 signal is not set; a rename waits for it\"");
+            }
+            return RenameReadiness.Missing.READINESS_UNREADABLE;
+        }
+        return m;
+    }
+
+    private final AtomicBoolean signalWaitLogged = new AtomicBoolean();
+
+    private RenameReadiness.Missing readinessSampled(CompletionCheck.Result r) {
         try {
             RenameReadiness.Missing m = r == null ? RenameReadiness.Missing.READINESS_UNREADABLE
                 : r.readinessMissing(idReadersPresent.getAsBoolean());
@@ -416,15 +432,18 @@ public final class CompletionBootWork implements AutoCloseable {
                 }
                 return -1;
             }
+            // The service's Gate3 signal (the flag below, which Main's Gate3 reads) is set BEFORE the sample is published and before readyOnce: volatile
+            // writes are seen in program order, so a rename that reads the readiness as NONE from this sample also sees the flag, and its one-row body's
+            // helpers take the id forms the readers take (RenameGuard's one-row decision and every helper read the same signal). readinessOf adds the belt.
+            if (result.gate3Latched()) {
+                gate3Latched = true;
+                gate3LatchPciOff = gate3LatchPciOff || result.gate3LatchPciOff();
+            }
             latest = result;
             if (result.readinessMissing(idReadersPresent.getAsBoolean()) == RenameReadiness.Missing.NONE) {
                 readyOnce = true;   // see the readiness: NONE is monotone
             }
             publishRestartEntry(result);
-            if (result.gate3Latched()) {
-                gate3Latched = true;
-                gate3LatchPciOff = gate3LatchPciOff || result.gate3LatchPciOff();
-            }
             long holding = (result.gate1() ? 1 : 0) + (result.gate2() ? 1 : 0) + (result.gate3() ? 1 : 0);
             return (holding < 3 ? 1 : 0) + (int) result.checks().stream().filter(c -> !c.present()).count()
                 + byTable(result.violators()).size();
