@@ -104,6 +104,21 @@ public final class CollectionSelector {
                    out.putIfAbsent(r.value1(), r.value2());
                }
            });
+        // a label the request named by id is that id, when the row of that id still carries the label; else it resolves to nothing, never
+        // to the row that holds the label now (I7). A plain read: the by-id read FOR KEY SHARE is the write's own, taken before this.
+        for (String n : nonEmpty) {
+            var requested = dev.nexus.service.db.ExpectedCollectionIds.requested(n);
+            if (requested.isPresent()) {
+                Long held = ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(requested.getAsLong()))
+                    .and(CATALOG_COLLECTIONS.NAME.eq(n)).fetchOne(CATALOG_COLLECTIONS.COLLECTION_ID);
+                if (held == null) {
+                    out.remove(n);
+                } else {
+                    out.put(n, held);
+                }
+            }
+        }
         // keep the caller's order, so the ids line up with the labels that resolved
         Map<String, Long> ordered = new LinkedHashMap<>();
         for (String n : nonEmpty) {
@@ -136,9 +151,9 @@ public final class CollectionSelector {
         if (name == null || name.isEmpty()) {
             return DSL.falseCondition();   // the empty label is no collection
         }
-        return idCol.eq(DSL.field(DSL.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
-            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(name))
-            .orderBy(liveFirst(), CATALOG_COLLECTIONS.COLLECTION_ID.desc()).limit(1)));
+        // CollectionIds.idOf: for a label the request named by id, THAT id and the label together; else live first, then the newest
+        // tombstone (linda Q3). A write under an id-addressed request never lands on whichever row holds the label now (I7).
+        return idCol.eq(dev.nexus.service.db.CollectionIds.idOf(tenant, name));
     }
 
     /** {@code ORDER BY} key that puts the row holding its label first: linda's live-first, then the newest tombstone (collection_id DESC). */
@@ -166,11 +181,21 @@ public final class CollectionSelector {
         if (nonEmpty.isEmpty()) {
             return DSL.falseCondition();
         }
+        // a label the request named by id is that id (with the label), never the row that holds the label now (I7)
+        List<String> named = nonEmpty.stream().filter(n -> dev.nexus.service.db.ExpectedCollectionIds.requested(n).isPresent()).toList();
+        List<String> free = nonEmpty.stream().filter(n -> !named.contains(n)).toList();
+        Condition out = DSL.falseCondition();
+        for (String n : named) {
+            out = out.or(idCol.eq(dev.nexus.service.db.CollectionIds.idOf(tenant, n)));
+        }
+        if (free.isEmpty()) {
+            return out;
+        }
         // one id per label: live first, then the newest tombstone (DISTINCT ON the label)
-        return idCol.in(DSL.select(CATALOG_COLLECTIONS.COLLECTION_ID).distinctOn(CATALOG_COLLECTIONS.NAME)
+        return out.or(idCol.in(DSL.select(CATALOG_COLLECTIONS.COLLECTION_ID).distinctOn(CATALOG_COLLECTIONS.NAME)
             .from(CATALOG_COLLECTIONS)
-            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.in(nonEmpty))
-            .orderBy(CATALOG_COLLECTIONS.NAME, liveFirst(), CATALOG_COLLECTIONS.COLLECTION_ID.desc()));
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.in(free))
+            .orderBy(CATALOG_COLLECTIONS.NAME, liveFirst(), CATALOG_COLLECTIONS.COLLECTION_ID.desc())));
     }
 
     /**

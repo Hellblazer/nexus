@@ -90,6 +90,15 @@ public final class ExpectedCollectionIds {
         return List.copyOf(left);
     }
 
+    /**
+     * The id the current request named for {@code label}, if it named one (RDR-229 P3.5c, I7): for a statement or a resolver outside
+     * this package that matches a collection by label, so it can match the REQUESTED id instead, never whichever row holds the label
+     * now. Reads nothing and consumes nothing; {@link CollectionIds#idOf} is the way to build the predicate and consume the id.
+     */
+    public static OptionalLong requested(String label) {
+        return of(label);
+    }
+
     /** The id this request named for {@code label}, if it named one. */
     static OptionalLong of(String label) {
         Carrier c = CURRENT.get();
