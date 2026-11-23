@@ -2515,7 +2515,7 @@
         its chunks. Definitions only. DATA EFFECT: none. After vectors-077 (the last definer of all four), before the grants-nexus-svc.xml
         runAlways block. See the included file's header.
     -->
-    <include file="db/changelog/vectors-082-restore-by-origin-id.xml"/>
+    <include file="db/changelog/vectors-083-restore-by-origin-id.xml"/>
 
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".

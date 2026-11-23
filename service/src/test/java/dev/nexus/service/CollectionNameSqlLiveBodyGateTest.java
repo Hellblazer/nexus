@@ -138,9 +138,10 @@ class CollectionNameSqlLiveBodyGateTest {
     static final Map<String, String> REQUIRED_LIVE = Map.of(
         // RDR-229 P3.1 stage 2b: vectors-069 redefined the last two once more to set collection_id; RDR-229 P3.5b (vectors-077,
         // nexus-p2m1x.24) redefines all three so their matches read the id and the name (a change of the matches only: the census
-        // below is unchanged because no name-parsing expression moved).
+        // below is unchanged because no name-parsing expression moved). RDR-229 P3.7 (vectors-083, nexus-p2m1x.27) redefines
+        // quarantine_restore_chunks once more, so its quarantine origin is matched by id from gate 3.
         "nexus.chash_conformance_report", "vectors-077-rdr229-p35b-readers-both.xml",
-        "nexus.quarantine_restore_chunks", "vectors-077-rdr229-p35b-readers-both.xml",
+        "nexus.quarantine_restore_chunks", "vectors-083-restore-by-origin-id.xml",
         "nexus.reaper_expire_client_quarantine", "vectors-077-rdr229-p35b-readers-both.xml");
 
     /** Floors on the real tree (234 includes and 120 live functions: 233 at the first run, 234 at develop 118701321; catalog-051-1a added nexus.collection_tuple_lock_key, 119 to 120; vectors-071-1 added nexus.rdr229_restamp, 120 to 121; RDR-229 P3.8's collections-001-1 and collections-002 added nexus.catalog_collection_tuple_duplicates_unscoped, nexus.collection_id_seq_heal and nexus.collection_id_taken, 121 to 124); a scan below them read too little. */
