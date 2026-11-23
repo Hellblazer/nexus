@@ -212,8 +212,8 @@ class Rdr229Row14ReembedRenameGapTest {
         JSONB meta = chunk.value3();
         assertThat(meta.data()).as("and it still did its work: the departed writer's span is gone from the renamed collection's chunk")
             .doesNotContain("line_start").doesNotContain("chunk_end_char");
-        assertThat(su(ctx -> ctx.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(T).and(CHUNKS.COLLECTION_ID.eq(newHolder)))))
-            .as("nothing was filed under the new holder").isZero();
+        int underNewHolder = su(ctx -> ctx.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(T).and(CHUNKS.COLLECTION_ID.eq(newHolder))));
+        assertThat(underNewHolder).as("nothing was filed under the new holder").isZero();
         assertThat(renamed).isNotEqualTo(x);
     }
 
@@ -238,9 +238,9 @@ class Rdr229Row14ReembedRenameGapTest {
         assertThat(row.targetId()).as("the job still names the collection it was filed for").isEqualTo(tgtId);
         assertThat(row.target()).as("under that row's current label").isEqualTo(renamed);
         assertThat(row.sourceId()).isEqualTo(srcId);
-        assertThat(su(ctx -> ctx.fetchCount(REEMBED_JOBS, REEMBED_JOBS.TENANT_ID.eq(T)
-            .and(REEMBED_JOBS.TARGET_COLLECTION_ID.eq(newHolder).or(REEMBED_JOBS.TARGET_COLLECTION.eq(tgt))))))
-            .as("no job targets the new holder of the old label").isZero();
+        int jobsOnNewHolder = su(ctx -> ctx.fetchCount(REEMBED_JOBS, REEMBED_JOBS.TENANT_ID.eq(T)
+            .and(REEMBED_JOBS.TARGET_COLLECTION_ID.eq(newHolder).or(REEMBED_JOBS.TARGET_COLLECTION.eq(tgt)))));
+        assertThat(jobsOnNewHolder).as("no job targets the new holder of the old label").isZero();
     }
 
     @Test
