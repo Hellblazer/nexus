@@ -4841,6 +4841,9 @@ def _check_data_moves(engine_status: object = _ENGINE_STATUS_UNSET) -> list[Heal
     return check_data_moves(engine_status)
 
 
+def _check_collection_ids(engine_status: object = _ENGINE_STATUS_UNSET) -> list[HealthResult]: return __import__("nexus.collection_id_health", fromlist=["check_collection_ids"]).check_collection_ids(engine_status)  # nexus-p2m1x.32 (RDR-229 P3.12): a named _check_* row, so a test that steps over the sweep's rows steps over this one; deferred, that module imports this one
+
+
 def _check_rdr229_completion(engine_status: object = _ENGINE_STATUS_UNSET) -> list[HealthResult]:
     """RDR-229 P3.1's completion check (nexus-p2m1x.17): ``nexus.rdr229_completion_health.check_rdr229_completion``. Named
     ``_check_*`` here for the same reason as :func:`_check_data_moves`."""
@@ -13779,17 +13782,14 @@ def run_health_checks(
         _cat = None
     results.extend(_step("_check_catalog", lambda: _check_catalog(_cat, _cat_path)))
 
-    # RDR-152 / bead nexus-gmiaf.33: storage-service checks.
-    # All three are gated internally on pg_credentials being present; they emit
-    # a single soft-warn-and-skip result when service/PG mode is not configured,
-    # so they are always safe to run.
+    # RDR-152 / bead nexus-gmiaf.33: storage-service checks, each gated on pg_credentials (one soft-warn skip without service/PG mode), so always safe to run.
     results.extend(_step("_check_storage_service_health", lambda: _check_storage_service_health()))
     results.extend(_step("_check_engine_convergence", lambda: _check_engine_convergence()))
     results.extend(_step("_check_ownerless_writes", lambda: _check_ownerless_writes(engine_status)))  # nexus-20onx
     results.extend(_step("_check_data_moves", lambda: _check_data_moves(engine_status)))  # nexus-f3yqd.2.17 (RDR-246)
     results.extend(_step("_check_pg_bundle", _check_pg_bundle))  # nexus-f3yqd.2.23: a bundle without pg_background
     results.extend(_step("_check_rdr229_completion", lambda: _check_rdr229_completion(engine_status)))  # nexus-p2m1x.17 (RDR-229 P3.1)
-    results.extend(_step("_check_collection_ids", lambda: __import__("nexus.collection_id_health", fromlist=["check_collection_ids"]).check_collection_ids(engine_status)))  # nexus-p2m1x.32 (RDR-229 P3.12): deferred, that module imports this one
+    results.extend(_step("_check_collection_ids", lambda: _check_collection_ids(engine_status)))  # nexus-p2m1x.32 (RDR-229 P3.12)
     results.extend(_step("_check_collection_tuples", lambda: _check_collection_tuples(engine_status)))  # nexus-p2m1x.28 (RDR-229 P3.8)
     results.extend(_step("_check_engine_reaper", lambda: _check_engine_reaper(engine_status)))  # nexus-wbfpw.56
     results.extend(_step("_check_per_collection_indexes", lambda: _check_per_collection_indexes(engine_status)))  # nexus-43ulx.24
