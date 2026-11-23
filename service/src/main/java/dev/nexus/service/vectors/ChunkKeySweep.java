@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
@@ -270,6 +271,10 @@ public final class ChunkKeySweep {
             if (cursor != null) {
                 writeString(out, cursor.collection());
                 writeString(out, cursor.chash());
+                out.writeBoolean(cursor.collectionId() != null);
+                if (cursor.collectionId() != null) {
+                    out.writeLong(cursor.collectionId());
+                }
             }
             out.writeInt(collections.size());
             for (String c : collections) {
@@ -337,8 +342,17 @@ public final class ChunkKeySweep {
         }
     }
 
-    /** A position in the sweep's order: the last {@code (collection, chash)} a batch took; {@code chash} is 64 hex. */
-    public record Cursor(String collection, String chash) {}
+    /**
+     * A position in the sweep's order: the last {@code (collection, chash)} a batch took; {@code chash} is 64 hex. From gate 3 the
+     * order is {@code (collection_id, chash)} and the cursor carries the id ({@code collectionId}), so a rename between batches
+     * does not end the sweep (the label would resolve to nothing). A cursor issued before the latch has no id ({@code null}):
+     * continued after it, the sweep restarts from the beginning, which is safe because a swept row no longer matches.
+     */
+    public record Cursor(String collection, String chash, Long collectionId) {
+        public Cursor(String collection, String chash) {
+            this(collection, chash, null);
+        }
+    }
 
     /** A collection the sweep leaves alone, why, and how many rows with a retired key it holds. */
     public record Blocked(String collection, String reason, long retiredRows) {}
@@ -872,6 +886,17 @@ public final class ChunkKeySweep {
             blocked = resume.blocked();
             remaining = resume.remaining();
             cursor = resume.cursor();
+            if (gateNow().holds() && cursor != null && cursor.collectionId() != null) {
+                // The continuation names its collections by the labels it was issued under; the collection in progress may have
+                // been renamed since (its cursor carries the id), so its current label joins the set (RDR-229 P3.5c review).
+                final Long inProgress = cursor.collectionId();
+                String current = scope.withTenant(tenant, ctx -> ctx.select(CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(inProgress))
+                    .fetchOne(CATALOG_COLLECTIONS.NAME));
+                if (current != null && (only == null || only.equals(current))) {
+                    sweepable.add(current);
+                }
+            }
         }
 
         long t0 = System.nanoTime();   // the budget is for the batches, not for the checks before them
@@ -954,10 +979,11 @@ public final class ChunkKeySweep {
         long s0 = System.nanoTime();
         Gate3 g = gateNow();
         boolean byId = g.holds();
-        // The cursor names the collection by the label the previous batch reported; from gate 3 the keyset is the id's order.
+        // From gate 3 the keyset is the id's order and the cursor's own id is the position (never its label, which a rename between
+        // batches leaves resolving to nothing); a cursor with no id was issued under the name order, so the sweep starts over.
         Condition keyset = after == null ? DSL.trueCondition()
-            : byId ? DSL.row(CHUNKS.COLLECTION_ID, CHUNKS.CHASH)
-                .gt(DSL.row(CollectionIds.idOf(tenant, after.collection()), DSL.val(cursorChash(after))))
+            : byId ? (after.collectionId() == null ? DSL.trueCondition()
+                : DSL.row(CHUNKS.COLLECTION_ID, CHUNKS.CHASH).gt(DSL.row(DSL.val(after.collectionId()), DSL.val(cursorChash(after)))))
             : DSL.row(CHUNKS.COLLECTION, CHUNKS.CHASH).gt(DSL.row(after.collection(), cursorChash(after)));
         Field<?> order = byId ? CHUNKS.COLLECTION_ID : CHUNKS.COLLECTION;
         Result<Record5<String, byte[], String, JSONB, Long>> rows = ctx
@@ -1001,7 +1027,7 @@ public final class ChunkKeySweep {
             updated += Math.max(0, n);
         }
         var lastRow = rows.get(rows.size() - 1);
-        Cursor last = new Cursor(lastRow.value1(), HexFormat.of().formatHex(lastRow.value2()));
+        Cursor last = new Cursor(lastRow.value1(), HexFormat.of().formatHex(lastRow.value2()), byId ? lastRow.value5() : null);
         return new Batch(updated, rows.size(), selectMs, updateMs, last);
     }
 

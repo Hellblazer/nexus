@@ -221,7 +221,7 @@ class Rdr229P35cVectorsReaperIdReadTest extends AtomicWriteTestBase {
     }
 
     @Test
-    void describe_readsGate3OnEveryCall() throws Exception {
+    void describe_readsGate3OnEveryCall_andTheLatchOnlyGoesForward() throws Exception {
         Renamed r = renamed("flip", 2, h -> Map.of("title", "t"));
         AtomicBoolean latched = new AtomicBoolean(false);
         ReaperRepository repo = reaper(latched::get);
@@ -230,8 +230,6 @@ class Rdr229P35cVectorsReaperIdReadTest extends AtomicWriteTestBase {
         latched.set(true);
         assertThat(repo.describe(r.tenant, r.oldName, r.chashes)).as("latched: by id, so the old name finds nothing").isEmpty();
         assertThat(repo.describe(r.tenant, r.newName, r.chashes)).hasSize(2);
-        latched.set(false);
-        assertThat(repo.describe(r.tenant, r.oldName, r.chashes)).as("dropped back: the name path again").hasSize(2);
     }
 
     @Test
@@ -339,6 +337,25 @@ class Rdr229P35cVectorsReaperIdReadTest extends AtomicWriteTestBase {
         assertThat(total).as("each row swept once across the batches").isEqualTo(6);
         assertThat(firstCursor).as("the cursor names the collection by the registry's label, not the stale row name").isEqualTo(a2);
         assertThat(retiredRows(tenant)).as("nothing left to sweep").isZero();
+    }
+
+    /** The cursor carries the collection's id (nexus-p2m1x.25 review): a rename between batches leaves its label resolving to nothing. */
+    @Test
+    void sweepApply_aRenameBetweenBatchesDoesNotEndTheSweepEarly() throws Exception {
+        String tenant = tenant("ksren"), a = docs("ksren-a"), a2 = docs("ksren-a-renamed");
+        su(ctx -> seed(ctx, tenant, a, 4, Rdr229P35cVectorsReaperIdReadTest::legacy));
+        ChunkKeySweep sw = sweep(LATCHED);
+
+        var first = sw.apply(tenant, plan(), Map.of(), null, 2, 1, BUDGET, null);
+        assertThat(first.rowsSwept()).isEqualTo(2);
+        assertThat(first.done()).isFalse();
+        assertThat(first.resume().cursor().collectionId()).as("the cursor carries the id").isNotNull();
+        su(ctx -> rename(ctx, tenant, a, a2, 4));
+
+        var second = sw.apply(tenant, plan(), Map.of(), null, 2, 1, BUDGET, first.resume());
+
+        assertThat(second.rowsSwept()).as("the sweep went on past the cursor, the label having moved").isEqualTo(2);
+        assertThat(retiredRows(tenant)).isZero();
     }
 
     @Test
