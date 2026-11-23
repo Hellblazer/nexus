@@ -673,7 +673,7 @@ public final class CompletionCheck {
             }
         }
         Optional<Boolean> latch = readLatch(ctx, tables, GATE3);
-ith no origin_collection_id key keeps gate 3 shut: after the latch a row with no
+        // A quarantine chunk with no origin_collection_id key keeps gate 3 shut: after the latch a row with no
         // origin id is no sibling of its label's holder, so the key must be there (present, JSON null for a dangling tag) before readers rely on it
         if (gate3Holds && latch.isEmpty()) {
             long lacking = quarantineChunksLackingOriginId(ctx, tables);
