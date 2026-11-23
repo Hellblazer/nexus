@@ -135,14 +135,14 @@ class Rdr229P35cIdReadersPinTest {
         assertThat(readersSelectById(census, java, sql, src)).as("the real tree: the readers select by id").isTrue();
 
         // A census reader with NO disposition (one row removed): the pin names it. The old pin iterated dispositions only and could not see it.
-        List<String> victim = java.stream().skip(1).filter(r -> r.split("\t", -1)[3].equals("id")).findFirst().orElseThrow();
+        String victim = java.stream().skip(1).filter(r -> r.split("\t", -1)[3].equals("id")).findFirst().orElseThrow();
         List<String> removed = new ArrayList<>(java);
         removed.remove(victim);
         assertThat(routedByName(census, removed, sql, src)).as("a reader with no disposition").hasSize(1);
         assertThat(readersSelectById(census, removed, sql, src)).isFalse();
 
         // An id reader of a child table's collection column that becomes label-kept: not an id read.
-        List<String> idRow = java.stream().skip(1).filter(r -> {
+        String idRow = java.stream().skip(1).filter(r -> {
             String[] f = r.split("\t", -1);
             return f[3].equals("id") && !f[2].equals("name");
         }).findFirst().orElseThrow();
