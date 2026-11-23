@@ -26,6 +26,8 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
@@ -244,24 +246,33 @@ class GrantsNexusSvcUpgradeIntegrationTest {
         String master = read("db/changelog/db.changelog-master.xml");
         assertThat(master).as("the master carries the registry include").contains(DATAMOVES_INCLUDE);
         master = master.replace(DATAMOVES_INCLUDE, "");
-        // a changeset that registers a move writes into the registry, so the includes that register one are as unborn as
-        // the registry itself in the old state; the new boot applies them. The set is read from the master (every include
-        // whose file INSERTs INTO nexus.data_moves), so a new registering include cannot be forgotten here. The owner-read
-        // policy follows the registering includes and reads the same unborn state, so it goes with them.
-        List<String> stripped = new ArrayList<>(ShippedMoveRegistrations.byInclude().keySet());
-        stripped.add("db/changelog/vectors-065-catalog-collections-owner-read.xml");
+        // an include that touches the registry (an INSERT, UPDATE, ALTER or DELETE of nexus.data_moves, a foreign key to it, a grant on it, a
+        // function body that reads it) is as unborn as the registry itself in the old state; the new boot applies it after datamoves-001. The set
+        // is read from the master: every include whose file, XML comments removed, names data_moves, so a new one cannot be forgotten here (the
+        // registering includes, datamoves-002's ALTER, vectors-081's UPDATE, a restamp function that reads the registry). Two exceptions, by
+        // name: datamoves-001 is the registry itself, taken out above; and grants-nexus-svc.xml, which names data_moves in its REVOKE, is the
+        // file this test is ABOUT: the test swaps in that file's old text itself below, and the new text is what the upgrade boot applies.
+        // The registering includes alone are also read from ShippedMoveRegistrations, which pins what the scan must at least hold.
+        Pattern touchesRegistry = Pattern.compile("\\bdata_moves\\b", Pattern.CASE_INSENSITIVE);
+        List<String> stripped = new ArrayList<>();
+        Matcher includes = Pattern.compile("<include\\s+file=\"([^\"]+)\"\\s*/>").matcher(master.replaceAll("(?s)<!--.*?-->", ""));
+        while (includes.find()) {
+            String file = includes.group(1);
+            if (file.equals(GRANTS_FILE) || stripped.contains(file)) {
+                continue;
+            }
+            if (touchesRegistry.matcher(read(file).replaceAll("(?s)<!--.*?-->", "")).find()) {
+                stripped.add(file);
+            }
+        }
+        assertThat(stripped).as("the scan holds every registering include")
+            .containsAll(ShippedMoveRegistrations.byInclude().keySet());
+        stripped.add("db/changelog/vectors-065-catalog-collections-owner-read.xml");   // the owner-read policy follows the registering includes
         // RDR-229 P3.1 (nexus-p2m1x.17): the stamp family builds on the registry and the policy above, so it is as unborn as they
-        // are: vectors-068 (the collection_id columns and CHECKs the stamp moves fill and validate), vectors-069 (the dual-write
-        // functions) and vectors-070 (the stamp moves and their owner-read policies). vectors-070 and catalog-052 register
-        // moves, so the scan above already holds them; they are named again only to make the list say so, and added only when
-        // the scan did not find them (a second entry would find its include already stripped). Sam's ruling (ask
-        // p31-existing-schema-tests) names 068, 069 and 070; no walk failure has shown 068 or 069 to be needed here (they touch no
-        // registry), they are stripped because the old state predates the stamp family as a whole.
-        //
-        // datamoves-002 (the finisher's verify_statement_timeout_ms column, an ALTER TABLE nexus.data_moves with no precondition) is
-        // the one include after datamoves-001 that reads the registry and is not a registering include, so the scan cannot hold it:
-        // left in, the old walk fails at datamoves-002-1 with 'relation "nexus.data_moves" does not exist' (chas run of 911747ea29).
-        // It landed after this list was written and is independent of P3.1; the new boot applies it after datamoves-001.
+        // are: vectors-068 (the collection_id columns and CHECKs the stamp moves fill and validate) and vectors-069 (the dual-write
+        // functions). They touch no registry, so the scan does not find them: they are stripped because the old state predates the stamp
+        // family as a whole (Sam's ruling, ask p31-existing-schema-tests, names 068, 069 and 070). Named only when the scan did not find
+        // them (a second entry would find its include already stripped).
         //
         // RDR-229 P3.8 (nexus-p2m1x.28): the collections family is as unborn as the stamp family it builds on. collections-002's
         // sequence-heal function reads catalog_collections.collection_id, which vectors-068 adds; left in, the old walk fails
@@ -279,10 +290,8 @@ class GrantsNexusSvcUpgradeIntegrationTest {
         // THE RULE for a future changeset (linda 2026-11-24): any changeset whose bodies name collection_id (the column vectors-068 adds)
         // joins this list, because the old walk runs without it; a real upgrade is unaffected (master order applies 068 first). A miss
         // fails the old walk at that changeset, and the non-vacuity assertion below names every entry, so the list cannot shrink unnoticed.
-        for (String unborn : List.of("db/changelog/datamoves-002-verify-statement-timeout.xml",
-                "db/changelog/vectors-068-collection-id-expand.xml",
+        for (String unborn : List.of("db/changelog/vectors-068-collection-id-expand.xml",
                 "db/changelog/vectors-069-collection-id-dual-write-functions.xml",
-                "db/changelog/vectors-070-collection-id-stamp-moves.xml",
                 "db/changelog/collections-001-tuple-unique-index.xml",
                 "db/changelog/collections-002-collection-id-seq-heal-function.xml",
                 "db/changelog/collections-003-tuple-lock-stripes.xml",
@@ -302,6 +311,7 @@ class GrantsNexusSvcUpgradeIntegrationTest {
                 "db/changelog/collections-002-collection-id-seq-heal-function.xml",
                 "db/changelog/vectors-077-rdr229-p35b-readers-both.xml",
                 "db/changelog/vectors-078-rdr229-p35b-readers-continue.xml",
+                "db/changelog/vectors-081-rdr229-validation-bounds.xml",
                 "db/changelog/vectors-083-restore-by-origin-id.xml",
                 "db/changelog/catalog-052-residue-moves-supersede.xml");
         for (String registering : stripped) {
