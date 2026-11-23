@@ -372,4 +372,27 @@ class Rdr229P35cCatalogReadersIntegrationTest extends AtomicWriteTestBase {
                 .and(CHUNKS.COLLECTION_ID.eq(r.id())))).as("the id key matched the existing row: still one row").isEqualTo(1);
         }
     }
+
+    /**
+     * RDR-229 P3.5c (census verification B): the stored-vector mismatch check reads the stored vector by the collection id from the latch. After
+     * a one-row rename the chunk's stored name is stale, so a read by the current label finds no vector and the check goes blind (a different
+     * supplied vector counted as no mismatch). The rename is the registry row's in-place rename that
+     * {@code CollectionRouteFixture.renameInPlaceBeforeTheWritesRead} performs in the gap; the stale stored name it leaves is the state here.
+     */
+    @Test
+    void theStoredVectorMismatchCheckStillSeesTheStoredVectorAfterAOneRowRename() throws Exception {
+        Renamed r = renamedCollection();
+        latched.set(true);
+        String doc2 = freshDoc("sv", r.newLabel());
+        float[] different = new float[384];
+        java.util.Arrays.fill(different, 0.5f);
+        Map<String, Object> supplied = new java.util.LinkedHashMap<>(chunk(r.chash(), "p35c text " + r.chash()));
+        supplied.put("embedding", different);
+
+        var response = gatedSvc.appendCombined(TENANT, r.newLabel(), doc2, List.of(row(0, r.chash())), List.of(supplied), false, null,
+            "minilm-l6-v2-384").response();
+
+        assertThat(response).as("the existing chunk keeps its vector, and its disagreement with the supplied one is counted")
+            .containsEntry("vector_mismatches", 1);
+    }
 }

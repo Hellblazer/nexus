@@ -925,7 +925,7 @@ public final class CombinedWriteService {
                 if (!existingWithSupplied.isEmpty()) {
                     List<String> hexes = new ArrayList<>(existingWithSupplied.size());
                     for (int i : existingWithSupplied) hexes.add(dedupChashes.get(i));
-                    Map<String, float[]> storedVectors = selectStoredVectors(ctx, ch, tenant, coll, hexes);
+                    Map<String, float[]> storedVectors = selectStoredVectors(ctx, ch, tenant, coll, hexes, gate3);
                     for (int i : existingWithSupplied) {
                         float[] stored = storedVectors.get(dedupChashes.get(i));
                         // A chash whose vector cannot be read back (concurrently deleted) is
@@ -1073,11 +1073,14 @@ public final class CombinedWriteService {
 
     /** The stored vector of each of {@code chashes} that exists in the collection (RDR-223 P1.5). */
     private static Map<String, float[]> selectStoredVectors(DSLContext ctx, DimTables.ChunkTable ch,
-            String tenant, String collection, List<String> chashes) {
+            String tenant, String collection, List<String> chashes, dev.nexus.service.datamove.Gate3 gate3) {
         Map<String, float[]> out = new HashMap<>();
+        // From gate 3 by the collection id, like selectExistingText: after a one-row rename a chunk's stored name is stale, and a name
+        // match would read no vector, leaving the stored-vector mismatch check blind (RDR-229 P3.5c, census verification B).
         ctx.select(ch.chash(), ch.embedding()).from(ch.table())
            .where(ch.tenantId().eq(tenant)
-                  .and(ch.collection().eq(collection))
+                  .and(dev.nexus.service.vectors.CollectionSelector.collectionIs(gate3, tenant, ch.collection(),
+                                                                                 ch.collectionId(), collection))
                   .and(ch.chash().in(chashes)))
            .fetch()
            .forEach(r -> { if (r.value2() != null) out.put(r.value1(), r.value2().floats()); });
