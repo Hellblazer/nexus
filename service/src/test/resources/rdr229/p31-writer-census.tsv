@@ -17,8 +17,8 @@ aspects	canary_query_ring	nexus.canary_query_ring_upsert [vectors-078-rdr229-p35
 aspects	canary_query_ring	nexus.canary_query_ring_upsert [vectors-078-rdr229-p35b-readers-continue.xml:677]	604	insert	sql_function	collection	collection_id	yes		sql
 aspects	canary_query_ring	rdr229-fkvalidate-canary_query_ring [vectors-072-collection-id-fk-twins.xml:268]	265	update	data_move	-	collection_id	yes	sets collection_id	move
 aspects	canary_query_ring	rdr229-stamp-canary_query_ring [vectors-070-collection-id-stamp-moves.xml:169]	166	update	data_move	-	collection_id	yes	sets collection_id	move
-aspects	canary_query_ring	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11714	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	verb
-aspects	canary_query_ring	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12158	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	unproven
+aspects	canary_query_ring	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11731	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	verb
+aspects	canary_query_ring	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12175	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	unproven
 aspects	document_aspects	rdr229-fkvalidate-document_aspects [vectors-072-collection-id-fk-twins.xml:200]	197	update	data_move	-	collection_id	yes	sets collection_id	move
 aspects	document_aspects	rdr229-p31-residue-document-aspects [catalog-052-residue-moves-supersede.xml:110]	107	update	data_move	-	collection_id	yes	sets collection_id	move
 aspects	document_aspects	rdr229-p31-residue-document-aspects [catalog-052-residue-moves-supersede.xml:192]	189	update	data_move	-	collection_id	yes	sets collection_id	move
@@ -34,10 +34,10 @@ aspects	document_aspects	service/src/main/java/dev/nexus/service/db/CatalogMoves
 aspects	document_aspects	service/src/main/java/dev/nexus/service/db/CatalogMoves.java	409	update	jooq	-	collection_id	yes		unproven
 aspects	document_aspects	service/src/main/java/dev/nexus/service/db/CatalogMoves.java	756	update	jooq	-	collection_id	yes		unproven
 aspects	document_aspects	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	4627	update	jooq	-	collection_id	yes		unproven
-aspects	document_aspects	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	7512	update	jooq	collection	collection_id	yes		require
-aspects	document_aspects	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11714	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	verb
-aspects	document_aspects	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11774	update	jooq	-	collection_id	yes		verb
-aspects	document_aspects	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12158	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	unproven
+aspects	document_aspects	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	7529	update	jooq	collection	collection_id	yes		require
+aspects	document_aspects	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11731	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	verb
+aspects	document_aspects	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11791	update	jooq	-	collection_id	yes		verb
+aspects	document_aspects	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12175	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	unproven
 aspects	document_aspects	service/src/main/java/dev/nexus/service/db/TenantImportLoad.java	335	insert	by-name	collection	collection_id	yes	TenantImportLoad by-name INSERT ... SELECT over TenantExport.TABLES	unproven
 aspects	document_highlights	rdr229-fkvalidate-document_highlights [vectors-072-collection-id-fk-twins.xml:251]	248	update	data_move	-	collection_id	yes	sets collection_id	move
 aspects	document_highlights	rdr229-p31-residue-document-highlights [catalog-052-residue-moves-supersede.xml:142]	107	update	data_move	-	collection_id	yes	sets collection_id	move
@@ -52,10 +52,10 @@ aspects	document_highlights	service/src/main/java/dev/nexus/service/db/CatalogMo
 aspects	document_highlights	service/src/main/java/dev/nexus/service/db/CatalogMoves.java	432	update	jooq	-	collection_id	yes		require
 aspects	document_highlights	service/src/main/java/dev/nexus/service/db/CatalogMoves.java	760	update	jooq	-	collection_id	yes		unproven
 aspects	document_highlights	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	4646	update	jooq	-	collection_id	yes		unproven
-aspects	document_highlights	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	7520	update	jooq	collection	collection_id	yes		require
-aspects	document_highlights	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11714	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	verb
-aspects	document_highlights	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11779	update	jooq	-	collection_id	yes		verb
-aspects	document_highlights	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12158	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	unproven
+aspects	document_highlights	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	7537	update	jooq	collection	collection_id	yes		require
+aspects	document_highlights	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11731	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	verb
+aspects	document_highlights	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11796	update	jooq	-	collection_id	yes		verb
+aspects	document_highlights	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12175	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	unproven
 aspects	document_highlights	service/src/main/java/dev/nexus/service/db/TenantImportLoad.java	335	insert	by-name	collection	collection_id	yes	TenantImportLoad by-name INSERT ... SELECT over TenantExport.TABLES	unproven
 catalog	catalog_collections	nexus.catalog_documents_owner_to_collection [vectors-078-rdr229-p35b-readers-continue.xml:351]	290	update	sql_function	superseded_by	superseded_by_id	yes		sql
 catalog	catalog_collections	nexus.gc_quarantine_orphans [vectors-077-rdr229-p35b-readers-both.xml:7917]	7760	insert	sql_function	superseded_by	superseded_by_id	yes		sql
@@ -66,13 +66,13 @@ catalog	catalog_collections	nexus.reaper_quarantine_chunks [vectors-077-rdr229-p
 catalog	catalog_collections	rdr229-reown-repo-stems-from-curator [vectors-067-reown-repo-stems-register.xml:153]	150	other	data_move	-	superseded_by_id	yes	handled: the template is a data-modifying WITH, not an UPDATE ... SET; it selects only live registry rows (c.superseded_by = ''), whose superseded_by_id is NULL, so the CHECK holds for every row version it writes (vectors-067)	move
 catalog	catalog_collections	rdr229-stamp-catalog_collections [vectors-070-collection-id-stamp-moves.xml:84]	81	update	data_move	-	superseded_by_id	yes	sets superseded_by_id	move
 catalog	catalog_collections	repair-catalog-collection-model-version [vectors-064-register-model-version-repair-move.xml:98]	95	update	data_move	-	superseded_by_id	yes	handled: D2's repair UPDATEs model_version of registry rows, tombstones included; vectors-068-19 adds the superseded_by_id CHECK only while no tombstone with a blank model_version and no id remains (its CONTINUE precondition), so the CHECK is absent while this move is open	move
-catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	10027	insert	jooq	superseded_by	superseded_by_id	yes		verb
-catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	10659	update	jooq	-	superseded_by_id	yes		unproven
-catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	10775	update	jooq	-	superseded_by_id	yes		require
-catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12509	update	jooq	-	superseded_by_id	yes		verb
-catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12523	update	jooq	-	superseded_by_id	yes		verb
-catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	13853	insert	jooq	superseded_by	superseded_by_id	yes		verb
-catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	13947	insert	jooq	superseded_by	superseded_by_id	yes		verb
+catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	10044	insert	jooq	superseded_by	superseded_by_id	yes		verb
+catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	10676	update	jooq	-	superseded_by_id	yes		unproven
+catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	10792	update	jooq	-	superseded_by_id	yes		require
+catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12526	update	jooq	-	superseded_by_id	yes		verb
+catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12540	update	jooq	-	superseded_by_id	yes		verb
+catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	13870	insert	jooq	superseded_by	superseded_by_id	yes		verb
+catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	13964	insert	jooq	superseded_by	superseded_by_id	yes		verb
 catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionMint.java	172	insert	jooq	superseded_by	superseded_by_id	yes		unproven
 catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionMint.java	252	update	jooq	-	superseded_by_id	yes		unproven
 catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionRename.java	166	insert	jooq	superseded_by	superseded_by_id	yes		unproven
@@ -84,11 +84,11 @@ catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/Collectio
 catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/TenantImportLoad.java	335	insert	by-name	superseded_by	superseded_by_id	yes	TenantImportLoad by-name INSERT ... SELECT over TenantExport.TABLES	unproven
 catalog	catalog_document_chunks	nexus.quarantine_restore_chunks [vectors-077-rdr229-p35b-readers-both.xml:5366]	5066	insert	sql_function	collection	collection_id	yes		sql
 catalog	catalog_document_chunks	rdr229-stamp-catalog_document_chunks [vectors-070-collection-id-stamp-moves.xml:288]	285	update	data_move	-	collection_id	yes	sets collection_id	move
-catalog	catalog_document_chunks	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	6250	insert	jooq	collection	collection_id	yes		require
-catalog	catalog_document_chunks	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11714	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	verb
-catalog	catalog_document_chunks	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11718	update	jooq	-	collection_id	yes		verb
-catalog	catalog_document_chunks	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12034	update	jooq	-	collection_id	yes		require
-catalog	catalog_document_chunks	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12158	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	unproven
+catalog	catalog_document_chunks	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	6267	insert	jooq	collection	collection_id	yes		require
+catalog	catalog_document_chunks	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11731	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	verb
+catalog	catalog_document_chunks	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11735	update	jooq	-	collection_id	yes		verb
+catalog	catalog_document_chunks	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12051	update	jooq	-	collection_id	yes		require
+catalog	catalog_document_chunks	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12175	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	unproven
 catalog	catalog_document_chunks	service/src/main/java/dev/nexus/service/db/ChashRepository.java	330	update	jooq	collection	collection_id	yes		verb
 catalog	catalog_document_chunks	service/src/main/java/dev/nexus/service/db/ChashRepository.java	338	update	jooq	-	collection_id	yes		verb
 catalog	catalog_document_chunks	service/src/main/java/dev/nexus/service/db/ManifestFill.java	381	update	jooq	-	collection_id	yes		unproven
@@ -125,26 +125,26 @@ catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepo
 catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	4109	update	jooq	-	physical_collection_id	yes		unproven
 catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	4574	update	jooq	-	physical_collection_id	yes		unproven
 catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	5677	update	jooq	-	physical_collection_id	yes		unproven
-catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	6524	update	jooq	-	physical_collection_id	yes		require
-catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	7491	update	jooq	physical_collection	physical_collection_id	yes		require
-catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	8266	update	jooq	-	physical_collection_id	yes		require
-catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	8692	update	jooq	-	physical_collection_id	yes		unproven
-catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	8901	update	jooq	-	physical_collection_id	yes		unproven
-catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	9089	update	jooq	-	physical_collection_id	yes		unproven
-catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	9127	update	jooq	-	physical_collection_id	yes		unproven
-catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	9181	update	jooq	-	physical_collection_id	yes		unproven
-catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	9631	update	jooq	-	physical_collection_id	yes		unproven
-catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11714	update	helper	physical_collection	physical_collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	verb
-catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11769	update	jooq	-	physical_collection_id	yes		verb
-catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12158	update	helper	physical_collection	physical_collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	unproven
-catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	13329	insert	jooq	physical_collection	physical_collection_id	yes		require
-catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	13407	insert	jooq	physical_collection	physical_collection_id	yes		require
-catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	14067	update	jooq	-	physical_collection_id	yes		unproven
-catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	14157	update	jooq	-	physical_collection_id	yes		unproven
-catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	14193	update	jooq	-	physical_collection_id	yes		unproven
-catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	14628	update	jooq	-	physical_collection_id	yes		unproven
+catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	6541	update	jooq	-	physical_collection_id	yes		require
+catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	7508	update	jooq	physical_collection	physical_collection_id	yes		require
+catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	8283	update	jooq	-	physical_collection_id	yes		require
+catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	8709	update	jooq	-	physical_collection_id	yes		unproven
+catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	8918	update	jooq	-	physical_collection_id	yes		unproven
+catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	9106	update	jooq	-	physical_collection_id	yes		unproven
+catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	9144	update	jooq	-	physical_collection_id	yes		unproven
+catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	9198	update	jooq	-	physical_collection_id	yes		unproven
+catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	9648	update	jooq	-	physical_collection_id	yes		unproven
+catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11731	update	helper	physical_collection	physical_collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	verb
+catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11786	update	jooq	-	physical_collection_id	yes		verb
+catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12175	update	helper	physical_collection	physical_collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	unproven
+catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	13346	insert	jooq	physical_collection	physical_collection_id	yes		require
+catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	13424	insert	jooq	physical_collection	physical_collection_id	yes		require
+catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	14084	update	jooq	-	physical_collection_id	yes		unproven
+catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	14174	update	jooq	-	physical_collection_id	yes		unproven
+catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	14210	update	jooq	-	physical_collection_id	yes		unproven
+catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	14645	update	jooq	-	physical_collection_id	yes		unproven
 catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/TenantImportLoad.java	335	insert	by-name	physical_collection	physical_collection_id	yes	TenantImportLoad by-name INSERT ... SELECT over TenantExport.TABLES	unproven
-catalog	catalog_reconcile_rows	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	14367	insert	jooq	physical_collection	-	no		unproven
+catalog	catalog_reconcile_rows	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	14384	insert	jooq	physical_collection	-	no		unproven
 catalog	chunk_orphaned_at	nexus.stamp_chunks_on_manifest_delete [vectors-077-rdr229-p35b-readers-both.xml:6977]	6945	insert	sql_function	collection	collection_id	yes		sql
 catalog	chunk_orphaned_at	nexus.stamp_chunks_on_manifest_update [vectors-077-rdr229-p35b-readers-both.xml:7111]	7062	insert	sql_function	collection	collection_id	yes		sql
 catalog	chunk_orphaned_at	rdr229-stamp-chunk_orphaned_at [vectors-070-collection-id-stamp-moves.xml:254]	251	update	data_move	-	collection_id	yes	sets collection_id	move
@@ -158,9 +158,9 @@ chunks	chunks	nexus.gc_restore_rereferenced_bounded [vectors-077-rdr229-p35b-rea
 chunks	chunks	nexus.quarantine_restore_chunks [vectors-077-rdr229-p35b-readers-both.xml:5313]	5066	insert	sql_function	collection	collection_id	yes		sql
 chunks	chunks	nexus.reaper_quarantine_chunks [vectors-077-rdr229-p35b-readers-both.xml:6656]	6481	insert	sql_function	collection	collection_id	yes		sql
 chunks	chunks	rdr229-stamp-chunks [vectors-070-collection-id-stamp-moves.xml:350]	347	update	data_move	-	collection_id	yes	sets collection_id	move
-chunks	chunks	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	6779	insert	helper	collection	collection_id	yes	ch.table() helper	require
-chunks	chunks	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11714	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	verb
-chunks	chunks	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12158	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	unproven
+chunks	chunks	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	6796	insert	helper	collection	collection_id	yes	ch.table() helper	require
+chunks	chunks	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11731	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	verb
+chunks	chunks	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12175	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	unproven
 chunks	chunks	service/src/main/java/dev/nexus/service/db/ChashRepository.java	320	update	helper	collection	collection_id	yes	ch.table() helper	verb
 chunks	chunks	service/src/main/java/dev/nexus/service/db/DepartedWriterSpans.java	561	update	jooq	collection	collection_id	yes		unproven
 chunks	chunks	service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	314	update	jooq	-	collection_id	yes		unproven
@@ -183,11 +183,11 @@ ops	gc_audit	nexus.quarantine_restore_chunks [vectors-077-rdr229-p35b-readers-bo
 ops	gc_audit	nexus.reaper_expire_client_quarantine [vectors-077-rdr229-p35b-readers-both.xml:6067]	5921	insert	sql_function	collection	collection_id	no		sql
 ops	gc_audit	nexus.reaper_expire_quarantine [vectors-077-rdr229-p35b-readers-both.xml:6349]	6259	insert	sql_function	collection	collection_id	no		sql
 ops	gc_audit	nexus.reaper_quarantine_chunks [vectors-077-rdr229-p35b-readers-both.xml:6704]	6481	insert	sql_function	collection	collection_id	no		sql
-ops	gc_audit	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11714	update	helper	collection	collection_id	no	COLLECTION_SCOPED_TABLES loop (rename/re-home)	history
-ops	gc_audit	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12158	update	helper	collection	collection_id	no	COLLECTION_SCOPED_TABLES loop (rename/re-home)	history
-ops	gc_audit	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	15072	insert	jooq	collection	collection_id	no		history
-ops	hook_failures	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11714	update	helper	collection	collection_id	no	COLLECTION_SCOPED_TABLES loop (rename/re-home)	history
-ops	hook_failures	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12158	update	helper	collection	collection_id	no	COLLECTION_SCOPED_TABLES loop (rename/re-home)	history
+ops	gc_audit	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11731	update	helper	collection	collection_id	no	COLLECTION_SCOPED_TABLES loop (rename/re-home)	history
+ops	gc_audit	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12175	update	helper	collection	collection_id	no	COLLECTION_SCOPED_TABLES loop (rename/re-home)	history
+ops	gc_audit	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	15089	insert	jooq	collection	collection_id	no		history
+ops	hook_failures	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11731	update	helper	collection	collection_id	no	COLLECTION_SCOPED_TABLES loop (rename/re-home)	history
+ops	hook_failures	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12175	update	helper	collection	collection_id	no	COLLECTION_SCOPED_TABLES loop (rename/re-home)	history
 ops	hook_failures	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	668	update	jooq	collection	collection_id	no		history
 ops	hook_failures	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	1798	insert	jooq	collection	collection_id	no		history
 ops	hook_failures	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	1833	insert	jooq	collection	collection_id	no		history
@@ -213,26 +213,26 @@ ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository
 ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	761	update	jooq	-	source_collection_id,target_collection_id	yes		unproven
 ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	809	update	jooq	-	source_collection_id,target_collection_id	yes		unproven
 ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	872	update	jooq	-	source_collection_id,target_collection_id	yes		unproven
-ops	relevance_log	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11714	update	helper	collection	collection_id	no	COLLECTION_SCOPED_TABLES loop (rename/re-home)	history
-ops	relevance_log	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12158	update	helper	collection	collection_id	no	COLLECTION_SCOPED_TABLES loop (rename/re-home)	history
+ops	relevance_log	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11731	update	helper	collection	collection_id	no	COLLECTION_SCOPED_TABLES loop (rename/re-home)	history
+ops	relevance_log	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12175	update	helper	collection	collection_id	no	COLLECTION_SCOPED_TABLES loop (rename/re-home)	history
 ops	relevance_log	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	174	insert	jooq	collection	collection_id	no		history
 ops	relevance_log	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	202	insert	jooq	collection	collection_id	no		history
 ops	relevance_log	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	366	insert	jooq	collection	collection_id	no		history
 ops	relevance_log	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	2294	insert	jooq	collection	collection_id	no		history
-ops	search_telemetry	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11714	update	helper	collection	collection_id	no	COLLECTION_SCOPED_TABLES loop (rename/re-home)	history
-ops	search_telemetry	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12158	update	helper	collection	collection_id	no	COLLECTION_SCOPED_TABLES loop (rename/re-home)	history
+ops	search_telemetry	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11731	update	helper	collection	collection_id	no	COLLECTION_SCOPED_TABLES loop (rename/re-home)	history
+ops	search_telemetry	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12175	update	helper	collection	collection_id	no	COLLECTION_SCOPED_TABLES loop (rename/re-home)	history
 ops	search_telemetry	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	401	insert	jooq	collection	collection_id	no		history
 ops	search_telemetry	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	663	update	jooq	collection	collection_id	no		history
 ops	search_telemetry	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	697	insert	jooq	collection	collection_id	no		history
 ops	search_telemetry	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	2312	insert	jooq	collection	collection_id	no		history
 taxonomy	taxonomy_centroids	rdr229-stamp-taxonomy_centroids [vectors-070-collection-id-stamp-moves.xml:271]	268	update	data_move	-	collection_id	yes	sets collection_id	move
-taxonomy	taxonomy_centroids	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11714	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	verb
-taxonomy	taxonomy_centroids	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12158	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	unproven
+taxonomy	taxonomy_centroids	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11731	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	verb
+taxonomy	taxonomy_centroids	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12175	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	unproven
 taxonomy	taxonomy_centroids	service/src/main/java/dev/nexus/service/vectors/TaxonomyCentroidRepository.java	167	insert	helper	collection	collection_id	yes	ct.table() helper	require
 taxonomy	taxonomy_meta	rdr229-fkvalidate-taxonomy_meta [vectors-072-collection-id-fk-twins.xml:234]	231	update	data_move	-	collection_id	yes	sets collection_id	move
 taxonomy	taxonomy_meta	rdr229-stamp-taxonomy_meta [vectors-070-collection-id-stamp-moves.xml:220]	217	update	data_move	-	collection_id	yes	sets collection_id	move
-taxonomy	taxonomy_meta	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11714	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	verb
-taxonomy	taxonomy_meta	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12158	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	unproven
+taxonomy	taxonomy_meta	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11731	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	verb
+taxonomy	taxonomy_meta	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12175	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	unproven
 taxonomy	taxonomy_meta	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	1699	update	jooq	collection	collection_id	yes		verb
 taxonomy	taxonomy_meta	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	1723	insert	jooq	collection	collection_id	yes		require
 taxonomy	taxonomy_meta	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	2260	insert	jooq	collection	collection_id	yes		require
@@ -248,8 +248,8 @@ taxonomy	topic_assignments	rdr229-fkvalidate-topic_assignments [vectors-072-coll
 taxonomy	topic_assignments	rdr229-stamp-topic_assignments [vectors-070-collection-id-stamp-moves.xml:305]	302	update	data_move	-	source_collection_id	yes	sets source_collection_id	move
 taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/CatalogIdStamps.java	113	update	jooq	-	source_collection_id	yes		unproven
 taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/CatalogIdStamps.java	130	update	jooq	-	source_collection_id	yes		unproven
-taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11714	update	helper	source_collection	source_collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	verb
-taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12158	update	helper	source_collection	source_collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	unproven
+taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11731	update	helper	source_collection	source_collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	verb
+taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12175	update	helper	source_collection	source_collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	unproven
 taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	543	insert	jooq	source_collection	source_collection_id	yes		require
 taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	768	insert	jooq	source_collection	source_collection_id	yes		require
 taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	823	insert	jooq	source_collection	source_collection_id	yes		require
@@ -264,8 +264,8 @@ taxonomy	topics	nexus.topics_doc_count_recount_ins [vectors-069-collection-id-du
 taxonomy	topics	nexus.topics_recount_doc_count [vectors-069-collection-id-dual-write-functions.xml:6026]	6012	update	sql_function	collection	collection_id	yes		sql
 taxonomy	topics	rdr229-fkvalidate-topics [vectors-072-collection-id-fk-twins.xml:217]	214	update	data_move	-	collection_id	yes	sets collection_id	move
 taxonomy	topics	rdr229-stamp-topics [vectors-070-collection-id-stamp-moves.xml:237]	234	update	data_move	-	collection_id	yes	sets collection_id	move
-taxonomy	topics	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11714	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	verb
-taxonomy	topics	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12158	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	unproven
+taxonomy	topics	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11731	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	verb
+taxonomy	topics	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12175	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	unproven
 taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	373	insert	jooq	collection	collection_id	yes		require
 taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	388	update	jooq	-	collection_id	yes		unproven
 taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	400	update	jooq	-	collection_id	yes		unproven
