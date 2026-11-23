@@ -57,17 +57,25 @@ import httpx
 # threads concurrently (the aspect-worker background thread, concurrent MCP
 # tool calls each constructing their own T2Database).
 #
-# STALENESS TRADE-OFF (deliberate, not an accident): this context is cached
-# for the PROCESS lifetime, not re-read per client -- so if the trust store
-# changes ON DISK while the process is running (a renewed CA bundle behind
-# an already-set SSL_CERT_FILE/SSL_CERT_DIR), the cached context will not
-# pick that up until the process restarts, where a per-client context would
-# have. This narrows to the SSL_CERT_FILE/SSL_CERT_DIR override path on
-# cloud https:// (local http:// never uses verify= at all) -- accepted
-# because the MCP server does restart and the alternative is paying this
-# fix's ~0.32s/call cost back on every call.
-_shared_ssl_context: ssl.SSLContext | None = None
-_shared_ssl_context_lock = threading.Lock()
+# KEYED ON THE TRUST ENVIRONMENT, as ``nexus.db.pooled_http._shared_ssl_context``
+# is: the context is rebuilt when ``SSL_CERT_FILE``, ``SSL_CERT_DIR`` or the
+# default-context factory (``ssl._create_default_https_context``, the documented
+# override point) changes, so an operator's change of trust store reaches every
+# client without a restart. A changed trust store on disk behind an unchanged
+# variable is still not re-read (the read-once property is the point). A
+# rebuild that fails keeps the context already in use: a process that was
+# working keeps working; only the first build can fail a caller.
+_slot: tuple[tuple[object, ...], ssl.SSLContext] | None = None
+_failed_key: tuple[object, ...] | None = None
+_lock = threading.Lock()
+
+
+def _trust_key() -> tuple[object, ...]:
+    return (
+        os.environ.get("SSL_CERT_FILE"),
+        os.environ.get("SSL_CERT_DIR"),
+        ssl._create_default_https_context,  # noqa: SLF001 — the documented override point
+    )
 
 
 def get_shared_ssl_context() -> ssl.SSLContext:
@@ -77,29 +85,48 @@ def get_shared_ssl_context() -> ssl.SSLContext:
 
     It is also what keeps a long-lived process working after its install tree
     goes away: the CA bundle (``certifi.where()``, inside the generation the
-    process started from) is read once, here, and never again, so a client
-    rebuilt hours later does not touch the disk. The T1 scratch store rebuilt
-    its client with a fresh context on a 401 heal and, once the bundle was
-    gone, failed for the rest of the process (2026-11-21; it shares this
-    context now).
+    process started from) is read once, here, and never again while the trust
+    environment is unchanged, so a client rebuilt hours later does not touch the
+    disk. The T1 scratch store rebuilt its client with a fresh context on a 401
+    heal and, once the bundle was gone, failed for the rest of the process
+    (2026-11-21; it shares this context now).
 
-    A bundle that cannot be read raises an ``OSError`` of the same type and
-    errno that names the bundle's path: ``ssl`` reports a missing ``cafile``
-    as a bare ``[Errno 2] No such file or directory``."""
-    global _shared_ssl_context
-    if _shared_ssl_context is None:
-        with _shared_ssl_context_lock:
-            if _shared_ssl_context is None:
-                try:
-                    _shared_ssl_context = httpx.create_ssl_context()
-                except OSError as exc:
-                    raise OSError(
-                        exc.errno,
-                        f"{exc.strerror or exc}: the TLS CA bundle could not be read (if it lived in an nx install "
-                        "that was removed while this process ran, restart the session to use the current install)",
-                        ca_bundle_path(),
-                    ) from exc
-    return _shared_ssl_context
+    A first build that fails raises: an ``ssl.SSLError`` (a corrupt bundle)
+    unchanged, with a note naming the bundle; any other ``OSError`` as the same
+    type and errno with the bundle's path, because ``ssl`` reports a missing
+    ``cafile`` as a bare ``[Errno 2] No such file or directory``."""
+    global _slot, _failed_key
+    key = _trust_key()
+    slot = _slot
+    if slot is not None and slot[0] == key:
+        return slot[1]
+    with _lock:
+        slot = _slot
+        if slot is not None and (slot[0] == key or _failed_key == key):
+            return slot[1]  # unchanged, or a change already known not to build: keep what works
+        try:
+            ctx = httpx.create_ssl_context()
+        except OSError as exc:
+            if slot is not None:
+                _failed_key = key
+                return slot[1]
+            raise _named(exc) from exc
+        _slot, _failed_key = (key, ctx), None
+        return ctx
+
+
+def _named(exc: OSError) -> OSError:
+    """*exc* with the CA bundle's path in it (see :func:`get_shared_ssl_context`)."""
+    path = ca_bundle_path()
+    if isinstance(exc, ssl.SSLError):
+        exc.add_note(f"the TLS CA bundle at {path} could not be loaded")
+        return exc
+    return OSError(
+        exc.errno,
+        f"{exc.strerror or exc}: the TLS CA bundle could not be read (if it lived in an nx install "
+        "that was removed while this process ran, restart the session to use the current install)",
+        path,
+    )
 
 
 def ca_bundle_path() -> str:

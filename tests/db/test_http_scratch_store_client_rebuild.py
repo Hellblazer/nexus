@@ -23,6 +23,7 @@ next call; and a CA-bundle failure names the path.
 
 from __future__ import annotations
 
+import os
 import shutil
 
 import certifi
@@ -61,7 +62,7 @@ def ca_file(tmp_path, monkeypatch):
     shutil.copyfile(certifi.where(), path)
     monkeypatch.setenv("SSL_CERT_FILE", str(path))
     monkeypatch.delenv("SSL_CERT_DIR", raising=False)
-    monkeypatch.setattr(shared_ssl, "_shared_ssl_context", None)
+    monkeypatch.setattr(shared_ssl, "_slot", None)
     return path
 
 
@@ -107,7 +108,7 @@ def test_failed_rebuild_leaves_the_old_client_open(store, ca_file, monkeypatch):
     build the new client first, close the old one only after."""
     old = store._client
     ca_file.unlink()
-    monkeypatch.setattr(shared_ssl, "_shared_ssl_context", None)  # force a fresh read of the missing file
+    monkeypatch.setattr(shared_ssl, "_slot", None)  # force a fresh read of the missing file
 
     with pytest.raises(OSError) as excinfo:
         store._adopt_session_token("another-token", SESSION)
@@ -129,28 +130,146 @@ def test_closed_client_is_rebuilt_on_the_next_call(store):
     assert not store._client.is_closed
 
 
-def test_a_client_swapped_mid_send_retries_on_the_replacement(store, monkeypatch):
+def test_a_send_on_a_client_a_concurrent_heal_just_replaced_completes_on_it(store, monkeypatch):
     """Folio, 2026-11-23T07:26:11Z: one scratch call's 401 heal swapped (and closed) the client while a
     concurrent call was sending on the old one, and that call failed once with 'client has been closed'.
-    The send now retries once on the replacement."""
-    real_live_client = store._live_client
+    A replaced client is now parked, not closed, so the send in flight on it finishes there."""
     stale = store._client
-    calls = {"n": 0}
 
     def swapped_after_the_check():
-        calls["n"] += 1
-        if calls["n"] == 1:
-            store._replace_client()  # the concurrent heal lands between the check and the send
-            return stale
-        return real_live_client()
+        store._replace_client()  # the concurrent heal lands between the check and the send
+        return stale
 
     monkeypatch.setattr(store, "_live_client", swapped_after_the_check)
 
     id_ = store.put("sent during a concurrent heal")
 
-    assert stale.is_closed
-    assert calls["n"] == 2
+    assert not stale.is_closed, "the heal closed a client a request was still using"
+    assert store._client is not stale
+    monkeypatch.undo()
     assert store.get(id_) is not None
+
+
+def test_a_client_closed_mid_send_retries_once_on_the_replacement(store, monkeypatch):
+    """If the client was closed anyway (an expired park, an owner close of a pool, a failed past rebuild)
+    between the check and the send, httpx refuses before any byte goes out and the send retries once."""
+    real_live_client = store._live_client
+    stale = store._client
+    calls = {"n": 0}
+
+    def closed_after_the_check():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            store._replace_client()
+            stale.close()
+            return stale
+        return real_live_client()
+
+    monkeypatch.setattr(store, "_live_client", closed_after_the_check)
+
+    id_ = store.put("sent on a client closed under it")
+
+    assert calls["n"] == 2
+    monkeypatch.undo()
+    assert store.get(id_) is not None
+
+
+def test_a_stream_error_is_never_retried(store, monkeypatch):
+    """httpx.StreamError subclasses RuntimeError but is raised after the request went out: retrying it
+    would replay a put. It propagates."""
+    client = store._client
+    sends = {"n": 0}
+
+    def post(*_a, **_k):
+        sends["n"] += 1
+        client.close()
+        raise httpx.StreamClosed()
+
+    monkeypatch.setattr(client, "post", post)
+
+    with pytest.raises(httpx.StreamError):
+        store.put("streamed once")
+
+    assert sends["n"] == 1
+
+
+def test_a_replaced_client_is_closed_after_the_request_timeout(store, monkeypatch):
+    from nexus.db import http_scratch_store as hss  # noqa: PLC0415 — test-local
+
+    first = store._client
+    store._replace_client()
+    assert not first.is_closed, "parked, still open for requests in flight"
+
+    monkeypatch.setattr(hss, "_PARKED_CLIENT_GRACE_S", 0.0)
+    store.put("the next send sweeps the park")
+
+    assert first.is_closed
+    assert store._parked == []
+
+
+def test_close_closes_parked_clients(store):
+    first = store._client
+    store._replace_client()
+
+    store.close()
+
+    assert first.is_closed and store._client.is_closed
+
+
+def test_a_failed_token_adoption_leaves_the_old_token_in_place(store, ca_file, monkeypatch):
+    """The heal sets the token, the baked header and the env only once the new client is built: a build
+    that fails leaves the client in place agreeing with the store's state."""
+    before_token = store._session_token
+    before_header = store._headers.get("X-Nexus-T1-Session")
+    monkeypatch.setenv("NX_T1_SESSION", "the-env-token")
+    ca_file.unlink()
+    monkeypatch.setattr(shared_ssl, "_slot", None)
+
+    with pytest.raises(OSError):
+        store._adopt_session_token("fresh-token", SESSION)
+
+    assert store._session_token == before_token
+    assert store._headers.get("X-Nexus-T1-Session") == before_header
+    assert os.environ["NX_T1_SESSION"] == "the-env-token"
+
+
+def test_a_failed_rebind_leaves_the_old_endpoint_in_place(store, ca_file, monkeypatch):
+    before = store._base_url
+    monkeypatch.setattr(
+        "nexus.db.service_endpoint.recover_endpoint_from_lease",
+        lambda *_a, **_k: ("http://127.0.0.1:1", "new-bearer"),
+    )
+    ca_file.unlink()
+    monkeypatch.setattr(shared_ssl, "_slot", None)
+
+    with pytest.raises(OSError):
+        store._rebind_from_lease()
+
+    assert store._base_url == before
+    assert store._headers["Authorization"] == f"Bearer {TOKEN}"
+
+
+def test_a_rebind_another_thread_already_made_builds_no_client(store, monkeypatch):
+    """Two concurrent connect failures: the second, finding the endpoint already moved while it waited on
+    the lease, retries on that client instead of building (and leaking) another."""
+    built = {"n": 0}
+    real_build = store._build_client
+
+    def counting_build():
+        built["n"] += 1
+        return real_build()
+
+    def lease_wait_during_which_another_thread_rebinds(*_a, **_k):
+        store._base_url = "http://127.0.0.1:2"  # the other thread's rebind
+        return ("http://127.0.0.1:2", "")
+
+    monkeypatch.setattr(store, "_build_client", counting_build)
+    monkeypatch.setattr(
+        "nexus.db.service_endpoint.recover_endpoint_from_lease", lease_wait_during_which_another_thread_rebinds,
+    )
+
+    assert store._rebind_from_lease() is True
+    assert built["n"] == 0
 
 
 def test_owner_close_is_not_undone(store):
@@ -185,3 +304,35 @@ def test_token_store_builds_without_rereading_the_ca_bundle(fake_server, ca_file
 
     with HttpTokenStore(base_url=fake_server, _token=TOKEN) as later:
         assert isinstance(later._client, httpx.Client)
+
+
+# ── the shared SSL context follows the trust environment ─────────────────────
+
+def test_the_shared_context_is_rebuilt_when_ssl_cert_file_changes(ca_file, tmp_path, monkeypatch):
+    first = shared_ssl.get_shared_ssl_context()
+    other = tmp_path / "other.pem"
+    shutil.copyfile(certifi.where(), other)
+    monkeypatch.setenv("SSL_CERT_FILE", str(other))
+
+    second = shared_ssl.get_shared_ssl_context()
+
+    assert second is not first
+    assert shared_ssl.get_shared_ssl_context() is second, "cached again under the new key"
+
+
+def test_a_rebuild_that_fails_keeps_the_context_in_use(ca_file, tmp_path, monkeypatch):
+    working = shared_ssl.get_shared_ssl_context()
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "missing.pem"))
+
+    assert shared_ssl.get_shared_ssl_context() is working
+
+
+def test_a_corrupt_bundle_stays_an_ssl_error_and_names_the_path(ca_file):
+    import ssl  # noqa: PLC0415 — test-local
+
+    ca_file.write_text("-----BEGIN CERTIFICATE-----\nnot a certificate\n-----END CERTIFICATE-----\n")
+
+    with pytest.raises(ssl.SSLError) as excinfo:
+        shared_ssl.get_shared_ssl_context()
+
+    assert any(str(ca_file) in note for note in getattr(excinfo.value, "__notes__", [])), excinfo.value

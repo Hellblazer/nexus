@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 import time
 from collections.abc import Callable
 from typing import Any, TYPE_CHECKING
@@ -166,6 +167,11 @@ def is_resume_pointer(tags: str, content: str) -> bool:
 # ── HttpScratchStore ───────────────────────────────────────────────────────────
 
 
+#: How long a replaced client stays open for requests already in flight on it: the request timeout
+#: (``_build_client``'s 30 s) plus a margin. See :meth:`HttpScratchStore._replace_client`.
+_PARKED_CLIENT_GRACE_S: float = 35.0
+
+
 class HttpScratchStore:
     """T1Database drop-in that delegates to the RDR-152 Java HTTP service.
 
@@ -281,8 +287,6 @@ class HttpScratchStore:
         # the sibling T2 singleton already carries the same guard (its
         # slot's resolution lock, ``mcp_infra._default_t2_slot``,
         # nexus-w1ip) for exactly this close()-under-a-live-caller class.
-        import threading  # noqa: PLC0415 — stdlib, deferred; ctor-only
-
         self._refresh_lock = threading.Lock()
         # nexus-r0d37 defect 2: set when a data-token re-mint healed the
         # bearer and the retry still 401'd; cleared by the next non-401
@@ -318,6 +322,7 @@ class HttpScratchStore:
         a client the store lost, never one its owner shut."""
         self._closed_by_owner = True
         self._client.close()
+        self._close_parked(everything=True)
         _log.debug("http_scratch_store.closed")
 
     def _apply_data_token_override(self) -> None:
@@ -486,8 +491,11 @@ class HttpScratchStore:
         token = manager.bearer_for(self._base_url, self._tenant)
         if token is None:
             return False
-        self._headers["Authorization"] = f"Bearer {token}"
-        self._replace_client()
+
+        def set_bearer() -> None:
+            self._headers["Authorization"] = f"Bearer {token}"
+
+        self._rebuild_with(set_bearer)
         _log.warning("http_scratch_store.data_token_remint_on_401")
         return True
 
@@ -525,22 +533,36 @@ class HttpScratchStore:
             recover_endpoint_from_lease,
         )
 
+        failed_url = self._base_url
         recovered = recover_endpoint_from_lease(
-            self._base_url, wait_budget_s=DEFAULT_LEASE_WAIT_BUDGET_S
+            failed_url, wait_budget_s=DEFAULT_LEASE_WAIT_BUDGET_S
         )
         if recovered is None:
             return False
         new_url, new_token = recovered
-        _log.warning("http_scratch_store.rebind", old=log_endpoint(self._base_url), new=log_endpoint(new_url))
-        self._base_url = new_url
-        if new_token:
-            self._headers["Authorization"] = f"Bearer {new_token}"
-        # nexus-wrwb7: re-apply AFTER the static-token half above -- when a
-        # mint_token credential is configured, the data token takes
-        # precedence over whatever the lease republished, exactly as at
-        # construction.
-        self._apply_data_token_override()
-        self._replace_client()
+
+        def rebind() -> None:
+            self._base_url = new_url
+            if new_token:
+                self._headers["Authorization"] = f"Bearer {new_token}"
+            # nexus-wrwb7: re-apply AFTER the static-token half above -- when a
+            # mint_token credential is configured, the data token takes
+            # precedence over whatever the lease republished, exactly as at
+            # construction.
+            self._apply_data_token_override()
+
+        # Under the lock like the other heal paths: two concurrent rebinds would
+        # each swap, and one fresh client would leak. The lease wait above stays
+        # outside it, so a rebind never holds up the 401 heals for 12 s.
+        lock = getattr(self, "_refresh_lock", None)
+        if lock is None:
+            self._rebuild_with(rebind)
+        else:
+            with lock:
+                if self._base_url != failed_url:
+                    return True  # another thread already rebound; retry on its client
+                self._rebuild_with(rebind)
+        _log.warning("http_scratch_store.rebind", old=log_endpoint(failed_url), new=log_endpoint(new_url))
         return True
 
     def _refresh_session_token_from_lease(self, sent_token: str) -> bool:
@@ -604,8 +626,12 @@ class HttpScratchStore:
         session token."""
         if not getattr(self, "_send_session_token", True):
             return
-        self._session_token = fresh
-        self._headers[_HEADER_T1_SESSION] = fresh
+
+        def adopt() -> None:
+            self._session_token = fresh
+            self._headers[_HEADER_T1_SESSION] = fresh
+
+        self._rebuild_with(adopt)
         # Subprocess children resolve NX_T1_SESSION at spawn — hand them
         # the live token, not the stranded one. Review M1: export the id
         # alongside when absent, so a later ctor's fallback chain
@@ -615,7 +641,6 @@ class HttpScratchStore:
         if self._export_adopted_token:
             os.environ[_SESSION_ENV] = fresh
             os.environ.setdefault(_SESSION_ID_ENV, session_id)
-        self._replace_client()
 
     def _recover_borrowed_session(self, sent_token: str) -> bool:
         """nexus-k9sec: the token this store borrowed is dead (HTTP 401 after
@@ -718,16 +743,54 @@ class HttpScratchStore:
         )
 
     def _replace_client(self) -> None:
-        """Swap in a freshly built client: build FIRST, close the old one after. Closing first stranded the
-        store on a closed client whenever the build raised (2026-11-21), and the store is a process-wide
-        singleton in the MCP server, so every later call failed until a restart. A failed build now raises
-        with the old client still open."""
+        """Swap in a freshly built client: build FIRST. Closing first stranded the store on a closed client
+        whenever the build raised (2026-11-21), and the store is a process-wide singleton in the MCP server,
+        so every later call failed until a restart. A failed build now raises with the old client in place.
+
+        The old client is PARKED, not closed: another thread may have a request in flight on it, and closing
+        its pool under that request fails it mid-read. It is closed once it is older than the request timeout
+        (at a later swap or send, see :meth:`_close_parked`) or when the owner calls :meth:`close`."""
         fresh = self._build_client()
         old, self._client = self._client, fresh
+        self._close_parked()
+        lock = self._parked_guard()
+        with lock:
+            self._parked.append((time.monotonic(), old))
+
+    def _parked_guard(self) -> Any:
+        """The lock over ``self._parked`` (created lazily: a store built with ``__new__`` has neither)."""
+        if getattr(self, "_parked_lock", None) is None:
+            self._parked_lock = threading.Lock()
+            self._parked: list[tuple[float, httpx.Client]] = []
+        return self._parked_lock
+
+    def _close_parked(self, *, everything: bool = False) -> None:
+        """Close the replaced clients no request can still be using: those parked longer than the request
+        timeout, or all of them when the owner closes the store."""
+        lock = self._parked_guard()
+        now = time.monotonic()
+        with lock:
+            due = [c for at, c in self._parked if everything or now - at >= _PARKED_CLIENT_GRACE_S]
+            self._parked = [(at, c) for at, c in self._parked if c not in due]
+        for client in due:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001 — closing a replaced pool is best effort
+                pass
+
+    def _rebuild_with(self, mutate: Callable[[], None]) -> None:
+        """Apply *mutate* (a new token, header or base URL) and swap in a client built from the result. If
+        *mutate* or the build raises, the store's token, headers and base URL are put back, so the client
+        still in place never disagrees with the state the next heal reads."""
+        saved = (self._base_url, dict(self._headers), getattr(self, "_session_token", None))
         try:
-            old.close()
-        except Exception:  # noqa: BLE001 — closing the replaced pool is best effort; the new one is in place
-            pass
+            mutate()
+            self._replace_client()
+        except BaseException:
+            self._base_url, self._headers = saved[0], saved[1]
+            if saved[2] is not None:
+                self._session_token = saved[2]
+            raise
 
     def _live_client(self) -> httpx.Client:
         """The client to send on: rebuilt once when it was closed under the store (anything but the owner's
@@ -748,9 +811,12 @@ class HttpScratchStore:
     def _send(self, path: str, *, json: dict[str, Any], headers: dict[str, str]) -> httpx.Response:
         """POST on the live client. A client closed between the check and the send (a concurrent heal swapped
         it) gets one retry on the replacement; httpx raises a plain RuntimeError for a closed client."""
+        self._close_parked()
         client = self._live_client()
         try:
             return client.post(path, json=json, headers=headers)
+        except httpx.StreamError:
+            raise  # a RuntimeError subclass raised AFTER bytes went out: never replay the request
         except RuntimeError:
             if getattr(client, "is_closed", False) is not True or getattr(self, "_closed_by_owner", False):
                 raise
