@@ -330,6 +330,7 @@ public final class AspectQueueDrain {
         List<Row> out = new ArrayList<>();
         // rows from gate 3 that name no collection by an id (no home, no queue collection_id): their stored name must resolve to a LIVE registry row
         Map<Long, String> nameOnly = new java.util.LinkedHashMap<>();
+        int danglingSkipped = 0;
         // the document's home: its own name column before gate 3; the registry's current label of its id after (NULL for none)
         Field<String> homeOf = k.label(tenant, d.PHYSICAL_COLLECTION, d.PHYSICAL_COLLECTION_ID).as("home");
         // the retired queue's own collection as a fallback: from gate 3 the registry's current label of the queue row's
@@ -338,9 +339,11 @@ public final class AspectQueueDrain {
         boolean queueHasId = k.byId() && queueHasCollectionId(ctx);
         // the queue row's own collection id when the table kept the column (selected so the row can say it names no collection by id)
         Field<Long> qCid = queueHasId ? qCollectionId : DSL.castNull(Long.class).as("q_cid");
+        // the registry's label of the queue row's own id, NULL when no registry row holds that id (a dangling id: the row is skipped)
+        Field<String> qIdLabel = queueHasId ? k.label(tenant, qCollection, qCollectionId).as("queue_id_label") : DSL.castNull(String.class).as("queue_id_label");
         Field<String> queueLabel = queueHasId ? DSL.coalesce(k.label(tenant, qCollection, qCollectionId), qCollection).as("queue_label") : qCollection;
         for (Record r : ctx.select(qId, queueLabel, qSourcePath, qDocId, qHash, qStatus, qNext,
-                    k.byId() ? homeOf : d.PHYSICAL_COLLECTION, qCid)
+                    k.byId() ? homeOf : d.PHYSICAL_COLLECTION, qCid, qIdLabel)
                 .from(q)
                 .leftJoin(d).on(d.TENANT_ID.eq(qTenant).and(d.TUMBLER.eq(qDocId)))
                 .where(qTenant.eq(tenant).and(qId.gt(afterId)))
@@ -360,11 +363,21 @@ public final class AspectQueueDrain {
             String home = r.get(k.byId() ? homeOf : d.PHYSICAL_COLLECTION);
             String queueName = r.get(queueLabel);
             String collection = home == null || home.isEmpty() ? queueName : home;
+            if (k.byId() && (home == null || home.isEmpty()) && r.get(qCid) != null && r.get(qIdLabel) == null) {
+                // the queue row names a collection by an id no registry row holds: skipped like the no-live-row case, never dispatched
+                // under its stored name (linda 2026-11-23)
+                danglingSkipped++;
+                continue;
+            }
             if (k.byId() && (home == null || home.isEmpty()) && r.get(qCid) == null) {
                 nameOnly.put(r.get(qId), queueName);
             }
             out.add(new Row(r.get(qId), collection, r.get(qSourcePath), nz(r.get(qDocId)),
                 nz(r.get(qHash)), r.get(qStatus), delay));
+        }
+        if (danglingSkipped > 0) {
+            SKIPPED_NO_LIVE_COLLECTION.addAndGet(danglingSkipped);
+            log.warn("event=aspect_queue_rows_skipped tenant={} rows={} reason=dangling_collection_id", tenant, danglingSkipped);
         }
         return nameOnly.isEmpty() ? out : dispatchable(ctx, tenant, out, nameOnly);
     }
@@ -372,7 +385,7 @@ public final class AspectQueueDrain {
     /** Queued rows from gate 3 whose name no live registry row holds, skipped (left in the table) and counted, never dispatched. */
     private static final java.util.concurrent.atomic.AtomicLong SKIPPED_NO_LIVE_COLLECTION = new java.util.concurrent.atomic.AtomicLong();
 
-    /** The number of queued rows skipped so far because their stored name resolves to no live registry row (for tests and the log). */
+    /** The number of queued rows skipped so far because their stored name resolves to no live registry row, or their collection id names no registry row (for tests and the log). */
     public static long skippedNoLiveCollection() {
         return SKIPPED_NO_LIVE_COLLECTION.get();
     }

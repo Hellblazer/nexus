@@ -328,6 +328,49 @@ class AspectQueueDrainIntegrationTest {
         }
     }
 
+    /**
+     * RDR-229 P3.5c (linda 2026-11-23, ruling a): a queued row whose collection_id names no registry row (dangling) is skipped with a WARN and
+     * a count, the same as the no-live-row case: it is not dispatched under its stored name, though a live collection bears that name.
+     */
+    @Test
+    void aQueuedRowWhoseCollectionIdNamesNoRegistryRowIsSkippedWithAWarn_notDispatchedUnderItsStoredName() throws Exception {
+        try (Fixture fx = new Fixture(ctx -> {
+            PgContainerHelper.insertCollection(ctx, TENANT_A, COLL_A);
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "a.dangling");
+            ctx.set(DSL.name("session_replication_role"), DSL.inline("replica")).execute();
+            try {
+                ctx.insertInto(QUEUE, DSL.field(DSL.name("tenant_id")), DSL.field(DSL.name("collection")),
+                        DSL.field(DSL.name("collection_id")), DSL.field(DSL.name("source_path")), DSL.field(DSL.name("doc_id")),
+                        DSL.field(DSL.name("status")), DSL.field(DSL.name("enqueued_at")), DSL.field(DSL.name("content_hash")))
+                    .values(DSL.val(TENANT_A), DSL.val(COLL_A), DSL.val(987654321L), DSL.val("/a/dangling.md"),
+                        DSL.val("a.dangling"), DSL.val("pending"), DSL.val(OffsetDateTime.now()), DSL.val("hd"))
+                    .execute();
+            } finally {
+                ctx.set(DSL.name("session_replication_role"), DSL.inline("origin")).execute();
+            }
+        })) {
+            long before = AspectQueueDrain.skippedNoLiveCollection();
+            var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(AspectQueueDrain.class);
+            var appender = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+            appender.start();
+            logger.addAppender(appender);
+            AspectQueueDrain latched = new AspectQueueDrain(fx.scope, fx.tuples,
+                new AspectQueueDrain.AdminCensus(new AdminConnection(fx.pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS)),
+                () -> List.of(TENANT_A, TENANT_B), () -> true);
+            try {
+                latched.run();
+            } finally {
+                logger.detachAppender(appender);
+            }
+
+            assertThat(tasks(fx)).as("a dangling collection id is no collection: nothing is dispatched").doesNotContainKey("a.dangling");
+            assertThat(AspectQueueDrain.skippedNoLiveCollection()).as("counted").isGreaterThanOrEqualTo(before + 1);
+            assertThat(appender.list).as("and a WARN names the reason").anyMatch(e ->
+                e.getLevel() == ch.qos.logback.classic.Level.WARN && e.getFormattedMessage().contains("reason=dangling_collection_id"));
+            assertThat((int) fx.su(ctx -> ctx.fetchCount(QUEUE, DSL.field(DSL.name("doc_id")).eq("a.dangling")))).as("and the row stays").isEqualTo(1);
+        }
+    }
+
     // ── rows that cannot move ───────────────────────────────────────────────
 
     @Test
