@@ -64,7 +64,7 @@ class Rdr229P37IdsStableTest {
 
         engine.stopWorker();   // gate 3 latches, the drop move registers but cannot run
         engine.gate3(true);
-        assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(30), () -> engine.completionCheck().gate3Latched())).as("gate 3 latched").isTrue();
+        assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(30), () -> engine.completion().gate3Latched())).as("gate 3 latched [" + engine.completion().gate3Why() + "]").isTrue();
         assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(30), () -> engine.moveRows(Rdr229RenameEngine.DROP_LABEL) == 1)).as("the move registered").isTrue();
         engine.completion();
         assertThat(engine.readiness().orElseThrow()).isEqualTo(Missing.NAME_KEY_DROP_MOVE);
