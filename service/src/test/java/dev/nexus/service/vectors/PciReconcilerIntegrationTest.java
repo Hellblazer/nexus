@@ -199,6 +199,22 @@ class PciReconcilerIntegrationTest {
         return logs().stream().filter(l -> l.contains(needle)).count();
     }
 
+    /**
+     * The events {@code events} holds that this test's own thread logged. reconcileOnce runs on the caller's thread; a reconciler another
+     * test started runs its passes on its scheduler thread, and stop() does not wait for a pass in flight
+     * ({@link #theScheduleRunsPassesOnAThreadOfItsOwn_stopEndsItWithoutWaiting}), so that pass's lines can land in a later test's
+     * appender (row 17: a second event=pci_reconcile_pass, 1 run in 4 on chas). A count of this test's pass reads only these.
+     */
+    static List<ILoggingEvent> onThisThread(List<ILoggingEvent> events) {
+        String me = Thread.currentThread().getName();
+        return events.stream().filter(e -> me.equals(e.getThreadName())).toList();
+    }
+
+    /** {@link #logged} for the lines this test's own thread logged. */
+    long loggedHere(String needle) {
+        return onThisThread(appender.list).stream().filter(e -> e.getFormattedMessage().contains(needle)).count();
+    }
+
     // -- fixtures ----------------------------------------------------------------------------------------
 
     /**
@@ -768,7 +784,7 @@ class PciReconcilerIntegrationTest {
 
         r.reconcileOnce();
 
-        var events = appender.list.subList(mark, appender.list.size());
+        var events = onThisThread(appender.list.subList(mark, appender.list.size()));
         var leafLines = events.stream().filter(e -> e.getFormattedMessage().contains("event=pci_count_done ")).toList();
         assertThat(leafLines).as("one per processed leaf").isNotEmpty()
             .allSatisfy(e -> assertThat(e.getLevel()).as("per-leaf lines stay DEBUG").isEqualTo(Level.DEBUG));
@@ -1290,11 +1306,34 @@ class PciReconcilerIntegrationTest {
             && l.contains("index=" + ghostIndex));
         assertThat(logs()).anyMatch(l -> l.contains("event=pci_index_drop_stale") && l.contains("index=" + ghostIndex));
         assertThat(logged("event=pci_index_dropped")).isZero();
-        assertThat(logged("event=pci_reconcile_pass ")).isEqualTo(1);
-        assertThat(logs()).anyMatch(l -> l.contains("event=pci_reconcile_pass ") && l.contains("drops=0"));
+        assertThat(loggedHere("event=pci_reconcile_pass ")).as("this test's one pass (a pass another test's scheduler had in flight is not it)")
+            .isEqualTo(1);
+        assertThat(onThisThread(appender.list)).anyMatch(e -> e.getFormattedMessage().contains("event=pci_reconcile_pass ")
+            && e.getFormattedMessage().contains("drops=0"));
         assertThat(sweepReads.get()).as("a stale drop refreshes nothing").isZero();
         assertThat(leaf(tenant).indexes()).as("the now-valid index is still there")
             .anyMatch(i -> i.name().equals(ghostIndex) && i.valid());
+    }
+
+    /**
+     * Row 17: the stray line the flake was. A pass line another thread logs while a test runs (a scheduler whose pass outlived its test's
+     * stop) is in the appender, so the class-wide count sees two where the test ran one; the count of this thread's lines sees its own.
+     */
+    @Test
+    void aPassLineAnotherThreadLogsInTheWindow_isNotCountedAsThisTestsPass() throws Exception {
+        String tenant = newTenant("strayline");
+        String ghostIndex = invalidGhostLeftover(tenant);
+        String schema = leaf(tenant).schema();
+        Thread stray = new Thread(() -> LoggerFactory.getLogger(PciReconciler.class)
+            .info("event=pci_reconcile_pass ran_to_end=true leaves=0 processed_leaves=0 drops=0 builds=0 (a stray pass)"),
+            PciReconciler.THREAD_NAME);
+        stray.start();
+        stray.join();
+
+        staleLeftoverPass(tenant, ghostIndex, new AtomicInteger(), su -> PgContainerHelper.markIndexValid(su, schema, ghostIndex));
+
+        assertThat(logged("event=pci_reconcile_pass ")).as("non-vacuity: the appender holds the stray line and this test's").isEqualTo(2);
+        assertThat(loggedHere("event=pci_reconcile_pass ")).as("this test's own pass only").isEqualTo(1);
     }
 
     @Test
