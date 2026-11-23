@@ -197,8 +197,9 @@ class CollectionDeleteFenceTest {
             throw new AssertionError("the delete did not finish: a deadlock or a lost wake-up", e);
         }
 
-        assertThat(su(ctx -> ctx.fetchExists(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID.eq(T)
-            .and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(siblingId))))).as("the renamed sibling's row was not touched").isTrue();
+        boolean siblingKept = su(ctx -> ctx.fetchExists(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID.eq(T)
+            .and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(siblingId))));
+        assertThat(siblingKept).as("the renamed sibling's row was not touched").isTrue();
         assertThat(registered(origin)).isFalse();
     }
 }
