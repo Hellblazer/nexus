@@ -23,7 +23,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * the database has the change, and that no cache entry survives.
  *
  * <p>The sites are the repository's: the upsert, the supersede, the rename, the delete and the ghost sweep. The one-row rename's
- * evict is {@code RenameGuard#committedOneRow}'s, and the tenant import's is {@code TenantImportUnconfirmedCommitTest}'s.
+ * lost commit is {@code Rdr229P37OneRowRenameLostCommitTest}'s, and the tenant import's is {@code TenantImportUnconfirmedCommitTest}'s.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class RegistryEvictOnLostCommitTest {

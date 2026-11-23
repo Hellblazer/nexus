@@ -203,13 +203,18 @@ public final class RenameGuard {
     }
 
     /**
-     * After the commit of a one-row catalog rename: both labels leave the registry cache (the old label's row is retired or gone and the
-     * new one's attributes may have changed, so a stale entry would let a later write pass the registration check and strand rows), and
-     * the outcome P3.7's body answered is the answer. Nothing is refilled: a miss reads the registry on the next use.
+     * After a one-row catalog rename's transaction (it returned, or its COMMIT reached the client as an exception: PostgreSQL may have applied it, the
+     * client saw an error): both labels leave the registry cache. The old label's row is renamed and the new one's attributes may have changed, so a
+     * stale entry would let a later write pass the registration check and strand rows. Nothing is refilled: a miss reads the registry on the next use.
+     * The caller runs this in a {@code finally} (row 15 addendum), so a thrown commit evicts too; evicting is always safe.
      */
-    RenameOutcome committedOneRow(String tenant, String oldLabel, String newLabel, RenameOutcome outcome) {
+    void evictOneRowLabels(String tenant, String oldLabel, String newLabel) {
         CollectionRegistry.evict(tenant, oldLabel);
         CollectionRegistry.evict(tenant, newLabel);
+    }
+
+    /** The outcome P3.7's body answered for a one-row catalog rename that committed: it is the answer (the labels were evicted by {@link #evictOneRowLabels}). */
+    RenameOutcome committedOneRow(String tenant, String oldLabel, String newLabel, RenameOutcome outcome) {
         return outcome;
     }
 

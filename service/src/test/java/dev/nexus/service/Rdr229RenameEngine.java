@@ -337,6 +337,11 @@ final class Rdr229RenameEngine implements AutoCloseable {
         return new dev.nexus.service.db.RenameGuard(readiness, new dev.nexus.service.db.CollectionOneRowRename());
     }
 
+    /** The engine's service-role connection pool, for a test that wraps it ({@code CommitThenThrowDataSource}) under its own repository. */
+    javax.sql.DataSource dataSource() {
+        return ds;
+    }
+
     /** The completion check itself (its durable latch accessor is what the tests read at construction, before any sample). */
     CompletionBootWork completionCheck() {
         return check;
