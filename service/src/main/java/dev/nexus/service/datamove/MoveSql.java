@@ -151,8 +151,14 @@ final class MoveSql {
 
     /** Runs {@code on_complete} on {@code connection}, in whatever transaction the caller has open. */
     static void runOnComplete(Connection connection, String onComplete) throws SQLException {
+        runOnComplete(connection, onComplete, st -> { });
+    }
+
+    /** As above; {@code inFlight} gets the statement before it runs, so another thread can cancel it (the engine is stopping). */
+    static void runOnComplete(Connection connection, String onComplete, java.util.function.Consumer<Statement> inFlight) throws SQLException {
         String sql = onComplete;
         try (Statement st = connection.createStatement()) {
+            inFlight.accept(st);
             st.execute(sql);
         }
     }
