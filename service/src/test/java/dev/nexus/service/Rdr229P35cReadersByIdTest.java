@@ -285,6 +285,30 @@ class Rdr229P35cReadersByIdTest extends AtomicWriteTestBase {
         assertThat(byId.residue(TENANT, old).aspects()).isZero();
     }
 
+    // ---- P3.7 census (linda 2026-11-23): after a simulated one-row rename, a by-key write under the NEW label touches exactly that collection ----
+
+    @Test
+    void setSalientSentencesByKey_underTheNewLabel_touchesExactlyTheRenamedCollectionsRow() throws Exception {
+        var latched = new AspectRepository(tenantScope, LATCHED);
+        var byName = new AspectRepository(tenantScope);
+        String old = register("sk"), other = register("sko");
+        String docA = "p35c.sk.a." + seq.incrementAndGet(), docB = "p35c.sk.b." + seq.incrementAndGet();
+        registerDoc(docA, old);
+        registerDoc(docB, other);
+        byName.upsertAspect(TENANT, aspect(old, "same.pdf", docA));
+        byName.upsertAspect(TENANT, aspect(other, "same.pdf", docB));   // the same source path under another collection
+        String neu = renameRegistryRow(old);
+
+        assertThat(latched.setSalientSentencesByKey(TENANT, neu, "same.pdf", "[\"only-the-renamed\"]"))
+            .as("one row: the renamed collection's, found by id under the new label").isEqualTo(1);
+
+        assertThat(byName.getSalientSentences(TENANT, docA)).as("the renamed collection's row took it").contains("only-the-renamed");
+        assertThat(byName.getSalientSentences(TENANT, docB)).as("the other collection's row of the same source path is untouched")
+            .satisfiesAnyOf(v -> assertThat(v).isNull(), v -> assertThat(v).doesNotContain("only-the-renamed"));
+        assertThat(latched.setSalientSentencesByKey(TENANT, old, "same.pdf", "[\"x\"]"))
+            .as("the old label is no collection from the latch: it touches nothing").isZero();
+    }
+
     // ---- a NULL id is no collection (linda 2026-11-20) ------------------------------------------------------------
 
     @Test
