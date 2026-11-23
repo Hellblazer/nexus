@@ -235,9 +235,13 @@ abstract class Rdr229SwapMovesFixtures extends DataMoveIntegrationBase {
         return moves(LABEL_F.eq(Rdr229ChunksFk.ADOPT_LABEL));
     }
 
-    /** The relation name of a {@code schema.name} the probes return. */
+    /**
+     * The relation name of a {@code schema.name} the probes return, as {@code regclass} prints it: without the schema, and
+     * unquoted when the name needed quotes (a mixed-case or punctuated leaf).
+     */
     static String bare(String qualified) {
-        return qualified.substring(qualified.indexOf('.') + 1);
+        String n = qualified.startsWith("nexus.") ? qualified.substring("nexus.".length()) : qualified;
+        return n.startsWith("\"") && n.endsWith("\"") ? n.substring(1, n.length() - 1).replace("\"\"", "\"") : n;
     }
 
     /** The relation names of the leaves of nexus.chunks, sorted. */
