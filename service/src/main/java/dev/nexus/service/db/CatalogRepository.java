@@ -10480,7 +10480,7 @@ public final class CatalogRepository {
             // go with it, in this transaction. FIRST statement of the purge: the tuple row locks come before the
             // document_aspects delete at step 5 (the claim-fenced aspect write's own order). Deliberately not in
             // `counts`: the response's key set is a wire contract and the purge reports what it always did.
-            if (!scope.matchesNothing()) AspectTaskRefs.deleteNaming(ctx, tenant, name);
+            if (!scope.matchesNothing()) { AspectTaskRefs.deleteNaming(ctx, tenant, name); CollectionDeleteFence.lockForDelete(ctx, tenant, name, scope, keepQuarantine, onlyId); }
 
             Map<String, Integer> counts = new LinkedHashMap<>();
             List<String> unregisteredSiblings = new ArrayList<>();

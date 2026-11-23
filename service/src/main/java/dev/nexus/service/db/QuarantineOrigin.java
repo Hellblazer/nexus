@@ -347,4 +347,9 @@ public final class QuarantineOrigin {
         }
         return hex.size();
     }
+
+    /** The quarantine collections that hold at least one row of {@code origin}, by name: the siblings {@link #deleteRowsOf} reaches. */
+    static List<String> siblingsHolding(DSLContext ctx, String tenant, String origin) {
+        return siblingsHolding(ctx, rowsOf(tenant, origin, null));
+    }
 }
