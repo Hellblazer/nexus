@@ -831,6 +831,7 @@ final class TenantKeyedStateTables {
         notKeyed.put("PciPlanCheck.lastSampled", PCI_OFF);
         notKeyed.put("PciCatalog.Snapshot.valid", PCI_OFF);
         notKeyed.put("PciCatalog.Snapshot.anchors", PCI_OFF);
+        notKeyed.put("PciCatalog.Snapshot.idAnchors", PCI_OFF);   // the same, for the id-predicate indexes, keyed by (model, tenant, id)
         notKeyed.put("PciCatalog.LeafBuilder.tenant", PCI_OFF);
         // nexus-4lnn1.1.4 (RDR-230): the recall canary's schedule and results, per engine in memory, lost on restart;
         // keyed by index name (which carries the tenant's hash) and written only by the builder-lock holder's pass.
