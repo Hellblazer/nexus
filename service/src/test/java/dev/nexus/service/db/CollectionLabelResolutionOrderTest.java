@@ -71,6 +71,10 @@ class CollectionLabelResolutionOrderTest {
                     ctx.alterTable(CATALOG_COLLECTIONS).dropConstraint(key.getName()).cascade().execute();
                 }
             }
+            // two live rows under one label (the AMBIGUOUS case) need the live-label index gone as well; jOOQ renders the DROP INDEX
+            // unqualified, so the connection is pointed at nexus first
+            ctx.setSchema("nexus").execute();
+            ctx.dropIndexIfExists(org.jooq.impl.DSL.name("nexus", "idx_catalog_collections_live_label")).execute();
             successorId = insert(ctx, SUCCESSOR, "label-order-succ", "live", false);
             return null;
         });
@@ -131,6 +135,13 @@ class CollectionLabelResolutionOrderTest {
 
         // state 1: the live row beats both tombstones, though the newer tombstone has the highest id
         Resolved first = resolveAll();
+        CollectionDeletes.Verdict deleteOfLabel = CollectionDeletes.verdict(scope, TENANT, LABEL, null);
+        assertThat(deleteOfLabel.kind()).isEqualTo(CollectionDeletes.Kind.PROCEED);
+        assertThat(deleteOfLabel.collectionId()).as("a delete by the label acts on the live row").isEqualTo(live);
+        // the older tombstone asked for by its ID is refused, naming its successor by id (a row retired since the boundary read it)
+        CollectionDeletes.Verdict deleteOfRetiredId = CollectionDeletes.verdict(scope, TENANT, LABEL, older);
+        assertThat(deleteOfRetiredId.kind()).isEqualTo(CollectionDeletes.Kind.SUPERSEDED);
+        assertThat(deleteOfRetiredId.successor()).isEqualTo(new CollectionSuccessor.Successor(successorId, SUCCESSOR));
         assertThat(first.registryId()).as("resolveLabel picks the live row").isEqualTo(live);
         assertThat(first.lifecycle()).as("lifecycleState reads the live row's").contains("live");
         assertThat(first.scopeId()).as("the purge scope's row is the live row").isEqualTo(live);
@@ -148,6 +159,107 @@ class CollectionLabelResolutionOrderTest {
             .contains("live");
         assertThat(second.scopeId()).as("the purge scope's row is the newest tombstone").isEqualTo(newer);
         assertThat(older).as("the older tombstone was never the answer").isNotEqualTo(second.registryId());
+        CollectionDeletes.Verdict deleteOfLabel2 = CollectionDeletes.verdict(scope, TENANT, LABEL, null);
+        assertThat(deleteOfLabel2.kind()).isEqualTo(CollectionDeletes.Kind.PROCEED);
+        assertThat(deleteOfLabel2.collectionId()).as("with no live row a delete by the label acts on the newest tombstone")
+            .isEqualTo(newer);
+    }
+
+    /** Two live rows under one label is the one state the delete by label refuses, naming both ids. */
+    @Test
+    void twoLiveRowsUnderOneLabelAreAmbiguousForADeleteByLabel() {
+        String label = "docs__label-order-amb__minilm-l6-v2-384__v1";
+        long[] ids = asSuperuser(ctx -> new long[] {insert(ctx, label, "label-order-amb-a", "live", false),
+            insert(ctx, label, "label-order-amb-b", "live", false)});
+        CollectionDeletes.Verdict v = CollectionDeletes.verdict(scope, TENANT, label, null);
+        assertThat(v.kind()).isEqualTo(CollectionDeletes.Kind.AMBIGUOUS);
+        assertThat(v.ids()).containsExactlyInAnyOrder(ids);
+        // the id path is the way out, and reaches exactly one of them
+        CollectionDeletes.Verdict byId = CollectionDeletes.verdict(scope, TENANT, label, ids[0]);
+        assertThat(byId.kind()).isEqualTo(CollectionDeletes.Kind.PROCEED);
+        assertThat(byId.collectionId()).isEqualTo(ids[0]);
+    }
+
+    // ---- CollectionSuccessor: a tombstone names its successor by id ------------------------------------------------------------------
+
+    /** Points the live row {@code id} at {@code toId}: a tombstone naming that row, by label text and by id. */
+    private void retire(DSLContext ctx, long id, String text, long toId) {
+        ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, text).set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, toId)
+            .where(CATALOG_COLLECTIONS.COLLECTION_ID.eq(id)).execute();
+    }
+
+    private Optional<CollectionSuccessor.Successor> successorOf(long id) {
+        return CollectionSuccessor.of(scope, TENANT, id);
+    }
+
+    /**
+     * X superseded by Y; Y deleted, which sets X.superseded_by_id to X and leaves the text; Y's label registered again as a new
+     * row. X names no successor, though a live row now bears the text: the label is not the identity.
+     */
+    @Test
+    void aDeletedSuccessorWhoseLabelIsTakenAgainIsNotTheSuccessor() {
+        String yLabel = "docs__label-order-y__minilm-l6-v2-384__v1";
+        long[] ids = asSuperuser(ctx -> {
+            long x = insert(ctx, "docs__label-order-x__minilm-l6-v2-384__v1", "label-order-x", "live", false);
+            long reregistered = insert(ctx, yLabel, "label-order-y2", "live", false);   // the new row that bears Y's text
+            retire(ctx, x, yLabel, x);   // what the delete of the old Y left: the text, and the id of the tombstone itself
+            return new long[] {x, reregistered};
+        });
+        assertThat(successorOf(ids[0])).as("a self-referencing id names no successor, whatever bears the text").isEmpty();
+    }
+
+    /** A chain A to B to C whose first tombstone was never re-pointed: A's id names C, by C's current label. */
+    @Test
+    void aChainIsFollowedByIdToTheLiveEnd_andTheLabelIsTheCurrentOne() {
+        long[] ids = asSuperuser(ctx -> {
+            long a = insert(ctx, "docs__label-order-ca__minilm-l6-v2-384__v1", "label-order-ca", "live", false);
+            long b = insert(ctx, "docs__label-order-cb__minilm-l6-v2-384__v1", "label-order-cb", "live", false);
+            long c = insert(ctx, "docs__label-order-cc__minilm-l6-v2-384__v1", "label-order-cc", "live", false);
+            retire(ctx, b, "docs__label-order-cc__minilm-l6-v2-384__v1", c);
+            retire(ctx, a, "docs__label-order-cb__minilm-l6-v2-384__v1", b);
+            return new long[] {a, b, c};
+        });
+        assertThat(successorOf(ids[0])).contains(
+            new CollectionSuccessor.Successor(ids[2], "docs__label-order-cc__minilm-l6-v2-384__v1"));
+        assertThat(successorOf(ids[1])).contains(
+            new CollectionSuccessor.Successor(ids[2], "docs__label-order-cc__minilm-l6-v2-384__v1"));
+        // the live end is renamed in place (P3.7's rename): the answer is its label now, not the text the tombstones carry
+        asSuperuser(ctx -> ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.NAME, "docs__label-order-cc-new__minilm-l6-v2-384__v1")
+            .where(CATALOG_COLLECTIONS.COLLECTION_ID.eq(ids[2])).execute());
+        assertThat(successorOf(ids[0])).contains(
+            new CollectionSuccessor.Successor(ids[2], "docs__label-order-cc-new__minilm-l6-v2-384__v1"));
+    }
+
+    @Test
+    void aCycleAndAChainPastTheDepthCapNameNoSuccessor_aChainWithinItDoes() {
+        long[] cycle = asSuperuser(ctx -> {
+            long a = insert(ctx, "docs__label-order-cy-a__minilm-l6-v2-384__v1", "label-order-cy-a", "live", false);
+            long b = insert(ctx, "docs__label-order-cy-b__minilm-l6-v2-384__v1", "label-order-cy-b", "live", false);
+            retire(ctx, a, "b", b);
+            retire(ctx, b, "a", a);
+            return new long[] {a, b};
+        });
+        assertThat(successorOf(cycle[0])).as("a cycle").isEmpty();
+
+        for (int length : new int[] {CollectionSuccessor.MAX_HOPS - 1, CollectionSuccessor.MAX_HOPS + 8}) {
+            long[] chain = asSuperuser(ctx -> {
+                long[] rows = new long[length + 1];
+                for (int i = 0; i <= length; i++) {
+                    rows[i] = insert(ctx, "docs__label-order-ch" + length + "-" + i + "__minilm-l6-v2-384__v1", "label-order-ch" + length + "-" + i,
+                        "live", false);
+                }
+                for (int i = 0; i < length; i++) {
+                    retire(ctx, rows[i], "next", rows[i + 1]);
+                }
+                return rows;
+            });
+            if (length < CollectionSuccessor.MAX_HOPS) {
+                assertThat(successorOf(chain[0])).as("a chain of %d hops", length).map(CollectionSuccessor.Successor::id)
+                    .contains(chain[length]);
+            } else {
+                assertThat(successorOf(chain[0])).as("a chain of %d hops is past the cap", length).isEmpty();
+            }
+        }
     }
 
     /** A row that names no successor is live whatever its lifecycle: a quarantined row still holds its label (linda/elsinore). */
