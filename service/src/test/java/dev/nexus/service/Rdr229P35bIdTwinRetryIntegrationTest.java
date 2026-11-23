@@ -195,8 +195,11 @@ class Rdr229P35bIdTwinRetryIntegrationTest {
     void stampOnManifestUpdate_aSameIdRenameRecordsNoOrphan() throws Exception {
         OwnedStore s = ownedStore("rn-same");
         su(ctx -> {
-            int n = ctx.update(CATALOG_DOCUMENT_CHUNKS).set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, s.renamed)
-                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(s.tenant)).and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(s.live)).execute();
+            // vectors-079's trigger gives a manifest row the name of its chunk, so a name-only UPDATE would change nothing; the name-path
+            // rename this test models (a row keeps its id and takes a new name) runs with that trigger off, as before P3.7
+            int n = withTriggerOff(ctx, "catalog_document_chunks", "trg_catalog_document_chunks_name_from_chunk",
+                () -> ctx.update(CATALOG_DOCUMENT_CHUNKS).set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, s.renamed)
+                    .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(s.tenant)).and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(s.live)).execute());
             assertThat(n).as("non-vacuity: both manifest rows are renamed").isEqualTo(2);
             assertThat(ctx.fetchCount(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(s.tenant)
                     .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(s.renamed)).and(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID.eq(s.id))))
@@ -347,10 +350,12 @@ class Rdr229P35bIdTwinRetryIntegrationTest {
             // the racer's chunk row (its record's foreign key names it) carries another collection's id, so the chunks' own id key is not met
             insertChunk(ctx, tenant, racer, ids[1], x, live);
             String model = PgContainerHelper.collectionModel(ctx, tenant, live);
-            ctx.insertInto(CHUNK_ORPHANED_AT)
+            // vectors-079's trigger would store the racer's record under the chunk's own name (the live collection's), so the racer would
+            // not hold the stale name the race needs; it is written with that trigger off, the state of a record written before P3.7
+            withTriggerOff(ctx, "chunk_orphaned_at", "trg_chunk_orphaned_at_name_from_chunk", () -> ctx.insertInto(CHUNK_ORPHANED_AT)
                 .set(CHUNK_ORPHANED_AT.TENANT_ID, tenant).set(CHUNK_ORPHANED_AT.COLLECTION, racer).set(CHUNK_ORPHANED_AT.COLLECTION_ID, ids[0])
                 .set(CHUNK_ORPHANED_AT.CHASH, bytes(x)).set(CHUNK_ORPHANED_AT.ORPHANED_AT, OffsetDateTime.now().minusDays(2))
-                .set(CHUNK_ORPHANED_AT.EMBEDDING_MODEL, model).execute();
+                .set(CHUNK_ORPHANED_AT.EMBEDDING_MODEL, model).execute());
             if (mode == Mode.OTHER_INDEX) {
                 ctx.createUniqueIndexIfNotExists(DSL.name(indexName)).on(CHUNK_ORPHANED_AT, CHUNK_ORPHANED_AT.TENANT_ID,
                     CHUNK_ORPHANED_AT.COLLECTION_ID, CHUNK_ORPHANED_AT.CHASH, CHUNK_ORPHANED_AT.EMBEDDING_MODEL).execute();
@@ -512,6 +517,28 @@ class Rdr229P35bIdTwinRetryIntegrationTest {
             out.add(Chash.ofText(tenant + "/chunk-" + i).toHex());
         }
         return out;
+    }
+
+    /** Runs {@code work} with {@code trigger} of {@code table} disabled ({@link PgContainerHelper#disableTrigger}), re-enabled after. */
+    private static <T> T withTriggerOff(DSLContext ctx, String table, String trigger, java.util.function.Supplier<T> work) {
+        ctx.connection(c -> {
+            try {
+                PgContainerHelper.disableTrigger(c, table, trigger);
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        });
+        try {
+            return work.get();
+        } finally {
+            ctx.connection(c -> {
+                try {
+                    PgContainerHelper.enableTrigger(c, table, trigger);
+                } catch (Exception e) {
+                    throw new IllegalStateException(e);
+                }
+            });
+        }
     }
 
     private static byte[] bytes(String hex) {
