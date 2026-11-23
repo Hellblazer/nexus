@@ -55,9 +55,27 @@ final class CollectionSelectors {
      * @param passesResolvedId the route's handler reads the id the boundary resolved ({@link CollectionSelectorFilter#RESOLVED_ID}),
      *                    not only the label: the delete, which must remove the one row of an id when a label is held by several.
      *                    Every route answers a retired row's id 409 {@code collection_superseded}, this one included
+     * @param writes      the route writes under the collection it names, so a request by id must read that id in the write's own
+     *                    transaction ({@link dev.nexus.service.db.ExpectedCollectionIds}); the filter reports a 2xx answer that did not
      */
-    record Route(Where where, List<Slot> slots, boolean passesResolvedId) {
+    record Route(Where where, List<Slot> slots, boolean passesResolvedId, boolean writes) {
     }
+
+    /**
+     * The routes that write under the collection they name, and must read a named id in their own transaction. The retiring verbs
+     * (supersede, rehome, rename, delete) are not here: the lock they take on the row is the retire's, not this read's.
+     */
+    static final java.util.Set<String> WRITES = java.util.Set.of(
+        "/v1/catalog/manifest/write", "/v1/catalog/manifest/append", "/v1/catalog/manifest/append_many",
+        "/v1/catalog/manifest/write_many", "/v1/catalog/import/chunk",
+        "/v1/vectors/upsert-chunks", "/v1/vectors/store-delete", "/v1/vectors/update-metadata",
+        "/v1/taxonomy/topics/insert", "/v1/taxonomy/assignments/assign", "/v1/taxonomy/assignments/assign_from_chashes",
+        "/v1/taxonomy/purge_collection", "/v1/taxonomy/meta/record", "/v1/taxonomy/topics/persist_split",
+        "/v1/taxonomy/topics/persist_rebuild", "/v1/taxonomy/topics/persist_discovered", "/v1/taxonomy/centroids/upsert",
+        "/v1/taxonomy/centroids/delete", "/v1/taxonomy/centroids/purge",
+        "/v1/aspects/delete", "/v1/aspects/salient_sentences/set_by_key", "/v1/aspects/upsert", "/v1/aspects/highlights/upsert",
+        "/v1/remap/clear_leg", "/v1/remap/record_batch", "/v1/pipeline/create", "/v1/pipeline/delete_collection",
+        "/v1/telemetry/relevance/log", "/v1/telemetry/hook_failures/record");
 
     /** The routes by full path. */
     static final Map<String, Route> ROUTES = Map.copyOf(table());
@@ -89,15 +107,15 @@ final class CollectionSelectors {
     }
 
     private static void get(Map<String, Route> t, String path, Slot... slots) {
-        t.put(path, new Route(Where.QUERY, List.of(slots), false));
+        t.put(path, new Route(Where.QUERY, List.of(slots), false, false));
     }
 
     private static void post(Map<String, Route> t, String path, Slot... slots) {
-        t.put(path, new Route(Where.BODY, List.of(slots), false));
+        t.put(path, new Route(Where.BODY, List.of(slots), false, WRITES.contains(path)));
     }
 
     private static void delete(Map<String, Route> t, String path, Slot... slots) {
-        t.put(path, new Route(Where.BODY, List.of(slots), true));
+        t.put(path, new Route(Where.BODY, List.of(slots), true, false));
     }
 
     private static Map<String, Route> table() {

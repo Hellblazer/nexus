@@ -6112,8 +6112,8 @@ public final class CatalogRepository {
         if (!anyRows) return;
         try {
             CollectionRegistry.lookupWritable(tenantScope, tenant, collection);
-        } catch (CollectionSupersededException e) {
-            throw e;
+        } catch (CollectionSupersededException | CollectionRetiredIdException | UnknownCollectionIdException e) {
+            throw e;   // a request by id answers its typed 409 or 404 (RDR-229 P3.5a), not a 200 with every document failed
         } catch (RuntimeException e) {
             // Unregistered, or a row the registry cannot resolve: each document reports it as it always did.
         }

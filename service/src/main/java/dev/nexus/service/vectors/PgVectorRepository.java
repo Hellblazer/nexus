@@ -1190,27 +1190,12 @@ public final class PgVectorRepository {
 
         String table = chunksTable(dim);
 
-        // RDR-204 Phase 1 (bead nexus-ft04v.7): require catalog_collections to
-        // already carry a row for `collection` before any chunk write — checked in
-        // its OWN short transaction (same shape the RDR-70r3c-era auto-stub used, so
-        // the v0.1.21 lock-contention fix below still holds: a plain existence SELECT
-        // takes no value lock at all, so there is no convoy to bound in the first
-        // place). Never add a chunk write path that bypasses this check.
-        //
-        // Checked in its OWN short transaction (v0.1.21, ChashVectorConcurrencyTest
-        // full-suite failure) rather than inline in the batch transaction below —
-        // kept for symmetry with that history even though a read-only check has no
-        // lock-hold duration to bound.
-        // nexus-i15oc: this is the re-check AFTER the embed round trip, the slow gap in which a supersede can
-        // commit. The supersede evicts the cached row, so isKnown is false and the read below sees the tombstone;
-        // plain requireRegistered would pass it and file the batch under the retired name. A cache hit is
-        // always a live row, so the common case stays free.
-        if (!CollectionRegistry.isKnown(tenant, collection)) {
-            tenantScope.withTenant(tenant, ctx -> {
-                CollectionRegistry.requireWritable(ctx, tenant, collection);
-                return null;
-            });
-        }
+        // RDR-204 Phase 1 (bead nexus-ft04v.7): require catalog_collections to already carry a row for `collection` before any
+        // chunk write; never add a chunk write path that bypasses this check. It is checked INSIDE the batch transaction below,
+        // as that lambda's first statement (CollectionRegistry.requireWritable on the write's own ctx): after the embed round trip,
+        // in the gap a supersede can commit in (nexus-i15oc; a retired row is refused, a cache hit is always a live row, so the
+        // common case stays free), and, for a request that named the collection by id, as the by-id read FOR KEY SHARE that keeps
+        // the id from being freed and its label taken again under the write (RDR-229 P3.5a, ExpectedCollectionIds).
 
         // nexus-ps9wb belt-and-suspenders: the chash sort above removes the
         // same-collection lock cycle, but a residual deadlock is still possible
@@ -1272,6 +1257,7 @@ public final class PgVectorRepository {
             final List<String>[] inTxUnownedHolder = new List[]{List.of()};
             try {
                 DeadlockRetry.run(collection, () -> tenantScope.withTenant(tenant, ctx -> {
+                    CollectionRegistry.requireWritable(ctx, tenant, collection);
                     racedThisWrite.set(0);
                     racedChashSampleHolder[0] = new ArrayList<>();
                     inTxUnownedHolder[0] = List.of();
@@ -6791,6 +6777,7 @@ FROM scope s
         if (ids == null || ids.isEmpty()) return 0;
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         return tenantScope.withTenant(tenant, ctx -> {
+            CollectionRegistry.require(ctx, tenant, collection);   // RDR-229 P3.5a: a request by id reads that id here, FOR KEY SHARE
             // RDR-191 GATE-2 (nexus-mmkqe): NO deleted_at predicate on the join —
             // a manifest row protects its chunk whether its owning document is
             // live (class a) or tombstoned (class b, soft-tombstone contract
@@ -8243,6 +8230,7 @@ FROM scope s
         }
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         return tenantScope.withTenant(tenant, ctx -> {
+            CollectionRegistry.require(ctx, tenant, collection);   // RDR-229 P3.5a: a request by id reads that id here, FOR KEY SHARE
             int affected = 0;
             List<String> missing = new ArrayList<>();
             for (int i = 0; i < ids.size(); i++) {

@@ -1091,6 +1091,9 @@ public final class TaxonomyRepository {
                 // NOT a DeadlockRetry trigger; the single bounded retry lives in
                 // assignFromChashes above, outside this belt.
                 PgSession.setTaxonomyAssignBounds(ctx);
+                // RDR-229 P3.5a: the write's own registry read (a cache hit for a label request); for a request by id, the by-id
+                // read FOR KEY SHARE, so the id cannot be freed and its label taken again under this write
+                CollectionRegistry.requireWritable(ctx, tenant, collection);
                 // chunks_<dim>.chash is bytea (RDR-180); the HTTP/route boundary carries
                 // hex text, so the existence probe goes through ChashHex.hex(...) — the
                 // house-blessed jOOQ seam that binds hex->bytes / fetches bytes->hex

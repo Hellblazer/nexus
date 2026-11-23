@@ -182,12 +182,12 @@ public final class CollectionRegistry {
     /**
      * {@link #require} by label, on this registry's cache. While the request named this label by {@code collection_id}
      * ({@link ExpectedCollectionIds}), it resolves THAT id instead, in the caller's transaction and {@code FOR KEY SHARE}
-     * ({@link #resolveRequestedId}), never the label.
+     * ({@link #readRequested}), never the label.
      */
     public CollectionRow resolveLabel(DSLContext ctx, String tenant, String label) {
         OptionalLong requested = ExpectedCollectionIds.of(label);
         if (requested.isPresent()) {
-            return resolveRequestedId(ctx, tenant, requested.getAsLong());
+            return readRequested(ctx, tenant, label, requested.getAsLong(), true);
         }
         Optional<CollectionRow> hit = cachedByLabel(tenant, label);
         if (hit.isPresent()) {
@@ -198,23 +198,47 @@ public final class CollectionRegistry {
     }
 
     /**
-     * The row a request named by {@code collection_id}, read in the caller's transaction with {@code FOR KEY SHARE} (a delete of
-     * the row waits for that transaction, so the id cannot be freed and its label taken again underneath the write). Never from the
-     * cache, which cannot hold a lock, and never by the label. No row is {@link UnknownCollectionIdException}; a retired row is
-     * {@link CollectionRetiredIdException} naming its successor by {@code superseded_by_id}; a live row is returned, and the caller
-     * writes under its label.
+     * The row a request named by {@code collection_id} (and resolved to {@code label} at the route boundary), read in the
+     * caller's transaction with {@code FOR KEY SHARE} (a delete of the row waits for that transaction, so the id cannot be freed
+     * and its label taken again underneath the write). Never from the cache, which cannot hold a lock, and never by the label. No
+     * row is {@link UnknownCollectionIdException}; a retired row is {@link CollectionRetiredIdException} naming its successor by
+     * {@code superseded_by_id}; a row of another label is {@link CollectionIdMismatchException}; a live row is returned.
      *
-     * @throws CollectionIdMismatchException if the row the read returns is not the row of that id (a registry defect)
+     * <p>The one place every in-transaction by-id read goes through ({@link #resolveLabel}, {@link CollectionIds#require}). A
+     * second read of the same label in one transaction answers from the transaction's memo: the lock is already held.
+     *
+     * @param consume true for a read in the WRITE's own transaction, which marks the id consumed ({@link ExpectedCollectionIds});
+     *        false for an outside-a-transaction lookup's short read, which must not count
+     * @throws CollectionIdMismatchException if the row the read returns is not the row of that id, or carries another label
+     *         (a registry defect, or an in-place rename in the gap, which Phase 3 does not have before P3.7)
      */
-    private CollectionRow resolveRequestedId(DSLContext ctx, String tenant, long collectionId) {
+    CollectionRow readRequested(DSLContext ctx, String tenant, String label, long collectionId, boolean consume) {
+        CollectionRow memo = ExpectedCollectionIds.memoized(ctx, label);
+        if (memo != null) {
+            if (consume) {
+                ExpectedCollectionIds.consumed(label);
+            }
+            return memo;
+        }
+        if (consume) {
+            ExpectedCollectionIds.beforeTransactionRead();
+        }
         CollectionRow row = fill(ctx, tenant, CATALOG_COLLECTIONS.COLLECTION_ID.eq(collectionId), List.of(), true,
             () -> new UnknownCollectionIdException(tenant, collectionId));
         if (row.collectionId() != collectionId) {
             throw new CollectionIdMismatchException(collectionId, row.collectionId());
         }
+        if (!row.label().equals(label)) {
+            throw new CollectionIdMismatchException(collectionId, label, row.label());
+        }
         if (row.isSuperseded()) {
             throw new CollectionRetiredIdException(tenant, collectionId, row.label(),
                 CollectionSuccessor.of(ctx, tenant, collectionId));
+        }
+        ExpectedCollectionIds.memoize(ctx, label, row);
+        if (consume) {
+            ExpectedCollectionIds.consumed(label);
+            ExpectedCollectionIds.afterTransactionRead();
         }
         return row;
     }
@@ -406,7 +430,8 @@ public final class CollectionRegistry {
      * Never touches the database — a pure in-process read.
      */
     public static Optional<CollectionRow> cached(String tenant, String collection) {
-        return SHARED.cachedByLabel(tenant, collection);
+        // a label the request named by id is never answered from the label cache (ExpectedCollectionIds)
+        return ExpectedCollectionIds.of(collection).isPresent() ? Optional.empty() : SHARED.cachedByLabel(tenant, collection);
     }
 
     /**
@@ -522,9 +547,14 @@ public final class CollectionRegistry {
      * @throws UnregisteredCollectionException if no row exists for the pair
      */
     public static CollectionRow lookup(TenantScope scope, String tenant, String collection) {
-        Optional<CollectionRow> hit = ExpectedCollectionIds.of(collection).isPresent() ? Optional.empty() : cached(tenant, collection);
+        Optional<CollectionRow> hit = cached(tenant, collection);
         if (hit.isPresent()) {
             return hit.get();
+        }
+        OptionalLong requested = ExpectedCollectionIds.of(collection);
+        if (requested.isPresent()) {
+            // a short read of the id, never the label; it is not the write's own transaction, so it does not count as consuming
+            return scope.withTenant(tenant, ctx -> SHARED.readRequested(ctx, tenant, collection, requested.getAsLong(), false));
         }
         return scope.withTenant(tenant, ctx -> require(ctx, tenant, collection));
     }
@@ -581,6 +611,13 @@ public final class CollectionRegistry {
         Optional<CollectionRow> hit = cached(tenant, collection);
         if (hit.isPresent()) {
             return Optional.ofNullable(hit.get().lifecycleState());
+        }
+        OptionalLong requested = ExpectedCollectionIds.of(collection);
+        if (requested.isPresent()) {
+            // a label the request named by id: the row of that id, never the label's
+            return Optional.ofNullable(ctx.select(CATALOG_COLLECTIONS.LIFECYCLE_STATE).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(requested.getAsLong()))
+                .fetchOne(CATALOG_COLLECTIONS.LIFECYCLE_STATE));
         }
         return Optional.ofNullable(ctx.select(CATALOG_COLLECTIONS.LIFECYCLE_STATE).from(CATALOG_COLLECTIONS)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(collection)))
