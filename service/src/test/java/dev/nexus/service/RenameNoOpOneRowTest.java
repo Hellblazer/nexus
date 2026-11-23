@@ -88,6 +88,11 @@ class RenameNoOpOneRowTest {
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
         }
+        // the chunks table is partitioned per tenant: this class's tenant gets its leaves (the engine does it at a tenant's first token)
+        su(ctx -> {
+            PgContainerHelper.ensureTenantPartitions(ctx, TENANT);
+            return null;
+        });
         // the name-key drop move, as far as this class needs it: every inbound foreign key on a registry key that holds `name`
         // (CollectionDeleteScopeByIdTest), so the registry row can be renamed in place with its content left at the old label
         su(ctx -> {
