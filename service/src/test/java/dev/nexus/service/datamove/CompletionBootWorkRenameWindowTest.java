@@ -3,6 +3,7 @@
 package dev.nexus.service.datamove;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import dev.nexus.service.BootWorkRegistry;
 import org.junit.jupiter.api.Test;
@@ -228,7 +229,9 @@ class CompletionBootWorkRenameWindowTest {
         assertThat(window.oneRowRegime()).as("non-vacuity: the in-process regime says not latched").isFalse();
         assertThat(work.gate3Latched()).as("non-vacuity: so does the accessor").isFalse();
         assertThat(work.latest().gate3Latched()).as("non-vacuity: and the last sample").isFalse();
-        assertThat(guard.<Boolean>pinned(oneRow -> oneRow)).as("the rename took the latched path: the row was read under the lock").isTrue();
+        // the latched path is the one that can refuse: the scripted sample has no completed drop move, so the one-row regime refuses naming it
+        assertThatThrownBy(() -> guard.pinned(oneRow -> oneRow)).as("the rename took the latched path: the row was read under the lock")
+            .isInstanceOf(dev.nexus.service.db.RenameRefusedException.class);
         assertThat(work.gate3Latched()).as("and the accessor keeps what was seen").isTrue();
     }
 
@@ -242,7 +245,8 @@ class CompletionBootWorkRenameWindowTest {
         assertThat(window.oneRowRegime()).as("non-vacuity: the regime says latched").isTrue();
         assertThat(work.gate3Latched()).as("non-vacuity: so does the accessor").isTrue();
         var guard = new dev.nexus.service.db.RenameGuard(Gate3.never(), work.renameReadiness());
-        assertThat(guard.<Boolean>pinned(oneRow -> oneRow)).as("control: the row is there: the latched path").isTrue();
+        assertThatThrownBy(() -> guard.pinned(oneRow -> oneRow)).as("control: the row is there: the latched path (it refuses: no drop move)")
+            .isInstanceOf(dev.nexus.service.db.RenameRefusedException.class);
 
         reader.row.set(false);   // a restore that lost the row, say
 
@@ -261,7 +265,7 @@ class CompletionBootWorkRenameWindowTest {
         };
         var work = work(reader, window);
         var guard = new dev.nexus.service.db.RenameGuard(Gate3.never(), work.renameReadiness());
-        org.assertj.core.api.Assertions.assertThatThrownBy(() -> guard.pinned(oneRow -> oneRow)).isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> guard.pinned(oneRow -> oneRow)).isInstanceOf(IllegalStateException.class);
     }
 
     /** A bounded poll for the schedule's thread. */

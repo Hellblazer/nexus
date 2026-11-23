@@ -17,10 +17,10 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 /**
- * RDR-229 P3.7 (nexus-p2m1x.27), fix check A observation O-5: a name-path rename that is open when gate 3 flips to true in process. A
- * rename that chose the name path before gate 3 held must not commit after the id readers switched, because it gives the collection a
- * new id they have not seen. So the whole rename runs inside {@code RenameReadiness#pinned}, and the completion check holds gate 3's flip
- * until every pinned rename has returned: the readers keep reading gate 3 as false while one is open, and read it as true once none is.
+ * RDR-229 P3.7 (nexus-p2m1x.27), fix check A observation O-5: a name-path rename that is open when gate 3 latches. A rename that chose
+ * the name path before the latch must not commit after it, because it gives the collection a new id the id readers have not seen. So the
+ * whole rename runs inside {@code RenameReadiness#pinned}, and the latch writer ({@code RenameWindow#latchWriter}, P3.4's seam) waits for every
+ * pinned rename to return before it writes the row and switches the one-row regime: while one is open there is no row and no regime.
  *
  * <p>The window is exercised directly (a pinned unit that waits on a latch, as a rename in its transaction would) and the rename route is
  * shown to go through it: every rename the route runs, name path or refused, counts one pinned call.
@@ -44,38 +44,44 @@ class Rdr229P37RenameWindowPinTest {
         }
     }
 
+    private int latchRows() {
+        return engine.su(ctx -> ctx.fetchCount(org.jooq.impl.DSL.table(org.jooq.impl.DSL.name("nexus", "rdr229_gate_latch"))));
+    }
+
     @Test
-    void gate3DoesNotFlipToTrueWhileAPinnedRenameIsOpen_andFlipsOnceItReturns() throws Exception {
+    void theGate3LatchIsNotWrittenWhileAPinnedRenameIsOpen_andIsWrittenOnceItReturns() throws Exception {
         assertThat(engine.completion().gate3()).as("non-vacuity: gate 3 does not hold before the flip").isFalse();
+        assertThat(latchRows()).as("non-vacuity: no latch row yet").isZero();
         ExecutorService pool = Executors.newFixedThreadPool(2);
         CountDownLatch inside = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
+        var readiness = engine.completionCheck().renameReadiness();
         try {
-            // a rename that began under the name path: it reads gate 3 as false and is still in its transaction
+            // a rename that began under the name path: the regime is off and it is still in its transaction
             Future<Boolean> open = pool.submit(() -> engine.pinned(() -> {
-                boolean sawGate3 = engine.gate3Holds();
+                boolean sawLatched = readiness.gate3Latched();
                 inside.countDown();
                 try {
                     release.await(60, TimeUnit.SECONDS);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 }
-                return sawGate3 || engine.gate3Holds();   // true if gate 3 flipped under it
+                return sawLatched || readiness.gate3Latched();   // true if the latch was written under it
             }));
             assertThat(inside.await(30, TimeUnit.SECONDS)).as("the pinned rename is open").isTrue();
 
-            // P3.4 completes: the input of gate 3 opens and the check samples
+            // P3.4 completes: the input of gate 3 opens and the check samples; its latch writer waits for the open rename
             engine.gate3(true);
-            Future<Boolean> flip = pool.submit(() -> engine.completion().gate3());
+            Future<Boolean> flip = pool.submit(() -> engine.completion().gate3Latched());
 
-            assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(2), () -> engine.gate3Holds() || flip.isDone()))
-                .as("the flip waits for the open rename: gate 3 still reads false and the sample has not returned").isFalse();
+            assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(2), () -> latchRows() > 0 || flip.isDone() || readiness.gate3Latched()))
+                .as("the latch waits for the open rename: no row, no regime, and the sample has not returned").isFalse();
 
             release.countDown();
-            assertThat(open.get(30, TimeUnit.SECONDS)).as("the open rename never saw gate 3 hold").isFalse();
-            assertThat(flip.get(30, TimeUnit.SECONDS)).as("the sample that waited saw gate 3 hold").isTrue();
-            assertThat(engine.gate3Holds()).as("a reader now switches to the id").isTrue();
-            assertThat(engine.<Boolean>pinned(engine::gate3Holds)).as("a rename that starts after the flip reads gate 3 as true").isTrue();
+            assertThat(open.get(30, TimeUnit.SECONDS)).as("the open rename never saw the latch").isFalse();
+            assertThat(flip.get(30, TimeUnit.SECONDS)).as("the sample that waited saw the latch written").isTrue();
+            assertThat(latchRows()).as("one row, written once the rename returned").isEqualTo(1);
+            assertThat(engine.<Boolean>pinned(readiness::gate3Latched)).as("a rename that starts after the latch is in the one-row regime").isTrue();
         } finally {
             release.countDown();
             pool.shutdownNow();

@@ -148,8 +148,18 @@ final class Rdr229RenameEngine implements AutoCloseable {
         service.start();
         startWorker();
         check.start();
+        // P3.3b's pass, as Main starts it: it registers the two swap moves once gate 1 holds, and the worker completes them and their validations; gate 2 of
+        // the boot read set (P3.3c) waits for them. Gate 3 itself stays simulated at its input.
+        var watchedCheck = check;
+        leafPass = new dev.nexus.service.vectors.LeafIndexPass(admin, bootWork, () -> {
+            var latest = watchedCheck.latest();
+            return latest != null && latest.gate1();
+        }, ENGINE_VERSION);
+        leafPass.start();
         startRegistrar();
     }
+
+    private dev.nexus.service.vectors.LeafIndexPass leafPass;
 
     /** The renames that went through {@link RenameReadiness#pinned}, over every boot of this engine: a rename that skipped the pin is not counted. */
     private final java.util.concurrent.atomic.AtomicInteger pinnedRenames = new java.util.concurrent.atomic.AtomicInteger();
@@ -314,6 +324,10 @@ final class Rdr229RenameEngine implements AutoCloseable {
     }
 
     private void stopEngine() {
+        if (leafPass != null) {
+            leafPass.close();
+            leafPass = null;
+        }
         registrarStop = true;
         if (registrar != null) {
             registrar.interrupt();
