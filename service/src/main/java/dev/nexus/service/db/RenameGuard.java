@@ -157,8 +157,9 @@ public final class RenameGuard {
     }
 
     /** The catalog's one-row body: P3.7's {@link OneRowRename} runs, and its whole outcome is kept for the caller. */
-    Map<String, Integer> oneRow(DSLContext ctx, String tenant, String oldLabel, String newLabel, RenameOutcome[] outcomeOut) {
-        outcomeOut[0] = oneRowRename.rename(ctx, tenant, oldLabel, newLabel);
+    Map<String, Integer> oneRow(DSLContext ctx, String tenant, String oldLabel, String newLabel, OneRowRename.Request request,
+                                RenameOutcome[] outcomeOut) {
+        outcomeOut[0] = oneRowRename.rename(ctx, tenant, oldLabel, newLabel, request);
         return outcomeOut[0].counts();
     }
 

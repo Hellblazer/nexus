@@ -93,11 +93,11 @@ class RenameGuardTest {
     /** The default one-row catalog rename refuses, writing nothing: P3.7 replaces it where the guard is built. */
     @Test
     void theDefaultOneRowRenameIsFailClosed() {
-        assertThatThrownBy(() -> OneRowRename.failClosed().rename(null, "t", "a", "b"))
+        assertThatThrownBy(() -> OneRowRename.failClosed().rename(null, "t", "a", "b", OneRowRename.Request.bare()))
             .isInstanceOf(RenamePathMismatchException.class).hasMessageContaining("'a'").hasMessageContaining("'b'");
         var guard = new RenameGuard(RenameReadiness.ready(), OneRowRename.failClosed());
-        assertThatThrownBy(() -> guard.oneRow(null, "t", "a", "b", new RenameOutcome[1])).isInstanceOf(RenamePathMismatchException.class);
-        assertThatCode(() -> new RenameGuard(RenameReadiness.ready(), (ctx, t, a, b) -> new RenameOutcome(java.util.Map.of(), 1L, "e", true)))
+        assertThatThrownBy(() -> guard.oneRow(null, "t", "a", "b", OneRowRename.Request.bare(), new RenameOutcome[1])).isInstanceOf(RenamePathMismatchException.class);
+        assertThatCode(() -> new RenameGuard(RenameReadiness.ready(), (ctx, t, a, b, r) -> new RenameOutcome(java.util.Map.of(), 1L, "e", true)))
             .as("P3.7's own implementation is a constructor argument").doesNotThrowAnyException();
     }
 

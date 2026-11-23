@@ -384,6 +384,8 @@ public final class HttpUtil {
      *   <li>{@code rename_refused} (409): a collection rename (the catalog's, or a per-store {@code rename_collection} route)
      *       while gate 3 holds and the one-row rename cannot run yet, RDR-229 P3.5a ({@link #RENAME_REFUSED_REASON}). The body
      *       carries {@code missing}: {@code name_key_drop_move} while the name-key drop move has no {@code completed_at},
+     *       {@code p35b_list_missing} when this build ships no P3.5b changeset list, {@code readiness_unreadable} when what the rename waits for cannot
+     *       be read, {@code p35c_readers_absent} while this engine's readers still select by name,
      *       else {@code restart} (a P3.5b changeset has not applied), or {@code latch_row_missing} when the readiness says the
      *       move is complete but the install has no gate 3 latch row (an inconsistency, as after a partial restore; never the
      *       name path). Nothing was renamed. The collection routes also answer
@@ -398,6 +400,8 @@ public final class HttpUtil {
      *   <li>{@code rename_not_in_registry} (409): a per-store rename in the one-row regime, where it is a no-op because the
      *       registry rename moved the label, found the registry did not ({@link #RENAME_NOT_IN_REGISTRY_REASON}): the new label
      *       is not a live row, or the old one still is. Nothing was changed.</li>
+     *   <li>{@code label_reserved} (409): a label a collection was renamed away from, which stays reserved until P4.1 drops the name columns
+     *       ({@link #LABEL_RESERVED_REASON}, RDR-229 P3.7); the body carries {@code label}. Nothing was written.</li>
      *   <li>{@code collection_superseded} (409): a chunk write (upsert-chunks, or the combined
      *       write_many / append / append_many) named a collection whose row carries {@code superseded_by}
      *       ({@link #COLLECTION_SUPERSEDED_REASON}, nexus-mp8ys). {@code error} carries the same value; the body
@@ -647,6 +651,18 @@ public final class HttpUtil {
             send(exchange, 409,
                 "{\"error\":" + jsonString(renamePathMismatch.getMessage())
                 + ",\"reason\":\"" + RENAME_PATH_MISMATCH_REASON + "\"}");
+            return true;
+        }
+        // RDR-229 P3.7 (linda 2026-11-23, addendum 8): a label a collection was renamed away from is reserved until P4.1 drops the name
+        // columns; refused before anything is written, a 409 naming the label.
+        var labelReserved = labelReserved(e);
+        if (labelReserved != null) {
+            log.warn("event={}_label_reserved {} label={}", event, context, labelReserved.label());
+            send(exchange, 409,
+                "{\"error\":" + jsonString(labelReserved.getMessage())
+                + ",\"reason\":\"" + LABEL_RESERVED_REASON + "\""
+                + ",\"label\":" + jsonString(labelReserved.label())
+                + "}");
             return true;
         }
         // RDR-210 Phase 6 Step 2 (bead nexus-f98bg): a name-rewriting verb (a rename of the chash, taxonomy,
@@ -950,6 +966,19 @@ public final class HttpUtil {
     static dev.nexus.service.db.RenamePathMismatchException renamePathMismatch(Throwable t) {
         for (Throwable c = t; c != null; c = c.getCause()) {
             if (c instanceof dev.nexus.service.db.RenamePathMismatchException r) {
+                return r;
+            }
+        }
+        return null;
+    }
+
+    /** {@code reason} of the 409 for a label that is reserved until P4.1 (RDR-229 P3.7). Wire contract. */
+    static final String LABEL_RESERVED_REASON = "label_reserved";
+
+    /** The {@link dev.nexus.service.db.LabelReservedException} in {@code t}'s cause chain, or null. */
+    static dev.nexus.service.db.LabelReservedException labelReserved(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof dev.nexus.service.db.LabelReservedException r) {
                 return r;
             }
         }
