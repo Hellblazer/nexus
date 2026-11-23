@@ -41,7 +41,7 @@ class ProductionGate3WiringTest {
         "TelemetryRepository", "PipelineRepository", "AspectQueueDrain", "TaxonomyCentroidRepository", "TopicRouteArm",
         "UriSegmentCensusReads", "PdfStubMetadataReads", "IndexRunCensusReads", "ChashConstraintValidator",
         "ChashConformanceHandler", "PciQueryRingReader", "TaxonomyRepository", "AspectRepository", "ChashRepository",
-        "RemapRepository", "ReembedJobRepository", "ReembedSourceReader", "CatalogRepository", "ManifestLabelStage");
+        "RemapRepository", "ReembedJobRepository", "ReembedSourceReader", "CatalogRepository", "ManifestLabelStage", "PciGate3Coverage");
 
     /** The files whose own overloads (or the service's test seam) mention {@code Gate3.never()}, and how many times. */
     private static final Set<String> MENTIONS_NEVER = Set.of(
@@ -99,7 +99,7 @@ class ProductionGate3WiringTest {
                 }
             }
         }
-        assertThat(examined).as("non-vacuity: the production constructions of gated classes found").isGreaterThanOrEqualTo(25);
+        assertThat(examined).as("non-vacuity: the production constructions of gated classes found").isGreaterThanOrEqualTo(26);
         assertThat(bare).as("a production site that built a gated class without the gate").isEmpty();
     }
 

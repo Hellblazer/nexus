@@ -173,7 +173,7 @@ class RouterProbeShapeIntegrationTest {
         return tenantScope.withTenant(tenant, ctx -> {
             PgSession.setSearchPlanCacheMode(ctx);
             return ctx.explain(PgVectorRepository.probeSelectedRowsQuery(
-                ctx, DIM, new String[] {collection}, MODEL, tenant, LIMIT)).plan();
+                ctx, DIM, CollectionSelector.byName(java.util.List.of(collection)), MODEL, tenant, LIMIT)).plan();
         });
     }
 
@@ -235,7 +235,7 @@ class RouterProbeShapeIntegrationTest {
             int counted = tenantScope.withTenant(TENANT, ctx -> {
                 PgSession.setSearchPlanCacheMode(ctx);
                 return PgVectorRepository.probeSelectedRowsQuery(
-                    ctx, DIM, new String[] {coll}, MODEL, TENANT, LIMIT).fetchOne(0, Integer.class);
+                    ctx, DIM, CollectionSelector.byName(java.util.List.of(coll)), MODEL, TENANT, LIMIT).fetchOne(0, Integer.class);
             });
             assertThat(counted).as("the probe counts min(scope, limit + 1) rows at scope %d", SCOPE_ROWS[i])
                 .isEqualTo(Math.min(SCOPE_ROWS[i], LIMIT + 1));

@@ -82,8 +82,6 @@ class PciLeafCountingByIdIntegrationTest extends PciIdIndexSupport {
 
         assertThat(count(tenant, name("cnt-r-old"), Gate3.never())).as("before gate 3: the rows' own label, as today").isEqualTo(ROWS);
         assertThat(count(tenant, name("cnt-r-new"), Gate3.never())).isZero();
-        int sixArguments = counting(tenant, tx -> PciLeafCounting.count(tx, 384, name("cnt-r-old"), M384, tenant, CAP));
-        assertThat(sixArguments).as("the six-argument form is the name path").isEqualTo(ROWS);
     }
 
     @Test
