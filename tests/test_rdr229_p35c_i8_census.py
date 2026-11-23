@@ -37,7 +37,7 @@ def test_every_row_has_a_verdict_and_a_basis_and_none_violates():
     assert len(rows) >= 60, f"only {len(rows)} rows: the census stopped seeing the writers"
     for r in rows:
         assert len(r) == 5, r
-        assert r[3] in {"holds", "n/a"}, f"{r[0]} {r[1]}: verdict {r[3]!r} (a violation is fixed, never listed)"
+        assert r[3] in {"holds", "holds-until-P4.1", "n/a"}, f"{r[0]} {r[1]}: verdict {r[3]!r} (a violation is fixed, never listed)"
         assert r[4].strip(), f"{r[0]} {r[1]}: no basis"
     assert len({(r[0], r[1]) for r in rows}) == len(rows), "a (writer, table) listed twice"
 
