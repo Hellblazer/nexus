@@ -1594,6 +1594,22 @@ public final class TaxonomyRepository {
     private static final java.util.Set<String> PURGE_SCOPES =
         java.util.Set.of(PURGE_SCOPE_FULL, PURGE_SCOPE_TAXONOMY_ONLY);
 
+    /**
+     * RDR-229 P3.5a (nexus-p2m1x.23): the by-id read of a write that is not keyed to a live, registered collection (a
+     * purge, a delete of centroids: they may clear the leftovers of a collection whose registry row is already gone). When
+     * the request named {@code collection} by id ({@link ExpectedCollectionIds}), reads that id in {@code ctx}'s
+     * transaction, {@code FOR KEY SHARE}, as the first collection-keyed statement: no row is a 404, a retired row a 409,
+     * and the write after it is by that id's row, never by a label another row has taken. By label it reads the row and
+     * ignores a missing one, which is the behaviour of these writes before the id existed.
+     */
+    public static void consumeRequestedId(DSLContext ctx, String tenant, String collection) {
+        try {
+            CollectionIds.require(ctx, tenant, collection);
+        } catch (UnregisteredCollectionException byLabelNoRow) {
+            // by label, with no registry row: the rows left under the name are still the caller's to clear
+        }
+    }
+
     /** Purge all taxonomy rows for a collection, full (cross-collection-reaching) scope. */
     public Map<String, Integer> purgeCollection(String tenant, String collection) {
         return purgeCollection(tenant, collection, PURGE_SCOPE_FULL);
@@ -1621,6 +1637,7 @@ public final class TaxonomyRepository {
                 "purgeCollection: unknown scope '" + scope + "' (allowed: " + PURGE_SCOPES + ")");
         }
         return tenantScope.withTenant(tenant, ctx -> {
+            consumeRequestedId(ctx, tenant, collection);   // before any collection-keyed statement
             var doomedIds = ctx.select(TOPICS.ID)
                 .from(TOPICS)
                 .where(TOPICS.COLLECTION.eq(collection))
