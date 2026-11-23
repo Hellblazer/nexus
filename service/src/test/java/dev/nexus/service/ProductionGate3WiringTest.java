@@ -51,8 +51,8 @@ class ProductionGate3WiringTest {
         "db/QuarantineOrigin.java", "db/ReembedJobRepository.java", "db/ReembedSourceReader.java", "db/RemapRepository.java",
         "db/RenameGuard.java", "db/TaxonomyRepository.java", "db/TelemetryRepository.java", "db/UriSegmentCensusReads.java",
         "http/ChashConformanceHandler.java", "vectors/ChunkConstraintAdmin.java", "vectors/ChunkKeySweep.java",
-        "vectors/ChunkOwnerLabel.java", "vectors/ChunkSensitivity.java", "vectors/ManifestLabelStage.java",
-        "vectors/PciIdBuilds.java", "vectors/PciLeafCounting.java", "vectors/PciQueryRingReader.java",
+        "vectors/ChunkOwnerLabel.java", "vectors/ManifestLabelStage.java",
+        "vectors/PciIdBuilds.java", "vectors/PciQueryRingReader.java",
         "vectors/PciGate3Coverage.java", "vectors/PciReconciler.java", "vectors/PgVectorRepository.java", "vectors/ReaperRepository.java",
         "vectors/TaxonomyCentroidRepository.java", "vectors/TopicRouteArm.java");
 
