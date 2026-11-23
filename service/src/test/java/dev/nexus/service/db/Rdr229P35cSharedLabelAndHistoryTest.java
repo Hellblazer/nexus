@@ -120,6 +120,28 @@ class Rdr229P35cSharedLabelAndHistoryTest extends AtomicWriteTestBase {
     }
 
     @Test
+    void theRegistryMissReadAnswersTheLiveRowOfASharedLabel_whicheverRowWasWrittenLast() throws Exception {
+        for (boolean tombstoneLast : new boolean[] {false, true}) {
+            String shared = label("fill" + tombstoneLast);
+            long live, tombstone;
+            if (tombstoneLast) {
+                live = registerRow(shared, "", null, "fillowner-l" + seq.incrementAndGet());
+                tombstone = registerRetiredNoSuccessor(shared, "gone-" + seq.incrementAndGet(), "fillowner-t" + seq.incrementAndGet());
+            } else {
+                tombstone = registerRetiredNoSuccessor(shared, "gone-" + seq.incrementAndGet(), "fillowner-t" + seq.incrementAndGet());
+                live = registerRow(shared, "", null, "fillowner-l" + seq.incrementAndGet());
+            }
+            assertThat(tombstone).as("non-vacuity: two rows of one label").isNotEqualTo(live);
+
+            CollectionRegistry.evictAll();   // a cache miss: the read under test is the fill
+            long found = tenantScope.withTenant(TENANT, ctx -> CollectionRegistry.require(ctx, TENANT, shared)).collectionId();
+
+            assertThat(found).as("the live row answers, whichever of the two has the higher id (tombstone last: " + tombstoneLast + ")")
+                .isEqualTo(live);
+        }
+    }
+
+    @Test
     void theSuccessorIdOfASharedLabelIsAFreshDrawNowThatTheNameKeyIsGone() throws Exception {
         String shared = label("succ");
         long tombstone = registerRetiredNoSuccessor(shared, "gone-" + seq.incrementAndGet(), "succowner-t");
