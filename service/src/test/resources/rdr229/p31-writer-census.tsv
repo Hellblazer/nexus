@@ -164,7 +164,7 @@ chunks	chunks	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	
 chunks	chunks	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12253	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	unproven	moveScopedTable
 chunks	chunks	service/src/main/java/dev/nexus/service/db/ChashRepository.java	358	update	helper	collection	collection_id	yes	ch.table() helper	verb	renameCollection
 chunks	chunks	service/src/main/java/dev/nexus/service/db/DepartedWriterSpans.java	651	update	jooq	collection	collection_id	yes		unproven	update
-chunks	chunks	service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	362	update	jooq	-	collection_id	yes		unproven	retagRowsOf
+chunks	chunks	service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	371	update	jooq	-	collection_id	yes		unproven	retagRowsOf
 chunks	chunks	service/src/main/java/dev/nexus/service/db/TenantImportLoad.java	349	insert	by-name	collection	collection_id	yes	TenantImportLoad by-name INSERT ... SELECT over TenantExport.TABLES	unproven	
 chunks	chunks	service/src/main/java/dev/nexus/service/vectors/ChunkKeySweep.java	1017	update	jooq	-	collection_id	yes		unproven	oneBatch
 chunks	chunks	service/src/main/java/dev/nexus/service/vectors/PgVectorRepository.java	1331	insert	helper	collection	collection_id	yes	ch.table() helper	require	upsertChunksInternal

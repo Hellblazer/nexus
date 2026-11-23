@@ -77,6 +77,17 @@ public final class QuarantineOrigin {
     private static final JSONB EMPTY_OBJECT = JSONB.jsonb("{}");
 
     private static final Field<String> ORIGIN_TAG = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "origin_collection");
+    /**
+     * A chunk row whose {@code metadata} names {@code origin} as its origin: from gate 3 by the origin's registry id
+     * ({@code origin_collection_id}; a row written before the id key carries none and is read by its label tag), before it by the label
+     * tag. One definition for {@code rowsOf} and the restore's sibling lookup (RDR-229 P3.5c).
+     */
+    public static Condition taggedWith(boolean byId, String tenant, String origin) {
+        return byId
+            ? ORIGIN_ID.eq(CollectionIds.idOf(tenant, origin).cast(String.class)).or(ORIGIN_ID.isNull().and(ORIGIN_TAG.eq(origin)))
+            : ORIGIN_TAG.eq(origin);
+    }
+
     /** The origin's registry id as the tag carries it (text); null on a row written before the id key. */
     private static final Field<String> ORIGIN_ID = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, ORIGIN_ID_KEY);
 
@@ -221,9 +232,7 @@ public final class QuarantineOrigin {
             .and(CollectionIdReads.is(gate3, tenant, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, PREFIX + origin).or(inRowDerivedSibling));
         // From gate 3 the tag names the origin by its id ({@code origin_collection_id}, which retagRowsOf writes), the label tag being the
         // pre-latch arm and the arm of a row written before the id key existed (it carries no id key); a tag that names no id reads by label.
-        Condition tagged = byId
-            ? ORIGIN_ID.eq(originId.cast(String.class)).or(ORIGIN_ID.isNull().and(ORIGIN_TAG.eq(origin)))
-            : ORIGIN_TAG.eq(origin);
+        Condition tagged = taggedWith(byId, tenant, origin);
         return CHUNKS.TENANT_ID.eq(tenant).and(inQuarantine).and(tagged.or(untaggedHere));
     }
 
