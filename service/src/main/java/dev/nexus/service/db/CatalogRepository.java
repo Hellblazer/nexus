@@ -6125,9 +6125,8 @@ public final class CatalogRepository {
         if (!anyRows) return;   // no row is filed under the name, but each document's transaction still reads the id (registryFirst)
         try {
             CollectionRegistry.lookupWritable(tenantScope, tenant, collection);
-        } catch (CollectionSupersededException | CollectionRetiredIdException | UnknownCollectionIdException e) {
-            throw e;   // a request by id answers its typed 409 or 404 (RDR-229 P3.5a), not a 200 with every document failed
         } catch (RuntimeException e) {
+            CollectionIdRefusals.rethrowIfRefusal(e);   // a request by id answers its typed 409 or 404 (RDR-229 P3.5a), not a 200 with every document failed
             // Unregistered, or a row the registry cannot resolve: each document reports it as it always did.
         }
     }

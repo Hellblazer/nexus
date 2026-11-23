@@ -61,6 +61,10 @@ import java.util.regex.Pattern;
  *       {@code successor_collection_id} its id. A tombstone that names no live successor (the successor was deleted, even if its
  *       label was taken again) answers 409 with neither field. A retired LABEL is not this filter's: it is not an id, and the
  *       delete keeps its 200 for it;</li>
+ *   <li>409 {@code collection_renamed}: the id's row carries another label than the one this filter resolved (a one-row rename landed
+ *       between this filter and the write's registry read, raised in the write's own transaction as
+ *       {@code CollectionRenamedUnderRequestException}); body {@code collection_id}, {@code requested_label}, {@code current_label}.
+ *       An ordinary race and not a defect: nothing was written and the client may read the collection again and retry;</li>
  *   <li>500 {@code collection_id_mismatch}: the registry answered an id with a row of another id. A registry inconsistency, an
  *       engine defect and not a caller mistake, so a 500 and never a 409; nothing is retried or guessed. No request reaches it
  *       today, since a read by id selects on the key.</li>

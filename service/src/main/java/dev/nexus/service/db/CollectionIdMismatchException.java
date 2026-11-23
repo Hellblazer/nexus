@@ -19,13 +19,6 @@ public final class CollectionIdMismatchException extends RuntimeException {
         this.resolved = resolved;
     }
 
-    /** The row of the id carries another label than the one the request was resolved to. */
-    public CollectionIdMismatchException(long collectionId, String expectedLabel, String rowLabel) {
-        super("collection_id " + collectionId + " names '" + rowLabel + "', not '" + expectedLabel + "'");
-        this.requested = collectionId;
-        this.resolved = collectionId;
-    }
-
     public long requested() { return requested; }
     public long resolved() { return resolved; }
 }

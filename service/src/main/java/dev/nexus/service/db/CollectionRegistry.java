@@ -202,15 +202,17 @@ public final class CollectionRegistry {
      * caller's transaction with {@code FOR KEY SHARE} (a delete of the row waits for that transaction, so the id cannot be freed
      * and its label taken again underneath the write). Never from the cache, which cannot hold a lock, and never by the label. No
      * row is {@link UnknownCollectionIdException}; a retired row is {@link CollectionRetiredIdException} naming its successor by
-     * {@code superseded_by_id}; a row of another label is {@link CollectionIdMismatchException}; a live row is returned.
+     * {@code superseded_by_id}; a row now bearing another label is {@link CollectionRenamedUnderRequestException}; a row of
+     * another id is {@link CollectionIdMismatchException}; a live row is returned.
      *
      * <p>The one place every in-transaction by-id read goes through ({@link #resolveLabel}, {@link CollectionIds#require}). A
      * second read of the same label in one transaction answers from the transaction's memo: the lock is already held.
      *
      * @param consume true for a read in the WRITE's own transaction, which marks the id consumed ({@link ExpectedCollectionIds});
      *        false for an outside-a-transaction lookup's short read, which must not count
-     * @throws CollectionIdMismatchException if the row the read returns is not the row of that id, or carries another label
-     *         (a registry defect, or an in-place rename in the gap, which Phase 3 does not have before P3.7)
+     * @throws CollectionIdMismatchException if the row the read returns is not the row of that id (a registry defect)
+     * @throws CollectionRenamedUnderRequestException if the row of the id carries another label than the one the request resolved
+     *         (a one-row rename, P3.7, landed in the gap: an ordinary race, 409 {@code collection_renamed})
      */
     CollectionRow readRequested(DSLContext ctx, String tenant, String label, long collectionId, boolean consume) {
         CollectionRow memo = WriteRegistryMemo.get(ctx, tenant, label);
@@ -230,7 +232,7 @@ public final class CollectionRegistry {
             throw new CollectionIdMismatchException(collectionId, row.collectionId());
         }
         if (!row.label().equals(label)) {
-            throw new CollectionIdMismatchException(collectionId, label, row.label());
+            throw new CollectionRenamedUnderRequestException(tenant, collectionId, label, row.label());
         }
         if (row.isSuperseded()) {
             throw new CollectionRetiredIdException(tenant, collectionId, row.label(),
@@ -295,8 +297,8 @@ public final class CollectionRegistry {
      * order a retiring verb locks its rows in ({@code CollectionTombstones#lockRows}), and memoises each, so the per-label checks that
      * follow answer from the memo. Locking one row after another in the request's order instead would let a writer holding the key
      * share of the higher id and waiting for the lower one meet a verb that holds the lower and waits for the higher: a cycle. Names
-     * a request gave by id read that id ({@link #readRequested}'s refusals: no row 404, a retired row 409, another label's row
-     * {@link CollectionIdMismatchException}); a label no row has is simply not memoised, and the per-label check that follows raises
+     * a request gave by id read that id ({@link #readRequested}'s refusals: no row 404, a retired row 409, a row renamed under the request
+     * {@link CollectionRenamedUnderRequestException}); a label no row has is simply not memoised, and the per-label check that follows raises
      * its own answer. Call it before any row work of the transaction.
      */
     void lockAllForWrite(DSLContext ctx, String tenant, java.util.Collection<String> labels) {
@@ -360,7 +362,7 @@ public final class CollectionRegistry {
                 chosen = rows.stream().filter(r -> r.collectionId() == id).findFirst()
                     .orElseThrow(() -> new UnknownCollectionIdException(tenant, id));
                 if (!chosen.label().equals(label)) {
-                    throw new CollectionIdMismatchException(id, label, chosen.label());
+                    throw new CollectionRenamedUnderRequestException(tenant, id, label, chosen.label());
                 }
                 if (chosen.isSuperseded()) {
                     throw new CollectionRetiredIdException(tenant, id, chosen.label(), CollectionSuccessor.of(ctx, tenant, id));

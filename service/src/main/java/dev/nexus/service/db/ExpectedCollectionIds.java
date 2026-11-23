@@ -25,7 +25,7 @@ import java.util.TreeSet;
  *   <li>{@link CollectionRegistry#resolveLabel} and {@link CollectionIds#require}, inside the handler's transaction, read the row
  *       of the id {@code FOR KEY SHARE} (a concurrent delete of the row waits for the write): no row is
  *       {@link UnknownCollectionIdException}, a retired row {@link CollectionRetiredIdException}, a row of another label
- *       {@link CollectionIdMismatchException}, a live row answers under its own label;</li>
+ *       {@link CollectionRenamedUnderRequestException}, a live row answers under its own label;</li>
  *   <li>{@link CollectionIds#idOf(String, String)} gives a subselect on the id as well as the label, so a statement carrying it
  *       writes NULL (the P3.1 CHECK refuses it) when the label is no longer the id's. It takes no lock and records no
  *       consumption: it is the stamp of a history row (a log, never a decision), and the write that must be live at commit reads
