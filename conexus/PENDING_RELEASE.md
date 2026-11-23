@@ -47,4 +47,6 @@ it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- `conexus/skills/rdr-close/SKILL.md`: one clause: the Step 6 target is found by its attributes and minted on first write, not rendered, nexus-p2m1x.30.
+
 ## Deferred to the next client release

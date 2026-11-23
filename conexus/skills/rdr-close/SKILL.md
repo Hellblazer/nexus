@@ -191,7 +191,7 @@ Skip all catalog steps silently if catalog is not initialized. The T2 record and
 
 The main RDR is already in its `rdr__` collection from `nx index repo`, drafts included (and refreshed in Step 4 only if the body changed during close). Do **not** duplicate it with store_put tool — that would create non-CCE blob entries in the same collection, degrading search quality.
 
-Per the collection rules (https://github.com/Hellblazer/nexus/blob/main/docs/collections.md), Rule 1, a knowledge collection is a subject area, never an owner id. The post-mortem's target is the bare subject `{repo}-rdr-research` (per Rule 3, never the four-segment form — `store_put` renders and, on first write, mints it), with `category="rdr_postmortem"` stamped on the chunk metadata so it is queryable as a distinct slice without needing its own collection.
+Per the collection rules (https://github.com/Hellblazer/nexus/blob/main/docs/collections.md), Rule 1, a knowledge collection is a subject area, never an owner id. The post-mortem's target is the bare subject `{repo}-rdr-research` (per Rule 3, never the four-segment form — `store_put` finds the collection by its attributes and, on first write, mints it), with `category="rdr_postmortem"` stamped on the chunk metadata so it is queryable as a distinct slice without needing its own collection.
 
 Check for an existing subject before writing (Rule 2, reuse before create). A new subject's collection is labelled `c<id>` by the engine, so it is found by its CONTENT_TYPE and OWNER columns (OWNER is the subject), not by its name; a live collection named `knowledge__<subject>__...` counts too, and a retired one does not:
 ```bash
