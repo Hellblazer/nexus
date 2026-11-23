@@ -192,9 +192,12 @@ public final class CollectionMint {
                     done = inSavepoint(ctx, () -> insert.get().onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.CONTENT_TYPE,
                             CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION)
                         // inlined, not bound: the inference predicate must be provably the index's own, and a bind parameter
-                        // is not a constant at parse time (42P10). Stays on superseded_by after gate 3 (P3.5c): the tuple index's
-                        // own predicate names that column until P4.1 redefines it.
+                        // is not a constant at parse time (42P10). The predicate implies today's index predicate (superseded_by = ''
+                        // AND lifecycle_state <> 'quarantine') and the id-only one P4.1 builds (superseded_by_id IS NULL AND ...): an
+                        // ON CONFLICT predicate needs only to imply the index's own, so the one statement infers its arbiter on either
+                        // index (linda 2026-11-23; pinned by Rdr229P35cSharedLabelAndHistoryTest on the id-only index).
                         .where(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(DSL.inline(""))
+                            .and(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.isNull())
                             .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.ne(DSL.inline("quarantine"))))
                         .doNothing().execute());
                 } catch (DataAccessException e) {
