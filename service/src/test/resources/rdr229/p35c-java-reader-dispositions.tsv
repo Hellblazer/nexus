@@ -343,6 +343,7 @@ java	vectors/ReaperRepository.java chunks order_by	collection	id	ordered by the 
 java	vectors/ReaperRepository.java chunks result	collection	id	the returned name is the registry's current label of collection_id from gate 3, never the stale row name
 java	vectors/ReaperRepository.java chunks select	collection	id	collectionsWithChunks lists the registry label of each row's collection_id from gate 3 (NULL ids are not listed)
 java	vectors/ReaperRepository.java chunks where	collection	id	describe, taggedOrigins and clientMovedOrigins filter by collection_id from gate 3; a NULL id selects nothing
+java	vectors/RestoreOriginMarker.java chunks expr	collection	id	the restore's marker-row check selects the named siblings' chunks by CollectionSelector.collectionIn(gate3, ...) and returns before reading anything unless gate 3 holds (RDR-229 P3.7): by id from the latch
 java	vectors/TaxonomyCentroidRepository.java catalog_collections select	name	label-kept	the registry's current label of the centroid's collection_id, which a reader returns from gate 3
 java	vectors/TaxonomyCentroidRepository.java catalog_collections where	name	label-kept	the name-path tombstone exclusion; from gate 3 the exclusion is by collection_id and superseded_by_id
 java	vectors/TaxonomyCentroidRepository.java catalog_collections where	superseded_by	id	from gate 3 the tombstone test reads superseded_by_id IS NOT NULL
