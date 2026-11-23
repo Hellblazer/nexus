@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import dev.nexus.service.datamove.Gate3;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.exception.DataAccessException;
@@ -133,7 +134,7 @@ class DepartedWriterSpansGuardedTest {
         List<String> calls = new ArrayList<>();
         var gone = new DepartedWriterSpans.Gone("c", new byte[32], null, null, null, null);
 
-        assertThatThrownBy(() -> DepartedWriterSpans.clear(ctxRecording(calls, true), "t", List.of(gone)))
+        assertThatThrownBy(() -> DepartedWriterSpans.clear(ctxRecording(calls, true), "t", List.of(gone), Gate3.never()))
             .isInstanceOf(IllegalStateException.class);
         assertThat(calls).isEmpty();
     }

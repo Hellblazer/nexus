@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import dev.nexus.service.datamove.Gate3;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -86,10 +87,44 @@ class QuarantineOriginLifecycleTest extends AtomicWriteTestBase {
         taggedRow(t, sibling, "two", prefixedLiveOrigin);
 
         tenantScope.withTenant(t, ctx -> {
-            assertThat(QuarantineOrigin.countRowsOf(ctx, t, quarantineRowOrigin)).isZero();
-            assertThat(QuarantineOrigin.holdsRowsOf(ctx, t, quarantineRowOrigin)).isFalse();
-            assertThat(QuarantineOrigin.countRowsOf(ctx, t, prefixedLiveOrigin)).isEqualTo(1);
-            assertThat(QuarantineOrigin.holdsRowsOf(ctx, t, prefixedLiveOrigin)).isTrue();
+            assertThat(QuarantineOrigin.countRowsOf(ctx, t, quarantineRowOrigin, Gate3.never())).isZero();
+            assertThat(QuarantineOrigin.holdsRowsOf(ctx, t, quarantineRowOrigin, Gate3.never())).isFalse();
+            assertThat(QuarantineOrigin.countRowsOf(ctx, t, prefixedLiveOrigin, Gate3.never())).isEqualTo(1);
+            assertThat(QuarantineOrigin.holdsRowsOf(ctx, t, prefixedLiveOrigin, Gate3.never())).isTrue();
+            return null;
+        });
+    }
+
+    /**
+     * RDR-229 P3.5c: from gate 3 the same questions are asked of the collection ids. The quarantine sibling's registry row is renamed
+     * (a one-row rename), so its chunk rows still carry the old name: a name match finds nothing, the id match finds both.
+     */
+    @Test
+    void fromGate3TheQuarantineRowsOfAnOriginAreFoundByCollectionId_afterTheSiblingIsRenamed() throws Exception {
+        String t = newTenant();
+        String sibling = col("s");
+        row(t, sibling, "quarantine");
+        String origin = col("o");
+        row(t, origin, "live");
+        taggedRow(t, sibling, "one", origin);
+        taggedRow(t, sibling, "two", origin);
+        String renamed = col("renamed");
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext d = DSL.using(su, SQLDialect.POSTGRES);
+            dev.nexus.service.RegistryRenameSupport.dropForeignKeysOntoTheRegistry(d);
+            dev.nexus.service.RegistryRenameSupport.rename(d, t, sibling, renamed);
+        }
+        Gate3 latched = () -> true;
+
+        tenantScope.withTenant(t, ctx -> {
+            assertThat(QuarantineOrigin.countRowsOf(ctx, t, origin, Gate3.never()))
+                .as("the name arm: the chunk rows name a collection that is no longer a quarantine label").isZero();
+            assertThat(QuarantineOrigin.countRowsOf(ctx, t, origin, latched)).as("the id arm").isEqualTo(2);
+            assertThat(QuarantineOrigin.holdsRowsOf(ctx, t, origin, latched)).isTrue();
+            assertThat(QuarantineOrigin.deleteRowsOf(ctx, t, origin, latched)).as("the sibling that lost rows, by its current label")
+                .containsExactly(Map.entry(renamed, 2));
+            assertThat(QuarantineOrigin.countRowsOf(ctx, t, origin, latched)).isZero();
             return null;
         });
     }

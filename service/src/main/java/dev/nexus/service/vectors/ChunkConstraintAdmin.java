@@ -4,10 +4,12 @@ package dev.nexus.service.vectors;
 
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 
+import dev.nexus.service.datamove.Gate3;
 import dev.nexus.service.db.AdminConnection;
 import dev.nexus.service.db.AdminDdlSession;
 import dev.nexus.service.db.AdminDdlSession.State;
 import org.jooq.DSLContext;
+import org.jooq.Field;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
 import org.slf4j.Logger;
@@ -126,9 +128,20 @@ public class ChunkConstraintAdmin {
     private static final String PROBE_STATEMENT_TIMEOUT = "10min";
 
     private final AdminConnection admin;
+    private final Gate3 gate3;
 
     public ChunkConstraintAdmin(AdminConnection admin) {
+        this(admin, Gate3.never());
+    }
+
+    /**
+     * RDR-229 P3.5c (nexus-p2m1x.25): from gate 3 ({@link Gate3#holds()}, read on every probe) the probe's bypass-prefix test
+     * reads the registry's current label of each row's {@code collection_id}, never the chunk row's own name; before it, the
+     * name column as it was.
+     */
+    public ChunkConstraintAdmin(AdminConnection admin, Gate3 gate3) {
         this.admin = Objects.requireNonNull(admin, "admin");
+        this.gate3 = Objects.requireNonNull(gate3, "gate3");
     }
 
     // ---- public ------------------------------------------------------------------------------------------------
@@ -153,7 +166,7 @@ public class ChunkConstraintAdmin {
         try (Session s = open(false)) {
             s.requireUnrestrictedView();
             s.setSession("statement_timeout", PROBE_STATEMENT_TIMEOUT);
-            return s.probe(plan);
+            return s.probe(plan, gate3.holds());
         }
     }
 
@@ -337,9 +350,11 @@ public class ChunkConstraintAdmin {
         }
 
         /** The probe query: one pass over {@code nexus.chunks}, grouped by tenant, typed jOOQ on the admin connection. */
-        List<TenantProbe> probe(ChunkKeyPlan plan) {
+        List<TenantProbe> probe(ChunkKeyPlan plan, boolean byId) {
+            // A NULL id is no collection: its label is NULL, so the bypass test never admits it as a non-bypass collection.
+            Field<String> label = byId ? CollectionSelector.labelOf(CHUNKS.TENANT_ID, CHUNKS.COLLECTION_ID) : CHUNKS.COLLECTION;
             var rows = ctx.select(CHUNKS.TENANT_ID, DSL.count(),
-                    DSL.count().filterWhere(ChunkKeySweep.notBypass(CHUNKS.COLLECTION, plan).and(ChunkKeySweep.retired(plan))),
+                    DSL.count().filterWhere(ChunkKeySweep.notBypass(label, plan).and(ChunkKeySweep.retired(plan))),
                     DSL.count().filterWhere(ChunkKeySweep.hashMismatch()),
                     DSL.count().filterWhere(ChunkKeySweep.modelMismatch()),
                     DSL.count().filterWhere(ChunkKeySweep.width(false)),

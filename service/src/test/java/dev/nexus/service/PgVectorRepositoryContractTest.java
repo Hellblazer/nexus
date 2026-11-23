@@ -1684,8 +1684,8 @@ class PgVectorRepositoryContractTest {
 
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(1024);
         List<Integer> zero = tenantScope.withTenant(TENANT_A, ctx ->
-            PgVectorRepository.batchUpdateMetadata(ctx, ch, col, List.of(chash),
-                List.of(Map.of("title", "Clean")), List.of(0)));
+            PgVectorRepository.batchUpdateMetadata(ctx, ch, TENANT_A, col, List.of(chash),
+                List.of(Map.of("title", "Clean")), List.of(0), null, dev.nexus.service.datamove.Gate3.never()));
         assertThat(zero).isEmpty();
 
         Map<String, Object> meta = storedMeta(col, chash);

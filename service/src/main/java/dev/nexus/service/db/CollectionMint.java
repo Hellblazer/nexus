@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import dev.nexus.service.datamove.Gate3;
 import dev.nexus.service.jooq.nexus.tables.records.CatalogCollectionsRecord;
 import org.jooq.DSLContext;
 import org.jooq.Field;
@@ -108,7 +109,7 @@ public final class CollectionMint {
      * @param clientRoute the client's route: a mint registers {@code live} collections only (never a quarantine one,
      *                    whose label would have to start {@code quarantine-})
      */
-    static Map<String, Object> mint(DSLContext ctx, String tenant, Map<String, Object> coll, boolean clientRoute) {
+    static Map<String, Object> mint(DSLContext ctx, String tenant, Map<String, Object> coll, boolean clientRoute, Gate3 gate3) {
         refuseSuppliedId(coll);
         String contentType = CatalogRepository.s(coll, "content_type");
         if (contentType == null || contentType.isBlank()) {
@@ -143,7 +144,7 @@ public final class CollectionMint {
                 + "have to start quarantine-");
         }
 
-        Map<String, Object> live = liveRow(ctx, tenant, contentType, owner, requestedModel, version);
+        Map<String, Object> live = liveRow(ctx, tenant, contentType, owner, requestedModel, version, gate3);
         if (live != null) {
             return withDisplayName(ctx, tenant, live, coll);
         }
@@ -153,7 +154,7 @@ public final class CollectionMint {
             // The partial index is not built yet (the engine booted before the re-own move completed): ON CONFLICT on it
             // would raise 42P10. Serialize the first mints of this tuple, then look again.
             lockTuple(ctx, tenant, contentType, owner, requestedModel, version);
-            live = liveRow(ctx, tenant, contentType, owner, requestedModel, version);
+            live = liveRow(ctx, tenant, contentType, owner, requestedModel, version, gate3);
             if (live != null) {
                 return withDisplayName(ctx, tenant, live, coll);
             }
@@ -191,7 +192,8 @@ public final class CollectionMint {
                     done = inSavepoint(ctx, () -> insert.get().onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.CONTENT_TYPE,
                             CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION)
                         // inlined, not bound: the inference predicate must be provably the index's own, and a bind parameter
-                        // is not a constant at parse time (42P10)
+                        // is not a constant at parse time (42P10). Stays on superseded_by after gate 3 (P3.5c): the tuple index's
+                        // own predicate names that column until P4.1 redefines it.
                         .where(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(DSL.inline(""))
                             .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.ne(DSL.inline("quarantine"))))
                         .doNothing().execute());
@@ -203,7 +205,7 @@ public final class CollectionMint {
                     // an operator's, an older build's): the same path as an absent index
                     log.warn("event=collection_tuple_index_not_inferable index={}", CollectionTupleIndexProbe.INDEX);
                     lockTuple(ctx, tenant, contentType, owner, requestedModel, version);
-                    live = liveRow(ctx, tenant, contentType, owner, requestedModel, version);
+                    live = liveRow(ctx, tenant, contentType, owner, requestedModel, version, gate3);
                     if (live != null) {
                         return withDisplayName(ctx, tenant, live, coll);
                     }
@@ -232,7 +234,7 @@ public final class CollectionMint {
             }
             throw e;
         }
-        Map<String, Object> row = minted(liveRow(ctx, tenant, contentType, owner, requestedModel, version), inserted,
+        Map<String, Object> row = minted(liveRow(ctx, tenant, contentType, owner, requestedModel, version, gate3), inserted,
             contentType, owner, requestedModel, version);
         // a lost race answers the winner's row, which gets the display_name this request carries, as a found row does
         return inserted == 0 ? withDisplayName(ctx, tenant, row, coll) : row;
@@ -445,10 +447,10 @@ public final class CollectionMint {
     }
 
     /** A recheck of one tuple: refuse, naming both, when another live collection than {@code t[0]} holds {@code t}. */
-    static Consumer<DSLContext> recheckOf(String tenant, String[] t) {
+    static Consumer<DSLContext> recheckOf(String tenant, String[] t, Gate3 gate3) {
         return ctx -> {
             if (t[0] != null) {
-                String held = heldBy(ctx, tenant, t[1], t[2], t[3], t[4], t[0]);
+                String held = heldBy(ctx, tenant, t[1], t[2], t[3], t[4], t[0], gate3);
                 if (held != null) {
                     throw conflict(t[0], held, t[1], t[2], t[3], t[4]);
                 }
@@ -466,21 +468,21 @@ public final class CollectionMint {
 
     /** The name of another live collection of this tuple (the lowest {@code collection_id}), or null. */
     static String heldBy(DSLContext ctx, String tenant, String contentType, String owner, String model, String version,
-                         String exceptName) {
+                         String exceptName, Gate3 gate3) {
         return ctx.select(CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
                 .and(CATALOG_COLLECTIONS.CONTENT_TYPE.eq(contentType))
                 .and(CATALOG_COLLECTIONS.OWNER_ID.eq(owner))
                 .and(CATALOG_COLLECTIONS.EMBEDDING_MODEL.eq(model))
                 .and(CATALOG_COLLECTIONS.MODEL_VERSION.eq(version))
-                .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(""))
+                .and(CollectionIdReads.live(gate3, CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.SUPERSEDED_BY_ID))
                 .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.ne("quarantine"))
                 .and(CATALOG_COLLECTIONS.NAME.ne(exceptName)))
             .orderBy(CATALOG_COLLECTIONS.COLLECTION_ID.asc()).limit(1).fetchOne(CATALOG_COLLECTIONS.NAME);
     }
 
     private static Map<String, Object> liveRow(DSLContext ctx, String tenant, String contentType, String owner,
-                                               String model, String version) {
+                                               String model, String version, Gate3 gate3) {
         Record r = ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID, CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.CONTENT_TYPE,
                 CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
                 CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LIFECYCLE_STATE, CATALOG_COLLECTIONS.DIMENSION)
@@ -490,7 +492,7 @@ public final class CollectionMint {
                 .and(CATALOG_COLLECTIONS.OWNER_ID.eq(owner))
                 .and(CATALOG_COLLECTIONS.EMBEDDING_MODEL.eq(model))
                 .and(CATALOG_COLLECTIONS.MODEL_VERSION.eq(version))
-                .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(""))
+                .and(CollectionIdReads.live(gate3, CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.SUPERSEDED_BY_ID))
                 .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.ne("quarantine")))
             .orderBy(CATALOG_COLLECTIONS.COLLECTION_ID.asc())
             .limit(1)
@@ -519,7 +521,7 @@ public final class CollectionMint {
      * {@link LiveTupleConflict}, a 409). With the partial UNIQUE index absent the tuples are locked first (sorted), then
      * re-read, so a concurrent mint, import or named registration of a tuple cannot slip a second row past the check.
      */
-    static void refuseLiveTupleConflicts(DSLContext ctx, String tenant, List<Map<String, Object>> fresh) {
+    static void refuseLiveTupleConflicts(DSLContext ctx, String tenant, List<Map<String, Object>> fresh, Gate3 gate3) {
         List<String[]> live = new ArrayList<>();   // {name, content_type, owner_id, embedding_model, model_version}
         for (Map<String, Object> coll : fresh) {
             if ("".equals(nne(CatalogRepository.s(coll, "superseded_by")))
@@ -542,7 +544,7 @@ public final class CollectionMint {
             if (earlier != null) {
                 throw conflict(r[0], earlier, r[1], r[2], r[3], r[4]);
             }
-            String held = heldBy(ctx, tenant, r[1], r[2], r[3], r[4], r[0]);
+            String held = heldBy(ctx, tenant, r[1], r[2], r[3], r[4], r[0], gate3);
             if (held != null) {
                 throw conflict(r[0], held, r[1], r[2], r[3], r[4]);
             }
@@ -555,17 +557,33 @@ public final class CollectionMint {
      * superseded or quarantined holds no live tuple and is not checked.
      */
     static void refuseHeldTuple(DSLContext ctx, String tenant, String name, String contentType, String owner, String model,
-                                String version, String lifecycleState, String supersededBy) {
+                                String version, String lifecycleState, String supersededBy, Gate3 gate3) {
         if (!"".equals(supersededBy) || "quarantine".equals(lifecycleState)) {
             return;
         }
         if (!tupleIndexExists(ctx)) {
             lockTuple(ctx, tenant, contentType, owner, model, version);
         }
-        String held = heldBy(ctx, tenant, contentType, owner, model, version, name);
+        String held = heldBy(ctx, tenant, contentType, owner, model, version, name, gate3);
         if (held != null) {
             throw conflict(name, held, contentType, owner, model, version);
         }
+    }
+
+    /**
+     * Whether a unique, non-partial index on exactly {@code (tenant_id, name)} of the registry still exists (the name primary key,
+     * today {@code catalog_collections_pk}). It is probed by its columns, not its name: P4.1's key swap may re-create a key under
+     * the same name on other columns. While one exists, a retired label still conflicts on it and a write to that label revives the
+     * tombstone; once it is gone (P4.1), only the live-label index arbitrates (RDR-229 G15) and a label held by a tombstone alone
+     * is written as a new live row.
+     */
+    static boolean nameKeyExists(DSLContext ctx) {
+        var def = DSL.field(DSL.name("pg_catalog", "pg_indexes", "indexdef"), String.class);
+        return ctx.select(def).from(DSL.table(DSL.name("pg_catalog", "pg_indexes")))
+            .where(DSL.field(DSL.name("pg_catalog", "pg_indexes", "schemaname"), String.class).eq("nexus"))
+            .and(DSL.field(DSL.name("pg_catalog", "pg_indexes", "tablename"), String.class).eq("catalog_collections"))
+            .fetch(def).stream().anyMatch(d -> d.startsWith("CREATE UNIQUE INDEX") && !d.contains(" WHERE ")
+                && d.endsWith("USING btree (tenant_id, name)"));
     }
 
     /** Whether the partial UNIQUE index of the live tuple exists (changeset collections-001-2). */

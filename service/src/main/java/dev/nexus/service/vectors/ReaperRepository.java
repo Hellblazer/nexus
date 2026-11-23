@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import dev.nexus.service.datamove.Gate3;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.TenantScope;
 
@@ -31,6 +32,12 @@ import static dev.nexus.service.jooq.nexus.Tables.REAPER_QUARANTINE_CHUNKS;
  * three questions it does answer are which collections hold chunks (from {@code nexus.chunks}, so a collection with
  * chunks and no catalog row is seen and refused rather than never listed), what lifecycle state each registered
  * collection is in, and the dry-run and move calls.
+ *
+ * <p>RDR-229 P3.5c (nexus-p2m1x.25), item 6: from gate 3 ({@link Gate3#holds()}, read on every call) the chunk filters
+ * select by {@code collection_id} and the collection names this class returns are the registry's current label of the
+ * row's id, never the chunk row's own name column (a one-row rename leaves that stale). Before gate 3 every statement is the
+ * name path as it was. The move and expiry functions take a name, and have no id twin: the caller's name is the registry label
+ * ({@link #collectionsWithChunks}), which is the P3.5b "both" form's argument.
  */
 public class ReaperRepository {   // not final: ChunkReaperIntegrationTest raises a statement timeout from a subclass
 
@@ -50,9 +57,21 @@ public class ReaperRepository {   // not final: ChunkReaperIntegrationTest raise
     public record Expiry(long expired, long protectedCount) {}
 
     private final TenantScope tenantScope;
+    private final Gate3 gate3;
 
     public ReaperRepository(TenantScope tenantScope) {
+        this(tenantScope, Gate3.never());
+    }
+
+    public ReaperRepository(TenantScope tenantScope, Gate3 gate3) {
         this.tenantScope = tenantScope;
+        this.gate3 = java.util.Objects.requireNonNull(gate3, "gate3");
+    }
+
+    /** Gate 3 read once for one statement, so its predicates and its select list agree; never held past the statement. */
+    private Gate3 gateNow() {
+        boolean holds = gate3.holds();
+        return () -> holds;
     }
 
     /**
@@ -63,6 +82,14 @@ public class ReaperRepository {   // not final: ChunkReaperIntegrationTest raise
     public List<String> collectionsWithChunks(String tenant, Duration statementTimeout) {
         return tenantScope.withTenant(tenant, ctx -> {
             PgSession.setStatementAndLockBounds(ctx, (int) statementTimeout.toMillis(), 2_000);
+            if (gateNow().holds()) {
+                // From gate 3: the registry's current label of each row's id. A NULL id is no collection, never a '' name.
+                Field<String> label = CollectionSelector.labelOf(CHUNKS.TENANT_ID, CHUNKS.COLLECTION_ID).as("label");
+                return ctx.selectDistinct(label).from(CHUNKS)
+                    .where(CHUNKS.TENANT_ID.eq(tenant)).and(CHUNKS.COLLECTION_ID.isNotNull())
+                    .orderBy(label)
+                    .fetch(label);
+            }
             return ctx.selectDistinct(CHUNKS.COLLECTION).from(CHUNKS)
                 .where(CHUNKS.TENANT_ID.eq(tenant))
                 .orderBy(CHUNKS.COLLECTION)
@@ -126,7 +153,9 @@ public class ReaperRepository {   // not final: ChunkReaperIntegrationTest raise
             ctx.select(CHUNKS.CHASH, ChunkOwnerLabel.title(), ChunkOwnerLabel.filePath(), ChunkOwnerLabel.textPrefix())
                .from(CHUNKS)
                .leftJoin(ChunkOwnerLabel.ownerLateral()).on(DSL.trueCondition())
-               .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(collection)).and(CHUNKS.CHASH.in(keys)))
+               .where(CHUNKS.TENANT_ID.eq(tenant)
+                   .and(CollectionSelector.collectionIs(gateNow(), tenant, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, collection))
+                   .and(CHUNKS.CHASH.in(keys)))
                .orderBy(CHUNKS.CHASH)
                .fetch(r -> new ChunkLabel(HexFormat.of().formatHex(r.value1()),
                    ChunkOwnerLabel.blankToNull(r.value2()), ChunkOwnerLabel.blankToNull(r.value3()),
@@ -169,7 +198,9 @@ public class ReaperRepository {   // not final: ChunkReaperIntegrationTest raise
             PgSession.setStatementAndLockBounds(ctx, statementTimeoutMs, 2_000);
             // No ORDER BY: SELECT DISTINCT cannot order by an expression it rebinds. Sorted below instead.
             return ctx.selectDistinct(origin).from(CHUNKS)
-                .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(quarantineCollection))
+                .where(CHUNKS.TENANT_ID.eq(tenant)
+                    .and(CollectionSelector.collectionIs(gateNow(), tenant, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID,
+                        quarantineCollection))
                     .and(engineOwned).and(origin.isNotNull()))
                 .fetch(origin).stream().sorted().toList();
         });
@@ -210,14 +241,19 @@ public class ReaperRepository {   // not final: ChunkReaperIntegrationTest raise
         Condition clientMoved = DSL.not(DSL.condition(reaperOwnsQuarantinedRow(CHUNKS.METADATA)));
         return tenantScope.withTenant(tenant, ctx -> {
             PgSession.setStatementAndLockBounds(ctx, statementTimeoutMs, 2_000);
+            Gate3 g = gateNow();
+            // The quarantine collection's own registry row: by the chunk's id from gate 3 (the rows are already selected by that id),
+            // by name before. The origin is a label the chunk's metadata tag carries, so it resolves against the registry's name.
+            Condition quarantineRow = CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
+                .and(g.holds() ? CATALOG_COLLECTIONS.COLLECTION_ID.eq(CHUNKS.COLLECTION_ID)
+                               : CATALOG_COLLECTIONS.NAME.eq(quarantineCollection))
+                .and(CATALOG_COLLECTIONS.CONTENT_TYPE.eq(contentType))
+                .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("quarantine"));
             return ctx.selectDistinct(origin).from(CHUNKS)
-                .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(quarantineCollection))
+                .where(CHUNKS.TENANT_ID.eq(tenant)
+                    .and(CollectionSelector.collectionIs(g, tenant, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, quarantineCollection))
                     .and(clientMoved).and(origin.isNotNull())
-                    .and(DSL.exists(DSL.selectOne().from(CATALOG_COLLECTIONS)
-                        .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
-                            .and(CATALOG_COLLECTIONS.NAME.eq(quarantineCollection))
-                            .and(CATALOG_COLLECTIONS.CONTENT_TYPE.eq(contentType))
-                            .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("quarantine")))))
+                    .and(DSL.exists(DSL.selectOne().from(CATALOG_COLLECTIONS).where(quarantineRow)))
                     .and(DSL.exists(DSL.selectOne().from(CATALOG_COLLECTIONS)
                         .where(CATALOG_COLLECTIONS.TENANT_ID.eq(CHUNKS.TENANT_ID)
                             .and(CATALOG_COLLECTIONS.NAME.eq(origin))

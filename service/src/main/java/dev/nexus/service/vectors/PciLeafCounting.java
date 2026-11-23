@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import dev.nexus.service.datamove.Gate3;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.vectors.PciCatalog.Leaf;
 import org.jooq.DSLContext;
@@ -47,10 +48,35 @@ final class PciLeafCounting {
      * Rows of {@code collection} on the leaf's (model, tenant) key, stopped at {@code cap + 1}. The probe's explicit
      * {@code tenant_id} predicate is REQUIRED for correctness: the admin role reads every tenant's chunks
      * ({@code chunks_gate_probe_owner_read}, vectors-029), so without it a same-named collection of another tenant would
-     * be added to the count and a leaf would build an index its own rows do not warrant.
+     * be added to the count and a leaf would build an index its own rows do not warrant. The name path ({@link Gate3#never()}).
      */
     static int count(DSLContext tx, int dim, String collection, String model, String tenant, int cap) {
-        Integer n = PgVectorRepository.probeSelectedRowsQuery(tx, dim, new String[] {collection}, model, tenant, cap)
+        return count(tx, dim, collection, model, tenant, cap, Gate3.never());
+    }
+
+    /**
+     * {@link #count(DSLContext, int, String, String, String, int)} that reads the collection's rows by {@code collection_id} once
+     * {@code gate3} holds (RDR-229 P3.5c, nexus-p2m1x.25): the label resolves to the registry's id in the same statement, so a collection
+     * renamed in place is counted under its new label (its chunk rows keep the old one) and the old label counts nothing. A NULL id is no
+     * collection: an empty or unregistered label counts zero and never falls back to the name. {@code gate3} is read on each call. The
+     * statement keeps the probe's shape ({@link PgVectorRepository#probeSelectedRowsQuery}): the model and the tenant on the leaf, the
+     * collection key, {@code LIMIT cap + 1} under a count.
+     */
+    static int count(DSLContext tx, int dim, String collection, String model, String tenant, int cap, Gate3 gate3) {
+        if (!gate3.holds()) {
+            Integer n = PgVectorRepository.probeSelectedRowsQuery(tx, dim, new String[] {collection}, model, tenant, cap)
+                .fetchOne(0, Integer.class);
+            return n == null ? 0 : n;
+        }
+        DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+        Integer n = tx.selectCount()
+            .from(tx.selectOne()
+                .from(ch.table())
+                .where(ch.embeddingModel().eq(model))
+                .and(ch.tenantId().eq(tenant))
+                .and(CollectionSelector.collectionIs(gate3, tenant, ch.collection(), ch.collectionId(), collection))
+                .limit(cap + 1)
+                .asTable("probe"))
             .fetchOne(0, Integer.class);
         return n == null ? 0 : n;
     }

@@ -1,5 +1,7 @@
 package dev.nexus.service.db;
 
+import dev.nexus.service.datamove.Gate3;
+import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.JSONB;
@@ -75,7 +77,7 @@ public final class AspectRepository {
     // OWN_ID is the id of the row's own name, for an UPDATE that does not name the collection (the NOT VALID CHECK
     // looks at every updated row, and a row not stamped yet has a name and no id).
     private static final Field<Long>            EX_COLLECTION_ID          = excluded(DOCUMENT_ASPECTS.COLLECTION_ID);
-    private static final Field<Long>            ASPECT_OWN_ID             = coalesce(DOCUMENT_ASPECTS.COLLECTION_ID,
+    private static final Field<Long>            ASPECT_OWN_NAME_ID        = coalesce(DOCUMENT_ASPECTS.COLLECTION_ID,
         CollectionIds.idOf(DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION));
 
     // COALESCE(EXCLUDED.x, table.x) fields for importAspect path
@@ -94,17 +96,57 @@ public final class AspectRepository {
     private static final Field<String>          EX_HL_MENTIONS     = excluded(DOCUMENT_HIGHLIGHTS.MENTIONS_MD);
     private static final Field<OffsetDateTime>  EX_HL_INGESTED_AT  = excluded(DOCUMENT_HIGHLIGHTS.INGESTED_AT);
 
+    // the conflict keys are ArbiterTwins' name and id columns for the table, not retyped here
+    private static final Field<?>[] ASPECT_NAME_KEY =
+        CollectionKey.fields(DOCUMENT_ASPECTS, TwinKeyUpsert.pair("document_aspects").orElseThrow().nameKey());
+    private static final Field<?>[] ASPECT_ID_KEY =
+        CollectionKey.fields(DOCUMENT_ASPECTS, TwinKeyUpsert.pair("document_aspects").orElseThrow().idKey());
+
     private final TenantScope tenantScope;
+    private final Gate3 gate3;
     /** RDR-229 P3.5a: the rename refusal this repository's rename consults first ({@link RenameGuard#open()} never refuses). */
     private final RenameGuard renameGuard;
 
     public AspectRepository(TenantScope tenantScope) {
-        this(tenantScope, RenameGuard.open());
+        this(tenantScope, Gate3.never(), RenameGuard.open());
     }
 
+    /** The rename guard alone: gate 3 never holds (P3.5a's callers and tests). */
     public AspectRepository(TenantScope tenantScope, RenameGuard renameGuard) {
+        this(tenantScope, Gate3.never(), renameGuard);
+    }
+
+    /** RDR-229 P3.5c: from gate 3 on the install the readers name a collection by its id column ({@link CollectionKey}). */
+    public AspectRepository(TenantScope tenantScope, Gate3 gate3) {
+        this(tenantScope, gate3, RenameGuard.open());
+    }
+
+    /** The production constructor: the one gate-3 signal and the one rename guard ({@code NexusService} passes both). */
+    public AspectRepository(TenantScope tenantScope, Gate3 gate3, RenameGuard renameGuard) {
         this.tenantScope = tenantScope;
-        this.renameGuard = renameGuard;
+        this.gate3 = java.util.Objects.requireNonNull(gate3, "gate3");
+        this.renameGuard = java.util.Objects.requireNonNull(renameGuard, "renameGuard");
+    }
+
+    private CollectionKey ck() {
+        return CollectionKey.of(gate3);
+    }
+
+    private Condition aspectsIn(String tenant, String c) {
+        return ck().eq(tenant, DOCUMENT_ASPECTS.COLLECTION, DOCUMENT_ASPECTS.COLLECTION_ID, c);
+    }
+
+    /** The id an UPDATE that names no collection leaves on the row: its own id from gate 3 (the name may be stale), else the name's. */
+    private Field<Long> ownId() {
+        return ck().byId() ? DOCUMENT_ASPECTS.COLLECTION_ID : ASPECT_OWN_NAME_ID;
+    }
+
+    /** One upsert on a table with a name key and its id twin ({@link TwinKeyUpsert}): the id key arbitrates from gate 3. */
+    private <T> T upsert(DSLContext ctx, java.util.function.Function<Field<?>[], T> statement) {
+        boolean byId = ck().byId();
+        return TwinKeyUpsert.run(ctx, "document_aspects",
+            byId ? TwinKeyUpsert.Arbiter.ID_KEY : TwinKeyUpsert.Arbiter.NAME_KEY,
+            c -> statement.apply(byId ? ASPECT_ID_KEY : ASPECT_NAME_KEY));
     }
 
     // ── Timestamp helpers ──────────────────────────────────────────────────────
@@ -315,7 +357,7 @@ public final class AspectRepository {
         OffsetDateTime extractedAtTs = v.extractedAt();
         // RDR-254: a doc_id naming a trashed or alias document never replaces the row's doc_id (AspectDocIdAttribution).
         Field<String> docIdOnConflict = AspectDocIdAttribution.onConflict(ctx, tenant, docId, EX_DOC_ID_COALESCE);
-        var result = ctx.insertInto(DOCUMENT_ASPECTS,
+        var insert = ctx.insertInto(DOCUMENT_ASPECTS,
                 DOCUMENT_ASPECTS.TENANT_ID,
                 DOCUMENT_ASPECTS.COLLECTION,
                 DOCUMENT_ASPECTS.SOURCE_PATH,
@@ -354,11 +396,9 @@ public final class AspectRepository {
                 NoteUri.canonical(nne((String) body.get("source_uri"))),
                 jsonbOrNull((String) body.get("salient_sentences")),
                 docId,
-                CollectionIds.require(ctx, tenant, collection))   // RDR-229 P3.1: read after the registration above
-            .onConflict(
-                DOCUMENT_ASPECTS.TENANT_ID,
-                DOCUMENT_ASPECTS.COLLECTION,
-                DOCUMENT_ASPECTS.SOURCE_PATH)
+                CollectionIds.require(ctx, tenant, collection));   // RDR-229 P3.1: read after the registration above
+        var result = upsert(ctx, key -> insert
+            .onConflict(key)
             .doUpdate()
             .set(DOCUMENT_ASPECTS.PROBLEM_FORMULATION,    EX_PROBLEM_FORMULATION)
             .set(DOCUMENT_ASPECTS.PROPOSED_METHOD,        EX_PROPOSED_METHOD)
@@ -378,7 +418,7 @@ public final class AspectRepository {
             .set(DOCUMENT_ASPECTS.DOC_ID,                 docIdOnConflict)
             .set(DOCUMENT_ASPECTS.COLLECTION_ID,          EX_COLLECTION_ID)
             .returning(DOCUMENT_ASPECTS.ID)
-            .fetch();
+            .fetch());
         return result.isEmpty() ? -1L : result.get(0).get(DOCUMENT_ASPECTS.ID);
     }
 
@@ -430,7 +470,7 @@ public final class AspectRepository {
     public Optional<Map<String, Object>> getAspect(String tenant, String collection, String sourcePath) {
         return tenantScope.withTenant(tenant, ctx -> {
             var rows = ctx.select(
-                    DOCUMENT_ASPECTS.COLLECTION,
+                    ck().label(tenant, DOCUMENT_ASPECTS.COLLECTION, DOCUMENT_ASPECTS.COLLECTION_ID).as("collection"),
                     DOCUMENT_ASPECTS.SOURCE_PATH,
                     DOCUMENT_ASPECTS.PROBLEM_FORMULATION,
                     DOCUMENT_ASPECTS.PROPOSED_METHOD,
@@ -446,7 +486,7 @@ public final class AspectRepository {
                     DOCUMENT_ASPECTS.SALIENT_SENTENCES,
                     DOCUMENT_ASPECTS.DOC_ID)
                 .from(DOCUMENT_ASPECTS)
-                .where(DOCUMENT_ASPECTS.COLLECTION.eq(collection)
+                .where(aspectsIn(tenant, collection)
                     .and(DOCUMENT_ASPECTS.SOURCE_PATH.eq(sourcePath)))
                 .fetch();
             if (rows.isEmpty()) return Optional.empty();
@@ -461,7 +501,7 @@ public final class AspectRepository {
         if (docId == null || docId.isBlank()) return Optional.empty();
         return tenantScope.withTenant(tenant, ctx -> {
             var rows = ctx.select(
-                    DOCUMENT_ASPECTS.COLLECTION,
+                    ck().label(tenant, DOCUMENT_ASPECTS.COLLECTION, DOCUMENT_ASPECTS.COLLECTION_ID).as("collection"),
                     DOCUMENT_ASPECTS.SOURCE_PATH,
                     DOCUMENT_ASPECTS.PROBLEM_FORMULATION,
                     DOCUMENT_ASPECTS.PROPOSED_METHOD,
@@ -490,7 +530,7 @@ public final class AspectRepository {
     public List<Map<String, Object>> listByCollection(String tenant, String collection, int limit, int offset) {
         return tenantScope.withTenant(tenant, ctx -> {
             var q = ctx.select(
-                    DOCUMENT_ASPECTS.COLLECTION,
+                    ck().label(tenant, DOCUMENT_ASPECTS.COLLECTION, DOCUMENT_ASPECTS.COLLECTION_ID).as("collection"),
                     DOCUMENT_ASPECTS.SOURCE_PATH,
                     DOCUMENT_ASPECTS.PROBLEM_FORMULATION,
                     DOCUMENT_ASPECTS.PROPOSED_METHOD,
@@ -506,7 +546,7 @@ public final class AspectRepository {
                     DOCUMENT_ASPECTS.SALIENT_SENTENCES,
                     DOCUMENT_ASPECTS.DOC_ID)
                 .from(DOCUMENT_ASPECTS)
-                .where(DOCUMENT_ASPECTS.COLLECTION.eq(collection))
+                .where(aspectsIn(tenant, collection))
                 .orderBy(DOCUMENT_ASPECTS.SOURCE_PATH.asc());
             var rows = (limit > 0 ? q.limit(limit).offset(offset) : q).fetch();
             List<Map<String, Object>> out = new ArrayList<>();
@@ -520,8 +560,9 @@ public final class AspectRepository {
      */
     public List<Map<String, Object>> listByExtractorVersion(String tenant, String extractorName, String maxVersion) {
         return tenantScope.withTenant(tenant, ctx -> {
+            var lbl = ck().label(tenant, DOCUMENT_ASPECTS.COLLECTION, DOCUMENT_ASPECTS.COLLECTION_ID).as("collection");
             var rows = ctx.select(
-                    DOCUMENT_ASPECTS.COLLECTION,
+                    lbl,
                     DOCUMENT_ASPECTS.SOURCE_PATH,
                     DOCUMENT_ASPECTS.PROBLEM_FORMULATION,
                     DOCUMENT_ASPECTS.PROPOSED_METHOD,
@@ -539,7 +580,7 @@ public final class AspectRepository {
                 .from(DOCUMENT_ASPECTS)
                 .where(DOCUMENT_ASPECTS.EXTRACTOR_NAME.eq(extractorName)
                     .and(DOCUMENT_ASPECTS.MODEL_VERSION.lt(maxVersion)))
-                .orderBy(DOCUMENT_ASPECTS.COLLECTION.asc(), DOCUMENT_ASPECTS.SOURCE_PATH.asc())
+                .orderBy(lbl.asc(), DOCUMENT_ASPECTS.SOURCE_PATH.asc())
                 .fetch();
             List<Map<String, Object>> out = new ArrayList<>();
             for (var r : rows) out.add(recordToMap(r));
@@ -606,7 +647,7 @@ public final class AspectRepository {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.update(DOCUMENT_ASPECTS)
                .set(DOCUMENT_ASPECTS.SALIENT_SENTENCES, jsonbOrNull(sentencesJson))
-               .set(DOCUMENT_ASPECTS.COLLECTION_ID, ASPECT_OWN_ID)
+               .set(DOCUMENT_ASPECTS.COLLECTION_ID, ownId())
                .where(DOCUMENT_ASPECTS.DOC_ID.eq(docId))
                .execute());
     }
@@ -619,7 +660,7 @@ public final class AspectRepository {
             var row = RequestedCollectionRead.require(ctx, tenant, collection);   // P3.5a: a request by id reads that id first
             return ctx.update(DOCUMENT_ASPECTS)
                .set(DOCUMENT_ASPECTS.SALIENT_SENTENCES, jsonbOrNull(sentencesJson))
-               .set(DOCUMENT_ASPECTS.COLLECTION_ID, ASPECT_OWN_ID)
+               .set(DOCUMENT_ASPECTS.COLLECTION_ID, ownId())
                .where(CollectionOwnedRows.of(row, DOCUMENT_ASPECTS.COLLECTION_ID, DOCUMENT_ASPECTS.COLLECTION, collection)
                    .and(DOCUMENT_ASPECTS.SOURCE_PATH.eq(sourcePath)))
                .execute();
@@ -750,10 +791,8 @@ public final class AspectRepository {
                             nullIfBlank((String) body.get("doc_id")),
                             collectionIds.get((String) body.get("collection")));
                 }
-                insert.onConflict(
-                        DOCUMENT_ASPECTS.TENANT_ID,
-                        DOCUMENT_ASPECTS.COLLECTION,
-                        DOCUMENT_ASPECTS.SOURCE_PATH)
+                final var rowsInsert = insert;
+                upsert(ctx, key -> rowsInsert.onConflict(key)
                       .doUpdate()
                       .set(DOCUMENT_ASPECTS.PROBLEM_FORMULATION,    EX_PROBLEM_FORMULATION)
                       .set(DOCUMENT_ASPECTS.PROPOSED_METHOD,        EX_PROPOSED_METHOD)
@@ -769,7 +808,7 @@ public final class AspectRepository {
                       .set(DOCUMENT_ASPECTS.SALIENT_SENTENCES,      EX_SALIENT_COALESCE)
                       .set(DOCUMENT_ASPECTS.DOC_ID,                 EX_DOC_ID_COALESCE)
                       .set(DOCUMENT_ASPECTS.COLLECTION_ID,          EX_COLLECTION_ID)
-                      .execute();
+                      .execute());
             }
             return kept.size();
         }));
@@ -786,7 +825,7 @@ public final class AspectRepository {
 
         {
             ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, (String) body.get("collection"));
-            return ctx.insertInto(DOCUMENT_ASPECTS,
+            var insert = ctx.insertInto(DOCUMENT_ASPECTS,
                     DOCUMENT_ASPECTS.TENANT_ID,
                     DOCUMENT_ASPECTS.COLLECTION,
                     DOCUMENT_ASPECTS.SOURCE_PATH,
@@ -823,11 +862,9 @@ public final class AspectRepository {
                     NoteUri.canonical(nne((String) body.get("source_uri"))),
                     jsonbOrNull((String) body.get("salient_sentences")),
                     nullIfBlank((String) body.get("doc_id")),
-                    CollectionIds.require(ctx, tenant, (String) body.get("collection")))   // RDR-229 P3.1
-                .onConflict(
-                    DOCUMENT_ASPECTS.TENANT_ID,
-                    DOCUMENT_ASPECTS.COLLECTION,
-                    DOCUMENT_ASPECTS.SOURCE_PATH)
+                    CollectionIds.require(ctx, tenant, (String) body.get("collection")));   // RDR-229 P3.1
+            return upsert(ctx, key -> insert
+                .onConflict(key)
                 .doUpdate()
                 .set(DOCUMENT_ASPECTS.PROBLEM_FORMULATION,    EX_PROBLEM_FORMULATION)
                 .set(DOCUMENT_ASPECTS.PROPOSED_METHOD,        EX_PROPOSED_METHOD)
@@ -843,7 +880,7 @@ public final class AspectRepository {
                 .set(DOCUMENT_ASPECTS.SALIENT_SENTENCES,      EX_SALIENT_COALESCE)
                 .set(DOCUMENT_ASPECTS.DOC_ID,                 EX_DOC_ID_COALESCE)
                 .set(DOCUMENT_ASPECTS.COLLECTION_ID,          EX_COLLECTION_ID)
-                .execute();
+                .execute());
         }
     }
 
@@ -911,7 +948,7 @@ public final class AspectRepository {
             var rows = ctx.select(
                     DOCUMENT_HIGHLIGHTS.DOC_ID,
                     DOCUMENT_HIGHLIGHTS.SOURCE_URI,
-                    DOCUMENT_HIGHLIGHTS.COLLECTION,
+                    ck().label(tenant, DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.COLLECTION_ID).as("collection"),
                     DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD,
                     DOCUMENT_HIGHLIGHTS.MENTIONS_MD,
                     DOCUMENT_HIGHLIGHTS.INGESTED_AT)
@@ -931,7 +968,7 @@ public final class AspectRepository {
             var rows = ctx.select(
                     DOCUMENT_HIGHLIGHTS.DOC_ID,
                     DOCUMENT_HIGHLIGHTS.SOURCE_URI,
-                    DOCUMENT_HIGHLIGHTS.COLLECTION,
+                    ck().label(tenant, DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.COLLECTION_ID).as("collection"),
                     DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD,
                     DOCUMENT_HIGHLIGHTS.MENTIONS_MD,
                     DOCUMENT_HIGHLIGHTS.INGESTED_AT)
@@ -952,7 +989,7 @@ public final class AspectRepository {
             var rows = ctx.select(
                     DOCUMENT_HIGHLIGHTS.DOC_ID,
                     DOCUMENT_HIGHLIGHTS.SOURCE_URI,
-                    DOCUMENT_HIGHLIGHTS.COLLECTION,
+                    ck().label(tenant, DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.COLLECTION_ID).as("collection"),
                     DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD,
                     DOCUMENT_HIGHLIGHTS.MENTIONS_MD,
                     DOCUMENT_HIGHLIGHTS.INGESTED_AT)
