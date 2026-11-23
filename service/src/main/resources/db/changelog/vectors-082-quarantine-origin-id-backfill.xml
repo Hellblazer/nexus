@@ -23,7 +23,7 @@
 
     THE ORDER. The worker takes the oldest registered_at first, so this move runs after vectors-070-15's rdr229-stamp-chunks: by then every
     chunk has its collection_id, and every quarantine mover's lookup of the origin id by name (chunks_collection_fk keeps the origin
-    registered) is non-null, so no new quarantine row lacks the key afterwards. Its label is in gate 2 (CompletionCheck.ReadSet.p35c), and
+    registered) is non-null, so no new quarantine row lacks the key afterwards. Its label is in gate 2 (CompletionCheck.ReadSet.quarantineOriginBackfill), and
     the gate-3 clause stays as the live backstop.
 
     THE VALUES. Only quarantine rows are written (about 1,429 in the cloud), but dml_utils pages the whole leaf by primary key, so the cost
