@@ -544,7 +544,7 @@ final class CollectionRouteCensus {
     record Resolving(int sites, String serves) { }
 
     static final java.util.Map<String, Resolving> RESOLVING = java.util.Map.ofEntries(
-        java.util.Map.entry("db/AspectRepository.java", new Resolving(13, "the /v1/aspects rows and the aspect ETL; the aspect upsert's write stamps the registry row's current label (requireWritable); the batch imports read their collections in id order (lockCollectionsInIdOrder)")),
+        java.util.Map.entry("db/AspectRepository.java", new Resolving(12, "the /v1/aspects rows and the aspect ETL; the aspect upsert's write stamps the registry row's current label (requireWritable); the batch imports read their collections in id order (CollectionRegistry.lockAllInIdOrder, not counted here)")),
         java.util.Map.entry("db/CatalogIdStamps.java", new Resolving(1, "the catalog writers' memoized label lookup")),
         java.util.Map.entry("db/CatalogMoves.java", new Resolving(1, "/v1/catalog/documents/move, the owners move")),
         java.util.Map.entry("db/CatalogRepository.java", new Resolving(29, "the document routes (DocumentCollectionRef), the collection routes (set_aspects_enabled reads its row in its write) and the catalog writers, and registryFirst, the manifest writers' registry check after their advisory locks; the re-home reads both ends FOR KEY SHARE (requireAllForWrite, then each locked row) and scopes by those rows")),

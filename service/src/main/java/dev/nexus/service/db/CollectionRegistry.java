@@ -404,6 +404,23 @@ public final class CollectionRegistry {
     }
 
     /**
+     * RDR-229 P3.5a: the registry rows of every collection a batch names, read FOR KEY SHARE in one statement in {@code collection_id}
+     * order (a retiring verb's order) before the batch registers the ones that are missing and writes. A name no row has is skipped here:
+     * the registration below creates it.
+     */
+    static void lockAllInIdOrder(DSLContext ctx, String tenant, java.util.Collection<String> collections) {
+        WriteRegistryMemo.assertNoneHeld(ctx, "a multi-collection batch");   // the batch is the transaction's first registry read
+        var named = collections.stream().filter(c -> c != null && !c.isEmpty()).toList();
+        if (named.size() > 1) {
+            try {
+                requireAllForWrite(ctx, tenant, named);
+            } catch (UnregisteredCollectionException unknown) {
+                // registered by the loop that follows
+            }
+        }
+    }
+
+    /**
      * The registry row of {@code collectionId}, read {@code FOR KEY SHARE} in {@code ctx}'s write transaction, for a write whose request
      * names the collection by id in its BODY and not at the route boundary (the document routes: {@code physical_collection_id}, in
      * the transaction that writes). The same read, lock, refusals and memo as a request by id at the boundary: no row is

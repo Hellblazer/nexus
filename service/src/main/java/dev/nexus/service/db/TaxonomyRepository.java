@@ -2333,8 +2333,7 @@ public final class TaxonomyRepository {
             String c = optS(r, "collection");
             if (c != null) collections.add(c);
         }
-        AspectRepository.lockCollectionsInIdOrder(ctx, tenant, collections);   // RDR-229 P3.5a: id order, before any registration or write
-        AspectRepository.lockCollectionsInIdOrder(ctx, tenant, collections);   // RDR-229 P3.5a: id order, before any registration or write
+        CollectionRegistry.lockAllInIdOrder(ctx, tenant, collections);   // RDR-229 P3.5a: id order, before any registration or write
         for (String c : collections) ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, c);
         // RDR-229 P3.1 stage 2b: each distinct collection's registry id, read once in this transaction.
         final Map<String, Long> collectionIds = idsOf(ctx, tenant, collections);
@@ -2406,8 +2405,7 @@ public final class TaxonomyRepository {
             String c = optS(r, "source_collection");
             if (c != null) collections.add(c);
         }
-        AspectRepository.lockCollectionsInIdOrder(ctx, tenant, collections);   // RDR-229 P3.5a: id order, before any registration or write
-        AspectRepository.lockCollectionsInIdOrder(ctx, tenant, collections);   // RDR-229 P3.5a: id order, before any registration or write
+        CollectionRegistry.lockAllInIdOrder(ctx, tenant, collections);   // RDR-229 P3.5a: id order, before any registration or write
         for (String c : collections) ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, c);
         final Map<String, Long> collectionIds = idsOf(ctx, tenant, collections);
 
@@ -2499,8 +2497,7 @@ public final class TaxonomyRepository {
     private static int importMetaBatch(DSLContext ctx, String tenant, List<Map<String, Object>> rows) {
         var collections = new java.util.LinkedHashSet<String>();
         for (var r : rows) collections.add(reqS(r, "collection"));
-        AspectRepository.lockCollectionsInIdOrder(ctx, tenant, collections);   // RDR-229 P3.5a: id order, before any registration or write
-        AspectRepository.lockCollectionsInIdOrder(ctx, tenant, collections);   // RDR-229 P3.5a: id order, before any registration or write
+        CollectionRegistry.lockAllInIdOrder(ctx, tenant, collections);   // RDR-229 P3.5a: id order, before any registration or write
         for (String c : collections) ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, c);
         final Map<String, Long> collectionIds = idsOf(ctx, tenant, collections);
 
