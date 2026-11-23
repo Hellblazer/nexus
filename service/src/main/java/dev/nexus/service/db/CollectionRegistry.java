@@ -536,6 +536,77 @@ public final class CollectionRegistry {
         });
     }
 
+    /**
+     * The registry rows of {@code labels} that exist, read {@code FOR SHARE} (stronger than the key share every writer takes: a concurrent
+     * retype of a row waits too) in {@code collection_id} order, and recorded in the transaction's memo like any registry read, so the writer
+     * census sees them. For the writers that decide from a non-key column of the row (the stale-note repair: is it still a knowledge collection)
+     * and must hold it unchanged until they commit. A label no row has is simply absent from the answer.
+     */
+    public static List<CollectionRow> readSharedForWrite(DSLContext ctx, String tenant, java.util.Collection<String> labels) {
+        if (labels.isEmpty()) {
+            return List.of();
+        }
+        return readLocked(ctx, tenant, CATALOG_COLLECTIONS.NAME.in(labels), true, labels);
+    }
+
+    /**
+     * The registry rows of {@code ids} (and the rows of {@code labels}, for rows the P3.1 stamp has not reached), in ANY state, read
+     * {@code FOR KEY SHARE} in {@code collection_id} order and recorded in the transaction's memo. For a cleanup that must run whatever the
+     * collection's state (a purge of a document's manifest rows clears a retired collection's rows too, so a retired row is not refused as
+     * {@link #lockIdForWrite} refuses it) but still takes its place in the canonical order. An id or label with no row is skipped.
+     */
+    public static void lockForCleanup(DSLContext ctx, String tenant, java.util.Collection<Long> ids, java.util.Collection<String> labels) {
+        Condition match = DSL.falseCondition();
+        if (!ids.isEmpty()) {
+            match = match.or(CATALOG_COLLECTIONS.COLLECTION_ID.in(ids));
+        }
+        if (!labels.isEmpty()) {
+            match = match.or(CATALOG_COLLECTIONS.NAME.in(labels));
+        }
+        if (ids.isEmpty() && labels.isEmpty()) {
+            return;
+        }
+        readLocked(ctx, tenant, match, false, labels);
+    }
+
+    private static List<CollectionRow> readLocked(DSLContext ctx, String tenant, Condition match, boolean fullShare,
+                                                  java.util.Collection<String> labels) {
+        noteWriteRead(tenant, String.join(",", labels));
+        Field<Integer> modelDimension = EMBEDDING_MODELS.DIMENSION.as("model_dimension");
+        var read = ctx.select(
+                CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.COLLECTION_ID,
+                CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.DIMENSION,
+                CATALOG_COLLECTIONS.LIFECYCLE_STATE, modelDimension,
+                CATALOG_COLLECTIONS.SUPERSEDED_BY)
+            .from(CATALOG_COLLECTIONS)
+            .leftJoin(EMBEDDING_MODELS)
+                .on(EMBEDDING_MODELS.EMBEDDING_MODEL.eq(CATALOG_COLLECTIONS.EMBEDDING_MODEL))
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(match))
+            .orderBy(CATALOG_COLLECTIONS.COLLECTION_ID);
+        List<CollectionRow> rows = (fullShare ? read.forShare() : read.forKeyShare()).of(CATALOG_COLLECTIONS)
+            .fetch(r -> rowOf(r, modelDimension, tenant));
+        for (CollectionRow row : rows) {
+            WriteRegistryMemo.put(ctx, tenant, "#" + row.collectionId(), row);
+        }
+        for (String label : labels) {
+            CollectionRow chosen = null;
+            for (CollectionRow candidate : rows) {   // the live row of the label first, else the newest tombstone (labelResolutionOrder)
+                if (!candidate.label().equals(label)) {
+                    continue;
+                }
+                if (chosen == null || (chosen.isSuperseded() && !candidate.isSuperseded())
+                    || (chosen.isSuperseded() == candidate.isSuperseded() && candidate.collectionId() > chosen.collectionId())) {
+                    chosen = candidate;
+                }
+            }
+            if (chosen != null) {
+                WriteRegistryMemo.put(ctx, tenant, label, chosen);
+            }
+        }
+        return rows;
+    }
+
     /** {@link #lockAllForWrite} on the process-wide registry. */
     public static void requireAllForWrite(DSLContext ctx, String tenant, java.util.Collection<String> labels) {
         SHARED.lockAllForWrite(ctx, tenant, labels);
