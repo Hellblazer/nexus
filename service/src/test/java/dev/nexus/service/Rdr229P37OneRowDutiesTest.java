@@ -113,4 +113,38 @@ class Rdr229P37OneRowDutiesTest {
         assertThat(tag.path("origin_collection").asText()).as("it names the new label as its origin").isEqualTo(b);
         assertThat(tag.path(dev.nexus.service.db.QuarantineOrigin.ORIGIN_ID_KEY).asLong()).as("and the renamed collection's id").isEqualTo(id);
     }
+
+    /**
+     * folio's r3 review F5, and its confirmation review S2: the one-row body remembers the row's tuple BEFORE its UPDATE. The UPDATE of a rename that
+     * takes another live collection's (content type, owner, model, version) raises 23505 on the live-tuple index, which aborts the transaction; the
+     * caller's race recheck ({@code CollectionMint#recheckOf}) then reads the remembered tuple in a new one and names the holder. Remembered after the
+     * UPDATE, the tuple is empty when the 23505 escapes, the recheck finds nothing to check and the client gets the raw violation. The mutant run is on the bead.
+     */
+    @Test
+    void aOneRowRenameWhoseUpdateHitsTheLiveTupleIndexIsRefusedNamingTheHolder() throws Exception {
+        String tenant = "p37-duty-t";
+        String token = engine.newTenant(tenant);
+        String a = "knowledge__p37dutyta__minilm-l6-v2-384__v1";
+        String b = "knowledge__p37dutytb__minilm-l6-v2-384__v1";
+        String holder = "knowledge__p37dutyth__minilm-l6-v2-384__v1";
+        engine.su(ctx -> {
+            PgContainerHelper.insertCollection(ctx, tenant, a);
+            PgContainerHelper.insertCollection(ctx, tenant, holder);
+            return null;
+        });
+        long id = engine.su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, a));
+        var cc = dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+        String holderOwner = engine.su(ctx -> ctx.select(cc.OWNER_ID).from(cc).where(cc.TENANT_ID.eq(tenant).and(cc.NAME.eq(holder))).fetchOne(0, String.class));
+        assertThat(holderOwner).as("non-vacuity: the holder's owner is not A's").isNotEqualTo(engine.<String>su(ctx -> ctx.select(cc.OWNER_ID).from(cc)
+            .where(cc.TENANT_ID.eq(tenant).and(cc.NAME.eq(a))).fetchOne(0, String.class)));
+
+        // B is a free label, and the client names the holder's owner for it: the row's tuple would then be the holder's
+        var r = engine.call("POST", "/v1/catalog/collections/rename", token,
+            "{\"old_name\":\"" + a + "\",\"new_name\":\"" + b + "\",\"owner_id\":\"" + holderOwner + "\"}");
+
+        assertThat(r.statusCode()).as("refused as a conflict, not a raw unique violation: " + r.body()).isEqualTo(409);
+        assertThat(r.body()).as("naming both collections").contains(holder).contains("are both live for the tuple");
+        assertThat(engine.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, a))).as("A was not renamed").isEqualTo(id);
+        assertThat(engine.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, b))).as("and nothing is registered under B").isNull();
+    }
 }
