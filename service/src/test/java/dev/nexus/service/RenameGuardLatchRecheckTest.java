@@ -11,6 +11,7 @@ import dev.nexus.service.db.AspectRepository;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.ChashRepository;
 import dev.nexus.service.db.RenameGuard;
+import dev.nexus.service.db.OneRowRename;
 import dev.nexus.service.db.RenameLatchLock;
 import dev.nexus.service.db.RenameRefusedException;
 import dev.nexus.service.db.TaxonomyRepository;
@@ -54,9 +55,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * outside the transaction, so a rename that passed it just before the gate 3 latch row was written could commit after it.
  *
  * <p>Every rename primitive the guard covers is driven through its own public method, with a real guard built as Main builds it
- * (a {@code Gate3} and a {@code RenameReadiness}), over a real database: the catalog rename, and the chash, taxonomy, telemetry,
- * aspects and highlights renames. The in-process gate 3 stays false throughout (it is set only after the latch writer returns), so
- * the entry check never refuses here: every refusal below is the row, read inside the transaction.
+ * (a {@code RenameReadiness} and the fail-closed {@code OneRowRename}), over a real database: the catalog rename, and the chash, taxonomy, telemetry,
+ * aspects and highlights renames. Every refusal below is the row, read inside the transaction by
+ * {@code RenameGuard.runRename}; there is no check outside it.
  *
  * <p>No timing is assumed. The order of events is made by the database's own lock state: a session of the test holds a lock, and the
  * test goes on only once {@code pg_locks} shows the other side waiting on it (a condition polled against a deadline, which only
@@ -80,9 +81,6 @@ class RenameGuardLatchRecheckTest {
     TelemetryRepository telemetry;
     AspectRepository aspects;
     final AtomicInteger n = new AtomicInteger();
-
-    /** Runs once, inside the entry check's {@code Gate3} read: the point after method entry and before the transaction. */
-    final AtomicReference<Runnable> atEntry = new AtomicReference<>();
 
     /**
      * One rename primitive, by its public method. {@code registeredTarget}: the primitive refuses a target the registry has no row
@@ -111,15 +109,8 @@ class RenameGuardLatchRecheckTest {
         svcDs = new HikariDataSource(config);
         pool = Executors.newFixedThreadPool(3);
 
-        // Main's shape: gate 3 is the in-process latch signal and stays false in this class; readiness says the drop move is missing.
-        Gate3 gate3 = () -> {
-            Runnable hook = atEntry.getAndSet(null);
-            if (hook != null) {
-                hook.run();
-            }
-            return false;
-        };
-        var guard = new RenameGuard(gate3, () -> Missing.NAME_KEY_DROP_MOVE);
+        // Main's shape: readiness says the drop move is missing; the one-row catalog rename is the fail-closed default.
+        var guard = new RenameGuard(() -> Missing.NAME_KEY_DROP_MOVE, OneRowRename.failClosed());
         var scope = new TenantScope(svcDs);
         catalog = new CatalogRepository(scope, Gate3.never(), guard);
         chash = new ChashRepository(scope, guard);
@@ -145,7 +136,6 @@ class RenameGuardLatchRecheckTest {
     @BeforeEach
     @AfterEach
     void noLatch() {
-        atEntry.set(null);
         su(ctx -> ctx.deleteFrom(LATCH).execute());
     }
 
@@ -236,27 +226,18 @@ class RenameGuardLatchRecheckTest {
         });
     }
 
-    // ---- the latch is written between method entry and commit -----------------------------------------------------------
+    // ---- the latch row decides, inside the transaction -------------------------------------------------------------------
 
-    /**
-     * The ruling's test. The entry check has passed (the in-process gate 3 is false); the latch row is then written, before the
-     * rename's transaction starts; the transaction reads it under the shared lock and refuses. Nothing is renamed.
-     */
+    /** With the latch row there and readiness missing, every primitive is refused with the typed 409 and nothing is renamed. */
     @Test
-    void theLatchWrittenAfterMethodEntryAndBeforeTheTransaction_refusesEveryPrimitive() {
+    void withTheLatchRow_everyPrimitiveIsRefusedAndNothingIsRenamed() {
         for (Prim p : prims) {
-            String from = register("entry");
-            String to = fresh("entry");
-            var ran = new java.util.concurrent.atomic.AtomicBoolean();
-            atEntry.set(() -> {
-                ran.set(true);
-                writeLatch();
-            });
+            String from = register("row");
+            String to = fresh("row");
+            writeLatch();
 
             assertRefused(p.name(), () -> p.rename().accept(from, to));
 
-            assertThat(ran).as("%s: non-vacuity: the latch was written after the entry check ran", p.name()).isTrue();
-            assertThat(latchRow()).as("%s: the latch row stands", p.name()).isTrue();
             assertThat(supersededBy(from)).as("%s: nothing renamed: the source is live", p.name()).isEqualTo("");
             assertThat(supersededBy(to)).as("%s: nothing renamed: the target has no row", p.name()).isNull();
             su(ctx -> ctx.deleteFrom(LATCH).execute());
@@ -277,9 +258,7 @@ class RenameGuardLatchRecheckTest {
                 w.setAutoCommit(false);
                 DSLContext wctx = DSL.using(w, SQLDialect.POSTGRES);
                 RenameLatchLock.exclusive(wctx);
-                wctx.insertInto(LATCH).set(DSL.field(DSL.name("gate"), String.class), CompletionCheck.GATE3)
-                    .set(DSL.field(DSL.name("latched_at"), java.time.OffsetDateTime.class), java.time.OffsetDateTime.now())
-                    .set(DSL.field(DSL.name("engine_version"), String.class), "test-writer").execute();
+                insertLatchRow(wctx);
                 assertThat(latchRow()).as("%s: guard: the row is not committed yet", p.name()).isFalse();
 
                 Future<?> rename = pool.submit(() -> p.rename().accept(from, to));
@@ -369,40 +348,127 @@ class RenameGuardLatchRecheckTest {
         }).as("after the latch, the next rename is refused").satisfies(t -> assertThat(refusalIn(t)).isNotNull());
     }
 
-    /**
-     * P3.7's dispatcher decision branches on the latch row only: no row is the name path, even with the in-process gate 3 true;
-     * the row with readiness complete is the one-row rename; the row with readiness missing is the same refusal.
-     */
-    @Test
-    void decideRenamePath_branchesOnTheLatchRowOnly() {
-        var liveGateNoRow = new RenameGuard(() -> true, () -> Missing.NONE);
-        var ready = new RenameGuard(() -> false, () -> Missing.NONE);
-        var notReady = new RenameGuard(() -> false, () -> Missing.NAME_KEY_DROP_MOVE);
-        java.util.function.Function<RenameGuard, RenameGuard.RenamePath> decide = g -> su(ctx ->
-            ctx.transactionResult(cfg -> g.decideRenamePath(cfg.dsl())));
-
-        assertThat(decide.apply(liveGateNoRow)).as("no row: the name path, whatever the in-process gate says")
-            .isEqualTo(RenameGuard.RenamePath.NAME_PATH);
-        assertThat(decide.apply(RenameGuard.open())).isEqualTo(RenameGuard.RenamePath.NAME_PATH);
-
-        writeLatch();
-        assertThat(latchRow()).as("setup: the row is committed").isTrue();
-        assertThat(decide.apply(ready)).as("the row and readiness complete").isEqualTo(RenameGuard.RenamePath.ONE_ROW);
-        assertRefused("decideRenamePath", () -> decide.apply(notReady));
+    private RenameGuard.RenamePath runRenameDecision(RenameGuard g) {
+        return g.runRename(new TenantScope(svcDs), TENANT, ctx -> RenameGuard.RenamePath.NAME_PATH, ctx -> RenameGuard.RenamePath.ONE_ROW);
     }
 
-    /** The open guard never takes the lock nor reads the latch: what a repository built without a guard gets. */
+    /**
+     * runRename decides from the latch row: none is the name path, the row with readiness complete is the one-row body, the row with
+     * readiness missing is the refusal. The open guard is always the name path.
+     */
     @Test
-    void theOpenGuardTakesNoLockAndReadsNoRow() throws Exception {
-        var open = RenameGuard.open();
+    void runRenameDecidesFromTheLatchRowOnly() {
+        var ready = new RenameGuard(() -> Missing.NONE, OneRowRename.failClosed());
+        var notReady = new RenameGuard(() -> Missing.NAME_KEY_DROP_MOVE, OneRowRename.failClosed());
+        assertThat(runRenameDecision(ready)).as("no row: the name path").isEqualTo(RenameGuard.RenamePath.NAME_PATH);
+
+        writeLatch();
+        assertThat(runRenameDecision(ready)).as("the row and readiness complete").isEqualTo(RenameGuard.RenamePath.ONE_ROW);
+        assertThat(runRenameDecision(RenameGuard.open())).as("the open guard never leaves the name path").isEqualTo(RenameGuard.RenamePath.NAME_PATH);
+        assertRefused("runRename", () -> runRenameDecision(notReady));
+    }
+
+    /**
+     * The lock order, with the writer holding the lock and its row not yet committed: the decision waits (pg_locks), and once the writer
+     * commits it is not the name path. A decision made without the lock would have answered the name path at once.
+     */
+    @Test
+    void theDecisionWaitsForALatchWriteInFlight_andIsNotTheNamePathAfterIt() throws Exception {
+        var ready = new RenameGuard(() -> Missing.NONE, OneRowRename.failClosed());
         try (Connection w = pg.createConnection("")) {
             w.setAutoCommit(false);
             DSLContext wctx = DSL.using(w, SQLDialect.POSTGRES);
-            RenameLatchLock.exclusive(wctx);   // a latch write in flight
-            Future<?> f = pool.submit(() -> su(ctx -> {
-                ctx.transaction(cfg -> open.requireRenameAllowed(cfg.dsl()));
+            RenameLatchLock.exclusive(wctx);
+            insertLatchRow(wctx);
+            Future<RenameGuard.RenamePath> decision = pool.submit(() -> runRenameDecision(ready));
+            try {
+                await(false, decision, "the decision");
+                assertThat(decision.isDone()).as("the decision waits for the latch write").isFalse();
+            } finally {
+                w.commit();
+            }
+            assertThat(decision.get(60, TimeUnit.SECONDS)).as("it read the row it waited for").isEqualTo(RenameGuard.RenamePath.ONE_ROW);
+        }
+    }
+
+    /**
+     * The rename lock is the FIRST thing every primitive's transaction takes: while a primitive waits on it, that backend holds no
+     * advisory lock and no relation lock for a write. Moving the call below the sweep gate, the re-embed guard or a row statement
+     * would show a held lock here.
+     */
+    @Test
+    void everyPrimitiveTakesTheRenameLockBeforeAnyOtherLock() throws Exception {
+        for (Prim p : prims) {
+            String from = register("order");
+            String to = p.registeredTarget() ? register("order-to") : fresh("order");
+            Future<?> rename;
+            try (Connection w = pg.createConnection("")) {
+                w.setAutoCommit(false);
+                RenameLatchLock.exclusive(DSL.using(w, SQLDialect.POSTGRES));
+                rename = pool.submit(() -> p.rename().accept(from, to));
+                try {
+                    await(false, rename, p.name());
+                    int pid = su(ctx -> ctx.select(DSL.field(DSL.name("pid"), Integer.class)).from(DSL.table(DSL.name("pg_catalog", "pg_locks")))
+                        .where(DSL.field(DSL.name("locktype"), String.class).eq("advisory"))
+                        .and(DSL.field(DSL.name("granted"), Boolean.class).eq(false)).fetchAny(0, Integer.class));
+                    int held = su(ctx -> ctx.fetchCount(DSL.table(DSL.name("pg_catalog", "pg_locks")),
+                        DSL.field(DSL.name("pid"), Integer.class).eq(pid).and(DSL.field(DSL.name("granted"), Boolean.class).eq(true))
+                            .and(DSL.field(DSL.name("locktype"), String.class).eq("advisory")
+                                .or(DSL.field(DSL.name("locktype"), String.class).eq("relation")
+                                    .and(DSL.field(DSL.name("mode"), String.class).in("RowExclusiveLock", "RowShareLock", "ShareLock"))))));
+                    assertThat(held).as("%s: while it waits for the rename lock it holds no other lock", p.name()).isZero();
+                } finally {
+                    w.rollback();
+                }
+            }
+            rename.get(60, TimeUnit.SECONDS);   // no latch row: the name path completes once the writer is gone
+        }
+    }
+
+    /** Under REPEATABLE READ the snapshot predates the lock wait, so the read of the row could be stale: runRename fails closed. */
+    @Test
+    void aTransactionThatIsNotReadCommittedFailsClosed() throws Exception {
+        var guard = new RenameGuard(() -> Missing.NONE, OneRowRename.failClosed());
+        try (Connection c = pg.createConnection("")) {
+            c.setAutoCommit(false);
+            c.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+            DSLContext ctx = DSL.using(c, SQLDialect.POSTGRES);
+            assertThatThrownBy(() -> guard.runRename(work -> work.apply(ctx), x -> "name", x -> "one"))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("READ COMMITTED").hasMessageContaining("repeatable read");
+            c.rollback();
+        }
+    }
+
+    /**
+     * The latch write's lock wait is bounded: with a rename's shared lock held it throws at the bound (here 500 ms), writes no row,
+     * and a second call after the release succeeds.
+     */
+    @Test
+    void theLatchWriteGivesUpAtItsLockTimeout_writesNoRow_andSucceedsOnceTheRenameIsDone() throws Exception {
+        try (Connection holder = pg.createConnection("")) {
+            holder.setAutoCommit(false);
+            RenameLatchLock.shared(DSL.using(holder, SQLDialect.POSTGRES));   // a rename in flight
+            assertThatThrownBy(() -> su(ctx -> {
+                CompletionCheck.insertLatch(ctx, CompletionCheck.GATE3, "test-engine", false, "500");
                 return null;
-            }));
+            })).as("lock_not_available").hasMessageContaining("lock timeout");
+            assertThat(latchRow()).as("no row was written").isFalse();
+            holder.rollback();
+        }
+        su(ctx -> {
+            CompletionCheck.insertLatch(ctx, CompletionCheck.GATE3, "test-engine", false, "500");
+            return null;
+        });
+        assertThat(latchRow()).as("after the release the write goes through").isTrue();
+    }
+
+    /** The open guard takes no lock and reads no row: what a repository built without a guard gets. */
+    @Test
+    void theOpenGuardTakesNoLockAndReadsNoRow() throws Exception {
+        try (Connection w = pg.createConnection("")) {
+            w.setAutoCommit(false);
+            RenameLatchLock.exclusive(DSL.using(w, SQLDialect.POSTGRES));   // a latch write in flight
+            Future<?> f = pool.submit(() -> runRenameDecision(RenameGuard.open()));
             try {
                 f.get(30, TimeUnit.SECONDS);   // returns at once: it does not wait on the lock the writer holds
             } catch (TimeoutException e) {
@@ -411,5 +477,11 @@ class RenameGuardLatchRecheckTest {
                 w.rollback();
             }
         }
+    }
+
+    private void insertLatchRow(DSLContext wctx) {
+        wctx.insertInto(LATCH).set(DSL.field(DSL.name("gate"), String.class), CompletionCheck.GATE3)
+            .set(DSL.field(DSL.name("latched_at"), java.time.OffsetDateTime.class), java.time.OffsetDateTime.now())
+            .set(DSL.field(DSL.name("engine_version"), String.class), "test-writer").execute();
     }
 }

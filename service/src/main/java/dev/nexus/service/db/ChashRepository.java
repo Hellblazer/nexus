@@ -221,7 +221,6 @@ public final class ChashRepository {
      * way by definition of the chash.
      */
     public int renameCollection(String tenant, String oldCollection, String newCollection) {
-        renameGuard.requireRenameAllowed();   // RDR-229 P3.5a: refused from gate 3 until the one-row rename can run
         if (oldCollection == null || oldCollection.isBlank()
                 || newCollection == null || newCollection.isBlank()) {
             throw new IllegalArgumentException("old and new collection must not be empty");
@@ -236,8 +235,9 @@ public final class ChashRepository {
         // fires vectors-021-3's chunk-locking trigger, so this whole transaction is retried on a 40P01
         // (the same wrap CatalogRepository.renameCollectionTxn carries). Everything it produces is the
         // `total` it returns; the registry cache update runs after the committed attempt returns.
-        int updated = DeadlockRetry.run("chash.renameCollection " + oldCollection, () -> tenantScope.withTenant(tenant, ctx -> {
-            renameGuard.requireRenameAllowed(ctx);   // RDR-229 P3.5a D2: first, under the rename lock the latch write takes
+        boolean[] noop = new boolean[1];   // set by the committed attempt when the one-row regime made this a no-op
+        int updated = DeadlockRetry.run("chash.renameCollection " + oldCollection, () -> renameGuard.runRename(tenantScope, tenant, ctx -> {
+            noop[0] = false;
             // nexus-11gh6 (post-review, T2 nexus/review-11gh6-gate-2026-08-08
             // [21797] Important finding): this method is a SECOND,
             // independently-reachable (via /v1/chash/*) implementation of the
@@ -350,6 +350,10 @@ public final class ChashRepository {
                 QuarantineOrigin.retagRowsOf(ctx, tenant, oldCollection, newCollection);
             }
             return total;
+        }, ctx -> {
+            RenameNoOpActivity.record("chash", oldCollection, newCollection);   // the registry rename moved the label: nothing to rewrite
+            noop[0] = true;
+            return 0;
         }));
         // Post-commit (nexus-h8rf6.2): see CollectionRegistry class doc. newCollection's
         // row already existed before this transaction (ensureCollectionRegistered
@@ -358,7 +362,9 @@ public final class ChashRepository {
         // on the rare eviction race otherwise (RDR-204 nexus-ft04v.14).
         // nexus-hkh1y: the lookup itself caches (on a miss, through the guarded fill); a direct
         // markKnown of its result would re-cache a read a concurrent evict had invalidated.
-        CollectionRegistry.lookup(tenantScope, tenant, newCollection);
+        if (!noop[0]) {
+            CollectionRegistry.lookup(tenantScope, tenant, newCollection);
+        }
         return updated;
     }
 

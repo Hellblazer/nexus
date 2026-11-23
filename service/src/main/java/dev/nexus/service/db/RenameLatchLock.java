@@ -13,18 +13,18 @@ import static org.jooq.impl.DSL.val;
  * two-key form, so it is a lock space of its own beside the single-key locks the repositories take on {@code hashtext(...)}).
  *
  * <ul>
- * <li>A rename takes it SHARED, first in its own transaction ({@link RenameGuard#requireRenameAllowed(DSLContext)}), then reads the
- *     latch row. Renames do not exclude each other here.</li>
+ * <li>A rename takes it SHARED, first in its own transaction ({@link RenameGuard#runRename}), then reads the latch row. Renames do not
+ *     exclude each other here.</li>
  * <li>The latch write takes it EXCLUSIVE in the transaction that inserts the row ({@code CompletionCheck#insertLatch}), so it waits for
  *     every rename in flight to commit or roll back, and a rename that starts after it is queued behind it. A rename therefore either
- *     committed before the row was written, or it reads the row (the database runs at READ COMMITTED, so the read after the lock
- *     sees what the writer committed).</li>
+ *     committed before the row was written, or it reads the row (the database runs at READ COMMITTED, which {@code runRename} asserts,
+ *     so the read after the lock sees what the writer committed).</li>
  * </ul>
  *
- * <p>The lock lives in the database, not in the process, because the row does: two engines against one install order the same way.
- * It does not replace P3.7's in-process rename write lock ({@code CompletionCheck.Gate3LatchWriter}); that seam stays and can run
- * around this. <b>Lock order</b>: this lock is taken before any other lock of the rename transaction, and the latch writer takes
- * nothing else, so no cycle can form through it.
+ * <p>This is the one lock of the rename and the latch write (linda, R-A): it lives in the database, not in the process, because the row
+ * does, so two engines against one install order the same way; there is no in-process rename lock beside it. <b>Lock order</b>: this
+ * lock is taken before any other lock of the rename transaction, and the latch writer takes nothing else, so no cycle can form
+ * through it.
  */
 public final class RenameLatchLock {
 

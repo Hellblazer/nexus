@@ -580,7 +580,9 @@ class MainPciWiringTest {
             .containsPattern("c\\s*==\\s*null\\s*\\?\\s*dev\\.nexus\\.service\\.datamove\\.RenameReadiness\\.Missing\\.NAME_KEY_DROP_MOVE");
 
         String service2 = code(Files.readString(Path.of("src/main/java/dev/nexus/service/NexusService.java")));
-        assertThat(service2).contains("new dev.nexus.service.db.RenameGuard(gate3, renameReadiness)")
+        assertThat(service2).as("one guard, built once, over the readiness and the fail-closed one-row catalog rename (P3.7 replaces it here)")
+            .containsOnlyOnce("new dev.nexus.service.db.RenameGuard(")
+            .contains("new dev.nexus.service.db.RenameGuard(renameReadiness, dev.nexus.service.db.OneRowRename.failClosed())")
             .contains("new CatalogRepository(tenantScope, gate3, renameGuard)")
             .as("the registry takes no Gate3").contains("CollectionRegistry.shared()").doesNotContain("CollectionRegistry.shared(gate3)");
     }

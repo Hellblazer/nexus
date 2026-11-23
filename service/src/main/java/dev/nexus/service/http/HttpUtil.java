@@ -597,6 +597,16 @@ public final class HttpUtil {
                 + "}");
             return true;
         }
+        // RDR-229 P3.5a (linda R-A): a catalog rename reached the one-row regime with no one-row rename to run
+        // (OneRowRename.failClosed, until P3.7 supplies one). Raised in the rename's transaction before any write; 409.
+        var renamePathMismatch = renamePathMismatch(e);
+        if (renamePathMismatch != null) {
+            log.warn("event={}_rename_path_mismatch {}", event, context);
+            send(exchange, 409,
+                "{\"error\":" + jsonString(renamePathMismatch.getMessage())
+                + ",\"reason\":\"" + RENAME_PATH_MISMATCH_REASON + "\"}");
+            return true;
+        }
         // RDR-210 Phase 6 Step 2 (bead nexus-f98bg): a name-rewriting verb (a rename of the chash, taxonomy,
         // telemetry or aspect rows, a rehome) named a collection a re-embed job in a lock state holds as its
         // source or target. Raised by the repository before any row changes (no SQLSTATE); a 409 naming the job.
@@ -861,6 +871,19 @@ public final class HttpUtil {
 
     /** {@code reason} of the 409 for a delete by a label that more than one live row holds (RDR-229 P3.5a). Wire contract. */
     static final String COLLECTION_LABEL_AMBIGUOUS_REASON = "collection_label_ambiguous";
+
+    /** {@code reason} on the 409 for a rename that reached the one-row regime with no one-row rename to run. Wire contract. */
+    static final String RENAME_PATH_MISMATCH_REASON = "rename_path_mismatch";
+
+    /** The {@link dev.nexus.service.db.RenamePathMismatchException} in {@code t}'s cause chain, or null. */
+    static dev.nexus.service.db.RenamePathMismatchException renamePathMismatch(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof dev.nexus.service.db.RenamePathMismatchException r) {
+                return r;
+            }
+        }
+        return null;
+    }
 
     /** The {@link dev.nexus.service.db.RenameRefusedException} in {@code t}'s cause chain, or null. */
     static dev.nexus.service.db.RenameRefusedException renameRefused(Throwable t) {
