@@ -369,7 +369,7 @@ public final class ReembedSourceReader {
     }
 
     private DeleteCounts deleteCounts(CollectionKey k, DSLContext ctx, String tenant, String source) {
-        long quarantine = QuarantineOrigin.countRowsOf(ctx, tenant, source);
+        long quarantine = QuarantineOrigin.countRowsOf(ctx, tenant, source, gate3);
 
         Select<Record1<Long>> sourceTopics = ctx.select(TOPICS.ID).from(TOPICS)
             .where(TOPICS.TENANT_ID.eq(tenant).and(k.eq(tenant, TOPICS.COLLECTION, TOPICS.COLLECTION_ID, source)));

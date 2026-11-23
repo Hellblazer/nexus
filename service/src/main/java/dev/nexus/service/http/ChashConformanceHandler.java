@@ -70,18 +70,27 @@ public final class ChashConformanceHandler implements HttpHandler {
 
     private final ChashConformanceConstraints constraints;
     private final dev.nexus.service.db.TenantScope scope;
+    /** RDR-229 P3.5c: the one gate 3 signal; the legacy-chunk detail reads the collection by its id from gate 3. */
+    private final dev.nexus.service.datamove.Gate3 gate3;
     private final long detailDeadlineMs;
     /** The tenants whose detail is being read now: one scan at a time per tenant (a second call answers busy, it does not scan again). Cleared as each call ends. */
     private final java.util.Set<String> detailInFlight = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     public ChashConformanceHandler(ChashConformanceConstraints constraints) {
-        this(constraints, null);
+        this(constraints, null, dev.nexus.service.datamove.Gate3.never());
+    }
+
+    /** Gate 3 never holds (tests): the legacy-chunk detail reads by name. */
+    public ChashConformanceHandler(ChashConformanceConstraints constraints, dev.nexus.service.db.TenantScope scope) {
+        this(constraints, scope, dev.nexus.service.datamove.Gate3.never());
     }
 
     /** @param scope the tenant-scoped sessions the opt-in {@code detail=legacy_chunks} reads through (null: that detail is not offered) */
-    public ChashConformanceHandler(ChashConformanceConstraints constraints, dev.nexus.service.db.TenantScope scope) {
+    public ChashConformanceHandler(ChashConformanceConstraints constraints, dev.nexus.service.db.TenantScope scope,
+                                   dev.nexus.service.datamove.Gate3 gate3) {
         this.constraints = constraints;
         this.scope = scope;
+        this.gate3 = java.util.Objects.requireNonNull(gate3, "gate3");
         // read once, when the handler is built: a test's way to run out of time, not a setting a request can change
         this.detailDeadlineMs = Long.getLong(DEADLINE_PROPERTY, DETAIL_DEADLINE_MS);
     }
@@ -132,7 +141,7 @@ public final class ChashConformanceHandler implements HttpHandler {
         }
         try {
             var d = dev.nexus.service.db.LegacyChunkSurvey.forTenant(scope, tenant, DETAIL_COUNT_CAP, DETAIL_LIST_CAP, DETAIL_TIMEOUT_MS,
-                detailDeadlineMs);
+                detailDeadlineMs, gate3);
             out.put("available", true);
             // a stage that was cut by the request deadline is null (unknown), never an empty answer
             out.put("chunk_reasons", d.chunkCounts() == null ? null : d.chunkCounts().byReason());

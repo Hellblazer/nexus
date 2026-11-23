@@ -601,14 +601,6 @@ public final class Main {
             return;
         }
 
-        // nexus-43ulx.12 (RDR-227): the router's valid-index set, built from the NX_SEARCH_PCI* settings the boot
-        // validation block after the pool (above the schema migration) has already parsed, and handed to the
-        // repository as its only index set (the empty default belongs to tests, never to production).
-        var pciSweep = dev.nexus.service.vectors.PciIndexSweep.create(ds, dev.nexus.service.db.PgSession.startupPciSettings());
-        var pgVectorRepo = new PgVectorRepository(tenantScope, docEmbedRouter, qryEmbedRouter, pciSweep);
-        // nexus-wym0l: fix and log the fan-out arm cap against the pool this process runs with.
-        pgVectorRepo.startupFanoutArmPermits();
-
         // RDR-229 P3.4: the gate 3 latch, read here, synchronously, BEFORE the listener binds. The completion check's own sample is asynchronous
         // and can fail, so a reader that went by it could route to stale names after a one-row rename on the first requests of a restart.
         // A read that fails is retried with backoff, and when the database cannot answer in the deadline the engine does not serve (the same
@@ -636,6 +628,14 @@ public final class Main {
             var c = completionRef.get();
             return c == null ? dev.nexus.service.datamove.RenameReadiness.Missing.NAME_KEY_DROP_MOVE : c.renameReadiness().missing();
         };
+        // nexus-43ulx.12 (RDR-227): the router's valid-index set, built from the NX_SEARCH_PCI* settings the boot
+        // validation block after the pool (above the schema migration) has already parsed, and handed to the
+        // repository as its only index set (the empty default belongs to tests, never to production). RDR-229 P3.5c: the repository
+        // takes the one gate 3 signal above, so it is built after the signal and before the service.
+        var pciSweep = dev.nexus.service.vectors.PciIndexSweep.create(ds, dev.nexus.service.db.PgSession.startupPciSettings());
+        var pgVectorRepo = new PgVectorRepository(tenantScope, docEmbedRouter, qryEmbedRouter, pciSweep, gate3);
+        // nexus-wym0l: fix and log the fan-out arm cap against the pool this process runs with.
+        pgVectorRepo.startupFanoutArmPermits();
         var service = new NexusService(port, token, ds, docEmbedRouter, pgVectorRepo, reranker,
                 localEmbedActivitySupplier, tupleTemplateRegistry, null, System::getenv,
                 () -> dev.nexus.service.db.PgSession.startupPciSettings().enabled(), null, null, gate3, renameReadiness);
@@ -673,7 +673,7 @@ public final class Main {
         service.bootWork(bootWork);
         var pciReconciler = dev.nexus.service.vectors.PciReconciler.create(ds, adminConnection, pciBootNonce, pciSweep,
                 dev.nexus.service.db.PgSession.startupPciSettings(), pciQueryRingExpiry::expireAll, pgVectorRepo,
-                tenantScope).bootWork(bootWork);
+                tenantScope, gate3).bootWork(bootWork);
         pciReconciler.start();
         // nexus-43ulx.23: GET /v1/status's per_collection_indexes, served from what the two halves already hold (the
         // sweep's last read, the reconciler's cached status): no catalog query per request. Bound here because the
@@ -693,7 +693,7 @@ public final class Main {
         // RDR-230 Phase 1 (Sam, 2026-11-06): plus the recall canary's per-index list, which GET /v1/status does not carry.
         service.chunksLeaves(leafBloatSweep::status, leafBloatSweep::periodSeconds, pciReconciler::maintenance);
         // nexus-6pfgb.43: the chunk CHECK add/validate routes run DDL on the admin connection; nothing calls them.
-        service.chunkConstraintAdmin(new dev.nexus.service.vectors.ChunkConstraintAdmin(adminConnection));
+        service.chunkConstraintAdmin(new dev.nexus.service.vectors.ChunkConstraintAdmin(adminConnection, gate3));
         // nexus-6pfgb.44: the same for the catalog TTL CHECK census/add/validate routes; nothing calls them.
         service.catalogTtlCheckAdmin(new dev.nexus.service.db.CatalogTtlCheckAdmin(adminConnection));
         // nexus-6pfgb.42: and for the manifest CHECK census/add/validate routes (chunk_index, labels); nothing calls them.
