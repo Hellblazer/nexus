@@ -39,18 +39,23 @@ import static org.assertj.core.api.Assertions.assertThat;
  * registry rows FOR KEY SHARE (any state) after the document's index-run lock; against a verb holding a row FOR UPDATE it waits, then completes.
  * {@link #aManifestPurge_meetsAVerbHoldingItsCollectionsRow_waitsAndThenPurges}.
  *
- * <p>The fixture drops, on its own database, what the one-row rename drops (see {@code HeavyRoutesRenameGapTest#prepared}).
+ * <p>The fixture drops, on its own database, what the one-row rename drops (see {@code HeavyRoutesRenameGapTest#prepared}). The trash purge
+ * test runs on a second, untouched fixture: {@code purge_trash} runs {@code SET CONSTRAINTS fk_catalog_chunks_chunk DEFERRED}, which the
+ * one-row rename's preparation drops, and the purge needs no rename.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class SweepAndPurgeRegistryFirstTest {
 
     CollectionRouteFixture fx;
+    /** The database as the product builds it (no foreign key dropped): the trash purge's function names {@code fk_catalog_chunks_chunk}. */
+    CollectionRouteFixture fxIntact;
     ExecutorService pool;
     int n;
 
     @BeforeAll
     void startAll() throws Exception {
         fx = HeavyRoutesRenameGapTest.prepared(new CollectionRouteFixture());
+        fxIntact = new CollectionRouteFixture();
         pool = Executors.newFixedThreadPool(2);
     }
 
@@ -58,11 +63,16 @@ class SweepAndPurgeRegistryFirstTest {
     void stopAll() {
         if (pool != null) pool.shutdownNow();
         if (fx != null) fx.close();
+        if (fxIntact != null) fxIntact.close();
     }
 
     private void chunk(String collection, String hex) {
-        fx.asSuperuser(ctx -> {
-            PgContainerHelper.insertChunks(ctx, fx.tenant, collection, List.of(hex), List.of("sweep text " + hex), List.of(new float[384]),
+        chunk(fx, collection, hex);
+    }
+
+    private static void chunk(CollectionRouteFixture f, String collection, String hex) {
+        f.asSuperuser(ctx -> {
+            PgContainerHelper.insertChunks(ctx, f.tenant, collection, List.of(hex), List.of("sweep text " + hex), List.of(new float[384]),
                 List.of(Map.<String, Object>of()));
             return null;
         });
@@ -151,7 +161,11 @@ class SweepAndPurgeRegistryFirstTest {
     }
 
     private int waitingRows() {
-        return fx.asSuperuser(ctx -> ctx.fetchCount(DSL.table(DSL.name("pg_catalog", "pg_locks")),
+        return waitingRows(fx);
+    }
+
+    private static int waitingRows(CollectionRouteFixture f) {
+        return f.asSuperuser(ctx -> ctx.fetchCount(DSL.table(DSL.name("pg_catalog", "pg_locks")),
             DSL.field(DSL.name("granted"), Boolean.class).isFalse()
                 .and(DSL.field(DSL.name("locktype"), String.class).in("tuple", "transactionid"))));
     }
@@ -202,33 +216,33 @@ class SweepAndPurgeRegistryFirstTest {
     void aTrashPurge_meetsAVerbHoldingTheRowOfACollectionItReaches_waitsAndThenPurges() throws Exception {
         String stem = "trs" + (n++);
         String b = label(stem);
-        fx.register(b);
+        fxIntact.register(b);
         String doc = "trs-doc-" + stem;
         String hex = Chash.ofText("trs-chunk-" + stem).toHex();
-        chunk(b, hex);
-        fx.asSuperuser(ctx -> {
-            CollectionIdSeeds.ownerDocument(ctx, fx.tenant, doc, b);
-            CollectionIdSeeds.manifestRows(ctx, fx.tenant, doc, b, 0, hex);
+        chunk(fxIntact, b, hex);
+        fxIntact.asSuperuser(ctx -> {
+            CollectionIdSeeds.ownerDocument(ctx, fxIntact.tenant, doc, b);
+            CollectionIdSeeds.manifestRows(ctx, fxIntact.tenant, doc, b, 0, hex);
             return null;
         });
-        int aged = fx.asSuperuser(ctx -> ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.DELETED_AT, java.time.OffsetDateTime.now().minusDays(40))
-            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(fx.tenant).and(CATALOG_DOCUMENTS.TUMBLER.eq(doc))).execute());
+        int aged = fxIntact.asSuperuser(ctx -> ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.DELETED_AT, java.time.OffsetDateTime.now().minusDays(40))
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(fxIntact.tenant).and(CATALOG_DOCUMENTS.TUMBLER.eq(doc))).execute());
         assertThat(aged).as("setup: the document is an aged tombstone").isEqualTo(1);
         Future<Resp> purge;
-        try (Connection verb = fx.pg.createConnection("")) {
+        try (Connection verb = fxIntact.pg.createConnection("")) {
             verb.setAutoCommit(false);
             DSL.using(verb, SQLDialect.POSTGRES).select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
-                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(fx.tenant)).and(CATALOG_COLLECTIONS.NAME.eq(b)).forUpdate().fetch();
-            purge = pool.submit(() -> fx.post("/v1/catalog/purge-trash", "{\"older_than_days\":30,\"dry_run\":false}"));
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(fxIntact.tenant)).and(CATALOG_COLLECTIONS.NAME.eq(b)).forUpdate().fetch();
+            purge = pool.submit(() -> fxIntact.post("/v1/catalog/purge-trash", "{\"older_than_days\":30,\"dry_run\":false}"));
             try {
                 long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
-                while (waitingRows() < 1) {
+                while (waitingRows(fxIntact) < 1) {
                     if (purge.isDone() || System.nanoTime() > deadline) {
                         throw new AssertionError("the trash purge never showed waiting on the collection's row (done: " + purge.isDone() + ")");
                     }
                     LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(5));
                 }
-                assertThat(manifestRows(doc)).as("nothing was purged while the verb held the row").isEqualTo(1);
+                assertThat(manifestRows(fxIntact, doc)).as("nothing was purged while the verb held the row").isEqualTo(1);
             } finally {
                 verb.rollback();
             }
@@ -236,12 +250,16 @@ class SweepAndPurgeRegistryFirstTest {
         Resp r = purge.get(120, TimeUnit.SECONDS);
         assertThat(r.status()).as(r.body()).isEqualTo(200);
         assertThat(r.json().path("documents_purged").asLong(-1)).as("the aged tombstone was purged once the verb let go").isEqualTo(1);
-        assertThat(manifestRows(doc)).isZero();
+        assertThat(manifestRows(fxIntact, doc)).isZero();
     }
 
     private int manifestRows(String doc) {
-        Integer count = fx.asSuperuser(ctx -> ctx.fetchCount(CATALOG_DOCUMENT_CHUNKS,
-            CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(fx.tenant).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(doc))));
+        return manifestRows(fx, doc);
+    }
+
+    private static int manifestRows(CollectionRouteFixture f, String doc) {
+        Integer count = f.asSuperuser(ctx -> ctx.fetchCount(CATALOG_DOCUMENT_CHUNKS,
+            CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(f.tenant).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(doc))));
         return count;
     }
 }
