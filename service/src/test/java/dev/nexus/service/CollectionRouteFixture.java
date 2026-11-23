@@ -192,6 +192,7 @@ final class CollectionRouteFixture implements AutoCloseable {
         gate3.row = present -> asSuperuser(ctx -> {
             if (present) {
                 dev.nexus.service.datamove.CompletionCheck.insertLatch(ctx, dev.nexus.service.datamove.CompletionCheck.GATE3, "fixture", false);
+                buildIdArbiters(ctx);   // gate 3 latches only after P3.3c's parent uniques and P3.4's arbiter indexes exist
             } else {
                 ctx.deleteFrom(DSL.table(DSL.name("nexus", "rdr229_gate_latch"))).execute();
             }
@@ -232,6 +233,34 @@ final class CollectionRouteFixture implements AutoCloseable {
         if (service != null) service.stop();
         if (svcDs != null) svcDs.close();
         if (pg != null) pg.stop();
+    }
+
+    /**
+     * The id arbiters the latched upserts infer their {@code ON CONFLICT} target from (RDR-229 P3.5c): P3.3c's parent uniques on
+     * {@code chunks} and {@code taxonomy_centroids}, and P3.4's arbiter indexes (built from {@link dev.nexus.service.datamove.IdUniqueIndexPass#SPECS}).
+     * Production latches gate 3 only after both exist; the fixture builds them when it latches, and builds them once.
+     */
+    static void buildIdArbiters(DSLContext ctx) {
+        ctx.createUniqueIndexIfNotExists("idx_fixture_chunks_id_uq")
+            .on(dev.nexus.service.jooq.nexus.Tables.CHUNKS, dev.nexus.service.jooq.nexus.Tables.CHUNKS.TENANT_ID,
+                dev.nexus.service.jooq.nexus.Tables.CHUNKS.COLLECTION_ID, dev.nexus.service.jooq.nexus.Tables.CHUNKS.CHASH,
+                dev.nexus.service.jooq.nexus.Tables.CHUNKS.EMBEDDING_MODEL).execute();
+        ctx.createUniqueIndexIfNotExists("idx_fixture_centroids_id_uq")
+            .on(dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS, dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS.TENANT_ID,
+                dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS.COLLECTION_ID, dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS.TOPIC_ID,
+                dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS.EMBEDDING_MODEL).execute();
+        for (var spec : dev.nexus.service.datamove.IdUniqueIndexPass.SPECS) {
+            if (!spec.unique()) continue;
+            List<org.jooq.Field<?>> cols = java.util.Arrays.stream(spec.columns().split(",\\s*"))
+                .<org.jooq.Field<?>>map(c -> DSL.field(DSL.name(c))).toList();
+            if (spec.predicate() != null && !spec.table().equals("topics")) continue;
+            var step = ctx.createUniqueIndexIfNotExists(spec.index()).on(DSL.table(DSL.name("nexus", spec.table())), cols);
+            if (spec.predicate() == null) {
+                step.execute();
+            } else if (spec.table().equals("topics")) {
+                step.where(dev.nexus.service.jooq.nexus.Tables.TOPICS.PARENT_ID.isNull()).execute();   // the one partial arbiter
+            }   // another partial unique (a job lock) is no arbiter of a latched upsert
+        }
     }
 
     // ---- the rename in the gap (RDR-229 P3.5a, F1) ----------------------------------------------------------------------
