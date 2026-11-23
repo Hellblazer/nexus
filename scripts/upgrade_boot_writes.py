@@ -52,8 +52,11 @@ rebuilt exactly once.
 
 Bounds: ``--ceiling-boot`` gates the upgrade boot's migrate + ready WAL (``boot_wal_bytes``; the release gate
 is 64 MiB, accepted by Sam 2026-11-10), ``--ceiling`` its total through settle (on a ``--restart-mid-queue``
-run, through the restart), and ``--ceiling-reboot`` a plain same-version reboot's migrate + ready
-(``reboot_wal_bytes``; 64 MiB on the release gate's same-version leg). Both limits are Sam's, 2026-11-10, recorded
+run, through the restart) LESS the WAL the registered data moves write after ready (``move_wal_bytes``: from the
+first status that shows a move working until idle, so the autovacuum they leave is in it; reported, never gated:
+the moves rewrite user rows on purpose, about 2.1 GB for the RDR-229 chunks stamp on the fixture), and
+``--ceiling-reboot`` a plain same-version reboot's migrate + ready (``reboot_wal_bytes``; 64 MiB on the release
+gate's same-version leg). Both limits are Sam's, 2026-11-10, recorded
 on nexus-f3yqd.1. Every boot's ``boot_wal_bytes`` is reported in ``boots[]``. A ``resume`` boot is never gated:
 a PCI build kept across the restart writes its WAL while it migrates.
 
@@ -325,6 +328,7 @@ class Sample:
     building: int
     vacuuming: int
     pci_building: tuple[tuple[str, int], ...] = ()  # (index name, building backend pid)
+    moves_active: bool = False   # a data move was still working when /v1/status was read with this sample
 
 
 def sample(inst: Install, t0: float) -> Sample | None:
@@ -515,6 +519,21 @@ def failed_moves(status: dict | None) -> list[dict]:
     return [e for e in ((status or {}).get("boot_work") or []) if _move_state(e) == "failed"]
 
 
+def moves_working(status: dict | None) -> bool:
+    """A data move that is neither parked nor failed shows in boot_work: the engine is still running a move."""
+    return any(_move_state(e) not in (None, "failed") and not _is_parked(e)
+               for e in ((status or {}).get("boot_work") or []))
+
+
+def move_wal_bytes(samples: list["Sample"], idle: "Sample") -> int:
+    """WAL from the first sample that saw a data move working until idle: the moves' own writes and the
+    autovacuum they leave behind, which the idle rule waits out. Reported, never gated (the stamp moves
+    rewrite every chunk row, about 24.6 KB of WAL a row in RDR-229's measurement, so ~2.1 GB on the fixture). 0 when no
+    sample saw a move working."""
+    first = next((x for x in samples if x.moves_active), None)
+    return 0 if first is None else max(0, idle.lsn - first.lsn)
+
+
 def boot_work_settled(status: dict | None) -> bool:
     """Every boot_work entry is a parked move (or there is none): nothing in it is still working."""
     if boot_work_empty(status):
@@ -617,6 +636,7 @@ def wait_idle(inst: Install, port_fn, t0: float, samples: list[Sample], rule: Id
                 on_sample(samples)
             port = port_fn()
             code, status = http_status(port, "/v1/status") if port else (0, None)
+            s.moves_active = code == 200 and moves_working(status)
             if code == 200 and (failed := failed_moves(status)):
                 raise HarnessError(f"{what}: data move failed: {failed}")
             older = [x for x in samples if x.t <= s.t - rule.window_s]
@@ -685,6 +705,7 @@ class Report:
     checkpoint_lsn: str = ""
     phases: dict[str, dict] = field(default_factory=dict)
     total_wal_bytes: int = 0
+    move_wal_bytes: int = 0   # the part of total_wal_bytes written after ready while data moves ran; reported, never gated
     total_io_write_bytes: int | None = None
     total_io_extend_bytes: int | None = None
     elapsed_s: float = 0.0
@@ -1085,6 +1106,7 @@ def measure_boot(inst: Install, a: argparse.Namespace, env: dict[str, str], labe
                      "ready": _phase(marks["bind"].lsn, marks["bind"], marks["ready"]),
                      "settle": _phase(marks["ready"].lsn, marks["ready"], idle)}
     rec["total_wal_bytes"] = idle.lsn - base
+    rec["move_wal_bytes"] = move_wal_bytes(samples, idle)
     if None not in (first.io_write_bytes, idle.io_write_bytes, first.io_extend_bytes, idle.io_extend_bytes):
         rec["total_io_write_bytes"] = int(idle.io_write_bytes or 0) - int(first.io_write_bytes or 0)
         rec["total_io_extend_bytes"] = int(idle.io_extend_bytes or 0) - int(first.io_extend_bytes or 0)
@@ -1115,6 +1137,7 @@ def boot_new(inst: Install, a: argparse.Namespace, env: dict[str, str], rep: Rep
     last = first
     rep.phases = first.get("phases", {})
     rep.total_wal_bytes = first.get("total_wal_bytes", 0)
+    rep.move_wal_bytes = first.get("move_wal_bytes", 0)
     rep.boot_wal_bytes = boot_wal_bytes(first)
     first["boot_wal_bytes"] = rep.boot_wal_bytes
     rep.total_io_write_bytes = first.get("total_io_write_bytes")
@@ -1207,15 +1230,18 @@ def boot_wal_bytes(boot: dict) -> int:
 
 
 def ceiling_verdict(boot_wal: int, total_wal: int, ceiling: int | None, ceiling_boot: int | None,
-                    reboot_wal: int = 0, ceiling_reboot: int | None = None) -> tuple[str, list[str]]:
+                    reboot_wal: int = 0, ceiling_reboot: int | None = None, move_wal: int = 0
+                    ) -> tuple[str, list[str]]:
     """The byte bounds, decided by Sam on 2026-11-10 (recorded on nexus-f3yqd.1). ``ceiling_boot`` gates the
     UPGRADE boot's migrate + ready (64 MiB on the release gate); ``ceiling`` gates that boot's total through
-    settle; ``ceiling_reboot`` gates a plain same-version ``reboot``'s migrate + ready (64 MiB on the release
+    settle LESS ``move_wal``, the WAL the registered data moves wrote after ready (they rewrite user rows by
+    design, in the background; reported as ``move_wal_bytes``, never gated: ask rdr229-upgrade-gate-pacing);
+    ``ceiling_reboot`` gates a plain same-version ``reboot``'s migrate + ready (64 MiB on the release
     gate's same-version leg). A ``resume`` boot is never gated, because a PCI build kept across the restart
     writes its WAL while it migrates; ``--ceiling-reboot`` is refused with ``--restart-mid-queue`` for that
     reason. Returns the verdict and the bounds that tripped."""
     tripped = [name for name, value, bound in (("boot", boot_wal, ceiling_boot), ("reboot", reboot_wal, ceiling_reboot),
-                                               ("total", total_wal, ceiling))
+                                               ("total", total_wal - move_wal, ceiling))
                if bound is not None and value > bound]
     if "boot" in tripped:
         return "boot-over-ceiling", tripped
@@ -1246,7 +1272,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--control-rows", type=int, default=5_000, help="rows in the control (must stay under the threshold)")
     ap.add_argument("--seed", type=int, default=20261110)
     ap.add_argument("--ceiling", type=int, default=None,
-                    help="fail (exit 1, over-ceiling) when the upgrade boot's total WAL, through settle, exceeds this")
+                    help="fail (exit 1, over-ceiling) when the upgrade boot's total WAL, through settle, less the WAL "
+                         "its data moves wrote after ready (move_wal_bytes, reported), exceeds this")
     ap.add_argument("--ceiling-boot", type=int, default=None,
                     help="fail (exit 1, boot-over-ceiling) when the upgrade boot's migrate + ready WAL exceeds this")
     ap.add_argument("--ceiling-reboot", type=int, default=None,
@@ -1337,7 +1364,8 @@ def main(argv: list[str] | None = None) -> int:
             raise HarnessError(f"--restart-mid-queue {a.restart_mid_queue} never fired: the upgrade boot showed "
                                f"fewer than {a.restart_mid_queue} pci_ builds, so the restart leg tested nothing")
         ceiling_name, rep.ceilings_tripped = ceiling_verdict(rep.boot_wal_bytes, rep.total_wal_bytes, a.ceiling,
-                                                             a.ceiling_boot, rep.reboot_wal_bytes, a.ceiling_reboot)
+                                                             a.ceiling_boot, rep.reboot_wal_bytes, a.ceiling_reboot,
+                                                             rep.move_wal_bytes)
         failed = [b["label"] for b in rep.boots if not b.get("reached_ready") and "harness_error" not in b]
         unmeasured = [b["harness_error"] for b in rep.boots if "harness_error" in b]
         if unmeasured and rep.boots[0].get("reached_ready"):

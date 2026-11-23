@@ -408,3 +408,60 @@ def test_a_pause_outside_the_registry_bounds_is_refused(tmp_path: Path, capsys: 
     with pytest.raises(SystemExit) as e:
         _mod.main(["--data-move-sleep-ms", "60001", "--new-jar", str(jar)])
     assert e.value.code == 2 and "--data-move-sleep-ms" in capsys.readouterr().err
+
+
+# ── the moves' own WAL after ready is reported, not gated (ask rdr229-upgrade-gate-pacing) ────
+
+_STAMP = {"id": "data-move:rdr229-stamp-chunks", "what": "working: 12 of 860 chunks"}
+
+
+def _sm(t: float, lsn: int, active: bool = False) -> object:
+    x = _s(t, lsn)
+    x.moves_active = active
+    return x
+
+
+def test_move_wal_runs_from_the_first_sample_that_saw_a_move_working_to_idle() -> None:
+    samples = [_sm(0, 100), _sm(1, 150), _sm(2, 200, True), _sm(3, 5_000, True), _sm(4, 9_000)]
+    assert _mod.move_wal_bytes(samples, samples[-1]) == 9_000 - 200   # the vacuum after the last chunk is in it
+    assert _mod.move_wal_bytes([_sm(0, 1), _sm(1, 9_000)], _sm(1, 9_000)) == 0   # no move seen: nothing attributed
+
+
+def test_only_a_running_move_counts_as_moves_working() -> None:
+    assert _mod.moves_working({"boot_work": [_STAMP]})
+    assert _mod.moves_working({"boot_work": [_BLOCKED_OTHER]})
+    for status in (None, {}, {"boot_work": []}, {"boot_work": [_BLOCKED, _PAUSED, _FAILED]},
+                   {"boot_work": [{"kind": "pci_build"}, {"id": "data-move-worker", "what": "working: x"}]}):
+        assert not _mod.moves_working(status), status
+
+
+def test_the_total_ceiling_ignores_post_ready_move_wal_but_the_report_has_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    move = 2_100 * 1024 * 1024   # the chunks stamp on the fixture, RDR-229's per-row figure
+    total = move + 5 * 1024 * 1024
+    # Gated on the total alone the run is red; with the moves' WAL taken out it is green and boot/reboot bounds still hold.
+    assert _mod.ceiling_verdict(1, total, _MIB64, _MIB64, 1, _MIB64) == ("over-ceiling", ["total"])
+    assert _mod.ceiling_verdict(1, total, _MIB64, _MIB64, 1, _MIB64, move_wal=move) == ("under-ceiling", [])
+    # WAL outside the moves still trips it
+    assert _mod.ceiling_verdict(1, total, _MIB64, None, move_wal=move - _MIB64 - 1) == ("over-ceiling", ["total"])
+    # the boot and reboot bounds are migrate + ready: move WAL never reaches them
+    assert _mod.ceiling_verdict(_MIB64 + 1, total, None, _MIB64, move_wal=move) == ("boot-over-ceiling", ["boot"])
+
+    boots = iter([{"label": "upgrade", "reached_ready": True, "total_wal_bytes": total, "move_wal_bytes": move,
+                   "phases": {"migrate": {"wal_bytes": 3}, "ready": {"wal_bytes": 4}}},
+                  {"label": "reboot", "reached_ready": True, "phases": {"migrate": {"wal_bytes": 1}, "ready": {"wal_bytes": 1}}}])
+    monkeypatch.setattr(_mod, "measure_boot", lambda *_a, **_k: next(boots))
+
+    class _Inst:
+        def checkpoint_lsn(self) -> str:
+            return "0/0"
+
+    class _A:
+        second_boot = True
+        restart_mode = "graceful"
+        _before: dict = {}
+
+    rep = _mod.Report(prev_client="x", new_jar="j", rows_per_collection=1, checkpoint_lsn="0/0")
+    _mod.boot_new(_Inst(), _A(), {}, rep)
+    assert rep.move_wal_bytes == move and rep.total_wal_bytes == total   # reported beside the total
+    assert _mod.ceiling_verdict(rep.boot_wal_bytes, rep.total_wal_bytes, _MIB64, _MIB64, rep.reboot_wal_bytes, _MIB64,
+                                rep.move_wal_bytes) == ("under-ceiling", [])
