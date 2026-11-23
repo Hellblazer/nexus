@@ -52,6 +52,20 @@ COLLECTION_MODEL_MISMATCH_REASON: str = "collection_model_mismatch"
 #: explicit registration revives a name.
 COLLECTION_SUPERSEDED_REASON: str = "collection_superseded"
 
+#: A collection route was given a ``collection_id`` no row of the tenant has, or one that names a retired row (a rename's or
+#: supersede's tombstone) (HTTP 404, RDR-229 P3.5a). Also carries ``collection_id`` (the id sent). A label with no row keeps
+#: the ``unregistered_collection`` 422; this reason is for id input only.
+UNKNOWN_COLLECTION_ID_REASON: str = "unknown_collection_id"
+
+#: A collection rename (the catalog's, or a per-store ``rename_collection`` route) refused from gate 3 until the one-row rename
+#: can run (HTTP 409, RDR-229 P3.5a). Also carries ``missing``: ``name_key_drop_move`` while the move has no ``completed_at``,
+#: else ``restart`` (a P3.5b changeset has not applied). Nothing was renamed.
+RENAME_REFUSED_REASON: str = "rename_refused"
+
+#: ``POST /v1/catalog/collections/delete`` by a label that more than one live row holds (HTTP 409, RDR-229 P3.5a). Also carries
+#: ``collection_ids``; the delete by ``collection_id`` removes one of them.
+COLLECTION_LABEL_AMBIGUOUS_REASON: str = "collection_label_ambiguous"
+
 #: A write naming an embedding model registered nowhere (HTTP 422, RDR-225).
 UNREGISTERED_EMBEDDING_MODEL_REASON: str = "unregistered_embedding_model"
 
