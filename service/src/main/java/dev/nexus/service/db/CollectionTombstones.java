@@ -128,7 +128,8 @@ public final class CollectionTombstones {
         if (names.isEmpty()) return 0;
         var s = CATALOG_COLLECTIONS.as("reg");
         Field<Long> registered = DSL.field(DSL.select(s.COLLECTION_ID).from(s)
-            .where(s.TENANT_ID.eq(CATALOG_COLLECTIONS.TENANT_ID)).and(s.NAME.eq(CATALOG_COLLECTIONS.SUPERSEDED_BY)));
+            .where(s.TENANT_ID.eq(CATALOG_COLLECTIONS.TENANT_ID)).and(s.NAME.eq(CATALOG_COLLECTIONS.SUPERSEDED_BY))
+            .orderBy(s.SUPERSEDED_BY_ID.asc().nullsFirst()).limit(1));  // the live row of a label (a tombstone may share it, G15)
         return ctx.update(CATALOG_COLLECTIONS)
             .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, registered)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.SUPERSEDED_BY.in(names))
@@ -146,7 +147,8 @@ public final class CollectionTombstones {
     public static int invariantViolations(DSLContext ctx, String tenant) {
         var s = CATALOG_COLLECTIONS.as("inv");
         Field<Long> successor = DSL.field(DSL.select(s.COLLECTION_ID).from(s)
-            .where(s.TENANT_ID.eq(CATALOG_COLLECTIONS.TENANT_ID)).and(s.NAME.eq(CATALOG_COLLECTIONS.SUPERSEDED_BY)));
+            .where(s.TENANT_ID.eq(CATALOG_COLLECTIONS.TENANT_ID)).and(s.NAME.eq(CATALOG_COLLECTIONS.SUPERSEDED_BY))
+            .orderBy(s.SUPERSEDED_BY_ID.asc().nullsFirst()).limit(1));
         return ctx.fetchCount(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(
             CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("").and(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.isNotNull())
             .or(CATALOG_COLLECTIONS.SUPERSEDED_BY.ne("").and(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.isDistinctFrom(

@@ -91,6 +91,7 @@ class Rdr229P35cCatalogReadersIntegrationTest extends AtomicWriteTestBase {
     private record Renamed(String oldLabel, String newLabel, String doc, String chash, long id) {}
 
     private Renamed renamedCollection() throws Exception {
+        latched.set(false);  // the fixture writes by the name path: the id upserts need P3.3c's parent key, which a scratch schema lacks
         Fx fx = fixture("rdr");
         String chash = ch("p35c catalog " + seq.incrementAndGet());
         var written = gatedSvc.writeManyCombined(TENANT, fx.collection(), List.of(chunk(chash, "p35c text " + chash)),
