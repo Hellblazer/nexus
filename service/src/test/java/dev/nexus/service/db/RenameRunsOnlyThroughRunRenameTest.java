@@ -253,7 +253,7 @@ class RenameRunsOnlyThroughRunRenameTest {
         }
         java.util.Map<String, Integer> allowed = allowlist("src/test/resources/rename-name-write-allowlist.txt");
         assertThat(inside).as("the primitives' own name writes, inside runRename: exact").isEqualTo(10);
-        assertThat(outside.values().stream().mapToInt(Integer::intValue).sum()).as("sites outside runRename: exact").isEqualTo(31);
+        assertThat(outside.values().stream().mapToInt(Integer::intValue).sum()).as("sites outside runRename: exact").isEqualTo(32);
         assertThat(unlisted(outside, allowed)).as("a name-column write outside runRename that is not on the allowlist").isEmpty();
     }
 

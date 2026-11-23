@@ -102,7 +102,7 @@ class WriterCensusUnprovenPinTest {
         "QuarantineOrigin.java|retagRowsOf|chunks",
         "ReembedJobRepository.java|advanceAfterBatch|reembed_jobs",
         "ReembedJobRepository.java|applyTransition|reembed_jobs",
-        "ReembedJobRepository.java|markRevived|reembed_jobs",
+        "ReembedJobRepository.java|markRevivedIn|reembed_jobs",
         "ReembedJobRepository.java|recordMoveInTxn|reembed_jobs",
         "ReembedJobRepository.java|reenter|reembed_jobs",
         "ReembedJobRepository.java|rescan|reembed_jobs",

@@ -8561,7 +8561,9 @@ FROM scope s
                 queries.add(ctx.update(ch.table())
                                .set(ch.metadata(), value)
                                .set(ch.lastWrittenAt(), DimTables.lastWrittenNow())
-                               .set(CHUNKS.COLLECTION_ID, rowCollectionId(ch))
+                               // the stored id wins (RDR-229 P3.5a row 14): a row whose label a one-row rename left behind, and another collection has
+                               // since taken, must keep the id of the collection it is in; the label's id fills only an unstamped row
+                               .set(CHUNKS.COLLECTION_ID, DSL.coalesce(ch.table().field("collection_id", Long.class), rowCollectionId(ch)))
                                .where(ch.collection().eq(collection).and(ch.chash().eq(ids.get(idx)))));
             }
             int[] affectedCounts = ctx.batch(queries).execute();
