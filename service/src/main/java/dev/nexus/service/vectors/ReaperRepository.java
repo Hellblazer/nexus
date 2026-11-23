@@ -233,8 +233,9 @@ public class ReaperRepository {   // not final: ChunkReaperIntegrationTest raise
      * the scope {@code nexus.reaper_expire_client_quarantine} itself enforces, all of it registry rows and never a
      * parse of a name: the quarantine collection is registered with catalog {@code content_type}
      * {@code contentType} and lifecycle state {@code quarantine}, and the origin is registered with that content
-     * type and lifecycle state {@code live} (restore, {@code vectors-025}, requires a live origin too). A row with
-     * no origin tag names no origin and is not listed: the engine never derives an origin from the sibling's name.
+     * type and lifecycle state {@code live} (restore, {@code vectors-025}, requires a live origin too), except that a
+     * marker row (its {@code origin_collection_id} the JSON null, RDR-229 P3.7) lists its tag whether or not the label is
+     * registered. A row with no origin tag names no origin and is not listed: the engine never derives an origin from the sibling's name.
      */
     public List<String> clientMovedOrigins(String tenant, String quarantineCollection, String contentType,
                                            int statementTimeoutMs) {
@@ -256,11 +257,14 @@ public class ReaperRepository {   // not final: ChunkReaperIntegrationTest raise
                     .and(CollectionSelector.collectionIs(g, tenant, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, quarantineCollection))
                     .and(clientMoved).and(origin.isNotNull())
                     .and(DSL.exists(DSL.selectOne().from(CATALOG_COLLECTIONS).where(quarantineRow)))
+                    // a live registered origin; or, RDR-229 P3.7 (linda 2026-11-23), a marker row (origin_collection_id the JSON null: the origin had
+                    // no registry row when it was quarantined), registered or not: the function expires those past retention by tag and the null id
                     .and(DSL.exists(DSL.selectOne().from(CATALOG_COLLECTIONS)
                         .where(CATALOG_COLLECTIONS.TENANT_ID.eq(CHUNKS.TENANT_ID)
                             .and(CATALOG_COLLECTIONS.NAME.eq(origin))
                             .and(CATALOG_COLLECTIONS.CONTENT_TYPE.eq(contentType))
-                            .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("live"))))))
+                            .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("live"))))
+                        .or(RestoreOriginMarker.isNullMarker())))
                 .fetch(origin).stream().sorted().toList();
         });
     }

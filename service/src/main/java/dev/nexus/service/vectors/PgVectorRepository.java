@@ -7552,7 +7552,12 @@ FROM scope s
         if (before != null) win = win.and(stamp.lt(before.atOffset(java.time.ZoneOffset.UTC)));
         final org.jooq.Condition window = win;
         Field<String> originStamp = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "origin_collection");
-        org.jooq.Condition fromThisOrigin = originStamp.isNull().or(originStamp.eq(originCollection));
+        // RDR-229 P3.7 (linda 2026-11-23): from gate 3 a chunk is the origin's by the origin's id (QuarantineOrigin's one definition, the label tag only for a
+        // row that carries no id key), so a window named by a one-row-renamed collection's NEW label finds the chunks tagged with its old one; an untagged
+        // chunk is still taken for this origin's. A marker row is selected through its label and refused by restoreAcross, as in every form.
+        org.jooq.Condition fromThisOrigin = gate3.holds()
+            ? dev.nexus.service.db.QuarantineOrigin.taggedWith(true, tenant, originCollection).or(originStamp.isNull())
+            : originStamp.isNull().or(originStamp.eq(originCollection));
         org.jooq.Condition past = after == null
             ? DSL.noCondition() : CHUNKS.CHASH.gt(dev.nexus.service.db.Chash.fromHex(after).toBytes());
         if (siblings.isEmpty()) {
