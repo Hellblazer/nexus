@@ -384,8 +384,8 @@ public final class ChashRepository {
             // origin's own rows. NOT when oldCollection is still a live registered collection: then its
             // quarantine rows (source-model vectors) stay with it. A catalog rename retires the source row
             // first, so this guard then passes.
-            if (!QuarantineOrigin.isLiveRegistered(ctx, tenant, oldCollection)) {
-                QuarantineOrigin.retagRowsOf(ctx, tenant, oldCollection, newCollection);
+            if (!QuarantineOrigin.isLiveRegistered(ctx, tenant, oldCollection, gate3)) {
+                QuarantineOrigin.retagRowsOf(ctx, tenant, oldCollection, newCollection, gate3);
             }
             return total;
         }, ctx -> {
