@@ -108,20 +108,16 @@ final class CatalogIdStamps {
      * the class comment) already name it and still carry the id they had. Gives them {@code id}; a row that already has
      * it is not written.
      *
-     * <p>Run for the whole of {@code collection} on purpose. A rename's target held nothing before (pass {@code sourceId}
-     * null), so the {@code IS DISTINCT FROM} predicate selects exactly the rows that moved. A re-home's target may name rows
-     * of another collection that a one-row rename left under a stale name, so from gate 3 the re-home passes the source's id:
-     * only rows still holding it were carried by the cascade (RDR-229 P3.5c).
+     * <p>Run for the whole of {@code collection} on purpose. A rename's target held nothing before, and a re-home's
+     * target rows already carry its id, so the {@code IS DISTINCT FROM} predicate selects exactly the rows that moved.
      */
-    static void repairCascadedIds(DSLContext ctx, String tenant, String collection, Long id, Long sourceId) {
+    static void repairCascadedIds(DSLContext ctx, String tenant, String collection, Long id) {
         ctx.update(TOPIC_ASSIGNMENTS).set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, id)
             .where(TOPIC_ASSIGNMENTS.TENANT_ID.eq(tenant)).and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(collection))
-            .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID.isDistinctFrom(id))
-            .and(sourceId == null ? DSL.noCondition() : TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID.eq(sourceId)).execute();
+            .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID.isDistinctFrom(id)).execute();
         ctx.update(CHUNK_ORPHANED_AT).set(CHUNK_ORPHANED_AT.COLLECTION_ID, id)
             .where(CHUNK_ORPHANED_AT.TENANT_ID.eq(tenant)).and(CHUNK_ORPHANED_AT.COLLECTION.eq(collection))
-            .and(CHUNK_ORPHANED_AT.COLLECTION_ID.isDistinctFrom(id))
-            .and(sourceId == null ? DSL.noCondition() : CHUNK_ORPHANED_AT.COLLECTION_ID.eq(sourceId)).execute();
+            .and(CHUNK_ORPHANED_AT.COLLECTION_ID.isDistinctFrom(id)).execute();
     }
 
     /**

@@ -118,7 +118,7 @@ final class CollectionSelectors {
     }
 
     private static void either(Map<String, Route> t, String path, Slot... slots) {
-        t.put(path, new Route(Where.EITHER, List.of(slots), false));
+        t.put(path, new Route(Where.EITHER, List.of(slots), false, WRITES.contains(path)));
     }
 
     private static void delete(Map<String, Route> t, String path, Slot... slots) {

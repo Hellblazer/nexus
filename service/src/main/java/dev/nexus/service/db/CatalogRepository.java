@@ -7538,7 +7538,7 @@ public final class CatalogRepository {
         var holder = CATALOG_DOCUMENTS.as("holder");
         Field<String> rewritten = NoteUri.moveTo(moving.SOURCE_URI, source, target);
         return ctx.select(moving.TUMBLER, holder.SOURCE_URI, holder.TUMBLER,
-                CollectionIdReads.labelOf(gate3, holder.TENANT_ID, holder.PHYSICAL_COLLECTION, holder.PHYSICAL_COLLECTION_ID))
+                holder.PHYSICAL_COLLECTION)
             .from(moving).join(holder).on(holder.TENANT_ID.eq(tenant).and(holder.SOURCE_URI.eq(rewritten)))
             .where(moving.TENANT_ID.eq(tenant))
             .and(movingRows.apply(moving))
@@ -11465,8 +11465,7 @@ public final class CatalogRepository {
     static void requireCollectionUrisFree(DSLContext ctx, String tenant, String source, String target,
                                                   String operation) {
         var hit = moveUriCollisions(ctx, tenant, source, target,
-            m -> CollectionIdReads.is(gate3, tenant, m.PHYSICAL_COLLECTION, m.PHYSICAL_COLLECTION_ID, source)
-                .and(NoteUri.namesCollection(m.SOURCE_URI, source)))
+            m -> m.PHYSICAL_COLLECTION.eq(source).and(NoteUri.namesCollection(m.SOURCE_URI, source)))
             .stream().findFirst().orElse(null);
         if (hit != null) {
             throw new SourceUriCollision(operation, hit.value2(), hit.value3(), hit.value4());
@@ -11708,7 +11707,7 @@ public final class CatalogRepository {
             ctx.update(CATALOG_DOCUMENT_CHUNKS).set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, newId)
                 .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)).and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(newName))
                 .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID.isDistinctFrom(newId)).execute();
-            CatalogIdStamps.repairCascadedIds(ctx, tenant, newName, newId, null);
+            CatalogIdStamps.repairCascadedIds(ctx, tenant, newName, newId);
             // Override with the pre-count captured above -- see the comment there.
             counts.put("topic_assignments", topicAssignmentsPreCount);
             // 2b. nexus-wbfpw.68: the quarantine rows tagged for oldName now name a collection that is gone.

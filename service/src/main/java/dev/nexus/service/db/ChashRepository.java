@@ -378,7 +378,7 @@ public final class ChashRepository {
                    .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(newCollection))
                    .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID.isDistinctFrom(newId)))
                .execute();
-            CatalogIdStamps.repairCascadedIds(ctx, tenant, newCollection, newId, null);
+            CatalogIdStamps.repairCascadedIds(ctx, tenant, newCollection, newId);
             // nexus-wbfpw.68: quarantine rows tagged for oldCollection now name a collection that is gone;
             // retag them to newCollection (an audit row per sibling). The chunk count returned stays the
             // origin's own rows. NOT when oldCollection is still a live registered collection: then its
