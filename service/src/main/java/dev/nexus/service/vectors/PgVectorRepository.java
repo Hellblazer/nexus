@@ -7557,6 +7557,7 @@ FROM scope s
         // chunk is still taken for this origin's. A marker row is selected through its label and refused by restoreAcross, as in every form.
         org.jooq.Condition fromThisOrigin = gate3.holds()
             ? dev.nexus.service.db.QuarantineOrigin.taggedWith(true, tenant, originCollection).or(originStamp.isNull())
+                .or(RestoreOriginMarker.isNullMarker().and(originStamp.eq(originCollection)))
             : originStamp.isNull().or(originStamp.eq(originCollection));
         org.jooq.Condition past = after == null
             ? DSL.noCondition() : CHUNKS.CHASH.gt(dev.nexus.service.db.Chash.fromHex(after).toBytes());
