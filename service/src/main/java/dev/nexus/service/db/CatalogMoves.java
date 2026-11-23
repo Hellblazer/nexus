@@ -170,6 +170,11 @@ public final class CatalogMoves {
         // The holder of the new URI, read before the locks and re-read after them: a concurrent move or registration
         // that changed it between the two is refused, not guessed at.
         String candidate = liveHolderOf(ctx, tenant, newUri);
+        // RDR-229 P3.5a lock order: the registry rows of the collections these documents are in come BEFORE any document row is locked
+        // (a retiring verb holds the registry row and then wants child rows; a child row first and the registry row after it can close
+        // a cycle with it). rekeyHighlights below needs the row of S's collection; it is read here, unlocked-then-locked, and checked
+        // again once the document rows are held.
+        lockCollectionsOfDocuments(ctx, tenant, CATALOG_DOCUMENTS.TUMBLER.in(candidate == null ? List.of(s) : List.of(s, candidate)));
         CatalogRepository.lockDocumentRowsSorted(ctx, tenant, true, s, candidate);
         String t = liveHolderOf(ctx, tenant, newUri);
         if (!java.util.Objects.equals(candidate, t)) {
@@ -248,6 +253,25 @@ public final class CatalogMoves {
     private static void afterWritesHook() {
         Runnable h = afterWritesHookForTests;
         if (h != null) h.run();
+    }
+
+    /**
+     * The registry rows (FOR KEY SHARE, one statement, id order) of the collections the documents matching {@code docCond} are filed in,
+     * read BEFORE the document rows are locked. The document read here is unlocked, so a document that moves collection before its row is
+     * locked is caught by {@link #rekeyHighlights}. A label with no registry row is left to the check that follows (the 422 as before).
+     */
+    private static void lockCollectionsOfDocuments(DSLContext ctx, String tenant, org.jooq.Condition docCond) {
+        List<String> labels = ctx.selectDistinct(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION).from(CATALOG_DOCUMENTS)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(docCond).and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.ne("")))
+            .fetch(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION);
+        if (labels.isEmpty()) {
+            return;
+        }
+        try {
+            CollectionRegistry.requireAllForWrite(ctx, tenant, labels);
+        } catch (UnregisteredCollectionException unregistered) {
+            // a document filed under a label with no registry row: the rekey that needs it answers as it always did
+        }
     }
 
     /** The tumbler of the LIVE document holding {@code sourceUri}, or null. */
@@ -424,6 +448,14 @@ public final class CatalogMoves {
      */
     private void rekeyHighlights(DSLContext ctx, String tenant, Counts c, String s, String t, String collection,
                                  String rowUri) {
+        if (collection != null && !collection.isBlank() && !CollectionRegistry.holdsRow(ctx, tenant, collection)
+                && ctx.fetchExists(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS,
+                    dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
+                        .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(collection)))) {
+            // the document's collection changed between the read before the locks and the read under them: the registry row of the new
+            // one cannot be taken now, after the document rows, without inverting the order. Nothing was written for it yet.
+            throw refuse("the collection of " + s + " changed while the move was starting (now " + collection + "); run it again");
+        }
         boolean sHas = ctx.fetchExists(DOCUMENT_HIGHLIGHTS,
             DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant).and(DOCUMENT_HIGHLIGHTS.DOC_ID.eq(s)));
         if (!sHas) {
@@ -517,6 +549,8 @@ public final class CatalogMoves {
         // two writers of the same rows in different orders can deadlock).
         org.jooq.Condition cond = CATALOG_DOCUMENTS.TUMBLER.like(a + ".%");
         if (b != null) cond = cond.or(CATALOG_DOCUMENTS.TUMBLER.like(b + ".%"));
+        // RDR-229 P3.5a lock order: the registry rows of the collections these documents are in, before their rows are locked (see documentMove)
+        lockCollectionsOfDocuments(ctx, tenant, cond);
         List<DocRow> aDocs = new ArrayList<>();
         List<DocRow> bDocs = new ArrayList<>();
         List<String> lockOrder = new ArrayList<>();

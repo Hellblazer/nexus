@@ -37,7 +37,8 @@ class ChildRowLockerCensusTest {
     private static final Pattern LOCK = Pattern.compile("\\.(forUpdate|forShare|forNoKeyUpdate|forKeyShare)\\s*\\(");
     private static final Pattern REGISTRY_READ = Pattern.compile("requireForWrite\\w*|requireWritable|requireAllForWrite|requireIdForWrite"
         + "|CollectionIds\\.require|registryFirst|lockAndRequireWritable|DocumentCollectionRef\\.(?:normalize\\w*|idOf)"
-        + "|RequestedCollectionRead\\.require|consumeRequestedId|stampHistory|lockRows|ensureCollectionRegistered\\w*|labelNow");
+        + "|RequestedCollectionRead\\.require|consumeRequestedId|stampHistory|lockRows|ensureCollectionRegistered\\w*|labelNow"
+        + "|lockCollectionsOfDocuments");
     private static final Pattern MEMBER = Pattern.compile(
         "\\n    (?!return |if |for |while |switch |try|else|new |throw |\\}|//|\\*|/\\*)[A-Za-z@][^;{}=\\n]*(?:\\n[^;{}=\\n]*)*?\\)\\s*"
             + "(?:throws[^{;]*)?\\{");

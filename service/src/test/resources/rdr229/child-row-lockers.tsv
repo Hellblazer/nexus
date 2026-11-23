@@ -4,11 +4,11 @@
 # file	method	table	lock	verdict	reason
 AspectDocIdAttribution.java	namesNonLiveDocument	CATALOG_DOCUMENTS	forShare	no-registry-lock	document read FOR SHARE inside writeAspect, which read the registry row first (the fenced and unfenced upsert both)
 AspectTaskRefs.java	lockNaming	TUPLES	forNoKeyUpdate	no-registry-lock	tuples rows of the aspects rename helper: a per-store rename holds no registry lock, so no registry waiter can be behind it; the fenced upsert takes its key share before the tuples row
-CatalogMoves.java	ownerMove	CATALOG_DOCUMENTS	forUpdate	no-registry-lock	owner move: owner and document rows only
-CatalogMoves.java	ownerMove	CATALOG_OWNERS	forUpdate	no-registry-lock	owner move: owner and document rows only
+CatalogMoves.java	ownerMove	CATALOG_DOCUMENTS	forUpdate	after-registry	the registry rows of the documents' collections are read FOR KEY SHARE first (lockCollectionsOfDocuments), and rekeyHighlights refuses a collection it does not hold
+CatalogMoves.java	ownerMove	CATALOG_OWNERS	forUpdate	no-registry-lock	the owner rows come first, before any registry read; no retiring verb locks a catalog_owners row while it holds a registry row, so no registry waiter sits behind it
 CatalogRepository.java	lockAndReadDocRow	CATALOG_DOCUMENTS	forKeyShare	no-registry-lock	document row lock by tumbler (the sensitivity and trash verbs); names no collection
-CatalogRepository.java	lockDocumentRow	CATALOG_DOCUMENTS	forKeyShare	no-registry-lock	document row lock by tumbler; every caller is a document writer that normalized (key share) first, or a repair that reads the registry FOR SHARE first (rewriteStaleNotes)
-CatalogRepository.java	lockDocumentRow	CATALOG_DOCUMENTS	forUpdate	no-registry-lock	document row lock by tumbler; every caller is a document writer that normalized (key share) first, or a repair that reads the registry FOR SHARE first (rewriteStaleNotes)
+CatalogRepository.java	lockDocumentRow	CATALOG_DOCUMENTS	forKeyShare	no-registry-lock	document row lock by tumbler; every caller reads the registry first: a document writer (normalize, key share), a repair (rewriteStaleNotes, FOR SHARE), the document and owner moves (CatalogMoves.lockCollectionsOfDocuments)
+CatalogRepository.java	lockDocumentRow	CATALOG_DOCUMENTS	forUpdate	no-registry-lock	document row lock by tumbler; every caller reads the registry first: a document writer (normalize, key share), a repair (rewriteStaleNotes, FOR SHARE), the document and owner moves (CatalogMoves.lockCollectionsOfDocuments)
 CatalogRepository.java	reconcileStage	CATALOG_RECONCILE_RUNS	forShare	no-registry-lock	the reconcile run row, no collection named
 CatalogRepository.java	refuseStaleExpected	CATALOG_DOCUMENT_CHUNKS	forUpdate	no-registry-lock	called inside appendOneDocumentTx after registryFirst (the manifest rows of one document)
 CatalogRepository.java	registerDocumentManyWithOutcome	CATALOG_OWNERS	forUpdate	after-registry	a registry read (requireWritable, registryFirst or normalize) precedes the lock in the same method

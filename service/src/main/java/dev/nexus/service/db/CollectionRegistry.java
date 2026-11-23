@@ -488,6 +488,11 @@ public final class CollectionRegistry {
         return SHARED.requireForWriteRow(ctx, tenant, label);
     }
 
+    /** True when this transaction has already read {@code label}'s registry row {@code FOR KEY SHARE} (it holds the lock). */
+    public static boolean holdsRow(DSLContext ctx, String tenant, String label) {
+        return WriteRegistryMemo.get(ctx, tenant, label) != null;
+    }
+
     /** {@link #requireForWriteIfPresentRow} on the process-wide registry. */
     public static Optional<CollectionRow> requireForWriteIfPresent(DSLContext ctx, String tenant, String label) {
         return SHARED.requireForWriteIfPresentRow(ctx, tenant, label);
