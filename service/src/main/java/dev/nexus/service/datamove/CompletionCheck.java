@@ -376,10 +376,7 @@ public final class CompletionCheck {
          * ({@link CompletionBootWork#gate3Latched()}), which can be newer than this sample (a sample is read before the latch writer flips the regime).
          */
         public RenameReadiness.Missing renameMissing(boolean latched) {
-            // A completed drop move counts as latched (the restart belt): the move is registered only once gate 3 is latched and its completion is
-            // durable, so a completed move means the name keys are gone whatever the in-process regime says. Kept until a restart test with
-            // vectors-080 passes; see RenameReadiness#dropMoveComplete.
-            if (!latched && !rename.dropMoveComplete()) {
+            if (!latched) {
                 return RenameReadiness.Missing.NONE;
             }
             if (!rename.dropMoveComplete()) {

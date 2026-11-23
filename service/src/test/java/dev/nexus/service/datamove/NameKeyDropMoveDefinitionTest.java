@@ -140,14 +140,11 @@ class NameKeyDropMoveDefinitionTest {
     }
 
     @Test
-    void aCompletedDropMoveCountsAsLatched_theBeltForARestartThatResetTheProcessLocalLatch() {
-        // after a restart: the latch is reset (not latched), the live gate 3 dipped, but the move completed: the name keys are gone
-        assertThat(result(false, RenameState(true, 3, List.of("a"))).renameMissing())
-            .as("not the name path (NONE): the restart is still awaited").isEqualTo(RenameReadiness.Missing.P35B_RESTART);
-        assertThat(result(false, RenameState(true, 3, List.of())).renameMissing())
-            .as("everything applied: NONE, and RenameGuard reads dropMoveComplete to take the one-row path")
-            .isEqualTo(RenameReadiness.Missing.NONE);
-        assertThat(result(false, RenameState(true, 0, List.of())).renameMissing()).isEqualTo(RenameReadiness.Missing.P35B_LIST_MISSING);
+    void aCompletedDropMoveIsNotALatch_withoutTheLatchNothingIsAwaited() {
+        // linda 2026-11-23: the belt is gone. Not latched, whatever the move and the list say, is the name path: nothing is awaited.
+        assertThat(result(false, false, RenameState(true, 3, List.of("a"))).renameMissing()).isEqualTo(RenameReadiness.Missing.NONE);
+        assertThat(result(false, false, RenameState(true, 3, List.of())).renameMissing()).isEqualTo(RenameReadiness.Missing.NONE);
+        assertThat(result(false, false, RenameState(true, 0, List.of())).renameMissing()).isEqualTo(RenameReadiness.Missing.NONE);
     }
 
     @Test

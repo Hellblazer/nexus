@@ -54,16 +54,6 @@ public interface RenameReadiness {
         return missing();
     }
 
-    /**
-     * Whether the name-key drop move has {@code completed_at}. A belt: the move is registered only once gate 3 is latched and its completion is
-     * durable and never undone, so a completed move means the name keys are gone and a rename is one-row or refused whatever the latch says.
-     * It covers a latch row that is gone while the move stands (a partial restore). A restart no longer needs it: the latch row survives one
-     * ({@code Rdr229P37RestartBeltTest}). The default is false.
-     */
-    default boolean dropMoveComplete() {
-        return false;
-    }
-
     /** What a rename from gate 3 (or, once the move completed, from then on) waits for; the wire value is {@code missing} on the 409 {@code rename_refused}. */
     enum Missing {
         /** Nothing: a rename may run. */
