@@ -58,6 +58,13 @@ def test_an_empty_diff_selects_the_always_on_checks_too() -> None:
     ("prose-edit/skills/b/SKILL.md", ["plugin-ledger"]),
     ("tests/fixtures/context-budgets.txt", []),
     ("scripts/context_budgets.py", []),
+    ("tests/_engine_substrate.py", ["pg-cluster"]),
+    ("tests/_tenant_drop.py", ["pg-cluster"]),
+    ("tests/_child_process.py", ["pg-cluster"]),
+    ("tests/_ddl_cluster_sites.py", ["pg-cluster"]),
+    ("tests/_tmp_root.py", ["pg-cluster"]),
+    ("tests/test_integration_pg_cluster.py", ["pg-cluster"]),
+    ("tests/test_x.py", []),
     ("sn/hooks/y.sh", ["plugin-ledger"]),
     ("tool-spill/a.py", ["plugin-ledger"]),
     ("prose-edit/b.md", ["plugin-ledger"]),
@@ -83,7 +90,8 @@ def test_the_context_budget_is_always_on_and_names_the_path_that_reached_it(path
 
 def test_selection_follows_the_fixed_order() -> None:
     chosen = gate.select({"conexus/skills/a.md", "docs/a.md", "service/b.java", "pyproject.toml"}, _wire, _ctx)
-    assert list(chosen) == ["file-size", "changelog", "wire-ledger", "context-budget", "cloud-leg", "plugin-ledger",
+    chosen = gate.select({"conexus/skills/a.md", "docs/a.md", "service/b.java", "pyproject.toml", "tests/_engine_substrate.py"}, _wire, _ctx)
+    assert list(chosen) == ["file-size", "changelog", "wire-ledger", "context-budget", "cloud-leg", "plugin-ledger", "pg-cluster",
                             "docs-readers", "write-seam"]
 
 
@@ -356,3 +364,18 @@ def test_the_printed_proof_commands_call_python3_because_a_pool_host_has_no_bare
     """Found by running the printed docs-readers command on a pool host (WSL): `sh: 1: python: not found`."""
     text = gate.proof_commands(leg, _files(leg), "a" * 40)
     assert "python3 scripts/watched_pytest.py --status" in text and " python scripts/" not in text
+
+
+# ── the throwaway-cluster conf census (halcyon, after the develop red on 2776c549e3) ──
+
+def test_a_cluster_path_selected_by_content_is_selected_too() -> None:
+    chosen = gate.select({"tests/db/test_x.py"}, _wire, _ctx, is_cluster=lambda p: p == "tests/db/test_x.py")
+    assert chosen["pg-cluster"] == "tests/db/test_x.py"
+
+
+def test_the_cluster_check_runs_the_conf_census_with_the_integration_marker_included_and_needs_no_engine() -> None:
+    spec = gate.SPECS["pg-cluster"]
+    assert spec.token == "PUSH_REFUSED_PG_CLUSTER" and spec.kind == "run" and spec.needs == ("tests/test_integration_pg_cluster.py",)
+    cmd = gate.command_for("pg-cluster", ["py"], ["py"])
+    assert cmd[-3:] == ["-m", "not slow", "tests/test_integration_pg_cluster.py"], "integration is not excluded: it pins the conf lines"
+    assert spec.min_passed == 80 and spec.skip_ok == "", "99 tests, no skips, no engine: a pass with skips or a mass skip is vacuous"

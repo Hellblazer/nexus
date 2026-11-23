@@ -31,6 +31,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._tmp_root import child_env_with_tmpdir
+
 _REC_NAME = "_git_push_develop_record_helpers"
 if _REC_NAME not in sys.modules:
     _spec = importlib.util.spec_from_file_location(_REC_NAME, Path(__file__).with_name("test_git_push_develop_sh_record.py"))
@@ -121,6 +123,32 @@ STUB_PLUGIN_ALWAYS_SKIPS = STUB_PLUGIN_LEDGER.replace(
 CEILINGS = "conexus/skills/catalog/SKILL.md 264\nconexus/skills/nexus/SKILL.md 8804\n"
 
 
+# Spelled in two pieces: tests/test_integration_pg_cluster.py's census counts every `pg_data_tempdir(` call in any test file
+# and wants a conf call beside it, and this string is a stand-in file's content, not a call.
+CLUSTER_MAKER = "from tests._child_process import pg_data_" + "tempdir\nd = pg_data_" + "tempdir('x')\n"
+CONF = "fsync = off\nsynchronous_commit = off\nfull_page_writes = off\n"
+SUBSTRATE_STUB = 'THROWAWAY_FSYNC_CONF = """' + CONF + '"""\n'
+CLUSTER_STUB = '''\
+import pathlib
+
+import pytest
+
+SRC = (pathlib.Path(__file__).resolve().parent / "_engine_substrate.py").read_text()
+PINNED = ["fsync = off", "synchronous_commit = off", "full_page_writes = off"]
+
+
+@pytest.mark.parametrize("i", range(85))
+def test_filler(i):
+    assert i >= 0
+
+
+def test_a_disk_cluster_keeps_the_fsync_lines_but_not_the_wal_cap_or_mmap():
+    body = SRC.split('"""')[1].split()
+    lines = [ln.strip() for ln in SRC.split('"""')[1].splitlines() if ln.strip()]
+    assert lines == PINNED, f"the conf lines are pinned exactly: {lines}"
+'''
+
+
 def _commit_paths(work: Path, message: str, files: dict[str, str]) -> str:
     for name, text in files.items():
         target = work / name
@@ -141,6 +169,8 @@ def armed(repos) -> tuple[Path, Path]:
     files["docs/wire-contract-pending.md"] = EMPTY_LEDGER
     files["src/nexus/__init__.py"] = ""                       # the size ratchet refuses a tree with no source or no test files
     files["service/src/main/java/dev/nexus/service/Main.java"] = "class Main {}\n"
+    files["tests/_engine_substrate.py"] = SUBSTRATE_STUB
+    files["tests/test_integration_pg_cluster.py"] = CLUSTER_STUB
     files["CHANGELOG.md"] = "# Changelog\n\n## [Unreleased]\n\n## [1.0.0]\n"
     files["changelog/unreleased/README.md"] = "Fragments: one per bead.\n"
     files["conexus/PENDING_RELEASE.md"] = "# Pending\n"
@@ -247,7 +277,7 @@ def test_a_gate_stopped_mid_run_removes_the_tree_and_stops_the_checks(armed, tmp
     proc = subprocess.Popen(
         [sys.executable, str(REPO_ROOT / "scripts" / "push_check_gate.py"), "--repo", str(work), "--base", "refs/remotes/origin/develop",
          "--tip", sha, "--python", sys.executable],
-        env={**os.environ, "TMPDIR": str(tmp), "GATE_STUB_MARKER": str(marker)}, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        env=child_env_with_tmpdir({**os.environ, "GATE_STUB_MARKER": str(marker)}, tmp), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
         deadline = time.monotonic() + 60
         while not marker.exists() and time.monotonic() < deadline:
@@ -732,3 +762,46 @@ def test_a_push_that_deletes_the_context_budget_script_is_refused_as_a_missing_c
     _git("commit", "-q", "-m", "drop it", cwd=work)
     proc = _push(work, fake_nx, _git("rev-parse", "HEAD", cwd=work))
     assert proc.returncode == 14 and "PUSH_REFUSED_CONTEXT_BUDGET" in proc.stdout and "scripts/context_budgets.py" in proc.stdout, proc.stdout
+
+
+# ── the throwaway-cluster conf census (halcyon, after the develop red on 2776c549e3) ──
+
+def test_replay_pg_cluster_a_conf_line_the_census_does_not_pin_is_refused(armed, fake_nx) -> None:
+    """2776c549e3's red: a push whose range added `log_autovacuum_min_duration = 0` to the throwaway cluster conf in
+    tests/_engine_substrate.py, while tests/test_integration_pg_cluster.py pins the exact lines (3 failures on develop; the lint
+    bucket does not run that file's 96 default-loop tests). A stand-in census carries the pin; the real file is replayed by hand."""
+    origin, work = armed
+    before = _git("rev-parse", "refs/heads/develop", cwd=origin)
+    sha = _commit_paths(work, "extra conf line", {"tests/_engine_substrate.py": SUBSTRATE_STUB.replace('full_page_writes = off\n', 'full_page_writes = off\nlog_autovacuum_min_duration = 0\n')})
+    proc = _push(work, fake_nx, sha)
+    assert proc.returncode == 14, proc.stdout + proc.stderr
+    assert "PUSH_REFUSED_PG_CLUSTER" in proc.stdout and "selected by tests/_engine_substrate.py" in proc.stdout
+    assert "log_autovacuum_min_duration = 0" in proc.stdout
+    assert "reproduce: uv run pytest -o addopts= -m 'not slow' tests/test_integration_pg_cluster.py" in proc.stdout
+    assert "--skip-pg-cluster '<reason>'" in proc.stdout
+    assert _git("rev-parse", "refs/heads/develop", cwd=origin) == before
+
+
+def test_pg_cluster_passes_when_the_conf_is_unchanged_and_a_touch_of_the_helper_selects_it(armed, fake_nx) -> None:
+    _origin, work = armed
+    ok = _push(work, fake_nx, _commit_paths(work, "comment", {"tests/_engine_substrate.py": "# a comment\n" + SUBSTRATE_STUB}))
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    assert "pg-cluster(" in ok.stderr
+
+
+def test_a_test_that_makes_a_cluster_selects_the_census_by_its_content(armed, fake_nx) -> None:
+    """A file under tests/ naming pg_data_tempdir( or integration_pg_conf( selects it even though its path is not listed."""
+    _origin, work = armed
+    ok = _push(work, fake_nx, _commit_paths(work, "a cluster test", {"tests/db/test_x.py": CLUSTER_MAKER}))
+    assert ok.returncode == 0 and "pg-cluster(" in ok.stderr, ok.stdout + ok.stderr
+    quiet = _push(work, fake_nx, _commit_paths(work, "unrelated", {"tests/db/test_y.py": "def test_y():\n    pass\n"}))
+    assert quiet.returncode == 0 and "pg-cluster(" not in quiet.stderr, quiet.stdout + quiet.stderr
+
+
+def test_pg_cluster_can_be_skipped_by_flag_on_the_record(armed, fake_nx) -> None:
+    _origin, work = armed
+    sha = _commit_paths(work, "extra conf line", {"tests/_engine_substrate.py": SUBSTRATE_STUB.replace('full_page_writes = off\n', 'full_page_writes = off\nlog_autovacuum_min_duration = 0\n')})
+    proc = _push(work, fake_nx, "--skip-pg-cluster", "census updated in the next push", sha)
+    assert proc.returncode == 0 and "PUSH_CHECK_SKIPPED pg-cluster reason=census updated in the next push" in proc.stdout.splitlines()
+    (record,) = _records(fake_nx[1])
+    assert _opt(record, "--skip") == ["pg-cluster=census updated in the next push"]

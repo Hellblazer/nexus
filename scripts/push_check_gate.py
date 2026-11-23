@@ -21,6 +21,10 @@ wire-ledger     what check_wire_contract_pairing.py treats as wire (service/, th
                 client http_* and indexer modules, tests with a raw envelope), or
                 the ledger docs/wire-contract-pending.md itself
 cloud-leg       docs/ (the ledger is under it)                                       tests/scripts/test_cloud_leg.py
+pg-cluster      the throwaway-cluster setup: tests/_engine_substrate.py,              tests/test_integration_pg_cluster.py
+                _tenant_drop.py, _child_process.py, _ddl_cluster_sites.py,            (-m "not slow": the integration marker
+                _tmp_root.py, that test file, or any changed tests/ .py that          is not excluded; no engine needed)
+                names pg_data_tempdir( / integration_pg_conf( / THROWAWAY_FSYNC_CONF
 plugin-ledger   conexus/, sn/, tool-spill/, prose-edit/, marketplace.json             tests/test_plugin_release_drift_ledger.py
                                                                                       (NX_REQUIRE_PLUGIN_DRIFT_CHECK=1: a tagless
                                                                                       tree fails instead of skipping)
@@ -111,6 +115,19 @@ WRITE_SEAM_TESTS = (
 PYTEST_BASE = ("-m", "pytest", "-p", "no:cacheprovider", "-q", "-rs", "-o", "addopts=")
 FAST_MARKERS = "not integration and not slow"
 DEFAULT_CHECK_TIMEOUT_S = 300
+#: pg-cluster (halcyon, after the develop red on 2776c549e3): tests/test_integration_pg_cluster.py pins the exact lines of the
+#: throwaway clusters' postgresql.conf and the census of every file that makes one. 96 of its 99 tests run in the default loop
+#: and 3 in the lint bucket, so a push that changed the conf (a new line in THROWAWAY_FSYNC_CONF) reached develop red. It needs no
+#: engine and no PG bundle (injected mount tables, fake process trees), so it runs live (99 tests, about 20 s), with the
+#: integration marker NOT excluded (``-m "not slow"``): if a test there ever needs an engine, it is a proof leg instead.
+CLUSTER_CENSUS = "tests/test_integration_pg_cluster.py"
+CLUSTER_MARKERS = "not slow"
+CLUSTER_PATHS = frozenset({
+    "tests/_engine_substrate.py", "tests/_tenant_drop.py", "tests/_child_process.py", "tests/_ddl_cluster_sites.py",
+    "tests/_tmp_root.py", CLUSTER_CENSUS,
+})
+#: A changed test that makes a throwaway cluster, applies its conf or names the conf constant selects the census too.
+CLUSTER_CONTENT = r"pg_data_tempdir\(|integration_pg_conf\(|apply_reloadable_throwaway_conf\(|THROWAWAY_FSYNC_CONF"
 #: What scripts/context_budgets.py covers when the tip's copy cannot be read (the script itself is reported missing then).
 CONTEXT_PLUGINS = ("conexus", "sn", "prose-edit", "tool-spill")
 CONTEXT_CEILINGS = "tests/fixtures/context-budgets.txt"
@@ -166,13 +183,19 @@ SPECS: dict[str, Spec] = {s.name: s for s in (
          # (9 tests) into a failure, so a pass cannot be a tagless one.
          min_passed=20, env=(("NX_REQUIRE_PLUGIN_DRIFT_CHECK", "1"),)),
     # Collected 2026-11-22: 67 files, 2790 tests (1061 on 2026-10-05, when ci.yml's floor of 600 was set).
+    Spec("pg-cluster", "PUSH_REFUSED_PG_CLUSTER", "run", (CLUSTER_CENSUS,),
+         "uv run pytest -o addopts= -m 'not slow' tests/test_integration_pg_cluster.py",
+         "update the pinned conf lines in tests/test_integration_pg_cluster.py with the change to the throwaway cluster conf "
+         "(tests/_engine_substrate.py THROWAWAY_FSYNC_CONF, WAL_CAP_CONF, apply_reloadable_throwaway_conf), in the same push",
+         # Collected 2026-11-22: 99 tests (96 default loop, 3 lint), all pass, none skip.
+         min_passed=80),
     Spec("docs-readers", "PUSH_REFUSED_DOCS_READERS", "proof", ("scripts/select_docs_reader_tests.py",),
          "", "", min_passed=1500),
     Spec("write-seam", "PUSH_REFUSED_WRITE_SEAM", "proof", (), "", "", min_passed=8),
 )}
 GATE_ERROR_TOKEN = "PUSH_REFUSED_CHECK_GATE_ERROR"
 _GATE_ERROR_ESCAPE = "  override, on the record: --skip-check-gate '<reason>'"
-ORDER = ("file-size", "changelog", "wire-ledger", "context-budget", "cloud-leg", "plugin-ledger", "docs-readers", "write-seam")
+ORDER = ("file-size", "changelog", "wire-ledger", "context-budget", "cloud-leg", "plugin-ledger", "pg-cluster", "docs-readers", "write-seam")
 SKIPPABLE = (*ORDER, "check-gate")
 
 
@@ -186,7 +209,12 @@ def write_seam_path(path: str) -> bool:
     return path in WRITE_SEAM_EXACT or path.startswith(WRITE_SEAM_PREFIXES)
 
 
-def select(paths: set[str], is_wire: Callable[[str], bool], is_context: Callable[[str], bool]) -> dict[str, str]:
+def cluster_path(path: str) -> bool:
+    return path in CLUSTER_PATHS
+
+
+def select(paths: set[str], is_wire: Callable[[str], bool], is_context: Callable[[str], bool],
+           is_cluster: Callable[[str], bool] = cluster_path) -> dict[str, str]:
     """The checks the outbound *paths* reach, each with the path that selected it (or ``always``)."""
     chosen: dict[str, str] = {"file-size": "always", "changelog": "always"}
 
@@ -204,6 +232,8 @@ def select(paths: set[str], is_wire: Callable[[str], bool], is_context: Callable
         chosen["docs-readers"] = hit
     if (hit := first(lambda p: p.startswith(PLUGIN_ROOTS) or p in PLUGIN_FILES)) is not None:
         chosen["plugin-ledger"] = hit
+    if (hit := first(is_cluster)) is not None:
+        chosen["pg-cluster"] = hit
     if (hit := first(write_seam_path)) is not None:
         chosen["write-seam"] = hit
     return {name: chosen[name] for name in ORDER if name in chosen}
@@ -239,6 +269,17 @@ def outbound_paths(repo: Path, base: str, tip: str) -> set[str]:
                   _git(repo, "log", "-m", "--name-only", "--no-renames", "--format=", "-z", f"{base}..{tip}")):
         paths.update(p for p in chunk.split("\0") if p.strip())
     return paths
+
+
+def cluster_content_paths(repo: Path, tip: str, paths: set[str]) -> set[str]:
+    """The changed ``tests/**/*.py`` among *paths* whose content at *tip* names the throwaway-cluster setup (``pg_data_tempdir(``,
+    ``integration_pg_conf(``, ``apply_reloadable_throwaway_conf(``, ``THROWAWAY_FSYNC_CONF``)."""
+    candidates = sorted(p for p in paths if p.startswith("tests/") and p.endswith(".py") and has_in_tree(repo, tip, p))
+    found: set[str] = set()
+    for i in range(0, len(candidates), 100):
+        out = _git(repo, "grep", "-l", "-E", CLUSTER_CONTENT, tip, "--", *candidates[i:i + 100], check=False)
+        found.update(line.split(":", 1)[1] for line in out.splitlines() if ":" in line)
+    return found
 
 
 def has_in_tree(repo: Path, rev: str, path: str) -> bool:
@@ -349,6 +390,8 @@ def command_for(name: str, python: list[str], pytest_cmd: list[str]) -> list[str
         return [*pytest_cmd, *PYTEST_BASE, "-m", FAST_MARKERS, "tests/scripts/test_cloud_leg.py"]
     if name == "plugin-ledger":
         return [*pytest_cmd, *PYTEST_BASE, "-m", FAST_MARKERS, "tests/test_plugin_release_drift_ledger.py"]
+    if name == "pg-cluster":
+        return [*pytest_cmd, *PYTEST_BASE, "-m", CLUSTER_MARKERS, CLUSTER_CENSUS]
     raise GateError(f"no command for check {name}")
 
 
@@ -659,11 +702,13 @@ def run_gate(repo: Path, base: str, tip: str, proofs: list[Path], skips: dict[st
     missing_proofs: list[str] = []
     with Tree(repo, tip, workdir) as tree:
         paths = outbound_paths(repo, base, tip)
-        selected = select(paths, _load_wire_predicates(tree, repo, tip), _load_context_predicate(tree))
+        by_content = cluster_content_paths(repo, tip, paths)
+        selected = select(paths, _load_wire_predicates(tree, repo, tip), _load_context_predicate(tree),
+                          lambda p: cluster_path(p) or p in by_content)
         runnable = [n for n in selected if SPECS[n].kind == "run"]
         proof_legs = [n for n in selected if SPECS[n].kind == "proof"]
         pytest_cmd = [python]
-        if any(n in ("cloud-leg", "plugin-ledger") and n not in skips for n in runnable):
+        if any(SPECS[n].min_passed and n not in skips for n in runnable):
             pytest_cmd = pytest_python(repo, python)
         specs = {n: SPECS[n] for n in selected}
 

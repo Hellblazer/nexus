@@ -71,7 +71,7 @@
 #     --proof <file>              A scripts/watched_pytest.py --status file proving a heavy check leg green on this tip's
 #                                 tree (see "Check gate" below). Repeatable; each is checked, none is a skip.
 #     --skip-<check> <reason>     Override ONE check of the check gate, on the record. <check> is file-size, changelog,
-#                                 context-budget, wire-ledger, cloud-leg, plugin-ledger, docs-readers, write-seam, or
+#                                 context-budget, wire-ledger, cloud-leg, plugin-ledger, pg-cluster, docs-readers, write-seam, or
 #                                 check-gate (the whole gate, for a gate that cannot start). Flags only, with no
 #                                 environment twin: an exported variable from an earlier session overrides nothing.
 #   A bad flag exits 64 with PUSH_REFUSED_USAGE before anything is fetched.
@@ -159,7 +159,11 @@
 # second, so a tree already over a ceiling is caught on any push). When the diff reaches them: the wire-pairing check for what
 # that script treats as wire (or the ledger); tests/scripts/test_cloud_leg.py for docs/; the plugin release-drift ledger test
 # (run with NX_REQUIRE_PLUGIN_DRIFT_CHECK=1, so a tagless tree fails instead of skipping) for conexus/, sn/, tool-spill/,
-# prose-edit/ and marketplace.json. VACUITY: a selected check whose script is missing from the tip, a script that exits 0 without
+# prose-edit/ and marketplace.json; tests/test_integration_pg_cluster.py (run with -m "not slow", so the integration marker is
+# not excluded; it needs no engine and takes about 20 s) for a change to the throwaway-cluster setup (tests/_engine_substrate.py,
+# _tenant_drop.py, _child_process.py, _ddl_cluster_sites.py, _tmp_root.py, that file, or any changed test that names
+# pg_data_tempdir( or the conf constants): it pins the exact conf lines, and neither the lint bucket nor a push saw it before
+# (develop red on 2776c549e3). VACUITY: a selected check whose script is missing from the tip, a script that exits 0 without
 # the marker a real run prints, a pytest check with fewer passing tests than its floor, and a pytest check that skips any test
 # (bar the one opt-in NX_CLOUDLEG_REAL_RUN skip of the cloud-leg file) are refusals, never passes or skips. Two heavy legs are not
 # run here but need a PROOF (--proof <file>, repeatable: the status file of scripts/watched_pytest.py): the docs-readers
@@ -434,7 +438,7 @@ _flag_allowed_given=0
 _check_proofs=()        # --proof files, in order
 # The check skips are set by their flags and by nothing else (no NX_PUSH_SKIP_<CHECK> twin: Sam's ruling asked for flags), so a
 # same-named variable inherited from the environment is dropped before the flags are read.
-for _skip_key in FILE_SIZE CHANGELOG CONTEXT_BUDGET WIRE_LEDGER CLOUD_LEG PLUGIN_LEDGER DOCS_READERS WRITE_SEAM CHECK_GATE; do
+for _skip_key in FILE_SIZE CHANGELOG CONTEXT_BUDGET WIRE_LEDGER CLOUD_LEG PLUGIN_LEDGER PG_CLUSTER DOCS_READERS WRITE_SEAM CHECK_GATE; do
   unset "_CHECK_SKIP_${_skip_key}"
 done
 while [[ $# -gt 0 ]]; do
@@ -467,7 +471,7 @@ while [[ $# -gt 0 ]]; do
     --source | --remote | --branch | --allowed-paths | --allowed-paths-from \
       | --skip-scope-audit | --skip-lock | --batch-minutes | --tenant-check | --skip-scrub | --red-fix \
       | --proof | --skip-file-size | --skip-changelog | --skip-context-budget | --skip-wire-ledger | --skip-cloud-leg \
-      | --skip-plugin-ledger | --skip-docs-readers | --skip-write-seam | --skip-check-gate) ;;
+      | --skip-plugin-ledger | --skip-pg-cluster | --skip-docs-readers | --skip-write-seam | --skip-check-gate) ;;
     *) _usage_refuse "unknown flag $_name" ;;
     esac
     if (( _has_val )); then
@@ -493,7 +497,7 @@ while [[ $# -gt 0 ]]; do
       _echo_flags+=("$_name" "$_val")
       ;;
     --skip-file-size | --skip-changelog | --skip-context-budget | --skip-wire-ledger | --skip-cloud-leg \
-      | --skip-plugin-ledger | --skip-docs-readers | --skip-write-seam | --skip-check-gate)
+      | --skip-plugin-ledger | --skip-pg-cluster | --skip-docs-readers | --skip-write-seam | --skip-check-gate)
       _skip_key="${_name#--skip-}"
       _skip_key="$(printf '%s' "${_skip_key//-/_}" | tr '[:lower:]' '[:upper:]')"
       printf -v "_CHECK_SKIP_${_skip_key}" '%s' "$_val"
@@ -982,7 +986,7 @@ if [[ "$branch" == "develop" ]]; then
     [[ -n "$_check_workdir" && -d "$_check_workdir" ]] || { _check_workdir=""; _check_gate_error "no temp directory for the tip's tree (TMPDIR=${TMPDIR:-/tmp})"; }
     _check_args=(--repo "$_scrub_root" --base "refs/remotes/$remote/$branch" --tip "$tip" --workdir "$_check_workdir" --python "$_check_py")
     for _check_proof in "${_check_proofs[@]+"${_check_proofs[@]}"}"; do _check_args+=(--proof "$_check_proof"); done
-    for _check_name in file-size changelog context-budget wire-ledger cloud-leg plugin-ledger docs-readers write-seam; do
+    for _check_name in file-size changelog context-budget wire-ledger cloud-leg plugin-ledger pg-cluster docs-readers write-seam; do
       _check_var="_CHECK_SKIP_$(printf '%s' "${_check_name//-/_}" | tr '[:lower:]' '[:upper:]')"
       [[ -z "${!_check_var:-}" ]] || _check_args+=(--skip "$_check_name=${!_check_var}")
     done
