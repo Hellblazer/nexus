@@ -587,7 +587,12 @@ class Scenario:
         cat.register(c.other, "foreign holder", content_type="prose", file_path="id_foreign/x.txt",
                      physical_collection="docs__rdr193foreign", source_uri=f"file://{c.root}/id_foreign/x.txt")
         stale_t = t("id_same_owner/x.txt")
-        _update_doc(self.tenant, stale_t, f"file_path = 'id_same_owner/old-name.txt', physical_collection = '{STALE_COLLECTION}'")
+        # RDR-229 P3.1/P3.5b: a document homed in another collection carries that collection's id beside its name, as every writer
+        # since the expand stamps it; a stale name with the current collection's id is the shape a one-row rename leaves, which
+        # reconcile rightly does not re-home (P3.5b compares ids where both rows carry one).
+        _update_doc(self.tenant, stale_t, f"file_path = 'id_same_owner/old-name.txt', physical_collection = '{STALE_COLLECTION}', "
+                    f"physical_collection_id = (SELECT cc.collection_id FROM nexus.catalog_collections cc "
+                    f"WHERE cc.tenant_id = d.tenant_id AND cc.name = '{STALE_COLLECTION}')")
         sql("id_legacy/unchanged.txt", "source_uri = ''")
         sql("id_legacy/changed.txt", "source_uri = ''")
         twin = str(cat.register(c.owner, "dup twin", content_type="prose",
