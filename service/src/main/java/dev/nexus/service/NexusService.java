@@ -1474,8 +1474,19 @@ public final class NexusService {
         return reaperTenants();
     }
 
-    /** Start the HTTP server (non-blocking). */
+    /**
+     * Start the HTTP server (non-blocking).
+     *
+     * <p>RDR-229 Phase 3 blocking row 15 (nexus-p2m1x.22): the registry's caches are process-wide, so a row another engine in this
+     * JVM cached from another database must not answer this engine's first request. Before serving, the engine empties them
+     * ({@link dev.nexus.service.db.CollectionRegistry#evictAll}); an evict only ever sends the next lookup to the database, so it
+     * is safe whatever was cached. A JVM serves one engine in production (EngineSingletonLock); a test fork runs many in turn.
+     */
     public void start() {
+        int dropped = dev.nexus.service.db.CollectionRegistry.evictAll();
+        if (dropped > 0) {
+            log.info("event=registry_cache_evicted_at_start rows={}", dropped);
+        }
         server.start();
         log.info("event=service_started port={}", getPort());
     }
