@@ -22,6 +22,7 @@ import java.util.concurrent.locks.LockSupport;
 
 import static dev.nexus.service.CollectionRouteFixture.label;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -105,6 +106,50 @@ class SweepAndPurgeRegistryFirstTest {
         assertThat(chunksIn(b, hex)).as("the new holder of the old label kept its chunk").isEqualTo(1);
     }
 
+    /**
+     * {@code write_many} with {@code sweep}: the post-commit sweep is handed the request's own name ({@code collection}, which the id it named
+     * decides), no longer the document's resolved label, and reads the row by id under its own gate. A document whose manifest drops a chash,
+     * written by an id whose row is renamed in the gap with the old label retaken, sweeps the dropped chash from the RENAMED collection
+     * (under its current label) and leaves the new holder's copy alone.
+     */
+    @Test
+    void writeManyWithSweep_byAnIdWhoseRowWasRenamedInTheGap_sweepsTheRenamedCollection_andLeavesTheNewHolder() {
+        String stem = "swm" + (n++);
+        String b = label(stem);
+        fx.register(b);
+        long x = fx.idOf(b);
+        String host = label(stem + "-host");
+        fx.register(host);
+        String doc = "swm-doc-" + stem;
+        fx.asSuperuser(ctx -> {
+            CollectionIdSeeds.ownerDocument(ctx, fx.tenant, doc, host);
+            return null;
+        });
+        String dropped = Chash.ofText("swm-dropped-" + stem).toHex();
+        String kept = Chash.ofText("swm-kept-" + stem).toHex();
+        chunk(b, dropped);   // the seed manifest references it, under the label the row bears now
+        Resp seed = fx.post("/v1/catalog/manifest/write_many", "{\"collection_id\":" + x + ",\"docs\":[{\"doc_id\":\"" + doc
+            + "\",\"rows\":[{\"position\":0,\"chash\":\"" + dropped + "\",\"chunk_index\":0}]}]}");
+        assertThat(seed.status()).as("setup: %s", seed.body()).isEqualTo(200);
+        CollectionRouteFixture.RenameGap gap = fx.renameInPlaceBeforeTheWritesRead(List.of(x), List.of(b), stem, g -> {
+            String current = g.currentLabelOf().get(x);
+            chunk(current, dropped);   // the renamed collection's copy, under its current label
+            chunk(current, kept);      // what the new manifest row references
+        });
+        Resp r;
+        try {
+            r = fx.post("/v1/catalog/manifest/write_many", "{\"collection_id\":" + x + ",\"sweep\":true,\"docs\":[{\"doc_id\":\"" + doc
+                + "\",\"rows\":[{\"position\":0,\"chash\":\"" + kept + "\",\"chunk_index\":0}]}]}");
+        } finally {
+            gap.close();
+        }
+        assertThat(gap.ran()).as("the write reached its registry read by id: %s", r.body()).isTrue();
+        assertThat(r.status()).as(r.body()).isEqualTo(200);
+        String current = gap.currentLabelOf().get(x);
+        assertThat(chunksIn(current, dropped)).as("the dropped chash was swept from the renamed collection, under its current label").isZero();
+        assertThat(chunksIn(b, dropped)).as("the new holder of the old label kept its copy").isEqualTo(1);
+    }
+
     private int waitingRows() {
         return fx.asSuperuser(ctx -> ctx.fetchCount(DSL.table(DSL.name("pg_catalog", "pg_locks")),
             DSL.field(DSL.name("granted"), Boolean.class).isFalse()
@@ -146,6 +191,52 @@ class SweepAndPurgeRegistryFirstTest {
         Resp r = purge.get(120, TimeUnit.SECONDS);
         assertThat(r.status()).as(r.body()).isEqualTo(200);
         assertThat(manifestRows(doc)).as("the purge followed once the verb let go").isZero();
+    }
+
+    /**
+     * {@code purge-trash} hard-deletes aged tombstones and sweeps their chunks in collections the request never names. It reads those
+     * collections' registry rows first, so against a verb holding one FOR UPDATE it waits (it has deleted nothing), and completes once the
+     * verb lets go.
+     */
+    @Test
+    void aTrashPurge_meetsAVerbHoldingTheRowOfACollectionItReaches_waitsAndThenPurges() throws Exception {
+        String stem = "trs" + (n++);
+        String b = label(stem);
+        fx.register(b);
+        String doc = "trs-doc-" + stem;
+        String hex = Chash.ofText("trs-chunk-" + stem).toHex();
+        chunk(b, hex);
+        fx.asSuperuser(ctx -> {
+            CollectionIdSeeds.ownerDocument(ctx, fx.tenant, doc, b);
+            CollectionIdSeeds.manifestRows(ctx, fx.tenant, doc, b, 0, hex);
+            return null;
+        });
+        int aged = fx.asSuperuser(ctx -> ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.DELETED_AT, java.time.OffsetDateTime.now().minusDays(40))
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(fx.tenant).and(CATALOG_DOCUMENTS.TUMBLER.eq(doc))).execute());
+        assertThat(aged).as("setup: the document is an aged tombstone").isEqualTo(1);
+        Future<Resp> purge;
+        try (Connection verb = fx.pg.createConnection("")) {
+            verb.setAutoCommit(false);
+            DSL.using(verb, SQLDialect.POSTGRES).select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(fx.tenant)).and(CATALOG_COLLECTIONS.NAME.eq(b)).forUpdate().fetch();
+            purge = pool.submit(() -> fx.post("/v1/catalog/purge-trash", "{\"older_than_days\":30,\"dry_run\":false}"));
+            try {
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
+                while (waitingRows() < 1) {
+                    if (purge.isDone() || System.nanoTime() > deadline) {
+                        throw new AssertionError("the trash purge never showed waiting on the collection's row (done: " + purge.isDone() + ")");
+                    }
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(5));
+                }
+                assertThat(manifestRows(doc)).as("nothing was purged while the verb held the row").isEqualTo(1);
+            } finally {
+                verb.rollback();
+            }
+        }
+        Resp r = purge.get(120, TimeUnit.SECONDS);
+        assertThat(r.status()).as(r.body()).isEqualTo(200);
+        assertThat(r.json().path("documents_purged").asLong(-1)).as("the aged tombstone was purged once the verb let go").isEqualTo(1);
+        assertThat(manifestRows(doc)).isZero();
     }
 
     private int manifestRows(String doc) {

@@ -132,7 +132,17 @@ final class StrictWriterCensus {
         "\\b[a-z_]*collection[a-z_]*\"?\\s*(?:=|<>|!=|in\\s*\\()\\s*\\?", Pattern.CASE_INSENSITIVE);
     private static final Pattern INSERT_COLUMNS = Pattern.compile("^\\s*insert\\s+into\\s+[^(]+\\(([^)]*)\\)", Pattern.CASE_INSENSITIVE);
 
-    /** Whether {@code sql} binds a value to a collection label or id column: {@code <x>collection<y> = ?} (or {@code in (?...)}), or an INSERT whose column list has one. */
+    /**
+     * Whether {@code sql} binds a value to a collection label or id column: {@code <x>collection<y> = ?} (or {@code in (?...)}), or an INSERT whose column list has one.
+     *
+     * <p><b>The blind spot, stated plainly.</b> A write keyed by a document, a topic or an alias id binds no collection column, so this returns
+     * false for it and the census does not judge it, even when the rows it reaches are in OTHER collections than the one whose row the
+     * transaction holds (the aspect and highlight re-homes, a topic merge or split, a purge keyed by topic ids). And {@link
+     * WriteRegistryMemo#holdsOneOf} passes a statement on ANY single matching bind (a label, or a number equal to a held id), so a statement
+     * that binds several collections is passed when one of them is held. So a re-run of the census can neither confirm that a fix for such a
+     * write holds nor catch its regression. The census stays record-only ({@code mode} defaults to off); the verb-race tests, not this
+     * census, are what prove those writers.
+     */
     static boolean bindsACollection(String sql) {
         if (COLLECTION_COLUMN_BOUND.matcher(sql).find()) {
             return true;
