@@ -208,7 +208,7 @@ final class ManifestReplace {
                 .execute();
         }
         if (!toUpdate.isEmpty()) {
-            update(ctx, tenant, docId, collection, collectionId, embeddingModel, toUpdate, chunkNames);
+            update(ctx, tenant, docId, lockedLabel, collectionId, embeddingModel, toUpdate, chunkNames);
         }
         if (!toInsert.isEmpty()) {
             CatalogRepository.insertManifestChunkRows(ctx, tenant, docId, collection, toInsert,
@@ -270,7 +270,7 @@ final class ManifestReplace {
                 DSL.val(in.lineEnd(), SQLDataType.INTEGER).cast(SQLDataType.INTEGER),
                 DSL.val(in.charStart(), SQLDataType.INTEGER).cast(SQLDataType.INTEGER),
                 DSL.val(in.charEnd(), SQLDataType.INTEGER).cast(SQLDataType.INTEGER),
-                DSL.val(ManifestChunkNames.nameFor(chunkNames, in.chashHex(), lockedLabel), SQLDataType.VARCHAR).cast(SQLDataType.VARCHAR),
+                DSL.val(ManifestChunkNames.nameFor(chunkNames, in.chashHex(), collection), SQLDataType.VARCHAR).cast(SQLDataType.VARCHAR),
                 DSL.val(collectionId, SQLDataType.BIGINT).cast(SQLDataType.BIGINT),
                 DSL.val(embeddingModel, SQLDataType.VARCHAR).cast(SQLDataType.VARCHAR),
                 DSL.val(in.sectionTitle(), SQLDataType.VARCHAR).cast(SQLDataType.VARCHAR),
