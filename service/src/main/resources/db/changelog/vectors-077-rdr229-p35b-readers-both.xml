@@ -11,7 +11,8 @@
       (t.collection_id = <id of the label> OR (t.collection_id IS NULL AND t.collection = p AND p <> ''))
     A NULL id is no collection and never matches through a '' name (linda 2026-11-20). The match is right at every point of the
     stamp because a rename keeps rewriting the name columns until P3.7's gates pass (RDR item 6); P4.1 removes the name arm.
-    Outputs are unchanged: only WHERE, ON, IN, EXISTS and = ANY clauses change. collection_vector_stats joins the manifest twice,
+    Outputs are unchanged except that nexus.live_chunks and nexus.collection_vector_stats gain a trailing collection_id column;
+    otherwise only WHERE, ON, IN, EXISTS and = ANY clauses change. collection_vector_stats joins the manifest twice,
     once by id and once by name, each at most one row per chunk, so a chunk with a stamped and an unstamped manifest row is
     counted once. Registry upserts take ON CONFLICT (tenant_id, name) WHERE superseded_by = '' AND superseded_by_id IS NULL (linda's
     G15 ruling, with the first conjunct added 2026-11-23): PostgreSQL infers a partial unique index only when the WHERE implies the
@@ -28,7 +29,8 @@
     THE ID TWINS (linda 2026-11-22). The search functions (hybrid, plain, manifest, metadata/aspect/topic/graph-hop scoped,
     the text gates and their probes, topic-set search) are NOT redefined: a both-shapes match cannot prove a per-collection
     index's partial predicate (WHERE collection = '<name>') nor bound the sensitive anti join's manifest read, so the name
-    functions keep their last definer's text, plans and index use until P4.1. Ids 100-139 each add <name>_by_id, the id path:
+    functions keep their last definer's text, plans and index use until P4.1. Ids 103-140 each add <name>_by_id (38 twins; hybrid_search_<dim> has none: it has no engine caller, and P4.1
+    drops the originals, b0340a8a31), the id path:
     the same arguments and RETURNS with the label parameter replaced by the resolved ids (bigint[], or bigint for one label),
     matching by collection_id only (no name arm, no registry lookup), because P3.5c's Java calls a twin only after gate 3 has
     latched, which implies every stamp move is complete. A twin gets a constant id the way its original gets a constant label:
