@@ -649,6 +649,7 @@ public final class TelemetryRepository {
         // RDR-210 Phase 6 Step 2 (bead nexus-f98bg): one transaction for the guard and both updates, so a
         // refusal leaves neither table touched. Refused while a re-embed job holds either name.
         return tenantScope.withTenant(tenant, ctx -> {
+            renameGuard.requireRenameAllowed(ctx);   // RDR-229 P3.5a D2: first, under the rename lock the latch write takes
             CatalogRepository.refuseUnderReembedJob(ctx, tenant, "rename", oldName, newName);
             int searchCount = ctx.update(SEARCH_TELEMETRY)
                 .set(SEARCH_TELEMETRY.COLLECTION, newName)

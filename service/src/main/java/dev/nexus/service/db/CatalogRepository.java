@@ -11415,6 +11415,7 @@ public final class CatalogRepository {
         // vectors-021-3's chunk-locking trigger; whole transaction retried on 40P01. `counts` is
         // built inside the lambda, so each attempt starts from an empty map.
         return manifestWriteTxn(tenant, "catalog.renameCollection " + oldName, ctx -> {
+            renameGuard.requireRenameAllowed(ctx);   // RDR-229 P3.5a D2: first, under the rename lock the latch write takes
             Map<String, Integer> counts = new LinkedHashMap<>();
             // nexus-11gh6 rev 2 §3.2 (Hal Q1: gate the Java collection-move
             // paths in this bead). The rename below bulk-repoints

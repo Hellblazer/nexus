@@ -484,13 +484,25 @@ public final class CompletionCheck {
     /**
      * {@code INSERT INTO nexus.rdr229_gate_latch ... ON CONFLICT DO NOTHING}, typed. The first writer's row stands, {@code pci_off} included:
      * it records the posture the gate latched in (no per-collection index was required because {@code NX_SEARCH_PCI=0}).
+     *
+     * <p>One transaction under {@link RenameLatchLock#exclusive} (RDR-229 P3.5a, ruling D2): the write waits for every collection rename in
+     * flight, and a rename that starts after it reads the row, so no rename commits after the latch unseen. The wait is bounded
+     * ({@link #LATCH_LOCK_TIMEOUT_MS}); a timeout throws, the row is not written, and the next evaluation tries again.
      */
     public static void insertLatch(DSLContext ctx, String gate, String engineVersion, boolean pciOff) {
-        ctx.insertInto(LATCH, LATCH_GATE, DSL.field(DSL.name("latched_at"), OffsetDateTime.class),
-                DSL.field(DSL.name("engine_version"), String.class), LATCH_PCI_OFF)
-            .values(gate, OffsetDateTime.now(java.time.ZoneOffset.UTC), engineVersion, pciOff)
-            .onConflictDoNothing().execute();
+        ctx.transaction(cfg -> {
+            DSLContext tx = cfg.dsl();
+            tx.select(DSL.function("set_config", String.class, DSL.val("lock_timeout"), DSL.val(LATCH_LOCK_TIMEOUT_MS), DSL.val(true))).fetch();
+            dev.nexus.service.db.RenameLatchLock.exclusive(tx);
+            tx.insertInto(LATCH, LATCH_GATE, DSL.field(DSL.name("latched_at"), OffsetDateTime.class),
+                    DSL.field(DSL.name("engine_version"), String.class), LATCH_PCI_OFF)
+                .values(gate, OffsetDateTime.now(java.time.ZoneOffset.UTC), engineVersion, pciOff)
+                .onConflictDoNothing().execute();
+        });
     }
+
+    /** How long the latch write waits for in-flight renames (and for their commit), in milliseconds, as the GUC text. */
+    static final String LATCH_LOCK_TIMEOUT_MS = "60000";
 
     /**
      * The latch row of {@code gate}: empty when there is none (or the table does not exist yet), else its {@code pci_off}. A failed read throws:

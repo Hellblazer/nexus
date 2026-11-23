@@ -1649,6 +1649,7 @@ public final class TaxonomyRepository {
     public Map<String, Integer> renameCollection(String tenant, String oldCol, String newCol) {
         CollectionLabel.validateUserLabel(newCol);
         return tenantScope.withTenant(tenant, ctx -> {
+            renameGuard.requireRenameAllowed(ctx);   // RDR-229 P3.5a D2: first, under the rename lock the latch write takes
             // RDR-210 Phase 6 Step 2 (bead nexus-f98bg): refused while a re-embed job holds either name.
             CatalogRepository.refuseUnderReembedJob(ctx, tenant, "rename", oldCol, newCol);
             // RDR-164 P1a: the new collection name must be registered before the denorm

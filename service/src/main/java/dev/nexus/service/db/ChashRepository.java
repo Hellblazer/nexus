@@ -229,6 +229,7 @@ public final class ChashRepository {
         // (the same wrap CatalogRepository.renameCollectionTxn carries). Everything it produces is the
         // `total` it returns; the registry cache update runs after the committed attempt returns.
         int updated = DeadlockRetry.run("chash.renameCollection " + oldCollection, () -> tenantScope.withTenant(tenant, ctx -> {
+            renameGuard.requireRenameAllowed(ctx);   // RDR-229 P3.5a D2: first, under the rename lock the latch write takes
             // nexus-11gh6 (post-review, T2 nexus/review-11gh6-gate-2026-08-08
             // [21797] Important finding): this method is a SECOND,
             // independently-reachable (via /v1/chash/*) implementation of the
