@@ -94,6 +94,9 @@ _JAVA_HANDLER = (
 _JAVA_REPOSITORY = (
     _REPO_ROOT / "service/src/main/java/dev/nexus/service/db/CatalogRepository.java"
 )
+#: P3.5a (b5daea0c40) moved the collections row builders (collRow, collRowWithLifecycle, collRowWithAspects) here,
+#: package-private static; the field-shape census reads both files.
+_JAVA_ROWS = _REPO_ROOT / "service/src/main/java/dev/nexus/service/db/CatalogRows.java"
 _FAKE_HANDLER = _REPO_ROOT / "tests/catalog/test_http_catalog_client.py"
 
 _CASE_ROUTE_RE = re.compile(r'case\s+"(/[A-Za-z0-9_/-]+)"\s*->')
@@ -255,13 +258,13 @@ def test_every_catalog_handler_route_is_faked_or_excluded() -> None:
 
 def _find_method_body_start(source: str, method_name: str) -> int:
     pattern = re.compile(
-        rf"(?:private|public|protected)[^\n{{;]*\b{re.escape(method_name)}\s*\("
+        rf"(?:private|public|protected|static)[^\n{{;]*\b{re.escape(method_name)}\s*\("
     )
     match = pattern.search(source)
     if not match:
         raise AssertionError(
             f"could not find a method signature for {method_name}() in "
-            f"CatalogRepository.java — it was renamed, deleted, or moved. "
+            f"CatalogRows.java or CatalogRepository.java — it was renamed, deleted, or moved. "
             f"If intentional, update the FIELD_SHAPE_CHECKS method name in "
             f"test_fake_catalog_handler_route_census.py; if unexpected, the "
             f"FakeCatalogHandler route(s) this method backs may now be stale."
@@ -572,7 +575,7 @@ def test_field_shape_parity_for_hand_verified_methods(
     wire level. This test extracts the literal key set each side actually
     produces and asserts equality.
     """
-    java_source = _read(_JAVA_REPOSITORY)
+    java_source = _read(_JAVA_ROWS) + "\n" + _read(_JAVA_REPOSITORY)
     fake_source = _read(_FAKE_HANDLER)
 
     methods = java_method.split("+")
