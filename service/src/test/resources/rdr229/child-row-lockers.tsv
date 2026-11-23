@@ -26,6 +26,7 @@ GroupRules.java	onLeave	GROUP_RECORDS	forShare	1	no-registry-lock	identity group
 IdentityRetention.java	run	IDENTITY_RECORDS	forUpdate	1	no-registry-lock	identity rows, no collection
 IdentityRows.java	lock	IDENTITY_RECORDS	forUpdate	1	no-registry-lock	identity rows, no collection
 ManifestFill.java	picked	?	forUpdate	1	no-registry-lock	background manifest fill: picks documents, takes no registry lock (it reads the registry unlocked); listed for review with the multi-collection writers
+ManifestReplace.java	clearRecordsById	CHUNK_ORPHANED_AT	forUpdate	1	no-registry-lock	called from ManifestReplace.replace from gate 3, after its registry read (the id-keyed twin of clearRecords; RDR-229 P3.5c)
 ManifestReplace.java	clearRecords	CHUNK_ORPHANED_AT	forUpdate	1	no-registry-lock	called from ManifestReplace.replace, after its registry read
 ManifestReplace.java	replace	CATALOG_DOCUMENT_CHUNKS	forUpdate	1	after-registry	a registry read (requireWritable, registryFirst or normalize) precedes the lock in the same method
 ManifestReplace.java	replace	CHUNKS	forNoKeyUpdate	1	after-registry	a registry read (requireWritable, registryFirst or normalize) precedes the lock in the same method
