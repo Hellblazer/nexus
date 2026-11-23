@@ -285,6 +285,45 @@ class Rdr229P35cVectorsReaperIdReadTest extends AtomicWriteTestBase {
         }
     }
 
+    /**
+     * RDR-229 P3.5c (linda 2026-11-23, ruling b): from gate 3 a quarantine chunk that carries the origin LABEL tag and no origin id is no sibling
+     * of the label's current holder (a label names whichever row holds it now): it is skipped, counted and WARNed. A quarantine collection
+     * whose chunks carry the id is found, and before the latch the label tag finds the first one as it always did.
+     */
+    @Test
+    void siblings_fromGate3_aQuarantineChunkWithOnlyTheLabelTagIsNoSiblingOfTheLabelsHolder_andTheSkipIsWarned() throws Exception {
+        String tenant = tenant("sib"), origin = knowledge("sib-origin"), qLabelOnly = "quarantine-" + knowledge("sib-label"),
+            qWithId = "quarantine-" + knowledge("sib-id");
+        su(ctx -> {
+            PgContainerHelper.insertCollection(ctx, tenant, origin);
+            long originId = dev.nexus.service.db.CollectionIds.require(ctx, tenant, origin);
+            seed(ctx, tenant, qLabelOnly, 2, h -> Map.of("origin_collection", origin));
+            seed(ctx, tenant, qWithId, 2, h -> Map.of("origin_collection", origin, "origin_collection_id", originId));
+        });
+        var unlatched = new dev.nexus.service.vectors.PgVectorRepository(tenantScope, embedder, embedder, Gate3.never());
+        var latchedRepo = new dev.nexus.service.vectors.PgVectorRepository(tenantScope, embedder, embedder, LATCHED);
+        assertThat(unlatched.resolveQuarantineSiblings(tenant, origin)).as("before gate 3 the label tag finds both")
+            .contains(qLabelOnly, qWithId);
+
+        var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(dev.nexus.service.vectors.PgVectorRepository.class);
+        var appender = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        appender.start();
+        logger.addAppender(appender);
+        long before = dev.nexus.service.vectors.PgVectorRepository.QUARANTINE_NO_ORIGIN_ID_SKIPPED.get();
+        List<String> siblings;
+        try {
+            siblings = latchedRepo.resolveQuarantineSiblings(tenant, origin);
+        } finally {
+            logger.detachAppender(appender);
+        }
+
+        assertThat(siblings).as("from gate 3 the id-tagged quarantine collection is a sibling and the label-only one is not")
+            .contains(qWithId).doesNotContain(qLabelOnly);
+        assertThat(dev.nexus.service.vectors.PgVectorRepository.QUARANTINE_NO_ORIGIN_ID_SKIPPED.get()).as("the skip is counted").isGreaterThan(before);
+        assertThat(appender.list).as("and a WARN says so").anyMatch(e -> e.getLevel() == ch.qos.logback.classic.Level.WARN
+            && e.getFormattedMessage().contains("carry no origin_collection_id"));
+    }
+
     @Test
     void lifecycleStates_namesTheRegistryLabel_whichGate() throws Exception {
         Renamed r = renamed("lcs", 1, h -> Map.of("title", "t"));
