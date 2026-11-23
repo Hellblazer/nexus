@@ -754,36 +754,42 @@ class TaxonomyWritersRegistryReadTest {
     }
 
     /**
-     * The prefix mode matched the name column before this change, so a projection stamped to a TOMBSTONE that bears the label was pruned
-     * with the live collection's. It still is: the prefix reads every row whose label starts with it, retired ones too. (The tombstone
-     * bears the SAME label, so no other collection's row is reached.)
+     * The prefix mode matched the name column before this change, so a projection stamped to a TOMBSTONE whose label starts with the prefix
+     * was pruned with the live collections'. It still is: the prefix reads every row whose label starts with it, retired ones too, and
+     * prunes by the ids it holds. (A tombstone and a live row cannot bear one label until P4.1 frees a tombstone's label: the registry's
+     * primary key and {@code catalog_collections_tenant_name_model_uq} are full keys, so the reachable case is a tombstone under its OWN
+     * label that shares the prefix.) A collection outside the prefix is not reached.
      */
     @Timeout(180)
     @Test
-    void pruneProjectionPrefix_reachesTheRowsStampedToASameNamedTombstone_asItDidByName() {
-        String b = registered("ppt");
-        long x = fx.idOf(b);
-        long tombstoneTopic = topic(b, "tombstone-topic");
-        String tombstoneDoc = doc("ppt-old");
-        projection(tombstoneTopic, tombstoneDoc, 0.1, b);
+    void pruneProjectionPrefix_reachesTheRowsStampedToATombstoneWhoseLabelStartsWithThePrefix_asItDidByName() {
+        String stem = "pptp-" + (n++);
+        String prefix = "docs__" + stem + "-";
+        String old = label(stem + "-old");
+        String live = label(stem + "-live");
+        String outside = registered("ppt-outside");
         String successor = registered("ppt-succ");
-        long y = renamedAndRetaken(b);   // x renamed away in place, a new live row y takes the label b
-        String c = fx.labelOf(x);
-        supersede(c, successor);
-        fx.asSuperuser(ctx -> ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.NAME, b)
-            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(fx.tenant).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(x))).execute());   // retired first, so the live-label index is not hit
-        long liveTopic = topic(b, "live-topic");
+        fx.register(old, live);
+        long tombstoneTopic = topic(old, "tombstone-topic");
+        String tombstoneDoc = doc("ppt-old");
+        projection(tombstoneTopic, tombstoneDoc, 0.1, old);
+        supersede(old, successor);
+        long liveTopic = topic(live, "live-topic");
         String liveDoc = doc("ppt-live");
-        projection(liveTopic, liveDoc, 0.1, b);
-        assertThat(sourceId(liveDoc, liveTopic)).as("setup: the live row y is the label's holder").isEqualTo(y);
-        assertThat(sourceId(tombstoneDoc, tombstoneTopic)).as("setup: the old projection is stamped to the tombstone").isEqualTo(x);
+        projection(liveTopic, liveDoc, 0.1, live);
+        long outsideTopic = topic(outside, "outside-topic");
+        String outsideDoc = doc("ppt-outside");
+        projection(outsideTopic, outsideDoc, 0.1, outside);
+        assertThat(sourceId(tombstoneDoc, tombstoneTopic)).as("setup: the old projection is stamped to the tombstone").isEqualTo(fx.idOf(old));
+        assertThat(sourceId(liveDoc, liveTopic)).as("setup: the live projection is stamped to the live row").isEqualTo(fx.idOf(live));
 
-        Resp r = fx.post("/v1/taxonomy/assignments/prune_projection", "{\"source_collection_prefix\":" + json(b) + ",\"min_similarity\":0.5}");
+        Resp r = fx.post("/v1/taxonomy/assignments/prune_projection", "{\"source_collection_prefix\":" + json(prefix) + ",\"min_similarity\":0.5}");
 
         assertThat(r.status()).as(r.body()).isEqualTo(200);
-        assertThat(r.json().path("removed").asInt(-1)).as("the live holder's and the same-named tombstone's").isEqualTo(2);
+        assertThat(r.json().path("removed").asInt(-1)).as("the live collection's and the tombstone's, not the outside one's").isEqualTo(2);
         assertThat(assignmentCount(liveDoc, liveTopic)).isZero();
-        assertThat(assignmentCount(tombstoneDoc, tombstoneTopic)).isZero();
+        assertThat(assignmentCount(tombstoneDoc, tombstoneTopic)).as("the tombstone's, as it was pruned by its name column").isZero();
+        assertThat(assignmentCount(outsideDoc, outsideTopic)).as("a collection outside the prefix is not reached").isEqualTo(1);
     }
 
     // ==== F2: a bind that matches nothing is a missing topic ============================================================
