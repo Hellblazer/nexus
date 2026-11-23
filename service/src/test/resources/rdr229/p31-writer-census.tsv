@@ -38,7 +38,7 @@ aspects	document_aspects	service/src/main/java/dev/nexus/service/db/CatalogRepos
 aspects	document_aspects	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11736	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	verb	renameCollectionTxn
 aspects	document_aspects	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11796	update	jooq	-	collection_id	yes		verb	renameCollectionTxn
 aspects	document_aspects	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12206	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	unproven	moveScopedTable
-aspects	document_aspects	service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	166	update	jooq	-	collection_id	yes		verb	apply
+aspects	document_aspects	service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	184	update	jooq	-	collection_id	yes		verb	apply
 aspects	document_aspects	service/src/main/java/dev/nexus/service/db/TenantImportLoad.java	349	insert	by-name	collection	collection_id	yes	TenantImportLoad by-name INSERT ... SELECT over TenantExport.TABLES	unproven	
 aspects	document_highlights	rdr229-fkvalidate-document_highlights [vectors-072-collection-id-fk-twins.xml:251]	248	update	data_move	-	collection_id	yes	sets collection_id	move	
 aspects	document_highlights	rdr229-p31-residue-document-highlights [catalog-052-residue-moves-supersede.xml:142]	107	update	data_move	-	collection_id	yes	sets collection_id	move	
@@ -57,7 +57,7 @@ aspects	document_highlights	service/src/main/java/dev/nexus/service/db/CatalogRe
 aspects	document_highlights	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11736	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	verb	renameCollectionTxn
 aspects	document_highlights	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11801	update	jooq	-	collection_id	yes		verb	renameCollectionTxn
 aspects	document_highlights	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12206	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	unproven	moveScopedTable
-aspects	document_highlights	service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	171	update	jooq	-	collection_id	yes		verb	apply
+aspects	document_highlights	service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	189	update	jooq	-	collection_id	yes		verb	apply
 aspects	document_highlights	service/src/main/java/dev/nexus/service/db/TenantImportLoad.java	349	insert	by-name	collection	collection_id	yes	TenantImportLoad by-name INSERT ... SELECT over TenantExport.TABLES	unproven	
 catalog	catalog_collections	nexus.catalog_documents_owner_to_collection [vectors-078-rdr229-p35b-readers-continue.xml:351]	290	update	sql_function	superseded_by	superseded_by_id	yes		sql	
 catalog	catalog_collections	nexus.gc_quarantine_orphans [vectors-077-rdr229-p35b-readers-both.xml:7919]	7762	insert	sql_function	superseded_by	superseded_by_id	yes		sql	
@@ -77,15 +77,15 @@ catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CatalogRe
 catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	14007	insert	jooq	superseded_by	superseded_by_id	yes		verb	doImportCollection
 catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionMint.java	175	insert	jooq	superseded_by	superseded_by_id	yes		unproven	mint
 catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionMint.java	259	update	jooq	-	superseded_by_id	yes		unproven	withDisplayName
-catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	136	update	jooq	-	superseded_by_id	yes		verb	apply
-catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	148	update	jooq	superseded_by	superseded_by_id	yes		verb	apply
+catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	154	update	jooq	-	superseded_by_id	yes		verb	apply
+catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	166	update	jooq	superseded_by	superseded_by_id	yes		verb	apply
 catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionRename.java	183	insert	jooq	superseded_by	superseded_by_id	yes		unproven	writeSuccessor
-catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionTombstones.java	177	update	jooq	superseded_by	superseded_by_id	yes		unproven	casSupersede
-catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionTombstones.java	209	update	jooq	superseded_by	superseded_by_id	yes		unproven	stampTombstone
-catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionTombstones.java	237	update	jooq	-	superseded_by_id	yes		unproven	repointTombstonesNaming
-catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionTombstones.java	266	update	jooq	superseded_by	superseded_by_id	yes		require	repointTombstones
-catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionTombstones.java	311	update	jooq	-	superseded_by_id	yes		unproven	deleteRegistryRows
-catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionTombstones.java	333	update	jooq	-	superseded_by_id	yes		verb	deleteRegistryRowById
+catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionTombstones.java	183	update	jooq	superseded_by	superseded_by_id	yes		unproven	casSupersede
+catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionTombstones.java	215	update	jooq	superseded_by	superseded_by_id	yes		unproven	stampTombstone
+catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionTombstones.java	243	update	jooq	-	superseded_by_id	yes		unproven	repointTombstonesNaming
+catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionTombstones.java	272	update	jooq	superseded_by	superseded_by_id	yes		require	repointTombstones
+catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionTombstones.java	317	update	jooq	-	superseded_by_id	yes		unproven	deleteRegistryRows
+catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionTombstones.java	339	update	jooq	-	superseded_by_id	yes		verb	deleteRegistryRowById
 catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/TenantImportLoad.java	349	insert	by-name	superseded_by	superseded_by_id	yes	TenantImportLoad by-name INSERT ... SELECT over TenantExport.TABLES	unproven	
 catalog	catalog_document_chunks	nexus.quarantine_restore_chunks [vectors-083-restore-by-origin-id.xml:1177]	871	insert	sql_function	collection	collection_id	yes		sql	
 catalog	catalog_document_chunks	rdr229-stamp-catalog_document_chunks [vectors-070-collection-id-stamp-moves.xml:288]	285	update	data_move	-	collection_id	yes	sets collection_id	move	
@@ -148,7 +148,7 @@ catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepo
 catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	14218	update	jooq	-	physical_collection_id	yes		unproven	raiseSensitivity
 catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	14254	update	jooq	-	physical_collection_id	yes		unproven	setSensitivity
 catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	14689	update	jooq	-	physical_collection_id	yes		unproven	backfillTitleAndYear
-catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	161	update	jooq	-	physical_collection_id	yes		verb	apply
+catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	179	update	jooq	-	physical_collection_id	yes		verb	apply
 catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/TenantImportLoad.java	349	insert	by-name	physical_collection	physical_collection_id	yes	TenantImportLoad by-name INSERT ... SELECT over TenantExport.TABLES	unproven	
 catalog	catalog_reconcile_rows	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	14428	insert	jooq	physical_collection	-	no		unproven	reconcileStage
 catalog	chunk_orphaned_at	nexus.stamp_chunks_on_manifest_delete [vectors-077-rdr229-p35b-readers-both.xml:6979]	6947	insert	sql_function	collection	collection_id	yes		sql	
