@@ -37,11 +37,14 @@ public final class CollectionTombstones {
      * it has one); the gc routes' Java take of the sweep gate carries the function's own 2 s bound, and a write that follows a rename gives up
      * after a bounded number of follows ({@link RenameFollow}).
      */
-    private static volatile String rowLockTimeoutMs = "10000";
+    /** The production bound of {@link #lockRows}, as the GUC text (milliseconds). */
+    public static final String ROW_LOCK_TIMEOUT_MS = "10000";
+
+    private static volatile String rowLockTimeoutMs = ROW_LOCK_TIMEOUT_MS;
 
     /** Test hook: a shorter bound, so a starvation test answers in a second; pass {@code null} to restore the default. */
     public static void setRowLockTimeoutMsForTests(String ms) {
-        rowLockTimeoutMs = ms == null ? "10000" : ms;
+        rowLockTimeoutMs = ms == null ? ROW_LOCK_TIMEOUT_MS : ms;
     }
 
     /**
@@ -53,23 +56,44 @@ public final class CollectionTombstones {
      * {@link RenameBusyException} says so. A wait over {@link RegistryLockWait#SLOW_MS} is logged with its time.
      */
     static void lockRows(DSLContext ctx, String tenant, String... names) {
+        lockWhere(ctx, tenant, CATALOG_COLLECTIONS.NAME.in(names), String.join(",", names));
+    }
+
+    /**
+     * {@link #lockRows} for the one-row rename (RDR-229 P3.7), which touches more than the rows of its two labels: the same statement, bound, log line and
+     * {@link RenameBusyException} on a timeout, over the rows named {@code oldName} or {@code newName}, every tombstone whose {@code superseded_by} names either
+     * label (the rename repoints them) and every row whose {@code superseded_by_id} is the id of a row named {@code newName} (repointed after that row's delete),
+     * whatever id the tombstone carries: a self-pointing or unstamped one is updated too. All of them are taken in the one statement in {@code collection_id}
+     * order, so none is locked later out of order (linda's census, items 3 and pass 2).
+     */
+    static void lockRowsOfOneRowRename(DSLContext ctx, String tenant, String oldName, String newName) {
+        var target = CATALOG_COLLECTIONS.as("target");
+        lockWhere(ctx, tenant,
+            CATALOG_COLLECTIONS.NAME.in(oldName, newName)
+                .or(CATALOG_COLLECTIONS.SUPERSEDED_BY.in(oldName, newName))
+                .or(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.in(ctx.select(target.COLLECTION_ID).from(target)
+                    .where(target.TENANT_ID.eq(tenant).and(target.NAME.eq(newName))))),
+            oldName + "," + newName);
+    }
+
+    private static void lockWhere(DSLContext ctx, String tenant, Condition rows, String labels) {
         WriteRegistryMemo.exempt(ctx, "a verb that locks the registry rows FOR UPDATE");
         String previous = ctx.select(DSL.function("current_setting", String.class, DSL.val("lock_timeout"))).fetchOne(0, String.class);
         ctx.select(DSL.function("set_config", String.class, DSL.val("lock_timeout"), DSL.val(rowLockTimeoutMs), DSL.val(true))).fetch();
         long started = System.nanoTime();
         try {
             ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
-                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.in(names))
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(rows)
                 .orderBy(CATALOG_COLLECTIONS.COLLECTION_ID)
                 .forUpdate().fetch();
         } catch (DataAccessException e) {
             if ("55P03".equals(e.sqlState())) {
-                RegistryLockWait.logIfSlow("verb", tenant, String.join(",", names), (System.nanoTime() - started) / 1_000_000, "timed_out");
+                RegistryLockWait.logIfSlow("verb", tenant, labels, (System.nanoTime() - started) / 1_000_000, "timed_out");
                 throw new RenameBusyException(rowLockTimeoutMs + " ms");
             }
             throw e;
         }
-        RegistryLockWait.logIfSlow("verb", tenant, String.join(",", names), (System.nanoTime() - started) / 1_000_000, "locked");
+        RegistryLockWait.logIfSlow("verb", tenant, labels, (System.nanoTime() - started) / 1_000_000, "locked");
         ctx.select(DSL.function("set_config", String.class, DSL.val("lock_timeout"), DSL.val(previous), DSL.val(true))).fetch();
     }
 
