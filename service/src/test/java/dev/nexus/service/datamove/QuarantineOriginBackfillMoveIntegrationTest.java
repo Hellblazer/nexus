@@ -252,13 +252,13 @@ class QuarantineOriginBackfillMoveIntegrationTest extends DataMoveIntegrationBas
 
     /**
      * The critics' shapes (review and critique of 02f8a135a3): quarantine is the lifecycle state, never the name prefix, so a
-     * {@code quarantine-}-named live collection is not the move's and a plainly named quarantine collection is; a row with NULL metadata gets
-     * the marker; and a quarantine row the chunks stamp has not reached (collection_id NULL, the move run while the stamp is paused or
+     * {@code quarantine-}-named live collection is not the move's and a plainly named quarantine collection is (chunks.metadata is NOT NULL
+     * on the leaves, so the template's COALESCE over it is only a guard); and a quarantine row the chunks stamp has not reached (collection_id NULL, the move run while the stamp is paused or
      * blocked, which DataMoveWorker.runCycle allows) is found by its name, given its own collection_id by the stamp's rule and the key. The
      * marker is pinned as the SQL predicates read it: the key exists ({@code jsonb_exists}) and its text is NULL.
      */
     @Test
-    void quarantineIsTheLifecycleState_aNullMetadataRowGetsTheMarker_andAnUnstampedQuarantineRowIsStampedAndKeyed() throws Exception {
+    void quarantineIsTheLifecycleState_theMarkerReadsAsSqlSeesIt_andAnUnstampedQuarantineRowIsStampedAndKeyed() throws Exception {
         live(T1, "live");
         String prefixedLive = quarantine(T1, "notreally");
         String plainQuarantine = name(T1, "plainq");
@@ -268,10 +268,7 @@ class QuarantineOriginBackfillMoveIntegrationTest extends DataMoveIntegrationBas
         String q1 = quarantine(T1, "q");
         chunk(T1, prefixedLive, "prefixedLive", tagged(name(T1, "live")));
         chunk(T1, plainQuarantine, "plainQuarantine", tagged(name(T1, "live")));
-        chunk(T1, q1, "nullMetadata", Map.of());
-        ctx().update(CHUNKS).set(CHUNKS.METADATA, (JSONB) null)
-            .where(CHUNKS.TENANT_ID.eq(T1)).and(CHUNKS.CHASH.eq(HexFormat.of().parseHex(chash(T1, "nullMetadata")))).execute();
-        assertThat(row(T1, "nullMetadata").metadata()).as("non-vacuity: SQL NULL metadata").isNull();
+        chunk(T1, q1, "dangling", tagged(name(T1, "gone")));   // metadata is NOT NULL on the chunks leaves, so a dangling label stands in for "no id"
         // as an upgrade leaves a row the chunks stamp has not reached: the name set, the id NULL (the CHECK is lifted to write it, then restored NOT VALID)
         P31CheckReplay.lift(ctx(), StampMoveSeeds.CHECK_CHANGESET.get("chunks"));
         try {
@@ -282,7 +279,7 @@ class QuarantineOriginBackfillMoveIntegrationTest extends DataMoveIntegrationBas
             P31CheckReplay.restore(ctx(), StampMoveSeeds.CHECK_CHANGESET.get("chunks"));
         }
         assertThat(collectionIdOf(T1, "unstamped")).as("non-vacuity: the row is unstamped").isNull();
-        assertThat(verificationRows(T1)).as("plainQuarantine, nullMetadata and unstamped; not the quarantine-named live one").isEqualTo(3);
+        assertThat(verificationRows(T1)).as("plainQuarantine, dangling and unstamped; not the quarantine-named live one").isEqualTo(3);
         Row prefixedBefore = row(T1, "prefixedLive");
         register(Map.of());
 
@@ -291,15 +288,15 @@ class QuarantineOriginBackfillMoveIntegrationTest extends DataMoveIntegrationBas
         assertThat(completedAt(LABEL_TEXT)).as("the move completes").isNotNull();
         assertThat(row(T1, "prefixedLive")).as("a quarantine-named live collection is not quarantine").isEqualTo(prefixedBefore);
         assertThat(row(T1, "plainQuarantine").key().asLong()).as("a plainly named quarantine collection is").isEqualTo(id(T1, "live"));
-        assertThat(row(T1, "nullMetadata").hasKey()).as("NULL metadata gets the key").isTrue();
-        assertThat(row(T1, "nullMetadata").key().isNull()).as("with the marker").isTrue();
+        assertThat(row(T1, "dangling").hasKey()).as("a dangling label gets the key").isTrue();
+        assertThat(row(T1, "dangling").key().isNull()).as("with the marker").isTrue();
         assertThat(row(T1, "unstamped").key().asLong()).as("the unstamped row is keyed").isEqualTo(id(T1, "live"));
         assertThat(collectionIdOf(T1, "unstamped")).as("and stamped, by the chunks stamp's rule")
             .isEqualTo(StampMoveSeeds.id(ctx(), T1, q1));
         Field<Boolean> exists = DSL.function("jsonb_exists", SQLDataType.BOOLEAN, CHUNKS.METADATA, DSL.val(KEY));
         Field<String> text = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, KEY);
         var marker = ctx().select(exists, text).from(CHUNKS)
-            .where(CHUNKS.TENANT_ID.eq(T1)).and(CHUNKS.CHASH.eq(HexFormat.of().parseHex(chash(T1, "nullMetadata")))).fetchOne();
+            .where(CHUNKS.TENANT_ID.eq(T1)).and(CHUNKS.CHASH.eq(HexFormat.of().parseHex(chash(T1, "dangling")))).fetchOne();
         assertThat(marker.value1()).as("the marker as the gate-3 clause reads it: the key exists").isTrue();
         assertThat(marker.value2()).as("and as siblingNames reads it: no id").isNull();
         assertThat(verificationRows(T1)).isZero();
