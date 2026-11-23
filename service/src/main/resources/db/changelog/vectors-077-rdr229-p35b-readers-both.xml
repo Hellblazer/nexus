@@ -3488,7 +3488,7 @@ BEGIN
       FROM nexus.chunks c
      WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))
        AND EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
-                 c.tenant_id, p_collection, c.chash, c.last_written_at, NULL))
+                 p_tenant_id, p_collection, c.chash, c.last_written_at, NULL))
      ORDER BY c.chash
      LIMIT v_row_limit;
 
@@ -3624,7 +3624,7 @@ BEGIN
          WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))
            AND c.chash = v.chash
            AND EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
-                 c.tenant_id, p_collection, c.chash, c.last_written_at, NULL))
+                 p_tenant_id, p_collection, c.chash, c.last_written_at, NULL))
         RETURNING c.tenant_id, c.collection, c.chash, c.embedding_model,
                   left(c.chunk_text, 80) AS text_prefix
     ),
@@ -3654,7 +3654,7 @@ BEGIN
       FROM nexus.chunks c
      WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))
        AND EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
-                 c.tenant_id, p_collection, c.chash, c.last_written_at, NULL));
+                 p_tenant_id, p_collection, c.chash, c.last_written_at, NULL));
 
     -- nexus-a6mon requirement 5: instrument it. The unbounded form logged only
     -- the edge's 499 -- no completion line, no timing, nothing between the cut
@@ -3989,7 +3989,7 @@ BEGIN
         -- stored chunk the denominator (the reaper's reading, vectors-024-1).
         SELECT count(*),
                count(*) FILTER (WHERE EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
-                     c.tenant_id, p_collection, c.chash, c.last_written_at, NULL)))
+                     p_tenant_id, p_collection, c.chash, c.last_written_at, NULL)))
           INTO v_total, v_reapable
           FROM nexus.chunks c
          WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''));
@@ -6518,7 +6518,7 @@ BEGIN
     IF p_dry_run THEN
         SELECT count(*),
                count(*) FILTER (WHERE EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
-                     c.tenant_id, p_collection, c.chash, c.last_written_at, p_grace)))
+                     p_tenant_id, p_collection, c.chash, c.last_written_at, p_grace)))
           INTO v_total, v_reapable
           FROM nexus.chunks c
          WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''));
@@ -6542,7 +6542,7 @@ BEGIN
     -- on what is true while no manifest writer can move the ground.
     SELECT count(*),
            count(*) FILTER (WHERE EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
-                 c.tenant_id, p_collection, c.chash, c.last_written_at, p_grace)))
+                 p_tenant_id, p_collection, c.chash, c.last_written_at, p_grace)))
       INTO v_total, v_reapable
       FROM nexus.chunks c
      WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''));
@@ -6567,7 +6567,7 @@ BEGIN
       FROM nexus.chunks c
      WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))
        AND EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
-                 c.tenant_id, p_collection, c.chash, c.last_written_at, p_grace))
+                 p_tenant_id, p_collection, c.chash, c.last_written_at, p_grace))
      ORDER BY c.chash
      LIMIT v_row_limit;
 
@@ -6646,7 +6646,7 @@ BEGIN
              WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))
                AND c.chash = v.chash
                AND EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
-                     c.tenant_id, p_collection, c.chash, c.last_written_at, p_grace))
+                     p_tenant_id, p_collection, c.chash, c.last_written_at, p_grace))
             RETURNING c.chash, c.chunk_text, c.embedding_384, c.embedding_768, c.embedding_1024,
                       c.metadata, c.created_at, c.embedding_model
         ),
@@ -7832,7 +7832,7 @@ BEGIN
       FROM nexus.chunks c
      WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))
        AND EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
-                 c.tenant_id, p_collection, c.chash, c.last_written_at, NULL));
+                 p_tenant_id, p_collection, c.chash, c.last_written_at, NULL));
 
     IF NOT EXISTS (SELECT 1 FROM _wbfpw16_victim) THEN
         RETURN QUERY SELECT 0::bigint, NULL::jsonb;
@@ -7991,7 +7991,7 @@ BEGIN
          WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_origin_id OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))
            AND c.chash = v.chash
            AND EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
-                 c.tenant_id, p_collection, c.chash, c.last_written_at, NULL))
+                 p_tenant_id, p_collection, c.chash, c.last_written_at, NULL))
         RETURNING c.tenant_id, c.collection, c.collection_id, c.chash, c.embedding_model,
                   left(c.chunk_text, 80) AS text_prefix
     ),
@@ -10021,11 +10021,12 @@ $$;
     <changeSet id="vectors-077-98" author="nexus-p2m1x.24">
         <comment>RDR-229 P3.5b (nexus-p2m1x.24), form B: nexus.collection_vector_stats reads both shapes of the collection name, the id where both sides carry one and the name where either lacks one (a NULL id never matches through a '' name). CREATE OR REPLACE of the view body, one column appended at the end, same volatility, security and grants. It outputs the registry's label for a stamped row's id (nexus.catalog_collections.name by collection_id; the row's own name where the row carries no id, so a half-stamped collection is still one row) and a trailing collection_id column (the registry's id; a row with no id takes the id of the registry row its name names, so a half-stamped collection is one group), so P3.7's one-row rename shows at once and P3.5c can join by the id. CREATE OR REPLACE appends the column at the end and changes nothing before it. The rollback DROPs the view and restores the last definer's text and its PUBLIC grant, because CREATE OR REPLACE cannot drop a column. DATA EFFECT: none; no row is read or written.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
--- Fix round (linda 2026-11-23, the 5x80k EXPLAIN): four UNION ALL branches, one per shape of a chunk's collection (stamped and
--- registered, stamped with no registry row, unstamped and registered, unstamped and unregistered or named ''), so the output label
--- and id are plain columns of each branch, and a caller's WHERE collection = 'X' or collection_id = N reaches the registry key,
--- the chunks key and, through the join's equalities, the manifest key in every branch, rather than a COALESCE over a LEFT JOIN
--- that no index serves. It stays set-based (nexus-mz9jv): the manifest is LEFT JOINed, the id arm and the name arm apart, never
+-- Fix round (linda 2026-11-23, the 5x80k EXPLAIN): three UNION ALL branches by the shape of a chunk's collection (stamped,
+-- unstamped and registered, unstamped and unregistered or named ''), so the output id is a plain column of each branch, and a
+-- caller's WHERE collection_id = N (the readers filter by id, before the latch too: linda's (iii)) reaches the chunks key and,
+-- through the join's equalities, the manifest's id index (P3.4's idx_catalog_chunks_collection_id) in every branch; the one
+-- stamped branch is one scan of the chunks. A filter on the label still selects the right rows, but only the unstamped branches
+-- serve it by key. It stays set-based (nexus-mz9jv): the manifest is LEFT JOINed, the id arm and the name arm apart, never
 -- probed per chunk, and a chunk that two live manifest rows hold is counted once (count(DISTINCT chash)).
 CREATE OR REPLACE VIEW nexus.collection_vector_stats
     WITH (security_invoker = true)
@@ -10038,15 +10039,16 @@ SELECT s.tenant_id,
        count(DISTINCT s.chash)                        AS stored_count,
        s.collection_id
   FROM (
-    -- 1. stamped, registered: the registry's label for the row's id
-    SELECT c.tenant_id, r.name AS collection, c.collection_id AS collection_id,
+    -- 1. stamped: the registry's label for the row's id, else (no registry row holds it) the row's own name; callers filter
+    -- by collection_id (linda's (iii)), which pushes onto c.collection_id here, so one scan of the stamped chunks serves both
+    SELECT c.tenant_id, COALESCE(r.name, c.collection) AS collection, c.collection_id AS collection_id,
            CASE WHEN c.embedding_384  IS NOT NULL THEN 384
                 WHEN c.embedding_768  IS NOT NULL THEN 768
                 WHEN c.embedding_1024 IS NOT NULL THEN 1024
            END AS dim,
            c.chash, c.created_at, (mi.chash IS NOT NULL OR mn.chash IS NOT NULL) AS live
       FROM nexus.chunks c
-      JOIN nexus.catalog_collections r
+      LEFT JOIN nexus.catalog_collections r
         ON r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id
       LEFT JOIN (nexus.catalog_document_chunks mi
                  JOIN nexus.catalog_documents di
@@ -10056,27 +10058,9 @@ SELECT s.tenant_id,
                  JOIN nexus.catalog_documents dn
                    ON dn.tenant_id = mn.tenant_id AND dn.tumbler = mn.doc_id AND dn.deleted_at IS NULL)
              ON mn.tenant_id = c.tenant_id AND mn.chash = c.chash AND mn.collection = c.collection AND c.collection <> '' AND mn.collection_id IS NULL
-    UNION ALL
-    -- 2. stamped, no registry row holds the id: the row's own name
-    SELECT c.tenant_id, c.collection AS collection, c.collection_id AS collection_id,
-           CASE WHEN c.embedding_384  IS NOT NULL THEN 384
-                WHEN c.embedding_768  IS NOT NULL THEN 768
-                WHEN c.embedding_1024 IS NOT NULL THEN 1024
-           END AS dim,
-           c.chash, c.created_at, (mi.chash IS NOT NULL OR mn.chash IS NOT NULL) AS live
-      FROM nexus.chunks c
-      LEFT JOIN (nexus.catalog_document_chunks mi
-                 JOIN nexus.catalog_documents di
-                   ON di.tenant_id = mi.tenant_id AND di.tumbler = mi.doc_id AND di.deleted_at IS NULL)
-             ON mi.tenant_id = c.tenant_id AND mi.collection_id = c.collection_id AND mi.chash = c.chash
-      LEFT JOIN (nexus.catalog_document_chunks mn
-                 JOIN nexus.catalog_documents dn
-                   ON dn.tenant_id = mn.tenant_id AND dn.tumbler = mn.doc_id AND dn.deleted_at IS NULL)
-             ON mn.tenant_id = c.tenant_id AND mn.chash = c.chash AND mn.collection = c.collection AND c.collection <> '' AND mn.collection_id IS NULL
      WHERE c.collection_id IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM nexus.catalog_collections r WHERE r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id)
     UNION ALL
-    -- 3. not stamped, registered under the row's name: the registry's id, so the collection is one group with its stamped rows
+    -- 2. not stamped, registered under the row's name: the registry's id, so the collection is one group with its stamped rows
     SELECT c.tenant_id, r.name AS collection, r.collection_id AS collection_id,
            CASE WHEN c.embedding_384  IS NOT NULL THEN 384
                 WHEN c.embedding_768  IS NOT NULL THEN 768
@@ -10093,7 +10077,7 @@ SELECT s.tenant_id,
      WHERE c.collection_id IS NULL
        AND c.collection <> ''
     UNION ALL
-    -- 4. not stamped, and not registered or named '' (a NULL id with the unset name is no collection and takes no id)
+    -- 3. not stamped, and not registered or named '' (a NULL id with the unset name is no collection and takes no id)
     SELECT c.tenant_id, c.collection AS collection, NULL::bigint AS collection_id,
            CASE WHEN c.embedding_384  IS NOT NULL THEN 384
                 WHEN c.embedding_768  IS NOT NULL THEN 768
@@ -10111,7 +10095,7 @@ SELECT s.tenant_id,
      WHERE c.collection_id IS NULL
        AND (c.collection = '' OR r.collection_id IS NULL)
   ) s
- GROUP BY s.tenant_id, s.collection, s.collection_id, s.dim;
+ GROUP BY s.tenant_id, s.collection_id, s.collection, s.dim;
 ]]></sql>
         <rollback>
             <sql splitStatements="false" stripComments="false"><![CDATA[
