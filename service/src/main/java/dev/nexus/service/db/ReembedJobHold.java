@@ -37,6 +37,15 @@ final class ReembedJobHold {
             .or(end(REEMBED_JOBS.TARGET_COLLECTION_ID, REEMBED_JOBS.TARGET_COLLECTION, tenant, ids, from, to));
     }
 
+    /**
+     * One job end against ONE collection, the match {@link #holding} makes: the job's stored id is the collection's id, or, for an end
+     * whose stored id names no live registry row (never stamped, deleted, retired), the label the job recorded is the collection's.
+     * The caller has the collection's row (locked) and passes its id and CURRENT label.
+     */
+    static Condition endIs(Field<Long> idColumn, Field<String> labelColumn, String tenant, long id, String label) {
+        return end(idColumn, labelColumn, tenant, List.of(id), label, label);
+    }
+
     private static Condition end(Field<Long> idColumn, Field<String> labelColumn, String tenant, List<Long> ids,
                                  String from, String to) {
         Condition byId = ids.isEmpty() ? DSL.falseCondition() : idColumn.in(ids);
