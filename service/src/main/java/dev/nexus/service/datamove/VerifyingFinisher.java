@@ -317,6 +317,11 @@ final class VerifyingFinisher implements MoveFinisher {
             return Result.report(failure(admin, move, e.stage, null, e.raised, e.detail));
         } catch (DataAccessException e) {
             SQLException raised = e.getCause(SQLException.class);
+            if (isAdoption(move) && raised != null && "57014".equals(raised.getSQLState())) {
+                // the parent ADD outgrew its tight bound (about 2000 leaves): a transient like any 57014 from on_complete (the move stays open, writes
+                // proceed after each timeout, and the retry count reaches "needs an operator"), with the reason that says what to do
+                return Result.report(failure(admin, move, FailureHandler.Stage.ON_COMPLETE, null, raised, adoptionTimeoutReason(admin, move)));
+            }
             return Result.report(failure(admin, move, FailureHandler.Stage.ON_COMPLETE, null, raised,
                 "on_complete of " + move.label() + " did not complete: "
                     + FailureHandler.oneLine(raised != null ? "sqlstate=" + raised.getSQLState() + " " + raised.getMessage()
@@ -461,6 +466,28 @@ final class VerifyingFinisher implements MoveFinisher {
 
     /** The run label the reporter shows for a completion statement. */
     static final String COMPLETION_RUN = "completion";
+
+    /**
+     * What an operator reads when the adoption's parent ADD times out under its bound: the bound and the leaf count it grew with (numbers only:
+     * the status is unauthenticated), and the one thing to do about it. {@link MoveReasons#publicForm} keeps this text as it is.
+     */
+    static String adoptionTimeoutReason(DSLContext admin, DataMove move) {
+        long leaves = chunkLeafCount(admin);
+        return "adoption timed out at " + move.statementTimeoutMs() + " ms over " + leaves + " leaves of nexus.chunks; raise statement_timeout_ms on "
+            + dev.nexus.service.vectors.Rdr229ChunksFk.ADOPT_LABEL + " for one attempt in a quiet window (it lengthens the write block on chunks and the registry by about "
+            + "that much), then set it back";
+    }
+
+    /** The leaves of nexus.chunks (a partition with no partitions of its own, named for chunks), counted from the catalog. */
+    static long chunkLeafCount(DSLContext ctx) {
+        var c = DSL.table(DSL.name("pg_catalog", "pg_class")).as("c");
+        var n = DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n");
+        return ctx.fetchCount(c.join(n).on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("c", "relnamespace")))),
+            DSL.field(DSL.name("n", "nspname"), String.class).eq("nexus"),
+            DSL.field(DSL.name("c", "relkind"), String.class).eq("r"),
+            DSL.field(DSL.name("c", "relispartition"), Boolean.class).isTrue(),
+            DSL.field(DSL.name("c", "relname"), String.class).like("chunks\\_%", '\\'));
+    }
 
     private static boolean isAdoption(DataMove move) {
         return move.label().equals(dev.nexus.service.vectors.Rdr229ChunksFk.ADOPT_LABEL);
