@@ -10734,14 +10734,23 @@ public final class CatalogRepository {
      * @return the number of rows updated (0 means no matching {@code (tenant, name)} row)
      */
     public int setCollectionAspectsEnabled(String tenant, String name, boolean enabled) {
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.update(CATALOG_COLLECTIONS)
+        return tenantScope.withTenant(tenant, ctx -> {
+            // RDR-229 P3.5a (nexus-p2m1x.23): the row this changes is read first, in this transaction, FOR KEY SHARE, and the UPDATE
+            // is keyed by its id. A request by collection_id whose id was freed (its label taken again by another row) answers 404
+            // here and changes nothing of the new holder; a request by label changes the one row the label resolves to.
+            Long id;
+            try {
+                id = CollectionIds.require(ctx, tenant, name);
+            } catch (UnregisteredCollectionException none) {
+                return 0;   // no such label: nothing to change, as before
+            }
+            return ctx.update(CATALOG_COLLECTIONS)
                .set(CATALOG_COLLECTIONS.ASPECTS_ENABLED, enabled)
                .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, CatalogIdStamps.keepSupersededId())
                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
-                   .and(CATALOG_COLLECTIONS.NAME.eq(name)))
-               .execute()
-        );
+                   .and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(id)))
+               .execute();
+        });
     }
 
     /**
