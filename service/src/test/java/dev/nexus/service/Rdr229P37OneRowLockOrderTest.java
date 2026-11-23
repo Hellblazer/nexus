@@ -474,7 +474,7 @@ class Rdr229P37OneRowLockOrderTest {
      */
     @Test
     void aRenameWhoseRowAWriterHoldsPastTheBound_answersRenameBusy_andChangesNothing() throws Exception {
-        assertThat(dev.nexus.service.db.CollectionOneRowRename.ROW_LOCK_TIMEOUT_MS).as("the production bound is slice C's 10 s").isEqualTo("10000");
+        assertThat(dev.nexus.service.db.CollectionTombstones.ROW_LOCK_TIMEOUT_MS).as("the production bound is slice C's 10 s").isEqualTo("10000");
         String tenant = "p37-lo-i";
         String token = engine.newTenant(tenant);
         String a = coll("p37loia");
