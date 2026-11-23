@@ -268,38 +268,51 @@ class Rdr229P37OneRowLockOrderTest {
 
     /**
      * linda's census, item 3: every registry row a rename touches is locked in ONE statement ordered by collection_id (the old row, the tombstone at the new
-     * label, the tombstones naming the old label). Two renames onto the SAME empty tombstone, each with tombstones of its own naming its old label, race: with
-     * the locks taken in id order they serialise and one wins; with the tombstones locked later, out of order, they could deadlock (40P01, a 5xx).
+     * label, the tombstones naming the old label, those pointing at the target tombstone's id). The renames that share registry rows are renames of ONE source
+     * onto two of its own empty tombstones: the handler revives a tombstone only for the rename its {@code superseded_by} names (nexus-v6za0), so two renames of
+     * different sources onto one tombstone never both reach the transaction, and on consistent data their row sets are disjoint. Here A has tombstones X and Y
+     * (ids below A's) and T (above); A to X and A to Y both pass the handler, queue on A's sweep gate inside their transactions, and are released together. With
+     * one ordered statement they serialise and one wins (the other answers 404 or 409). With the tombstones locked in a second statement, each holds its own
+     * target and one holds A while it waits for the other's target: 40P01. DeadlockRetry absorbs a 40P01 (the loser retries and is refused cleanly), so the
+     * status alone cannot show a deadlock; the belt's process-wide retry counter does (the mutant run is recorded on the bead).
      */
     @Test
-    void twoRenamesTouchingOverlappingTombstonesInOppositeOrdersDoNotDeadlock() throws Exception {
+    void oneSourceRenamedOntoTwoOfItsTombstonesAtOnce_serialisesWithoutADeadlockAndOneWins() throws Exception {
         for (int round = 0; round < 3; round++) {
-            String tenant = "p37-lo-e" + round;
+            String tenant = "p37-lo-f" + round;
             String token = engine.newTenant(tenant);
-            String a = coll("p37loea" + round);
-            String c = coll("p37loec" + round);
-            String x = coll("p37loex" + round);
-            String z = coll("p37loez" + round);
-            String t1 = coll("p37loet1" + round);
-            String t2 = coll("p37loet2" + round);
+            String a = coll("p37lofa" + round);
+            String x = coll("p37lofx" + round);
+            String y = coll("p37lofy" + round);
+            String t = coll("p37loft" + round);
             engine.su(ctx -> {
-                for (String n : List.of(c, a, x, z, t1, t2)) {   // C gets the lowest id, A next: the two renames reach the shared tombstone from opposite ends
+                for (String n : List.of(x, y, a, t)) {   // x and y below a in id order, t above it
                     PgContainerHelper.insertCollection(ctx, tenant, n);
                 }
                 return null;
             });
-            for (String[] sup : new String[][] {{x, z}, {t1, a}, {t2, c}}) {
-                var r = engine.call("POST", "/v1/catalog/collections/supersede", token, "{\"name\":\"" + sup[0] + "\",\"superseded_by\":\"" + sup[1] + "\"}");
-                assertThat(r.statusCode()).as("non-vacuity: tombstone " + sup[0] + ": " + r.body()).isEqualTo(200);
+            for (String tomb : List.of(x, y, t)) {
+                var r = engine.call("POST", "/v1/catalog/collections/supersede", token, "{\"name\":\"" + tomb + "\",\"superseded_by\":\"" + a + "\"}");
+                assertThat(r.statusCode()).as("non-vacuity: tombstone " + tomb + " of " + a + ": " + r.body()).isEqualTo(200);
             }
             var pool = Executors.newFixedThreadPool(2);
-            try {
+            try (Connection g = engine.pg.createConnection("")) {
+                g.setAutoCommit(false);
+                gate(DSL.using(g, SQLDialect.POSTGRES), "pg_advisory_xact_lock", tenant, a).fetch();   // both renames queue here, past the handler
+                int advisoryBase = advisoryWaiters();
+                long retriesBefore = dev.nexus.service.db.DeadlockRetry.retryAttemptCount();
                 Future<Rdr229RenameEngine.Renamed> r1 = pool.submit(() -> engine.rename(token, a, x));
-                Future<Rdr229RenameEngine.Renamed> r2 = pool.submit(() -> engine.rename(token, c, x));
-                int s1 = r1.get(120, TimeUnit.SECONDS).status();
-                int s2 = r2.get(120, TimeUnit.SECONDS).status();
-                assertThat(List.of(s1, s2)).as("no deadlock (40P01) and no 5xx: each is a rename or a clean refusal").allMatch(s -> s == 200 || s == 404 || s == 409);
-                assertThat(List.of(s1, s2).stream().filter(s -> s == 200).count()).as("exactly one rename took the shared tombstone's label").isEqualTo(1L);
+                Future<Rdr229RenameEngine.Renamed> r2 = pool.submit(() -> engine.rename(token, a, y));
+                assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(30), () -> advisoryWaiters() >= advisoryBase + 2))
+                    .as("non-vacuity: both renames passed the handler and wait on the sweep gate inside their transactions").isTrue();
+                g.commit();   // released together into the registry row locks
+                var o1 = r1.get(120, TimeUnit.SECONDS);
+                var o2 = r2.get(120, TimeUnit.SECONDS);
+                assertThat(List.of(o1.status(), o2.status())).as("no 5xx: r1=" + o1 + " r2=" + o2).allMatch(s -> s == 200 || s == 404 || s == 409);
+                assertThat(List.of(o1, o2).stream().filter(o -> o.status() == 200).count()).as("exactly one rename won: r1=" + o1 + " r2=" + o2)
+                    .isEqualTo(1L);
+                assertThat(dev.nexus.service.db.DeadlockRetry.retryAttemptCount() - retriesBefore)
+                    .as("no deadlock, not even one the retry belt absorbed: r1=" + o1 + " r2=" + o2).isZero();
             } finally {
                 pool.shutdownNow();
             }
