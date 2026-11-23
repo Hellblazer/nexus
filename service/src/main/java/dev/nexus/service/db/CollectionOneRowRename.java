@@ -55,12 +55,19 @@ final class CollectionOneRowRename {
      */
     static Map<String, Integer> apply(DSLContext ctx, String tenant, String oldName, String newName, String newContentType,
                                       String newOwnerId, boolean targetRowExists, String[] tuple) {
+        // LOCK ORDER (linda, folio's P3.5a review): the rename lock (RenameLatchLock SHARED, taken by the caller), then FOR UPDATE on the registry rows
+        // this rename touches, in ascending collection_id order, then everything else. The id writers hold FOR KEY SHARE on the registry row; once the
+        // name key is gone the name UPDATE below is a non-key update, so without FOR UPDATE a writer could commit into the row this rename just retired.
+        ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.in(oldName, newName)))
+            .orderBy(CATALOG_COLLECTIONS.COLLECTION_ID).forUpdate().fetch();
         Record6<Long, String, String, String, String, String> own = ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID,
                 CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL,
                 CATALOG_COLLECTIONS.MODEL_VERSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
             .from(CATALOG_COLLECTIONS)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(oldName))
                 .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")))
+            .forUpdate()
             .fetchOne();
         if (own == null) {
             throw new CatalogRepository.CollectionMergeRefused("renaming " + oldName + " to " + newName + ": " + oldName
