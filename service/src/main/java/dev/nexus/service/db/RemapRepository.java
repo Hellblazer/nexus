@@ -96,13 +96,6 @@ public final class RemapRepository {
         return ck().eqHistory(tenant, CHASH_REMAP.TARGET_COLLECTION, CHASH_REMAP.TARGET_COLLECTION_ID, c);
     }
 
-    /** The batch upsert under {@link TwinKeyUpsert}: the id key arbitrates from gate 3, the name key before. */
-    private <T> T upsert(DSLContext ctx, java.util.function.Function<Field<?>[], T> statement) {
-        boolean byId = ck().byId();
-        return TwinKeyUpsert.run(ctx, "chash_remap", byId ? TwinKeyUpsert.Arbiter.ID_KEY : TwinKeyUpsert.Arbiter.NAME_KEY,
-            c -> statement.apply(byId ? ID_KEY : NAME_KEY));
-    }
-
     /**
      * Persist one map batch in ONE transaction (the r2 ordering unit).
      *
@@ -187,7 +180,9 @@ public final class RemapRepository {
                         ids.get(e.sourceCollection()), ids.get(e.targetCollection()));
             }
             final var rows = step;
-            upsert(ctx, key -> rows.onConflict(key)
+            final boolean byId1 = ck().byId();
+            TwinKeyUpsert.run(ctx, "chash_remap", byId1 ? TwinKeyUpsert.Arbiter.ID_KEY : TwinKeyUpsert.Arbiter.NAME_KEY,
+                c -> { Field<?>[] key = byId1 ? ID_KEY : NAME_KEY; return rows.onConflict(key)
                 .doUpdate()
                 .set(CHASH_REMAP.NEW_CHASH, DSL.field("EXCLUDED.new_chash", byte[].class))
                 .set(CHASH_REMAP.TARGET_COLLECTION, DSL.field("EXCLUDED.target_collection", String.class))
@@ -196,7 +191,7 @@ public final class RemapRepository {
                 // the conflict branch re-stamps both ids: a row not stamped yet has names and no ids
                 .set(CHASH_REMAP.SOURCE_COLLECTION_ID, DSL.field("EXCLUDED.source_collection_id", Long.class))
                 .set(CHASH_REMAP.TARGET_COLLECTION_ID, DSL.field("EXCLUDED.target_collection_id", Long.class))
-                .execute());
+                .execute(); });
             return null;
         });
         log.info("event=remap_record_batch tenant={} entries={} deduped={}",

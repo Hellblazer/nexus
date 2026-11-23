@@ -415,8 +415,8 @@ final class TenantKeyedStateTables {
         notKeyed.put("NexusService.TENANT_RESET_TUPLE_BOUND", CONSTANT);
         // nexus-4lnn1.1.3 (RDR-230): the recall canary's query ring. Its rows are in nexus.canary_query_ring (FORCE RLS,
         // cascading foreign key to the collection registry); what the engine holds in memory is a short queue.
-        notKeyed.put("AspectQueueDrain.SKIPPED_NO_LIVE_COLLECTION", "a process-wide count of retired-queue rows skipped because their stored name resolves to no "
-            + "live registry row (a number, no tenant or row); read by tests, never reset for a tenant");
+        notKeyed.put("DepartedWriterSpans.UNRESOLVED", "a process-wide count of manifest spans whose collection id could not be resolved from gate 3 (a number, " + "no tenant, collection or row); read by tests and the status surface, never reset for a tenant");
+        notKeyed.put("AspectQueueDrain.SKIPPED_NO_LIVE_COLLECTION", "a process-wide count of retired-queue rows skipped because their stored name resolves to no " + "live registry row (a number, no tenant or row); read by tests, never reset for a tenant");
         notKeyed.put("PciQueryRing.queue", "a bounded in-memory queue (1,024 entries) drained every 30 seconds; an "
             + "entry for a reset tenant is skipped by the function's foreign key, so nothing outlives the reset");
         notKeyed.put("PciQueryRing.Entry.tenant", "the tenant of one queued ring entry, immutable; dies when the "
