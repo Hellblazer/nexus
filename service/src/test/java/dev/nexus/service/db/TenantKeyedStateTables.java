@@ -220,6 +220,9 @@ final class TenantKeyedStateTables {
         notKeyed.put("DataMoveWorker.loop", DATA_MOVE_HANDLE);
         notKeyed.put("DataMoveWorker.callConnection", DATA_MOVE_CALL);
         notKeyed.put("CallConnection.running", DATA_MOVE_CALL);
+        notKeyed.put("VerifyingFinisher.inFlight", "the backend pid of the validation in flight (a move with no statement bound runs its "
+            + "on_complete before its claim) and the engine's own admin values, kept so a stop can cancel it; no per-tenant state, "
+            + "cleared when the statement ends");
         notKeyed.put("LeafCatalog.TenantLeaf.tenant", PRINCIPAL);
         notKeyed.put("MoveTenants.TENANT_ID", JOOQ_COLUMN);
         notKeyed.put("FailureHandler.Failure.tenant", PRINCIPAL);
