@@ -6,7 +6,10 @@ import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.Record;
+import org.jooq.SortField;
+import org.jooq.impl.DSL;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
@@ -156,6 +159,21 @@ public final class CollectionRegistry {
         return SHARED;
     }
 
+    /**
+     * The order in which a label held by several rows resolves to one: the live row first, then the NEWEST tombstone (linda's
+     * corrected Q3 ruling, 2026-11-23: no resolver filters strictly to live in Phase 3). "Live" means not superseded,
+     * {@code superseded_by = ''} and {@code superseded_by_id IS NULL}, and not {@code lifecycle_state = 'live'}: a quarantined or
+     * trashed row that is not superseded still holds its label. Every label read that must pick one row ({@link #resolveLabel},
+     * {@link #lifecycleState}, {@code CollectionPurgeScope#resolve}) orders by this and takes the first row, so the rule is
+     * written once and a change to what "live" means is a change here. A by-id read selects one row by its key and needs no order.
+     */
+    public static List<SortField<?>> labelResolutionOrder() {
+        return List.of(
+            DSL.when(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("").and(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.isNull()), 1)
+                .otherwise(0).desc(),
+            CATALOG_COLLECTIONS.COLLECTION_ID.desc());
+    }
+
     // ---- the id-keyed API (RDR-229 P3.5a) -------------------------------------------------------------------------------
 
     /** {@link #require} by label, on this registry's cache. */
@@ -164,7 +182,7 @@ public final class CollectionRegistry {
         if (hit.isPresent()) {
             return hit.get();
         }
-        return fill(ctx, tenant, CATALOG_COLLECTIONS.NAME.eq(label),
+        return fill(ctx, tenant, CATALOG_COLLECTIONS.NAME.eq(label), labelResolutionOrder(),
             () -> new UnregisteredCollectionException(tenant, label));
     }
 
@@ -181,7 +199,7 @@ public final class CollectionRegistry {
         if (hit.isPresent()) {
             return hit.get();
         }
-        return fill(ctx, tenant, CATALOG_COLLECTIONS.COLLECTION_ID.eq(collectionId),
+        return fill(ctx, tenant, CATALOG_COLLECTIONS.COLLECTION_ID.eq(collectionId), List.of(),
             () -> new UnknownCollectionIdException(tenant, collectionId));
     }
 
@@ -288,7 +306,7 @@ public final class CollectionRegistry {
      * id), build its {@link CollectionRow}, and cache it under both keys unless an evict ran between the read and the fill
      * (nexus-hkh1y), in which case the row is returned and not cached.
      */
-    private CollectionRow fill(DSLContext ctx, String tenant, Condition where,
+    private CollectionRow fill(DSLContext ctx, String tenant, Condition where, List<SortField<?>> order,
                                java.util.function.Supplier<RuntimeException> missing) {
         long evictionsBeforeRead;
         synchronized (fillLock) {
@@ -305,6 +323,8 @@ public final class CollectionRegistry {
             .leftJoin(EMBEDDING_MODELS)
                 .on(EMBEDDING_MODELS.EMBEDDING_MODEL.eq(CATALOG_COLLECTIONS.EMBEDDING_MODEL))
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(where))
+            .orderBy(order)
+            .limit(1)
             .fetchOne();
         if (r == null) {
             throw missing.get();
@@ -530,6 +550,8 @@ public final class CollectionRegistry {
         }
         return Optional.ofNullable(ctx.select(CATALOG_COLLECTIONS.LIFECYCLE_STATE).from(CATALOG_COLLECTIONS)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(collection)))
+            .orderBy(labelResolutionOrder())
+            .limit(1)
             .fetchOne(CATALOG_COLLECTIONS.LIFECYCLE_STATE));
     }
 
