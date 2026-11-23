@@ -304,7 +304,12 @@ class AspectQueueDrainIntegrationTest {
             PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "a.live");
             PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "a.nobody");
             row(ctx, TENANT_A, COLL_A, "a.live", "/a/live.md", "pending", null, "hl");
-            row(ctx, TENANT_A, nobody, "a.nobody", "/a/nobody.md", "pending", null, "hn");
+            ctx.set(DSL.name("session_replication_role"), DSL.inline("replica")).execute();   // the queue row names a collection nothing registers
+            try {
+                row(ctx, TENANT_A, nobody, "a.nobody", "/a/nobody.md", "pending", null, "hn");
+            } finally {
+                ctx.set(DSL.name("session_replication_role"), DSL.inline("origin")).execute();
+            }
         })) {
             long before = AspectQueueDrain.skippedNoLiveCollection();
             AspectQueueDrain latched = new AspectQueueDrain(fx.scope, fx.tuples,

@@ -176,7 +176,10 @@ class Rdr229P35cRestReadersByIdTest extends Rdr229P35cRestFixture {
         }
     }
 
-    /** The rename arm rewrites the rows that carry an id; a pre-id row is left alone (never stamped with the new id). */
+    /**
+     * The rename arm retags a row that carries an id by that id, and a row with no id by name (linda 2026-11-23: telemetry is a history
+     * table); from the latch the pre-id row is never stamped with the new id, so it reads as pre-id history under the new label.
+     */
     @Test
     void telemetryRepository_renameLeavesPreIdRowsAlone() throws Exception {
         String old = register(TENANT, "code", "tr");
@@ -185,10 +188,11 @@ class Rdr229P35cRestReadersByIdTest extends Rdr229P35cRestFixture {
         var byId = new TelemetryRepository(tenantScope, LATCHED);
         new TelemetryRepository(tenantScope).logSearchBatch(TENANT, List.<Object[]>of(new Object[] {now, "qh-r-" + old, old, 5, 3, 0.4, 0.5}));
         insertPreIdSearchRow(TENANT, old, 0);
-        assertThat(byId.renameCollection(TENANT, old, target)).containsEntry("search_telemetry", 1);
-        assertThat(byId.queryCollectionStats(TENANT, target, 365).get("row_count")).isEqualTo(1L);
-        assertThat(byId.queryCollectionStats(TENANT, old, 365).get("pre_id_row_count"))
-            .as("the pre-id row still says the old label, with no id").isEqualTo(1L);
+        assertThat(byId.renameCollection(TENANT, old, target)).containsEntry("search_telemetry", 2);
+        assertThat(byId.queryCollectionStats(TENANT, target, 365).get("row_count")).as("the stamped row, by id").isEqualTo(1L);
+        assertThat(byId.queryCollectionStats(TENANT, target, 365).get("pre_id_row_count"))
+            .as("the pre-id row is retagged by name and stays without an id").isEqualTo(1L);
+        assertThat(byId.queryCollectionStats(TENANT, old, 365).get("pre_id_row_count")).as("nothing is left under the old label").isEqualTo(0L);
     }
 
     @SuppressWarnings("unchecked")

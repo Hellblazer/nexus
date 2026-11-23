@@ -38,10 +38,6 @@ class Rdr229P35cTaxonomyLockByIdTest extends AtomicWriteTestBase {
         String unrelated = "code__p35clock" + seq.incrementAndGet() + "u__minilm-l6-v2-384__v1";
         registerCollection(oldLabel);
         registerCollection(unrelated);
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            RegistryRenameSupport.rename(DSL.using(su, SQLDialect.POSTGRES), TENANT, oldLabel, newLabel);   // the one-row rename: the id stays
-        }
         CountDownLatch held = new CountDownLatch(1), release = new CountDownLatch(1);
         CompletableFuture<Void> holder = CompletableFuture.runAsync(() -> tenantScope.withTenant(TENANT, ctx -> {
             TaxonomyCollectionLock.lockTaxonomyCollection(ctx, TENANT, oldLabel);
@@ -55,6 +51,11 @@ class Rdr229P35cTaxonomyLockByIdTest extends AtomicWriteTestBase {
         }));
         try {
             assertThat(held.await(20, TimeUnit.SECONDS)).as("the first persist holds the lock").isTrue();
+            // the one-row rename happens while the first persist holds the lock: the label it took no longer names the row
+            try (Connection su = pg.createConnection("")) {
+                su.setAutoCommit(true);
+                RegistryRenameSupport.rename(DSL.using(su, SQLDialect.POSTGRES), TENANT, oldLabel, newLabel);   // the one-row rename: the id stays
+            }
 
             tenantScope.withTenant(TENANT, ctx -> {
                 TaxonomyCollectionLock.lockTaxonomyCollection(ctx, TENANT, unrelated);

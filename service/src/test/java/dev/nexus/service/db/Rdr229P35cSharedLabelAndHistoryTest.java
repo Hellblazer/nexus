@@ -159,14 +159,16 @@ class Rdr229P35cSharedLabelAndHistoryTest extends AtomicWriteTestBase {
 
             List<String> logs = captureLogs(() -> {
                 mint(first, owner);
-                mint(second, owner);   // the same tuple: the ON CONFLICT arm answers the first row
+                // the same tuple under another label: the inferred arbiter reports the conflict (a LiveTupleConflict), it is not a failure
+                // of inference, which would have logged the fallback event
+                org.assertj.core.api.Assertions.assertThatThrownBy(() -> mint(second, owner)).isInstanceOf(CollectionMint.LiveTupleConflict.class);
             });
 
             assertThat(logs).as("the ON CONFLICT predicate implies the id-only index's, so the arbiter is inferred: no fallback")
                 .noneMatch(l -> l.contains("collection_tuple_index_not_inferable"));
             int rowsOfTuple = su(d -> d.fetchCount(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)
                 .and(CATALOG_COLLECTIONS.OWNER_ID.eq(owner))));
-            assertThat(rowsOfTuple).as("one live row for the tuple: the second mint lost the conflict").isEqualTo(1);
+            assertThat(rowsOfTuple).as("one row for the tuple: the second mint lost the conflict").isEqualTo(1);
         } finally {
             su(d -> { CollectionMintSupport.dropIndex(d); return null; });
         }
@@ -187,7 +189,7 @@ class Rdr229P35cSharedLabelAndHistoryTest extends AtomicWriteTestBase {
             PgContainerHelper.insertChunks(d, TENANT, sibling, List.of(byId, byLabelOnly), List.of("a", "b"),
                 List.of(new float[384], new float[384]),
                 List.of(Map.of("origin_collection", "stale-" + origin, QuarantineOrigin.ORIGIN_ID_KEY, originId),
-                    Map.of("origin_collection", origin + "-renamed")));
+                    Map.of("origin_collection", origin)));
             RegistryRenameSupport.rename(d, TENANT, origin, origin + "-renamed");   // the one-row rename: the id stays, the stored labels go stale
             return null;
         });
@@ -247,7 +249,8 @@ class Rdr229P35cSharedLabelAndHistoryTest extends AtomicWriteTestBase {
             long live, tombstone;
             if (tombstoneLast) {
                 live = registerRow(shared, "", null, "fillowner-l" + seq.incrementAndGet());
-                tombstone = registerRetiredNoSuccessor(shared, "gone-" + seq.incrementAndGet(), "fillowner-t" + seq.incrementAndGet());
+                // a tombstone written after the live row (a live-label index forbids a second live row): it names the live row as its successor
+                tombstone = registerRow(shared, "gone-" + seq.incrementAndGet(), live, "fillowner-t" + seq.incrementAndGet());
             } else {
                 tombstone = registerRetiredNoSuccessor(shared, "gone-" + seq.incrementAndGet(), "fillowner-t" + seq.incrementAndGet());
                 live = registerRow(shared, "", null, "fillowner-l" + seq.incrementAndGet());
