@@ -992,6 +992,12 @@ public final class HttpUtil {
     /** {@code reason} of the 409 for a delete by a label that more than one live row holds (RDR-229 P3.5a). Wire contract. */
     static final String COLLECTION_LABEL_AMBIGUOUS_REASON = "collection_label_ambiguous";
 
+    /**
+     * {@code reason} on the 409 for a collection delete refused while a re-embed job in a non-terminal state holds the collection as its source
+     * or target (RDR-229 P3.5a row 14); the body also carries {@code collection} and {@code job_id}. Nothing was removed. Wire contract.
+     */
+    static final String COLLECTION_BUSY_REASON = "collection_busy";
+
     /** {@code reason} on the 409 for a rename that reached the one-row regime with no one-row rename to run. Wire contract. */
     static final String RENAME_PATH_MISMATCH_REASON = "rename_path_mismatch";
 
