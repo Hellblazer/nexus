@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import dev.nexus.service.datamove.Gate3;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -87,9 +88,31 @@ class QuarantineOriginLifecycleTest extends AtomicWriteTestBase {
 
         tenantScope.withTenant(t, ctx -> {
             assertThat(QuarantineOrigin.countRowsOf(ctx, t, quarantineRowOrigin)).isZero();
-            assertThat(QuarantineOrigin.holdsRowsOf(ctx, t, quarantineRowOrigin)).isFalse();
+            assertThat(QuarantineOrigin.holdsRowsOf(ctx, t, quarantineRowOrigin, Gate3.never())).isFalse();
             assertThat(QuarantineOrigin.countRowsOf(ctx, t, prefixedLiveOrigin)).isEqualTo(1);
-            assertThat(QuarantineOrigin.holdsRowsOf(ctx, t, prefixedLiveOrigin)).isTrue();
+            assertThat(QuarantineOrigin.holdsRowsOf(ctx, t, prefixedLiveOrigin, Gate3.never())).isTrue();
+            return null;
+        });
+    }
+
+    /** RDR-229 P3.5c: from gate 3 the same questions are asked of the collection ids, and answer the same here (no rename). */
+    @Test
+    void fromGate3TheQuarantineRowsOfAnOriginAreFoundByCollectionId() throws Exception {
+        String t = newTenant();
+        String sibling = col("s");
+        row(t, sibling, "quarantine");
+        String origin = col("o");
+        row(t, origin, "live");
+        taggedRow(t, sibling, "one", origin);
+        taggedRow(t, sibling, "two", origin);
+        Gate3 latched = () -> true;
+
+        tenantScope.withTenant(t, ctx -> {
+            assertThat(QuarantineOrigin.countRowsOf(ctx, t, origin, latched)).isEqualTo(2);
+            assertThat(QuarantineOrigin.holdsRowsOf(ctx, t, origin, latched)).isTrue();
+            assertThat(QuarantineOrigin.deleteRowsOf(ctx, t, origin, latched)).as("the sibling that lost rows, by its label")
+                .containsExactly(Map.entry(sibling, 2));
+            assertThat(QuarantineOrigin.countRowsOf(ctx, t, origin, latched)).isZero();
             return null;
         });
     }
