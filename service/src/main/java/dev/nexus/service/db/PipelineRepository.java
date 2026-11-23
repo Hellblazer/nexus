@@ -827,7 +827,11 @@ public final class PipelineRepository {
             var row = RequestedCollectionRead.require(ctx, tenant, collection);   // P3.5a: a request by id reads that id first
             return ctx.deleteFrom(PDF_PIPELINE)
                .where(PDF_PIPELINE.TENANT_ID.eq(tenant)
-                       .and(CollectionOwnedRows.of(row, PDF_PIPELINE.COLLECTION_ID, PDF_PIPELINE.COLLECTION, collection)))
+                       // a ledger outlives its registry row (the client deletes the row first, then asks for this cleanup by name): with
+                       // no row the rows are found by the history rule, the dangling ids included (P3.5c, CollectionKey#eqLedger)
+                       .and(row.isPresent()
+                           ? CollectionOwnedRows.of(row, PDF_PIPELINE.COLLECTION_ID, PDF_PIPELINE.COLLECTION, collection)
+                           : k.eqLedger(tenant, PDF_PIPELINE.COLLECTION, PDF_PIPELINE.COLLECTION_ID, collection)))
                .execute();
         });
     }
