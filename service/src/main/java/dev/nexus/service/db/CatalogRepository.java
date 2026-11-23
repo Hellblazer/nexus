@@ -3546,7 +3546,7 @@ public final class CatalogRepository {
             ? DSL.noCondition()
             : DSL.coalesce(CATALOG_DOCUMENTS.CHUNK_COUNT, 0).eq(chunkCount);
         Condition md5Cond = DSL.md5(CATALOG_DOCUMENTS.TITLE).eq(DSL.md5(DSL.val(title)));
-        return ctx.select(documentFields(gate3)).from(CATALOG_DOCUMENTS)
+        return ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
             .where(md5Cond.and(CATALOG_DOCUMENTS.TITLE.eq(title)).and(CATALOG_DOCUMENTS.DELETED_AT.isNull())
                 .and(ownerCond).and(typeCond).and(chunkCond))
             .orderBy(CATALOG_DOCUMENTS.TUMBLER);
@@ -4447,7 +4447,7 @@ public final class CatalogRepository {
     }
 
     /** Splits the live pre-filter rows into the rewrite, merge and refused classes (each sorted by tumbler). */
-    private static void classifyStaleNotes(DSLContext ctx, String tenant, List<org.jooq.Record3<String, String, String>> rows,
+    private void classifyStaleNotes(DSLContext ctx, String tenant, List<org.jooq.Record3<String, String, String>> rows,
                                            List<StaleNote> rewrite, List<StaleNote> merge, List<StaleNote> refused) {
         List<StaleNote> candidates = new ArrayList<>();
         java.util.Set<String> collections = new java.util.TreeSet<>();
@@ -6177,7 +6177,7 @@ public final class CatalogRepository {
      *             multi-row batches are safe as-is.
      */
     static void insertManifestChunkRows(DSLContext ctx, String tenant, String docId, String coll,
-                                                 List<Map<String, Object>> rows, ManifestInsertMode mode) {
+                                                 List<Map<String, Object>> rows, ManifestInsertMode mode, Gate3 gate3) {
         if (rows == null || rows.isEmpty()) return;
         // RDR-191 (Hal ruling 2026-08-12): `coll` is the CALLER-SUPPLIED
         // collection -- validated non-blank at the HTTP boundary
@@ -6257,10 +6257,10 @@ public final class CatalogRepository {
                 // again takes an incoming value and keeps its stored one against an incoming NULL. Every
                 // right-hand side reads the row as it was before this statement, so the chash comparison is
                 // against the old chash though the chash is set above.
-                .set(CATALOG_DOCUMENT_CHUNKS.LINE_START, spanOnConflict(CATALOG_DOCUMENT_CHUNKS.LINE_START))
-                .set(CATALOG_DOCUMENT_CHUNKS.LINE_END, spanOnConflict(CATALOG_DOCUMENT_CHUNKS.LINE_END))
-                .set(CATALOG_DOCUMENT_CHUNKS.CHAR_START, spanOnConflict(CATALOG_DOCUMENT_CHUNKS.CHAR_START))
-                .set(CATALOG_DOCUMENT_CHUNKS.CHAR_END, spanOnConflict(CATALOG_DOCUMENT_CHUNKS.CHAR_END))
+                .set(CATALOG_DOCUMENT_CHUNKS.LINE_START, spanOnConflict(CATALOG_DOCUMENT_CHUNKS.LINE_START, gate3))
+                .set(CATALOG_DOCUMENT_CHUNKS.LINE_END, spanOnConflict(CATALOG_DOCUMENT_CHUNKS.LINE_END, gate3))
+                .set(CATALOG_DOCUMENT_CHUNKS.CHAR_START, spanOnConflict(CATALOG_DOCUMENT_CHUNKS.CHAR_START, gate3))
+                .set(CATALOG_DOCUMENT_CHUNKS.CHAR_END, spanOnConflict(CATALOG_DOCUMENT_CHUNKS.CHAR_END, gate3))
                 .execute();
             case UPSERT_IMPORT -> insert
                 .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION)
@@ -6288,7 +6288,7 @@ public final class CatalogRepository {
      * ManifestInsertMode#UPSERT_APPEND}: the incoming value when the conflicting row holds another chunk (its
      * chash or collection differs), else the incoming value if it has one and the stored one if not.
      */
-    private Field<Integer> spanOnConflict(TableField<?, Integer> column) {
+    private static Field<Integer> spanOnConflict(TableField<?, Integer> column, Gate3 gate3) {
         // chash and collection are both NOT NULL (baseline; catalog-025), so a plain != would not misread a NULL
         // here; isDistinctFrom on the collection costs nothing and keeps a NULL from reading as "same chunk"
         // should the constraint ever be relaxed.
@@ -6315,7 +6315,7 @@ public final class CatalogRepository {
         return row.containsKey("section_title") || row.containsKey("section_type") || row.containsKey("page_number");
     }
 
-    private static String writeManifestRows(DSLContext ctx, String tenant, String docId,
+    private String writeManifestRows(DSLContext ctx, String tenant, String docId,
                                           String collection, List<Map<String, Object>> rows) {
         return writeManifestRows(ctx, tenant, docId, collection, rows, null, null, null, null, null, null);
     }
@@ -6378,7 +6378,7 @@ public final class CatalogRepository {
      *         {@link #writeManifestMany}) has the collection to sweep
      *         dropped chashes from without threading a second parameter.
      */
-    private static String writeManifestRows(DSLContext ctx, String tenant, String docId,
+    private String writeManifestRows(DSLContext ctx, String tenant, String docId,
                                           String collection, List<Map<String, Object>> rows,
                                           Map<String, ResolvedChunk> resolvedChunks,
                                           int[] chunksWrittenOut,
@@ -6428,7 +6428,7 @@ public final class CatalogRepository {
         // nexus-z0o2p.29: a replace writes the difference (ManifestReplace) so a re-index that keeps a chunk's
         // row stops dropping and re-listing it; the delete-and-insert below remains for a bad row (it fails there
         // as it always did) and for a rewrite of more than ManifestReplace.MAX_CHANGED_ROWS rows.
-        List<DepartedWriterSpans.Gone> diffed = ManifestReplace.replace(ctx, tenant, docId, collection, rows);
+        List<DepartedWriterSpans.Gone> diffed = ManifestReplace.replace(ctx, tenant, docId, collection, rows, gate3);
         if (diffed != null) {
             if (!rows.isEmpty()) stampIndexedAt(ctx, tenant, docId);
             removed = priorRows == PRIOR_ROWS_UNREAD ? null : priorRows != null ? priorRows : diffed;
@@ -6453,7 +6453,7 @@ public final class CatalogRepository {
                 // stamped with the SAME `collection` -- there is no longer a
                 // per-row resolution outcome to vary on, so there is nothing to
                 // skip.
-                insertManifestChunkRows(ctx, tenant, docId, collection, rows, ManifestInsertMode.PLAIN);
+                insertManifestChunkRows(ctx, tenant, docId, collection, rows, ManifestInsertMode.PLAIN, gate3);
             }
         }
         // nexus-pvkbv: a chunk this document held and no longer does (edited so it dropped it, or now under
@@ -8208,7 +8208,7 @@ public final class CatalogRepository {
             Map<Integer, String> writtenAt = chashesByPosition(toWrite);
             Map<Integer, DepartedWriterSpans.Gone> priorAt = DepartedWriterSpans.rowsAt(ctx, tenant, docId, writtenAt.keySet(), gate3);
             for (var row : toWrite) {
-                insertManifestChunkRows(ctx, tenant, docId, collection, List.of(row), ManifestInsertMode.UPSERT_APPEND);
+                insertManifestChunkRows(ctx, tenant, docId, collection, List.of(row), ManifestInsertMode.UPSERT_APPEND, gate3);
             }
             DepartedWriterSpans.clearDisplaced(ctx, tenant, docId, collection, priorAt, writtenAt, gate3);
             // nexus-e4gel: fold documents.chunk_count in the SAME transaction,
@@ -13653,7 +13653,7 @@ public final class CatalogRepository {
                 Map<Integer, String> writtenAt = chashesByPosition(batch);
                 Map<Integer, DepartedWriterSpans.Gone> priorAt =
                     DepartedWriterSpans.rowsAt(ctx, tenant, docId, writtenAt.keySet(), gate3);
-                insertManifestChunkRows(ctx, tenant, docId, collection, batch, ManifestInsertMode.UPSERT_IMPORT);
+                insertManifestChunkRows(ctx, tenant, docId, collection, batch, ManifestInsertMode.UPSERT_IMPORT, gate3);
                 DepartedWriterSpans.clearDisplaced(ctx, tenant, docId, collection, priorAt, writtenAt, gate3);
             }
             return rows.size();
@@ -13667,7 +13667,7 @@ public final class CatalogRepository {
         acquireIndexRunLock(ctx, tenant, docId);
         Map<Integer, String> writtenAt = chashesByPosition(List.of(row));
         Map<Integer, DepartedWriterSpans.Gone> priorAt = DepartedWriterSpans.rowsAt(ctx, tenant, docId, writtenAt.keySet(), gate3);
-        insertManifestChunkRows(ctx, tenant, docId, collection, List.of(row), ManifestInsertMode.UPSERT_IMPORT);
+        insertManifestChunkRows(ctx, tenant, docId, collection, List.of(row), ManifestInsertMode.UPSERT_IMPORT, gate3);
         DepartedWriterSpans.clearDisplaced(ctx, tenant, docId, collection, priorAt, writtenAt, gate3);
     }
 

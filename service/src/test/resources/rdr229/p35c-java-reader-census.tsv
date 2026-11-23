@@ -291,11 +291,11 @@ service/src/main/java/dev/nexus/service/db/ManifestForeignCollectionReads.java	9
 service/src/main/java/dev/nexus/service/db/ManifestForeignCollectionReads.java	93	catalog_documents	physical_collection	group_by	alias	-
 service/src/main/java/dev/nexus/service/db/ManifestReplace.java	127	catalog_document_chunks	collection	select	jooq	-
 service/src/main/java/dev/nexus/service/db/ManifestReplace.java	139	catalog_document_chunks	collection	result	jooq	-
-service/src/main/java/dev/nexus/service/db/ManifestReplace.java	183	chunks	collection	where	jooq	-
-service/src/main/java/dev/nexus/service/db/ManifestReplace.java	184	chunks	collection	order_by	jooq	-
-service/src/main/java/dev/nexus/service/db/ManifestReplace.java	271	catalog_document_chunks	collection	set_value	literal	-
-service/src/main/java/dev/nexus/service/db/ManifestReplace.java	286	chunk_orphaned_at	collection	expr	jooq	-
-service/src/main/java/dev/nexus/service/db/ManifestReplace.java	288	chunk_orphaned_at	collection	order_by	jooq	-
+service/src/main/java/dev/nexus/service/db/ManifestReplace.java	186	chunks	collection	where	jooq	-
+service/src/main/java/dev/nexus/service/db/ManifestReplace.java	187	chunks	collection	order_by	jooq	-
+service/src/main/java/dev/nexus/service/db/ManifestReplace.java	275	catalog_document_chunks	collection	set_value	literal	-
+service/src/main/java/dev/nexus/service/db/ManifestReplace.java	290	chunk_orphaned_at	collection	expr	jooq	-
+service/src/main/java/dev/nexus/service/db/ManifestReplace.java	292	chunk_orphaned_at	collection	order_by	jooq	-
 service/src/main/java/dev/nexus/service/db/PdfStubMetadataReads.java	159	catalog_collections	name	select	alias	-
 service/src/main/java/dev/nexus/service/db/PdfStubMetadataReads.java	161	catalog_collections	name	order_by	alias	-
 service/src/main/java/dev/nexus/service/db/PdfStubMetadataReads.java	186	catalog_document_chunks	collection	join_on	alias	-

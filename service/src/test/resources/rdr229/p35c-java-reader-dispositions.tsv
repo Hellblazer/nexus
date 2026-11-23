@@ -83,6 +83,13 @@ java	db/DepartedWriterSpans.java catalog_document_chunks where	collection	id
 java	db/DepartedWriterSpans.java chunks join_on	collection	id	
 java	db/DepartedWriterSpans.java chunks set_value	collection	id	
 java	db/DepartedWriterSpans.java chunks where	collection	id	
+java	db/ManifestReplace.java catalog_document_chunks result	collection	id	from gate 3 the stored row is compared and cleared by its id; the label shown is the caller's
+java	db/ManifestReplace.java catalog_document_chunks select	collection	id	from gate 3 the stored row is compared and cleared by its id; the label shown is the caller's
+java	db/ManifestReplace.java catalog_document_chunks set_value	collection	both	keys the chunk rows and orphan records by their stored name columns, which a rename leaves equal on both sides until P4.1 drops them; the write sets the name beside the id
+java	db/ManifestReplace.java chunk_orphaned_at expr	collection	both	keys the chunk rows and orphan records by their stored name columns, which a rename leaves equal on both sides until P4.1 drops them; the write sets the name beside the id
+java	db/ManifestReplace.java chunk_orphaned_at order_by	collection	both	keys the chunk rows and orphan records by their stored name columns, which a rename leaves equal on both sides until P4.1 drops them; the write sets the name beside the id
+java	db/ManifestReplace.java chunks order_by	collection	both	keys the chunk rows and orphan records by their stored name columns, which a rename leaves equal on both sides until P4.1 drops them; the write sets the name beside the id
+java	db/ManifestReplace.java chunks where	collection	both	keys the chunk rows and orphan records by their stored name columns, which a rename leaves equal on both sides until P4.1 drops them; the write sets the name beside the id
 java	db/QuarantineOrigin.java catalog_collections expr	name	label-kept	resolves the origin, sibling or quarantine collection's label to its registry row
 java	db/QuarantineOrigin.java catalog_collections expr	superseded_by	id	
 java	db/QuarantineOrigin.java catalog_collections select	name	label-kept	resolves the origin, sibling or quarantine collection's label to its registry row

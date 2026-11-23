@@ -105,6 +105,7 @@ class Rdr229P35cCollectionRenameReviveTest {
             PgContainerHelper.dropConstraint(su, DSL.table(DSL.name(fk.value1(), fk.value2())), fk.value3());
         }
         PgContainerHelper.dropConstraint(su, CATALOG_COLLECTIONS, "catalog_collections_pk");
+        PgContainerHelper.dropConstraint(su, CATALOG_COLLECTIONS, "catalog_collections_tenant_name_model_uq");
     }
 
     @Test

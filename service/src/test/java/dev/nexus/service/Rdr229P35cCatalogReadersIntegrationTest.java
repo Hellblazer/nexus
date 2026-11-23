@@ -93,8 +93,10 @@ class Rdr229P35cCatalogReadersIntegrationTest extends AtomicWriteTestBase {
     private Renamed renamedCollection() throws Exception {
         Fx fx = fixture("rdr");
         String chash = ch("p35c catalog " + seq.incrementAndGet());
-        gatedSvc.writeManyCombined(TENANT, fx.collection(), List.of(chunk(chash, "p35c text " + chash)),
+        var written = gatedSvc.writeManyCombined(TENANT, fx.collection(), List.of(chunk(chash, "p35c text " + chash)),
             List.of(doc(fx.docId(), List.of(row(0, chash)))), null, false, true);
+        assertThat(chunkExists(fx.collection(), chash)).as("fixture: the chunk is stored; " + written.response()).isTrue();
+        assertThat(manifestChashes(fx.docId())).as("fixture: the manifest row is stored; " + written.response()).contains(chash);
         long id = registryId(fx.collection());
         String newLabel = "code__aw" + "rdrnew" + seq.incrementAndGet() + "__minilm-l6-v2-384__v1";
         renameRegistryRow(fx.collection(), newLabel);
