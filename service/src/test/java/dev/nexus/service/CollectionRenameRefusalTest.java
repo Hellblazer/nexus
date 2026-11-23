@@ -422,26 +422,25 @@ class CollectionRenameRefusalTest {
     // ---- the window closed ---------------------------------------------------------------------------------------------
 
     /**
-     * RDR line 2656 (the P3.5 test), second clause, as linda's R-A ruling (2026-11-23) leaves it on this base: from the latch row
-     * with the drop move complete and every P3.5b changeset applied, the {@code rename_refused} refusal does not apply, and the
-     * rename that runs is P3.7's one-row rename. P3.7 is not on this base, so the catalog rename's one-row body is the fail-closed
-     * default: 409 {@code rename_path_mismatch}, nothing renamed (running the name path would rewrite name columns the one-row
-     * regime's keys depend on). This replaces the earlier assertion that this state answered 200 on the name path (a spec change from
-     * the ruling); P3.7's acceptance test covers the real one-row rename.
+     * RDR line 2656 (the P3.5 test), second clause, as linda's R-A ruling (2026-11-23) leaves it: from the latch row with the drop move
+     * complete and every P3.5b changeset applied, the {@code rename_refused} refusal does not apply, and the rename that runs is P3.7's
+     * one-row rename. Before P3.7 the one-row body was the fail-closed default (409 {@code rename_path_mismatch}); P3.7
+     * (nexus-p2m1x.27) wires {@code CollectionOneRowRename} in its place, so the rename answers 200 and moves the registry row only:
+     * the new label holds the same collection_id and the old label is gone, not retired. {@code Rdr229P37RenameAcceptanceTest} covers
+     * the rest of the one-row rename.
      */
     @Test
-    void fromTheRow_withTheWindowClosed_theCatalogRenameFailsClosed() {
+    void fromTheRow_withTheWindowClosed_theCatalogRenameIsTheOneRowRename() {
         fx.gate3.set(true);
         fx.renameWindow.set(Missing.NONE);
         String from = registered("open");
         long id = fx.idOf(from);
         String to = CollectionRouteFixture.label("rr-open-to-" + (n++));
         Resp r = renameByLabel(from, to);
-        assertThat(r.status()).as(r.body()).isEqualTo(409);
-        assertThat(r.reason()).as("not the window refusal: %s", r.body()).isEqualTo("rename_path_mismatch");
-        assertThat(r.json().path("error").asText()).isNotBlank();
-        assertThat(fx.idOf(from)).as("nothing renamed").isEqualTo(id);
-        assertThat(fx.supersededBy(from)).isEqualTo("");
-        assertThat(fx.exists(to)).isFalse();
+        assertThat(r.status()).as("not the window refusal, not rename_path_mismatch: " + r.body()).isEqualTo(200);
+        assertThat(r.json().path("collection_id").asLong()).as("the answer names the renamed row's id").isEqualTo(id);
+        assertThat(r.json().path("ids_stable").asBoolean()).isTrue();
+        assertThat(fx.idOf(to)).as("one-row: the new label holds the same collection_id").isEqualTo(id);
+        assertThat(fx.exists(from)).as("the old label is gone, not left as a tombstone").isFalse();
     }
 }
