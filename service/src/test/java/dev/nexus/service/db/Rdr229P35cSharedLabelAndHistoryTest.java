@@ -102,6 +102,50 @@ class Rdr229P35cSharedLabelAndHistoryTest extends AtomicWriteTestBase {
         return id;
     }
 
+    // ---- Q3, repointTombstonesNaming: only a tombstone whose id is NULL or dangling (linda 2026-11-23) ----------------------
+
+    private long supersededById(long tombstone) throws Exception {
+        return su(d -> d.select(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID).from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(tombstone))
+            .fetchOne(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID));
+    }
+
+    private int repointNaming(String name) throws Exception {
+        return su(d -> d.transactionResult(cfg -> CollectionTombstones.repointTombstonesNaming(DSL.using(cfg), TENANT, List.of(name))));
+    }
+
+    /** (a) A is renamed (one row) to B, and a tombstone T still says successor "A" while its id names the row now called B: a new collection that lands as A leaves T on B. */
+    @Test
+    void aTombstoneWhoseIdNamesALiveRowIsNotRepointedWhenANewCollectionTakesTheLabelItsTextNames() throws Exception {
+        String a = label("rp-a"), b = label("rp-b");
+        long aId = registerRow(a, "", null, "rp-owner-a");
+        su(d -> d.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.NAME, b)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(aId)).execute());
+        long t = registerRow(label("rp-t"), a, aId, "rp-owner-t");
+        long newA = registerRow(a, "", null, "rp-owner-new");
+
+        int moved = repointNaming(a);
+
+        assertThat(supersededById(t)).as("T's id names the live row now called B: it stays there").isEqualTo(aId).isNotEqualTo(newA);
+        assertThat(moved).as("no tombstone was moved").isZero();
+    }
+
+    /** (b) T's successor was deleted (its id names no registry row); a new X lands: T is repointed to it. */
+    @Test
+    void aTombstoneWhoseSuccessorWasDeletedIsRepointedWhenANewCollectionLandsUnderThatLabel() throws Exception {
+        String x = label("rp-x");
+        long oldX = registerRow(x, "", null, "rp-owner-x");
+        long t = registerRow(label("rp-t2"), x, oldX, "rp-owner-t2");
+        su(d -> d.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT))
+            .and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(oldX)).execute());
+        long newX = registerRow(x, "", null, "rp-owner-x2");
+
+        int moved = repointNaming(x);
+
+        assertThat(supersededById(t)).as("the dangling id is repointed to the row that landed").isEqualTo(newX);
+        assertThat(moved).isEqualTo(1);
+    }
+
     // ---- Q3: a label shared by a live row and a tombstone --------------------------------------------------------------
 
     @Test

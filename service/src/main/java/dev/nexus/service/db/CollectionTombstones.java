@@ -163,6 +163,10 @@ public final class CollectionTombstones {
      * stale one). Run in the registration's own transaction, after the insert, so the invariant (a row of the named
      * successor exists, so its id) holds at commit. A tombstone that already has the right id is not written.
      *
+     * <p>Only a tombstone whose {@code superseded_by_id} is NULL or dangling (no LIVE registry row holds it) is re-pointed (linda
+     * 2026-11-23): one whose id still names a live collection already has a true successor, whatever its text says, so a label that
+     * passes to a new collection never steals the tombstones of the one it left.
+     *
      * @return the number of tombstones re-pointed
      */
     static int repointTombstonesNaming(DSLContext ctx, String tenant, java.util.Collection<String> names) {
@@ -171,10 +175,14 @@ public final class CollectionTombstones {
         Field<Long> registered = DSL.field(DSL.select(s.COLLECTION_ID).from(s)
             .where(s.TENANT_ID.eq(CATALOG_COLLECTIONS.TENANT_ID)).and(s.NAME.eq(CATALOG_COLLECTIONS.SUPERSEDED_BY))
             .orderBy(CollectionIdReads.liveFirst(s)).limit(1));  // live first, else the newest tombstone
+        var held = CATALOG_COLLECTIONS.as("heldsucc");
         return ctx.update(CATALOG_COLLECTIONS)
             .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, registered)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.SUPERSEDED_BY.in(names))
             .and(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.isDistinctFrom(registered))
+            .and(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.isNull().or(DSL.notExists(DSL.selectOne().from(held)
+                .where(held.TENANT_ID.eq(tenant)).and(held.COLLECTION_ID.eq(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID))
+                .and(held.SUPERSEDED_BY.eq("")).and(held.SUPERSEDED_BY_ID.isNull()))))
             .execute();
     }
 
