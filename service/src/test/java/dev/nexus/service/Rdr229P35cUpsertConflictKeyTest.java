@@ -64,7 +64,7 @@ import java.util.stream.Stream;
  * }</pre>
  *
  * <p><b>Design point the manifest subject surfaces.</b> A manifest row references its chunk by the name foreign key {@code
- * fk_catalog_chunks_chunk} until P3.7 drops it. The id-key arm updates the row that names A and carries B's id; the manifest row
+ * fk_catalog_chunks_chunk} until P4.1 drops it (P3.7 keeps it). The id-key arm updates the row that names A and carries B's id; the manifest row
  * the same write inserts names B. So the id-key arm's DO UPDATE must also set {@code collection} to the writer's name, or the
  * foreign key refuses the manifest row and the write fails. The id-key test requires the write to succeed, which holds only if
  * the arm does that. (The other two upserts are free to do the same; no test asserts the surviving name.)
