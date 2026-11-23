@@ -15,12 +15,16 @@ import static org.assertj.core.api.Assertions.assertThat;
 import dev.nexus.service.CollectionRouteFixture.Resp;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.CollectionRegistry;
+import dev.nexus.service.datamove.IdUniqueIndexPass;
+import org.jooq.Field;
 import org.jooq.impl.DSL;
+
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.LongFunction;
 
@@ -49,7 +53,27 @@ class Rdr229P35cIdAddressedRenameRaceTest {
     @BeforeAll
     void startAll() throws Exception {
         fx = new CollectionRouteFixture();
+        // P3.4's arbiter indexes exist before any latched upsert: the id arbiter needs them
+        for (String t : List.of("taxonomy_meta", "document_aspects", "topics")) {
+            ensureArbiterIndex(t);
+        }
         fx.gate3.set(true);
+    }
+
+    /** The arbiter index P3.4's pass builds for {@code table}, created from its spec if not there yet. */
+    private void ensureArbiterIndex(String table) {
+        var spec = IdUniqueIndexPass.SPECS.stream().filter(x -> x.table().equals(table) && x.unique()).findFirst().orElseThrow();
+        List<Field<?>> cols = java.util.Arrays.stream(spec.columns().split(",\\s*")).<Field<?>>map(c -> DSL.field(DSL.name(c))).toList();
+        fx.asSuperuser(ctx -> {
+            var step = ctx.createUniqueIndexIfNotExists(spec.index()).on(DSL.table(DSL.name("nexus", table)), cols);
+            if (spec.predicate() != null) {
+                assertThat(table).as("the only partial arbiter this test builds is topics'").isEqualTo("topics");
+                step.where(TOPICS.PARENT_ID.isNull()).execute();
+            } else {
+                step.execute();
+            }
+            return null;
+        });
     }
 
     @AfterAll
