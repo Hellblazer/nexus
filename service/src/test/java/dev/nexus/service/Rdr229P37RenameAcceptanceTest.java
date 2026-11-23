@@ -7,6 +7,7 @@ import static dev.nexus.service.ByIdRestoreSupport.registryIds;
 import static dev.nexus.service.ByIdRestoreSupport.rowsByCollection;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import org.junit.jupiter.api.AfterAll;
@@ -250,7 +251,12 @@ class Rdr229P37RenameAcceptanceTest {
         assertNotRenamed(w, "(the model token differs)");
     }
 
-    /** (iii) A rename onto a live target is refused, as on the name path. */
+    /**
+     * (iii) A rename onto a live target is refused, as on the name path. The repository is called directly, wired as the engine wires it (the one-row
+     * rename behind a ready RenameGuard, gate 3 held): the route's handler answers a live target with the same text before the repository is reached
+     * (folio's r3 review F1), so only a direct call exercises the repository's own check. The exact message is the shared check's: the one-row body's
+     * belt ("it became live while this rename ran") would refuse too, so the text tells the two apart.
+     */
     @Test
     void sharedCheck_aRenameOntoALiveTargetIsRefused() throws Exception {
         var w = seeded("rl");
@@ -258,11 +264,13 @@ class Rdr229P37RenameAcceptanceTest {
             PgContainerHelper.insertCollection(ctx, w.tenant(), w.b());
             return null;
         });
+        var repo = new dev.nexus.service.db.CatalogRepository(new dev.nexus.service.db.TenantScope(env.ds), () -> true,
+            new dev.nexus.service.db.RenameGuard(dev.nexus.service.datamove.RenameReadiness.ready(), new dev.nexus.service.db.CollectionOneRowRename()));
 
-        var r = env.callJson("POST", "/v1/catalog/collections/rename", w.token(), "{\"old_name\":\"" + w.a() + "\",\"new_name\":\"" + w.b() + "\"}");
-
-        assertThat(r.statusCode()).as("refused: " + r.body()).isEqualTo(409);
-        assertThat(r.body()).as("the live-target refusal, not a unique violation (23505 also answers 409)").contains("already exists");
+        assertThatThrownBy(() -> repo.renameCollectionOutcome(w.tenant(), w.a(), w.b(), null, null, null, null))
+            .as("the repository's own live-target refusal")
+            .isInstanceOf(dev.nexus.service.db.CatalogRepository.CollectionMergeRefused.class)
+            .hasMessage("target collection already exists: " + w.b());
         assertThat(env.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, w.tenant(), w.a()))).as("the source is still registered").isNotNull();
     }
 
