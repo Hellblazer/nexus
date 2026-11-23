@@ -61,7 +61,34 @@ final class CollectionRouteFixture implements AutoCloseable {
     final String token;
     static final ObjectMapper MAPPER = new ObjectMapper();
 
-    final AtomicBoolean gate3 = new AtomicBoolean(false);
+    final Gate3Signal gate3 = new Gate3Signal();
+
+    /**
+     * The gate-3 signal as Main builds it (linda 2026-11-23): the LATCHED value, monotone, read on each call. {@link #sample} is the
+     * completion check's sample (a gate 3 that holds latches; one that does not changes nothing), and {@link #newBoot} is a restart
+     * on an install whose latch row is, or is not, there; {@link #set} is {@code newBoot}, for the tests that move between installs.
+     */
+    static final class Gate3Signal implements Gate3 {
+        private final AtomicBoolean latched = new AtomicBoolean(false);
+
+        @Override public boolean holds() {
+            return latched.get();
+        }
+
+        void sample(boolean liveGate3) {
+            if (liveGate3) {
+                latched.set(true);
+            }
+        }
+
+        void newBoot(boolean latchedAtBoot) {
+            latched.set(latchedAtBoot);
+        }
+
+        void set(boolean latchedAtBoot) {
+            newBoot(latchedAtBoot);
+        }
+    }
     final AtomicReference<RenameReadiness.Missing> renameWindow = new AtomicReference<>(RenameReadiness.Missing.NONE);
 
     final PostgreSQLContainer<?> pg;
@@ -157,7 +184,7 @@ final class CollectionRouteFixture implements AutoCloseable {
         svcDs = new HikariDataSource(cfg);
         var embedder = new PgVectorRepositoryContractTest.FakeEmbedder(384);
         var repo = new PgVectorRepository(new TenantScope(svcDs), embedder, embedder);
-        Gate3 gate = gate3::get;
+        Gate3 gate = gate3;
         RenameReadiness readiness = renameWindow::get;
         EmbedderRouter router = localEmbed ? new EmbedderRouter(new MiniEmbedder(), "document") : null;
         java.util.function.Function<String, String> env = localEmbed
