@@ -11424,7 +11424,6 @@ public final class CatalogRepository {
         // vectors-021-3's chunk-locking trigger; whole transaction retried on 40P01. `counts` is
         // built inside the lambda, so each attempt starts from an empty map.
         return renameGuard.runRename(work -> manifestWriteTxn(tenant, "catalog.renameCollection " + oldName, work), ctx -> {
-            CollectionTombstones.lockRows(ctx, tenant, oldName, newName);   // live at commit: both rows FOR UPDATE, before any chunk or manifest work
             Map<String, Integer> counts = new LinkedHashMap<>(); oneRowOut[0] = null;   // a retried attempt decides afresh
             // nexus-11gh6 rev 2 §3.2 (Hal Q1: gate the Java collection-move
             // paths in this bead). The rename below bulk-repoints
@@ -11439,6 +11438,7 @@ public final class CatalogRepository {
             for (String c : java.util.stream.Stream.of(oldName, newName).sorted().distinct().toList()) {
                 acquireSweepGateShared(ctx, tenant, c);
             }
+            CollectionTombstones.lockRows(ctx, tenant, oldName, newName);   // live at commit: after the gates, as a writer goes gate then key share (no cycle with a sweep)
             // RDR-210 Phase 6 Step 2 (bead nexus-f98bg, ruling 4): a name a re-embed job in a lock state is moving
             // documents out of or into is not renamed underneath it. Read under the sweep gates above, in the
             // rename's own transaction.
