@@ -74,7 +74,7 @@ catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CatalogRe
 catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	13945	insert	jooq	superseded_by	superseded_by_id	yes		verb	importCollectionsBatchReport
 catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	14040	insert	jooq	superseded_by	superseded_by_id	yes		verb	doImportCollection
 catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionMint.java	173	insert	jooq	superseded_by	superseded_by_id	yes		unproven	mint
-catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionMint.java	254	update	jooq	-	superseded_by_id	yes		unproven	withDisplayName
+catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionMint.java	257	update	jooq	-	superseded_by_id	yes		unproven	withDisplayName
 catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionRename.java	174	insert	jooq	superseded_by	superseded_by_id	yes		unproven	writeSuccessor
 catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionTombstones.java	125	update	jooq	superseded_by	superseded_by_id	yes		unproven	casSupersede
 catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionTombstones.java	157	update	jooq	superseded_by	superseded_by_id	yes		unproven	stampTombstone
