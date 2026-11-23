@@ -530,6 +530,8 @@ public final class CollectionRegistry {
         }
         return Optional.ofNullable(ctx.select(CATALOG_COLLECTIONS.LIFECYCLE_STATE).from(CATALOG_COLLECTIONS)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(collection)))
+            .orderBy(DSL.when(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("").and(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.isNull()), 1).otherwise(0).desc(),
+                CATALOG_COLLECTIONS.COLLECTION_ID.desc()).limit(1)
             .fetchOne(CATALOG_COLLECTIONS.LIFECYCLE_STATE));
     }
 

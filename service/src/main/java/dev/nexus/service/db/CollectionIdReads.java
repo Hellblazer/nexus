@@ -29,8 +29,13 @@ import java.util.Collection;
  * (its name column held {@code ''}) keeps no label either: {@link #labelOf} gives {@code ''} for it, as the name column did.
  *
  * <p><b>Which registry row a label names.</b> The live one ({@code superseded_by_id IS NULL}) when the label has one, else the
- * tombstone that holds it. After P3.6's live-label index a label may be held by a tombstone beside a live row; the reader of that
- * label means the live collection.
+ * newest tombstone that holds it ({@code ORDER BY (superseded_by_id IS NOT NULL), collection_id DESC}). After P3.6's live-label
+ * index a label may be held by a tombstone beside a live row; the reader of that label means the live collection.
+ * {@link #is} and {@link #in} agree on that one row per label.
+ *
+ * <p><b>The gate is the latched, monotone value</b> (linda 2026-11-23): once it holds on an install it never returns to false, so
+ * a clause built from it does not have to survive a return to the names. It is still read on every call, never cached here, so
+ * the switch needs no restart.
  */
 final class CollectionIdReads {
 
@@ -38,8 +43,8 @@ final class CollectionIdReads {
     }
 
     /**
-     * A scalar subselect giving the registry id of {@code label} in {@code tenant}: the live row's, else a tombstone's; NULL for
-     * {@code ''}, {@code null} or a label with no row. Uncorrelated, so the planner runs it once.
+     * A scalar subselect giving the registry id of {@code label} in {@code tenant}: the live row's, else the newest tombstone's; NULL
+     * for {@code ''}, {@code null} or a label with no row. Uncorrelated, so the planner runs it once.
      */
     static Field<Long> idOfLabel(String tenant, String label) {
         if (label == null || label.isEmpty()) {
@@ -48,8 +53,18 @@ final class CollectionIdReads {
         var c = CATALOG_COLLECTIONS.as("cir");
         return DSL.field(DSL.select(c.COLLECTION_ID).from(c)
             .where(c.TENANT_ID.eq(tenant).and(c.NAME.eq(label)))
-            .orderBy(c.SUPERSEDED_BY_ID.asc().nullsFirst())
+            .orderBy(liveFirst(c))
             .limit(1));
+    }
+
+    /** The order that picks one registry row of a label: the live one, else the newest tombstone (use with {@code limit(1)}). */
+    static java.util.List<org.jooq.OrderField<?>> liveFirst() {
+        return liveFirst(CATALOG_COLLECTIONS);
+    }
+
+    /** {@link #liveFirst()} over an alias of the registry. Live means not superseded ({@code superseded_by = '' AND superseded_by_id IS NULL}), not {@code lifecycle_state}. */
+    static java.util.List<org.jooq.OrderField<?>> liveFirst(dev.nexus.service.jooq.nexus.tables.CatalogCollections t) {
+        return java.util.List.of(DSL.when(t.SUPERSEDED_BY.eq("").and(t.SUPERSEDED_BY_ID.isNull()), 1).otherwise(0).desc(), t.COLLECTION_ID.desc());
     }
 
     /** {@code nameCol = label} before gate 3; {@code idCol = <the registry id of label>} from gate 3. */
@@ -58,16 +73,20 @@ final class CollectionIdReads {
     }
 
     /**
-     * {@code nameCol IN labels} before gate 3; {@code idCol IN (the registry ids of labels)} from gate 3 (every row holding one of
-     * the labels, live or tombstone). An empty list matches nothing, either way.
+     * {@code nameCol IN labels} before gate 3; {@code idCol IN (the registry id of each label)} from gate 3, the one row per label
+     * that {@link #is} resolves. An empty list matches nothing, either way.
      */
     static Condition in(Gate3 gate3, String tenant, Field<String> nameCol, Field<Long> idCol, Collection<String> labels) {
         if (!gate3.holds()) {
             return nameCol.in(labels);
         }
         var c = CATALOG_COLLECTIONS.as("cir");
-        return idCol.in(DSL.select(c.COLLECTION_ID).from(c)
-            .where(c.TENANT_ID.eq(tenant).and(c.NAME.in(labels))));
+        var order = new java.util.ArrayList<org.jooq.OrderField<?>>();
+        order.add(c.NAME.asc());
+        order.addAll(liveFirst(c));
+        return idCol.in(DSL.select(c.COLLECTION_ID).distinctOn(c.NAME).from(c)
+            .where(c.TENANT_ID.eq(tenant).and(c.NAME.in(labels)))
+            .orderBy(order));
     }
 
     /** The label a stored row shows: its name column before gate 3; the registry's current name of its id from gate 3 ({@code ''} for no id). */
@@ -96,11 +115,20 @@ final class CollectionIdReads {
     }
 
     /**
-     * The successor a tombstone names: its {@code superseded_by} before gate 3; the registry's current name of its
-     * {@code superseded_by_id} from gate 3 ({@code ''} for a live row).
+     * The {@code superseded_by} a registry row shows on the wire (RDR-229 Q4: the Phase 3 wire stays byte-identical). Before gate 3
+     * the text column. From gate 3 a tombstone whose successor still exists shows that successor's current label; a live row
+     * ({@code ''}) and a retired tombstone with no successor (its {@code superseded_by_id} is its own {@code collection_id}) show the
+     * stored text, exactly as before.
      */
-    static Field<String> successorLabel(Gate3 gate3, Field<String> tenantCol, Field<String> supersededBy, Field<Long> supersededById) {
-        return labelOf(gate3, tenantCol, supersededBy, supersededById);
+    static Field<String> successor(Gate3 gate3) {
+        var t = CATALOG_COLLECTIONS;
+        if (!gate3.holds()) {
+            return t.SUPERSEDED_BY;
+        }
+        var c = CATALOG_COLLECTIONS.as("cis");
+        return DSL.when(t.SUPERSEDED_BY_ID.isNull().or(t.SUPERSEDED_BY_ID.eq(t.COLLECTION_ID)), t.SUPERSEDED_BY)
+            .otherwise(DSL.coalesce(DSL.field(DSL.select(c.NAME).from(c)
+                .where(c.TENANT_ID.eq(t.TENANT_ID).and(c.COLLECTION_ID.eq(t.SUPERSEDED_BY_ID)))), t.SUPERSEDED_BY));
     }
 
     /**
@@ -118,7 +146,9 @@ final class CollectionIdReads {
     /**
      * A history table's rows of the collection {@code label} ({@code relevance_log}, {@code search_telemetry}, {@code hook_failures},
      * {@code gc_audit}): their id column is nullable and no stamp fills it on an old row (p31-checks kind HISTORY). Before gate 3 the
-     * name column; from gate 3 the row's id, or, for a row with no id, its name column. An empty or null label matches nothing.
+     * name column. From gate 3 (linda's history ruling): the row's id; and a row whose collection is gone (an id no live registry row
+     * holds, its name the label) so a deleted collection's audit trail still lists by its name. A NULL id never resolves to a
+     * collection: those rows are {@link #historyPreId}'s. An empty or null label matches nothing.
      */
     static Condition historyIs(Gate3 gate3, String tenant, Field<String> nameCol, Field<Long> idCol, String label) {
         if (!gate3.holds()) {
@@ -127,7 +157,19 @@ final class CollectionIdReads {
         if (label == null || label.isEmpty()) {
             return DSL.falseCondition();
         }
-        return idCol.eq(idOfLabel(tenant, label)).or(idCol.isNull().and(nameCol.eq(label)));
+        var c = CATALOG_COLLECTIONS.as("cihx");
+        Condition noLiveHolder = DSL.notExists(DSL.selectOne().from(c)
+            .where(c.TENANT_ID.eq(tenant).and(c.COLLECTION_ID.eq(idCol)).and(c.SUPERSEDED_BY_ID.isNull())));
+        return idCol.eq(idOfLabel(tenant, label)).or(idCol.isNotNull().and(nameCol.eq(label)).and(noLiveHolder));
+    }
+
+    /**
+     * The rows a history surface shows apart, marked: those with no id ({@code NULL}) written under {@code label}. From gate 3 only;
+     * they are pre-id history, recorded under that label, which may belong to a collection since renamed (linda's history ruling).
+     * Nothing attributes them to the label's current holder and nothing moves, counts or deletes by them.
+     */
+    static Condition historyPreId(Gate3 gate3, Field<String> nameCol, Field<Long> idCol, String label) {
+        return !gate3.holds() || label == null || label.isEmpty() ? DSL.falseCondition() : idCol.isNull().and(nameCol.eq(label));
     }
 
     /** A history row's collection as a label: the registry's current name of its id, else its own name column. */

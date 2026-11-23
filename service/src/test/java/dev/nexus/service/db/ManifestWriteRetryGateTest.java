@@ -98,6 +98,8 @@ class ManifestWriteRetryGateTest {
     private static final Map<String, String> READ_ONLY_REFERENCES = new TreeMap<>(Map.ofEntries(
         Map.entry("PgVectorRepository", "ownership, manifest and source_uri lookups (SELECT ... FROM catalog_document_chunks) and prose;"
             + " it writes chunks, never manifest rows"),
+        Map.entry("CollectionIdReads", "RDR-229 P3.5c: the catalog readers' name-or-id clauses and label expressions over the manifest's"
+            + " collection columns (conditions and select fields); it executes no statement and writes no row"),
         Map.entry("IdUniqueIndexPass", "RDR-229 P3.4: names catalog_document_chunks only as the table of a supporting index it builds"
             + " (CREATE INDEX CONCURRENTLY idx_catalog_chunks_collection_id); reads the catalog, writes no row"),
         Map.entry("LegacyChunkSurvey", "nexus-f3yqd: reads manifest rows to find a chunk's owners and to classify a manifest row by its chunk;"

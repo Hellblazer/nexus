@@ -179,6 +179,9 @@ public final class QuarantineOrigin {
      *                   shares the origin's attributes once its row is written), or {@code null}
      */
     private static Condition rowsOf(String tenant, String origin, String exceptName, Gate3 gate3) {
+        // RELIANCE (RDR-229 P3.5c): the origin is found by the {@code origin_collection} TAG, a label, and rowsOf never reads
+        // {@code origin_collection_id}. The tag stays current only because the rename calls retagRowsOf (P3.7's one-row rename, wren's
+        // CollectionOneRowRename, must keep calling it); a rename that skipped it would strand the tagged rows under the old label.
         var sib = CATALOG_COLLECTIONS.as("quarantine_sibling");
         var org = CATALOG_COLLECTIONS.as("quarantine_origin");
         var twin = CATALOG_COLLECTIONS.as("quarantine_twin");

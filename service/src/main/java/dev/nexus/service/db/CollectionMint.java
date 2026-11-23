@@ -556,12 +556,6 @@ public final class CollectionMint {
      * superseded or quarantined holds no live tuple and is not checked.
      */
     static void refuseHeldTuple(DSLContext ctx, String tenant, String name, String contentType, String owner, String model,
-                                String version, String lifecycleState, String supersededBy) {
-        refuseHeldTuple(ctx, tenant, name, contentType, owner, model, version, lifecycleState, supersededBy, Gate3.never());
-    }
-
-    /** {@link #refuseHeldTuple(DSLContext, String, String, String, String, String, String, String, String)} reading the id from gate 3 (RDR-229 P3.5c). */
-    static void refuseHeldTuple(DSLContext ctx, String tenant, String name, String contentType, String owner, String model,
                                 String version, String lifecycleState, String supersededBy, Gate3 gate3) {
         if (!"".equals(supersededBy) || "quarantine".equals(lifecycleState)) {
             return;
@@ -576,13 +570,19 @@ public final class CollectionMint {
     }
 
     /**
-     * Whether the registry's name primary key {@code catalog_collections_pk} still exists. While it does, a retired label still
-     * conflicts on it and a write to that label revives the tombstone; once P3.7/P4.1 drop it, only the live-label index
-     * arbitrates (RDR-229 G15) and a label held by a tombstone alone is written as a new live row.
+     * Whether a unique, non-partial index on exactly {@code (tenant_id, name)} of the registry still exists (the name primary key,
+     * today {@code catalog_collections_pk}). It is probed by its columns, not its name: P4.1's key swap may re-create a key under
+     * the same name on other columns. While one exists, a retired label still conflicts on it and a write to that label revives the
+     * tombstone; once it is gone (P4.1), only the live-label index arbitrates (RDR-229 G15) and a label held by a tombstone alone
+     * is written as a new live row.
      */
     static boolean nameKeyExists(DSLContext ctx) {
-        return ctx.fetchExists(ctx.selectOne().where(
-            DSL.function("to_regclass", Object.class, DSL.val("nexus.catalog_collections_pk")).isNotNull()));
+        var def = DSL.field(DSL.name("pg_catalog", "pg_indexes", "indexdef"), String.class);
+        return ctx.select(def).from(DSL.table(DSL.name("pg_catalog", "pg_indexes")))
+            .where(DSL.field(DSL.name("pg_catalog", "pg_indexes", "schemaname"), String.class).eq("nexus"))
+            .and(DSL.field(DSL.name("pg_catalog", "pg_indexes", "tablename"), String.class).eq("catalog_collections"))
+            .fetch(def).stream().anyMatch(d -> d.startsWith("CREATE UNIQUE INDEX") && !d.contains(" WHERE ")
+                && d.endsWith("USING btree (tenant_id, name)"));
     }
 
     /** Whether the partial UNIQUE index of the live tuple exists (changeset collections-001-2). */

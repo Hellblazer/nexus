@@ -36,7 +36,7 @@ import java.util.stream.Stream;
 /**
  * RDR-229 P3.5c (nexus-p2m1x.25), test first: the engine's three upserts that conflict on a collection name key take the id key
  * as their conflict target from gate 3 on the install (RDR item 6, "Readers during the stamp"; P3.5c step), and go back to the
- * name key when gate 3 stops holding (linda 2026-11-22).
+ * name key never: gate 3 is the latched, monotone value (linda 2026-11-23), so there is no return to the name key.
  *
  * <p>The three upserts, each a subject of every test below:
  * <ul>
@@ -51,7 +51,7 @@ import java.util.stream.Stream;
  * </ul>
  * From gate 3 each conflicts on the id key, {@code (tenant_id, collection_id, chash | topic_id, embedding_model)}: a write that
  * matches an existing row by {@code collection_id} under a different name updates that row; a second row for one collection id
- * is never inserted. When gate 3 stops holding (an id index went INVALID) the next write arbitrates on the name key again.
+ * is never inserted. Gate 3 never stops holding once latched, so no test returns a write to the name key.
  *
  * <p><b>This file does not compile until P3.5c adds the constructors below</b> (accepted on this feature branch: they stay red
  * until the code exists). Every call that takes a {@link Gate3} is in one of the three static factories at the foot of the
@@ -72,10 +72,10 @@ import java.util.stream.Stream;
  * <p>Fixture. The state is the one a name-path rename leaves in the window the RDR names: the registry holds two names A and B,
  * B carries id Y, and a stored row names A (so the name foreign key holds) and id Y. A write for B resolves to Y and finds that
  * row by the id key only. The id unique key (P3.3b/P3.3c build it per leaf; this tree has neither) is created by the id-key and
- * flip tests over the partitioned parent and dropped again, so the guards keep the name key alone as their arbiter.
+ * id-key tests over the partitioned parent and dropped again, so the guards keep the name key alone as their arbiter.
  *
  * <p>Tests: guards (pass once the constructors exist, and the name key is today's behaviour), id-key (fail until the conflict
- * target moves), flip (gate 3 true, then false: the second write must arbitrate as the guard does).
+ * target moves), (no flip: the gate is monotone).
  */
 class Rdr229P35cUpsertConflictKeyTest extends AtomicWriteTestBase {
 
@@ -336,56 +336,8 @@ class Rdr229P35cUpsertConflictKeyTest extends AtomicWriteTestBase {
         assertThat(rows.get(0).getValue()).as("and that row took the write").isEqualTo("replacement text");
     }
 
-    // ---- the flip: gate 3 holds, then stops holding ------------------------------------------------------------
-
-    /**
-     * FAILS until the conflict target moves and reads the gate on every write. A {@link Gate3} backed by an {@link AtomicBoolean}:
-     * with it true a write goes to the id key (as above); set false (an id index went INVALID) the next write arbitrates on the
-     * name key again, exactly as the guards do. Both keys exist, so two writes tell the keys apart:
-     * <ul>
-     *   <li>a write whose name matches a row is a name-key conflict: that row is updated, one row remains;</li>
-     *   <li>a write whose id matches a row named otherwise is NOT matched by the id key any more: the row that names A keeps
-     *       its seed text (the write inserts a second row, which the live id unique key refuses, or is arbitrated by the name
-     *       key alone; either way the id key did not update A's row).</li>
-     * </ul>
-     */
-    @ParameterizedTest
-    @MethodSource("upserts")
-    void whenGate3StopsHoldingTheNextWriteArbitratesOnTheNameKeyAgain(Upsert u) throws Exception {
-        String a = register("fa");
-        String b = register("fb");
-        Long idOfB = registryId(b);
-        var gate = new AtomicBoolean(true);
-        Gate3 gate3 = gate::get;
-        String byId = u.newKey(), sameName = u.newKey(), idOnlyAfter = u.newKey();
-        try {
-            u.seedNamedAWithIdOfB(a, b, byId, "seed");
-            withIdKeys(() -> {
-                // gate 3 holds: the id key
-                u.write(gate3, b, byId, "id write");
-                assertThat(u.rowsOfId(idOfB, byId)).as("gate 3 true: matched by id, one row").hasSize(1)
-                    .allSatisfy(r -> assertThat(r.getValue()).isEqualTo("id write"));
-
-                // gate 3 stops holding: the name key
-                gate.set(false);
-                u.write(Gate3.never(), b, sameName, "same name v1");   // a row named B, carrying B's id
-                u.write(gate3, b, sameName, "same name v2");
-                assertThat(u.rowsOfId(idOfB, sameName)).as("gate 3 false: matched by the name, one row, updated")
-                    .containsExactly(Map.entry(b, "same name v2"));
-
-                u.seedNamedAWithIdOfB(a, b, idOnlyAfter, "seed after");
-                try {
-                    u.write(gate3, b, idOnlyAfter, "must not match by id");
-                } catch (RuntimeException expectedWhenTheIdKeyRefusesTheSecondRow) {
-                    // the name key finds no row, so the INSERT meets the id unique key: 23505, the statement rolls back
-                }
-                assertThat(u.rowsOfId(idOfB, idOnlyAfter)).as("gate 3 false: the id key no longer updates the row that names A")
-                    .contains(Map.entry(a, "seed after"));
-            });
-        } finally {
-            u.delete(byId);
-            u.delete(sameName);
-            u.delete(idOnlyAfter);
-        }
-    }
+    // ---- no flip back: gate 3 is the LATCHED value (linda 2026-11-23) -----------------------------------------------
+    //
+    // It never returns to false once it holds, so no write returns to the name key. That the latched value stays true while the
+    // live gate 3 goes false is pinned by PciIdGate3IntegrationTest#gate3Latches_andStaysLatchedWhileTheLiveGate3GoesFalseOnAnInvalidIdIndex_andANewReporterReadsItAgain.
 }

@@ -103,7 +103,7 @@ class Rdr229P31ChunkSideWritersTest extends AtomicWriteTestBase {
         unstamp(sibling);
         assertThat(row(sibling, hex).collectionId()).as("fixture: unstamped").isNull();
 
-        int n = tenantScope.withTenant(T, ctx -> QuarantineOrigin.retagRowsOf(ctx, T, from, to));
+        int n = tenantScope.withTenant(T, ctx -> QuarantineOrigin.retagRowsOf(ctx, T, from, to, Gate3.never()));
 
         assertThat(n).as("one row retagged").isEqualTo(1);
         Row after = row(sibling, hex);
@@ -127,7 +127,7 @@ class Rdr229P31ChunkSideWritersTest extends AtomicWriteTestBase {
                 List.of("retag text"), List.of(new float[384]), List.of(Map.of("origin_collection", from)));
         }
 
-        int n = tenantScope.withTenant(T, ctx -> QuarantineOrigin.retagRowsOf(ctx, T, from, to));
+        int n = tenantScope.withTenant(T, ctx -> QuarantineOrigin.retagRowsOf(ctx, T, from, to, Gate3.never()));
 
         assertThat(n).isEqualTo(1);
         Row after = row(sibling, hex);

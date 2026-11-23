@@ -36,11 +36,6 @@ public final class CollectionTombstones {
      *
      * @return the number of rows updated (0 means no {@code (tenant, name)} row, or a different target already set)
      */
-    static int supersede(DSLContext ctx, String tenant, String name, String supersededBy, Field<OffsetDateTime> stampedAt) {
-        return supersede(ctx, tenant, name, supersededBy, stampedAt, Gate3.never());
-    }
-
-    /** {@link #supersede(DSLContext, String, String, String, Field)} reading the id from gate 3 (RDR-229 P3.5c). */
     static int supersede(DSLContext ctx, String tenant, String name, String supersededBy, Field<OffsetDateTime> stampedAt,
                          Gate3 gate3) {
         CollectionIds.require(ctx, tenant, supersededBy);
@@ -63,11 +58,6 @@ public final class CollectionTombstones {
      *
      * @return the number of rows updated (0 means no {@code (tenant, fromName)} row, or a different target already set)
      */
-    static int supersede(DSLContext ctx, String tenant, String fromName, String toName, long toId) {
-        return supersede(ctx, tenant, fromName, toName, toId, Gate3.never());
-    }
-
-    /** {@link #supersede(DSLContext, String, String, String, long)} reading the id from gate 3 (RDR-229 P3.5c). */
     static int supersede(DSLContext ctx, String tenant, String fromName, String toName, long toId, Gate3 gate3) {
         return casSupersede(ctx, tenant, fromName, toName, DSL.val(toId), DSL.currentOffsetDateTime(), gate3);
     }
@@ -108,11 +98,13 @@ public final class CollectionTombstones {
         if (supersededBy == null || supersededBy.isEmpty()) return;
         var s = CATALOG_COLLECTIONS.as("succ");
         Field<Long> successor = DSL.field(DSL.select(s.COLLECTION_ID).from(s)
-            .where(s.TENANT_ID.eq(tenant)).and(s.NAME.eq(supersededBy)));
+            .where(s.TENANT_ID.eq(tenant)).and(s.NAME.eq(supersededBy))
+            .orderBy(CollectionIdReads.liveFirst(s)).limit(1));
         ctx.update(CATALOG_COLLECTIONS)
             .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, supersededBy)
             .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, DSL.coalesce(successor, CATALOG_COLLECTIONS.COLLECTION_ID))
-            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(name))
+            // the row just written (live); a tombstone that shares the label is not this one
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(name)).and(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.isNull())
             .execute();
     }
 
@@ -129,11 +121,30 @@ public final class CollectionTombstones {
         var s = CATALOG_COLLECTIONS.as("reg");
         Field<Long> registered = DSL.field(DSL.select(s.COLLECTION_ID).from(s)
             .where(s.TENANT_ID.eq(CATALOG_COLLECTIONS.TENANT_ID)).and(s.NAME.eq(CATALOG_COLLECTIONS.SUPERSEDED_BY))
-            .orderBy(s.SUPERSEDED_BY_ID.asc().nullsFirst()).limit(1));  // the live row of a label (a tombstone may share it, G15)
+            .orderBy(CollectionIdReads.liveFirst(s)).limit(1));  // live first, else the newest tombstone
         return ctx.update(CATALOG_COLLECTIONS)
             .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, registered)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.SUPERSEDED_BY.in(names))
             .and(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.isDistinctFrom(registered))
+            .execute();
+    }
+
+    /**
+     * Re-points every tombstone of {@code tenant} that names {@code fromId} onto {@code toId}: {@code superseded_by_id} becomes
+     * {@code toId} and {@code superseded_by} the registry's label of {@code toId}, in one statement that touches no other column or
+     * row. For P3.7's one-row rename (which replaces {@link #repointTombstonesNaming}, kept until it goes). The column has no foreign
+     * key, only the CHECK {@code (superseded_by = '') = (superseded_by_id IS NULL)}, which the statement keeps true, so the registry
+     * row of {@code fromId} can be deleted before or after the call in one transaction.
+     *
+     * @return the number of tombstones re-pointed
+     */
+    static int repointTombstones(DSLContext ctx, String tenant, long fromId, long toId) {
+        var s = CATALOG_COLLECTIONS.as("rpt");
+        Field<String> label = DSL.field(DSL.select(s.NAME).from(s).where(s.TENANT_ID.eq(tenant)).and(s.COLLECTION_ID.eq(toId)));
+        return ctx.update(CATALOG_COLLECTIONS)
+            .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, toId)
+            .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, label)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.eq(fromId))
             .execute();
     }
 
@@ -148,7 +159,7 @@ public final class CollectionTombstones {
         var s = CATALOG_COLLECTIONS.as("inv");
         Field<Long> successor = DSL.field(DSL.select(s.COLLECTION_ID).from(s)
             .where(s.TENANT_ID.eq(CATALOG_COLLECTIONS.TENANT_ID)).and(s.NAME.eq(CATALOG_COLLECTIONS.SUPERSEDED_BY))
-            .orderBy(s.SUPERSEDED_BY_ID.asc().nullsFirst()).limit(1));
+            .orderBy(CollectionIdReads.liveFirst(s)).limit(1));
         return ctx.fetchCount(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(
             CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("").and(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.isNotNull())
             .or(CATALOG_COLLECTIONS.SUPERSEDED_BY.ne("").and(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.isDistinctFrom(
@@ -168,11 +179,6 @@ public final class CollectionTombstones {
      *
      * @return the number of registry rows deleted
      */
-    static int deleteRegistryRows(DSLContext ctx, String tenant, List<String> names) {
-        return deleteRegistryRows(ctx, tenant, names, Gate3.never());
-    }
-
-    /** {@link #deleteRegistryRows(DSLContext, String, List)}; from gate 3 a survivor is found by the successor's id alone (RDR-229 P3.5c). */
     static int deleteRegistryRows(DSLContext ctx, String tenant, List<String> names, Gate3 gate3) {
         if (names.isEmpty()) return 0;
         var d = CATALOG_COLLECTIONS.as("gone");
