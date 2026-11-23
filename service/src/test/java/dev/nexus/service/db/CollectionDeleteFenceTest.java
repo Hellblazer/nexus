@@ -30,6 +30,7 @@ import java.util.function.Function;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * RDR-229 P3.5a row 14 (nexus-p2m1x.23): the collection delete reads the registry rows of the quarantine siblings whose rows it removes,
@@ -37,6 +38,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@code FOR UPDATE} is mid-flight when the delete starts; the delete must wait on that row BEFORE it removes any of the sibling's rows
  * (its first wait used to be the registry row delete at its very end, after the rows were gone), and then finish with no deadlock and no
  * rows left behind.
+ *
+ * <p>The re-embed jobs (nexus-p2m1x.23, linda's ruling): a delete that arrives through the route refuses while a job in a non-terminal state names the
+ * collection as its source or target, checked under the per-tenant start guard and the origin's registry row, so a job that starts while the
+ * delete runs cannot slip in.
  *
  * <p>The verb is a hand session on its own connection, as {@code GcRegistryRowHeldByVerbTest} does it: {@code FOR UPDATE} on the row is all a
  * verb's first step is. The wait is observed through {@code pg_stat_activity} ({@link PgActivityProbe}), never a sleep.
@@ -201,5 +206,81 @@ class CollectionDeleteFenceTest {
             .and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(siblingId))));
         assertThat(siblingKept).as("the renamed sibling's row was not touched").isTrue();
         assertThat(registered(origin)).isFalse();
+    }
+
+    // ── (b) a delete is refused while a re-embed job holds the collection ───
+
+    private String registeredLabel(String stem) throws Exception {
+        String l = "docs__row14job" + stem + n.incrementAndGet() + "__minilm-l6-v2-384__v1";
+        su(ctx -> { PgContainerHelper.insertCollection(ctx, T, l); return null; });
+        return l;
+    }
+
+    @Test
+    void aDeleteOfTheSourceOrTheTargetOfANonTerminalJob_isRefusedNamingTheJob_andRemovesNothing() throws Exception {
+        var jobs = new ReembedJobRepository(scope);
+        String src = registeredLabel("src");
+        String tgt = registeredLabel("tgt");
+        su(ctx -> { PgContainerHelper.insertChunks(ctx, T, src, List.of(Chash.ofText("row14 job src " + src).toHex()),
+            List.of("row14 job chunk"), List.of(new float[384]), List.of(Map.<String, Object>of())); return null; });
+        var job = jobs.start(T, src, tgt, null, false, false);
+
+        assertThatThrownBy(() -> catalog.deleteCollection(T, src, false))
+            .as("the source of a planned job").isInstanceOf(CatalogRepository.CollectionHeldByReembedJob.class)
+            .hasMessageContaining(job.jobId().toString());
+        assertThatThrownBy(() -> catalog.deleteCollectionById(T, tgt, idOf(tgt), false))
+            .as("the target of it, by id").isInstanceOf(CatalogRepository.CollectionHeldByReembedJob.class);
+        assertThat(registered(src)).as("nothing was removed").isTrue();
+        assertThat(registered(tgt)).isTrue();
+        assertThat(chunksIn(src)).isEqualTo(1);
+
+        // the same on every other non-terminal state: a running job holds its collections too
+        jobs.applyTransition(T, job.jobId(), ReembedJobRepository.PLANNED, null, ReembedJobRepository.RUNNING, ReembedJobRepository.Transition.NONE);
+        assertThatThrownBy(() -> catalog.deleteCollection(T, src, false)).isInstanceOf(CatalogRepository.CollectionHeldByReembedJob.class);
+
+        // a terminal job holds nothing
+        jobs.applyTransition(T, job.jobId(), ReembedJobRepository.RUNNING, null, ReembedJobRepository.ABORTED, ReembedJobRepository.Transition.NONE);
+        assertThat(catalog.deleteCollection(T, src, false)).as("once the job is aborted the delete goes through").containsEntry("chunks", 1);
+        assertThat(registered(src)).isFalse();
+    }
+
+    @Test
+    void theRunnersOwnDeleteOfItsSource_isNotRefusedForTheJobItBelongsTo() throws Exception {
+        var jobs = new ReembedJobRepository(scope);
+        String src = registeredLabel("rsrc");
+        String tgt = registeredLabel("rtgt");
+        jobs.start(T, src, tgt, null, false, false);
+
+        // the two-argument delete is the re-embed runner's cutover step: the job is in a lock state and this is its own work
+        catalog.deleteCollection(T, src);
+
+        assertThat(registered(src)).isFalse();
+    }
+
+    @Timeout(120)
+    @Test
+    void aJobStartingWhileADeleteRuns_cannotProceed_andFindsTheCollectionGoneOnceTheDeleteCommits() throws Exception {
+        var jobs = new ReembedJobRepository(scope);
+        String[] c = originWithSibling();
+        String origin = c[0];
+        String sibling = c[1];
+        String other = registeredLabel("other");
+        Future<Map<String, Integer>> delete;
+        try (Connection verb = verbHolding(sibling)) {
+            delete = pool.submit(() -> catalog.deleteCollection(T, origin, false));
+            // the delete holds the per-tenant guard SHARED and is parked on the sibling's row
+            assertThat(PgActivityProbe.waitsOnALock(pg, "%key share%catalog_collections%")).as("the delete is mid-flight").isTrue();
+
+            assertThatThrownBy(() -> jobs.start(T, origin, other, null, false, false))
+                .as("a start takes the guard exclusive and cannot while the delete holds it: refused, retryable, nothing written")
+                .isInstanceOf(ReembedJobRepository.LockContention.class);
+            assertThat(delete.isDone()).isFalse();
+            verb.rollback();
+        }
+        delete.get(60, TimeUnit.SECONDS);
+
+        assertThatThrownBy(() -> jobs.start(T, origin, other, null, false, false))
+            .as("after the delete committed the start's own registry read finds no collection").isInstanceOf(UnregisteredCollectionException.class);
+        assertThat(jobs.listAll(T).stream().filter(j -> j.sourceCollection().equals(origin)).count()).as("no job was filed").isZero();
     }
 }
