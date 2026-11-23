@@ -17,23 +17,12 @@ import java.util.List;
  *
  * <p><b>Bounds.</b> {@link #STATEMENT_TIMEOUT_MS} 1400 ms for the completion (the framework derives {@code lock_timeout} as
  * min(5 s, statement/2), 700 ms, so there is no lock constant here); {@link #VERIFY_STATEMENT_TIMEOUT_MS} 60 s for the finisher's
- * first, READ ONLY verification pass, which is the warm-up (Sam, T2 {@code nexus/sam-ruling-split-move-bounds-2026-11-21}).
+ * first, READ ONLY verification pass (Sam, T2 {@code nexus/sam-ruling-split-move-bounds-2026-11-21}).
  *
  * <p><b>Verification</b> (runs READ ONLY, ACCESS SHARE only, once table-wide and once per tenant, and again inside the completion
  * transaction under the 1400 ms budget): it returns a row for each leaf of the table without a valid unique index on the id key, and no
- * row otherwise. Everything else in it is a warm-up, a plain scan that returns nothing, written as
- * {@code WHERE CASE WHEN <read only> THEN (SELECT count(..) ..) ELSE 0 END < 0} so the planner has to run it and only in a READ ONLY
- * transaction ({@code current_setting('transaction_read_only') = 'on'}): the finisher's first pass is READ ONLY, and the completion
- * transaction's re-check is read-write, where the warm set is already hot and a second full-heap scan would spend the 1400 ms budget
- * ({@code VerifyingFinisher#recheck} runs the text under what is left of it, then {@code on_complete} gets a fresh 1400 ms). There is
- * no {@code pg_prewarm}. For the chunks swap the warm-up is (1) the anti-join of {@code nexus.chunks} to {@code nexus.catalog_collections}
- * on the composite's three columns, which is the query the composite's validation runs (so whichever plan the planner picks, it reads
- * what {@code on_complete} will read: the leaf heaps or the id-key indexes, and the registry), and (2) a count over a column no index
- * holds, which forces a read of every heap page. Both arms run in the table-wide run only ({@code $1 IS NULL}): they are about the
- * table, not a tenant, so a tenant's run would repeat the whole scan. They do not report an orphan row: the table-wide run reads the
- * registry as the migrating role, whose owner-read policy (vectors-065) is not present on an install where the serving role migrates,
- * and there a missing registry would read as every chunk orphaned and fail the move for good; the composite's own validation reports
- * a real orphan.
+ * row otherwise, and reads nothing else (a catalog read). It once carried READ ONLY warm-up scans of the whole chunks heap for the
+ * composite's inline validation; the composite is now added leaf by leaf with no scan, so they are gone (see {@code chunksVerification}).
  *
  * <p><b>A deliberate deviation from item 6:</b> the RDR says the verification also returns any row with a null id. It does not. Gate 1
  * requires P3.1's NOT NULL CHECK on {@code collection_id} to be present and validated before the pass registers this move (the stamp
@@ -201,25 +190,15 @@ public final class Rdr229SwapMove {
             .map(c -> "'" + c + "'").collect(java.util.stream.Collectors.joining(", "));
     }
 
-    /** The read-only guard of a warm-up arm: the arm runs only in a READ ONLY transaction, the finisher's first pass. */
-    private static String warmWhenReadOnly(String scan) {
-        return "WHERE $1 IS NULL\n"
-            + "               AND CASE WHEN pg_catalog.current_setting('transaction_read_only') = 'on'\n"
-            + "                        THEN (" + scan + ")\n"
-            + "                        ELSE 0 END < 0";
-    }
-
+    /**
+     * The chunks swap's verification is the leaf-key check alone. It used to carry two READ ONLY warm-up scans of the whole chunks heap (the
+     * anti-join to the registry and a count over a column no index holds) because on_complete added the composite validated in the
+     * statement and the warm set had to be hot for its 1400 ms. The composite is now added without a scan (Rdr229ChunksFk), so they warmed
+     * nothing and cost a full cold heap read under the 60 s verify bound that grows with the rows: at three to five times today's it would not
+     * finish, and the first pass would time out (57014) on every retry. They are gone (linda, 2026-11-23).
+     */
     private static String chunksVerification() {
-        return leafKeyVerification("chunks", "chash")
-            + "\n            UNION ALL\n            SELECT 1\n             "
-            + warmWhenReadOnly("""
-                SELECT pg_catalog.count(*)
-                                              FROM nexus.chunks c
-                                              LEFT JOIN nexus.catalog_collections cc
-                                                ON cc.tenant_id = c.tenant_id AND cc.collection_id = c.collection_id AND cc.embedding_model = c.embedding_model
-                                             WHERE cc.tenant_id IS NULL""")
-            + "\n            UNION ALL\n            SELECT 1\n             "
-            + warmWhenReadOnly("SELECT pg_catalog.count(c.chunk_text) FROM nexus.chunks c");
+        return leafKeyVerification("chunks", "chash");
     }
 
     // ── on_complete ────────────────────────────────────────────────────────────────────────────────────────
