@@ -180,17 +180,6 @@ public final class CompletionBootWork implements AutoCloseable {
     }
 
     /**
-     * RDR-229 item 6, "Readers during the stamp": whether gate 3 of the latest sample holds, read per call, never cached. False before
-     * the first sample. {@code Main} hands it to each reader that switches to the id ({@link Gate3}).
-     */
-    public Gate3 gate3() {
-        return () -> {
-            var r = latest();
-            return r != null && r.gate3();
-        };
-    }
-
-    /**
      * What a rename from gate 3 still waits for, read per call ({@link RenameReadiness}). Until P3.7 registers the name-key drop move
      * there is no move whose {@code completed_at} could be set, so the answer is true as well as safe: the move is missing. P3.7's code
      * replaces this with the move's row and the {@code databasechangelog} reads (the P3.5b changesets), from the same snapshot as
