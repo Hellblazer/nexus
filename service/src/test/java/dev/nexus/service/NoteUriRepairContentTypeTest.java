@@ -237,26 +237,47 @@ class NoteUriRepairContentTypeTest {
         assertThat(docUri(f.tenant, "n1")).isEqualTo(f.nx(f.x1, "alpha"));
     }
 
+    /**
+     * The repair takes the registry row FOR SHARE before its "locked" stage (RDR-229 P3.5a, registry first), so a flip to docs between the census and the
+     * lock can no longer land: it WAITS behind the repair. The hook's flip runs on a second connection with a lock_timeout, so a regression (the
+     * flip going through, or the repair not holding the row) fails the assertions instead of hanging the repair's own thread on its own lock.
+     */
     @Test
-    void apply_aRowFlippedToDocsBetweenTheCensusAndTheLockIsNotRewritten() throws Exception {
+    void apply_aFlipToDocsAtTheLockedStageWaitsBehindTheRepair_soTheRowIsRewrittenAsKnowledge() throws Exception {
         Fx f = new Fx("flip");
         String label = registerLabel(f.tenant, "knowledge");
         seedNote(f.tenant, "n1", label, f.nx(f.x1, "alpha"));
+        java.util.concurrent.atomic.AtomicReference<Throwable> flip = new java.util.concurrent.atomic.AtomicReference<>();
+        java.util.concurrent.atomic.AtomicBoolean ran = new java.util.concurrent.atomic.AtomicBoolean();
         CatalogRepository.setNoteUriRepairHookForTests(stage -> {
-            if (stage.equals("locked")) {
+            if (!stage.equals("locked")) return;
+            ran.set(true);
+            try (Connection other = pg.createConnection("")) {
+                other.setAutoCommit(true);
+                var dsl = DSL.using(other, SQLDialect.POSTGRES);
+                dsl.select(DSL.function("set_config", String.class, DSL.val("lock_timeout"), DSL.val("400ms"), DSL.val(false))).fetch();
                 try {
-                    setContentType(f.tenant, label, "docs");
-                } catch (Exception e) {
-                    throw new IllegalStateException(e);
+                    dsl.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.CONTENT_TYPE, "docs")
+                        .where(CATALOG_COLLECTIONS.TENANT_ID.eq(f.tenant).and(CATALOG_COLLECTIONS.NAME.eq(label))).execute();
+                } catch (Throwable t) {
+                    flip.set(t);
                 }
+            } catch (java.sql.SQLException e) {
+                throw new IllegalStateException(e);
             }
         });
 
-        Map<String, Object> r = repo.repairStaleNoteUris(f.tenant, true, 1000, 5);
+        Map<String, Object> r;
+        try {
+            r = repo.repairStaleNoteUris(f.tenant, true, 1000, 5);
+        } finally {
+            CatalogRepository.setNoteUriRepairHookForTests(null);
+        }
 
-        assertThat(r.get("rewrite")).as("the census ran before the flip").isEqualTo(1);
-        assertThat(r.get("rewritten")).isEqualTo(0);
-        assertThat(docUri(f.tenant, "n1")).isEqualTo(f.nx(f.x1, "alpha"));
+        assertThat(ran.get()).as("the locked stage ran").isTrue();
+        assertThat(flip.get()).as("the flip waited on the repair's share lock and timed out").isNotNull().hasStackTraceContaining("lock timeout");
+        assertThat(r.get("rewritten")).as("the row was still a knowledge collection when the repair wrote it").isEqualTo(1);
+        assertThat(docUri(f.tenant, "n1")).isEqualTo(f.nx(label, "alpha"));
     }
 
     @Test

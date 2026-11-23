@@ -183,18 +183,9 @@ public final class ExpectedCollectionIds {
         return id == null ? OptionalLong.empty() : OptionalLong.of(id);
     }
 
-    /**
-     * Records that a write route had nothing to write under {@code label} (an empty batch), so no transaction read its id and none
-     * needed to: there is nothing for the id to protect. The one other way an id is consumed. It is a claim nothing checks at run
-     * time, so it is made only by an early return that comes BEFORE the first {@code withTenant} of its method, and never for a
-     * document or row that a later transaction still deletes or stamps (an empty rows list still deletes the stored manifest rows):
-     * {@code NothingToWriteSourceScanTest} reads the source and fails on a call that is not such an early return.
-     */
-    public static void nothingToWrite(String label) {
-        Carrier c = CURRENT.get();
-        if (c != null) {
-            c.consumed.add(label);
-        }
+    /** Whether this request named {@code label} by id: the one case whose empty write still reads its row (linda's ruling, {@link CollectionRegistry#readRowForEmptyWrite}). */
+    public static boolean named(String label) {
+        return of(label).isPresent();
     }
 
     /**

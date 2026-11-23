@@ -6152,9 +6152,8 @@ public final class CatalogRepository {
      */
     private void refuseRowsUnderSupersededCollection(String tenant, String collection,
                                                       List<Map<String, Object>> docs) {
-        // no document, so no transaction: an early return before any withTenant (the only kind of nothingToWrite; a document with no
-        // rows still opens one, deletes the stored manifest rows and clears their spans, and its transaction reads the id)
-        if (docs == null || docs.isEmpty()) { ExpectedCollectionIds.nothingToWrite(collection); return; }
+        // no document: a by-id call still reads its row (a document with no rows opens a transaction of its own, which reads the id)
+        if (docs == null || docs.isEmpty()) { CollectionRegistry.readRowForEmptyWrite(tenantScope, tenant, collection); return; }
         boolean anyRows = false;
         for (Map<String, Object> d : docs) {
             if (d != null && d.get("rows") instanceof List<?> l && !l.isEmpty()) {
@@ -13732,7 +13731,7 @@ public final class CatalogRepository {
      */
     public int importChunksBatch(String tenant, String docId, String collection, List<Map<String, Object>> rows) {
         requireNonBlank(collection, "collection");
-        if (rows == null || rows.isEmpty()) { ExpectedCollectionIds.nothingToWrite(collection); return 0; }
+        if (rows == null || rows.isEmpty()) { CollectionRegistry.readRowForEmptyWrite(tenantScope, tenant, collection); return 0; }
         return RenameFollow.run(collection, gate -> manifestWriteTxn(tenant, "catalog.importChunksBatch " + collection, ctx -> {
             // Conflict key: (tenant_id, doc_id, position). doc_id is constant for
             // this call (the {doc_id, rows} import envelope is per-document).

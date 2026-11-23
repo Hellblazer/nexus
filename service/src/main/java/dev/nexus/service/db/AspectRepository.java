@@ -235,7 +235,9 @@ public final class AspectRepository {
             // No fence: the payload gates run before a transaction opens, as ever.
             ValidUpsert valid = validateUpsert(body);
             if (valid == null) {
-                ExpectedCollectionIds.nothingToWrite(body.get("collection") instanceof String c ? c : null);
+                if (body.get("collection") instanceof String c && !c.isEmpty()) {
+                    CollectionRegistry.readRowForEmptyWrite(tenantScope, tenant, c);   // nothing to write: a by-id call still reads its row
+                }
                 return -1L;
             }
             return DeadlockRetry.run("aspect.upsert " + valid.collection(),

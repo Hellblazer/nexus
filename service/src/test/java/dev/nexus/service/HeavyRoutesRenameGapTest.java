@@ -362,6 +362,12 @@ class HeavyRoutesRenameGapTest {
                 }
             }
             ctx.alterTable(CATALOG_COLLECTIONS).dropConstraint(CATALOG_COLLECTIONS.getPrimaryKey().getName()).cascade().execute();
+            // the registry keeps its live arbiter: the upserts that register a collection (the re-embed target's) name (tenant_id, name) in
+            // their ON CONFLICT, which the dropped primary key was; a unique index on the same columns serves, and an in-place rename keeps it unique
+            // (after P4.1 drops the primary key, that conflict target needs the live-label index's WHERE clause: a P4.1 item, not this one). Both fixtures
+            // run through prepared(), so the index is on the one the re-embed case uses too.
+            ctx.createUniqueIndex("hv_catalog_collections_tenant_name").on(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID,
+                CATALOG_COLLECTIONS.NAME).execute();
             ctx.alterTable(CATALOG_DOCUMENT_CHUNKS).dropConstraintIfExists("fk_catalog_chunks_chunk").execute();
             ctx.alterTable(TOPIC_ASSIGNMENTS).dropConstraintIfExists("topic_assignments_chunk_fk").execute();
             return null;

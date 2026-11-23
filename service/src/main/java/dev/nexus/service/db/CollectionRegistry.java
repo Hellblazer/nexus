@@ -520,6 +520,22 @@ public final class CollectionRegistry {
         SHARED.lockIdsAndLabelsForWrite(ctx, tenant, ids, labels);
     }
 
+    /**
+     * linda's ruling (RDR-229 P3.5a): a writer reads its collection's row {@code FOR KEY SHARE} first, with nothing to write too, so a by-id
+     * call answers the same whatever its batch size: a 200 holds only for a live row, and a freed id is 404. A write with an empty batch calls
+     * this where it used to return at once; it opens a write transaction only when the request named the collection by id (a request by label
+     * names no row to guard, and keeps its no-transaction answer).
+     */
+    public static void readRowForEmptyWrite(TenantScope scope, String tenant, String label) {
+        if (!ExpectedCollectionIds.named(label)) {
+            return;
+        }
+        scope.withTenant(tenant, ctx -> {
+            requireForWrite(ctx, tenant, label);
+            return null;
+        });
+    }
+
     /** {@link #lockAllForWrite} on the process-wide registry. */
     public static void requireAllForWrite(DSLContext ctx, String tenant, java.util.Collection<String> labels) {
         SHARED.lockAllForWrite(ctx, tenant, labels);

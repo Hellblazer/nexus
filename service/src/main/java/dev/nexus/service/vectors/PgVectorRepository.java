@@ -6790,7 +6790,7 @@ FROM scope s
         dev.nexus.service.db.QuarantineOrigin.requireNotQuarantine(tenantScope, tenant, "store-delete", collection);
         int dim = dimForCollection(tenant, collection);
         if (ids == null || ids.isEmpty()) {
-            dev.nexus.service.db.ExpectedCollectionIds.nothingToWrite(collection);   // an early return before any transaction
+            CollectionRegistry.readRowForEmptyWrite(tenantScope, tenant, collection);   // a by-id call reads its row whatever its batch size
             return 0;
         }
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
@@ -7813,7 +7813,7 @@ FROM scope s
                                       nextAfter, keyed);
         }
         if (siblings.isEmpty()) {
-            dev.nexus.service.db.ExpectedCollectionIds.nothingToWrite(originCollection);   // P3.5a: no sibling, no transaction, nothing to write
+            readOriginForEmptyRestore(tenant, originCollection);   // no sibling: a by-id call still reads its origin's row
             return noSiblingOutcome(hex, dryRun, source, nextAfter);
         }
         var byChash = new java.util.LinkedHashMap<String, QuarantineRestoreOutcome.Row>();
@@ -7841,6 +7841,27 @@ FROM scope s
         }
         return new QuarantineRestoreOutcome(List.copyOf(byChash.values()), auditIds.isEmpty() ? null : auditIds.get(0),
                                             dryRun, source, nextAfter, List.copyOf(auditIds), List.copyOf(siblings));
+    }
+
+    /**
+     * linda's ruling: a restore with nothing to restore from still reads its origin's registry row when the request named it by id, in a
+     * transaction with the restore's own lock and statement bounds (a bound that trips is the typed busy, {@link #asRestoreBusy}); by label it
+     * names no row to guard and opens none. The origin's row was checked unlocked before the siblings were looked up; this is the key share.
+     */
+    private void readOriginForEmptyRestore(String tenant, String originCollection) {
+        if (!dev.nexus.service.db.ExpectedCollectionIds.named(originCollection)) {
+            return;
+        }
+        try {
+            tenantScope.withTenant(tenant, ctx -> {
+                PgSession.setStatementAndLockBounds(ctx, PgSession.DEFAULT_GC_RESTORE_BOUNDED_STATEMENT_TIMEOUT_MS,
+                                                    PgSession.DEFAULT_GC_RESTORE_BOUNDED_LOCK_TIMEOUT_MS);
+                GcCollectionReads.enter(ctx, tenant, originCollection);
+                return null;
+            });
+        } catch (RuntimeException e) {
+            throw asRestoreBusy(e);
+        }
     }
 
     /** The outcome of a restore with no quarantine sibling to look in: every chash reads missing and no audit row is written. */
@@ -7910,8 +7931,7 @@ FROM scope s
     private QuarantineRestoreOutcome markedOnly(String tenant, String originCollection, QuarantineRestoreOutcome outcome,
                                                 KeyedRestore keyed) {
         if (keyed == null) {
-            // P3.5a: no transaction and no sibling to restore from: nothing is written under the origin, so its id has nothing to guard
-            dev.nexus.service.db.ExpectedCollectionIds.nothingToWrite(originCollection);
+            readOriginForEmptyRestore(tenant, originCollection);   // no sibling to restore from: a by-id call still reads its origin's row
             return outcome;
         }
         try {
@@ -8299,7 +8319,7 @@ FROM scope s
                                                             List<String> deleteKeys) {
         int dim = dimForCollection(tenant, collection);
         if (ids == null || ids.isEmpty()) {
-            dev.nexus.service.db.ExpectedCollectionIds.nothingToWrite(collection);   // an early return before any transaction
+            CollectionRegistry.readRowForEmptyWrite(tenantScope, tenant, collection);   // a by-id call reads its row whatever its batch size
             return new MetadataUpdateOutcome(0, List.of());
         }
         if (ids.size() != metadatas.size()) {
