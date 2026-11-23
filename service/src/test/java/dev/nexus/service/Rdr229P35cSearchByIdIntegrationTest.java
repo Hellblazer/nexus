@@ -581,6 +581,30 @@ class Rdr229P35cSearchByIdIntegrationTest extends AtomicWriteTestBase {
             .hasMessageContaining("recorded before collection ids, under label " + deleted + "; no live collection holds " + deleted);
     }
 
+    /** A NULL-id audit row whose label only a tombstone holds: no live holder, so the restore refuses (the ordered resolver would pick the tombstone). */
+    @Test
+    void aNullIdAuditRowWhoseLabelOnlyATombstoneHoldsIsRefused() throws Exception {
+        String label = "code__p35caudtomb" + seq.incrementAndGet() + "__minilm-l6-v2-384__v1";
+        registerCollection(label);
+        String successor = label.replace("__v1", "__succ");
+        registerCollection(successor);
+        try (Connection su = pg.createConnection("")) {
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            long succId = ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(successor))
+                .fetchOne(CATALOG_COLLECTIONS.COLLECTION_ID);
+            ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, successor)
+                .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, succId)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(label)).execute();
+        }
+        long audit = auditRow(label, null, ch("p35c audit tombstone"));
+
+        assertThat(org.assertj.core.api.Assertions.catchThrowable(() ->
+                repository(LATCHED).quarantineRestoreFromAudit(TENANT, label, null, audit, 0, 10, "tester", true)))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("recorded before collection ids, under label " + label + "; no live collection holds " + label);
+    }
+
     @Test
     void anAuditRowWithAnIdIsMatchedByItAfterARename() throws Exception {
         Renamed c = renamedCollection("audid");
