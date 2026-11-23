@@ -65,8 +65,19 @@ COLLECTION_ID_MISMATCH_REASON: str = "collection_id_mismatch"
 
 #: A collection rename (the catalog's, or a per-store ``rename_collection`` route) refused from gate 3 until the one-row rename
 #: can run (HTTP 409, RDR-229 P3.5a). Also carries ``missing``: ``name_key_drop_move`` while the move has no ``completed_at``,
-#: else ``restart`` (a P3.5b changeset has not applied). Nothing was renamed.
+#: else ``restart`` (a P3.5b changeset has not applied), or ``latch_row_missing`` when the rename readiness says the move is
+#: complete but the install has no gate 3 latch row (an inconsistency, as after a partial restore). Nothing was renamed.
 RENAME_REFUSED_REASON: str = "rename_refused"
+
+#: A catalog rename reached the one-row regime (the gate 3 latch row exists and the rename readiness is complete) with no one-row
+#: rename to run (HTTP 409, RDR-229 P3.5a): the engine refuses rather than rewrite name columns the one-row regime's keys depend
+#: on. Nothing was renamed.
+RENAME_PATH_MISMATCH_REASON: str = "rename_path_mismatch"
+
+#: A per-store ``rename_collection`` route (chash, taxonomy, telemetry, aspects, highlights) in the one-row regime, where it is a
+#: no-op because the registry rename has moved the label, found that the registry did not (HTTP 409, RDR-229 P3.5a): the new
+#: label is not a live registry row, or the old one still is. Rename the collection in the registry first. Nothing was changed.
+RENAME_NOT_IN_REGISTRY_REASON: str = "rename_not_in_registry"
 
 #: ``POST /v1/catalog/collections/delete`` by a label that more than one live row holds (HTTP 409, RDR-229 P3.5a). Also carries
 #: ``collection_ids``; the delete by ``collection_id`` removes one of them.

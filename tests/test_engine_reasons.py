@@ -58,6 +58,8 @@ def test_the_quarantine_restore_busy_reason_equals_the_engines() -> None:
         "UNKNOWN_COLLECTION_ID_REASON",
         "COLLECTION_ID_MISMATCH_REASON",
         "RENAME_REFUSED_REASON",
+        "RENAME_PATH_MISMATCH_REASON",
+        "RENAME_NOT_IN_REGISTRY_REASON",
         "COLLECTION_LABEL_AMBIGUOUS_REASON",
     ],
 )
