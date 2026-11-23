@@ -58,7 +58,7 @@ class Rdr229P37LabelReservedTest {
         String token = engine.newTenant(tenant);
         String a = coll("p37lr" + tag + n + "a", 1);
         String b = coll("p37lr" + tag + n + "b", 1);
-        String chash = dev.nexus.service.vectors.Chash.ofText("p37 label reserved " + tag + n).toHex();
+        String chash = dev.nexus.service.db.Chash.ofText("p37 label reserved " + tag + n).toHex();
         engine.su(ctx -> {
             PgContainerHelper.insertCollection(ctx, tenant, a);
             PgContainerHelper.insertChunks(ctx, tenant, a, List.of(chash), List.of("text of " + tag), List.of(new float[384]), List.of(Map.of()));
