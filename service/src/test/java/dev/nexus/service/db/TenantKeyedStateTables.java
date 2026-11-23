@@ -387,6 +387,8 @@ final class TenantKeyedStateTables {
             + "per-run tally that dies with the run");
         notKeyed.put("StatusHandler.aspectQueue", "a supplier of the install-wide drain result; not keyed by tenant");
         notKeyed.put("StatusHandler.catalogEpoch", "a supplier of whether the install's role can read the cluster facts the catalog epoch hashes (RDR-229 P3.11); one install-wide boolean, not keyed by tenant");
+        notKeyed.put("CompletionBootWork.DbReader.latchWriteFailingSince", "when the gate 3 latch write first failed to take its lock in the current run of failures (RDR-229 P3.5a), for the elapsed figure in the WARN; one install-wide instant, not keyed by tenant");
+        notKeyed.put("RenameNoOpActivity.NOOPS", "a process-wide count of per-store renames answered as the one-row no-op (RDR-229 P3.5a), read only by tests; one counter, not keyed by tenant");
         notKeyed.put("CatalogEpoch.NULL_LOGGED", "a once-per-process latch for the WARN that a pg_control member read NULL (RDR-229 P3.11); one install-wide flag, not keyed by tenant");
         notKeyed.put("StatusHandler.collectionTupleIndex", "a supplier of whether the install-wide live-tuple index exists (RDR-229 P3.8); not keyed by tenant");
         notKeyed.put("StatusHandler.liveLabelIndex", "a supplier of whether the install-wide live-label index exists and is valid (RDR-229 P3.12); not keyed by tenant");
