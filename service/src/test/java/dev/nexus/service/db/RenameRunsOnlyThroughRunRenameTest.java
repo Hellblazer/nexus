@@ -136,6 +136,13 @@ class RenameRunsOnlyThroughRunRenameTest {
      * whitespace collapsed) of those outside any runRename call, with how many times each occurs, and the number inside one.
      */
     static NameWrites nameWrites(String src) {
+        return writes(NAME_WRITE, src);
+    }
+
+    /** Writes of the retirement columns: {@code .set(<T>.SUPERSEDED_BY | SUPERSEDED_BY_ID, ...)}. */
+    private static final Pattern RETIRE_WRITE = Pattern.compile("\\.set\\(\\s*[A-Za-z_]\\w*\\.SUPERSEDED_BY(?:_ID)?\\s*,");
+
+    static NameWrites writes(Pattern pattern, String src) {
         List<int[]> spans = new ArrayList<>();
         var calls = Pattern.compile("\\.runRename\\(").matcher(src);
         while (calls.find()) {
@@ -144,7 +151,7 @@ class RenameRunsOnlyThroughRunRenameTest {
         }
         java.util.Map<String, Integer> outside = new java.util.TreeMap<>();
         int inside = 0;
-        var writes = NAME_WRITE.matcher(src);
+        var writes = pattern.matcher(src);
         while (writes.find()) {
             int at = writes.start();
             if (spans.stream().anyMatch(sp -> sp[0] <= at && at < sp[1])) {
@@ -244,17 +251,43 @@ class RenameRunsOnlyThroughRunRenameTest {
                 w.outside().forEach((site, count) -> outside.put(f.getFileName() + " | " + site, count));
             }
         }
+        java.util.Map<String, Integer> allowed = allowlist("src/test/resources/rename-name-write-allowlist.txt");
+        assertThat(inside).as("the primitives' own name writes, inside runRename: exact").isEqualTo(10);
+        assertThat(outside.values().stream().mapToInt(Integer::intValue).sum()).as("sites outside runRename: exact").isEqualTo(28);
+        assertThat(unlisted(outside, allowed)).as("a name-column write outside runRename that is not on the allowlist").isEmpty();
+    }
+
+    static java.util.Map<String, Integer> allowlist(String file) throws IOException {
         java.util.Map<String, Integer> allowed = new java.util.TreeMap<>();
-        for (String line : Files.readAllLines(Path.of("src/test/resources/rename-name-write-allowlist.txt"))) {
+        for (String line : Files.readAllLines(Path.of(file))) {
             if (line.isBlank() || line.startsWith("#")) continue;
             String[] cols = line.split("\\|", 4);
             assertThat(cols).as("file | count | site | reason: %s", line).hasSize(4);
             assertThat(cols[3].trim()).as("a reason for %s", cols[0]).isNotBlank();
             allowed.put(cols[0].trim() + " | " + cols[2].trim(), Integer.parseInt(cols[1].trim()));
         }
-        assertThat(inside).as("the primitives' own name writes, inside runRename: exact").isEqualTo(10);
-        assertThat(outside.values().stream().mapToInt(Integer::intValue).sum()).as("sites outside runRename: exact").isEqualTo(28);
-        assertThat(unlisted(outside, allowed)).as("a name-column write outside runRename that is not on the allowlist").isEmpty();
+        return allowed;
+    }
+
+    /**
+     * Every write of {@code superseded_by} or {@code superseded_by_id} is on the retirement allowlist, keyed by file and site text: a
+     * verb that retires or revives a registry row takes its rows FOR UPDATE first ({@code CollectionTombstones#lockRows}), so a new
+     * writer of these columns is the moment to ask whether it is such a verb. Exact counts.
+     */
+    @Test
+    void everyWriteOfTheRetirementColumnsIsOnTheAllowlist() throws Exception {
+        java.util.Map<String, Integer> found = new java.util.TreeMap<>();
+        int total = 0;
+        try (Stream<Path> s = Files.walk(MAIN)) {
+            for (Path f : s.filter(x -> x.toString().endsWith(".java")).toList()) {
+                NameWrites w = writes(RETIRE_WRITE, code(f));
+                total += w.inside() + w.outside().values().stream().mapToInt(Integer::intValue).sum();
+                w.outside().forEach((site, count) -> found.put(f.getFileName() + " | " + site, count));
+            }
+        }
+        assertThat(total).as("retirement-column writes: exact").isEqualTo(18);
+        assertThat(unlisted(found, allowlist("src/test/resources/retire-write-allowlist.txt")))
+            .as("a write of superseded_by or superseded_by_id that is not on the allowlist").isEmpty();
     }
 
     /**

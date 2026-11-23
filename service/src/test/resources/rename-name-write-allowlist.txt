@@ -3,7 +3,7 @@
 # cannot be swapped for a label-changing one in the same file: the new site's text is not on this list.
 # RenameRunsOnlyThroughRunRenameTest matches .set(<T>.COLLECTION | PHYSICAL_COLLECTION | SOURCE_COLLECTION, ...), .set(CATALOG_COLLECTIONS.NAME, ...)
 # and the DimTables / CollectionScopedTable accessor form .set(<t>.collection(), ...), and fails when a file's count for a site differs
-# from this list. A label-changing site belongs inside runRename, not here. Out of scope for the scan: raw SQL in string literals.
+# from this list. A label-changing site belongs inside runRename, not here. Out of scope for the scan: writes built with DSL.field(name) and raw SQL in string literals.
 # Format: <file> | <count> | <site text> | <reason>
 AspectRepository.java | 3 | .set(DOCUMENT_HIGHLIGHTS.COLLECTION, EX_HL_COLLECTION) | highlight upserts and imports: the row's own collection on insert or conflict, not a rename
 CatalogMoves.java | 1 | .set(DOCUMENT_HIGHLIGHTS.COLLECTION, collection) | the document move's re-key of highlights to the target collection (a move, not a label change)
