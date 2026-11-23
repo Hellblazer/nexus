@@ -7,6 +7,7 @@ import org.jooq.Field;
 import org.jooq.impl.DSL;
 
 import java.util.Objects;
+import java.util.OptionalLong;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 
@@ -53,6 +54,15 @@ public final class CollectionIds {
         if (name == null || name.isEmpty()) {
             return DSL.castNull(Long.class);
         }
+        long requested = ExpectedCollectionIds.of(name).orElse(0L);
+        if (requested > 0) {
+            // the request named this label by id: the statement names the id too, so a row whose label is no longer the id's
+            // gets NULL, which the P3.1 CHECK refuses; the write is by id, and that is the consumption
+            ExpectedCollectionIds.consumed(name);
+            var c = CATALOG_COLLECTIONS.as("cid");
+            return DSL.field(DSL.select(c.COLLECTION_ID).from(c)
+                .where(c.TENANT_ID.eq(tenant)).and(c.COLLECTION_ID.eq(requested)).and(c.NAME.eq(name)));
+        }
         return idOf(DSL.val(tenant), DSL.val(name));
     }
 
@@ -70,7 +80,10 @@ public final class CollectionIds {
 
     /**
      * The registry's {@code collection_id} for {@code (tenant, name)}, read now in {@code ctx}'s transaction;
-     * {@code null} for {@code ''} or {@code null} (unset, no read). Never cached.
+     * {@code null} for {@code ''} or {@code null} (unset, no read). Never cached. For a name the request named by
+     * {@code collection_id} ({@link ExpectedCollectionIds}) it is the row of THAT id, read {@code FOR KEY SHARE}: no row is
+     * {@link UnknownCollectionIdException}, a retired row {@link CollectionRetiredIdException}, another label
+     * {@link CollectionIdMismatchException}.
      *
      * @throws UnregisteredCollectionException when the name is not empty and has no registry row for the tenant
      */
@@ -78,6 +91,11 @@ public final class CollectionIds {
         Objects.requireNonNull(tenant, "tenant");
         if (name == null || name.isEmpty()) {
             return null;
+        }
+        OptionalLong requested = ExpectedCollectionIds.of(name);
+        if (requested.isPresent()) {
+            // the request named this label by id: the row of that id, FOR KEY SHARE, in this transaction (never the label's)
+            return CollectionRegistry.shared().readRequested(ctx, tenant, name, requested.getAsLong(), true).collectionId();
         }
         Long id = ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID)
             .from(CATALOG_COLLECTIONS)

@@ -161,6 +161,7 @@ public final class NexusService {
     private static final String DEFAULT_TENANT = "default";
 
     private final HttpServer server;
+    private dev.nexus.service.http.CollectionSelectorFilter collectionSelectorFilter;
     private final TenantScope tenantScope;
     /**
      * RDR-205 Phase 1 Step 5 (bead nexus-em75s.5): the tuple sweep's tenant
@@ -763,9 +764,9 @@ public final class NexusService {
         // IdempotencyKeyGuard (RDR-222 Phase 1, nexus-yye8l.5) follows AuthFilter on every context: an
         // Idempotency-Key on a route that cannot use it is a 400, never an ignored key.
         // RDR-229 P3.5a: CollectionSelectorFilter resolves collection_id to the label on the collection-taking routes.
+        collectionSelectorFilter = new dev.nexus.service.http.CollectionSelectorFilter(dev.nexus.service.db.CollectionRegistry.shared(), tenantScope);
         var authFilter = List.of(new AuthFilter(tokenCache, tokenStore, catalogRepo),
-                new dev.nexus.service.http.IdempotencyKeyGuard(),
-                new dev.nexus.service.http.CollectionSelectorFilter(dev.nexus.service.db.CollectionRegistry.shared(), tenantScope));
+                new dev.nexus.service.http.IdempotencyKeyGuard(), collectionSelectorFilter);
 
         var whoamiCtx = server.createContext("/v1/_whoami", new WhoamiHandler(tenantScope));
         whoamiCtx.getFilters().addAll(authFilter);
@@ -2186,6 +2187,11 @@ public final class NexusService {
         return ownerlessWritePolicy;
     }
     public dev.nexus.service.db.TaxonomyCoverage taxonomyCoverage() { return vectorHandler.taxonomyCoverage(); } // RDR-134 Step 2: shared by the vector, taxonomy and catalog handlers
+
+    /** The collection route boundary's filter, for a test that sets its seams (RDR-229 P3.5a). */
+    public dev.nexus.service.http.CollectionSelectorFilter collectionSelectorFilter() {
+        return collectionSelectorFilter;
+    }
 
     /**
      * Actual bound port. Useful when constructed with port 0.

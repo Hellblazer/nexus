@@ -358,8 +358,13 @@ final class TenantKeyedStateTables {
         notKeyed.put("UnknownCollectionIdException.tenant", "payload of an exception thrown to one caller (RDR-229 P3.5a)");
         notKeyed.put("CollectionSelectorFilter.Resolver.tenant", "the tenant of one request: the resolver is built per request and dies with it (RDR-229 P3.5a)");
         notKeyed.put("CollectionSelectorFilter.Resolver.expected", "the ids one request named, by label: the resolver is built per request and dies with it (RDR-229 P3.5a)");
-        notKeyed.put("CollectionSelectorFilter.afterResolveForTests", TEST_HOOK);
-        notKeyed.put("ExpectedCollectionIds.CURRENT", "the ids the request on this thread named, by label: set by the route boundary just before the handler and removed in a finally, so no request outlives it and nothing is keyed by tenant (RDR-229 P3.5a)");
+        notKeyed.put("CollectionSelectorFilter.afterResolve", TEST_HOOK);
+        notKeyed.put("CollectionSelectorFilter.beforeTransactionRead", TEST_HOOK);
+        notKeyed.put("CollectionSelectorFilter.afterTransactionRead", TEST_HOOK);
+        notKeyed.put("CollectionSelectorFilter.unconsumedSink", TEST_HOOK);
+        notKeyed.put("ExpectedCollectionIds.Carrier.ids", "the ids the request on this thread named, by label: set by the route boundary just before the handler and removed in a finally, so no request outlives it and nothing is keyed by tenant (RDR-229 P3.5a)");
+        notKeyed.put("ExpectedCollectionIds.Carrier.consumed", "the labels the request on this thread has read by id in its own transaction; dies with the request's carrier (RDR-229 P3.5a)");
+        notKeyed.put("ExpectedCollectionIds.Carrier.memo", "the rows the request's by-id read returned in one transaction; dies with the request's carrier (RDR-229 P3.5a)");
         notKeyed.put("CollectionRetiredIdException.tenant", "payload of an exception thrown to one caller (RDR-229 P3.5a)");
         notKeyed.put("ReembedRunner.tenantSource", "a supplier of the tenant list, re-read from service_tokens at "
             + "the start of every runner pass; the runner keeps nothing per tenant between passes");

@@ -608,7 +608,7 @@ public final class HttpUtil {
         if (idMismatch != null) {
             log.error("event={}_collection_id_mismatch {} requested={} resolved={}", event, context, idMismatch.requested(),
                 idMismatch.resolved());
-            send(exchange, 500, CollectionSelectorFilter.mismatchBody(idMismatch.requested(), idMismatch.resolved()));
+            send(exchange, 500, CollectionSelectorFilter.mismatchBody(idMismatch.requested(), idMismatch.resolved(), idMismatch.getMessage()));
             return true;
         }
         // RDR-229 P3.5a: a rename (the catalog's or one of the per-store rename_collection routes) from gate 3 until the

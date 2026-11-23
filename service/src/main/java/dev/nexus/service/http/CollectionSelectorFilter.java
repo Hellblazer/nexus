@@ -100,11 +100,25 @@ public final class CollectionSelectorFilter extends Filter {
     static final String COLLECTION_ID_MISMATCH_REASON = HttpUtil.COLLECTION_ID_MISMATCH_REASON;
 
     /**
-     * Test seam: runs after the boundary has resolved the ids and named them in {@link ExpectedCollectionIds}, and before the
-     * handler, so a test can change the registry in the one gap the handler's by-id read has to survive, with no timing.
-     * Null in production.
+     * Test seams of THIS filter (one per engine, so a test class that runs beside another cannot take their hook). All null in
+     * production. {@code afterResolve} runs after the boundary has named the ids and before the handler;
+     * {@code beforeTransactionRead} runs once per request, just before the first by-id read a write transaction makes (after every
+     * outside-a-transaction lookup passed); {@code unconsumed} receives a report line for each write route that answered 2xx without
+     * reading a named id in its own transaction.
      */
-    public static volatile Runnable afterResolveForTests;
+    private volatile Runnable afterResolve;
+    private volatile Runnable beforeTransactionRead;
+    private volatile Runnable afterTransactionRead;
+    private volatile java.util.function.Consumer<String> unconsumedSink;
+
+    /** Sets this filter's test seams (any may be null); {@code afterTransactionRead} runs with the by-id read's lock held. */
+    public void testHooks(Runnable afterResolve, Runnable beforeTransactionRead, Runnable afterTransactionRead,
+                          java.util.function.Consumer<String> unconsumedSink) {
+        this.afterResolve = afterResolve;
+        this.beforeTransactionRead = beforeTransactionRead;
+        this.afterTransactionRead = afterTransactionRead;
+        this.unconsumedSink = unconsumedSink;
+    }
 
     /** How the filter reads rows: a seam, so a test can hand it a row the registry never would. */
     interface Rows {
@@ -182,14 +196,35 @@ public final class CollectionSelectorFilter extends Filter {
             return;
         }
         try {
-            ExpectedCollectionIds.set(resolver.expected);
-            Runnable hook = afterResolveForTests;
+            ExpectedCollectionIds.set(resolver.expected, beforeTransactionRead, afterTransactionRead);
+            Runnable hook = afterResolve;
             if (hook != null) {
                 hook.run();
             }
             chain.doFilter(next);
         } finally {
+            if (route.writes()) {
+                reportUnconsumed(next);
+            }
             ExpectedCollectionIds.clear();
+        }
+    }
+
+    /**
+     * A write route that answered 2xx while a named id was never read in its own transaction went on by label: the gap this
+     * filter's ids exist to close is open on that route. ERROR in the log, and the test sink when a test set one.
+     */
+    private void reportUnconsumed(HttpExchange exchange) {
+        List<String> left = ExpectedCollectionIds.unconsumed();
+        int status = exchange.getResponseCode();
+        if (left.isEmpty() || status < 200 || status >= 300) {
+            return;
+        }
+        String path = exchange.getRequestURI().getPath();
+        log.error("event=collection_id_not_consumed path={} labels={} status={}", LogText.escapeControl(path), left.size(), status);
+        java.util.function.Consumer<String> sink = unconsumedSink;
+        if (sink != null) {
+            sink.accept(path + " " + left);
         }
     }
 
@@ -234,8 +269,13 @@ public final class CollectionSelectorFilter extends Filter {
 
     /** The 500 body of a registry row that is not the row of the id asked for: {@code reason} {@code collection_id_mismatch}. */
     static String mismatchBody(long requested, long resolved) {
+        return mismatchBody(requested, resolved, "collection_id " + requested + " resolved to a registry row of collection_id " + resolved);
+    }
+
+    /** {@link #mismatchBody(long, long)} with the words of the mismatch (another id, or another label for the id). */
+    static String mismatchBody(long requested, long resolved, String error) {
         Map<String, Object> body = new LinkedHashMap<>();
-        body.put("error", "collection_id " + requested + " resolved to a registry row of collection_id " + resolved);
+        body.put("error", error);
         body.put("reason", COLLECTION_ID_MISMATCH_REASON);
         body.put("collection_id", requested);
         body.put("resolved_collection_id", resolved);
