@@ -1693,6 +1693,54 @@ class PgVectorRepositoryContractTest {
         assertThat(meta.get("title")).isEqualTo("Clean");
     }
 
+    /**
+     * RDR-229 P3.5a row 14: the metadata update keeps the id the row STORES. A row whose label a one-row rename left behind, and another
+     * collection has since taken, must keep the id of the collection it is in; the label's id fills only an unstamped row. The row here is
+     * stamped to {@code other}'s id while its name column bears {@code col}, which resolves to a different id.
+     */
+    @Test
+    void batchUpdateMetadata_keepsTheStoredCollectionId_notTheIdItsLabelResolvesTo() throws SQLException {
+        String col = "code__keepid-label__voyage-code-3__v1";
+        String other = "code__keepid-other__voyage-code-3__v1";
+        String chash = "bbbb" + "b".repeat(60);
+        repo1024.upsertChunks(TENANT_A, col, List.of(chash), List.of("keep stored id probe"), List.of(Map.of("title", "Before")));
+        own(TENANT_A, col, chash);
+        long otherId;
+        long labelId;
+        try (Connection su = pg.createConnection("")) {
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(dsl, TENANT_A, other);
+            otherId = dsl.select(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.COLLECTION_ID)
+                .from(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+                .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A)
+                    .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(other)))
+                .fetchOne(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.COLLECTION_ID);
+            labelId = dsl.select(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.COLLECTION_ID)
+                .from(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+                .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A)
+                    .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(col)))
+                .fetchOne(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.COLLECTION_ID);
+            int stamped = dsl.update(CHUNKS).set(CHUNKS.COLLECTION_ID, otherId)
+                .where(CHUNKS.COLLECTION.eq(col), CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(chash))).execute();
+            assertThat(stamped).as("setup: the row is stamped to another collection's id").isEqualTo(1);
+        }
+        assertThat(otherId).as("setup: the label resolves to a different id").isNotEqualTo(labelId);
+
+        DimTables.ChunkTable ch = DimTables.CHUNKS.get(1024);
+        tenantScope.withTenant(TENANT_A, ctx ->
+            PgVectorRepository.batchUpdateMetadata(ctx, ch, TENANT_A, col, List.of(chash), List.of(Map.<String, Object>of("title", "After")), List.of(0),
+                List.of(), dev.nexus.service.datamove.Gate3.never()));
+
+        long storedId;
+        try (Connection su = pg.createConnection("")) {
+            storedId = DSL.using(su, SQLDialect.POSTGRES).select(CHUNKS.COLLECTION_ID).from(CHUNKS)
+                .where(CHUNKS.COLLECTION.eq(col), CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(chash)))
+                .fetchOne(CHUNKS.COLLECTION_ID);
+        }
+        assertThat(storedId).as("the update kept the id the row stored").isEqualTo(otherId);
+        assertThat(storedMeta(col, chash).get("title")).as("and wrote the metadata").isEqualTo("After");
+    }
+
     @Test
     void upsertChunks_stubStillSendingExplicitEmptyTitle_stillRevertsEnrichment() throws Exception {
         // Adversarial control for the test above: merge semantics alone do NOT

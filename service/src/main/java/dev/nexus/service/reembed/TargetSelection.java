@@ -48,7 +48,7 @@ import java.util.regex.Pattern;
  * it is {@code done} or {@code aborted}, its state unchanged, so a later {@code --all} never deletes the revived
  * collection. A {@code failed} earlier job is never marked: it is in a lock state with the target as its source,
  * so {@link #decide} refuses the revive until it is aborted (reviving under it would let its {@code --resume}
- * undo the revive), matching {@code ReembedJobRepository.markRevived}.
+ * undo the revive), matching the mark {@code ReembedJobRepository#startMarking} writes.
  * {@link Revive#markEarlierJob} is that decision for a given earlier job state, for the repository to apply.
  */
 public final class TargetSelection {
