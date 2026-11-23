@@ -36,7 +36,38 @@ class RenameRunsOnlyThroughRunRenameTest {
     };
 
     private static String code(Path file) throws IOException {
-        return Files.readString(file).replaceAll("(?s)/\\*.*?\\*/", "").replaceAll("//[^\\n]*", "");
+        return strip(Files.readString(file));
+    }
+
+    /**
+     * The source without comments, and with every string, text block and char literal blanked to an empty one: a brace, a quote or
+     * a {@code //} inside a literal (a URL, a JSON fragment) cannot unbalance the scan, and a comment cannot hide or fake a call.
+     */
+    static String strip(String src) {
+        StringBuilder out = new StringBuilder(src.length());
+        int i = 0, n = src.length();
+        while (i < n) {
+            char c = src.charAt(i);
+            if (c == '/' && i + 1 < n && src.charAt(i + 1) == '/') {
+                while (i < n && src.charAt(i) != '\n') i++;
+            } else if (c == '/' && i + 1 < n && src.charAt(i + 1) == '*') {
+                int end = src.indexOf("*/", i + 2);
+                i = end < 0 ? n : end + 2;
+            } else if (src.startsWith("\"\"\"", i)) {
+                int end = src.indexOf("\"\"\"", i + 3);
+                i = end < 0 ? n : end + 3;
+                out.append("\"\"");
+            } else if (c == '"' || c == '\'') {
+                int j = i + 1;
+                while (j < n && src.charAt(j) != c) j += src.charAt(j) == '\\' ? 2 : 1;
+                i = j + 1;
+                out.append(c).append(c);
+            } else {
+                out.append(c);
+                i++;
+            }
+        }
+        return out.toString();
     }
 
     /** The text from {@code open} (an opening bracket's index) to its match, brackets included. */
@@ -54,25 +85,80 @@ class RenameRunsOnlyThroughRunRenameTest {
         var m = Pattern.compile("(?m)^\\s+(?:public|private|protected)\\s+[\\w<>,\\[\\] .?]+\\s" + name + "\\s*\\(").matcher(src);
         assertThat(m.find()).as("method %s found", name).isTrue();
         int paren = src.indexOf('(', m.end() - 1);
-        int brace = src.indexOf('{', src.indexOf(')', paren + balanced(src, paren, '(', ')').length() - 1));
+        int brace = src.indexOf('{', paren + balanced(src, paren, '(', ')').length() - 1);
         return balanced(src, brace, '{', '}');
+    }
+
+    /**
+     * What {@code method} of {@code src} (already {@link #strip stripped}) opens outside its one {@code renameGuard.runRename(} call:
+     * a transaction opener, or the call missing or repeated. Null when the method is clean.
+     */
+    static String opensOutsideRunRename(String src, String method) {
+        String body = methodBody(src, method);
+        int at = body.indexOf("renameGuard.runRename(");
+        if (at < 0) return "no runRename call";
+        if (body.indexOf("renameGuard.runRename(", at + 1) >= 0) return "more than one runRename call";
+        String outside = body.replace(balanced(body, body.indexOf('(', at), '(', ')'), "");
+        for (String opener : List.of("withTenant(", "manifestWriteTxn(")) {
+            if (outside.contains(opener)) return opener;
+        }
+        return null;
     }
 
     @Test
     void everyPrimitiveOpensItsTransactionOnlyThroughRunRename() throws Exception {
         int examined = 0;
         for (String[] p : PRIMITIVES) {
-            String body = methodBody(code(MAIN.resolve("dev/nexus/service").resolve(p[0])), p[1]);
-            int at = body.indexOf("renameGuard.runRename(");
-            assertThat(at).as("%s.%s calls runRename", p[0], p[1]).isGreaterThanOrEqualTo(0);
-            assertThat(body.indexOf("renameGuard.runRename(", at + 1)).as("%s.%s calls it once", p[0], p[1]).isEqualTo(-1);
-            String call = balanced(body, body.indexOf('(', at), '(', ')');
-            String outside = body.replace(call, "");
-            assertThat(outside).as("%s.%s opens no transaction outside runRename", p[0], p[1])
-                .doesNotContain("withTenant(").doesNotContain("manifestWriteTxn(");
+            String src = code(MAIN.resolve("dev/nexus/service").resolve(p[0]));
+            assertThat(opensOutsideRunRename(src, p[1])).as("%s.%s opens its transaction only through one runRename call", p[0], p[1]).isNull();
             examined++;
         }
         assertThat(examined).as("non-vacuity: the six primitives").isEqualTo(6);
+    }
+
+    /** The check has teeth: it flags a primitive that opens a transaction outside runRename, and is not fooled by literals or comments. */
+    @Test
+    void theScanFlagsATransactionOutsideRunRename_andIgnoresLiteralsAndComments() {
+        String clean = strip("""
+            class R {
+                public int renameCollection(String t, String o, String n) {
+                    String url = "http://x/{";   // a brace and a slash pair inside a literal
+                    char open = '{';
+                    /* tenantScope.withTenant( in a comment */
+                    return renameGuard.runRename(tenantScope, t, ctx -> { return 1; }, ctx -> 0);
+                }
+            }
+            """);
+        assertThat(opensOutsideRunRename(clean, "renameCollection")).as("clean: literals and comments are not code").isNull();
+
+        String outsideTxn = strip("""
+            class R {
+                public int renameCollection(String t, String o, String n) {
+                    tenantScope.withTenant(t, ctx -> ctx.update(X).execute());
+                    return renameGuard.runRename(tenantScope, t, ctx -> 1, ctx -> 0);
+                }
+            }
+            """);
+        assertThat(opensOutsideRunRename(outsideTxn, "renameCollection")).as("a transaction opened beside runRename").isEqualTo("withTenant(");
+
+        String noCall = strip("""
+            class R {
+                public int renameCollection(String t, String o, String n) {
+                    return tenantScope.withTenant(t, ctx -> 1);
+                }
+            }
+            """);
+        assertThat(opensOutsideRunRename(noCall, "renameCollection")).as("a primitive that skips runRename").isEqualTo("no runRename call");
+
+        String twice = strip("""
+            class R {
+                public int renameCollection(String t, String o, String n) {
+                    renameGuard.runRename(tenantScope, t, ctx -> 1, ctx -> 0);
+                    return renameGuard.runRename(tenantScope, t, ctx -> 1, ctx -> 0);
+                }
+            }
+            """);
+        assertThat(opensOutsideRunRename(twice, "renameCollection")).isEqualTo("more than one runRename call");
     }
 
     @Test
