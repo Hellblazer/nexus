@@ -145,7 +145,7 @@ public final class TaxonomyRepository {
     private static void ensureCollectionRegisteredAllowingSuperseded(DSLContext ctx, String tenant,
                                                                      String collection) {
         if (collection == null || collection.isBlank()) return;
-        CollectionRegistry.requireRegistered(ctx, tenant, collection);
+        CollectionRegistry.requireForWrite(ctx, tenant, collection);   // RDR-229 P3.5a: a write's check takes the key share, a tombstone allowed
     }
 
     /**
@@ -158,7 +158,7 @@ public final class TaxonomyRepository {
      */
     private static String modelOf(DSLContext ctx, String tenant, String collection) {
         if (collection == null || collection.isBlank()) return null;
-        return CollectionRegistry.require(ctx, tenant, collection).embeddingModel();
+        return CollectionRegistry.requireForWrite(ctx, tenant, collection).embeddingModel();
     }
 
     /**
@@ -202,41 +202,6 @@ public final class TaxonomyRepository {
             ids.put(n, CollectionIds.require(ctx, tenant, n));
         }
         return ids;
-    }
-
-    /**
-     * Serialize taxonomy persist operations per (tenant, collection) within the
-     * CURRENT transaction (nexus-n2ls1).
-     *
-     * <p>The persist paths' existing-topics guard is a plain unlocked SELECT
-     * COUNT: two concurrent persists for the same (tenant, collection) both
-     * counted 0 under READ COMMITTED, both inserted the same root label, and
-     * the loser hit the taxonomy-004 partial unique index (SQLSTATE 23505 →
-     * HTTP 409, observed live 2026-07-07). {@code pg_advisory_xact_lock}
-     * blocks the second persist until the first commits, so the loser then
-     * sees the winner's committed rows and takes the guard-skip (discover) or
-     * a fresh replace (rebuild). Released automatically at commit/rollback.
-     * A {@code hashtext} collision between two different keys merely
-     * over-serializes — never a correctness issue.
-     */
-    private static void lockTaxonomyCollection(DSLContext ctx, String tenant, String collection) {
-        // Bounded wait FIRST (critique, nexus-n2ls1): without a lock_timeout a
-        // stuck holder turns the fast retryable 409 this fix removes into an
-        // indefinite in-transaction wait surfacing as an edge 504 — worse
-        // observability than the original bug. set_config(..., true) is
-        // SET LOCAL (txn-scoped, auto-reverts at commit/rollback); a timed-out
-        // acquire raises SQLSTATE 55P03, a clean retryable error. The timeout
-        // also bounds this txn's subsequent row-lock waits — acceptable, these
-        // persist txns are short writes.
-        ctx.select(function("set_config", String.class,
-                   val("lock_timeout"), val("5000"), val(true)))
-           .fetch();
-        // Typed-DSL function composition (house rule: no raw string-SQL —
-        // RawSqlGateTest): SELECT pg_advisory_xact_lock(hashtext(:key)).
-        // hashtext returns int4, implicitly widened to the bigint overload.
-        ctx.select(function("pg_advisory_xact_lock", Object.class,
-                   function("hashtext", Integer.class, val(tenant + "/" + collection))))
-           .fetch();
     }
 
     // ⚠ DRIFT RISK (RDR-164 review S4): several ON CONFLICT DO UPDATE sites below
@@ -1599,8 +1564,9 @@ public final class TaxonomyRepository {
      * purge, a delete of centroids: they may clear the leftovers of a collection whose registry row is already gone). When
      * the request named {@code collection} by id ({@link ExpectedCollectionIds}), reads that id in {@code ctx}'s
      * transaction, {@code FOR KEY SHARE}, as the first collection-keyed statement: no row is a 404, a retired row a 409,
-     * and the write after it is by that id's row, never by a label another row has taken. By label it reads the row and
-     * ignores a missing one, which is the behaviour of these writes before the id existed.
+     * and the write after it is by that id's row, never by a label another row has taken. By label it reads the row it
+     * resolves to, {@code FOR KEY SHARE} too (linda's option (b)), and ignores a missing one, which is the behaviour of these
+     * writes before the id existed.
      */
     public static void consumeRequestedId(DSLContext ctx, String tenant, String collection) {
         try {
@@ -2004,7 +1970,7 @@ public final class TaxonomyRepository {
     // not ETL) are NOT in scope: they never supply an explicit id (server-generated,
     // exempt), and they already arbitrate the ONLY key they can hit
     // (TOPICS.TENANT_ID, TOPICS.COLLECTION, TOPICS.LABEL) WHERE PARENT_ID IS NULL) —
-    // plus lockTaxonomyCollection serializes per-collection writers, a stronger belt
+    // plus TaxonomyCollectionLock serializes per-collection writers, a stronger belt
     // than the retry this class's import siblings use. Non-root topics (parent_id NOT
     // NULL) are outside the partial index's predicate entirely — no identity key to
     // guard.
@@ -3029,8 +2995,7 @@ public final class TaxonomyRepository {
             // children escape the taxonomy-004 partial index (parent_id NOT
             // NULL) so a race here duplicates children rather than 409ing —
             // the same per-collection lock closes both.
-            lockTaxonomyCollection(ctx, tenant, collectionName);
-            ensureCollectionRegistered(ctx, tenant, collectionName);
+            TaxonomyCollectionLock.lockAndRequireWritable(ctx, tenant, collectionName);   // advisory lock keyed by id, then the key share
             // RDR-229 P3.1 stage 2b: the collection's registry id for every child topic written below.
             final Long collectionId = CollectionIds.require(ctx, tenant, collectionName);
             // Delete parent assignments
@@ -3154,8 +3119,7 @@ public final class TaxonomyRepository {
         return tenantScope.withTenant(tenant, ctx -> {
             // nexus-n2ls1: same guard-then-write shape as persistDiscoveredTopics
             // (delete-then-insert here) — serialize per-collection first.
-            lockTaxonomyCollection(ctx, tenant, collection);
-            ensureCollectionRegistered(ctx, tenant, collection);
+            TaxonomyCollectionLock.lockAndRequireWritable(ctx, tenant, collection);   // advisory lock keyed by id, then the key share
             // RDR-229 P3.1 stage 2b: the collection's registry id for every topic and assignment written below.
             final Long collectionId = CollectionIds.require(ctx, tenant, collection);
             // REPLACE semantics — clear old rows even when there are no new specs.
@@ -3286,8 +3250,7 @@ public final class TaxonomyRepository {
             // nexus-n2ls1: serialize per-collection BEFORE the guard — the guard
             // alone is a TOCTOU race under concurrent discovery (both count 0,
             // both insert, loser 23505 → 409).
-            lockTaxonomyCollection(ctx, tenant, collection);
-            ensureCollectionRegistered(ctx, tenant, collection);
+            TaxonomyCollectionLock.lockAndRequireWritable(ctx, tenant, collection);   // advisory lock keyed by id, then the key share
             // RDR-229 P3.1 stage 2b: the collection's registry id for every topic written below.
             final Long collectionId = CollectionIds.require(ctx, tenant, collection);
             int existing = ctx.selectCount()

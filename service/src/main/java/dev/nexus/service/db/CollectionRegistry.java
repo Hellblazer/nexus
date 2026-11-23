@@ -268,7 +268,7 @@ public final class CollectionRegistry {
      * nothing and answers 200): empty when a request by label finds no row, with nothing to lock. A request by id still answers its
      * typed 404 or 409. A retired row of a label is returned, as {@link #resolveLabel} returns it: only a request by its id is refused.
      */
-    public Optional<CollectionRow> requireForWriteIfPresent(DSLContext ctx, String tenant, String label) {
+    public Optional<CollectionRow> requireForWriteIfPresentRow(DSLContext ctx, String tenant, String label) {
         return lockForWrite(ctx, tenant, label);
     }
 
@@ -299,14 +299,23 @@ public final class CollectionRegistry {
         }
     }
 
+    /**
+     * Drops the transaction's memo of registry rows it read {@code FOR KEY SHARE}: call it after rolling back to a savepoint, which
+     * released any lock taken inside it (the memo says it is held). Nothing in a savepoint reads the registry today; this keeps a
+     * future read from leaving a stale entry.
+     */
+    public static void forgetWriteMemo(DSLContext ctx) {
+        WriteRegistryMemo.forget(ctx);
+    }
+
     /** {@link #requireForWriteRow} on the process-wide registry. */
     public static CollectionRow requireForWrite(DSLContext ctx, String tenant, String label) {
         return SHARED.requireForWriteRow(ctx, tenant, label);
     }
 
-    /** {@link #requireForWriteIfPresent} on the process-wide registry. */
+    /** {@link #requireForWriteIfPresentRow} on the process-wide registry. */
     public static Optional<CollectionRow> requireForWriteIfPresent(DSLContext ctx, String tenant, String label) {
-        return SHARED.requireForWriteIfPresent(ctx, tenant, label);
+        return SHARED.requireForWriteIfPresentRow(ctx, tenant, label);
     }
 
     /**
