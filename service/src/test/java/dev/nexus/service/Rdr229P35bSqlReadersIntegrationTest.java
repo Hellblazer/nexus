@@ -159,9 +159,14 @@ class Rdr229P35bSqlReadersIntegrationTest {
             stampChunks(ctx, DIVERGED, divergedId, DIVERGED_CHASHES);
             stampManifest(ctx, DIVERGED, divergedId, DIVERGED_CHASHES);
             ctx.alterTable(CATALOG_DOCUMENT_CHUNKS).dropConstraintIfExists(DSL.name("fk_catalog_chunks_chunk")).execute();
+            // P3.7's vectors-079 trigger stamps a manifest row's name from its chunk until P4.1 drops the name columns, so the diverged
+            // name is the state after P4.1, where neither the key nor the trigger exists: the rewrite runs with triggers off
+            // (session_replication_role = replica, this session only; the key is already dropped).
+            ctx.set(DSL.name("session_replication_role"), DSL.inline("replica"));
             ctx.update(CATALOG_DOCUMENT_CHUNKS).set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, DIVERGED_MANIFEST_NAME)
                 .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT)).and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(DIVERGED))
                 .execute();
+            ctx.set(DSL.name("session_replication_role"), DSL.inline("origin"));
             assertThat(ctx.fetchCount(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT)
                     .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(DIVERGED_MANIFEST_NAME))
                     .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID.eq(divergedId))))
