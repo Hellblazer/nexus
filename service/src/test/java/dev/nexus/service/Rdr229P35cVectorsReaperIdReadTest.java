@@ -294,6 +294,40 @@ class Rdr229P35cVectorsReaperIdReadTest extends AtomicWriteTestBase {
         }
     }
 
+    // ---- collectionStats (linda (iii)): the by-id read equals the by-name read on a half-stamped collection ---------------
+
+    @Test
+    void collectionStats_onAHalfStampedCollection_readsByIdWhatTheNameFormReads_unlatchedAndLatched() throws Exception {
+        String tenant = tenant("hst"), c = docs("hst"), other = docs("hst-other");
+        List<String> hex = new ArrayList<>();
+        su(ctx -> {
+            hex.addAll(seed(ctx, tenant, c, 4, h -> Map.of("title", "t")));
+            seed(ctx, tenant, other, 2, h -> Map.of("title", "t"));
+        });
+        try (Connection conn = pg.createConnection("")) {
+            conn.setAutoCommit(true);
+            PgContainerHelper.dropConstraint(conn, CHUNKS, "chunks_collection_id_check");
+            PgContainerHelper.dropConstraint(conn, CHUNKS, "chunks_collection_id_not_null");
+            int n = DSL.using(conn, SQLDialect.POSTGRES).update(CHUNKS).setNull(CHUNKS.COLLECTION_ID)
+                .where(CHUNKS.TENANT_ID.eq(tenant)).and(CHUNKS.COLLECTION.eq(c))
+                .and(CHUNKS.CHASH.in(hex.subList(0, 2).stream().map(h -> java.util.HexFormat.of().parseHex(h)).toList())).execute();
+            assertThat(n).as("fixture: half of the collection's chunks have no id yet").isEqualTo(2);
+        }
+
+        var unlatched = new dev.nexus.service.vectors.PgVectorRepository(tenantScope, embedder, embedder, Gate3.never())
+            .collectionStats(tenant);
+        var latchedRows = new dev.nexus.service.vectors.PgVectorRepository(tenantScope, embedder, embedder, LATCHED)
+            .collectionStats(tenant);
+
+        assertThat(unlatched).as("non-vacuity: the half-stamped collection is listed with every one of its chunks")
+            .anySatisfy(r -> {
+                assertThat(r.get("name")).isEqualTo(c);
+                assertThat(((Number) r.get("stored_count")).longValue()).isEqualTo(4L);
+            });
+        assertThat(latchedRows).as("by id (latched) exactly what the name form (unlatched) answers: the view gives an unstamped registered chunk "
+            + "its registry id").isEqualTo(unlatched);
+    }
+
     // ---- ChunkKeySweep ------------------------------------------------------------------------------------------------
 
     @Test
