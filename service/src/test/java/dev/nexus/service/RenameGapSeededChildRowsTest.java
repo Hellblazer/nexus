@@ -218,6 +218,7 @@ class RenameGapSeededChildRowsTest {
         assertThat(centroids.json().path("deleted").asInt(-1)).as("no centroid either").isZero();
         assertThat(topicLabelsOf(x)).as("the collection's topic is still there").containsExactly("seed-topic");
         var t = TAXONOMY_CENTROIDS;
-        assertThat(fx.asSuperuser(ctx -> ctx.fetchCount(t, t.COLLECTION_ID.eq(x)))).as("and its centroid").isEqualTo(1);
+        Integer centroids2 = fx.asSuperuser(ctx -> ctx.fetchCount(t, t.COLLECTION_ID.eq(x)));
+        assertThat(centroids2).as("and its centroid").isEqualTo(1);
     }
 }
