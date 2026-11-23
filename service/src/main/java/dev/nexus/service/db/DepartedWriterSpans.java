@@ -105,7 +105,17 @@ final class DepartedWriterSpans {
     /** Spans from gate 3 whose collection id could not be resolved (RDR-229 P3.5c): logged at WARN and counted, never kept silently. */
     private static final java.util.concurrent.atomic.AtomicLong UNRESOLVED = new java.util.concurrent.atomic.AtomicLong();
 
-    /** The count of unresolved spans so far (for tests and the status surface). */
+    /**
+     * The one reading of the gate a pass uses: the rows a pass reads (their label and id columns) and the clear that follows them must see the
+     * SAME answer, or at the one-time latch flip a row read by name is cleared by id, found to carry no id, counted unresolved and skipped
+     * (folio's review F1). A caller takes it once per pass and hands it to {@code rowsAt}, {@code Gone.columns} and {@code clear*}.
+     */
+    static Gate3 pinned(Gate3 gate3) {
+        final boolean latched = gate3.holds();
+        return () -> latched;
+    }
+
+    /** The count of unresolved spans so far. Read by the tests only: no production code reads it, the WARN line at the two resolving sites is the production signal. */
     static long unresolvedSpans() {
         return UNRESOLVED.get();
     }
