@@ -26,9 +26,12 @@ public final class CollectionTombstones {
 
     /**
      * The registry row lock bound, in milliseconds as the GUC text (linda's Q3): a verb that cannot lock its rows in this time answers
-     * {@link RenameBusyException} (503 {@code rename_busy}) and changes nothing. PostgreSQL lets new {@code FOR KEY SHARE} lockers
-     * join a row while a {@code FOR UPDATE} waits for the old ones, so steady overlapping writers can starve the verb: the bound turns
-     * that into an answer. Writers get no timeout.
+     * {@link RenameBusyException} (503 {@code rename_busy}) and changes nothing. A new {@code FOR KEY SHARE} locker joins a row while
+     * a {@code FOR UPDATE} waits for the earlier holder (pinned by
+     * {@code RetiringVerbsLiveAtCommitTest#aWriterArrivingWhileTheVerbIsQueuedBehindAHolderJoinsIt_andTheVerbWaitsForBoth}), so the
+     * verb waits for every holder, the late ones included, and steady overlapping writers could keep the row from it. A single writer
+     * held past the bound ends the wait the same way ({@code aVerbWhoseRowIsHeldPastItsBoundAnswersRenameBusy_andChangesNothing}).
+     * Either way the bound turns the wait into an answer. Writers get no timeout.
      */
     private static volatile String rowLockTimeoutMs = "10000";
 
