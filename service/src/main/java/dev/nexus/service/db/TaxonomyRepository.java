@@ -204,10 +204,13 @@ public final class TaxonomyRepository {
      * an UPDATE that names no collection column (a label or review change, the conflict arm of an import). The NOT
      * VALID {@code topics_collection_id_check} is evaluated on every updated row version, so a topic the P3.1 stamp
      * has not reached (collection set, {@code collection_id} NULL) is refused (23514) by any UPDATE that leaves the id
-     * alone. Correlated on the row's own {@code (tenant_id, collection)}; NULL for {@code ''}, as the CHECK wants.
+     * alone. The row KEEPS the id it carries (nexus-p2m1x.23): an id is the collection's identity, and a name column can be stale (a
+     * one-row rename leaves it at the old label, which no row holds or another row now holds), so re-deriving the id from the name
+     * would give NULL (23514) or another collection's id. Only a row with no id yet takes the id its own name resolves to; NULL for
+     * {@code ''}, as the CHECK wants.
      */
     private static Field<Long> topicRowCollectionId() {
-        return CollectionIds.idOf(TOPICS.TENANT_ID, TOPICS.COLLECTION);
+        return coalesce(TOPICS.COLLECTION_ID, CollectionIds.idOf(TOPICS.TENANT_ID, TOPICS.COLLECTION));
     }
 
     /**
@@ -216,11 +219,17 @@ public final class TaxonomyRepository {
      * the name (the twin of {@link #modelFollowing}). Resolved from the winning NAME rather than copied from
      * {@code EXCLUDED}, so a losing write that leaves an unstamped row's name alone still stamps its id: the NOT VALID
      * CHECK refuses every row version whose id and name disagree.
+     *
+     * <p>nexus-p2m1x.23: the winning row KEEPS the id it carries (the incoming row's, or the existing row's). Only a row with no id falls
+     * back to its name. Re-resolving a stamped row's id from its name gives NULL when the name lost its registry row (the CHECK then
+     * refuses the update, 23514) and another collection's id when the old name was taken by a new row.
      */
     private static Field<Long> sourceIdFollowing(org.jooq.Condition incomingWins) {
         Field<String> winner = when(incomingWins, org.jooq.impl.DSL.excluded(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION))
             .otherwise(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION);
-        return CollectionIds.idOf(TOPIC_ASSIGNMENTS.TENANT_ID, winner);
+        Field<Long> winnerId = when(incomingWins, org.jooq.impl.DSL.excluded(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID))
+            .otherwise(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID);
+        return coalesce(winnerId, CollectionIds.idOf(TOPIC_ASSIGNMENTS.TENANT_ID, winner));
     }
 
     /** The registry id of each distinct name, read in this transaction ({@code null} for none), for a batch INSERT. */
@@ -403,13 +412,21 @@ public final class TaxonomyRepository {
         });
     }
 
-    /** Update topic label without changing review_status. */
+    /**
+     * Update topic label without changing review_status.
+     *
+     * <p>RDR-229 P3.5a (nexus-p2m1x.23), also {@link #renameTopic} and {@link #markTopicReviewed}: the topic's collection is read {@code FOR
+     * KEY SHARE} by the id the topic carries before the update (a verb that retires it waits), and the update is confined to the topic
+     * of that home and keeps the id. A name column can be stale after a one-row rename, and the old name may be another collection's.
+     */
     public void updateTopicLabel(String tenant, long topicId, String newLabel) {
         tenantScope.withTenant(tenant, ctx -> {
+            var home = TaxonomyRegistryReads.registryFirstOfTopic(ctx, tenant, topicId);
+            if (home.isEmpty()) return null;
             ctx.update(TOPICS)
                .set(TOPICS.LABEL, newLabel)
                .set(TOPICS.COLLECTION_ID, topicRowCollectionId())
-               .where(TOPICS.ID.eq(topicId))
+               .where(TOPICS.ID.eq(topicId).and(home.get().ownsTopic()))
                .execute();
             return null;
         });
@@ -418,11 +435,13 @@ public final class TaxonomyRepository {
     /** Rename topic and mark as accepted. */
     public void renameTopic(String tenant, long topicId, String newLabel) {
         tenantScope.withTenant(tenant, ctx -> {
+            var home = TaxonomyRegistryReads.registryFirstOfTopic(ctx, tenant, topicId);
+            if (home.isEmpty()) return null;
             ctx.update(TOPICS)
                .set(TOPICS.LABEL, newLabel)
                .set(TOPICS.REVIEW_STATUS, "accepted")
                .set(TOPICS.COLLECTION_ID, topicRowCollectionId())
-               .where(TOPICS.ID.eq(topicId))
+               .where(TOPICS.ID.eq(topicId).and(home.get().ownsTopic()))
                .execute();
             return null;
         });
@@ -431,10 +450,12 @@ public final class TaxonomyRepository {
     /** Update review_status. */
     public void markTopicReviewed(String tenant, long topicId, String status) {
         tenantScope.withTenant(tenant, ctx -> {
+            var home = TaxonomyRegistryReads.registryFirstOfTopic(ctx, tenant, topicId);
+            if (home.isEmpty()) return null;
             ctx.update(TOPICS)
                .set(TOPICS.REVIEW_STATUS, status)
                .set(TOPICS.COLLECTION_ID, topicRowCollectionId())
-               .where(TOPICS.ID.eq(topicId))
+               .where(TOPICS.ID.eq(topicId).and(home.get().ownsTopic()))
                .execute();
             return null;
         });
@@ -527,15 +548,13 @@ public final class TaxonomyRepository {
      */
     public Optional<String> deleteTopic(String tenant, long topicId) {
         return tenantScope.withTenant(tenant, ctx -> {
-            var rows = ctx.select(TOPICS.COLLECTION)
-                .from(TOPICS)
-                .where(TOPICS.ID.eq(topicId))
-                .fetch();
-            if (rows.isEmpty()) return Optional.<String>empty();
-            String collection = rows.get(0).get(TOPICS.COLLECTION);
+            // RDR-229 P3.5a (nexus-p2m1x.23): the topic's collection AND the source collections of the assignments the FK cascade removes are
+            // read FOR KEY SHARE (one statement, id order) before the delete; the delete is confined to the topic of that home
+            var home = TaxonomyRegistryReads.registryFirstOfTopics(ctx, tenant, true, List.of(topicId));
+            if (home.isEmpty()) return Optional.<String>empty();
             // Assignments cascade via FK ON DELETE CASCADE
-            ctx.deleteFrom(TOPICS).where(TOPICS.ID.eq(topicId)).execute();
-            return Optional.of(collection);
+            ctx.deleteFrom(TOPICS).where(TOPICS.ID.eq(topicId).and(home.get().ownsTopic())).execute();
+            return Optional.of(home.get().currentLabel());
         });
     }
 
@@ -546,16 +565,13 @@ public final class TaxonomyRepository {
     public Optional<String> mergeTopics(String tenant, long sourceId, long targetId) {
         if (sourceId == targetId) return Optional.empty();
         return tenantScope.withTenant(tenant, ctx -> {
-            var rows = ctx.select(TOPICS.COLLECTION)
-                .from(TOPICS)
-                .where(TOPICS.ID.eq(sourceId))
-                .fetch();
-            if (rows.isEmpty()) return Optional.<String>empty();
-            String collection = rows.get(0).get(TOPICS.COLLECTION);
-            // RDR-229 P3.5a (review): the topic's collection is read FOR KEY SHARE before any assignment row is written, so a verb that
-            // retires it waits for this merge (registry first, then the child rows); a collection with no row (the leftovers of a
-            // deleted one) is merged as it always was
-            CollectionRegistry.requireForWriteIfPresent(ctx, tenant, collection);
+            // RDR-229 P3.5a (nexus-p2m1x.23): the registry rows the merge writes under are read FOR KEY SHARE in ONE statement in id order before
+            // any assignment row is written: the collections of both topics, by the ids they carry (a name column can be stale), and the source
+            // collections of the assignments of both (the moved rows, and the target's rows a conflict re-points). A collection with no row (the
+            // leftovers of a deleted one) is merged as it always was
+            var home = TaxonomyRegistryReads.registryFirstOfTopics(ctx, tenant, true, List.of(sourceId, targetId));
+            if (home.isEmpty()) return Optional.<String>empty();
+            String collection = home.get().currentLabel();
 
             // Move assignments: prefer higher similarity on conflict.
             // GREATEST(COALESCE(...), COALESCE(...)) + CASE WHEN expressions referencing
@@ -588,7 +604,7 @@ public final class TaxonomyRepository {
                         coalesce(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID,
                             CollectionIds.idOf(TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)))
                     .from(TOPIC_ASSIGNMENTS)
-                    .where(TOPIC_ASSIGNMENTS.TOPIC_ID.eq(sourceId)))
+                    .where(TOPIC_ASSIGNMENTS.TOPIC_ID.eq(sourceId).and(home.get().holdsTopic(TOPIC_ASSIGNMENTS.TOPIC_ID, sourceId))))
                .onConflict(
                     TOPIC_ASSIGNMENTS.TENANT_ID,
                     TOPIC_ASSIGNMENTS.DOC_ID,
@@ -616,14 +632,14 @@ public final class TaxonomyRepository {
                .execute();
 
             ctx.deleteFrom(TOPIC_ASSIGNMENTS)
-               .where(TOPIC_ASSIGNMENTS.TOPIC_ID.eq(sourceId))
+               .where(TOPIC_ASSIGNMENTS.TOPIC_ID.eq(sourceId).and(home.get().holdsTopic(TOPIC_ASSIGNMENTS.TOPIC_ID, sourceId)))
                .execute();
 
             // RDR-154 P0 (nexus-i7ivk): no manual doc_count resync. The assignment
             // move (INSERT) and source purge (DELETE) above each fire the
             // statement-level triggers, which recompute target.doc_count from the
             // live assignment rows; the trigger is the sole writer.
-            ctx.deleteFrom(TOPICS).where(TOPICS.ID.eq(sourceId)).execute();
+            ctx.deleteFrom(TOPICS).where(TOPICS.ID.eq(sourceId).and(home.get().ownsTopic())).execute();
 
             return Optional.of(collection);
         });
@@ -1515,6 +1531,10 @@ public final class TaxonomyRepository {
      * while a genuinely chash-shaped title still gets full delete semantics.
      */
     public int purgeAssignmentsForDoc(String tenant, String project, String title) {
+        // RDR-229 P3.5a (nexus-p2m1x.23): the project is a LABEL; it names the collection whose row the label resolves to NOW, read FOR KEY SHARE
+        // (a label no row holds is the leftovers of a deleted collection and reaches only rows no id has reached, the purge's rule). The
+        // topics are those of that row by its id: a topic whose name column bears the label but whose id is another collection's is not this
+        // project's. The source collections of the assignments removed are read with it, in id order.
         if (!title.matches("^[0-9a-f]{64}$")) {
             // Not a chash-shaped identifier -- structurally cannot match any
             // topic_assignments row (see javadoc above). Still run the
@@ -1522,8 +1542,9 @@ public final class TaxonomyRepository {
             // behavior for a non-matching title (unconditional, not gated
             // on removed > 0).
             return tenantScope.withTenant(tenant, ctx -> {
+                var row = TaxonomyRegistryReads.registryFirstAround(ctx, tenant, project, TaxonomyRegistryReads.Names::empty);
                 ctx.deleteFrom(TOPICS)
-                   .where(TOPICS.COLLECTION.eq(project)
+                   .where(ownTopics(row.orElse(null), project)
                        .and(TOPICS.ID.notIn(
                            selectDistinct(TOPIC_ASSIGNMENTS.TOPIC_ID).from(TOPIC_ASSIGNMENTS))))
                    .execute();
@@ -1531,13 +1552,18 @@ public final class TaxonomyRepository {
             });
         }
         return tenantScope.withTenant(tenant, ctx -> {
+            final byte[] doc = docIdBytes(title);
+            final org.jooq.Condition projectTopics = TaxonomyRegistryReads.topicsNamedBy(ctx, tenant, project);
+            var row = TaxonomyRegistryReads.registryFirstAround(ctx, tenant, project, () -> TaxonomyRegistryReads.sourcesOf(ctx, tenant,
+                TOPIC_ASSIGNMENTS.DOC_ID.eq(doc).and(TOPIC_ASSIGNMENTS.TOPIC_ID.in(select(TOPICS.ID).from(TOPICS).where(projectTopics)))));
+            final org.jooq.Condition ownTopics = ownTopics(row.orElse(null), project);
             int removed = ctx.deleteFrom(TOPIC_ASSIGNMENTS)
-                .where(TOPIC_ASSIGNMENTS.DOC_ID.eq(docIdBytes(title))
+                .where(TOPIC_ASSIGNMENTS.DOC_ID.eq(doc)
                     .and(TOPIC_ASSIGNMENTS.TOPIC_ID.in(
-                        select(TOPICS.ID).from(TOPICS).where(TOPICS.COLLECTION.eq(project)))))
+                        select(TOPICS.ID).from(TOPICS).where(ownTopics))))
                 .execute();
             ctx.deleteFrom(TOPICS)
-               .where(TOPICS.COLLECTION.eq(project)
+               .where(ownTopics
                    .and(TOPICS.ID.notIn(
                        selectDistinct(TOPIC_ASSIGNMENTS.TOPIC_ID).from(TOPIC_ASSIGNMENTS))))
                .execute();
@@ -1566,14 +1592,27 @@ public final class TaxonomyRepository {
      * {@code docs__art} reaches {@code docs__art-x}), which is wrong when each collection has its own threshold.
      */
     public int pruneProjectionBelow(String tenant, String sourceCollection, double minSimilarity, boolean exact) {
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.deleteFrom(TOPIC_ASSIGNMENTS)
+        return tenantScope.withTenant(tenant, ctx -> {
+            // RDR-229 P3.5a (nexus-p2m1x.23): the rows pruned are the source collections' own, by their ids: exact reads the one row the label
+            // resolves to now FOR KEY SHARE, a prefix reads the rows of every collection whose label starts with it in one id-ordered
+            // statement. A source_collection name column can be stale after a one-row rename (the old label may now be another collection's), so
+            // it matches only a row no id has reached.
+            final org.jooq.Condition source;
+            if (exact) {
+                var row = CollectionRegistry.requireForWriteIfPresent(ctx, tenant, sourceCollection);
+                source = CollectionOwnedRows.of(row, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, sourceCollection);
+            } else {
+                var rows = TaxonomyRegistryReads.registryFirstOfPrefix(ctx, tenant, sourceCollection);
+                var byId = rows.isEmpty() ? org.jooq.impl.DSL.falseCondition()
+                    : TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID.in(TaxonomyRegistryReads.idsOf(rows));
+                source = byId.or(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID.isNull().and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.startsWith(sourceCollection)));
+            }
+            return ctx.deleteFrom(TOPIC_ASSIGNMENTS)
                .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
-                   .and(exact
-                       ? TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(sourceCollection)
-                       : TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.startsWith(sourceCollection))
+                   .and(source)
                    .and(TOPIC_ASSIGNMENTS.SIMILARITY.lt(minSimilarity)))
-               .execute());
+               .execute();
+        });
     }
 
     /**
@@ -1647,7 +1686,12 @@ public final class TaxonomyRepository {
             // after a one-row rename, and the old name may now be another collection's); a label no row holds
             // reaches only a row the stamp has not reached (no id yet): a stamped row belongs to a collection whatever its name says, and the
             // label may be the OLD name of a renamed one
-            final Long purgedId = consumeRequestedId(ctx, tenant, collection);
+            // RDR-229 P3.5a (nexus-p2m1x.23): the rows the purge reaches are read in one id-ordered run, the collection's own among them: the
+            // doomed topics' assignments carry the source collections of the documents projected onto them (other collections' chunks), and
+            // those collections' registry rows are read FOR KEY SHARE too, before any delete
+            final Long purgedId = TaxonomyRegistryReads.registryFirstAround(ctx, tenant, collection, () -> TaxonomyRegistryReads.sourcesOf(ctx, tenant,
+                TOPIC_ASSIGNMENTS.TOPIC_ID.in(select(TOPICS.ID).from(TOPICS).where(TaxonomyRegistryReads.topicsNamedBy(ctx, tenant, collection)))))
+                .map(CollectionRow::collectionId).orElse(null);
             final org.jooq.Condition topicsOf = purgedId == null ? TOPICS.COLLECTION_ID.isNull().and(TOPICS.COLLECTION.eq(collection))
                 : TOPICS.COLLECTION_ID.eq(purgedId).or(TOPICS.COLLECTION_ID.isNull().and(TOPICS.COLLECTION.eq(collection)));
             var doomedIds = ctx.select(TOPICS.ID)
@@ -2779,13 +2823,25 @@ public final class TaxonomyRepository {
             // children escape the taxonomy-004 partial index (parent_id NOT
             // NULL) so a race here duplicates children rather than 409ing —
             // the same per-collection lock closes both.
-            final String coll = TaxonomyCollectionLock.currentLabel(TaxonomyCollectionLock.lockAndRequireWritable(ctx, tenant, collectionName), collectionName);   // advisory lock keyed by id, then the key share
+            final CollectionRow locked = TaxonomyCollectionLock.lockAndRequireWritable(ctx, tenant, collectionName);   // advisory lock keyed by id, then the key share
+            final String coll = TaxonomyCollectionLock.currentLabel(locked, collectionName);
+            // RDR-229 P3.5a (nexus-p2m1x.23): the parent's assignments carry the source collections of documents projected onto it, and the
+            // delete below removes them: those rows are read FOR KEY SHARE in one id-ordered statement before it, and the parent must be a
+            // topic of this collection
+            if (locked != null) {
+                TaxonomyRegistryReads.registryFirstRest(ctx, tenant, () -> TaxonomyRegistryReads.sourcesOf(ctx, tenant,
+                    TOPIC_ASSIGNMENTS.TOPIC_ID.eq(topicId)), java.util.Set.of(), locked);
+                TaxonomyRegistryReads.requireTopicIn(ctx, topicId, locked);
+            }
             // RDR-229 P3.1 stage 2b: the collection's registry id for every child topic written below.
             final Long collectionId = CollectionIds.require(ctx, tenant, coll);
             // Delete parent assignments
             ctx.deleteFrom(TOPIC_ASSIGNMENTS)
                .where(TOPIC_ASSIGNMENTS.TENANT_ID.eq(tenant)
-                   .and(TOPIC_ASSIGNMENTS.TOPIC_ID.eq(topicId)))
+                   .and(TOPIC_ASSIGNMENTS.TOPIC_ID.eq(topicId))
+                   .and(locked == null ? org.jooq.impl.DSL.trueCondition()
+                       : TOPIC_ASSIGNMENTS.TOPIC_ID.in(select(TOPICS.ID).from(TOPICS).where(TOPICS.ID.eq(topicId)
+                           .and(TOPICS.COLLECTION_ID.eq(locked.collectionId()).or(TOPICS.COLLECTION_ID.isNull()))))))
                .execute();
 
             List<Long> childIds = new ArrayList<>();
