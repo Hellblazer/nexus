@@ -25,6 +25,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -402,6 +403,48 @@ class PciIdGate3IntegrationTest extends PciIdIndexSupport {
         }
     }
 
+    // -- RDR-229 P3.5c (linda 2026-11-23): a quarantine chunk with no origin_collection_id key keeps gate 3 shut -------------------------
+
+    private void setQuarantineMetadata(String tenant, long id, String json) throws Exception {
+        asSuperuser(su -> su.update(CHUNKS).set(CHUNKS.METADATA, org.jooq.JSONB.valueOf(json))
+            .where(CHUNKS.TENANT_ID.eq(tenant)).and(CHUNKS.COLLECTION_ID.eq(id)).execute());
+    }
+
+    @Test
+    void aQuarantineChunkWithoutTheOriginIdKeyKeepsGate3Shut_untilTheKeyIsPresentAsAValueOrAsJsonNull() throws Exception {
+        String tenant = newTenant("q-origin");
+        long id = collection(tenant, name("q-origin"), 300);
+        PciReconciler r = reconciler(settings(16));
+        r.reconcileOnce();
+        gate2 = true;
+        r.reconcileOnce();
+        assertThat(uncovered(r, tenant)).isEmpty();
+        asSuperuser(su -> su.update(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+            .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.LIFECYCLE_STATE, "quarantine")
+            .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+            .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.COLLECTION_ID.eq(id)).execute());
+        var reporter = reporter(r);
+        try {
+            for (String carrying : new String[] {"{\"title\":\"old quarantine row\"}", "null"}) {
+                asSuperuser(su -> su.deleteFrom(LATCH).execute());
+                setQuarantineMetadata(tenant, id, carrying.equals("null") ? "{}" : carrying);
+                var shut = reporter.refresh();
+                assertThat(shut.gate3()).as("a pre-id quarantine chunk: gate 3 does not hold").isFalse();
+                assertThat(shut.gate3Why()).as("and says why, with the count")
+                    .contains("quarantine chunks lack origin_collection_id").contains("300").contains("backfill pending");
+            }
+            for (String key : new String[] {"{\"origin_collection_id\": 7}", "{\"origin_collection_id\": null}"}) {
+                asSuperuser(su -> su.deleteFrom(LATCH).execute());
+                setQuarantineMetadata(tenant, id, key);
+                var open = reporter.refresh();
+                assertThat(open.gate3()).as("the key present (%s): gate 3 holds: %s", key, open.gate3Why()).isTrue();
+            }
+        } finally {
+            reporter.close();
+            asSuperuser(su -> su.deleteFrom(LATCH).execute());
+        }
+    }
+
     // -- N2: a killed REINDEX of an id index leaves an INVALID leftover that the next pass drops --------------------
 
     boolean hasIdLeftover(String tenant) {
@@ -481,7 +524,7 @@ class PciIdGate3IntegrationTest extends PciIdIndexSupport {
 
     @Test
     void aPciOnInstallWithNoLeafAtAll_hasNothingRequired_butIsNotVerifiedEmpty_soTheRegistryDecides() throws Exception {
-        var empty = new PciGate3Coverage(() -> new PciCatalog.Snapshot(List.of()), settings(16), Clock.systemUTC());
+        var empty = new PciGate3Coverage(() -> new PciCatalog.Snapshot(List.of()), settings(16), Clock.systemUTC(), dev.nexus.service.datamove.Gate3.never());
         String tenant = newTenant("noleaf");
         collection(tenant, name("noleaf"), 10);                // a live registry row exists, whatever the (empty) snapshot says
         try (Connection admin = adminDs.getConnection()) {

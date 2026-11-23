@@ -397,7 +397,7 @@ final class RestoreIdFill {
     /**
      * A quarantined chunk's metadata tags its origin by name ({@code origin_collection}) and by id
      * ({@link QuarantineOrigin#ORIGIN_ID_KEY}). The id is the backup's installation's; a restore mints new ids, so a tag that
-     * has the key gets the id the map holds for it, or loses the key when the map holds none (the name beside it is not
+     * has the key gets the id the map holds for it, or the key set to JSON null when the map holds none (the name beside it is not
      * consulted: from P3.7 it may be a stale label, or another collection's). Every other key of the metadata is kept. A row
      * without the key is not written.
      */
@@ -411,7 +411,10 @@ final class RestoreIdFill {
         Field<Long> restored = map.target(sourceId);
         Field<JSONB> refilled = DSL.function("jsonb_set", SQLDataType.JSONB, metadata,
             DSL.val(new String[] {QuarantineOrigin.ORIGIN_ID_KEY}), DSL.function("to_jsonb", SQLDataType.JSONB, restored));
-        Field<JSONB> stripped = DSL.function("jsonb_delete", SQLDataType.JSONB, metadata, DSL.val(QuarantineOrigin.ORIGIN_ID_KEY));
+        // an unmapped id is marked, never removed: the key present with JSON null is how a dangling tag reads (the backfill's mark), and an
+        // absent key would keep gate 3 shut (CompletionCheck's quarantine clause)
+        Field<JSONB> stripped = DSL.function("jsonb_set", SQLDataType.JSONB, metadata,
+            DSL.val(new String[] {QuarantineOrigin.ORIGIN_ID_KEY}), DSL.val(JSONB.jsonb("null")));
         ctx.update(TenantImportStaging.stageTable(rows).as("s"))
             .set(DSL.field(DSL.name("metadata"), SQLDataType.JSONB), DSL.when(restored.isNotNull(), refilled).otherwise(stripped))
             .where(DSL.function("jsonb_exists", SQLDataType.BOOLEAN, metadata, DSL.val(QuarantineOrigin.ORIGIN_ID_KEY)).isTrue())
