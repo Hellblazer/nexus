@@ -13,6 +13,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.function.Function;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+
 /**
  * The one entry point of every collection rename, RDR-229 P3.5a (bead nexus-p2m1x.23; linda's rulings 3, D2 and R-A): the object
  * {@code CatalogRepository.renameCollectionTxn} and the rename of each per-store repository (chash, taxonomy, telemetry, aspects,
@@ -209,12 +211,13 @@ public final class RenameGuard {
      * @throws RenameNotInRegistryException when it is not so
      */
     static void requireRegistryRenamed(DSLContext ctx, String tenant, String oldLabel, String newLabel) {
-        var live = ctx.select(DSL.field(DSL.name("name"), String.class))
-            .from(DSL.table(DSL.name("nexus", "catalog_collections")))
-            .where(DSL.field(DSL.name("tenant_id"), String.class).eq(tenant))
-            .and(DSL.field(DSL.name("name"), String.class).in(oldLabel, newLabel))
-            .and(DSL.field(DSL.name("superseded_by"), String.class).eq(""))
-            .fetch(DSL.field(DSL.name("name"), String.class));
+        // "live" is CollectionRegistry.notSuperseded(), the one definition the label resolvers share
+        var live = ctx.select(CATALOG_COLLECTIONS.NAME)
+            .from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+            .and(CATALOG_COLLECTIONS.NAME.in(oldLabel, newLabel))
+            .and(CollectionRegistry.notSuperseded())
+            .fetch(CATALOG_COLLECTIONS.NAME);
         if (!live.contains(newLabel) || live.contains(oldLabel)) {
             throw new RenameNotInRegistryException();
         }
