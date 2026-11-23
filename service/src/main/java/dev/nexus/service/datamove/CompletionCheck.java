@@ -661,11 +661,10 @@ public final class CompletionCheck {
             return "";
         }
         try {
-            var r = ctx.fetchOne("SELECT count(*) FILTER (WHERE label LIKE ? AND completed_at IS NULL), "
-                + "count(*) FILTER (WHERE label = ? AND completed_at IS NULL) FROM nexus.data_moves",
-                dev.nexus.service.vectors.Rdr229ChunksFk.LEAF_LABEL_PREFIX + "%", dev.nexus.service.vectors.Rdr229ChunksFk.ADOPT_LABEL);
-            long leaves = r == null ? 0 : r.get(0, Long.class);
-            boolean adopt = r != null && r.get(1, Long.class) > 0;
+            Field<String> labelField = DSL.field(DSL.name("label"), String.class);
+            var open = DSL.field(DSL.name("completed_at"), org.jooq.impl.SQLDataType.TIMESTAMPWITHTIMEZONE).isNull();
+            long leaves = ctx.fetchCount(MOVES, labelField.like(dev.nexus.service.vectors.Rdr229ChunksFk.LEAF_LABEL_PREFIX + "%"), open);
+            boolean adopt = ctx.fetchCount(MOVES, labelField.eq(dev.nexus.service.vectors.Rdr229ChunksFk.ADOPT_LABEL), open) > 0;
             if (leaves == 0 && !adopt) {
                 return "";
             }
