@@ -3,6 +3,7 @@
 package dev.nexus.service.vectors;
 
 import dev.nexus.service.datamove.Gate3;
+import dev.nexus.service.db.CollectionKey;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.TenantScope;
 
@@ -87,15 +88,8 @@ public class ReaperRepository {   // not final: ChunkReaperIntegrationTest raise
                 // (by id, no live filter: an id to its label), or, for an id no registry row holds (dangling), under the stored
                 // chunks.collection of that id's rows (one per id: min). A NULL id is no collection, never a '' name. One registry
                 // probe per id (GROUP BY), not per chunk row, under this statement bound. Two ids that share a label list it once.
-                var c = CATALOG_COLLECTIONS.as("lbl");
-                Field<String> label = DSL.coalesce(
-                    DSL.field(DSL.select(c.NAME).from(c).where(c.TENANT_ID.eq(tenant)).and(c.COLLECTION_ID.eq(CHUNKS.COLLECTION_ID))),
-                    DSL.min(CHUNKS.COLLECTION)).as("label");
-                return ctx.select(label).from(CHUNKS)
-                    .where(CHUNKS.TENANT_ID.eq(tenant)).and(CHUNKS.COLLECTION_ID.isNotNull())
-                    .groupBy(CHUNKS.COLLECTION_ID)
-                    .orderBy(label)
-                    .fetch(label).stream().distinct().toList();
+                return CollectionKey.distinctLabelsKeepingDangling(ctx, tenant, CHUNKS, CHUNKS.TENANT_ID.eq(tenant),
+                    CHUNKS.COLLECTION_ID, CHUNKS.COLLECTION);
             }
             return ctx.selectDistinct(CHUNKS.COLLECTION).from(CHUNKS)
                 .where(CHUNKS.TENANT_ID.eq(tenant))
