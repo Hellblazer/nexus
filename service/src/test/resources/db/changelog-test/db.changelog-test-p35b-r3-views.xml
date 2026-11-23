@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-229 P3.5b (nexus-p2m1x.24), the fix round of 2026-11-23: the r3 bodies of nexus.collection_vector_stats and
+    nexus.live_chunks (vectors-077-98 and -99 at 68bb22481a), copied verbatim into the scratch schema p35b_r3 but for their
+    CREATE line, so Rdr229P35bBranchPartitionIntegrationTest can compare the four-branch rewrite with them on one fixture.
+    Applied once to the test's own database, never to the product schema.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="p35b-r3-views-1" author="nexus-p2m1x.24">
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE SCHEMA p35b_r3;
+]]></sql>
+    </changeSet>
+
+    <changeSet id="p35b-r3-views-2" author="nexus-p2m1x.24">
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE VIEW p35b_r3.collection_vector_stats
+    WITH (security_invoker = true)
+AS
+SELECT c.tenant_id,
+       COALESCE(r.name, c.collection) AS collection,
+       CASE WHEN c.embedding_384  IS NOT NULL THEN 384
+            WHEN c.embedding_768  IS NOT NULL THEN 768
+            WHEN c.embedding_1024 IS NOT NULL THEN 1024
+       END AS dim,
+       count(*) FILTER (WHERE lvi.chash IS NOT NULL OR lvn.chash IS NOT NULL) AS chunk_count,
+       max(c.created_at) FILTER (WHERE lvi.chash IS NOT NULL OR lvn.chash IS NOT NULL) AS last_write,
+       count(*)                                                    AS stored_count,
+       max(c.collection_id)                                        AS collection_id
+  FROM nexus.chunks c
+  LEFT JOIN nexus.catalog_collections r
+         ON r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id
+  LEFT JOIN (SELECT DISTINCT m.tenant_id, m.collection_id, m.chash
+               FROM nexus.catalog_document_chunks m
+               JOIN nexus.catalog_documents d
+                 ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+              WHERE d.deleted_at IS NULL AND m.collection_id IS NOT NULL) lvi
+         ON lvi.tenant_id = c.tenant_id AND lvi.collection_id = c.collection_id AND lvi.chash = c.chash
+  LEFT JOIN (SELECT m.tenant_id, m.collection, m.chash, bool_or(m.collection_id IS NULL) AS unstamped
+               FROM nexus.catalog_document_chunks m
+               JOIN nexus.catalog_documents d
+                 ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+              WHERE d.deleted_at IS NULL AND m.collection <> ''
+              GROUP BY m.tenant_id, m.collection, m.chash) lvn
+         ON lvn.tenant_id = c.tenant_id AND lvn.collection = c.collection AND c.collection <> '' AND lvn.chash = c.chash
+        AND (c.collection_id IS NULL OR lvn.unstamped)
+ GROUP BY c.tenant_id, COALESCE(r.name, c.collection), 3;
+]]></sql>
+    </changeSet>
+
+    <changeSet id="p35b-r3-views-3" author="nexus-p2m1x.24">
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE VIEW p35b_r3.live_chunks
+    WITH (security_invoker = true)
+AS
+SELECT c.tenant_id,
+       COALESCE(r.name, c.collection) AS collection,
+       c.chash,
+       c.chunk_text,
+       COALESCE(c.embedding_384, c.embedding_768, c.embedding_1024)::nexus.vector AS embedding,
+       c.chunk_tsv,
+       c.metadata,
+       c.created_at,
+       CASE WHEN c.embedding_384  IS NOT NULL THEN 384
+            WHEN c.embedding_768  IS NOT NULL THEN 768
+            WHEN c.embedding_1024 IS NOT NULL THEN 1024
+       END AS dim,
+       c.collection_id
+  FROM nexus.chunks c
+  LEFT JOIN nexus.catalog_collections r
+         ON r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id
+ WHERE EXISTS (SELECT 1
+                  FROM nexus.catalog_document_chunks m
+                  JOIN nexus.catalog_documents d
+                    ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                 WHERE m.tenant_id = c.tenant_id
+                   AND m.chash     = c.chash
+                   AND d.deleted_at IS NULL
+                   AND (c.collection_id = m.collection_id OR ((c.collection_id IS NULL OR m.collection_id IS NULL) AND c.collection = m.collection AND c.collection <> '')));
+]]></sql>
+    </changeSet>
+
+</databaseChangeLog>

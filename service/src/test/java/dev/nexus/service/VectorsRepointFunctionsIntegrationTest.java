@@ -516,6 +516,9 @@ class VectorsRepointFunctionsIntegrationTest {
                         DSL.using(conn, SQLDialect.POSTGRES), "nexus",
                         "search_metadata_scoped_%", "search_topic_scoped_%",
                         "search_graph_hop_%", "search_aspect_scoped_%");
+                    // RDR-229 P3.5b (vectors-077): each facade's id-path twin <name>_by_id is the same facade on the id, not a
+                    // thirteenth verb; Rdr229P35bIdTwinAttributesTest pins the pairs.
+                    names = names.stream().filter(nm -> !nm.endsWith("_by_id")).toList();
                     assertThat(names)
                         .as("the 12 combined-query facades (4 verbs x 3 dims) must "
                             + "number 12 post-RDR-156-Decision-5 — the original 9 "

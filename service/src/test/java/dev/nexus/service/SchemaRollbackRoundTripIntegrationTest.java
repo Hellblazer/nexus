@@ -779,8 +779,9 @@ class SchemaRollbackRoundTripIntegrationTest {
         return names;
     }
 
+    /** A vectors-055 function: it carries the flag and is not one of RDR-229 P3.5b's id twins (<name>_by_id, vectors-077), which carry it too. */
     private static boolean carriesExcludeSensitive(PgCatalogProbes.FunctionDefinition f) {
-        return f.arguments().contains("p_exclude_sensitive");
+        return f.arguments().contains("p_exclude_sensitive") && !f.identity().contains("_by_id(");
     }
 
     /**

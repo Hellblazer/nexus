@@ -476,7 +476,16 @@ public final class PgContainerHelper {
             return startDedicated();
         }
         try {
-            return SharedCluster.acquireDatabase();
+            PostgreSQLContainer<?> clone = SharedCluster.acquireDatabase();
+            if (Rdr229CompleteStamps.formAApplied()) { // -Dnexus.test.formA.applied=true: the clone with the vectors-078 form A bodies applied
+                try (Connection su = clone.createConnection("")) {
+                    Rdr229CompleteStamps.completeAndApplyFormA(su);
+                } catch (Exception e) {
+                    clone.stop();
+                    throw new IllegalStateException("RDR-229 P3.5b form A variant of the clone failed: " + e.getMessage(), e);
+                }
+            }
+            return clone;
         } catch (SQLException e) {
             throw new IllegalStateException("nexus-yhmav shared-cluster acquire failed", e);
         }
@@ -503,7 +512,8 @@ public final class PgContainerHelper {
      *   <li>{@code Rdr229P31SingleRoleSupersededByCheckTest} -- migrates as {@code nexus_svc} itself (the single-role
      *       posture the registry's owner-read changeset and vectors-068-19 key on by name); the shared cluster holds
      *       {@code nexus_svc} from the template migration and it cannot be declared exclusive and dropped.</li>
-     *   <li>{@code Rdr192LiveCExplainEvidenceIntegrationTest}, {@code ReadPathLeafPruningIntegrationTest} --
+     *   <li>{@code Rdr192LiveCExplainEvidenceIntegrationTest}, {@code ReadPathLeafPruningIntegrationTest},
+     *       {@code Rdr229P35bIdTwinIntegrationTest} --
      *       read the plans {@code auto_explain} writes to the CONTAINER's log ({@link #serverLog}); a shared
      *       cluster's log holds every class's output, and {@code ALTER ROLE nexus_svc SET auto_explain...}
      *       is cluster-wide.</li>
@@ -1404,6 +1414,23 @@ public final class PgContainerHelper {
         runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-hnsw-index-collection.xml",
             "databasechangelog_test_hnsw_index_collection", Map.of("schema", schema, "table", table, "index", index,
                 "column", column, "collection", requireTestLiteral(collection)));
+    }
+
+    /**
+     * The per-collection partial HNSW index keyed on the registry id, the predicate P3.4 rebuilds every per-collection
+     * index with (RDR-229 P3.5b, nexus-p2m1x.24): {@code CREATE INDEX index ON schema.table USING hnsw (column
+     * nexus.vector_cosine_ops) WHERE collection_id = 'collectionId'::bigint}, through
+     * {@code db.changelog-test-hnsw-index-collection-id.xml}. Not CONCURRENTLY.
+     */
+    public static void createLeafHnswIndexOnId(Connection su, String schema, String table, String index, String column,
+                                               long collectionId) throws Exception {
+        requireTestIdentifier(schema);
+        requireTestIdentifier(table);
+        requireTestIdentifier(index);
+        requireEmbeddingColumn(column);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-hnsw-index-collection-id.xml",
+            "databasechangelog_test_hnsw_index_collection_id", Map.of("schema", schema, "table", table, "index", index,
+                "column", column, "collectionId", Long.toString(collectionId)));
     }
 
     /**

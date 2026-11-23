@@ -17,6 +17,8 @@ Usage: rdr229_p31_writer_census.py <tree-root> [--write] [--check]
 import collections
 import pathlib
 import re
+
+import changelog_text  # scripts/ is on sys.path when a script here is run or imported by the tests
 import sys
 
 ROOT = pathlib.Path(sys.argv[1]).resolve()
@@ -223,8 +225,7 @@ for inc in includes:
         continue
     raw = p.read_text()
     blank = lambda mm: re.sub(r"[^\n]", " ", mm.group(0))
-    text = re.sub(r"<rollback>.*?</rollback>", blank, raw, flags=re.S)
-    text = re.sub(r"<!--.*?-->", blank, text, flags=re.S)
+    text = changelog_text.strip_noise(raw)  # comments before rollbacks; the order lives in scripts/changelog_text.py
     events = [(mm.start(), "def", mm.group(1).lower(), mm) for mm in FN_RE.finditer(text)]
     events += [(mm.start(), "drop", mm.group(1).lower(), mm) for mm in DROP_RE.finditer(text)]
     for pos, kind, name, mm in sorted(events, key=lambda e: e[0]):

@@ -903,10 +903,10 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
             // cannot. Each answers a number or a boolean, search_path is pinned, EXECUTE is nexus_svc's only, and neither writes a table.
             assertThat(definers).containsExactly(
                 "collection_id_seq_heal", "collection_id_taken", "create_tenant_partitions", "ensure_vector_extensions_relocated", "ensure_vector_extensions_unrelocated",
-                "text_gate_probe_1024", "text_gate_probe_384", "text_gate_probe_768",
-                // nexus-bbtc2 (vectors-060): the by-collection probes take the probes' posture, definer here.
-                "text_gate_probe_by_collection_1024", "text_gate_probe_by_collection_384",
-                "text_gate_probe_by_collection_768");
+                "text_gate_probe_1024", "text_gate_probe_1024_by_id", "text_gate_probe_384", "text_gate_probe_384_by_id", "text_gate_probe_768", "text_gate_probe_768_by_id",
+                // nexus-bbtc2 (vectors-060): the by-collection probes take the probes' posture, definer here; so does each RDR-229 P3.5b <name>_by_id twin (vectors-077).
+                "text_gate_probe_by_collection_1024", "text_gate_probe_by_collection_1024_by_id", "text_gate_probe_by_collection_384",
+                "text_gate_probe_by_collection_384_by_id", "text_gate_probe_by_collection_768", "text_gate_probe_by_collection_768_by_id");
         }
     }
 

@@ -6583,8 +6583,10 @@ FROM scope s
                .leftJoin(owner).on(DSL.trueCondition())
                .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(collection)))
                .and(after)
+               // RDR-229 P3.5b (the 5x80k EXPLAIN): tenant and collection as the call's constants, not the row's columns (equal
+               // under the where above), so the inlined function's registry read runs once per statement, not once per chunk
                .and(DSL.exists(DSL.selectFrom(CHUNK_IS_REAPABLE.call(
-                   CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.LAST_WRITTEN_AT, grace))))
+                   DSL.val(tenant), DSL.val(collection), CHUNKS.CHASH, CHUNKS.LAST_WRITTEN_AT, grace))))
                .orderBy(CHUNKS.CHASH)
                .limit(limit).offset(offset)
                .fetch(r -> new ReapableChunk(

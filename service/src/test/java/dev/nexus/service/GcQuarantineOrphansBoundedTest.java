@@ -5,7 +5,6 @@ package dev.nexus.service;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.Chash;
-import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.jooq.nexus.Routines;
@@ -287,20 +286,24 @@ class GcQuarantineOrphansBoundedTest {
             try {
                 float[] unit = new float[384];
                 unit[0] = 1f;
-                // P3.1: a chunk must carry its collection's registry id (NOT NULL CHECK), so the origin is registered for
-                // the insert and its registry row removed after it, which leaves the legacy shape the function must refuse.
-                PgContainerHelper.insertCollection(ctx, TENANT, src);
+                // RDR-229 P3.5b: a chunk of a collection with no registry row is a legacy row (written before P3.1, not yet
+                // stamped), so its id is NULL: no P3.1 writer can write one, and a row carrying an id no registry row holds
+                // names no collection to a reader that reads the id. The P3.1 CHECKs that refuse it are dropped around the
+                // insert and put back NOT VALID by the operator's re-add, as they stand while the stamp has not finished.
+                PgContainerHelper.dropConstraint(su, CHUNKS, "chunks_collection_id_check");
+                PgContainerHelper.dropConstraint(su, CHUNKS, "chunks_collection_id_not_null");
                 ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, CHUNKS.CHASH,
                         CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384)
-                   .values(TENANT, src, CollectionIds.require(ctx, TENANT, src), Chash.ofText("a6mon unreg").toBytes(),
+                   .values(TENANT, src, (Long) null, Chash.ofText("a6mon unreg").toBytes(),
                            "minilm-l6-v2-384", "text", Vector.of(unit))
                    .execute();
-                ctx.deleteFrom(CATALOG_COLLECTIONS)
-                   .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(src)).execute();
                 // RDR-192 Step 8: the function only reaches its registration check for a chunk
                 // older than the grace window; no origin row means it is aged by raw SQL here.
                 ctx.update(CHUNKS).set(CHUNKS.LAST_WRITTEN_AT, java.time.OffsetDateTime.now().minusDays(40))
                    .where(CHUNKS.TENANT_ID.eq(TENANT).and(CHUNKS.COLLECTION.eq(src))).execute();
+                // the CHECKs back only now: a NOT VALID CHECK still applies to a row an UPDATE rewrites
+                PgContainerHelper.runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-p31-readd.xml",
+                    "databasechangelog_test_p31_readd", Map.of());
                 assertThat(ctx.fetchExists(ctx.selectOne().from(CATALOG_COLLECTIONS)
                         .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(src))))
                     .as("precondition: the origin has a chunk but no catalog row").isFalse();
