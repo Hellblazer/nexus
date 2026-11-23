@@ -59,10 +59,10 @@ final class CollectionIdReads {
 
     /** The order that picks one registry row of a label: the live one, else the newest tombstone (use with {@code limit(1)}). */
     static java.util.List<org.jooq.OrderField<?>> liveFirst() {
-        return liveFirst(CATALOG_COLLECTIONS);
+        return java.util.List.copyOf(CollectionRegistry.labelResolutionOrder());   // the one definition (P3.5a); the alias form below mirrors it
     }
 
-    /** {@link #liveFirst()} over an alias of the registry. Live means not superseded ({@code superseded_by = '' AND superseded_by_id IS NULL}), not {@code lifecycle_state}. */
+    /** {@link #liveFirst()} over an alias of the registry ({@link CollectionRegistry#labelResolutionOrder()} cannot take one; the two are the same order). Live means not superseded ({@code superseded_by = '' AND superseded_by_id IS NULL}), not {@code lifecycle_state}. */
     static java.util.List<org.jooq.OrderField<?>> liveFirst(dev.nexus.service.jooq.nexus.tables.CatalogCollections t) {
         return java.util.List.of(DSL.when(t.SUPERSEDED_BY.eq("").and(t.SUPERSEDED_BY_ID.isNull()), 1).otherwise(0).desc(), t.COLLECTION_ID.desc());
     }
