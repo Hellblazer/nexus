@@ -6,6 +6,7 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import dev.nexus.service.db.DeadlockRetry;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
@@ -79,6 +80,15 @@ class Rdr229P37OneRowLockOrderTest {
             DSL.field(DSL.name("locktype"), String.class).eq("advisory").and(DSL.field(DSL.name("granted"), Boolean.class).isFalse())));
     }
 
+    /**
+     * No {@link DeadlockRetry} attempt since {@code before}. The rename runs inside the belt, which retries a 40P01; the retried attempt then answers
+     * cleanly (a 200, or a 404/409 once the other side has committed), so a deadlock the belt absorbed does not show in the statuses. The counter is
+     * process-wide and the engine runs in this JVM, so the delta is this test's.
+     */
+    private static void assertNoDeadlockRetrySince(long before, String what) {
+        assertThat(DeadlockRetry.retryAttemptCount() - before).as("no deadlock, not even one the retry belt absorbed: " + what).isZero();
+    }
+
     @Test
     void anIdWriteInFlightMakesTheRenameWait_andAfterItCommitsTheRenameProceedsAndTheWriteIsVisibleUnderTheNewLabel() throws Exception {
         String tenant = "p37-lo-a";
@@ -99,6 +109,7 @@ class Rdr229P37OneRowLockOrderTest {
                 .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(a))).forKeyShare().fetch();   // an id write in flight
             int waitersBefore = lockWaiters();
 
+            long retriesBefore = DeadlockRetry.retryAttemptCount();
             Future<Rdr229RenameEngine.Renamed> rename = pool.submit(() -> engine.rename(token, a, b));
 
             assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(30), () -> lockWaiters() > waitersBefore))
@@ -111,6 +122,7 @@ class Rdr229P37OneRowLockOrderTest {
 
             var r = rename.get(60, TimeUnit.SECONDS);
             assertThat(r.status()).as("after the writer commits the rename proceeds: " + r).isEqualTo(200);
+            assertNoDeadlockRetrySince(retriesBefore, "the rename and the id writer holding FOR KEY SHARE");
         } finally {
             pool.shutdownNow();
         }
@@ -141,6 +153,7 @@ class Rdr229P37OneRowLockOrderTest {
             DSL.using(h, SQLDialect.POSTGRES).select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
                 .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(t))).forUpdate().fetch();   // stalls the rename after its name UPDATE
             int base = lockWaiters();
+            long retriesBefore = DeadlockRetry.retryAttemptCount();
             Future<Rdr229RenameEngine.Renamed> rename = pool.submit(() -> engine.rename(token, a, b));
             assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(30), () -> lockWaiters() > base)).as("the rename is in flight, parked on the tombstone").isTrue();
 
@@ -160,6 +173,7 @@ class Rdr229P37OneRowLockOrderTest {
                 .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(id))).forKeyShare().fetch(CATALOG_COLLECTIONS.NAME);
             assertThat(byId).as("by id the writer finds the row under the new label").containsExactly(b);
             w.commit();
+            assertNoDeadlockRetrySince(retriesBefore, "the rename and the writer for the retired label");
         } finally {
             pool.shutdownNow();
         }
@@ -202,6 +216,7 @@ class Rdr229P37OneRowLockOrderTest {
                 return null;
             });
             assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(30), () -> advisoryWaiters() > advisoryBase)).as("the sweep is queued behind the writer").isTrue();
+            long retriesBefore = DeadlockRetry.retryAttemptCount();
             Future<Rdr229RenameEngine.Renamed> rename = pool.submit(() -> engine.rename(token, a, b));
             assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(30), () -> advisoryWaiters() > advisoryBase + 1))
                 .as("the rename queues behind the sweep, on the ADVISORY gate (pg_locks)").isTrue();
@@ -213,7 +228,8 @@ class Rdr229P37OneRowLockOrderTest {
             w.commit();
 
             sweep.get(60, TimeUnit.SECONDS);
-            assertThat(rename.get(60, TimeUnit.SECONDS).status()).as("the rename finishes after the sweep, no 40P01").isEqualTo(200);
+            assertThat(rename.get(60, TimeUnit.SECONDS).status()).as("the rename finishes after the sweep").isEqualTo(200);
+            assertNoDeadlockRetrySince(retriesBefore, "the rename, the queued sweep and the writer holding the shared gate (no 40P01)");
         } finally {
             pool.shutdownNow();
         }
@@ -245,6 +261,7 @@ class Rdr229P37OneRowLockOrderTest {
             DSL.using(h, SQLDialect.POSTGRES).select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
                 .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(t))).forUpdate().fetch();   // stalls the rename after its name UPDATE
             int base = lockWaiters();
+            long retriesBefore = DeadlockRetry.retryAttemptCount();
             Future<Rdr229RenameEngine.Renamed> rename = pool.submit(() -> engine.rename(token, a, b));
             assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(30), () -> lockWaiters() > base)).as("the rename is in flight, holding A's row").isTrue();
 
@@ -260,6 +277,7 @@ class Rdr229P37OneRowLockOrderTest {
             var r = register.get(60, TimeUnit.SECONDS);
             assertThat(r.statusCode()).as("refused once the rename committed: " + r.body()).isEqualTo(409);
             assertThat(r.body()).contains("label_reserved");
+            assertNoDeadlockRetrySince(retriesBefore, "the rename and the registration waiting on it");
         } finally {
             pool.shutdownNow();
         }
@@ -300,7 +318,7 @@ class Rdr229P37OneRowLockOrderTest {
                 g.setAutoCommit(false);
                 gate(DSL.using(g, SQLDialect.POSTGRES), "pg_advisory_xact_lock", tenant, a).fetch();   // both renames queue here, past the handler
                 int advisoryBase = advisoryWaiters();
-                long retriesBefore = dev.nexus.service.db.DeadlockRetry.retryAttemptCount();
+                long retriesBefore = DeadlockRetry.retryAttemptCount();
                 Future<Rdr229RenameEngine.Renamed> r1 = pool.submit(() -> engine.rename(token, a, x));
                 Future<Rdr229RenameEngine.Renamed> r2 = pool.submit(() -> engine.rename(token, a, y));
                 assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(30), () -> advisoryWaiters() >= advisoryBase + 2))
@@ -311,8 +329,7 @@ class Rdr229P37OneRowLockOrderTest {
                 assertThat(List.of(o1.status(), o2.status())).as("no 5xx: r1=" + o1 + " r2=" + o2).allMatch(s -> s == 200 || s == 404 || s == 409);
                 assertThat(List.of(o1, o2).stream().filter(o -> o.status() == 200).count()).as("exactly one rename won: r1=" + o1 + " r2=" + o2)
                     .isEqualTo(1L);
-                assertThat(dev.nexus.service.db.DeadlockRetry.retryAttemptCount() - retriesBefore)
-                    .as("no deadlock, not even one the retry belt absorbed: r1=" + o1 + " r2=" + o2).isZero();
+                assertNoDeadlockRetrySince(retriesBefore, "r1=" + o1 + " r2=" + o2);
             } finally {
                 pool.shutdownNow();
             }
