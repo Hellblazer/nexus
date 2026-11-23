@@ -75,6 +75,8 @@ class CollectionRetiredIdAuxRoutesTest {
                 List.of(new float[384]), List.of(Map.<String, Object>of()));
             return null;
         });
+        // the gc functions select orphans with reapable(c), which honours the 30 day grace: this chunk stands for one orphaned long ago
+        ReapableFixtures.agePastGrace(fx.pg, fx.tenant, collection);
     }
 
     private int chunksOf(String collection, String hex) {
@@ -150,6 +152,7 @@ class CollectionRetiredIdAuxRoutesTest {
         Resp ok = fx.post("/v1/vectors/gc/quarantine-orphans", "{\"collection_id\":" + fx.idOf(control)
             + ",\"quarantine_collection\":" + json("quarantine-" + control) + ",\"quarantined_at\":\"" + STAMP + "\"}");
         assertThat(ok.status()).as("control: %s", ok.body()).isEqualTo(200);
+        assertThat(ok.json().path("moved").asLong(-1)).as("control: the aged orphan was moved: %s", ok.body()).isEqualTo(1);
 
         String a = registered("orphans-gap");
         long x = fx.idOf(a);
@@ -205,10 +208,13 @@ class CollectionRetiredIdAuxRoutesTest {
         long x = fx.idOf(a);
         String hex = Chash.ofText("aux-qrestore-" + a).toHex();
         seedChunk(a, hex);
+        assertThat(chunksOf(a, hex)).as("setup: the chunk is in the origin").isEqualTo(1);
         Resp moved = fx.post("/v1/vectors/gc/quarantine-orphans", "{\"collection_id\":" + x
             + ",\"quarantine_collection\":" + json("quarantine-" + a) + ",\"quarantined_at\":\"" + STAMP + "\"}");
-        assertThat(moved.status()).as("setup: the chunk is quarantined: %s", moved.body()).isEqualTo(200);
-        assertThat(chunksOf("quarantine-" + a, hex)).as("setup").isEqualTo(1);
+        assertThat(moved.status()).as("setup: the orphans route answered: %s", moved.body()).isEqualTo(200);
+        assertThat(moved.json().path("moved").asLong(-1)).as("setup: the route moved the aged orphan: %s", moved.body()).isEqualTo(1);
+        assertThat(chunksOf("quarantine-" + a, hex)).as("setup: the chunk is in the quarantine sibling").isEqualTo(1);
+        assertThat(chunksOf(a, hex)).as("setup: and no longer in the origin").isZero();
 
         Resp r = withTheLabelTakenBeforeTheMove(a, null, () -> fx.post("/v1/vectors/gc/quarantine-restore",
             "{\"origin_collection_id\":" + x + ",\"chashes\":[\"" + hex + "\"]}"));
