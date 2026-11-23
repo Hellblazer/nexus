@@ -2556,7 +2556,10 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
         assertThat(inCollection(t, quarantineOf(c), hs.get(0))).as("none of the three moved anything").isTrue();
     }
 
-    /** Blocks until a backend is waiting on an advisory lock inside a quarantine_restore_chunks call. */
+    /**
+     * Blocks until a backend is waiting on an advisory lock for a quarantine restore: inside the quarantine_restore_chunks call, or, since the
+     * route takes the sweep gate in Java before it (RDR-229 P3.5a, GcCollectionReads), at that gate's own statement.
+     */
     private void awaitAdvisoryLockWaiter() throws Exception {
         var activity = DSL.table(DSL.name("pg_catalog", "pg_stat_activity"));
         var waitType = DSL.field(DSL.name("pg_catalog", "pg_stat_activity", "wait_event_type"), String.class);
@@ -2567,7 +2570,8 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             while (System.nanoTime() < deadline) {
                 int waiting = ctx.fetchCount(activity,
-                    waitType.eq("Lock").and(waitEvent.eq("advisory")).and(query.like("%quarantine_restore_chunks%")));
+                    waitType.eq("Lock").and(waitEvent.eq("advisory"))
+                        .and(query.like("%quarantine_restore_chunks%").or(query.like("%pg_advisory_xact_lock%"))));
                 if (waiting > 0) return;
                 Thread.sleep(20);
             }

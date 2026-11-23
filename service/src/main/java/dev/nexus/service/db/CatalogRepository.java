@@ -6088,10 +6088,27 @@ public final class CatalogRepository {
      */
     public static void acquireSweepGateExclusiveHeldByGc(DSLContext ctx, String tenant, String collection) {
         WriteRegistryMemo.assertGateFirst(ctx, tenant, collection);
-        ctx.select(DSL.function("pg_advisory_xact_lock", Object.class,
-                   DSL.function("hashtext", Integer.class, DSL.val("sweepgate:" + tenant + "/" + collection))))
-           .fetch();
+        // The function's own first statements, taken here: lock_timeout 2000 (local to the transaction), then the gate, and a wait that
+        // runs out is the function's own answer: SQLSTATE 55P03 with its message (the routes map it to the typed busy answer, and the
+        // wait cannot be unbounded: a route that sets no bound of its own, as the unbounded floored move does, would otherwise hang on a
+        // gate a stuck session holds)
+        ctx.select(DSL.function("set_config", String.class, DSL.val("lock_timeout"), DSL.val(Integer.toString(GC_GATE_LOCK_TIMEOUT_MS)),
+                   DSL.val(true))).fetch();
+        try {
+            ctx.select(DSL.function("pg_advisory_xact_lock", Object.class,
+                       DSL.function("hashtext", Integer.class, DSL.val("sweepgate:" + tenant + "/" + collection))))
+               .fetch();
+        } catch (org.jooq.exception.DataAccessException e) {
+            if (SqlConstraints.isLockNotAvailable(e)) {
+                throw new org.jooq.exception.DataAccessException("timed out acquiring the RDR-191 sweep gate for tenant=" + tenant
+                    + ", collection=" + collection + " -- a manifest writer is holding it; retry", e);
+            }
+            throw e;
+        }
     }
+
+    /** The lock bound the gc SQL functions set before their sweep gate (vectors-069); the Java take of the same gate waits no longer. */
+    static final int GC_GATE_LOCK_TIMEOUT_MS = 2_000;
 
     /**
      * EXCLUSIVE half of the gate, taken ONLY by the sweep's own transaction

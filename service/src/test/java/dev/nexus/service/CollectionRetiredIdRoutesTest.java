@@ -465,6 +465,16 @@ class CollectionRetiredIdRoutesTest {
      * nothing about where an id-only write goes.
      */
     private Resp withTheRowRenamedAndTheLabelTaken(CollectionRouteFixture f, String b, long x, String c, Supplier<Resp> request) {
+        return withTheRowRenamedAndTheLabelTaken(f, b, x, c, null, request);
+    }
+
+    /**
+     * As above, and {@code afterRename} (when not null) runs in the hook's thread once the row is renamed and the old label taken: the
+     * place to store something under the row's NEW label. A chunk stored before the rename would block it (the chunk's foreign key to the
+     * registry is ON UPDATE NO ACTION), so a test that needs a stored chunk files it here, under C, where the write will look for it.
+     */
+    private Resp withTheRowRenamedAndTheLabelTaken(CollectionRouteFixture f, String b, long x, String c, Runnable afterRename,
+                                                   Supplier<Resp> request) {
         // warm the process-wide cache for the label: a by-label lookup fills B -> X's row, and the rename below does not evict it
         dev.nexus.service.db.CollectionRegistry.lookup(new dev.nexus.service.db.TenantScope(f.svcDs), f.tenant, b);
         assertThat(dev.nexus.service.db.CollectionRegistry.cached(f.tenant, b)).as("setup: the cache is warm for " + b).isPresent();
@@ -475,6 +485,9 @@ class CollectionRetiredIdRoutesTest {
                 .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(f.tenant))
                 .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.COLLECTION_ID.eq(x)).execute());
             f.register(b);
+            if (afterRename != null) {
+                afterRename.run();
+            }
             ran.incrementAndGet();
         }), null, null);
         try {
@@ -549,12 +562,13 @@ class CollectionRetiredIdRoutesTest {
         long x = fxLocal.idOf(b);
         String doc = "rn-gap-doc-" + b;
         String hex = Chash.ofText("rn-gap-wmd-" + b).toHex();
-        seedChunkIn(fxLocal, b, hex);
         fxLocal.asSuperuser(ctx -> {
             CollectionIdSeeds.ownerDocument(ctx, fxLocal.tenant, doc, host);
             return null;
         });
-        Resp r = withTheRowRenamedAndTheLabelTaken(fxLocal, b, x, c, () -> fxLocal.post("/v1/catalog/manifest/write_many",
+        // the chunk is stored under the NEW label, filed in the hook once the row is renamed (a chunk stored under B first would block the
+        // in-place rename: its foreign key to the registry is ON UPDATE NO ACTION)
+        Resp r = withTheRowRenamedAndTheLabelTaken(fxLocal, b, x, c, () -> seedChunkIn(fxLocal, c, hex), () -> fxLocal.post("/v1/catalog/manifest/write_many",
             "{\"collection_id\":" + x + ",\"docs\":[{\"doc_id\":" + json(doc) + ",\"rows\":[{\"position\":0,\"chash\":\"" + hex
                 + "\",\"chunk_index\":0}]}]}"));
         assertThat(r.status()).as("not refused for the rename: %s", r.body()).isEqualTo(200);

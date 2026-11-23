@@ -207,7 +207,8 @@ class CollectionRetiredIdAuxRoutesTest {
         // the sibling holds a chunk of its own, and the hook seeds the new holder of the label: an expiry that ran would be able to take them
         fx.register("quarantine-" + a);
         seedChunk("quarantine-" + a, Chash.ofText("aux-expire-gap-q-" + a).toHex());
-        Resp r = withTheLabelTakenBeforeTheMove(a, hex, () -> fx.post("/v1/vectors/gc/expire-quarantine",
+        // keep_quarantine: the hook's delete of the origin must not take the sibling's rows itself, or the assertion below proves nothing
+        Resp r = withTheLabelTakenBeforeTheMove(a, hex, true, () -> fx.post("/v1/vectors/gc/expire-quarantine",
             "{\"origin_collection_id\":" + x + ",\"quarantine_collection\":" + json("quarantine-" + a)
                 + ",\"cutoff\":\"" + STAMP + "\"}"));
 

@@ -254,7 +254,7 @@ public final class CollectionSelectorFilter extends Filter {
             return;
         }
         try {
-            ExpectedCollectionIds.setDocumentIds(named);
+            ExpectedCollectionIds.setDocumentIds(named, beforeTransactionRead, afterTransactionRead);   // the test seams reach document writes too
             chain.doFilter(exchange);
         } finally {
             reportUnconsumed(exchange);

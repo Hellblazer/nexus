@@ -122,10 +122,15 @@ public final class ExpectedCollectionIds {
      * per-transaction finding does not apply to them ({@code Carrier.requestLevelOnly}).
      */
     public static void setDocumentIds(Map<String, Long> idsByKey) {
+        setDocumentIds(idsByKey, null, null);
+    }
+
+    /** {@link #setDocumentIds(Map)} with the test seams of {@link #set}: run once, around the write transaction's by-id read; null in production. */
+    public static void setDocumentIds(Map<String, Long> idsByKey, Runnable beforeTransactionRead, Runnable afterTransactionRead) {
         if (idsByKey.isEmpty()) {
             CURRENT.remove();
         } else {
-            Carrier c = new Carrier(idsByKey, Set.of(), null, null);
+            Carrier c = new Carrier(idsByKey, Set.of(), beforeTransactionRead, afterTransactionRead);
             c.requestLevelOnly = true;
             CURRENT.set(c);
         }
