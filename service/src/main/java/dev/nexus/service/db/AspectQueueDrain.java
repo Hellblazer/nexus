@@ -329,7 +329,12 @@ public final class AspectQueueDrain {
         List<Row> out = new ArrayList<>();
         // the document's home: its own name column before gate 3; the registry's current label of its id after (NULL for none)
         Field<String> homeOf = k.label(tenant, d.PHYSICAL_COLLECTION, d.PHYSICAL_COLLECTION_ID).as("home");
-        for (Record r : ctx.select(qId, qCollection, qSourcePath, qDocId, qHash, qStatus, qNext,
+        // the retired queue's own collection as a fallback: from gate 3 the registry's current label of the queue row's
+        // collection_id when the table kept that column (an install that kept it), else the row's own name
+        Field<Long> qCollectionId = DSL.field(DSL.name("q", "collection_id"), Long.class);
+        boolean queueHasId = k.byId() && queueHasCollectionId(ctx);
+        Field<String> queueLabel = queueHasId ? DSL.coalesce(k.label(tenant, qCollection, qCollectionId), qCollection).as("queue_label") : qCollection;
+        for (Record r : ctx.select(qId, queueLabel, qSourcePath, qDocId, qHash, qStatus, qNext,
                     k.byId() ? homeOf : d.PHYSICAL_COLLECTION)
                 .from(q)
                 .leftJoin(d).on(d.TENANT_ID.eq(qTenant).and(d.TUMBLER.eq(qDocId)))
@@ -348,11 +353,19 @@ public final class AspectQueueDrain {
             // document's current home is the name a task must carry; the row's own is the fallback (the retired queue has an id
             // column only on an install that kept it, so its own name stays the fallback after gate 3 too).
             String home = r.get(k.byId() ? homeOf : d.PHYSICAL_COLLECTION);
-            String collection = home == null || home.isEmpty() ? r.get(qCollection) : home;
+            String queueName = r.get(queueLabel);
+            String collection = home == null || home.isEmpty() ? queueName : home;
             out.add(new Row(r.get(qId), collection, r.get(qSourcePath), nz(r.get(qDocId)),
                 nz(r.get(qHash)), r.get(qStatus), delay));
         }
         return out;
+    }
+
+    private static boolean queueHasCollectionId(DSLContext ctx) {
+        var cols = DSL.table(DSL.name("information_schema", "columns"));
+        return ctx.fetchExists(cols, DSL.field(DSL.name("table_schema"), String.class).eq("nexus")
+            .and(DSL.field(DSL.name("table_name"), String.class).eq("aspect_extraction_queue"))
+            .and(DSL.field(DSL.name("column_name"), String.class).eq("collection_id")));
     }
 
     private static String nz(String s) {

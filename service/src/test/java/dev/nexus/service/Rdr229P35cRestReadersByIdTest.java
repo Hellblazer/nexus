@@ -41,91 +41,9 @@ import java.util.function.Function;
  * Each test makes both assertions, before the latch (a {@link Gate3#never()} reader) and after it (a fresh reader over
  * {@code () -> true}), with no restart between.
  */
-class Rdr229P35cRestReadersByIdTest extends AtomicWriteTestBase {
+class Rdr229P35cRestReadersByIdTest extends Rdr229P35cRestFixture {
 
-    private static final String MODEL = "minilm-l6-v2-384";
     private static final Gate3 LATCHED = () -> true;
-
-    // ---- fixture -----------------------------------------------------------------------------------------------
-
-    private <T> T su(Function<DSLContext, T> f) throws Exception {
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            return f.apply(DSL.using(su, SQLDialect.POSTGRES));
-        }
-    }
-
-    private String register(String tenant, String type, String tag) throws Exception {
-        String c = type + "__p35cx" + tag + seq.incrementAndGet() + "__" + MODEL + "__v1";
-        su(ctx -> {
-            PgContainerHelper.insertCollection(ctx, tenant, c);
-            return null;
-        });
-        return c;
-    }
-
-    /** Renames the registry row of {@code old} to {@code neu} in place; the children keep {@code old}. */
-    private String renameRegistryRow(String tenant, String old, String neu) throws Exception {
-        su(ctx -> {
-            ctx.set(DSL.name("session_replication_role"), DSL.inline("replica")).execute();
-            try {
-                ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.NAME, neu)
-                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(old)).execute();
-            } finally {
-                ctx.set(DSL.name("session_replication_role"), DSL.inline("origin")).execute();
-            }
-            return null;
-        });
-        return neu;
-    }
-
-    private String renameRegistryRow(String tenant, String old) throws Exception {
-        return renameRegistryRow(tenant, old, old.replaceFirst("p35cx", "p35cn"));
-    }
-
-    private byte[] nextChash() {
-        int n = seq.incrementAndGet();
-        byte[] b = new byte[32];
-        b[0] = (byte) (n >> 8);
-        b[1] = (byte) n;
-        b[31] = 7;
-        return b;
-    }
-
-    private void insertChunk(String tenant, String collection, byte[] chash, String metadataJson) throws Exception {
-        float[] v = new float[384];
-        v[0] = 1f;
-        su(ctx -> ctx.insertInto(CHUNKS)
-            .set(CHUNKS.TENANT_ID, tenant).set(CHUNKS.COLLECTION, collection).set(CHUNKS.CHASH, chash)
-            .set(CHUNKS.EMBEDDING_MODEL, MODEL).set(CHUNKS.CHUNK_TEXT, "p35c rest")
-            .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
-            .set(CHUNKS.METADATA, JSONB.valueOf(metadataJson))
-            .set(CHUNKS.EMBEDDING_384, Vector.of(v)).execute());
-    }
-
-    private void insertDocument(String tenant, String tumbler, String collection, String contentType, String filePath,
-                                String sourceUri, String indexState, String indexContentHash) throws Exception {
-        su(ctx -> ctx.insertInto(CATALOG_DOCUMENTS)
-            .set(CATALOG_DOCUMENTS.TENANT_ID, tenant).set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
-            .set(CATALOG_DOCUMENTS.TITLE, "doc " + tumbler).set(CATALOG_DOCUMENTS.CONTENT_TYPE, contentType)
-            .set(CATALOG_DOCUMENTS.FILE_PATH, filePath).set(CATALOG_DOCUMENTS.SOURCE_URI, sourceUri)
-            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
-            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(tenant, collection))
-            .set(CATALOG_DOCUMENTS.INDEX_STATE, indexState.isEmpty() ? null : indexState)
-            .set(CATALOG_DOCUMENTS.INDEX_CONTENT_HASH, indexContentHash)
-            .set(CATALOG_DOCUMENTS.METADATA, JSONB.valueOf("{}"))
-            .execute());
-    }
-
-    private void insertManifest(String tenant, String tumbler, int position, String collection, byte[] chash) throws Exception {
-        su(ctx -> ctx.insertInto(CATALOG_DOCUMENT_CHUNKS)
-            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant).set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, tumbler)
-            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position).set(CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, position)
-            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, chash).set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
-            .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, MODEL)
-            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
-            .execute());
-    }
 
     // ---- UriSegmentCensusReads --------------------------------------------------------------------------------
 
@@ -175,11 +93,102 @@ class Rdr229P35cRestReadersByIdTest extends AtomicWriteTestBase {
         assertThat(byId.queryCollectionStats(TENANT, neu, 365).get("row_count")).isEqualTo(1L);
         assertThat(byId.queryCollectionStats(TENANT, old, 365).get("row_count"))
             .as("the row carries an id: the stale name no longer finds it").isEqualTo(0L);
-        assertThat(byId.queryCollectionStats(TENANT, ghost, 365).get("row_count"))
-            .as("a row with no id is found by its name").isEqualTo(1L);
+        var ghostStats = byId.queryCollectionStats(TENANT, ghost, 365);
+        assertThat(ghostStats.get("row_count")).as("a row with no id is no collection's: never folded into its figures").isEqualTo(0L);
+        assertThat(ghostStats.get("pre_id_row_count")).as("it is reported on its own, as pre-id history").isEqualTo(1L);
         assertThat(byId.queryCollectionStats(TENANT, "", 365).get("row_count")).as("a NULL id is no collection").isEqualTo(0L);
+        assertThat(byId.queryCollectionStats(TENANT, "", 365).get("pre_id_row_count")).isEqualTo(0L);
+        assertThat(byName.queryCollectionStats(TENANT, ghost, 365)).as("before the latch the stats keep their shape")
+            .doesNotContainKey("pre_id_row_count").containsEntry("row_count", 1L);
         assertThat(hookCollections(byId)).contains(neu).doesNotContain(old);
         assertThat(relevanceCollections(byId)).contains(neu).doesNotContain(old);
+    }
+
+    private void insertPreIdSearchRow(String tenant, String name, double kept) throws Exception {
+        su(ctx -> ctx.insertInto(dev.nexus.service.jooq.nexus.Tables.SEARCH_TELEMETRY)
+            .set(dev.nexus.service.jooq.nexus.Tables.SEARCH_TELEMETRY.TENANT_ID, tenant)
+            .set(dev.nexus.service.jooq.nexus.Tables.SEARCH_TELEMETRY.TS, java.time.OffsetDateTime.now())
+            .set(dev.nexus.service.jooq.nexus.Tables.SEARCH_TELEMETRY.QUERY_HASH, "preid-" + seq.incrementAndGet())
+            .set(dev.nexus.service.jooq.nexus.Tables.SEARCH_TELEMETRY.COLLECTION, name)
+            .set(dev.nexus.service.jooq.nexus.Tables.SEARCH_TELEMETRY.RAW_COUNT, 5)
+            .set(dev.nexus.service.jooq.nexus.Tables.SEARCH_TELEMETRY.KEPT_COUNT, (int) kept)
+            .execute());
+    }
+
+    /**
+     * Q2 (final): a row written under a label before it carried an id is pre-id label history, never attributed to whichever
+     * collection holds the label now. A is renamed to B (the id rows follow the id to B), then a NEW collection takes the label A:
+     * the new A's figures exclude every old row, and the NULL-id rows written under "A" show only as pre_id_row_count.
+     */
+    @Test
+    void telemetryRepository_aLabelThatPassedToAnotherCollectionNeverReachesTheOldRows() throws Exception {
+        String a = register(TENANT, "code", "tq");
+        String now = Instant.now().truncatedTo(ChronoUnit.SECONDS).toString();
+        var byName = new TelemetryRepository(tenantScope);
+        var byId = new TelemetryRepository(tenantScope, LATCHED);
+        byName.logSearchBatch(TENANT, List.<Object[]>of(new Object[] {now, "qh-id-" + a, a, 5, 3, 0.4, 0.5}));   // stamped with A's id
+        insertPreIdSearchRow(TENANT, a, 0);                                                              // written before the stamp
+        String b = renameRegistryRow(TENANT, a);
+        su(ctx -> {
+            PgContainerHelper.insertCollection(ctx, TENANT, a);   // a new collection takes the label A
+            return null;
+        });
+
+        var newA = byId.queryCollectionStats(TENANT, a, 365);
+        assertThat(newA.get("row_count")).as("the new A has none of the old collection's rows").isEqualTo(0L);
+        assertThat(newA.get("zero_hit_rate")).as("no rate over rows that are not its own").isEqualTo("null");
+        assertThat(newA.get("median_top_distance")).isEqualTo("null");
+        assertThat(newA.get("pre_id_row_count")).as("the old rows named A with no id appear only as pre-id").isEqualTo(1L);
+        var oldA = byId.queryCollectionStats(TENANT, b, 365);
+        assertThat(oldA.get("row_count")).as("the id row follows its id to B").isEqualTo(1L);
+        assertThat(oldA.get("pre_id_row_count")).isEqualTo(0L);
+    }
+
+    /** The listings say what a row is: an id row carries its id, a NULL-id row is flagged pre_id, a dangling id says gone. */
+    @Test
+    @SuppressWarnings("unchecked")
+    void telemetryRepository_listingsFlagPreIdAndGoneRows() throws Exception {
+        String live = register(TENANT, "code", "tf");
+        String doomed = register(TENANT, "code", "td");
+        String ghost = "ghost-p35c-flag-" + seq.incrementAndGet();
+        String now = Instant.now().truncatedTo(ChronoUnit.SECONDS).toString();
+        var byName = new TelemetryRepository(tenantScope);
+        var byId = new TelemetryRepository(tenantScope, LATCHED);
+        String h = "p35c-flag-" + seq.get();
+        byName.recordHookFailure(TENANT, h + "-live", live, "p35c-hook", "e", now, "", false, "single");
+        byName.recordHookFailure(TENANT, h + "-ghost", ghost, "p35c-hook", "e", now, "", false, "single");
+        byName.recordHookFailure(TENANT, h + "-doomed", doomed, "p35c-hook", "e", now, "", false, "single");
+        Long doomedId = registryId(TENANT, doomed);
+        deleteRegistryRow(TENANT, doomed);
+
+        Map<String, Map<String, Object>> byDoc = new java.util.HashMap<>();
+        for (var r : (List<Map<String, Object>>) byId.getHookFailures(TENANT, 0, List.of(), 1000).get("rows")) {
+            byDoc.put((String) r.get("doc_id"), r);
+        }
+        assertThat(byDoc.get(h + "-live")).containsEntry("collection", live).doesNotContainKeys("pre_id", "gone")
+            .containsEntry("collection_id", registryId(TENANT, live));
+        assertThat(byDoc.get(h + "-ghost")).containsEntry("collection", ghost).containsEntry("pre_id", true)
+            .doesNotContainKey("collection_id");
+        assertThat(byDoc.get(h + "-doomed")).containsEntry("gone", true).containsEntry("collection_id", doomedId)
+            .containsEntry("collection", doomed);
+        for (var r : (List<Map<String, Object>>) byName.getHookFailures(TENANT, 0, List.of(), 1000).get("rows")) {
+            assertThat(r).as("before the latch the listing keeps its shape").doesNotContainKeys("pre_id", "gone", "collection_id");
+        }
+    }
+
+    /** The rename arm rewrites the rows that carry an id; a pre-id row is left alone (never stamped with the new id). */
+    @Test
+    void telemetryRepository_renameLeavesPreIdRowsAlone() throws Exception {
+        String old = register(TENANT, "code", "tr");
+        String target = register(TENANT, "code", "tt");
+        String now = Instant.now().truncatedTo(ChronoUnit.SECONDS).toString();
+        var byId = new TelemetryRepository(tenantScope, LATCHED);
+        new TelemetryRepository(tenantScope).logSearchBatch(TENANT, List.<Object[]>of(new Object[] {now, "qh-r-" + old, old, 5, 3, 0.4, 0.5}));
+        insertPreIdSearchRow(TENANT, old, 0);
+        assertThat(byId.renameCollection(TENANT, old, target)).containsEntry("search_telemetry", 1);
+        assertThat(byId.queryCollectionStats(TENANT, target, 365).get("row_count")).isEqualTo(1L);
+        assertThat(byId.queryCollectionStats(TENANT, old, 365).get("pre_id_row_count"))
+            .as("the pre-id row still says the old label, with no id").isEqualTo(1L);
     }
 
     @SuppressWarnings("unchecked")
@@ -257,5 +266,76 @@ class Rdr229P35cRestReadersByIdTest extends AtomicWriteTestBase {
 
         assertThat(byId.deleteForCollection(TENANT, old)).as("the label that names nothing").isZero();
         assertThat(byId.deleteForCollection(TENANT, neu)).isEqualTo(1);
+    }
+
+    // ---- a superseded (retired) collection that keeps its data ---------------------------------------------------
+
+    /** A retired collection with stub PDFs, failed-run documents and chunks is read by its own id: the readers neither skip nor lose it. */
+    @Test
+    void theReaders_readASupersededCollectionByItsOwnId() throws Exception {
+        String stubs = register(TENANT, "knowledge", "sp");
+        byte[] chash = nextChash();
+        insertChunk(TENANT, stubs, chash, "{\"title\":\"\",\"content_hash\":\"deadbeefcafe0123\"}");
+        String pdf = "7." + seq.incrementAndGet() + ".6";
+        insertDocument(TENANT, pdf, stubs, "pdf", "/p35c/" + pdf + ".pdf", "file:///p35c/" + pdf + ".pdf", "", "");
+        insertManifest(TENANT, pdf, 0, stubs, chash);
+        supersede(TENANT, stubs);
+        assertThat(stubEntry(new PdfStubMetadataReads(repo, LATCHED).read(TENANT, 10), stubs).stubChunks())
+            .as("a kept source holding stub PDFs is not reported clean").isEqualTo(1);
+
+        String failed = register(TENANT, "code", "sf");
+        String hash = "p35c-retired-" + seq.incrementAndGet();
+        String tumbler = "7." + seq.incrementAndGet() + ".5";
+        insertChunk(TENANT, failed, nextChash(), "{\"content_hash\":\"" + hash + "\"}");
+        insertDocument(TENANT, tumbler, failed, "code", "/p35c/r.py", "", "failed", hash);
+        supersede(TENANT, failed);
+        assertThat(new IndexRunCensusReads(repo, LATCHED).read(TENANT, 50).failedHidden().value().examples())
+            .extracting(IndexRunCensusReads.HiddenDoc::tumbler).contains(tumbler);
+    }
+
+    /**
+     * updateMetadata stamps the row's own collection id from its own name. A chunk of a superseded collection (a re-embed that kept its
+     * source) must still take it: the name resolves to the retired row's id, not to NULL (which the id CHECK refuses).
+     */
+    @Test
+    void updateMetadata_stillWorksOnAChunkOfASupersededCollection() throws Exception {
+        String c = register(TENANT, "code", "um");
+        byte[] chash = nextChash();
+        insertChunk(TENANT, c, chash, "{}");
+        supersede(TENANT, c);
+        var vectors = new dev.nexus.service.vectors.PgVectorRepository(tenantScope, embedder, embedder);
+        String hex = java.util.HexFormat.of().formatHex(chash);
+        assertThat(vectors.updateMetadata(TENANT, c, List.of(hex), List.of(Map.of("frecency_score", 0.5)))).isEqualTo(1);
+    }
+
+    // ---- PipelineRepository: the ledger rule -----------------------------------------------------------------
+
+    /** The client deletes the registry row first and then asks for the pipeline cleanup by name: the rows must still go. */
+    @Test
+    void pipelineRepository_deleteForCollectionStillFindsRowsOfADeletedRegistryRow() throws Exception {
+        String c = register(TENANT, "code", "pd");
+        String hash = "p35c-ledger-" + seq.incrementAndGet();
+        var byId = new PipelineRepository(tenantScope, LATCHED);
+        assertThat(byId.create(TENANT, hash, "/p35c/l.pdf", c, true).status()).isEqualTo("created");
+        deleteRegistryRow(TENANT, c);
+        assertThat(byId.resolve(TENANT, PipelineRepository.PipelineRef.byDocument(hash, c, "/p35c/l.pdf")))
+            .as("a pipeline whose collection is gone is still found by its recorded name").isNotNull();
+        assertThat(byId.deleteForCollection(TENANT, c)).isEqualTo(1);
+    }
+
+    /** A label that passed to another live collection never reaches the old collection's pipeline rows. */
+    @Test
+    void pipelineRepository_aReusedLabelDoesNotReachTheOldRows() throws Exception {
+        String a = register(TENANT, "code", "pr");
+        String hash = "p35c-reuse-" + seq.incrementAndGet();
+        var byId = new PipelineRepository(tenantScope, LATCHED);
+        assertThat(byId.create(TENANT, hash, "/p35c/u.pdf", a, true).status()).isEqualTo("created");
+        String b = renameRegistryRow(TENANT, a);
+        su(ctx -> {
+            PgContainerHelper.insertCollection(ctx, TENANT, a);   // the label A now names another collection
+            return null;
+        });
+        assertThat(byId.deleteForCollection(TENANT, a)).as("the new A owns none of the old rows").isZero();
+        assertThat(byId.deleteForCollection(TENANT, b)).isEqualTo(1);
     }
 }

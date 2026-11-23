@@ -3,12 +3,15 @@
 package dev.nexus.service.db;
 
 import dev.nexus.service.datamove.Gate3;
+import dev.nexus.service.jooq.nexus.tables.CatalogDocumentChunks;
+import dev.nexus.service.jooq.nexus.tables.CatalogDocuments;
 import dev.nexus.service.vectors.ChunkMetadataKeys;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.JSONB;
 import org.jooq.Record2;
+import org.jooq.Record3;
 import org.jooq.Select;
 import org.jooq.Table;
 import org.jooq.impl.DSL;
@@ -119,7 +122,7 @@ public final class PdfStubMetadataReads {
     }
 
     /** An examined collection and the embedding model the registry gives it. */
-    record CollectionRef(String name, String embeddingModel) {}
+    record CollectionRef(String name, String embeddingModel, Long id) {}
 
     /** The answer: every examined collection, in name order, stub-free ones included (they were examined). */
     public record Page(int limit, List<CollectionStubs> collections) {}
@@ -175,6 +178,17 @@ public final class PdfStubMetadataReads {
     }
 
     /**
+     * The same list with each registry row's {@code collection_id}: the id the per-collection statement reads by from gate 3, so a
+     * label shared by a live row and a tombstone (or a retired label alone) is never resolved back to an id by name.
+     */
+    static Select<Record3<String, String, Long>> collectionRefsQuery(DSLContext ctx, String tenant) {
+        var cols = CATALOG_COLLECTIONS;
+        return ctx.select(cols.NAME, cols.EMBEDDING_MODEL, cols.COLLECTION_ID).from(cols)
+            .where(cols.TENANT_ID.eq(tenant).and(cols.CONTENT_TYPE.in(SCANNED_CONTENT_TYPES)))
+            .orderBy(cols.NAME, cols.COLLECTION_ID);
+    }
+
+    /**
      * The statement of ONE collection: one row per stub source, {@code cnt} the stub chunks under that source in the first
      * {@code fetchLimit} stub rows (none when the collection has no stub). The caller passes {@code limit + 1}.
      * {@code model} is the collection's registry model, a constant so the chunk partitions prune at plan time. Public so a
@@ -189,6 +203,25 @@ public final class PdfStubMetadataReads {
     public static Select<Record2<String, Integer>> query(DSLContext ctx, String tenant, String collection, String model,
                                                          int fetchLimit, Gate3 gate3) {
         CollectionKey k = CollectionKey.of(gate3);
+        return statement(ctx, tenant, model, fetchLimit, k,
+            (d, m) -> k.eq(tenant, d.PHYSICAL_COLLECTION, d.PHYSICAL_COLLECTION_ID, collection),
+            (d, m) -> k.eq(tenant, m.COLLECTION, m.COLLECTION_ID, collection));
+    }
+
+    /**
+     * The statement of ONE collection named by its registry id ({@code collection_id}), for a reader that has latched on gate 3:
+     * the documents, manifest rows and chunks are matched on their id columns and nothing is resolved by a label.
+     */
+    public static Select<Record2<String, Integer>> queryById(DSLContext ctx, String tenant, long collectionId, String model,
+                                                             int fetchLimit) {
+        return statement(ctx, tenant, model, fetchLimit, CollectionKey.of(() -> true),
+            (d, m) -> d.PHYSICAL_COLLECTION_ID.eq(collectionId), (d, m) -> m.COLLECTION_ID.eq(collectionId));
+    }
+
+    private static Select<Record2<String, Integer>> statement(
+            DSLContext ctx, String tenant, String model, int fetchLimit, CollectionKey k,
+            java.util.function.BiFunction<CatalogDocuments, CatalogDocumentChunks, Condition> documentCollection,
+            java.util.function.BiFunction<CatalogDocuments, CatalogDocumentChunks, Condition> manifestCollection) {
         var d = CATALOG_DOCUMENTS.as("d");
         var m = CATALOG_DOCUMENT_CHUNKS.as("m");
         var earlier = CATALOG_DOCUMENT_CHUNKS.as("earlier");
@@ -206,11 +239,11 @@ public final class PdfStubMetadataReads {
             .join(ch).on(ch.TENANT_ID.eq(m.TENANT_ID).and(k.same(ch.COLLECTION, ch.COLLECTION_ID, m.COLLECTION, m.COLLECTION_ID))
                 .and(ch.CHASH.eq(m.CHASH)))
             .where(d.TENANT_ID.eq(tenant)
-                .and(k.eq(tenant, d.PHYSICAL_COLLECTION, d.PHYSICAL_COLLECTION_ID, collection))
+                .and(documentCollection.apply(d, m))
                 .and(d.DELETED_AT.isNull())
                 .and(format.eq("pdf"))
                 .and(pythonFalsy(DSL.jsonbGetAttribute(d.METADATA, "extraction_method")))
-                .and(k.eq(tenant, m.COLLECTION, m.COLLECTION_ID, collection))
+                .and(manifestCollection.apply(d, m))
                 .and(ch.TENANT_ID.eq(tenant))
                 .and(ch.EMBEDDING_MODEL.eq(model))
                 .and(carriesNonChunkRowKey(ch.METADATA))
@@ -258,7 +291,7 @@ public final class PdfStubMetadataReads {
         List<CollectionRef> refs = repo.tenantScope().withTenant(tenant, ctx -> {
             PgSession.setLocal(ctx, "statement_timeout", Integer.toString(collectionBoundMs()));
             List<CollectionRef> out = new ArrayList<>();
-            for (var r : collectionsQuery(ctx, tenant).fetch()) out.add(new CollectionRef(r.value1(), r.value2()));
+            for (var r : collectionRefsQuery(ctx, tenant).fetch()) out.add(new CollectionRef(r.value1(), r.value2(), r.value3()));
             return out;
         });
         List<CollectionStubs> out = new ArrayList<>(refs.size());
@@ -283,7 +316,11 @@ public final class PdfStubMetadataReads {
         return repo.tenantScope().withTenant(tenant, ctx -> {
             PgSession.setLocal(ctx, "statement_timeout", Integer.toString(boundMs));
             Map<String, Integer> sources = new LinkedHashMap<>();
-            for (var r : query(ctx, tenant, ref.name(), ref.embeddingModel(), limit + 1, gate3).fetch()) {
+            // from gate 3 by the registry row's own id (carried from the list), never the label resolved back to an id
+            var statement = CollectionKey.of(gate3).byId()
+                ? queryById(ctx, tenant, ref.id(), ref.embeddingModel(), limit + 1)
+                : query(ctx, tenant, ref.name(), ref.embeddingModel(), limit + 1);
+            for (var r : statement.fetch()) {
                 sources.merge(r.value1(), r.value2(), Integer::sum);
             }
             int total = sources.values().stream().mapToInt(Integer::intValue).sum();
