@@ -7811,6 +7811,7 @@ FROM scope s
         }
         if (siblings.isEmpty()) {
             dev.nexus.service.db.ExpectedCollectionIds.nothingToWrite(originCollection);   // P3.5a: no sibling, no transaction, nothing to write
+            return noSiblingOutcome(hex, dryRun, source, nextAfter);
         }
         var byChash = new java.util.LinkedHashMap<String, QuarantineRestoreOutcome.Row>();
         for (String h : hex) byChash.putIfAbsent(h, missingRow(h));
@@ -7837,6 +7838,14 @@ FROM scope s
         }
         return new QuarantineRestoreOutcome(List.copyOf(byChash.values()), auditIds.isEmpty() ? null : auditIds.get(0),
                                             dryRun, source, nextAfter, List.copyOf(auditIds), List.copyOf(siblings));
+    }
+
+    /** The outcome of a restore with no quarantine sibling to look in: every chash reads missing and no audit row is written. */
+    private static QuarantineRestoreOutcome noSiblingOutcome(String[] hex, boolean dryRun, QuarantineRestoreOutcome.Source source,
+                                                              String nextAfter) {
+        var byChash = new java.util.LinkedHashMap<String, QuarantineRestoreOutcome.Row>();
+        for (String h : hex) byChash.putIfAbsent(h, missingRow(h));
+        return new QuarantineRestoreOutcome(List.copyOf(byChash.values()), null, dryRun, source, nextAfter, List.of(), List.of());
     }
 
     /**
