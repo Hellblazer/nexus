@@ -80,7 +80,7 @@ java	db/CollectionTombstones.java catalog_collections select	name	label-kept	res
 java	db/CollectionTombstones.java catalog_collections where	name	label-kept	resolves the retiring, successor or deleted label to its registry row
 java	db/CollectionTombstones.java catalog_collections where	superseded_by	both	the CAS and the delete read superseded_by_id from gate 3; repointTombstonesNaming and the parity check read the label by design (a self-id tombstone keeps only the label)
 java	db/DepartedWriterSpans.java ? expr	collection	id	
-java	db/DepartedWriterSpans.java catalog_document_chunks expr	collection	id	
+java	db/DepartedWriterSpans.java catalog_document_chunks expr	collection	both	Gone.COLUMNS is the name-path column list, returned by Gone.columns(gate3) before the latch; every other line of the group reads through the gate
 java	db/DepartedWriterSpans.java catalog_document_chunks result	collection	id	
 java	db/DepartedWriterSpans.java catalog_document_chunks select	collection	id	
 java	db/DepartedWriterSpans.java catalog_document_chunks where	collection	id	
