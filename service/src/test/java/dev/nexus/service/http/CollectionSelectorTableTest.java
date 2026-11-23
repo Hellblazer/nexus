@@ -43,14 +43,14 @@ class CollectionSelectorTableTest {
     }
 
     @Test
-    void onlyTheDeleteResolvesARetiredRow() {
-        List<String> tombstone = new ArrayList<>();
+    void onlyTheDeleteHandsItsHandlerTheResolvedId() {
+        List<String> passes = new ArrayList<>();
         for (Map.Entry<String, CollectionSelectors.Route> e : CollectionSelectors.ROUTES.entrySet()) {
-            if (e.getValue().tombstoneOk()) {
-                tombstone.add(e.getKey());
+            if (e.getValue().passesResolvedId()) {
+                passes.add(e.getKey());
             }
         }
-        assertThat(tombstone).containsExactly("/v1/catalog/collections/delete");
+        assertThat(passes).containsExactly("/v1/catalog/collections/delete");
     }
 
     @Test

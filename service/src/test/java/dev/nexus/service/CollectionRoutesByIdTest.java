@@ -327,10 +327,12 @@ class CollectionRoutesByIdTest {
     /**
      * Residual S-7 acceptance (bead note on nexus-p2m1x.23): "Rename, then look up by the old id: not found". A rename
      * while gate 3 does not hold is the name path, which gives the collection a new id (RDR line 2662: "until then a
-     * rename gives the collection a new id"), so the old id resolves to nothing.
+     * rename gives the collection a new id"), so the old id no longer answers as the collection. Under linda's D3 ruling
+     * (2026-11-23, which replaces this test's earlier 404) the old id is the id of a retired row, so it answers 409
+     * {@code collection_superseded} naming the new label and id; 404 {@code unknown_collection_id} is for an id with no row at all.
      */
     @Test
-    void afterANamePathRenameTheOldIdIsNotFound() {
+    void afterANamePathRenameTheOldIdIsRefusedNamingTheNewOne() {
         fx.gate3.set(false);
         String from = CollectionRouteFixture.label("ren-old");
         String to = CollectionRouteFixture.label("ren-new");
@@ -340,8 +342,10 @@ class CollectionRoutesByIdTest {
             "{\"old_name\":" + json(from) + ",\"new_name\":" + json(to) + "}");
         assertThat(renamed.status()).as(renamed.body()).isEqualTo(200);
         Resp byOldId = fx.get("/v1/catalog/collections/get?collection_id=" + oldId);
-        assertThat(byOldId.status()).as(byOldId.body()).isEqualTo(404);
-        assertThat(byOldId.reason()).isEqualTo("unknown_collection_id");
+        assertThat(byOldId.status()).as(byOldId.body()).isEqualTo(409);
+        assertThat(byOldId.reason()).isEqualTo("collection_superseded");
+        assertThat(byOldId.json().path("superseded_by").asText()).isEqualTo(to);
+        assertThat(byOldId.json().path("successor_collection_id").asLong(-1)).isEqualTo(fx.idOf(to));
         assertThat(fx.get("/v1/catalog/collections/get?name=" + enc(to)).status()).as("the new label resolves").isEqualTo(200);
     }
 

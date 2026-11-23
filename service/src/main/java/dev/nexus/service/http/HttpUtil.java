@@ -386,7 +386,10 @@ public final class HttpUtil {
      *       carries {@code missing}: {@code name_key_drop_move} while the name-key drop move has no {@code completed_at},
      *       else {@code restart} (a P3.5b changeset has not applied). Nothing was renamed. The collection routes also answer
      *       404 {@code unknown_collection_id} ({@link #UNKNOWN_COLLECTION_ID_REASON}, naming {@code collection_id}) for an id
-     *       no row has, from {@code CollectionSelectorFilter}, and the delete answers 409
+     *       no row has, and 409 {@code collection_superseded} for the id of a retired row (the body also carries {@code collection_id}
+     *       and, when a live row bears the successor's label, {@code successor_collection_id}), and 500
+     *       {@code collection_id_mismatch} ({@link #COLLECTION_ID_MISMATCH_REASON}) for a registry row of another id, all from
+     *       {@code CollectionSelectorFilter}; the delete answers 409
      *       {@code collection_label_ambiguous} ({@link #COLLECTION_LABEL_AMBIGUOUS_REASON}, listing {@code collection_ids}).</li>
      *   <li>{@code collection_superseded} (409): a chunk write (upsert-chunks, or the combined
      *       write_many / append / append_many) named a collection whose row carries {@code superseded_by}
@@ -855,6 +858,12 @@ public final class HttpUtil {
 
     /** {@code reason} of the 404 for a {@code collection_id} no row of the tenant has (RDR-229 P3.5a). Wire contract. */
     static final String UNKNOWN_COLLECTION_ID_REASON = "unknown_collection_id";
+
+    /**
+     * {@code reason} of the 500 for a registry row that is not the row of the {@code collection_id} asked for (RDR-229 P3.5a):
+     * an engine invariant, refused before any write can land in another collection. Wire contract.
+     */
+    static final String COLLECTION_ID_MISMATCH_REASON = "collection_id_mismatch";
 
     /** {@code reason} of the 409 for a rename refused from gate 3 until the one-row rename can run (RDR-229 P3.5a). Wire contract. */
     static final String RENAME_REFUSED_REASON = "rename_refused";

@@ -148,14 +148,16 @@ class CollectionDeleteByIdTest {
     // ---- point 4 -------------------------------------------------------------------------------------------------------
 
     /**
-     * Contract point 4 as linda changed it on 2026-11-23 (option (b)): a superseded label, or a superseded row's id, is deleted
-     * with the 200 it always got, and the refusal naming the successor moves to the paired client release (P3.12). The
-     * tombstone goes; the live successor is untouched. (From gate 3 the purge is scoped by the tombstone's own id:
-     * {@link CollectionDeleteScopeByIdTest}.) Both ways a tombstone arises: a supersede (the tombstone keeps its data) and a
+     * Contract point 4 as linda's rulings of 2026-11-23 changed it. A superseded LABEL is deleted with the 200 it always got
+     * (option (b); the refusal naming the successor moved to the paired client release, P3.12): the tombstone goes and the live
+     * successor is untouched. A superseded row's ID is refused (D3, which replaces this test's earlier "a retired id is deleted"):
+     * 409 {@code collection_superseded} naming the successor's label ({@code superseded_by}, the key the client reads) and id
+     * ({@code successor_collection_id}), and nothing is deleted. (From gate 3 the label's purge is scoped by the tombstone's own
+     * id: {@link CollectionDeleteScopeByIdTest}.) Both ways a tombstone arises: a supersede (the tombstone keeps its data) and a
      * name-path rename (the tombstone is empty).
      */
     @Test
-    void point4_aSupersededLabelOrIdIsDeleted_theSuccessorStays() {
+    void point4_aSupersededLabelIsDeleted_aSupersededIdIsRefused409NamingTheSuccessor() {
         // a supersede, deleted by its label
         String oldOne = registered("p4-old");
         String successor = registered("p4-succ");
@@ -169,22 +171,31 @@ class CollectionDeleteByIdTest {
         assertThat(fx.supersededBy(successor)).as("and the live successor is untouched").isEqualTo("");
         assertThat(fx.idOf(successor)).isEqualTo(successorId);
 
-        // a supersede, deleted by the tombstone's id
+        // a supersede, asked for by the tombstone's id: refused, nothing deleted
         String oldTwo = registered("p4-old-id");
         long oldTwoId = fx.idOf(oldTwo);
         assertThat(fx.post("/v1/catalog/collections/supersede",
             "{\"name\":" + json(oldTwo) + ",\"superseded_by\":" + json(successor) + "}").status()).isEqualTo(200);
         Resp byId = fx.post(DELETE, "{\"collection_id\":" + oldTwoId + "}");
-        assertThat(byId.status()).as(byId.body()).isEqualTo(200);
+        assertThat(byId.status()).as(byId.body()).isEqualTo(409);
+        assertThat(byId.reason()).isEqualTo("collection_superseded");
         assertThat(byId.json().path("collection_id").asLong(-1)).isEqualTo(oldTwoId);
-        assertThat(fx.exists(oldTwo)).isFalse();
+        assertThat(byId.json().path("superseded_by").asText()).isEqualTo(successor);
+        assertThat(byId.json().path("successor_collection_id").asLong(-1)).isEqualTo(successorId);
+        assertThat(fx.exists(oldTwo)).as("a refused delete removes nothing").isTrue();
         assertThat(fx.exists(successor)).isTrue();
 
-        // a name-path rename: the old label is an empty tombstone of the new one
+        // a name-path rename: the old label is an empty tombstone of the new one; its label deletes it, its id is refused
         String from = registered("p4-ren-from");
+        long fromId = fx.idOf(from);
         String to = label("del-p4-ren-to-" + (n++));
         Resp ren = fx.post("/v1/catalog/collections/rename", "{\"old_name\":" + json(from) + ",\"new_name\":" + json(to) + "}");
         assertThat(ren.status()).as("setup: " + ren.body()).isEqualTo(200);
+        Resp tombstoneById = fx.post(DELETE, "{\"collection_id\":" + fromId + "}");
+        assertThat(tombstoneById.status()).as(tombstoneById.body()).isEqualTo(409);
+        assertThat(tombstoneById.json().path("superseded_by").asText()).isEqualTo(to);
+        assertThat(tombstoneById.json().path("successor_collection_id").asLong(-1)).isEqualTo(fx.idOf(to));
+        assertThat(fx.exists(from)).isTrue();
         Resp byTombstone = fx.post(DELETE, "{\"name\":" + json(from) + "}");
         assertThat(byTombstone.status()).as(byTombstone.body()).isEqualTo(200);
         assertThat(fx.exists(from)).as("the rename's empty tombstone goes").isFalse();
