@@ -79,12 +79,12 @@ public final class Rdr229ChunksFk {
      * adopts: same columns in the same order, same referenced columns, ON DELETE RESTRICT (r), ON UPDATE NO ACTION (a), MATCH SIMPLE (s), not
      * deferrable. The column numbers are read from each table, so a leaf with a dropped column is compared by name.
      */
-    static String hasValidatedMatch(String rel) {
+    public static String hasValidatedMatch(String rel) {
         return matching(rel, true);
     }
 
     /** As {@link #hasValidatedMatch}, whether or not the key is validated: a leaf with one has nothing to add (only to validate). */
-    static String hasMatch(String rel) {
+    public static String hasMatch(String rel) {
         return matching(rel, false);
     }
 
@@ -163,7 +163,7 @@ public final class Rdr229ChunksFk {
      * The on_complete of a leaf validation move, as a {@code format} template with one {@code %1$L}: the leaf's name as a literal. It validates
      * each key of the leaf to the registry that is not validated yet, whatever its name, and does nothing when the leaf or its key is gone.
      */
-    static String leafOnComplete() {
+    public static String leafOnComplete() {
         return "DO $v$ DECLARE c record; BEGIN FOR c IN SELECT k.conname FROM pg_catalog.pg_constraint k WHERE k.conrelid = "
             + "pg_catalog.to_regclass(%1$L) AND k.contype = 'f' AND NOT k.convalidated AND k.confrelid = "
             + "'nexus.catalog_collections'::pg_catalog.regclass LOOP EXECUTE 'ALTER TABLE ' || %1$L || ' VALIDATE CONSTRAINT ' || "
@@ -171,7 +171,7 @@ public final class Rdr229ChunksFk {
     }
 
     /** PL/pgSQL for the swap's own on_complete: the leaf keys and moves, then the adoption move (registered once, after the leaves). */
-    static String swapSteps() {
+    public static String swapSteps() {
         return reconcileLeaves() + registerAdoptMove();
     }
 
@@ -193,11 +193,12 @@ public final class Rdr229ChunksFk {
 
     /**
      * The adoption move's on_complete (one DO block, no EXCEPTION clause). Done when the composite exists. Otherwise: reconcile the leaves; if
-     * any needed work and this call queued some of it, the move re-opens itself (completed_at back to NULL, so the worker comes back to it);
+     * any needed work and this call queued some of it, the move re-opens itself (completed_at back to NULL, and registered_at now, so it sorts after
+     * the leaf moves just queued and the worker comes back to it once they have run);
      * if any needed work that is already queued, 55P03 (transient, the move is blocked and retried with a backoff, and nothing was written);
      * if none did, add the parent constraint, which PostgreSQL adopts leaf by leaf.
      */
-    static String adoptOnComplete() {
+    public static String adoptOnComplete() {
         return "DO $adopt$\nDECLARE\n" + RECONCILE_DECLARE + "BEGIN\n"
             + """
                 IF EXISTS (SELECT 1 FROM pg_catalog.pg_constraint
@@ -209,7 +210,7 @@ public final class Rdr229ChunksFk {
             + """
                 IF pending THEN
                     IF changed THEN
-                        UPDATE nexus.data_moves SET completed_at = NULL WHERE label = '%1$s';
+                        UPDATE nexus.data_moves SET completed_at = NULL, registered_at = pg_catalog.clock_timestamp() WHERE label = '%1$s';
                         RETURN;
                     END IF;
                     RAISE EXCEPTION 'rdr229 adoption of %2$s is waiting: a leaf of nexus.chunks has no validated foreign key yet (its validation move is queued)'
