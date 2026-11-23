@@ -37,6 +37,9 @@ BEGIN
 END
 $s$;
 ]]></sql>
+        <!-- The rollback restores 60000 on every row whose label matches the two patterns and holds 2147483647, including the rows the swap registered
+             at run time under the same patterns (rdr229-fkvalidate-<child>-chunk-fk, rdr229-fkvalidate-chunks-leaf-<leaf>): they carry a 60 s bound again and
+             a validation that outlasts it fails 57014. A row registered at another bound would also come back as 60000 (none is). -->
         <rollback>
             <sql splitStatements="false" stripComments="false"><![CDATA[
 DO $s$
