@@ -1039,7 +1039,10 @@ def _read_https_uri(
     if http_client is None:
         import httpx  # noqa: PLC0415  — optional/heavy dependency deferred (httpx)
 
-        http_client = httpx.Client(timeout=30, follow_redirects=True)
+        from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — deferred: the db package import is heavy for this module
+
+        # The process-wide SSL context: the aspect worker outlives install generations.
+        http_client = httpx.Client(timeout=30, follow_redirects=True, verify=get_shared_ssl_context())
         own_client = True
     try:
         try:
@@ -1931,7 +1934,9 @@ def _stat_https_uri(
     if http_client is None:
         import httpx  # noqa: PLC0415  — optional/heavy dependency deferred (httpx)
 
-        http_client = httpx.Client(timeout=HTTPS_STAT_TIMEOUT_S, follow_redirects=True)
+        from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — deferred: the db package import is heavy for this module
+
+        http_client = httpx.Client(timeout=HTTPS_STAT_TIMEOUT_S, follow_redirects=True, verify=get_shared_ssl_context())
         own_client = True
 
     response: Any = None
@@ -2043,7 +2048,9 @@ def _confirm_head(uri: str, http_client: Any) -> Any:
     own_client = http_client is None
     if own_client:
         import httpx  # noqa: PLC0415  — optional/heavy dependency deferred (httpx)
-        http_client = httpx.Client(timeout=HTTPS_STAT_TIMEOUT_S, follow_redirects=True)
+        from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — deferred: the db package import is heavy for this module
+
+        http_client = httpx.Client(timeout=HTTPS_STAT_TIMEOUT_S, follow_redirects=True, verify=get_shared_ssl_context())
     try:
         response = http_client.head(uri)
     except Exception:  # noqa: BLE001 — no confirmation; the caller keeps its first verdict
@@ -2110,11 +2117,14 @@ def capture_https_etag(source_uri: str, *, http_client: Any = None) -> str:
     if http_client is None:
         import httpx  # noqa: PLC0415  — optional/heavy dependency deferred (httpx)
 
+        from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — deferred: the db package import is heavy for this module
+
         http_client = httpx.Client(
             timeout=httpx.Timeout(
                 HTTPS_ETAG_CAPTURE_TIMEOUT_S, connect=HTTPS_ETAG_CAPTURE_CONNECT_TIMEOUT_S,
             ),
             follow_redirects=True,
+            verify=get_shared_ssl_context(),  # read once per process: the write path runs in the MCP server
         )
         own_client = True
     try:
