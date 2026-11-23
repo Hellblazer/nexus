@@ -56,8 +56,9 @@ class ProductionGate3WiringTest {
         "vectors/PciReconciler.java", "vectors/PgVectorRepository.java", "vectors/ReaperRepository.java",
         "vectors/TaxonomyCentroidRepository.java", "vectors/TopicRouteArm.java");
 
+    /** Comments removed, string and text-block literals kept whole: a {@code "/*"} inside a literal must not swallow the code after it. */
     private static String strip(String src) {
-        return src.replaceAll("(?s)/\\*.*?\\*/", "").replaceAll("//[^\\n]*", "");
+        return EgressGuardCensus.stripComments(src);
     }
 
     private static List<Path> sources() throws IOException {
@@ -98,7 +99,7 @@ class ProductionGate3WiringTest {
                 }
             }
         }
-        assertThat(examined).as("non-vacuity: the production constructions of gated classes found").isGreaterThanOrEqualTo(20);
+        assertThat(examined).as("non-vacuity: the production constructions of gated classes found").isGreaterThanOrEqualTo(25);
         assertThat(bare).as("a production site that built a gated class without the gate").isEmpty();
     }
 

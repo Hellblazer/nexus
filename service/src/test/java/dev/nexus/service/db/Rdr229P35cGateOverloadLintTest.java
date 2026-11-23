@@ -19,7 +19,7 @@ import java.util.stream.Stream;
 
 /**
  * RDR-229 P3.5c (nexus-p2m1x.25): the three {@link QuarantineOrigin} overloads that delegate with {@code Gate3.never()} stay only
- * for callers in another group's files and for tests (ReembedSourceReader, ChashRepository: the assembly threads the gate there).
+ * for callers in another group's files and for tests (none left: the assembly threaded the gate through ReembedSourceReader and ChashRepository).
  * A production caller that is not on that list fails here, so a name-path read cannot be added unseen. The list can only shrink:
  * an entry whose call is gone fails too, so it is removed when the caller takes the gate.
  */
@@ -28,10 +28,8 @@ class Rdr229P35cGateOverloadLintTest {
     /** The delegating forms: method name and the argument count that selects the name-path overload. */
     private static final Pattern CALL = Pattern.compile("QuarantineOrigin\\.(countRowsOf|isLiveRegistered|retagRowsOf)\\(([^;]*?)\\)\\s*[;)\\s,?:&|]");
 
-    private static final Set<String> KNOWN = Set.of(
-        "db/ReembedSourceReader.java countRowsOf",
-        "db/ChashRepository.java isLiveRegistered",
-        "db/ChashRepository.java retagRowsOf");
+    /** Empty since the assembly threaded the gate through ReembedSourceReader and ChashRepository: no production caller uses a gateless form. */
+    private static final Set<String> KNOWN = Set.of();
 
     private static int arguments(String list) {
         int depth = 0, count = 1;

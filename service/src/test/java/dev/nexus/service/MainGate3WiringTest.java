@@ -24,7 +24,7 @@ class MainGate3WiringTest {
     private static String code(String file) throws Exception {
         // Maven runs a module's tests with the module directory as cwd.
         String src = Files.readString(Path.of("src/main/java/dev/nexus/service/" + file));
-        return src.replaceAll("(?s)/\\*.*?\\*/", "").replaceAll("//[^\\n]*", "");
+        return EgressGuardCensus.stripComments(src);
     }
 
     @Test
@@ -40,6 +40,11 @@ class MainGate3WiringTest {
         assertThat(main.substring(service, main.indexOf(";", service)))
             .as("the production service takes the one signal and the readiness").containsPattern("gate3,\\s*renameReadiness\\)");
         assertThat(main).as("Main never builds a never-latched signal").doesNotContain("Gate3.never()");
+        int signal = main.indexOf("Gate3 gate3 =");
+        int repo = main.indexOf("new PgVectorRepository(");
+        assertThat(signal).isPositive();
+        assertThat(repo).as("the vector repository is built after the signal it takes, and before the service that serves it")
+            .isGreaterThan(signal).isLessThan(service);
     }
 
     @Test
