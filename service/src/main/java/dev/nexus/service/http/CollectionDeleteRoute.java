@@ -54,9 +54,24 @@ final class CollectionDeleteRoute {
                 HttpUtil.send(exchange, 409, MAPPER.writeValueAsString(out));
             }
             case PROCEED -> {
-                Map<String, Integer> counts = id != null
-                    ? repo.deleteCollectionById(tenant, name, id, keepQuarantine)
-                    : repo.deleteCollection(tenant, name, keepQuarantine);
+                Map<String, Integer> counts;
+                try {
+                    counts = id != null
+                        ? repo.deleteCollectionById(tenant, name, id, keepQuarantine)
+                        : repo.deleteCollection(tenant, name, keepQuarantine);
+                } catch (RuntimeException e) {
+                    // a re-embed job in a non-terminal state holds the collection (RDR-229 P3.5a row 14): refused before anything is removed
+                    var held = HttpUtil.collectionHeldByReembedJob(e);
+                    if (held == null) {
+                        throw e;
+                    }
+                    out.put("error", held.getMessage());
+                    out.put("reason", HttpUtil.COLLECTION_BUSY_REASON);
+                    out.put("collection", name);
+                    out.put("job_id", held.jobId().toString());
+                    HttpUtil.send(exchange, 409, MAPPER.writeValueAsString(out));
+                    return;
+                }
                 out.put("deleted", counts);
                 if (verdict.collectionId() > 0) {
                     out.put("collection_id", verdict.collectionId());
