@@ -95,12 +95,14 @@ public final class CollectionOneRowRename implements OneRowRename {
                 new CollectionTupleLock.Tuple(tenant, peekContentType, peekOwner, peek.value4(), peek.value5())));
         }
         // EVERY registry row the rename will touch is locked here, in ONE statement ordered by collection_id (linda's census, item 3): the old row, the
-        // target or the tombstone at the new label (which is deleted), the tombstones whose superseded_by names the old label (repointed) and those that point
-        // at the target tombstone's id (repointed after its delete). Locking the tombstones later, after the rename's own row, would take them out of id order.
+        // target or the tombstone at the new label (which is deleted), the tombstones whose superseded_by names the old label (repointed), those that point
+        // at the target tombstone's id (repointed after its delete), and every tombstone whose superseded_by names the NEW label whatever id it carries:
+        // repointTombstonesNaming below updates them all, a self-pointing or unstamped one included (linda's census pass 2). Locking the tombstones later,
+        // after the rename's own row, would take them out of id order.
         var target = CATALOG_COLLECTIONS.as("target");
         ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.in(oldName, newName)
-                .or(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(oldName))
+                .or(CATALOG_COLLECTIONS.SUPERSEDED_BY.in(oldName, newName))
                 .or(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.in(ctx.select(target.COLLECTION_ID).from(target)
                     .where(target.TENANT_ID.eq(tenant).and(target.NAME.eq(newName)))))))
             .orderBy(CATALOG_COLLECTIONS.COLLECTION_ID).forUpdate().fetch();
