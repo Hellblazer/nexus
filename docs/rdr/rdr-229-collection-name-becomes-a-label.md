@@ -2953,24 +2953,35 @@ its acceptance is that test green plus the census pin it lowers.
     registry read a verb holds past the route's statement bound. The four
     gc routes (`POST /v1/vectors/gc/quarantine-orphans`,
     `restore-rereferenced`, `expire-quarantine`, `quarantine-restore`;
-    `CollectionSelectors.java:220-223`) work in one transaction, in this
-    order: the sweep gate, taken in Java under the SQL function's own 2 s
-    lock bound; the registry rows, read FOR KEY SHARE under the writers'
-    rule, with no lock timeout of their own; then the SQL function, called
-    with the rows' current labels. A row renamed after its gate was taken
-    rolls the transaction back, and it runs again under the new label's
-    gate (`GcCollectionReads.java:107-145`;
-    `CatalogRepository.java:6098-6125`). A route that sets no statement
-    bound gets 25 s for the registry read, and a route that sets one keeps
-    it (`GcCollectionReads.java:72`, `:116-121`). Past the bound, a row a
-    verb holds answers 503 `rename_busy` with Retry-After, except on
-    `quarantine-restore`, which answers its own 503
-    `quarantine_restore_busy`; a keyed sweep whose gate times out answers
-    503 `sweep_gate_busy` (`KeyedSweep.java:194-207`). On either answer the
-    client waits Retry-After and resends a keyed sweep under the same key
-    (`http_vector_client.py:2490-2494`). The bound is a gc route's because
-    an operator's gc can be retried; an ingest writer has none, waits for
-    the verb, and a wait of a second or more is logged as
+    `CollectionSelectors.java:220-223`) work in one transaction per
+    attempt (an unkeyed `quarantine-restore` across several quarantine
+    siblings runs one per sibling, `PgVectorRepository.java:8093-8094`), in
+    this order: the sweep gate, where the route takes one, taken in Java
+    under the SQL function's own 2 s lock bound; the registry rows, read
+    FOR KEY SHARE under the writers' rule, with no lock timeout of their
+    own; then the SQL function, called with the rows' current labels.
+    `quarantine-orphans` gates its collection, the bounded
+    `expire-quarantine` gates the sibling, and `quarantine-restore` gates
+    its collection when it has siblings; `restore-rereferenced`, the
+    unbounded `expire-quarantine` and a `quarantine-restore` with no
+    sibling take no gate (`PgVectorRepository.java:6962-8253`). A row
+    renamed after its gate was taken rolls the transaction back, and it
+    runs again under the new label's gate
+    (`GcCollectionReads.java:107-145`; `CatalogRepository.java:6098-6125`).
+    A route that sets no statement bound gets 25 s for the registry read,
+    and a route that sets one keeps it (`GcCollectionReads.java:72`,
+    `:116-121`). Past the bound, a row a verb holds answers 503
+    `rename_busy` with Retry-After, except on `quarantine-restore`, which
+    answers its own 503 `quarantine_restore_busy`, for a gate timeout too.
+    A keyed `quarantine-orphans` or keyed bounded `expire-quarantine`
+    whose gate times out answers 503 `sweep_gate_busy`
+    (`VectorHandler.java:1707`, `:1727`, `:2162`;
+    `KeyedSweep.java:194-207`). The client waits Retry-After and resends a
+    keyed sweep under the same key on `rename_busy` and `sweep_gate_busy`,
+    and on `quarantine_restore_busy` only when the answer says nothing
+    moved (`http_vector_client.py:2482-2494`). The bound is a gc route's
+    because an operator's gc can be retried; an ingest writer has no such
+    bound, waits for the verb, and a wait of a second or more is logged as
     `registry_wait_slow` (`GcCollectionReads.java:66-71`;
     `CollectionRegistry.java:137-151`). The re-home is a writer: it takes
     both labels' sweep gates shared, reads both registry rows FOR KEY
@@ -2978,7 +2989,7 @@ its acceptance is that test green plus the census pin it lowers.
     (`CatalogRepository.java:11971-12093`). From gate 3 it sets the id
     and label of the manifest rows, topic assignments and orphan marks
     whose chunk moved, judged by the chunk's id, and does not rely on the
-    foreign keys' cascade, which goes at P3.7
+    chunks key's name cascade, whose child keys stay until P4.1
     (`CollectionRehomeScope.java:128-144`; `CatalogIdStamps.java:120-149`;
     T2 `229-research-321`).
   - P3.5b SQL readers: the plpgsql functions, the views keyed on names
@@ -3832,4 +3843,4 @@ large, and moved under a ratchet.
 - 2026-11-23: P3.4 folded from the stacked code (grant 3, nexus-p2m1x.22): the gate 3 latch row (`vectors-080-1`) and its boot read, the PCI clause read from the database with the PCI-off case and the B-row coverage, the runtime id arbiters after gate 2 and not in the boot walk, the name-index retire behind the latch, `IdReaders.PRESENT` and the singleton lock, the held entries (`id-unique-index-held`), gate 3 implying gate 2, the PCI clause's B-row cap per leaf, the latch's hold for P3.5's readers and P3.7's one-row rename and its refusal, the per-leaf budget with its bound, the canary twin's wait for `vectors-078-8`, and linda's rulings on nexus-p2m1x.22. Builds run beside the name index, not as rebuilds. P3.4's Test sentence gains "before the latch" (Sam, ask rdr229-p34-test-latch, 2026-11-23).
 - 2026-11-23: P3.5a folded from the stacked code (grant 3, nexus-p2m1x.23): the refusal's wire values (`rename_refused` with `name_key_drop_move`, `restart`, or the guard's own `latch_row_missing`), the latch row deciding the path, the registry keyed by id with no gate, the route boundary's id-to-label turn and the delete's resolved id, the boundary's typed 400, 404 and 409 answers, the unreachable 409 `collection_id_mismatch`, the 503 `rename_busy`, the four readers that hold a `Gate3`, the client's id trust waiting on both the drop move and `ids_stable`, the incremental-adoption refusal also waiting on P3.5b, `ids_stable` false in this tree, and the citations moved by the stack. P3.5's Test sentence and its Verify line now read "before gate 3 has latched" and "once gate 3 has latched" and its rename clause reads "from the latch a rename is refused" (Sam, asks rdr229-p35-test-latch and rdr229-p35-test-before-latch, option 1 each, and option 1 on the rename clause in session) (T2 `229-research-300` to `-314`; fix checks `229-fix-check-27fcc5dbb5`, `229-fix-check-f0562ed03e`).
 - 2026-11-23: P3.5b folded from the stacked code (grant 3, nexus-p2m1x.24): the CONTINUE gate as one `sqlCheck` applying the completion check's stamp-label rule, the empty-name rule of the both-shapes match, the search functions kept on names with `_by_id` twins, the plan measurement done as acceptance item 3, the ghost sweep's by-id stats read, `vectors-078-8` now in the tree, "every P3.5b changeset" named as the twelve ids of `p35b-continue-changesets.txt` in `databasechangelog` (no engine code reads the list before P3.7), the restart text not shipped, and the trigger on `physical_collection_id` (T2 `229-research-315` to `-320`).
-- 2026-11-23: P3.5a's gc routes and re-home folded from the stacked code (grant 3, nexus-p2m1x.23): the gc routes' order (the sweep gate in Java, the registry rows FOR KEY SHARE with no lock timeout, the SQL function with the current labels), the 25 s registry-read bound on a route that sets none, `rename_busy`'s three sources, `quarantine_restore_busy` and `sweep_gate_busy`, the client's same-key resend, `registry_wait_slow`, and the re-home as a writer that sets the moved rows' id and label itself (T2 `229-research-321`).
+- 2026-11-23: P3.5a's gc routes and re-home folded from the stacked code (grant 3, nexus-p2m1x.23): the gc routes' order (the sweep gate in Java where the route takes one, the registry rows FOR KEY SHARE with no lock timeout, the SQL function with the current labels), the 25 s registry-read bound on a route that sets none, `rename_busy`'s three sources, `quarantine_restore_busy` and, on the keyed quarantine and bounded expire forms, `sweep_gate_busy`, the client's same-key resend, `registry_wait_slow`, and the re-home as a writer that sets the moved rows' id and label itself (T2 `229-research-321`).
