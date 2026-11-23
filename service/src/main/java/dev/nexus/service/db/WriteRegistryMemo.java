@@ -49,6 +49,11 @@ final class WriteRegistryMemo {
         map(ctx).put(key(tenant, label), row);
     }
 
+    /** Drops one entry: the savepoint that read it rolled back and released its lock. */
+    static void remove(DSLContext ctx, String tenant, String label) {
+        map(ctx).remove(key(tenant, label));
+    }
+
     private static final String TAKEN = "nexus.collection-registry.advisory-taken";
 
     @SuppressWarnings("unchecked")
