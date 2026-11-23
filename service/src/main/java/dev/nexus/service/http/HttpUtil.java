@@ -406,6 +406,10 @@ public final class HttpUtil {
      *       is not a live row, or the old one still is. Nothing was changed.</li>
      *   <li>{@code label_reserved} (409): a label a collection was renamed away from, which stays reserved until P4.1 drops the name columns
      *       ({@link #LABEL_RESERVED_REASON}, RDR-229 P3.7); the body carries {@code label}. Nothing was written.</li>
+     *   <li>{@code restore_origin_unregistered} (409): a restore ({@code restore-rereferenced}, bounded or not, or {@code quarantine-restore}) from
+     *       gate 3 named quarantined chunks tagged with the origin's label whose {@code origin_collection_id} is the JSON null marker, an origin
+     *       that had no registry row when they were quarantined ({@link #RESTORE_ORIGIN_UNREGISTERED_REASON}, RDR-229 P3.7); the body carries
+     *       {@code label} and {@code rows} (how many). The whole call is refused before anything moves; the chunks stay quarantined.</li>
      *   <li>{@code collection_superseded} (409): a chunk write (upsert-chunks, or the combined
      *       write_many / append / append_many) named a collection whose row carries {@code superseded_by}
      *       ({@link #COLLECTION_SUPERSEDED_REASON}, nexus-mp8ys). {@code error} carries the same value; the body
@@ -689,6 +693,19 @@ public final class HttpUtil {
                 "{\"error\":" + jsonString(labelReserved.getMessage())
                 + ",\"reason\":\"" + LABEL_RESERVED_REASON + "\""
                 + ",\"label\":" + jsonString(labelReserved.label())
+                + "}");
+            return true;
+        }
+        // RDR-229 P3.7 (linda 2026-11-23): a restore named quarantined chunks whose origin tag is the null marker (the origin had no registry
+        // row when they were quarantined); from gate 3 they are not restorable by id. Refused before anything moves; 409 naming the label.
+        var restoreOrigin = restoreOriginUnregistered(e);
+        if (restoreOrigin != null) {
+            log.warn("event={}_restore_origin_unregistered {} label={} rows={}", event, context, restoreOrigin.label(), restoreOrigin.rows());
+            send(exchange, 409,
+                "{\"error\":" + jsonString(restoreOrigin.getMessage())
+                + ",\"reason\":\"" + RESTORE_ORIGIN_UNREGISTERED_REASON + "\""
+                + ",\"label\":" + jsonString(restoreOrigin.label())
+                + ",\"rows\":" + restoreOrigin.rows()
                 + "}");
             return true;
         }
@@ -1008,6 +1025,19 @@ public final class HttpUtil {
     static dev.nexus.service.db.RenamePathMismatchException renamePathMismatch(Throwable t) {
         for (Throwable c = t; c != null; c = c.getCause()) {
             if (c instanceof dev.nexus.service.db.RenamePathMismatchException r) {
+                return r;
+            }
+        }
+        return null;
+    }
+
+    /** {@code reason} of the 409 for a restore whose named chunks carry the null origin marker (RDR-229 P3.7). Wire contract. */
+    static final String RESTORE_ORIGIN_UNREGISTERED_REASON = "restore_origin_unregistered";
+
+    /** The {@link dev.nexus.service.db.RestoreOriginUnregisteredException} in {@code t}'s cause chain, or null. */
+    static dev.nexus.service.db.RestoreOriginUnregisteredException restoreOriginUnregistered(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof dev.nexus.service.db.RestoreOriginUnregisteredException r) {
                 return r;
             }
         }
