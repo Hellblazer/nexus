@@ -749,7 +749,7 @@ public final class NexusService {
                         this::perCollectionIndexesStatus, this::chunksLeafBloatStatus)
                         .embedPosture(() -> this.embedPosture)
                         .bootWork(() -> { var w = this.bootWork; return w == null ? java.util.List.of() : w.snapshot(); })
-                        .rdr229Completion(() -> { var w = this.bootWork; return w == null ? null : w.rdr229Completion(); })
+                        .rdr229Completion(() -> { var w = this.bootWork; return w == null ? null : w.rdr229Completion(); }).dataMovesNeedOperator(() -> { var w = this.bootWork; return w == null ? java.util.List.of() : w.dataMovesNeedOperator(); })
                         .aspectQueue(() -> this.aspectQueueDrainResult).testTenantResetRoute(tenantResetRoute)
                         .collectionTupleIndex(dev.nexus.service.db.CollectionTupleIndexProbe.statusSupplier(dataSource)).liveLabelIndex(dev.nexus.service.db.LiveLabelIndexProbe.statusSupplier(dataSource)).catalogEpoch(dev.nexus.service.db.CatalogEpochStatus.statusSupplier(dataSource)));
 

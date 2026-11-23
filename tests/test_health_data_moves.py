@@ -318,3 +318,117 @@ def test_the_prerequisite_hint_names_the_bundle_upgrade_only_while_the_bundle_la
         (row,) = [r for r in check_data_moves(status) if r.label == "Data move m1"]
         assert ("`nx upgrade` replaces that bundle" in " ".join(row.fix_suggestions)) is named
         assert "self-managed" in " ".join(row.fix_suggestions)
+
+
+# ── a move the engine says needs an operator (RDR-246, nexus-p2m1x.22) ───────────────────────────────────────
+
+
+def _paged(label: str, retries: int = 3, builds: bool = True, sqlstate: str | None = "57014") -> dict:
+    return {
+        "label": label, "retries": retries, "last_attempt_at": "2026-11-23T10:00:00Z",
+        "next_retry_at": "2026-11-23T10:02:00Z", "sqlstate": sqlstate, "statement_timeout_ms": 1400,
+        "terminates_index_builds": builds,
+    }
+
+
+def _needs_operator_status(*paged: dict, boot_work: list[dict] | None = None) -> dict:
+    return {
+        "boot_work": boot_work if boot_work is not None else [
+            _classed(p["label"], f"blocked: {p['label']}: on_complete did not complete sqlstate=57014; needs an operator",
+                     None) for p in paged
+        ],
+        "data_moves_need_operator": bool(paged),
+        "data_moves_need_operator_labels": [p["label"] for p in paged],
+        "data_moves_need_operator_moves": list(paged),
+    }
+
+
+def test_a_move_that_needs_an_operator_is_a_red_row_naming_the_label_the_bound_and_both_times():
+    rows = check_data_moves(_needs_operator_status(_paged("rdr229-swap-chunks")))
+
+    row = _by_label(rows)["Data move rdr229-swap-chunks"]
+    assert row.ok is False and row.warn is False, "red, not a warning"
+    assert "needs an operator: rdr229-swap-chunks" in row.detail
+    assert "statement_timeout_ms 1400 ms" in row.detail
+    assert "sqlstate 57014" in row.detail
+    assert "last attempt 2026-11-23T10:00:00Z" in row.detail
+    assert "next retry 2026-11-23T10:02:00Z" in row.detail
+    hint = " ".join(row.fix_suggestions)
+    assert "keeps retrying" in hint
+    assert "event=data_move_needs_operator" in hint
+    assert "ends the in-flight index builds" in hint
+    assert any("transient_retries = 0" in s and "'rdr229-swap-chunks'" in s for s in row.fix_suggestions)
+    assert len(_red(rows)) == 1, "one row for the move, not the plain blocked row as well"
+    assert _by_label(rows)[SUMMARY_LABEL].ok
+
+
+def test_a_need_operator_move_without_the_index_build_claim_does_not_make_it():
+    row = _by_label(check_data_moves(_needs_operator_status(_paged("m", retries=20, builds=False))))["Data move m"]
+
+    assert row.ok is False and row.warn is False
+    assert "index builds" not in row.detail
+    assert "index builds" not in " ".join(row.fix_suggestions)
+    assert "failed 20 times in a row" in row.detail
+
+
+def test_the_move_is_red_whatever_state_its_entry_shows_while_a_retry_runs():
+    status = _needs_operator_status(_paged("m"), boot_work=[_entry("m", "working: m, retrying after being blocked since x")])
+
+    row = _by_label(check_data_moves(status))["Data move m"]
+
+    assert row.ok is False and row.warn is False and row.detail.startswith("needs an operator: m")
+
+
+def test_a_listed_move_whose_entry_has_gone_is_still_a_red_row():
+    status = _needs_operator_status(_paged("gone"), boot_work=[])
+
+    assert [r.label for r in _red(check_data_moves(status))] == ["Data move gone"]
+
+
+def test_a_control_move_not_in_the_list_keeps_its_plain_blocked_row():
+    status = _needs_operator_status(_paged("paged"), boot_work=[
+        _entry("paged", "blocked: paged: x; needs an operator"),
+        _entry("control", "blocked: control: waiting for a background worker slot"),
+    ])
+
+    rows = _by_label(check_data_moves(status))
+
+    assert rows["Data move paged"].detail.startswith("needs an operator: paged")
+    assert rows["Data move control"].detail.startswith("blocked: control: waiting for a background worker slot")
+    assert "needs an operator" not in rows["Data move control"].detail
+
+
+def test_an_empty_list_changes_nothing_and_an_engine_without_the_field_keeps_the_plain_row():
+    plain = {"boot_work": [_entry("m", "blocked: m: waiting for a background worker slot; needs an operator")]}
+    empty = dict(plain, data_moves_need_operator=False, data_moves_need_operator_labels=[],
+                 data_moves_need_operator_moves=[])
+
+    for status in (plain, empty):
+        row = _by_label(check_data_moves(status))["Data move m"]
+        assert row.ok is False and row.warn is False
+        assert row.detail.startswith("blocked: m: waiting for a background worker slot")
+
+
+def test_the_pg_background_warning_is_untouched_beside_a_paged_move(monkeypatch):
+    monkeypatch.setattr(dmh, "_old_bundle_pending", lambda: True)
+    status = _needs_operator_status(_paged("paged"), boot_work=[
+        _entry("paged", "blocked: paged: x; needs an operator"),
+        _classed("waiting", "blocked: waiting: pg_background is not installed", "missing_prerequisite"),
+    ])
+
+    rows = _by_label(check_data_moves(status))
+
+    assert rows["Data move waiting"].ok is False and rows["Data move waiting"].warn is True
+    assert [r.label for r in _red(check_data_moves(status))] == ["Data move paged"]
+
+
+def test_malformed_need_operator_fields_cost_nothing():
+    status = {"boot_work": [_entry("m", "blocked: m: x")], "data_moves_need_operator_moves": [
+        "junk", {"label": 3}, {"label": "m", "retries": "many", "last_attempt_at": None, "statement_timeout_ms": True},
+    ]}
+
+    row = _by_label(check_data_moves(status))["Data move m"]
+
+    assert row.ok is False and row.warn is False
+    assert "last attempt unknown" in row.detail and "next retry unknown" in row.detail
+    assert "statement_timeout_ms" not in row.detail
