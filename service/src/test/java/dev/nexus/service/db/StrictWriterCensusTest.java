@@ -89,18 +89,43 @@ class StrictWriterCensusTest {
         assertThat(StrictWriterCensus.on()).isFalse();
     }
 
+    private static CollectionRow row(long id, String label) {
+        return new CollectionRow("code", "o", "voyage-code-3", 1024, "live", "", id, label);
+    }
+
     @Test
-    void anAdvisoryLockAfterARegistryRead_failsWhileTheCensusIsOn() {
+    void anAdvisoryLockAfterARegistryRead_failsWhileTheCensusIsOn_andAReEntryDoesNot() {
         DSLContext ctx = txn();
         WriteRegistryMemo.assertNoneHeld(ctx, "a lock");   // census off by default: nothing held, nothing thrown
-        WriteRegistryMemo.put(ctx, "t", "x", new CollectionRow("code", "o", "voyage-code-3", 1024, "live"));
         boolean was = ExpectedCollectionIds.censusOn();
         ExpectedCollectionIds.setCensus(true);
         try {
-            assertThatThrownBy(() -> WriteRegistryMemo.assertNoneHeld(ctx, "the sweep gate of x"))
+            WriteRegistryMemo.assertNoneHeld(ctx, "the index-run lock of d");              // taken first: fine
+            WriteRegistryMemo.put(ctx, "t", "x", row(7, "x"));
+            WriteRegistryMemo.assertNoneHeld(ctx, "the index-run lock of d");              // taken again after the read: a re-entry
+            assertThatThrownBy(() -> WriteRegistryMemo.assertNoneHeld(ctx, "the index-run lock of e"))
                 .isInstanceOf(IllegalStateException.class).hasMessageContaining("advisory locks come first");
-            WriteRegistryMemo.forget(ctx);
-            WriteRegistryMemo.assertNoneHeld(ctx, "the sweep gate of x");   // nothing held now
+        } finally {
+            ExpectedCollectionIds.setCensus(was);
+        }
+    }
+
+    @Test
+    void aSweepGateAfterARegistryRead_isRefused_unlessItIsTheGateOfTheLabelARenameMovedTheWriteOnto() {
+        DSLContext ctx = txn();
+        boolean was = ExpectedCollectionIds.censusOn();
+        ExpectedCollectionIds.setCensus(true);
+        try {
+            WriteRegistryMemo.assertGateFirst(ctx, "t", "old");                            // the gate of the boundary label, first
+            WriteRegistryMemo.put(ctx, "t", "old", row(7, "new"));                         // the row read under it: now called "new"
+            WriteRegistryMemo.put(ctx, "t", "new", row(7, "new"));
+            WriteRegistryMemo.assertGateFirst(ctx, "t", "old");                            // re-entry
+            WriteRegistryMemo.assertGateFirst(ctx, "t", "new");                            // the rename target: the same row, same id
+            WriteRegistryMemo.put(ctx, "t", "other", row(9, "other"));
+            assertThatThrownBy(() -> WriteRegistryMemo.assertGateFirst(ctx, "t", "other"))  // a different collection's gate after the read
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("advisory locks come first");
+            assertThatThrownBy(() -> WriteRegistryMemo.assertGateFirst(ctx, "t", "unread")) // a label no row of this transaction has
+                .isInstanceOf(IllegalStateException.class);
         } finally {
             ExpectedCollectionIds.setCensus(was);
         }
