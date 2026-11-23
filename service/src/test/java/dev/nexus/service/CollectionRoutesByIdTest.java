@@ -594,40 +594,21 @@ class CollectionRoutesByIdTest {
                 Prepared p = new Prepared(route, "rg" + n);
                 CollectionRouteFixture f = p.f;
                 f.gate3.set(false);
-                java.util.Map<Long, String> currentLabelOf = new java.util.LinkedHashMap<>();
-                java.util.Set<Long> newHolders = new java.util.LinkedHashSet<>();
-                java.util.concurrent.atomic.AtomicBoolean ran = new java.util.concurrent.atomic.AtomicBoolean();
-                f.service.collectionSelectorFilter().testHooks(null, () -> {
-                    if (ran.compareAndSet(false, true)) {
-                        java.util.concurrent.CompletableFuture.runAsync(() -> {
-                            for (int k = 0; k < p.idSide.size(); k++) {
-                                String old = p.idSide.get(k);
-                                long id = p.idSideIds.get(k);
-                                String fresh = (old.startsWith("quarantine-") ? "quarantine-" : "") + CollectionRouteFixture.label("rg" + n + "-r" + k);
-                                f.asSuperuser(ctx -> ctx.update(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
-                                    .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME, fresh)
-                                    .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(f.tenant))
-                                    .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.COLLECTION_ID.eq(id)).execute());
-                                currentLabelOf.put(id, fresh);
-                                f.register(old);   // a new row takes the old label
-                                newHolders.add(f.idOf(old));
-                            }
-                        }).join();
-                    }
-                }, null, null);
                 Resp r;
+                CollectionRouteFixture.RenameGap gap = f.renameInPlaceBeforeTheWritesRead(p.idSideIds, p.idSide, "rg" + n);
                 try {
                     r = call(route, Mode.ID, p);
                 } finally {
+                    gap.close();
                     f.service.collectionSelectorFilter().testHooks(null, null, null, unconsumed::add);
                 }
-                if (!ran.get()) {
+                if (!gap.ran()) {
                     System.err.println("rename_gap " + path + " skipped: the route reached no registry read by id (" + r.status() + ")");
                     return;
                 }
                 renameGapRan.incrementAndGet();
                 List<String> violations = new ArrayList<>();
-                int landed = renameGapFindings(f, currentLabelOf, newHolders, violations)[0];
+                int landed = renameGapFindings(f, gap.currentLabelOf(), gap.newHolders(), violations)[0];
                 renameGapLanded.merge(path, landed, Integer::sum);
                 System.err.printf("rename_gap %s status=%d landed_rows=%d%n", path, r.status(), landed);
                 assertThat(violations).as("%s by id after a rename in the gap (answered %d: %s)", route.label(), r.status(), r.body()).isEmpty();
