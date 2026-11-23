@@ -289,17 +289,19 @@ public final class CatalogMoves {
         try {
             CollectionRegistry.requireAllForWrite(ctx, tenant, labels);
         } catch (UnregisteredCollectionException unregistered) {
-            // Before the latch, labels are exact, so an unregistered physical_collection has no registry row: there is no lock to take, and no
-            // verb can race the move (every verb needs the row). After the latch, an unresolved label is a stale label for a row that exists,
-            // so skipping its lock would misdirect the move: refuse (the by-id branch above has no such skip) (linda 2026-11-23). The rekey that
-            // needs the row answers as it always did; the document is named here because an unregistered collection is a data problem.
-            java.util.Set<String> registered = new java.util.HashSet<>(ctx.select(CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS)
-                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.in(labels)).fetch(CATALOG_COLLECTIONS.NAME));
-            for (var d : docs) {
-                if (d.value2() != null && !d.value2().isEmpty() && !registered.contains(d.value2())) {
-                    LOG.warn("event=catalog_move_unregistered_collection tenant={} doc_id={} collection={}: the move goes ahead without a registry lock",
-                        tenant, d.value1(), d.value2());
-                }
+            // see below: a label with no registry row is no lock to take
+        }
+        // Before the latch, labels are exact, so an unregistered physical_collection has no registry row: there is no lock to take, and no
+        // verb can race the move (every verb needs the row). After the latch, an unresolved label is a stale label for a row that exists,
+        // so skipping its lock would misdirect the move: refuse (the by-id branch above has no such skip) (linda 2026-11-23). The rekey that
+        // needs the row answers as it always did. A single unregistered label is skipped quietly by the lock (a multi-label call raises), so
+        // the documents are named here either way: an unregistered collection is a data problem.
+        java.util.Set<String> registered = new java.util.HashSet<>(ctx.select(CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.in(labels)).fetch(CATALOG_COLLECTIONS.NAME));
+        for (var d : docs) {
+            if (d.value2() != null && !d.value2().isEmpty() && !registered.contains(d.value2())) {
+                LOG.warn("event=catalog_move_unregistered_collection tenant={} doc_id={} collection={}: the move goes ahead without a registry lock",
+                    tenant, d.value1(), d.value2());
             }
         }
     }

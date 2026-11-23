@@ -4,7 +4,7 @@
 # file	method	table	lock	count	verdict	reason
 AspectDocIdAttribution.java	namesNonLiveDocument	CATALOG_DOCUMENTS	forShare	1	no-registry-lock	document read FOR SHARE inside writeAspect, which read the registry row first (the fenced and unfenced upsert both)
 AspectTaskRefs.java	lockNaming	TUPLES	forNoKeyUpdate	1	no-registry-lock	tuples rows of the aspects rename helper: a per-store rename holds no registry lock, so no registry waiter can be behind it; the fenced upsert takes its key share before the tuples row
-CatalogMoves.java	ownerMove	CATALOG_DOCUMENTS	forUpdate	1	after-registry	the registry rows of the documents' collections are read FOR KEY SHARE first (lockCollectionsOfDocuments), and rekeyHighlights refuses a collection it does not hold
+CatalogMoves.java	ownerMove	CATALOG_DOCUMENTS	forUpdate	1	after-registry	the registry rows of every collection the move writes in are read FOR KEY SHARE first, in one id-ordered statement (lockCollectionsOfDocuments), and requireCollectionsHeld refuses a collection it does not hold once the document rows are locked
 CatalogMoves.java	ownerMove	CATALOG_OWNERS	forUpdate	1	no-registry-lock	the owner rows come first, before any registry read; no retiring verb locks a catalog_owners row while it holds a registry row, so no registry waiter sits behind it
 CatalogRepository.java	lockAndReadDocRow	CATALOG_DOCUMENTS	forKeyShare	1	no-registry-lock	document row lock by tumbler (the sensitivity and trash verbs); names no collection
 CatalogRepository.java	lockDocumentRow	CATALOG_DOCUMENTS	forKeyShare	1	no-registry-lock	document row lock by tumbler; every caller reads the registry first: a document writer (normalize, key share), a repair (rewriteStaleNotes, FOR SHARE), the document and owner moves (CatalogMoves.lockCollectionsOfDocuments)
@@ -20,6 +20,7 @@ CollectionRegistry.java	fillOrNull	CATALOG_COLLECTIONS	forKeyShare	1	registry	th
 CollectionRegistry.java	lockAllForWrite	CATALOG_COLLECTIONS	forKeyShare	1	registry	the registry row itself: the verb FOR UPDATE, the writer FOR KEY SHARE, the stale-note repair FOR SHARE (registry first)
 CollectionRegistry.java	lockIdsAndLabelsForWrite	CATALOG_COLLECTIONS	forKeyShare	1	registry	the registry row itself: the verb FOR UPDATE, the writer FOR KEY SHARE, the stale-note repair FOR SHARE (registry first)
 CollectionTombstones.java	lockRows	CATALOG_COLLECTIONS	forUpdate	1	registry	the registry row itself: the verb FOR UPDATE, the writer FOR KEY SHARE, the stale-note repair FOR SHARE (registry first)
+CollectionTombstones.java	repointTombstones	CATALOG_COLLECTIONS	forUpdate	1	after-registry	the successor's registry row is read FOR KEY SHARE first (requireIdForWrite), then the tombstone rows FOR UPDATE in collection_id order, the order of a retiring verb's lockRows (folio review F4)
 GroupRules.java	lock	GROUP_RECORDS	forUpdate	1	no-registry-lock	identity group rows, no collection
 GroupRules.java	onJoin	GROUP_RECORDS	forShare	1	no-registry-lock	identity group rows, no collection
 GroupRules.java	onLeave	GROUP_RECORDS	forShare	1	no-registry-lock	identity group rows, no collection

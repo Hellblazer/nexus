@@ -43,7 +43,7 @@ final class CatalogIdStamps {
         var c = CATALOG_COLLECTIONS.as("kid");
         Field<Long> own = DSL.field(DSL.select(c.COLLECTION_ID).from(c)
             .where(c.TENANT_ID.eq(tenant)).and(c.NAME.eq(DSL.nullif(name, DSL.inline(""))))
-            .orderBy(CollectionIdReads.liveFirst(c)).limit(1));  // live first, else the newest tombstone
+            .orderBy(CollectionIdReads.liveFirst(c)).limit(DSL.inline(1)));  // live first, else the newest tombstone
         return DSL.coalesce(id, own);
     }
 
@@ -97,7 +97,7 @@ final class CatalogIdStamps {
         var s = CATALOG_COLLECTIONS.as("sid");
         Field<Long> successor = DSL.field(DSL.select(s.COLLECTION_ID).from(s)
             .where(s.TENANT_ID.eq(CATALOG_COLLECTIONS.TENANT_ID)).and(s.NAME.eq(CATALOG_COLLECTIONS.SUPERSEDED_BY))
-            .orderBy(CollectionIdReads.liveFirst(s)).limit(1));   // a label may name a live row and tombstones: live first, else the newest
+            .orderBy(CollectionIdReads.liveFirst(s)).limit(DSL.inline(1)));   // a label may name a live row and tombstones: live first, else the newest
         return DSL.when(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(DSL.inline("")), DSL.castNull(Long.class))
             .otherwise(DSL.coalesce(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, successor, CATALOG_COLLECTIONS.COLLECTION_ID));
     }

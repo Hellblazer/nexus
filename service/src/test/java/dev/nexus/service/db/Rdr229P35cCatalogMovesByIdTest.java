@@ -61,6 +61,8 @@ class Rdr229P35cCatalogMovesByIdTest {
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.applyProductSchema(su);
             RegistryRenameSupport.dropForeignKeysOntoTheRegistry(DSL.using(su, SQLDialect.POSTGRES));   // a one-row rename cascades nowhere
+            // the name unique of the aspects (until P3.7 / P4.1 drops it): a collection that took the old label may hold a row at the path the move targets
+            DSL.using(su, SQLDialect.POSTGRES).alterTable(DOCUMENT_ASPECTS).dropConstraintIfExists(DSL.name("document_aspects_tenant_col_path_uq")).execute();
         }
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
@@ -156,18 +158,15 @@ class Rdr229P35cCatalogMovesByIdTest {
         aspects.upsertHighlight(t, b);
     }
 
+    /** One aspect row, inserted directly: the aspects upsert arbitrates on the name unique this class drops (P3.7 / P4.1 drop it). */
     private void aspect(String t, String docId, String coll, String sourcePath, String sourceUri, String text) {
-        Map<String, Object> b = new LinkedHashMap<>();
-        b.put("collection", coll);
-        b.put("source_path", sourcePath);
-        b.put("source_uri", sourceUri);
-        b.put("doc_id", docId);
-        b.put("problem_formulation", text);
-        b.put("confidence", 0.9);
-        b.put("extracted_at", OffsetDateTime.now().toString());
-        b.put("model_version", "v1");
-        b.put("extractor_name", "test");
-        aspects.upsertAspect(t, b);
+        long id = idOf(t, coll);
+        su(ctx -> ctx.insertInto(DOCUMENT_ASPECTS)
+            .set(DOCUMENT_ASPECTS.TENANT_ID, t).set(DOCUMENT_ASPECTS.COLLECTION, coll).set(DOCUMENT_ASPECTS.COLLECTION_ID, id)
+            .set(DOCUMENT_ASPECTS.SOURCE_PATH, sourcePath).set(DOCUMENT_ASPECTS.SOURCE_URI, sourceUri).set(DOCUMENT_ASPECTS.DOC_ID, docId)
+            .set(DOCUMENT_ASPECTS.PROBLEM_FORMULATION, text).set(DOCUMENT_ASPECTS.CONFIDENCE, 0.9)
+            .set(DOCUMENT_ASPECTS.EXTRACTED_AT, OffsetDateTime.now()).set(DOCUMENT_ASPECTS.MODEL_VERSION, "v1")
+            .set(DOCUMENT_ASPECTS.EXTRACTOR_NAME, "test").execute());
     }
 
     private record Hl(String collection, Long collectionId) {}
@@ -225,11 +224,14 @@ class Rdr229P35cCatalogMovesByIdTest {
         Object[] gap = renameAndRetake(t, COLL_A);
         long x = (Long) gap[0];
         long y = idOf(t, COLL_A);
-        // the new holder's row of a vanished document, at the path S moves to (written directly: the stored label B is Y's now)
+        // the new holder's row of a TRASHED document, at the path S moves to (written directly: the stored label B is Y's now)
+        String ghost = registered(t, "1.1", "ghost", null, "/ghost.pdf", COLL_A);
+        su(ctx -> ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.DELETED_AT, OffsetDateTime.now())
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(t)).and(CATALOG_DOCUMENTS.TUMBLER.eq(ghost)).execute());
         su(ctx -> ctx.insertInto(DOCUMENT_ASPECTS)
             .set(DOCUMENT_ASPECTS.TENANT_ID, t).set(DOCUMENT_ASPECTS.COLLECTION, COLL_A).set(DOCUMENT_ASPECTS.COLLECTION_ID, y)
             .set(DOCUMENT_ASPECTS.SOURCE_PATH, "/new/a.pdf").set(DOCUMENT_ASPECTS.SOURCE_URI, "file:///gone/a.pdf")
-            .set(DOCUMENT_ASPECTS.DOC_ID, "9.9.9").set(DOCUMENT_ASPECTS.CONFIDENCE, 0.5)
+            .set(DOCUMENT_ASPECTS.DOC_ID, ghost).set(DOCUMENT_ASPECTS.CONFIDENCE, 0.5)
             .set(DOCUMENT_ASPECTS.EXTRACTED_AT, OffsetDateTime.now()).set(DOCUMENT_ASPECTS.MODEL_VERSION, "v1")
             .set(DOCUMENT_ASPECTS.EXTRACTOR_NAME, "test").execute());
         latched.set(true);
@@ -242,7 +244,7 @@ class Rdr229P35cCatalogMovesByIdTest {
         assertThat(rows.get(0).value1()).isEqualTo(s);
         assertThat(rows.get(0).value2()).isEqualTo(x);
         assertThat(rows.get(0).value3()).isEqualTo("/new/a.pdf");
-        assertThat(rows.get(1).value1()).isEqualTo("9.9.9");
+        assertThat(rows.get(1).value1()).isEqualTo(ghost);
         assertThat(rows.get(1).value2()).isEqualTo(y);
     }
 
@@ -285,6 +287,7 @@ class Rdr229P35cCatalogMovesByIdTest {
         var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(CatalogMoves.class);
         var appender = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
         appender.start();
+        logger.setLevel(ch.qos.logback.classic.Level.WARN);
         logger.addAppender(appender);
         try {
             moves.moveDocument(t, s, "file:///new/a.pdf", "/new/a.pdf", false);
