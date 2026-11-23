@@ -140,8 +140,12 @@ class PciIdRingIntegrationTest extends PciIdIndexSupport {
     }
 
     private PciReconciler withSchedule(PciSettings s, PciCanarySchedule schedule) {
+        return withSchedule(s, schedule, PciIndexSweep.create(svcDs, s));
+    }
+
+    private PciReconciler withSchedule(PciSettings s, PciCanarySchedule schedule, PciIndexSweep sweep) {
         var builder = new PciBuilderSession(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS, NONCE, s);
-        var r = new PciReconciler(catalog::read, builder, PciIndexSweep.create(svcDs, s), s, java.time.Clock.systemUTC(),
+        var r = new PciReconciler(catalog::read, builder, sweep, s, java.time.Clock.systemUTC(),
             PciReconciler.SET_LOCAL_TENANT, PciReconciler.COUNT_TIMEOUT, Duration.ofSeconds(60), java.util.random.RandomGenerator.getDefault(),
             tenants -> 0, schedule);
         r.idBuildGate(() -> gate2);
@@ -195,5 +199,37 @@ class PciIdRingIntegrationTest extends PciIdIndexSupport {
                 .containsExactly(latched ? idIndex : nameIndex);
             gate3 = false;
         }
+    }
+
+    /**
+     * The maintenance status reads an id target's anchor origin from the id index: after the latch the name index is gone, so a call site that
+     * asked the sweep for the name index's anchor would report none. A fresh reconciler has no reading of its own, so the sweep's anchor is the one used.
+     */
+    @Test
+    void theMaintenanceStatusReadsAnIdTargetsAnchorFromTheIdIndex() throws Exception {
+        String tenant = newTenant("anchor");
+        String coll = name("anchor");
+        long id = collection(tenant, coll, 300);
+        var s = settings(16);
+        PciReconciler builds = reconciler(s);
+        builds.reconcileOnce();
+        gate2 = true;
+        builds.reconcileOnce();                              // the name index and the id index, each with its anchor comment
+        gate3 = true;
+        builds.reconcileOnce();                              // the name index retires
+        assertThat(validNameIndexed(tenant)).isEmpty();
+        assertThat(validIdIndexed(tenant)).containsExactly(id);
+        PciIndexSweep sweep = PciIndexSweep.create(svcDs, s);
+        sweep.refresh();
+        assertThat(sweep.anchor(M384, tenant, coll)).as("no name index, no name anchor").isEmpty();
+
+        String idIndex = PciCatalog.indexNameById(M384, tenant, id);
+        var schedule = new PciCanarySchedule((target, trigger) ->
+            new PciCanary.Result(target, trigger, PciCanary.State.GREEN, null, 10, 1.0, 1.0, 0, java.time.Instant.now(), null, null));
+        schedule.remeasure(new PciCanary.Target(PciReconciler.leafId(leaf(tenant)), tenant, M384, coll, idIndex, id), null);
+        PciReconciler fresh = withSchedule(s, schedule, sweep);   // no pass yet: no reading, so the status falls back to the sweep's anchor
+
+        var entry = fresh.maintenance().canary().indexes().stream().filter(e -> e.index().equals(idIndex)).findFirst().orElseThrow();
+        assertThat(entry.anchor()).as("the id index's own anchor origin").isEqualTo(PciCatalog.ORIGIN_BUILT);
     }
 }
