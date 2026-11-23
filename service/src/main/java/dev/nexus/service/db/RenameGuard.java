@@ -50,7 +50,12 @@ public final class RenameGuard {
      * one-row regime outside the window. {@code gate3} stays a constructor argument as P3.5a's guard has it; nothing here reads it.
      */
     private boolean oneRowRegime() {
-        return readiness.gate3Latched() || readiness.dropMoveComplete();   // the second term is the restart belt, see RenameReadiness#dropMoveComplete
+        return readiness.gate3Latched() || readiness.dropMoveComplete();   // the second term is the belt, see RenameReadiness#dropMoveComplete
+    }
+
+    /** The decision a rename takes inside the window: a fresh read of the latch row (linda 2026-11-23), or the completed drop move (the belt). */
+    private boolean oneRowRegimeUnderLock() {
+        return readiness.gate3LatchedUnderLock() || readiness.dropMoveComplete();
     }
 
     /**
@@ -76,9 +81,9 @@ public final class RenameGuard {
      */
     public <T> T pinned(OnPath<T> rename) {
         return readiness.pinned(() -> {
-            boolean oneRow = oneRowRegime();
+            boolean oneRow = oneRowRegimeUnderLock();
             if (oneRow) {
-                RenameReadiness.Missing missing = readiness.missing();
+                RenameReadiness.Missing missing = readiness.missingLatched();
                 if (missing != RenameReadiness.Missing.NONE) {
                     throw new RenameRefusedException(missing);
                 }

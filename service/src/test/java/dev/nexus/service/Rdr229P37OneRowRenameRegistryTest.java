@@ -264,6 +264,37 @@ class Rdr229P37OneRowRenameRegistryTest {
         }
     }
 
+    /**
+     * linda 2026-11-23, ruling 2: CollectionRegistry stays a static cache; the one-row rename evicts the OLD label under the rename lock, after
+     * commit, through the existing {@code CollectionRegistry.evict}. A lookup by the new label resolves to the same collection, one by the old misses.
+     */
+    @Test
+    void aOneRowRenameEvictsTheOldLabelFromTheRegistryCache_theNewLabelResolvesToTheSameCollection() throws Exception {
+        String tenant = "p37-evict";
+        String token = engine.newTenant(tenant);
+        String oldName = coll("p37evict", 1);
+        String newName = coll("p37evict", 2);
+        engine.su(ctx -> {
+            PgContainerHelper.insertCollection(ctx, tenant, oldName);
+            return null;
+        });
+        long id = engine.su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, oldName));
+        var before = dev.nexus.service.db.CollectionRegistry.lookup(engine.scope(), tenant, oldName);
+        assertThat(dev.nexus.service.db.CollectionRegistry.isKnown(tenant, oldName)).as("non-vacuity: the old label is cached").isTrue();
+
+        var r = engine.rename(token, oldName, newName);
+
+        assertThat(r.status()).as("the rename route: " + r).isEqualTo(200);
+        assertThat(engine.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, newName)))
+            .as("non-vacuity: one-row, the same collection_id under the new label").isEqualTo(id);
+        assertThat(dev.nexus.service.db.CollectionRegistry.isKnown(tenant, oldName)).as("the old label's cache key was evicted").isFalse();
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> dev.nexus.service.db.CollectionRegistry.lookup(engine.scope(), tenant, oldName))
+            .as("a lookup by the old label misses: the row is under the new label").isInstanceOf(RuntimeException.class);
+        assertThat(dev.nexus.service.db.CollectionRegistry.lookup(engine.scope(), tenant, newName))
+            .as("a lookup by the new label resolves to the same collection (its row carries what the old one did)").isEqualTo(before);
+        assertThat(engine.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, newName))).isEqualTo(id);
+    }
+
     private static String codeColl(String owner, int version) {
         return "code__" + owner + "__minilm-l6-v2-384__v" + version;
     }

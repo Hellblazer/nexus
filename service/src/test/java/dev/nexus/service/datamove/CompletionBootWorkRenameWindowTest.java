@@ -29,7 +29,7 @@ class CompletionBootWorkRenameWindowTest {
      * A reader that behaves like the real check around the latch: when its gate 3 holds and no row exists it calls the writer with a row write that
      * records into {@code events}; the result's latch is the row's existence after that call, and a writer that throws leaves it unlatched.
      */
-    private static final class Scripted implements CompletionBootWork.Reader {
+    private static class Scripted implements CompletionBootWork.Reader {
         final CompletionCheck.Gate3LatchWriter writer;
         final List<String> events = java.util.Collections.synchronizedList(new ArrayList<>());
         final AtomicBoolean row = new AtomicBoolean();
@@ -55,6 +55,11 @@ class CompletionBootWorkRenameWindowTest {
             }
             return new CompletionCheck.Result(true, true, gate3, List.of(), List.of(), true, 0L, List.of(), List.of(), gate3 ? "" : "no id index",
                 CompletionCheck.Dangling.UNREAD, false, latched, false, false, CompletionCheck.RenameState.NOT_READ);
+        }
+
+        @Override
+        public boolean latchRowPresent() {
+            return row.get();
         }
 
         @Override
@@ -202,6 +207,61 @@ class CompletionBootWorkRenameWindowTest {
             release.countDown();
             pool.shutdownNow();
         }
+    }
+
+    /**
+     * linda 2026-11-23, ruling 1: the rename's path comes from a fresh read of the latch row inside the window, never the regime flag or the sample.
+     * The regime says "not latched" while the row is present at lock time: the rename takes the latched (one-row) path.
+     */
+    @Test
+    void theRenamePathFollowsTheLatchRowReadUnderTheLock_theRegimeSaysNotLatchedButTheRowIsPresent() {
+        var window = new RenameWindow();
+        var reader = new Scripted(window.latchWriter());
+        reader.gate3 = false;   // the check latches nothing: the row appears out of band
+        var work = work(reader, window);
+        work.publish();
+        var guard = new dev.nexus.service.db.RenameGuard(Gate3.never(), work.renameReadiness());
+        assertThat(guard.<Boolean>pinned(oneRow -> oneRow)).as("control: no row, not latched: the name path").isFalse();
+
+        reader.row.set(true);   // the row is present at lock time
+
+        assertThat(window.oneRowRegime()).as("non-vacuity: the in-process regime says not latched").isFalse();
+        assertThat(work.gate3Latched()).as("non-vacuity: so does the accessor").isFalse();
+        assertThat(work.latest().gate3Latched()).as("non-vacuity: and the last sample").isFalse();
+        assertThat(guard.<Boolean>pinned(oneRow -> oneRow)).as("the rename took the latched path: the row was read under the lock").isTrue();
+        assertThat(work.gate3Latched()).as("and the accessor keeps what was seen").isTrue();
+    }
+
+    /** The reverse: the regime and the accessor say latched but the row is absent at lock time: the rename takes the name path. */
+    @Test
+    void theRenamePathFollowsTheLatchRowReadUnderTheLock_theRegimeSaysLatchedButTheRowIsAbsent() {
+        var window = new RenameWindow();
+        var reader = new Scripted(window.latchWriter());
+        var work = work(reader, window);
+        work.publish();
+        assertThat(window.oneRowRegime()).as("non-vacuity: the regime says latched").isTrue();
+        assertThat(work.gate3Latched()).as("non-vacuity: so does the accessor").isTrue();
+        var guard = new dev.nexus.service.db.RenameGuard(Gate3.never(), work.renameReadiness());
+        assertThat(guard.<Boolean>pinned(oneRow -> oneRow)).as("control: the row is there: the latched path").isTrue();
+
+        reader.row.set(false);   // a restore that lost the row, say
+
+        assertThat(guard.<Boolean>pinned(oneRow -> oneRow)).as("the row is absent at lock time: the name path, whatever the flag says").isFalse();
+    }
+
+    /** A row that cannot be read is neither latched nor not latched: the rename fails, it does not guess. */
+    @Test
+    void aLatchRowThatCannotBeReadFailsTheRename() {
+        var window = new RenameWindow();
+        var reader = new Scripted(window.latchWriter()) {
+            @Override
+            public boolean latchRowPresent() {
+                throw new IllegalStateException("the database cannot answer");
+            }
+        };
+        var work = work(reader, window);
+        var guard = new dev.nexus.service.db.RenameGuard(Gate3.never(), work.renameReadiness());
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> guard.pinned(oneRow -> oneRow)).isInstanceOf(IllegalStateException.class);
     }
 
     /** A bounded poll for the schedule's thread. */

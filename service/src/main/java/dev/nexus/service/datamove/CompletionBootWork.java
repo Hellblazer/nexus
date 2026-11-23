@@ -74,6 +74,14 @@ public final class CompletionBootWork implements AutoCloseable {
 
         void abort();
 
+        /**
+         * A fresh read of the latch row, on a connection of its own: true when {@code nexus.rdr229_gate_latch} holds gate 3's row. The rename takes
+         * its path from this, inside its window. Throws when the row cannot be read.
+         */
+        default boolean latchRowPresent() {
+            throw new UnsupportedOperationException("this reader cannot read the latch row");
+        }
+
         @Override
         void close();
     }
@@ -293,6 +301,21 @@ public final class CompletionBootWork implements AutoCloseable {
             @Override
             public boolean gate3Latched() {
                 return latched();
+            }
+
+            @Override
+            public boolean gate3LatchedUnderLock() {
+                boolean row = reader.latchRowPresent();   // the decision: a fresh read, not the regime, the accessor or the sample
+                if (row) {
+                    gate3Latched = true;   // sticky, as the accessor is: the row was seen
+                }
+                return row;
+            }
+
+            @Override
+            public Missing missingLatched() {
+                var r = latest();
+                return r == null ? Missing.NAME_KEY_DROP_MOVE : r.renameMissing(true);
             }
 
             @Override
@@ -648,6 +671,15 @@ public final class CompletionBootWork implements AutoCloseable {
                     CompletionCheck.insertLatch(w.ctx(), gate, version == null ? "dev" : version, pciOff);
                 }
             });
+        }
+
+        @Override
+        public boolean latchRowPresent() {
+            try (AdminDdlSession r = AdminDdlSession.open(admin, new AdminDdlSession.Settings("nexus-rdr229-gate-latch-rename", 0L,
+                    "rdr229 gate latch rename read", "nexus", "rdr229_gate_latch", "none"), false)) {
+                r.setSession("default_transaction_read_only", "on");
+                return CompletionCheck.readLatch(r.ctx(), CompletionCheck.GATE3).isPresent();
+            }
         }
 
         @Override

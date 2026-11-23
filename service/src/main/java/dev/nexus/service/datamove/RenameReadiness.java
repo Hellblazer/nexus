@@ -40,10 +40,25 @@ public interface RenameReadiness {
     }
 
     /**
-     * Whether the name-key drop move has {@code completed_at}. A belt for the process-local latch (it resets on a restart): the move is
-     * registered only when gate 3 holds and its completion is durable and never undone, so a completed move means the name keys are gone
-     * and a rename is one-row or refused whatever the latch and the live gate 3 say. TODO: revisit when vectors-080's latch table is
-     * tested across a restart; it may make this redundant. The default is false.
+     * The latch decision of a rename, taken inside {@link #pinned} (linda 2026-11-23): a FRESH read of the latch row
+     * ({@code nexus.rdr229_gate_latch}), never the in-process regime or the last sample, which stay a fast-path hint for {@link #gate3Latched()}
+     * and the status. A regime that says "not latched" with the row present reads latched here, and the reverse. A read that fails throws: unknown is
+     * neither latched nor not latched. The default is {@link #gate3Latched()} (a readiness with no database, a test's lambda).
+     */
+    default boolean gate3LatchedUnderLock() {
+        return gate3Latched();
+    }
+
+    /** What a rename waits for once the latch decision says latched: {@link #missing()} with the latch taken as true. The default is {@link #missing()}. */
+    default Missing missingLatched() {
+        return missing();
+    }
+
+    /**
+     * Whether the name-key drop move has {@code completed_at}. A belt: the move is registered only once gate 3 is latched and its completion is
+     * durable and never undone, so a completed move means the name keys are gone and a rename is one-row or refused whatever the latch says.
+     * It covers a latch row that is gone while the move stands (a partial restore). A restart no longer needs it: the latch row survives one
+     * ({@code Rdr229P37RestartBeltTest}). The default is false.
      */
     default boolean dropMoveComplete() {
         return false;
