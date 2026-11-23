@@ -44,6 +44,17 @@ final class TaxonomyCollectionLock {
      * as the writers always did.
      */
     static CollectionRow lockAndRequireWritable(DSLContext ctx, String tenant, String collection) {
+        return lockAndRequireWritable(ctx, tenant, collection, null);
+    }
+
+    /**
+     * {@link #lockAndRequireWritable(DSLContext, String, String)} for a writer that also reads OTHER collections' registry rows (RDR-229
+     * P3.5a, nexus-p2m1x.23): {@code beforeOwnRow} runs after the advisory lock and BEFORE the collection's own registry row is read, with
+     * the id the lock is keyed by (null when the label has no row), so the writer can read its whole set of rows in {@code collection_id}
+     * order, its own among them, and hold none while it waits for a lower one. Not called for a blank collection (it has no row).
+     */
+    static CollectionRow lockAndRequireWritable(DSLContext ctx, String tenant, String collection,
+                                                java.util.function.Consumer<Long> beforeOwnRow) {
         if (collection == null || collection.isBlank()) {
             lock(ctx, tenant + "/" + collection);
             return null;
@@ -52,6 +63,9 @@ final class TaxonomyCollectionLock {
         OptionalLong named = ExpectedCollectionIds.of(collection);
         Long keyed = named.isPresent() ? Long.valueOf(named.getAsLong()) : unlockedId(ctx, tenant, collection);
         lock(ctx, keyed == null ? tenant + "/" + collection : key(tenant, keyed));
+        if (beforeOwnRow != null) {
+            beforeOwnRow.accept(keyed);
+        }
         CollectionRow row = CollectionRegistry.requireWritable(ctx, tenant, collection);
         if (keyed == null || keyed != row.collectionId()) {
             lock(ctx, key(tenant, row.collectionId()));
