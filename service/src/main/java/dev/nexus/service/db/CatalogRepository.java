@@ -10906,9 +10906,8 @@ public final class CatalogRepository {
     }
 
     /**
-     * {@link #renameCollection(String, String, String, String, String, String, String)}, answering the renamed row too
-     * ({@link RenameOutcome}). The one rename primitive of the catalog: refused first, from gate 3 until the one-row rename can
-     * run, with {@link RenameRefusedException} ({@link RenameGuard}, RDR-229 P3.5a).
+     * {@link #renameCollection(String, String, String, String, String, String, String)}, answering the renamed row ({@link RenameOutcome}) too.
+     * The one rename primitive: refused from gate 3 until the one-row rename can run ({@link RenameRefusedException}, at entry and again in the transaction).
      */
     public RenameOutcome renameCollectionOutcome(String tenant, String oldName, String newName,
                                                  String expectedTargetSupersededBy, String newContentType,
@@ -11425,6 +11424,7 @@ public final class CatalogRepository {
         // vectors-021-3's chunk-locking trigger; whole transaction retried on 40P01. `counts` is
         // built inside the lambda, so each attempt starts from an empty map.
         return manifestWriteTxn(tenant, "catalog.renameCollection " + oldName, ctx -> {
+            renameGuard.requireRenameAllowed(ctx);   // RDR-229 P3.5a D2: first, under the rename lock the latch write takes
             Map<String, Integer> counts = new LinkedHashMap<>();
             // nexus-11gh6 rev 2 §3.2 (Hal Q1: gate the Java collection-move
             // paths in this bead). The rename below bulk-repoints
