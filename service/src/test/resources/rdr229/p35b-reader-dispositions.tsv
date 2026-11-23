@@ -9,6 +9,8 @@
 #   name-kept      a form-B search function P3.5b leaves on its last definer's name path until P4.1, so its plans, per-collection index use and
 #                  sensitive anti join stay as they are; its id path is the twin named in the reason (<object>_by_id), which P3.5c calls after gate 3 (linda 2026-11-22)
 #   no-caller      a form B function with no engine caller: kept on its name path, no id twin, dropped at P4.1
+#   child-name-stamp  a vectors-079 row trigger (RDR-229 P3.7) that reads chunks.collection, and resolves the chunk's superseded_by, to stamp a
+#                  child row's name; dropped with the name keys at P4.1 (linda 2026-11-23)
 #   unchanged-fallback  a reader P3.5b leaves on its last definer because it has no match to redefine (an output-only or an id-first read); needs a reason
 #   id-twin        an id-path twin <object>_by_id vectors-077 adds: it matches by collection_id only; the name column it reads is its RETURNS name, as the
 #                  original's; the original is name-kept
@@ -170,3 +172,10 @@ view	nexus.collection_health_meta	physical_collection	id	grouped by registry lab
 view	nexus.collection_vector_stats	collection	both	chunk-to-manifest match by B-join (id when both carry one, non-empty name when either lacks one); output column unchanged
 view	nexus.live_chunks	collection	both	chunk-to-manifest match by B-join (id when both carry one, non-empty name when either lacks one); output column unchanged
 view	nexus.topics_with_counts	collection	id	collection column is the registry label of topics.collection_id (left join; '' when unset) [catalog-009-read-shape-views.xml:138]
+function	nexus.catalog_document_chunks_name_from_chunk	collection	child-name-stamp	vectors-079 row trigger (P3.7): reads the chunk's name to stamp the child's; dropped with the name keys at P4.1
+function	nexus.catalog_document_chunks_name_from_chunk	superseded_by	child-name-stamp	vectors-079 row trigger (P3.7): reads the chunk's name to stamp the child's; dropped with the name keys at P4.1
+function	nexus.chunk_orphaned_at_name_from_chunk	collection	child-name-stamp	vectors-079 row trigger (P3.7): reads the chunk's name to stamp the child's; dropped with the name keys at P4.1
+function	nexus.chunk_orphaned_at_name_from_chunk	superseded_by	child-name-stamp	vectors-079 row trigger (P3.7): reads the chunk's name to stamp the child's; dropped with the name keys at P4.1
+function	nexus.topic_assignments_name_from_chunk	collection	child-name-stamp	vectors-079 row trigger (P3.7): reads the chunk's name to stamp the child's; dropped with the name keys at P4.1
+function	nexus.topic_assignments_name_from_chunk	source_collection	child-name-stamp	vectors-079 row trigger (P3.7): reads the chunk's name to stamp the child's; dropped with the name keys at P4.1
+function	nexus.topic_assignments_name_from_chunk	superseded_by	child-name-stamp	vectors-079 row trigger (P3.7): reads the chunk's name to stamp the child's; dropped with the name keys at P4.1
