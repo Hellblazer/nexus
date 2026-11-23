@@ -21,6 +21,7 @@ import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -78,6 +79,13 @@ public final class IdUniqueIndexPass implements AutoCloseable {
     static final Duration PERIOD = Duration.ofSeconds(60);
     static final Duration BUILD_STATEMENT_TIMEOUT = Duration.ofHours(6);
     static final int DUPLICATES_LOGGED = 5;
+    /** A finished pass looks again this often, so an index dropped or invalidated later is rebuilt (r1 minor). */
+    static final Duration RECHECK = Duration.ofMinutes(10);
+    /** The duplicate report's statement bound: it groups a whole table. */
+    static final Duration REPORT_STATEMENT_TIMEOUT = Duration.ofSeconds(60);
+    /** A timed-out or cancelled build waits this long, doubling, at most {@link #BACKOFF_MAX}, before it is tried again. */
+    static final Duration BACKOFF_BASE = Duration.ofHours(1);
+    static final Duration BACKOFF_MAX = Duration.ofHours(24);
 
     private static final String SCHEMA = "nexus";
     private static final String BUILD_TEMPLATE = "CREATE %sINDEX CONCURRENTLY %I ON %I.%I (%s)%s";
@@ -150,8 +158,25 @@ public final class IdUniqueIndexPass implements AutoCloseable {
     private final Map<String, String> corrupt = new LinkedHashMap<>();
     private final Object passLock = new Object();
     private volatile Consumer<String> beforeStatement;
-    private boolean finished;
+    /** Indexes of a pass name that exist VALID with another definition: reported, never dropped or rebuilt by the pass. Guarded by {@link #passLock}. */
+    private final Map<String, String> mismatched = new LinkedHashMap<>();
+    /** Twins whose wait has been logged at INFO once. Guarded by {@link #passLock}. */
+    private final java.util.Set<String> waitLogged = new java.util.HashSet<>();
+    /** A build that timed out or was cancelled waits out its backoff, by index name. Guarded by {@link #passLock}. */
+    private final Map<String, Backoff> backoffs = new java.util.HashMap<>();
+    /** The build statement's bound; a test shortens it. */
+    private volatile Duration buildTimeout = BUILD_STATEMENT_TIMEOUT;
+    /** How long a finished pass waits before it looks again; a test shortens it. */
+    private volatile Duration recheck = RECHECK;
+    /** When the last pass found every index in place; the pass looks again after {@link #RECHECK}. Null when not finished. */
+    private Instant finishedAt;
     private ScheduledExecutorService scheduler;
+
+    /** One index's failed builds: how many in a row and when the next may start. */
+    private static final class Backoff {
+        int failures;
+        Instant nextAttempt = Instant.MIN;
+    }
 
     public IdUniqueIndexPass(AdminConnection admin, BootWorkRegistry registry, Gate2 gate2) {
         this.admin = Objects.requireNonNull(admin, "admin");
@@ -164,7 +189,32 @@ public final class IdUniqueIndexPass implements AutoCloseable {
         this.beforeStatement = hook;
     }
 
-    /** True when every applicable index exists and is VALID with its definition: what gate 3 requires. A failed read is false. */
+    /** Test seam: how long a finished pass waits before it looks again. */
+    void recheckEvery(Duration period) {
+        this.recheck = Objects.requireNonNull(period);
+    }
+
+    /** Test seam: the build statement's bound. */
+    void buildTimeout(Duration timeout) {
+        this.buildTimeout = Objects.requireNonNull(timeout);
+    }
+
+    /** How long an index whose build failed {@code failures} times in a row waits: one hour, doubling, at most a day. */
+    static Duration backoffAfter(int failures) {
+        Duration d = BACKOFF_BASE;
+        for (int i = 1; i < failures && d.compareTo(BACKOFF_MAX) < 0; i++) {
+            d = d.multipliedBy(2);
+        }
+        return d.compareTo(BACKOFF_MAX) > 0 ? BACKOFF_MAX : d;
+    }
+
+    /** The status text for an index of the pass's name that stands with another definition. */
+    static String mismatchText(Spec s) {
+        return "an index named " + s.index() + " on " + s.table() + " exists with a different definition than P3.4's (" + s.columns()
+            + (s.predicate() == null ? "" : " WHERE " + s.predicate()) + "); the pass neither drops nor rebuilds it, so gate 3 waits until an "
+            + "operator drops it, after which the next pass builds the right one";
+    }
+
     /** True while a changeset {@code s}'s twin waits for ({@link ArbiterTwins#WAITS_FOR_CHANGESETS}) is not recorded in databasechangelog. */
     static boolean waiting(DSLContext ctx, Spec s) {
         List<String> ids = ArbiterTwins.WAITS_FOR_CHANGESETS.getOrDefault(s.index(), List.of());
@@ -176,6 +226,26 @@ public final class IdUniqueIndexPass implements AutoCloseable {
         return ctx.fetchCount(DSL.selectDistinct(id).from(dcl).where(id.in(ids))) < ids.size();
     }
 
+    /**
+     * The changesets the pass's twins still wait for ({@link ArbiterTwins#WAITS_FOR_CHANGESETS}), for gate3_why and boot_work: the ids not yet
+     * recorded in databasechangelog of every twin that is not yet VALID. Empty when nothing waits.
+     */
+    public static List<String> waitingChangesets(DSLContext ctx) {
+        var dcl = DSL.table(DSL.name("public", "databasechangelog"));
+        var id = DSL.field(DSL.name("id"), String.class);
+        List<String> out = new ArrayList<>();
+        for (Spec s : SPECS) {
+            List<String> ids = ArbiterTwins.WAITS_FOR_CHANGESETS.getOrDefault(s.index(), List.of());
+            if (ids.isEmpty() || valid(ctx, s)) {
+                continue;
+            }
+            var recorded = ctx.selectDistinct(id).from(dcl).where(id.in(ids)).fetch(id);
+            ids.stream().filter(i -> !recorded.contains(i) && !out.contains(i)).forEach(out::add);
+        }
+        return out;
+    }
+
+    /** True when every applicable index exists and is VALID with its definition: what gate 3 requires. A failed read is false. */
     public static boolean allValid(DSLContext ctx) {
         try {
             for (Spec s : SPECS) {
@@ -280,7 +350,7 @@ public final class IdUniqueIndexPass implements AutoCloseable {
     /** One pass, now. A gate that does not hold ends it before any connection opens. */
     public Result runOnce() {
         synchronized (passLock) {
-            if (finished) {
+            if (finishedAt != null && Duration.between(finishedAt, Instant.now()).compareTo(recheck) < 0) {
                 return new Result(true, 0, 0, corruptTables());
             }
             boolean held;
@@ -336,14 +406,32 @@ public final class IdUniqueIndexPass implements AutoCloseable {
     private Result run(Connection conn) throws SQLException {
         var ctx = DSL.using(conn, org.jooq.SQLDialect.POSTGRES);
         List<Spec> todo = new ArrayList<>();
+        List<String> waits = new ArrayList<>();
+        Instant now = Instant.now();
         for (Spec s : SPECS) {
-            if (!corrupt.containsKey(s.index()) && !valid(ctx, s)) {
-                if (waiting(ctx, s)) {
-                    log.debug("event=id_unique_index_waiting index={} for={}", s.index(), ArbiterTwins.WAITS_FOR_CHANGESETS.get(s.index()));
-                    continue;   // its table's writer is replaced by a changeset not yet recorded: building now would race the old body
-                }
-                todo.add(s);
+            if (corrupt.containsKey(s.index()) || mismatched.containsKey(s.index()) || valid(ctx, s)) {
+                continue;
             }
+            if (waiting(ctx, s)) {
+                List<String> ids = ArbiterTwins.WAITS_FOR_CHANGESETS.get(s.index());
+                if (waitLogged.add(s.index())) {
+                    log.info("event=id_unique_index_waiting index={} for_changesets={} reason=writer_replaced_by_a_changeset_not_yet_recorded",
+                        s.index(), ids);
+                }
+                waits.add(s.index() + " waits for changeset " + String.join(", ", ids));
+                continue;   // its table's writer is replaced by a changeset not yet recorded: building now would race the old body
+            }
+            if (validExists(ctx, s)) {   // a VALID index of our name with another definition: a named failure, never dropped by us
+                mismatched.put(s.index(), mismatchText(s));
+                log.error("event=id_unique_index_definition_mismatch table={} index={} want=\"{}{}\"", s.table(), s.index(), s.columns(),
+                    s.predicate() == null ? "" : " WHERE " + s.predicate());
+                continue;
+            }
+            Backoff wait = backoffs.get(s.index());
+            if (wait != null && now.isBefore(wait.nextAttempt)) {
+                continue;
+            }
+            todo.add(s);
         }
         int built = 0;
         int dropped = 0;
@@ -369,15 +457,22 @@ public final class IdUniqueIndexPass implements AutoCloseable {
                 }
                 try {
                     setSession(ctx, "lock_timeout", "0");
-                    setSession(ctx, "statement_timeout", BUILD_STATEMENT_TIMEOUT.toMillis() + "ms");
+                    setSession(ctx, "statement_timeout", buildTimeout.toMillis() + "ms");
                     ddl(conn, ctx, BUILD_TEMPLATE, s.buildArguments());
                     built++;
+                    backoffs.remove(s.index());
                     registry.progress(BOOT_WORK_ID, (long) built, (long) todo.size());
                     log.info("event=id_unique_index_built table={} index={}", s.table(), s.index());
                 } catch (SQLException | DataAccessException e) {
                     String state = sqlState(e);
                     if (s.unique() && "23505".equals(state)) {
                         duplicate(conn, ctx, s);
+                    } else if ("57014".equals(state)) {   // the build's statement bound or a cancel: back off, do not rebuild every tick (r1 minor)
+                        Backoff b = backoffs.computeIfAbsent(s.index(), k -> new Backoff());
+                        b.failures++;
+                        b.nextAttempt = Instant.now().plus(backoffAfter(b.failures));
+                        log.warn("event=id_unique_index_build_failed table={} index={} cause=\"{}\" failures={} next_attempt={}", s.table(),
+                            s.index(), oneLine(e), b.failures, b.nextAttempt);
                     } else {
                         log.warn("event=id_unique_index_build_failed table={} cause=\"{}\" retry=next_tick", s.table(), oneLine(e));
                         if (connectionLost(state)) {
@@ -393,14 +488,17 @@ public final class IdUniqueIndexPass implements AutoCloseable {
             } catch (DataAccessException e) {   // a dead connection (the walk ended the backend): the session goes with it
                 log.debug("event=id_unique_index_reset_skipped cause=\"{}\"", oneLine(e));
             }
-            if (!corrupt.isEmpty()) {
-                String text = String.join("; ", corrupt.values());
-                registry.register(BOOT_WORK_ID, text, 0L, (long) corrupt.size(), UNIT, true, ON_STOP);
-            } else if (built == todo.size()) {
+            List<String> held = new ArrayList<>(corrupt.values());
+            held.addAll(mismatched.values());
+            if (!held.isEmpty()) {
+                registry.register(BOOT_WORK_ID, String.join("; ", held), 0L, (long) held.size(), UNIT, true, ON_STOP);
+            } else if (!waits.isEmpty()) {
+                registry.register(BOOT_WORK_ID, WHAT + ": " + String.join("; ", waits), 0L, (long) waits.size(), UNIT, true, ON_STOP);
+            } else if (built == todo.size() && backoffs.isEmpty()) {
                 registry.finish(BOOT_WORK_ID);
-            }   // otherwise the entry stays, with its count: work is left for the next tick
+            }   // otherwise the entry stays, with its count: work is left for a later tick
         }
-        finished = corrupt.isEmpty() && allValid(ctx);
+        finishedAt = corrupt.isEmpty() && mismatched.isEmpty() && allValid(ctx) ? Instant.now() : null;
         return new Result(true, built, dropped, corruptTables());
     }
 
@@ -424,9 +522,14 @@ public final class IdUniqueIndexPass implements AutoCloseable {
             }
             Field<String> key = DSL.concat(parts);
             Field<Integer> n = DSL.count();
-            ctx.select(key, n).from(DSL.table(DSL.name(SCHEMA, s.table()))).where(filter(s))
-                .groupBy(columns).having(n.gt(1)).orderBy(key).limit(DUPLICATES_LOGGED)
-                .forEach(r -> keys.add(r.get(key) + " x" + r.get(n)));
+            // one short transaction bounds the report (it groups a whole table): PgSession.setLocal sets the statement bound with its network timeout
+            ctx.transaction(cfg -> {
+                DSLContext tx = DSL.using(cfg);
+                dev.nexus.service.db.PgSession.setLocal(tx, "statement_timeout", Long.toString(REPORT_STATEMENT_TIMEOUT.toMillis()));
+                tx.select(key, n).from(DSL.table(DSL.name(SCHEMA, s.table()))).where(filter(s))
+                    .groupBy(columns).having(n.gt(1)).orderBy(key).limit(DUPLICATES_LOGGED)
+                    .forEach(r -> keys.add(r.get(key) + " x" + r.get(n)));
+            });
         } catch (DataAccessException e) {
             keys.add("(could not read: " + oneLine(e) + ")");
         }
@@ -446,6 +549,15 @@ public final class IdUniqueIndexPass implements AutoCloseable {
         ddl(conn, ctx, DROP_TEMPLATE, SCHEMA, s.index());
         log.info("event=id_unique_index_dropped reason=invalid_leftover table={}", s.table());
         return true;
+    }
+
+    /** A VALID index of {@code s}'s name exists (whatever its definition). */
+    private static boolean validExists(DSLContext ctx, Spec s) {
+        return ctx.fetchExists(DSL.selectOne().from(INDEX.as("i"))
+            .join(CLASS.as("c")).on(col("c", "oid").eq(col("i", "indexrelid")))
+            .join(NAMESPACE.as("n")).on(col("n", "oid").eq(col("c", "relnamespace")))
+            .where(text("n", "nspname").eq(SCHEMA)).and(text("c", "relname").eq(s.index()))
+            .and(DSL.field(DSL.name("i", "indisvalid"), Boolean.class).isTrue()));
     }
 
     private static boolean invalidExists(DSLContext ctx, Spec s) {

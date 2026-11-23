@@ -29,15 +29,20 @@ import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
  *
  * <p><b>Gate 2</b> is read once at the start of a pass ({@link #gate2Holds}). Until it holds no id build is planned, so a
  * chunk-family {@code on_complete} (which ends builds in flight, {@code VerifyingFinisher.java:40-41}) cannot end one. The
- * default is false: an engine with no completion check builds no id index.
+ * default is false: an engine with no completion check builds no id index. The exception: a gate 3 latch row that says
+ * {@code pci_off} (gate 3 latched while per-collection indexing was off, so no id index was required then) makes the id builds go ahead as if
+ * gate 2 held ({@link #pciOffLatch}), because the readers are on the id regardless and need those indexes now that PCI is on.
  *
  * <p><b>Null ids.</b> A collection is built by id only once none of its rows on the leaf, for the leaf's tenant and model, has a
  * null {@code collection_id} (stamp-before-build, RDR-247 Scope boundary). {@link #nullIdCollections} reads that for the
  * collections that could be built, in the leaf's counting transaction, with the tenant predicate: the admin role reads every
  * tenant's chunks, so without it another tenant's unstamped row of the same name would hold this tenant's build back.
  *
- * <p><b>Gate 3</b> is read once at the start of a pass too ({@link #gate3Holds}); once it holds, the planner retires the name family
- * (no name builds, {@code REPLACED_BY_ID} drops). Gate 3's own PCI clause is {@link PciGate3Coverage}, read from the database.
+ * <p><b>The retire</b> ({@link #gate3Holds}, read once at the start of a pass): once gate 3 has LATCHED and the id readers are present
+ * ({@link IdReaders#PRESENT}) the planner retires the name family (no name builds, {@code REPLACED_BY_ID} drops). Gate 3's own PCI clause is
+ * {@link PciGate3Coverage}, read from the database. {@code REPLACED_BY_ID} is safe because {@code EngineSingletonLock} (nexus-5tykh) allows one
+ * engine per database: the engine that drops a name index is the one that serves, so {@code IdReaders.PRESENT} is the serving engine's own value,
+ * never a peer's.
  */
 final class PciIdBuilds {
 
@@ -48,9 +53,16 @@ final class PciIdBuilds {
         this.gate2 = gate2 == null ? () -> false : gate2;
     }
 
+    private volatile BooleanSupplier pciOffLatch = () -> false;
+
+    /** Whether the gate 3 latch row says it latched while PCI was off: the id builds then do not wait for gate 2. */
+    void pciOffLatch(BooleanSupplier pciOffLatch) {
+        this.pciOffLatch = pciOffLatch == null ? () -> false : pciOffLatch;
+    }
+
     boolean gate2Holds() {
         try {
-            return gate2.getAsBoolean();
+            return gate2.getAsBoolean() || pciOffLatch.getAsBoolean();
         } catch (RuntimeException e) {   // unknown is not "holds"
             return false;
         }

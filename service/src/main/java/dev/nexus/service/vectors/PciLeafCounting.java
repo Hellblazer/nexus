@@ -15,7 +15,8 @@ import java.time.Duration;
 /** The reads of a leaf's counting transaction that {@link PciReconciler} (near its size cap) shares with {@link PciIdBuilds}. */
 final class PciLeafCounting {
 
-    private static final Logger log = LoggerFactory.getLogger(PciLeafCounting.class);
+    /** PciReconciler's logger: the counting transaction moved here from it, and its events keep their category (operators and tests read it). */
+    private static final Logger log = LoggerFactory.getLogger(PciReconciler.class);
 
     private PciLeafCounting() { }
 

@@ -4,6 +4,7 @@ package dev.nexus.service.vectors;
 
 import dev.nexus.service.BootWorkRegistry;
 import dev.nexus.service.datamove.CompletionBootWork;
+import dev.nexus.service.datamove.Gate3Latch;
 import dev.nexus.service.datamove.CompletionCheck;
 import dev.nexus.service.db.AdminConnection;
 import dev.nexus.service.db.PgSession.PciSettings;
@@ -19,6 +20,8 @@ import org.junit.jupiter.api.TestInstance;
 import java.sql.Connection;
 import java.time.Clock;
 import java.util.List;
+import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
@@ -206,9 +209,12 @@ class PciIdGate3IntegrationTest extends PciIdIndexSupport {
         assertThat(validIdIndexed(tenant)).containsExactly(id);
     }
 
+    /**
+     * A reporter that reads the coverage on every sample, latched or not (the throttle's period is zero), so a test sees the live state; the
+     * production reporter repeats the read at most every {@code LATCHED_COVERAGE_PERIOD} once latched (see the throttle test).
+     */
     CompletionBootWork reporter(PciReconciler r) {
-        return new CompletionBootWork(new BootWorkRegistry(Clock.systemUTC()), new AdminConnection(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS),
-            new CompletionCheck.ReadSet(List.of(), List.of()), r.gate3Source(), List.of(c -> true));
+        return reporter(r, CompletionCheck.Gate3LatchWriter.IMMEDIATE);
     }
 
     static final org.jooq.Table<?> LATCH = DSL.table(DSL.name("nexus", "rdr229_gate_latch"));
@@ -281,8 +287,9 @@ class PciIdGate3IntegrationTest extends PciIdIndexSupport {
     }
 
     CompletionBootWork reporter(PciReconciler r, CompletionCheck.Gate3LatchWriter seam) {
-        return new CompletionBootWork(new BootWorkRegistry(Clock.systemUTC()), new AdminConnection(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS),
-            new CompletionCheck.ReadSet(List.of(), List.of()), r.gate3Source(), List.of(c -> true), seam);
+        var admin = new AdminConnection(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS);
+        return new CompletionBootWork(new BootWorkRegistry(Clock.systemUTC()), admin, new CompletionCheck.ReadSet(List.of(), List.of()),
+            r.gate3Source(), List.of(c -> true), seam, Gate3Latch.readAtBoot(admin), java.time.Duration.ZERO);
     }
 
     @Test
@@ -305,7 +312,7 @@ class PciIdGate3IntegrationTest extends PciIdIndexSupport {
                 try {
                     assertThat(readOnly.select(DSL.function("current_setting", SQLDataType.VARCHAR, DSL.val("transaction_read_only")))
                         .fetchOne(0, String.class)).as("non-vacuity: this is a read-only session").isEqualTo("on");
-                    org.assertj.core.api.Assertions.assertThatThrownBy(() -> CompletionCheck.insertLatch(readOnly, CompletionCheck.GATE3, "v"))
+                    org.assertj.core.api.Assertions.assertThatThrownBy(() -> CompletionCheck.insertLatch(readOnly, CompletionCheck.GATE3, "v", false))
                         .as("the latch INSERT cannot run on the read-only session").hasMessageContaining("read-only");
                 } finally {
                     readOnly.select(DSL.function("set_config", SQLDataType.VARCHAR, DSL.val("default_transaction_read_only"), DSL.val("off"),
@@ -473,13 +480,153 @@ class PciIdGate3IntegrationTest extends PciIdIndexSupport {
     }
 
     @Test
-    void aPciOnInstallWithNoLeafAtAll_hasNothingRequired_andNothingToIndex() throws Exception {
+    void aPciOnInstallWithNoLeafAtAll_hasNothingRequired_butIsNotVerifiedEmpty_soTheRegistryDecides() throws Exception {
         var empty = new PciGate3Coverage(() -> new PciCatalog.Snapshot(List.of()), settings(16), Clock.systemUTC());
+        String tenant = newTenant("noleaf");
+        collection(tenant, name("noleaf"), 10);                // a live registry row exists, whatever the (empty) snapshot says
         try (Connection admin = adminDs.getConnection()) {
-            var coverage = empty.read(DSL.using(admin, SQLDialect.POSTGRES));
-            assertThat(coverage).as("not unknown: a fresh install with no tenant has nothing to index").isPresent();
-            assertThat(coverage.get().nothingToIndex()).isTrue();
+            DSLContext ctx = DSL.using(admin, SQLDialect.POSTGRES);
+            var coverage = empty.read(ctx);
+            assertThat(coverage).as("not unknown: no tenant leaf means nothing required").isPresent();
+            assertThat(coverage.get().planned()).isEmpty();
+            assertThat(coverage.get().nothingToIndex()).as("but not 'verified empty': nothing was probed").isFalse();
             assertThat(coverage.get().uncovered()).isEmpty();
+
+            var read = CompletionCheck.evaluate(ctx, new CompletionCheck.ReadSet(List.of(), List.of()), empty, List.of());
+            assertThat(read.gate2()).as("non-vacuity: gate 2 holds").isTrue();
+            assertThat(read.gate3()).as("an empty plan over a populated registry does not pass").isFalse();
+            assertThat(read.gate3Why()).contains("no collection requires an id-predicate index");
+        }
+    }
+
+    // -- linda 2026-11-23: the required set, the latch read at construction, the PCI-off latch, the throttle ------------
+
+    @Test
+    void aCollectionThatCrossesTheThresholdWithNoIndex_holdsGate3ShutUntilItsIdIndexIsValid() throws Exception {
+        String tenant = newTenant("cross");
+        collection(tenant, name("cross-a"), 300);
+        PciReconciler r = reconciler(settings(16));
+        r.reconcileOnce();
+        gate2 = true;
+        r.reconcileOnce();
+        assertThat(uncovered(r, tenant)).as("the indexed collection is covered").isEmpty();
+        collection(tenant, name("cross-b"), 50);                // below B: nothing requires it
+        assertThat(uncovered(r, tenant)).as("a collection below the threshold with no index is not required").isEmpty();
+
+        long idB = collection(tenant, name("cross-b"), 300);    // 350 rows now: it has crossed B, and has no index of either kind
+
+        var holding = coverage(r).orElseThrow();
+        assertThat(holding.uncovered()).as("required before its index exists: gate 3 cannot latch ahead of it")
+            .containsExactly(PciCatalog.idKey(M384, tenant, idB));
+        assertThat(holding.nothingToIndex()).isFalse();
+        asSuperuser(su -> su.deleteFrom(LATCH).execute());
+        var reporter = reporter(r);
+        try {
+            var read = reporter.refresh();
+            assertThat(read.gate3()).as("gate 3 is false: %s", read.gate3Why()).isFalse();
+            assertThat(read.gate3Latched()).isFalse();
+            assertThat(latchRow(CompletionCheck.GATE3)).isFalse();
+
+            r.reconcileOnce();                                  // the reconciler builds it
+
+            assertThat(validIdIndexed(tenant)).contains(idB);
+            assertThat(uncovered(r, tenant)).isEmpty();
+            var after = reporter.refresh();
+            assertThat(after.gate3()).as("and gate 3 holds once its id index is VALID: %s", after.gate3Why()).isTrue();
+            assertThat(after.gate3Latched()).isTrue();
+        } finally {
+            reporter.close();
+            asSuperuser(su -> su.deleteFrom(LATCH).execute());
+        }
+    }
+
+    @Test
+    void aFreshReporterOnADatabaseThatHoldsTheLatchRow_readsLatchedBeforeAnySample() throws Exception {
+        String tenant = newTenant("boot");
+        collection(tenant, name("boot"), 10);
+        PciReconciler r = reconciler(settings(16));
+        asSuperuser(su -> su.deleteFrom(LATCH).execute());
+        asSuperuser(su -> { CompletionCheck.insertLatch(su, CompletionCheck.GATE3, "engine-0", true); return null; });
+        try {
+            var reporter = reporter(r);
+            try {
+                assertThat(reporter.latest()).as("non-vacuity: no sample has run").isNull();
+                assertThat(reporter.gate3Latched()).as("known at construction, from the row").isTrue();
+                assertThat(reporter.gate3LatchedPciOff()).isTrue();
+            } finally {
+                reporter.close();
+            }
+            asSuperuser(su -> su.deleteFrom(LATCH).execute());
+            var restored = reporter(r);
+            try {
+                assertThat(restored.gate3Latched()).as("no row: not latched, and that is an answer").isFalse();
+                assertThat(restored.gate3LatchedPciOff()).isFalse();
+            } finally {
+                restored.close();
+            }
+        } finally {
+            asSuperuser(su -> su.deleteFrom(LATCH).execute());
+        }
+    }
+
+    @Test
+    void aLatchThatSaysPciOff_makesTheReconcilerBuildTheIdIndexesWithoutWaitingForGate2() throws Exception {
+        String tenant = newTenant("pcioff");
+        long id = collection(tenant, name("pcioff"), 300);
+        PciReconciler r = reconciler(settings(16));
+        gate2 = false;
+        pciOffLatch = false;
+        r.reconcileOnce();
+        r.reconcileOnce();
+        assertThat(validNameIndexed(tenant)).containsExactly(name("pcioff"));
+        assertThat(validIdIndexed(tenant)).as("gate 2 not held and no pci_off latch: no id build").isEmpty();
+
+        pciOffLatch = true;                                     // the latch row says gate 3 latched while PCI was off
+        r.reconcileOnce();
+
+        assertThat(validIdIndexed(tenant)).as("PCI is on now: the id index is built first, as if gate 2 held").containsExactly(id);
+        assertThat(validNameIndexed(tenant)).as("the name index stays: the retire still needs the latched gate 3 and the readers").containsExactly(name("pcioff"));
+    }
+
+    @Test
+    void onceLatched_theCoverageReadIsThrottled_whileBeforeTheLatchEverySampleReads() throws Exception {
+        var reads = new java.util.concurrent.atomic.AtomicInteger();
+        CompletionCheck.Gate3Source covered = c -> {
+            reads.incrementAndGet();
+            return Optional.of(new CompletionCheck.IdIndexCoverage(Set.of("k"), Set.of("k"), Set.of()));
+        };
+        CompletionCheck.Gate3Source waiting = c -> {
+            reads.incrementAndGet();
+            return Optional.of(new CompletionCheck.IdIndexCoverage(Set.of("k"), Set.of(), Set.of()));
+        };
+        var admin = new AdminConnection(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS);
+        var gates = new CompletionCheck.ReadSet(List.of(), List.of());
+        asSuperuser(su -> su.deleteFrom(LATCH).execute());
+        try {
+            var latched = new CompletionBootWork(new BootWorkRegistry(Clock.systemUTC()), admin, gates, covered, List.of(c -> true),
+                CompletionCheck.Gate3LatchWriter.IMMEDIATE, Gate3Latch.of(true, false));
+            try {
+                latched.refresh();
+                latched.refresh();
+                latched.refresh();
+                assertThat(reads.get()).as("latched at boot: one coverage read in the period, the rest reuse it").isEqualTo(1);
+            } finally {
+                latched.close();
+            }
+            reads.set(0);
+            asSuperuser(su -> su.deleteFrom(LATCH).execute());      // the first reporter's gate 3 latched the row; the second starts not latched
+            var open = new CompletionBootWork(new BootWorkRegistry(Clock.systemUTC()), admin, gates, waiting, List.of(c -> true),
+                CompletionCheck.Gate3LatchWriter.IMMEDIATE, Gate3Latch.of(false, false));
+            try {
+                open.refresh();
+                open.refresh();
+                open.refresh();
+                assertThat(reads.get()).as("not latched: every sample reads").isEqualTo(3);
+            } finally {
+                open.close();
+            }
+        } finally {
+            asSuperuser(su -> su.deleteFrom(LATCH).execute());
         }
     }
 }

@@ -19,6 +19,7 @@ import dev.nexus.service.http.HttpUtil;
  *  "gate3_why":text ("" when gate 3 holds),
  *  "gate3_latched":bool (gate 3 has held once on this install: the engine's readers go by this, not by the live "gate3"),
  *  "id_index_invalid":bool (some id-predicate PCI index is INVALID: building, killed or mid-rebuild),
+ *  "gate3_latch_pci_off":bool (the latch row says gate 3 latched while NX_SEARCH_PCI was off: no id index was required then),
  *  "labels_total":n,"labels_incomplete":[{"label","table","why"}],
  *  "checks_missing":[{"table","constraint","what"}],
  *  "validate_waits":[{"table","constraints":[names],"what":operator text}]}
@@ -40,6 +41,7 @@ final class CompletionStatusJson {
             .append(",\"gate3_why\":").append(HttpUtil.jsonString(r.gate3() ? "" : r.gate3Why()))
             .append(",\"gate3_latched\":").append(r.gate3Latched())
             .append(",\"id_index_invalid\":").append(r.idIndexInvalid())
+            .append(",\"gate3_latch_pci_off\":").append(r.gate3LatchPciOff())
             .append(",\"labels_total\":").append(r.labels().size())
             .append(",\"labels_incomplete\":[");
         boolean first = true;
