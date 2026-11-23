@@ -232,8 +232,10 @@ public final class StatusHandler implements HttpHandler {
      * {@code data_moves_need_operator} (a boolean), {@code data_moves_need_operator_labels} (their labels) and
      * {@code data_moves_need_operator_moves}, one object each: {@code label}, {@code retries}, {@code last_attempt_at} and
      * {@code next_retry_at} (ISO-8601 UTC; the engine computes the second, so a client does not repeat the backoff),
-     * {@code sqlstate} (null when unknown), {@code statement_timeout_ms} and {@code terminates_index_builds} (each retry ends
-     * in-flight index builds). No run, tenant or server text. The moves keep
+     * {@code sqlstate} (null when unknown), {@code statement_timeout_ms}, {@code terminates_index_builds} (an attempt ends
+     * in-flight index builds), {@code step} (the stage of the last failure this engine saw, or null), {@code bound_ms} (the
+     * bound that failure missed when it was a timeout, else null) and {@code retry_in_progress} (a retry runs now, so
+     * {@code next_retry_at} is past). No run, tenant or server text. The moves keep
      * retrying; this says a human should look. A supplier answers from memory
      * ({@link dev.nexus.service.BootWorkRegistry#dataMovesNeedOperator()}). Unbound, the keys are omitted.
      */
@@ -843,7 +845,10 @@ public final class StatusHandler implements HttpHandler {
             appendSeconds(body, m.nextRetryAt());
             body.append(",\"sqlstate\":").append(m.sqlstate() == null ? "null" : HttpUtil.jsonString(m.sqlstate()))
                 .append(",\"statement_timeout_ms\":").append(m.statementTimeoutMs())
-                .append(",\"terminates_index_builds\":").append(m.terminatesIndexBuilds()).append('}');
+                .append(",\"terminates_index_builds\":").append(m.terminatesIndexBuilds())
+                .append(",\"step\":").append(m.step() == null ? "null" : HttpUtil.jsonString(m.step()))
+                .append(",\"bound_ms\":").append(m.boundMs() < 0 ? "null" : Integer.toString(m.boundMs()))
+                .append(",\"retry_in_progress\":").append(m.retryInProgress()).append('}');
         }
         body.append(']');
     }

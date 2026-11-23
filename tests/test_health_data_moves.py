@@ -6,11 +6,17 @@ one a warning.
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import nexus.data_moves_health as dmh
 import nexus.db.http_engine_status as http_status
 import nexus.health as health
 from nexus.health import HealthResult
 from nexus.data_moves_health import ID_PREFIX, REPORTER_ID, SUMMARY_LABEL, WORKER_ID, check_data_moves
+
+
+_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "data_moves_need_operator_status"
 
 
 def _entry(label: str, what: str, done: int | None = 3, total: int | None = 20) -> dict:
@@ -323,11 +329,12 @@ def test_the_prerequisite_hint_names_the_bundle_upgrade_only_while_the_bundle_la
 # ── a move the engine says needs an operator (RDR-246, nexus-p2m1x.22) ───────────────────────────────────────
 
 
-def _paged(label: str, retries: int = 3, builds: bool = True, sqlstate: str | None = "57014") -> dict:
+def _paged(label: str, retries: int = 3, builds: bool = True, sqlstate: str | None = "57014",
+           step: str | None = "on_complete", bound: int | None = 1400, working: bool = False) -> dict:
     return {
         "label": label, "retries": retries, "last_attempt_at": "2026-11-23T10:00:00Z",
         "next_retry_at": "2026-11-23T10:02:00Z", "sqlstate": sqlstate, "statement_timeout_ms": 1400,
-        "terminates_index_builds": builds,
+        "terminates_index_builds": builds, "step": step, "bound_ms": bound, "retry_in_progress": working,
     }
 
 
@@ -349,8 +356,7 @@ def test_a_move_that_needs_an_operator_is_a_red_row_naming_the_label_the_bound_a
     row = _by_label(rows)["Data move rdr229-swap-chunks"]
     assert row.ok is False and row.warn is False, "red, not a warning"
     assert "needs an operator: rdr229-swap-chunks" in row.detail
-    assert "statement_timeout_ms 1400 ms" in row.detail
-    assert "sqlstate 57014" in row.detail
+    assert "step on_complete missed its 1400 ms bound (SQLSTATE 57014)" in row.detail
     assert "last attempt 2026-11-23T10:00:00Z" in row.detail
     assert "next retry 2026-11-23T10:02:00Z" in row.detail
     hint = " ".join(row.fix_suggestions)
@@ -362,6 +368,45 @@ def test_a_move_that_needs_an_operator_is_a_red_row_naming_the_label_the_bound_a
     assert _by_label(rows)[SUMMARY_LABEL].ok
 
 
+def test_a_lock_timeout_shows_its_own_bound_not_the_statement_timeout():
+    row = _by_label(check_data_moves(_needs_operator_status(_paged("m", sqlstate="55P03", bound=700))))["Data move m"]
+
+    assert "step on_complete missed its 700 ms bound (SQLSTATE 55P03)" in row.detail
+    assert "1400" not in row.detail
+
+
+def test_a_non_timeout_sqlstate_names_no_bound():
+    for sqlstate in ("40001", "08006"):
+        row = _by_label(check_data_moves(_needs_operator_status(_paged("m", sqlstate=sqlstate, bound=None))))["Data move m"]
+
+        assert f"step on_complete failed with SQLSTATE {sqlstate}" in row.detail
+        assert "bound" not in row.detail and " ms" not in row.detail
+
+
+def test_a_bound_is_not_named_when_the_engine_sends_none_even_for_a_timeout():
+    row = _by_label(check_data_moves(_needs_operator_status(_paged("m", bound=None, step=None))))["Data move m"]
+
+    assert "bound" not in row.detail and "SQLSTATE 57014" in row.detail
+
+
+def test_a_retry_in_progress_is_said_not_an_overdue_next_retry():
+    row = _by_label(check_data_moves(_needs_operator_status(_paged("m", working=True))))["Data move m"]
+
+    assert "a retry is in progress now" in row.detail
+    assert "next retry" not in row.detail
+
+
+def test_the_retry_now_hint_warns_when_the_attempt_ends_index_builds_and_not_otherwise():
+    ends = _by_label(check_data_moves(_needs_operator_status(_paged("m", builds=True))))["Data move m"]
+    plain = _by_label(check_data_moves(_needs_operator_status(_paged("m", builds=False))))["Data move m"]
+
+    reset_ends = [s for s in ends.fix_suggestions if "transient_retries = 0" in s]
+    reset_plain = [s for s in plain.fix_suggestions if "transient_retries = 0" in s]
+    assert len(reset_ends) == 1 and len(reset_plain) == 1
+    assert "fix the cause first" in reset_ends[0] and "ends the in-flight index builds again" in reset_ends[0]
+    assert "fix the cause first" not in reset_plain[0]
+
+
 def test_a_need_operator_move_without_the_index_build_claim_does_not_make_it():
     row = _by_label(check_data_moves(_needs_operator_status(_paged("m", retries=20, builds=False))))["Data move m"]
 
@@ -369,6 +414,7 @@ def test_a_need_operator_move_without_the_index_build_claim_does_not_make_it():
     assert "index builds" not in row.detail
     assert "index builds" not in " ".join(row.fix_suggestions)
     assert "failed 20 times in a row" in row.detail
+    assert "fix the cause first" not in " ".join(row.fix_suggestions)
 
 
 def test_the_move_is_red_whatever_state_its_entry_shows_while_a_retry_runs():
@@ -432,3 +478,32 @@ def test_malformed_need_operator_fields_cost_nothing():
     assert row.ok is False and row.warn is False
     assert "last attempt unknown" in row.detail and "next retry unknown" in row.detail
     assert "statement_timeout_ms" not in row.detail
+
+
+def test_a_bool_is_not_a_retry_count():
+    status = {"boot_work": [_entry("m", "blocked: m: x")], "data_moves_need_operator_moves": [
+        {"label": "m", "retries": True, "bound_ms": True, "sqlstate": "57014", "step": "on_complete"},
+    ]}
+
+    row = _by_label(check_data_moves(status))["Data move m"]
+
+    assert "failed many times in a row" in row.detail
+    assert "bound" not in row.detail
+
+
+def test_the_engines_own_status_shape_is_read():
+    """The fixture is the key set and types the engine's ``/v1/status`` renders (``MoveNeedsOperatorIntegrationTest`` fails
+    when the engine's body and this file differ), so the keys the doctor reads cannot drift from the Java."""
+    fixture = json.loads((_FIXTURES / "paged.json").read_text())
+    status = dict(fixture, boot_work=[_entry("rdr229-swap-chunks", "blocked: rdr229-swap-chunks: x; needs an operator")])
+
+    rows = check_data_moves(status)
+
+    row = _by_label(rows)["Data move rdr229-swap-chunks"]
+    assert row.ok is False and row.warn is False
+    assert "step on_complete missed its 700 ms bound (SQLSTATE 55P03)" in row.detail
+    assert "last attempt 2026-11-23T10:00:00Z" in row.detail and "next retry 2026-11-23T10:02:00Z" in row.detail
+    assert "each attempt ends in-flight index builds" in row.detail
+    assert sorted(fixture["data_moves_need_operator_moves"][0]) == sorted(
+        ["label", "retries", "last_attempt_at", "next_retry_at", "sqlstate", "statement_timeout_ms",
+         "terminates_index_builds", "step", "bound_ms", "retry_in_progress"])
