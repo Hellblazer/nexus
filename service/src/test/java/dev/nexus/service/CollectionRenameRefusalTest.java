@@ -62,7 +62,7 @@ class CollectionRenameRefusalTest {
     @BeforeEach
     void reset() {
         fx.gate3.set(false);
-        fx.renameWindow.set(Missing.NONE);
+        fx.renameWindow.set(Missing.NAME_KEY_DROP_MOVE);   // the state before any latch: no row, the drop move missing
     }
 
     private String registered(String stem) {
@@ -100,7 +100,7 @@ class CollectionRenameRefusalTest {
      */
     @Test
     void beforeGate3_aRenameIsTheNamePathInEveryWindow() {
-        for (Missing window : Missing.values()) {
+        for (Missing window : new Missing[] {Missing.NAME_KEY_DROP_MOVE, Missing.P35B_RESTART}) {
             fx.renameWindow.set(window);
             fx.gate3.set(false);
             String from = registered("pre-w" + window.ordinal());
@@ -109,6 +109,32 @@ class CollectionRenameRefusalTest {
             assertThat(r.status()).as("gate 3 does not hold, window %s: %s", window, r.body()).isEqualTo(200);
             assertThat(fx.exists(to)).isTrue();
             assertThat(fx.supersededBy(from)).as("the old label is the tombstone the name path leaves").isEqualTo(to);
+        }
+    }
+
+    /**
+     * linda's Q-B: no latch row while the readiness says the move is complete is an inconsistency (as after a partial restore). Every
+     * rename, the catalog's and the five per-store routes, is the typed 409 {@code rename_refused} whose {@code missing} is
+     * {@code latch_row_missing}, and nothing is renamed: the name path would mint a new id.
+     */
+    @Test
+    void noLatchRow_withTheReadinessComplete_isRefusedNamingTheMissingRow() {
+        fx.gate3.set(false);
+        fx.renameWindow.set(Missing.NONE);
+        String from = registered("norow");
+        long id = fx.idOf(from);
+        String to = registered("norow-to");
+        Resp r = renameByLabel(from, CollectionRouteFixture.label("rr-norow-new-" + (n++)));
+        assertThat(r.status()).as(r.body()).isEqualTo(409);
+        assertThat(r.reason()).as(r.body()).isEqualTo(REASON);
+        assertThat(r.json().path("missing").asText()).as(r.body()).isEqualTo("latch_row_missing");
+        assertThat(fx.idOf(from)).as("nothing renamed").isEqualTo(id);
+        assertThat(fx.supersededBy(from)).isEqualTo("");
+        for (StoreRename route : CollectionRouteCensus.STORE_RENAMES) {
+            Resp s = storeRename(route, from, to);
+            assertThat(s.status()).as(route.path() + ": " + s.body()).isEqualTo(409);
+            assertThat(s.reason()).as(s.body()).isEqualTo(REASON);
+            assertThat(s.json().path("missing").asText()).as(s.body()).isEqualTo("latch_row_missing");
         }
     }
 
@@ -228,7 +254,7 @@ class CollectionRenameRefusalTest {
         String first = null;
         for (boolean windowClosed : new boolean[] {false, true}) {
             fx.gate3.set(false);
-            fx.renameWindow.set(windowClosed ? Missing.NONE : Missing.NAME_KEY_DROP_MOVE);
+            fx.renameWindow.set(windowClosed ? Missing.P35B_RESTART : Missing.NAME_KEY_DROP_MOVE);
             String from = registered("epoch-w" + windowClosed);
             String to = CollectionRouteFixture.label("rr-epoch-to-w" + windowClosed + "-" + (n++));
             Resp r = renameByLabel(from, to);
@@ -297,8 +323,7 @@ class CollectionRenameRefusalTest {
     /** One state of the two seams in which a rename is not refused. */
     record State(boolean gate3, Missing window) { }
 
-    static final List<State> OPEN_STATES = List.of(new State(false, Missing.NONE),
-        new State(false, Missing.NAME_KEY_DROP_MOVE), new State(false, Missing.P35B_RESTART), new State(true, Missing.NONE));
+    static final List<State> OPEN_STATES = List.of(new State(false, Missing.NAME_KEY_DROP_MOVE), new State(false, Missing.P35B_RESTART));
 
     private Resp storeRename(StoreRename route, String from, String to) {
         return fx.post(route.path(), "{\"old\":" + json(from) + ",\"new\":" + json(to) + "}");
@@ -354,12 +379,11 @@ class CollectionRenameRefusalTest {
 
     /**
      * The refusal's own conditions, on the same five routes: with no latch row (any window) a per-store rename is the name path as
-     * before and answers 200; with the row and the window closed it answers 200 too, as the one-row regime's no-op (linda's R-A
-     * ruling; {@code RenameNoOpOneRowTest} holds that the rows stay untouched). Without this the test above could pass
-     * on a route that refuses everything.
+     * before and answers 200. Without this the test above could pass on a route that refuses everything. (In the one-row regime the
+     * route is a no-op that checks the registry rename happened: {@link #everyPerStoreRenameRoute_inTheOneRowRegime_answers409WhenTheRegistryRenameDidNotHappen}.)
      */
     @Test
-    void everyPerStoreRenameRoute_isNotRefusedBeforeGate3_orWithTheWindowClosed() {
+    void everyPerStoreRenameRoute_isNotRefusedBeforeGate3() {
         for (StoreRename route : CollectionRouteCensus.STORE_RENAMES) {
             for (State st : OPEN_STATES) {
                 fx.gate3.set(st.gate3());
@@ -371,6 +395,27 @@ class CollectionRenameRefusalTest {
                 assertThat(r.reason()).as(what).isNotEqualTo(REASON);
                 assertThat(r.status()).as(what).isEqualTo(200);
             }
+        }
+    }
+
+    /**
+     * linda's Q-A: in the one-row regime a per-store rename is a no-op only if the registry rename moved the label. Here it did not
+     * (both labels are live rows), so each of the five routes is a typed 409 {@code rename_not_in_registry} and changes nothing;
+     * {@code RenameNoOpOneRowTest} holds the 200 for a pair the registry did rename, with the rows compared by xmin.
+     */
+    @Test
+    void everyPerStoreRenameRoute_inTheOneRowRegime_answers409WhenTheRegistryRenameDidNotHappen() {
+        for (StoreRename route : CollectionRouteCensus.STORE_RENAMES) {
+            fx.gate3.set(true);
+            fx.renameWindow.set(Missing.NONE);
+            String from = registered("onerow-from");
+            String to = registered("onerow-to");
+            Resp r = storeRename(route, from, to);
+            String what = route.path() + ": " + r.body();
+            assertThat(r.status()).as(what).isEqualTo(409);
+            assertThat(r.reason()).as(what).isEqualTo("rename_not_in_registry");
+            assertThat(r.json().path("error").asText()).as(what).contains("rename the collection in the registry first");
+            assertThat(fx.supersededBy(from)).as("nothing changed").isEqualTo("");
         }
     }
 

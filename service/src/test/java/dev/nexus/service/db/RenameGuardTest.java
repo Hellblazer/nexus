@@ -40,9 +40,36 @@ class RenameGuardTest {
             .extracting(e -> ((RenameRefusedException) e).missing()).isEqualTo(Missing.NAME_KEY_DROP_MOVE);
     }
 
+    /** Before the latch (the readiness still waits for something) there is no row, and the rename is the name path. */
     @Test
-    void noLatchRowIsTheNamePath_whateverTheReadinessSays() {
+    void noLatchRowWithTheReadinessNotComplete_isTheNamePath() {
         assertThat(RenameGuard.decide(false, mainReadiness())).isEqualTo(RenamePath.NAME_PATH);
+        assertThat(RenameGuard.decide(false, () -> Missing.P35B_RESTART)).isEqualTo(RenamePath.NAME_PATH);
+    }
+
+    /**
+     * linda's Q-B: the readiness says the move is complete but there is no latch row, an inconsistency (as after a partial restore):
+     * the typed 409 {@code rename_refused} whose {@code missing} is {@code latch_row_missing}, never the name path (it would mint a new id).
+     */
+    @Test
+    void noLatchRowWithTheReadinessComplete_isRefusedNamingTheMissingRow() {
+        assertThatThrownBy(() -> RenameGuard.decide(false, RenameReadiness.ready())).isInstanceOf(RenameRefusedException.class)
+            .satisfies(e -> {
+                var r = (RenameRefusedException) e;
+                assertThat(r.missing()).isEqualTo(Missing.LATCH_ROW_MISSING);
+                assertThat(r.wireValue()).isEqualTo("latch_row_missing");
+                assertThat(r.getMessage()).contains("latch row");
+            });
+    }
+
+    /** A rename that names no body for the one-row regime is a construction error, not a null pointer in the one-row regime only. */
+    @Test
+    void aNullOneRowBodyFailsAtOnce_namingTheArgument() {
+        var guard = new RenameGuard(mainReadiness(), OneRowRename.failClosed());
+        assertThatThrownBy(() -> guard.runRename(work -> work.apply(null), ctx -> "name", null))
+            .isInstanceOf(NullPointerException.class).hasMessageContaining("oneRowBody");
+        assertThatThrownBy(() -> RenameGuard.open().runRename(work -> work.apply(null), ctx -> "name", null))
+            .as("the open guard too").isInstanceOf(NullPointerException.class);
     }
 
     @Test
@@ -69,7 +96,7 @@ class RenameGuardTest {
         assertThatThrownBy(() -> OneRowRename.failClosed().rename(null, "t", "a", "b"))
             .isInstanceOf(RenamePathMismatchException.class).hasMessageContaining("'a'").hasMessageContaining("'b'");
         var guard = new RenameGuard(RenameReadiness.ready(), OneRowRename.failClosed());
-        assertThatThrownBy(() -> guard.oneRowCounts(null, "t", "a", "b", new String[1])).isInstanceOf(RenamePathMismatchException.class);
+        assertThatThrownBy(() -> guard.oneRow(null, "t", "a", "b", new RenameOutcome[1])).isInstanceOf(RenamePathMismatchException.class);
         assertThatCode(() -> new RenameGuard(RenameReadiness.ready(), (ctx, t, a, b) -> new RenameOutcome(java.util.Map.of(), 1L, "e", true)))
             .as("P3.7's own implementation is a constructor argument").doesNotThrowAnyException();
     }
@@ -80,7 +107,7 @@ class RenameGuardTest {
         assertThat(Arrays.stream(RenameGuard.class.getConstructors()).count()).as("one public constructor").isEqualTo(1);
         assertThat(Arrays.stream(RenameGuard.class.getDeclaredMethods()).filter(m -> Modifier.isPublic(m.getModifiers()))
             .map(m -> m.getName()).distinct().toList())
-            .as("the public surface: open, runRename, oneRowCounts, idsStable")
-            .containsExactlyInAnyOrder("open", "runRename", "oneRowCounts", "idsStable");
+            .as("the public surface: open, runRename, idsStable (the one-row body and its commit hook are package-private)")
+            .containsExactlyInAnyOrder("open", "runRename", "idsStable");
     }
 }

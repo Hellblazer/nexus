@@ -24,7 +24,12 @@ public interface RenameReadiness {
         /** The name-key drop move (P3.7) has not completed. Wire value {@code name_key_drop_move}. */
         NAME_KEY_DROP_MOVE,
         /** The move completed but a P3.5b changeset has not applied yet: the engine must restart. Wire value {@code restart}. */
-        P35B_RESTART
+        P35B_RESTART,
+        /**
+         * Not a readiness answer: the rename guard's own refusal when the readiness says {@link #NONE} (the move is done) and there is no
+         * gate 3 latch row, an inconsistency such as a partial restore. Wire value {@code latch_row_missing}.
+         */
+        LATCH_ROW_MISSING
     }
 
     /** A readiness that never waits, for tests and for a store gate 3 never reaches. */
