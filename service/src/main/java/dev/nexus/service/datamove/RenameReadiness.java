@@ -32,8 +32,9 @@ public interface RenameReadiness {
         P35B_RESTART,
         /**
          * The readiness could not be read (no sample yet, a read that failed or ran past {@link CompletionCheck#READINESS_READ_TIMEOUT_MS}, a list that
-         * could not be read): it never answers NONE from an error. Before the latch it is not consulted (a rename is the name path); after it, the rename is
-         * refused. Wire value {@code readiness_unreadable} (linda 2026-11-23).
+         * could not be read) and no earlier sample read NONE: an error never yields NONE before the first ready sample. After one, an error keeps NONE
+         * (the facts are monotone; linda's Q3 ruling, {@code CompletionBootWork#renameReadiness}). Before the latch it is not consulted (a rename is the
+         * name path); after it, the rename is refused. Wire value {@code readiness_unreadable} (linda 2026-11-23).
          */
         READINESS_UNREADABLE,
         /**
