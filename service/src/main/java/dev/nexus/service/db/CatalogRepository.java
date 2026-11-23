@@ -11074,9 +11074,17 @@ public final class CatalogRepository {
         // RDR-229 P3.7: the id the route boundary resolved oldName from, when the request named the source by id (null for a request by label)
         var requested = ExpectedCollectionIds.requested(oldName);
         Long requestedSourceId = requested.isPresent() ? requested.getAsLong() : null;
-        Map<String, Integer> counts = CollectionMint.refusingRace(tenantScope, tenant,
-            () -> renameCollectionTxn(tenant, oldName, newName, requestedSourceId, expectedTargetSupersededBy, newContentType, newOwnerId,
-                newNameEmbeddingModel, tuple, epoch, oneRow), CollectionMint.recheckOf(tenant, tuple, gate3));
+        Map<String, Integer> counts;
+        try {
+            counts = CollectionMint.refusingRace(tenantScope, tenant,
+                () -> renameCollectionTxn(tenant, oldName, newName, requestedSourceId, expectedTargetSupersededBy, newContentType, newOwnerId,
+                    newNameEmbeddingModel, tuple, epoch, oneRow), CollectionMint.recheckOf(tenant, tuple, gate3));
+        } finally {
+            // Row 15 addendum (linda): a COMMIT that reached the client as an exception may still have been applied (PostgreSQL applied it, the client saw
+            // an error), so the one-row body's labels leave the cache on a throw as they do after a return; evicting is always safe. oneRow[0] is set once
+            // the body has run, so a rename that failed before the body (a refusal, a rollback) evicts nothing here.
+            if (oneRow[0] != null) renameGuard.evictOneRowLabels(tenant, oldName, newName);
+        }
         if (oneRow[0] != null) return renameGuard.committedOneRow(tenant, oldName, newName, oneRow[0]);   // the path taken, not a count key
         long renamedId = 0;
         // Post-commit (nexus-h8rf6 wave review): the rename RETIRES the old registry row —
