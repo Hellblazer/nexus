@@ -12,6 +12,7 @@ import org.jooq.impl.DSL;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
@@ -178,14 +179,44 @@ public final class CollectionRegistry {
 
     // ---- the id-keyed API (RDR-229 P3.5a) -------------------------------------------------------------------------------
 
-    /** {@link #require} by label, on this registry's cache. */
+    /**
+     * {@link #require} by label, on this registry's cache. While the request named this label by {@code collection_id}
+     * ({@link ExpectedCollectionIds}), it resolves THAT id instead, in the caller's transaction and {@code FOR KEY SHARE}
+     * ({@link #resolveRequestedId}), never the label.
+     */
     public CollectionRow resolveLabel(DSLContext ctx, String tenant, String label) {
+        OptionalLong requested = ExpectedCollectionIds.of(label);
+        if (requested.isPresent()) {
+            return resolveRequestedId(ctx, tenant, requested.getAsLong());
+        }
         Optional<CollectionRow> hit = cachedByLabel(tenant, label);
         if (hit.isPresent()) {
             return hit.get();
         }
-        return fill(ctx, tenant, CATALOG_COLLECTIONS.NAME.eq(label), labelResolutionOrder(),
+        return fill(ctx, tenant, CATALOG_COLLECTIONS.NAME.eq(label), labelResolutionOrder(), false,
             () -> new UnregisteredCollectionException(tenant, label));
+    }
+
+    /**
+     * The row a request named by {@code collection_id}, read in the caller's transaction with {@code FOR KEY SHARE} (a delete of
+     * the row waits for that transaction, so the id cannot be freed and its label taken again underneath the write). Never from the
+     * cache, which cannot hold a lock, and never by the label. No row is {@link UnknownCollectionIdException}; a retired row is
+     * {@link CollectionRetiredIdException} naming its successor by {@code superseded_by_id}; a live row is returned, and the caller
+     * writes under its label.
+     *
+     * @throws CollectionIdMismatchException if the row the read returns is not the row of that id (a registry defect)
+     */
+    private CollectionRow resolveRequestedId(DSLContext ctx, String tenant, long collectionId) {
+        CollectionRow row = fill(ctx, tenant, CATALOG_COLLECTIONS.COLLECTION_ID.eq(collectionId), List.of(), true,
+            () -> new UnknownCollectionIdException(tenant, collectionId));
+        if (row.collectionId() != collectionId) {
+            throw new CollectionIdMismatchException(collectionId, row.collectionId());
+        }
+        if (row.isSuperseded()) {
+            throw new CollectionRetiredIdException(tenant, collectionId, row.label(),
+                CollectionSuccessor.of(ctx, tenant, collectionId));
+        }
+        return row;
     }
 
     /**
@@ -201,7 +232,7 @@ public final class CollectionRegistry {
         if (hit.isPresent()) {
             return hit.get();
         }
-        return fill(ctx, tenant, CATALOG_COLLECTIONS.COLLECTION_ID.eq(collectionId), List.of(),
+        return fill(ctx, tenant, CATALOG_COLLECTIONS.COLLECTION_ID.eq(collectionId), List.of(), false,
             () -> new UnknownCollectionIdException(tenant, collectionId));
     }
 
@@ -308,14 +339,14 @@ public final class CollectionRegistry {
      * id), build its {@link CollectionRow}, and cache it under both keys unless an evict ran between the read and the fill
      * (nexus-hkh1y), in which case the row is returned and not cached.
      */
-    private CollectionRow fill(DSLContext ctx, String tenant, Condition where, List<SortField<?>> order,
+    private CollectionRow fill(DSLContext ctx, String tenant, Condition where, List<SortField<?>> order, boolean keyShare,
                                java.util.function.Supplier<RuntimeException> missing) {
         long evictionsBeforeRead;
         synchronized (fillLock) {
             evictionsBeforeRead = evictions[0];
         }
         Field<Integer> modelDimension = EMBEDDING_MODELS.DIMENSION.as("model_dimension");
-        Record r = ctx.select(
+        var read = ctx.select(
                 CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.COLLECTION_ID,
                 CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
                 CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.DIMENSION,
@@ -326,8 +357,9 @@ public final class CollectionRegistry {
                 .on(EMBEDDING_MODELS.EMBEDDING_MODEL.eq(CATALOG_COLLECTIONS.EMBEDDING_MODEL))
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(where))
             .orderBy(order)
-            .limit(1)
-            .fetchOne();
+            .limit(1);
+        // FOR KEY SHARE names the registry row alone: PostgreSQL refuses a row lock on the nullable side of the outer join
+        Record r = keyShare ? read.forKeyShare().of(CATALOG_COLLECTIONS).fetchOne() : read.fetchOne();
         if (r == null) {
             throw missing.get();
         }
@@ -490,7 +522,7 @@ public final class CollectionRegistry {
      * @throws UnregisteredCollectionException if no row exists for the pair
      */
     public static CollectionRow lookup(TenantScope scope, String tenant, String collection) {
-        Optional<CollectionRow> hit = cached(tenant, collection);
+        Optional<CollectionRow> hit = ExpectedCollectionIds.of(collection).isPresent() ? Optional.empty() : cached(tenant, collection);
         if (hit.isPresent()) {
             return hit.get();
         }
