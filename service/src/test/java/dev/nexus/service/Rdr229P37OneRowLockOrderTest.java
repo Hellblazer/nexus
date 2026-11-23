@@ -503,4 +503,66 @@ class Rdr229P37OneRowLockOrderTest {
         assertThat(engine.<Boolean>su(ctx -> dev.nexus.service.datamove.CompletionCheck.readLatch(ctx, dev.nexus.service.datamove.CompletionCheck.GATE3).isPresent()))
             .as("the latch row is still there").isTrue();
     }
+
+    /**
+     * folio on 6eb8000e0d: the target checks run under the lock cover every child table, not chunks alone. The parked-rename scenario again, with only a
+     * catalog document (no chunk) filed under Y's id while the rename waits. "revived": Y is revived through the route, so the live-target check refuses.
+     * "retired": Y stays a tombstone and the document lands under its id, so the emptiness check (blockingTable, which matches by the target's id from gate
+     * 3) refuses; the shared checks before the lock found Y empty. Either way 409, and Y, its id and the document are intact.
+     */
+    @Test
+    void aTargetThatGainsOnlyADocumentWhileTheRenameWaits_isRefusedUnderTheLock() throws Exception {
+        for (String shape : List.of("revived", "retired")) {
+            String tenant = "p37-lo-j" + shape;
+            String token = engine.newTenant(tenant);
+            String x = coll("p37lojx" + shape);
+            String y = coll("p37lojy" + shape);
+            engine.su(ctx -> {
+                PgContainerHelper.insertCollection(ctx, tenant, x);   // X first: X's id is below Y's
+                PgContainerHelper.insertCollection(ctx, tenant, y);
+                return null;
+            });
+            var sup = engine.call("POST", "/v1/catalog/collections/supersede", token, "{\"name\":\"" + y + "\",\"superseded_by\":\"" + x + "\"}");
+            assertThat(sup.statusCode()).as(shape + ": non-vacuity: Y is an empty tombstone of X: " + sup.body()).isEqualTo(200);
+            long xId = engine.su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, x));
+            long yId = engine.su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, y));
+            assertThat(xId).isLessThan(yId);
+            String tumbler = "p37-lo-j-doc-" + shape;
+            var pool = Executors.newFixedThreadPool(1);
+            try (Connection w = engine.pg.createConnection("")) {
+                w.setAutoCommit(false);
+                DSL.using(w, SQLDialect.POSTGRES).select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(x))).forKeyShare().fetch();
+                int base = lockWaiters();
+                Future<Rdr229RenameEngine.Renamed> rename = pool.submit(() -> engine.rename(token, x, y));
+                assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(30), () -> lockWaiters() > base)).as(shape + ": the rename parks on X").isTrue();
+
+                if (shape.equals("revived")) {
+                    var revive = engine.call("POST", "/v1/catalog/collections/upsert", token, "{\"name\":\"" + y + "\",\"content_type\":\"knowledge\","
+                        + "\"owner_id\":\"p37lojy" + shape + "\",\"embedding_model\":\"" + MODEL + "\",\"model_version\":\"v1\"}");
+                    assertThat(revive.statusCode()).as("Y is revived while the rename waits: " + revive.body()).isEqualTo(200);
+                }
+                engine.su(ctx -> ctx.insertInto(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS,
+                        dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.TENANT_ID, dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.TUMBLER,
+                        dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.TITLE, dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.PHYSICAL_COLLECTION,
+                        dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
+                    .values(tenant, tumbler, "only a document", y, yId).execute());   // no chunk: only a catalog document under Y's id
+                assertThat(rename.isDone()).as(shape + ": still parked").isFalse();
+                w.commit();
+
+                var r = rename.get(60, TimeUnit.SECONDS);
+                assertThat(r.status()).as(shape + ": refused under the lock: " + r).isEqualTo(409);
+                assertThat(r.body()).as(shape + ": " + r).contains(shape.equals("revived") ? "already exists" : "catalog_documents");
+            } finally {
+                pool.shutdownNow();
+            }
+            assertThat(engine.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, y))).as(shape + ": Y keeps its row and its id").isEqualTo(yId);
+            assertThat(engine.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, x))).as(shape + ": X was not renamed").isEqualTo(xId);
+            assertThat(engine.<Long>su(ctx -> (long) ctx.fetchCount(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS,
+                dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                    .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))
+                    .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID.eq(yId)))))
+                .as(shape + ": the document is still Y's").isEqualTo(1L);
+        }
+    }
 }
