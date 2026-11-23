@@ -252,6 +252,41 @@ class WritersLiveAtCommitRouteTest {
         assertThat(m.status()).as(m.body()).isEqualTo(200);
     }
 
+    /**
+     * {@code set_aspects_enabled} (a route the hand-kept list had missed, and a writer of the registry row's own flag) arriving, with a
+     * second writer behind it, while a supersede holds the row: both wait for the verb (each reads the row FOR KEY SHARE, which the verb's
+     * {@code FOR UPDATE} blocks), and once the verb commits both read the retired row by id and are refused 409, the flag unflipped and
+     * nothing filed under the retired collection. No deadlock between the three, and none absorbed.
+     */
+    @Timeout(180)
+    @Test
+    void aSetAspectsEnabledAndASecondWriterArrivingWhileASupersedeHoldsTheRow_bothWait_thenBothAreRefused409() throws Exception {
+        String x = registered("aspects-x");
+        String y = registered("aspects-y");
+        long xid = fx.idOf(x);
+        Future<Resp> supersede;
+        Future<Resp> flag;
+        Future<Resp> second;
+        try (Connection park = fx.pg.createConnection("")) {
+            supersede = parkedSupersede(park, x, y);
+            flag = pool.submit(() -> fx.post("/v1/catalog/collections/set_aspects_enabled",
+                "{\"collection_id\":" + xid + ",\"aspects_enabled\":true}"));
+            awaitWaiting(2, flag, "set_aspects_enabled waits for the registry row of " + x);
+            second = pool.submit(() -> fx.post("/v1/taxonomy/topics/insert",
+                "{\"collection_id\":" + xid + ",\"label\":\"aspects-second\",\"doc_count\":1}"));
+            awaitWaiting(3, second, "the second writer waits for the same row");
+            assertThat(flag.isDone() || second.isDone()).as("neither writer got past the verb").isFalse();
+            park.rollback();
+        }
+        assertThat(supersede.get(60, TimeUnit.SECONDS).status()).isEqualTo(200);
+        assertRefusedAsRetired(flag.get(60, TimeUnit.SECONDS), y);
+        assertRefusedAsRetired(second.get(60, TimeUnit.SECONDS), y);
+        Boolean enabled = fx.asSuperuser(ctx -> ctx.select(CATALOG_COLLECTIONS.ASPECTS_ENABLED).from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(fx.tenant)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(xid))
+            .fetchOne(CATALOG_COLLECTIONS.ASPECTS_ENABLED));
+        assertThat(enabled).as("the flag of the retired row was not flipped").isNotEqualTo(Boolean.TRUE);
+    }
+
     // ---- history writes are exempt: they stamp the id without a lock and do not wait for the verb -----------------------------
 
     @Timeout(180)

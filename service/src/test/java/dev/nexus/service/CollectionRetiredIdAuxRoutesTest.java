@@ -184,10 +184,14 @@ class CollectionRetiredIdAuxRoutesTest {
 
         String a = registered("restore-gap");
         long x = fx.idOf(a);
-        Resp r = withTheLabelTakenBeforeTheMove(a, null, () -> fx.post("/v1/vectors/gc/restore-rereferenced",
+        String hex = Chash.ofText("aux-restore-gap-" + a).toHex();
+        // the hook seeds a chunk into the NEW holder of the label: a move that went through the label would touch it
+        Resp r = withTheLabelTakenBeforeTheMove(a, hex, () -> fx.post("/v1/vectors/gc/restore-rereferenced",
             "{\"origin_collection_id\":" + x + ",\"quarantine_collection\":" + json("quarantine-" + a) + "}"));
 
         assertUnknownId(r, x);
+        assertThat(chunksOf(a, hex)).as("the new holder's chunk is untouched").isEqualTo(1);
+        assertThat(chunksOf("quarantine-" + a, hex)).as("and nothing reached the quarantine sibling").isZero();
     }
 
     @Test
@@ -199,11 +203,17 @@ class CollectionRetiredIdAuxRoutesTest {
 
         String a = registered("expire-gap");
         long x = fx.idOf(a);
-        Resp r = withTheLabelTakenBeforeTheMove(a, null, () -> fx.post("/v1/vectors/gc/expire-quarantine",
+        String hex = Chash.ofText("aux-expire-gap-" + a).toHex();
+        // the sibling holds a chunk of its own, and the hook seeds the new holder of the label: an expiry that ran would be able to take them
+        fx.register("quarantine-" + a);
+        seedChunk("quarantine-" + a, Chash.ofText("aux-expire-gap-q-" + a).toHex());
+        Resp r = withTheLabelTakenBeforeTheMove(a, hex, () -> fx.post("/v1/vectors/gc/expire-quarantine",
             "{\"origin_collection_id\":" + x + ",\"quarantine_collection\":" + json("quarantine-" + a)
                 + ",\"cutoff\":\"" + STAMP + "\"}"));
 
         assertUnknownId(r, x);
+        assertThat(chunksOf(a, hex)).as("the new holder's chunk is untouched").isEqualTo(1);
+        assertThat(chunksOf("quarantine-" + a, Chash.ofText("aux-expire-gap-q-" + a).toHex())).as("and the sibling's chunk survives").isEqualTo(1);
     }
 
     /** A collection {@code a} (by label {@code a}, id {@code x}) whose one aged orphan {@code hex} the engine moved into {@code quarantine-a}; each step asserted. */

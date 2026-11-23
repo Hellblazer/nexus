@@ -419,6 +419,7 @@ public final class CollectionRegistry {
     CollectionRow lockIdForWrite(DSLContext ctx, String tenant, long collectionId) {
         String key = "#" + collectionId;
         noteWriteRead(tenant, key);
+        ExpectedCollectionIds.beforeTransactionRead();   // test seams, as for a boundary-named id (no-ops in production)
         CollectionRow row = fillOrNull(ctx, tenant, CATALOG_COLLECTIONS.COLLECTION_ID.eq(collectionId), List.of(), true, false);
         if (row == null) {
             throw new UnknownCollectionIdException(tenant, collectionId);
@@ -431,6 +432,7 @@ public final class CollectionRegistry {
         }
         WriteRegistryMemo.put(ctx, tenant, row.label(), row);
         ExpectedCollectionIds.consumed(ctx, key);
+        ExpectedCollectionIds.afterTransactionRead();
         return row;
     }
 
