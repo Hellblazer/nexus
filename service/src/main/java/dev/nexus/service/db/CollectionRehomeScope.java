@@ -58,6 +58,9 @@ final class CollectionRehomeScope {
 
     String target() { return target; }
 
+    /** The source's resolved id from gate 3 (null when its label has no row), else null: the name scope. */
+    Long sourceId() { return sourceId; }
+
     /** True from gate 3 when the source label has no registry row, so the scope matches nothing at the source. */
     boolean sourceMatchesNothing() { return byId && sourceId == null; }
 
@@ -110,8 +113,8 @@ final class CollectionRehomeScope {
      * RDR-231: refuse when a note URI of the source's own documents, rewritten label to label by {@link NoteUri#moveTo}, a
      * different live document already holds. Only the source's own documents move (home collection = the source).
      */
-    void requireUrisFree(DSLContext ctx, String tenant, String operation) {
-        var hit = CatalogRepository.moveUriCollisions(ctx, tenant, source, target,
+    void requireUrisFree(DSLContext ctx, dev.nexus.service.datamove.Gate3 gate3, String tenant, String operation) {
+        var hit = CatalogRepository.moveUriCollisions(ctx, gate3, tenant, source, target,
             m -> of(m.PHYSICAL_COLLECTION, m.PHYSICAL_COLLECTION_ID, byId, source, sourceId)
                 .and(NoteUri.namesCollection(m.SOURCE_URI, source)))
             .stream().findFirst().orElse(null);

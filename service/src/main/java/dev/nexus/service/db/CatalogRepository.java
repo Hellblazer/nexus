@@ -7504,7 +7504,7 @@ public final class CatalogRepository {
      */
     private void requireMoveUriFree(DSLContext ctx, String tenant, String docId, String source,
                                            String target) {
-        var hit = moveUriCollisions(ctx, tenant, source, target, m -> m.TUMBLER.eq(docId))
+        var hit = moveUriCollisions(ctx, gate3, tenant, source, target, m -> m.TUMBLER.eq(docId))
             .stream().findFirst().orElse(null);
         if (hit != null) {
             throw new SourceUriCollision("re-embedding " + source + " into " + target, hit.value2(), hit.value3(),
@@ -7522,7 +7522,7 @@ public final class CatalogRepository {
      * catalog-016 constrains only live rows, and both sides carry an explicit tenant predicate beside RLS.
      */
     static org.jooq.Result<org.jooq.Record4<String, String, String, String>> moveUriCollisions(
-            DSLContext ctx, String tenant, String source, String target,
+            DSLContext ctx, Gate3 gate3, String tenant, String source, String target,
             java.util.function.Function<dev.nexus.service.jooq.nexus.tables.CatalogDocuments, Condition> movingRows) {
         var moving = CATALOG_DOCUMENTS.as("moving");
         var holder = CATALOG_DOCUMENTS.as("holder");
@@ -7553,7 +7553,7 @@ public final class CatalogRepository {
         }
         return tenantScope.withTenant(tenant, ctx -> {
             Map<String, String> out = new LinkedHashMap<>();
-            for (var r : moveUriCollisions(ctx, tenant, source, target, m -> m.TUMBLER.in(docIds))) {
+            for (var r : moveUriCollisions(ctx, gate3, tenant, source, target, m -> m.TUMBLER.in(docIds))) {
                 out.putIfAbsent(r.value1(), r.value3());
             }
             return out;
@@ -10961,7 +10961,7 @@ public final class CatalogRepository {
         String[] epoch = new String[1];   // baton's CatalogEpoch, read inside the transaction's tenant scope
         Map<String, Integer> counts = CollectionMint.refusingRace(tenantScope, tenant,
             () -> renameCollectionTxn(tenant, oldName, newName, expectedTargetSupersededBy, newContentType, newOwnerId,
-                newNameEmbeddingModel, tuple, epoch, oneRow), CollectionMint.recheckOf(tenant, tuple));
+                newNameEmbeddingModel, tuple, epoch, oneRow), CollectionMint.recheckOf(tenant, tuple, gate3));
         if (oneRow[0] != null) return renameGuard.committedOneRow(tenant, oldName, newName, oneRow[0]);   // the path taken, not a count key
         long renamedId = 0;
         // Post-commit (nexus-h8rf6 wave review): the rename RETIRES the old registry row —
@@ -11449,7 +11449,7 @@ public final class CatalogRepository {
      */
     private void requireCollectionUrisFree(DSLContext ctx, String tenant, String source, String target,
                                            String operation) {
-        var hit = moveUriCollisions(ctx, tenant, source, target,
+        var hit = moveUriCollisions(ctx, gate3, tenant, source, target,
             m -> CollectionIdReads.is(gate3, tenant, m.PHYSICAL_COLLECTION, m.PHYSICAL_COLLECTION_ID, source)
                 .and(NoteUri.namesCollection(m.SOURCE_URI, source)))
             .stream().findFirst().orElse(null);
@@ -11970,7 +11970,7 @@ public final class CatalogRepository {
             // RDR-231: the move rewrites note URIs from source to target (moveScopedTable). If a live
             // document would land on a URI a live document already holds, nothing moves: chunks and
             // manifest rows move by table and are keyed by chash, so one document cannot be held back.
-            scope.requireUrisFree(ctx, tenant, "re-homing " + source + " onto " + target);
+            scope.requireUrisFree(ctx, gate3, tenant, "re-homing " + source + " onto " + target);
 
             Map<String, Integer> moved = new LinkedHashMap<>();
             Map<String, Integer> leftBehind = new LinkedHashMap<>();
@@ -11981,6 +11981,7 @@ public final class CatalogRepository {
             // RDR-229 P3.1: the moved rows take the target's id with its name; the rows the chunk cascade carried
             // (the manifest, the topic assignments, chunk_orphaned_at) are given it afterwards.
             final Long targetId = scope.targetId(ctx, tenant);
+            final Long sourceId = scope.sourceId();   // gate 3: the source's resolved id, else null (by name)
             for (CollectionScopedTable t : COLLECTION_SCOPED_TABLES) {
                 if (CASCADE_CARRIED_TABLES.contains(t.countKey())) {
                     continue;
