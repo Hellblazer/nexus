@@ -691,6 +691,7 @@ class Report:
     ceiling: int | None = None
     ceiling_boot: int | None = None
     ceiling_reboot: int | None = None
+    data_move_sleep_ms: int = 0
     new_jar_sha256: str | None = None
     new_jar_commit: str | None = None
     new_engine_version: dict = field(default_factory=dict)
@@ -908,12 +909,25 @@ def run_doctor(inst: Install, a: argparse.Namespace, env: dict[str, str], label:
                       "rc": r.returncode}
 
 
+#: The engine setting that overrides every registered data move's ``sleep_ms`` (DataMoveWorker.SLEEP_ENV).
+DATA_MOVE_SLEEP_ENV = "NX_DATA_MOVE_SLEEP_MS"
+
+
+def new_engine_env(env: dict[str, str], jar: Path, sleep_ms: int) -> dict[str, str]:
+    """The environment of every boot of the new engine. ``env`` has had every NX_*/NEXUS_* variable stripped, so
+    this is where the harness's own deliberate settings are added: the jar under test and the data-move pause.
+    The pause is explicit, never the machine's: production's registered pacing (the RDR-229 chunks stamp sleeps 20 s
+    per 100 rows) is about 4.8 h on the fixture, which no ``--max-wait`` covers. ``nx daemon service start`` and
+    the engine it spawns inherit this environment (``_spawn_service`` builds its env from ``os.environ``)."""
+    return {**env, "NEXUS_SERVICE_JAR": str(jar), DATA_MOVE_SLEEP_ENV: str(sleep_ms)}
+
+
 def measure_boot(inst: Install, a: argparse.Namespace, env: dict[str, str], label: str, base_lsn: str) -> dict:
     """One boot of the new engine on the stopped install, measured from the cluster's last checkpoint
     (``base_lsn``) until idle, or until the boot fails: ``nx daemon service start`` exits non-zero, or
     ``/health`` never answers 200 within ``--max-wait``. A failed boot is a result, not a harness error:
     its bytes are counted to the moment the failure was seen. Leaves the install stopped."""
-    new_env = {**env, "NEXUS_SERVICE_JAR": str(a.new_jar)}
+    new_env = new_engine_env(env, a.new_jar, a.data_move_sleep_ms)
     base = lsn_bytes(base_lsn)
     logs = LogWatch(inst.config_dir)
     t0 = time.monotonic()
@@ -1239,6 +1253,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="fail (exit 1, reboot-over-ceiling) when the same-version reboot's migrate + ready WAL exceeds "
                          "this; refused with --restart-mid-queue (a resume boot is never gated) and --no-second-boot")
     ap.add_argument("--max-wait", type=float, default=2400.0, help="seconds each boot may take to reach idle")
+    ap.add_argument("--data-move-sleep-ms", type=int, default=0, metavar="MS",
+                    help="NX_DATA_MOVE_SLEEP_MS for the new engine's boots: the pause after every data-move chunk, "
+                         "overriding each move's registered sleep_ms (0 to 60000; default 0, so the moves finish "
+                         "inside --max-wait; recorded in the report)")
     ap.add_argument("--idle-window", type=float, default=60.0)
     ap.add_argument("--idle-wal-bytes", type=int, default=1 << 20)
     ap.add_argument("--work", type=Path, default=None, help="work dir (default a new temp dir, removed after)")
@@ -1276,6 +1294,8 @@ def main(argv: list[str] | None = None) -> int:
                  "(that second boot is a resume, which is never gated) or --no-second-boot (there is no reboot)")
     if a.restart_mid_queue and not a.second_boot:
         ap.error("--restart-mid-queue needs the second boot (drop --no-second-boot): the verdict is what it resumed")
+    if not 0 <= a.data_move_sleep_ms <= 60_000:
+        ap.error("--data-move-sleep-ms must be between 0 and 60000 (the registry's sleep_ms bounds)")
     if a.prepare_only and a.work is None:
         ap.error("--prepare-only needs --work, the directory the old state is left in")
     if a.rows < PCI_BUILD_MIN_ROWS or a.control_rows >= PCI_BUILD_MIN_ROWS:
@@ -1291,6 +1311,7 @@ def main(argv: list[str] | None = None) -> int:
     inst = Install(config)
     rep = Report(prev_client=a.prev_client, new_jar=str(a.new_jar), rows_per_collection=a.rows, ceiling=a.ceiling,
                  ceiling_boot=a.ceiling_boot, ceiling_reboot=a.ceiling_reboot,
+                 data_move_sleep_ms=a.data_move_sleep_ms,
                  new_jar_sha256=None if a.prepare_only else jar_identity(a.new_jar))
     rc = 2
     try:

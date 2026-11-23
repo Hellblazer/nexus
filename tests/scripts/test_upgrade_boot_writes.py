@@ -348,3 +348,63 @@ def test_a_working_or_otherwise_blocked_move_or_any_other_entry_still_holds_idle
 def test_a_failed_move_fails_the_leg() -> None:
     assert _mod.failed_moves({"boot_work": [_BLOCKED, _FAILED]}) == [_FAILED]
     assert not _mod.status_says_idle(200, {"boot_work": [_FAILED]})
+
+
+# ── data-move pacing in the upgrade legs (ask rdr229-upgrade-gate-pacing) ────
+
+
+def _main_with_stubbed_boots(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, argv: list[str]) -> tuple[int, dict, dict]:
+    """``main`` with the old state and the boots stubbed: what ``boot_new`` was handed, and the report JSON."""
+    import json
+
+    from tests._module_seam import setattr_in
+
+    jar = tmp_path / "nexus-service.jar"
+    jar.write_bytes(b"x")
+    seen: dict = {}
+
+    def fake_boot_new(inst, a, env, rep) -> None:  # noqa: ANN001
+        seen.update(env=dict(env), sleep=a.data_move_sleep_ms)
+        rep.boots = [{"label": "upgrade", "reached_ready": True}]
+
+    monkeypatch.setattr(_mod, "build_old_state", lambda *_a, **_k: None)
+    monkeypatch.setattr(_mod, "boot_new", fake_boot_new)
+    monkeypatch.setattr(_mod, "jar_identity", lambda _j: "sha")
+    setattr_in(monkeypatch, _mod, "subprocess.run", lambda *_a, **_k: None)
+    monkeypatch.setattr(_mod.Install, "pgdata", property(lambda self: tmp_path / "pgdata"))
+    out = tmp_path / "report.json"
+    rc = _mod.main([*argv, "--new-jar", str(jar), "--work", str(tmp_path / "work"), "--json", str(out), "--no-second-boot"])
+    return rc, seen, json.loads(out.read_text(encoding="utf-8"))
+
+
+def test_the_new_engine_env_carries_the_pause_although_main_strips_nx_variables(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("NX_DATA_MOVE_SLEEP_MS", "60000")   # an ambient value on the lab host
+    monkeypatch.setenv("NX_SOMETHING_ELSE", "1")
+    rc, seen, report = _main_with_stubbed_boots(monkeypatch, tmp_path, [])
+    assert rc == 0, report
+    # main's strip removed every NX_*/NEXUS_* variable, the ambient pause included ...
+    assert "NX_DATA_MOVE_SLEEP_MS" not in seen["env"] and "NX_SOMETHING_ELSE" not in seen["env"]
+    # ... and the boots' env adds the harness's own, default 0, after it
+    env = _mod.new_engine_env(seen["env"], Path("/j.jar"), seen["sleep"])
+    assert env["NX_DATA_MOVE_SLEEP_MS"] == "0" and env["NEXUS_SERVICE_JAR"] == "/j.jar"
+    assert env["NEXUS_CONFIG_DIR"] == seen["env"]["NEXUS_CONFIG_DIR"]
+
+
+def test_the_report_records_the_data_move_pause(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _rc, seen, report = _main_with_stubbed_boots(monkeypatch, tmp_path, ["--data-move-sleep-ms", "250"])
+    assert seen["sleep"] == 250 and report["data_move_sleep_ms"] == 250
+    assert _mod.new_engine_env({}, Path("j"), 250)["NX_DATA_MOVE_SLEEP_MS"] == "250"
+
+
+def test_the_default_pause_is_zero_and_recorded(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _rc, _seen, report = _main_with_stubbed_boots(monkeypatch, tmp_path, [])
+    assert report["data_move_sleep_ms"] == 0
+
+
+def test_a_pause_outside_the_registry_bounds_is_refused(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    jar = tmp_path / "nexus-service.jar"
+    jar.write_bytes(b"x")
+    with pytest.raises(SystemExit) as e:
+        _mod.main(["--data-move-sleep-ms", "60001", "--new-jar", str(jar)])
+    assert e.value.code == 2 and "--data-move-sleep-ms" in capsys.readouterr().err
