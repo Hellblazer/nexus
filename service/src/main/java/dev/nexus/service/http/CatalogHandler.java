@@ -666,7 +666,7 @@ public final class CatalogHandler implements HttpHandler {
         // nexus-rfvyy.6.6: the owner row and the document row are separate transactions, so a non-boolean
         // 'sensitive' must be refused (IllegalArgumentException, the ladder's 400) BEFORE the owner write, or a
         // refused request would leave an owner row behind.
-        if (body.containsKey("tumbler")) CatalogRepository.sensitiveFlag(body);
+        if (body.containsKey("tumbler")) { CatalogRepository.sensitiveFlag(body); CatalogRepository.checkDocumentCollection(body); }
         // Owner upsert (if tumbler_prefix present)
         if (body.containsKey("tumbler_prefix")) {
             repo.upsertOwner(tenant, body);

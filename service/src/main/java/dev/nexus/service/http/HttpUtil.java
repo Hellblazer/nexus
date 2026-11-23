@@ -584,6 +584,14 @@ public final class HttpUtil {
                 + "}");
             return true;
         }
+        // RDR-229 P3.5a D1: a document route named its collection by an id no row of the tenant has. The collection routes get the
+        // same body from CollectionSelectorFilter, before their handler runs; the document routes resolve the id in the write.
+        var unknownId = unknownCollectionId(e);
+        if (unknownId != null) {
+            log.warn("event={}_unknown_collection_id {} collection_id={}", event, context, unknownId.collectionId());
+            send(exchange, 404, CollectionSelectorFilter.unknownBody(unknownId.collectionId()));
+            return true;
+        }
         // RDR-229 P3.5a: a rename (the catalog's or one of the per-store rename_collection routes) from gate 3 until the
         // one-row rename can run. Raised by the shared rename primitive before anything is written; 409 naming the
         // missing condition, the name-key drop move or the restart that applies P3.5b's changesets.
@@ -848,6 +856,16 @@ public final class HttpUtil {
         for (Throwable c = t; c != null; c = c.getCause()) {
             if (c instanceof dev.nexus.service.db.CollectionSupersededException s) {
                 return s;
+            }
+        }
+        return null;
+    }
+
+    /** The {@link dev.nexus.service.db.UnknownCollectionIdException} in {@code t}'s cause chain, or null. */
+    static dev.nexus.service.db.UnknownCollectionIdException unknownCollectionId(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof dev.nexus.service.db.UnknownCollectionIdException u) {
+                return u;
             }
         }
         return null;
