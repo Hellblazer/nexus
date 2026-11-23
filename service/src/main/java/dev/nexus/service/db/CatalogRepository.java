@@ -11071,8 +11071,11 @@ public final class CatalogRepository {
         QuarantineOrigin.requireNotQuarantine(tenantScope, tenant, "rename", newName);
         String[] tuple = new String[5]; RenameOutcome[] oneRow = new RenameOutcome[1];   // oneRow: set when P3.7's body ran
         String[] epoch = new String[1];   // baton's CatalogEpoch, read inside the transaction's tenant scope
+        // RDR-229 P3.7: the id the route boundary resolved oldName from, when the request named the source by id (null for a request by label)
+        var requested = ExpectedCollectionIds.requested(oldName);
+        Long requestedSourceId = requested.isPresent() ? requested.getAsLong() : null;
         Map<String, Integer> counts = CollectionMint.refusingRace(tenantScope, tenant,
-            () -> renameCollectionTxn(tenant, oldName, newName, expectedTargetSupersededBy, newContentType, newOwnerId,
+            () -> renameCollectionTxn(tenant, oldName, newName, requestedSourceId, expectedTargetSupersededBy, newContentType, newOwnerId,
                 newNameEmbeddingModel, tuple, epoch, oneRow), CollectionMint.recheckOf(tenant, tuple, gate3));
         if (oneRow[0] != null) return renameGuard.committedOneRow(tenant, oldName, newName, oneRow[0]);   // the path taken, not a count key
         long renamedId = 0;
@@ -11721,7 +11724,7 @@ public final class CatalogRepository {
         return targetRowExists;
     }
 
-    private Map<String, Integer> renameCollectionTxn(String tenant, String oldName, String newName,
+    private Map<String, Integer> renameCollectionTxn(String tenant, String oldName, String newName, Long requestedSourceId,
                                                         String expectedTargetSupersededBy,
                                                         String newContentTypeOrNull, String newOwnerIdOrNull,
                                                         String newNameEmbeddingModelOrNull, String[] tupleOut,
