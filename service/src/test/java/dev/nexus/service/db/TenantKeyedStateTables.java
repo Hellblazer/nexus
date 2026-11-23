@@ -784,7 +784,7 @@ final class TenantKeyedStateTables {
         // every leaf (and dropped to unknown by one that did not); the gate and the per-pass plan values are not kept.
         notKeyed.put("PciIdBuilds.readers", "whether this engine's id readers are present (IdReaders.PRESENT, which P3.5c flips) as a supplier, bound once at boot; a callback, no data");
         notKeyed.put("PciIdBuilds.pciOffLatch", "whether the gate 3 latch row says it latched while PCI was off, as a supplier bound once at boot; a callback, no data");
-        notKeyed.put("CompletionBootWork.DbReader.coverage", COMPLETION_ENGINE_WIDE + "the last PCI coverage read, reused for at most ten minutes once gate 3 has latched "
+        notKeyed.put("CompletionBootWork.DbReader.coverage", TenantKeyedStateTablesRdr229.COMPLETION_ENGINE_WIDE + "the last PCI coverage read, reused for at most ten minutes once gate 3 has latched "
             + "(it holds id keys: model, tenant and collection id), in memory only and replaced by the next read");
         notKeyed.put("CompletionBootWork.DbReader.coverageAt", "when that coverage was read (a time); no tenant state");
         notKeyed.put("PciIdBuilds.gate3", "the completion check's gate 3 as a supplier, bound once at boot; a callback, no data");

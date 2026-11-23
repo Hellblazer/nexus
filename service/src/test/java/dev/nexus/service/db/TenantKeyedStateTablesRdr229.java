@@ -69,7 +69,7 @@ final class TenantKeyedStateTablesRdr229 {
             + "seam; a duration");
     }
 
-    private static final String COMPLETION_ENGINE_WIDE = "the RDR-229 boot-time completion check is engine-wide, never a "
+    static final String COMPLETION_ENGINE_WIDE = "the RDR-229 boot-time completion check is engine-wide, never a "
         + "tenant's: it reads nexus.data_moves (a global registry with no tenant column), pg_catalog and the registry's "
         + "row counts on the engine's admin connection, and a Result holds labels, table and constraint names and counts "
         + "summed over every tenant, no tenant id on the wire (its one slot that can name a collection, gate3Uncovered, "
