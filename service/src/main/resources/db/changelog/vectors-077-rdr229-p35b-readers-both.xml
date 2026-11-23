@@ -7461,11 +7461,11 @@ LANGUAGE sql
 STABLE
 SECURITY INVOKER
 AS $$
-    -- Fix round (linda 2026-11-23, the 5x80k EXPLAIN): the registry id of p_collection is read once per call (k.cid), and each
-    -- id-or-name match is two probes, the id arm and the name arm apart: the id arm on (tenant_id, chash) (P3.3c's child index on
-    -- chunk_orphaned_at; the manifest's (tenant_id, chash) index), the name arm on the primary key (tenant_id, collection, chash)
-    -- and the manifest's (tenant_id, chash), so no OR and no per-row registry read stands between a probe and its index. Each orphaned_at probe takes
-    -- the latest record by ORDER BY ... LIMIT 1, and GREATEST ignores a NULL, so the latest of both arms is the answer as before.
+    -- Fix round (linda 2026-11-23, the 5x80k EXPLAIN): the registry id of p_collection is read once (k.cid), not once per arm; each
+    -- probe stays one index probe on (tenant_id, chash) with the id-or-name match as its filter, as r3 had it. Splitting the two arms
+    -- into separate probes (b6ff7a3cb7) doubled the probes per chunk once a caller inlines this function, so it is not done.
+    -- The orphaned_at probe takes the latest record by ORDER BY ... LIMIT 1: the id-or-name match can name two records of one chunk
+    -- during the stamp.
     SELECT true
       FROM (SELECT (SELECT cc.collection_id
                       FROM nexus.catalog_collections cc
@@ -7475,17 +7475,8 @@ AS $$
                p_last_written_at,
                (SELECT o.orphaned_at
                   FROM nexus.chunk_orphaned_at o
-                 WHERE o.tenant_id     = p_tenant
-                   AND o.collection_id = k.cid
-                   AND o.chash         = p_chash
-                 ORDER BY o.orphaned_at DESC NULLS LAST
-                 LIMIT 1),
-               (SELECT o.orphaned_at
-                  FROM nexus.chunk_orphaned_at o
                  WHERE o.tenant_id  = p_tenant
-                   AND o.collection_id IS NULL
-                   AND o.collection = p_collection
-                   AND p_collection <> ''
+                   AND (o.collection_id = k.cid OR (o.collection_id IS NULL AND o.collection = p_collection AND p_collection <> ''))
                    AND o.chash      = p_chash
                  ORDER BY o.orphaned_at DESC NULLS LAST
                  LIMIT 1)
@@ -7493,17 +7484,8 @@ AS $$
        AND NOT EXISTS (
              SELECT 1
                FROM nexus.catalog_document_chunks m
-              WHERE m.tenant_id     = p_tenant
-                AND m.collection_id = k.cid
-                AND m.chash         = p_chash
-           )
-       AND NOT EXISTS (
-             SELECT 1
-               FROM nexus.catalog_document_chunks m
               WHERE m.tenant_id  = p_tenant
-                AND m.collection_id IS NULL
-                AND m.collection = p_collection
-                AND p_collection <> ''
+                AND (m.collection_id = k.cid OR (m.collection_id IS NULL AND m.collection = p_collection AND p_collection <> ''))
                 AND m.chash      = p_chash
            )
        AND NOT EXISTS (
@@ -10162,104 +10144,35 @@ GRANT SELECT ON nexus.collection_vector_stats TO PUBLIC;
     <changeSet id="vectors-077-99" author="nexus-p2m1x.24">
         <comment>RDR-229 P3.5b (nexus-p2m1x.24), form B: nexus.live_chunks reads both shapes of the collection name, the id where both sides carry one and the name where either lacks one (a NULL id never matches through a '' name). CREATE OR REPLACE of the view body, one column appended at the end, same volatility, security and grants. It outputs the registry's label for a stamped row's id (nexus.catalog_collections.name by collection_id; the row's own name where the row carries no id) and a trailing collection_id column, so P3.7's one-row rename shows at once. CREATE OR REPLACE appends the column at the end and changes nothing before it. The rollback DROPs the view and restores the last definer's text and its PUBLIC grant, because CREATE OR REPLACE cannot drop a column. DATA EFFECT: none; no row is read or written.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
--- Fix round (linda 2026-11-23, the 5x80k EXPLAIN): UNION ALL branches by the shape of a chunk's collection, so the label is a plain
--- column a caller's WHERE collection = 'X' reaches the keys through, and the manifest test is two EXISTS (the id arm, the name
--- arm) the planner runs as separate SubPlans on their own keys, so a LIMIT page stops early.
+-- Fix round (linda 2026-11-23): r3's body kept. On 5x80k a one-collection LIMIT 100 page reads 2.48 ms / 3,012 hits against
+-- 1.03 ms before; the UNION ALL split tried in b6ff7a3cb7 built a hashed SubPlan over the tenant's whole manifest (3,241 ms).
 CREATE OR REPLACE VIEW nexus.live_chunks
     WITH (security_invoker = true)
 AS
-    -- 1. stamped, registered: the registry's label for the row's id
-    SELECT c.tenant_id,
-           r.name AS collection,
-           c.chash,
-           c.chunk_text,
-           COALESCE(c.embedding_384, c.embedding_768, c.embedding_1024)::nexus.vector AS embedding,
-           c.chunk_tsv,
-           c.metadata,
-           c.created_at,
-           CASE WHEN c.embedding_384  IS NOT NULL THEN 384
-                 WHEN c.embedding_768  IS NOT NULL THEN 768
-                 WHEN c.embedding_1024 IS NOT NULL THEN 1024
-            END AS dim,
-           c.collection_id
-      FROM nexus.chunks c
-      JOIN nexus.catalog_collections r
-        ON r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id
-     WHERE (EXISTS (SELECT 1
-                       FROM nexus.catalog_document_chunks m
-                       JOIN nexus.catalog_documents d
-                         ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
-                      WHERE m.tenant_id = c.tenant_id
-                        AND m.chash     = c.chash
-                        AND d.deleted_at IS NULL
-                        AND m.collection_id = c.collection_id)
-        OR EXISTS (SELECT 1
-                       FROM nexus.catalog_document_chunks m
-                       JOIN nexus.catalog_documents d
-                         ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
-                      WHERE m.tenant_id = c.tenant_id
-                        AND m.chash     = c.chash
-                        AND d.deleted_at IS NULL
-                        AND m.collection_id IS NULL AND m.collection = c.collection AND c.collection <> ''))
-UNION ALL
-    -- 2. stamped, no registry row holds the id: the row's own name
-    SELECT c.tenant_id,
-           c.collection AS collection,
-           c.chash,
-           c.chunk_text,
-           COALESCE(c.embedding_384, c.embedding_768, c.embedding_1024)::nexus.vector AS embedding,
-           c.chunk_tsv,
-           c.metadata,
-           c.created_at,
-           CASE WHEN c.embedding_384  IS NOT NULL THEN 384
-                 WHEN c.embedding_768  IS NOT NULL THEN 768
-                 WHEN c.embedding_1024 IS NOT NULL THEN 1024
-            END AS dim,
-           c.collection_id
-      FROM nexus.chunks c
-     WHERE c.collection_id IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM nexus.catalog_collections r WHERE r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id)
-       AND (EXISTS (SELECT 1
-                       FROM nexus.catalog_document_chunks m
-                       JOIN nexus.catalog_documents d
-                         ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
-                      WHERE m.tenant_id = c.tenant_id
-                        AND m.chash     = c.chash
-                        AND d.deleted_at IS NULL
-                        AND m.collection_id = c.collection_id)
-        OR EXISTS (SELECT 1
-                       FROM nexus.catalog_document_chunks m
-                       JOIN nexus.catalog_documents d
-                         ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
-                      WHERE m.tenant_id = c.tenant_id
-                        AND m.chash     = c.chash
-                        AND d.deleted_at IS NULL
-                        AND m.collection_id IS NULL AND m.collection = c.collection AND c.collection <> ''))
-UNION ALL
-    -- 3. not stamped: the row's own name (the registry holds it under that name, or not at all)
-    SELECT c.tenant_id,
-           c.collection AS collection,
-           c.chash,
-           c.chunk_text,
-           COALESCE(c.embedding_384, c.embedding_768, c.embedding_1024)::nexus.vector AS embedding,
-           c.chunk_tsv,
-           c.metadata,
-           c.created_at,
-           CASE WHEN c.embedding_384  IS NOT NULL THEN 384
-                 WHEN c.embedding_768  IS NOT NULL THEN 768
-                 WHEN c.embedding_1024 IS NOT NULL THEN 1024
-            END AS dim,
-           c.collection_id
-      FROM nexus.chunks c
-     WHERE c.collection_id IS NULL
-       AND (EXISTS (SELECT 1
-                       FROM nexus.catalog_document_chunks m
-                       JOIN nexus.catalog_documents d
-                         ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
-                      WHERE m.tenant_id = c.tenant_id
-                        AND m.chash     = c.chash
-                        AND d.deleted_at IS NULL
-                        AND m.collection = c.collection AND c.collection <> ''));
+SELECT c.tenant_id,
+       COALESCE(r.name, c.collection) AS collection,
+       c.chash,
+       c.chunk_text,
+       COALESCE(c.embedding_384, c.embedding_768, c.embedding_1024)::nexus.vector AS embedding,
+       c.chunk_tsv,
+       c.metadata,
+       c.created_at,
+       CASE WHEN c.embedding_384  IS NOT NULL THEN 384
+            WHEN c.embedding_768  IS NOT NULL THEN 768
+            WHEN c.embedding_1024 IS NOT NULL THEN 1024
+       END AS dim,
+       c.collection_id
+  FROM nexus.chunks c
+  LEFT JOIN nexus.catalog_collections r
+         ON r.tenant_id = c.tenant_id AND r.collection_id = c.collection_id
+ WHERE EXISTS (SELECT 1
+                  FROM nexus.catalog_document_chunks m
+                  JOIN nexus.catalog_documents d
+                    ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                 WHERE m.tenant_id = c.tenant_id
+                   AND m.chash     = c.chash
+                   AND d.deleted_at IS NULL
+                   AND (c.collection_id = m.collection_id OR ((c.collection_id IS NULL OR m.collection_id IS NULL) AND c.collection = m.collection AND c.collection <> '')));
 ]]></sql>
         <rollback>
             <sql splitStatements="false" stripComments="false"><![CDATA[
