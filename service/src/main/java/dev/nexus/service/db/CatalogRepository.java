@@ -12603,7 +12603,7 @@ public final class CatalogRepository {
      * untouched by this change.
      */
     public GhostSweepResult sweepGhostsAndMarkDormant(String tenant, boolean dryRun) {
-        List<SweptRow> rows = evictingTenantIfItThrows(tenant, !dryRun, () -> tenantScope.withTenant(tenant, ctx -> {
+        List<SweptRow> rows = CollectionRegistry.evictingTenantIfItThrows(tenant, !dryRun, () -> tenantScope.withTenant(tenant, ctx -> {
             var nameAndState = ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.LIFECYCLE_STATE,
                     CollectionIdReads.successor(gate3), CATALOG_COLLECTIONS.COLLECTION_ID)
                 .from(CATALOG_COLLECTIONS)
@@ -12747,22 +12747,6 @@ public final class CatalogRepository {
             }
         }
         return new GhostSweepResult(rows.size(), deleted, dormant, held, ghostNames, dormantNames);
-    }
-
-    /**
-     * Row 15 addendum: runs {@code transaction}; when it throws and {@code evict} holds, the tenant's cached registry rows go before the
-     * exception does. A COMMIT that reached the caller as an exception may still have been applied, and a sweep that threw has no list of
-     * the rows it changed, so the tenant's cache is emptied (always safe: the next read refills it).
-     */
-    private static <T> T evictingTenantIfItThrows(String tenant, boolean evict, java.util.function.Supplier<T> transaction) {
-        try {
-            return transaction.get();
-        } catch (RuntimeException | Error e) {
-            if (evict) {
-                CollectionRegistry.shared().evictTenant(tenant);
-            }
-            throw e;
-        }
     }
 
     /** Return ACTIVE owners filtered by owner_type. Used by repos.py:list_repos_dual (nexus-qnp5s). */

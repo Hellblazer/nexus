@@ -905,6 +905,22 @@ public final class CollectionRegistry {
     }
 
     /**
+     * Row 15 addendum: runs {@code transaction}; when it throws and {@code evict} holds, the tenant's cached registry rows go before the
+     * exception does. A COMMIT that reached the caller as an exception may still have been applied, and a sweep that threw has no list of
+     * the rows it changed, so the tenant's cache is emptied (always safe: the next read refills it).
+     */
+    public static <T> T evictingTenantIfItThrows(String tenant, boolean evict, java.util.function.Supplier<T> transaction) {
+        try {
+            return transaction.get();
+        } catch (RuntimeException | Error e) {
+            if (evict) {
+                shared().evictTenant(tenant);
+            }
+            throw e;
+        }
+    }
+
+    /**
      * Forget every cached row, for every tenant (nexus-5tykh). {@link EngineSingletonLock} calls it after the engine
      * lost its one-engine-per-database lock and took it back: another engine may have served the database in the
      * gap and changed or superseded rows this cache still holds. Bumps the eviction count, so a miss whose read
