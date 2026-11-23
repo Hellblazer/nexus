@@ -190,4 +190,73 @@ class RenameFollowGateOrderTest {
         Resp r = writer.get(120, TimeUnit.SECONDS);
         assertThat(r.status()).as(r.body()).isEqualTo(200);
     }
+
+    /**
+     * The GUARD-LESS upsert (review of afb50430c1, item 3): {@code upsert-chunks} over HTTP always passes an ownership guard, so the test
+     * above passes on code that took the gate only when the guard's in-transaction recheck was on. This one calls the repository path the
+     * fix made unconditional, with no guard, as an internal caller would, with the id named on the thread as the route boundary does
+     * ({@code ExpectedCollectionIds.set}). Under the old condition it takes no gate, never waits for the new label's, and the test fails
+     * at "never waited"; under the fix it waits for the gate holding no registry row, then lands the chunk under the row's current label.
+     */
+    @Timeout(180)
+    @Test
+    void aGuardLessUpsertByIdThatFindsItsRowRenamed_takesTheNewLabelsGateFirst_andLandsUnderTheCurrentLabel() throws Exception {
+        String b = label("rf-guardless-b-" + (n++));
+        fx.register(b);
+        long x = fx.idOf(b);
+        String c = label("rf-guardless-c-" + (n++));
+        String hex = Chash.ofText("rf-guardless-" + b).toHex();
+        var embedder = new PgVectorRepositoryContractTest.FakeEmbedder(384);
+        var repo = new dev.nexus.service.vectors.PgVectorRepository(new dev.nexus.service.db.TenantScope(fx.svcDs), embedder, embedder);
+        AtomicBoolean renamed = new AtomicBoolean();
+        Future<?> writer;
+        try (Connection gateHolder = fx.pg.createConnection("")) {
+            gateHolder.setAutoCommit(false);
+            DSL.using(gateHolder, SQLDialect.POSTGRES).select(DSL.function("pg_advisory_xact_lock", Object.class,
+                DSL.function("hashtext", Integer.class, DSL.val("sweepgate:" + fx.tenant + "/" + c)))).fetch();
+            writer = pool.submit(() -> {
+                dev.nexus.service.db.ExpectedCollectionIds.set(java.util.Map.of(b, x), () -> {
+                    if (renamed.compareAndSet(false, true)) {
+                        CompletableFuture.runAsync(() -> fx.asSuperuser(ctx -> ctx.update(CATALOG_COLLECTIONS)
+                            .set(CATALOG_COLLECTIONS.NAME, c)
+                            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(fx.tenant)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(x)).execute())).join();
+                    }
+                }, null);
+                try {
+                    repo.upsertChunks(fx.tenant, b, java.util.List.of(hex), java.util.List.of("guard-less rename follow text"),
+                        java.util.List.of(java.util.Map.<String, Object>of()));   // no ownership guard: the recheck is off
+                } finally {
+                    dev.nexus.service.db.ExpectedCollectionIds.clear();
+                }
+                return null;
+            });
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
+            while (waitingAdvisory() < 1) {
+                if (writer.isDone() || System.nanoTime() > deadline) {
+                    throw new AssertionError("the guard-less upsert never waited for the new label's gate (done: " + writer.isDone()
+                        + "): it takes no gate when no ownership guard is set");
+                }
+                LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(5));
+            }
+            assertThat(renamed.get()).as("setup: the row was renamed in the window").isTrue();
+            try (Connection probe = fx.pg.createConnection("")) {
+                probe.setAutoCommit(false);
+                try {
+                    DSL.using(probe, SQLDialect.POSTGRES).select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                        .where(CATALOG_COLLECTIONS.TENANT_ID.eq(fx.tenant)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(x))
+                        .forUpdate().noWait().fetch();
+                } catch (DataAccessException e) {
+                    throw new AssertionError("the guard-less upsert waits for the new label's gate while holding the registry row (" + e.sqlState() + ")", e);
+                } finally {
+                    probe.rollback();
+                }
+            }
+            gateHolder.rollback();
+        }
+        writer.get(120, TimeUnit.SECONDS);
+        byte[] chash = java.util.HexFormat.of().parseHex(hex);
+        java.util.List<String> labels = fx.asSuperuser(ctx -> ctx.select(CHUNKS.COLLECTION).from(CHUNKS)
+            .where(CHUNKS.COLLECTION_ID.eq(x)).and(CHUNKS.CHASH.eq(chash)).fetch(CHUNKS.COLLECTION));
+        assertThat(labels).as("the chunk landed under the row's current label").containsExactly(c);
+    }
 }
