@@ -9939,6 +9939,18 @@ public final class CatalogRepository {
             return;
         }
         String[] tuple = new String[5];
+        try {
+            upsertCollectionTxn(tenant, coll, clientRoute, tuple);
+        } finally {
+            // Post-commit (nexus-afkjy): the SET arm of the transaction may have changed the row's content_type, owner or tombstone, and
+            // CollectionRegistry.require answers a cached KNOWN entry with no read, so the next require would see the old row
+            // until restart. Same post-commit discipline as delete, rename and supersede; see CollectionRegistry.evict. In a
+            // finally (row 15 addendum): a COMMIT that reached the client as an exception may still have been applied.
+            CollectionRegistry.evict(tenant, s(coll, "name"));
+        }
+    }
+
+    private void upsertCollectionTxn(String tenant, Map<String, Object> coll, boolean clientRoute, String[] tuple) {
         CollectionMint.refusingRace(tenantScope, tenant, () -> tenantScope.withTenant(tenant, ctx -> {
             String name           = s(coll, "name");
             // RDR-229 P3.6: the two clauses the database itself enforces (a NUL, a lone surrogate) stand BEFORE the
@@ -10157,10 +10169,6 @@ public final class CatalogRepository {
             }
             return null;
         }), CollectionMint.recheckOf(tenant, tuple));
-        // Post-commit (nexus-afkjy): the SET arm above may have changed the row's content_type, owner or tombstone, and
-        // CollectionRegistry.require answers a cached KNOWN entry with no read, so the next require would see the old row
-        // until restart. Same post-commit discipline as delete, rename and supersede; see CollectionRegistry.evict.
-        CollectionRegistry.evict(tenant, s(coll, "name"));
     }
 
     /**
@@ -10414,22 +10422,31 @@ public final class CatalogRepository {
     }
 
     private Map<String, Integer> deleteCollection(String tenant, String name, boolean keepQuarantine, Long onlyId) {
-        DeleteOutcome outcome = deleteCollectionTxn(tenant, name, keepQuarantine, onlyId);
-        Map<String, Integer> counts = outcome.counts();
-        // A quarantine sibling this delete emptied and unregistered: same post-commit eviction as the name itself.
-        for (String sibling : outcome.unregisteredSiblings()) {
-            CollectionRegistry.evict(tenant, sibling);
+        DeleteOutcome outcome = null;
+        try {
+            outcome = deleteCollectionTxn(tenant, name, keepQuarantine, onlyId);
+        } finally {
+            // Post-commit (nexus-h8rf6 wave review): the registry row is gone; a stale
+            // CollectionRegistry entry would make later writers silently skip
+            // re-registration if the name is reused. Same post-commit discipline as
+            // markKnown — see CollectionRegistry.evict. In a finally (row 15 addendum): a COMMIT that reached the client as an
+            // exception may still have been applied. The siblings and predecessors it removed are known only from an
+            // outcome that came back, so a delete that threw empties this tenant's cache instead (evicting is always safe).
+            if (outcome == null) {
+                CollectionRegistry.shared().evictTenant(tenant);
+            } else {
+                // A quarantine sibling this delete emptied and unregistered: same post-commit eviction as the name itself.
+                for (String sibling : outcome.unregisteredSiblings()) {
+                    CollectionRegistry.evict(tenant, sibling);
+                }
+                // Retired predecessors of the deleted name (nexus-s80u9): their rows are gone too.
+                for (String retired : outcome.retiredRemoved()) {
+                    CollectionRegistry.evict(tenant, retired);
+                }
+                CollectionRegistry.evict(tenant, name);
+            }
         }
-        // Retired predecessors of the deleted name (nexus-s80u9): their rows are gone too.
-        for (String retired : outcome.retiredRemoved()) {
-            CollectionRegistry.evict(tenant, retired);
-        }
-        // Post-commit (nexus-h8rf6 wave review): the registry row is gone; a stale
-        // CollectionRegistry entry would make later writers silently skip
-        // re-registration if the name is reused. Same post-commit discipline as
-        // markKnown — see CollectionRegistry.evict.
-        CollectionRegistry.evict(tenant, name);
-        return counts;
+        return outcome.counts();
     }
 
     /**
@@ -10472,9 +10489,13 @@ public final class CatalogRepository {
         // step 6), which fires vectors-021-3's chunk-locking trigger; whole transaction retried on 40P01.
         // `counts` is built inside the lambda, so each attempt starts from an empty map.
         return manifestWriteTxn(tenant, "catalog.deleteCollection " + name, ctx -> {
+            // RDR-229 P3.5a, row 16: a delete by id reads and locks the row of that id first (the registry row before any child row,
+            // the canonical lock order), in this transaction, so a row that is gone, retired, or no longer bears `name` since the
+            // verdict read is refused (404 / 409) before anything is purged, and the purge below is of THAT row's id.
+            Long lockedId = onlyId == null ? null : CollectionRefusals.requireSourceById(ctx, tenant, onlyId, name).collectionId();
             deferManifestChunkFk(ctx);
             // RDR-229 P3.5a: before gate 3 the name columns scope the purge; from it the row's id does, and a label with no row purges nothing
-            CollectionPurgeScope scope = CollectionPurgeScope.resolve(ctx, gate3.holds(), tenant, name, onlyId);
+            CollectionPurgeScope scope = CollectionPurgeScope.resolve(ctx, gate3.holds(), tenant, name, lockedId);
 
             // RDR-235 (nexus-5r2sc.2.6): the collection's unconsumed aspects tasks (available, claimed and dead)
             // go with it, in this transaction. FIRST statement of the purge: the tuple row locks come before the
@@ -10614,7 +10635,7 @@ public final class CatalogRepository {
             // 7. registry row LAST (RESTRICT children are now gone), with the retired predecessors of step 8, in one
             //    delete. RDR-229 P3.1 (R7): a survivor that still names one of these rows (a predecessor that holds
             //    content, or one kept under keepQuarantine) is repaired first, in this transaction.
-            Long rowId = scope.scopedById() ? scope.id() : onlyId;   // the one row to delete, when the delete knows it
+            Long rowId = scope.scopedById() ? scope.id() : lockedId;   // the one row to delete, when the delete knows it
             List<String> registryRows = new ArrayList<>(retiredRemoved.size() + 1);
             registryRows.add(name);
             registryRows.addAll(retiredRemoved);
@@ -10745,6 +10766,17 @@ public final class CatalogRepository {
      * nexus-gaou3 409). Inside, it takes the rename lock shared and both rows FOR UPDATE ({@link CollectionTombstones#supersede}).
      */
     public int supersedeCollection(String tenant, String name, String supersededBy, String supersededAt) {
+        return supersedeCollection(tenant, name, null, supersededBy, supersededAt);
+    }
+
+    /**
+     * {@link #supersedeCollection(String, String, String, String)} for a request that named its source by {@code collection_id}
+     * ({@code requestedSourceId}; null for a request by label): inside the verb's own transaction the source is locked and read by
+     * that id, and a row that is gone (404 {@code unknown_collection_id}), retired (409 {@code collection_superseded}) or no longer
+     * bearing {@code name} (409 {@code collection_id_mismatch}) is refused before anything is written ({@link CollectionRefusals}).
+     * The route boundary resolved the id to {@code name} in an earlier read, and the label can have been taken by another row since.
+     */
+    public int supersedeCollection(String tenant, String name, Long requestedSourceId, String supersededBy, String supersededAt) {
         // superseded_at is timestamptz NULL after catalog-002-1-temporal-typing;
         // nexus-xtmtf: typed OffsetDateTime bind (blank -> NULL), no cast.
         Field<java.time.OffsetDateTime> stampedAt = supersededAt == null || supersededAt.isBlank()
@@ -10752,24 +10784,29 @@ public final class CatalogRepository {
             : DSL.val(tsOrNull(supersededAt));
         // RDR-229 P3.1 (R7): the statement, its CAS conjunct and the successor-id resolution live in
         // CollectionTombstones.supersede; an unregistered target is refused there with UnregisteredCollectionException.
-        int updated = DeadlockRetry.run("catalog.supersedeCollection " + name, () -> tenantScope.withTenant(tenant, ctx -> {
-            int n = CollectionTombstones.supersede(ctx, tenant, name, supersededBy, stampedAt);
-            // catalog-051-2 (RDR-229): the retired row no longer holds its tuple, so a slug-owned successor whose documents
-            // name that owner (a re-home moves them while the source stays live) can take it now. The same no-op write
-            // as renameCollectionTxn's: it fires catalog-044's BEFORE trigger on UPDATE OF owner_id.
-            if (n > 0 && supersededBy != null && !supersededBy.isEmpty()) {
-                rederiveOwner(ctx, tenant, supersededBy);
+        int updated = 0;
+        try {
+            updated = DeadlockRetry.run("catalog.supersedeCollection " + name, () -> tenantScope.withTenant(tenant, ctx -> {
+                int n = CollectionTombstones.supersede(ctx, tenant, name, requestedSourceId, supersededBy, stampedAt);
+                // catalog-051-2 (RDR-229): the retired row no longer holds its tuple, so a slug-owned successor whose documents
+                // name that owner (a re-home moves them while the source stays live) can take it now. The same no-op write
+                // as renameCollectionTxn's: it fires catalog-044's BEFORE trigger on UPDATE OF owner_id.
+                if (n > 0 && supersededBy != null && !supersededBy.isEmpty()) {
+                    rederiveOwner(ctx, tenant, supersededBy);
+                }
+                return n;
+            }));
+        } finally {
+            // nexus-mp8ys: post-commit, like every evict (see CollectionRegistry.evict), and in a finally (row 15 addendum): a COMMIT
+            // that reached the client as an exception may still have been applied, and evicting is always safe. The cached row
+            // names no successor; left in place it would let an implicit chunk write to the retired
+            // name pass the registry check, which is the stranding this refusal exists to stop. The
+            // next write re-reads the row, finds the successor and is refused.
+            CollectionRegistry.evict(tenant, name);
+            // nexus-afkjy: rederiveOwner above may have changed the successor's owner_id, which its cached row also holds.
+            if (supersededBy != null && !supersededBy.isEmpty()) {
+                CollectionRegistry.evict(tenant, supersededBy);
             }
-            return n;
-        }));
-        // nexus-mp8ys: post-commit, like every evict (see CollectionRegistry.evict). The cached row
-        // names no successor; left in place it would let an implicit chunk write to the retired
-        // name pass the registry check, which is the stranding this refusal exists to stop. The
-        // next write re-reads the row, finds the successor and is refused.
-        CollectionRegistry.evict(tenant, name);
-        // nexus-afkjy: rederiveOwner above may have changed the successor's owner_id, which its cached row also holds.
-        if (updated > 0 && supersededBy != null && !supersededBy.isEmpty()) {
-            CollectionRegistry.evict(tenant, supersededBy);
         }
         return updated;
     }
@@ -11010,6 +11047,20 @@ public final class CatalogRepository {
     public RenameOutcome renameCollectionOutcome(String tenant, String oldName, String newName,
                                                  String expectedTargetSupersededBy, String newContentType,
                                                  String newOwnerId, String newNameEmbeddingModel) {
+        return renameCollectionOutcome(tenant, oldName, newName, null, expectedTargetSupersededBy, newContentType, newOwnerId,
+            newNameEmbeddingModel);
+    }
+
+    /**
+     * {@link #renameCollectionOutcome(String, String, String, String, String, String, String)} for a request that named its source by
+     * {@code collection_id} ({@code requestedSourceId}; null for a request by label): inside the rename's own transaction the source
+     * is locked and read by that id, and a row that is gone (404 {@code unknown_collection_id}), retired (409
+     * {@code collection_superseded}) or no longer bearing {@code oldName} (409 {@code collection_id_mismatch}) is refused before
+     * anything is written ({@link CollectionRefusals}); the route boundary resolved the id to {@code oldName} in an earlier read.
+     */
+    public RenameOutcome renameCollectionOutcome(String tenant, String oldName, String newName, Long requestedSourceId,
+                                                 String expectedTargetSupersededBy, String newContentType,
+                                                 String newOwnerId, String newNameEmbeddingModel) {
         // nexus-wbfpw.71: a rename re-homes chunks and registry rows with no audit row, so it is refused on a
         // quarantine collection, as source or as target (the sanctioned verbs are restore and expiry).
         // RDR-229 P2.5: each end is judged by its row (registry cache, else one single-column read); an end with
@@ -11018,9 +11069,19 @@ public final class CatalogRepository {
         QuarantineOrigin.requireNotQuarantine(tenantScope, tenant, "rename", newName);
         String[] tuple = new String[5]; RenameOutcome[] oneRow = new RenameOutcome[1];   // oneRow: set when P3.7's body ran
         String[] epoch = new String[1];   // baton's CatalogEpoch, read inside the transaction's tenant scope
-        Map<String, Integer> counts = CollectionMint.refusingRace(tenantScope, tenant,
-            () -> renameCollectionTxn(tenant, oldName, newName, expectedTargetSupersededBy, newContentType, newOwnerId,
-                newNameEmbeddingModel, tuple, epoch, oneRow), CollectionMint.recheckOf(tenant, tuple));
+        Map<String, Integer> counts;
+        try {
+            counts = CollectionMint.refusingRace(tenantScope, tenant,
+                () -> renameCollectionTxn(tenant, oldName, newName, requestedSourceId, expectedTargetSupersededBy, newContentType,
+                    newOwnerId, newNameEmbeddingModel, tuple, epoch, oneRow), CollectionMint.recheckOf(tenant, tuple));
+        } catch (RuntimeException | Error e) {
+            // Row 15 addendum: a COMMIT that reached the client as an exception may still have been applied (PostgreSQL applied it,
+            // the client saw an error), so both labels leave the cache here as they do after a return; evicting is always safe.
+            // (The one-row regime's own evict, RenameGuard#committedOneRow, runs only on a return.)
+            CollectionRegistry.evict(tenant, oldName);
+            CollectionRegistry.evict(tenant, newName);
+            throw e;
+        }
         if (oneRow[0] != null) return renameGuard.committedOneRow(tenant, oldName, newName, oneRow[0]);   // the path taken, not a count key
         long renamedId = 0;
         // Post-commit (nexus-h8rf6 wave review): the rename RETIRES the old registry row —
@@ -11514,7 +11575,7 @@ public final class CatalogRepository {
     }
 
     private Map<String, Integer> renameCollectionTxn(String tenant, String oldName, String newName,
-                                                        String expectedTargetSupersededBy,
+                                                        Long requestedSourceId, String expectedTargetSupersededBy,
                                                         String newContentTypeOrNull, String newOwnerIdOrNull,
                                                         String newNameEmbeddingModelOrNull, String[] tupleOut,
                                                         String[] epochOut, RenameOutcome[] oneRowOut) {
@@ -11680,7 +11741,7 @@ public final class CatalogRepository {
             //    onto it. X goes first: Y has X's live tuple, which the partial UNIQUE index refuses while X holds it, and
             //    P3.1's superseded_by_id CHECK needs Y's id before Y has a row. The whole step, the revive of a retired Y
             //    (nexus-cecqy, nexus-v6za0) and the order are CollectionRename's.
-            CollectionRename.retireAndRegister(ctx, tenant, oldName, newName, newContentType, newOwnerId, counts, tupleOut);
+            CollectionRename.retireAndRegister(ctx, tenant, oldName, newName, requestedSourceId, newContentType, newOwnerId, counts, tupleOut);
 
             // 2. Re-home every child denorm-collection table X->Y (Y now exists, FK satisfied).
             //    Driven by COLLECTION_SCOPED_TABLES so this loop and collectionIsEmpty can

@@ -27,11 +27,12 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
  * on the same single row; a test builds the state by dropping the keys as the superuser.
  * <i>It runs as two transactions:</i> the route asks {@link #verdict} first, one read transaction that decides (delete, unknown
  * id, ambiguous label), and then calls the repository, whose purge runs in its own transaction (retried whole on a deadlock). A
- * row can change between the two: an id deleted in the gap purges nothing and answers the 200 of an already-empty collection, and
- * a second live row registered under the label in the gap is not seen by the verdict. Neither removes a registry row the request
- * did not name, because the purge transaction deletes the registry row by the named id (and, from gate 3, scopes the purge by
- * it). Closing the gap would put the verdict inside the purge transaction; P4.1's live-label index makes that unnecessary for the
- * ambiguity, and nothing needs it for the id.
+ * row can change between the two, so a delete by id reads and locks the row of that id {@code FOR UPDATE} first in the purge
+ * transaction ({@link CollectionRefusals#requireSourceById}, row 16): an id deleted in the gap is a 404
+ * {@code unknown_collection_id}, one retired in the gap a 409 {@code collection_superseded}, one whose label another row took a 409
+ * {@code collection_id_mismatch}, and nothing is purged in any of them. The purge is then of that id, and the registry row it
+ * removes is that id's, so a request never removes a row it did not name. A second live row registered under the label in the gap
+ * is not seen by the verdict; P4.1's live-label index makes that unnecessary for the ambiguity.
  *
  * <p>A label is read by its rows, never through {@link CollectionRegistry#require}, which would raise on a label that two live rows
  * hold; an id is read as the row of that id and that label together, so an id that does not belong to the label the request

@@ -582,8 +582,8 @@ public final class CollectionSelectorFilter extends Filter {
         }
         long id = integer(slot, idNode);
         node.put(slot.labelField(), resolver.resolve(id).label());
-        if (route.passesResolvedId()) {
-            node.put(RESOLVED_ID, id);
+        if (route.passesResolvedId() && slot == route.slots().get(0)) {
+            node.put(RESOLVED_ID, id);   // the id of the route's source (its first slot): a supersede's superseded_by_id is not it
         }
         return true;
     }

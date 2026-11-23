@@ -2619,6 +2619,11 @@ public final class CatalogHandler implements HttpHandler {
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("updated", updated)));
     }
 
+    /** The id the route boundary resolved the request's source to ({@link CollectionSelectorFilter#RESOLVED_ID}), or null for a request by label. */
+    private static Long resolvedSourceId(Map<String, Object> body) {
+        return body.get(CollectionSelectorFilter.RESOLVED_ID) instanceof Number n ? n.longValue() : null;
+    }
+
     private void handleCollectionSupersede(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
@@ -2711,7 +2716,9 @@ public final class CatalogHandler implements HttpHandler {
             // instant every time the operation is retried.
             HttpUtil.send(exchange, 200, "{\"updated\":1}"); return;
         }
-        int updated = repo.supersedeCollection(tenant, name, supersededBy, supersededAt != null ? supersededAt : "");
+        // row 16: a request by collection_id has its source read and locked by that id in the verb's own transaction (the route boundary
+        // left the id it resolved in the body)
+        int updated = repo.supersedeCollection(tenant, name, resolvedSourceId(body), supersededBy, supersededAt != null ? supersededAt : "");
         if (updated == 0) {
             // The UPDATE carries guard 2's precondition in its WHERE, so zero rows here
             // means the row we just read has already changed. That precondition rules out
@@ -2984,7 +2991,7 @@ public final class CatalogHandler implements HttpHandler {
         // whenever the target turns out live or absent anyway; it only compares when the
         // target is STILL a non-live tombstone at commit time, same as this handler's own
         // identityOk/empty gate above.
-        var renamed = repo.renameCollectionOutcome(tenant, oldName, newName, tgtSuperseded,
+        var renamed = repo.renameCollectionOutcome(tenant, oldName, newName, resolvedSourceId(body), tgtSuperseded,
             newContentType, newOwnerId, newNameEmbeddingModel);
         // RDR-229 P3.5a: the renamed row, for the client to rebind from (residual S-7): the new label, its id and whether
         // ids survive a rename here, with the catalog epoch an id cache keys on. The key is omitted, never null, when the

@@ -51,23 +51,39 @@ public final class CollectionTombstones {
      * {@link RenameBusyException} says so. A wait over {@link RegistryLockWait#SLOW_MS} is logged with its time.
      */
     static void lockRows(DSLContext ctx, String tenant, String... names) {
+        lockRowsWhere(ctx, tenant, CATALOG_COLLECTIONS.NAME.in(names), String.join(",", names));
+    }
+
+    /**
+     * {@link #lockRows(DSLContext, String, String...)} with the row of {@code sourceId} in the set (RDR-229 P3.5a, row 16): a verb that
+     * was asked about a collection by {@code collection_id} takes that row in the same ordered, bounded statement as the others, so the
+     * lock order and the {@link RenameBusyException} bound are the label form's. The row of the id need not bear any of {@code names}
+     * (it may have been freed and re-registered since the route boundary read it): the caller then reads it
+     * ({@link CollectionRefusals#requireSourceById}, a plain second {@code FOR UPDATE} on a row it holds) and refuses.
+     */
+    static void lockRows(DSLContext ctx, String tenant, long sourceId, String... names) {
+        lockRowsWhere(ctx, tenant, CATALOG_COLLECTIONS.COLLECTION_ID.eq(sourceId).or(CATALOG_COLLECTIONS.NAME.in(names)),
+            "#" + sourceId + (names.length == 0 ? "" : "," + String.join(",", names)));
+    }
+
+    private static void lockRowsWhere(DSLContext ctx, String tenant, org.jooq.Condition which, String described) {
         WriteRegistryMemo.exempt(ctx, "a verb that locks the registry rows FOR UPDATE");
         String previous = ctx.select(DSL.function("current_setting", String.class, DSL.val("lock_timeout"))).fetchOne(0, String.class);
         ctx.select(DSL.function("set_config", String.class, DSL.val("lock_timeout"), DSL.val(rowLockTimeoutMs), DSL.val(true))).fetch();
         long started = System.nanoTime();
         try {
             ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
-                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.in(names))
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(which)
                 .orderBy(CATALOG_COLLECTIONS.COLLECTION_ID)
                 .forUpdate().fetch();
         } catch (DataAccessException e) {
             if ("55P03".equals(e.sqlState())) {
-                RegistryLockWait.logIfSlow("verb", tenant, String.join(",", names), (System.nanoTime() - started) / 1_000_000, "timed_out");
+                RegistryLockWait.logIfSlow("verb", tenant, described, (System.nanoTime() - started) / 1_000_000, "timed_out");
                 throw new RenameBusyException(rowLockTimeoutMs + " ms");
             }
             throw e;
         }
-        RegistryLockWait.logIfSlow("verb", tenant, String.join(",", names), (System.nanoTime() - started) / 1_000_000, "locked");
+        RegistryLockWait.logIfSlow("verb", tenant, described, (System.nanoTime() - started) / 1_000_000, "locked");
         ctx.select(DSL.function("set_config", String.class, DSL.val("lock_timeout"), DSL.val(previous), DSL.val(true))).fetch();
     }
 
@@ -83,10 +99,26 @@ public final class CollectionTombstones {
      * @return the number of rows updated (0 means no {@code (tenant, name)} row, or a different target already set)
      */
     static int supersede(DSLContext ctx, String tenant, String name, String supersededBy, Field<OffsetDateTime> stampedAt) {
+        return supersede(ctx, tenant, name, null, supersededBy, stampedAt);
+    }
+
+    /**
+     * {@link #supersede(DSLContext, String, String, String, Field)} for a request that named the source by {@code collection_id}
+     * ({@code requestedSourceId}, null for a request by label): the source row of that id is locked in the same ordered statement as the
+     * others and read by id, and a row that is gone, retired, or no longer bears {@code name} is refused
+     * ({@link CollectionRefusals#requireSourceById}) before anything is written.
+     */
+    static int supersede(DSLContext ctx, String tenant, String name, Long requestedSourceId, String supersededBy,
+                         Field<OffsetDateTime> stampedAt) {
         // The canonical lock order (RenameGuard#runRename), steps 1 and 3: this verb takes no sweep gate. The successor's row too, so a
         // delete of the successor between the target check and the UPDATE cannot leave the CHECK a successor that is gone (23514).
         RenameLatchLock.shared(ctx);
-        lockRows(ctx, tenant, name, supersededBy);
+        if (requestedSourceId == null) {
+            lockRows(ctx, tenant, name, supersededBy);
+        } else {
+            lockRows(ctx, tenant, requestedSourceId, name, supersededBy);
+            CollectionRefusals.requireSourceById(ctx, tenant, requestedSourceId, name);
+        }
         CollectionIds.require(ctx, tenant, supersededBy);
         return casSupersede(ctx, tenant, name, supersededBy, CollectionIds.idOf(tenant, supersededBy), stampedAt);
     }

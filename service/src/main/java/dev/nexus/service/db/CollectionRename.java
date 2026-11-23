@@ -27,7 +27,8 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
  * <li>With the index absent, the advisory locks of X's tuple and Y's tuple, in the sorted order the batch paths take theirs
  *     ({@link CollectionTupleLock#lock}), before either row is touched: a registration takes a tuple's lock and then
  *     its row, so a rename that held X's row and then waited for a tuple's lock could meet it head on.</li>
- * <li>Both registry rows, X's and Y's when it exists, {@code SELECT ... FOR UPDATE} in {@code collection_id} order
+ * <li>Both registry rows, X's and Y's when it exists (and the row of the {@code collection_id} the request named X by, if it did:
+ *     {@link CollectionRefusals#requireSourceById} then refuses a row that is gone, retired or no longer X's), {@code SELECT ... FOR UPDATE} in {@code collection_id} order
  *     ({@link CollectionTombstones#lockRows}, bounded by its timeout: {@link RenameBusyException}), before the first row write. The
  *     wait can be long (a writer in flight on X), so what the steps above read is read again after it: X's and Y's tuples, Y's
  *     liveness and the URIs X's documents would take; a change is the named 409 ({@link CatalogRepository.CollectionMergeRefused} or
@@ -63,7 +64,7 @@ final class CollectionRename {
      * @param newContentType the new row's content type: the caller's, else X's
      * @param newOwnerId     the new row's owner: the caller's, else X's
      */
-    static void retireAndRegister(DSLContext ctx, String tenant, String oldName, String newName,
+    static void retireAndRegister(DSLContext ctx, String tenant, String oldName, String newName, Long requestedSourceId,
                                   Field<String> newContentType, Field<String> newOwnerId, Map<String, Integer> counts,
                                   String[] tuple) {
         Record4<String, String, String, String> own = ownTuple(ctx, tenant, oldName);
@@ -74,7 +75,15 @@ final class CollectionRename {
                 new CollectionTupleLock.Tuple(tenant, own.value1(), own.value2(), own.value3(), own.value4()),
                 new CollectionTupleLock.Tuple(tenant, source.value1(), source.value2(), source.value3(), source.value4())));
         }
-        CollectionTombstones.lockRows(ctx, tenant, oldName, newName);   // canonical lock order (RenameGuard#runRename): after the tuple locks above, before any row write
+        // canonical lock order (RenameGuard#runRename): after the tuple locks above, before any row write. A request by collection_id
+        // takes its source row in the same ordered statement, then reads it by that id (row 16): a row that is gone, retired, or no
+        // longer bears X's label is the typed refusal, ahead of the recheck below, which would otherwise read the label's new holder.
+        if (requestedSourceId == null) {
+            CollectionTombstones.lockRows(ctx, tenant, oldName, newName);
+        } else {
+            CollectionTombstones.lockRows(ctx, tenant, requestedSourceId, oldName, newName);
+            CollectionRefusals.requireSourceById(ctx, tenant, requestedSourceId, oldName);
+        }
         recheckAfterLock(ctx, tenant, oldName, newName, newContentType, newOwnerId, own, source);
         long successorId = successorId(ctx, tenant, newName);
         int retired = CollectionTombstones.supersede(ctx, tenant, oldName, newName, successorId);
