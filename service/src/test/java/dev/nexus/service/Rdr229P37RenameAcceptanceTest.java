@@ -261,6 +261,33 @@ class Rdr229P37RenameAcceptanceTest {
         assertThat(env.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, w.tenant(), w.a()))).as("the source is still registered").isNotNull();
     }
 
+    /** (h) The aspect-task rewrite in the one-row regime (one claimed and one available task): after the rename the tasks name B and none names A. */
+    @Test
+    void legH_theQueuedAspectTasksNameTheNewLabelAfterAOneRowRename() throws Exception {
+        int n = SEQ.incrementAndGet();
+        String tenant = "t-p37acc-h" + n;
+        String token = env.newTenant(tenant);
+        String a = label("p37acch" + n + "a", 1);
+        String b = label("p37acch" + n + "b", 1);
+        env.su(ctx -> {
+            Rdr229RenameSeeds.full(ctx, tenant, a);
+            return null;
+        });
+        long id = env.su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, a));
+        var tuples = Rdr229RenameChecks.tuples(new dev.nexus.service.db.TenantScope(env.ds));
+        tuples.out(tenant, "aspects", Map.of("queue", "aspects"), Map.of(), Rdr229RenameChecks.taskBody(a, "t.1"), "t.1", null);
+        tuples.inp(tenant, "aspects", Map.of("queue", "aspects"), "worker-1", 600L).orElseThrow();   // t.1 is claimed
+        tuples.out(tenant, "aspects", Map.of("queue", "aspects"), Map.of(), Rdr229RenameChecks.taskBody(a, "t.2"), "t.2", null);   // t.2 is available
+        assertThat(env.<Integer>su(ctx -> dev.nexus.service.db.AspectTaskRefs.countNaming(ctx, tenant, a))).as("non-vacuity: two tasks name A").isEqualTo(2);
+
+        var r = env.callJson("POST", "/v1/catalog/collections/rename", token, "{\"old_name\":\"" + a + "\",\"new_name\":\"" + b + "\"}");
+
+        assertThat(r.statusCode()).as("the rename: " + r.body()).isEqualTo(200);
+        assertThat(env.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, b))).as("non-vacuity: one-row").isEqualTo(id);
+        assertThat(env.<Integer>su(ctx -> dev.nexus.service.db.AspectTaskRefs.countNaming(ctx, tenant, b))).as("both tasks, the claimed and the available, name B").isEqualTo(2);
+        assertThat(env.<Integer>su(ctx -> dev.nexus.service.db.AspectTaskRefs.countNaming(ctx, tenant, a))).as("none names A").isZero();
+    }
+
     /** (b) A manifest write referencing an existing chunk after the rename commits, and the chunk's orphan row is cleared. */
     @Test
     void legB_aManifestWriteOfAnExistingChunkCommits_andClearsItsOrphanRow() throws Exception {
