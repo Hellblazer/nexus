@@ -867,8 +867,16 @@ class CompletionCheckIntegrationTest {
         ctx.deleteFrom(moves).where(label.eq(NameKeyDropMove.LABEL)).execute();
         try {
             swap();
-            ctx.execute("UPDATE pg_catalog.pg_constraint SET convalidated = false WHERE conrelid = 'nexus.chunks'::pg_catalog.regclass AND conname = ?",
-                Rdr229SwapMove.COMPOSITE_CONSTRAINT);
+            var con = DSL.table(DSL.name("pg_catalog", "pg_constraint"));
+            var rel = DSL.table(DSL.name("pg_catalog", "pg_class"));
+            var ns = DSL.table(DSL.name("pg_catalog", "pg_namespace"));
+            var chunksOid = DSL.select(DSL.field(DSL.name("pg_class", "oid"))).from(rel).join(ns)
+                .on(DSL.field(DSL.name("pg_namespace", "oid")).eq(DSL.field(DSL.name("pg_class", "relnamespace"))))
+                .where(DSL.field(DSL.name("pg_class", "relname"), String.class).eq("chunks"))
+                .and(DSL.field(DSL.name("pg_namespace", "nspname"), String.class).eq("nexus"));
+            assertThat(ctx.update(con).set(DSL.field(DSL.name("convalidated"), Boolean.class), false)
+                .where(DSL.field(DSL.name("conname"), String.class).eq(Rdr229SwapMove.COMPOSITE_CONSTRAINT))
+                .and(DSL.field(DSL.name("conrelid")).in(chunksOid)).execute()).as("non-vacuity: the key's catalog row is marked NOT VALID").isEqualTo(1);
             var notValid = CompletionCheck.evaluate(ctx, rs, everyIndexValid(), CompletionCheck.DIRECT, List.of(), CompletionCheck.latchOnCtx("engine-p37"));
             assertThat(state(notValid, CHUNKS_SWAP).why()).contains(Rdr229SwapMove.COMPOSITE_CONSTRAINT).contains("NOT VALID");
             assertThat(notValid.gate3Latched()).as("the chunks id key is NOT VALID: no latch").isFalse();
@@ -883,8 +891,10 @@ class CompletionCheckIntegrationTest {
             assertThat(ctx.fetchCount(moves, label.eq(NameKeyDropMove.LABEL))).as("no name-key drop while the id key is missing").isZero();
 
             // the key again, as the swap adds it (validated: no NOT VALID on the partitioned table)
-            ctx.execute("ALTER TABLE nexus.chunks ADD CONSTRAINT " + Rdr229SwapMove.COMPOSITE_CONSTRAINT + " FOREIGN KEY (tenant_id, collection_id, embedding_model)"
-                + " REFERENCES nexus.catalog_collections (tenant_id, collection_id, embedding_model) ON DELETE RESTRICT");
+            ctx.alterTable(DSL.table(DSL.name("nexus", "chunks"))).add(DSL.constraint(DSL.name(Rdr229SwapMove.COMPOSITE_CONSTRAINT))
+                .foreignKey(DSL.name("tenant_id"), DSL.name("collection_id"), DSL.name("embedding_model"))
+                .references(DSL.name("nexus", "catalog_collections"), DSL.name("tenant_id"), DSL.name("collection_id"), DSL.name("embedding_model"))
+                .onDeleteRestrict()).execute();
             var held = CompletionCheck.evaluate(ctx, rs, everyIndexValid(), CompletionCheck.DIRECT, List.of(), CompletionCheck.latchOnCtx("engine-p37"));
             assertThat(held.gate2()).as("non-vacuity: with the key validated gate 2 holds").isTrue();
             assertThat(held.gate3Latched()).as("and gate 3 latches").isTrue();
