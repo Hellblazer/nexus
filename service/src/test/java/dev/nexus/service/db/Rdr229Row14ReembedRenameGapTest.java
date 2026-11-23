@@ -277,7 +277,7 @@ class Rdr229Row14ReembedRenameGapTest {
         assertThat(jobRow(job.jobId()).state()).isEqualTo(ReembedJobRepository.DONE);
     }
 
-    // ── ReembedJobRepository.markRevived, run inside start's transaction ────
+    // ── the earlier job's mark (markRevivedIn), run inside startMarking's transaction ────
 
     @Test
     void startMarking_afterTheEarlierJobsTargetWasRenamedInPlaceAndItsLabelRetaken_marksTheJobOfTheRowById_andNotOneOfTheNewHolder() throws Exception {
@@ -299,6 +299,34 @@ class Rdr229Row14ReembedRenameGapTest {
         assertThat(jobRow(earlier.jobId()).disposition()).isEqualTo("revived");
         assertThat(jobRow(decoy.jobId()).disposition()).as("the new holder's job is not touched").isNull();
         assertThat(jobRow(started.job().jobId()).targetId()).as("the new job goes to the row, not to the label's new holder").isEqualTo(aId);
+    }
+
+    /**
+     * The earlier job's mark is written in the start's own transaction, so a start that loses (here: the source already holds a job in a lock
+     * state, which the source-lock index refuses AFTER the mark) rolls the mark back with it, and the earlier job stays unmarked. The retry,
+     * once the holder is gone, marks it: {@code markRevivedIn} is idempotent and matches the earlier job by the rows' ids.
+     */
+    @Test
+    void startMarking_thatLosesTheStart_leavesTheEarlierJobUnmarked_andTheRetryMarksIt() throws Exception {
+        var repo = new ReembedJobRepository(scope);
+        String a = registered("lossA");
+        String b = registered("lossB");
+        String c = registered("lossC");
+        var earlier = finishedJob(repo, a, b, null);                                  // A -> B, finished
+        var holder = repo.start(T, b, c, null, false, false);                          // B -> C, in a lock state: B is a held source
+
+        assertThatThrownBy(() -> repo.startMarking(T, b, a, null, false, false, true))   // the way back, B -> A: refused at the insert
+            .isInstanceOf(ReembedJobRepository.JobLockHeld.class);
+
+        assertThat(jobRow(earlier.jobId()).disposition()).as("the losing start's mark went with its transaction").isNull();
+
+        repo.applyTransition(T, holder.jobId(), ReembedJobRepository.PLANNED, null, ReembedJobRepository.ABORTED,
+            ReembedJobRepository.Transition.NONE).orElseThrow();
+        var retried = repo.startMarking(T, b, a, null, false, false, true);
+
+        assertThat(retried.revived()).as("the retry marks the earlier job").isPresent();
+        assertThat(retried.revived().orElseThrow().jobId()).isEqualTo(earlier.jobId());
+        assertThat(jobRow(earlier.jobId()).disposition()).isEqualTo("revived");
     }
 
     @Test
