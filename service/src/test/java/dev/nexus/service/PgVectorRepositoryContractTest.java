@@ -153,6 +153,7 @@ class PgVectorRepositoryContractTest {
                 "code__getbyids__voyage-code-3__v1", "code__getoffset__voyage-code-3__v1",
                 "code__getrls__voyage-code-3__v1", "code__getwheregte__voyage-code-3__v1",
                 "code__getwherene__voyage-code-3__v1", "code__getwherenonlive__voyage-code-3__v1",
+                "code__keepid-label__voyage-code-3__v1", "code__keepid-other__voyage-code-3__v1",
                 "code__listpage__voyage-code-3__v1",
                 "code__listrls__voyage-code-3__v1", "code__manifest__voyage-code-3__v1",
                 "code__manifestbroken__voyage-code-3__v1", "code__manifestrls__voyage-code-3__v1",
@@ -1709,7 +1710,6 @@ class PgVectorRepositoryContractTest {
         long labelId;
         try (Connection su = pg.createConnection("")) {
             var dsl = DSL.using(su, SQLDialect.POSTGRES);
-            PgContainerHelper.insertCollection(dsl, TENANT_A, other);
             otherId = dsl.select(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.COLLECTION_ID)
                 .from(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
                 .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A)

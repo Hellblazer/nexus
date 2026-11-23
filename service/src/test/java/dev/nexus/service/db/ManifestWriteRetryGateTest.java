@@ -124,6 +124,9 @@ class ManifestWriteRetryGateTest {
             + " second line) and prose; no DML"),
         Map.entry("ValidateConstraintsHandler", "javadoc naming the table whose CHECK the job validates; no DML"),
         Map.entry("TaxonomyRepository", "a comment naming the idiom; no code reference"),
+        Map.entry("TrashPurgeRegistryReads", "nexus-p2m1x.23: a jOOQ SELECT DISTINCT of the collections of the manifest rows of aged tombstones,"
+            + " to read their registry rows FOR KEY SHARE before purge_trash runs; it writes nothing (purge_trash, the manifest writer,"
+            + " is called from CatalogRepository)"),
         Map.entry("TenantScope", "a table-name list for the VACUUM allowlist; VACUUM ANALYZE is not manifest DML"),
         Map.entry("DeadlockRetry", "class javadoc naming the manifest writers it guards; the belt itself touches no table"),
         Map.entry("CatalogHandler", "comments only"),
