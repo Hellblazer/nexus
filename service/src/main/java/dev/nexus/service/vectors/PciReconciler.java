@@ -457,7 +457,7 @@ public final class PciReconciler {
             PciCanary.Target t = r.target();
             IndexReading reading = ledger.reading(t.leaf(), t.index());
             java.util.Optional<String> sweepOrigin = reading != null ? java.util.Optional.empty()
-                : sweep.anchor(t.model(), t.tenant(), t.collection()).map(PciCatalog.Anchor::origin);
+                : sweep.anchorOf(t).map(PciCatalog.Anchor::origin);   // the family the target measures: an id target reads the id index's anchor
             entries.add(PciMaintenanceStatus.entry(r, reading, sweepOrigin,
                 reindex.redAfterReindex(t.index(), clock.instant())));
         }

@@ -4213,6 +4213,7 @@ hour (`pass_started_at`; there is no pass deadline), and when `builder_state` is
 engine's `sweep_seconds`, 600 when absent); it passes on `ok` and `standby` (a peer holds the builder lock; a standby
 with a fresh read passes `invalid` above zero with a note, since the invalid index may be the peer's build in flight), and
 on `off` with the note "builds disabled by `NX_SEARCH_PCI=0`". `unparsed` is shown, never a warning.
+`valid_id` and `invalid_id` (RDR-229 P3.4, additive) count the id-predicate indexes, which serve once gate 3 has latched and the name indexes retire, when `valid` alone reads 0; the row shows them ("3 valid, 2 by id") and `invalid_id` warns like `invalid`, with the same build-in-flight and standby notes. An older engine omits them and they read 0.
 `reindex_leftover` (nexus-rn1yd) counts the invalid `pci_<hash>_ccnew`/`_ccold` indexes a failed `REINDEX CONCURRENTLY`
 left behind, apart from `unparsed` (an index is counted once). The row shows it ("2 reindex leftover") and warns only
 when `builder_state` is `off`, because then nothing drops it (set `NX_SEARCH_PCI=1`, or `DROP INDEX CONCURRENTLY` it by
