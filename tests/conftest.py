@@ -17,6 +17,7 @@ from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database
 
 from tests import _signal_fence, _storage_touch_guard
+from tests._pytest_args import is_full_suite as _is_full_suite
 
 # nexus-pfuns round 2: enables the `pytester` fixture (pytest's own
 # built-in sandbox-subprocess testing plugin) for
@@ -471,7 +472,8 @@ def _refuse_heavy_laptop_run(config, *, platform: str | None = None, env=None) -
         f"(NX_TEST_T2_SUBSTRATE is not none); several sessions share "
         f"this laptop. {_LOCAL_HEAVY_ENV}=1 runs it here anyway (for a run that needs claude, bd or "
         "this laptop's credentials); NX_TEST_T2_SUBSTRATE=none needs no engine. Run it on chas: "
-        f"lab-remote -c lab-l -- uv run pytest {shlex.join(str(a) for a in args)}",
+        f"lab-remote -c {'lab-l' if _is_full_suite(args) else 'lab-m'} -- "
+        f"uv run pytest {shlex.join(str(a) for a in args)}",
         returncode=75,
     )
 
