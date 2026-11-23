@@ -6,8 +6,11 @@ package dev.nexus.service.db;
  * A verb that retires or revives a registry row (the catalog rename, the collection supersede) could not lock the row within its
  * bound, because writers still held it (RDR-229 P3.5a, linda's Q3 ruling). Raised by {@link CollectionTombstones#lockRows} before the
  * verb has written anything; the transaction rolls back and changes nothing.
- * {@link dev.nexus.service.http.HttpUtil#sendTypedDbError} answers 503 {@code rename_busy} with {@code Retry-After}. Retryable. Writers
- * get no timeout of their own.
+ * {@link dev.nexus.service.http.HttpUtil#sendTypedDbError} answers 503 {@code rename_busy} with {@code Retry-After}. Retryable. A WRITER
+ * has no timeout on a registry row (it waits for a verb's lock, and a statement bound of its route may still end the wait); two of its waits
+ * are bounded: the exclusive sweep gate the gc routes take in Java carries the 2 s bound of the SQL functions it stands in for (SQLSTATE
+ * 55P03, the sweep gate's own message), and a write that follows a rename gives up after {@code RenameFollow}'s bounded number of follows with
+ * this exception ({@link #renamedRepeatedly}): both retryable.
  */
 public final class RenameBusyException extends RuntimeException {
 

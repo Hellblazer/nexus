@@ -3,6 +3,7 @@
 package dev.nexus.service.db;
 
 import org.jooq.DSLContext;
+import org.jooq.impl.DSL;
 
 /**
  * RDR-229 P3.5a (nexus-p2m1x.23, linda's Q2 ruling): the in-order prologue of the four {@code /v1/vectors/gc} writes, which move,
@@ -64,9 +65,14 @@ public final class GcCollectionReads {
      * @throws RenameFollow.Moved when the row whose gate was taken is now named another label ({@link #attempt} runs again)
      */
     public static Labels enter(DSLContext ctx, String tenant, Gate gate, String gateLabel, String origin, String sibling) {
+        // The lock bound the route set (or none), put back after the registry reads: the Java take of the gate carries the function's own
+        // 2 s bound, but the registry rows are read under the writers' rule, no timeout of their own (a verb's FOR UPDATE ends the wait when
+        // it commits; the route's statement bound still applies), so a registry row held by a verb is not answered as a gate that timed out
+        String priorLockTimeout = ctx.fetchValue(DSL.function("current_setting", String.class, DSL.val("lock_timeout")));
         if (gate != Gate.NONE) {
             CatalogRepository.acquireSweepGateExclusiveHeldByGc(ctx, tenant, gateLabel);
         }
+        ctx.select(DSL.function("set_config", String.class, DSL.val("lock_timeout"), DSL.val("0"), DSL.val(true))).fetch();
         boolean siblingById = sibling != null && ExpectedCollectionIds.of(sibling).isPresent();
         CollectionRegistry.requireAllForWrite(ctx, tenant, siblingById ? java.util.List.of(origin, sibling) : java.util.List.of(origin));
         CollectionRow originRow = CollectionRegistry.requireForWrite(ctx, tenant, origin);
@@ -76,6 +82,7 @@ public final class GcCollectionReads {
         } else if (gate == Gate.SIBLING && siblingRow != null) {
             RenameFollow.check(gateLabel, siblingRow);
         }
+        ctx.select(DSL.function("set_config", String.class, DSL.val("lock_timeout"), DSL.val(priorLockTimeout), DSL.val(true))).fetch();
         return new Labels(originRow.label(), siblingRow != null ? siblingRow.label() : sibling);
     }
 

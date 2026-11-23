@@ -31,7 +31,9 @@ public final class CollectionTombstones {
      * {@code RetiringVerbsLiveAtCommitTest#aWriterArrivingWhileTheVerbIsQueuedBehindAHolderJoinsIt_andTheVerbWaitsForBoth}), so the
      * verb waits for every holder, the late ones included, and steady overlapping writers could keep the row from it. A single writer
      * held past the bound ends the wait the same way ({@code aVerbWhoseRowIsHeldPastItsBoundAnswersRenameBusy_andChangesNothing}).
-     * Either way the bound turns the wait into an answer. Writers get no timeout.
+     * Either way the bound turns the wait into an answer. A writer has no timeout on the registry row (only its route's statement bound, where
+     * it has one); the gc routes' Java take of the sweep gate carries the function's own 2 s bound, and a write that follows a rename gives up
+     * after a bounded number of follows ({@link RenameFollow}).
      */
     private static volatile String rowLockTimeoutMs = "10000";
 
