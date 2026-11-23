@@ -9,3 +9,50 @@
 # A NULL id is no collection: an id or both reader never falls back to a '' name (linda 2026-11-20).
 # The two upserts (PgVectorRepository chunks, TaxonomyCentroidRepository taxonomy_centroids, op on_conflict) take the id key as their conflict target from gate 3: disposition id.
 kind	object	name_column	disposition	reason
+java	db/AspectRepository.java document_aspects expr	collection	id	
+java	db/AspectRepository.java document_aspects select	collection	id	
+java	db/AspectRepository.java document_aspects where	collection	both	reads by id from gate 3; the rename arm (renameCollection / rename*Collection) still rewrites by the name it renames, which P3.7's one-row rename removes (a rename is refused from gate 3 until then)
+java	db/AspectRepository.java document_highlights expr	collection	both	the DO UPDATE writes the incoming row's name through to the name column (EXCLUDED.collection) beside the id it re-stamps (EX_HL_COLLECTION_ID); the name column is written until P4.1
+java	db/AspectRepository.java document_highlights select	collection	id	
+java	db/AspectRepository.java document_highlights where	collection	both	reads by id from gate 3; the rename arm (renameCollection / rename*Collection) still rewrites by the name it renames, which P3.7's one-row rename removes (a rename is refused from gate 3 until then)
+java	db/ChashRepository.java catalog_collections select	name	label-kept	the id arm of lookup reports the registry's current label of the chunk's collection_id: the display name, read from the registry row the id names
+java	db/ChashRepository.java catalog_collections where	name	label-kept	renameCollection resolves the user-supplied old and new labels to their registry rows (the embedding models), the rename arm's own name lookup
+java	db/ChashRepository.java catalog_document_chunks where	collection	both	reads by id from gate 3; the rename arm (renameCollection / rename*Collection) still rewrites by the name it renames, which P3.7's one-row rename removes (a rename is refused from gate 3 until then)
+java	db/ChashRepository.java chunks expr	collection	id	
+java	db/ChashRepository.java chunks select	collection	id	the published name probe (PROBE_SQL) stays the name arm; from gate 3 a typed join on collection_id to the registry reports the current label
+java	db/ChashRepository.java chunks where	collection	both	reads by id from gate 3; the rename arm (renameCollection / rename*Collection) still rewrites by the name it renames, which P3.7's one-row rename removes (a rename is refused from gate 3 until then)
+java	db/ReembedJobRepository.java reembed_jobs expr	source_collection	id	
+java	db/ReembedJobRepository.java reembed_jobs expr	target_collection	id	
+java	db/ReembedJobRepository.java reembed_jobs select	source_collection	id	
+java	db/ReembedJobRepository.java reembed_jobs select	target_collection	id	
+java	db/ReembedJobRepository.java reembed_jobs where	source_collection	id	
+java	db/ReembedJobRepository.java reembed_jobs where	target_collection	id	
+java	db/ReembedSourceReader.java catalog_document_chunks expr	collection	id	
+java	db/ReembedSourceReader.java catalog_document_chunks where	collection	id	
+java	db/ReembedSourceReader.java catalog_documents expr	physical_collection	id	
+java	db/ReembedSourceReader.java catalog_documents where	physical_collection	id	
+java	db/ReembedSourceReader.java chunks expr	collection	id	
+java	db/ReembedSourceReader.java chunks where	collection	id	
+java	db/ReembedSourceReader.java document_aspects expr	collection	id	
+java	db/ReembedSourceReader.java document_highlights expr	collection	id	
+java	db/ReembedSourceReader.java topic_assignments expr	source_collection	id	
+java	db/ReembedSourceReader.java topics where	collection	id	
+java	db/RemapRepository.java chash_remap expr	source_collection	id	
+java	db/RemapRepository.java chash_remap expr	target_collection	id	
+java	db/RemapRepository.java chash_remap select	target_collection	id	
+java	db/TaxonomyRepository.java catalog_collections join_on	name	id	
+java	db/TaxonomyRepository.java catalog_collections where	superseded_by	id	
+java	db/TaxonomyRepository.java chunks where	collection	id	
+java	db/TaxonomyRepository.java taxonomy_meta expr	collection	id	
+java	db/TaxonomyRepository.java taxonomy_meta select	collection	id	
+java	db/TaxonomyRepository.java taxonomy_meta where	collection	both	reads by id from gate 3; the rename arm (renameCollection / rename*Collection) still rewrites by the name it renames, which P3.7's one-row rename removes (a rename is refused from gate 3 until then)
+java	db/TaxonomyRepository.java topic_assignments expr	source_collection	id	
+java	db/TaxonomyRepository.java topic_assignments select	source_collection	id	
+java	db/TaxonomyRepository.java topic_assignments where	source_collection	both	reads by id from gate 3; the rename arm (renameCollection / rename*Collection) still rewrites by the name it renames, which P3.7's one-row rename removes (a rename is refused from gate 3 until then)
+java	db/TaxonomyRepository.java topics expr	collection	id	
+java	db/TaxonomyRepository.java topics join_on	collection	id	
+java	db/TaxonomyRepository.java topics select	collection	id	
+java	db/TaxonomyRepository.java topics where	collection	both	reads by id from gate 3; the rename arm (renameCollection / rename*Collection) still rewrites by the name it renames, which P3.7's one-row rename removes (a rename is refused from gate 3 until then)
+java	vectors/ReaperRepository.java catalog_collections select	name	id	
+java	vectors/ReaperRepository.java catalog_collections where	name	id	
+java	vectors/ReaperRepository.java chunks expr	collection	id	
