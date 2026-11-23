@@ -334,6 +334,7 @@ public final class DataMoveWorker implements AutoCloseable {
             labels.add(move.label());
         }
         states.retainOnly(labels, superseded);
+        failures.retainOnly(labels);
         int worked = 0;
         for (DataMove move : open) {
             if (stopped) {
@@ -431,7 +432,7 @@ public final class DataMoveWorker implements AutoCloseable {
             // the row as it is now: another move may have run for hours since the list was read
             Optional<DataMove> current = DataMoveRegistry.reload(ctx, listed.label());
             if (current.isEmpty()) {
-                states.forget(listed.label());
+                forgetMove(listed.label());
                 return;
             }
             move = current.get();
@@ -481,6 +482,12 @@ public final class DataMoveWorker implements AutoCloseable {
             detail, ctx));
     }
 
+    /** The move is no longer open: what the states and the failure handler keep for it goes. */
+    private void forgetMove(String label) {
+        states.forget(label);
+        failures.forget(label);
+    }
+
     /** {@link #fail} for a failure that is already built (the finisher's). */
     private boolean report(FailureHandler.Failure reported) {
         FailureHandler.Failure failure = reported.masked();   // no credential reaches the handler, a log line or a registry column
@@ -503,7 +510,12 @@ public final class DataMoveWorker implements AutoCloseable {
             // a handler that counted no retry leaves the row's count as it was
             int retries = d.retries() >= 0 ? d.retries() : move.transientRetries();
             MoveEvents.blocked(move.label(), stage.name(), failure.tenant(), retries, sqlstate, d.reason());
-            states.blocked(move, d.reason());
+            states.blocked(move, d.reason(), d.page());
+            var page = d.page();
+            if (page != null && page.entered() && states.announce(move.label())) {
+                MoveEvents.needsOperator(move.label(), page.step(), sqlstate, page.boundMs(), retries,
+                    page.terminatesIndexBuilds(), MoveRetryPolicy.pageReason(retries, page.terminatesIndexBuilds()));
+            }
         }
         return false;
     }
@@ -570,7 +582,7 @@ public final class DataMoveWorker implements AutoCloseable {
             () -> stopped));
         switch (result.outcome()) {
             case COMPLETED -> {
-                states.forget(move.label());
+                forgetMove(move.label());
                 notifyCompleted(move);
             }
             case FAILED -> {
@@ -584,7 +596,7 @@ public final class DataMoveWorker implements AutoCloseable {
             case LEFT_OPEN -> states.runsComplete(move);
             case REPORT -> report(result.failure());
             case PAUSED -> states.paused(result.move());
-            case GONE -> states.forget(move.label());
+            case GONE -> forgetMove(move.label());
         }
         if (result.outcome() == MoveFinisher.Outcome.COMPLETED || result.outcome() == MoveFinisher.Outcome.LEFT_OPEN) {
             clearRetries(move, ctx);   // a clean pass resets the count; no failure reached the handler to do it
@@ -652,7 +664,7 @@ public final class DataMoveWorker implements AutoCloseable {
         // a pause, a superseding row, a failure or a completion set since the pass began: no further CALL starts
         Optional<DataMove> current = DataMoveRegistry.reload(ctx, listed.label());
         if (current.isEmpty()) {
-            states.forget(listed.label());
+            forgetMove(listed.label());
             return false;
         }
         DataMove move = current.get();

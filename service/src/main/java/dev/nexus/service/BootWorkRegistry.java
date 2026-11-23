@@ -91,11 +91,17 @@ public final class BootWorkRegistry {
      * @param nextRetryAt   {@code lastAttemptAt} plus the retry policy's backoff for {@code retries}, so a client never
      *                      duplicates the formula
      * @param sqlstate      the SQLSTATE of the last transient error, or null when its text names none
-     * @param terminatesIndexBuilds whether each retry ends in-flight index builds (PCI, leaf, id-unique): a run of lock or
-     *                      statement timeouts at {@code on_complete} on a chunk-family move
+     * @param terminatesIndexBuilds whether an attempt of this move ends in-flight index builds (PCI, leaf, id-unique): the last
+     *                      failure's finisher did, or, when this process has seen no failure of the move, its definition
+     *                      (an {@code on_complete} that names the chunk family) says one would
+     * @param step          the stage of the last failure ({@code on_complete}), or null when this process has seen none
+     * @param boundMs       the bound the last failure missed (the move's lock or statement timeout, by the step), or -1 when
+     *                      the failure was not a timeout or this process has seen none
+     * @param retryInProgress a retry pass is running now, so {@code nextRetryAt} is already past
      */
     public record NeedsOperator(String label, int retries, Instant lastAttemptAt, Instant nextRetryAt, String sqlstate,
-                                int statementTimeoutMs, boolean terminatesIndexBuilds) { }
+                                int statementTimeoutMs, boolean terminatesIndexBuilds, String step, int boundMs,
+                                boolean retryInProgress) { }
 
     private volatile List<NeedsOperator> dataMovesNeedOperator = List.of();
 
