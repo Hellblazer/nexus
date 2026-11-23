@@ -342,7 +342,9 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
                 }
                 lock(c, second, PgContainerHelper.LockMode.ACCESS_EXCLUSIVE);
                 c.commit();
-            } catch (SQLException | InterruptedException | java.util.concurrent.TimeoutException | java.util.concurrent.BrokenBarrierException e) {
+            } catch (SQLException | org.jooq.exception.DataAccessException | InterruptedException | java.util.concurrent.TimeoutException
+                     | java.util.concurrent.BrokenBarrierException e) {
+                // the deadlock victim's transaction is aborted: it ends here, before DeadlockRetry runs the work again on this connection
                 try {
                     c.rollback();
                 } catch (SQLException ignored) {
