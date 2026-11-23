@@ -587,7 +587,9 @@ public final class CollectionRegistry {
         List<CollectionRow> rows = (fullShare ? read.forShare() : read.forKeyShare()).of(CATALOG_COLLECTIONS)
             .fetch(r -> rowOf(r, modelDimension, tenant));
         for (CollectionRow row : rows) {
-            WriteRegistryMemo.put(ctx, tenant, "#" + row.collectionId(), row);
+            // a retired row goes under the key no id read answers from (RegistryRowLocks.heldKey): lockIdForWrite must refuse it, never
+            // hand it back as live
+            WriteRegistryMemo.put(ctx, tenant, row.isSuperseded() ? RegistryRowLocks.heldKey(row.collectionId()) : "#" + row.collectionId(), row);
         }
         for (String label : labels) {
             CollectionRow chosen = null;

@@ -217,8 +217,8 @@ ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository
 ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	752	update	jooq	-	source_collection_id,target_collection_id	yes		unproven	startNextPass
 ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	803	update	jooq	-	source_collection_id,target_collection_id	yes		unproven	setCutoverStep
 ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	837	update	jooq	-	source_collection_id,target_collection_id	yes		unproven	setLastError
-ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	900	update	jooq	-	source_collection_id,target_collection_id	yes		unproven	markRevivedIn
-ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	962	update	jooq	-	source_collection_id,target_collection_id	yes		unproven	recordMoveInTxn
+ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	890	update	jooq	-	source_collection_id,target_collection_id	yes		unproven	markRevivedIn
+ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	952	update	jooq	-	source_collection_id,target_collection_id	yes		unproven	recordMoveInTxn
 ops	relevance_log	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11763	update	helper	collection	collection_id	no	COLLECTION_SCOPED_TABLES loop (rename/re-home)	history	
 ops	relevance_log	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12233	update	helper	collection	collection_id	no	COLLECTION_SCOPED_TABLES loop (rename/re-home)	history	
 ops	relevance_log	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	193	insert	jooq	collection	collection_id	no		history	
