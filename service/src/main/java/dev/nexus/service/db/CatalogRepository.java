@@ -7500,7 +7500,7 @@ public final class CatalogRepository {
      * URI is not rewritten (not a note of {@code source}) never appears; only live rows count on both sides, because
      * catalog-016 constrains only live rows, and both sides carry an explicit tenant predicate beside RLS.
      */
-    private static org.jooq.Result<org.jooq.Record4<String, String, String, String>> moveUriCollisions(
+    static org.jooq.Result<org.jooq.Record4<String, String, String, String>> moveUriCollisions(
             DSLContext ctx, String tenant, String source, String target,
             java.util.function.Function<dev.nexus.service.jooq.nexus.tables.CatalogDocuments, Condition> movingRows) {
         var moving = CATALOG_DOCUMENTS.as("moving");
@@ -11038,7 +11038,7 @@ public final class CatalogRepository {
         // nexus-4lnn1.1.2 (RDR-230 P1.2a, vectors-054): the recall canary's persisted query ring. A derived cache of
         // one collection, so it follows a rename and a re-home with the collection. Its key (tenant_id, collection,
         // vector_digest) holds the collection, so a re-home that finds the same digest on both sides leaves the
-        // source's row where it is and counts it (movableAtSource derives that from the key), and the target's ring
+        // source's row where it is and counts it (CollectionRehomeScope.movable derives that from the key), and the target's ring
         // may then exceed its 32 rows until its next write trims it. The foreign key to catalog_collections
         // (tenant_id, name, embedding_model) is satisfied by a rename (the new registry row is written first and
         // copies the model) and by a same-model re-home; see rehomeCollection for the cross-model case.
@@ -11898,20 +11898,19 @@ public final class CatalogRepository {
             refuseUnderReembedJob(ctx, tenant, "rehome", source, target);
             requireLiveCollection(ctx, source, "source");
             requireLiveCollection(ctx, target, "target");
+            // RDR-229 P3.5a (linda's ruling R-B): before gate 3 the name columns scope every read and write of this
+            // re-home; from it the ids the two labels resolve to do (a one-row rename leaves the names stale).
+            CollectionRehomeScope scope = CollectionRehomeScope.resolve(ctx, gate3.holds(), tenant, source, target);
             // RDR-225 (nexus-3wh8d.13): the chunk UPDATE below files the source's chunk rows under the
             // target, and a chunk keeps its collection's embedding model (the composite foreign key to
             // catalog_collections, and the partition the row lives in). Across models that UPDATE cannot
             // succeed, so refuse it up front naming both models, rather than let PostgreSQL abort the
             // transaction on a constraint named for a partition. A source with no chunk rows moves
             // everything else whatever its model.
-            String sourceModel = ctx.select(CATALOG_COLLECTIONS.EMBEDDING_MODEL).from(CATALOG_COLLECTIONS)
-                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(source))
-                .fetchOne(CATALOG_COLLECTIONS.EMBEDDING_MODEL);
-            String targetModel = ctx.select(CATALOG_COLLECTIONS.EMBEDDING_MODEL).from(CATALOG_COLLECTIONS)
-                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(target))
-                .fetchOne(CATALOG_COLLECTIONS.EMBEDDING_MODEL);
+            String sourceModel = scope.sourceModel(ctx, tenant);
+            String targetModel = scope.targetModel(ctx, tenant);
             if (!sourceModel.equals(targetModel)
-                    && ctx.fetchExists(ctx.selectOne().from(CHUNKS).where(CHUNKS.COLLECTION.eq(source)))) {
+                    && ctx.fetchExists(ctx.selectOne().from(CHUNKS).where(scope.sourceChunks()))) {
                 // The typed exception, not RehomeRefused: HttpUtil.sendTypedDbError answers it as a 409
                 // carrying reason=collection_model_mismatch, the contract the route documents.
                 throw new CollectionModelMismatchException(source, sourceModel, target, targetModel);
@@ -11922,29 +11921,29 @@ public final class CatalogRepository {
             // ring (every other model-keyed table is reached through chunks), so drop the source's ring here rather
             // than fail the whole re-home on the foreign key. It is a derived cache that refills from live queries.
             if (!sourceModel.equals(targetModel)) {
-                ctx.deleteFrom(CANARY_QUERY_RING)
-                    .where(CANARY_QUERY_RING.TENANT_ID.eq(tenant)).and(CANARY_QUERY_RING.COLLECTION.eq(source))
+                ctx.deleteFrom(CANARY_QUERY_RING).where(CANARY_QUERY_RING.TENANT_ID.eq(tenant))
+                    .and(scope.atSource(CANARY_QUERY_RING.COLLECTION, CANARY_QUERY_RING.COLLECTION_ID))
                     .execute();
             }
             // RDR-231: the move rewrites note URIs from source to target (moveScopedTable). If a live
             // document would land on a URI a live document already holds, nothing moves: chunks and
             // manifest rows move by table and are keyed by chash, so one document cannot be held back.
-            requireCollectionUrisFree(ctx, tenant, source, target, "re-homing " + source + " onto " + target);
+            scope.requireUrisFree(ctx, tenant, "re-homing " + source + " onto " + target);
 
             Map<String, Integer> moved = new LinkedHashMap<>();
             Map<String, Integer> leftBehind = new LinkedHashMap<>();
             // RDR-235 (nexus-5r2sc.2.6): the source's unconsumed aspects tasks (available, claimed and dead) are
             // re-homed with it, every one movable (a task's id comes from its doc_id, so none can collide). BEFORE
             // the loop, which writes document_aspects: the tuple row locks come first.
-            moved.put(ASPECT_TASKS_KEY, AspectTaskRefs.rewriteCollection(ctx, tenant, source, target));
+            moved.put(ASPECT_TASKS_KEY, scope.sourceMatchesNothing() ? 0 : AspectTaskRefs.rewriteCollection(ctx, tenant, source, target));
             // RDR-229 P3.1: the moved rows take the target's id with its name; the rows the chunk cascade carried
             // (the manifest, the topic assignments, chunk_orphaned_at) are given it afterwards.
-            final Long targetId = CollectionIds.require(ctx, tenant, target);
+            final Long targetId = scope.targetId(ctx, tenant);
             for (CollectionScopedTable t : COLLECTION_SCOPED_TABLES) {
                 if (CASCADE_CARRIED_TABLES.contains(t.countKey())) {
                     continue;
                 }
-                moved.put(t.countKey(), moveScopedTable(ctx, t, source, target, targetId, leftBehind));
+                moved.put(t.countKey(), moveScopedTable(ctx, t, scope, targetId, leftBehind));
             }
             // The manifest rows the chunk cascade carried to the target (ManifestInsertGateTest: pinned writer).
             ctx.update(CATALOG_DOCUMENT_CHUNKS).set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, targetId)
@@ -11954,7 +11953,7 @@ public final class CatalogRepository {
             return new RehomeResult(
                 moved.getOrDefault("chunks", 0),
                 moved.getOrDefault("catalog_documents", 0),
-                moved, leftBehind, rehomeStatus(ctx, tenant, source, target));
+                moved, leftBehind, rehomeStatus(ctx, tenant, scope));
         });
     }
 
@@ -11969,11 +11968,8 @@ public final class CatalogRepository {
 
     /** {@link #rehomeStatus(String, String)} that can also say what is STUCK, given the target. */
     public RehomeStatus rehomeStatus(String tenant, String source, String target) {
-        return tenantScope.withTenant(tenant, ctx -> rehomeStatus(ctx, tenant, source, target));
-    }
-
-    private RehomeStatus rehomeStatus(DSLContext ctx, String tenant, String source) {
-        return rehomeStatus(ctx, tenant, source, null);
+        return tenantScope.withTenant(tenant, ctx ->
+            rehomeStatus(ctx, tenant, CollectionRehomeScope.resolve(ctx, gate3.holds(), tenant, source, target)));
     }
 
     /**
@@ -11984,27 +11980,28 @@ public final class CatalogRepository {
      *        questions and only the second needs a target. With null, movable
      *        equals remaining — nothing is known to be stuck.
      */
-    private RehomeStatus rehomeStatus(DSLContext ctx, String tenant, String source, String target) {
+    private RehomeStatus rehomeStatus(DSLContext ctx, String tenant, CollectionRehomeScope scope) {
+        final String target = scope.target();
         Map<String, Integer> byTable = new LinkedHashMap<>();
         int total = 0;
         int movable = 0;
         // RDR-235 (nexus-5r2sc.2.6): the unconsumed aspects tasks naming the source count toward what still names
         // it, and every one of them is movable (no collision is possible).
-        int tasks = AspectTaskRefs.countNaming(ctx, tenant, source);
+        int tasks = scope.sourceMatchesNothing() ? 0 : AspectTaskRefs.countNaming(ctx, tenant, scope.source());
         if (tasks > 0) {
             byTable.put(ASPECT_TASKS_KEY, tasks);
         }
         total += tasks;
         movable += tasks;
         for (CollectionScopedTable t : COLLECTION_SCOPED_TABLES) {
-            int n = ctx.fetchCount(t.table(), t.collection().eq(source));
+            int n = ctx.fetchCount(t.table(), scope.atSource(t));
             if (n > 0) {
                 byTable.put(t.countKey(), n);
             }
             total += n;
             movable += target == null
                 ? n
-                : ctx.fetchCount(t.table(), movableAtSource(ctx, t, source, target));
+                : ctx.fetchCount(t.table(), scope.movable(ctx, t));
         }
         // Spelled as selectCount().from(...) rather than fetchCount(TABLE, cond) so the
         // TombstoneFilterGateTest scan can SEE these two reads: it recognizes a literal
@@ -12013,9 +12010,9 @@ public final class CatalogRepository {
         // deliberately counted) beats being unpoliced by accident.
         return new RehomeStatus(
             ctx.selectCount().from(CHUNKS)
-               .where(CHUNKS.COLLECTION.eq(source)).fetchOne(0, Integer.class),
+               .where(scope.sourceChunks()).fetchOne(0, Integer.class),
             ctx.selectCount().from(CATALOG_DOCUMENTS)
-               .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(source)).fetchOne(0, Integer.class),
+               .where(scope.sourceDocuments()).fetchOne(0, Integer.class),
             total, movable, byTable);
     }
 
@@ -12060,44 +12057,11 @@ public final class CatalogRepository {
      * {@code deleted_at} to filter on in any case, so filtering the document side alone
      * would move a tombstoned document's chunks while its own row stayed behind.
      */
-    /**
-     * The WHERE that selects rows at {@code source} this operation CAN move —
-     * everything at the source except rows whose move would collide with a row
-     * already at {@code target}.
-     *
-     * <p>Shared by {@link #moveScopedTable} and {@link #rehomeStatus} on
-     * purpose: if the mover and the progress report disagreed about what is
-     * movable, {@code done()} would either never fire or fire early, and both
-     * failures look like a correct 200 to a caller. One definition, used twice.
-     */
-    @SuppressWarnings({"unchecked", "rawtypes"})
-    private Condition movableAtSource(DSLContext ctx, CollectionScopedTable t,
-                                      String source, String target) {
-        Condition where = t.collection().eq(source);
-        int aliasSeq = 0;
-        for (org.jooq.UniqueKey<?> key : t.table().getKeys()) {
-            boolean keyed = key.getFields().stream()
-                .anyMatch(f -> f.getName().equals(t.collection().getName()));
-            if (!keyed) {
-                continue;
-            }
-            Table<?> peer = t.table().as("rehome_peer_" + (aliasSeq++));
-            Condition match = ((Field<String>) peer.field(t.collection().getName())).eq(target);
-            for (Field<?> f : key.getFields()) {
-                if (f.getName().equals(t.collection().getName())) {
-                    continue;
-                }
-                match = match.and(((Field) peer.field(f.getName()))
-                    .eq((Field) t.table().field(f.getName())));
-            }
-            where = where.and(DSL.notExists(ctx.selectOne().from(peer).where(match)));
-        }
-        return where;
-    }
-
-    private int moveScopedTable(DSLContext ctx, CollectionScopedTable t, String source,
-                                String target, Long targetId, Map<String, Integer> leftBehind) {
-        Condition where = movableAtSource(ctx, t, source, target);
+    private int moveScopedTable(DSLContext ctx, CollectionScopedTable t, CollectionRehomeScope scope,
+                                Long targetId, Map<String, Integer> leftBehind) {
+        final String source = scope.source();
+        final String target = scope.target();
+        Condition where = scope.movable(ctx, t);
         var set = ctx.update(t.table()).set(t.collection(), target).set(t.collectionId(), targetId);
         Field<String> uri = noteUriColumn(t);
         if (uri != null) {
@@ -12108,7 +12072,7 @@ public final class CatalogRepository {
         // Whatever still names the source in a table we just moved is, by construction,
         // a row the collision predicate excluded. Count it so "done" can never be read
         // as "nothing was left behind".
-        int stillHere = ctx.fetchCount(t.table(), t.collection().eq(source));
+        int stillHere = ctx.fetchCount(t.table(), scope.atSource(t));
         if (stillHere > 0) {
             leftBehind.put(t.countKey(), stillHere);
         }
