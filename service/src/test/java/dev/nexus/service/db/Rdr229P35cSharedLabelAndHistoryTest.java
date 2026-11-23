@@ -45,7 +45,7 @@ class Rdr229P35cSharedLabelAndHistoryTest extends AtomicWriteTestBase {
 
     @BeforeAll
     void dropTheNameKeys() throws Exception {
-        gated = new CatalogRepository(tenantScope, latched::get);
+        gated = new CatalogRepository(tenantScope, latched::get, dev.nexus.service.db.RenameGuard.open());
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext d = DSL.using(su, SQLDialect.POSTGRES);

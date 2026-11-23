@@ -60,7 +60,7 @@ import java.util.stream.Stream;
  * <pre>{@code
  *   new PgVectorRepository(TenantScope, Embedder docEmbedder, Embedder queryEmbedder, Gate3 gate3)
  *   new TaxonomyCentroidRepository(TenantScope, Gate3 gate3)
- *   new CatalogRepository(TenantScope, Gate3 gate3)
+ *   new CatalogRepository(TenantScope, Gate3 gate3, RenameGuard)
  * }</pre>
  *
  * <p><b>Design point the manifest subject surfaces.</b> A manifest row references its chunk by the name foreign key {@code
@@ -94,7 +94,7 @@ class Rdr229P35cUpsertConflictKeyTest extends AtomicWriteTestBase {
     }
 
     private static CatalogRepository catalogRepository(TenantScope scope, Gate3 gate3) {
-        return new CatalogRepository(scope, gate3);
+        return new CatalogRepository(scope, gate3, dev.nexus.service.db.RenameGuard.open());
     }
 
     // ---- fixture -----------------------------------------------------------------------------------------------

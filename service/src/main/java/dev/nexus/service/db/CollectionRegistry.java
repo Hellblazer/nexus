@@ -6,6 +6,7 @@ import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.Record;
+import org.jooq.impl.DSL;
 
 import java.util.Map;
 import java.util.Optional;

@@ -204,8 +204,8 @@ public final class CollectionTombstones {
      *
      * @return the number of registry rows deleted for {@code id}: 0 or 1, the predecessors not counted
      */
-    static int deleteRegistryRowById(DSLContext ctx, String tenant, String name, long id, List<String> predecessors) {
-        deleteRegistryRows(ctx, tenant, predecessors);
+    static int deleteRegistryRowById(DSLContext ctx, String tenant, String name, long id, List<String> predecessors, Gate3 gate3) {
+        deleteRegistryRows(ctx, tenant, predecessors, gate3);
         ctx.update(CATALOG_COLLECTIONS)
             .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, CATALOG_COLLECTIONS.COLLECTION_ID)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
