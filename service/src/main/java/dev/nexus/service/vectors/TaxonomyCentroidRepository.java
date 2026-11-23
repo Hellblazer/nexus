@@ -443,6 +443,8 @@ public final class TaxonomyCentroidRepository {
     public int deleteByIds(String tenant, String collection, List<Long> topicIds) {
         if (topicIds == null || topicIds.isEmpty()) return 0;
         return tenantScope.withTenant(tenant, ctx -> {
+            // RDR-229 P3.5a (nexus-p2m1x.23): the id the request named is read first, before any centroid row is touched
+            dev.nexus.service.db.TaxonomyRepository.consumeRequestedId(ctx, tenant, collection);
             int deleted = 0;
             for (int dim : DIMS) {
                 DimTables.CentroidTable ct = DimTables.CENTROIDS.get(dim);
@@ -468,6 +470,7 @@ public final class TaxonomyCentroidRepository {
      */
     public int purgeByCollection(String tenant, String collection) {
         return tenantScope.withTenant(tenant, ctx -> {
+            dev.nexus.service.db.TaxonomyRepository.consumeRequestedId(ctx, tenant, collection);   // RDR-229 P3.5a
             int deleted = 0;
             for (int dim : DIMS) {
                 DimTables.CentroidTable ct = DimTables.CENTROIDS.get(dim);
