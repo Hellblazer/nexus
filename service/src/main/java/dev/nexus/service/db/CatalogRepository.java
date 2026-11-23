@@ -11192,7 +11192,8 @@ public final class CatalogRepository {
 
     /**
      * Refuse {@code verb} (a name-rewriting operation: {@code rename}, {@code rehome}, or a satellite table's
-     * rename) when a re-embed job in a lock state names {@code from} or {@code to} as its source or its target.
+     * rename) when a re-embed job in a lock state holds {@code from} or {@code to} as its source or its target, matched by
+     * the collection's id, else by the recorded label ({@link ReembedJobHold}).
      * Rewriting a name a job is moving documents out of or into desynchronises the job from the data it holds.
      *
      * <p>Call it inside the verb's own transaction, after the verb's other locks. It takes the per-tenant guard
@@ -11212,8 +11213,7 @@ public final class CatalogRepository {
             .from(REEMBED_JOBS)
             .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
             .and(REEMBED_JOBS.STATE.in(ReembedJobRepository.LOCK_STATES))
-            .and(REEMBED_JOBS.SOURCE_COLLECTION.in(from, to)
-                .or(REEMBED_JOBS.TARGET_COLLECTION.in(from, to)))
+            .and(ReembedJobHold.holding(ctx, tenant, from, to))
             .orderBy(REEMBED_JOBS.STARTED_AT, REEMBED_JOBS.JOB_ID)
             .limit(1)
             .fetchOne();
