@@ -185,11 +185,67 @@ java	db/UriSegmentCensusReads.java catalog_documents expr	physical_collection	id
 java	db/UriSegmentCensusReads.java document_aspects expr	collection	id	
 java	db/UriSegmentCensusReads.java document_highlights expr	collection	id	
 java	reembed/TargetSelection.java gc_audit select	collection	both	not a read: the SQL text of an operator hint in a refusal message, naming the history table's own collection column (a row with a NULL id keeps its name); the message text is a wire string
+java	vectors/ChunkConstraintAdmin.java chunks expr	collection	id	the probe's bypass-prefix test reads the registry label of collection_id from gate 3 (NULL id is never counted)
+java	vectors/ChunkKeySweep.java catalog_document_chunks expr	collection	id	the manifest match operand is collection_id from gate 3
+java	vectors/ChunkKeySweep.java catalog_documents where	physical_collection	id	homeless_documents counts physical_collection_id IS NULL from gate 3 (an empty name keeps a NULL id, P3.1 NULLIF rule)
+java	vectors/ChunkKeySweep.java chunks expr	collection	id	the label, keyset and bypass operands read collection_id (the registry label of it for reports) from gate 3; the name column before
+java	vectors/ChunkKeySweep.java chunks group_by	collection	id	grouped by (tenant_id, collection_id) from gate 3
+java	vectors/ChunkKeySweep.java chunks where	collection	id	collectionIs/collectionIn by id from gate 3, bypass-prefix test on the registry label; a NULL id is no collection
+java	vectors/ChunkOwnerLabel.java catalog_document_chunks order_by	collection	id	as the chunks row: manifest collection_id against the chunk's collection_id from gate 3
+java	vectors/ChunkOwnerLabel.java chunks order_by	collection	id	the own-collection-first ranking of ownerLateral(Gate3) compares the manifest row's collection_id with chunks.collection_id from gate 3
+java	vectors/ChunkSensitivity.java catalog_document_chunks where	collection	id	notSensitive and servableUnderExclude take Gate3 and the chunk's collection_id column: the manifest row is matched on collection_id from gate 3
+java	vectors/CollectionSelector.java catalog_collections select	name	label-kept	resolves the caller's label to its registry id (and the registry's current label of an id): the user's label, not a key
+java	vectors/CollectionSelector.java catalog_collections where	name	label-kept	the label to id resolution of the reader (tenant and name): the user's label is the input, the id is what the statement then reads
+java	vectors/DimTables.java chunks accessor_def	collection	id	the typed name accessor stays for the name path and the writers; ChunkTable.collectionId() is the id accessor readers use from gate 3
+java	vectors/DimTables.java taxonomy_centroids accessor_def	collection	id	as chunks: CentroidTable.collectionId() is the id accessor readers use from gate 3
+java	vectors/ManifestLabelStage.java catalog_document_chunks join_on	collection	id	the bounded occurrence statement's join back to the manifest matches collection_id from gate 3
+java	vectors/ManifestLabelStage.java catalog_document_chunks where	collection	id	the holder probe and both occurrence statements match the manifest by collection_id from gate 3 (CollectionSelector.collectionIs)
+java	vectors/PciAnchorReads.java chunks where	collection	both	name-predicate index anchors only: countRows/writtenSince count a NAME-predicate index's own rows (its predicate is collection = name) and the caller routes per index family to countRowsById/writtenSinceById for an id index; P3.4 retires the name family after gate 3
+java	vectors/PciBuilderSession.java ? where	collection	both	run-time DDL: BUILD_TEMPLATE is the name-predicate index (WHERE collection = %L) and BUILD_BY_ID_TEMPLATE beside it builds the id family; P3.4 stops name builds once gate 3 latches
+java	vectors/PciGate3Coverage.java catalog_collections select	name	label-kept	enumerates the (tenant, model) registry rows into id-keyed Reg entries; the label is carried as data and selects no collection
+java	vectors/PciGate3Coverage.java catalog_collections select	superseded_by	both	read only as empty or not (superseded), never as a collection selector; the row's id is read beside it
+java	vectors/PciIdBuilds.java catalog_collections select	name	label-kept	enumerates the (tenant, model) registry rows into RegistryRow(name, id, ...) for the planner; the label is carried as data and selects no collection
+java	vectors/PciIdBuilds.java catalog_collections select	superseded_by	both	read only as empty or not (superseded), never as a collection selector; the row's id is read beside it
+java	vectors/PciIdBuilds.java chunks where	collection	both	hasNullId finds the rows of a name whose id is still NULL, which no id predicate can select: it is the stamp-before-build probe that holds an id build back
+java	vectors/PciLeafCounting.java chunks where	collection	id	count() reads the rows by collection_id from gate 3 (CollectionSelector.collectionIs, label resolved in the statement); the name probe stays before it; a NULL id counts nothing
+java	vectors/PciQueryRingReader.java canary_query_ring where	collection	id	load() selects the ring by collection_id from gate 3 (CollectionSelector.collectionIs); the name path stays before it; a NULL id selects nothing
+java	vectors/PgVectorRepository.java catalog_collections join_on	name	id	from gate 3 the registry row joins the view on collection_id; the name join stays for the name path
+java	vectors/PgVectorRepository.java catalog_collections order_by	name	label-kept	the listings order by the registry label they return
+java	vectors/PgVectorRepository.java catalog_collections result	name	label-kept	the sibling names are the registry labels the restore then addresses
+java	vectors/PgVectorRepository.java catalog_collections select	name	label-kept	the registry label is what listCollections, the stats and the routing listing return, and what the sibling resolution reads
+java	vectors/PgVectorRepository.java catalog_collections select	superseded_by	id	from gate 3 the tombstone's successor is the registry label of superseded_by_id
+java	vectors/PgVectorRepository.java catalog_collections where	name	label-kept	the sibling resolution's quarantine-label match; the label is the input
+java	vectors/PgVectorRepository.java catalog_collections where	superseded_by	id	the live routing filter reads superseded_by_id IS NULL from gate 3
+java	vectors/PgVectorRepository.java catalog_document_chunks select	collection	id	the document's chunk reads return the registry label of each manifest row's collection_id from gate 3; a NULL id has no collection and refuses
+java	vectors/PgVectorRepository.java catalog_document_chunks where	collection	id	liveOwnedChashes, the manifest-driver subselect, the delete guard, the ownerless census and the restore reads match the manifest by collection_id from gate 3
+java	vectors/PgVectorRepository.java catalog_documents where	physical_collection	id	the manifest-less census's live-notes scope reads physical_collection_id from gate 3 (MANIFEST_LESS_CENSUS_BY_ID_SQL, derived from the published text)
+java	vectors/PgVectorRepository.java chunk_orphaned_at where	collection	id	the reapable listing's orphaning record is matched on collection_id from gate 3
+java	vectors/PgVectorRepository.java chunks expr	collection	id	the name-arm operands of the gated predicates (probe, notSensitive, the row id derivation, chunkScope): every one reads collection_id from gate 3
+java	vectors/PgVectorRepository.java chunks on_conflict	collection	id	the content upsert arbitrates on (tenant_id, collection_id, chash, embedding_model) from gate 3 and on the name key before it, through TwinKeyUpsert
+java	vectors/PgVectorRepository.java chunks select	collection	id	attachEmbeddings keys the rows by the registry label of the row's collection_id from gate 3, never the row's own name
+java	vectors/PgVectorRepository.java chunks set_value	collection	id	the id arm's DO UPDATE sets the chunk's name to the writer's (excluded.collection): fk_catalog_chunks_chunk ties the manifest's name to the chunk's until P3.7 (linda 2026-11-22)
+java	vectors/PgVectorRepository.java chunks where	collection	id	the router probe, chunkScope (get, list, count, getWhere, getAllMetadata, getEmbeddings), the metadata UPDATEs, delete, the reapable listing, the quarantine reads and attachEmbeddings select collection_id from gate 3; the search statements call the _by_id twins
+java	vectors/PgVectorRepository.java collection_vector_stats join_on	collection	id	from gate 3 the registry row joins on the view's trailing collection_id column
+java	vectors/PgVectorRepository.java collection_vector_stats order_by	collection	both	ordered by the view's output label (the registry's, from P3.5b's form B view)
+java	vectors/PgVectorRepository.java collection_vector_stats select	collection	both	the view's collection is the registry label of the row's id (P3.5b form B: a stamped row answers its id's label); read as output
+java	vectors/PgVectorRepository.java gc_audit select	collection	id	the restore compares the audit row's collection_id with the origin's registry id from gate 3; a row with no id names no collection
+java	vectors/Rdr229SwapMove.java catalog_collections where	name	label-kept	the stamp move's template and verification resolve each row's name to the registry id (cc.name = t.<name column>): the join that makes the id, so it has no id arm
+java	vectors/ReaperRepository.java catalog_collections expr	name	label-kept	the quarantine sibling's exists-check matches by collection_id from gate 3; its name operand stays for the name path
 java	vectors/ReaperRepository.java catalog_collections select	name	id	
-java	vectors/ReaperRepository.java catalog_collections select	name	label-kept	lifecycleStates keys the registry's lifecycle by label: the registry's own name column is the key the reaper looks its collections up by
+java	vectors/ReaperRepository.java catalog_collections select	name	label-kept	lifecycleStates returns the registry's own label with its lifecycle_state; the registry is the label's source
 java	vectors/ReaperRepository.java catalog_collections where	name	id	
-java	vectors/ReaperRepository.java catalog_collections where	name	label-kept	resolves the quarantine collection's label and the origin label a chunk's metadata carries (origin_collection, a label written at move time) to their registry rows
+java	vectors/ReaperRepository.java catalog_collections where	name	label-kept	the origin exists-check resolves the origin_collection tag a chunk carries against the registry label; the label is the input
 java	vectors/ReaperRepository.java chunks expr	collection	id	
-java	vectors/ReaperRepository.java chunks order_by	collection	id	
-java	vectors/ReaperRepository.java chunks result	collection	id	
-java	vectors/ReaperRepository.java chunks select	collection	id	
+java	vectors/ReaperRepository.java chunks order_by	collection	id	ordered by the registry label from gate 3
+java	vectors/ReaperRepository.java chunks result	collection	id	the returned name is the registry's current label of collection_id from gate 3, never the stale row name
+java	vectors/ReaperRepository.java chunks select	collection	id	collectionsWithChunks lists the registry label of each row's collection_id from gate 3 (NULL ids are not listed)
+java	vectors/ReaperRepository.java chunks where	collection	id	describe, taggedOrigins and clientMovedOrigins filter by collection_id from gate 3; a NULL id selects nothing
+java	vectors/TaxonomyCentroidRepository.java catalog_collections select	name	label-kept	the registry's current label of the centroid's collection_id, which a reader returns from gate 3
+java	vectors/TaxonomyCentroidRepository.java catalog_collections where	name	label-kept	the name-path tombstone exclusion; from gate 3 the exclusion is by collection_id and superseded_by_id
+java	vectors/TaxonomyCentroidRepository.java catalog_collections where	superseded_by	id	from gate 3 the tombstone test reads superseded_by_id IS NOT NULL
+java	vectors/TaxonomyCentroidRepository.java taxonomy_centroids expr	collection	id	the name-arm operands of the gated predicates, label and ordering: from gate 3 the reads use collection_id and return the registry label of it
+java	vectors/TaxonomyCentroidRepository.java taxonomy_centroids on_conflict	collection	id	the centroid upsert arbitrates on (tenant_id, collection_id, topic_id, embedding_model) from gate 3, the name key before it, through TwinKeyUpsert
+java	vectors/TaxonomyCentroidRepository.java taxonomy_centroids set_value	collection	id	the id arm's DO UPDATE sets the name to the writer's (linda 2026-11-22); P3.7 revisits it
+java	vectors/TaxonomyCentroidRepository.java taxonomy_centroids where	collection	id	count, getByCollection, deleteByIds, purgeByCollection and the dim-transition delete select collection_id from gate 3
+java	vectors/TopicRouteArm.java chunks expr	collection	id	attachMetadata keys the routed rows by the resolved collection id from gate 3
+java	vectors/TopicRouteArm.java chunks where	collection	id	attachMetadata selects the routed chunks by collection_id from gate 3
