@@ -48,12 +48,12 @@ class Rdr229P35cManifestFillableByIdTest extends ManifestFillableTestBase {
             // vectors-079 stamps a manifest row's name from its chunk until P4.1, so the row naming the new label (the state after P4.1, where neither the
             // key nor the trigger exists) is written with triggers off, on this session only
             int n;
-            ctx.set(DSL.name("session_replication_role"), DSL.inline("replica"));
+            ctx.set(DSL.name("session_replication_role"), DSL.inline("replica")).execute();
             try {
                 n = ctx.update(CATALOG_DOCUMENT_CHUNKS).set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, renamed)
                     .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT)).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(d)).execute();
             } finally {
-                ctx.set(DSL.name("session_replication_role"), DSL.inline("origin"));
+                ctx.set(DSL.name("session_replication_role"), DSL.inline("origin")).execute();
             }
             assertThat(n).as("setup: the manifest row names the new label").isEqualTo(1);
         }
