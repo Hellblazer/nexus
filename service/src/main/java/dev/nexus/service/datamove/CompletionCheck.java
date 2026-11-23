@@ -570,12 +570,6 @@ ith no origin_collection_id key keeps gate 3 shut: after the latch a row with no
     /** The most quarantine chunks without the origin key the probe counts: it stops there (it needs existence, and a count to report). */
     static final long QUARANTINE_PROBE_CAP = 10_000;
 
-    /**
-     * How many quarantine chunks (rows of {@code chunks} whose collection_id names a registry row whose lifecycle_state is quarantine, as
-     * QuarantineOrigin.isQuarantine judges it) carry no {@code origin_collection_id} key, at most {@link #QUARANTINE_PROBE_CAP} + 1. KEY
-     * PRESENCE, not a non-null value: a dangling tag is backfilled to the key present with JSON null, which passes. Read-only; scoped to the
-     * quarantine collections through the registry join and the chunks' (tenant_id, collection_id) key, never a scan of every chunk.
-     */
     /** The probe's statement, unexecuted, so a plan test can explain the exact text. */
     public static org.jooq.Select<? extends org.jooq.Record1<Integer>> quarantineProbe(DSLContext ctx) {
         Table<?> cc = DSL.table(DSL.name("nexus", "catalog_collections")).as("qcc");
@@ -593,6 +587,12 @@ ith no origin_collection_id key keeps gate 3 shut: after the latch a row with no
             .limit(QUARANTINE_PROBE_CAP + 1);
     }
 
+    /**
+     * How many quarantine chunks (rows of {@code chunks} whose collection_id names a registry row whose lifecycle_state is quarantine, as
+     * QuarantineOrigin.isQuarantine judges it) carry no {@code origin_collection_id} key, at most {@link #QUARANTINE_PROBE_CAP} + 1. KEY
+     * PRESENCE, not a non-null value: a dangling tag is backfilled to the key present with JSON null, which passes. Read-only; scoped to the
+     * quarantine collections through the registry join and the chunks' (tenant_id, collection_id) key, never a scan of every chunk.
+     */
     static long quarantineChunksLackingOriginId(DSLContext ctx, Set<String> tables) {
         if (!tables.contains("chunks") || !tables.contains("catalog_collections")
             || !columnExists(ctx, "catalog_collections", "lifecycle_state") || !columnExists(ctx, "chunks", "collection_id")) {
