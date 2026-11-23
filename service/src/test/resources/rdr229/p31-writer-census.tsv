@@ -183,20 +183,20 @@ ops	gc_audit	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	1
 ops	gc_audit	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	15132	insert	jooq	collection	collection_id	no	
 ops	hook_failures	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11610	update	helper	collection	collection_id	no	COLLECTION_SCOPED_TABLES loop (rename/re-home)
 ops	hook_failures	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12061	update	helper	collection	collection_id	no	COLLECTION_SCOPED_TABLES loop (rename/re-home)
-ops	hook_failures	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	658	update	jooq	collection	collection_id	no	
-ops	hook_failures	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	1782	insert	jooq	collection	collection_id	no	
-ops	hook_failures	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	1817	insert	jooq	collection	collection_id	no	
-ops	hook_failures	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	2358	insert	jooq	collection	collection_id	no	
+ops	hook_failures	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	673	update	jooq	collection	collection_id	no	
+ops	hook_failures	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	1797	insert	jooq	collection	collection_id	no	
+ops	hook_failures	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	1832	insert	jooq	collection	collection_id	no	
+ops	hook_failures	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	2373	insert	jooq	collection	collection_id	no	
 ops	pdf_pipeline	rdr229-stamp-pdf_pipeline [vectors-070-collection-id-stamp-moves.xml:135]	132	update	data_move	-	collection_id	yes	sets collection_id
-ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	285	insert	jooq	collection	collection_id	yes	
-ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	332	update	jooq	-	collection_id	yes	
-ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	364	update	jooq	-	collection_id	yes	
-ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	421	update	jooq	-	collection_id	yes	
-ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	437	update	jooq	-	collection_id	yes	
-ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	452	update	jooq	-	collection_id	yes	
-ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	458	update	jooq	-	collection_id	yes	
-ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	683	update	jooq	-	collection_id	yes	
-ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	754	update	jooq	-	collection_id	yes	
+ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	304	insert	jooq	collection	collection_id	yes	
+ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	351	update	jooq	-	collection_id	yes	
+ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	383	update	jooq	-	collection_id	yes	
+ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	440	update	jooq	-	collection_id	yes	
+ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	456	update	jooq	-	collection_id	yes	
+ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	471	update	jooq	-	collection_id	yes	
+ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	477	update	jooq	-	collection_id	yes	
+ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	702	update	jooq	-	collection_id	yes	
+ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	773	update	jooq	-	collection_id	yes	
 ops	reembed_jobs	rdr229-stamp-reembed_jobs [vectors-070-collection-id-stamp-moves.xml:152]	149	update	data_move	-	source_collection_id,target_collection_id	yes	sets source_collection_id,target_collection_id
 ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	340	insert	jooq	source_collection,target_collection	source_collection_id,target_collection_id	yes	
 ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	457	update	jooq	-	source_collection_id,target_collection_id	yes	
@@ -210,16 +210,16 @@ ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository
 ops	reembed_jobs	service/src/main/java/dev/nexus/service/db/ReembedJobRepository.java	905	update	jooq	-	source_collection_id,target_collection_id	yes	
 ops	relevance_log	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11610	update	helper	collection	collection_id	no	COLLECTION_SCOPED_TABLES loop (rename/re-home)
 ops	relevance_log	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12061	update	helper	collection	collection_id	no	COLLECTION_SCOPED_TABLES loop (rename/re-home)
-ops	relevance_log	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	167	insert	jooq	collection	collection_id	no	
-ops	relevance_log	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	194	insert	jooq	collection	collection_id	no	
-ops	relevance_log	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	358	insert	jooq	collection	collection_id	no	
-ops	relevance_log	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	2278	insert	jooq	collection	collection_id	no	
+ops	relevance_log	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	179	insert	jooq	collection	collection_id	no	
+ops	relevance_log	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	206	insert	jooq	collection	collection_id	no	
+ops	relevance_log	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	371	insert	jooq	collection	collection_id	no	
+ops	relevance_log	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	2293	insert	jooq	collection	collection_id	no	
 ops	search_telemetry	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11610	update	helper	collection	collection_id	no	COLLECTION_SCOPED_TABLES loop (rename/re-home)
 ops	search_telemetry	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12061	update	helper	collection	collection_id	no	COLLECTION_SCOPED_TABLES loop (rename/re-home)
-ops	search_telemetry	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	393	insert	jooq	collection	collection_id	no	
-ops	search_telemetry	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	653	update	jooq	collection	collection_id	no	
-ops	search_telemetry	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	681	insert	jooq	collection	collection_id	no	
-ops	search_telemetry	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	2296	insert	jooq	collection	collection_id	no	
+ops	search_telemetry	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	406	insert	jooq	collection	collection_id	no	
+ops	search_telemetry	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	668	update	jooq	collection	collection_id	no	
+ops	search_telemetry	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	696	insert	jooq	collection	collection_id	no	
+ops	search_telemetry	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	2311	insert	jooq	collection	collection_id	no	
 taxonomy	taxonomy_centroids	rdr229-stamp-taxonomy_centroids [vectors-070-collection-id-stamp-moves.xml:271]	268	update	data_move	-	collection_id	yes	sets collection_id
 taxonomy	taxonomy_centroids	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11610	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)
 taxonomy	taxonomy_centroids	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12061	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)
