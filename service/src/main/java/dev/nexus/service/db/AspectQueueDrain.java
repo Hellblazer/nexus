@@ -337,7 +337,7 @@ public final class AspectQueueDrain {
         Field<Long> qCollectionId = DSL.field(DSL.name("q", "collection_id"), Long.class);
         boolean queueHasId = k.byId() && queueHasCollectionId(ctx);
         // the queue row's own collection id when the table kept the column (selected so the row can say it names no collection by id)
-        Field<Long> qCid = queueHasId ? qCollectionId : DSL.inline((Long) null).as("q_cid");
+        Field<Long> qCid = queueHasId ? qCollectionId : DSL.castNull(Long.class).as("q_cid");
         Field<String> queueLabel = queueHasId ? DSL.coalesce(k.label(tenant, qCollection, qCollectionId), qCollection).as("queue_label") : qCollection;
         for (Record r : ctx.select(qId, queueLabel, qSourcePath, qDocId, qHash, qStatus, qNext,
                     k.byId() ? homeOf : d.PHYSICAL_COLLECTION, qCid)

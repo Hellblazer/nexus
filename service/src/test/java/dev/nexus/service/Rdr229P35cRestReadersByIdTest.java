@@ -188,6 +188,11 @@ class Rdr229P35cRestReadersByIdTest extends Rdr229P35cRestFixture {
         var byId = new TelemetryRepository(tenantScope, LATCHED);
         new TelemetryRepository(tenantScope).logSearchBatch(TENANT, List.<Object[]>of(new Object[] {now, "qh-r-" + old, old, 5, 3, 0.4, 0.5}));
         insertPreIdSearchRow(TENANT, old, 0);
+        // the name-path rename the route follows: the catalog retires the old row as a tombstone naming the new one, then the telemetry
+        // rename runs; the stamped row's id is the tombstone's, and the renamed row's own id is the successor's
+        long targetId = registryId(TENANT, target);
+        su(ctx -> ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, target).set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, targetId)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(old)).execute());
         assertThat(byId.renameCollection(TENANT, old, target)).containsEntry("search_telemetry", 2);
         assertThat(byId.queryCollectionStats(TENANT, target, 365).get("row_count")).as("the stamped row, by id").isEqualTo(1L);
         assertThat(byId.queryCollectionStats(TENANT, target, 365).get("pre_id_row_count"))
