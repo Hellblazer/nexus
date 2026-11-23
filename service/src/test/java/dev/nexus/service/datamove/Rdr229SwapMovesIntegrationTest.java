@@ -13,6 +13,7 @@ import dev.nexus.service.VectorSeeds;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.DrivingTableIsolationCheck;
 import dev.nexus.service.vectors.LeafIndexPass;
+import dev.nexus.service.vectors.Rdr229ChunksFk;
 import dev.nexus.service.vectors.Rdr229SwapMove;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
@@ -272,34 +273,48 @@ class Rdr229SwapMovesIntegrationTest extends Rdr229SwapMovesFixtures {
      * seam (they are set again, unchanged, after the re-check).
      */
     @Test
-    void theSwapVerificationWarmsTheOnCompleteSetUnderTheLongBoundAndOnCompleteRunsUnder1400And700() {
+    void theSwapVerificationReadsOnlyTheCatalogsAndEveryCompletionRunsUnderItsOwnPairOfBounds() {
         seed("bounds");
         registerSwaps();
-        var settings = new ArrayList<List<String>>();
+        var settings = new java.util.LinkedHashMap<String, List<String>>();
         var finisher = new VerifyingFinisher();
-        finisher.recheckHook = tx -> settings.add(List.of(
-            tx.select(DSL.function(DSL.name("current_setting"), String.class, DSL.inline("statement_timeout"))).fetchOne(0, String.class),
-            tx.select(DSL.function(DSL.name("current_setting"), String.class, DSL.inline("lock_timeout"))).fetchOne(0, String.class)));
+        finisher.recheckHook = tx -> {
+            // the completion's UPDATE has set completed_at to this transaction's now(): the one row it matches is the move being completed
+            String label = tx.fetchOne("SELECT label FROM nexus.data_moves WHERE completed_at = now()").get(0, String.class);
+            settings.put(label, List.of(
+                tx.select(DSL.function(DSL.name("current_setting"), String.class, DSL.inline("statement_timeout"))).fetchOne(0, String.class),
+                tx.select(DSL.function(DSL.name("current_setting"), String.class, DSL.inline("lock_timeout"))).fetchOne(0, String.class)));
+        };
 
         for (String label : List.of(CHUNKS_SWAP, CENTROIDS_SWAP)) {
             var row = moves(LABEL_F.eq(label)).get(0);
             assertThat((Integer) row.get("statement_timeout_ms")).as(label + ": the completion's statement bound").isEqualTo(1400);
-            assertThat((Integer) row.get("verify_statement_timeout_ms")).as(label + ": the warm-up's own, longer bound (about 60 s)")
+            assertThat((Integer) row.get("verify_statement_timeout_ms")).as(label + ": the first pass's own, longer bound (about 60 s)")
                 .isBetween(30_000, 120_000);
         }
         String chunksVerification = ((String) moves(LABEL_F.eq(CHUNKS_SWAP)).get(0).get("verification")).toLowerCase(java.util.Locale.ROOT);
-        assertThat(chunksVerification).as("the chunks swap's verification reads the chunks leaves, the id-key indexes and the registry")
-            .contains("chunks").contains("catalog_collections").containsAnyOf("pg_index", "indisvalid");
+        assertThat(chunksVerification).as("the chunks swap's verification reads the catalogs only: no heap scan, no registry anti-join")
+            .contains("pg_partition_tree").contains("indisvalid").doesNotContain("catalog_collections").doesNotContain("chunk_text")
+            .doesNotContain("transaction_read_only");
 
-        runSwaps(finisher);
+        runUntilComposite(finisher);
 
-        assertThat(settings).as("the completion transaction of both swaps ran, after their verification phase").hasSizeGreaterThanOrEqualTo(2);
-        // the moves the swap registered run in the same cycles: a validation that blocks no writer has no statement bound and a 5 s lock
-        // wait ("0", "5s"); every other completion, the swaps and the adoption move included, runs under 1400 ms and 700 ms
-        assertThat(settings).as("only the two bound pairs occur: 1400/700 ms (a step that blocks writers) and 0/5 s (a validation)")
-            .allSatisfy(s -> assertThat(s).isIn(List.of("1400ms", "700ms"), List.of("0", "5s")));
-        assertThat(settings.stream().filter(s -> s.equals(List.of("1400ms", "700ms"))).count())
-            .as("both swaps completed under statement_timeout 1400 ms and lock_timeout 700 ms").isGreaterThanOrEqualTo(2);
+        // a step that blocks writers: 1400 ms and 700 ms. A validation that blocks none: statement_timeout 0 and a 5 s lock wait, and nothing else
+        var tight = List.of("1400ms", "700ms");
+        var lockWaitOnly = List.of("0", "5s");
+        assertThat(settings).as("non-vacuity: both swaps, the adoption move, three child validations and at least one leaf validation completed")
+            .containsKeys(CHUNKS_SWAP, CENTROIDS_SWAP, Rdr229ChunksFk.ADOPT_LABEL);
+        long validations = 0;
+        for (var e : settings.entrySet()) {
+            boolean validation = e.getKey().startsWith(Rdr229ChunksFk.LEAF_LABEL_PREFIX)
+                || Rdr229SwapMove.CHILD_TABLES.stream().anyMatch(t -> e.getKey().equals(Rdr229SwapMove.validationLabel(t)));
+            if (validation) {
+                validations++;
+            }
+            List<String> expected = validation ? lockWaitOnly : tight;
+            assertThat(e.getValue()).as(e.getKey() + ": the bounds its completion ran under").isEqualTo(expected);
+        }
+        assertThat(validations).as("three child validations and one per leaf").isGreaterThanOrEqualTo(3L + 1L);
     }
 
     // ── 7: a lock the swap cannot get ──────────────────────────────────────────────────────────────────────
