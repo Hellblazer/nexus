@@ -39,6 +39,24 @@ public final class ImportLabelRefusals {
         return keep(rows, name, CollectionLabel::shapeBreach);
     }
 
+    /**
+     * The rows whose label is not reserved ({@link LabelReserved}); the others are refused with the rule {@code label_reserved}. Runs on the rows that
+     * would be INSERTed (an existing registration is a no-op and is not judged).
+     */
+    List<Map<String, Object>> keepUnreserved(List<Map<String, Object>> rows, Function<Map<String, Object>, String> name,
+                                             java.util.function.Predicate<String> reserved) {
+        var kept = new ArrayList<Map<String, Object>>(rows.size());
+        for (var row : rows) {
+            String label = name.apply(row);
+            if (reserved.test(label)) {
+                byName.put(label, new Refusal(printable(label), "label_reserved", printable(new LabelReservedException(label).getMessage())));
+            } else {
+                kept.add(row);
+            }
+        }
+        return kept;
+    }
+
     private List<Map<String, Object>> keep(List<Map<String, Object>> rows, Function<Map<String, Object>, String> name,
                                            Function<String, java.util.Optional<CollectionLabel.Breach>> check) {
         var kept = new ArrayList<Map<String, Object>>(rows.size());
