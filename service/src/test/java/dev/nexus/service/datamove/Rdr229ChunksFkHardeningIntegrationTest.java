@@ -787,6 +787,47 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
         }
     }
 
+    /**
+     * The watch's read of the registry meets ACCESS EXCLUSIVE on nexus.data_moves (an operator's maintenance, a migration changeset). The read has
+     * its own 2 s lock wait, so it fails and the watch looks again at its next interval; a close() while the read waits returns within its join
+     * (6 s) with the thread ended, and cancels nothing. Without the session's bounds the read waits on the lock until the network timeout and the
+     * thread outlives close().
+     */
+    @Test
+    void aWatchWhoseReadIsBlockedOnTheRegistryStillEndsWithinTheJoinOfClose() throws Exception {
+        String application = "nexus-data-move-watchlocked-" + System.nanoTime();
+        try (Connection victim = openAsWorker(application)) {
+            int victimPid = pid(victim);
+            OffsetDateTime start = backendStart(victim);
+            Connection holder = pg.createConnection("");
+            parked.add(holder);
+            holder.setAutoCommit(false);
+            lock(holder, "data_moves", PgContainerHelper.LockMode.ACCESS_EXCLUSIVE);
+            var watch = CompletionWatch.start(adminConnection, "p33c-watch-locked", victimPid, application, start);
+            long seen = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+            while (System.nanoTime() < seen && !watchReadBlocked()) {
+                sleepMs(100);
+            }
+            assertThat(watchReadBlocked()).as("non-vacuity: the watch's read is waiting behind the lock").isTrue();
+
+            long closing = System.nanoTime();
+            watch.close();
+            long closeMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - closing);
+
+            assertThat(watch.ended()).as("the watch's thread had ended when close() returned (it took %d ms)", closeMs).isTrue();
+            assertThat(closeMs).as("within the join").isLessThan(6_000L);
+            assertThat(watch.fired()).as("a read that never completed cancelled nothing").isFalse();
+            sleep(victim, 0.1);
+        }
+    }
+
+    /** True when a session named for the watch is waiting on a lock. */
+    private boolean watchReadBlocked() {
+        return PgContainerHelper.backendsBlockedOnLocks(ctx()) > 0 && ctx().fetchExists(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")),
+            DSL.field(DSL.name("application_name"), String.class).eq(DataMoveOrphans.PREFIX + "watch"),
+            DSL.field(DSL.name("wait_event_type"), String.class).eq("Lock"));
+    }
+
     // ── the evidence that the worker role's validation is set-based ─────────────────────────────────────────
 
     /**
