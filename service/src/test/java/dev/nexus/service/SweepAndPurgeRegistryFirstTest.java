@@ -18,7 +18,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.locks.LockSupport;
 
 import static dev.nexus.service.CollectionRouteFixture.label;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
@@ -160,12 +159,6 @@ class SweepAndPurgeRegistryFirstTest {
         assertThat(chunksIn(b, dropped)).as("the new holder of the old label kept its copy").isEqualTo(1);
     }
 
-    private int waitingRows() {
-        return fx.asSuperuser(ctx -> ctx.fetchCount(DSL.table(DSL.name("pg_catalog", "pg_locks")),
-            DSL.field(DSL.name("granted"), Boolean.class).isFalse()
-                .and(DSL.field(DSL.name("locktype"), String.class).in("tuple", "transactionid"))));
-    }
-
     @Test
     void aManifestPurge_meetsAVerbHoldingItsCollectionsRow_waitsAndThenPurges() throws Exception {
         String stem = "prg" + (n++);
@@ -186,13 +179,10 @@ class SweepAndPurgeRegistryFirstTest {
                 .where(CATALOG_COLLECTIONS.TENANT_ID.eq(fx.tenant)).and(CATALOG_COLLECTIONS.NAME.eq(b)).forUpdate().fetch();
             purge = pool.submit(() -> fx.post("/v1/catalog/manifest/purge", "{\"doc_id\":\"" + doc + "\"}"));
             try {
-                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
-                while (waitingRows() < 1) {
-                    if (purge.isDone() || System.nanoTime() > deadline) {
-                        throw new AssertionError("the purge never showed waiting on the collection's row (done: " + purge.isDone() + ")");
-                    }
-                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(5));
-                }
+                // a backend in a lock wait whose statement is the registry row read FOR KEY SHARE: the purge's wait on the verb's lock on that row
+                assertThat(PgActivityProbe.waitsOnALock(fx.pg, "%key share%catalog_collections%"))
+                    .as("the manifest purge waits on the registry row the verb holds, read FOR KEY SHARE (done: %s)", purge.isDone()).isTrue();
+                assertThat(purge.isDone()).as("and has not finished").isFalse();
                 assertThat(manifestRows(doc)).as("nothing was purged while the verb held the row").isEqualTo(1);
             } finally {
                 verb.rollback();
