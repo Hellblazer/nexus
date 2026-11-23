@@ -55,8 +55,10 @@ class LabelReservedPlanTest {
         Set<String> accounted = new HashSet<>(probed);
         accounted.addAll(LabelReserved.HISTORY_NOT_PROBED.keySet());
         assertThat(accounted).as("every ArbiterTwins entry is probed or listed in HISTORY_NOT_PROBED with a reason").isEqualTo(all);
-        assertThat(probed).as("non-vacuity: the partitioned name keys and pdf_pipeline (linda's ruling) are probed").contains("chunks", "taxonomy_centroids", "pdf_pipeline");
-        assertThat(probed).as("the history tables are never probed").doesNotContain("chash_remap", "reembed_jobs");
+        assertThat(probed).as("non-vacuity: the partitioned name keys, pdf_pipeline (linda's ruling) and chash_remap (census pass 2: its name key survives the "
+            + "name-key drop) are probed").contains("chunks", "taxonomy_centroids", "pdf_pipeline", "chash_remap");
+        assertThat(probed).as("reembed_jobs is never probed: an active job blocks the rename itself").doesNotContain("reembed_jobs");
+        assertThat(LabelReserved.HISTORY_NOT_PROBED.keySet()).as("the tables left out, each with its reason").containsExactly("reembed_jobs");
         LabelReserved.HISTORY_NOT_PROBED.values().forEach(reason -> assertThat(reason).isNotBlank());
     }
 
