@@ -322,7 +322,7 @@ class AspectQueueDrainIntegrationTest {
             assertThat(tasks).as("the row whose name a live registry row holds is dispatched, the other is not")
                 .containsKey("a.live").doesNotContainKey("a.nobody");
             assertThat(JSON.readTree(tasks.get("a.live").get(TUPLES.BODY)).get("collection").asText()).isEqualTo(COLL_A);
-            assertThat(AspectQueueDrain.skippedNoLiveCollection()).as("counted").isEqualTo(before + 1);
+            assertThat(AspectQueueDrain.skippedNoLiveCollection()).as("counted (the row is read again on a later batch)").isGreaterThanOrEqualTo(before + 1);
             int left = fx.su(ctx -> ctx.fetchCount(QUEUE, DSL.field(DSL.name("doc_id")).eq("a.nobody")));
             assertThat(left).as("and left in the table").isEqualTo(1);
         }

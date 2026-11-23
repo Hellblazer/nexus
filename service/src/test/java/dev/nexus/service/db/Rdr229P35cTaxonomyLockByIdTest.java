@@ -65,8 +65,8 @@ class Rdr229P35cTaxonomyLockByIdTest extends AtomicWriteTestBase {
             assertThatThrownBy(() -> tenantScope.withTenant(TENANT, ctx -> {
                 TaxonomyCollectionLock.lockTaxonomyCollection(ctx, TENANT, newLabel);
                 return null;
-            })).as("the same collection under its new label waits for the first, and times out (55P03) while it is held")
-                .hasStackTraceContaining("55P03");
+            })).as("the same collection under its new label waits for the first, and times out (lock timeout) while it is held")
+                .hasStackTraceContaining("lock timeout");
         } finally {
             release.countDown();
             holder.get(30, TimeUnit.SECONDS);

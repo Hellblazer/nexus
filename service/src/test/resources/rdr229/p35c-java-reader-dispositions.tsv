@@ -137,6 +137,7 @@ java	db/QuarantineOrigin.java catalog_collections where	name	label-kept	resolves
 java	db/QuarantineOrigin.java catalog_collections where	superseded_by	id	
 java	db/QuarantineOrigin.java chunks expr	collection	id	
 java	db/QuarantineOrigin.java chunks where	collection	id	
+java	db/QuarantineOrigin.java chunks select	collection	both	the sibling listing selects the chunk's collection id (and its registry label for output) from the latch, the name before it (the pre-latch arm)
 java	db/QuarantineOrigin.java chunks order_by	collection	both	the sibling listing orders by the chunk's collection id and the registry label from the latch, and by the name before it (the pre-latch arm)
 java	db/ReembedJobRepository.java reembed_jobs expr	source_collection	id	
 java	db/ReembedJobRepository.java reembed_jobs expr	target_collection	id	
