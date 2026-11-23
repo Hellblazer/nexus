@@ -8,6 +8,7 @@ import dev.nexus.service.datamove.Gate3;
 import dev.nexus.service.datamove.RenameReadiness.Missing;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.OneRowRename;
+import dev.nexus.service.db.RenameLatchLock;
 import dev.nexus.service.db.RenameGuard;
 import dev.nexus.service.db.TenantScope;
 import org.jooq.DSLContext;
@@ -39,8 +40,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  * RDR-229 P3.5a, linda's "live at commit" ruling (bead nexus-p2m1x.23): every verb that RETIRES a registry row (the catalog rename's name
  * body and the collection supersede) takes, in this order, the rename lock shared, the old registry row {@code FOR UPDATE} (the
  * target's too when a rename revives or retires it, in {@code collection_id} order), and only then does any chunk, manifest or child-row
- * work. A writer holds {@code FOR KEY SHARE} on the registry row it writes under (a foreign key takes it, and the by-id read takes it
- * explicitly) and never the rename lock, and {@code FOR UPDATE} conflicts with {@code FOR KEY SHARE}.
+ * work. A writer holds {@code FOR KEY SHARE} on the registry row it writes under (the registry check every write transaction runs
+ * first takes it, by id through the request carrier and by label through the memoised in-transaction read, and the foreign key takes it
+ * again at the first child insert) and never the rename lock, and {@code FOR UPDATE} conflicts with {@code FOR KEY SHARE}. The writers
+ * below are hand-rolled sessions that take that key share; the production writers are exercised after slice A's assembly.
  *
  * <p>(i) A writer holds its key share on X with a row written and not committed: the verb waits, and once the writer commits, its
  * work includes the writer's row. (ii) The reverse order: the verb holds X {@code FOR UPDATE} and is parked later in its own
@@ -119,7 +122,7 @@ class RetiringVerbsLiveAtCommitTest {
         return name;
     }
 
-    /** The by-id read of a writer: the registry row's {@code superseded_by}, read {@code FOR KEY SHARE}. */
+    /** A writer's registry check: the row's {@code superseded_by}, read {@code FOR KEY SHARE} first in its transaction. */
     private static String keyShare(DSLContext ctx, String name) {
         return ctx.select(CATALOG_COLLECTIONS.SUPERSEDED_BY).from(CATALOG_COLLECTIONS)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(name))
@@ -128,7 +131,11 @@ class RetiringVerbsLiveAtCommitTest {
 
     /** A writer's row: a chunk filed under {@code collection} on the writer's own session. */
     private static void writeChunk(DSLContext ctx, String collection) {
-        byte[] chash = HexFormat.of().parseHex(dev.nexus.service.db.Chash.ofText(collection + "/chunk").toHex());
+        writeChunk(ctx, collection, "chunk");
+    }
+
+    private static void writeChunk(DSLContext ctx, String collection, String salt) {
+        byte[] chash = HexFormat.of().parseHex(dev.nexus.service.db.Chash.ofText(collection + "/" + salt).toHex());
         PgContainerHelper.insertChunk384(ctx, TENANT, collection, chash, VectorSeeds.vec(384, 0.1f));
     }
 
@@ -142,19 +149,31 @@ class RetiringVerbsLiveAtCommitTest {
             .fetchOne(CATALOG_COLLECTIONS.SUPERSEDED_BY));
     }
 
-    /** How many sessions of this database wait for a lock. */
-    private int waiters() {
-        return su(ctx -> ctx.fetchCount(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")),
-            DSL.field(DSL.name("wait_event_type"), String.class).eq("Lock")
-                .and(DSL.field(DSL.name("datname"), String.class).eq(DSL.function("current_database", String.class)))));
+    /** The two kinds of wait the tests order by: a row lock (the tuple or the transaction it waits on) and an advisory lock. */
+    private enum Wait {
+        ROW("tuple", "transactionid"), ADVISORY("advisory");
+
+        final String[] locktypes;
+
+        Wait(String... locktypes) {
+            this.locktypes = locktypes;
+        }
     }
 
-    /** Waits (against a deadline, no assumption about speed) until {@code count} sessions wait for a lock; fails when {@code racer} ended. */
-    private void awaitWaiters(int count, Future<?> racer, String what) {
+    /** How many lock requests of this kind are waiting now: the specific rows of {@code pg_locks} that are not granted. */
+    private int waiting(Wait kind) {
+        return su(ctx -> ctx.fetchCount(DSL.table(DSL.name("pg_catalog", "pg_locks")),
+            DSL.field(DSL.name("granted"), Boolean.class).isFalse()
+                .and(DSL.field(DSL.name("locktype"), String.class).in(kind.locktypes))));
+    }
+
+    /** Waits (against a deadline, no assumption about speed) until {@code count} lock requests of {@code kind} wait; fails when {@code racer} ended. */
+    private void awaitWaiting(Wait kind, int count, Future<?> racer, String what) {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
-        while (waiters() < count) {
+        while (waiting(kind) < count) {
             if (racer.isDone() || System.nanoTime() > deadline) {
-                throw new AssertionError(what + ": " + count + " waiting session(s) never showed (racer done: " + racer.isDone() + ")");
+                throw new AssertionError(what + ": " + count + " waiting " + kind + " lock request(s) never showed in pg_locks (racer done: "
+                    + racer.isDone() + ")");
             }
             LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(5));
         }
@@ -175,7 +194,7 @@ class RetiringVerbsLiveAtCommitTest {
             writeChunk(wc, x);   // the writer's row, not committed
             rename = pool.submit(() -> repo.renameCollection(TENANT, x, y));
             try {
-                awaitWaiters(1, rename, "the rename waits for the writer's key share on " + x);
+                awaitWaiting(Wait.ROW, 1, rename, "the rename waits for the writer's key share on " + x);
                 assertThat(rename.isDone()).as("the rename waits for the writer").isFalse();
             } finally {
                 w.commit();
@@ -201,7 +220,7 @@ class RetiringVerbsLiveAtCommitTest {
             writeChunk(wc, x);
             supersede = pool.submit(() -> repo.supersedeCollection(TENANT, x, y, null));
             try {
-                awaitWaiters(1, supersede, "the supersede waits for the writer's key share on " + x);
+                awaitWaiting(Wait.ROW, 1, supersede, "the supersede waits for the writer's key share on " + x);
                 assertThat(supersede.isDone()).as("the supersede waits for the writer").isFalse();
             } finally {
                 w.commit();
@@ -233,9 +252,9 @@ class RetiringVerbsLiveAtCommitTest {
                 .where(CHUNKS.TENANT_ID.eq(TENANT)).and(CHUNKS.COLLECTION.eq(x)).forUpdate().fetch();
             rename = pool.submit(() -> repo.renameCollection(TENANT, x, y));
             try {
-                awaitWaiters(1, rename, "the rename parks on X's chunk row");
+                awaitWaiting(Wait.ROW, 1, rename, "the rename parks on X's chunk row");
                 writer = pool.submit(writerSeeing(x));
-                awaitWaiters(2, writer, "the writer waits for the key share on " + x);
+                awaitWaiting(Wait.ROW, 2, writer, "the writer waits for the key share on " + x);
                 assertThat(writer.isDone()).as("the writer waits for the verb").isFalse();
                 assertThat(rename.isDone()).as("guard: the rename is parked").isFalse();
             } finally {
@@ -263,9 +282,9 @@ class RetiringVerbsLiveAtCommitTest {
                 .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(y)).forUpdate().fetch();
             supersede = pool.submit(() -> repo.supersedeCollection(TENANT, x, y, null));
             try {
-                awaitWaiters(1, supersede, "the supersede parks on the successor's row");
+                awaitWaiting(Wait.ROW, 1, supersede, "the supersede parks on the successor's row");
                 writer = pool.submit(writerSeeing(x));
-                awaitWaiters(2, writer, "the writer waits for the key share on " + x);
+                awaitWaiting(Wait.ROW, 2, writer, "the writer waits for the key share on " + x);
                 assertThat(writer.isDone()).as("the writer waits for the verb").isFalse();
             } finally {
                 park.rollback();
@@ -298,7 +317,6 @@ class RetiringVerbsLiveAtCommitTest {
     void aSweepQueuedForTheExclusiveGate_closesNoCycleBetweenAWriterAndARename() throws Exception {
         String x = registered("cy-x");
         String y = label("cy-y");
-        long retriesBefore = dev.nexus.service.db.DeadlockRetry.retryAttemptCount();
         Future<?> sweep;
         Future<?> rename;
         try (Connection w = pg.createConnection("")) {
@@ -313,9 +331,9 @@ class RetiringVerbsLiveAtCommitTest {
                 }
                 return null;
             });
-            awaitWaiters(1, sweep, "the sweep queues for the exclusive gate of " + x);
+            awaitWaiting(Wait.ADVISORY, 1, sweep, "the sweep queues for the exclusive gate of " + x);
             rename = pool.submit(() -> repo.renameCollection(TENANT, x, y));
-            awaitWaiters(2, rename, "the rename queues for the gate behind the sweep");
+            awaitWaiting(Wait.ADVISORY, 2, rename, "the rename queues for the gate behind the sweep");
 
             keyShare(wc, x);   // in the canonical order the rename holds no row yet, so this does not wait
             writeChunk(wc, x);
@@ -324,7 +342,8 @@ class RetiringVerbsLiveAtCommitTest {
         sweep.get(60, TimeUnit.SECONDS);
         rename.get(60, TimeUnit.SECONDS);
 
-        assertThat(dev.nexus.service.db.DeadlockRetry.retryAttemptCount()).as("no deadlock, so no retry fired").isEqualTo(retriesBefore);
+        assertThat(dev.nexus.service.db.DeadlockRetry.lastRetriedContext()).as("no deadlock, so this rename's transaction was not retried")
+            .isNotEqualTo("catalog.renameCollection " + x);
         assertThat(chunksNamed(y)).as("the rename's repoint includes the writer's row").isEqualTo(1);
         assertThat(supersededBy(x)).isEqualTo(y);
     }
@@ -340,8 +359,9 @@ class RetiringVerbsLiveAtCommitTest {
     @Timeout(120)
     @Test
     void aRenameOntoATombstoneLocksBothRowsInIdOrder_andRevivesTheTarget() throws Exception {
-        String x = registered("rv-x");
-        String y = label("rv-y");
+        // X sorts AFTER Y by label and has the LOWER id: locking by label order instead of id order would lock Y first and this goes red
+        String x = registered("rv-z");
+        String y = label("rv-a");
         repo.renameCollection(TENANT, x, y);   // X is now the tombstone of Y; Y was minted after X, so it has the higher id
         assertThat(supersededBy(x)).isEqualTo(y);
         long idX = su(ctx -> ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
@@ -357,9 +377,9 @@ class RetiringVerbsLiveAtCommitTest {
             keyShare(DSL.using(w, SQLDialect.POSTGRES), y);   // a writer in flight on the source
             rename = pool.submit(() -> repo.renameCollection(TENANT, y, x));
             try {
-                awaitWaiters(1, rename, "the rename waits for the writer on " + y);
+                awaitWaiting(Wait.ROW, 1, rename, "the rename waits for the writer on " + y);
                 reader = pool.submit(writerSeeing(x));
-                awaitWaiters(2, reader, "a key share on the tombstone waits: the rename holds it while it waits on " + y);
+                awaitWaiting(Wait.ROW, 2, reader, "a key share on the tombstone waits: the rename holds it while it waits on " + y);
                 assertThat(reader.isDone()).isFalse();
             } finally {
                 w.commit();
@@ -370,6 +390,217 @@ class RetiringVerbsLiveAtCommitTest {
         assertThat(reader.get(60, TimeUnit.SECONDS)).as("the reader saw X after the revive: live").isEmpty();
         assertThat(supersededBy(x)).as("the tombstone is revived").isEmpty();
         assertThat(supersededBy(y)).as("the source is retired onto it").isEqualTo(x);
+    }
+
+    // ---- the supersede: the rename lock, and the successor's row too ------------------------------------------------------
+
+    @Timeout(120)
+    @Test
+    void aSupersedeTakesTheRenameLockShared_soALatchWriteInFlightHoldsItBack() throws Exception {
+        String x = registered("sp-rl-x");
+        String y = registered("sp-rl-y");
+        Future<Integer> supersede;
+        try (Connection latchWrite = pg.createConnection("")) {
+            latchWrite.setAutoCommit(false);
+            RenameLatchLock.exclusive(DSL.using(latchWrite, SQLDialect.POSTGRES));   // the latch write holds the rename lock
+            supersede = pool.submit(() -> repo.supersedeCollection(TENANT, x, y, null));
+            try {
+                awaitWaiting(Wait.ADVISORY, 1, supersede, "the supersede waits on the rename lock");
+                assertThat(supersede.isDone()).isFalse();
+                assertThat(supersededBy(x)).as("nothing was written while it waited").isEmpty();
+            } finally {
+                latchWrite.rollback();
+            }
+        }
+        assertThat(supersede.get(60, TimeUnit.SECONDS)).isEqualTo(1);
+        assertThat(supersededBy(x)).isEqualTo(y);
+    }
+
+    @Timeout(120)
+    @Test
+    void aSupersedeLocksTheSuccessorsRowToo_soAWriterInFlightOnItHoldsTheSupersedeBack() throws Exception {
+        String x = registered("sp-sc-x");
+        String y = registered("sp-sc-y");
+        Future<Integer> supersede;
+        try (Connection w = pg.createConnection("")) {
+            w.setAutoCommit(false);
+            keyShare(DSL.using(w, SQLDialect.POSTGRES), y);   // a writer in flight on the SUCCESSOR
+            supersede = pool.submit(() -> repo.supersedeCollection(TENANT, x, y, null));
+            try {
+                awaitWaiting(Wait.ROW, 1, supersede, "the supersede waits for the writer on the successor " + y);
+                assertThat(supersede.isDone()).isFalse();
+            } finally {
+                w.commit();
+            }
+        }
+        assertThat(supersede.get(60, TimeUnit.SECONDS)).isEqualTo(1);
+        assertThat(supersededBy(x)).isEqualTo(y);
+    }
+
+    // ---- the pinned order, with the live-tuple index ABSENT so the tuple locks actually run -----------------------------
+
+    private static org.jooq.Field<Object> tupleLock(String owner, String model, String version) {
+        return DSL.function("pg_advisory_xact_lock", Object.class,
+            DSL.function(DSL.name("nexus", "collection_tuple_lock_key"), Long.class, DSL.val(TENANT), DSL.val("knowledge"),
+                DSL.val(owner), DSL.val(model), DSL.val(version)));
+    }
+
+    /**
+     * RDR-229 P3.8 pinned the tuple locks before any registry row, and the verb's row locks follow them. With the index absent the
+     * rename takes the new row's tuple lock; a session holds it, so the rename waits (an advisory request), and from another
+     * session X's row is free: a rename that locked X first would hold it here.
+     */
+    @Timeout(120)
+    @Test
+    void theTupleLocksComeBeforeTheRegistryRows_withTheIndexAbsent() throws Exception {
+        su(ctx -> {
+            CollectionMintSupport.dropIndex(ctx);
+            return null;
+        });
+        String x = registered("tl-x");
+        String y = label("tl-y");
+        var attrs = su(ctx -> ctx.select(CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION).from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(x)).fetchOne());
+        String newOwner = "tl-owner-y";
+        Future<?> rename;
+        try (Connection holder = pg.createConnection("")) {
+            holder.setAutoCommit(false);
+            DSL.using(holder, SQLDialect.POSTGRES).select(tupleLock(newOwner, attrs.value1(), attrs.value2())).fetch();
+            rename = pool.submit(() -> repo.renameCollection(TENANT, x, y, null, "knowledge", newOwner));
+            try {
+                awaitWaiting(Wait.ADVISORY, 1, rename, "the rename waits for the new row's tuple lock");
+                su(ctx -> ctx.select(CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(x)).forUpdate().noWait().fetch());
+            } finally {
+                holder.commit();
+            }
+        }
+        rename.get(60, TimeUnit.SECONDS);
+        assertThat(supersededBy(x)).as("the rename went through once the tuple lock was free").isEqualTo(y);
+    }
+
+    // ---- a writer arrives while the verb is queued behind a holder; the verb's bound --------------------------------------
+
+    /**
+     * PostgreSQL lets a new {@code FOR KEY SHARE} locker join a row while a {@code FOR UPDATE} waits for the earlier ones: the verb
+     * waits for BOTH writers, and its repoint includes both rows. The second writer's key share does not wait (a bound on it would
+     * make the test fail rather than hang).
+     */
+    @Timeout(120)
+    @Test
+    void aWriterArrivingWhileTheVerbIsQueuedBehindAHolderJoinsIt_andTheVerbWaitsForBoth() throws Exception {
+        String x = registered("qq-x");
+        String y = label("qq-y");
+        Future<?> rename;
+        try (Connection w1 = pg.createConnection(""); Connection w2 = pg.createConnection("")) {
+            w1.setAutoCommit(false);
+            w2.setAutoCommit(false);
+            DSLContext c1 = DSL.using(w1, SQLDialect.POSTGRES);
+            DSLContext c2 = DSL.using(w2, SQLDialect.POSTGRES);
+            keyShare(c1, x);
+            writeChunk(c1, x);
+            rename = pool.submit(() -> repo.renameCollection(TENANT, x, y));
+            awaitWaiting(Wait.ROW, 1, rename, "the rename queues behind the first writer");
+            c2.select(DSL.function("set_config", String.class, DSL.val("lock_timeout"), DSL.val("3000"), DSL.val(true))).fetch();
+            keyShare(c2, x);   // joins: does not wait behind the queued FOR UPDATE
+            writeChunk(c2, x, "second writer");
+            assertThat(rename.isDone()).isFalse();
+            w1.commit();
+            assertThat(rename.isDone()).as("the first writer is done, the second still holds the row").isFalse();
+            assertThat(waiting(Wait.ROW)).as("the rename still waits").isGreaterThanOrEqualTo(1);
+            w2.commit();
+        }
+        rename.get(60, TimeUnit.SECONDS);
+        assertThat(chunksNamed(y)).as("the repoint includes both writers' rows").isEqualTo(2);
+        assertThat(chunksNamed(x)).isZero();
+    }
+
+    /**
+     * Steady overlapping writers (two sessions that hand the key share to each other, so the row is never free) starve the verb; its
+     * bound (here 1 s) turns that into 503 {@code rename_busy}: a typed refusal, nothing changed, within the bound and not a hang.
+     */
+    @Timeout(120)
+    @Test
+    void aVerbStarvedByAStreamOfWritersAnswersRenameBusyWithinItsBound_andChangesNothing() throws Exception {
+        dev.nexus.service.db.CollectionTombstones.setRowLockTimeoutMsForTests("1000");
+        try {
+            String x = registered("st-x");
+            String y = label("st-y");
+            Future<?> rename;
+            long started = System.nanoTime();
+            try (Connection a = pg.createConnection(""); Connection b = pg.createConnection("")) {
+                a.setAutoCommit(false);
+                b.setAutoCommit(false);
+                Connection holding = a, joining = b;
+                keyShare(DSL.using(holding, SQLDialect.POSTGRES), x);
+                rename = pool.submit(() -> repo.renameCollection(TENANT, x, y));
+                awaitWaiting(Wait.ROW, 1, rename, "the rename queues behind the stream");
+                while (!rename.isDone() && System.nanoTime() - started < TimeUnit.SECONDS.toNanos(30)) {
+                    DSLContext next = DSL.using(joining, SQLDialect.POSTGRES);
+                    next.select(DSL.function("set_config", String.class, DSL.val("lock_timeout"), DSL.val("3000"), DSL.val(true))).fetch();
+                    keyShare(next, x);   // the next holder joins before the current one lets go: the row is never free
+                    holding.commit();
+                    Connection t = holding;
+                    holding = joining;
+                    joining = t;
+                }
+                holding.rollback();
+            }
+            Throwable failure = null;
+            try {
+                rename.get(30, TimeUnit.SECONDS);
+            } catch (java.util.concurrent.ExecutionException e) {
+                failure = e.getCause();
+            }
+            long elapsedMs = (System.nanoTime() - started) / 1_000_000;
+
+            assertThat(failure).as("the verb answered instead of hanging").isNotNull();
+            boolean busy = false;
+            for (Throwable c = failure; c != null; c = c.getCause()) busy |= c instanceof dev.nexus.service.db.RenameBusyException;
+            assertThat(busy).as("rename_busy, got %s", failure).isTrue();
+            assertThat(elapsedMs).as("within the bound plus slack, not a hang").isLessThan(20_000);
+            assertThat(supersededBy(x)).as("nothing changed: X is live").isEmpty();
+            assertThat(su(ctx -> ctx.fetchExists(ctx.selectOne().from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(y))))).as("and Y was not registered").isFalse();
+        } finally {
+            dev.nexus.service.db.CollectionTombstones.setRowLockTimeoutMsForTests(null);
+        }
+    }
+
+    // ---- what the wait made stale is read again ----------------------------------------------------------------------------
+
+    /**
+     * A writer in flight changes X's owner (so X's tuple) and commits; the rename, which read X's tuple before it waited for X's row,
+     * reads it again once it holds the row, sees the change and answers the named refusal, not a 23505 or a duplicate live tuple.
+     */
+    @Timeout(120)
+    @Test
+    void whatTheWaitMadeStaleIsReadAgain_aChangedTupleIsTheNamedRefusal() throws Exception {
+        String x = registered("rr-x");
+        String y = label("rr-y");
+        Future<?> rename;
+        try (Connection w = pg.createConnection("")) {
+            w.setAutoCommit(false);
+            DSLContext wc = DSL.using(w, SQLDialect.POSTGRES);
+            keyShare(wc, x);
+            rename = pool.submit(() -> repo.renameCollection(TENANT, x, y));
+            try {
+                awaitWaiting(Wait.ROW, 1, rename, "the rename waits for the writer");
+                wc.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.OWNER_ID, "changed-while-waiting")
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(x)).execute();
+            } finally {
+                w.commit();
+            }
+        }
+        Throwable failure = null;
+        try {
+            rename.get(60, TimeUnit.SECONDS);
+        } catch (java.util.concurrent.ExecutionException e) {
+            failure = e.getCause();
+        }
+        assertThat(failure).as("the rename is refused").isInstanceOf(CatalogRepository.CollectionMergeRefused.class)
+            .hasMessageContaining("changed while this rename waited");
+        assertThat(supersededBy(x)).as("nothing was renamed").isEmpty();
     }
 
     /** A writer: key share on the row first, and a row written only when the row is still live. */
