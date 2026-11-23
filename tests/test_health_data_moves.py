@@ -403,8 +403,22 @@ def test_the_retry_now_hint_warns_when_the_attempt_ends_index_builds_and_not_oth
     reset_ends = [s for s in ends.fix_suggestions if "transient_retries = 0" in s]
     reset_plain = [s for s in plain.fix_suggestions if "transient_retries = 0" in s]
     assert len(reset_ends) == 1 and len(reset_plain) == 1
-    assert "fix the cause first" in reset_ends[0] and "ends the in-flight index builds again" in reset_ends[0]
+    assert "fix the cause first" in reset_ends[0] and "end the in-flight index builds again" in reset_ends[0]
     assert "fix the cause first" not in reset_plain[0]
+
+
+def test_after_a_restart_the_index_build_claim_is_hedged_until_the_engine_sees_the_move_fail():
+    """No step means this engine has not seen the move fail since it started: the flag is the move's definition, so the
+    row says an attempt "may" end index builds instead of stating it (the confirmation review of 756bb3cc0a)."""
+    unseen = _by_label(check_data_moves(_needs_operator_status(
+        _paged("m", retries=20, step=None, sqlstate=None, bound=None))))["Data move m"]
+    seen = _by_label(check_data_moves(_needs_operator_status(_paged("m"))))["Data move m"]
+
+    assert "may end in-flight index builds (this engine has not seen the move fail yet)" in unseen.detail
+    assert "each attempt ends in-flight index builds" not in unseen.detail
+    assert any("not known yet" in s for s in unseen.fix_suggestions)
+    assert "each attempt ends in-flight index builds" in seen.detail
+    assert not any("not known yet" in s for s in seen.fix_suggestions)
 
 
 def test_a_need_operator_move_without_the_index_build_claim_does_not_make_it():
