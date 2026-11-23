@@ -1148,6 +1148,14 @@ final class ChunkReaper {
         boolean quietWhenNoOrigins() {
             return !variant.isEmpty();
         }
+
+        /**
+         * The client-moved lister names only origins the function may expire (a live registered knowledge origin, or an origin only a marker row
+         * names: RDR-229 P3.7, linda 2026-11-23), so the registered-origin check below does not apply to it. The reaper's own population keeps it.
+         */
+        boolean listerScopesTheOrigins() {
+            return !variant.isEmpty();
+        }
     }
 
     /** The rows the reaper moved: tagged, {@link Settings#quarantineRetention}, {@code reaper_expire_quarantine}. */
@@ -1221,7 +1229,7 @@ final class ChunkReaper {
                 return null;
             }
             for (String origin : origins) {
-                if (!states.containsKey(origin)) {
+                if (!pop.listerScopesTheOrigins() && !states.containsKey(origin)) {
                     // An origin with no catalog row is a catalog anomaly or a retired collection; nothing is expired
                     // for it (an operator should look at it first), and nothing is audited as refused.
                     log.info("event=reaper_{}expire_skipped tenant={} quarantine={} origin={} reason=origin_not_registered",
