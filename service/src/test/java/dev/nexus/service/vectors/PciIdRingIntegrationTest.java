@@ -102,4 +102,38 @@ class PciIdRingIntegrationTest extends PciIdIndexSupport {
             PciIndexSweep.create(svcDs, s), s, tenants -> 0, new PgVectorRepository(new TenantScope(svcDs), none, none),
             new TenantScope(svcDs)).canaryLatch()).as("each reconciler has its own").isNotSameAs(latch);
     }
+
+    /**
+     * Critic: the canary's vacuum trigger observes the family the canary measures. A leaf holding both an id index and a name index of one collection
+     * (before the retire): before the latch the vacuum trigger arms the name index, once latched the id index, never both.
+     */
+    @Test
+    void theVacuumTriggerObservesTheNameIndexBeforeTheLatch_andTheIdIndexAfterIt() throws Exception {
+        String tenant = newTenant("vacuum");
+        String coll = name("vacuum");
+        long id = collection(tenant, coll, 300);
+        PciReconciler r = reconciler(settings(16));
+        r.reconcileOnce();
+        gate2 = true;
+        r.reconcileOnce();
+        var leaf = leaf(tenant);
+        String nameIndex = PciCatalog.indexName(M384, tenant, coll);
+        String idIndex = PciCatalog.indexNameById(M384, tenant, id);
+
+        assertThat(PciReconciler.canaryFamily(leaf, java.util.Set.of(), false)).as("before the latch: the name index").containsExactly(nameIndex);
+        assertThat(PciReconciler.canaryFamily(leaf, java.util.Set.of(), true)).as("latched: the id index").containsExactly(idIndex);
+        assertThat(PciReconciler.canaryFamily(leaf, java.util.Set.of(idIndex), true)).as("one the plan drops is not observed").isEmpty();
+
+        // through the schedule: a vacuum that reaped deletes arms the family the canary measures, and only it
+        var t0 = java.time.Instant.parse("2026-11-23T00:00:00Z");
+        for (boolean latched : new boolean[] {false, true}) {
+            var schedule = new PciCanarySchedule(new PciReindexIntegrationTest.ScriptedCanary());
+            var family = PciReconciler.canaryFamily(leaf, java.util.Set.of(), latched);
+            schedule.observeLeaf("nexus.leaf", family, PciCanaryScheduleTest.stats(0, 0, 0, null, t0));                         // the baseline
+            schedule.observeLeaf("nexus.leaf", family, PciCanaryScheduleTest.stats(10, 0, 0, null, t0.plusSeconds(600)));       // a vacuum after deletes
+            assertThat(schedule.pending(latched ? idIndex : nameIndex)).as("latched=%s: the measured family is armed", latched)
+                .isEqualTo(PciCanarySchedule.VACUUM);
+            assertThat(schedule.pending(latched ? nameIndex : idIndex)).as("and the other is not").isNull();
+        }
+    }
 }
