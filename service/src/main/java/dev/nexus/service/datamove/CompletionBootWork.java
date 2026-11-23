@@ -193,7 +193,13 @@ public final class CompletionBootWork implements AutoCloseable {
      */
     public String statusJson() {
         CompletionCheck.Result r = latest;
-        return r == null ? null : CompletionStatusJson.render(r, idReadersPresent.getAsBoolean());
+        if (r == null) {
+            return null;
+        }
+        // rename_missing reports what a rename waits for NOW: the readiness the rename path itself reads, with its monotone NONE (after a sample read the
+        // readiness as NONE, an unreadable sample reports none, not refused). Before the latch the rename is the name path and nothing is awaited.
+        RenameReadiness.Missing renameMissing = r.gate3Latched() ? readinessOf(r) : RenameReadiness.Missing.NONE;
+        return CompletionStatusJson.render(r, renameMissing);
     }
 
     /**
@@ -233,8 +239,12 @@ public final class CompletionBootWork implements AutoCloseable {
     }
 
     private RenameReadiness.Missing readinessOrUnreadable() {
+        return readinessOf(latest());
+    }
+
+    /** The readiness over {@code r} (null: no sample), monotone and fail closed as {@link #renameReadiness()} says; never throws. */
+    private RenameReadiness.Missing readinessOf(CompletionCheck.Result r) {
         try {
-            var r = latest();
             RenameReadiness.Missing m = r == null ? RenameReadiness.Missing.READINESS_UNREADABLE
                 : r.readinessMissing(idReadersPresent.getAsBoolean());
             // The facts behind NONE are monotone (a drop move that completed stays complete, a changeset that applied stays applied), so a
