@@ -71,9 +71,12 @@ final class Rdr229RenameRestartPrecondition {
         return new Env(engine, new Reached(met, met ? "" : note.toString().strip()));
     }
 
-    /** Hard wait: every {@code rdr229-stamp-*} move has {@code completed_at} and gate 1 holds, within {@link #STAMP_WAIT}. */
+    /**
+     * Hard wait: every {@code rdr229-stamp-*} move has {@code completed_at} and gates 1 and 2 hold, within {@link #STAMP_WAIT}. On the P3.4 base
+     * the boot read set includes P3.3c's swap moves, which the harness's LeafIndexPass registers once gate 1 holds.
+     */
     static void awaitStampMovesComplete(Rdr229RenameEngine engine) throws InterruptedException {
-        boolean done = Rdr229RenameEngine.await(STAMP_WAIT, () -> engine.completion().gate1());
+        boolean done = Rdr229RenameEngine.await(STAMP_WAIT, () -> engine.completion().gate2());
         var result = engine.completion();
         long stamps = engine.su(ctx -> ctx.fetchCount(org.jooq.impl.DSL.table(org.jooq.impl.DSL.name("nexus", "data_moves")),
             org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("label"), String.class).like("rdr229-stamp-%")));
