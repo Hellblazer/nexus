@@ -8,6 +8,7 @@ written). One row per (writer, table) of ``service/src/test/resources/rdr229/p31
 (file:line, from that census) and a verdict:
 
   holds   the writer files the locked row's current label (the basis names the line or the commit that makes it so)
+  holds-until-P4.1   a site linda ruled safe in Phase 3 that P4.1 (nexus-p2m1x.35) must revisit (the reaper's by-label SQL calls)
   n/a     the write is not an id-addressed write of a live collection's row (a registry verb, a fidelity import, a trigger, a SQL function whose
           label argument is its caller's, which is a row of this census)
 
@@ -27,8 +28,8 @@ OUT = ROOT / "service/src/test/resources/rdr229/p35c-i8-stored-label-census.tsv"
 P35A = "P3.5a round 2 (tamsin)"
 # (file, table-or-"*") -> (verdict, basis). A file entry with "*" covers every table of that file not listed by name.
 BASIS = {
-    ("TaxonomyRepository.java", "*"): ("holds", f"{P35A} 2390d20721: the label is the locked row's, from lockAndRequireWritable / ensureCollectionRegistered / labelNow; import batches (importTopic, importAssignmentsBatch, importMetaBatch, importTopicsBatch) file the label of the row they registered; assign_from_chashes: P3.5c, below"),
-    ("TaxonomyCentroidRepository.java", "*"): ("holds", f"{P35A} 2390d20721: upsertCentroids writes collectionRow.label() (P3.5c's id arbiter keeps it: the conflict arm also sets the name)"),
+    ("TaxonomyRepository.java", "*"): ("holds", f"{P35A} 2390d20721: the label is the locked row's, from lockAndRequireWritable / ensureCollectionRegistered / labelNow; import batches (importTopic, importAssignmentsBatch, importMetaBatch, importTopicsBatch) file the label of the row they registered; assign_from_chashes: P3.5c, below. The persist paths stamp the current label but find the topic rows they replace by name in three statements (persist_rebuild and persist_discovered, around the root-topic select and the delete): W1 (tamsin) fixes those, with its own rename-gap test"),
+    ("TaxonomyCentroidRepository.java", "*"): ("holds", f"{P35A} 2390d20721: upsertCentroids writes collectionRow.label() (P3.5c's id arbiter keeps it: the conflict arm also sets the name). The two statements that find a centroid's existing rows by name (the dim-transition delete and the model-change delete) are W1 (tamsin)'s, with its own rename-gap test"),
     ("AspectRepository.java", "*"): ("holds", f"{P35A} 2390d20721: writeAspect and the highlight upserts file requireWritable(...).label(); the batch imports file the label of the row they registered"),
     ("PipelineRepository.java", "*"): ("holds", f"{P35A} 7826f5767c: create files the row under the collection's CURRENT label"),
     ("ReembedJobRepository.java", "*"): ("holds", f"{P35A} 51440c6624: start reads both ends in id order and files their current labels"),
@@ -53,7 +54,12 @@ SQL = ("n/a", "a SQL function or trigger: its label argument is its caller's, a 
 SQL_ASSIGN = ("holds", "P3.5c: TaxonomyRepository.assignFromChashesRetryingDeadlocks reads the row FOR KEY SHARE in each of its two transactions and calls the function with the row's CURRENT label (Rdr229P35cIdAddressedRenameRaceTest, own and cross pass)")
 
 
+REAPER = ("holds-until-P4.1", "nexus-p2m1x.35, R1 reservation: the reaper calls the function by LABEL (ReaperRepository, ChunkReaper); linda ruled the call safe in Phase 3, out of P3.5c's scope, and it is a P4.1 precondition")
+
+
 def verdict(file, table):
+    if file.startswith("nexus.reaper_"):
+        return REAPER
     if file.startswith("nexus."):
         return SQL_ASSIGN if file.startswith("nexus.assign_from_chashes_") else SQL
     return BASIS.get((file, table)) or BASIS.get((file, "*")) or (None, None)
