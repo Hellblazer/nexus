@@ -464,6 +464,15 @@ class VectorSensitivityRouteParityTest {
         CLASSIFIED_DEFINITION_READERS.put("stamp_chunks_on_manifest_update()",
             new Classified("trigger", Exposure.NO_TEXT,
                 "trigger function that stamps chunk_orphaned_at; no result row"));
+        CLASSIFIED_DEFINITION_READERS.put("catalog_document_chunks_name_from_chunk()",
+            new Classified("trigger", Exposure.NO_TEXT,
+                "RDR-229 P3.7 vectors-079 trigger function: a BEFORE INSERT OR UPDATE row trigger that probes nexus.chunks by its key columns (tenant, collection, collection_id, chash, embedding_model) and sets the child row's own collection name; it never selects chunk_text and returns the child row to the trigger machinery, no result row"));
+        CLASSIFIED_DEFINITION_READERS.put("chunk_orphaned_at_name_from_chunk()",
+            new Classified("trigger", Exposure.NO_TEXT,
+                "RDR-229 P3.7 vectors-079 trigger function: a BEFORE INSERT OR UPDATE row trigger that probes nexus.chunks by its key columns (tenant, collection, collection_id, chash, embedding_model) and sets the child row's own collection name; it never selects chunk_text and returns the child row to the trigger machinery, no result row"));
+        CLASSIFIED_DEFINITION_READERS.put("topic_assignments_name_from_chunk()",
+            new Classified("trigger", Exposure.NO_TEXT,
+                "RDR-229 P3.7 vectors-079 trigger function: a BEFORE INSERT OR UPDATE row trigger that probes nexus.chunks by its key columns (tenant, collection, collection_id, chash, embedding_model) and sets the child row's own collection name; it never selects chunk_text and returns the child row to the trigger machinery, no result row"));
         CLASSIFIED_DEFINITION_READERS.put("taxonomy_coverage_counts_1024(p_collection text)",
             new Classified("TABLE(has_taxonomy boolean, chunks bigint, unassigned bigint)", Exposure.NO_TEXT,
                 "counts of live chunks and of those without a topic assignment: numbers, not text"));
