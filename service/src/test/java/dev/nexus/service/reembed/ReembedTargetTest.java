@@ -29,7 +29,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * RDR-210 Phase 6 Step 2 (bead nexus-f98bg): the target-selection decision on the registry rows a real job leaves
  * behind, with the repository calls that apply a {@code Revive}. {@code TargetSelectionTest} covers the decision on
  * hand-built rows; this class covers that the real rows ({@code listCollections}), the real supersede a cutover
- * performs, the real upsert that clears a supersession and the real {@code markRevived} agree with it. The start
+ * performs, the real upsert that clears a supersession and the real way-back start's mark ({@code startMarking}) agree with it. The start
  * route that strings these together is the next commit's; the test strings them itself.
  *
  * <p>Run: {@code -Dtest=ReembedTargetTest,TargetSelectionTest}.
@@ -76,7 +76,7 @@ class ReembedTargetTest extends ReembedFixture {
         assertThat(decision).isEqualTo(new Revive(fx.src()));
 
         applyRevive(fx, (Revive) decision);
-        assertThat(jobs.markRevived(fx.tenant(), fx.src(), fx.tgt())).isPresent();
+        assertThat(jobs.startMarking(fx.tenant(), fx.tgt(), fx.src(), null, false, false, true).revived()).isPresent();
 
         assertThat(supersededBy(fx, fx.src())).as("the upsert cleared the supersession").isEmpty();
         assertThat(TargetSelection.select(rows(fx), CONTENT_TYPE, owner(fx), BGE)).isEqualTo(new Live(fx.src()));
@@ -104,7 +104,7 @@ class ReembedTargetTest extends ReembedFixture {
         Decision decision = wayBack(fx, null);
         assertThat(decision).isEqualTo(new Revive(fx.src()));
         applyRevive(fx, (Revive) decision);
-        assertThat(jobs.markRevived(fx.tenant(), fx.src(), fx.tgt())).isPresent();
+        assertThat(jobs.startMarking(fx.tenant(), fx.tgt(), fx.src(), null, false, false, true).revived()).isPresent();
 
         Job marked = job(fx, aborted.jobId());
         assertThat(marked.state()).isEqualTo(ABORTED);
