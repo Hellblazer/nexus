@@ -136,6 +136,7 @@ class RenameGuardTest {
 
     @Test
     void theWireValuesOfEveryMissingConditionAreDistinct() {
+        assertThat(RenameRefusedException.wireValue(Missing.READINESS_UNREADABLE)).isEqualTo("readiness_unreadable");
         assertThat(RenameRefusedException.wireValue(Missing.NAME_KEY_DROP_MOVE)).isEqualTo("name_key_drop_move");
         assertThat(RenameRefusedException.wireValue(Missing.P35B_LIST_MISSING)).isEqualTo("p35b_list_missing");
         assertThat(RenameRefusedException.wireValue(Missing.P35B_RESTART)).isEqualTo("restart");

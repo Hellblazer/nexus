@@ -67,7 +67,13 @@ public interface RenameReadiness {
          */
         P35B_LIST_MISSING,
         /** The move completed but a P3.5b changeset has not applied yet: the engine must restart. Wire value {@code restart}. */
-        P35B_RESTART
+        P35B_RESTART,
+        /**
+         * The readiness could not be read (no sample yet, a read that failed or ran past {@link CompletionCheck#READINESS_READ_TIMEOUT_MS}, a list that
+         * could not be read): it never answers NONE from an error. Before the latch it is not consulted (a rename is the name path); after it, the rename is
+         * refused. Wire value {@code readiness_unreadable} (linda 2026-11-23).
+         */
+        READINESS_UNREADABLE
     }
 
     /** A readiness that never waits and never latches, for tests and for a store gate 3 never reaches. */

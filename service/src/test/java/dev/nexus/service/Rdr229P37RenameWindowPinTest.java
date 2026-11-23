@@ -76,6 +76,11 @@ class Rdr229P37RenameWindowPinTest {
 
             Rdr229RenameEngine.await(Duration.ofSeconds(2), () -> latchRows() > 0 || flip.isDone() || readiness.gate3Latched());
             assertThat(latchRows()).as("the latch waits for the open rename: no row").isZero();
+            // linda 2026-11-23 (a): the drop move is registered only once the latch is written, so with the live gate 3 holding and no row there is no move
+            // and the readiness is not NONE
+            assertThat(engine.completionCheck().latest().gate3()).as("non-vacuity: the live gate 3 holds").isTrue();
+            assertThat(engine.moveRows(Rdr229RenameEngine.DROP_LABEL)).as("no drop move is registered without the latch row").isZero();
+            assertThat(engine.completionCheck().renameReadiness().missing()).as("and the readiness is not NONE").isNotEqualTo(dev.nexus.service.datamove.RenameReadiness.Missing.NONE);
             assertThat(readiness.gate3Latched()).as("no regime").isFalse();
             assertThat(flip.isDone()).as("and the sample has not returned: " + (flip.isDone() ? flip.resultNow() : "")).isFalse();
 

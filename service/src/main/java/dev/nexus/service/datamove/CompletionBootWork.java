@@ -284,8 +284,8 @@ public final class CompletionBootWork implements AutoCloseable {
 
     /**
      * What a rename from gate 3 still waits for, read per call ({@link RenameReadiness}), from the latest sample, the one that
-     * {@link #gate3()} reads: {@link CompletionCheck.Result#renameMissing(boolean)}, with the latch read as the rename window's regime or the durable
-     * latch ({@link #gate3Latched()}). Before the first sample it answers that the name-key drop move is missing (not known yet is not ready).
+     * {@link #gate3()} reads: {@link CompletionCheck.Result#readinessMissing()}, which does not depend on the latch (NONE implies the latch row exists, since the
+     * drop move is registered only once it is latched). Before the first sample, or on any error, it answers {@code readiness_unreadable}.
      * Its {@link RenameReadiness#pinned} is the rename window ({@link RenameWindow}): the latch is written, and the regime flips, only when
      * every pinned rename has returned.
      */
@@ -293,8 +293,7 @@ public final class CompletionBootWork implements AutoCloseable {
         return new RenameReadiness() {
             @Override
             public Missing missing() {
-                var r = latest();
-                return r == null ? Missing.NAME_KEY_DROP_MOVE : r.renameMissing(latched());
+                return readinessOrUnreadable();
             }
 
             @Override
@@ -313,8 +312,21 @@ public final class CompletionBootWork implements AutoCloseable {
 
             @Override
             public Missing missingLatched() {
-                var r = latest();
-                return r == null ? Missing.NAME_KEY_DROP_MOVE : r.renameMissing(true);
+                return readinessOrUnreadable();
+            }
+
+            /**
+             * Total, cheap and fail closed (linda 2026-11-23): it answers from the last sample (no read of its own), never throws, and any error or
+             * the absence of a sample is {@code readiness_unreadable}, never NONE. Whether a rename consults it is the latch's business: before the
+             * latch the rename is the name path and the answer is not read.
+             */
+            private Missing readinessOrUnreadable() {
+                try {
+                    var r = latest();
+                    return r == null ? Missing.READINESS_UNREADABLE : r.readinessMissing();
+                } catch (RuntimeException e) {
+                    return Missing.READINESS_UNREADABLE;
+                }
             }
 
             @Override

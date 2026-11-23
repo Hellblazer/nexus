@@ -31,6 +31,8 @@ public final class RenameRefusedException extends RuntimeException {
                 + "(db/rdr229/p35b-continue-changesets.txt is missing or names nothing); a restart does not fix it, a build with the list does";
             case P35B_RESTART -> "a collection rename is refused until the engine restarts to apply the P3.5b changesets; "
                 + "the restart is the missing condition";
+            case READINESS_UNREADABLE -> "a collection rename is refused because what it waits for could not be read; the readiness is the "
+                + "missing condition, and it is read again at the next sample";
             case NONE -> "";
         };
     }
@@ -40,7 +42,7 @@ public final class RenameRefusedException extends RuntimeException {
         return missing;
     }
 
-    /** The wire value of {@code missing}: {@code name_key_drop_move}, {@code p35b_list_missing} or {@code restart}. */
+    /** The wire value of {@code missing}: {@code name_key_drop_move}, {@code p35b_list_missing}, {@code restart} or {@code readiness_unreadable}. */
     public String wireValue() {
         return wireValue(missing);
     }
@@ -51,6 +53,7 @@ public final class RenameRefusedException extends RuntimeException {
             case NAME_KEY_DROP_MOVE -> "name_key_drop_move";
             case P35B_LIST_MISSING -> "p35b_list_missing";
             case P35B_RESTART -> "restart";
+            case READINESS_UNREADABLE -> "readiness_unreadable";
             case NONE -> "";
         };
     }

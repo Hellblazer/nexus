@@ -269,6 +269,34 @@ class CompletionBootWorkRenameWindowTest {
         assertThatThrownBy(() -> guard.pinned(oneRow -> oneRow)).isInstanceOf(IllegalStateException.class);
     }
 
+    /**
+     * folio's round-3 critique: the readiness is total and fails closed. With no sample (the check cannot read) it answers readiness_unreadable,
+     * never NONE; a read that throws publishes nothing and leaves the answer as it was; and it costs no read of its own (it answers from the last sample).
+     */
+    @Test
+    void theReadinessFailsClosedWhenTheCheckCannotBeRead_andNeverYieldsNoneFromAnError() {
+        var window = new RenameWindow();
+        var reads = new java.util.concurrent.atomic.AtomicInteger();
+        var reader = new Scripted(CompletionCheck.Gate3LatchWriter.IMMEDIATE) {
+            @Override
+            public CompletionCheck.Result read() {
+                reads.incrementAndGet();
+                throw new IllegalStateException("the database cannot answer");
+            }
+        };
+        var work = work(reader, window);
+
+        assertThat(work.publish()).as("an unreadable check publishes nothing").isEqualTo(-1);
+
+        assertThat(work.latest()).isNull();
+        assertThat(work.renameReadiness().missing()).as("no sample is not ready, and never NONE from an error").isEqualTo(RenameReadiness.Missing.READINESS_UNREADABLE);
+        int before = reads.get();
+        for (int i = 0; i < 5; i++) {
+            work.renameReadiness().missing();
+        }
+        assertThat(reads.get()).as("the readiness reads no database of its own: it answers from the last sample").isEqualTo(before);
+    }
+
     /** A bounded poll for the schedule's thread. */
     private static boolean await(Duration timeout, java.util.function.BooleanSupplier condition) throws InterruptedException {
         long deadline = System.nanoTime() + timeout.toNanos();

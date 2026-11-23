@@ -23,9 +23,9 @@ import dev.nexus.service.http.HttpUtil;
  *  "labels_total":n,"labels_incomplete":[{"label","table","why"}],
  *  "checks_missing":[{"table","constraint","what"}],
  *  "validate_waits":[{"table","constraints":[names],"what":operator text}],
- *  "rename_missing":"none"|"name_key_drop_move"|"p35b_list_missing"|"restart"}
+ *  "rename_missing":"none"|"name_key_drop_move"|"p35b_list_missing"|"restart"|"readiness_unreadable"}
  * </pre>
- * {@code rename_missing} (RDR-229 P3.7, [additive]) is what a collection rename waits for, spelled as the 409 {@code rename_refused}'s
+ * {@code rename_missing} (RDR-229 P3.7, [additive]) is what a collection rename waits for ({@code readiness_unreadable} when it could not be read, after the latch), spelled as the 409 {@code rename_refused}'s
  * {@code missing}: {@code none} before gate 3 (the rename is the name path) and once the one-row rename can run, {@code name_key_drop_move}
  * from gate 3 until that move has {@code completed_at}, then {@code p35b_list_missing} while this build ships no P3.5b changeset list (a restart
  * does not fix it) or {@code restart} until every changeset of the list has applied. Once gate 3 is latched the value no longer follows

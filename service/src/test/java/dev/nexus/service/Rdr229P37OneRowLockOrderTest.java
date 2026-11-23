@@ -143,4 +143,55 @@ class Rdr229P37OneRowLockOrderTest {
             pool.shutdownNow();
         }
     }
+
+    private static org.jooq.Select<org.jooq.Record1<Object>> gate(DSLContext ctx, String function, String tenant, String label) {
+        return ctx.select(DSL.function(function, Object.class, DSL.function("hashtext", Integer.class, DSL.val("sweepgate:" + tenant + "/" + label))));
+    }
+
+    /**
+     * The three-way case the canonical order exists for (every advisory lock before any row lock): a queued EXCLUSIVE sweep, a writer holding the SHARED
+     * sweep gate and an id write in flight, and the rename. The rename takes its sweep gates before it locks the registry row, so it queues behind the
+     * sweep without holding the row the writer needs; the writer commits, the sweep runs, the rename proceeds. With the row taken first this is a deadlock.
+     */
+    @Test
+    void aQueuedExclusiveSweep_aWriterHoldingTheSharedGate_andTheRename_allFinishWithoutADeadlock() throws Exception {
+        String tenant = "p37-lo-c";
+        String token = engine.newTenant(tenant);
+        String a = coll("p37loca");
+        String b = coll("p37locb");
+        engine.su(ctx -> {
+            Rdr229RenameSeeds.chunksAndRing(ctx, tenant, a);
+            return null;
+        });
+        long id = engine.su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, a));
+        String chash = dev.nexus.service.db.Chash.ofText("lock order three way").toHex();
+        var pool = Executors.newFixedThreadPool(2);
+        try (Connection w = engine.pg.createConnection(""); Connection s = engine.pg.createConnection("")) {
+            w.setAutoCommit(false);
+            DSLContext wc = DSL.using(w, SQLDialect.POSTGRES);
+            gate(wc, "pg_advisory_xact_lock_shared", tenant, a).fetch();   // the writer holds the shared gate
+            wc.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(a))).forKeyShare().fetch();   // and an id write in flight
+            int base = lockWaiters();
+
+            s.setAutoCommit(false);
+            Future<?> sweep = pool.submit(() -> {
+                gate(DSL.using(s, SQLDialect.POSTGRES), "pg_advisory_xact_lock", tenant, a).fetch();   // the sweep queues EXCLUSIVE
+                s.commit();
+                return null;
+            });
+            assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(30), () -> lockWaiters() > base)).as("the sweep is queued behind the writer").isTrue();
+            Future<Rdr229RenameEngine.Renamed> rename = pool.submit(() -> engine.rename(token, a, b));
+            assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(30), () -> lockWaiters() > base + 1)).as("the rename queues behind the sweep, on the gate").isTrue();
+
+            PgContainerHelper.insertChunks(wc, tenant, a, List.of(chash), List.of("the writer finishes"), List.of(new float[384]), List.of(Map.of()));
+            w.commit();   // the writer is done: nothing it needs is held by the queued rename
+
+            sweep.get(60, TimeUnit.SECONDS);
+            assertThat(rename.get(60, TimeUnit.SECONDS).status()).as("the rename finishes after the sweep").isEqualTo(200);
+        } finally {
+            pool.shutdownNow();
+        }
+        assertThat(engine.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, b))).isEqualTo(id);
+    }
 }

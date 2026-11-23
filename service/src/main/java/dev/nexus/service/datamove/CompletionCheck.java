@@ -235,10 +235,18 @@ public final class CompletionCheck {
      * and {@code missing}: the P3.5b changeset ids the list names ({@link P35bChangesets}) and those {@code databasechangelog} does
      * not record as applied. A missing or empty list is refused: {@link #p35bApplied} is false then.
      */
-    public record RenameState(boolean dropMoveComplete, int listed, List<String> missing) {
+    public record RenameState(boolean dropMoveComplete, int listed, List<String> missing, boolean unreadable) {
         public RenameState {
             missing = List.copyOf(missing);
         }
+
+        /** A state that was read. */
+        public RenameState(boolean dropMoveComplete, int listed, List<String> missing) {
+            this(dropMoveComplete, listed, missing, false);
+        }
+
+        /** The state could not be read (a failure or a timeout): the readiness is {@code readiness_unreadable}, never NONE. */
+        public static final RenameState UNREADABLE = new RenameState(false, 0, List.of(), true);
 
         /** Not read yet, or built by hand: the drop move incomplete and no list. */
         public static final RenameState NOT_READ = new RenameState(false, 0, List.of());
@@ -376,8 +384,17 @@ public final class CompletionCheck {
          * ({@link CompletionBootWork#gate3Latched()}), which can be newer than this sample (a sample is read before the latch writer flips the regime).
          */
         public RenameReadiness.Missing renameMissing(boolean latched) {
-            if (!latched) {
-                return RenameReadiness.Missing.NONE;
+            return latched ? readinessMissing() : RenameReadiness.Missing.NONE;
+        }
+
+        /**
+         * What the one-row rename waits for, whether or not gate 3 has latched (linda 2026-11-23): total, and fail closed. The drop move is registered
+         * only once the latch is written, so a complete move implies the row; readiness NONE implies it too, and is never answered from an error
+         * ({@link RenameReadiness.Missing#READINESS_UNREADABLE}). The status field ({@link #renameMissing()}) keeps saying none before the latch.
+         */
+        public RenameReadiness.Missing readinessMissing() {
+            if (rename.unreadable()) {
+                return RenameReadiness.Missing.READINESS_UNREADABLE;
             }
             if (!rename.dropMoveComplete()) {
                 return RenameReadiness.Missing.NAME_KEY_DROP_MOVE;
@@ -628,7 +645,7 @@ public final class CompletionCheck {
         }
         return new Result(gate1, gate2, gate3Holds, List.copyOf(states.values()), List.copyOf(checks), supersededByPresent,
             waiting, List.copyOf(violators), List.copyOf(uncovered), why, danglingTombstones(ctx, tables, null), pciNotApplicable,
-            latch.isPresent(), idInvalid, latch.orElse(false), renameState(ctx, moves, p35b.get()));
+            latch.isPresent(), idInvalid, latch.orElse(false), readRenameState(ctx, moves, p35b));
     }
 
     /**
@@ -658,6 +675,28 @@ public final class CompletionCheck {
             }
         }
         return true;
+    }
+
+    /** The bound on the readiness reads (the databasechangelog read), as {@code SET LOCAL statement_timeout}: the readiness runs on every pre-latch rename's path. */
+    public static final long READINESS_READ_TIMEOUT_MS = 2000L;
+
+    /**
+     * {@link #renameState} under {@link #READINESS_READ_TIMEOUT_MS}, total: any failure or timeout, of the list or of the database, is
+     * {@link RenameState#UNREADABLE} and never an exception or a NONE (a sample that threw would leave the last answer standing; this one says so).
+     */
+    private static RenameState readRenameState(DSLContext ctx, Map<String, Move> moves, java.util.function.Supplier<Set<String>> p35b) {
+        try {
+            Set<String> listed = p35b.get();
+            return ctx.transactionResult(cfg -> {
+                DSLContext tx = cfg.dsl();
+                tx.select(DSL.function("set_config", String.class, DSL.val("statement_timeout"), DSL.val(Long.toString(READINESS_READ_TIMEOUT_MS)), DSL.val(true)))
+                    .fetch();
+                return renameState(tx, moves, listed);
+            });
+        } catch (RuntimeException e) {
+            log.warn("event=rdr229_rename_readiness_unreadable cause=\"{}\"", e.toString());
+            return RenameState.UNREADABLE;
+        }
     }
 
     /** P3.7: the name-key drop move's completion (a label with no row is incomplete) and the P3.5b changesets not yet in databasechangelog. */

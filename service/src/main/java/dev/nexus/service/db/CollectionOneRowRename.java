@@ -55,37 +55,43 @@ final class CollectionOneRowRename {
      */
     static Map<String, Integer> apply(DSLContext ctx, String tenant, String oldName, String newName, String newContentType,
                                       String newOwnerId, boolean targetRowExists, String[] tuple) {
-        // LOCK ORDER (linda, folio's P3.5a review): the rename lock (RenameLatchLock SHARED, taken by the caller), then FOR UPDATE on the registry rows
-        // this rename touches, in ascending collection_id order, then everything else. The id writers hold FOR KEY SHARE on the registry row; once the
-        // name key is gone the name UPDATE below is a non-key update, so without FOR UPDATE a writer could commit into the row this rename just retired.
+        // LOCK ORDER (linda's canonical order, via tamsin; runRename's javadoc on slice C states it once): the rename lock (RenameLatchLock SHARED, taken by the
+        // caller), then the sweep gate(s) SHARED (the shared checks the caller runs before this body), then the collection tuple lock(s), then the registry rows
+        // in collection_id order, FOR UPDATE, then the child rows. Every advisory lock comes before any row lock. The id writers hold FOR KEY SHARE on the
+        // registry row; once the name key is gone the name UPDATE below is a non-key update, so without FOR UPDATE a writer could commit into the row this
+        // rename just retired.
+        //
+        // The tuple locks are keyed on the row's tuple, so the row is read once WITHOUT a lock to name them, then locked and read again.
+        Record6<Long, String, String, String, String, String> peek = readOwn(ctx, tenant, oldName, false);
+        if (peek == null) {
+            throw notLive(oldName, newName);
+        }
+        String peekContentType = newContentType != null ? newContentType : peek.value2();
+        newOwnerId = ownerTheRenameMayChange(peekContentType, peek.value3(), newOwnerId);
+        String peekOwner = newOwnerId != null ? newOwnerId : peek.value3();
+        if (!CollectionMint.tupleIndexExists(ctx)) {
+            // the row's tuple and the new one (the same key when the client names none): sorted and once each, as the name path takes them
+            CollectionTupleLock.lock(ctx, List.of(
+                new CollectionTupleLock.Tuple(tenant, peek.value2(), peek.value3(), peek.value4(), peek.value5()),
+                new CollectionTupleLock.Tuple(tenant, peekContentType, peekOwner, peek.value4(), peek.value5())));
+        }
         ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.in(oldName, newName)))
             .orderBy(CATALOG_COLLECTIONS.COLLECTION_ID).forUpdate().fetch();
-        Record6<Long, String, String, String, String, String> own = ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID,
-                CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL,
-                CATALOG_COLLECTIONS.MODEL_VERSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
-            .from(CATALOG_COLLECTIONS)
-            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(oldName))
-                .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")))
-            .forUpdate()
-            .fetchOne();
+        Record6<Long, String, String, String, String, String> own = readOwn(ctx, tenant, oldName, true);
         if (own == null) {
+            throw notLive(oldName, newName);
+        }
+        if (!own.value2().equals(peek.value2()) || !java.util.Objects.equals(own.value3(), peek.value3()) || !own.value4().equals(peek.value4())
+                || !own.value5().equals(peek.value5())) {
             throw new CatalogRepository.CollectionMergeRefused("renaming " + oldName + " to " + newName + ": " + oldName
-                + " is not a live registered collection (it was retired or removed while this one ran); nothing was renamed");
+                + " changed attributes while this one ran; nothing was renamed, so try again");
         }
         long id = own.value1();
         // linda 2026-11-23, addendum 8: a label a collection was renamed away from is reserved until P4.1, unless this very collection takes it back
         LabelReserved.requireFree(ctx, tenant, newName, id);
-        String contentType = newContentType != null ? newContentType : own.value2();
-        // The owner a settled collection holds is not replaced by a client's slug: see ownerTheRenameMayChange.
-        newOwnerId = ownerTheRenameMayChange(contentType, own.value3(), newOwnerId);
-        String owner = newOwnerId != null ? newOwnerId : own.value3();
-        if (!CollectionMint.tupleIndexExists(ctx)) {
-            // the row's tuple and the new one (the same key when the client names none): sorted and once each, as the name path takes them
-            CollectionTupleLock.lock(ctx, List.of(
-                new CollectionTupleLock.Tuple(tenant, own.value2(), own.value3(), own.value4(), own.value5()),
-                new CollectionTupleLock.Tuple(tenant, contentType, owner, own.value4(), own.value5())));
-        }
+        String contentType = peekContentType;
+        String owner = peekOwner;
         Map<String, Integer> counts = new LinkedHashMap<>();
         if (targetRowExists) {
             CollectionTombstones.deleteRegistryRows(ctx, tenant, List.of(newName));
@@ -141,6 +147,21 @@ final class CollectionOneRowRename {
             .and(NoteUri.namesCollection(DOCUMENT_HIGHLIGHTS.SOURCE_URI, oldName)).execute());
         QuarantineOrigin.retagRowsOf(ctx, tenant, oldName, newName);
         return counts;
+    }
+
+    private static Record6<Long, String, String, String, String, String> readOwn(DSLContext ctx, String tenant, String oldName, boolean forUpdate) {
+        var q = ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID,
+                CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL,
+                CATALOG_COLLECTIONS.MODEL_VERSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
+            .from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(oldName))
+                .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")));
+        return forUpdate ? q.forUpdate().fetchOne() : q.fetchOne();
+    }
+
+    private static CatalogRepository.CollectionMergeRefused notLive(String oldName, String newName) {
+        return new CatalogRepository.CollectionMergeRefused("renaming " + oldName + " to " + newName + ": " + oldName
+            + " is not a live registered collection (it was retired or removed while this one ran); nothing was renamed");
     }
 
     /** The shape of an owner that documents settled: a tumbler segment such as {@code 1-2} ({@code catalog_collection_owner_replaceable}'s test). */
