@@ -92,6 +92,44 @@ abstract class Rdr229SwapMovesFixtures extends DataMoveIntegrationBase {
         }
     }
 
+    /** The columns of the per-leaf key, in key order (Rdr229ChunksFk.FK_DEFINITION spells the same list). */
+    static final List<String> LEAF_KEY_COLUMNS = List.of("tenant_id", "collection_id", "embedding_model");
+
+    /**
+     * The {@code nexus_test} functions the fixtures call (lock_table, add_fk_not_valid_columns, validate_constraint, drop_index), which the
+     * data-move database does not carry: installed through the test changelog under a bookkeeping table of its own, so the product's walk is
+     * untouched, and usable by the migrating role (the one that runs the worker's sessions).
+     */
+    @BeforeAll
+    void installTestFunctions() throws Exception {
+        PgContainerHelper.runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-objects.xml", "databasechangelog_test_objects_p33c", Map.of());
+        PgContainerHelper.grantSchemaUsage(su, "nexus_test", ADMIN);
+        assertThat(Rdr229ChunksFk.FK_DEFINITION).as("the per-leaf key the fixtures add by hand is the one the swap adds")
+            .isEqualTo("FOREIGN KEY (" + String.join(", ", LEAF_KEY_COLUMNS) + ") REFERENCES nexus.catalog_collections (" + String.join(", ", LEAF_KEY_COLUMNS)
+                + ") ON DELETE RESTRICT");
+    }
+
+    /** The per-leaf key as the swap adds it, NOT VALID: the same columns, the same actions. */
+    static void addLeafKeyNotValid(Connection c, String leaf, String constraint) {
+        PgContainerHelper.addFkNotValidColumns(c, table("nexus", leaf), constraint, LEAF_KEY_COLUMNS, table("nexus", "catalog_collections"),
+            LEAF_KEY_COLUMNS, PgContainerHelper.DeleteAction.RESTRICT, false);
+    }
+
+    /** {@code table} locked in {@code mode} in {@code c}'s open transaction: the lock outlives the call and ends with the transaction. */
+    static void lock(Connection c, String table, PgContainerHelper.LockMode mode) {
+        PgContainerHelper.lockTable(c, table("nexus", table), mode);
+    }
+
+    /** A transaction-scoped setting on {@code c}: {@code setLocal(c, "lock_timeout", "700ms")}. */
+    static void setLocal(Connection c, String setting, Object value) {
+        DSL.using(c, SQLDialect.POSTGRES).setLocal(DSL.name(setting), DSL.inline(value)).execute();
+    }
+
+    /** {@code c}'s backend sleeps for {@code seconds}; a cancel ends it with 57014 (wrapped in a DataAccessException, whose cause {@link #sqlState} reads). */
+    static void sleep(Connection c, Number seconds) {
+        DSL.using(c, SQLDialect.POSTGRES).select(DSL.function("pg_sleep", Object.class, DSL.inline(seconds))).fetch();
+    }
+
     @BeforeAll
     void captureStampRows() {
         for (String table : List.of("chunks", "taxonomy_centroids")) {
@@ -145,20 +183,6 @@ abstract class Rdr229SwapMovesFixtures extends DataMoveIntegrationBase {
         for (LeafFk f : leafFks()) {
             if (f.name().endsWith(Rdr229ChunksFk.LEAF_CONSTRAINT_SUFFIX)) {
                 ctx().alterTable(table("nexus", f.leaf())).dropConstraintIfExists(DSL.name(f.name())).execute();
-            }
-        }
-        // an id unique index that backs no constraint and hangs under no parent index (a leaf made while the parent had no key) would make the
-        // probe's reset call nexus_test.drop_index, which this fixture's database does not carry: drop those here
-        for (var key : IdKeyIndexProbe.KEYS) {
-            for (var idx : IdKeyIndexProbe.indexes(ctx(), key)) {
-                if (idx.constraint() == null && idx.parentIndex() == null) {
-                    int dot = idx.index().indexOf('.');
-                    try {
-                        runSql(P33cSql.stmt("drop.index", quote(idx.index().substring(0, dot)) + "." + quote(idx.index().substring(dot + 1))));
-                    } catch (SQLException e) {
-                        throw new IllegalStateException(e);
-                    }
-                }
             }
         }
         IdKeyIndexProbe.reset(ctx());
@@ -329,7 +353,7 @@ abstract class Rdr229SwapMovesFixtures extends DataMoveIntegrationBase {
             .fetchOne(0, String.class);
     }
 
-    /** Runs {@code sql} (DDL, SET, LOCK: no typed jOOQ form) on a session of its own through the engine's one sanctioned sink for SQL text. */
+    /** Runs {@code sql}, a registry text (a move's on_complete), on a session of its own through the engine's one sanctioned sink for SQL text. */
     void runSql(String sql) throws SQLException {
         try (Connection c = pg.createConnection("")) {
             MoveSql.runOnComplete(c, sql);
@@ -426,7 +450,7 @@ abstract class Rdr229SwapMovesFixtures extends DataMoveIntegrationBase {
             boolean svc = DSL.using(c, SQLDialect.POSTGRES).fetchExists(DSL.table(DSL.name("pg_catalog", "pg_roles")),
                 DSL.field(DSL.name("rolname"), String.class).eq("nexus_svc"));
             if (svc) {
-                MoveSql.runOnComplete(c, P33cSql.stmt("set.role", "nexus_svc"));
+                DSL.using(c, SQLDialect.POSTGRES).set(DSL.name("role"), DSL.inline("nexus_svc")).execute();
             }
             var regclass = new org.jooq.impl.DefaultDataType<>(SQLDialect.POSTGRES, Object.class, "regclass");
             DSL.using(c, SQLDialect.POSTGRES).select(DSL.function(DSL.name("nexus", "create_tenant_partitions"), SQLDataType.INTEGER,
@@ -509,7 +533,7 @@ abstract class Rdr229SwapMovesFixtures extends DataMoveIntegrationBase {
         Connection c = pg.createConnection("");
         parked.add(c);
         c.setAutoCommit(false);
-        MoveSql.runOnComplete(c, P33cSql.stmt("lock.table", "nexus." + quote(leaf), "ACCESS EXCLUSIVE"));
+        lock(c, leaf, PgContainerHelper.LockMode.ACCESS_EXCLUSIVE);
         return new Held(c, leaf, label, worker);
     }
     static int completionPid(DataMoveWorker w, String label, long timeoutMs) {

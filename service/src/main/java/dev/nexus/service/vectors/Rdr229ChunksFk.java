@@ -67,6 +67,12 @@ public final class Rdr229ChunksFk {
     public static final String FK_DEFINITION = "FOREIGN KEY (" + FK_COLUMNS + ") REFERENCES nexus.catalog_collections (" + FK_COLUMNS
         + ") ON DELETE RESTRICT";
 
+    /** The adoption's lock on chunks, taken under its own short lock wait: the statement that blocks every writer, so tests name it. */
+    public static final String LOCK_CHUNKS = "LOCK TABLE nexus.chunks IN SHARE ROW EXCLUSIVE MODE";
+
+    /** The parent key's one statement, the ADD that PostgreSQL turns into the adoption of the leaf keys. */
+    public static final String ADD_PARENT = "ALTER TABLE nexus.chunks ADD CONSTRAINT " + PARENT_CONSTRAINT + " " + FK_DEFINITION;
+
     /** The registry's stamp move text (vectors-070-1), word for word, as dollar-quoted text: the template and the verification. */
     private static final String REGISTRY_TEMPLATE = "UPDATE <driving_table> SET superseded_by_id = COALESCE((SELECT s.collection_id FROM "
         + "nexus.catalog_collections s WHERE s.tenant_id = t.tenant_id AND s.name = t.superseded_by), t.collection_id) WHERE "
@@ -277,7 +283,7 @@ public final class Rdr229ChunksFk {
                 lock_wait := pg_catalog.current_setting('lock_timeout');
                 PERFORM pg_catalog.set_config('lock_timeout', '%4$dms', true);
                 BEGIN
-                    LOCK TABLE nexus.chunks IN SHARE ROW EXCLUSIVE MODE;
+                    %6$s;
                 EXCEPTION WHEN lock_not_available THEN
                     RAISE EXCEPTION USING MESSAGE = 'rdr229 adoption of %2$s ' || '%5$s' || ' (SHARE ROW EXCLUSIVE, %4$d ms): a session holds a conflicting lock on it or on a leaf',
                         ERRCODE = 'lock_not_available';
@@ -287,15 +293,15 @@ public final class Rdr229ChunksFk {
                 changed := false;
                 paused_count := 0;
                 paused_first := NULL;
-            """.formatted(ADOPT_LABEL, PARENT_CONSTRAINT, FK_DEFINITION, LOCK_WAIT_MS, LOCK_FAILED_MARKER)
+            """.formatted(ADOPT_LABEL, PARENT_CONSTRAINT, FK_DEFINITION, LOCK_WAIT_MS, LOCK_FAILED_MARKER, LOCK_CHUNKS)
             + reconcile
             + """
                 IF pending THEN
                     UPDATE nexus.data_moves SET completed_at = NULL, registered_at = pg_catalog.clock_timestamp() WHERE label = '%1$s';
                     RETURN;
                 END IF;
-                ALTER TABLE nexus.chunks ADD CONSTRAINT %2$s %3$s;
-            """.formatted(ADOPT_LABEL, PARENT_CONSTRAINT, FK_DEFINITION)
+                %4$s;
+            """.formatted(ADOPT_LABEL, PARENT_CONSTRAINT, FK_DEFINITION, ADD_PARENT)
             + "END\n$adopt$";
     }
 
