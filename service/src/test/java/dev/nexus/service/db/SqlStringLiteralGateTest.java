@@ -138,6 +138,9 @@ class SqlStringLiteralGateTest {
         Map.entry("dev/nexus/service/CatalogDocumentWriterCensusTest.java", 4),
         // input to DdlLogParser under test
         Map.entry("dev/nexus/service/DdlLogParserTest.java", 28),
+        // input to the twin-key upsert coverage census's scanner under test: the planted-violation fixture's raw ON CONFLICT
+        // statement, scanned for its conflict target and never executed (RDR-229 #7, nexus-p2m1x.20)
+        Map.entry("dev/nexus/service/db/TwinKeyUpsertCoverageCensusTest.java", 1),
         // input to the extension-bootstrap site scanner under test
         Map.entry("dev/nexus/service/ExtensionBootstrapSiteConformanceTest.java", 6),
         // an expected message substring
@@ -169,7 +172,7 @@ class SqlStringLiteralGateTest {
         // an expected substring of the gc function body
         Map.entry("dev/nexus/service/vectors/PgVectorRepositoryGcQuarantineTest.java", 1));
 
-    private static final int TEXT_TOTAL = 104;
+    private static final int TEXT_TOTAL = 105;
 
     /** JDBC calls that take SQL text, per file, exact. Each entry says what the SQL is. */
     private static final Map<String, Integer> JDBC_ENTRY = Map.ofEntries(
