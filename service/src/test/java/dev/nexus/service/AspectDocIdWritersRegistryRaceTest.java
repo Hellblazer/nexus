@@ -241,8 +241,9 @@ class AspectDocIdWritersRegistryRaceTest {
         boolean deleted = whileAVerbHolds(coll, v -> { }, () -> repo.deleteHighlight(TENANT, doc));
 
         assertThat(deleted).as("the delete landed once the verb let go").isTrue();
-        assertThat(asSuperuser(ctx -> ctx.fetchCount(DOCUMENT_HIGHLIGHTS,
-            DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(TENANT).and(DOCUMENT_HIGHLIGHTS.DOC_ID.eq(doc))))).isZero();
+        int left = asSuperuser(ctx -> ctx.fetchCount(DOCUMENT_HIGHLIGHTS,
+            DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(TENANT).and(DOCUMENT_HIGHLIGHTS.DOC_ID.eq(doc))));
+        assertThat(left).isZero();
     }
 
     @Timeout(180)
@@ -261,7 +262,8 @@ class AspectDocIdWritersRegistryRaceTest {
             () -> repo.deleteHighlight(TENANT, doc));
 
         assertThat(deleted).as("the delete followed the re-homed row").isTrue();
-        assertThat(asSuperuser(ctx -> ctx.fetchCount(DOCUMENT_HIGHLIGHTS,
-            DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(TENANT).and(DOCUMENT_HIGHLIGHTS.DOC_ID.eq(doc))))).isZero();
+        int left = asSuperuser(ctx -> ctx.fetchCount(DOCUMENT_HIGHLIGHTS,
+            DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(TENANT).and(DOCUMENT_HIGHLIGHTS.DOC_ID.eq(doc))));
+        assertThat(left).isZero();
     }
 }
