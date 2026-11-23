@@ -112,28 +112,6 @@ public class TwinKeyUpsertCoverageCensusTest {
             "elsinore, RDR-229 P3.5b/c (nexus-p2m1x.24/.25): fixed on her branch (vectors-077/078; Java through TwinKeyUpsert); remove when it stacks");  // line 3158
         KNOWN_PENDING.put("dev/nexus/service/db/TaxonomyRepository.java::topics::JAVA_DO_NOTHING::2",
             "elsinore, RDR-229 P3.5b/c (nexus-p2m1x.24/.25): fixed on her branch (vectors-077/078; Java through TwinKeyUpsert); remove when it stacks");  // line 3288
-        KNOWN_PENDING.put("nexus.canary_query_ring_upsert [db/changelog/vectors-069-collection-id-dual-write-functions.xml]::canary_query_ring::SQL_DO_UPDATE::1",
-            "elsinore, RDR-229 P3.5b/c (nexus-p2m1x.24/.25): fixed on her branch (vectors-077/078; Java through TwinKeyUpsert); remove when it stacks");  // line 7789
-        KNOWN_PENDING.put("nexus.canary_query_ring_upsert [db/changelog/vectors-069-collection-id-dual-write-functions.xml]::canary_query_ring::SQL_DO_UPDATE::2",
-            "elsinore, RDR-229 P3.5b/c (nexus-p2m1x.24/.25): fixed on her branch (vectors-077/078; Java through TwinKeyUpsert); remove when it stacks");  // line 7795
-        KNOWN_PENDING.put("nexus.canary_query_ring_upsert [db/changelog/vectors-069-collection-id-dual-write-functions.xml]::canary_query_ring::SQL_DO_UPDATE::3",
-            "elsinore, RDR-229 P3.5b/c (nexus-p2m1x.24/.25): fixed on her branch (vectors-077/078; Java through TwinKeyUpsert); remove when it stacks");  // line 7801
-        KNOWN_PENDING.put("nexus.gc_quarantine_orphans [db/changelog/vectors-040-gc-audit-labels-by-text-and-manifest.xml]::chunks::SQL_DO_UPDATE::1",
-            "elsinore, RDR-229 P3.5b/c (nexus-p2m1x.24/.25): fixed on her branch (vectors-077/078; Java through TwinKeyUpsert); remove when it stacks");  // line 221
-        KNOWN_PENDING.put("nexus.gc_quarantine_orphans_bounded [db/changelog/vectors-069-collection-id-dual-write-functions.xml]::chunks::SQL_DO_UPDATE::1",
-            "elsinore, RDR-229 P3.5b/c (nexus-p2m1x.24/.25): fixed on her branch (vectors-077/078; Java through TwinKeyUpsert); remove when it stacks");  // line 715
-        KNOWN_PENDING.put("nexus.gc_restore_rereferenced [db/changelog/vectors-069-collection-id-dual-write-functions.xml]::chunks::SQL_DO_NOTHING::1",
-            "elsinore, RDR-229 P3.5b/c (nexus-p2m1x.24/.25): fixed on her branch (vectors-077/078; Java through TwinKeyUpsert); remove when it stacks");  // line 1908
-        KNOWN_PENDING.put("nexus.gc_restore_rereferenced_bounded [db/changelog/vectors-069-collection-id-dual-write-functions.xml]::chunks::SQL_DO_NOTHING::1",
-            "elsinore, RDR-229 P3.5b/c (nexus-p2m1x.24/.25): fixed on her branch (vectors-077/078; Java through TwinKeyUpsert); remove when it stacks");  // line 2294
-        KNOWN_PENDING.put("nexus.quarantine_restore_chunks [db/changelog/vectors-069-collection-id-dual-write-functions.xml]::chunks::SQL_DO_NOTHING::1",
-            "elsinore, RDR-229 P3.5b/c (nexus-p2m1x.24/.25): fixed on her branch (vectors-077/078; Java through TwinKeyUpsert); remove when it stacks");  // line 2819
-        KNOWN_PENDING.put("nexus.reaper_quarantine_chunks [db/changelog/vectors-069-collection-id-dual-write-functions.xml]::chunks::SQL_DO_UPDATE::1",
-            "elsinore, RDR-229 P3.5b/c (nexus-p2m1x.24/.25): fixed on her branch (vectors-077/078; Java through TwinKeyUpsert); remove when it stacks");  // line 1521
-        KNOWN_PENDING.put("nexus.stamp_chunks_on_manifest_delete [db/changelog/vectors-069-collection-id-dual-write-functions.xml]::chunk_orphaned_at::SQL_DO_UPDATE::1",
-            "elsinore, RDR-229 P3.5b/c (nexus-p2m1x.24/.25): fixed on her branch (vectors-077/078; Java through TwinKeyUpsert); remove when it stacks");  // line 4590
-        KNOWN_PENDING.put("nexus.stamp_chunks_on_manifest_update [db/changelog/vectors-069-collection-id-dual-write-functions.xml]::chunk_orphaned_at::SQL_DO_UPDATE::1",
-            "elsinore, RDR-229 P3.5b/c (nexus-p2m1x.24/.25): fixed on her branch (vectors-077/078; Java through TwinKeyUpsert); remove when it stacks");  // line 4690
     }
 
     /**
