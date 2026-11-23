@@ -4,7 +4,10 @@ package dev.nexus.service;
 
 import static dev.nexus.service.CollectionRouteFixture.json;
 import static dev.nexus.service.CollectionRouteFixture.label;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_PROFILE;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_META;
@@ -53,6 +56,7 @@ class Rdr229P35cIdAddressedRenameRaceTest {
     private static final String EMBEDDING_384 = "[" + String.join(",", java.util.Collections.nCopies(384, "0.1")) + "]";
 
     CollectionRouteFixture fx;
+    CollectionRouteFixture fxLocal;   // the engine that serves a re-embed (reembed start); built like HeavyRoutesRenameGapTest's
     int n;
 
     @BeforeAll
@@ -70,11 +74,34 @@ class Rdr229P35cIdAddressedRenameRaceTest {
             return null;
         });
         fx.gate3.set(true);   // latches the gate, and builds the id arbiters the latched upserts infer
+        fxLocal = new CollectionRouteFixture(true);
+        fxLocal.buildIdTwins();
+        fxLocal.asSuperuser(ctx -> {
+            for (var key : CATALOG_COLLECTIONS.getKeys()) {
+                if (!key.getFields().contains(CATALOG_COLLECTIONS.NAME)) continue;
+                for (var fk : key.getReferences()) {
+                    ctx.alterTable(fk.getTable()).dropConstraintIfExists(fk.getName()).execute();
+                }
+            }
+            ctx.alterTable(CATALOG_COLLECTIONS).dropConstraint(CATALOG_COLLECTIONS.getPrimaryKey().getName()).cascade().execute();
+            // the registry keeps its live arbiter for the upsert that registers the re-embed's target (see HeavyRoutesRenameGapTest.prepared)
+            ctx.createUniqueIndex("i7_catalog_collections_tenant_name").on(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID,
+                CATALOG_COLLECTIONS.NAME).execute();
+            ctx.alterTable(CATALOG_DOCUMENT_CHUNKS).dropConstraintIfExists(DSL.name("fk_catalog_chunks_chunk")).execute();
+            ctx.alterTable(TOPIC_ASSIGNMENTS).dropConstraintIfExists(DSL.name("topic_assignments_chunk_fk")).execute();
+            ctx.deleteFrom(EMBEDDING_PROFILE).where(EMBEDDING_PROFILE.TENANT_ID.eq(fxLocal.tenant)).and(EMBEDDING_PROFILE.CONTENT_TYPE.eq("docs")).execute();
+            ctx.insertInto(EMBEDDING_PROFILE, EMBEDDING_PROFILE.TENANT_ID, EMBEDDING_PROFILE.CONTENT_TYPE, EMBEDDING_PROFILE.EMBEDDING_MODEL,
+                EMBEDDING_PROFILE.DIMENSION).values(fxLocal.tenant, "docs", "bge-base-en-v15-768", 768).execute();
+            return null;
+        });
+        fxLocal.service.setReembedServedModelsForTests(() -> List.of("bge-base-en-v15-768", "minilm-l6-v2-384"));
+        fxLocal.gate3.set(true);
     }
 
     @AfterAll
     void stopAll() {
         if (fx != null) fx.close();
+        if (fxLocal != null) fxLocal.close();
     }
 
     private String registered(String stem) {
@@ -366,5 +393,151 @@ class Rdr229P35cIdAddressedRenameRaceTest {
         assertOk(g);
         assertStored(g, names(DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.COLLECTION_ID, DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID,
             g.x()), highlightsOf(g.y()));
+    }
+
+    // ---- the routes folio's review found uncovered: chunk upsert, centroids, reembed start, pipeline create, remap, chash, document move ----------
+
+    /** The rows of {@code table} that name collection {@code id}, with {@code cols}; the tenant of the fixture. */
+    private List<org.jooq.Record> rowsOf(CollectionRouteFixture f, String table, List<String> cols, String idCol, long id) {
+        return f.asSuperuser(ctx -> ctx.select(cols.stream().map(c -> DSL.field(DSL.name(c))).toList())
+            .from(DSL.table(DSL.name("nexus", table)))
+            .where(DSL.field(DSL.name("tenant_id"), String.class).eq(f.tenant)).and(DSL.field(DSL.name(idCol), Long.class).eq(id)).fetch());
+    }
+
+    private void assertRowsUnder(Gap g, List<org.jooq.Record> x, String nameCol, List<org.jooq.Record> y) {
+        assertThat(x).as("non-vacuity: rows were filed for id %d", g.x()).isNotEmpty();
+        assertThat(x.stream().map(r -> String.valueOf(r.get(DSL.field(DSL.name(nameCol))))).toList())
+            .as("I8: they carry the locked row's current label %s, never the boundary's", g.c()).allMatch(g.c()::equals);
+        assertThat(y).as("I7: the new holder of the old label got none").isEmpty();
+    }
+
+    @Test
+    void chunkUpsert_underAnIdRenamedInTheGap_filesTheChunkUnderTheCurrentLabelAndNotInTheNewHolder() {
+        String b = registered("cu");
+        String hex = Chash.ofText("p35c-i7 upsert " + b).toHex();
+        Gap g = inTheGap(b, y -> { },
+            x -> fx.post("/v1/vectors/upsert-chunks", "{\"collection_id\":" + x + ",\"ids\":[\"" + hex + "\"],\"documents\":[\"i7 upsert text\"]}"));
+        assertOk(g);
+        assertRowsUnder(g, rowsOf(fx, "chunks", List.of("collection"), "collection_id", g.x()), "collection",
+            rowsOf(fx, "chunks", List.of("collection"), "collection_id", g.y()));
+    }
+
+    @Test
+    void centroidUpsert_underAnIdRenamedInTheGap_filesTheCentroidUnderTheCurrentLabelAndNotInTheNewHolder() {
+        String b = registered("ce");
+        long topic = seedTopic(fx.idOf(b), "i7-centroid");
+        Gap g = inTheGap(b, y -> { },
+            x -> fx.post("/v1/taxonomy/centroids/upsert", "{\"records\":[{\"collection_id\":" + x + ",\"topic_id\":" + topic
+                + ",\"label\":\"i7c\",\"doc_count\":1,\"embedding\":" + EMBEDDING_384 + "}]}"));
+        assertOk(g);
+        assertRowsUnder(g, rowsOf(fx, "taxonomy_centroids", List.of("collection"), "collection_id", g.x()), "collection",
+            rowsOf(fx, "taxonomy_centroids", List.of("collection"), "collection_id", g.y()));
+    }
+
+    @Test
+    void pipelineCreate_underAnIdRenamedInTheGap_filesTheRunUnderTheCurrentLabelAndNotInTheNewHolder() {
+        String b = registered("pl");
+        String hash = "i7-" + b;
+        Gap g = inTheGap(b, y -> { },
+            x -> fx.post("/v1/pipeline/create", "{\"collection_id\":" + x + ",\"content_hash\":" + json(hash) + ",\"pdf_path\":\"/i7.pdf\"}"));
+        assertOk(g);
+        assertRowsUnder(g, rowsOf(fx, "pdf_pipeline", List.of("collection"), "collection_id", g.x()), "collection",
+            rowsOf(fx, "pdf_pipeline", List.of("collection"), "collection_id", g.y()));
+    }
+
+    @Test
+    void remapRecord_underAnIdRenamedInTheGap_filesTheFactUnderTheCurrentLabelAndNotInTheNewHolder() {
+        String b = registered("rm");
+        String target = registered("rmt");
+        long targetId = fx.idOf(target);
+        String chash = Chash.ofText("i7-remap-" + b).toHex();
+        Gap g = inTheGap(b, y -> { },
+            x -> fx.post("/v1/remap/record_batch", "{\"source_collection_id\":" + x + ",\"entries\":[{\"old_id\":\"i7-old\",\"new_chash\":\"" + chash
+                + "\",\"target_collection_id\":" + targetId + ",\"provenance\":\"i7\"}]}"));
+        assertOk(g);
+        assertRowsUnder(g, rowsOf(fx, "chash_remap", List.of("source_collection"), "source_collection_id", g.x()), "source_collection",
+            rowsOf(fx, "chash_remap", List.of("source_collection"), "source_collection_id", g.y()));
+    }
+
+    /** The re-embed start is on the engine that serves one: the same rename in the gap, on the local fixture. */
+    @Test
+    void reembedStart_underAnIdRenamedInTheGap_filesTheJobUnderTheCurrentLabelAndNotInTheNewHolder() {
+        String b = label("i7-re-" + (n++));
+        fxLocal.register(b);
+        long x = fxLocal.idOf(b);
+        String target = "docs__i7-re-" + (n++) + "__bge-base-en-v15-768__v1";
+        CollectionRegistry.lookup(new dev.nexus.service.db.TenantScope(fxLocal.svcDs), fxLocal.tenant, b);
+        try (CollectionRouteFixture.RenameGap gap = fxLocal.renameInPlaceBeforeTheWritesRead(List.of(x), List.of(b), "i8-" + (n++), null)) {
+            Resp r = fxLocal.post("/v1/vectors/reembed/jobs", "{\"source_collection_id\":" + x + ",\"target_collection\":" + json(target) + "}");
+            assertThat(gap.ran()).as("setup: the rename ran before the write's own by-id read (%s)", r.body()).isTrue();
+            assertThat(r.status()).as("the job is filed: %s", r.body()).isEqualTo(201);
+            String c = gap.currentLabelOf().get(x);
+            long y = gap.newHolders().iterator().next();
+            assertThat(fxLocal.idOf(b)).as("the old label is the new row's").isEqualTo(y).isNotEqualTo(x);
+            var forX = rowsOf(fxLocal, "reembed_jobs", List.of("source_collection"), "source_collection_id", x);
+            assertThat(forX).as("non-vacuity: the job was filed for id %d", x).isNotEmpty();
+            assertThat(forX.stream().map(row -> String.valueOf(row.get(0))).toList()).as("I8: under the current label %s", c).allMatch(c::equals);
+            assertThat(rowsOf(fxLocal, "reembed_jobs", List.of("source_collection"), "source_collection_id", y)).as("I7: none for the new holder").isEmpty();
+        }
+    }
+
+    /** A read by id: the counts are X's rows whichever collection bears the old label now. */
+    @Test
+    void chashCount_byAnIdWhoseLabelAnotherCollectionTookAfterTheRename_countsTheRenamedRowsAndNotTheNewHoldersOfTheOldLabel() {
+        String b = registered("ch");
+        long x = fx.idOf(b);
+        seedChunk(x, "p35c-i7 chash one");
+        seedChunk(x, "p35c-i7 chash two");
+        String c = label("i7-ch-renamed-" + (n++));
+        fx.asSuperuser(ctx -> ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.NAME, c)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(fx.tenant)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(x)).execute());
+        fx.register(b);   // a NEW row takes the old label
+        long y = fx.idOf(b);
+        seedChunk(y, "p35c-i7 chash held 1");
+        seedChunk(y, "p35c-i7 chash held 2");
+        seedChunk(y, "p35c-i7 chash held 3");
+        Resp r = fx.get("/v1/chash/count_for_collection?collection_id=" + x);
+        assertThat(r.status()).as(r.body()).isEqualTo(200);
+        assertThat(r.json().path("count").asInt()).as("the renamed row's two chunks, not the new holder's three: %s", r.body()).isEqualTo(2);
+    }
+
+    /** S and T are documents of X; T holds the new URI and has a highlights row, which the move re-keys to S's collection: X, under its current label. */
+    @Test
+    void documentMove_underAnIdRenamedInTheGap_rekeysTheHighlightsToTheRenamedRowAndNotTheNewHolder() {
+        String b = registered("dm");
+        String s = "1.1.101", t = "1.1.102";
+        fx.asSuperuser(ctx -> {
+            ctx.insertInto(dev.nexus.service.jooq.nexus.Tables.CATALOG_OWNERS)
+                .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_OWNERS.TENANT_ID, fx.tenant)
+                .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_OWNERS.TUMBLER_PREFIX, "1.1")
+                .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_OWNERS.NAME, "i7-owner")
+                .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_OWNERS.OWNER_TYPE, "curator").onConflictDoNothing().execute();
+            CollectionIdSeeds.ownerDocument(ctx, fx.tenant, s, b);
+            CollectionIdSeeds.ownerDocument(ctx, fx.tenant, t, b);
+            ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.SOURCE_URI, "file:///old/i7.pdf").set(CATALOG_DOCUMENTS.FILE_PATH, "/old/i7.pdf")
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(fx.tenant)).and(CATALOG_DOCUMENTS.TUMBLER.eq(s)).execute();
+            ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.SOURCE_URI, "file:///new/i7.pdf").set(CATALOG_DOCUMENTS.FILE_PATH, "/new/i7.pdf")
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(fx.tenant)).and(CATALOG_DOCUMENTS.TUMBLER.eq(t)).execute();
+            return null;
+        });
+        Resp seeded = fx.post("/v1/aspects/highlights/upsert", "{\"collection_id\":" + fx.idOf(b) + ",\"doc_id\":" + json(t)
+            + ",\"source_uri\":\"file:///new/i7.pdf\",\"ingested_at\":\"2026-01-01T00:00:00Z\",\"highlights_md\":\"i7 marks\"}");
+        assertThat(seeded.status()).as("setup: %s", seeded.body()).isEqualTo(200);
+        // the move names a tumbler, not a collection id, so the gap hook (armed by a request that carries one) cannot fire: the rename and the
+        // new holder of the old label are in place before the request, which is the same state the gap leaves
+        long x = fx.idOf(b);
+        String c = label("i7-dm-renamed-" + (n++));
+        fx.asSuperuser(ctx -> ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.NAME, c)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(fx.tenant)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(x)).execute());
+        fx.register(b);
+        long y = fx.idOf(b);
+        assertThat(y).as("setup: the old label is a new row's").isNotEqualTo(x);
+        Resp r = fx.post("/v1/catalog/documents/move",
+            "{\"tumbler\":" + json(s) + ",\"new_source_uri\":\"file:///new/i7.pdf\",\"new_file_path\":\"/new/i7.pdf\",\"dry_run\":false}");
+        assertThat(r.status()).as("the move goes ahead by id: %s", r.body()).isEqualTo(200);
+        var moved = rowsOf(fx, "document_highlights", List.of("collection", "doc_id"), "collection_id", x);
+        assertThat(moved).as("non-vacuity: the highlights now belong to S, in X").extracting(row -> String.valueOf(row.get("doc_id"))).contains(s);
+        assertThat(moved.stream().map(row -> String.valueOf(row.get("collection"))).toList()).as("I8: under the current label %s", c).allMatch(c::equals);
+        assertThat(rowsOf(fx, "document_highlights", List.of("collection"), "collection_id", y)).as("I7: the new holder got none").isEmpty();
     }
 }
