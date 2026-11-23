@@ -162,8 +162,6 @@ public final class NexusService {
 
     private final HttpServer server;
     private final TenantScope tenantScope;
-    /** RDR-229 P3.5c: gate 3 latched on this install; the repositories read the id once it holds (read per call). */
-    private final dev.nexus.service.datamove.Gate3 gate3;
     /**
      * RDR-205 Phase 1 Step 5 (bead nexus-em75s.5): the tuple sweep's tenant
      * enumeration reads {@code nexus.tuple_tenants} directly via a plain
@@ -707,7 +705,7 @@ public final class NexusService {
         final boolean tenantResetRoute = tenantResetRouteEnabled(env);
         this.tenantScope = new TenantScope(dataSource);
         this.dataSource = dataSource;
-        this.gate3 = java.util.Objects.requireNonNull(gate3, "gate3");
+        java.util.Objects.requireNonNull(gate3, "gate3"); // RDR-229 P3.5c: the repositories read the id once it holds
 
         // Token lifecycle (RDR-152 bead nexus-gmiaf.32.2): resolve bearer→tenant
         // server-side against the service_tokens registry (RLS-off, read pre-context

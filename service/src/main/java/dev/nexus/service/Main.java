@@ -601,15 +601,29 @@ public final class Main {
             return;
         }
 
-        // RDR-229 P3.5c (nexus-p2m1x.25): the one gate 3 signal the Java readers switch to the id on, read on every call. It answers
-        // the boot latch (read below, before the listener binds) until the completion check starts, then the check's latch, which
-        // never goes back to false; so a latched install never routes by a stale name, even on the first requests of a restart.
-        var bootLatchRef = new java.util.concurrent.atomic.AtomicReference<dev.nexus.service.datamove.Gate3Latch>();
+        // RDR-229 P3.4: the gate 3 latch, read here, synchronously, BEFORE the listener binds. The completion check's own sample is asynchronous
+        // and can fail, so a reader that went by it could route to stale names after a one-row rename on the first requests of a restart.
+        // A read that fails is retried with backoff, and when the database cannot answer in the deadline the engine does not serve (the same
+        // fail-fast as every boot step above that cannot read it); it never guesses latched or not.
+        dev.nexus.service.datamove.Gate3Latch gate3Latch;
+        try {
+            gate3Latch = dev.nexus.service.datamove.Gate3Latch.readAtBoot(adminConnection);
+        } catch (IllegalStateException e) {
+            ds.close();
+            log.error("event=rdr229_gate3_latch_boot_read_failed error=\"{}\"", e.getMessage(), e);
+            System.exit(1);
+            return;
+        }
+        log.info("event=rdr229_gate3_latch_read latched={} pci_off={}", gate3Latch.latched(), gate3Latch.pciOff());
+        // RDR-229 P3.5c (nexus-p2m1x.25): the one gate 3 signal the Java readers switch to the id on, read on every call. The boot
+        // latch is read above, before anything that reads or writes a collection is built or scheduled, so the signal never has an
+        // unset state: it answers that latch until the completion check starts, then the check's latch, which never returns to false;
+        // so a latched install never routes by a stale name, even on the first requests and the first scheduled ticks of a restart.
+        final var bootLatch = gate3Latch;
         var completionRef = new java.util.concurrent.atomic.AtomicReference<dev.nexus.service.datamove.CompletionBootWork>();
         dev.nexus.service.datamove.Gate3 gate3 = () -> {
             var c = completionRef.get();
-            var b = bootLatchRef.get();
-            return c != null ? c.gate3Latched() : b != null && b.latched();
+            return c != null ? c.gate3Latched() : bootLatch.latched();
         };
         // nexus-43ulx.12 (RDR-227): the router's valid-index set, built from the NX_SEARCH_PCI* settings the boot
         // validation block after the pool (above the schema migration) has already parsed, and handed to the
@@ -627,21 +641,6 @@ public final class Main {
         // nexus-csayy.6 (RDR-248): the import routes open a session only on an engine that holds the singleton lock
         // (null: NX_ENGINE_SINGLETON_LOCK=off, or a pooler, where the lock is skipped).
         service.importWiring().declareSingletonLockHeld(singletonLock != null);
-        // RDR-229 P3.4: the gate 3 latch, read here, synchronously, BEFORE the listener binds. The completion check's own sample is asynchronous
-        // and can fail, so a reader that went by it could route to stale names after a one-row rename on the first requests of a restart.
-        // A read that fails is retried with backoff, and when the database cannot answer in the deadline the engine does not serve (the same
-        // fail-fast as every boot step above that cannot read it); it never guesses latched or not.
-        dev.nexus.service.datamove.Gate3Latch gate3Latch;
-        try {
-            gate3Latch = dev.nexus.service.datamove.Gate3Latch.readAtBoot(adminConnection);
-        } catch (IllegalStateException e) {
-            ds.close();
-            log.error("event=rdr229_gate3_latch_boot_read_failed error=\"{}\"", e.getMessage(), e);
-            System.exit(1);
-            return;
-        }
-        log.info("event=rdr229_gate3_latch_read latched={} pci_off={}", gate3Latch.latched(), gate3Latch.pciOff());
-        bootLatchRef.set(gate3Latch);
         service.start();
         // The read half runs in every engine, whatever NX_SEARCH_PCI says: one read now, then one per
         // NX_SEARCH_PCI_SWEEP_SECONDS. Started after the service so the pool is serving; stopped in the
