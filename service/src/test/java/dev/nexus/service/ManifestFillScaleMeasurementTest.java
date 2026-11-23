@@ -66,16 +66,19 @@ class ManifestFillScaleMeasurementTest extends ManifestFillTestBase {
             DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
             PgContainerHelper.insertCollection(seed, TENANT, COLL);
             String model = PgContainerHelper.collectionModel(seed, TENANT, COLL);
+            // RDR-229 P3.1: every content row names its collection by id too (the collection_id CHECKs).
+            long collId = dev.nexus.service.db.CollectionIds.require(seed, TENANT, COLL);
 
             int docs = (N - 1) / POSITIONS_PER_DOC + 1;
             var docSeries = DSL.generateSeries(0, docs - 1).as("d", "n");
             Field<Integer> n = docSeries.field("n", Integer.class);
             seed.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
-                    CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.CONTENT_TYPE,
+                    CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID,
+                    CATALOG_DOCUMENTS.CONTENT_TYPE,
                     CATALOG_DOCUMENTS.INDEXED_AT, CATALOG_DOCUMENTS.METADATA)
                 .select(seed.select(DSL.inline(TENANT), DSL.concat(DSL.inline("9."), DSL.cast(n, SQLDataType.VARCHAR), DSL.inline(".1")),
                         DSL.concat(DSL.inline("doc "), DSL.cast(n, SQLDataType.VARCHAR)), DSL.inline(COLL),
-                        DSL.inline("prose"), DSL.val(OffsetDateTime.parse(DOC_AT), CATALOG_DOCUMENTS.INDEXED_AT),
+                        DSL.val(collId, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID), DSL.inline("prose"), DSL.val(OffsetDateTime.parse(DOC_AT), CATALOG_DOCUMENTS.INDEXED_AT),
                         DSL.val(JSONB.valueOf("{}"), CATALOG_DOCUMENTS.METADATA))
                     .from(docSeries))
                 .execute();
@@ -97,9 +100,9 @@ class ManifestFillScaleMeasurementTest extends ManifestFillTestBase {
                     DSL.inline(",\"chunk_start_char\":0,\"chunk_end_char\":100"));
                 Field<String> meta = DSL.concat(DSL.inline("{\"indexed_at\":\"" + OK_AT + "\",\"section_title\":\"S\""),
                     DSL.when(prose, DSL.inline("")).otherwise(spanKeys), DSL.inline("}"));
-                seed.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.EMBEDDING_MODEL, CHUNKS.CHASH,
+                seed.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, CHUNKS.EMBEDDING_MODEL, CHUNKS.CHASH,
                         CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_768, CHUNKS.METADATA)
-                    .select(seed.select(DSL.val(TENANT, CHUNKS.TENANT_ID), DSL.val(COLL, CHUNKS.COLLECTION),
+                    .select(seed.select(DSL.val(TENANT, CHUNKS.TENANT_ID), DSL.val(COLL, CHUNKS.COLLECTION), DSL.val(collId, CHUNKS.COLLECTION_ID),
                             DSL.val(model, CHUNKS.EMBEDDING_MODEL), chash, DSL.inline("stub"),
                             DSL.val(VectorSeeds.vec(768, 0.1f), CHUNKS.EMBEDDING_768),
                             DSL.cast(meta, SQLDataType.JSONB))
@@ -110,14 +113,14 @@ class ManifestFillScaleMeasurementTest extends ManifestFillTestBase {
                 var legacy = pend;
                 seed.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                         CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                        CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
-                        CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN, CATALOG_DOCUMENT_CHUNKS.LINE_START,
+                        CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID,
+                        CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN, CATALOG_DOCUMENT_CHUNKS.LINE_START,
                         CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END)
                     .select(seed.select(DSL.val(TENANT, CATALOG_DOCUMENT_CHUNKS.TENANT_ID),
                             DSL.concat(DSL.inline("9."), DSL.cast(i.minus(1).div(POSITIONS_PER_DOC), SQLDataType.VARCHAR),
                                 DSL.inline(".1")),
                             i.minus(1).mod(POSITIONS_PER_DOC), i.minus(1).mod(POSITIONS_PER_DOC), chash,
-                            DSL.val(COLL, CATALOG_DOCUMENT_CHUNKS.COLLECTION),
+                            DSL.val(COLL, CATALOG_DOCUMENT_CHUNKS.COLLECTION), DSL.val(collId, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID),
                             DSL.val(model, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL),
                             DSL.when(legacy, DSL.inline(false)).otherwise(DSL.inline(true)),
                             DSL.when(legacy.or(prose), nullSpan).otherwise(ls),
