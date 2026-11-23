@@ -50,6 +50,14 @@ public final class RenameGuard {
     }
 
     /**
+     * Whether a collection delete scopes its purge by the row's id rather than by the name columns: gate 3, read per call
+     * ({@link CollectionPurgeScope}). The guard is the repository's one holder of the gate-3 signal.
+     */
+    public boolean scopesDeletesById() {
+        return gate3.holds();
+    }
+
+    /**
      * Whether a collection's id survives a rename on this install (R6's {@code ids_stable}, the key P3.5a's rename response
      * carries). Always false in this tree: the rename it runs is the name path, which gives the collection a new id, whatever
      * gate 3 says. P3.7's one-row rename keeps the id and is what makes this true (gate 3 holding, the drop move complete, every
