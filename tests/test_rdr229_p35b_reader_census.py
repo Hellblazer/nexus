@@ -8,6 +8,7 @@ object set against pg_catalog of a migrated database, which catches an object th
 """
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -193,7 +194,6 @@ _P35B_FILES = (_REPO / "service" / "src" / "main" / "resources" / "db" / "change
 
 def _redefined_by_p35b() -> set[tuple[str, str]]:
     """(kind, object) of every function, view and trigger vectors-077 or vectors-078 creates or replaces, comments stripped."""
-    import re
     out: set[tuple[str, str]] = set()
     for f in _P35B_FILES:
         text = re.sub(r"<!--.*?-->", "", f.read_text(), flags=re.S)
