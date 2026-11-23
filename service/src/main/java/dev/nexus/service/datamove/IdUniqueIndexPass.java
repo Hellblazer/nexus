@@ -54,8 +54,9 @@ import java.util.function.Consumer;
  *
  * <p><b>A duplicate is corruption, not data.</b> Before P3.7 each collection name maps to exactly one id and each table's name-keyed unique
  * already forbids the duplicate, so a unique violation (23505) on one of these builds means the table is corrupt. The pass then drops the
- * INVALID leftover, logs the duplicate keys (at most {@link #DUPLICATES_LOGGED}), keeps a {@code boot_work} entry that says so in words,
- * and does not build that index again in this engine's life: nothing loops. Gate 3 stays false, so the rename keeps its fourteen-table name
+ * INVALID leftover, logs the duplicate keys (at most {@link #DUPLICATES_LOGGED}) at ERROR, keeps a {@code boot_work} entry that says so in words
+ * ({@link #HELD_BOOT_WORK_ID}: visible and safe to stop, but not work for {@code nx upgrade}), and does not build that index again in this engine's
+ * life: nothing loops. Gate 3 stays false, so the rename keeps its fourteen-table name
  * path. Any other failure (a lock wait, a cancelled build) is retried at the next tick. The status text names the table, never a tenant or
  * a key value (the status is unauthenticated); the values are in the log.
  *
@@ -67,12 +68,23 @@ public final class IdUniqueIndexPass implements AutoCloseable {
     private static final Logger log = LoggerFactory.getLogger(IdUniqueIndexPass.class);
 
     public static final String APPLICATION_NAME = PciBuilderSession.APPLICATION_NAME_PREFIX + "id-unique-index-pass";
+    /** The {@code boot_work} entry of builds in progress: that IS work, and {@code nx upgrade} waits for it. */
     public static final String BOOT_WORK_ID = "id-unique-index-pass";
+    /**
+     * The {@code boot_work} entry of a standing condition: a table found corrupt (a duplicate on the id key), or an index of a pass name that stands with another
+     * definition. It stays visible ({@code nx doctor}, {@code gate3_why}, the log at ERROR) and is safe to stop, but it is NOT work: nothing is running, an
+     * upgrade or restart changes nothing about it, and a permanent entry would otherwise defer {@code nx upgrade}'s bundle swap and the boot-write harness's idle
+     * rule for good. {@code nexus.daemon.pg_bundle_refresh.engine_busy_reason} and {@code scripts/upgrade_boot_writes.py} skip this id (linda, 2026-11-23). A
+     * twin that only waits for a changeset has no entry at all: {@link #waitingChangesets} names it in {@code gate3_why}.
+     */
+    public static final String HELD_BOOT_WORK_ID = "id-unique-index-held";
     /** ASCII "iduqidxp". */
     public static final long LOCK_KEY = 0x6964757169647870L;
 
     static final String WHAT = "building the unique id indexes the rename's upserts use";
     static final String UNIT = "indexes";
+    static final String HELD_ON_STOP = "nothing is lost and nothing is running: this is a standing condition, which a restart does not clear; the corrupt rows "
+        + "or the other index are the operator's to repair";
     static final String ON_STOP = "a build in flight keeps running in the database and finishes there; one that is ended is dropped and built again "
         + "by the next engine";
     static final Duration INITIAL_DELAY = Duration.ofSeconds(30);
@@ -146,6 +158,19 @@ public final class IdUniqueIndexPass implements AutoCloseable {
     @FunctionalInterface
     public interface Gate2 {
         boolean holds();
+    }
+
+    /** What the pass holds, as words (the {@link #HELD_BOOT_WORK_ID} text): read by the completion check for {@code gate3_why}. One pass runs per engine. */
+    private static volatile List<String> heldReasons = List.of();
+
+    /** The corruption and definition-mismatch conditions the running pass holds, in words that name a table or an index, never a tenant or a key value. */
+    public static List<String> heldReasons() {
+        return heldReasons;
+    }
+
+    /** Test seam: forget what a pass held, so one test's corruption is not another's gate3_why. */
+    static void forgetHeld() {
+        heldReasons = List.of();
     }
 
     /** What one pass did: whether it ran, how many it built, how many leftovers it dropped, and the tables found corrupt so far. */
@@ -341,6 +366,7 @@ public final class IdUniqueIndexPass implements AutoCloseable {
 
     @Override
     public synchronized void close() {
+        heldReasons = List.of();
         if (scheduler != null) {
             scheduler.shutdownNow();
             scheduler = null;
@@ -406,10 +432,17 @@ public final class IdUniqueIndexPass implements AutoCloseable {
     private Result run(Connection conn) throws SQLException {
         var ctx = DSL.using(conn, org.jooq.SQLDialect.POSTGRES);
         List<Spec> todo = new ArrayList<>();
-        List<String> waits = new ArrayList<>();
+        java.util.Set<String> builtNames = new java.util.HashSet<>();
         Instant now = Instant.now();
         for (Spec s : SPECS) {
-            if (corrupt.containsKey(s.index()) || mismatched.containsKey(s.index()) || valid(ctx, s)) {
+            if (mismatched.containsKey(s.index())) {
+                if (validExists(ctx, s) && !valid(ctx, s)) {
+                    continue;   // the wrong index still stands: reported, left alone
+                }
+                mismatched.remove(s.index());   // dropped or replaced by the operator: judged afresh below, built if it is missing
+                log.info("event=id_unique_index_mismatch_cleared index={}", s.index());
+            }
+            if (corrupt.containsKey(s.index()) || valid(ctx, s)) {
                 continue;
             }
             if (waiting(ctx, s)) {
@@ -418,7 +451,6 @@ public final class IdUniqueIndexPass implements AutoCloseable {
                     log.info("event=id_unique_index_waiting index={} for_changesets={} reason=writer_replaced_by_a_changeset_not_yet_recorded",
                         s.index(), ids);
                 }
-                waits.add(s.index() + " waits for changeset " + String.join(", ", ids));
                 continue;   // its table's writer is replaced by a changeset not yet recorded: building now would race the old body
             }
             if (validExists(ctx, s)) {   // a VALID index of our name with another definition: a named failure, never dropped by us
@@ -460,6 +492,7 @@ public final class IdUniqueIndexPass implements AutoCloseable {
                     setSession(ctx, "statement_timeout", buildTimeout.toMillis() + "ms");
                     ddl(conn, ctx, BUILD_TEMPLATE, s.buildArguments());
                     built++;
+                    builtNames.add(s.index());
                     backoffs.remove(s.index());
                     registry.progress(BOOT_WORK_ID, (long) built, (long) todo.size());
                     log.info("event=id_unique_index_built table={} index={}", s.table(), s.index());
@@ -490,11 +523,17 @@ public final class IdUniqueIndexPass implements AutoCloseable {
             }
             List<String> held = new ArrayList<>(corrupt.values());
             held.addAll(mismatched.values());
+            heldReasons = List.copyOf(held);
             if (!held.isEmpty()) {
-                registry.register(BOOT_WORK_ID, String.join("; ", held), 0L, (long) held.size(), UNIT, true, ON_STOP);
-            } else if (!waits.isEmpty()) {
-                registry.register(BOOT_WORK_ID, WHAT + ": " + String.join("; ", waits), 0L, (long) waits.size(), UNIT, true, ON_STOP);
-            } else if (built == todo.size() && backoffs.isEmpty()) {
+                // a standing condition, not work: its own entry id, which the idle rules skip (HELD_BOOT_WORK_ID)
+                registry.register(HELD_BOOT_WORK_ID, String.join("; ", held), 0L, (long) held.size(), UNIT, true, HELD_ON_STOP);
+            } else {
+                registry.finish(HELD_BOOT_WORK_ID);
+            }
+            // The builds in progress are work until every one that can be built has been; a corrupt table is not left to build.
+            boolean workLeft = !backoffs.isEmpty()
+                || todo.stream().anyMatch(sp -> !builtNames.contains(sp.index()) && !corrupt.containsKey(sp.index()));
+            if (!workLeft) {
                 registry.finish(BOOT_WORK_ID);
             }   // otherwise the entry stays, with its count: work is left for a later tick
         }

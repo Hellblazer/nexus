@@ -86,3 +86,41 @@ def test_the_blocked_state_carries_a_parked_move_the_idle_rules_discount():
     status = _fixture("stamps_blocked")
     parked = _harness.parked_moves(status)
     assert len(parked) == 1 and parked[0]["id"].startswith("data-move:rdr229-stamp-")
+
+
+# ---- the standing P3.4 conditions (nexus-p2m1x.22; linda 2026-11-23) ----------------------------------------------------------
+# A corrupt table or an index of a pass's name with another definition keeps a boot_work entry for good: nothing is running and a
+# restart clears neither. It stays visible and safe to stop, but it is not work for either idle rule. The building entry
+# ("id-unique-index-pass") IS work.
+
+_HELD_ENTRY = {
+    "id": "id-unique-index-held",
+    "what": "the unique id index on taxonomy_meta was not built: two rows share an id key, which means the table is corrupt",
+    "started_at": "2026-11-23T12:00:00Z", "done": 0, "total": 1, "unit": "indexes", "safe_to_stop": True,
+    "on_stop": "nothing is lost and nothing is running", "step": None,
+}
+
+
+@pytest.mark.parametrize("state", _STATES)
+def test_a_standing_p34_condition_does_not_defer_the_bundle_swap_and_does_not_hold_the_harness(state, monkeypatch, tmp_path):
+    status = json.loads(json.dumps(_fixture(state)))
+    status["boot_work"].append(dict(_HELD_ENTRY))
+    assert [e for e in status["boot_work"] if e["id"] == "id-unique-index-held"], "non-vacuity: the entry is in boot_work"
+    assert _busy(monkeypatch, tmp_path, status) is None
+    assert _harness.boot_work_settled(status)
+    assert _harness.status_says_idle(200, status)
+
+
+def test_control_the_building_entry_and_other_work_beside_a_standing_condition_still_count(monkeypatch, tmp_path):
+    status = json.loads(json.dumps(_fixture("all_stamps_done_gate3_waiting")))
+    status["boot_work"] += [dict(_HELD_ENTRY), {**_OLD_ENTRY, "id": "id-unique-index-pass", "what": "building the unique id indexes"}]
+    assert _busy(monkeypatch, tmp_path, status) is not None
+    assert not _harness.boot_work_settled(status)
+
+
+def test_control_a_standing_condition_alone_would_defer_without_the_skip(monkeypatch, tmp_path):
+    """Non-vacuity of the case above: the same entry under another id is work."""
+    status = json.loads(json.dumps(_fixture("all_stamps_done_gate3_waiting")))
+    status["boot_work"].append({**_HELD_ENTRY, "id": "some-other-entry"})
+    assert _busy(monkeypatch, tmp_path, status) is not None
+    assert not _harness.boot_work_settled(status)
