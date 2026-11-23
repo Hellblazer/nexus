@@ -3128,6 +3128,9 @@ class RawSqlGateTest {
         "index-comment-not-an-anchor", "index-comment-wrong-version", "index-comment-clear",
         // nexus-4lnn1.1.10: an anchor text with no relfilenode, behind PgContainerHelper.commentIndexAnchorWithoutRelfilenode
         "index-comment-no-relfilenode",
+        // nexus-p2m1x.27 (RDR-229 P3.7): ALTER TABLE ... DISABLE/ENABLE TRIGGER, the control of the vectors-079 tests, behind
+        // PgContainerHelper.disableTrigger and enableTrigger (both names through requireTestIdentifier)
+        "trigger-disable", "trigger-enable",
         // earlier batches, each behind a requireTestIdentifier helper (or taking no caller input) and named nowhere
         // else in code
         "role-planner-guc", "nologin-role", "schema-usage", "schema-default-select-acl", "table-owner",

@@ -27,6 +27,12 @@ public final class RenameRefusedException extends RuntimeException {
         return switch (missing) {
             case NAME_KEY_DROP_MOVE -> "a collection rename is refused until the name-key drop move has completed on this "
                 + "install; the move is the missing condition";
+            case P35B_LIST_MISSING -> "a collection rename is refused because this build ships no P3.5b changeset list "
+                + "(db/rdr229/p35b-continue-changesets.txt is missing or names nothing); a restart does not fix it, a build with the list does";
+            case P35C_READERS_ABSENT -> "a collection rename is refused because this engine's readers still select by collection name (P3.5c's id readers "
+                + "are not present), so a one-row rename would leave a reader on a label that no longer names the collection; the id readers are the missing condition";
+            case READINESS_UNREADABLE -> "a collection rename is refused because what it waits for could not be read; the readiness is the "
+                + "missing condition, and it is read again at the next sample";
             case P35B_RESTART -> "a collection rename is refused until the engine restarts to apply the P3.5b changesets; "
                 + "the restart is the missing condition";
             case LATCH_ROW_MISSING -> "a collection rename is refused: the rename readiness says the name-key drop move is complete but "
@@ -40,7 +46,7 @@ public final class RenameRefusedException extends RuntimeException {
         return missing;
     }
 
-    /** The wire value of {@code missing}: {@code name_key_drop_move} or {@code restart}. */
+    /** The wire value of {@code missing}: {@code name_key_drop_move}, {@code p35b_list_missing}, {@code restart}, {@code readiness_unreadable}, {@code p35c_readers_absent} or {@code latch_row_missing}. */
     public String wireValue() {
         return wireValue(missing);
     }
@@ -50,6 +56,9 @@ public final class RenameRefusedException extends RuntimeException {
         return switch (missing) {
             case NAME_KEY_DROP_MOVE -> "name_key_drop_move";
             case P35B_RESTART -> "restart";
+            case P35B_LIST_MISSING -> "p35b_list_missing";
+            case READINESS_UNREADABLE -> "readiness_unreadable";
+            case P35C_READERS_ABSENT -> "p35c_readers_absent";
             case LATCH_ROW_MISSING -> "latch_row_missing";
             case NONE -> "";
         };
