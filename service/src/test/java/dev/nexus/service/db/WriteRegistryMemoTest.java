@@ -149,7 +149,7 @@ class WriteRegistryMemoTest {
         String y = seeded("retire-y");
         scope.withTenant(TENANT, ctx -> {
             assertThat(CollectionRegistry.requireWritable(ctx, TENANT, x).isSuperseded()).as("live before the verb").isFalse();
-            int updated = CollectionTombstones.supersede(ctx, TENANT, x, y, DSL.currentOffsetDateTime());
+            int updated = CollectionTombstones.supersede(ctx, TENANT, x, y, DSL.currentOffsetDateTime(), dev.nexus.service.datamove.Gate3.never());
             assertThat(updated).as("setup: the verb retired the row").isEqualTo(1);
             assertThatThrownBy(() -> CollectionRegistry.requireWritable(ctx, TENANT, x))
                 .as("the memo must not hand back the live row it read before the verb's own retire")

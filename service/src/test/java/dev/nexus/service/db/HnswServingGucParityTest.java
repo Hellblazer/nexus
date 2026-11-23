@@ -258,7 +258,7 @@ class HnswServingGucParityTest {
             }
             String member = body.substring(from, end);
             from = end + 1;
-            if (!member.contains("getWhereCondition(ch, where)") || !member.contains("tenantScope.withTenant(")) {
+            if (!member.contains("getWhereCondition(ch, where") || !member.contains("tenantScope.withTenant(")) {
                 continue;
             }
             methods++;

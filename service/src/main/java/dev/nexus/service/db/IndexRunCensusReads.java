@@ -2,12 +2,13 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import dev.nexus.service.datamove.Gate3;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.Record2;
 import org.jooq.Record4;
-import org.jooq.Record6;
+import org.jooq.Record7;
 import org.jooq.Select;
 import org.jooq.impl.DSL;
 import org.slf4j.Logger;
@@ -153,6 +154,7 @@ public final class IndexRunCensusReads {
     private final CatalogRepository repo;
     private final Clock clock;
     private final LongSupplier nanos;
+    private final Gate3 gate3;
 
     public IndexRunCensusReads(CatalogRepository repo) {
         this(repo, Clock.systemUTC());
@@ -165,9 +167,22 @@ public final class IndexRunCensusReads {
 
     /** {@code nanos} is the monotonic source every time bound reads; a test replaces it to spend a budget deterministically. */
     public IndexRunCensusReads(CatalogRepository repo, Clock clock, LongSupplier nanos) {
+        this(repo, clock, nanos, Gate3.never());
+    }
+
+    /**
+     * RDR-229 P3.5c: from gate 3 the failed-run bucket names a document's collection by its id (the registry's current label of
+     * {@code physical_collection_id}) and reads its chunks by {@code collection_id}; before it, by the name columns.
+     */
+    public IndexRunCensusReads(CatalogRepository repo, Gate3 gate3) {
+        this(repo, Clock.systemUTC(), System::nanoTime, gate3);
+    }
+
+    public IndexRunCensusReads(CatalogRepository repo, Clock clock, LongSupplier nanos, Gate3 gate3) {
         this.repo = repo;
         this.clock = clock;
         this.nanos = nanos;
+        this.gate3 = java.util.Objects.requireNonNull(gate3, "gate3");
     }
 
     // ── statements (public so a plan test can explain the exact statement the route runs) ──
@@ -189,9 +204,22 @@ public final class IndexRunCensusReads {
             .limit(fetchLimit);
     }
 
-    /** The tenant's live failed documents, {@code fetchLimit} at most: tumbler, source URI, chunk_count, collection, hash, has a manifest. */
-    public static Select<Record6<String, String, Integer, String, String, Boolean>> failedQuery(
+    /**
+     * The tenant's live failed documents, {@code fetchLimit} at most: tumbler, source URI, chunk_count, collection, hash, has a
+     * manifest, and the document's {@code physical_collection_id} (NULL before gate 3).
+     */
+    public static Select<Record7<String, String, Integer, String, String, Boolean, Long>> failedQuery(
             DSLContext ctx, String tenant, int fetchLimit) {
+        return failedQuery(ctx, tenant, fetchLimit, Gate3.never());
+    }
+
+    /**
+     * As {@link #failedQuery(DSLContext, String, int)}; from gate 3 the collection is the registry's current label of the
+     * document's {@code physical_collection_id} (NULL for a document with no id: no collection, never its {@code ''} name).
+     */
+    public static Select<Record7<String, String, Integer, String, String, Boolean, Long>> failedQuery(
+            DSLContext ctx, String tenant, int fetchLimit, Gate3 gate3) {
+        CollectionKey k = CollectionKey.of(gate3);
         var d = CATALOG_DOCUMENTS;
         var m = CATALOG_DOCUMENT_CHUNKS;
         // the client's _content_hash: meta.content_hash, else the hash the fence recorded
@@ -201,7 +229,9 @@ public final class IndexRunCensusReads {
             DSL.inline(""));
         Field<Boolean> hasManifest = DSL.field(DSL.exists(
             ctx.selectOne().from(m).where(m.TENANT_ID.eq(d.TENANT_ID).and(m.DOC_ID.eq(d.TUMBLER)))));
-        return ctx.select(d.TUMBLER, d.SOURCE_URI, d.CHUNK_COUNT, d.PHYSICAL_COLLECTION, contentHash, hasManifest)
+        return ctx.select(d.TUMBLER, d.SOURCE_URI, d.CHUNK_COUNT,
+                k.label(tenant, d.PHYSICAL_COLLECTION, d.PHYSICAL_COLLECTION_ID), contentHash, hasManifest,
+                k.byId() ? d.PHYSICAL_COLLECTION_ID : DSL.castNull(Long.class))
             .from(d)
             .where(d.TENANT_ID.eq(tenant)
                 .and(d.DELETED_AT.isNull())
@@ -376,28 +406,43 @@ public final class IndexRunCensusReads {
 
     private FailedHidden failedHidden(DSLContext ctx, Budget budget, String tenant, int limit) {
         budget.arm(ctx);
-        var rows = new ArrayList<>(failedQuery(ctx, tenant, limit + 1).fetch());
+        var rows = new ArrayList<>(failedQuery(ctx, tenant, limit + 1, gate3).fetch());
         boolean capped = rows.size() > limit;
         if (capped) rows = new ArrayList<>(rows.subList(0, limit));
         int failed = rows.size();
 
-        // The documents the heal would try to rebuild: no manifest row, and a hash and a collection to look the chunks up by.
-        Map<String, List<Candidate>> byCollection = new LinkedHashMap<>();
+        // The documents the heal would try to rebuild: no manifest row, and a hash and a collection to look the chunks up by. From
+        // gate 3 the collection is the document's own physical_collection_id, carried to every later read (a label shared by a
+        // live row and a tombstone, or a retired label, is never resolved back to an id by name); before it, the name.
+        boolean byId = CollectionKey.of(gate3).byId();
+        Map<Object, List<Candidate>> byCollection = new LinkedHashMap<>();
         for (var r : rows) {
             boolean hasManifest = Boolean.TRUE.equals(r.value6());
             String collection = r.value4() == null ? "" : r.value4();
             String hash = r.value5() == null ? "" : r.value5();
-            if (hasManifest || collection.isEmpty() || hash.isEmpty()) continue;
-            byCollection.computeIfAbsent(collection, k -> new ArrayList<>())
+            Object key = byId ? r.value7() : collection;
+            if (hasManifest || key == null || collection.isEmpty() || hash.isEmpty()) continue;
+            byCollection.computeIfAbsent(key, k -> new ArrayList<>())
                 .add(new Candidate(r.value1(), r.value2(), r.value3() == null ? 0 : r.value3(), hash));
         }
         if (byCollection.isEmpty()) return new FailedHidden(failed, capped, 0, capped, List.of());
 
         budget.arm(ctx);
-        Map<String, String> models = new HashMap<>();
-        for (var c : ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.EMBEDDING_MODEL).from(CATALOG_COLLECTIONS)
-                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.in(byCollection.keySet()))).fetch()) {
-            models.put(c.value1(), c.value2());
+        Map<Object, String> models = new HashMap<>();
+        if (byId) {
+            for (var c : ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL).from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
+                        .and(CATALOG_COLLECTIONS.COLLECTION_ID.in(byCollection.keySet().stream().map(Long.class::cast).toList())))
+                    .fetch()) {
+                models.put(c.value1(), c.value2());
+            }
+        } else {
+            for (var c : ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.EMBEDDING_MODEL).from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
+                        .and(CATALOG_COLLECTIONS.NAME.in(byCollection.keySet().stream().map(String.class::cast).toList())))
+                    .fetch()) {
+                models.put(c.value1(), c.value2());
+            }
         }
 
         List<HiddenDoc> hidden = new ArrayList<>();
@@ -442,13 +487,29 @@ public final class IndexRunCensusReads {
         return ctx.select(h, DSL.count()).from(rows).groupBy(h);
     }
 
-    private static Map<String, Integer> storedByHash(DSLContext ctx, Budget budget, String tenant, String collection,
-                                                      String model, List<String> hashes) {
+    /** As {@link #storedByHashQuery(DSLContext, String, String, String, List)}, for the collection's registry id (from gate 3). */
+    public static Select<Record2<String, Integer>> storedByHashQueryById(DSLContext ctx, String tenant, long collectionId,
+                                                                        String model, List<String> hashes) {
+        Field<String> hash = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "content_hash");
+        var rows = ctx.select(hash.as("h")).from(CHUNKS)
+            .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION_ID.eq(collectionId))
+                .and(CHUNKS.EMBEDDING_MODEL.eq(model)).and(hash.in(hashes)))
+            .asTable("rows");
+        Field<String> h = rows.field("h", String.class);
+        return ctx.select(h, DSL.count()).from(rows).groupBy(h);
+    }
+
+    /** {@code collection} is the registry id (a Long) from gate 3, the name (a String) before it. */
+    private static Map<String, Integer> storedByHash(DSLContext ctx, Budget budget, String tenant, Object collection,
+                                                     String model, List<String> hashes) {
         Map<String, Integer> out = new HashMap<>();
         for (int i = 0; i < hashes.size(); i += HASH_BATCH) {
             budget.arm(ctx);
             var batch = hashes.subList(i, Math.min(i + HASH_BATCH, hashes.size()));
-            for (var r : storedByHashQuery(ctx, tenant, collection, model, batch).fetch()) {
+            var statement = collection instanceof Long id
+                ? storedByHashQueryById(ctx, tenant, id, model, batch)
+                : storedByHashQuery(ctx, tenant, (String) collection, model, batch);
+            for (var r : statement.fetch()) {
                 out.merge(r.value1(), r.value2(), Integer::sum);
             }
         }

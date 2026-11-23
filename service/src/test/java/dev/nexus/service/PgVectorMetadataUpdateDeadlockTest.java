@@ -149,7 +149,8 @@ class PgVectorMetadataUpdateDeadlockTest {
 
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(DIM);
         List<Integer> zero = tenantScope.withTenant(TENANT, ctx ->
-            PgVectorRepository.batchUpdateMetadata(ctx, ch, COLLECTION, ids, metas, all));
+            PgVectorRepository.batchUpdateMetadata(ctx, ch, TENANT, COLLECTION, ids, metas, all, null,
+                dev.nexus.service.datamove.Gate3.never()));
 
         assertThat(zero)
             .as("the only zero-affected index is the missing chash, reported by the CALLER'S index")
@@ -173,7 +174,8 @@ class PgVectorMetadataUpdateDeadlockTest {
 
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(DIM);
         List<Integer> zero = tenantScope.withTenant(TENANT, ctx ->
-            PgVectorRepository.batchUpdateMetadata(ctx, ch, COLLECTION, ids, metas, all));
+            PgVectorRepository.batchUpdateMetadata(ctx, ch, TENANT, COLLECTION, ids, metas, all, null,
+                dev.nexus.service.datamove.Gate3.never()));
 
         assertThat(zero).containsExactly(9, 5, 1);
     }
@@ -233,7 +235,8 @@ class PgVectorMetadataUpdateDeadlockTest {
                 for (int it = 0; it < ITERATIONS; it++) {
                     List<Map<String, Object>> metas = metasFor(ids, it);
                     List<Integer> zero = tenantScope.withTenant(TENANT, ctx ->
-                        PgVectorRepository.batchUpdateMetadata(ctx, ch, COLLECTION, ids, metas, all));
+                        PgVectorRepository.batchUpdateMetadata(ctx, ch, TENANT, COLLECTION, ids, metas, all, null,
+                dev.nexus.service.datamove.Gate3.never()));
                     if (!zero.isEmpty()) {
                         throw new AssertionError("seeded rows reported zero-affected: " + zero);
                     }

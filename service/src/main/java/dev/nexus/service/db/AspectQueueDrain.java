@@ -4,6 +4,7 @@ package dev.nexus.service.db;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.nexus.service.datamove.Gate3;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.Record;
@@ -126,6 +127,7 @@ public final class AspectQueueDrain {
     private final TupleRepository tuples;
     private final Census census;
     private final Supplier<? extends Collection<String>> fallbackTenants;
+    private final Gate3 gate3;
 
     /**
      * @param tuples          the tuple space to write into, or null when the engine has no tuple templates (the
@@ -134,10 +136,17 @@ public final class AspectQueueDrain {
      */
     public AspectQueueDrain(TenantScope scope, TupleRepository tuples, Census census,
                             Supplier<? extends Collection<String>> fallbackTenants) {
+        this(scope, tuples, census, fallbackTenants, Gate3.never());
+    }
+
+    /** RDR-229 P3.5c: from gate 3 a document's home collection is the registry's current label of its {@code physical_collection_id}. */
+    public AspectQueueDrain(TenantScope scope, TupleRepository tuples, Census census,
+                            Supplier<? extends Collection<String>> fallbackTenants, Gate3 gate3) {
         this.scope = scope;
         this.tuples = tuples;
         this.census = census;
         this.fallbackTenants = fallbackTenants;
+        this.gate3 = java.util.Objects.requireNonNull(gate3, "gate3");
     }
 
     /** Run once. Never throws: a failure is logged and reported as an unknown retained count. */
@@ -304,7 +313,8 @@ public final class AspectQueueDrain {
         }
     }
 
-    private static List<Row> readBatch(DSLContext ctx, String tenant, long afterId, long retentionCap) {
+    private List<Row> readBatch(DSLContext ctx, String tenant, long afterId, long retentionCap) {
+        CollectionKey k = CollectionKey.of(gate3);
         OffsetDateTime now = ctx.select(DSL.currentOffsetDateTime()).fetchOne(0, OffsetDateTime.class);
         Table<?> q = QUEUE.as("q");
         Field<Long> qId = DSL.field(DSL.name("q", "id"), Long.class);
@@ -317,7 +327,15 @@ public final class AspectQueueDrain {
         Field<OffsetDateTime> qNext = DSL.field(DSL.name("q", "next_retry_at"), OffsetDateTime.class);
         var d = CATALOG_DOCUMENTS;
         List<Row> out = new ArrayList<>();
-        for (Record r : ctx.select(qId, qCollection, qSourcePath, qDocId, qHash, qStatus, qNext, d.PHYSICAL_COLLECTION)
+        // the document's home: its own name column before gate 3; the registry's current label of its id after (NULL for none)
+        Field<String> homeOf = k.label(tenant, d.PHYSICAL_COLLECTION, d.PHYSICAL_COLLECTION_ID).as("home");
+        // the retired queue's own collection as a fallback: from gate 3 the registry's current label of the queue row's
+        // collection_id when the table kept that column (an install that kept it), else the row's own name
+        Field<Long> qCollectionId = DSL.field(DSL.name("q", "collection_id"), Long.class);
+        boolean queueHasId = k.byId() && queueHasCollectionId(ctx);
+        Field<String> queueLabel = queueHasId ? DSL.coalesce(k.label(tenant, qCollection, qCollectionId), qCollection).as("queue_label") : qCollection;
+        for (Record r : ctx.select(qId, queueLabel, qSourcePath, qDocId, qHash, qStatus, qNext,
+                    k.byId() ? homeOf : d.PHYSICAL_COLLECTION)
                 .from(q)
                 .leftJoin(d).on(d.TENANT_ID.eq(qTenant).and(d.TUMBLER.eq(qDocId)))
                 .where(qTenant.eq(tenant).and(qId.gt(afterId)))
@@ -332,13 +350,22 @@ public final class AspectQueueDrain {
             }
             // The row's collection name is as old as the row: a collection rename or a re-embed move since then
             // re-homed the DOCUMENT (catalog_documents.physical_collection) and not this retired table. The
-            // document's current home is the name a task must carry; the row's own is the fallback.
-            String home = r.get(d.PHYSICAL_COLLECTION);
-            String collection = home == null || home.isEmpty() ? r.get(qCollection) : home;
+            // document's current home is the name a task must carry; the row's own is the fallback (the retired queue has an id
+            // column only on an install that kept it, so its own name stays the fallback after gate 3 too).
+            String home = r.get(k.byId() ? homeOf : d.PHYSICAL_COLLECTION);
+            String queueName = r.get(queueLabel);
+            String collection = home == null || home.isEmpty() ? queueName : home;
             out.add(new Row(r.get(qId), collection, r.get(qSourcePath), nz(r.get(qDocId)),
                 nz(r.get(qHash)), r.get(qStatus), delay));
         }
         return out;
+    }
+
+    private static boolean queueHasCollectionId(DSLContext ctx) {
+        var cols = DSL.table(DSL.name("information_schema", "columns"));
+        return ctx.fetchExists(cols, DSL.field(DSL.name("table_schema"), String.class).eq("nexus")
+            .and(DSL.field(DSL.name("table_name"), String.class).eq("aspect_extraction_queue"))
+            .and(DSL.field(DSL.name("column_name"), String.class).eq("collection_id")));
     }
 
     private static String nz(String s) {

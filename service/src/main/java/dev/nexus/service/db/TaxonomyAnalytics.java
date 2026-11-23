@@ -19,9 +19,25 @@ import static org.jooq.impl.DSL.*;
 final class TaxonomyAnalytics {
 
     private final TenantScope tenantScope;
+    private final dev.nexus.service.datamove.Gate3 gate3;
 
-    TaxonomyAnalytics(TenantScope tenantScope) {
+    TaxonomyAnalytics(TenantScope tenantScope, dev.nexus.service.datamove.Gate3 gate3) {
         this.tenantScope = tenantScope;
+        this.gate3 = java.util.Objects.requireNonNull(gate3, "gate3");
+    }
+
+    /** RDR-229 P3.5c: from gate 3 on the readers name a collection by its id column; one reading of gate 3 per call. */
+    private CollectionKey ck() {
+        return CollectionKey.of(gate3);
+    }
+
+    private org.jooq.Condition assignedFrom(String tenant, String c) {
+        return ck().eq(tenant, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, c);
+    }
+
+    /** The column that identifies a projection's source collection in a count or a grouping: its id from gate 3, its name before. */
+    private org.jooq.Field<?> srcKey() {
+        return ck().key(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID);
     }
 
     /**
@@ -30,22 +46,23 @@ final class TaxonomyAnalytics {
      */
     public Map<String, Object> computeIcfMapAtomic(String tenant) {
         return tenantScope.withTenant(tenant, ctx -> {
-            int nEffective = ctx.select(countDistinct(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION))
+            final var sk = srcKey();  // one reading of gate 3 for the whole method
+            int nEffective = ctx.select(countDistinct(sk))
                 .from(TOPIC_ASSIGNMENTS)
                 .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
-                    .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.isNotNull()))
+                    .and(sk.isNotNull()))
                 .fetchOne(0, Integer.class);
 
             List<Map<String, Object>> rows = new ArrayList<>();
             if (nEffective >= 2) {
                 var icfRows = ctx.select(
                         TOPIC_ASSIGNMENTS.TOPIC_ID,
-                        countDistinct(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION).as("df"))
+                        countDistinct(sk).as("df"))
                     .from(TOPIC_ASSIGNMENTS)
                     .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
-                        .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.isNotNull()))
+                        .and(sk.isNotNull()))
                     .groupBy(TOPIC_ASSIGNMENTS.TOPIC_ID)
-                    .having(countDistinct(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION).gt(0))
+                    .having(countDistinct(sk).gt(0))
                     .fetch();
                 for (var r : icfRows) {
                     var m = new LinkedHashMap<String, Object>();
@@ -93,35 +110,38 @@ final class TaxonomyAnalytics {
      */
     public List<Map<String, Object>> detectHubsData(String tenant, int minCollections) {
         return tenantScope.withTenant(tenant, ctx -> {
+            var ckey = ck();  // one reading: the grouping keys and the labels must agree
+            var srcLabel = ckey.label(tenant, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID)
+                .as("source_collection");
             var rows = ctx.select(
                     TOPICS.ID.as("topic_id"),
                     TOPICS.LABEL,
-                    TOPICS.COLLECTION,
-                    countDistinct(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION).as("df"),
+                    ckey.label(tenant, TOPICS.COLLECTION, TOPICS.COLLECTION_ID).as("collection"),
+                    countDistinct(ckey.key(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID)).as("df"),
                     count().as("total_chunks"),
                     max(TOPIC_ASSIGNMENTS.ASSIGNED_AT).as("last_assigned_at"))
                .from(TOPIC_ASSIGNMENTS)
                .join(TOPICS).on(TOPICS.ID.eq(TOPIC_ASSIGNMENTS.TOPIC_ID))
                .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
-                   .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.isNotNull()))
-               .groupBy(TOPICS.ID, TOPICS.LABEL, TOPICS.COLLECTION)
-               .having(countDistinct(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION).ge(minCollections))
+                   .and(ckey.key(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID).isNotNull()))
+               .groupBy(TOPICS.ID, TOPICS.LABEL, ckey.key(TOPICS.COLLECTION, TOPICS.COLLECTION_ID))
+               .having(countDistinct(ckey.key(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID)).ge(minCollections))
                .orderBy(count().desc())
                .fetch();
 
             // Per-hub source collection sets
-            var allSources = ctx.select(TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
+            var allSources = ctx.select(TOPIC_ASSIGNMENTS.TOPIC_ID, srcLabel)
                 .from(TOPIC_ASSIGNMENTS)
                 .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
-                    .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.isNotNull()))
-                .orderBy(TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
+                    .and(ckey.key(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID).isNotNull()))
+                .orderBy(TOPIC_ASSIGNMENTS.TOPIC_ID, srcLabel)
                 .fetch();
 
             // Build topic_id -> [source_collection, ...] map
             java.util.Map<Long, List<String>> sourcesMap = new java.util.HashMap<>();
             for (var r : allSources) {
                 long tid = r.get(TOPIC_ASSIGNMENTS.TOPIC_ID);
-                String sc = r.get(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION);
+                String sc = r.get(srcLabel);
                 sourcesMap.computeIfAbsent(tid, k -> new ArrayList<>()).add(sc);
             }
 
@@ -135,12 +155,13 @@ final class TaxonomyAnalytics {
                 .flatMap(List::stream).distinct().toList();
             java.util.Map<String, OffsetDateTime> discoverAt = new java.util.HashMap<>();
             if (!contributing.isEmpty()) {
-                for (var r : ctx.select(TAXONOMY_META.COLLECTION, TAXONOMY_META.LAST_DISCOVER_AT)
+                var metaLabel = ckey.label(tenant, TAXONOMY_META.COLLECTION, TAXONOMY_META.COLLECTION_ID);
+                for (var r : ctx.select(metaLabel, TAXONOMY_META.LAST_DISCOVER_AT)
                         .from(TAXONOMY_META)
-                        .where(TAXONOMY_META.COLLECTION.in(contributing))
+                        .where(ck().in(tenant, TAXONOMY_META.COLLECTION, TAXONOMY_META.COLLECTION_ID, contributing))
                         .fetch()) {
                     OffsetDateTime at = r.get(TAXONOMY_META.LAST_DISCOVER_AT);
-                    if (at != null) discoverAt.put(r.get(TAXONOMY_META.COLLECTION), at);
+                    if (at != null) discoverAt.put(r.get(metaLabel), at);
                 }
             }
 
@@ -150,7 +171,7 @@ final class TaxonomyAnalytics {
                 var m = new LinkedHashMap<String, Object>();
                 m.put("topic_id", tid);
                 m.put("label", r.get(TOPICS.LABEL));
-                m.put("collection", r.get(TOPICS.COLLECTION));
+                m.put("collection", r.get("collection", String.class));
                 m.put("df", r.get("df", Integer.class));
                 m.put("total_chunks", r.get("total_chunks", Integer.class));
                 Object lastAt = r.get("last_assigned_at");
@@ -193,7 +214,7 @@ final class TaxonomyAnalytics {
             var simRows = ctx.select(TOPIC_ASSIGNMENTS.SIMILARITY)
                 .from(TOPIC_ASSIGNMENTS)
                 .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
-                    .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(collection))
+                    .and(assignedFrom(tenant, collection))
                     .and(TOPIC_ASSIGNMENTS.SIMILARITY.isNotNull()))
                 .orderBy(TOPIC_ASSIGNMENTS.SIMILARITY.asc())
                 .fetch();
@@ -210,7 +231,7 @@ final class TaxonomyAnalytics {
                .from(TOPIC_ASSIGNMENTS)
                .join(TOPICS).on(TOPICS.ID.eq(TOPIC_ASSIGNMENTS.TOPIC_ID))
                .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
-                   .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(collection)))
+                   .and(assignedFrom(tenant, collection)))
                .groupBy(TOPIC_ASSIGNMENTS.TOPIC_ID, TOPICS.LABEL)
                .orderBy(count().desc())
                .limit(topN)
@@ -280,7 +301,8 @@ final class TaxonomyAnalytics {
                 .from(tgt).where(linkable)
                 .fetchOne(0, int.class);
 
-            var rows = ctx.selectDistinct(tgt.TOPIC_ID, TOPICS.LABEL, tgt.SOURCE_COLLECTION)
+            var tgtLabel = ck().label(tenant, tgt.SOURCE_COLLECTION, tgt.SOURCE_COLLECTION_ID);
+            var rows = ctx.selectDistinct(tgt.TOPIC_ID, TOPICS.LABEL, tgtLabel)
                 .from(tgt)
                 .leftJoin(TOPICS).on(TOPICS.ID.eq(tgt.TOPIC_ID))
                 .where(linkable)
@@ -293,7 +315,7 @@ final class TaxonomyAnalytics {
                 var m = new LinkedHashMap<String, Object>();
                 m.put("topic_id", r.get(tgt.TOPIC_ID));
                 m.put("label", r.get(TOPICS.LABEL));
-                m.put("collection", r.get(tgt.SOURCE_COLLECTION));
+                m.put("collection", r.get(tgtLabel));
                 out.add(m);
             }
             var result = new LinkedHashMap<String, Object>();

@@ -277,11 +277,11 @@ public final class CatalogHandler implements HttpHandler {
         this.repo = repo;
         this.linkRoutes = new CatalogLinksHandler(new dev.nexus.service.db.CatalogLinksRepository(repo));
         this.boundedReads = new CatalogBoundedReadRoutes(repo);
-        this.stubMetadataRoute = new CatalogStubMetadataRoute(new dev.nexus.service.db.PdfStubMetadataReads(repo));
+        this.stubMetadataRoute = new CatalogStubMetadataRoute(new dev.nexus.service.db.PdfStubMetadataReads(repo, repo.gate3()));
         this.ownerRoutes = new CatalogOwnerRoutes(repo);
         this.moveRoutes = new CatalogMoveRoutes(new dev.nexus.service.db.CatalogMoves(repo));
         this.censusRoutes = new CatalogCensusRoutes(
-            new dev.nexus.service.db.IndexRunCensusReads(repo), new dev.nexus.service.db.NextSeqDriftReads(repo));
+            new dev.nexus.service.db.IndexRunCensusReads(repo, repo.gate3()), new dev.nexus.service.db.NextSeqDriftReads(repo));
         this.manifestFill = new CatalogManifestFillRoutes(new dev.nexus.service.db.ManifestFill(repo),
             new dev.nexus.service.db.ManifestFillableCount(repo), manifestFillJobs, coverage);
         this.combinedWriteService = combinedWriteService;

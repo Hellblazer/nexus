@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import dev.nexus.service.datamove.Gate3;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.Record4;
@@ -65,7 +66,7 @@ final class CollectionRename {
      */
     static void retireAndRegister(DSLContext ctx, String tenant, String oldName, String newName,
                                   Field<String> newContentType, Field<String> newOwnerId, Map<String, Integer> counts,
-                                  String[] tuple) {
+                                  String[] tuple, Gate3 gate3) {
         Record4<String, String, String, String> own = ownTuple(ctx, tenant, oldName);
         Record5<String, String, String, String, String> source = successorAttributes(ctx, tenant, oldName, newContentType, newOwnerId);
         if (source != null && own != null && !CollectionMint.tupleIndexExists(ctx)) {
@@ -77,7 +78,7 @@ final class CollectionRename {
         CollectionTombstones.lockRows(ctx, tenant, oldName, newName);   // canonical lock order (RenameGuard#runRename): after the tuple locks above, before any row write
         recheckAfterLock(ctx, tenant, oldName, newName, newContentType, newOwnerId, own, source);
         long successorId = successorId(ctx, tenant, newName);
-        int retired = CollectionTombstones.supersede(ctx, tenant, oldName, newName, successorId);
+        int retired = CollectionTombstones.supersede(ctx, tenant, oldName, newName, successorId, gate3);
         if (retired == 0 && own != null) {
             // the CAS matched no row of an X that exists: another writer retired it for a third target while this rename ran
             throw new CatalogRepository.CollectionMergeRefused("renaming " + oldName + " to " + newName + ": " + oldName
@@ -85,7 +86,7 @@ final class CollectionRename {
         }
         counts.put("catalog_collections_superseded", retired);
         if (source != null && own != null && !(source.value1().equals(own.value1()) && source.value2().equals(own.value2()))) {
-            checkSuccessorTuple(ctx, tenant, newName, source, tuple);
+            checkSuccessorTuple(ctx, tenant, newName, source, tuple, gate3);
         }
         int written = writeSuccessor(ctx, tenant, oldName, newName, successorId, newContentType, newOwnerId);
         if (written == 0) {
@@ -120,12 +121,17 @@ final class CollectionRename {
         CatalogRepository.requireCollectionUrisFree(ctx, tenant, oldName, newName, operation);
     }
 
-    /** Y's id: the id of Y's own tombstone when Y is being revived (it keeps it), else a fresh draw from the sequence. */
+    /**
+     * Y's id: the id of Y's own tombstone when Y is being revived (it keeps it), else a fresh draw from the sequence. Revival
+     * happens only while the name primary key still makes the tombstone's label conflict; once it is gone (RDR-229 G15) the
+     * write inserts a new live row, and a row inserted with the tombstone's id would break the registry's id key.
+     */
     static long successorId(DSLContext ctx, String tenant, String newName) {
         Long own = ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(newName)))
+            .orderBy(CollectionIdReads.liveFirst()).limit(1)
             .fetchOne(CATALOG_COLLECTIONS.COLLECTION_ID);
-        return own != null ? own : CollectionMint.drawId(ctx, tenant);
+        return own != null && CollectionMint.nameKeyExists(ctx) ? own : CollectionMint.drawId(ctx, tenant);
     }
 
     /** X's own content type, owner, model and version (null when X has no row), to tell whether Y's tuple is X's. */
@@ -133,6 +139,7 @@ final class CollectionRename {
         return ctx.select(CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL,
                 CATALOG_COLLECTIONS.MODEL_VERSION)
             .from(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(oldName)))
+            .orderBy(CollectionIdReads.liveFirst()).limit(1)
             .fetchOne();
     }
 
@@ -142,7 +149,8 @@ final class CollectionRename {
         return ctx.select(newContentType, newOwnerId, CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
                 CATALOG_COLLECTIONS.LIFECYCLE_STATE)
             .from(CATALOG_COLLECTIONS)
-            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(oldName))).fetchOne();
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(oldName)))
+            .orderBy(CollectionIdReads.liveFirst()).limit(1).fetchOne();
     }
 
     /**
@@ -151,10 +159,10 @@ final class CollectionRename {
      * rename of one member of D4's accepted pair stays possible. {@code tuple} records Y's tuple for the race recheck.
      */
     private static void checkSuccessorTuple(DSLContext ctx, String tenant, String newName,
-                                            Record5<String, String, String, String, String> source, String[] tuple) {
+                                            Record5<String, String, String, String, String> source, String[] tuple, Gate3 gate3) {
         CollectionMint.remember(tuple, newName, source.value1(), source.value2(), source.value3(), source.value4());
         CollectionMint.refuseHeldTuple(ctx, tenant, newName, source.value1(), source.value2(), source.value3(),
-            source.value4(), source.value5(), "");
+            source.value4(), source.value5(), "", gate3);
     }
 
     /**
@@ -188,7 +196,12 @@ final class CollectionRename {
                 // UPSERT, not a bare INSERT (nexus-cecqy): the conflict that can reach here is Y's own tombstone from an
                 // earlier rename Y->X (a LIVE Y is refused by the caller). Renaming back onto that retired name REVIVES
                 // it, which is what the round trip means. The conflicting row keeps its own collection_id.
+                // RDR-229 G15 (P3.5c): the arbiter is the LIVE-label name key, WHERE superseded_by = '' AND superseded_by_id IS NULL,
+                // so it infers P3.6's live-label index (the predicate implies the index's own); a label held only by a tombstone
+                // does not conflict and is written as a new live row. P4.1, which drops superseded_by, drops this half of
+                // the predicate. Disposition label-kept: the label is the registry's name.
                 .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+                .where(CollectionIdReads.liveLabelConflict())
                 .doUpdate()
                 .set(CATALOG_COLLECTIONS.CONTENT_TYPE,         DSL.excluded(CATALOG_COLLECTIONS.CONTENT_TYPE))
                 .set(CATALOG_COLLECTIONS.OWNER_ID,             DSL.excluded(CATALOG_COLLECTIONS.OWNER_ID))

@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import dev.nexus.service.datamove.Gate3;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -102,7 +103,7 @@ class Rdr229P31ChunkSideWritersTest extends AtomicWriteTestBase {
         unstamp(sibling);
         assertThat(row(sibling, hex).collectionId()).as("fixture: unstamped").isNull();
 
-        int n = tenantScope.withTenant(T, ctx -> QuarantineOrigin.retagRowsOf(ctx, T, from, to));
+        int n = tenantScope.withTenant(T, ctx -> QuarantineOrigin.retagRowsOf(ctx, T, from, to, Gate3.never()));
 
         assertThat(n).as("one row retagged").isEqualTo(1);
         Row after = row(sibling, hex);
@@ -126,7 +127,7 @@ class Rdr229P31ChunkSideWritersTest extends AtomicWriteTestBase {
                 List.of("retag text"), List.of(new float[384]), List.of(Map.of("origin_collection", from)));
         }
 
-        int n = tenantScope.withTenant(T, ctx -> QuarantineOrigin.retagRowsOf(ctx, T, from, to));
+        int n = tenantScope.withTenant(T, ctx -> QuarantineOrigin.retagRowsOf(ctx, T, from, to, Gate3.never()));
 
         assertThat(n).isEqualTo(1);
         Row after = row(sibling, hex);
@@ -151,7 +152,7 @@ class Rdr229P31ChunkSideWritersTest extends AtomicWriteTestBase {
         unstamp(c);
         var gone = List.of(new DepartedWriterSpans.Gone(c, HexFormat.of().parseHex(hex), null, null, null, null));
 
-        int cleared = tenantScope.withTenant(T, ctx -> DepartedWriterSpans.clear(ctx, T, gone));
+        int cleared = tenantScope.withTenant(T, ctx -> DepartedWriterSpans.clear(ctx, T, gone, Gate3.never()));
 
         assertThat(cleared).as("fail-open: a refused UPDATE would read 0 here").isEqualTo(1);
         Row after = row(c, hex);

@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import dev.nexus.service.datamove.Gate3;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.Record6;
@@ -40,6 +41,10 @@ import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
  * one of the two schemes (a heap scan or an index range per table, the planner's choice), so its cost is linear in
  * those rows and is bounded by the timeout, which a client reads as "cannot say" (a 503).
  *
+ * <p><b>RDR-229 P3.5c.</b> From gate 3 the registry join is on the id each table carries ({@code physical_collection_id},
+ * {@code collection_id}) and the group's collection is the registry's current label of that id ({@code ''} for a row with no
+ * id or no registry row); before it, the join and the group are on the name column as they were.
+ *
  * <p>READ ONLY. No write, no lock beyond the snapshot's.
  */
 public final class UriSegmentCensusReads {
@@ -60,14 +65,20 @@ public final class UriSegmentCensusReads {
     public record Page(int count, int limit, boolean capped, List<Group> groups) {}
 
     private final CatalogRepository repo;
+    private final Gate3 gate3;
 
     public UriSegmentCensusReads(CatalogRepository repo) {
+        this(repo, Gate3.never());
+    }
+
+    public UriSegmentCensusReads(CatalogRepository repo, Gate3 gate3) {
         this.repo = repo;
+        this.gate3 = java.util.Objects.requireNonNull(gate3, "gate3");
     }
 
     private static Select<Record6<String, String, String, String, String, Integer>> perTable(
-            String tenant, Field<String> tableLabel, Field<String> schemeLabel, String prefix, Table<?> table,
-            Field<String> tenantId, Field<String> uri, Field<String> collection) {
+            CollectionKey k, String tenant, Field<String> tableLabel, Field<String> schemeLabel, String prefix, Table<?> table,
+            Field<String> tenantId, Field<String> uri, Field<String> collection, Field<Long> collectionId) {
         var c = CATALOG_COLLECTIONS;
         // The text after the first "://" up to the next "/": for "chroma://x/y" and "nx-note://x/y" alike, "x". Typed
         // jOOQ with INLINE literal arguments, not binds: the select list and the GROUP BY each render this expression,
@@ -76,11 +87,12 @@ public final class UriSegmentCensusReads {
         Field<String> segment = DSL.function("split_part", String.class,
             DSL.function("split_part", String.class, uri, DSL.inline("://"), DSL.inline(2)),
             DSL.inline("/"), DSL.inline(1));
-        Field<String> coll = DSL.coalesce(collection, DSL.inline(""));
+        // the group's collection: the row's name before gate 3; the registry's current label of its id after (the join is on the id)
+        Field<String> coll = DSL.coalesce(k.byId() ? c.NAME : collection, DSL.inline(""));
         Field<String> ctype = DSL.coalesce(c.CONTENT_TYPE, DSL.inline(""));
         return DSL.select(tableLabel.as("tbl"), schemeLabel.as("scheme"), segment.as("segment"),
                           coll.as("coll"), ctype.as("ctype"), DSL.count().as("n"))
-            .from(table.leftJoin(c).on(c.TENANT_ID.eq(tenantId).and(c.NAME.eq(collection))))
+            .from(table.leftJoin(c).on(c.TENANT_ID.eq(tenantId).and(k.same(c.NAME, c.COLLECTION_ID, collection, collectionId))))
             .where(tenantId.eq(tenant).and(uri.startsWith(prefix)))
             .groupBy(segment, coll, ctype);
     }
@@ -91,22 +103,28 @@ public final class UriSegmentCensusReads {
      * a UNION ALL. Public so a plan-shape test can explain the exact statement the route runs.
      */
     public static Select<?> listQuery(DSLContext ctx, String tenant, int fetchLimit) {
+        return listQuery(ctx, tenant, fetchLimit, Gate3.never());
+    }
+
+    /** As {@link #listQuery(DSLContext, String, int)}, reading the collection by its id when {@code gate3} holds (read once here). */
+    public static Select<?> listQuery(DSLContext ctx, String tenant, int fetchLimit, Gate3 gate3) {
+        CollectionKey k = CollectionKey.of(gate3);
         var docs = CATALOG_DOCUMENTS;
         var asp = DOCUMENT_ASPECTS;
         var hl = DOCUMENT_HIGHLIGHTS;
         List<Select<Record6<String, String, String, String, String, Integer>>> parts = List.of(
-            perTable(tenant, DSL.inline("catalog_documents"), DSL.inline("chroma"), CHROMA, docs, docs.TENANT_ID,
-                     docs.SOURCE_URI, docs.PHYSICAL_COLLECTION),
-            perTable(tenant, DSL.inline("catalog_documents"), DSL.inline("nx-note"), NOTE, docs, docs.TENANT_ID,
-                     docs.SOURCE_URI, docs.PHYSICAL_COLLECTION),
-            perTable(tenant, DSL.inline("document_aspects"), DSL.inline("chroma"), CHROMA, asp, asp.TENANT_ID,
-                     asp.SOURCE_URI, asp.COLLECTION),
-            perTable(tenant, DSL.inline("document_aspects"), DSL.inline("nx-note"), NOTE, asp, asp.TENANT_ID,
-                     asp.SOURCE_URI, asp.COLLECTION),
-            perTable(tenant, DSL.inline("document_highlights"), DSL.inline("chroma"), CHROMA, hl, hl.TENANT_ID,
-                     hl.SOURCE_URI, hl.COLLECTION),
-            perTable(tenant, DSL.inline("document_highlights"), DSL.inline("nx-note"), NOTE, hl, hl.TENANT_ID,
-                     hl.SOURCE_URI, hl.COLLECTION));
+            perTable(k, tenant, DSL.inline("catalog_documents"), DSL.inline("chroma"), CHROMA, docs, docs.TENANT_ID,
+                     docs.SOURCE_URI, docs.PHYSICAL_COLLECTION, docs.PHYSICAL_COLLECTION_ID),
+            perTable(k, tenant, DSL.inline("catalog_documents"), DSL.inline("nx-note"), NOTE, docs, docs.TENANT_ID,
+                     docs.SOURCE_URI, docs.PHYSICAL_COLLECTION, docs.PHYSICAL_COLLECTION_ID),
+            perTable(k, tenant, DSL.inline("document_aspects"), DSL.inline("chroma"), CHROMA, asp, asp.TENANT_ID,
+                     asp.SOURCE_URI, asp.COLLECTION, asp.COLLECTION_ID),
+            perTable(k, tenant, DSL.inline("document_aspects"), DSL.inline("nx-note"), NOTE, asp, asp.TENANT_ID,
+                     asp.SOURCE_URI, asp.COLLECTION, asp.COLLECTION_ID),
+            perTable(k, tenant, DSL.inline("document_highlights"), DSL.inline("chroma"), CHROMA, hl, hl.TENANT_ID,
+                     hl.SOURCE_URI, hl.COLLECTION, hl.COLLECTION_ID),
+            perTable(k, tenant, DSL.inline("document_highlights"), DSL.inline("nx-note"), NOTE, hl, hl.TENANT_ID,
+                     hl.SOURCE_URI, hl.COLLECTION, hl.COLLECTION_ID));
         Select<Record6<String, String, String, String, String, Integer>> union = parts.get(0);
         for (int i = 1; i < parts.size(); i++) union = union.unionAll(parts.get(i));
         var u = union.asTable("u");
@@ -132,7 +150,7 @@ public final class UriSegmentCensusReads {
         return repo.tenantScope().withTenant(tenant, ctx -> {
             PgSession.setLocal(ctx, "statement_timeout", Integer.toString(Integer.getInteger(
                 CatalogRepository.FILLABLE_COUNT_TIMEOUT_PROPERTY, CatalogRepository.FILLABLE_COUNT_TIMEOUT_MS)));
-            var rows = listQuery(ctx, tenant, limit + 1).fetch();
+            var rows = listQuery(ctx, tenant, limit + 1, gate3).fetch();
             int count = rows.isEmpty() ? 0 : rows.get(0).get(6, Integer.class);
             boolean capped = count > limit;
             int n = Math.min(rows.size(), limit);

@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import dev.nexus.service.datamove.Gate3;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
@@ -87,7 +88,7 @@ class CollectionTombstonesSupersedeToIdTest {
     }
 
     private int supersedeToId(String from, String to, long toId) {
-        Integer n = scope.withTenant(T, ctx -> CollectionTombstones.supersede(ctx, T, from, to, toId));
+        Integer n = scope.withTenant(T, ctx -> CollectionTombstones.supersede(ctx, T, from, to, toId, Gate3.never()));
         return n;
     }
 
@@ -121,7 +122,7 @@ class CollectionTombstonesSupersedeToIdTest {
         register(x);
 
         assertThatThrownBy(() -> scope.withTenant(T, ctx ->
-                CollectionTombstones.supersede(ctx, T, x, y, DSL.currentOffsetDateTime())))
+                CollectionTombstones.supersede(ctx, T, x, y, DSL.currentOffsetDateTime(), Gate3.never())))
             .isInstanceOf(UnregisteredCollectionException.class);
 
         assertThat(supersededBy(x)).as("nothing was written").isEmpty();
@@ -152,12 +153,12 @@ class CollectionTombstonesSupersedeToIdTest {
         String x = name("lost-x"), y = name("lost-y"), z = name("lost-z");
         register(x);
         register(z);
-        Integer retiredForZ = scope.withTenant(T, ctx -> CollectionTombstones.supersede(ctx, T, x, z, DSL.currentOffsetDateTime()));
+        Integer retiredForZ = scope.withTenant(T, ctx -> CollectionTombstones.supersede(ctx, T, x, z, DSL.currentOffsetDateTime(), Gate3.never()));
         assertThat(retiredForZ).as("guard: X is already retired for Z").isEqualTo(1);
 
         assertThatThrownBy(() -> scope.withTenant(T, ctx -> {
             CollectionRename.retireAndRegister(ctx, T, x, y, CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
-                new java.util.HashMap<>(), new String[4]);
+                new java.util.HashMap<>(), new String[4], Gate3.never());
             return null;
         }))
             .isInstanceOf(CatalogRepository.CollectionMergeRefused.class)

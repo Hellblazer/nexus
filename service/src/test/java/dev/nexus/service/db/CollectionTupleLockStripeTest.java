@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import dev.nexus.service.datamove.Gate3;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.CollectionMintSupport;
@@ -181,7 +182,7 @@ class CollectionTupleLockStripeTest {
         assertThat(held.await(10, TimeUnit.SECONDS)).isTrue();
         CompletableFuture<Void> registration = CompletableFuture.runAsync(() -> scope.withTenant(T, ctx -> {
             CollectionMint.refuseHeldTuple(ctx, T, "knowledge__derivation__" + MODEL + "__v1", "knowledge", owner, MODEL, "v1",
-                "live", "");
+                "live", "", Gate3.never());
             return null;
         }));
         Thread.sleep(1500);
@@ -196,7 +197,7 @@ class CollectionTupleLockStripeTest {
     @Test
     void aLargeImportWithTheIndexAbsentTakesAtMost256TupleLocks() {
         int held = scope.withTenant(T, ctx -> {
-            CollectionMint.refuseLiveTupleConflicts(ctx, T, freshRows("bulk-", 5000));
+            CollectionMint.refuseLiveTupleConflicts(ctx, T, freshRows("bulk-", 5000), Gate3.never());
             return advisoryLocksHeld(ctx);
         });
         assertThat(held).as("5000 tuples: exactly one lock for each stripe they fall in, no more and none dropped")
@@ -303,7 +304,7 @@ class CollectionTupleLockStripeTest {
                     throw new IllegalStateException(e);
                 }
                 return scope.withTenant(T, ctx -> {
-                    CollectionMint.refuseLiveTupleConflicts(ctx, T, freshRows(prefix, 1500));
+                    CollectionMint.refuseLiveTupleConflicts(ctx, T, freshRows(prefix, 1500), Gate3.never());
                     return advisoryLocksHeld(ctx);
                 });
             }));
@@ -323,9 +324,9 @@ class CollectionTupleLockStripeTest {
         });
         try {
             int held = scope.withTenant(T, ctx -> {
-                CollectionMint.refuseLiveTupleConflicts(ctx, T, freshRows("indexed-", 50));
+                CollectionMint.refuseLiveTupleConflicts(ctx, T, freshRows("indexed-", 50), Gate3.never());
                 CollectionMint.refuseHeldTuple(ctx, T, "knowledge__indexed-one__" + MODEL + "__v1", "knowledge", "indexed-one",
-                    MODEL, "v1", "live", "");
+                    MODEL, "v1", "live", "", Gate3.never());
                 return advisoryLocksHeld(ctx);
             });
             assertThat(held).isZero();

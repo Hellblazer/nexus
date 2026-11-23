@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import dev.nexus.service.datamove.Gate3;
 import dev.nexus.service.db.AdminConnection;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.PgSession.PciSettings;
@@ -286,6 +287,8 @@ public final class PciReconciler {
     private final ToIntFunction<Collection<String>> ringExpiry;
     /** nexus-4lnn1.1.4: when the recall canary runs and what it last found; {@code null} means no canary (tests). */
     private final PciCanarySchedule canary;
+    /** RDR-229 P3.5c: the one latched gate 3 signal; the leaf row counts and the id half's recount read the collection by its id from it. */
+    private final Gate3 readGate;
 
     private final Map<LeafKey, Failure> failures = new ConcurrentHashMap<>();
     /** What the DDL half last read of each index's anchor, and the anchors it writes on what it finds (nexus-4lnn1.1.10). */
@@ -367,6 +370,15 @@ public final class PciReconciler {
                   PciSettings settings, Clock clock, TenantBinder tenantBinder, Duration countTimeout,
                   Duration period, RandomGenerator random, ToIntFunction<Collection<String>> ringExpiry,
                   PciCanarySchedule canary) {
+        this(catalog, builder, sweep, settings, clock, tenantBinder, countTimeout, period, random, ringExpiry, canary, Gate3.never());
+    }
+
+    /** As above with the gate 3 signal the counts read the id on (RDR-229 P3.5c); the forms above pass {@link Gate3#never()} (tests). */
+    PciReconciler(Supplier<PciCatalog.Snapshot> catalog, PciBuilderSession builder, PciIndexSweep sweep,
+                  PciSettings settings, Clock clock, TenantBinder tenantBinder, Duration countTimeout,
+                  Duration period, RandomGenerator random, ToIntFunction<Collection<String>> ringExpiry,
+                  PciCanarySchedule canary, Gate3 readGate) {
+        this.readGate = Objects.requireNonNull(readGate, "readGate");
         this.canary = canary;
         this.ledger = new PciAnchorLedger(Objects.requireNonNull(clock, "clock"), reindex::reference,
             name -> reindex.owedAnchors().containsKey(name));
@@ -413,13 +425,21 @@ public final class PciReconciler {
                                        PciSettings settings, ToIntFunction<Collection<String>> ringExpiry,
                                        PgVectorRepository repository,
                                        dev.nexus.service.db.TenantScope scope) {
-        var ring = new PciQueryRingReader(Objects.requireNonNull(scope, "scope"));
+        return create(ds, admin, bootNonce, sweep, settings, ringExpiry, repository, scope, Gate3.never());
+    }
+
+    /** As above, reading the collection by its id from {@code gate3}, the one latched signal {@code Main} builds (RDR-229 P3.5c). */
+    public static PciReconciler create(DataSource ds, AdminConnection admin, String bootNonce, PciIndexSweep sweep,
+                                       PciSettings settings, ToIntFunction<Collection<String>> ringExpiry,
+                                       PgVectorRepository repository,
+                                       dev.nexus.service.db.TenantScope scope, Gate3 gate3) {
+        var ring = new PciQueryRingReader(Objects.requireNonNull(scope, "scope"), gate3);
         var runner = new PciCanary(ring::load, Objects.requireNonNull(repository, "repository").canaryStatements());
         return new PciReconciler(new PciCatalog(ds)::read,
             new PciBuilderSession(admin.url(), admin.user(), admin.password(), bootNonce, settings), sweep, settings,
             Clock.systemUTC(), SET_LOCAL_TENANT, COUNT_TIMEOUT,
             Duration.ofSeconds(Objects.requireNonNull(settings, "settings").sweepSeconds()),
-            RandomGenerator.getDefault(), ringExpiry, new PciCanarySchedule(runner));
+            RandomGenerator.getDefault(), ringExpiry, new PciCanarySchedule(runner), gate3);
     }
 
     /** The canary's latest result for every index it has run on, by index name (empty without a canary). */
@@ -975,7 +995,7 @@ public final class PciReconciler {
         int b = settings.buildMinRows();
         Map<String, Integer> counts = new HashMap<>();
         for (String collection : toCount) {
-            counts.put(collection, PciLeafCounting.count(tx, dimension, collection, model, tenant, b));
+            counts.put(collection, PciLeafCounting.count(tx, dimension, collection, model, tenant, b, readGate));
         }
 
         Instant now = clock.instant();
@@ -999,12 +1019,12 @@ public final class PciReconciler {
         if (recounted) {
             int rankCap = Math.multiplyExact(b, RANK_CAP_FACTOR);
             for (String collection : candidates) {
-                counts.put(collection, PciLeafCounting.count(tx, dimension, collection, model, tenant, rankCap));
+                counts.put(collection, PciLeafCounting.count(tx, dimension, collection, model, tenant, rankCap, readGate));
             }
         }
         // RDR-229 P3.4: the id half. The null-id read runs only once gate 2 holds, for the collections that could build.
         var plan = PciIdBuilds.plan(tx, leaf, dimension, counts, registry, backedOff, inFlight, settings, gate2, gate3,
-            Math.multiplyExact(b, RANK_CAP_FACTOR));
+            Math.multiplyExact(b, RANK_CAP_FACTOR), readGate);
         List<Action> actions = plan.actions();
         PciAnchorLedger.Reads anchors = readAnchors(tx, leaf, dimension, actions, now);
         // One reading, logged and carried: the pass line's sum and max are over exactly these figures. The per-leaf

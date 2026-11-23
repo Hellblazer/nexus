@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import dev.nexus.service.datamove.Gate3;
+import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.exception.DataAccessException;
@@ -82,13 +84,14 @@ public final class CollectionTombstones {
      *
      * @return the number of rows updated (0 means no {@code (tenant, name)} row, or a different target already set)
      */
-    static int supersede(DSLContext ctx, String tenant, String name, String supersededBy, Field<OffsetDateTime> stampedAt) {
+    static int supersede(DSLContext ctx, String tenant, String name, String supersededBy, Field<OffsetDateTime> stampedAt,
+                         Gate3 gate3) {
         // The canonical lock order (RenameGuard#runRename), steps 1 and 3: this verb takes no sweep gate. The successor's row too, so a
         // delete of the successor between the target check and the UPDATE cannot leave the CHECK a successor that is gone (23514).
         RenameLatchLock.shared(ctx);
         lockRows(ctx, tenant, name, supersededBy);
         CollectionIds.require(ctx, tenant, supersededBy);
-        return casSupersede(ctx, tenant, name, supersededBy, CollectionIds.idOf(tenant, supersededBy), stampedAt);
+        return casSupersede(ctx, tenant, name, supersededBy, CollectionIds.idOf(tenant, supersededBy), stampedAt, gate3);
     }
 
     /**
@@ -107,21 +110,25 @@ public final class CollectionTombstones {
      *
      * @return the number of rows updated (0 means no {@code (tenant, fromName)} row, or a different target already set)
      */
-    static int supersede(DSLContext ctx, String tenant, String fromName, String toName, long toId) {
-        return casSupersede(ctx, tenant, fromName, toName, DSL.val(toId), DSL.currentOffsetDateTime());
+    static int supersede(DSLContext ctx, String tenant, String fromName, String toName, long toId, Gate3 gate3) {
+        return casSupersede(ctx, tenant, fromName, toName, DSL.val(toId), DSL.currentOffsetDateTime(), gate3);
     }
 
     private static int casSupersede(DSLContext ctx, String tenant, String name, String supersededBy, Field<Long> successorId,
-                                    Field<OffsetDateTime> stampedAt) {
-        // the transaction retires the row itself: a read of it later in this transaction must not be handed the live row it read before
-        WriteRegistryMemo.forget(ctx);
+                                    Field<OffsetDateTime> stampedAt, Gate3 gate3) {
+        // RDR-229 P3.5c: the row is the caller's label (the registry name stays); "live" and "already this target" read the
+        // id from gate 3. The name arm of a write (the SET) is the dual write's, not a read.
+        Condition live = CollectionIdReads.live(gate3, CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.SUPERSEDED_BY_ID);
+        Condition alreadyThis = gate3.holds() ? CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.eq(successorId)
+            : CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(supersededBy);
+        WriteRegistryMemo.forget(ctx);   // P3.5a: the transaction retires the row itself
         return ctx.update(CATALOG_COLLECTIONS)
             .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, supersededBy)
             .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, successorId)
             // nexus-0svvu (a): stamp only on the transition OUT OF '' (a genuine first supersede); a row that
             // already carries THIS target keeps whatever instant it already has.
             .set(CATALOG_COLLECTIONS.SUPERSEDED_AT,
-                DSL.when(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(""), stampedAt)
+                DSL.when(live, stampedAt)
                    .otherwise(CATALOG_COLLECTIONS.SUPERSEDED_AT))
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
                 .and(CATALOG_COLLECTIONS.NAME.eq(name))
@@ -129,8 +136,7 @@ public final class CollectionTombstones {
                 // It is the one source of the DIFFERENT-target refusal: the loser of a concurrent supersede to
                 // another target matches zero rows, and renameCollectionTxn's emptiness/identity asymmetry
                 // (nexus-2sovp) depends on this CAS staying exactly this strict.
-                .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")
-                    .or(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(supersededBy))))
+                .and(live.or(alreadyThis)))
             .execute();
     }
 
@@ -146,11 +152,13 @@ public final class CollectionTombstones {
         WriteRegistryMemo.forget(ctx);
         var s = CATALOG_COLLECTIONS.as("succ");
         Field<Long> successor = DSL.field(DSL.select(s.COLLECTION_ID).from(s)
-            .where(s.TENANT_ID.eq(tenant)).and(s.NAME.eq(supersededBy)));
+            .where(s.TENANT_ID.eq(tenant)).and(s.NAME.eq(supersededBy))
+            .orderBy(CollectionIdReads.liveFirst(s)).limit(1));
         ctx.update(CATALOG_COLLECTIONS)
             .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, supersededBy)
             .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, DSL.coalesce(successor, CATALOG_COLLECTIONS.COLLECTION_ID))
-            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(name))
+            // the row just written (live); a tombstone that shares the label is not this one
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(name)).and(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.isNull())
             .execute();
     }
 
@@ -167,11 +175,33 @@ public final class CollectionTombstones {
         WriteRegistryMemo.forget(ctx);
         var s = CATALOG_COLLECTIONS.as("reg");
         Field<Long> registered = DSL.field(DSL.select(s.COLLECTION_ID).from(s)
-            .where(s.TENANT_ID.eq(CATALOG_COLLECTIONS.TENANT_ID)).and(s.NAME.eq(CATALOG_COLLECTIONS.SUPERSEDED_BY)));
+            .where(s.TENANT_ID.eq(CATALOG_COLLECTIONS.TENANT_ID)).and(s.NAME.eq(CATALOG_COLLECTIONS.SUPERSEDED_BY))
+            .orderBy(CollectionIdReads.liveFirst(s)).limit(1));  // live first, else the newest tombstone
         return ctx.update(CATALOG_COLLECTIONS)
             .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, registered)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.SUPERSEDED_BY.in(names))
             .and(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.isDistinctFrom(registered))
+            .execute();
+    }
+
+    /**
+     * Re-points every tombstone of {@code tenant} that names {@code fromId} onto {@code toId}: {@code superseded_by_id} becomes
+     * {@code toId} and {@code superseded_by} the registry's label of {@code toId}, in one statement that touches no other column or
+     * row. For P3.7's one-row rename (which replaces {@link #repointTombstonesNaming}, kept until it goes). The column has no foreign
+     * key, only the CHECK {@code (superseded_by = '') = (superseded_by_id IS NULL)}, which the statement keeps true, so the registry
+     * row of {@code fromId} can be deleted before or after the call in one transaction.
+     *
+     * @return the number of tombstones re-pointed
+     */
+    static int repointTombstones(DSLContext ctx, String tenant, long fromId, long toId) {
+        // the successor's row first, FOR KEY SHARE (the writer's registry check: a retired or unknown target is refused), so the label
+        // written is the row's current one and the row cannot be retired under the statement
+        String label = CollectionRegistry.requireIdForWrite(ctx, tenant, toId).label();
+        WriteRegistryMemo.forget(ctx);   // the statement below writes registry rows
+        return ctx.update(CATALOG_COLLECTIONS)
+            .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, toId)
+            .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, label)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.eq(fromId))
             .execute();
     }
 
@@ -185,7 +215,8 @@ public final class CollectionTombstones {
     public static int invariantViolations(DSLContext ctx, String tenant) {
         var s = CATALOG_COLLECTIONS.as("inv");
         Field<Long> successor = DSL.field(DSL.select(s.COLLECTION_ID).from(s)
-            .where(s.TENANT_ID.eq(CATALOG_COLLECTIONS.TENANT_ID)).and(s.NAME.eq(CATALOG_COLLECTIONS.SUPERSEDED_BY)));
+            .where(s.TENANT_ID.eq(CATALOG_COLLECTIONS.TENANT_ID)).and(s.NAME.eq(CATALOG_COLLECTIONS.SUPERSEDED_BY))
+            .orderBy(CollectionIdReads.liveFirst(s)).limit(1));
         return ctx.fetchCount(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(
             CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("").and(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.isNotNull())
             .or(CATALOG_COLLECTIONS.SUPERSEDED_BY.ne("").and(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.isDistinctFrom(
@@ -205,18 +236,18 @@ public final class CollectionTombstones {
      *
      * @return the number of registry rows deleted
      */
-    static int deleteRegistryRows(DSLContext ctx, String tenant, List<String> names) {
+    static int deleteRegistryRows(DSLContext ctx, String tenant, List<String> names, Gate3 gate3) {
         if (names.isEmpty()) return 0;
         WriteRegistryMemo.forget(ctx);
         var d = CATALOG_COLLECTIONS.as("gone");
         Field<Long> goneId = d.COLLECTION_ID;
+        Condition byId = CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.in(
+            DSL.select(goneId).from(d).where(d.TENANT_ID.eq(tenant)).and(d.NAME.in(names)));
         ctx.update(CATALOG_COLLECTIONS)
             .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, CATALOG_COLLECTIONS.COLLECTION_ID)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
             .and(CATALOG_COLLECTIONS.NAME.notIn(names))
-            .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.in(names)
-                .or(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.in(
-                    DSL.select(goneId).from(d).where(d.TENANT_ID.eq(tenant)).and(d.NAME.in(names)))))
+            .and(gate3.holds() ? byId : CATALOG_COLLECTIONS.SUPERSEDED_BY.in(names).or(byId))
             .execute();
         return ctx.deleteFrom(CATALOG_COLLECTIONS)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.in(names))
@@ -231,9 +262,9 @@ public final class CollectionTombstones {
      *
      * @return the number of registry rows deleted for {@code id}: 0 or 1, the predecessors not counted
      */
-    static int deleteRegistryRowById(DSLContext ctx, String tenant, String name, long id, List<String> predecessors) {
+    static int deleteRegistryRowById(DSLContext ctx, String tenant, String name, long id, List<String> predecessors, Gate3 gate3) {
         WriteRegistryMemo.forget(ctx);
-        deleteRegistryRows(ctx, tenant, predecessors);
+        deleteRegistryRows(ctx, tenant, predecessors, gate3);
         ctx.update(CATALOG_COLLECTIONS)
             .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, CATALOG_COLLECTIONS.COLLECTION_ID)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
