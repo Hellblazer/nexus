@@ -258,8 +258,8 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
             {
                 // the PRODUCTION leaf on_complete of every leaf, under the bounds the finisher gives a validation (no statement bound, 5 s lock wait),
                 // in a transaction that stays open
-                MoveSql.runOnComplete(holder, "SET LOCAL statement_timeout = 0");
-                MoveSql.runOnComplete(holder, "SET LOCAL lock_timeout = '5s'");
+                MoveSql.runOnComplete(holder, P33cSql.stmt("set.local", "statement_timeout", "0"));
+                MoveSql.runOnComplete(holder, P33cSql.stmt("set.local", "lock_timeout", "'5s'"));
                 for (var m : leafMoves()) {
                     MoveSql.runOnComplete(holder, (String) m.get("on_complete"));
                 }
@@ -282,7 +282,7 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
                             try {
                                 writer.setAutoCommit(false);
                                 DSLContext w = DSL.using(writer, SQLDialect.POSTGRES);
-                                MoveSql.runOnComplete(writer, "SET LOCAL lock_timeout = '2s'");
+                                MoveSql.runOnComplete(writer, P33cSql.stmt("set.local", "lock_timeout", "'2s'"));
                                 PgContainerHelper.insertChunks(w, tenant, collection, List.of(hex), List.of("w"), List.of(new float[768]), List.of(Map.of()));
                                 writer.commit();
                             } catch (SQLException | RuntimeException e) {
@@ -313,8 +313,8 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
     @Test
     void negativeControl_conflictingLockOrderIsSeenByTheRetryCounters() throws Exception {
         try (Connection a = pg.createConnection(""); Connection b = pg.createConnection(""); Connection setup = pg.createConnection("")) {
-            MoveSql.runOnComplete(setup, "CREATE TABLE IF NOT EXISTS nexus.p33c_dl_a (x int)");
-            MoveSql.runOnComplete(setup, "CREATE TABLE IF NOT EXISTS nexus.p33c_dl_b (x int)");
+            MoveSql.runOnComplete(setup, P33cSql.stmt("create.dl.table", "p33c_dl_a"));
+            MoveSql.runOnComplete(setup, P33cSql.stmt("create.dl.table", "p33c_dl_b"));
             long retriesBefore = DeadlockRetry.retryAttemptCount();
             AtomicInteger attemptsA = new AtomicInteger();
             AtomicInteger attemptsB = new AtomicInteger();
@@ -325,7 +325,7 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
             fb.get(30, TimeUnit.SECONDS);
             assertThat(attemptsA.get() + attemptsB.get()).as("one session was the deadlock victim and ran again").isEqualTo(3);
             assertThat(DeadlockRetry.retryAttemptCount() - retriesBefore).as("and DeadlockRetry counted its retry").isGreaterThanOrEqualTo(1);
-            MoveSql.runOnComplete(setup, "DROP TABLE IF EXISTS nexus.p33c_dl_a, nexus.p33c_dl_b");
+            MoveSql.runOnComplete(setup, P33cSql.stmt("drop.dl.tables"));
         }
     }
 
@@ -334,11 +334,11 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
             int attempt = attempts.incrementAndGet();
             try {
                 c.setAutoCommit(false);
-                MoveSql.runOnComplete(c, "LOCK TABLE nexus." + first + " IN ACCESS EXCLUSIVE MODE");
+                MoveSql.runOnComplete(c, P33cSql.stmt("lock.table", "nexus." + first, "ACCESS EXCLUSIVE"));
                 if (attempt == 1) {
                     firstLockTaken.await(10, TimeUnit.SECONDS);   // both hold their first lock before either asks for the second
                 }
-                MoveSql.runOnComplete(c, "LOCK TABLE nexus." + second + " IN ACCESS EXCLUSIVE MODE");
+                MoveSql.runOnComplete(c, P33cSql.stmt("lock.table", "nexus." + second, "ACCESS EXCLUSIVE"));
                 c.commit();
             } catch (SQLException | InterruptedException | java.util.concurrent.TimeoutException | java.util.concurrent.BrokenBarrierException e) {
                 try {
@@ -377,8 +377,7 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
             default -> "ON DELETE RESTRICT";
         };
         try {
-            runSql("ALTER TABLE nexus." + quote(leaf) + " ADD CONSTRAINT " + quote(mismatch) + " FOREIGN KEY " + columns
-                + " REFERENCES nexus.catalog_collections " + columns + " " + actions);
+            runSql(P33cSql.stmt("add.fk", "nexus." + quote(leaf), quote(mismatch), columns, columns, actions));
             resume(Rdr229ChunksFk.ADOPT_LABEL);
 
             runOnCompleteOnOwnSession(onCompleteOf(Rdr229ChunksFk.ADOPT_LABEL));
@@ -410,9 +409,7 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
         seed("reopen");
         registerSwaps();
         runSwaps(new VerifyingFinisher());
-        for (LeafFk f : leafFks()) {
-            runSql("ALTER TABLE nexus." + quote(f.leaf()) + " VALIDATE CONSTRAINT " + quote(f.name()));
-        }
+        validateEveryLeafByHand();
         pause("rdr229-%");
         resume(Rdr229ChunksFk.ADOPT_LABEL);
         var before = adoptMoves().get(0);
