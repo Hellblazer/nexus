@@ -37,11 +37,14 @@ public final class CollectionTombstones {
      * it has one); the gc routes' Java take of the sweep gate carries the function's own 2 s bound, and a write that follows a rename gives up
      * after a bounded number of follows ({@link RenameFollow}).
      */
-    private static volatile String rowLockTimeoutMs = "10000";
+    /** The production bound of {@link #lockRows}, as the GUC text (milliseconds). */
+    public static final String ROW_LOCK_TIMEOUT_MS = "10000";
+
+    private static volatile String rowLockTimeoutMs = ROW_LOCK_TIMEOUT_MS;
 
     /** Test hook: a shorter bound, so a starvation test answers in a second; pass {@code null} to restore the default. */
     public static void setRowLockTimeoutMsForTests(String ms) {
-        rowLockTimeoutMs = ms == null ? "10000" : ms;
+        rowLockTimeoutMs = ms == null ? ROW_LOCK_TIMEOUT_MS : ms;
     }
 
     /**
@@ -66,6 +69,23 @@ public final class CollectionTombstones {
     static void lockRows(DSLContext ctx, String tenant, long sourceId, String... names) {
         lockRowsWhere(ctx, tenant, CATALOG_COLLECTIONS.COLLECTION_ID.eq(sourceId).or(CATALOG_COLLECTIONS.NAME.in(names)),
             "#" + sourceId + (names.length == 0 ? "" : "," + String.join(",", names)));
+    }
+
+    /**
+     * {@link #lockRows} for the one-row rename (RDR-229 P3.7), which touches more than the rows of its two labels: the same statement, bound, log line and
+     * {@link RenameBusyException} on a timeout, over the rows named {@code oldName} or {@code newName}, every tombstone whose {@code superseded_by} names either
+     * label (the rename repoints them) and every row whose {@code superseded_by_id} is the id of a row named {@code newName} (repointed after that row's delete),
+     * whatever id the tombstone carries: a self-pointing or unstamped one is updated too. All of them are taken in the one statement in {@code collection_id}
+     * order, so none is locked later out of order (linda's census, items 3 and pass 2).
+     */
+    static void lockRowsOfOneRowRename(DSLContext ctx, String tenant, String oldName, String newName) {
+        var target = CATALOG_COLLECTIONS.as("target");
+        lockRowsWhere(ctx, tenant,
+            CATALOG_COLLECTIONS.NAME.in(oldName, newName)
+                .or(CATALOG_COLLECTIONS.SUPERSEDED_BY.in(oldName, newName))
+                .or(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.in(ctx.select(target.COLLECTION_ID).from(target)
+                    .where(target.TENANT_ID.eq(tenant).and(target.NAME.eq(newName))))),
+            oldName + "," + newName);
     }
 
     private static void lockRowsWhere(DSLContext ctx, String tenant, org.jooq.Condition which, String described) {
