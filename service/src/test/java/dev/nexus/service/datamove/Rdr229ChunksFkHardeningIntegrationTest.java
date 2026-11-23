@@ -82,7 +82,7 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
     private void foreignBackendsSurvive(java.util.concurrent.Callable<Integer> sweep) throws Exception {
         String suffix = Long.toString(System.nanoTime());
         String otherDb = "p33c_other_db_" + suffix;
-        String otherRole = "p33c_other_role_" + suffix;
+        String otherRole = "p33c_other_role";   // literal and this class's alone (TestRoleUniquenessScanTest); the data-move database is the class's own, and the finally drops it
         PgContainerHelper.createDatabase(su, otherDb);
         PgContainerHelper.createLoginRole(su, otherRole, "p33c_pw", false);
         String otherUrl = adminConnection.url().replaceFirst("(jdbc:postgresql://[^/]+/)[^?]+", "$1" + otherDb);
@@ -828,7 +828,7 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
         assertThat(flags.value2()).as("and forced on its owner").isTrue();
 
         String suffix = Long.toString(System.nanoTime());
-        String role = "p33c_nonowner_" + suffix;
+        String role = "p33c_nonowner";   // literal and this class's alone (TestRoleUniquenessScanTest); dropped in the finally
         String ownerTable = "p33c_scratch_owner_" + suffix;
         String otherTable = "p33c_scratch_other_" + suffix;
         PgContainerHelper.createLoginRole(su, role, "p33c_pw", false);
