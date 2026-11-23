@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
-import dev.nexus.service.datamove.Gate3;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
@@ -97,8 +96,8 @@ import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_MODELS;
  * its id; one resolution by either key fills both, an evict by label drops both, and a fill that raced an evict (the
  * nexus-hkh1y guard) is dropped for both. The process-wide cache is one {@link #shared()} registry, which every static method
  * below serves and the route boundary uses; a registry built with {@code new} owns a cache of its own (the isolated registry
- * of a test). Each registry takes {@link Gate3} by constructor and reads it per call ({@link #readerKey}), so the switch from
- * the name to the id needs no restart. Until gate 3 the readers still key on the label.
+ * of a test). The registry has no gate-3 dependency (linda 2026-11-23): which key a reader queries on, the label or the id, is
+ * the reader's own choice from the one {@code Gate3} its repository is given, and the registry only serves both.
  */
 
 public final class CollectionRegistry {
@@ -129,17 +128,15 @@ public final class CollectionRegistry {
 
     /** The registry over the process-wide cache. Declared after the two indexes it aliases. */
     private static final CollectionRegistry SHARED =
-        new CollectionRegistry(Gate3.never(), KNOWN, KNOWN_BY_ID, FILL_LOCK, EVICTIONS);
+        new CollectionRegistry(KNOWN, KNOWN_BY_ID, FILL_LOCK, EVICTIONS);
 
-    private final Gate3 gate3;
     private final Map<String, CollectionRow> known;
     private final Map<String, CollectionRow> knownById;
     private final Object fillLock;
     private final long[] evictions;
 
-    private CollectionRegistry(Gate3 gate3, Map<String, CollectionRow> known, Map<String, CollectionRow> knownById,
+    private CollectionRegistry(Map<String, CollectionRow> known, Map<String, CollectionRow> knownById,
                                Object fillLock, long[] evictions) {
-        this.gate3 = java.util.Objects.requireNonNull(gate3, "gate3");
         this.known = known;
         this.knownById = knownById;
         this.fillLock = fillLock;
@@ -147,21 +144,16 @@ public final class CollectionRegistry {
     }
 
     /**
-     * A registry with a cache of its own (empty, and no other registry's), reading {@code gate3} per call. What a test builds;
-     * production code uses {@link #shared(Gate3)}, so an evict by a repository reaches the cache the route boundary reads.
+     * A registry with a cache of its own (empty, and no other registry's). What a test builds;
+     * production code uses {@link #shared()}, so an evict by a repository reaches the cache the route boundary reads.
      */
-    public CollectionRegistry(Gate3 gate3) {
-        this(gate3, new ConcurrentHashMap<>(), new ConcurrentHashMap<>(), new Object(), new long[1]);
+    public CollectionRegistry() {
+        this(new ConcurrentHashMap<>(), new ConcurrentHashMap<>(), new Object(), new long[1]);
     }
 
-    /** The process-wide registry, gate 3 never holding: what the static methods below are. */
+    /** The process-wide registry: what the static methods below are, and what the route boundary and every evict use. */
     public static CollectionRegistry shared() {
         return SHARED;
-    }
-
-    /** A registry over the process-wide cache that reads {@code gate3} per call: the route boundary's. */
-    public static CollectionRegistry shared(Gate3 gate3) {
-        return new CollectionRegistry(gate3, KNOWN, KNOWN_BY_ID, FILL_LOCK, EVICTIONS);
     }
 
     // ---- the id-keyed API (RDR-229 P3.5a) -------------------------------------------------------------------------------
@@ -246,15 +238,6 @@ public final class CollectionRegistry {
             knownById.keySet().removeIf(k -> k.startsWith(prefix));
         }
         return removed[0];
-    }
-
-    /**
-     * What a reader keys its query on: the label while {@link Gate3} does not hold (the name columns, as before P3.5), the id
-     * ({@link CollectionRow#collectionId()}) once it does. Decided per call from the injected signal, so the switch needs no
-     * restart and drops back if gate 3 does.
-     */
-    public Object readerKey(CollectionRow row) {
-        return gate3.holds() ? (Object) row.collectionId() : row.label();
     }
 
     private static String key(String tenant, String collection) {

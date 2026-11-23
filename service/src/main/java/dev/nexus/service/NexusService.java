@@ -708,7 +708,7 @@ public final class NexusService {
         var remapRepo     = new RemapRepository(tenantScope);
         var ladderRepo    = new LadderRepository(tenantScope);
         var pipelineRepo  = new PipelineRepository(tenantScope);
-        this.catalogRepo  = new CatalogRepository(tenantScope, renameGuard);
+        this.catalogRepo  = new CatalogRepository(tenantScope, gate3, renameGuard);
         this.identityRepo = new dev.nexus.service.db.IdentityRepository(tenantScope, java.time.Clock.systemUTC());
         var identityFence = new dev.nexus.service.http.IdentityFence(new dev.nexus.service.db.IdentityFenceReads(tenantScope)); // RDR-253
 
@@ -765,7 +765,7 @@ public final class NexusService {
         // RDR-229 P3.5a: CollectionSelectorFilter resolves collection_id to the label on the collection-taking routes.
         var authFilter = List.of(new AuthFilter(tokenCache, tokenStore, catalogRepo),
                 new dev.nexus.service.http.IdempotencyKeyGuard(),
-                new dev.nexus.service.http.CollectionSelectorFilter(dev.nexus.service.db.CollectionRegistry.shared(gate3), tenantScope));
+                new dev.nexus.service.http.CollectionSelectorFilter(dev.nexus.service.db.CollectionRegistry.shared(), tenantScope));
 
         var whoamiCtx = server.createContext("/v1/_whoami", new WhoamiHandler(tenantScope));
         whoamiCtx.getFilters().addAll(authFilter);
