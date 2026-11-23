@@ -6514,7 +6514,8 @@ public final class CatalogRepository {
         // nexus-z0o2p.29: a replace writes the difference (ManifestReplace) so a re-index that keeps a chunk's
         // row stops dropping and re-listing it; the delete-and-insert below remains for a bad row (it fails there
         // as it always did) and for a rewrite of more than ManifestReplace.MAX_CHANGED_ROWS rows.
-        List<DepartedWriterSpans.Gone> diffed = ManifestReplace.replace(ctx, tenant, docId, collection, rows, gate3);
+        final Gate3 spansGate = DepartedWriterSpans.pinned(gate3);   // read once for the pass: the rows are read and cleared by one reading of the latch
+        List<DepartedWriterSpans.Gone> diffed = ManifestReplace.replace(ctx, tenant, docId, collection, rows, spansGate);
         if (diffed != null) {
             if (!rows.isEmpty()) stampIndexedAt(ctx, tenant, docId);
             removed = priorRows == PRIOR_ROWS_UNREAD ? null : priorRows != null ? priorRows : diffed;
@@ -6522,7 +6523,7 @@ public final class CatalogRepository {
             var removal = ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId));
             if (priorRows == null) {
                 removed = DepartedWriterSpans.Gone.allOf(
-                    removal.returningResult(DepartedWriterSpans.Gone.columns(gate3)).fetch());
+                    removal.returningResult(DepartedWriterSpans.Gone.columns(spansGate)).fetch());
             } else {
                 removal.execute();
                 removed = priorRows == PRIOR_ROWS_UNREAD ? null : priorRows;
@@ -6550,7 +6551,7 @@ public final class CatalogRepository {
         // UPDATE still retries (see DepartedWriterSpans).
         if (removed != null && !removed.isEmpty()) {
             DepartedWriterSpans.clear(ctx, tenant,
-                DepartedWriterSpans.departed(removed, collection, newChashes(rows)), gate3);
+                DepartedWriterSpans.departed(removed, collection, newChashes(rows)), spansGate);
         }
         // nexus-b6enc F5: the manifest IS the count's source of truth — fold
         // it in the same transaction so no REPLACE can leave a stale count.
@@ -8300,11 +8301,12 @@ public final class CatalogRepository {
             // nexus-pvkbv: an upsert that puts another chunk at a position this document holds displaces the
             // chunk that stood there; the rows at these positions are read first, the displaced ones cleared after.
             Map<Integer, String> writtenAt = chashesByPosition(toWrite);
-            Map<Integer, DepartedWriterSpans.Gone> priorAt = DepartedWriterSpans.rowsAt(ctx, tenant, docId, writtenAt.keySet(), gate3);
+            final Gate3 spansGate = DepartedWriterSpans.pinned(gate3);   // read once for the pass
+            Map<Integer, DepartedWriterSpans.Gone> priorAt = DepartedWriterSpans.rowsAt(ctx, tenant, docId, writtenAt.keySet(), spansGate);
             for (var row : toWrite) {
                 insertManifestChunkRows(ctx, tenant, docId, coll, List.of(row), ManifestInsertMode.UPSERT_APPEND, gate3);
             }
-            DepartedWriterSpans.clearDisplaced(ctx, tenant, docId, coll, priorAt, writtenAt, gate3);
+            DepartedWriterSpans.clearDisplaced(ctx, tenant, docId, coll, priorAt, writtenAt, spansGate);
             // nexus-e4gel: fold documents.chunk_count in the SAME transaction,
             // exactly as writeManifestRows does (nexus-b6enc F5). The REPLACE
             // path folded and the APPEND path did not, so an append-grown
@@ -8724,15 +8726,16 @@ public final class CatalogRepository {
             // purged document is back. No sweep gate: a purge names no collection (it deletes the
             // document's rows whichever collection they name), and the gate is per collection.
             acquireIndexRunLock(ctx, tenant, docId);
+            final Gate3 spansGate = DepartedWriterSpans.pinned(gate3);   // read once for the pass
             var removed = DepartedWriterSpans.Gone.allOf(ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS)
                              .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId))
-                             .returningResult(DepartedWriterSpans.Gone.columns(gate3))
+                             .returningResult(DepartedWriterSpans.Gone.columns(spansGate))
                              .fetch());
             int deleted = removed.size();
             // nexus-pvkbv: every chunk the document held is departed; see DepartedWriterSpans. A tombstoned
             // document throws below and the whole transaction, this clear included, rolls back.
             if (deleted > 0) {
-                DepartedWriterSpans.clear(ctx, tenant, DepartedWriterSpans.departed(removed, null, Set.of()), gate3);
+                DepartedWriterSpans.clear(ctx, tenant, DepartedWriterSpans.departed(removed, null, Set.of()), spansGate);
             }
             // nexus-eldyi: guarded, fail loud. *deleted* counts
             // catalog_document_chunks rows (a DIFFERENT table with no
@@ -13824,10 +13827,11 @@ public final class CatalogRepository {
                 var batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
                 // nexus-pvkbv: a changed-content import puts another chunk at a held position; see appendOneDocumentTx.
                 Map<Integer, String> writtenAt = chashesByPosition(batch);
+                final Gate3 spansGate = DepartedWriterSpans.pinned(gate3);   // read once for the pass
                 Map<Integer, DepartedWriterSpans.Gone> priorAt =
-                    DepartedWriterSpans.rowsAt(ctx, tenant, docId, writtenAt.keySet(), gate3);
+                    DepartedWriterSpans.rowsAt(ctx, tenant, docId, writtenAt.keySet(), spansGate);
                 insertManifestChunkRows(ctx, tenant, docId, coll, batch, ManifestInsertMode.UPSERT_IMPORT, gate3);
-                DepartedWriterSpans.clearDisplaced(ctx, tenant, docId, coll, priorAt, writtenAt, gate3);
+                DepartedWriterSpans.clearDisplaced(ctx, tenant, docId, coll, priorAt, writtenAt, spansGate);
             }
             return rows.size();
         }));
@@ -13840,9 +13844,10 @@ public final class CatalogRepository {
         acquireIndexRunLock(ctx, tenant, docId);
         collection = registryFirst(ctx, tenant, collection, gate);   // the id is the identity: the row's CURRENT label
         Map<Integer, String> writtenAt = chashesByPosition(List.of(row));
-        Map<Integer, DepartedWriterSpans.Gone> priorAt = DepartedWriterSpans.rowsAt(ctx, tenant, docId, writtenAt.keySet(), gate3);
+        final Gate3 spansGate = DepartedWriterSpans.pinned(gate3);   // read once for the pass
+        Map<Integer, DepartedWriterSpans.Gone> priorAt = DepartedWriterSpans.rowsAt(ctx, tenant, docId, writtenAt.keySet(), spansGate);
         insertManifestChunkRows(ctx, tenant, docId, collection, List.of(row), ManifestInsertMode.UPSERT_IMPORT, gate3);
-        DepartedWriterSpans.clearDisplaced(ctx, tenant, docId, collection, priorAt, writtenAt, gate3);
+        DepartedWriterSpans.clearDisplaced(ctx, tenant, docId, collection, priorAt, writtenAt, spansGate);
     }
 
     /**
