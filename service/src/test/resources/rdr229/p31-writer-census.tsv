@@ -28,8 +28,8 @@ aspects	document_aspects	service/src/main/java/dev/nexus/service/db/AspectReposi
 aspects	document_aspects	service/src/main/java/dev/nexus/service/db/AspectRepository.java	587	update	jooq	collection	collection_id	yes		verb	renameAspectCollection
 aspects	document_aspects	service/src/main/java/dev/nexus/service/db/AspectRepository.java	607	update	jooq	-	collection_id	yes		unproven	setSalientSentences
 aspects	document_aspects	service/src/main/java/dev/nexus/service/db/AspectRepository.java	620	update	jooq	-	collection_id	yes		require	setSalientSentencesByKey
-aspects	document_aspects	service/src/main/java/dev/nexus/service/db/AspectRepository.java	725	insert	jooq	collection	collection_id	yes		require	importAspectsBatch
-aspects	document_aspects	service/src/main/java/dev/nexus/service/db/AspectRepository.java	806	insert	jooq	collection	collection_id	yes		require	doImportAspect
+aspects	document_aspects	service/src/main/java/dev/nexus/service/db/AspectRepository.java	717	insert	jooq	collection	collection_id	yes		require	importAspectsBatch
+aspects	document_aspects	service/src/main/java/dev/nexus/service/db/AspectRepository.java	798	insert	jooq	collection	collection_id	yes		require	doImportAspect
 aspects	document_aspects	service/src/main/java/dev/nexus/service/db/CatalogMoves.java	397	update	jooq	-	collection_id	yes		unproven	moveAspects
 aspects	document_aspects	service/src/main/java/dev/nexus/service/db/CatalogMoves.java	433	update	jooq	-	collection_id	yes		unproven	moveAspects
 aspects	document_aspects	service/src/main/java/dev/nexus/service/db/CatalogMoves.java	790	update	jooq	-	collection_id	yes		unproven	rewrite
@@ -44,10 +44,10 @@ aspects	document_highlights	rdr229-p31-residue-document-highlights [catalog-052-
 aspects	document_highlights	rdr229-p31-residue-document-highlights [catalog-052-residue-moves-supersede.xml:243]	240	update	data_move	-	collection_id	yes	sets collection_id	move	
 aspects	document_highlights	rdr229-residue-document-highlights [catalog-049-note-uri-residue.xml:1538]	1506	update	data_move	-	collection_id	yes	superseded by rdr229-p31-residue-document-highlights	move	
 aspects	document_highlights	rdr229-stamp-document_highlights [vectors-070-collection-id-stamp-moves.xml:203]	200	update	data_move	-	collection_id	yes	sets collection_id	move	
-aspects	document_highlights	service/src/main/java/dev/nexus/service/db/AspectRepository.java	889	insert	jooq	collection	collection_id	yes		require	upsertHighlight
-aspects	document_highlights	service/src/main/java/dev/nexus/service/db/AspectRepository.java	1044	insert	jooq	collection	collection_id	yes		require	importHighlightsBatch
-aspects	document_highlights	service/src/main/java/dev/nexus/service/db/AspectRepository.java	1090	insert	jooq	collection	collection_id	yes		require	doImportHighlight
-aspects	document_highlights	service/src/main/java/dev/nexus/service/db/AspectRepository.java	1132	update	jooq	collection	collection_id	yes		verb	renameHighlightsCollection
+aspects	document_highlights	service/src/main/java/dev/nexus/service/db/AspectRepository.java	881	insert	jooq	collection	collection_id	yes		require	upsertHighlight
+aspects	document_highlights	service/src/main/java/dev/nexus/service/db/AspectRepository.java	1036	insert	jooq	collection	collection_id	yes		require	importHighlightsBatch
+aspects	document_highlights	service/src/main/java/dev/nexus/service/db/AspectRepository.java	1082	insert	jooq	collection	collection_id	yes		require	doImportHighlight
+aspects	document_highlights	service/src/main/java/dev/nexus/service/db/AspectRepository.java	1124	update	jooq	collection	collection_id	yes		verb	renameHighlightsCollection
 aspects	document_highlights	service/src/main/java/dev/nexus/service/db/CatalogMoves.java	240	update	jooq	-	collection_id	yes		unproven	documentMove
 aspects	document_highlights	service/src/main/java/dev/nexus/service/db/CatalogMoves.java	464	update	jooq	-	collection_id	yes		unproven	rekeyHighlights
 aspects	document_highlights	service/src/main/java/dev/nexus/service/db/CatalogMoves.java	794	update	jooq	-	collection_id	yes		unproven	rewrite
@@ -233,10 +233,10 @@ taxonomy	taxonomy_meta	rdr229-fkvalidate-taxonomy_meta [vectors-072-collection-i
 taxonomy	taxonomy_meta	rdr229-stamp-taxonomy_meta [vectors-070-collection-id-stamp-moves.xml:220]	217	update	data_move	-	collection_id	yes	sets collection_id	move	
 taxonomy	taxonomy_meta	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11736	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	verb	renameCollectionTxn
 taxonomy	taxonomy_meta	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12200	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)	unproven	moveScopedTable
-taxonomy	taxonomy_meta	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	1716	update	jooq	collection	collection_id	yes		verb	renameCollection
-taxonomy	taxonomy_meta	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	1740	insert	jooq	collection	collection_id	yes		require	recordDiscoverCount
-taxonomy	taxonomy_meta	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	2280	insert	jooq	collection	collection_id	yes		require	importTaxonomyMeta
-taxonomy	taxonomy_meta	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	2536	insert	jooq	collection	collection_id	yes		require	importMetaBatch
+taxonomy	taxonomy_meta	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	1711	update	jooq	collection	collection_id	yes		verb	renameCollection
+taxonomy	taxonomy_meta	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	1735	insert	jooq	collection	collection_id	yes		require	recordDiscoverCount
+taxonomy	taxonomy_meta	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	2275	insert	jooq	collection	collection_id	yes		require	importTaxonomyMeta
+taxonomy	taxonomy_meta	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	2531	insert	jooq	collection	collection_id	yes		require	importMetaBatch
 taxonomy	taxonomy_meta	service/src/main/java/dev/nexus/service/db/TenantImportLoad.java	335	insert	by-name	collection	collection_id	yes	TenantImportLoad by-name INSERT ... SELECT over TenantExport.TABLES	unproven	
 taxonomy	topic_assignments	nexus.assign_from_chashes_1024 [vectors-077-rdr229-p35b-readers-both.xml:140]	48	insert	sql_function	source_collection	source_collection_id	yes		sql	
 taxonomy	topic_assignments	nexus.assign_from_chashes_1024 [vectors-077-rdr229-p35b-readers-both.xml:187]	48	insert	sql_function	source_collection	source_collection_id	yes		sql	
@@ -253,11 +253,11 @@ taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/CatalogRep
 taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	562	insert	jooq	source_collection	source_collection_id	yes		require	mergeTopics
 taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	787	insert	jooq	source_collection	source_collection_id	yes		require	assignOne
 taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	842	insert	jooq	source_collection	source_collection_id	yes		require	assignOne
-taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	1710	update	jooq	source_collection	source_collection_id	yes		verb	renameCollection
-taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	2208	insert	jooq	source_collection	source_collection_id	yes		require	importAssignment
-taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	2446	insert	jooq	source_collection	source_collection_id	yes		require	importAssignmentsBatch
-taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	3254	insert	jooq	source_collection	source_collection_id	yes		require	persistRebuildTopics
-taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	3417	insert	jooq	source_collection	source_collection_id	yes		require	batchInsertAssignments
+taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	1705	update	jooq	source_collection	source_collection_id	yes		verb	renameCollection
+taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	2203	insert	jooq	source_collection	source_collection_id	yes		require	importAssignment
+taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	2441	insert	jooq	source_collection	source_collection_id	yes		require	importAssignmentsBatch
+taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	3249	insert	jooq	source_collection	source_collection_id	yes		require	persistRebuildTopics
+taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	3412	insert	jooq	source_collection	source_collection_id	yes		require	batchInsertAssignments
 taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/TenantImportLoad.java	335	insert	by-name	source_collection	source_collection_id	yes	TenantImportLoad by-name INSERT ... SELECT over TenantExport.TABLES	unproven	
 taxonomy	topics	nexus.topics_doc_count_recount_del [vectors-069-collection-id-dual-write-functions.xml:5911]	5852	update	sql_function	collection	collection_id	yes		sql	
 taxonomy	topics	nexus.topics_doc_count_recount_ins [vectors-069-collection-id-dual-write-functions.xml:5736]	5660	update	sql_function	collection	collection_id	yes		sql	
@@ -270,10 +270,10 @@ taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.ja
 taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	407	update	jooq	-	collection_id	yes		unproven	updateTopicLabel
 taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	419	update	jooq	-	collection_id	yes		unproven	renameTopic
 taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	432	update	jooq	-	collection_id	yes		unproven	markTopicReviewed
-taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	1701	update	jooq	collection	collection_id	yes		verb	renameCollection
-taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	2152	insert	jooq	collection	collection_id	yes		require	importTopic
-taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	2373	insert	jooq	collection	collection_id	yes		require	importTopicsBatch
-taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	3074	insert	jooq	collection	collection_id	yes		require	persistSplit
-taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	3213	insert	jooq	collection	collection_id	yes		require	persistRebuildTopics
-taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	3347	insert	jooq	collection	collection_id	yes		require	persistDiscoveredTopics
+taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	1696	update	jooq	collection	collection_id	yes		verb	renameCollection
+taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	2147	insert	jooq	collection	collection_id	yes		require	importTopic
+taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	2368	insert	jooq	collection	collection_id	yes		require	importTopicsBatch
+taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	3069	insert	jooq	collection	collection_id	yes		require	persistSplit
+taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	3208	insert	jooq	collection	collection_id	yes		require	persistRebuildTopics
+taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	3342	insert	jooq	collection	collection_id	yes		require	persistDiscoveredTopics
 taxonomy	topics	service/src/main/java/dev/nexus/service/db/TenantImportLoad.java	335	insert	by-name	collection	collection_id	yes	TenantImportLoad by-name INSERT ... SELECT over TenantExport.TABLES	unproven	

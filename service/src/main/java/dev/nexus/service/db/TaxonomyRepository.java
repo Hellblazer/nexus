@@ -1665,16 +1665,11 @@ public final class TaxonomyRepository {
             }
             if (PURGE_SCOPE_FULL.equals(scope)) {
                 final org.jooq.Condition unstamped = TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID.isNull().and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(collection));
-                final org.jooq.Condition assignedFrom = purgedId == null ? unstamped : TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID.eq(purgedId).or(unstamped);
-                assignments += ctx.deleteFrom(TOPIC_ASSIGNMENTS).where(assignedFrom).execute();
+                assignments += ctx.deleteFrom(TOPIC_ASSIGNMENTS).where(purgedId == null ? unstamped : TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID.eq(purgedId).or(unstamped)).execute();
             }
-            int topics = ctx.deleteFrom(TOPICS)
-                .where(topicsOf)
-                .execute();
+            int topics = ctx.deleteFrom(TOPICS).where(topicsOf).execute();
             final org.jooq.Condition metaUnstamped = TAXONOMY_META.COLLECTION_ID.isNull().and(TAXONOMY_META.COLLECTION.eq(collection));
-            int meta = ctx.deleteFrom(TAXONOMY_META)
-                .where(purgedId == null ? metaUnstamped : TAXONOMY_META.COLLECTION_ID.eq(purgedId).or(metaUnstamped))
-                .execute();
+            int meta = ctx.deleteFrom(TAXONOMY_META).where(purgedId == null ? metaUnstamped : TAXONOMY_META.COLLECTION_ID.eq(purgedId).or(metaUnstamped)).execute();
             return Map.of("topics", topics, "assignments", assignments, "links", links, "meta", meta);
         });
     }
