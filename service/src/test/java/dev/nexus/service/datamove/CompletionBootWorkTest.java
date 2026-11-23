@@ -145,7 +145,8 @@ class CompletionBootWorkTest {
     void whenEveryGateHoldsAndNothingWaitsNothingIsListed_theFieldIsStillThere() throws Exception {
         var registry = new BootWorkRegistry(Clock.systemUTC());
         var reader = new Fixed(() -> CompletionCheck.evaluate(ctx, new CompletionCheck.ReadSet(List.of(), List.of()),
-            c -> Optional.of(new CompletionCheck.IdIndexCoverage(Set.of("a"), Set.of("a"), Set.of())), CompletionCheck.DIRECT));
+            c -> Optional.of(new CompletionCheck.IdIndexCoverage(Set.of("a"), Set.of("a"), Set.of())), CompletionCheck.DIRECT,
+            () -> Set.<String>of()));   // no P3.5b list: this build's restart notice (RDR-229 P3.7) is not what this test is about
         var work = new CompletionBootWork(registry, reader);
         assertThat(work.publish()).as("every gate holds: nothing waits").isZero();
         assertThat(registry.snapshot()).isEmpty();
