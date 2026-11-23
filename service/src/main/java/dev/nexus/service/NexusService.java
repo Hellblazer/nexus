@@ -162,6 +162,8 @@ public final class NexusService {
 
     private final HttpServer server;
     private final TenantScope tenantScope;
+    /** RDR-229 P3.5a and P3.5c: the one gate 3 signal Main builds; every repository and the drain below take this instance. */
+    private final dev.nexus.service.datamove.Gate3 gate3;
     /**
      * RDR-205 Phase 1 Step 5 (bead nexus-em75s.5): the tuple sweep's tenant
      * enumeration reads {@code nexus.tuple_tenants} directly via a plain
@@ -683,6 +685,7 @@ public final class NexusService {
         verifyTenantResetRouteBind(env);
         final boolean tenantResetRoute = tenantResetRouteEnabled(env);
         this.tenantScope = new TenantScope(dataSource);
+        this.gate3 = java.util.Objects.requireNonNull(gate3, "gate3");
         this.dataSource = dataSource;
 
         // Token lifecycle (RDR-152 bead nexus-gmiaf.32.2): resolve bearer→tenant
@@ -700,15 +703,15 @@ public final class NexusService {
         // Field, not a constructor local (mirrors scratchRepo/catalogRepo above):
         // runScheduledSweep's plan-expiry arm (hygiene-001 follow-on) needs it.
         this.planRepo     = new PlanRepository(tenantScope);
-        var telemetryRepo = new TelemetryRepository(tenantScope, renameGuard);
+        var telemetryRepo = new TelemetryRepository(tenantScope, gate3, renameGuard);
         this.scratchRepo  = new ScratchRepository(tenantScope);
-        var taxonomyRepo  = new TaxonomyRepository(tenantScope, renameGuard); var taxonomyCoverage = new dev.nexus.service.db.TaxonomyCoverage(tenantScope); // RDR-134 Step 2
+        var taxonomyRepo  = new TaxonomyRepository(tenantScope, gate3, renameGuard); var taxonomyCoverage = new dev.nexus.service.db.TaxonomyCoverage(tenantScope); // RDR-134 Step 2
         var taxonomyCentroidRepo = new dev.nexus.service.vectors.TaxonomyCentroidRepository(tenantScope, gate3);
-        var aspectRepo    = new AspectRepository(tenantScope, renameGuard);
-        var chashRepo     = new ChashRepository(tenantScope, renameGuard);
-        var remapRepo     = new RemapRepository(tenantScope);
+        var aspectRepo    = new AspectRepository(tenantScope, gate3, renameGuard);
+        var chashRepo     = new ChashRepository(tenantScope, gate3, renameGuard);
+        var remapRepo     = new RemapRepository(tenantScope, gate3);
         var ladderRepo    = new LadderRepository(tenantScope);
-        var pipelineRepo  = new PipelineRepository(tenantScope);
+        var pipelineRepo  = new PipelineRepository(tenantScope, gate3);
         this.catalogRepo  = new CatalogRepository(tenantScope, gate3, renameGuard);
         this.identityRepo = new dev.nexus.service.db.IdentityRepository(tenantScope, java.time.Clock.systemUTC());
         var identityFence = new dev.nexus.service.http.IdentityFence(new dev.nexus.service.db.IdentityFenceReads(tenantScope)); // RDR-253
@@ -787,7 +790,7 @@ public final class NexusService {
         // reveal how many tenants share the engine.
         var chashConformanceCtx = server.createContext(dev.nexus.service.http.ChashConformanceHandler.PATH,
                 new dev.nexus.service.http.ChashConformanceHandler(
-                        new dev.nexus.service.db.ChashConformanceConstraints(tenantScope), tenantScope));
+                        new dev.nexus.service.db.ChashConformanceConstraints(tenantScope), tenantScope, gate3));
         chashConformanceCtx.getFilters().addAll(authFilter);
 
         // /v1/requests/<id> — RDR-222 Phase 1 request status (bead nexus-yye8l.4). The one
@@ -809,7 +812,7 @@ public final class NexusService {
         // null when no router is wired (matches every other embed-dependent
         // capability's absent-backend 503, never a partially-wired NPE).
         var combinedWriteService = docEmbedderRouter != null
-            ? new dev.nexus.service.db.CombinedWriteService(tenantScope, catalogRepo, docEmbedderRouter)
+            ? new dev.nexus.service.db.CombinedWriteService(tenantScope, catalogRepo, docEmbedderRouter, gate3)
             : null;
         var catalogCtx = server.createContext("/v1/catalog",
                 new CatalogHandler(catalogRepo, combinedWriteService, reconcileJobs, chunkKeyAllowlistCheck, manifestFillJobs, taxonomyCoverage));
@@ -857,7 +860,7 @@ public final class NexusService {
         // connection the constraint routes run on is bound late, from Main (chunkConstraintAdmin).
         this.chunkKeysAudit = catalogRepo::recordGcAudit;
         final dev.nexus.service.vectors.ChunkKeySweep chunkKeySweep = pgVectorRepository == null ? null
-                : new dev.nexus.service.vectors.ChunkKeySweep(tenantScope, pgVectorRepository);
+                : new dev.nexus.service.vectors.ChunkKeySweep(tenantScope, pgVectorRepository, gate3);
         var chunkKeysCtx = server.createContext(dev.nexus.service.http.ChunkKeysAdminHandler.PATH,
                 new dev.nexus.service.http.ChunkKeysAdminHandler(
                         () -> chunkKeysSweepForTests != null ? chunkKeysSweepForTests : chunkKeySweep,
@@ -968,7 +971,7 @@ public final class NexusService {
         // after boot, not a full interval: an engine that restarts more often than hourly must still reap.
         ChunkReaper.Settings reaperSettings = ChunkReaper.Settings.fromEnv(System::getenv);
         if (pgVectorRepository != null && reaperSettings.enabled()) {
-            var reaperStore = new dev.nexus.service.vectors.ReaperRepository(tenantScope);
+            var reaperStore = new dev.nexus.service.vectors.ReaperRepository(tenantScope, gate3);
             ChunkReaper reaper = new ChunkReaper(
                 reaperStore, pgVectorRepository, catalogRepo,
                 new dev.nexus.service.db.Rdr192BackfillGate(ladderRepo, ChunkReaper.emptyTenantProbe(reaperStore)),
@@ -1001,8 +1004,8 @@ public final class NexusService {
         // (a batch can run for minutes). The first pass runs a few seconds after boot, which is the boot pickup of
         // any job left planned, running or in cutover; the control routes wake it through kickReembed().
         // Tenants are the reaper's: the default tenant plus every token-bearing one, since the job tables are FORCE RLS.
-        var reembedJobs = new dev.nexus.service.db.ReembedJobRepository(tenantScope);
-        var reembedReader = new dev.nexus.service.db.ReembedSourceReader(tenantScope);
+        var reembedJobs = new dev.nexus.service.db.ReembedJobRepository(tenantScope, gate3);
+        var reembedReader = new dev.nexus.service.db.ReembedSourceReader(tenantScope, gate3);
         if (localEngineEnabled(env) && combinedWriteService != null) {
             var runner = new dev.nexus.service.reembed.ReembedRunner(
                 reembedJobs,
@@ -1304,7 +1307,7 @@ public final class NexusService {
      */
     public void chashConstraintValidator(dev.nexus.service.db.AdminConnection admin) {
         this.chashConstraintValidator = new dev.nexus.service.db.ChashConstraintValidator(admin, tenantScope,
-            tokenStore::listKnownTenants);
+            tokenStore::listKnownTenants, gate3);
     }
 
     /**
@@ -1315,7 +1318,7 @@ public final class NexusService {
      */
     public void aspectQueueDrain(dev.nexus.service.db.AdminConnection admin) {
         aspectQueueDrain(new dev.nexus.service.db.AspectQueueDrain(tenantScope, tupleRepo,
-            new dev.nexus.service.db.AspectQueueDrain.AdminCensus(admin), this::reaperTenants));
+            new dev.nexus.service.db.AspectQueueDrain.AdminCensus(admin), this::reaperTenants, gate3));
     }
 
     /** {@link #aspectQueueDrain(dev.nexus.service.db.AdminConnection)} with the drain supplied (tests). */
