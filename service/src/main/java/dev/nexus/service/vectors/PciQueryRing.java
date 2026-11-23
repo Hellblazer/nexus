@@ -106,8 +106,9 @@ public final class PciQueryRing {
     }
 
     /**
-     * Follow {@code latch} for admission: once it holds the name indexes have retired and the collection's valid per-collection index is its id
-     * index, so a query is admitted on that. Before it, on the name index, as ever. The latch is read at each admission, never cached.
+     * Follow {@code latch} for admission: once it holds the id indexes are valid (gate 2 builds them before the latch) and the serving path and the
+     * canary select by id, so a query is admitted on the collection's valid id index; the name indexes retire on the next pass after the latch, and
+     * until then an id index is the one that counts. Before the latch, on the name index, as ever. The latch is read at each admission, never cached.
      */
     public void followLatch(dev.nexus.service.datamove.Gate3 latch) {
         this.gate3 = Objects.requireNonNull(latch, "latch");
