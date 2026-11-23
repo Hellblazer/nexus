@@ -173,4 +173,32 @@ class RenameGapSeededChildRowsTest {
         assertThat(r.status()).as("the meta row stored under the old label is found by the id: %s", r.body()).isEqualTo(200);
         assertThat(r.json().path("count").asInt(-1)).isEqualTo(5);
     }
+
+    /**
+     * A label NO row holds (the old name of a collection that was renamed) reaches only rows the id stamp has not reached: an operation by that label
+     * (the purges here, by label, as an old client sends them) touches none of the renamed collection's stamped rows, which carry its id under the old
+     * name. ({@code CollectionOwnedRows}, the centroid {@code ownedBy} and the topic purge.)
+     */
+    @Test
+    void aPurgeByTheOldLabelOfARenamedCollection_touchesNoneOfItsRows() {
+        String b = registered("oldlabel");
+        long x = fx.idOf(b);
+        long topic = seedTopic(b, "seed-topic");
+        String body = "{\"records\":[{\"collection\":" + json(b) + ",\"topic_id\":" + topic
+            + ",\"label\":\"c\",\"doc_count\":1,\"embedding\":" + EMBEDDING + "}]}";
+        assertThat(fx.post("/v1/taxonomy/centroids/upsert", body).status()).as("setup").isEqualTo(200);
+        oneRowRename(b);   // b is held by no row now
+        assertThat(fx.exists(b)).as("setup: no row holds the old label").isFalse();
+
+        Resp topics = fx.post("/v1/taxonomy/purge_collection", "{\"collection\":" + json(b) + "}");
+        Resp centroids = fx.post("/v1/taxonomy/centroids/purge", "{\"collection\":" + json(b) + "}");
+
+        assertThat(topics.status()).as(topics.body()).isEqualTo(200);
+        assertThat(topics.json().path("topics").asInt(-1)).as("no topic of the renamed collection was purged by its old label").isZero();
+        assertThat(centroids.status()).as(centroids.body()).isEqualTo(200);
+        assertThat(centroids.json().path("deleted").asInt(-1)).as("no centroid either").isZero();
+        assertThat(topicLabelsOf(x)).as("the collection's topic is still there").containsExactly("seed-topic");
+        var t = TAXONOMY_CENTROIDS;
+        assertThat(fx.asSuperuser(ctx -> ctx.fetchCount(t, t.COLLECTION_ID.eq(x)))).as("and its centroid").isEqualTo(1);
+    }
 }

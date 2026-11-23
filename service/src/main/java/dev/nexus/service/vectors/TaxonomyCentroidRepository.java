@@ -492,14 +492,14 @@ public final class TaxonomyCentroidRepository {
 
     /**
      * The centroid rows of one collection: by the registry id the write transaction read (a name column can be stale after a one-row
-     * rename, and the old name may now be another collection's), and by name only for a collection with no registry row (the leftovers
-     * of a deleted one) and a row the stamp has not reached (no id yet).
+     * rename, and the old name may now be another collection's), and by name only for a row the stamp has not reached (no id yet), with or
+     * without a registry row: a label no row holds may be the old name of a renamed collection, whose stamped rows are not its.
      */
     private static org.jooq.Condition ownedBy(DimTables.CentroidTable ct, Long id, String collection) {
-        if (id == null) {
-            return ct.collection().eq(collection);
-        }
         org.jooq.Field<Long> idColumn = ct.table().field("collection_id", Long.class);
+        if (id == null) {
+            return idColumn.isNull().and(ct.collection().eq(collection));   // no registry row: only a row the id stamp has not reached
+        }
         return idColumn.eq(id).or(idColumn.isNull().and(ct.collection().eq(collection)));
     }
 

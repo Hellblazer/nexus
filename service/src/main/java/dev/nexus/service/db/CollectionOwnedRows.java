@@ -12,8 +12,9 @@ import java.util.Optional;
  * ruling: the id is the identity). When the write's transaction has read the collection's registry row, the rows are the ones that
  * carry its {@code collection_id}, whatever their name column says (a one-row rename leaves child name columns at the old label, and the
  * old label may by now be another collection's); a row the P3.1 stamp has not reached yet (no id) is matched by the row's current
- * label. When no row exists (a label no row has: the leftovers of a deleted collection) the rows are matched by the name asked for, as
- * they always were.
+ * label. When no row exists (a label no row holds) the name reaches ONLY rows the stamp has not reached: a stamped row carries the id
+ * of a collection whatever its name column says, and a label no row holds may be the OLD name of a collection that was renamed, whose
+ * rows must not be touched by an operation that names the old label.
  */
 final class CollectionOwnedRows {
 
@@ -22,7 +23,7 @@ final class CollectionOwnedRows {
 
     static Condition of(Optional<CollectionRow> row, Field<Long> idColumn, Field<String> nameColumn, String asked) {
         if (row.isEmpty()) {
-            return nameColumn.eq(asked);
+            return idColumn.isNull().and(nameColumn.eq(asked));
         }
         return idColumn.eq(row.get().collectionId()).or(idColumn.isNull().and(nameColumn.eq(row.get().label())));
     }

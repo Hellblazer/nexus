@@ -1642,10 +1642,11 @@ public final class TaxonomyRepository {
         }
         return tenantScope.withTenant(tenant, ctx -> {
             // before any collection-keyed statement. The rows to purge are the registry row's own, by its id (a name column can be stale
-            // after a one-row rename, and the old name may now be another collection's); a collection with no row (leftovers of a
-            // deleted one) is purged by name, as it always was, and so is a row the stamp has not reached (no id yet)
+            // after a one-row rename, and the old name may now be another collection's); a label no row holds
+            // reaches only a row the stamp has not reached (no id yet): a stamped row belongs to a collection whatever its name says, and the
+            // label may be the OLD name of a renamed one
             final Long purgedId = consumeRequestedId(ctx, tenant, collection);
-            final org.jooq.Condition topicsOf = purgedId == null ? TOPICS.COLLECTION.eq(collection)
+            final org.jooq.Condition topicsOf = purgedId == null ? TOPICS.COLLECTION_ID.isNull().and(TOPICS.COLLECTION.eq(collection))
                 : TOPICS.COLLECTION_ID.eq(purgedId).or(TOPICS.COLLECTION_ID.isNull().and(TOPICS.COLLECTION.eq(collection)));
             var doomedIds = ctx.select(TOPICS.ID)
                 .from(TOPICS)
@@ -1663,19 +1664,16 @@ public final class TaxonomyRepository {
                     .execute();
             }
             if (PURGE_SCOPE_FULL.equals(scope)) {
-                assignments += ctx.deleteFrom(TOPIC_ASSIGNMENTS)
-                    .where(purgedId == null ? TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(collection)
-                        : TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID.eq(purgedId).or(
-                            TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID.isNull().and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(collection))))
-                    .execute();
+                final org.jooq.Condition unstamped = TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID.isNull().and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(collection));
+                final org.jooq.Condition assignedFrom = purgedId == null ? unstamped : TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID.eq(purgedId).or(unstamped);
+                assignments += ctx.deleteFrom(TOPIC_ASSIGNMENTS).where(assignedFrom).execute();
             }
             int topics = ctx.deleteFrom(TOPICS)
                 .where(topicsOf)
                 .execute();
+            final org.jooq.Condition metaUnstamped = TAXONOMY_META.COLLECTION_ID.isNull().and(TAXONOMY_META.COLLECTION.eq(collection));
             int meta = ctx.deleteFrom(TAXONOMY_META)
-                .where(purgedId == null ? TAXONOMY_META.COLLECTION.eq(collection)
-                    : TAXONOMY_META.COLLECTION_ID.eq(purgedId).or(
-                        TAXONOMY_META.COLLECTION_ID.isNull().and(TAXONOMY_META.COLLECTION.eq(collection))))
+                .where(purgedId == null ? metaUnstamped : TAXONOMY_META.COLLECTION_ID.eq(purgedId).or(metaUnstamped))
                 .execute();
             return Map.of("topics", topics, "assignments", assignments, "links", links, "meta", meta);
         });
