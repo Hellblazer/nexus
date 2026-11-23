@@ -259,7 +259,9 @@ public final class CollectionTombstones {
             .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, CATALOG_COLLECTIONS.COLLECTION_ID)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
             .and(CATALOG_COLLECTIONS.COLLECTION_ID.ne(id))
-            .and(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.eq(id).or(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(name)))
+            // from gate 3 a survivor names the deleted row by its id alone: a label can name two registry rows (linda 2026-11-23)
+            .and(gate3.holds() ? CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.eq(id)
+                : CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.eq(id).or(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(name)))
             .execute();
         return ctx.deleteFrom(CATALOG_COLLECTIONS)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(id))

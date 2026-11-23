@@ -204,6 +204,43 @@ class Rdr229P35cSharedLabelAndHistoryTest extends AtomicWriteTestBase {
     }
 
     @Test
+    void deletingARegistryRowByIdFromTheLatchRepointsOnlyTheSurvivorsThatNameItsId_notThoseNamingItsLabelText() throws Exception {
+        String label = label("delid");
+        long doomed = registerRow(label, "", null, "delid-owner-a");
+        String other = label("delother");
+        long otherId = registerRow(other, "", null, "delid-owner-b");
+        // a tombstone whose text names the doomed row's label but whose id names ANOTHER collection (the label passed on)
+        String stale = label("delstale");
+        registerRow(stale, label, otherId, "delid-owner-c");
+        // a tombstone that names the doomed row by id
+        String byId = label("delbyid");
+        registerRow(byId, label, doomed, "delid-owner-d");
+        latched.set(true);
+
+        tenantScope.withTenant(TENANT, ctx -> CollectionTombstones.deleteRegistryRowById(ctx, TENANT, label, doomed, List.of(), gated.gate3()));
+
+        Long staleTarget = su(d -> d.select(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID).from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(stale)).fetchOne(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID));
+        assertThat(staleTarget).as("the tombstone whose text names the label but whose id names another collection is not repointed").isEqualTo(otherId);
+        Long ownId = su(d -> d.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(byId)).fetchOne(CATALOG_COLLECTIONS.COLLECTION_ID));
+        Long byIdTarget = su(d -> d.select(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID).from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(byId)).fetchOne(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID));
+        assertThat(byIdTarget).as("the tombstone that names the deleted row by its id becomes retired, no successor (its own id)").isEqualTo(ownId);
+    }
+
+    @Test
+    void theOwnerRootOfASharedLabelIsTheLiveRowsOwner() throws Exception {
+        String shared = label("ownroot");
+        registerRetiredNoSuccessor(shared, "gone-" + seq.incrementAndGet(), "ownroot-tombstone");
+        registerRow(shared, "", null, "ownroot-live");
+        for (boolean gate : new boolean[] {false, true}) {
+            latched.set(gate);
+            assertThat(gated.collectionOwnerRoot(TENANT, shared).get("owner_id")).as("gate " + gate + ": the live row's owner").isEqualTo("ownroot-live");
+        }
+    }
+
+    @Test
     void theRegistryMissReadAnswersTheLiveRowOfASharedLabel_whicheverRowWasWrittenLast() throws Exception {
         for (boolean tombstoneLast : new boolean[] {false, true}) {
             String shared = label("fill" + tombstoneLast);

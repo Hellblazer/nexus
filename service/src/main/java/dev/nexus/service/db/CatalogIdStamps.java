@@ -96,7 +96,8 @@ final class CatalogIdStamps {
     static Field<Long> keepSupersededId() {
         var s = CATALOG_COLLECTIONS.as("sid");
         Field<Long> successor = DSL.field(DSL.select(s.COLLECTION_ID).from(s)
-            .where(s.TENANT_ID.eq(CATALOG_COLLECTIONS.TENANT_ID)).and(s.NAME.eq(CATALOG_COLLECTIONS.SUPERSEDED_BY)));
+            .where(s.TENANT_ID.eq(CATALOG_COLLECTIONS.TENANT_ID)).and(s.NAME.eq(CATALOG_COLLECTIONS.SUPERSEDED_BY))
+            .orderBy(CollectionIdReads.liveFirst(s)).limit(1));   // a label may name a live row and tombstones: live first, else the newest
         return DSL.when(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(DSL.inline("")), DSL.castNull(Long.class))
             .otherwise(DSL.coalesce(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, successor, CATALOG_COLLECTIONS.COLLECTION_ID));
     }
