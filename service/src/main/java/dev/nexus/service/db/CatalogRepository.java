@@ -12064,7 +12064,10 @@ public final class CatalogRepository {
                 moved.put(t.countKey(), moveScopedTable(ctx, t, scope, targetId, leftBehind));
             }
             // The manifest rows the chunk cascade carried to the target (ManifestInsertGateTest: pinned writer).
+            // Written with the target's label as well as its id: the cascade of fk_catalog_chunks_chunk has done the label when that foreign key
+            // exists, and nothing has when it does not (P3.7 drops it), so the mover does not depend on it.
             ctx.update(CATALOG_DOCUMENT_CHUNKS).set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, targetId)
+                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, tgt)
                 .where(scope.cascadedManifest(tenant, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
                     CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, targetId)).execute();
             scope.repairCascaded(ctx, tenant, targetId);

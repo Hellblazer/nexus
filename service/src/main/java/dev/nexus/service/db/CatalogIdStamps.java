@@ -125,20 +125,26 @@ final class CatalogIdStamps {
      * hold a stored name no label has), and the id alone is too wide: the rows of a chunk the re-home left behind (a collision)
      * also hold the source's id and must keep it, so the chunk's own id is the test.
      */
-    static void repairCascadedIdsFrom(DSLContext ctx, String tenant, Long sourceId, Long targetId) {
+    static void repairCascadedIdsFrom(DSLContext ctx, String tenant, Long sourceId, Long targetId, String targetLabel) {
+        // The rows whose chunk MOVED (it is at the target and no longer at the source), given the target's label and id: the foreign keys that
+        // cascade the label (topic_assignments_chunk_fk) go at P3.7, and a row they did not carry keeps the source's label.
         var c = CHUNKS.as("rcc");
-        ctx.update(TOPIC_ASSIGNMENTS).set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, targetId)
+        var gone = CHUNKS.as("rcg");
+        ctx.update(TOPIC_ASSIGNMENTS).set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, targetId).set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, targetLabel)
             .where(TOPIC_ASSIGNMENTS.TENANT_ID.eq(tenant)).and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID.eq(sourceId))
             .and(DSL.exists(DSL.selectOne().from(c).where(c.TENANT_ID.eq(tenant))
-                .and(c.COLLECTION.eq(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)).and(c.CHASH.eq(TOPIC_ASSIGNMENTS.DOC_ID))
-                .and(c.COLLECTION_ID.eq(targetId))))
+                .and(c.CHASH.eq(TOPIC_ASSIGNMENTS.DOC_ID)).and(c.COLLECTION_ID.eq(targetId))))
+            .and(DSL.notExists(DSL.selectOne().from(gone).where(gone.TENANT_ID.eq(tenant))
+                .and(gone.CHASH.eq(TOPIC_ASSIGNMENTS.DOC_ID)).and(gone.COLLECTION_ID.eq(sourceId))))
             .execute();
         var o = CHUNKS.as("rco");
-        ctx.update(CHUNK_ORPHANED_AT).set(CHUNK_ORPHANED_AT.COLLECTION_ID, targetId)
+        var ogone = CHUNKS.as("rcq");
+        ctx.update(CHUNK_ORPHANED_AT).set(CHUNK_ORPHANED_AT.COLLECTION_ID, targetId).set(CHUNK_ORPHANED_AT.COLLECTION, targetLabel)
             .where(CHUNK_ORPHANED_AT.TENANT_ID.eq(tenant)).and(CHUNK_ORPHANED_AT.COLLECTION_ID.eq(sourceId))
             .and(DSL.exists(DSL.selectOne().from(o).where(o.TENANT_ID.eq(tenant))
-                .and(o.COLLECTION.eq(CHUNK_ORPHANED_AT.COLLECTION)).and(o.CHASH.eq(CHUNK_ORPHANED_AT.CHASH))
-                .and(o.COLLECTION_ID.eq(targetId))))
+                .and(o.CHASH.eq(CHUNK_ORPHANED_AT.CHASH)).and(o.COLLECTION_ID.eq(targetId))))
+            .and(DSL.notExists(DSL.selectOne().from(ogone).where(ogone.TENANT_ID.eq(tenant))
+                .and(ogone.CHASH.eq(CHUNK_ORPHANED_AT.CHASH)).and(ogone.COLLECTION_ID.eq(sourceId))))
             .execute();
     }
 }

@@ -130,16 +130,23 @@ final class CollectionRehomeScope {
         if (!byId) {
             return tenantColumn.eq(tenant).and(collectionColumn.eq(target)).and(idColumn.isDistinctFrom(targetId));
         }
+        // The chunk the manifest row points at MOVED: it is at the target now and no longer at the source. Judged by the chunk's id, not by the
+        // manifest row's name column: the mover does not rely on a foreign key's ON UPDATE cascade to carry the manifest (the name key and the
+        // foreign key go at P3.7, and a manifest row the cascade did not carry keeps the source's label). A chunk a collision left behind is
+        // still at the source, so its manifest row stays.
         var c = CHUNKS.as("rcm");
+        var left = CHUNKS.as("rcl");
         return tenantColumn.eq(tenant).and(idColumn.eq(sourceId))
             .and(DSL.exists(DSL.selectOne().from(c).where(c.TENANT_ID.eq(tenant))
-                .and(c.COLLECTION.eq(collectionColumn)).and(c.CHASH.eq(chashColumn)).and(c.COLLECTION_ID.eq(targetId))));
+                .and(c.CHASH.eq(chashColumn)).and(c.COLLECTION_ID.eq(targetId))))
+            .and(DSL.notExists(DSL.selectOne().from(left).where(left.TENANT_ID.eq(tenant))
+                .and(left.CHASH.eq(chashColumn)).and(left.COLLECTION_ID.eq(sourceId))));
     }
 
     /** The topic assignments and {@code chunk_orphaned_at} rows the chunk update carried: by name before gate 3, by id from it. */
     void repairCascaded(DSLContext ctx, String tenant, Long targetId) {
         if (byId) {
-            CatalogIdStamps.repairCascadedIdsFrom(ctx, tenant, sourceId, targetId);
+            CatalogIdStamps.repairCascadedIdsFrom(ctx, tenant, sourceId, targetId, target);
         } else {
             CatalogIdStamps.repairCascadedIds(ctx, tenant, target, targetId);
         }
