@@ -52,10 +52,16 @@ COLLECTION_MODEL_MISMATCH_REASON: str = "collection_model_mismatch"
 #: explicit registration revives a name.
 COLLECTION_SUPERSEDED_REASON: str = "collection_superseded"
 
-#: A collection route was given a ``collection_id`` no row of the tenant has, or one that names a retired row (a rename's or
-#: supersede's tombstone) (HTTP 404, RDR-229 P3.5a). Also carries ``collection_id`` (the id sent). A label with no row keeps
-#: the ``unregistered_collection`` 422; this reason is for id input only.
+#: A collection route was given a ``collection_id`` no row of the tenant has (HTTP 404, RDR-229 P3.5a). Also carries
+#: ``collection_id`` (the id sent). The id of a retired row (a rename's or supersede's tombstone) is the 409
+#: ``collection_superseded`` instead, on every route (linda's D3 ruling). A label with no row keeps the
+#: ``unregistered_collection`` 422; this reason is for id input only.
 UNKNOWN_COLLECTION_ID_REASON: str = "unknown_collection_id"
+
+#: A collection route resolved a ``collection_id`` to a registry row of another id (HTTP 500, RDR-229 P3.5a): an engine
+#: invariant, refused before any write can land in another collection. Also carries ``collection_id`` (the id sent) and
+#: ``resolved_collection_id``. Not a caller mistake and not retryable.
+COLLECTION_ID_MISMATCH_REASON: str = "collection_id_mismatch"
 
 #: A collection rename (the catalog's, or a per-store ``rename_collection`` route) refused from gate 3 until the one-row rename
 #: can run (HTTP 409, RDR-229 P3.5a). Also carries ``missing``: ``name_key_drop_move`` while the move has no ``completed_at``,
