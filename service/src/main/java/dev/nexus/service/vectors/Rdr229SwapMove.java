@@ -70,8 +70,11 @@ public final class Rdr229SwapMove {
     static final int CHUNK_SIZE = 10_000;
     static final int SLEEP_MS = 8_000;
 
-    /** The validation moves: SUE only, so the bound is the generous one (P3.2: longest statement 0.8 s). */
-    private static final int VALIDATION_STATEMENT_TIMEOUT_MS = 60_000;
+    /**
+     * The validation moves: SHARE UPDATE EXCLUSIVE only, which blocks no writer, so they carry no statement bound, a lock wait only (Sam's
+     * ruling, T2 {@code nexus/sam-ruling-validate-bounds-lock-wait-only-2026-11-23}; it was 60 s, P3.2's longest statement 0.8 s).
+     */
+    private static final int VALIDATION_STATEMENT_TIMEOUT_MS = dev.nexus.service.datamove.DataMove.NO_STATEMENT_BOUND_MS;
 
     /** The label prefix and suffix of a child's validation move: {@code rdr229-fkvalidate-<table>-chunk-fk}. */
     static final String VALIDATION_LABEL_PREFIX = "rdr229-fkvalidate-";
