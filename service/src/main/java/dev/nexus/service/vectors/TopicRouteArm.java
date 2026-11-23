@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import dev.nexus.service.datamove.Gate3;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.TaxonomyCoverage;
 import dev.nexus.service.db.TenantScope;
@@ -11,6 +12,7 @@ import dev.nexus.service.vectors.PgVectorRepository.Candidate;
 import dev.nexus.service.vectors.TaxonomyCentroidRepository.AnnHit;
 import org.jooq.Record;
 import org.jooq.Result;
+import org.jooq.impl.DSL;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -25,7 +27,10 @@ import java.util.Set;
 import java.util.concurrent.Semaphore;
 
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SET_1024;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SET_1024_BY_ID;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SET_384;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SET_384_BY_ID;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SET_768_BY_ID;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SET_768;
 
 /**
@@ -108,10 +113,17 @@ final class TopicRouteArm {
 
     private final TenantScope tenantScope;
     private final TaxonomyCentroidRepository centroids;
+    /** RDR-229 P3.5c: gate 3, read per statement (never cached); from gate 3 the topic-set search calls its {@code _by_id} twin. */
+    private final Gate3 gate3;
 
     TopicRouteArm(TenantScope tenantScope) {
+        this(tenantScope, Gate3.never());
+    }
+
+    TopicRouteArm(TenantScope tenantScope, Gate3 gate3) {
         this.tenantScope = tenantScope;
-        this.centroids = new TaxonomyCentroidRepository(tenantScope);
+        this.gate3 = java.util.Objects.requireNonNull(gate3, "gate3");
+        this.centroids = new TaxonomyCentroidRepository(tenantScope, gate3);
     }
 
     /**
@@ -257,13 +269,32 @@ final class TopicRouteArm {
     private List<Candidate> topicSearch(String tenant, String model, String collection, int dim, Vector queryVec,
                                         Long[] topics, int k, boolean excludeSensitive, ArmRun run,
                                         long requestDeadlineNanos, long fanoutDeadlineNanos, int searchBoundMs) {
-        org.jooq.Table<?> fn = switch (dim) {
-            case 384 -> SEARCH_TOPIC_SET_384.call(queryVec, topics, collection, k, model, tenant, excludeSensitive);
-            case 768 -> SEARCH_TOPIC_SET_768.call(queryVec, topics, collection, k, model, tenant, excludeSensitive);
-            case 1024 -> SEARCH_TOPIC_SET_1024.call(queryVec, topics, collection, k, model, tenant, excludeSensitive);
-            default -> throw new IllegalArgumentException("unsupported dim " + dim);
-        };
+        // RDR-229 P3.5c: gate 3 is read once per statement. From gate 3 the collection is resolved to its id in the statement's
+        // transaction and search_topic_set_<dim>_by_id runs (it answers the registry's label); a label that resolves to no id
+        // has no rows ("a NULL id is no collection"), which the caller reads as the unscoped fallback. The twins' sensitive anti
+        // join fails open on an unstamped row, so they are called only after the latch.
+        final boolean byId = gate3.holds();
         Result<? extends Record> result = tenantScope.withTenant(tenant, ctx -> {
+            org.jooq.Table<?> fn;
+            if (byId) {
+                Long id = CollectionSelector.of(() -> true, ctx, tenant, collection).idOf(collection);
+                if (id == null) {
+                    return null;
+                }
+                fn = switch (dim) {
+                    case 384 -> SEARCH_TOPIC_SET_384_BY_ID.call(queryVec, topics, id, k, model, tenant, excludeSensitive);
+                    case 768 -> SEARCH_TOPIC_SET_768_BY_ID.call(queryVec, topics, id, k, model, tenant, excludeSensitive);
+                    case 1024 -> SEARCH_TOPIC_SET_1024_BY_ID.call(queryVec, topics, id, k, model, tenant, excludeSensitive);
+                    default -> throw new IllegalArgumentException("unsupported dim " + dim);
+                };
+            } else {
+                fn = switch (dim) {
+                    case 384 -> SEARCH_TOPIC_SET_384.call(queryVec, topics, collection, k, model, tenant, excludeSensitive);
+                    case 768 -> SEARCH_TOPIC_SET_768.call(queryVec, topics, collection, k, model, tenant, excludeSensitive);
+                    case 1024 -> SEARCH_TOPIC_SET_1024.call(queryVec, topics, collection, k, model, tenant, excludeSensitive);
+                    default -> throw new IllegalArgumentException("unsupported dim " + dim);
+                };
+            }
             PgSession.setSearchStatementTimeout(ctx, boundMs(run, requestDeadlineNanos, fanoutDeadlineNanos, searchBoundMs));
             PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
             PgSession.setHnswEfSearch(ctx, k);
@@ -271,6 +302,9 @@ final class TopicRouteArm {
             PgSession.setSearchPlanCacheMode(ctx);
             return ctx.selectFrom(fn).fetch();
         });
+        if (result == null) {
+            return List.of();
+        }
         List<Candidate> out = new ArrayList<>(result.size());
         for (Record rec : result) {
             Map<String, Object> row = new LinkedHashMap<>();
@@ -322,13 +356,17 @@ final class TopicRouteArm {
             boundMs = (int) Math.max(1L, Math.min(boundMs, (remaining + 999_999L) / 1_000_000L));
         }
         final int statementBoundMs = boundMs;
+        // RDR-229 P3.5c: gate 3 read once. From gate 3 the chunk rows are found by the registry id the routed labels resolve to,
+        // and keyed by it (the row's own name is stale after a one-row rename; the row the search returned carries the label).
+        final CollectionSelector sel = CollectionSelector.of(gate3, tenantScope, tenant, collections);
         var found = tenantScope.withTenant(tenant, ctx -> {
             PgSession.setSearchStatementTimeout(ctx, statementBoundMs);
-            return ctx.select(ch.collection(), ch.chash(), ch.metadata())
+            org.jooq.Field<String> key = sel.byId() ? DSL.cast(ch.collectionId(), String.class) : ch.collection();
+            return ctx.select(key, ch.chash(), ch.metadata())
                       .from(ch.table())
                       .where(ch.embeddingModel().eq(model))
                       .and(ch.tenantId().eq(tenant))
-                      .and(ch.collection().in(collections))
+                      .and(sel.in(ch.collection(), ch.collectionId()))
                       .and(ch.chash().in(chashes))
                       .fetch();
         });
@@ -340,7 +378,8 @@ final class TopicRouteArm {
         }
         for (Map<String, Object> row : rows) {
             if (row.get("collection") instanceof String c && routed.contains(c)) {
-                Map<String, Object> meta = metadata.get(c + "\u0000" + row.get("id"));
+                Object rowKey = sel.byId() ? sel.idOf(c) : c;
+                Map<String, Object> meta = rowKey == null ? null : metadata.get(rowKey + "\u0000" + row.get("id"));
                 if (meta != null) {
                     row.putAll(meta);
                 }

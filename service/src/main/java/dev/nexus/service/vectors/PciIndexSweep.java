@@ -205,6 +205,17 @@ public final class PciIndexSweep implements PciIndexSet {
         return s.set().hasValidIndex(model, tenant, collection);
     }
 
+    /** From memory, like {@link #hasValidIndex}: the id-predicate index of the last successful read (RDR-229 P3.5c). */
+    @Override
+    public boolean hasValidIdIndex(String model, String tenant, long collectionId) {
+        State s = state.get();
+        if (expired(s)) {
+            noteExpired(s);
+            return false;
+        }
+        return s.set().hasValidIdIndex(model, tenant, collectionId);
+    }
+
     /**
      * As {@link PciIndexSet#validIndex}, from memory, with the name the last read saw and since when this key has been
      * listed without a break (a set that expired and recovered counts as a new run). An expired set answers empty.

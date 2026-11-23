@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import dev.nexus.service.datamove.Gate3;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
@@ -52,12 +53,23 @@ public final class ChunkSensitivity {
      * @param chash the chunk row's raw {@code bytea} chash column (not the hex-converted field)
      */
     public static Condition notSensitive(Field<String> tenantId, Field<String> collection, Field<byte[]> chash) {
+        return notSensitive(Gate3.never(), tenantId, collection, null, chash);
+    }
+
+    /**
+     * {@link #notSensitive(Field, Field, Field)} that reads the chunk's collection by id once {@code gate3} holds (RDR-229 P3.5c,
+     * item 6): the manifest row is matched on {@code collection_id = collectionId}, the chunk row's id column, so a one-row
+     * rename that leaves the chunk's own name stale still finds the manifest. {@code collectionId} is unused before gate 3 (null
+     * is fine). A chunk row whose id is NULL matches no manifest row: a NULL id is no collection.
+     */
+    public static Condition notSensitive(Gate3 gate3, Field<String> tenantId, Field<String> collection,
+                                         Field<Long> collectionId, Field<byte[]> chash) {
         var m = CATALOG_DOCUMENT_CHUNKS;
         var d = CATALOG_DOCUMENTS;
         return DSL.notExists(DSL.selectOne().from(m)
             .join(d).on(d.TENANT_ID.eq(m.TENANT_ID).and(d.TUMBLER.eq(m.DOC_ID)))
             .where(m.TENANT_ID.eq(tenantId))
-            .and(m.COLLECTION.eq(collection))
+            .and(gate3.holds() ? m.COLLECTION_ID.eq(collectionId) : m.COLLECTION.eq(collection))
             .and(m.CHASH.eq(chash))
             .and(d.DELETED_AT.isNull())
             .and(d.SENSITIVE));
@@ -113,15 +125,21 @@ public final class ChunkSensitivity {
      * @param chash the chunk row's raw {@code bytea} chash column (not the hex-converted field)
      */
     public static Condition servableUnderExclude(Field<String> tenantId, Field<String> collection, Field<byte[]> chash) {
+        return servableUnderExclude(Gate3.never(), tenantId, collection, null, chash);
+    }
+
+    /** {@link #servableUnderExclude(Field, Field, Field)} that reads the collection by id once {@code gate3} holds (RDR-229 P3.5c). */
+    public static Condition servableUnderExclude(Gate3 gate3, Field<String> tenantId, Field<String> collection,
+                                                 Field<Long> collectionId, Field<byte[]> chash) {
         var m = CATALOG_DOCUMENT_CHUNKS;
         var d = CATALOG_DOCUMENTS;
         return DSL.exists(DSL.selectOne().from(m)
                 .join(d).on(d.TENANT_ID.eq(m.TENANT_ID).and(d.TUMBLER.eq(m.DOC_ID)))
                 .where(m.TENANT_ID.eq(tenantId))
-                .and(m.COLLECTION.eq(collection))
+                .and(gate3.holds() ? m.COLLECTION_ID.eq(collectionId) : m.COLLECTION.eq(collection))
                 .and(m.CHASH.eq(chash))
                 .and(d.DELETED_AT.isNull()))
-            .and(notSensitive(tenantId, collection, chash));
+            .and(notSensitive(gate3, tenantId, collection, collectionId, chash));
     }
 
     /**
