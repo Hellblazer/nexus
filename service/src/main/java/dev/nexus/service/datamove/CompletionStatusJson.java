@@ -22,8 +22,14 @@ import dev.nexus.service.http.HttpUtil;
  *  "gate3_latch_pci_off":bool (the latch row says gate 3 latched while NX_SEARCH_PCI was off: no id index was required then),
  *  "labels_total":n,"labels_incomplete":[{"label","table","why"}],
  *  "checks_missing":[{"table","constraint","what"}],
- *  "validate_waits":[{"table","constraints":[names],"what":operator text}]}
+ *  "validate_waits":[{"table","constraints":[names],"what":operator text}],
+ *  "rename_missing":"none"|"name_key_drop_move"|"p35b_list_missing"|"restart"|"readiness_unreadable"}
  * </pre>
+ * {@code rename_missing} (RDR-229 P3.7, [additive]) is what a collection rename waits for ({@code readiness_unreadable} when it could not be read, after the latch), spelled as the 409 {@code rename_refused}'s
+ * {@code missing}: {@code none} before gate 3 (the rename is the name path) and once the one-row rename can run, {@code name_key_drop_move}
+ * from gate 3 until that move has {@code completed_at}, then {@code p35b_list_missing} while this build ships no P3.5b changeset list (a restart
+ * does not fix it) or {@code restart} until every changeset of the list has applied. Once gate 3 is latched the value no longer follows
+ * the live gate 3: a dip of gate 3 leaves it as it is.
  * {@code labels_total} and {@code gates_holding} count the engine's own moves and gates, not any tenant's data. {@code labels_incomplete}
  * lists each stamp label whose move is not complete (a label the queue allowlist marks not applicable is not listed).
  * {@code validate_waits[].what} is the operator text: it names the {@code nexus.rdr229_restamp} step.
@@ -33,6 +39,11 @@ final class CompletionStatusJson {
     private CompletionStatusJson() { /* static */ }
 
     static String render(CompletionCheck.Result r) {
+        return render(r, true);
+    }
+
+    /** As above with whether this engine's id readers are present, which the {@code rename_missing} field reports ({@code p35c_readers_absent}). */
+    static String render(CompletionCheck.Result r, boolean idReadersPresent) {
         long holding = (r.gate1() ? 1 : 0) + (r.gate2() ? 1 : 0) + (r.gate3() ? 1 : 0);
         StringBuilder b = new StringBuilder(512);
         b.append("{\"gate1\":").append(r.gate1()).append(",\"gate2\":").append(r.gate2()).append(",\"gate3\":").append(r.gate3())
@@ -72,6 +83,8 @@ final class CompletionStatusJson {
             b.append("],\"what\":").append(HttpUtil.jsonString(CompletionBootWork.validateWaits(w))).append('}');
             first = false;
         }
-        return b.append("]}").toString();
+        RenameReadiness.Missing missing = r.renameMissing(r.gate3Latched(), idReadersPresent);
+        return b.append("],\"rename_missing\":").append(HttpUtil.jsonString(missing == RenameReadiness.Missing.NONE ? "none"
+            : dev.nexus.service.db.RenameRefusedException.wireValue(missing))).append('}').toString();
     }
 }
