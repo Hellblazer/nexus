@@ -142,7 +142,7 @@ final class TenantKeyedStateTablesRdr229 {
             + "resolved from gate 3 (a number, no tenant, collection or row); read by tests and the status surface, never reset for a tenant");
         notKeyed.put("AspectQueueDrain.SKIPPED_NO_LIVE_COLLECTION", "a process-wide count of retired-queue rows skipped because their "
             + "stored name resolves to no live registry row, or whose collection id names none (a number, no tenant or row); read by tests, never reset for a tenant");
-        notKeyed.put("PgVectorRepository.QUARANTINE_NO_ORIGIN_ID_SKIPPED", "a process-wide count of sibling reads that skipped quarantine rows with a "
+        notKeyed.put("QuarantineOrigin.NO_ORIGIN_ID_SKIPPED", "a process-wide count of sibling reads that skipped quarantine rows with a "
             + "label tag and no origin id (a number, no tenant, collection or row); read by tests, never reset for a tenant");
     }
 

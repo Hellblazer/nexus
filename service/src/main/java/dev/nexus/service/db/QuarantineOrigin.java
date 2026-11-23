@@ -98,6 +98,28 @@ public final class QuarantineOrigin {
         return ORIGIN_ID.isNull().and(ORIGIN_TAG.eq(origin));
     }
 
+    /** How many sibling reads skipped quarantine rows that carry a label tag and no origin id (RDR-229 P3.5c); process-wide, no tenant state. */
+    public static final java.util.concurrent.atomic.AtomicLong NO_ORIGIN_ID_SKIPPED = new java.util.concurrent.atomic.AtomicLong();
+
+    private static final org.slf4j.Logger LOG = org.slf4j.LoggerFactory.getLogger(QuarantineOrigin.class);
+
+    /**
+     * From gate 3 a quarantine row that carries the label tag and no origin id is no sibling of the label's current holder (it is skipped by
+     * {@link #taggedWith}): count it and say so, so a pending backfill is seen (linda 2026-11-23). Existence only, bounded by the quarantine
+     * collections the sibling read walks.
+     */
+    public static void warnOfRowsWithNoOriginId(DSLContext ctx, String tenant, String origin) {
+        boolean any = ctx.fetchExists(DSL.selectOne().from(CHUNKS)
+            .where(CHUNKS.TENANT_ID.eq(tenant))
+            .and(CHUNKS.COLLECTION_ID.in(DSL.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("quarantine"))))
+            .and(taggedWithoutId(origin)));
+        if (any) {
+            NO_ORIGIN_ID_SKIPPED.incrementAndGet();
+            LOG.warn("quarantine chunks tagged origin_collection={} carry no origin_collection_id: skipped as siblings of the label's current holder (pre-id quarantine; backfill pending)", origin);
+        }
+    }
+
     /** The origin's registry id as the tag carries it (text); null on a row written before the id key. */
     private static final Field<String> ORIGIN_ID = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, ORIGIN_ID_KEY);
 

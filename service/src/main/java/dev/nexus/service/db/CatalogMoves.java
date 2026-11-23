@@ -19,6 +19,7 @@ import java.util.function.Function;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_OWNERS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_LINKS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
@@ -96,6 +97,8 @@ public final class CatalogMoves {
     private static final String SENS_REASON_MOVE = "move absorbed";
     /** Bounded like {@code CatalogRepository.MAX_ALIAS_HOPS}. */
     private static final int MAX_ALIAS_HOPS = 16;
+
+    private static final org.slf4j.Logger LOG = org.slf4j.LoggerFactory.getLogger(CatalogMoves.class);
 
     private final CatalogRepository repo;
 
@@ -278,16 +281,28 @@ public final class CatalogMoves {
             }
             return;
         }
-        List<String> labels = ctx.selectDistinct(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION).from(CATALOG_DOCUMENTS)
+        var docs = ctx.select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION).from(CATALOG_DOCUMENTS)
             .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(docCond).and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.ne("")))
-            .fetch(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION);
+            .fetch();
+        List<String> labels = docs.stream().map(r -> r.value2()).distinct().toList();
         if (labels.isEmpty()) {
             return;
         }
         try {
             CollectionRegistry.requireAllForWrite(ctx, tenant, labels);
         } catch (UnregisteredCollectionException unregistered) {
-            // before gate 3 only: a document filed under a label with no registry row; the rekey that needs it answers as it always did
+            // Before the latch, labels are exact, so an unregistered physical_collection has no registry row: there is no lock to take, and no
+            // verb can race the move (every verb needs the row). After the latch, an unresolved label is a stale label for a row that exists,
+            // so skipping its lock would misdirect the move: refuse (the by-id branch above has no such skip) (linda 2026-11-23). The rekey that
+            // needs the row answers as it always did; the document is named here because an unregistered collection is a data problem.
+            java.util.Set<String> registered = new java.util.HashSet<>(ctx.select(CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.in(labels)).fetch(CATALOG_COLLECTIONS.NAME));
+            for (var d : docs) {
+                if (!registered.contains(d.value2())) {
+                    LOG.warn("event=catalog_move_unregistered_collection tenant={} doc_id={} collection={}: the move goes ahead without a registry lock",
+                        tenant, d.value1(), d.value2());
+                }
+            }
         }
     }
 
