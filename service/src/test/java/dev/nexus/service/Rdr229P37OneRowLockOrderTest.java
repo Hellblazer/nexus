@@ -446,4 +446,47 @@ class Rdr229P37OneRowLockOrderTest {
         assertThat(engine.<Long>su(ctx -> (long) ctx.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION_ID.eq(yId))
             .and(CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(chash)))))).as("the write into Y is still Y's").isEqualTo(1L);
     }
+
+    /**
+     * linda's Q1 ruling on folio's r3 critique (F2): the one-row rename's registry row lock is bounded as slice C's lockRows is. A writer holding KEY SHARE on
+     * the old row past the bound makes the rename answer 503 rename_busy with Retry-After, and nothing changed: the registry row, the child rows (the same
+     * rows, by xmin) and the latch row. The test injects a 1 s bound; the production bound is pinned at 10 s.
+     */
+    @Test
+    void aRenameWhoseRowAWriterHoldsPastTheBound_answersRenameBusy_andChangesNothing() throws Exception {
+        assertThat(dev.nexus.service.db.CollectionOneRowRename.ROW_LOCK_TIMEOUT_MS).as("the production bound is slice C's 10 s").isEqualTo("10000");
+        String tenant = "p37-lo-i";
+        String token = engine.newTenant(tenant);
+        String a = coll("p37loia");
+        String b = coll("p37loib");
+        engine.su(ctx -> {
+            Rdr229RenameSeeds.chunksAndRing(ctx, tenant, a);
+            return null;
+        });
+        long id = engine.su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, a));
+        var before = engine.su(ctx -> Rdr229RenameChecks.snapshots(ctx, tenant, a));
+        assertThat(before.values().stream().mapToInt(List::size).sum()).as("non-vacuity: A's child rows are there").isPositive();
+        assertThat(engine.<Boolean>su(ctx -> dev.nexus.service.datamove.CompletionCheck.readLatch(ctx, dev.nexus.service.datamove.CompletionCheck.GATE3).isPresent()))
+            .as("non-vacuity: the latch row").isTrue();
+        dev.nexus.service.db.CollectionOneRowRename.setRowLockTimeoutMsForTests("1000");
+        try (Connection w = engine.pg.createConnection("")) {
+            w.setAutoCommit(false);
+            DSL.using(w, SQLDialect.POSTGRES).select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(a))).forKeyShare().fetch();   // held past the bound
+
+            var r = engine.call("POST", "/v1/catalog/collections/rename", token, "{\"old_name\":\"" + a + "\",\"new_name\":\"" + b + "\"}");
+
+            assertThat(r.statusCode()).as("busy: " + r.body()).isEqualTo(503);
+            assertThat(Rdr229RenameEngine.MAPPER.readTree(r.body()).path("reason").asText()).isEqualTo("rename_busy");
+            assertThat(r.headers().firstValue("Retry-After")).as("retryable").hasValue("5");
+            w.rollback();
+        } finally {
+            dev.nexus.service.db.CollectionOneRowRename.setRowLockTimeoutMsForTests(null);
+        }
+        assertThat(engine.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, a))).as("A is where it was").isEqualTo(id);
+        assertThat(engine.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, b))).as("nothing is registered under B").isNull();
+        assertThat(engine.su(ctx -> Rdr229RenameChecks.snapshots(ctx, tenant, a))).as("the child rows are the same rows (xmin)").isEqualTo(before);
+        assertThat(engine.<Boolean>su(ctx -> dev.nexus.service.datamove.CompletionCheck.readLatch(ctx, dev.nexus.service.datamove.CompletionCheck.GATE3).isPresent()))
+            .as("the latch row is still there").isTrue();
+    }
 }
