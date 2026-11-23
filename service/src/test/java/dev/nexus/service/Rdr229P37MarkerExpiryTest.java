@@ -162,6 +162,36 @@ class Rdr229P37MarkerExpiryTest extends AtomicWriteTestBase {
         assertThat(held(t, sibling, noKey)).as("a row with no id key is not a marker row").isTrue();
     }
 
+    /**
+     * Label L is registered and live. A client-moved marker row tagged L sits beside L's own client-moved row (L's id), both past retention. One pass reaps
+     * both, once each: the lister names L once, so one call of the function takes both rows, and writes one audit row naming both.
+     */
+    @Test
+    void aMarkerRowBesideTheLiveCollectionsOwnRow_bothAreReapedOnce_inOnePass() throws Exception {
+        String t = "p37mx-a4-" + seq.incrementAndGet();
+        String l = label("l", seq.get());
+        String sibling = "quarantine-" + label("sib", seq.get());
+        register(t, l, sibling);
+        long lId = su(ctx -> CollectionIds.require(ctx, t, l));
+        String marker = row(t, sibling, l, "marker", null, true, false);
+        String own = row(t, sibling, l, "own", lId, true, false);
+
+        var result = reaper(t).runOnce(null).tenant(t);
+
+        assertThat(result.clientExpiry(sibling)).isNotNull();
+        assertThat(result.clientExpiry(sibling).expired()).as("both rows, counted once each").isEqualTo(2);
+        assertThat(result.clientExpiry(sibling).refusal()).as("no refusal").isNull();
+        assertThat(result.clientExpiry(sibling).error()).as("no error").isNull();
+        assertThat(held(t, sibling, marker)).isFalse();
+        assertThat(held(t, sibling, own)).isFalse();
+        var audit = su(ctx -> ctx.select(org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("chash_count"), Integer.class))
+            .from(org.jooq.impl.DSL.table(org.jooq.impl.DSL.name("nexus", "gc_audit")))
+            .where(org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("tenant_id"), String.class).eq(t)
+                .and(org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("operation"), String.class).eq(ChunkReaper.AUDIT_EXPIRED_CLIENT)))
+            .fetch(0, Integer.class));
+        assertThat(audit).as("one audit row per function call, naming both chunks").containsExactly(2);
+    }
+
     /** Pin of existing behaviour: the engine-moved population's expiry takes a marker row by its tag. */
     @Test
     void anEngineMovedMarkerRowPastItsAge_isReapedByReaperExpireQuarantine() throws Exception {
