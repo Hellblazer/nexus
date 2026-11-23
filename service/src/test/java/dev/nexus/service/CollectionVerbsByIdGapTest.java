@@ -315,6 +315,154 @@ class CollectionVerbsByIdGapTest {
         assertThat(fx.supersededBy(a)).as("the source was not retired").isEmpty();
     }
 
+    // ---- the idempotent retry, decided under the lock by id; the label read cannot decide it (row 16 ship-blockers 1 and 2) ----------
+
+    private Long supersededById(String label) {
+        return fx.asSuperuser(ctx -> ctx.select(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID).from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(fx.tenant)).and(CATALOG_COLLECTIONS.NAME.eq(label))
+            .fetchOne(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID));
+    }
+
+    private java.time.OffsetDateTime supersededAt(String label) {
+        return fx.asSuperuser(ctx -> ctx.select(CATALOG_COLLECTIONS.SUPERSEDED_AT).from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(fx.tenant)).and(CATALOG_COLLECTIONS.NAME.eq(label))
+            .fetchOne(CATALOG_COLLECTIONS.SUPERSEDED_AT));
+    }
+
+    /** A request by id that arrives after another identical supersede already retired the source to the same target: today's 200, nothing written. */
+    @Test
+    void aByIdRetryToTheSameTargetAnswers200UpdatedOne_andWritesAndLeavesNothingUnconsumed() {
+        for (boolean successorById : new boolean[] {true, false}) {
+            String a = registered("idem-a-" + successorById);
+            String b = registered("idem-b-" + successorById);
+            long x = fx.idOf(a);
+            long y = fx.idOf(b);
+            AtomicInteger fired = new AtomicInteger();
+            AtomicInteger retireStatus = new AtomicInteger();
+            java.util.List<String> unconsumed = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+            fx.service.collectionSelectorFilter().testHooks(retireInTheGap(a, b, fired, retireStatus), null, null, unconsumed::add);
+            Resp r;
+            try {
+                r = fx.post("/v1/catalog/collections/supersede", "{\"collection_id\":" + x
+                    + (successorById ? ",\"superseded_by_id\":" + y : ",\"superseded_by\":" + json(b)) + "}");
+            } finally {
+                noHooks();
+            }
+
+            String why = "successor by id: " + successorById;
+            assertThat(retireStatus.get()).as("setup: the first supersede retired the source. " + why).isEqualTo(200);
+            assertThat(r.status()).as(why + ": " + r.body()).isEqualTo(200);
+            assertThat(r.json().path("updated").asInt(-1)).as(why).isEqualTo(1);
+            assertThat(fx.supersededBy(a)).as(why).isEqualTo(b);
+            assertThat(supersededById(a)).as(why).isEqualTo(y);
+            assertThat(supersededAt(a)).as("a retry re-stamps nothing. " + why).isNotNull();
+            assertThat(unconsumed).as("every named id was read in the verb's own transaction. " + why).isEmpty();
+        }
+    }
+
+    /**
+     * A source retired to ANOTHER successor, which the request does not name (the retire lands after the handler's reads): 409, and the
+     * tombstone is not re-pointed. Red against an idempotence check that ignores which successor the source holds.
+     */
+    @Test
+    void aByIdSupersedeOfASourceAlreadyRetiredToADifferentSuccessorIdAnswers409_andRepointsNothing() {
+        String a = registered("other-a");
+        String xs = registered("other-x");
+        String ys = registered("other-y");
+        long x = fx.idOf(a);
+        long xsId = fx.idOf(xs);
+        long ysId = fx.idOf(ys);
+        AtomicInteger fired = new AtomicInteger();
+        AtomicInteger retireStatus = new AtomicInteger();
+        fx.service.collectionSelectorFilter().testHooks(null, retireInTheGap(a, xs, fired, retireStatus), null, null);
+        Resp r;
+        try {
+            r = fx.post("/v1/catalog/collections/supersede", "{\"collection_id\":" + x + ",\"superseded_by_id\":" + ysId + "}");
+        } finally {
+            noHooks();
+        }
+
+        assertThat(retireStatus.get()).as("setup: the source was retired to the first successor").isEqualTo(200);
+        assertThat(r.status()).as(r.body()).isEqualTo(409);
+        assertThat(r.reason()).isEqualTo("collection_superseded");
+        assertThat(fx.supersededBy(a)).as("superseded_by is the first successor's").isEqualTo(xs);
+        assertThat(supersededById(a)).as("and so is superseded_by_id").isEqualTo(xsId);
+    }
+
+    /**
+     * The successor's label was taken again: the request's successor id bears the label, but the source (retired, by the label's text)
+     * points at the id of the label's OLD holder. The label read of the handler cannot tell them apart; the by-id compare in the CAS can.
+     * The state is built directly: a pre-P4.1 registry cannot hold two rows of a label.
+     */
+    @Test
+    void aSupersedeByASuccessorIdWhoseLabelTheSourceNamesForAnotherRowIsRefused_andSupersededByIdIsUnchanged() {
+        String a = registered("retaken-succ-a");
+        String old = registered("retaken-succ-old");
+        String b = registered("retaken-succ-b");
+        long oldId = fx.idOf(old);
+        fx.asSuperuser(ctx -> ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, b)
+            .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, oldId)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(fx.tenant)).and(CATALOG_COLLECTIONS.NAME.eq(a)).execute());
+        Long before = supersededById(a);
+        assertThat(before).as("setup: the source names the label of b but the id of another row").isEqualTo(oldId);
+
+        Resp r = fx.post("/v1/catalog/collections/supersede", "{\"name\":" + json(a) + ",\"superseded_by_id\":" + fx.idOf(b) + "}");
+
+        assertThat(r.status()).as(r.body()).isEqualTo(409);
+        assertThat(fx.supersededBy(a)).isEqualTo(b);
+        assertThat(supersededById(a)).as("not re-pointed at the new holder of the label").isEqualTo(oldId);
+    }
+
+    /**
+     * A source named by id whose label was freed and taken again by a row already superseded to the requested label: the handler's label
+     * read finds that row and its same-target shortcut would answer 200 for the wrong collection. The verb decides by id: 404.
+     */
+    @Test
+    void aSupersedeByAnIdWhoseLabelNowBelongsToARowAlreadySupersededToTheTargetIsRefused_notAnsweredWithAFalse200() {
+        String a = registered("retaken-src-a");
+        String b = registered("retaken-src-b");
+        long x = fx.idOf(a);
+        long y = fx.idOf(b);
+        AtomicInteger fired = new AtomicInteger();
+        fx.service.collectionSelectorFilter().testHooks(() -> {
+            if (fired.getAndIncrement() == 0) {
+                elsewhere(() -> {
+                    assertThat(fx.post(DELETE, "{\"name\":" + json(a) + "}").status()).isEqualTo(200);
+                    fx.register(a);
+                    assertThat(fx.post("/v1/catalog/collections/supersede",
+                        "{\"name\":" + json(a) + ",\"superseded_by\":" + json(b) + "}").status()).isEqualTo(200);
+                });
+            }
+        }, null, null, null);
+        Resp r;
+        try {
+            r = fx.post("/v1/catalog/collections/supersede", "{\"collection_id\":" + x + ",\"superseded_by_id\":" + y + "}");
+        } finally {
+            noHooks();
+        }
+
+        assertThat(fx.idOf(a)).as("setup: the label is another row's").isNotEqualTo(x);
+        assertThat(fx.supersededBy(a)).as("setup: that row is superseded to the target").isEqualTo(b);
+        assertRefusedAsUnknownId(r, x);
+        assertThat(supersededById(a)).as("the holder's tombstone is untouched").isEqualTo(y);
+    }
+
+    /** Pin: by label, the same-target retry keeps the handler's shortcut: 200 {"updated":1} and nothing rewritten. */
+    @Test
+    void aByLabelRetryToTheSameTargetStillAnswers200UpdatedOne() {
+        String a = registered("label-retry-a");
+        String b = registered("label-retry-b");
+        String body = "{\"name\":" + json(a) + ",\"superseded_by\":" + json(b) + "}";
+        assertThat(fx.post("/v1/catalog/collections/supersede", body).status()).isEqualTo(200);
+        java.time.OffsetDateTime stamped = supersededAt(a);
+
+        Resp again = fx.post("/v1/catalog/collections/supersede", body);
+
+        assertThat(again.status()).as(again.body()).isEqualTo(200);
+        assertThat(again.json().path("updated").asInt(-1)).isEqualTo(1);
+        assertThat(supersededAt(a)).as("not re-stamped").isEqualTo(stamped);
+    }
+
     // ---- retired between the handler's reads and the verb's lock (code 6) -----------------------------------------------------------
 
     @Test

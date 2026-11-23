@@ -172,7 +172,19 @@ public final class CollectionTombstones {
             lockRows(ctx, tenant, ids, requestedSuccessorId != null ? new String[] {name} : new String[] {name, supersededBy});
         }
         if (requestedSourceId != null) {
-            CollectionRefusals.requireSourceById(ctx, tenant, requestedSourceId, name);
+            try {
+                CollectionRefusals.requireSourceById(ctx, tenant, requestedSourceId, name);
+            } catch (CollectionRetiredIdException retired) {
+                // the idempotent retry, decided here under the row lock and by id (tamsin, row 16): a source already retired to the
+                // very successor the request names changes nothing and answers today's 200; any other retired source stays the 409
+                if (!alreadySupersededTo(ctx, tenant, requestedSourceId, name, supersededBy, requestedSuccessorId)) {
+                    throw retired;
+                }
+                if (requestedSuccessorId != null) {
+                    ExpectedCollectionIds.consumed(ctx, supersededBy);   // the successor's id counts as read: its row is locked above
+                }
+                return 1;
+            }
         }
         Field<Long> successor;
         if (requestedSuccessorId != null) {
@@ -182,7 +194,7 @@ public final class CollectionTombstones {
             CollectionIds.require(ctx, tenant, supersededBy);
             successor = CollectionIds.idOf(tenant, supersededBy);
         }
-        return casSupersede(ctx, tenant, name, requestedSourceId, supersededBy, successor, stampedAt, gate3);
+        return casSupersede(ctx, tenant, name, requestedSourceId, supersededBy, successor, requestedSuccessorId != null, stampedAt, gate3);
     }
 
     /**
@@ -212,15 +224,33 @@ public final class CollectionTombstones {
      * {@link CollectionRefusals#requireSourceById} must not retire the other one.
      */
     static int supersede(DSLContext ctx, String tenant, String fromName, Long requestedSourceId, String toName, long toId, Gate3 gate3) {
-        return casSupersede(ctx, tenant, fromName, requestedSourceId, toName, DSL.val(toId), DSL.currentOffsetDateTime(), gate3);
+        return casSupersede(ctx, tenant, fromName, requestedSourceId, toName, DSL.val(toId), false, DSL.currentOffsetDateTime(), gate3);
+    }
+
+    /**
+     * True when the retired row {@code sourceId}, locked by the caller and bearing {@code name}, is already superseded to the successor
+     * the request names: by id ({@code requestedSuccessorId}) when it named one, else by the label {@code supersededBy}.
+     */
+    private static boolean alreadySupersededTo(DSLContext ctx, String tenant, long sourceId, String name, String supersededBy,
+                                               Long requestedSuccessorId) {
+        var r = ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.SUPERSEDED_BY_ID)
+            .from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(sourceId))
+            .fetchOne();
+        if (r == null || !name.equals(r.get(CATALOG_COLLECTIONS.NAME))) {
+            return false;
+        }
+        return requestedSuccessorId != null ? requestedSuccessorId.equals(r.get(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID))
+            : supersededBy.equals(r.get(CATALOG_COLLECTIONS.SUPERSEDED_BY));
     }
 
     private static int casSupersede(DSLContext ctx, String tenant, String name, Long sourceId, String supersededBy,
-                                    Field<Long> successorId, Field<OffsetDateTime> stampedAt, Gate3 gate3) {
+                                    Field<Long> successorId, boolean successorById, Field<OffsetDateTime> stampedAt, Gate3 gate3) {
         // RDR-229 P3.5c: the row is the caller's label (the registry name stays); "live" and "already this target" read the
         // id from gate 3. The name arm of a write (the SET) is the dual write's, not a read.
         Condition live = CollectionIdReads.live(gate3, CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.SUPERSEDED_BY_ID);
-        Condition alreadyThis = gate3.holds() ? CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.eq(successorId)
+        // a successor named by id is "already this" by its id, never by a label text that a later holder may bear
+        Condition alreadyThis = gate3.holds() || successorById ? CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.eq(successorId)
             : CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(supersededBy);
         WriteRegistryMemo.forget(ctx);   // P3.5a: the transaction retires the row itself
         return ctx.update(CATALOG_COLLECTIONS)
