@@ -334,4 +334,100 @@ class Rdr229P35cCatalogMovesByIdTest {
             .isEqualTo(idA).isNotEqualTo(y);
         assertThat(moved.collection()).as("under its current label").isEqualTo(c);
     }
+
+    // ---- CM-FIX: the move holds the registry row of every collection it writes in, before any document row -------------------------------
+
+    /**
+     * Probes, from a second session inside the move's own transaction (after its last write), whether the registry row of {@code collectionId} is
+     * held against a retiring verb: a verb's first step is {@code FOR UPDATE} on that row, which a held {@code FOR KEY SHARE} refuses (55P03 on
+     * NOWAIT). Without the lock the probe takes the row and the verb would run beside the move.
+     */
+    private boolean heldAgainstAVerbDuring(String tenant, long collectionId, Runnable move) {
+        java.util.concurrent.atomic.AtomicReference<Boolean> held = new java.util.concurrent.atomic.AtomicReference<>();
+        CatalogMoves.afterWritesHookForTests = () -> {
+            try (Connection c = pg.createConnection("")) {
+                c.setAutoCommit(false);
+                try {
+                    DSL.using(c, SQLDialect.POSTGRES).select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                        .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(collectionId))
+                        .forUpdate().noWait().fetch();
+                    held.set(false);
+                } catch (org.jooq.exception.DataAccessException e) {
+                    held.set(true);   // 55P03: the move holds it
+                } finally {
+                    c.rollback();
+                }
+            } catch (java.sql.SQLException e) {
+                throw new IllegalStateException(e);
+            }
+        };
+        try {
+            move.run();
+        } finally {
+            CatalogMoves.afterWritesHookForTests = null;
+        }
+        assertThat(held.get()).as("non-vacuity: the probe ran inside the move").isNotNull();
+        return held.get();
+    }
+
+    private static final String COLL_K = "code__p35cmoves-k__voyage-code-3__v1";
+
+    /** S has an aspect row filed under another collection K: the move holds K's registry row too, so a verb on K waits for it. */
+    @Test
+    void aDocumentMoveHoldsTheRegistryRowOfACollectionItsAspectRowsAreFiledUnder() throws Exception {
+        String t = tenant();
+        latched.set(false);
+        register(t, COLL_A);
+        register(t, COLL_K);
+        curatorOwner(t, "1.1", "pdfs");
+        String s = registered(t, "1.1", "s", "file:///old/a.pdf", "/old/a.pdf", COLL_A);
+        aspect(t, s, COLL_K, "/old/a.pdf", "file:///old/a.pdf", "filed under K");
+        long k = idOf(t, COLL_K);
+        latched.set(true);
+
+        assertThat(heldAgainstAVerbDuring(t, k, () -> moves.moveDocument(t, s, "file:///new/a.pdf", "/new/a.pdf", false)))
+            .as("a verb's FOR UPDATE on K is refused while the move runs").isTrue();
+    }
+
+    /** An absorbed T has a document U filed under collection K2 whose alias_of names it: the absorb re-points U, so K2's row is held. */
+    @Test
+    void anAbsorbHoldsTheRegistryRowOfACollectionOfADocumentThatAliasesTheAbsorbedOne() throws Exception {
+        String t = tenant();
+        latched.set(false);
+        register(t, COLL_A);
+        register(t, COLL_K);
+        curatorOwner(t, "1.1", "pdfs");
+        String s = registered(t, "1.1", "s", "file:///old/a.pdf", "/old/a.pdf", COLL_A);
+        String tt = registered(t, "1.1", "t", "file:///new/a.pdf", "/new/a.pdf", COLL_A);
+        String u = registered(t, "1.1", "u", null, "/u.pdf", COLL_K);
+        su(ctx -> ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.ALIAS_OF, tt)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(t)).and(CATALOG_DOCUMENTS.TUMBLER.eq(u)).execute());
+        long k = idOf(t, COLL_K);
+        latched.set(true);
+
+        assertThat(heldAgainstAVerbDuring(t, k, () -> moves.moveDocument(t, s, "file:///new/a.pdf", "/new/a.pdf", false)))
+            .as("a verb's FOR UPDATE on the alias row's collection is refused while the absorb runs").isTrue();
+    }
+
+    /** The fold deletes the absorbed B document's aspect rows, filed under collection K: the fold holds K's registry row. */
+    @Test
+    void anOwnerFoldHoldsTheRegistryRowOfACollectionTheAbsorbedDocumentsAspectRowsAreFiledUnder() throws Exception {
+        String t = tenant();
+        latched.set(false);
+        register(t, COLL_A);
+        register(t, COLL_B);
+        register(t, COLL_K);
+        repoOwner(t, "1.1", "proj", HASH_A, OLD_ROOT);
+        registered(t, "1.1", "docs/x.md", null, "docs/x.md", COLL_A);
+        repoOwner(t, "1.2", "proj-renamed", HASH_B, NEW_ROOT);
+        String bx = registered(t, "1.2", "docs/x.md", null, "docs/x.md", COLL_B);
+        String bxUri = su(ctx -> ctx.select(CATALOG_DOCUMENTS.SOURCE_URI).from(CATALOG_DOCUMENTS)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(t)).and(CATALOG_DOCUMENTS.TUMBLER.eq(bx)).fetchOne(CATALOG_DOCUMENTS.SOURCE_URI));
+        aspect(t, bx, COLL_K, "docs/x.md", bxUri, "B's extraction, filed under K");
+        long k = idOf(t, COLL_K);
+        latched.set(true);
+
+        assertThat(heldAgainstAVerbDuring(t, k, () -> moves.moveOwner(t, "1.1", NEW_ROOT, HASH_B, false)))
+            .as("a verb's FOR UPDATE on K is refused while the fold runs").isTrue();
+    }
 }
