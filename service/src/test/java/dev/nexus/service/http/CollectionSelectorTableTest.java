@@ -43,6 +43,19 @@ class CollectionSelectorTableTest {
     }
 
     @Test
+    void everyWriteRouteIsARouteOfTheTable_andOnlyBodyRoutesWrite() {
+        assertThat(CollectionSelectors.WRITES).as("non-vacuity").hasSizeGreaterThanOrEqualTo(25);
+        for (String path : CollectionSelectors.WRITES) {
+            CollectionSelectors.Route route = CollectionSelectors.ROUTES.get(path);
+            assertThat(route).as("a write route that is not in the table: %s", path).isNotNull();
+            assertThat(route.writes()).as(path).isTrue();
+            assertThat(route.where()).as(path).isEqualTo(CollectionSelectors.Where.BODY);
+        }
+        long marked = CollectionSelectors.ROUTES.values().stream().filter(CollectionSelectors.Route::writes).count();
+        assertThat(marked).as("the table marks exactly the WRITES set").isEqualTo(CollectionSelectors.WRITES.size());
+    }
+
+    @Test
     void onlyTheDeleteHandsItsHandlerTheResolvedId() {
         List<String> passes = new ArrayList<>();
         for (Map.Entry<String, CollectionSelectors.Route> e : CollectionSelectors.ROUTES.entrySet()) {

@@ -51,6 +51,8 @@ class CollectionSelectorFilterRowsTest {
     private final Map<Long, CollectionRow> byId = new HashMap<>();
     private final Map<Long, CollectionSuccessor.Successor> successors = new HashMap<>();
 
+    private CollectionSelectorFilter filter;
+    private final java.util.concurrent.ConcurrentLinkedQueue<String> reports = new java.util.concurrent.ConcurrentLinkedQueue<>();
     private HttpServer server;
     private HttpClient http;
     private String base;
@@ -81,6 +83,8 @@ class CollectionSelectorFilterRowsTest {
                 return Optional.ofNullable(successors.get(retiredId));
             }
         };
+        filter = new CollectionSelectorFilter(rows);
+        filter.testHooks(null, null, null, reports::add);
         server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
         for (String path : CollectionSelectors.ROUTES.keySet()) {
             var context = server.createContext(path, exchange -> {
@@ -106,7 +110,7 @@ class CollectionSelectorFilterRowsTest {
                     return "sets the tenant";
                 }
             });
-            context.getFilters().add(new CollectionSelectorFilter(rows));
+            context.getFilters().add(filter);
         }
         server.start();
         http = TestHttp.client();
@@ -348,5 +352,26 @@ class CollectionSelectorFilterRowsTest {
         Resp r = post("/v1/vectors/store-get", body);
         assertThat(r.status()).isEqualTo(200);
         assertThat(r.body()).as("the bytes untouched, spacing included").endsWith(body);
+    }
+
+    // ---- the consumption report ----------------------------------------------------------------------------------------------------
+
+    /**
+     * A write route that answers 2xx for an id without any in-transaction read of it is reported (the stub handler reads nothing, as a
+     * handler that went on by label would); a route that is not a write route is not. A request by label names no id, so there is
+     * nothing to consume and nothing to report.
+     */
+    @Test
+    void aWriteRouteThatAnswers2xxWithoutReadingTheIdIsReported_otherRoutesAreNot() throws Exception {
+        reports.clear();
+        assertThat(post("/v1/taxonomy/topics/insert", "{\"collection_id\":5,\"label\":\"x\"}").status()).isEqualTo(200);
+        assertThat(reports).as("a write route, 2xx, id never read in a transaction").hasSize(1);
+        assertThat(reports.peek()).contains("/v1/taxonomy/topics/insert").contains("live-five");
+
+        reports.clear();
+        assertThat(post("/v1/vectors/store-get", "{\"collection_id\":5}").status()).isEqualTo(200);
+        assertThat(get("/v1/catalog/collections/get?collection_id=5").status()).isEqualTo(200);
+        assertThat(post("/v1/taxonomy/topics/insert", "{\"collection\":\"live-five\",\"label\":\"x\"}").status()).isEqualTo(200);
+        assertThat(reports).as("a read route, and a request by label").isEmpty();
     }
 }
