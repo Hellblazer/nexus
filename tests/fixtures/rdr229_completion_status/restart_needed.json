@@ -24,6 +24,9 @@
     "labels_incomplete": [],
     "checks_missing": [],
     "validate_waits": [],
-    "rename_missing": "restart"
+    "rename_missing": "restart",
+    "gate3_latched": true,
+    "id_index_invalid": false,
+    "gate3_latch_pci_off": false
   }
 }
