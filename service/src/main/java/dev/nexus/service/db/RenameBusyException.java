@@ -18,4 +18,13 @@ public final class RenameBusyException extends RuntimeException {
         super("the collection is in use by writers: the rename or supersede could not lock its registry row within " + bound
             + "; nothing was changed, retry shortly");
     }
+
+    private RenameBusyException(String message, boolean verbatim) {
+        super(message);
+    }
+
+    /** A write that follows a rename gave up after the collection was renamed {@code times} times while it ran (RenameFollow). */
+    static RenameBusyException renamedRepeatedly(int times) {
+        return new RenameBusyException("the collection was renamed " + times + " times while the write ran; nothing was written, retry shortly", true);
+    }
 }

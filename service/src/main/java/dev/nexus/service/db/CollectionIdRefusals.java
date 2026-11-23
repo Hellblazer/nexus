@@ -15,7 +15,8 @@ public final class CollectionIdRefusals {
     /** True for the registry's typed refusals of a write: an id no row has, a retired id or name, an id and a client label that no longer agree, a row of another id. */
     public static boolean isRefusal(Throwable e) {
         return e instanceof UnknownCollectionIdException || e instanceof CollectionRetiredIdException
-            || e instanceof CollectionIdMismatchException || e instanceof CollectionSupersededException;
+            || e instanceof CollectionIdMismatchException || e instanceof CollectionSupersededException
+            || RenameFollow.isMoved(e);   // not a refusal: the attempt is run again, and a per-document catch must not turn it into a failure
     }
 
     /** Rethrows {@code e} when it is one of the registry's typed refusals; returns for anything else. */
