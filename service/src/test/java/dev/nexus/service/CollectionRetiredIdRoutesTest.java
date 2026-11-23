@@ -562,6 +562,23 @@ class CollectionRetiredIdRoutesTest {
         assertThat(underTheNewHolder).as("no manifest row under the new holder").isZero();
     }
 
+    /** The topic rows of X are filed under C, X's CURRENT label, and the new holder of B has none. */
+    @Test
+    void topicInsert_byAnIdWhoseRowWasRenamedAndItsLabelTaken_landsInTheRenamedCollection() {
+        String b = registered("rn-gap-topic-b");
+        String c = label("retired-rn-gap-topic-c-" + (n++));
+        long x = fx.idOf(b);
+        Resp topic = withTheRowRenamedAndTheLabelTaken(fx, b, x, c, () -> fx.post("/v1/taxonomy/topics/insert",
+            "{\"collection_id\":" + x + ",\"label\":\"rn-gap-topic\",\"doc_count\":1}"));
+        assertThat(topic.status()).as("an id-only write follows the rename: %s", topic.body()).isEqualTo(200);
+        java.util.List<String> labels = fx.asSuperuser(ctx -> ctx.select(TOPICS.COLLECTION).from(TOPICS).where(TOPICS.COLLECTION_ID.eq(x))
+            .fetch(TOPICS.COLLECTION));
+        assertThat(labels).as("the topic is the renamed collection's, under its new label").containsExactly(c);
+        Long newId = fx.idOf(b);
+        int underTheNewHolder = fx.asSuperuser(ctx -> ctx.fetchCount(TOPICS, TOPICS.COLLECTION_ID.eq(newId)));
+        assertThat(underTheNewHolder).as("nothing under the new holder of the old label").isZero();
+    }
+
     @Test
     void aspectUpsert_byAnIdWhoseRowWasRenamedAndItsLabelTaken_landsInTheRenamedCollection() {
         String b = registered("rn-gap-aspect-b");

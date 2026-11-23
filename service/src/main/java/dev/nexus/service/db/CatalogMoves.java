@@ -435,7 +435,7 @@ public final class CatalogMoves {
             var set = collection == null || collection.isBlank()
                 ? q.set(DOCUMENT_HIGHLIGHTS.COLLECTION_ID, CatalogIdStamps.keepHighlightId())
                 : q.set(DOCUMENT_HIGHLIGHTS.COLLECTION, collection)
-                    .set(DOCUMENT_HIGHLIGHTS.COLLECTION_ID, CollectionIds.idOf(tenant, collection));
+                    .set(DOCUMENT_HIGHLIGHTS.COLLECTION_ID, CollectionIds.require(ctx, tenant, collection));   // P3.5a: read FOR KEY SHARE, not an unlocked name lookup
             c.highlightRowsRewritten += set
                 .where(DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant).and(DOCUMENT_HIGHLIGHTS.DOC_ID.eq(t)))
                 .execute();

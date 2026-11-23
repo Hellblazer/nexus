@@ -796,10 +796,10 @@ public final class PipelineRepository {
     public int deleteForCollection(String tenant, String collection) {
         requireNonBlank(collection, "collection");
         return tenantScope.withTenant(tenant, ctx -> {
-            RequestedCollectionRead.require(ctx, tenant, collection);   // P3.5a: a request by id reads that id first
+            var row = RequestedCollectionRead.require(ctx, tenant, collection);   // P3.5a: a request by id reads that id first
             return ctx.deleteFrom(PDF_PIPELINE)
                .where(PDF_PIPELINE.TENANT_ID.eq(tenant)
-                       .and(PDF_PIPELINE.COLLECTION.eq(collection)))
+                       .and(CollectionOwnedRows.of(row, PDF_PIPELINE.COLLECTION_ID, PDF_PIPELINE.COLLECTION, collection)))
                .execute();
         });
     }

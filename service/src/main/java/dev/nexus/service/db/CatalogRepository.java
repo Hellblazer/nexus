@@ -8184,7 +8184,7 @@ public final class CatalogRepository {
             // acquireIndexRunLock's javadoc) — this was the one mutation path
             // left outside the lock when it landed.
             acquireIndexRunLock(ctx, tenant, docId);
-            registryFirst(ctx, tenant, collection);
+            final String coll = registryFirst(ctx, tenant, collection);   // the id is the identity: the row's CURRENT label, from the locked read
             // An append with rows learns of a tombstone at its chunk_count fold below; a sweep-only
             // append (empty rows) has no fold, so check here: it must be refused 409 like any
             // other append to a tombstoned document, not sweep on its behalf.
@@ -8206,7 +8206,7 @@ public final class CatalogRepository {
             // earlier document of the same append_many request wrote, so a chash
             // shared between two documents of one request is not counted as a race.
             if (resolvedChunks != null) {
-                chunksWritten[0] = upsertManifestChunkVectors(ctx, tenant, collection, toWrite,
+                chunksWritten[0] = upsertManifestChunkVectors(ctx, tenant, coll, toWrite,
                         resolvedChunks, writtenThisRequest, writtenChashesOut, raced);
                 java.util.function.Consumer<DSLContext> hook = afterChunkUpsertHookForTests;
                 if (hook != null) hook.accept(ctx);
@@ -8228,9 +8228,9 @@ public final class CatalogRepository {
             Map<Integer, String> writtenAt = chashesByPosition(toWrite);
             Map<Integer, DepartedWriterSpans.Gone> priorAt = DepartedWriterSpans.rowsAt(ctx, tenant, docId, writtenAt.keySet());
             for (var row : toWrite) {
-                insertManifestChunkRows(ctx, tenant, docId, collection, List.of(row), ManifestInsertMode.UPSERT_APPEND);
+                insertManifestChunkRows(ctx, tenant, docId, coll, List.of(row), ManifestInsertMode.UPSERT_APPEND);
             }
-            DepartedWriterSpans.clearDisplaced(ctx, tenant, docId, collection, priorAt, writtenAt);
+            DepartedWriterSpans.clearDisplaced(ctx, tenant, docId, coll, priorAt, writtenAt);
             // nexus-e4gel: fold documents.chunk_count in the SAME transaction,
             // exactly as writeManifestRows does (nexus-b6enc F5). The REPLACE
             // path folded and the APPEND path did not, so an append-grown
@@ -13679,7 +13679,7 @@ public final class CatalogRepository {
             // document's index-run lock after the gate, in writeManifestRows's order; a document move
             // for the same document then either precedes it or waits for it.
             acquireIndexRunLock(ctx, tenant, docId);
-            registryFirst(ctx, tenant, collection);
+            final String coll = registryFirst(ctx, tenant, collection);   // the id is the identity: the row's CURRENT label
 
             final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / 10);
             for (int start = 0; start < deduped.size(); start += chunkSize) {
@@ -13693,8 +13693,8 @@ public final class CatalogRepository {
                 Map<Integer, String> writtenAt = chashesByPosition(batch);
                 Map<Integer, DepartedWriterSpans.Gone> priorAt =
                     DepartedWriterSpans.rowsAt(ctx, tenant, docId, writtenAt.keySet());
-                insertManifestChunkRows(ctx, tenant, docId, collection, batch, ManifestInsertMode.UPSERT_IMPORT);
-                DepartedWriterSpans.clearDisplaced(ctx, tenant, docId, collection, priorAt, writtenAt);
+                insertManifestChunkRows(ctx, tenant, docId, coll, batch, ManifestInsertMode.UPSERT_IMPORT);
+                DepartedWriterSpans.clearDisplaced(ctx, tenant, docId, coll, priorAt, writtenAt);
             }
             return rows.size();
         });
@@ -13705,7 +13705,7 @@ public final class CatalogRepository {
         requireDocumentExists(ctx, tenant, docId);
         acquireSweepGateShared(ctx, tenant, collection);
         acquireIndexRunLock(ctx, tenant, docId);
-        registryFirst(ctx, tenant, collection);
+        collection = registryFirst(ctx, tenant, collection);   // the id is the identity: the row's CURRENT label
         Map<Integer, String> writtenAt = chashesByPosition(List.of(row));
         Map<Integer, DepartedWriterSpans.Gone> priorAt = DepartedWriterSpans.rowsAt(ctx, tenant, docId, writtenAt.keySet());
         insertManifestChunkRows(ctx, tenant, docId, collection, List.of(row), ManifestInsertMode.UPSERT_IMPORT);
