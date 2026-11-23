@@ -119,6 +119,7 @@ public final class Rdr229ChunksFk {
             pending       boolean := false;
             changed       boolean := false;
             lock_wait     pg_catalog.text;
+            key_wait      pg_catalog.text;
             paused_first  text;
             paused_count  integer := 0;
             is_failed     boolean;
@@ -161,7 +162,10 @@ public final class Rdr229ChunksFk {
                 LOOP
                     pending := true;
                     IF NOT %2$s THEN
+                        key_wait := pg_catalog.current_setting('lock_timeout');
+                        PERFORM pg_catalog.set_config('lock_timeout', '%12$dms', true);   -- the key's SHARE ROW EXCLUSIVE on the leaf and the registry waits as the lock on chunks does
                         EXECUTE pg_catalog.format('ALTER TABLE %%I.%%I ADD CONSTRAINT %%I %3$s NOT VALID', l.ns, l.leaf, l.leaf || '%4$s');
+                        PERFORM pg_catalog.set_config('lock_timeout', key_wait, true);
                         changed := true;
                     END IF;
                     INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms,
@@ -186,7 +190,7 @@ public final class Rdr229ChunksFk {
             %11$s    END LOOP;
             """.formatted(hasValidatedMatch("pt.relid"), hasMatch("l.rel"), FK_DEFINITION, LEAF_CONSTRAINT_SUFFIX, labelExpr,
                 REGISTRY_TEMPLATE, DataMove.NO_STATEMENT_BOUND_MS, REGISTRY_VERIFICATION, leafOnComplete(),
-                LeafIndexPass.swapLabel("chunks"), check);
+                LeafIndexPass.swapLabel("chunks"), check, LOCK_WAIT_MS);
     }
 
     /**
@@ -240,8 +244,10 @@ public final class Rdr229ChunksFk {
      *       a queued request stalls the writers behind it; on a timeout the move backs off and retries). A leaf is created with ACCESS
      *       EXCLUSIVE on its model partition, which this conflicts with, so none appears after the recheck below. The lock wait goes back to the
      *       move's own afterwards.</li>
-     *   <li><b>Under the lock:</b> reconcile again (a leaf that appeared meanwhile is queued and the move re-opens), then end the index builders
-     *       (only now, about to add: a deferring pass ends none) and add the parent constraint, which PostgreSQL adopts leaf by leaf with no scan.</li>
+     *   <li><b>Under the lock:</b> reconcile again (a leaf that appeared meanwhile is queued and the move re-opens), then add the parent constraint,
+     *       which PostgreSQL adopts leaf by leaf with no scan. A lock that timed out says so ({@link #LOCK_FAILED_MARKER}), and the finisher then
+     *       ends the index builders that were blocking it, and only those (linda 2026-11-23: a running build holds SHARE UPDATE EXCLUSIVE, so a kill
+     *       after the lock would never meet one); the failure itself is the 55P03 whose backoff leads to the next attempt.</li>
      * </ol>
      */
     public static String adoptOnComplete() {
@@ -270,25 +276,31 @@ public final class Rdr229ChunksFk {
                 END IF;
                 lock_wait := pg_catalog.current_setting('lock_timeout');
                 PERFORM pg_catalog.set_config('lock_timeout', '%4$dms', true);
-                LOCK TABLE nexus.chunks IN SHARE ROW EXCLUSIVE MODE;
+                BEGIN
+                    LOCK TABLE nexus.chunks IN SHARE ROW EXCLUSIVE MODE;
+                EXCEPTION WHEN lock_not_available THEN
+                    RAISE EXCEPTION USING MESSAGE = 'rdr229 adoption of %2$s ' || '%5$s' || ' (SHARE ROW EXCLUSIVE, %4$d ms): a session holds a conflicting lock on it or on a leaf',
+                        ERRCODE = 'lock_not_available';
+                END;
                 PERFORM pg_catalog.set_config('lock_timeout', lock_wait, true);
                 pending := false;
                 changed := false;
                 paused_count := 0;
                 paused_first := NULL;
-            """.formatted(ADOPT_LABEL, PARENT_CONSTRAINT, FK_DEFINITION, LOCK_WAIT_MS)
+            """.formatted(ADOPT_LABEL, PARENT_CONSTRAINT, FK_DEFINITION, LOCK_WAIT_MS, LOCK_FAILED_MARKER)
             + reconcile
             + """
                 IF pending THEN
                     UPDATE nexus.data_moves SET completed_at = NULL, registered_at = pg_catalog.clock_timestamp() WHERE label = '%1$s';
                     RETURN;
                 END IF;
-                PERFORM pg_catalog.pg_terminate_backend(a.pid) FROM pg_catalog.pg_stat_activity a
-                 WHERE a.application_name LIKE '%4$s%%' AND a.datname = pg_catalog.current_database() AND a.pid <> pg_catalog.pg_backend_pid();
                 ALTER TABLE nexus.chunks ADD CONSTRAINT %2$s %3$s;
-            """.formatted(ADOPT_LABEL, PARENT_CONSTRAINT, FK_DEFINITION, PciBuilderSession.APPLICATION_NAME_PREFIX)
+            """.formatted(ADOPT_LABEL, PARENT_CONSTRAINT, FK_DEFINITION)
             + "END\n$adopt$";
     }
+
+    /** What the adoption's failure says when its lock on chunks timed out (and not a wait on a leaf key or a pause): the finisher looks for it. */
+    public static final String LOCK_FAILED_MARKER = "could not lock nexus.chunks";
 
     /** The adoption's own lock wait for SHARE ROW EXCLUSIVE on chunks, in milliseconds (the move's is 700): it bounds the writer stall behind a queued request. */
     public static final int LOCK_WAIT_MS = 200;
