@@ -58,7 +58,7 @@ def test_a_write_is_not_a_read():
 
 
 _DISPOSITIONS = _REPO / "service" / "src" / "test" / "resources" / "rdr229" / "p35b-reader-dispositions.tsv"
-_VOCABULARY = {"id", "both", "label-kept", "parse-removed", "writer-kept", "name-kept", "id-twin", "no-caller"}
+_VOCABULARY = {"id", "both", "label-kept", "parse-removed", "writer-kept", "name-kept", "id-twin", "no-caller", "unchanged-fallback"}
 _TWIN = "_by_id"  # the id-path twin of a name-kept search function (linda 2026-11-22)
 # P4.1 (nexus-p2m1x.35) redefines these views without their name arm, then drops the name columns with RESTRICT (linda 2026-11-22)
 _P41_REDEFINE_VIEWS = {"nexus.collection_vector_stats", "nexus.live_chunks"}
@@ -185,3 +185,47 @@ def test_after_p35b_a_form_a_object_reads_no_name_but_the_label_or_a_writers_sta
                   if r[5] == "A" and r[4] != "catalog_collections.name" and (r[0], r[1], r[4]) not in kept})
     assert not bad, f"form A objects still read a name column after P3.5b: {bad}"
     assert not any(r[0] == "trigger" for r in live), "the catalog-044 trigger still fires on a name column after P3.5b"
+
+
+_P35B_FILES = (_REPO / "service" / "src" / "main" / "resources" / "db" / "changelog" / "vectors-077-rdr229-p35b-readers-both.xml",
+               _REPO / "service" / "src" / "main" / "resources" / "db" / "changelog" / "vectors-078-rdr229-p35b-readers-continue.xml")
+
+
+def _redefined_by_p35b() -> set[tuple[str, str]]:
+    """(kind, object) of every function, view and trigger vectors-077 or vectors-078 creates or replaces, comments stripped."""
+    import re
+    out: set[tuple[str, str]] = set()
+    for f in _P35B_FILES:
+        text = re.sub(r"<!--.*?-->", "", f.read_text(), flags=re.S)
+        for m in re.finditer(r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(nexus\.\w+)\s*\(", text, re.I):
+            out.add(("function", m.group(1).lower()))
+        for m in re.finditer(r"CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+(nexus\.\w+)", text, re.I):
+            out.add(("view", m.group(1).lower()))
+        for m in re.finditer(r"CREATE\s+TRIGGER\s+(\w+)[^;]*?\bON\s+(nexus\.\w+)", text, re.I | re.S):
+            out.add(("trigger", f"{m.group(2).lower()}.{m.group(1).lower()}"))
+    return out
+
+
+def test_a_both_or_id_disposition_names_an_object_p35b_redefines():
+    """critique S4 (2026-11-23): 'both' and 'id' claim a redefinition, so the object must be created or replaced in
+    vectors-077/078; an object P3.5b leaves on its last definer (no match to redefine) is 'unchanged-fallback' with a reason."""
+    redefined = _redefined_by_p35b()
+    assert len(redefined) > 50, f"non-vacuity: only {len(redefined)} objects found in vectors-077/078"
+    claims = {(k, o) for (k, o, _c), (d, _r) in _dispositions().items() if d in ("both", "id")}
+    assert not sorted(claims - redefined), f"'both'/'id' on objects vectors-077/078 do not redefine: {sorted(claims - redefined)}"
+    kept = {(k, o) for (k, o, _c), (d, r) in _dispositions().items() if d == "unchanged-fallback"}
+    assert not sorted(kept & redefined), f"'unchanged-fallback' on objects vectors-077/078 do redefine: {sorted(kept & redefined)}"
+    assert all(r for (_k, _o, _c), (d, r) in _dispositions().items() if d == "unchanged-fallback"), "unchanged-fallback needs a reason"
+
+
+# critique S5 (2026-11-23): the live SQL objects that still read a collection name column after P3.5b (form B's name arm, the
+# name-kept search functions, writer stamp resolves, registry label reads). P4.1 removes the name columns, so it lowers this
+# to 0; any other change to the number is a reader added or removed and must be read, then the pin moved in the same commit.
+_LIVE_NAME_READERS_PIN = 129
+
+
+def test_the_live_name_readers_are_pinned_for_p41_to_lower():
+    live = _live_rows()
+    objects = {(r[0], r[1]) for r in live}
+    assert len(objects) == _LIVE_NAME_READERS_PIN, (
+        f"{len(objects)} live SQL objects read a collection name column (pin {_LIVE_NAME_READERS_PIN}); P4.1 lowers it to 0")
