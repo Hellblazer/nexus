@@ -284,9 +284,11 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
     }
 
     /**
-     * The adoption that outgrows its tight bound (about 2000 leaves in production; here a 150 ms bound and a held writer, so the statement timer
-     * fires inside the lock wait) is a transient: the move stays open, nothing fails, the retry is counted, and the recorded reason names the
-     * bound and the leaf count and says what to do, in the form the status shows.
+     * The adoption that outgrows its tight bound (about 2000 leaves in production) is a transient: the move stays open, nothing fails, the retry is
+     * counted, and the recorded reason names the bound and the leaf count and says what to do, in the form the status shows. The timeout is forced
+     * inside the on_complete, after the re-check: the registered text gets a 2 s sleep ahead of the parent ADD under a 1000 ms bound, which the
+     * re-check (a registry read) cannot reach, so the statement timer fires in the adoption's own statement and the reason is the adoption's, never the
+     * re-check's. (A lock wait cannot stand in for the slow ADD: the move's lock wait is half its bound, so a lock wait ends in 55P03 first.)
      */
     @Test
     void anAdoptionThatTimesOutUnderItsBoundRecordsTheBoundTheLeafCountAndTheRemedy() throws Exception {
@@ -294,14 +296,15 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
         registerSwaps();
         runSwaps(new VerifyingFinisher());
         validateEveryLeafByHand();
-        ctx().update(table("nexus", "data_moves")).set(DSL.field(DSL.name("statement_timeout_ms"), Integer.class), 150)
+        String text = onCompleteOf(Rdr229ChunksFk.ADOPT_LABEL);
+        String addStatement = "ALTER TABLE nexus.chunks ADD CONSTRAINT " + Rdr229ChunksFk.PARENT_CONSTRAINT;
+        assertThat(text).as("the parent ADD is in the registered text").contains(addStatement);
+        ctx().update(table("nexus", "data_moves"))
+            .set(DSL.field(DSL.name("statement_timeout_ms"), Integer.class), 1_000)
+            .set(DSL.field(DSL.name("on_complete"), String.class), text.replace(addStatement, "PERFORM pg_catalog.pg_sleep(2);\n    " + addStatement))
             .where(LABEL_F.eq(Rdr229ChunksFk.ADOPT_LABEL)).execute();
         pause("rdr229-%");
         resume(Rdr229ChunksFk.ADOPT_LABEL);
-        Connection writer = pg.createConnection("");
-        parked.add(writer);
-        writer.setAutoCommit(false);
-        MoveSql.runOnComplete(writer, "LOCK TABLE nexus." + quote(chunkLeaves().get(0)) + " IN ROW EXCLUSIVE MODE");
 
         productionWorker(new VerifyingFinisher()).runCycle();
 
@@ -310,11 +313,12 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
         assertThat(adopt.get("completed_at")).as("the move stays open").isNull();
         assertThat((Integer) adopt.get("transient_retries")).as("and the timeout counts toward the needs-an-operator threshold").isGreaterThanOrEqualTo(1);
         String reason = (String) adopt.get("last_transient");
-        assertThat(reason).as("the reason names the bound, the leaf count and the remedy")
-            .contains("adoption timed out at 150 ms over " + VerifyingFinisher.chunkLeafCount(ctx()) + " leaves")
-            .contains("raise statement_timeout_ms on " + Rdr229ChunksFk.ADOPT_LABEL + " for one attempt in a quiet window");
-        assertThat(MoveReasons.publicForm(reason)).as("and the status keeps it").contains("adoption timed out at 150 ms over");
-        assertThat(compositeOnId()).isEmpty();
+        assertThat(reason).as("the reason is the adoption's own, from its on_complete and not from the re-check, and names the bound, the leaf count and the remedy")
+            .contains("adoption timed out at 1000 ms over " + VerifyingFinisher.chunkLeafCount(ctx()) + " leaves")
+            .contains("raise statement_timeout_ms on " + Rdr229ChunksFk.ADOPT_LABEL + " for one attempt in a quiet window")
+            .doesNotContain("verification in the completion transaction");
+        assertThat(MoveReasons.publicForm(reason)).as("and the status keeps it").contains("adoption timed out at 1000 ms over");
+        assertThat(compositeOnId()).as("the ADD did not run to completion").isEmpty();
     }
 
     /**
