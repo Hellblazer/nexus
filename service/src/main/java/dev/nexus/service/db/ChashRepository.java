@@ -135,6 +135,19 @@ public final class ChashRepository {
     // ── lookup ─────────────────────────────────────────────────────────────────
 
     /**
+     * The lookup probe from gate 3, typed: the collections holding this chash as the registry's current label of each chunk's
+     * {@code collection_id}, joined on the id. Public so {@code ChashProbePlanShapeTest} EXPLAINs exactly the statement {@code lookup} runs
+     * from the latch, as it does {@link #PROBE_SQL} before it.
+     */
+    public static org.jooq.ResultQuery<?> idProbe(DSLContext ctx, String tenant, byte[] chash) {
+        return ctx.select(CATALOG_COLLECTIONS.NAME.as("collection"), CHUNKS.CREATED_AT)
+            .from(CHUNKS).join(CATALOG_COLLECTIONS)
+            .on(CATALOG_COLLECTIONS.TENANT_ID.eq(CHUNKS.TENANT_ID)
+                .and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(CHUNKS.COLLECTION_ID)))
+            .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.CHASH.eq(chash)));
+    }
+
+    /**
      * Return all {@code (collection, created_at)} rows for {@code chash} —
      * the collections whose chunk store actually holds this content.
      *
@@ -153,14 +166,7 @@ public final class ChashRepository {
         return tenantScope.withTenant(tenant, ctx -> {
             // RDR-229 P3.5c: from gate 3 the collection is the registry's label of the chunk's id (typed, joined on the id);
             // before it, the published probe over the name column.
-            var rows = ck().byId()
-                ? ctx.select(CATALOG_COLLECTIONS.NAME.as("collection"), CHUNKS.CREATED_AT)
-                     .from(CHUNKS).join(CATALOG_COLLECTIONS)
-                     .on(CATALOG_COLLECTIONS.TENANT_ID.eq(CHUNKS.TENANT_ID)
-                         .and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(CHUNKS.COLLECTION_ID)))
-                     .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.CHASH.eq(bytes)))
-                     .fetch()
-                : ctx.resultQuery(PROBE_SQL, bytes).fetch();
+            var rows = ck().byId() ? idProbe(ctx, tenant, bytes).fetch() : ctx.resultQuery(PROBE_SQL, bytes).fetch();
             List<Map<String, String>> result = new ArrayList<>(rows.size());
             for (var r : rows) {
                 OffsetDateTime ts = r.get("created_at", OffsetDateTime.class);
@@ -193,12 +199,14 @@ public final class ChashRepository {
     public Set<String> distinctCollections(String tenant) {
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(384);
         return tenantScope.withTenant(tenant, ctx -> {
-            var raw = ck().label(tenant, ch.collection(), CHUNKS.COLLECTION_ID);
-            var lbl = raw.as("collection");
-            return new HashSet<>(ctx.selectDistinct(lbl)
+            if (ck().byId()) {
+                // DISTINCT collection_id first, then each id's label once (not a correlated label per chunk row)
+                return new HashSet<>(CollectionKey.distinctLabels(ctx, tenant, ch.table(), ch.tenantId().eq(tenant), CHUNKS.COLLECTION_ID));
+            }
+            return new HashSet<>(ctx.selectDistinct(ch.collection())
                              .from(ch.table())
-                             .where(ch.tenantId().eq(tenant).and(raw.isNotNull()))
-                             .fetch(lbl));
+                             .where(ch.tenantId().eq(tenant))
+                             .fetch(ch.collection()));
         });
     }
 

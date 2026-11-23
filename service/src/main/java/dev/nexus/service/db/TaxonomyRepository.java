@@ -101,10 +101,11 @@ public final class TaxonomyRepository {
             TOPICS.CENTROID_HASH, TOPICS.DOC_COUNT, TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS, TOPICS.TERMS);
     }
 
-    private static final Field<?>[] META_NAME_KEY = {TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION};
-    private static final Field<?>[] META_ID_KEY = {TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION_ID};
-    private static final Field<?>[] TOPIC_NAME_KEY = {TOPICS.TENANT_ID, TOPICS.COLLECTION, TOPICS.LABEL};
-    private static final Field<?>[] TOPIC_ID_KEY = {TOPICS.TENANT_ID, TOPICS.COLLECTION_ID, TOPICS.LABEL};
+    // the conflict keys are ArbiterTwins' name and id columns for the table, not retyped here
+    private static final Field<?>[] META_NAME_KEY = CollectionKey.fields(TAXONOMY_META, TwinKeyUpsert.pair("taxonomy_meta").orElseThrow().nameKey());
+    private static final Field<?>[] META_ID_KEY = CollectionKey.fields(TAXONOMY_META, TwinKeyUpsert.pair("taxonomy_meta").orElseThrow().idKey());
+    private static final Field<?>[] TOPIC_NAME_KEY = CollectionKey.fields(TOPICS, TwinKeyUpsert.pair("topics").orElseThrow().nameKey());
+    private static final Field<?>[] TOPIC_ID_KEY = CollectionKey.fields(TOPICS, TwinKeyUpsert.pair("topics").orElseThrow().idKey());
 
     /**
      * One upsert on a table with a name key and its id twin ({@link TwinKeyUpsert}): the name key arbitrates before gate 3, the
@@ -479,7 +480,7 @@ public final class TaxonomyRepository {
      */
     public List<Map<String, Object>> getDocCountDrift(String tenant) {
         return tenantScope.withTenant(tenant, ctx ->
-            mapDriftRows(ctx.selectFrom(TOPICS_DOC_COUNT_DRIFT.call(tenant)).fetch()));
+            mapDriftRows(ctx, tenant, ctx.selectFrom(TOPICS_DOC_COUNT_DRIFT.call(tenant)).fetch()));
     }
 
     /**
@@ -494,7 +495,7 @@ public final class TaxonomyRepository {
      */
     public Map<String, Object> recountDocCount(String tenant, boolean dryRun) {
         return tenantScope.withTenant(tenant, ctx -> {
-            List<Map<String, Object>> rows = mapDriftRows(
+            List<Map<String, Object>> rows = mapDriftRows(ctx, tenant,
                 ctx.selectFrom(TOPICS_RECOUNT_DOC_COUNT.call(tenant, dryRun)).fetch());
             var out = new LinkedHashMap<String, Object>();
             out.put("dry_run", dryRun);
@@ -513,13 +514,23 @@ public final class TaxonomyRepository {
      *  the two generated jOOQ Table classes carry distinct Field identities
      *  despite the identical column names, so a single typed-Field helper
      *  cannot serve both without relying on jOOQ's by-name fallback). */
-    private static List<Map<String, Object>> mapDriftRows(org.jooq.Result<? extends org.jooq.Record> result) {
+    private List<Map<String, Object>> mapDriftRows(DSLContext ctx, String tenant, org.jooq.Result<? extends org.jooq.Record> result) {
+        // The functions return t.collection, the row's own name column, which a one-row rename leaves stale. From gate 3 the collection is
+        // the live registry label of the topic's id, read here by topic id, else the name the function returned (RDR-229 P3.5c).
+        var k = ck();
+        var lbl = k.label(tenant, TOPICS.COLLECTION, TOPICS.COLLECTION_ID);
+        Map<Long, String> labels = new HashMap<>();
+        if (k.byId() && !result.isEmpty()) {
+            var ids = result.getValues("topic_id", Long.class);
+            ctx.select(TOPICS.ID, lbl).from(TOPICS).where(TOPICS.ID.in(ids)).forEach(x -> labels.put(x.value1(), x.value2()));
+        }
         List<Map<String, Object>> rows = new ArrayList<>(result.size());
         for (org.jooq.Record rec : result) {
             var m = new LinkedHashMap<String, Object>();
             m.put("topic_id",     rec.get("topic_id", Long.class));
             m.put("label",        rec.get("label", String.class));
-            m.put("collection",   rec.get("collection", String.class));
+            String live = labels.get(rec.get("topic_id", Long.class));
+            m.put("collection",   live != null ? live : rec.get("collection", String.class));
             m.put("doc_count",    rec.get("doc_count", Integer.class));
             m.put("actual_count", rec.get("actual_count", Long.class));
             rows.add(Collections.unmodifiableMap(m));
@@ -542,7 +553,7 @@ public final class TaxonomyRepository {
             String collection = rows.get(0).get(lbl);
             // Assignments cascade via FK ON DELETE CASCADE
             ctx.deleteFrom(TOPICS).where(TOPICS.ID.eq(topicId)).execute();
-            return Optional.ofNullable(collection);
+            return Optional.of(collection == null ? "" : collection);
         });
     }
 
@@ -553,7 +564,8 @@ public final class TaxonomyRepository {
     public Optional<String> mergeTopics(String tenant, long sourceId, long targetId) {
         if (sourceId == targetId) return Optional.empty();
         return tenantScope.withTenant(tenant, ctx -> {
-            var lbl = ck().label(tenant, TOPICS.COLLECTION, TOPICS.COLLECTION_ID);
+            var k = ck();  // one reading of gate 3 for the whole merge
+            var lbl = k.label(tenant, TOPICS.COLLECTION, TOPICS.COLLECTION_ID);
             var rows = ctx.select(lbl)
                 .from(TOPICS)
                 .where(TOPICS.ID.eq(sourceId))
@@ -583,12 +595,12 @@ public final class TaxonomyRepository {
                         TOPIC_ASSIGNMENTS.ASSIGNED_BY,
                         TOPIC_ASSIGNMENTS.SIMILARITY,
                         TOPIC_ASSIGNMENTS.ASSIGNED_AT,
-                        ck().copyName(tenant, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID),
+                        k.copyName(tenant, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID),
                         // RDR-225: the moved row keeps the model of the chunk it points at.
                         TOPIC_ASSIGNMENTS.EMBEDDING_MODEL,
                         // RDR-229 P3.1 stage 2b: and the id of its source collection, resolved from the name (the
                         // moved row may itself be unstamped); from gate 3 the row's own id (P3.5c).
-                        ck().byId() ? TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID
+                        k.byId() ? TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID
                             : CollectionIds.idOf(TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION))
                     .from(TOPIC_ASSIGNMENTS)
                     .where(TOPIC_ASSIGNMENTS.TOPIC_ID.eq(sourceId)))
@@ -628,7 +640,7 @@ public final class TaxonomyRepository {
             // live assignment rows; the trigger is the sole writer.
             ctx.deleteFrom(TOPICS).where(TOPICS.ID.eq(sourceId)).execute();
 
-            return Optional.of(collection);
+            return Optional.of(collection == null ? "" : collection);
         });
     }
 
@@ -1859,12 +1871,14 @@ public final class TaxonomyRepository {
 
     /** Count distinct source_collections for projection rows (N_effective for ICF). */
     public int countDistinctSourceCollections(String tenant) {
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(countDistinct(srcKey()))
+        return tenantScope.withTenant(tenant, ctx -> {
+            final var sk = srcKey();  // one reading of gate 3 for the whole statement
+            return ctx.select(countDistinct(sk))
                .from(TOPIC_ASSIGNMENTS)
                .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
-                   .and(srcKey().isNotNull()))
-               .fetchOne(0, Integer.class));
+                   .and(sk.isNotNull()))
+               .fetchOne(0, Integer.class);
+        });
     }
 
     /**
@@ -1876,21 +1890,23 @@ public final class TaxonomyRepository {
      * retained as a DSL.field() cast fragment for the CAST expression per spec.
      */
     public List<Map<String, Object>> computeIcfRows(String tenant, int nEffective) {
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(
+        return tenantScope.withTenant(tenant, ctx -> {
+            final var sk = srcKey();  // one reading of gate 3 for the whole statement
+            return ctx.select(
                     TOPIC_ASSIGNMENTS.TOPIC_ID,
                     field("CAST({0} AS DOUBLE PRECISION)", Double.class, val(nEffective))
-                        .div(countDistinct(srcKey()))
+                        .div(countDistinct(sk))
                         .as("icf_raw"))
                .from(TOPIC_ASSIGNMENTS)
                .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
-                   .and(srcKey().isNotNull()))
+                   .and(sk.isNotNull()))
                .groupBy(TOPIC_ASSIGNMENTS.TOPIC_ID)
-               .having(countDistinct(srcKey()).gt(0))
+               .having(countDistinct(sk).gt(0))
                .fetch()
                .map(r -> Map.of(
                    "topic_id", r.get(TOPIC_ASSIGNMENTS.TOPIC_ID),
-                   "icf_raw",  r.get("icf_raw", Double.class))));
+                   "icf_raw",  r.get("icf_raw", Double.class)));
+        });
     }
 
     // ── Top topics / corpus evidence ───────────────────────────────────────────
@@ -2564,22 +2580,23 @@ public final class TaxonomyRepository {
      */
     public Map<String, Object> computeIcfMapAtomic(String tenant) {
         return tenantScope.withTenant(tenant, ctx -> {
-            int nEffective = ctx.select(countDistinct(srcKey()))
+            final var sk = srcKey();  // one reading of gate 3 for the whole method
+            int nEffective = ctx.select(countDistinct(sk))
                 .from(TOPIC_ASSIGNMENTS)
                 .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
-                    .and(srcKey().isNotNull()))
+                    .and(sk.isNotNull()))
                 .fetchOne(0, Integer.class);
 
             List<Map<String, Object>> rows = new ArrayList<>();
             if (nEffective >= 2) {
                 var icfRows = ctx.select(
                         TOPIC_ASSIGNMENTS.TOPIC_ID,
-                        countDistinct(srcKey()).as("df"))
+                        countDistinct(sk).as("df"))
                     .from(TOPIC_ASSIGNMENTS)
                     .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
-                        .and(srcKey().isNotNull()))
+                        .and(sk.isNotNull()))
                     .groupBy(TOPIC_ASSIGNMENTS.TOPIC_ID)
-                    .having(countDistinct(srcKey()).gt(0))
+                    .having(countDistinct(sk).gt(0))
                     .fetch();
                 for (var r : icfRows) {
                     var m = new LinkedHashMap<String, Object>();
@@ -2640,9 +2657,9 @@ public final class TaxonomyRepository {
                .from(TOPIC_ASSIGNMENTS)
                .join(TOPICS).on(TOPICS.ID.eq(TOPIC_ASSIGNMENTS.TOPIC_ID))
                .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
-                   .and(srcKey().isNotNull()))
+                   .and(ckey.key(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID).isNotNull()))
                .groupBy(TOPICS.ID, TOPICS.LABEL, ckey.key(TOPICS.COLLECTION, TOPICS.COLLECTION_ID))
-               .having(countDistinct(srcKey()).ge(minCollections))
+               .having(countDistinct(ckey.key(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID)).ge(minCollections))
                .orderBy(count().desc())
                .fetch();
 
@@ -2650,7 +2667,7 @@ public final class TaxonomyRepository {
             var allSources = ctx.select(TOPIC_ASSIGNMENTS.TOPIC_ID, srcLabel)
                 .from(TOPIC_ASSIGNMENTS)
                 .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
-                    .and(srcKey().isNotNull()))
+                    .and(ckey.key(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID).isNotNull()))
                 .orderBy(TOPIC_ASSIGNMENTS.TOPIC_ID, srcLabel)
                 .fetch();
 
@@ -2865,7 +2882,7 @@ public final class TaxonomyRepository {
                .join(ta2).on(ta.TOPIC_ID.eq(ta2.ID))
                .join(tb2).on(tb.TOPIC_ID.eq(tb2.ID))
                .where(ta.TOPIC_ID.lt(tb.TOPIC_ID)
-                   .and(ck().same(ta2.COLLECTION, ta2.COLLECTION_ID, tb2.COLLECTION, tb2.COLLECTION_ID).not()))
+                   .and(ck().differ(ta2.COLLECTION, ta2.COLLECTION_ID, tb2.COLLECTION, tb2.COLLECTION_ID)))
                .groupBy(
                    field("LEAST(a.topic_id, b.topic_id)", Long.class),
                    field("GREATEST(a.topic_id, b.topic_id)", Long.class))

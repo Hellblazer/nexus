@@ -306,6 +306,26 @@ def scan_java(p):
             add(f, line_of(code, pos), b[0], "collection", op, "helper")
         else:
             skipped_accessors[var] += 1
+    # r.getSourceCollection() / getTargetCollection() / getCollection() / getPhysicalCollection() / getSupersededBy() on a variable typed by a generated
+    # record class (ReembedJobsRecord r): the typed accessor of a name column, which the r.get(CONSTANT) rule never sees. A variable not typed by a
+    # record class in this file (a lambda parameter) is counted as a skipped accessor, as x.collection() is.
+    rec_binds = sorted((mm.start(), mm.group(2), re.sub(r"(?<!^)(?=[A-Z])", "_", mm.group(1)).lower())
+                       for mm in re.finditer(r"\b([A-Z]\w*)Record\s+(\w+)\b", m))
+    for mm in re.finditer(r"(?<![\w$.])([a-z_][A-Za-z0-9_]*)\.get(Collection|PhysicalCollection|SourceCollection|TargetCollection|SupersededBy)\(\)", m):
+        var, pos = mm.group(1), mm.start(1)
+        col = re.sub(r"(?<!^)(?=[A-Z])", "_", mm.group(2)).lower()
+        hit = None
+        for bp, bv, bt in rec_binds:
+            if bp > pos:
+                break
+            if bv == var:
+                hit = bt
+        if hit and col in LISTED.get(hit, ()):
+            op = op_of(m, calls, pos)
+            if op is not None:
+                add(f, line_of(code, pos), hit, col, "result" if op == "expr" else op, "record_getter")
+        else:
+            skipped_accessors["get:" + var] += 1
     # DSL.field("collection") / DSL.name("collection"), t.field("collection", String.class)
     for mm in re.finditer(r"(?:field|name)\(\s*(?:[^()\"]*,\s*)?(?:\"[^\"]*\"\s*,\s*)*\"(collection|physical_collection|source_collection|target_collection|superseded_by)\"", code):
         col, pos = mm.group(1), mm.start()

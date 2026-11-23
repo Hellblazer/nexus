@@ -11,18 +11,20 @@
 kind	object	name_column	disposition	reason
 java	db/AspectRepository.java document_aspects expr	collection	id	
 java	db/AspectRepository.java document_aspects select	collection	id	
-java	db/AspectRepository.java document_aspects where	collection	both	reads by id from gate 3; the rename arm (renameCollection / rename*Collection) still rewrites by the name it renames, which P3.7's one-row rename removes (a rename is refused from gate 3 until then)
+java	db/AspectRepository.java document_aspects where	collection	both	reads by id from gate 3; the rename arm (renameCollection / rename*Collection) still rewrites by the name it renames, which P3.7's one-row rename removes
 java	db/AspectRepository.java document_highlights expr	collection	both	the DO UPDATE writes the incoming row's name through to the name column (EXCLUDED.collection) beside the id it re-stamps (EX_HL_COLLECTION_ID); the name column is written until P4.1
 java	db/AspectRepository.java document_highlights select	collection	id	
-java	db/AspectRepository.java document_highlights where	collection	both	reads by id from gate 3; the rename arm (renameCollection / rename*Collection) still rewrites by the name it renames, which P3.7's one-row rename removes (a rename is refused from gate 3 until then)
+java	db/AspectRepository.java document_highlights where	collection	both	reads by id from gate 3; the rename arm (renameCollection / rename*Collection) still rewrites by the name it renames, which P3.7's one-row rename removes
 java	db/ChashRepository.java catalog_collections select	name	label-kept	the id arm of lookup reports the registry's current label of the chunk's collection_id: the display name, read from the registry row the id names
 java	db/ChashRepository.java catalog_collections where	name	label-kept	renameCollection resolves the user-supplied old and new labels to their registry rows (the embedding models), the rename arm's own name lookup
-java	db/ChashRepository.java catalog_document_chunks where	collection	both	reads by id from gate 3; the rename arm (renameCollection / rename*Collection) still rewrites by the name it renames, which P3.7's one-row rename removes (a rename is refused from gate 3 until then)
-java	db/ChashRepository.java chunks expr	collection	id	
+java	db/ChashRepository.java catalog_document_chunks where	collection	both	reads by id from gate 3; the rename arm (renameCollection / rename*Collection) still rewrites by the name it renames, which P3.7's one-row rename removes
+java	db/ChashRepository.java chunks result	collection	id	
 java	db/ChashRepository.java chunks select	collection	id	the published name probe (PROBE_SQL) stays the name arm; from gate 3 a typed join on collection_id to the registry reports the current label
-java	db/ChashRepository.java chunks where	collection	both	reads by id from gate 3; the rename arm (renameCollection / rename*Collection) still rewrites by the name it renames, which P3.7's one-row rename removes (a rename is refused from gate 3 until then)
+java	db/ChashRepository.java chunks where	collection	both	reads by id from gate 3; the rename arm (renameCollection / rename*Collection) still rewrites by the name it renames, which P3.7's one-row rename removes
 java	db/ReembedJobRepository.java reembed_jobs expr	source_collection	id	
 java	db/ReembedJobRepository.java reembed_jobs expr	target_collection	id	
+java	db/ReembedJobRepository.java reembed_jobs result	source_collection	id	Job's source and target: the live registry label of the row's id, else the stored name (history with no registry FK, linda 2026-11-23); the stored name is the fallback only for a gone collection
+java	db/ReembedJobRepository.java reembed_jobs result	target_collection	id	Job's source and target: the live registry label of the row's id, else the stored name (history with no registry FK, linda 2026-11-23); the stored name is the fallback only for a gone collection
 java	db/ReembedJobRepository.java reembed_jobs select	source_collection	id	
 java	db/ReembedJobRepository.java reembed_jobs select	target_collection	id	
 java	db/ReembedJobRepository.java reembed_jobs where	source_collection	id	
@@ -37,22 +39,28 @@ java	db/ReembedSourceReader.java document_aspects expr	collection	id
 java	db/ReembedSourceReader.java document_highlights expr	collection	id	
 java	db/ReembedSourceReader.java topic_assignments expr	source_collection	id	
 java	db/ReembedSourceReader.java topics where	collection	id	
+java	db/RemapRepository.java catalog_collections expr	name	id	
 java	db/RemapRepository.java chash_remap expr	source_collection	id	
 java	db/RemapRepository.java chash_remap expr	target_collection	id	
-java	db/RemapRepository.java chash_remap select	target_collection	id	
+java	db/RemapRepository.java chash_remap order_by	source_collection	id	
+java	db/RemapRepository.java chash_remap result	source_collection	id	
+java	db/RemapRepository.java chash_remap select	source_collection	id	the target as a label: the live registry label of its id, else the stored name for a gone target (history, linda 2026-11-23)
 java	db/TaxonomyRepository.java catalog_collections join_on	name	id	
 java	db/TaxonomyRepository.java catalog_collections where	superseded_by	id	
 java	db/TaxonomyRepository.java chunks where	collection	id	
 java	db/TaxonomyRepository.java taxonomy_meta expr	collection	id	
 java	db/TaxonomyRepository.java taxonomy_meta select	collection	id	
-java	db/TaxonomyRepository.java taxonomy_meta where	collection	both	reads by id from gate 3; the rename arm (renameCollection / rename*Collection) still rewrites by the name it renames, which P3.7's one-row rename removes (a rename is refused from gate 3 until then)
+java	db/TaxonomyRepository.java taxonomy_meta where	collection	both	reads by id from gate 3; the rename arm (renameCollection / rename*Collection) still rewrites by the name it renames, which P3.7's one-row rename removes
 java	db/TaxonomyRepository.java topic_assignments expr	source_collection	id	
 java	db/TaxonomyRepository.java topic_assignments select	source_collection	id	
-java	db/TaxonomyRepository.java topic_assignments where	source_collection	both	reads by id from gate 3; the rename arm (renameCollection / rename*Collection) still rewrites by the name it renames, which P3.7's one-row rename removes (a rename is refused from gate 3 until then)
+java	db/TaxonomyRepository.java topic_assignments where	source_collection	both	reads by id from gate 3; the rename arm (renameCollection / rename*Collection) still rewrites by the name it renames, which P3.7's one-row rename removes
 java	db/TaxonomyRepository.java topics expr	collection	id	
 java	db/TaxonomyRepository.java topics join_on	collection	id	
 java	db/TaxonomyRepository.java topics select	collection	id	
-java	db/TaxonomyRepository.java topics where	collection	both	reads by id from gate 3; the rename arm (renameCollection / rename*Collection) still rewrites by the name it renames, which P3.7's one-row rename removes (a rename is refused from gate 3 until then)
-java	vectors/ReaperRepository.java catalog_collections select	name	id	
-java	vectors/ReaperRepository.java catalog_collections where	name	id	
+java	db/TaxonomyRepository.java topics where	collection	both	reads by id from gate 3; the rename arm (renameCollection / rename*Collection) still rewrites by the name it renames, which P3.7's one-row rename removes
+java	vectors/ReaperRepository.java catalog_collections select	name	label-kept	lifecycleStates keys the registry's lifecycle by label: the registry's own name column is the key the reaper looks its collections up by
+java	vectors/ReaperRepository.java catalog_collections where	name	label-kept	resolves the quarantine collection's label and the origin label a chunk's metadata carries (origin_collection, a label written at move time) to their registry rows
 java	vectors/ReaperRepository.java chunks expr	collection	id	
+java	vectors/ReaperRepository.java chunks order_by	collection	id	
+java	vectors/ReaperRepository.java chunks result	collection	id	
+java	vectors/ReaperRepository.java chunks select	collection	id	
