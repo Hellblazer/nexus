@@ -5,6 +5,7 @@ package dev.nexus.service;
 import dev.nexus.service.CollectionRouteFixture.Resp;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
+import dev.nexus.service.db.RenameGuard;
 import dev.nexus.service.db.CollectionRefusals;
 import dev.nexus.service.db.CollectionRetiredIdException;
 import dev.nexus.service.db.TenantScope;
@@ -21,6 +22,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static dev.nexus.service.CollectionRouteFixture.json;
 import static dev.nexus.service.CollectionRouteFixture.label;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -31,6 +33,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * earlier read; here the label is freed and registered again as a NEW row (a new id) in the gap, and a verb that went on by the label
  * would retire, rename or delete the new row's collection. Each verb answers 404 {@code unknown_collection_id} for the id it was
  * asked about and leaves the new holder of the label as it was.
+ *
+ * <p>A supersede that names its SUCCESSOR by id ({@code superseded_by_id}) reads and locks the successor by that id in the same
+ * ordered statement as the source (B3): the successor's id freed and its label taken again, retired, or bearing another label is
+ * refused, and no tombstone points at the label's later holder. A successor named by label is locked and read by that label, and a
+ * test pins it. Supersede and rename also answer 409 for a source retired in the gap (the {@code beforeTransactionRead} seam, which
+ * the verb runs just before its first by-id read, the ordered lock).
  *
  * <p>The supersede and the rename use the route boundary's {@code afterResolve} seam: the hook runs after the id is resolved and
  * before the handler, so the order is fixed and no timing is involved. The delete cannot: its route asks a verdict (a read of the
@@ -88,6 +96,16 @@ class CollectionVerbsByIdGapTest {
                     deleteStatus.set(fx.post(DELETE, "{\"name\":" + json(a) + "}").status());
                     fx.register(a);
                 });
+            }
+        };
+    }
+
+    /** What the hook does in the gap, once: retires {@code victim}'s row by superseding it to {@code successor} (both by label). */
+    private Runnable retireInTheGap(String victim, String successor, AtomicInteger fired, AtomicInteger status) {
+        return () -> {
+            if (fired.getAndIncrement() == 0) {   // the supersede below passes through the boundary too: only the first call acts
+                elsewhere(() -> status.set(fx.post("/v1/catalog/collections/supersede",
+                    "{\"name\":" + json(victim) + ",\"superseded_by\":" + json(successor) + "}").status()));
             }
         };
     }
@@ -164,6 +182,189 @@ class CollectionVerbsByIdGapTest {
         assertThat(fx.supersededBy(c)).isEqualTo(renamed);
     }
 
+    // ---- supersede: the SUCCESSOR named by id (B3) ----------------------------------------------------------------------------------
+
+    /**
+     * A supersede that names its successor by {@code superseded_by_id} reads and locks the successor by that id in the verb's own
+     * transaction. The successor's id is freed and its label registered again between the route boundary and the verb: the handler's
+     * pre-reads (by label) find the new holder and go on, and only the by-id read of the successor refuses. No tombstone points at the
+     * new holder.
+     */
+    @Test
+    void aSupersedeByASuccessorIdFreedBetweenTheBoundaryAndTheHandlerIsRefused_andNoTombstonePointsAtTheNewHolder() {
+        String a = registered("succ-gone-a");
+        String b = registered("succ-gone-b");
+        long x = fx.idOf(a);
+        long y = fx.idOf(b);
+        AtomicInteger fired = new AtomicInteger();
+        AtomicInteger deleteStatus = new AtomicInteger();
+        fx.service.collectionSelectorFilter().testHooks(freeTheIdAndTakeTheLabel(b, fired, deleteStatus), null, null, null);
+        Resp r;
+        try {
+            r = fx.post("/v1/catalog/collections/supersede", "{\"collection_id\":" + x + ",\"superseded_by_id\":" + y + "}");
+        } finally {
+            noHooks();
+        }
+
+        assertThat(deleteStatus.get()).as("setup: the hook freed the successor's id").isEqualTo(200);
+        Long z = fx.idOf(b);
+        assertThat(z).as("setup: the successor's label is now another row's").isNotNull().isNotEqualTo(y);
+        assertRefusedAsUnknownId(r, y);
+        assertThat(fx.supersededBy(a)).as("the source was not retired, so no tombstone points at the new holder").isEmpty();
+        assertThat(fx.idOf(a)).as("and it is the row it was").isEqualTo(x);
+        assertThat(fx.supersededBy(b)).as("the new holder of the successor's label is as it was").isEmpty();
+    }
+
+    /** The same, with the source named by label: only the successor's slot carries an id. */
+    @Test
+    void aSupersedeByLabelOfASourceWhoseSuccessorIdIsFreedInTheGapIsRefusedToo() {
+        String a = registered("succ-gone-label-a");
+        String b = registered("succ-gone-label-b");
+        long y = fx.idOf(b);
+        AtomicInteger fired = new AtomicInteger();
+        AtomicInteger deleteStatus = new AtomicInteger();
+        fx.service.collectionSelectorFilter().testHooks(freeTheIdAndTakeTheLabel(b, fired, deleteStatus), null, null, null);
+        Resp r;
+        try {
+            r = fx.post("/v1/catalog/collections/supersede", "{\"name\":" + json(a) + ",\"superseded_by_id\":" + y + "}");
+        } finally {
+            noHooks();
+        }
+
+        assertThat(deleteStatus.get()).as("setup: the hook freed the successor's id").isEqualTo(200);
+        assertRefusedAsUnknownId(r, y);
+        assertThat(fx.supersededBy(a)).as("no tombstone points at the new holder").isEmpty();
+    }
+
+    /** A successor retired between the handler's pre-reads and the verb's lock answers 409 collection_superseded, naming ITS successor. */
+    @Test
+    void aSupersedeByASuccessorIdRetiredInTheGapIsRefused409_andNothingIsWritten() {
+        String a = registered("succ-retired-a");
+        String b = registered("succ-retired-b");
+        String c = registered("succ-retired-c");
+        long y = fx.idOf(b);
+        AtomicInteger fired = new AtomicInteger();
+        AtomicInteger retireStatus = new AtomicInteger();
+        fx.service.collectionSelectorFilter().testHooks(null, retireInTheGap(b, c, fired, retireStatus), null, null);
+        Resp r;
+        try {
+            r = fx.post("/v1/catalog/collections/supersede", "{\"name\":" + json(a) + ",\"superseded_by_id\":" + y + "}");
+        } finally {
+            noHooks();
+        }
+
+        assertThat(retireStatus.get()).as("setup: the hook retired the successor").isEqualTo(200);
+        assertThat(r.status()).as(r.body()).isEqualTo(409);
+        assertThat(r.reason()).isEqualTo("collection_superseded");
+        assertThat(r.json().path("collection_id").asLong(-1)).isEqualTo(y);
+        assertThat(r.json().path("superseded_by").asText()).isEqualTo(c);
+        assertThat(fx.supersededBy(a)).as("the source was not retired").isEmpty();
+    }
+
+    /**
+     * A successor named by LABEL is locked and read by that label, in the verb's transaction: a label freed and taken again in the gap
+     * is followed to its current holder, which is what a request by label means. Pins the by-label form against a change that gives the
+     * successor an id it was never sent.
+     */
+    @Test
+    void aSupersedeByASuccessorLabelFollowsTheLabelToItsCurrentHolder() {
+        String a = registered("succ-label-a");
+        String b = registered("succ-label-b");
+        long x = fx.idOf(a);
+        long y = fx.idOf(b);
+        AtomicInteger fired = new AtomicInteger();
+        AtomicInteger deleteStatus = new AtomicInteger();
+        fx.service.collectionSelectorFilter().testHooks(freeTheIdAndTakeTheLabel(b, fired, deleteStatus), null, null, null);
+        Resp r;
+        try {
+            r = fx.post("/v1/catalog/collections/supersede", "{\"collection_id\":" + x + ",\"superseded_by\":" + json(b) + "}");
+        } finally {
+            noHooks();
+        }
+
+        assertThat(deleteStatus.get()).as("setup: the hook freed the label's first row").isEqualTo(200);
+        long z = fx.idOf(b);
+        assertThat(z).as("setup: the label is now another row's").isNotEqualTo(y);
+        assertThat(r.status()).as(r.body()).isEqualTo(200);
+        assertThat(fx.supersededBy(a)).as("the tombstone names the label").isEqualTo(b);
+        Long pointsAt = fx.asSuperuser(ctx -> ctx.select(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID).from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(fx.tenant)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(x))
+            .fetchOne(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID));
+        assertThat(pointsAt).as("and the id of the label's current holder, locked by that label").isEqualTo(z);
+    }
+
+    /**
+     * A successor id whose row bears another label than the one the verb was given is refused 409 collection_id_mismatch (the id and the
+     * label disagree), and nothing is written: no tombstone carries a label its id's row does not bear. Direct, because no request can
+     * make them disagree while the one-row rename is fail-closed.
+     */
+    @Test
+    void aSupersedeWhoseSuccessorIdBearsAnotherLabelIsRefusedAsAMismatch_andNothingIsWritten() {
+        String a = registered("succ-mismatch-a");
+        String b = registered("succ-mismatch-b");
+        long y = fx.idOf(b);
+        CatalogRepository repo = new CatalogRepository(new TenantScope(fx.svcDs));
+
+        assertThatThrownBy(() -> repo.supersedeCollection(fx.tenant, a, null, "some-other-label", y, ""))
+            .isInstanceOfSatisfying(dev.nexus.service.db.CollectionIdMismatchException.class, e -> {
+                assertThat(e.labelDisagreement()).isTrue();
+                assertThat(e.requestedLabel()).isEqualTo("some-other-label");
+                assertThat(e.currentLabel()).isEqualTo(b);
+            });
+
+        assertThat(fx.supersededBy(a)).as("the source was not retired").isEmpty();
+    }
+
+    // ---- retired between the handler's reads and the verb's lock (code 6) -----------------------------------------------------------
+
+    @Test
+    void aSupersedeByAnIdRetiredInTheGapAnswers409CollectionSuperseded_andTheNewTargetIsNotApplied() {
+        String a = registered("retired-sup-a");
+        String b = registered("retired-sup-b");
+        String c = registered("retired-sup-c");
+        long x = fx.idOf(a);
+        AtomicInteger fired = new AtomicInteger();
+        AtomicInteger retireStatus = new AtomicInteger();
+        fx.service.collectionSelectorFilter().testHooks(null, retireInTheGap(a, c, fired, retireStatus), null, null);
+        Resp r;
+        try {
+            r = fx.post("/v1/catalog/collections/supersede", "{\"collection_id\":" + x + ",\"superseded_by\":" + json(b) + "}");
+        } finally {
+            noHooks();
+        }
+
+        assertThat(retireStatus.get()).as("setup: the hook retired the source").isEqualTo(200);
+        assertThat(r.status()).as(r.body()).isEqualTo(409);
+        assertThat(r.reason()).isEqualTo("collection_superseded");
+        assertThat(r.json().path("collection_id").asLong(-1)).isEqualTo(x);
+        assertThat(r.json().path("superseded_by").asText()).as("it names the row's own successor, not the one asked for").isEqualTo(c);
+        assertThat(fx.supersededBy(a)).as("the tombstone is the hook's").isEqualTo(c);
+    }
+
+    @Test
+    void aRenameByAnIdRetiredInTheGapAnswers409CollectionSuperseded_andNothingIsRegisteredUnderTheNewName() {
+        String a = registered("retired-ren-a");
+        String c = registered("retired-ren-c");
+        String target = label("verbgap-retired-ren-target-" + (n++));
+        long x = fx.idOf(a);
+        AtomicInteger fired = new AtomicInteger();
+        AtomicInteger retireStatus = new AtomicInteger();
+        fx.service.collectionSelectorFilter().testHooks(null, retireInTheGap(a, c, fired, retireStatus), null, null);
+        Resp r;
+        try {
+            r = fx.post("/v1/catalog/collections/rename", "{\"collection_id\":" + x + ",\"new_name\":" + json(target) + "}");
+        } finally {
+            noHooks();
+        }
+
+        assertThat(retireStatus.get()).as("setup: the hook retired the source").isEqualTo(200);
+        assertThat(r.status()).as(r.body()).isEqualTo(409);
+        assertThat(r.reason()).isEqualTo("collection_superseded");
+        assertThat(r.json().path("collection_id").asLong(-1)).isEqualTo(x);
+        assertThat(fx.exists(target)).as("nothing was registered under the new name").isFalse();
+        assertThat(fx.supersededBy(a)).as("the tombstone is the hook's").isEqualTo(c);
+    }
+
     // ---- rename ---------------------------------------------------------------------------------------------------------------------
 
     /**
@@ -215,6 +416,28 @@ class CollectionVerbsByIdGapTest {
 
         assertThatThrownBy(() -> repo.deleteCollectionById(fx.tenant, a, x, false))
             .as("a delete by an id with no row")
+            .isInstanceOf(UnknownCollectionIdException.class)
+            .extracting(e -> ((UnknownCollectionIdException) e).collectionId()).isEqualTo(x);
+
+        assertThat(fx.idOf(a)).as("the new holder's row is still there under its own id").isEqualTo(z);
+        assertThat(chunksOf(a, hex)).as("and so is its content").isEqualTo(1);
+    }
+
+    /** From gate 3 the purge is by id, so the old code purged nothing and answered 200 for a freed id: the refusal is what changed. */
+    @Test
+    void fromGate3ADeleteByAnIdFreedBeforeThePurgeIsRefused_andTheNewHolderOfTheLabelKeepsItsContent() {
+        String a = registered("delete-g3-a");
+        long x = fx.idOf(a);
+        assertThat(fx.post(DELETE, "{\"name\":" + json(a) + "}").status()).as("setup: the id is freed").isEqualTo(200);
+        fx.register(a);
+        String hex = Chash.ofText(a + "/g3-new-holder-chunk").toHex();
+        seedChunk(a, hex);
+        long z = fx.idOf(a);
+        assertThat(z).as("setup: the label is another row's").isNotEqualTo(x);
+        CatalogRepository repo = new CatalogRepository(new TenantScope(fx.svcDs), () -> true, RenameGuard.open());
+
+        assertThatThrownBy(() -> repo.deleteCollectionById(fx.tenant, a, x, false))
+            .as("a delete by an id with no row, gate 3 holding")
             .isInstanceOf(UnknownCollectionIdException.class)
             .extracting(e -> ((UnknownCollectionIdException) e).collectionId()).isEqualTo(x);
 

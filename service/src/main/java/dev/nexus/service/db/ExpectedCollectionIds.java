@@ -37,7 +37,7 @@ import java.util.TreeSet;
  *
  * <p><b>Consumption.</b> A named id is <i>consumed</i> only by one of the in-transaction reads above on the write's own context,
  * never by an outside-a-transaction lookup. After the handler the filter reports a named id of a write route that was not
- * consumed ({@link #unconsumed()}): a write that went on by label. With the census on ({@link #setCensus}, a test seam) it also
+ * consumed ({@link #unconsumed()}): a write that went on by label. The retiring verbs consume theirs in {@link CollectionRefusals#requireSourceById}. With the census on ({@link #setCensus}, a test seam) it also
  * reports, per transaction, a transaction that wrote and read none of the named ids ({@link #censusFindings()}): consumption by
  * the request is not consumption by every write transaction of it. A transaction is told by its jOOQ configuration, which every
  * context derived from the transaction's own shares. A history write (a log row, never a decision) does not read the id and

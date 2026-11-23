@@ -64,8 +64,21 @@ public final class CollectionTombstones {
      * ({@link CollectionRefusals#requireSourceById}, a plain second {@code FOR UPDATE} on a row it holds) and refuses.
      */
     static void lockRows(DSLContext ctx, String tenant, long sourceId, String... names) {
-        lockRowsWhere(ctx, tenant, CATALOG_COLLECTIONS.COLLECTION_ID.eq(sourceId).or(CATALOG_COLLECTIONS.NAME.in(names)),
-            "#" + sourceId + (names.length == 0 ? "" : "," + String.join(",", names)));
+        lockRows(ctx, tenant, List.of(sourceId), names);
+    }
+
+    /**
+     * {@link #lockRows(DSLContext, String, long, String...)} for several named ids: the rows of {@code ids} and of {@code names}, in
+     * the one ordered statement. A supersede that names its successor by id takes the successor's row here, beside the source's, so the
+     * successor is locked by the id the request named and never through whichever row holds its label now.
+     */
+    static void lockRows(DSLContext ctx, String tenant, List<Long> ids, String... names) {
+        // the seam of a request's by-id read, just before the transaction's first one (a no-op in production): the verb's by-id read is
+        // this statement and the requireSourceById after it
+        ExpectedCollectionIds.beforeTransactionRead();
+        lockRowsWhere(ctx, tenant, CATALOG_COLLECTIONS.COLLECTION_ID.in(ids).or(CATALOG_COLLECTIONS.NAME.in(names)),
+            ids.stream().map(i -> "#" + i).collect(java.util.stream.Collectors.joining(","))
+                + (names.length == 0 ? "" : "," + String.join(",", names)));
     }
 
     private static void lockRowsWhere(DSLContext ctx, String tenant, org.jooq.Condition which, String described) {
@@ -113,17 +126,43 @@ public final class CollectionTombstones {
      */
     static int supersede(DSLContext ctx, String tenant, String name, Long requestedSourceId, String supersededBy,
                          Field<OffsetDateTime> stampedAt, Gate3 gate3) {
+        return supersede(ctx, tenant, name, requestedSourceId, supersededBy, null, stampedAt, gate3);
+    }
+
+    /**
+     * {@link #supersede(DSLContext, String, String, Long, String, Field, Gate3)} for a request that also named the SUCCESSOR by
+     * {@code collection_id} ({@code requestedSuccessorId}, null when it was named by label): the successor's row is locked in the same
+     * ordered statement as the source's and read by that id, and an id that is gone (404 {@code unknown_collection_id}), retired (409
+     * {@code collection_superseded}) or no longer bears {@code supersededBy} (409 {@code collection_id_mismatch}) is refused before
+     * anything is written, so the tombstone points at the row of the id the request named and never at a later holder of its label.
+     * A successor named by label is locked and read by that label, in this transaction.
+     */
+    static int supersede(DSLContext ctx, String tenant, String name, Long requestedSourceId, String supersededBy,
+                         Long requestedSuccessorId, Field<OffsetDateTime> stampedAt, Gate3 gate3) {
         // The canonical lock order (RenameGuard#runRename), steps 1 and 3: this verb takes no sweep gate. The successor's row too, so a
         // delete of the successor between the target check and the UPDATE cannot leave the CHECK a successor that is gone (23514).
         RenameLatchLock.shared(ctx);
-        if (requestedSourceId == null) {
+        if (requestedSourceId == null && requestedSuccessorId == null) {
             lockRows(ctx, tenant, name, supersededBy);
         } else {
-            lockRows(ctx, tenant, requestedSourceId, name, supersededBy);
+            List<Long> ids = new java.util.ArrayList<>(2);
+            if (requestedSourceId != null) ids.add(requestedSourceId);
+            if (requestedSuccessorId != null) ids.add(requestedSuccessorId);
+            // a successor named by id is locked by that id; the label's holder is not locked for it
+            lockRows(ctx, tenant, ids, requestedSuccessorId != null ? new String[] {name} : new String[] {name, supersededBy});
+        }
+        if (requestedSourceId != null) {
             CollectionRefusals.requireSourceById(ctx, tenant, requestedSourceId, name);
         }
-        CollectionIds.require(ctx, tenant, supersededBy);
-        return casSupersede(ctx, tenant, name, supersededBy, CollectionIds.idOf(tenant, supersededBy), stampedAt, gate3);
+        Field<Long> successor;
+        if (requestedSuccessorId != null) {
+            CollectionRefusals.requireSourceById(ctx, tenant, requestedSuccessorId, supersededBy);
+            successor = DSL.val(requestedSuccessorId);
+        } else {
+            CollectionIds.require(ctx, tenant, supersededBy);
+            successor = CollectionIds.idOf(tenant, supersededBy);
+        }
+        return casSupersede(ctx, tenant, name, requestedSourceId, supersededBy, successor, stampedAt, gate3);
     }
 
     /**
@@ -143,11 +182,21 @@ public final class CollectionTombstones {
      * @return the number of rows updated (0 means no {@code (tenant, fromName)} row, or a different target already set)
      */
     static int supersede(DSLContext ctx, String tenant, String fromName, String toName, long toId, Gate3 gate3) {
-        return casSupersede(ctx, tenant, fromName, toName, DSL.val(toId), DSL.currentOffsetDateTime(), gate3);
+        return supersede(ctx, tenant, fromName, null, toName, toId, gate3);
     }
 
-    private static int casSupersede(DSLContext ctx, String tenant, String name, String supersededBy, Field<Long> successorId,
-                                    Field<OffsetDateTime> stampedAt, Gate3 gate3) {
+    /**
+     * {@link #supersede(DSLContext, String, String, String, long, Gate3)} for a rename that named its source by {@code collection_id}
+     * ({@code requestedSourceId}, null for a rename by label): the retire is scoped to that row. A label can carry two registry rows
+     * (the {@code (tenant, name, embedding_model)} key allows it until P4.1), and a by-id verb that passed
+     * {@link CollectionRefusals#requireSourceById} must not retire the other one.
+     */
+    static int supersede(DSLContext ctx, String tenant, String fromName, Long requestedSourceId, String toName, long toId, Gate3 gate3) {
+        return casSupersede(ctx, tenant, fromName, requestedSourceId, toName, DSL.val(toId), DSL.currentOffsetDateTime(), gate3);
+    }
+
+    private static int casSupersede(DSLContext ctx, String tenant, String name, Long sourceId, String supersededBy,
+                                    Field<Long> successorId, Field<OffsetDateTime> stampedAt, Gate3 gate3) {
         // RDR-229 P3.5c: the row is the caller's label (the registry name stays); "live" and "already this target" read the
         // id from gate 3. The name arm of a write (the SET) is the dual write's, not a read.
         Condition live = CollectionIdReads.live(gate3, CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.SUPERSEDED_BY_ID);
@@ -164,6 +213,9 @@ public final class CollectionTombstones {
                    .otherwise(CATALOG_COLLECTIONS.SUPERSEDED_AT))
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
                 .and(CATALOG_COLLECTIONS.NAME.eq(name))
+                // a request by id retires the row of that id and no other row that bears the label (row 16, code 5); a request by label
+                // relies on the registry's (tenant, name) primary key, which makes the label one row until P4.1 moves it
+                .and(sourceId == null ? DSL.trueCondition() : CATALOG_COLLECTIONS.COLLECTION_ID.eq(sourceId))
                 // nexus-cecqy / nexus-0svvu / nexus-2sovp: LOAD-BEARING, do not weaken or remove this conjunct.
                 // It is the one source of the DIFFERENT-target refusal: the loser of a concurrent supersede to
                 // another target matches zero rows, and renameCollectionTxn's emptiness/identity asymmetry
@@ -278,6 +330,10 @@ public final class CollectionTombstones {
      * <p>The rows of {@code names} are deleted in one statement, so a chain of tombstones that all go (A names B names
      * C) needs no leaf-first order. A tombstone that holds nothing is the caller's to list in {@code names}
      * (nexus-s80u9); one that holds content stays and is repaired here.
+     *
+     * <p>Keyed on {@code (tenant, name)}: the registry's primary key makes a name one row today, so the delete and the repair act on the
+     * row the caller locked. When P4.1 moves the key a label can name two rows, and a verb that passed
+     * {@link CollectionRefusals#requireSourceById} must use {@link #deleteRegistryRowById} instead of this.
      *
      * @return the number of registry rows deleted
      */

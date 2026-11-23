@@ -828,7 +828,7 @@ public final class CollectionRegistry {
     }
 
     /** The {@link CollectionRow} of one registry record, with the model's dimension where the row's own is NULL. */
-    private static CollectionRow rowOf(Record r, Field<Integer> modelDimension, String tenant) {
+    static CollectionRow rowOf(Record r, Field<Integer> modelDimension, String tenant) {
         String label = r.get(CATALOG_COLLECTIONS.NAME);
         // RDR-204 Phase 2 follow-up (bead nexus-ft04v.16, hygiene-002 finding):
         // catalog_collections.dimension is NULL BY DESIGN for a walked zero-chunk row
@@ -902,6 +902,22 @@ public final class CollectionRegistry {
      */
     public static void evict(String tenant, String collection) {
         SHARED.evictLabel(tenant, collection);
+    }
+
+    /**
+     * Row 15 addendum: runs {@code transaction}; when it throws and {@code evict} holds, the tenant's cached registry rows go before the
+     * exception does. A COMMIT that reached the caller as an exception may still have been applied, and a sweep that threw has no list of
+     * the rows it changed, so the tenant's cache is emptied (always safe: the next read refills it).
+     */
+    public static <T> T evictingTenantIfItThrows(String tenant, boolean evict, java.util.function.Supplier<T> transaction) {
+        try {
+            return transaction.get();
+        } catch (RuntimeException | Error e) {
+            if (evict) {
+                shared().evictTenant(tenant);
+            }
+            throw e;
+        }
     }
 
     /**

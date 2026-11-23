@@ -87,7 +87,7 @@ final class CollectionRename {
         }
         recheckAfterLock(ctx, tenant, oldName, newName, newContentType, newOwnerId, own, source);
         long successorId = successorId(ctx, tenant, newName);
-        int retired = CollectionTombstones.supersede(ctx, tenant, oldName, newName, successorId, gate3);
+        int retired = CollectionTombstones.supersede(ctx, tenant, oldName, requestedSourceId, newName, successorId, gate3);
         if (retired == 0 && own != null) {
             // the CAS matched no row of an X that exists: another writer retired it for a third target while this rename ran
             throw new CatalogRepository.CollectionMergeRefused("renaming " + oldName + " to " + newName + ": " + oldName

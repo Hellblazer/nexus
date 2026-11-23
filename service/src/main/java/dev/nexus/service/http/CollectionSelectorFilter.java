@@ -97,6 +97,9 @@ public final class CollectionSelectorFilter extends Filter {
     /** The id the filter resolved on the delete route, a JSON integer in the body; never accepted from a client. */
     static final String RESOLVED_ID = "resolved_id";
 
+    /** The id the filter resolved a supersede's {@code superseded_by_id} to, in the body like {@link #RESOLVED_ID}; never accepted from a client. */
+    static final String RESOLVED_SUCCESSOR_ID = "resolved_successor_id";
+
     /** An id has at most 18 decimal digits, in a query string and in a body alike (the same bound, so both answer 400 above it). */
     private static final Pattern DECIMAL = Pattern.compile("-?[0-9]{1,18}");
     private static final long MAX_ID = 999_999_999_999_999_999L;
@@ -468,7 +471,7 @@ public final class CollectionSelectorFilter extends Filter {
         if (!(root instanceof ObjectNode body)) {
             return in;
         }
-        boolean changed = route.passesResolvedId() && body.remove(RESOLVED_ID) != null;
+        boolean changed = route.passesResolvedId() && (body.remove(RESOLVED_ID) != null | body.remove(RESOLVED_SUCCESSOR_ID) != null);
         for (CollectionSelectors.Slot slot : route.slots()) {
             if (slot.nested()) {
                 if (body.get(slot.nestedIn()) instanceof ArrayNode elements) {
@@ -516,7 +519,7 @@ public final class CollectionSelectorFilter extends Filter {
                         throw bad(name + " must be given once");
                     }
                     hit = true;
-                } else if (route.passesResolvedId() && RESOLVED_ID.equals(name)) {
+                } else if (route.passesResolvedId() && (RESOLVED_ID.equals(name) || RESOLVED_SUCCESSOR_ID.equals(name))) {
                     hit = true;
                 } else if (value == JsonToken.START_ARRAY && nestedArrays.contains(name)) {
                     hit |= scanRecords(p, nestedIds);
@@ -584,6 +587,8 @@ public final class CollectionSelectorFilter extends Filter {
         node.put(slot.labelField(), resolver.resolve(id).label());
         if (route.passesResolvedId() && slot == route.slots().get(0)) {
             node.put(RESOLVED_ID, id);   // the id of the route's source (its first slot): a supersede's superseded_by_id is not it
+        } else if (route.passesResolvedId() && route.slots().size() > 1 && slot == route.slots().get(1)) {
+            node.put(RESOLVED_SUCCESSOR_ID, id);   // a supersede's successor (its second slot): the verb reads and locks it by this id
         }
         return true;
     }
