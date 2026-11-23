@@ -22,10 +22,9 @@ related_rdrs: [RDR-109, RDR-214]
 
 ## Problem Statement
 
-Sam, 2026-11-23: "youre literally maintaining a test monolith instead of the
-application... we have transitioned to maintaining tests not creating features
-and functionality and satisfying our users." He asked for this RDR with: "find
-solutions in existing patterns and best practices - dont just make it up".
+The repository now spends more of its effort keeping its test and gate
+apparatus green than shipping features users notice. This RDR measures that,
+and grounds each proposed change in a named source or a measured repo figure.
 
 Terms used throughout:
 
@@ -96,7 +95,7 @@ change, so a red in one blocks a push that did not touch what it measures.
 #### Gap 6: Accounting reds block on Sam
 
 A ceiling value is a pre-declared test criterion. Sam's standing rules reserve
-"changes to pre-declared test or promotion criteria" to him, and
+changes to pre-declared test or promotion criteria to him, and
 `tests/storage_touch_ceiling.toml` says a raise "needs a reviewed reason in that
 commit's message" (258-research-13). A new Liquibase changeset or a new
 tenant-provisioning test moves a ceiling, so some ordinary product commits wait
