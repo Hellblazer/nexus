@@ -7115,7 +7115,7 @@ FROM scope s
             // P3.5a: the function takes no sweep gate (catalog-042), so the rows are read first, then it runs with their current labels
             var labels = GcCollectionReads.enter(ctx, tenant, GcCollectionReads.Gate.NONE, originCollection, originCollection, quarantineCollection);
             // RDR-229 P3.7 (linda 2026-11-23): from gate 3 a quarantined chunk with the null origin marker is not restorable by id; say so, not a zero
-            RestoreOriginMarker.requireNone(ctx, gate3, tenant, List.of(labels.sibling()), restoreOriginLabels(originCollection, labels.origin()), null);
+            RestoreOriginMarker.requireNone(ctx, gate3, tenant, List.of(labels.sibling()), RestoreOriginMarker.originLabels(originCollection, labels.origin()), null);
             return Routines.gcRestoreRereferenced(ctx.configuration(), dim, tenant, labels.sibling(), labels.origin());
         }));
     }
@@ -7183,7 +7183,7 @@ FROM scope s
             PgSession.setStatementAndLockBounds(ctx, statementTimeoutMs, lockTimeoutMs);
             GcCollectionReads.beforeMove();
             var labels = GcCollectionReads.enter(ctx, tenant, GcCollectionReads.Gate.NONE, originCollection, originCollection, quarantineCollection);
-            RestoreOriginMarker.requireNone(ctx, gate3, tenant, List.of(labels.sibling()), restoreOriginLabels(originCollection, labels.origin()), null);
+            RestoreOriginMarker.requireNone(ctx, gate3, tenant, List.of(labels.sibling()), RestoreOriginMarker.originLabels(originCollection, labels.origin()), null);
             var rec = ctx.selectFrom(GC_RESTORE_REREFERENCED_BOUNDED.call(
                     dim, tenant, labels.sibling(), labels.origin(), rowLimit))
                .fetchOne();
@@ -7552,13 +7552,7 @@ FROM scope s
         if (before != null) win = win.and(stamp.lt(before.atOffset(java.time.ZoneOffset.UTC)));
         final org.jooq.Condition window = win;
         Field<String> originStamp = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "origin_collection");
-        // RDR-229 P3.7 (linda 2026-11-23): from gate 3 a chunk is the origin's by the origin's id (QuarantineOrigin's one definition, the label tag only for a
-        // row that carries no id key), so a window named by a one-row-renamed collection's NEW label finds the chunks tagged with its old one; an untagged
-        // chunk is still taken for this origin's. A marker row is selected through its label and refused by restoreAcross, as in every form.
-        org.jooq.Condition fromThisOrigin = gate3.holds()
-            ? dev.nexus.service.db.QuarantineOrigin.taggedWith(true, tenant, originCollection).or(originStamp.isNull())
-                .or(RestoreOriginMarker.isNullMarker().and(originStamp.eq(originCollection)))
-            : originStamp.isNull().or(originStamp.eq(originCollection));
+        org.jooq.Condition fromThisOrigin = RestoreOriginMarker.windowOrigin(gate3, tenant, originCollection, originStamp);
         org.jooq.Condition past = after == null
             ? DSL.noCondition() : CHUNKS.CHASH.gt(dev.nexus.service.db.Chash.fromHex(after).toBytes());
         if (siblings.isEmpty()) {
@@ -7795,7 +7789,7 @@ FROM scope s
                                                     String[] hex, String actor, boolean dryRun, boolean reattach,
                                                     Long sourceAuditId, QuarantineRestoreOutcome.Source source,
                                                     String nextAfter, KeyedRestore keyed) {
-        refuseUnregisteredOriginRows(tenant, originCollection, siblings, hex);
+        RestoreOriginMarker.refuseRequested(tenantScope, gate3, tenant, originCollection, siblings, hex);
         if (keyed != null) {
             return restoreAcrossKeyed(tenant, originCollection, siblings, hex, actor, reattach, sourceAuditId, source,
                                       nextAfter, keyed);
@@ -7829,26 +7823,6 @@ FROM scope s
         }
         return new QuarantineRestoreOutcome(List.copyOf(byChash.values()), auditIds.isEmpty() ? null : auditIds.get(0),
                                             dryRun, source, nextAfter, List.copyOf(auditIds), List.copyOf(siblings));
-    }
-
-    /** The origin's label as the request named it and as the registry holds it now (one entry when they are the same). */
-    private static List<String> restoreOriginLabels(String requested, String current) {
-        return requested.equals(current) ? List.of(requested) : List.of(requested, current);
-    }
-
-    /**
-     * RDR-229 P3.7 (linda 2026-11-23): from gate 3 a requested chunk in the siblings whose label tag is the origin's but whose id key is the null marker
-     * is not restorable by id; the restore would read it {@code missing}. The whole call is refused before any sibling is touched (409
-     * {@code restore_origin_unregistered}); the chunks stay quarantined. A read of its own: nothing is locked and nothing is written.
-     */
-    private void refuseUnregisteredOriginRows(String tenant, String originCollection, List<String> siblings, String[] hex) {
-        if (!gate3.holds() || siblings.isEmpty()) {
-            return;
-        }
-        tenantScope.withTenant(tenant, ctx -> {
-            RestoreOriginMarker.requireNone(ctx, gate3, tenant, siblings, List.of(originCollection), List.of(hex));
-            return null;
-        });
     }
 
     /**
