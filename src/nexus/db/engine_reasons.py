@@ -58,9 +58,9 @@ COLLECTION_SUPERSEDED_REASON: str = "collection_superseded"
 #: ``unregistered_collection`` 422; this reason is for id input only.
 UNKNOWN_COLLECTION_ID_REASON: str = "unknown_collection_id"
 
-#: A collection route resolved a ``collection_id`` to a registry row of another id (HTTP 500, RDR-229 P3.5a): an engine
-#: invariant, refused before any write can land in another collection. Also carries ``collection_id`` (the id sent) and
-#: ``resolved_collection_id``. Not a caller mistake and not retryable.
+#: A collection route resolved a ``collection_id`` to a registry row of another id (HTTP 500, RDR-229 P3.5a): a registry
+#: inconsistency, an engine defect. Also carries ``collection_id`` (the id sent) and ``resolved_collection_id``. Not a caller
+#: mistake and not retryable.
 COLLECTION_ID_MISMATCH_REASON: str = "collection_id_mismatch"
 
 #: A collection rename (the catalog's, or a per-store ``rename_collection`` route) refused from gate 3 until the one-row rename
