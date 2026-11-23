@@ -221,6 +221,10 @@ public final class CollectionKey {
      * The distinct labels of the collections a table holds rows for, in label order: {@code DISTINCT collection_id} first, then the
      * registry label of each id once (a join), never a correlated label per row. Before gate 3 it is the caller's name query, so
      * this is for the id arm only. A NULL id is no collection and is left out.
+     *
+     * <p>Choose this when an id no registry row holds (a dangling id) is NOT a collection to list: the join drops it. A caller that must see
+     * every collection its rows name, a dangling one included (the reaper's pass, chash-reconcile's ghost detection), takes
+     * {@link #distinctLabelsKeepingDangling} instead.
      */
     public static List<String> distinctLabels(DSLContext ctx, String tenant, Table<?> table, Condition tenantRows, Field<Long> id) {
         var ids = ctx.selectDistinct(id.as("cid")).from(table).where(tenantRows).and(id.isNotNull()).asTable("ckids");
@@ -228,6 +232,25 @@ public final class CollectionKey {
         return ctx.select(c.NAME).from(ids).join(c)
             .on(c.TENANT_ID.eq(tenant).and(c.COLLECTION_ID.eq(ids.field("cid", Long.class))))
             .orderBy(c.NAME).fetch(c.NAME);
+    }
+
+    /**
+     * The distinct labels of every collection id a table holds rows for, in label order, a dangling id included (linda 2026-11-23): each id is
+     * named by the registry row's current name (by id, no live filter), or, for an id no registry row holds, by the stored name of that id's rows
+     * ({@code min(storedName)}, one per id). One registry read per id (GROUP BY), never per row. A NULL id is no collection and is left out; two ids
+     * that share a label list it once.
+     *
+     * <p>Choose this when a collection whose registry row is gone must still be listed, so a ghost shows up to the caller that looks for it:
+     * the reaper's {@code collectionsWithChunks} and {@code ChashRepository#distinctCollections}. {@link #distinctLabels} drops such an id.
+     */
+    public static List<String> distinctLabelsKeepingDangling(DSLContext ctx, String tenant, Table<?> table, Condition tenantRows,
+                                                              Field<Long> id, Field<String> storedName) {
+        var c = CATALOG_COLLECTIONS.as("ckdk");
+        Field<String> label = DSL.coalesce(
+            DSL.field(DSL.select(c.NAME).from(c).where(c.TENANT_ID.eq(tenant)).and(c.COLLECTION_ID.eq(id))),
+            DSL.min(storedName)).as("label");
+        return ctx.select(label).from(table).where(tenantRows).and(id.isNotNull()).groupBy(id).orderBy(label)
+            .fetch(label).stream().distinct().toList();
     }
 
     /** The jOOQ fields of {@code table} named by {@code columns} (a key column list of ArbiterTwins, as TwinKeyUpsert.Pair carries it), in order. */
