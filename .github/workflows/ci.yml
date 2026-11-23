@@ -2133,6 +2133,7 @@ jobs:
         with:
           persist-credentials: false
           sparse-checkout: |
+            scripts/ci_gate_fan_in.py
             scripts/ddl_ratchet.py
             tests/ddl_ceiling.toml
             tests/__init__.py
@@ -2148,30 +2149,28 @@ jobs:
           pattern: ddl-report-shard-*
           path: ddl-reports
 
-      - name: DDL/bytes ratchet over the whole run (fan-in)
+      # One step runs all three whole-run checks (scripts/ci_gate_fan_in.py), because GitHub skips the steps after
+      # a failed one: as three steps, a WAL overage in the DDL fan-in hid a tenant-saving overage in the next
+      # and cost a CI cycle to find. The script runs them in this order, each printing its own verdict, and
+      # fails once naming every check that failed. tests/scripts/test_ci_gate_fan_in.py pins what it runs and
+      # that each verdict is the check's own; the two wiring tests keep this line honest.
+      #
+      # 1. nexus-ekp7w: the DDL/bytes ratchet (scripts/ddl_ratchet.py fan-in), described above. `--advisory`
+      #    and `--bytes-advisory` go to it alone.
+      # 2. nexus-abcqb: the tenant-saving ratchet. Sums `provisioned` over every shard's
+      #    nx-storage-touch-report.json (uploaded with the DDL report) and checks the run's total against
+      #    tests/storage_touch_ceiling.toml. Stdlib only, from the repo root (python3 >= 3.11 for tomllib).
+      #    ARMED (nexus-ylpac): `[python_unit] measured_on` in that file names the CI runs the ceiling came
+      #    from, so a run whose tenant-minting total is above it fails pytest-gate.
+      #    tests/scripts/test_storage_touch_fan_in_wiring.py keeps the step and that key consistent.
+      # 3. nexus-bo5lv: every shard must split the SAME collection. least_duration (nexus-zkr7q) sorts the
+      #    ids and fills the lightest group, so one test missing from one leg's collection moves most of the
+      #    split, and the legs would run overlapping groups with a gap while each still passed. Each shard's
+      #    workers record the split's input and the group they kept (tests/_shard_collection_plugin.py); this
+      #    checks the inputs agree and the groups partition them.
+      - name: Whole-run gate (DDL/bytes fan-in, storage-touch fan-in, shard collection; every one evaluated)
         if: needs.changes.outputs.code == 'true'
-        run: python3 scripts/ddl_ratchet.py fan-in --suite python_unit --shards 6 --report ddl-reports/*/nx-ddl-report.json ${{ (vars.NX_CI_POOL == 'off' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && '--bytes-advisory' || '' }}
-
-      # nexus-abcqb: the tenant-saving ratchet. Sums `provisioned` over every shard's
-      # nx-storage-touch-report.json (uploaded with the DDL report) and checks the run's total against
-      # tests/storage_touch_ceiling.toml. Stdlib only, from the repo root (python3 >= 3.11 for tomllib).
-      # ARMED (nexus-ylpac): `[python_unit] measured_on` in that file names the CI runs the ceiling came
-      # from, so a run whose tenant-minting total is above it fails pytest-gate.
-      # tests/scripts/test_storage_touch_fan_in_wiring.py keeps the step and that key consistent.
-      - name: Tenant-saving ratchet over the whole run (storage-touch fan-in)
-        if: needs.changes.outputs.code == 'true'
-        run: |
-          python3 -m tests._storage_touch_fan_in ddl-reports --suite python_unit --shards 6
-
-      # nexus-bo5lv: every shard must split the SAME collection. least_duration (nexus-zkr7q) sorts the
-      # ids and fills the lightest group, so one test missing from one leg's collection moves most of the
-      # split, and the legs would run overlapping groups with a gap while each still passed. Each shard's
-      # workers record the split's input and the group they kept (tests/_shard_collection_plugin.py); this
-      # checks the inputs agree and the groups partition them.
-      - name: Every shard split the same collection
-        if: needs.changes.outputs.code == 'true'
-        run: |
-          python3 -m tests._shard_collection ddl-reports --shards 6
+        run: python3 scripts/ci_gate_fan_in.py --reports-dir ddl-reports --suite python_unit --shards 6 ${{ (vars.NX_CI_POOL == 'off' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && '--bytes-advisory' || '' }}
 
   ca3-pgvector-bundle:
     # RDR-157 P1 CA-3 gate (bead nexus-vwvv5.2): prove the assemble path — a

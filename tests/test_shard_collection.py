@@ -168,10 +168,14 @@ def test_ci_uploads_the_reports_and_pytest_gate_checks_them() -> None:
     assert "${{ runner.temp }}/ddl-report/nx-shard-collection-*.json" in text
     assert "${{ runner.temp }}/ddl-report/nx-shard-durations.json" in text
     assert "            tests/_shard_collection.py\n" in text, "pytest-gate's sparse checkout must carry the check"
-    shards = text.count("python3 -m tests._shard_collection ddl-reports --shards 6")
-    assert shards == 1, shards
-    step = text.split("- name: Every shard split the same collection", 1)[1].split("\n      - ", 1)[0]
+    # The check is the third of the gate script's checks (scripts/ci_gate_fan_in.py); one step runs all three so a
+    # failure in an earlier one cannot hide this verdict. tests/scripts/test_ci_gate_fan_in.py pins the command.
+    assert text.count("python3 -m tests._shard_collection ddl-reports --shards 6") == 0, "a standalone step would run the check outside the gate"
+    step = text.split("- name: Whole-run gate (", 1)[1].split("\n      - ", 1)[0]
+    assert "python3 scripts/ci_gate_fan_in.py --reports-dir ddl-reports" in step and "--shards 6" in step
     assert "continue-on-error" not in step, "the check is enforced"
+    gate_script = (REPO_ROOT / "scripts" / "ci_gate_fan_in.py").read_text()
+    assert '"tests._shard_collection", args.reports_dir, "--shards"' in gate_script, "the gate script must run this check"
     assert "tests._shard_collection_plugin" in (REPO_ROOT / "tests" / "conftest.py").read_text()
 
 
