@@ -496,12 +496,16 @@ class Rdr229P35cSearchByIdIntegrationTest extends AtomicWriteTestBase {
         // a client-moved sibling: its own name is not the reaper's, a chunk tagged with the origin is the only link
         String moved = "code__p35csibmoved" + seq.incrementAndGet() + "__minilm-l6-v2-384__v1";
         registerCollection(moved);
+        registerCollection(origin);   // the origin is registered: from gate 3 the tag names it by its id (a label-only tag is no sibling, ruling b)
         try (Connection su = pg.createConnection("")) {
             var ctx = DSL.using(su, SQLDialect.POSTGRES);
             ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.LIFECYCLE_STATE, "quarantine")
                 .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.in(sibling, moved)).execute();
             PgContainerHelper.insertChunks(ctx, TENANT, moved, List.of(ch("p35c sibling chunk")), List.of("alpha sib"),
-                List.of(embedder.embed(List.of("alpha sib")).get(0)), List.of(Map.of("origin_collection", origin)));
+                List.of(embedder.embed(List.of("alpha sib")).get(0)),
+                List.of(Map.of("origin_collection", origin, "origin_collection_id",
+                    ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                        .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(origin)).fetchOne(CATALOG_COLLECTIONS.COLLECTION_ID))));
             ByIdRestoreSupport.dropRegistryNameKeys(ctx);
             ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.NAME, renamedSibling + "x")
                 .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(moved)).execute();

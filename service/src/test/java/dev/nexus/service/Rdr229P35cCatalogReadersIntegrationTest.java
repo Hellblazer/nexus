@@ -385,11 +385,13 @@ class Rdr229P35cCatalogReadersIntegrationTest extends AtomicWriteTestBase {
         latched.set(true);
         String doc2 = freshDoc("sv", r.newLabel());
         float[] different = new float[384];
-        java.util.Arrays.fill(different, 0.5f);
+        for (int i = 0; i < different.length; i++) different[i] = (float) Math.sin(i + 1.0);   // not what the test embedder stored
         Map<String, Object> supplied = new java.util.LinkedHashMap<>(chunk(r.chash(), "p35c text " + r.chash()));
         supplied.put("embedding", different);
 
-        var response = gatedSvc.appendCombined(TENANT, r.newLabel(), doc2, List.of(row(0, r.chash())), List.of(supplied), false, null,
+        // the combined write's own gate: the three-argument constructor stands for Gate3.never()
+        var latchedSvc = new CombinedWriteService(tenantScope, gated, new EmbedderRouter(embedder, "document"), latched::get);
+        var response = latchedSvc.appendCombined(TENANT, r.newLabel(), doc2, List.of(row(0, r.chash())), List.of(supplied), false, null,
             "minilm-l6-v2-384").response();
 
         assertThat(response).as("the existing chunk keeps its vector, and its disagreement with the supplied one is counted")

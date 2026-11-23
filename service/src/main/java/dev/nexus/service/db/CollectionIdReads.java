@@ -60,7 +60,10 @@ final class CollectionIdReads {
 
     /** {@link #liveFirst()} over an alias of the registry ({@link CollectionRegistry#labelResolutionOrder()} cannot take one; the two are the same order). Live means not superseded ({@code superseded_by = '' AND superseded_by_id IS NULL}), not {@code lifecycle_state}. */
     static java.util.List<org.jooq.OrderField<?>> liveFirst(dev.nexus.service.jooq.nexus.tables.CatalogCollections t) {
-        return java.util.List.of(DSL.when(t.SUPERSEDED_BY.eq("").and(t.SUPERSEDED_BY_ID.isNull()), 1).otherwise(0).desc(), t.COLLECTION_ID.desc());
+        // every constant inline: a statement that uses this in a jOOQ batch template (CatalogIdStamps.keep inside CatalogMoves.rewrite's batch) must
+        // carry no bind value of its own, or the batch's bind() leaves the template's parameters unset ("No value specified for parameter 4")
+        return java.util.List.of(DSL.when(t.SUPERSEDED_BY.eq(DSL.inline("")).and(t.SUPERSEDED_BY_ID.isNull()), DSL.inline(1)).otherwise(DSL.inline(0)).desc(),
+            t.COLLECTION_ID.desc());
     }
 
     /** {@code nameCol = label} before gate 3; {@code idCol = <the registry id of label>} from gate 3. */

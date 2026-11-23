@@ -100,7 +100,11 @@ class Rdr229P35cEmbedSkipByIdTest {
         assertThat(embedder.callCount()).as("from gate 3 the existence read finds the row by its id: nothing is embedded again").isEqualTo(afterSeed);
 
         var byName = new PgVectorRepository(tenantScope, embedder, embedder, dev.nexus.service.datamove.Gate3.never());
-        byName.upsertChunks(TENANT, RENAMED, List.of(chash), List.of("the same text"), List.of(Map.of("v", "3")));
+        try {
+            byName.upsertChunks(TENANT, RENAMED, List.of(chash), List.of("the same text"), List.of(Map.of("v", "3")));
+        } catch (RuntimeException expected) {
+            // the name read found no row, so the write tried to insert a second row for the one id: the id unique refuses it, after the embed
+        }
         assertThat(embedder.callCount()).as("control: the name read before the latch finds nothing under the new label and embeds again")
             .isGreaterThan(afterSeed);
     }

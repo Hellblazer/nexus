@@ -337,22 +337,28 @@ class AspectQueueDrainIntegrationTest {
         try (Fixture fx = new Fixture(ctx -> {
             PgContainerHelper.insertCollection(ctx, TENANT_A, COLL_A);
             PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "a.dangling");
-            ctx.set(DSL.name("session_replication_role"), DSL.inline("replica")).execute();
-            try {
-                ctx.insertInto(QUEUE, DSL.field(DSL.name("tenant_id")), DSL.field(DSL.name("collection")),
-                        DSL.field(DSL.name("collection_id")), DSL.field(DSL.name("source_path")), DSL.field(DSL.name("doc_id")),
-                        DSL.field(DSL.name("status")), DSL.field(DSL.name("enqueued_at")), DSL.field(DSL.name("content_hash")))
-                    .values(DSL.val(TENANT_A), DSL.val(COLL_A), DSL.val(987654321L), DSL.val("/a/dangling.md"),
-                        DSL.val("a.dangling"), DSL.val("pending"), DSL.val(OffsetDateTime.now()), DSL.val("hd"))
-                    .execute();
-            } finally {
-                ctx.set(DSL.name("session_replication_role"), DSL.inline("origin")).execute();
-            }
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "a.seed");
+            row(ctx, TENANT_A, COLL_A, "a.seed", "/a/seed.md", "pending", null, "hs");   // creates the retired queue table the fixture then extends
         })) {
+            fx.su(ctx -> {
+                ctx.set(DSL.name("session_replication_role"), DSL.inline("replica")).execute();
+                try {
+                    ctx.insertInto(QUEUE, DSL.field(DSL.name("tenant_id")), DSL.field(DSL.name("collection")),
+                            DSL.field(DSL.name("collection_id")), DSL.field(DSL.name("source_path")), DSL.field(DSL.name("doc_id")),
+                            DSL.field(DSL.name("status")), DSL.field(DSL.name("enqueued_at")), DSL.field(DSL.name("content_hash")))
+                        .values(DSL.val(TENANT_A), DSL.val(COLL_A), DSL.val(987654321L), DSL.val("/a/dangling.md"),
+                            DSL.val("a.dangling"), DSL.val("pending"), DSL.val(OffsetDateTime.now()), DSL.val("hd"))
+                        .execute();
+                } finally {
+                    ctx.set(DSL.name("session_replication_role"), DSL.inline("origin")).execute();
+                }
+                return null;
+            });
             long before = AspectQueueDrain.skippedNoLiveCollection();
             var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(AspectQueueDrain.class);
             var appender = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
             appender.start();
+            logger.setLevel(ch.qos.logback.classic.Level.WARN);
             logger.addAppender(appender);
             AspectQueueDrain latched = new AspectQueueDrain(fx.scope, fx.tuples,
                 new AspectQueueDrain.AdminCensus(new AdminConnection(fx.pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS)),
