@@ -127,9 +127,20 @@ public final class CollectionRegistry {
     /** Test seam (nexus-hkh1y): runs between a miss's read and its cache fill. */
     static volatile Runnable afterMissReadForTests;
 
+    /**
+     * The gate-3 signal of the process-wide {@link #SHARED} registry, which has none: every static method is a label to row
+     * lookup, correct before and after gate 3, and none of them chooses between the name and the id. A static path that reached
+     * {@link #readerKey} would take the name path for ever after the latch (the stale-name bug), so reaching it fails loudly here
+     * and the caller moves onto an injected instance ({@link #shared(Gate3)}, or {@code new CollectionRegistry(gate3)} in a test).
+     */
+    private static final Gate3 NOT_CONSULTED = () -> {
+        throw new IllegalStateException("the process-wide CollectionRegistry holds no Gate3: a caller that keys a query on the "
+            + "name or the id (readerKey) must use a registry built with CollectionRegistry.shared(gate3)");
+    };
+
     /** The registry over the process-wide cache. Declared after the two indexes it aliases. */
     private static final CollectionRegistry SHARED =
-        new CollectionRegistry(Gate3.never(), KNOWN, KNOWN_BY_ID, FILL_LOCK, EVICTIONS);
+        new CollectionRegistry(NOT_CONSULTED, KNOWN, KNOWN_BY_ID, FILL_LOCK, EVICTIONS);
 
     private final Gate3 gate3;
     private final Map<String, CollectionRow> known;
@@ -154,7 +165,7 @@ public final class CollectionRegistry {
         this(gate3, new ConcurrentHashMap<>(), new ConcurrentHashMap<>(), new Object(), new long[1]);
     }
 
-    /** The process-wide registry, gate 3 never holding: what the static methods below are. */
+    /** The process-wide registry, built with a Gate3 that throws if consulted: what the static methods below are. */
     public static CollectionRegistry shared() {
         return SHARED;
     }
