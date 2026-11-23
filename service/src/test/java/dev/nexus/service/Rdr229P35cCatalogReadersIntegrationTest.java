@@ -413,14 +413,14 @@ class Rdr229P35cCatalogReadersIntegrationTest extends AtomicWriteTestBase {
             int n;
             // vectors-079 stamps a manifest row's name from its chunk until P4.1, so the diverged name (the state after P4.1, where neither the key nor
             // the trigger exists) is written with triggers off, on this session only
-            dsl.set(DSL.name("session_replication_role"), DSL.inline("replica"));
+            dsl.set(DSL.name("session_replication_role"), DSL.inline("replica")).execute();
             try {
                 n = dsl.update(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS)
                     .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.COLLECTION, r.newLabel())
                     .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT))
                     .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(r.doc())).execute();
             } finally {
-                dsl.set(DSL.name("session_replication_role"), DSL.inline("origin"));
+                dsl.set(DSL.name("session_replication_role"), DSL.inline("origin")).execute();
             }
             assertThat(n).as("setup: a manifest row is written under the new label").isEqualTo(1);
         }
