@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.http;
 
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.JsonToken;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -13,7 +15,8 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpPrincipal;
 import dev.nexus.service.db.CollectionRegistry;
 import dev.nexus.service.db.CollectionRow;
-import dev.nexus.service.db.LiveCollectionId;
+import dev.nexus.service.db.CollectionSuccessor;
+import dev.nexus.service.db.ExpectedCollectionIds;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.db.UnknownCollectionIdException;
 import org.slf4j.Logger;
@@ -29,10 +32,12 @@ import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.OptionalLong;
+import java.util.Optional;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
@@ -49,14 +54,16 @@ import java.util.regex.Pattern;
  *   <li>404 {@code unknown_collection_id}, naming the id: the tenant has no row with that id, and only then (linda's D3 ruling,
  *       2026-11-23);</li>
  *   <li>409 {@code collection_superseded} on EVERY route, the delete included, when the id names a retired row (a rename's or
- *       supersede's tombstone, the id of a collection that no longer answers to it). The body names the retired row
- *       ({@code collection}, {@code collection_id}) and its successor: {@code superseded_by} is the successor's label, which is
- *       the key the client's {@code superseded_write_error_from_body} reads, and {@code successor_collection_id} its id. A retired
- *       row whose successor has no live row (the successor was deleted) answers 409 with no successor fields. A retired LABEL
- *       is not this filter's: it is not an id, and the delete keeps its 200 for it;</li>
- *   <li>500 {@code collection_id_mismatch}: the registry answered an id with a row of another id (or one without a label). An
- *       engine invariant, so a 500 and never a 409, which tells a client its own request conflicts. The request is refused so
- *       that no write can land in another collection; nothing is retried or guessed.</li>
+ *       supersede's tombstone, the id of a collection that no longer answers to it). The body ({@link CollectionSupersededBody})
+ *       names the retired row ({@code collection}, {@code collection_id}) and its live successor, found by
+ *       {@code superseded_by_id} and not by the tombstone's label text ({@link CollectionSuccessor}): {@code superseded_by} is the
+ *       successor's current label, which is the key the client's {@code superseded_write_error_from_body} reads, and
+ *       {@code successor_collection_id} its id. A tombstone that names no live successor (the successor was deleted, even if its
+ *       label was taken again) answers 409 with neither field. A retired LABEL is not this filter's: it is not an id, and the
+ *       delete keeps its 200 for it;</li>
+ *   <li>500 {@code collection_id_mismatch}: the registry answered an id with a row of another id. A registry inconsistency, an
+ *       engine defect and not a caller mistake, so a 500 and never a 409; nothing is retried or guessed. No request reaches it
+ *       today, since a read by id selects on the key.</li>
  * </ul>
  * A label that no row has keeps the handler's own answer (422 {@code unregistered_collection} on the routes that refuse one).
  *
@@ -66,7 +73,15 @@ import java.util.regex.Pattern;
  * from every body of that route first, so only this filter can set it. Every body is parsed (never a byte search for the id
  * field, which an escaped key defeats); a body that is not JSON goes to the handler as it came.
  *
- * <p>A body is rewritten through {@link HttpExchange#setStreams}, which keeps the exchange object (the before-send hooks of the
+ * <p><b>The id travels on to the handler.</b> The handler works by label, and between this filter and the handler an id could
+ * be freed and its label taken by another row, so a write by the id would land in that row. So the filter names every id it
+ * resolved, by label, in {@link ExpectedCollectionIds} (a {@link ThreadLocal} cleared in a {@code finally}; the handler runs on
+ * this thread), and while it does, {@code CollectionRegistry} resolves THAT id inside the handler's transaction,
+ * {@code FOR KEY SHARE}, never the label: no row is 404, a retired row 409, a live row proceeds under its own label (linda's
+ * ruling on the route boundary's gap). A request by label is untouched.
+ *
+ * <p>A body is scanned for the id fields with a streaming parser (no document tree is built unless one is found), so a large
+ * chunk body that names no id costs one pass over its tokens. A body is rewritten through {@link HttpExchange#setStreams}, which keeps the exchange object (the before-send hooks of the
  * vector routes are keyed by it); only a query string needs a wrapper, because the request URI cannot be replaced otherwise.
  */
 public final class CollectionSelectorFilter extends Filter {
@@ -84,13 +99,20 @@ public final class CollectionSelectorFilter extends Filter {
     /** {@code reason} of the 500 for a registry row that is not the row of the id asked for. Wire contract. */
     static final String COLLECTION_ID_MISMATCH_REASON = HttpUtil.COLLECTION_ID_MISMATCH_REASON;
 
+    /**
+     * Test seam: runs after the boundary has resolved the ids and named them in {@link ExpectedCollectionIds}, and before the
+     * handler, so a test can change the registry in the one gap the handler's by-id read has to survive, with no timing.
+     * Null in production.
+     */
+    public static volatile Runnable afterResolveForTests;
+
     /** How the filter reads rows: a seam, so a test can hand it a row the registry never would. */
     interface Rows {
         /** The row of {@code id}, retired or not. @throws UnknownCollectionIdException when the tenant has none */
         CollectionRow byId(String tenant, long id);
 
-        /** The id of the live row a label names, if any. */
-        OptionalLong liveIdOf(String tenant, String label);
+        /** The live successor the retired row {@code retiredId} names by {@code superseded_by_id}, if it names one. */
+        Optional<CollectionSuccessor.Successor> successorOf(String tenant, long retiredId);
     }
 
     private final Rows rows;
@@ -101,8 +123,8 @@ public final class CollectionSelectorFilter extends Filter {
                 return registry.lookupId(scope, tenant, id);
             }
 
-            @Override public OptionalLong liveIdOf(String tenant, String label) {
-                return LiveCollectionId.of(scope, tenant, label);
+            @Override public Optional<CollectionSuccessor.Successor> successorOf(String tenant, long retiredId) {
+                return CollectionSuccessor.of(scope, tenant, retiredId);
             }
         });
     }
@@ -137,8 +159,8 @@ public final class CollectionSelectorFilter extends Filter {
             return;
         }
         HttpExchange next = exchange;
+        Resolver resolver = new Resolver(tenant);
         try {
-            Resolver resolver = new Resolver(tenant);
             if (route.where() == CollectionSelectors.Where.QUERY) {
                 String rewritten = rewriteQuery(route, resolver, exchange.getRequestURI().getRawQuery());
                 if (rewritten != null) {
@@ -159,7 +181,16 @@ public final class CollectionSelectorFilter extends Filter {
             }
             return;
         }
-        chain.doFilter(next);
+        try {
+            ExpectedCollectionIds.set(resolver.expected);
+            Runnable hook = afterResolveForTests;
+            if (hook != null) {
+                hook.run();
+            }
+            chain.doFilter(next);
+        } finally {
+            ExpectedCollectionIds.clear();
+        }
     }
 
     private static boolean hasBody(String method) {
@@ -169,9 +200,11 @@ public final class CollectionSelectorFilter extends Filter {
 
     // ── id to label ────────────────────────────────────────────────────────────────────────────────────
 
-    /** Resolves ids through the registry for one request. */
+    /** Resolves ids through the registry for one request, and keeps the label each resolved to. */
     private final class Resolver {
         private final String tenant;
+        /** The id each label resolved to in this request, for {@link ExpectedCollectionIds}; dies with the request. */
+        final Map<String, Long> expected = new LinkedHashMap<>();
 
         Resolver(String tenant) {
             this.tenant = tenant;
@@ -184,52 +217,29 @@ public final class CollectionSelectorFilter extends Filter {
             } catch (UnknownCollectionIdException e) {
                 throw unknown(id);
             }
-            if (row.collectionId() != id || row.label().isEmpty()) {
-                log.error("event=collection_id_mismatch tenant={} requested={} resolved={} label={}", tenant, id,
-                    row.collectionId(), LogText.escapeControl(row.label()));
-                throw mismatch(id, row.collectionId());
+            if (row.collectionId() != id) {
+                log.error("event=collection_id_mismatch tenant={} requested={} resolved={}", tenant, id, row.collectionId());
+                throw new Refusal(500, mismatchBody(id, row.collectionId()));
             }
             if (row.isSuperseded()) {
-                throw superseded(tenant, row);
+                throw new Refusal(409, CollectionSupersededBody.of(id, row.label(), rows.successorOf(tenant, id)));
+            }
+            Long prior = expected.putIfAbsent(row.label(), id);
+            if (prior != null && prior != id) {
+                throw bad("collection_ids " + prior + " and " + id + " name the one label '" + row.label() + "'");
             }
             return row;
         }
     }
 
-    private static Refusal mismatch(long requested, long resolved) {
+    /** The 500 body of a registry row that is not the row of the id asked for: {@code reason} {@code collection_id_mismatch}. */
+    static String mismatchBody(long requested, long resolved) {
         Map<String, Object> body = new LinkedHashMap<>();
-        body.put("error", "collection_id " + requested + " resolved to a row of another id");
+        body.put("error", "collection_id " + requested + " resolved to a registry row of collection_id " + resolved);
         body.put("reason", COLLECTION_ID_MISMATCH_REASON);
         body.put("collection_id", requested);
         body.put("resolved_collection_id", resolved);
-        return new Refusal(500, json(body));
-    }
-
-    /**
-     * The 409 for the id of a retired row, in the shape of the engine's other {@code collection_superseded} bodies
-     * ({@code HttpUtil#sendTypedDbError}): {@code error} and {@code reason} the same value, then {@code message}, {@code collection}
-     * (the retired label) and {@code superseded_by} (the successor's label); and the ids, {@code collection_id} and
-     * {@code successor_collection_id}. The successor fields are present only when a live row bears the label the tombstone names
-     * ({@link LiveCollectionId}).
-     */
-    private Refusal superseded(String tenant, CollectionRow retired) {
-        OptionalLong successorId = retired.supersededBy().isEmpty()
-            ? OptionalLong.empty() : rows.liveIdOf(tenant, retired.supersededBy());
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("error", HttpUtil.COLLECTION_SUPERSEDED_REASON);
-        body.put("reason", HttpUtil.COLLECTION_SUPERSEDED_REASON);
-        body.put("message", successorId.isPresent()
-            ? "collection_id " + retired.collectionId() + " ('" + retired.label() + "') was superseded by '"
-                + retired.supersededBy() + "' (collection_id " + successorId.getAsLong() + "), so a request that names it is refused"
-            : "collection_id " + retired.collectionId() + " ('" + retired.label()
-                + "') is retired and names no live successor, so a request that names it is refused");
-        body.put("collection", retired.label());
-        body.put("collection_id", retired.collectionId());
-        if (successorId.isPresent()) {
-            body.put("superseded_by", retired.supersededBy());
-            body.put("successor_collection_id", successorId.getAsLong());
-        }
-        return new Refusal(409, json(body));
+        return json(body);
     }
 
     private static Refusal unknown(long id) {
@@ -310,14 +320,20 @@ public final class CollectionSelectorFilter extends Filter {
     // ── a JSON body ────────────────────────────────────────────────────────────────────────────────────
 
     private byte[] rewriteBody(CollectionSelectors.Route route, Resolver resolver, byte[] in) throws IOException {
-        // Every body is parsed: a search of the bytes for the id field is defeated by an escaped key, and the delete route's
-        // resolved_id must never get past one. An unchanged body goes on as the bytes that came.
-        JsonNode root;
+        // A token scan, not a document tree: it finds the id fields (decoded, so an escaped key is still one), the delete
+        // route's resolved_id, and a duplicate of an id key, and skips every other value whole. The tree is built only on a hit.
+        // A body that is not JSON goes to the handler, which refuses it in its own words; a duplicate id key is this filter's own
+        // refusal (a Refusal, not an IOException), so the pass-through below never swallows it.
+        boolean hit;
         try {
-            root = MAPPER.readTree(in);
+            hit = scan(route, in);
         } catch (IOException e) {
-            return in;   // not JSON: the handler refuses it in its own words
+            return in;
         }
+        if (!hit) {
+            return in;
+        }
+        JsonNode root = MAPPER.readTree(in);
         if (!(root instanceof ObjectNode body)) {
             return in;
         }
@@ -336,6 +352,73 @@ public final class CollectionSelectorFilter extends Filter {
             }
         }
         return changed ? MAPPER.writeValueAsBytes(body) : in;
+    }
+
+    /**
+     * One streaming pass over the top level of a request body: true when it names an id field of the route (or, on the delete,
+     * {@value #RESOLVED_ID}); 400 when an id key is given twice in one object (a query string answers the same, and the tree
+     * reader would keep the last silently). An {@link IOException} is a body that is not JSON.
+     */
+    private static boolean scan(CollectionSelectors.Route route, byte[] in) throws IOException {
+        Set<String> topIds = new HashSet<>();
+        Set<String> nestedIds = new HashSet<>();
+        Set<String> nestedArrays = new HashSet<>();
+        for (CollectionSelectors.Slot slot : route.slots()) {
+            if (slot.nested()) {
+                nestedArrays.add(slot.nestedIn());
+                nestedIds.add(slot.idField());
+            } else {
+                topIds.add(slot.idField());
+            }
+        }
+        boolean hit = false;
+        Set<String> seen = new HashSet<>();
+        try (JsonParser p = MAPPER.getFactory().createParser(in)) {
+            if (p.nextToken() != JsonToken.START_OBJECT) {
+                return false;
+            }
+            while (p.nextToken() == JsonToken.FIELD_NAME) {
+                String name = p.currentName();
+                JsonToken value = p.nextToken();
+                if (topIds.contains(name)) {
+                    if (!seen.add(name)) {
+                        throw bad(name + " must be given once");
+                    }
+                    hit = true;
+                } else if (route.passesResolvedId() && RESOLVED_ID.equals(name)) {
+                    hit = true;
+                } else if (value == JsonToken.START_ARRAY && nestedArrays.contains(name)) {
+                    hit |= scanRecords(p, nestedIds);
+                    continue;   // the array is consumed
+                }
+                p.skipChildren();
+            }
+        }
+        return hit;
+    }
+
+    /** The elements of a nested array, positioned on its START_ARRAY: true when one names an id field; 400 for a repeated key. */
+    private static boolean scanRecords(JsonParser p, Set<String> idFields) throws IOException {
+        boolean hit = false;
+        while (p.nextToken() != JsonToken.END_ARRAY) {
+            if (p.currentToken() != JsonToken.START_OBJECT) {
+                p.skipChildren();
+                continue;
+            }
+            Set<String> seen = new HashSet<>();
+            while (p.nextToken() == JsonToken.FIELD_NAME) {
+                String name = p.currentName();
+                p.nextToken();
+                if (idFields.contains(name)) {
+                    if (!seen.add(name)) {
+                        throw bad(name + " must be given once");
+                    }
+                    hit = true;
+                }
+                p.skipChildren();
+            }
+        }
+        return hit;
     }
 
     /** Replaces {@code slot}'s id in {@code node} by its label; true when it changed {@code node}. */
@@ -379,7 +462,7 @@ public final class CollectionSelectorFilter extends Filter {
             throw bad(slot.idField() + " must be a JSON integer");
         }
         long id = value.longValue();
-        if (Math.abs(id) > MAX_ID) {
+        if (id < -MAX_ID || id > MAX_ID) {
             throw bad(slot.idField() + " must be a decimal integer of at most 18 digits");   // as a query string answers
         }
         return id;

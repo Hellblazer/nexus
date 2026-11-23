@@ -49,18 +49,24 @@ public final class CollectionDeletes {
         /** A label held by more than one live row: refuse, naming every id. Only an id reaches one of them. */
         AMBIGUOUS,
         /** An id given with the request has no row under the label the request names. */
-        UNKNOWN
+        UNKNOWN,
+        /**
+         * An id given with the request is the id of a row retired since the route boundary read it: the delete answers the same
+         * 409 {@code collection_superseded} the boundary does (linda's D3), and deletes nothing.
+         */
+        SUPERSEDED
     }
 
     /**
      * @param kind         the decision
      * @param collectionId the id of the row the delete acts on; 0 when the label has no row
      * @param ids          every live row's id, for {@link Kind#AMBIGUOUS}
+     * @param successor    for {@link Kind#SUPERSEDED}, the live row the tombstone names by {@code superseded_by_id}, else null
      */
-    public record Verdict(Kind kind, long collectionId, long[] ids) {
+    public record Verdict(Kind kind, long collectionId, long[] ids, CollectionSuccessor.Successor successor) {
 
         static Verdict of(Kind kind, long collectionId) {
-            return new Verdict(kind, collectionId, new long[0]);
+            return new Verdict(kind, collectionId, new long[0], null);
         }
     }
 
@@ -89,6 +95,11 @@ public final class CollectionDeletes {
             if (row == null) {
                 return Verdict.of(Kind.UNKNOWN, resolvedId);
             }
+            if (row.value2() == 0) {
+                // retired between the route boundary's read and this one: the boundary's refusal, from the same facts
+                return new Verdict(Kind.SUPERSEDED, resolvedId, new long[0],
+                    CollectionSuccessor.of(ctx, tenant, resolvedId).orElse(null));
+            }
         } else {
             List<Long> live = new ArrayList<>();
             for (Record2<Long, Integer> r : rows) {
@@ -98,7 +109,7 @@ public final class CollectionDeletes {
                 }
             }
             if (live.size() > 1) {
-                return new Verdict(Kind.AMBIGUOUS, 0L, live.stream().mapToLong(Long::longValue).toArray());
+                return new Verdict(Kind.AMBIGUOUS, 0L, live.stream().mapToLong(Long::longValue).toArray(), null);
             }
             if (row == null && !rows.isEmpty()) {
                 row = rows.get(0);   // no live row: the first in resolution order is the newest tombstone
