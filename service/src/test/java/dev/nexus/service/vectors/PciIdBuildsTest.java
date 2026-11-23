@@ -32,14 +32,14 @@ class PciIdBuildsTest {
     }
 
     @Test
-    void theProductionDefaultIsIdReadersPresent_falseOnThisBranch_soTheRetireNeverRunsUntilP35cFlipsIt() {
+    void theProductionDefaultIsIdReadersPresent_trueSinceP35c_soTheRetireRunsOnceGate3Latches() {
         var b = new PciIdBuilds();
         b.gate3(() -> true);
 
         // The default supplier reads IdReaders.present(), a method, so a flip of the constant is never held inlined by a caller.
         assertThat(b.gate3Holds()).as("latched gate 3, production readers default").isEqualTo(IdReaders.present());
-        // P3.5c flips IdReaders.PRESENT to true; this assertion is the one it changes with it.
-        assertThat(IdReaders.present()).as("false on the P3.4 branch").isFalse();
-        assertThat(b.gate3Holds()).isFalse();
+        // P3.5c flipped IdReaders.PRESENT to true; Rdr229P35cIdReadersPinTest holds it to what the readers do.
+        assertThat(IdReaders.present()).as("true since P3.5c").isTrue();
+        assertThat(b.gate3Holds()).isTrue();
     }
 }

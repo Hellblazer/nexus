@@ -22,6 +22,7 @@ import java.util.Map;
 import java.util.Optional;
 
 import static dev.nexus.service.db.JsonbSupport.jsonbRequired;
+import static dev.nexus.service.db.TaxonomyBatchRows.*;
 import static dev.nexus.service.jooq.nexus.Tables.*;
 import static org.jooq.impl.DSL.*;
 
@@ -117,19 +118,6 @@ public final class TaxonomyRepository {
     // the conflict keys are ArbiterTwins' name and id columns for the table, not retyped here
     private static final Field<?>[] META_NAME_KEY = CollectionKey.fields(TAXONOMY_META, TwinKeyUpsert.pair("taxonomy_meta").orElseThrow().nameKey());
     private static final Field<?>[] META_ID_KEY = CollectionKey.fields(TAXONOMY_META, TwinKeyUpsert.pair("taxonomy_meta").orElseThrow().idKey());
-    private static final Field<?>[] TOPIC_NAME_KEY = CollectionKey.fields(TOPICS, TwinKeyUpsert.pair("topics").orElseThrow().nameKey());
-    private static final Field<?>[] TOPIC_ID_KEY = CollectionKey.fields(TOPICS, TwinKeyUpsert.pair("topics").orElseThrow().idKey());
-
-    /**
-     * One upsert on a table with a name key and its id twin ({@link TwinKeyUpsert}): the name key arbitrates before gate 3, the
-     * id key from it. The statement gets the conflict columns of the key in force, from one reading of gate 3.
-     */
-    private <T> T upsert(DSLContext ctx, String table, Field<?>[] nameKey, Field<?>[] idKey,
-                         java.util.function.BiFunction<DSLContext, Field<?>[], T> statement) {
-        boolean byId = ck().byId();
-        return TwinKeyUpsert.run(ctx, table, byId ? TwinKeyUpsert.Arbiter.ID_KEY : TwinKeyUpsert.Arbiter.NAME_KEY,
-            c -> statement.apply(c, byId ? idKey : nameKey));
-    }
 
     // ── doc_id hex/bytes boundary (RDR-194 P3c, nexus-tk070.p3c) ────────────────
 
@@ -1802,7 +1790,9 @@ public final class TaxonomyRepository {
                     TAXONOMY_META.LAST_DISCOVER_AT,
                     TAXONOMY_META.COLLECTION_ID)
                .values(tenant, coll, docCount, discoveredAtTs, CollectionIds.require(ctx, tenant, collection));
-            upsert(ctx, "taxonomy_meta", META_NAME_KEY, META_ID_KEY, (c, key) -> insert
+            final boolean byId1 = ck().byId();
+            TwinKeyUpsert.run(ctx, "taxonomy_meta", byId1 ? TwinKeyUpsert.Arbiter.ID_KEY : TwinKeyUpsert.Arbiter.NAME_KEY,
+                c -> { Field<?>[] key = byId1 ? META_ID_KEY : META_NAME_KEY; return insert
                .onConflict(key)
                .doUpdate()
                .set(TAXONOMY_META.LAST_DISCOVER_DOC_COUNT,
@@ -1812,7 +1802,7 @@ public final class TaxonomyRepository {
                     field("GREATEST(nexus.taxonomy_meta.last_discover_at,"
                         + " EXCLUDED.last_discover_at)", OffsetDateTime.class))
                .set(TAXONOMY_META.COLLECTION_ID, org.jooq.impl.DSL.excluded(TAXONOMY_META.COLLECTION_ID))
-               .execute());
+               .execute(); });
             return null;
         });
     }
@@ -2350,7 +2340,9 @@ public final class TaxonomyRepository {
                     TAXONOMY_META.COLLECTION_ID)
                .values(tenant, collection, lastDiscoverDocCount, lastDiscoverAtTs,
                        CollectionIds.require(ctx, tenant, collection));
-            upsert(ctx, "taxonomy_meta", META_NAME_KEY, META_ID_KEY, (c, key) -> insert
+            final boolean byId2 = ck().byId();
+            TwinKeyUpsert.run(ctx, "taxonomy_meta", byId2 ? TwinKeyUpsert.Arbiter.ID_KEY : TwinKeyUpsert.Arbiter.NAME_KEY,
+                c -> { Field<?>[] key = byId2 ? META_ID_KEY : META_NAME_KEY; return insert
                .onConflict(key)
                .doUpdate()
                .set(TAXONOMY_META.LAST_DISCOVER_DOC_COUNT,
@@ -2360,7 +2352,7 @@ public final class TaxonomyRepository {
                     field("GREATEST(nexus.taxonomy_meta.last_discover_at,"
                         + " EXCLUDED.last_discover_at)", OffsetDateTime.class))
                .set(TAXONOMY_META.COLLECTION_ID, org.jooq.impl.DSL.excluded(TAXONOMY_META.COLLECTION_ID))
-               .execute());
+               .execute(); });
             return null;
         });
     }
@@ -2611,7 +2603,9 @@ public final class TaxonomyRepository {
                         optI(r, "last_discover_doc_count", 0), lastAtTs, collectionIds.get(reqS(r, "collection")));
             }
             final var rowsInsert = insert;
-            upsert(ctx, "taxonomy_meta", META_NAME_KEY, META_ID_KEY, (c, key) -> rowsInsert.onConflict(key)
+            final boolean byId3 = ck().byId();
+            TwinKeyUpsert.run(ctx, "taxonomy_meta", byId3 ? TwinKeyUpsert.Arbiter.ID_KEY : TwinKeyUpsert.Arbiter.NAME_KEY,
+                c -> { Field<?>[] key = byId3 ? META_ID_KEY : META_NAME_KEY; return rowsInsert.onConflict(key)
                   .doUpdate()
                   .set(TAXONOMY_META.LAST_DISCOVER_DOC_COUNT,
                        field("GREATEST(nexus.taxonomy_meta.last_discover_doc_count,"
@@ -2620,43 +2614,9 @@ public final class TaxonomyRepository {
                        field("GREATEST(nexus.taxonomy_meta.last_discover_at,"
                            + " EXCLUDED.last_discover_at)", OffsetDateTime.class))
                   .set(TAXONOMY_META.COLLECTION_ID, org.jooq.impl.DSL.excluded(TAXONOMY_META.COLLECTION_ID))
-                  .execute());
+                  .execute(); });
         }
         return rows.size();
-    }
-
-    // ── batch map-extraction helpers (mirror TaxonomyHandler's per-row parse) ──
-    private static String reqS(Map<String, Object> r, String k) {
-        Object v = r.get(k);
-        if (v == null || v.toString().isEmpty()) throw new IllegalArgumentException("Missing required field: " + k);
-        return v.toString();
-    }
-    private static String optS(Map<String, Object> r, String k) {
-        Object v = r.get(k);
-        return v == null ? null : v.toString();
-    }
-    private static Double optD(Map<String, Object> r, String k) {
-        Object v = r.get(k);
-        if (v == null) return null;
-        if (v instanceof Number n) return n.doubleValue();
-        try { return Double.parseDouble(v.toString()); } catch (NumberFormatException e) { return null; }
-    }
-    private static Long optL(Map<String, Object> r, String k) {
-        Object v = r.get(k);
-        if (v == null) return null;
-        if (v instanceof Number n) return n.longValue();
-        try { return Long.parseLong(v.toString()); } catch (NumberFormatException e) { return null; }
-    }
-    private static long reqL(Map<String, Object> r, String k) {
-        Long l = optL(r, k);
-        if (l == null) throw new IllegalArgumentException("Missing required field: " + k);
-        return l;
-    }
-    private static int optI(Map<String, Object> r, String k, int def) {
-        Object v = r.get(k);
-        if (v instanceof Number n) return n.intValue();
-        if (v != null) { try { return Integer.parseInt(v.toString()); } catch (NumberFormatException ignored) { } }
-        return def;
     }
 
     // ── Analytical methods (nexus-gmiaf.14): the read-only ones live in TaxonomyAnalytics ──
@@ -3018,13 +2978,12 @@ public final class TaxonomyRepository {
                         TOPICS.DOC_COUNT, TOPICS.CREATED_AT, TOPICS.TERMS, TOPICS.REVIEW_STATUS,
                         TOPICS.COLLECTION_ID)
                     .values(tenant, label, coll, 0, now, terms, reviewStatus, collectionId);
-                // RDR-229 P3.5c: the root-label key (partial, parent_id IS NULL) arbitrates by id from gate 3.
-                Long topicId = upsert(ctx, "topics", TOPIC_NAME_KEY, TOPIC_ID_KEY, (c, key) -> rootInsert
-                    .onConflict(key)
-                    .where(TOPICS.PARENT_ID.isNull())
-                    .doNothing()
+                // Target-less DO NOTHING (the twin-key rule): the root-label key and its id twin both arbitrate, so a racing root insert
+                // is skipped whichever key it trips, and the select below finds the winner's row.
+                Long topicId = rootInsert
+                    .onConflictDoNothing()
                     .returningResult(TOPICS.ID)
-                    .fetchOne(TOPICS.ID));
+                    .fetchOne(TOPICS.ID);
                 if (topicId == null) {
                     topicId = ctx.select(TOPICS.ID).from(TOPICS)
                         .where(TOPICS.TENANT_ID.eq(tenant),
@@ -3153,12 +3112,12 @@ public final class TaxonomyRepository {
                         TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION,
                         TOPICS.DOC_COUNT, TOPICS.CREATED_AT, TOPICS.TERMS, TOPICS.COLLECTION_ID)
                     .values(tenant, label, coll, 0, now, terms, collectionId);
-                Long topicId = upsert(ctx, "topics", TOPIC_NAME_KEY, TOPIC_ID_KEY, (c, key) -> rootInsert
-                    .onConflict(key)
-                    .where(TOPICS.PARENT_ID.isNull())
-                    .doNothing()
+                // Target-less DO NOTHING (the twin-key rule): the root-label key and its id twin both arbitrate, so a racing root insert
+                // is skipped whichever key it trips, and the select below finds the winner's row.
+                Long topicId = rootInsert
+                    .onConflictDoNothing()
                     .returningResult(TOPICS.ID)
-                    .fetchOne(TOPICS.ID));
+                    .fetchOne(TOPICS.ID);
                 if (topicId == null) {
                     topicId = ctx.select(TOPICS.ID).from(TOPICS)
                         .where(TOPICS.TENANT_ID.eq(tenant),

@@ -91,31 +91,11 @@ public class TwinKeyUpsertCoverageCensusTest {
             "arbiter is topics' id primary key (ON CONFLICT (TOPICS.ID)), a third key: a racing insert carries a different id, so a retry would meet the same label collision again; the name key and its id twin cover the same rows, so the twin adds no failure the name key did not already raise (bob, 2026-11-22)");  // line 2354
     }
 
-    static {
-        // RDR-229 #7 coverage (bob, 2026-11-22). Sites in elsinore's P3.5b/c mapping are fixed on her branch and leave this list
-        // when it stacks (a stale entry fails), and the list is empty once IdReaders.PRESENT (P3.5c) is true.
-        KNOWN_PENDING.put("dev/nexus/service/db/AspectRepository.java::document_aspects::JAVA_DO_UPDATE::1",
-            "elsinore, RDR-229 P3.5b/c (nexus-p2m1x.24/.25): fixed on her branch (vectors-077/078; Java through TwinKeyUpsert); remove when it stacks");  // line 345
-        KNOWN_PENDING.put("dev/nexus/service/db/AspectRepository.java::document_aspects::JAVA_DO_UPDATE::2",
-            "elsinore, RDR-229 P3.5b/c (nexus-p2m1x.24/.25): fixed on her branch (vectors-077/078; Java through TwinKeyUpsert); remove when it stacks");  // line 727
-        KNOWN_PENDING.put("dev/nexus/service/db/AspectRepository.java::document_aspects::JAVA_DO_UPDATE::3",
-            "elsinore, RDR-229 P3.5b/c (nexus-p2m1x.24/.25): fixed on her branch (vectors-077/078; Java through TwinKeyUpsert); remove when it stacks");  // line 801
-        KNOWN_PENDING.put("dev/nexus/service/db/RemapRepository.java::chash_remap::JAVA_DO_UPDATE::1",
-            "elsinore, RDR-229 P3.5b/c (nexus-p2m1x.24/.25): fixed on her branch (vectors-077/078; Java through TwinKeyUpsert); remove when it stacks");  // line 152
-        KNOWN_PENDING.put("dev/nexus/service/db/TaxonomyRepository.java::taxonomy_meta::JAVA_DO_UPDATE::1",
-            "elsinore, RDR-229 P3.5b/c (nexus-p2m1x.24/.25): fixed on her branch (vectors-077/078; Java through TwinKeyUpsert); remove when it stacks");  // line 1696
-        KNOWN_PENDING.put("dev/nexus/service/db/TaxonomyRepository.java::taxonomy_meta::JAVA_DO_UPDATE::2",
-            "elsinore, RDR-229 P3.5b/c (nexus-p2m1x.24/.25): fixed on her branch (vectors-077/078; Java through TwinKeyUpsert); remove when it stacks");  // line 2234
-        KNOWN_PENDING.put("dev/nexus/service/db/TaxonomyRepository.java::taxonomy_meta::JAVA_DO_UPDATE::3",
-            "elsinore, RDR-229 P3.5b/c (nexus-p2m1x.24/.25): fixed on her branch (vectors-077/078; Java through TwinKeyUpsert); remove when it stacks");  // line 2490
-        KNOWN_PENDING.put("dev/nexus/service/db/TaxonomyRepository.java::topics::JAVA_DO_NOTHING::1",
-            "elsinore, RDR-229 P3.5b/c (nexus-p2m1x.24/.25): fixed on her branch (vectors-077/078; Java through TwinKeyUpsert); remove when it stacks");  // line 3158
-        KNOWN_PENDING.put("dev/nexus/service/db/TaxonomyRepository.java::topics::JAVA_DO_NOTHING::2",
-            "elsinore, RDR-229 P3.5b/c (nexus-p2m1x.24/.25): fixed on her branch (vectors-077/078; Java through TwinKeyUpsert); remove when it stacks");  // line 3288
-    }
+    // KNOWN_PENDING is empty: the nine Java sites of elsinore's P3.5c (document_aspects x3, chash_remap, taxonomy_meta x3, topics DO NOTHING x2)
+    // go through TwinKeyUpsert on this tree (RDR-229 P3.5c assembly), and the SQL ones left with P3.5b. The two topics id-key sites stay in PERMANENT.
 
     /**
-     * KNOWN_PENDING lists sites elsinore's P3.5b/c is fixing; an entry her stack misses would stay pending forever. So once P3.5c has
+     * KNOWN_PENDING lists sites another lane is fixing; an entry its stack misses would stay pending forever. So once P3.5c has
      * flipped {@link dev.nexus.service.vectors.IdReaders#PRESENT} (her readers select by id: P3.5b and P3.5c are on the tree), the list
      * must be empty. Skipped before that.
      */

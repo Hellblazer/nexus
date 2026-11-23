@@ -141,14 +141,6 @@ public final class AspectRepository {
         return ck().byId() ? DOCUMENT_ASPECTS.COLLECTION_ID : ASPECT_OWN_NAME_ID;
     }
 
-    /** One upsert on a table with a name key and its id twin ({@link TwinKeyUpsert}): the id key arbitrates from gate 3. */
-    private <T> T upsert(DSLContext ctx, java.util.function.Function<Field<?>[], T> statement) {
-        boolean byId = ck().byId();
-        return TwinKeyUpsert.run(ctx, "document_aspects",
-            byId ? TwinKeyUpsert.Arbiter.ID_KEY : TwinKeyUpsert.Arbiter.NAME_KEY,
-            c -> statement.apply(byId ? ASPECT_ID_KEY : ASPECT_NAME_KEY));
-    }
-
     // ── Timestamp helpers ──────────────────────────────────────────────────────
 
     static OffsetDateTime parseTs(String iso) {
@@ -397,7 +389,9 @@ public final class AspectRepository {
                 jsonbOrNull((String) body.get("salient_sentences")),
                 docId,
                 CollectionIds.require(ctx, tenant, collection));   // RDR-229 P3.1: read after the registration above
-        var result = upsert(ctx, key -> insert
+        final boolean byId1 = ck().byId();
+        var result = TwinKeyUpsert.run(ctx, "document_aspects", byId1 ? TwinKeyUpsert.Arbiter.ID_KEY : TwinKeyUpsert.Arbiter.NAME_KEY,
+            c -> { Field<?>[] key = byId1 ? ASPECT_ID_KEY : ASPECT_NAME_KEY; return insert
             .onConflict(key)
             .doUpdate()
             .set(DOCUMENT_ASPECTS.PROBLEM_FORMULATION,    EX_PROBLEM_FORMULATION)
@@ -418,7 +412,7 @@ public final class AspectRepository {
             .set(DOCUMENT_ASPECTS.DOC_ID,                 docIdOnConflict)
             .set(DOCUMENT_ASPECTS.COLLECTION_ID,          EX_COLLECTION_ID)
             .returning(DOCUMENT_ASPECTS.ID)
-            .fetch());
+            .fetch(); });
         return result.isEmpty() ? -1L : result.get(0).get(DOCUMENT_ASPECTS.ID);
     }
 
@@ -792,7 +786,9 @@ public final class AspectRepository {
                             collectionIds.get((String) body.get("collection")));
                 }
                 final var rowsInsert = insert;
-                upsert(ctx, key -> rowsInsert.onConflict(key)
+                final boolean byId2 = ck().byId();
+                TwinKeyUpsert.run(ctx, "document_aspects", byId2 ? TwinKeyUpsert.Arbiter.ID_KEY : TwinKeyUpsert.Arbiter.NAME_KEY,
+                    c -> { Field<?>[] key = byId2 ? ASPECT_ID_KEY : ASPECT_NAME_KEY; return rowsInsert.onConflict(key)
                       .doUpdate()
                       .set(DOCUMENT_ASPECTS.PROBLEM_FORMULATION,    EX_PROBLEM_FORMULATION)
                       .set(DOCUMENT_ASPECTS.PROPOSED_METHOD,        EX_PROPOSED_METHOD)
@@ -808,7 +804,7 @@ public final class AspectRepository {
                       .set(DOCUMENT_ASPECTS.SALIENT_SENTENCES,      EX_SALIENT_COALESCE)
                       .set(DOCUMENT_ASPECTS.DOC_ID,                 EX_DOC_ID_COALESCE)
                       .set(DOCUMENT_ASPECTS.COLLECTION_ID,          EX_COLLECTION_ID)
-                      .execute());
+                      .execute(); });
             }
             return kept.size();
         }));
@@ -863,7 +859,9 @@ public final class AspectRepository {
                     jsonbOrNull((String) body.get("salient_sentences")),
                     nullIfBlank((String) body.get("doc_id")),
                     CollectionIds.require(ctx, tenant, (String) body.get("collection")));   // RDR-229 P3.1
-            return upsert(ctx, key -> insert
+            final boolean byId3 = ck().byId();
+            return TwinKeyUpsert.run(ctx, "document_aspects", byId3 ? TwinKeyUpsert.Arbiter.ID_KEY : TwinKeyUpsert.Arbiter.NAME_KEY,
+                c -> { Field<?>[] key = byId3 ? ASPECT_ID_KEY : ASPECT_NAME_KEY; return insert
                 .onConflict(key)
                 .doUpdate()
                 .set(DOCUMENT_ASPECTS.PROBLEM_FORMULATION,    EX_PROBLEM_FORMULATION)
@@ -880,7 +878,7 @@ public final class AspectRepository {
                 .set(DOCUMENT_ASPECTS.SALIENT_SENTENCES,      EX_SALIENT_COALESCE)
                 .set(DOCUMENT_ASPECTS.DOC_ID,                 EX_DOC_ID_COALESCE)
                 .set(DOCUMENT_ASPECTS.COLLECTION_ID,          EX_COLLECTION_ID)
-                .execute());
+                .execute(); });
         }
     }
 
@@ -1453,88 +1451,7 @@ public final class AspectRepository {
      *         reducerKind is unrecognised
      */
     public Double confidenceAggregate(String tenant, List<String> sourceUris, String reducerKind) {
-        if (sourceUris == null || sourceUris.isEmpty()) return null;
-        List<String> uris = sourceUris.stream().map(NoteUri::canonical).distinct().toList();  // RDR-231
-
-        String aggFunc = switch (reducerKind) {
-            case "avg_confidence" -> "AVG";
-            case "min_confidence" -> "MIN";
-            case "max_confidence" -> "MAX";
-            default -> null;
-        };
-        if (aggFunc == null) return null;
-
-        // Accumulate across batches: AVG needs sum+count; MIN/MAX fold naturally.
-        double sumAcc = 0.0;
-        long   cntAcc = 0L;
-        Double minAcc = null;
-        Double maxAcc = null;
-
-        for (int start = 0; start < uris.size(); start += 300) {
-            List<String> batch = uris.subList(start, Math.min(start + 300, uris.size()));
-
-            final double[] localSum = {0.0};
-            final long[]   localCnt = {0L};
-            final Double[] localVal = {null};
-
-            tenantScope.withTenant(tenant, ctx -> {
-                if ("AVG".equals(aggFunc)) {
-                    // For AVG we need SUM+COUNT to fold across batches correctly.
-                    var rows = ctx.select(
-                            sum(DOCUMENT_ASPECTS.CONFIDENCE),
-                            count(DOCUMENT_ASPECTS.CONFIDENCE))
-                        .from(DOCUMENT_ASPECTS)
-                        .where(DOCUMENT_ASPECTS.SOURCE_URI.in(batch)
-                            .and(DOCUMENT_ASPECTS.CONFIDENCE.isNotNull()))
-                        .fetch();
-                    if (!rows.isEmpty()) {
-                        Object sumVal = rows.get(0).get(0);
-                        Object cntVal = rows.get(0).get(1);
-                        if (sumVal != null) localSum[0] = ((Number) sumVal).doubleValue();
-                        if (cntVal != null) localCnt[0] = ((Number) cntVal).longValue();
-                    }
-                } else if ("MIN".equals(aggFunc)) {
-                    var rows = ctx.select(min(DOCUMENT_ASPECTS.CONFIDENCE))
-                        .from(DOCUMENT_ASPECTS)
-                        .where(DOCUMENT_ASPECTS.SOURCE_URI.in(batch)
-                            .and(DOCUMENT_ASPECTS.CONFIDENCE.isNotNull()))
-                        .fetch();
-                    if (!rows.isEmpty()) {
-                        Object val = rows.get(0).get(0);
-                        if (val != null) localVal[0] = ((Number) val).doubleValue();
-                    }
-                } else {
-                    var rows = ctx.select(max(DOCUMENT_ASPECTS.CONFIDENCE))
-                        .from(DOCUMENT_ASPECTS)
-                        .where(DOCUMENT_ASPECTS.SOURCE_URI.in(batch)
-                            .and(DOCUMENT_ASPECTS.CONFIDENCE.isNotNull()))
-                        .fetch();
-                    if (!rows.isEmpty()) {
-                        Object val = rows.get(0).get(0);
-                        if (val != null) localVal[0] = ((Number) val).doubleValue();
-                    }
-                }
-                return null;
-            });
-
-            if ("AVG".equals(aggFunc)) {
-                sumAcc += localSum[0];
-                cntAcc += localCnt[0];
-            } else if (localVal[0] != null) {
-                if ("MIN".equals(aggFunc)) {
-                    minAcc = (minAcc == null) ? localVal[0] : Math.min(minAcc, localVal[0]);
-                } else {
-                    maxAcc = (maxAcc == null) ? localVal[0] : Math.max(maxAcc, localVal[0]);
-                }
-            }
-        }
-
-        return switch (reducerKind) {
-            case "avg_confidence" -> cntAcc == 0 ? null : sumAcc / cntAcc;
-            case "min_confidence" -> minAcc;
-            case "max_confidence" -> maxAcc;
-            default -> null;
-        };
+        return AspectConfidence.aggregate(tenantScope, tenant, sourceUris, reducerKind);
     }
 
     /**
