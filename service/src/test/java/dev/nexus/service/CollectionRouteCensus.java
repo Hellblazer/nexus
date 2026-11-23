@@ -368,7 +368,7 @@ final class CollectionRouteCensus {
     static final java.util.Set<String> ID_NAMES_OTHER_THAN_SLOTS = java.util.Set.of(
         "collection_id", "collection_ids",
         // response and reason names, never read from a request
-        "unknown_collection_id", "successor_collection_id");
+        "unknown_collection_id");
 
     /** The id a probe uses for a collection that does not exist: far above any identity value a test run reaches. */
     static final long UNKNOWN_ID = 987_654_321_012L;
