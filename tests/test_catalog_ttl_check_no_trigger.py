@@ -40,6 +40,9 @@ NAMING_ALLOWED = {
     # among them (a read of its own fixed keys); a census names a site and calls nothing (nexus-p2m1x.25)
     "scripts/rdr229_p35c_java_reader_census.py",
     "service/src/test/resources/rdr229/p35c-java-reader-census-excluded.tsv",
+    # the per-leaf FK census (nexus-p2m1x.21) lists every engine file that holds an ADD or VALIDATE CONSTRAINT with its exact counts, these classes
+    # among them (the boot-time admin validators, kept at their 30 minute bound); it is a test of the engine classes and runs nothing
+    "service/src/test/java/dev/nexus/service/datamove/Rdr229ValidationBoundsCensusIntegrationTest.java",
     # the chunk routes' own scan lists the one class that borrows its comparison; the file name is spelled in two parts
     # because that scan reads this file too
     "tests/test_retire_" + "keys_no_trigger.py",

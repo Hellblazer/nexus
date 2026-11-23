@@ -154,7 +154,7 @@ abstract class Rdr229SwapMovesFixtures extends DataMoveIntegrationBase {
                 if (idx.constraint() == null && idx.parentIndex() == null) {
                     int dot = idx.index().indexOf('.');
                     try {
-                        runSql("DROP INDEX IF EXISTS " + quote(idx.index().substring(0, dot)) + "." + quote(idx.index().substring(dot + 1)));
+                        runSql(P33cSql.stmt("drop.index", quote(idx.index().substring(0, dot)) + "." + quote(idx.index().substring(dot + 1))));
                     } catch (SQLException e) {
                         throw new IllegalStateException(e);
                     }
@@ -300,6 +300,19 @@ abstract class Rdr229SwapMovesFixtures extends DataMoveIntegrationBase {
             .map(rec -> new LeafFk(rec.value1(), rec.value2(), rec.value3(), rec.value4())).toList();
     }
 
+    /**
+     * Validates every leaf key with the production text of its leaf move (the registry's own), so the adoption sees every leaf ready; the moves stay open.
+     */
+    void validateEveryLeafByHand() throws SQLException {
+        for (LeafFk f : leafFks()) {
+            validateLeafByHand(f.leaf());
+        }
+    }
+
+    void validateLeafByHand(String leaf) throws SQLException {
+        runSql(onCompleteOf(Rdr229ChunksFk.LEAF_LABEL_PREFIX + leaf));
+    }
+
     void pause(String labelLike) {
         ctx().update(table("nexus", "data_moves")).set(DSL.field(DSL.name("paused_at"), OffsetDateTime.class), OffsetDateTime.now())
             .set(DSL.field(DSL.name("paused_by"), String.class), "p33c-test").where(LABEL_F.like(labelLike)).execute();
@@ -413,7 +426,7 @@ abstract class Rdr229SwapMovesFixtures extends DataMoveIntegrationBase {
             boolean svc = DSL.using(c, SQLDialect.POSTGRES).fetchExists(DSL.table(DSL.name("pg_catalog", "pg_roles")),
                 DSL.field(DSL.name("rolname"), String.class).eq("nexus_svc"));
             if (svc) {
-                MoveSql.runOnComplete(c, "SET ROLE nexus_svc");
+                MoveSql.runOnComplete(c, P33cSql.stmt("set.role", "nexus_svc"));
             }
             var regclass = new org.jooq.impl.DefaultDataType<>(SQLDialect.POSTGRES, Object.class, "regclass");
             DSL.using(c, SQLDialect.POSTGRES).select(DSL.function(DSL.name("nexus", "create_tenant_partitions"), SQLDataType.INTEGER,
@@ -496,7 +509,7 @@ abstract class Rdr229SwapMovesFixtures extends DataMoveIntegrationBase {
         Connection c = pg.createConnection("");
         parked.add(c);
         c.setAutoCommit(false);
-        MoveSql.runOnComplete(c, "LOCK TABLE nexus." + quote(leaf) + " IN ACCESS EXCLUSIVE MODE");
+        MoveSql.runOnComplete(c, P33cSql.stmt("lock.table", "nexus." + quote(leaf), "ACCESS EXCLUSIVE"));
         return new Held(c, leaf, label, worker);
     }
     static int completionPid(DataMoveWorker w, String label, long timeoutMs) {
