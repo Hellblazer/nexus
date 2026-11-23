@@ -11819,7 +11819,7 @@ public final class CatalogRepository {
             // the same refusals as the name path (sweep gates, re-embed job, model token, live or populated target), then the one-row body
             CollectionRenameChecks.shared(this, ctx, tenant, oldName, newName, expectedTargetSupersededBy, newNameEmbeddingModelOrNull);
             return renameGuard.oneRow(ctx, tenant, oldName, newName,
-                new OneRowRename.Request(newContentTypeOrNull, newOwnerIdOrNull, tupleOut,
+                new OneRowRename.Request(requestedSourceId, newContentTypeOrNull, newOwnerIdOrNull, tupleOut,
                     locked -> CollectionRenameChecks.target(this, locked, tenant, newName, expectedTargetSupersededBy)), oneRowOut);
         });
     }

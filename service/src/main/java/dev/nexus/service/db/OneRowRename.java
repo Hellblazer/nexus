@@ -21,16 +21,20 @@ public interface OneRowRename {
      * What the catalog rename hands the one-row body beyond the two labels (RDR-229 P3.7): what the client derived for the new label, the caller's target checks
      * (run again under the registry row locks), and where the row's tuple is reported for the caller's race recheck ({@link CollectionMint#recheckOf}).
      *
+     * @param sourceId        the {@code collection_id} the request named the source by (resolved to {@code oldLabel} by the route boundary), or null for a
+     *                        request by label: the body locks that row with the others and refuses, before it writes, an id that is unknown or retired or that
+     *                        now bears another label ({@link CollectionRefusals#requireSourceById}), so a label freed and registered again in between is never
+     *                        renamed in the id's place
      * @param newContentType  the client's content type for the new label, or null to keep the row's
      * @param newOwnerId      the client's owner, or null to keep the row's
      * @param tupleOut        receives the row's tuple after the rename (five slots)
      * @param targetUnderLock the caller's target checks (live target, emptiness, identity), run again by the body once it holds the registry row locks;
      *                        it refuses as the shared checks do and answers whether a retired row of the new label exists now (folio's r3 critique F1)
      */
-    record Request(String newContentType, String newOwnerId, String[] tupleOut, TargetCheck targetUnderLock) {
-        /** No client attributes, no retired target, nowhere to report a tuple: for a test of the seam. */
+    record Request(Long sourceId, String newContentType, String newOwnerId, String[] tupleOut, TargetCheck targetUnderLock) {
+        /** A request by label, no client attributes, no retired target, nowhere to report a tuple: for a test of the seam. */
         public static Request bare() {
-            return new Request(null, null, new String[5], ctx -> false);
+            return new Request(null, null, null, new String[5], ctx -> false);
         }
     }
 

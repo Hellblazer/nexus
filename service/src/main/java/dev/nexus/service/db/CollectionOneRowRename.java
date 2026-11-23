@@ -50,13 +50,14 @@ public final class CollectionOneRowRename implements OneRowRename {
 
     @Override
     public RenameOutcome rename(DSLContext ctx, String tenant, String oldLabel, String newLabel, Request request) {
-        Outcome o = apply(ctx, tenant, oldLabel, newLabel, request.newContentType(), request.newOwnerId(), request.targetUnderLock(),
-            request.tupleOut());
+        Outcome o = apply(ctx, tenant, oldLabel, newLabel, request.sourceId(), request.newContentType(), request.newOwnerId(),
+            request.targetUnderLock(), request.tupleOut());
         // read here, inside the rename's own tenant scope (CatalogEpoch.of is empty outside it); the id survived, so ids are stable
         return new RenameOutcome(o.counts(), o.collectionId(), CatalogEpoch.of(ctx, tenant).orElse(null), true);
     }
 
     /**
+     * @param sourceId       the id the request named the source by, or null for a request by label (see {@link OneRowRename.Request})
      * @param newContentType the client's content type for the new label, or null to keep the row's
      * @param newOwnerId     the client's owner, or null to keep the row's
      * @param targetUnderLock the caller's target checks, run here under the registry row locks: they refuse a live or populated target and answer
@@ -72,7 +73,7 @@ public final class CollectionOneRowRename implements OneRowRename {
     /** What the one-row rename answers: the renamed collection's id (slice C's {@code RenameOutcome} carries it) and the counts the route reports. */
     record Outcome(long collectionId, Map<String, Integer> counts) { }
 
-    static Outcome apply(DSLContext ctx, String tenant, String oldName, String newName, String newContentType,
+    static Outcome apply(DSLContext ctx, String tenant, String oldName, String newName, Long sourceId, String newContentType,
                                       String newOwnerId, OneRowRename.TargetCheck targetUnderLock, String[] tuple) {
         // LOCK ORDER (linda's canonical order, via tamsin; runRename's javadoc on slice C states it once): the rename lock (RenameLatchLock SHARED, taken by the
         // caller), then the sweep gate(s) SHARED (the shared checks the caller runs before this body), then the collection tuple lock(s), then the registry rows
@@ -99,7 +100,13 @@ public final class CollectionOneRowRename implements OneRowRename {
         // at the target tombstone's id (repointed after its delete), and every tombstone whose superseded_by names the NEW label whatever id it carries:
         // repointTombstonesNaming below updates them all, a self-pointing or unstamped one included (linda's census pass 2). Locking the tombstones later,
         // after the rename's own row, would take them out of id order.
-        CollectionTombstones.lockRowsOfOneRowRename(ctx, tenant, oldName, newName);   // bounded: RenameBusyException, 503 rename_busy, nothing written
+        CollectionTombstones.lockRowsOfOneRowRename(ctx, tenant, oldName, newName, sourceId);   // bounded: RenameBusyException, 503 rename_busy, nothing written
+        if (sourceId != null) {
+            // the request named the source by id: the label was resolved from it outside this transaction, and a label freed and registered again in between
+            // would make readOwn below lock and rename the new holder. The id's row is held now (the statement above took it in id order): refuse, before any
+            // read of the label and any write, an id that is unknown or retired or that no longer bears oldName
+            CollectionRefusals.requireSourceById(ctx, tenant, sourceId, oldName);
+        }
         Record6<Long, String, String, String, String, String> own = readOwn(ctx, tenant, oldName, true);
         if (own == null) {
             throw notLive(oldName, newName);

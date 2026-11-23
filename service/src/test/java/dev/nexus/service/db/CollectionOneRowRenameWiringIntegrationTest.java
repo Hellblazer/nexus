@@ -72,7 +72,7 @@ class CollectionOneRowRenameWiringIntegrationTest {
     }
 
     private void rename(String tenant, String oldName, String newName, String contentType, String owner) {
-        CollectionOneRowRename.apply(ctx, tenant, oldName, newName, contentType, owner, locked -> false, new String[5]);
+        CollectionOneRowRename.apply(ctx, tenant, oldName, newName, null, contentType, owner, locked -> false, new String[5]);
     }
 
     @Test
