@@ -515,11 +515,21 @@ def failed_moves(status: dict | None) -> list[dict]:
     return [e for e in ((status or {}).get("boot_work") or []) if _move_state(e) == "failed"]
 
 
+#: The id of a standing P3.4 condition (``IdUniqueIndexPass.HELD_BOOT_WORK_ID``: a corrupt table, or an index of a pass's name with
+#: another definition): visible and safe to stop, but nothing is running and a restart clears neither, so the idle rule does not wait on it
+#: (linda 2026-11-23, nexus-p2m1x.22).
+STANDING_CONDITION_ID = "id-unique-index-held"
+
+
+def _is_standing_condition(entry: dict) -> bool:
+    return isinstance(entry, dict) and str(entry.get("id") or "") == STANDING_CONDITION_ID
+
+
 def boot_work_settled(status: dict | None) -> bool:
-    """Every boot_work entry is a parked move (or there is none): nothing in it is still working."""
+    """Every boot_work entry is a parked move or a standing condition (or there is none): nothing in it is still working."""
     if boot_work_empty(status):
         return True
-    return all(_is_parked(e) for e in status["boot_work"])
+    return all(_is_parked(e) or _is_standing_condition(e) for e in status["boot_work"])
 
 
 def status_says_idle(code: int, status: dict | None) -> bool:

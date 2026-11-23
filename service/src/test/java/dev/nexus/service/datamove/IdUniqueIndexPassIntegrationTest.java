@@ -50,6 +50,7 @@ class IdUniqueIndexPassIntegrationTest extends DataMoveIntegrationBase {
 
     @AfterEach
     void dropTheIndexesAndRows() throws Exception {
+        IdUniqueIndexPass.forgetHeld();
         IdIndexCatalogReads.forgetWaitedChangesets(ctx());
         asReplica(d -> {
             // jOOQ renders DROP INDEX without the schema of its name (an index is dropped by its own name), so the schema goes on the path
@@ -184,9 +185,9 @@ class IdUniqueIndexPassIntegrationTest extends DataMoveIntegrationBase {
         assertThat(first.built()).as("every other applicable index is").isEqualTo(applicable() - 1);
         assertThat(IdUniqueIndexPass.allValid(ctx())).as("gate 3 waits with it").isFalse();
         assertThat(IdUniqueIndexPass.waitingChangesets(ctx())).as("the wait is named, for gate3_why").containsExactly("vectors-078-8");
-        assertThat(registry.snapshot()).as("and reported in boot_work, not finished")
-            .filteredOn(e -> e.id().equals(IdUniqueIndexPass.BOOT_WORK_ID)).singleElement()
-            .satisfies(e -> assertThat(e.what()).contains(canary).contains("vectors-078-8"));
+        assertThat(registry.snapshot()).as("a wait is not work: no boot_work entry of the pass, building or held, while it waits (it would be permanent here and "
+                + "defer nx upgrade's bundle swap); gate3_why names it instead")
+            .noneMatch(e -> e.id().equals(IdUniqueIndexPass.BOOT_WORK_ID) || e.id().equals(IdUniqueIndexPass.HELD_BOOT_WORK_ID));
 
         IdIndexCatalogReads.recordWaitedChangesets(ctx());
         var second = pass(new BootWorkRegistry(Clock.systemUTC()), true).runOnce();
@@ -212,11 +213,43 @@ class IdUniqueIndexPassIntegrationTest extends DataMoveIntegrationBase {
         assertThat(sent).as("no CREATE over it, no DROP of it").noneMatch(q -> q.contains(index));
         assertThat(PgCatalogProbes.indexExists(ctx(), "nexus", index)).as("left standing").isTrue();
         assertThat(IdUniqueIndexPass.allValid(ctx())).as("gate 3 stays false").isFalse();
-        assertThat(registry.snapshot()).filteredOn(e -> e.id().equals(IdUniqueIndexPass.BOOT_WORK_ID)).singleElement()
-            .satisfies(e -> assertThat(e.what()).contains(index).contains("different definition"));
+        assertThat(registry.snapshot()).as("a standing condition, under its own id (the idle rules skip it); not the building entry")
+            .noneMatch(e -> e.id().equals(IdUniqueIndexPass.BOOT_WORK_ID))
+            .filteredOn(e -> e.id().equals(IdUniqueIndexPass.HELD_BOOT_WORK_ID)).singleElement()
+            .satisfies(e -> {
+                assertThat(e.what()).contains(index).contains("different definition");
+                assertThat(e.safeToStop()).isTrue();
+            });
+        assertThat(IdUniqueIndexPass.heldReasons()).as("gate3_why reads the same words").singleElement().asString().contains(index);
         sent.clear();
         pass.runOnce();
         assertThat(sent).as("and not on the next tick either").noneMatch(q -> q.contains(index));
+    }
+
+    /**
+     * N3: the text says the next pass builds the right index once the operator drops the wrong one, so it must: the mismatch is re-tested every
+     * pass and forgotten once no VALID index of that name stands. Gate 3's read goes true; the held entry is gone.
+     */
+    @Test
+    void afterTheOperatorDropsTheWrongIndex_theNextPassBuildsTheRightOne_andGate3Reads() throws Exception {
+        String index = "idx_taxonomy_meta_id_uq";
+        asSuperuser(d -> d.createIndex(index).on(TAXONOMY_META, DSL.field(DSL.name("tenant_id"))).execute());
+        var registry = new BootWorkRegistry(Clock.systemUTC());
+        var pass = pass(registry, true);
+        pass.runOnce();
+        assertThat(IdUniqueIndexPass.allValid(ctx())).as("held while the wrong index stands").isFalse();
+        assertThat(registry.snapshot()).anyMatch(e -> e.id().equals(IdUniqueIndexPass.HELD_BOOT_WORK_ID));
+
+        asSuperuser(d -> {
+            d.set(DSL.name("search_path"), DSL.inline("nexus")).execute();
+            return d.dropIndex(DSL.name(index)).execute();
+        });
+        var after = pass.runOnce();
+        assertThat(after.built()).as("the right one is built by the very next pass, no restart").isEqualTo(1);
+        assertThat(IdUniqueIndexPass.allValid(ctx())).as("gate 3's read goes true").isTrue();
+        assertThat(IdUniqueIndexPass.heldReasons()).isEmpty();
+        assertThat(registry.snapshot()).as("nothing held, nothing building").noneMatch(e -> e.id().equals(IdUniqueIndexPass.HELD_BOOT_WORK_ID)
+            || e.id().equals(IdUniqueIndexPass.BOOT_WORK_ID));
     }
 
     /**
@@ -350,9 +383,17 @@ class IdUniqueIndexPassIntegrationTest extends DataMoveIntegrationBase {
         assertThat(PgCatalogProbes.indexDefs(ctx(), "nexus", "taxonomy_meta")).as("no INVALID leftover stays")
             .noneMatch(d -> d.contains("idx_taxonomy_meta_id_uq"));
         assertThat(IdUniqueIndexPass.allValid(ctx())).as("gate 3 stays false").isFalse();
-        assertThat(registry.snapshot()).filteredOn(e -> e.id().equals(IdUniqueIndexPass.BOOT_WORK_ID)).singleElement()
-            .satisfies(e -> assertThat(e.what()).contains("taxonomy_meta").contains("corrupt").contains("fourteen-table name path")
-                .doesNotContain(TENANT).doesNotContain("990001"));
+        assertThat(registry.snapshot()).as("held under its own id (the idle rules skip it), never as the building entry")
+            .noneMatch(e -> e.id().equals(IdUniqueIndexPass.BOOT_WORK_ID))
+            .filteredOn(e -> e.id().equals(IdUniqueIndexPass.HELD_BOOT_WORK_ID)).singleElement()
+            .satisfies(e -> {
+                assertThat(e.what()).contains("taxonomy_meta").contains("corrupt").contains("fourteen-table name path")
+                    .doesNotContain(TENANT).doesNotContain("990001");
+                assertThat(e.safeToStop()).isTrue();
+            });
+        assertThat(IdUniqueIndexPass.heldReasons()).as("gate3_why carries the same words").singleElement().asString().contains("taxonomy_meta");
+        assertThat(appender.list).as("logged at ERROR").anyMatch(ev -> ev.getLevel() == ch.qos.logback.classic.Level.ERROR
+            && ev.getFormattedMessage().contains("event=id_unique_index_duplicate"));
 
         sent.clear();
         var second = pass.runOnce();
