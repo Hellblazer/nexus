@@ -306,9 +306,9 @@ public final class MoveBootWork implements AutoCloseable {
 
     /**
      * The open moves in the needs-an-operator state, for {@code /v1/status}: the row says it ({@link MoveRetryPolicy#needsOperator(DataMove)},
-     * 20 consecutive transients, so a restart brings it back) or the worker's state does (the reason its handler built said
-     * "needs an operator", which is the {@code on_complete} run of lock or statement timeouts; kept while the move is
-     * retried). The list is empty again the sample after the move completes or its retry count is reset.
+     * 20 consecutive transients, so a restart brings it back) or the worker's state does (the early rule, latched in the handler
+     * and carried in {@link MoveStates.State#needsOperator()}). The list is empty again the sample after the move completes or
+     * its retry count is reset. Also announces ({@link #announce}) each move this process has not yet paged.
      */
     private List<BootWorkRegistry.NeedsOperator> needOperator(List<DataMove> open) {
         List<BootWorkRegistry.NeedsOperator> out = new java.util.ArrayList<>();
@@ -320,11 +320,37 @@ public final class MoveBootWork implements AutoCloseable {
                 continue;
             }
             Instant last = m.lastTransientAt().toInstant();
+            // the last failure this process saw says the step, the bound and whether it ended builds; with none (an engine that
+            // has just started) the move's definition says whether an attempt would
+            boolean seen = state.map(s -> s.step() != null).orElse(false);
+            boolean builds = seen ? state.get().terminatesIndexBuilds() : m.onComplete() != null && ChunkFamily.touches(m);
             out.add(new BootWorkRegistry.NeedsOperator(m.label(), m.transientRetries(), last,
                 last.plus(MoveRetryPolicy.backoff(m.transientRetries())), MoveReasons.sqlstateOf(m.lastTransient()),
-                m.statementTimeoutMs(), state.map(MoveStates.State::terminatesIndexBuilds).orElse(false)));
+                m.statementTimeoutMs(), builds, seen ? state.get().step() : null,
+                seen ? state.get().boundMs() : FailureHandler.PageInfo.NO_BOUND,
+                state.map(s -> s.kind() == MoveStates.Kind.WORKING).orElse(false)));
         }
+        announce(out);
         return List.copyOf(out);
+    }
+
+    /**
+     * Logs {@code event=data_move_needs_operator} for each listed move this process has not announced: the ones already in the
+     * state when it started, which the worker's transition never sees. {@link MoveStates#announce} is shared with the worker, so
+     * the two never both log one move. A move whose last failure this process saw but whose state does not yet say
+     * "needs an operator" is skipped: the worker is about to log it with its step and bound. A move that has left the list
+     * is forgotten, so entering the state again pages again.
+     */
+    private void announce(List<BootWorkRegistry.NeedsOperator> listed) {
+        for (var e : listed) {
+            var state = states.state(e.label());
+            boolean workerAboutToLog = state.map(s -> s.step() != null && !s.needsOperator()).orElse(false);
+            if (!workerAboutToLog && states.announce(e.label())) {
+                MoveEvents.needsOperator(e.label(), e.step(), e.sqlstate(), e.boundMs(), e.retries(),
+                    e.terminatesIndexBuilds(), MoveRetryPolicy.pageReason(e.retries(), e.terminatesIndexBuilds()));
+            }
+        }
+        states.retainAnnounced(listed.stream().map(BootWorkRegistry.NeedsOperator::label).toList());
     }
 
     private record Desired(String what, Long done, Long total, BootWorkRegistry.Step step, String reasonClass) {

@@ -743,13 +743,11 @@ public final class NexusService {
         // it, never a fresh System.currentTimeMillis() sample at a different
         // moment) -- the "no second clock source" requirement in one place.
         server.createContext("/v1/status",
-                new dev.nexus.service.http.StatusHandler(docEmbedderRouter, localEmbedActivitySupplier,
+                dev.nexus.service.http.StatusBootWork.bind(new dev.nexus.service.http.StatusHandler(docEmbedderRouter, localEmbedActivitySupplier,
                         versionHandler.processStartMillis(), ownerlessWritePolicy, this::reaperStatus,
                         dev.nexus.service.db.ChunksIsolationCheck.statusSupplier(dataSource, java.time.Clock.systemUTC()),
                         this::perCollectionIndexesStatus, this::chunksLeafBloatStatus)
-                        .embedPosture(() -> this.embedPosture)
-                        .bootWork(() -> { var w = this.bootWork; return w == null ? java.util.List.of() : w.snapshot(); })
-                        .rdr229Completion(() -> { var w = this.bootWork; return w == null ? null : w.rdr229Completion(); }).dataMovesNeedOperator(() -> { var w = this.bootWork; return w == null ? java.util.List.of() : w.dataMovesNeedOperator(); })
+                        .embedPosture(() -> this.embedPosture), () -> this.bootWork)
                         .aspectQueue(() -> this.aspectQueueDrainResult).testTenantResetRoute(tenantResetRoute)
                         .collectionTupleIndex(dev.nexus.service.db.CollectionTupleIndexProbe.statusSupplier(dataSource)).liveLabelIndex(dev.nexus.service.db.LiveLabelIndexProbe.statusSupplier(dataSource)).catalogEpoch(dev.nexus.service.db.CatalogEpochStatus.statusSupplier(dataSource)));
 
