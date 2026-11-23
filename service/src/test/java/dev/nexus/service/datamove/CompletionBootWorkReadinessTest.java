@@ -75,25 +75,25 @@ class CompletionBootWorkReadinessTest {
 
     /**
      * linda's census of 19d19081dc, item 1: the readiness waits for P3.5c's readers. Everything else complete and the id readers absent
-     * ({@code IdReaders.present()} is false on this base) is {@code p35c_readers_absent}: in the readiness and in the status field. The test-only seam makes
-     * them present and the same state reads NONE.
+     * ({@code IdReaders.present()} false) is {@code p35c_readers_absent}: in the readiness and in the status field. P3.5c is in this base, so the default
+     * is present and the same state reads NONE; the test-only seam makes the readers absent again.
      */
     @Test
-    void aReadyInstallWhoseReadersAreNotTheIdReadersIsP35cReadersAbsent_untilTheyArePresent() {
+    void aReadyInstallReadsNone_whenTheIdReadersArePresent_andP35cReadersAbsentWhenTheyAreNot() {
         var reader = new Scripted();
         reader.next.set(result(new CompletionCheck.RenameState(true, 1, List.of())));
         var work = work(reader);
         work.publish();
 
-        assertThat(dev.nexus.service.vectors.IdReaders.present()).as("non-vacuity: this base's readers still select by name").isFalse();
-        assertThat(work.renameReadiness().missing()).as("complete, but the id readers are absent: the default is IdReaders.present()")
+        assertThat(dev.nexus.service.vectors.IdReaders.present()).as("non-vacuity: this base carries P3.5c's id readers").isTrue();
+        assertThat(work.renameReadiness().missing()).as("complete, and the default is IdReaders.present(): ready").isEqualTo(RenameReadiness.Missing.NONE);
+        assertThat(work.statusJson()).as("the status field says so").contains("\"rename_missing\":\"none\"");
+
+        CompletionBootWorkTestSupport.idReadersPresent(work, () -> false);
+
+        assertThat(work.renameReadiness().missing()).as("with the readers absent the same state waits for them")
             .isEqualTo(RenameReadiness.Missing.P35C_READERS_ABSENT);
-        assertThat(work.statusJson()).as("the status field says so").contains("\"rename_missing\":\"p35c_readers_absent\"");
-
-        CompletionBootWorkTestSupport.idReadersPresent(work, () -> true);
-
-        assertThat(work.renameReadiness().missing()).as("with the readers present the same state is ready").isEqualTo(RenameReadiness.Missing.NONE);
-        assertThat(work.statusJson()).contains("\"rename_missing\":\"none\"");
+        assertThat(work.statusJson()).contains("\"rename_missing\":\"p35c_readers_absent\"");
     }
 
     /** The facts behind NONE are monotone: a read that fails after a NONE does not take it back, and one that read something missing does. */
