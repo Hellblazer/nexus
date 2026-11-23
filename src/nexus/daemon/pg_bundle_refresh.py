@@ -375,6 +375,17 @@ def _is_data_move(entry: dict) -> bool:
     return str(entry.get("id") or "").startswith("data-move:")
 
 
+#: The engine's ``boot_work`` id of a standing P3.4 condition (``IdUniqueIndexPass.HELD_BOOT_WORK_ID``): a table found corrupt (two rows
+#: share an id key) or an index of a pass's name that stands with another definition. Both stay visible (``nx doctor``, ``gate3_why``,
+#: the engine log at ERROR) and are safe to stop, but nothing is running and neither a restart nor an upgrade clears them: counting
+#: them would defer the bundle swap for good (linda 2026-11-23, nexus-p2m1x.22). The building entry (``id-unique-index-pass``) is work.
+STANDING_CONDITION_ID = "id-unique-index-held"
+
+
+def _is_standing_condition(entry: dict) -> bool:
+    return str(entry.get("id") or "") == STANDING_CONDITION_ID
+
+
 def engine_busy_reason(config_dir: Path, *, moves_can_run: bool = True) -> str | None:
     """Why the stack should not be bounced now, or ``None`` when it is idle.
 
@@ -385,7 +396,7 @@ def engine_busy_reason(config_dir: Path, *, moves_can_run: bool = True) -> str |
     ``moves_can_run=False`` is for a bundle that lacks pg_background: no data move can run on it, so a
     ``queued:`` or ``working:`` move is waiting for the very swap this gate guards, and counting it as work
     would defer the swap for ever (F33: from 8.2.0 the registered moves were ``queued:`` at the attended
-    ``nx upgrade`` and its bundle swap was deferred on them). Index builds and other entries still count."""
+    ``nx upgrade`` and its bundle swap was deferred on them). Index builds and other entries still count; a standing P3.4 condition (:data:`STANDING_CONDITION_ID`) does not."""
     status = _engine_status()
     if status is None:
         if not _service_up(config_dir):
@@ -393,7 +404,8 @@ def engine_busy_reason(config_dir: Path, *, moves_can_run: bool = True) -> str |
         return "the engine is running but its status cannot be read, so whether it is building indexes is unknown"
     work = [
         e for e in (status.get("boot_work") or [])
-        if isinstance(e, dict) and not _is_parked_move(e) and (moves_can_run or not _is_data_move(e))
+        if isinstance(e, dict) and not _is_parked_move(e) and not _is_standing_condition(e)
+        and (moves_can_run or not _is_data_move(e))
     ]
     if work:
         names = ", ".join(sorted({str(e.get("what") or e.get("id") or "work")[:60] for e in work}))

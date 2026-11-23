@@ -884,6 +884,8 @@ final class TenantKeyedStateTables {
         notKeyed.put("IdUniqueIndexPass.corrupt", ID_UNIQUE_INDEX_PASS_ENGINE_WIDE + "the indexes whose build hit a duplicate, by "
             + "index name, with the status text (which names the table, never a tenant or a key); bounded by the number of indexes the "
             + "pass builds, in memory only (the next engine tries again), read and written under the pass lock");
+        notKeyed.put("IdUniqueIndexPass.heldReasons", ID_UNIQUE_INDEX_PASS_ENGINE_WIDE + "the words of the standing conditions the pass holds "
+            + "(a corrupt table, a mismatched index), table and index names only, never a tenant or a key value; read by gate3_why");
         notKeyed.put("IdUniqueIndexPass.SPECS", ID_UNIQUE_INDEX_PASS_ENGINE_WIDE + "the pass's fixed list of indexes (table, index "
             + "name, key columns, predicate), built from ArbiterTwins and constants; the same for every tenant and never changed");
         notKeyed.put("IdUniqueIndexPass.beforeStatement", ID_UNIQUE_INDEX_PASS_ENGINE_WIDE + "a test seam: a consumer that sees "
