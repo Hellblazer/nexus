@@ -450,9 +450,10 @@ public final class CollectionRegistry {
     }
 
     /**
-     * Drops the transaction's memo of registry rows it read {@code FOR KEY SHARE}: call it after rolling back to a savepoint, which
-     * released any lock taken inside it (the memo says it is held). Nothing in a savepoint reads the registry today; this keeps a
-     * future read from leaving a stale entry.
+     * Drops the transaction's memo of registry rows it read {@code FOR KEY SHARE}: a rollback to a savepoint releases any lock taken
+     * inside it while the memo says it is held, so a savepoint that contains a registry read must call this after the rollback. No
+     * savepoint in the engine contains one today (the two savepoints of the search path's short-page count and re-run are read-only
+     * and never read the registry, so their rollbacks no longer call it); {@code WriteRegistryMemoTest} pins the behaviour.
      */
     public static void forgetWriteMemo(DSLContext ctx) {
         WriteRegistryMemo.forget(ctx);

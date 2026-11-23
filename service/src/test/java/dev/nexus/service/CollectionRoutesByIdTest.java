@@ -124,20 +124,29 @@ class CollectionRoutesByIdTest {
         int transactions = 0;
         int exempt = 0;
         int unknown = 0;
+        java.util.Map<String, Integer> perRoute = new java.util.TreeMap<>();
         for (String line : censusLines) {
+            int routeTransactions = 0;
             for (String part : line.split(" ")) {
-                if (part.startsWith("examined=")) transactions += Integer.parseInt(part.substring(9));
-                if (part.startsWith("exempt=")) exempt += Integer.parseInt(part.substring(7));
+                if (part.startsWith("examined=")) { transactions += Integer.parseInt(part.substring(9)); routeTransactions += Integer.parseInt(part.substring(9)); }
+                if (part.startsWith("exempt=")) { exempt += Integer.parseInt(part.substring(7)); routeTransactions += Integer.parseInt(part.substring(7)); }
                 if (part.startsWith("unknown=")) unknown += Integer.parseInt(part.substring(8));
             }
+            perRoute.merge(line.substring(0, line.indexOf(' ')), routeTransactions, Integer::sum);
         }
         System.err.printf("by_id_census routes_examined=%d routes_skipped=%d write_transactions_examined=%d exempt_history_transactions=%d "
-            + "unreadable_transactions=%d%n  examined=%s%n  skipped=%s%n", examinedPaths.size(), skipped.size(), transactions, exempt,
-            unknown, examinedPaths, skipped);
+            + "unreadable_transactions=%d%n  examined=%s%n  skipped=%s%n  write_transactions_by_route=%s%n", examinedPaths.size(),
+            skipped.size(), transactions, exempt, unknown, examinedPaths, skipped, perRoute);
         try {
             assertThat(examinedPaths).as("non-vacuity: the routes pinned to answer 2xx by id did").containsAll(writes);
             assertThat(transactions + exempt).as("non-vacuity: the per-transaction census examined at least one write transaction")
                 .isPositive();
+            // a floor per route, not one for the whole run: each route pinned to answer 2xx by id must have had a write transaction
+            // examined (or exempted as a history write) of its own, so a route whose write moved out of the census cannot hide behind
+            // the others
+            for (String route : MUST_CONSUME) {
+                assertThat(perRoute.getOrDefault(route, 0)).as("non-vacuity: write transactions examined for " + route).isPositive();
+            }
         } finally {
             if (fx != null) fx.close();
             if (fxLocal != null) fxLocal.close();

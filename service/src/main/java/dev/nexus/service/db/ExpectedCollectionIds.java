@@ -207,7 +207,10 @@ public final class ExpectedCollectionIds {
         }
     }
 
-    /** Turns the per-transaction census on or off. A test seam; {@code CollectionSelectorFilter#testHooks} sets it with its sink. */
+    /**
+     * Turns the per-transaction census on or off. A JVM-wide switch (the request threads are the HTTP server's, so a thread-local of
+     * the test's own thread would never be seen): a test that turns it on must turn it off again, which
+     * {@code CollectionSelectorFilter#testHooks} does when it is given no sink. A test seam; {@code CollectionSelectorFilter#testHooks} sets it with its sink. */
     public static void setCensus(boolean on) {
         census = on;
     }

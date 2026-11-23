@@ -73,10 +73,13 @@ final class TaxonomyCollectionLock {
     private static void lock(DSLContext ctx, String key) {
         // Bounded wait FIRST (critique, nexus-n2ls1): without a lock_timeout a stuck holder turns the fast retryable 409 this removes
         // into an indefinite in-transaction wait surfacing as an edge 504. set_config(..., true) is SET LOCAL (transaction-scoped); a
-        // timed-out acquire raises SQLSTATE 55P03, a clean retryable error. The timeout also bounds this transaction's later row-lock
-        // waits, acceptable: these persist transactions are short writes.
+        // timed-out acquire raises SQLSTATE 55P03, a clean retryable error. The bound is for THIS advisory lock only: it is put back
+        // as soon as the lock is held, so the registry key share and the child-row waits that follow have none (a writer's wait has no
+        // timeout, linda's ruling; the verb's wait is the bounded one).
+        String previous = ctx.select(function("current_setting", String.class, val("lock_timeout"))).fetchOne(0, String.class);
         ctx.select(function("set_config", String.class, val("lock_timeout"), val("5000"), val(true))).fetch();
         // Typed-DSL function composition (house rule: no raw string SQL, RawSqlGateTest): SELECT pg_advisory_xact_lock(hashtext(:key)).
         ctx.select(function("pg_advisory_xact_lock", Object.class, function("hashtext", Integer.class, val(key)))).fetch();
+        ctx.select(function("set_config", String.class, val("lock_timeout"), val(previous), val(true))).fetch();
     }
 }
