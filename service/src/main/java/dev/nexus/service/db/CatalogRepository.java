@@ -9672,8 +9672,10 @@ public final class CatalogRepository {
             if (r == null) return null;
             Map<String, Object> m = chunkRow(chash, r.value1(), r.value2());
             dev.nexus.service.vectors.PgVectorRepository.runBeforeSensitiveLookupHook();
-            // chunk_sensitive_many matches the manifest's stored name, which a one-row rename leaves as it was: ask by the chunk's own stored name, never the label
-            boolean sensitive = !ChunkSensitivity.sensitiveChashes(ctx, tenant, r.value3(), List.of(chash)).isEmpty();
+            // chunk_sensitive_many reads both shapes since P3.5b: a stamped manifest row matches by the registry id of the name it is asked, so ask by
+            // the label the caller named (the one that selected the chunk by its id from gate 3, and the stored name before it), never the chunk's own
+            // stored name, which a one-row rename leaves stale: that name resolves to no id and the flag would read false (fail open).
+            boolean sensitive = !ChunkSensitivity.sensitiveChashes(ctx, tenant, collection, List.of(chash)).isEmpty();
             // The lookup is a second statement: an owner flagged after the read is seen here. Under exclude that
             // chunk is a miss too, so the text is never returned with sensitive=true (the F2 rule for search and get).
             if (excludeSensitive && sensitive) return null;
@@ -9766,7 +9768,7 @@ public final class CatalogRepository {
             m.put("chunk_text",          textVal);
             m.put("metadata",            metaVal != null ? parseMetaJson(metaVal.data()) : Map.of());
             dev.nexus.service.vectors.PgVectorRepository.runBeforeSensitiveLookupHook();
-            boolean sensitive = !ChunkSensitivity.sensitiveChashes(ctx, tenant, row.value5(), List.of(chash)).isEmpty();  // the stored name, as in resolveSpan
+            boolean sensitive = !ChunkSensitivity.sensitiveChashes(ctx, tenant, colVal, List.of(chash)).isEmpty();  // the label, as in resolveSpan
             // The lookup is a second statement: an owner flagged after the read is seen here. Under exclude that
             // chunk is a miss too, so the text is never returned with sensitive=true (the F2 rule for search and get).
             if (excludeSensitive && sensitive) return null;
