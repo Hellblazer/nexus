@@ -10,7 +10,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
@@ -345,11 +344,10 @@ class Rdr229P37RenameAcceptanceTest {
 
     /**
      * (c2) folio 2026-11-23: deleting the renamed collection B itself, after a real one-row rename A to B, leaves no row under B's id in any child
-     * table, although B's rows still carry the name A. The base's delete purges by label (c3b0bc4152), so it would leave them; P3.5a slice B's CollectionPurgeScope (12cd3722cd)
-     * purge closes it.
+     * table, although B's rows still carry the name A. The base carries P3.5a slice B's CollectionPurgeScope (replayed as 05305cb5f6 and 45f6b8fb29), which
+     * resolves the delete to B's id from gate 3 and purges every child table by that id, so the rows that still carry the name A go too.
      */
     @Test
-    @Disabled("enabled when P3.5a's CollectionPurgeScope (12cd3722cd) is on the base")
     void legC2_deletingTheRenamedCollectionLeavesNoRowUnderItsIdInAnyChildTable() throws Exception {
         var w = renamedCollection("c2");
         assertThat(childRowsUnderId(w.tenant(), w.id()).values().stream().mapToLong(Long::longValue).sum())
@@ -358,7 +356,8 @@ class Rdr229P37RenameAcceptanceTest {
         var r = env.callJson("POST", "/v1/catalog/collections/delete", w.token(), "{\"name\":\"" + w.b() + "\"}");
 
         assertThat(r.statusCode()).as("the delete of B answers: " + r.body()).isEqualTo(200);
-        assertThat(childRowsUnderId(w.tenant(), w.id())).as("no row is left under B's id in any child table, whatever name it carries")
+        var left = childRowsUnderId(w.tenant(), w.id());
+        assertThat(left).as("no row is left under B's id in any child table, whatever name it carries: " + left)
             .allSatisfy((table, n) -> assertThat(n).as(table).isZero());
     }
 
