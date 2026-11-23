@@ -516,57 +516,10 @@ class CollectionRoutesByIdTest {
 
     // ---- F1: every writer that reads by id writes under the LOCKED row's current label (linda's Q1) -----------------------------
 
-    /** The (name column, id column) pairs of the schema ({@code collection}/{@code collection_id}, {@code source_collection}/...), found once. */
-    private List<String[]> nameIdPairs;
-
-    private List<String[]> nameIdPairs(CollectionRouteFixture f) {
-        if (nameIdPairs == null) {
-            nameIdPairs = f.asSuperuser(ctx -> {
-                List<String[]> pairs = new ArrayList<>();
-                ctx.meta().filterSchemas(sc -> sc.getName().equals("nexus")).getTables().forEach(t -> {
-                    for (var field : t.fields()) {
-                        if (field.getType() == String.class && t.field(field.getName() + "_id") != null
-                            && t.field(field.getName() + "_id").getType() == Long.class
-                            && (field.getName().equals("collection") || field.getName().endsWith("_collection") || field.getName().equals("name"))) {
-                            pairs.add(new String[] {t.getName(), field.getName(), field.getName() + "_id"});
-                        }
-                    }
-                });
-                return pairs;
-            });
-        }
-        return nameIdPairs;
-    }
-
     /** Rows anywhere in the schema carrying one of {@code ids} beside a label that is not that row's current label, and rows of {@code foreign} ids. */
     private int[] renameGapFindings(CollectionRouteFixture f, java.util.Map<Long, String> currentLabelOf, java.util.Set<Long> newHolders,
                                     List<String> violations) {
-        int[] counts = new int[1];   // rows that carry a renamed id (the write landed somewhere)
-        f.asSuperuser(ctx -> {
-            for (String[] pair : nameIdPairs(f)) {
-                var table = org.jooq.impl.DSL.table(org.jooq.impl.DSL.name("nexus", pair[0]));
-                var name = org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("nexus", pair[0], pair[1]), String.class);
-                var id = org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("nexus", pair[0], pair[2]), Long.class);
-                if (pair[0].equals("catalog_collections")) {
-                    continue;   // the registry itself: the rename in place is the setup
-                }
-                int holders = ctx.fetchCount(table, id.in(newHolders));
-                if (holders > 0) {
-                    violations.add(pair[0] + "." + pair[2] + ": " + holders + " row(s) carry the id of the NEW holder of the old label");
-                }
-                for (var e : currentLabelOf.entrySet()) {
-                    int carried = ctx.fetchCount(table, id.eq(e.getKey()));
-                    counts[0] += carried;
-                    int stale = ctx.fetchCount(table, id.eq(e.getKey()).and(name.isDistinctFrom(e.getValue())));
-                    if (stale > 0) {
-                        violations.add(pair[0] + "." + pair[1] + ": " + stale + " row(s) carry id " + e.getKey() + " beside a label that is not "
-                            + e.getValue() + ", its current one");
-                    }
-                }
-            }
-            return null;
-        });
-        return counts;
+        return RenameGapInvariant.findings(f, currentLabelOf, newHolders, violations, java.util.Set.of(), true);
     }
 
     /** The WRITES routes the rename-in-the-gap check cannot run, each with its reason. A route not here and not HEAVY must reach its by-id read. */
@@ -580,29 +533,29 @@ class CollectionRoutesByIdTest {
 
     /**
      * The WRITES routes the table-driven rename-gap test does NOT run, because the census classes them HEAVY (they need a document, a chunk, a
-     * job or a pipeline run that this fixture does not build, so an empty request answers before it reads the id), each with where its rename
-     * gap is covered, or that it is not yet. A route listed UNCOVERED has no rename-gap test of its own as of this commit; the final dynamic test
-     * prints them, and asserts that every HEAVY WRITES route of the census has an entry here, so a new one cannot be skipped unnamed.
+     * job or a pipeline run that this fixture does not build, so an empty request answers before it reads the id), each with the test that
+     * covers its rename gap. An entry that starts with UNCOVERED (a route with no rename-gap test of its own) FAILS the final dynamic test, so a new HEAVY
+     * route cannot be named here without a test; the routes this class's note says are covered by {@code HeavyRoutesRenameGapTest} must be exactly that class's cases.
      */
     private static final java.util.Map<String, String> HEAVY_WRITES_ELSEWHERE = java.util.Map.ofEntries(
         java.util.Map.entry("/v1/vectors/upsert-chunks", "CollectionRetiredIdRoutesTest.upsertChunks_byAnIdWhoseRowWasRenamed..., RenameFollowGateOrderTest (two cases: the guarded and the guard-less path)"),
         java.util.Map.entry("/v1/catalog/manifest/write_many", "CollectionRetiredIdRoutesTest.writeMany_byAnIdWhoseRowWasRenamed... and writeManyWithDocsOnly_..."),
         java.util.Map.entry("/v1/aspects/upsert", "CollectionRetiredIdRoutesTest.aspectUpsert_byAnIdWhoseRowWasRenamed..."),
         java.util.Map.entry("/v1/catalog/collections/rehome", "RenameFollowGateOrderTest (the re-home case) and CollectionRehomeLiveAtCommitTest"),
-        java.util.Map.entry("/v1/catalog/manifest/write", "UNCOVERED: no rename-gap test of its own (it shares writeManifestRows with write_many)"),
-        java.util.Map.entry("/v1/catalog/manifest/append", "UNCOVERED: no rename-gap test of its own (appendOneDocumentTx, under RenameFollow)"),
-        java.util.Map.entry("/v1/catalog/manifest/append_many", "UNCOVERED: no rename-gap test of its own (appendOneDocumentTx, under RenameFollow)"),
-        java.util.Map.entry("/v1/catalog/import/chunk", "UNCOVERED: no rename-gap test of its own (doImportChunk, under RenameFollow)"),
-        java.util.Map.entry("/v1/vectors/gc/quarantine-orphans", "UNCOVERED for a rename (a stored chunk blocks the in-place rename); the freed-id gap is CollectionRetiredIdAuxRoutesTest"),
-        java.util.Map.entry("/v1/vectors/gc/restore-rereferenced", "UNCOVERED for a rename; the freed-id gap is CollectionRetiredIdAuxRoutesTest"),
-        java.util.Map.entry("/v1/vectors/gc/expire-quarantine", "UNCOVERED for a rename; the freed-id gap is CollectionRetiredIdAuxRoutesTest"),
-        java.util.Map.entry("/v1/vectors/gc/quarantine-restore", "UNCOVERED for a rename; the freed-id gap is CollectionRetiredIdAuxRoutesTest"),
-        java.util.Map.entry("/v1/vectors/reembed/jobs", "UNCOVERED: no rename-gap test of its own (ReembedJobRepository.start files under the locked rows' labels)"),
-        java.util.Map.entry("/v1/taxonomy/assignments/assign", "UNCOVERED: no rename-gap test of its own (assignOne stamps labelNow)"),
-        java.util.Map.entry("/v1/taxonomy/topics/persist_split", "UNCOVERED: no rename-gap test of its own (persist_rebuild and persist_discovered: RenameGapSeededChildRowsTest)"),
-        java.util.Map.entry("/v1/aspects/highlights/upsert", "UNCOVERED: no rename-gap test of its own"),
-        java.util.Map.entry("/v1/remap/record_batch", "UNCOVERED: no rename-gap test of its own"),
-        java.util.Map.entry("/v1/pipeline/create", "UNCOVERED: no rename-gap test of its own"));
+        java.util.Map.entry("/v1/catalog/manifest/write", "HeavyRoutesRenameGapTest"),
+        java.util.Map.entry("/v1/catalog/manifest/append", "HeavyRoutesRenameGapTest"),
+        java.util.Map.entry("/v1/catalog/manifest/append_many", "HeavyRoutesRenameGapTest"),
+        java.util.Map.entry("/v1/catalog/import/chunk", "HeavyRoutesRenameGapTest"),
+        java.util.Map.entry("/v1/vectors/gc/quarantine-orphans", "HeavyRoutesRenameGapTest (a rename in the gap); CollectionRetiredIdAuxRoutesTest (the freed-id gap)"),
+        java.util.Map.entry("/v1/vectors/gc/restore-rereferenced", "HeavyRoutesRenameGapTest (a rename in the gap); CollectionRetiredIdAuxRoutesTest (the freed-id gap)"),
+        java.util.Map.entry("/v1/vectors/gc/expire-quarantine", "HeavyRoutesRenameGapTest (a rename in the gap); CollectionRetiredIdAuxRoutesTest (the freed-id gap)"),
+        java.util.Map.entry("/v1/vectors/gc/quarantine-restore", "HeavyRoutesRenameGapTest (a rename in the gap); CollectionRetiredIdAuxRoutesTest (the freed-id gap)"),
+        java.util.Map.entry("/v1/vectors/reembed/jobs", "HeavyRoutesRenameGapTest"),
+        java.util.Map.entry("/v1/taxonomy/assignments/assign", "HeavyRoutesRenameGapTest"),
+        java.util.Map.entry("/v1/taxonomy/topics/persist_split", "HeavyRoutesRenameGapTest (persist_rebuild and persist_discovered: RenameGapSeededChildRowsTest)"),
+        java.util.Map.entry("/v1/aspects/highlights/upsert", "HeavyRoutesRenameGapTest"),
+        java.util.Map.entry("/v1/remap/record_batch", "HeavyRoutesRenameGapTest"),
+        java.util.Map.entry("/v1/pipeline/create", "HeavyRoutesRenameGapTest"));
 
     /**
      * The table-driven rename-gap test over the GENERIC routes of the census (RDR-229 P3.5a, review F1): for each, a request by ID whose
@@ -663,11 +616,22 @@ class CollectionRoutesByIdTest {
                     unnamed.add(rt.path());
                 }
             }
+            List<String> uncovered = new ArrayList<>();
+            List<String> namedForTheHeavyClass = new ArrayList<>();
             HEAVY_WRITES_ELSEWHERE.forEach((path, where) -> {
                 if (where.startsWith("UNCOVERED")) {
-                    System.err.println("rename_gap_uncovered " + path + " :: " + where);
+                    uncovered.add(path + " :: " + where);
+                }
+                if (where.startsWith("HeavyRoutesRenameGapTest")) {
+                    namedForTheHeavyClass.add(path);
                 }
             });
+            assertThat(uncovered).as("HEAVY WRITES routes with no rename-gap test of their own").isEmpty();
+            assertThat(namedForTheHeavyClass).as("the routes named for HeavyRoutesRenameGapTest are its cases, exactly")
+                .containsExactlyInAnyOrderElementsOf(HeavyRoutesRenameGapTest.COVERED_PATHS);
+            assertThat(HEAVY_WRITES_ELSEWHERE.keySet()).as("every route this map names is a HEAVY WRITES route of the census (no stale entry)")
+                .allSatisfy(path -> assertThat(CollectionRouteCensus.ROUTES.stream()
+                    .anyMatch(rt -> rt.path().equals(path) && CollectionSelectorFilter.writeRoutePaths().contains(path))).as(path).isTrue());
             assertThat(unnamed).as("HEAVY WRITES routes the rename-gap test does not run and HEAVY_WRITES_ELSEWHERE does not name").isEmpty();
         }));
         nodes.add(DynamicTest.dynamicTest("non-vacuity: routes ran the rename and the named writers landed rows", () -> {

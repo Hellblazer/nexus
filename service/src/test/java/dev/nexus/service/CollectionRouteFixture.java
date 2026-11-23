@@ -274,6 +274,16 @@ final class CollectionRouteFixture implements AutoCloseable {
      * (the label the id's row bore, same index). What it did is on the returned handle; close it (try-with-resources) to remove the hook.
      */
     public RenameGap renameInPlaceBeforeTheWritesRead(List<Long> ids, List<String> oldLabels, String stem) {
+        return renameInPlaceBeforeTheWritesRead(ids, oldLabels, stem, null);
+    }
+
+    /**
+     * As above, and {@code afterRename} (when not null) runs on the hook's other thread once every row is renamed and every old label taken,
+     * with the handle (so the current labels and the new holders' ids are readable): the place to store what the write will look for under
+     * the row's CURRENT label (a stored chunk blocks nothing here, but a row seeded before the rename bears the old name by construction).
+     */
+    public RenameGap renameInPlaceBeforeTheWritesRead(List<Long> ids, List<String> oldLabels, String stem,
+                                                      java.util.function.Consumer<RenameGap> afterRename) {
         if (ids.size() != oldLabels.size()) {
             throw new IllegalArgumentException("one old label per id: " + ids.size() + " ids, " + oldLabels.size() + " labels");
         }
@@ -290,6 +300,9 @@ final class CollectionRouteFixture implements AutoCloseable {
                         gap.currentLabelOf.put(id, fresh);
                         register(old);   // a new row takes the old label
                         gap.newHolders.add(idOf(old));
+                    }
+                    if (afterRename != null) {
+                        afterRename.accept(gap);
                     }
                 }).join();
             }
