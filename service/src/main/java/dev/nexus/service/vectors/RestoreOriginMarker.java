@@ -66,4 +66,37 @@ final class RestoreOriginMarker {
             throw new RestoreOriginUnregisteredException(labels.get(0), rows);
         }
     }
+
+    /** The origin's label as the request named it and as the registry holds it now (one entry when they are the same). */
+    static List<String> originLabels(String requested, String current) {
+        return requested.equals(current) ? List.of(requested) : List.of(requested, current);
+    }
+
+    /**
+     * The date-range restore's origin condition. RDR-229 P3.7 (linda 2026-11-23): from gate 3 a chunk is the origin's by the origin's id (QuarantineOrigin's one definition, the label tag only for a
+     * row that carries no id key), so a window named by a one-row-renamed collection's NEW label finds the chunks tagged with its old one; an untagged
+     * chunk is still taken for this origin's. A marker row is selected through its label and refused by restoreAcross, as in every form.
+     */
+    static Condition windowOrigin(Gate3 gate3, String tenant, String originCollection, Field<String> originStamp) {
+        return gate3.holds()
+            ? QuarantineOrigin.taggedWith(true, tenant, originCollection).or(originStamp.isNull())
+                .or(isNullMarker().and(originStamp.eq(originCollection)))
+            : originStamp.isNull().or(originStamp.eq(originCollection));
+    }
+
+    /**
+     * RDR-229 P3.7 (linda 2026-11-23): from gate 3 a requested chunk in the siblings whose label tag is the origin's but whose id key is the null marker
+     * is not restorable by id; the restore would read it {@code missing}. The whole call is refused before any sibling is touched (409
+     * {@code restore_origin_unregistered}); the chunks stay quarantined. A read of its own: nothing is locked and nothing is written.
+     */
+    static void refuseRequested(dev.nexus.service.db.TenantScope scope, Gate3 gate3, String tenant, String originCollection, List<String> siblings,
+                                String[] hex) {
+        if (!gate3.holds() || siblings.isEmpty()) {
+            return;
+        }
+        scope.withTenant(tenant, ctx -> {
+            requireNone(ctx, gate3, tenant, siblings, List.of(originCollection), List.of(hex));
+            return null;
+        });
+    }
 }
