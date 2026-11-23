@@ -3,6 +3,7 @@
 package dev.nexus.service;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -47,6 +48,11 @@ class Rdr229P37OneRowRenameByIdTest {
         engine = new Rdr229RenameEngine();
         pre = Rdr229RenameRestartPrecondition.reach(engine).reached();
         pre.require();
+        // non-vacuity: the one-row regime is what these cases run in. The latch row exists (gate 3 latched: the engine's cached signal and the row itself),
+        // and RenameGuard takes the one-row body only past it, so a rename in this class that succeeds ran the one-row body, not the name path.
+        assertThat(engine.gate3Holds()).as("the engine's gate 3 signal is latched").isTrue();
+        assertThat(engine.<Integer>su(ctx -> ctx.fetchCount(DSL.table(DSL.name("nexus", "rdr229_gate_latch")))))
+            .as("the gate 3 latch row exists (nexus.rdr229_gate_latch)").isPositive();
     }
 
     @AfterAll
@@ -111,6 +117,13 @@ class Rdr229P37OneRowRenameByIdTest {
     void aRenameByCollectionId_succeedsAndTheRowKeepsItsId() throws Exception {
         World w = world("a");
         String newName = coll(w.ownerA() + "x", 2);
+        // chunks under A: the one-row rename does not rewrite them, the name path does (chunks.collection is one of the 14 scoped tables)
+        engine.su(ctx -> {
+            Rdr229RenameSeeds.chunksAndRing(ctx, w.tenant(), w.a());
+            return null;
+        });
+        long chunks = engine.su(ctx -> (long) ctx.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(w.tenant()).and(CHUNKS.COLLECTION.eq(w.a()))));
+        assertThat(chunks).as("non-vacuity: chunks under the collection to rename").isPositive();
 
         var r = engine.renameById(w.token(), w.idA(), newName, Map.of("content_type", "knowledge", "owner_id", w.ownerA() + "x"));
 
@@ -118,6 +131,11 @@ class Rdr229P37OneRowRenameByIdTest {
         assertThat(MAPPER.readTree(r.body()).path("collection_id").asLong(-1)).as("the answer names the renamed row's id").isEqualTo(w.idA());
         assertThat(engine.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, w.tenant(), newName))).as("the row is renamed in place").isEqualTo(w.idA());
         assertThat(engine.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, w.tenant(), w.a()))).as("nothing is left at the old label").isNull();
+        assertThat(engine.<Long>su(ctx -> (long) ctx.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(w.tenant()).and(CHUNKS.COLLECTION.eq(w.a())))))
+            .as("the one-row body ran, not the name path: the chunks still carry the OLD label, which only the name path rewrites").isEqualTo(chunks);
+        assertThat(engine.<Long>su(ctx -> (long) ctx.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(w.tenant()).and(CHUNKS.COLLECTION.eq(newName)))))
+            .as("and none carries the new one").isZero();
+        assertThat(MAPPER.readTree(r.body()).path("ids_stable").asBoolean()).as("the one-row outcome reports ids stable: " + r).isTrue();
     }
 
     // ---- (b) ---------------------------------------------------------------------------------------------------------------
