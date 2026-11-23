@@ -146,10 +146,9 @@ class Rdr229P37PrerequisitesTest extends AtomicWriteTestBase {
         // P3.5b's assign_from_chashes_384 writes source_collection = the caller's label, and topic_assignments_chunk_fk keys that name to the chunk's
         // own: a chunk still named old would refuse the new label. P3.7's vectors-079 BEFORE INSERT OR UPDATE trigger sets source_collection from the
         // chunk row the assignment references, so the key stays in place and accepts the write. The key is asserted present (non-vacuity), never dropped.
-        Integer fk = su(d -> d.resultQuery(
-            "SELECT count(*)::int FROM pg_catalog.pg_constraint WHERE conname = 'topic_assignments_chunk_fk' AND conrelid = 'nexus.topic_assignments'::regclass")
-            .fetchOne(0, Integer.class));
-        assertThat(fk).as("non-vacuity: topic_assignments_chunk_fk is in place").isEqualTo(1);
+        boolean fk = su(d -> d.fetchExists(DSL.table(DSL.name("pg_catalog", "pg_constraint")),
+            DSL.field(DSL.name("conname"), String.class).eq("topic_assignments_chunk_fk")));
+        assertThat(fk).as("non-vacuity: topic_assignments_chunk_fk is in place").isTrue();
 
         Map<String, Object> out = taxonomy.assignFromChashes(TENANT, neu, hexes, false);
 
