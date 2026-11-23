@@ -80,9 +80,11 @@ public final class CatalogLinksRepository {
     }
 
     private final TenantScope tenantScope;
+    private final dev.nexus.service.datamove.Gate3 gate3;
 
     public CatalogLinksRepository(CatalogRepository base) {
         this.tenantScope = base.tenantScope();
+        this.gate3 = base.gate3();
     }
 
     /**
@@ -194,7 +196,7 @@ public final class CatalogLinksRepository {
             if (sourceUriPrefix != null && !sourceUriPrefix.isBlank()) {
                 filter = filter.and(CATALOG_DOCUMENTS.SOURCE_URI.like(likePrefix(sourceUriPrefix), '\\'));
             }
-            return ctx.select(CatalogRepository.documentFields()).from(CATALOG_DOCUMENTS)
+            return ctx.select(CatalogRepository.documentFields(gate3)).from(CATALOG_DOCUMENTS)
                .where(CATALOG_DOCUMENTS.DELETED_AT.isNull().and(filter))
                .orderBy(CATALOG_DOCUMENTS.TUMBLER)
                .limit(limit > 0 ? limit : Integer.MAX_VALUE)

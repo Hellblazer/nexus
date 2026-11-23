@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import dev.nexus.service.datamove.Gate3;
 import dev.nexus.service.db.PgSession.PciSettings;
 import dev.nexus.service.vectors.PciCatalog.Leaf;
 import dev.nexus.service.vectors.PciReconcilePlanner.RegistryRow;
@@ -230,6 +231,18 @@ final class PciIdBuilds {
     static PciReconcilePlanner.Plan plan(DSLContext tx, Leaf leaf, int dimension, Map<String, Integer> counts,
                                          Collection<RegistryRow> registry, Set<String> backedOff, String inFlight,
                                          PciSettings settings, boolean gate2, boolean gate3, int rankCap) {
+        return plan(tx, leaf, dimension, counts, registry, backedOff, inFlight, settings, gate2, gate3, rankCap, Gate3.never());
+    }
+
+    /**
+     * {@link #plan} whose recount of the ids' candidates reads each candidate's rows by {@code collection_id} once {@code readGate} holds
+     * (RDR-229 P3.5c, nexus-p2m1x.25; {@link PciLeafCounting#count(DSLContext, int, String, String, String, int, Gate3)}): an id build's
+     * candidate is a registry row, and a registry row renamed in place has chunk rows under its old label. {@code gate3} (the boolean) is
+     * still P3.4's retire switch and is unchanged; {@code readGate} is the engine's Gate3 read at each count.
+     */
+    static PciReconcilePlanner.Plan plan(DSLContext tx, Leaf leaf, int dimension, Map<String, Integer> counts,
+                                         Collection<RegistryRow> registry, Set<String> backedOff, String inFlight,
+                                         PciSettings settings, boolean gate2, boolean gate3, int rankCap, Gate3 readGate) {
         var inputs = new PciReconcilePlanner.IdPlanInputs(gate2, new PciReconcilePlanner.IdReads() {
             @Override
             public Set<String> nullIdCollections(Collection<RegistryRow> candidates) {
@@ -240,7 +253,7 @@ final class PciIdBuilds {
             public Map<String, Integer> recount(Collection<String> collections) {
                 Map<String, Integer> out = new HashMap<>();
                 collections.forEach(c ->
-                    out.put(c, PciLeafCounting.count(tx, dimension, c, leaf.model(), leaf.tenant(), rankCap)));
+                    out.put(c, PciLeafCounting.count(tx, dimension, c, leaf.model(), leaf.tenant(), rankCap, readGate)));
                 return out;
             }
         }, gate3);

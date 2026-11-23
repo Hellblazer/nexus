@@ -179,6 +179,9 @@ final class TenantKeyedStateTables {
         notKeyed.put("CatalogDocReads.Page.documents", RESULT);
         notKeyed.put("CatalogMoves.Counts.absorbedTumblers", RESULT);   // RDR-254: one move's absorbed rows
         notKeyed.put("CatalogMoves.Report.asMap", RESULT);              // RDR-254: one move's report
+        // RDR-229 P3.5c: one statement's selector, the labels it was built from and their resolved ids, dropped with the call
+        notKeyed.put("CollectionSelector.names", RESULT);
+        notKeyed.put("CollectionSelector.ids", RESULT);
         notKeyed.put("CatalogMoves.lockOrderHookForTests", TEST_HOOK);
         notKeyed.put("CatalogMoves.afterWritesHookForTests", TEST_HOOK);
         notKeyed.put("CatalogMoves.FoldPlan.pairsT", RESULT);   // RDR-254: the fold read for one owner move

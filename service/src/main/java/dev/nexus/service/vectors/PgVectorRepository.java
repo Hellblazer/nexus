@@ -2,6 +2,14 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import dev.nexus.service.datamove.Gate3;
+import static dev.nexus.service.vectors.SearchFunctions.plainSearchFn;
+import static dev.nexus.service.vectors.SearchFunctions.manifestSearchFn;
+import static dev.nexus.service.vectors.SearchFunctions.chashAllowedSearchFn;
+import static dev.nexus.service.vectors.SearchFunctions.textGatedByChashFn;
+import static dev.nexus.service.vectors.SearchFunctions.textGatedAllowedFn;
+import static dev.nexus.service.vectors.SearchFunctions.textGatedHnswFirstFn;
+
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.db.CatalogRepository;
@@ -27,10 +35,8 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNK_IS_REAPABLE;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNK_LIVE_OWNERS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNK_LIVE_OWNERS_BY_ID;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNK_ORPHANED_AT;
-import static dev.nexus.service.jooq.nexus.Tables.SEARCH_ASPECT_SCOPED_1024;
-import static dev.nexus.service.jooq.nexus.Tables.SEARCH_ASPECT_SCOPED_384;
-import static dev.nexus.service.jooq.nexus.Tables.SEARCH_ASPECT_SCOPED_768;
 // RDR-191 Phase 4 (nexus-o8dil.16/.18): chunks_384/768/1024 collapsed into the
 // single nexus.chunks table (three nullable embedding_<dim> columns) --
 // CHUNKS_384/CHUNKS_768/CHUNKS_1024 no longer exist as generated jOOQ Table
@@ -50,45 +56,22 @@ import static dev.nexus.service.jooq.nexus.Tables.GC_QUARANTINE_ORPHANS_BOUNDED;
 import static dev.nexus.service.jooq.nexus.Tables.GC_QUARANTINE_ORPHANS_FLOORED;
 import static dev.nexus.service.jooq.nexus.Tables.GC_RESTORE_REREFERENCED_BOUNDED;
 import dev.nexus.service.jooq.nexus.Routines;
-import static dev.nexus.service.jooq.nexus.Tables.SEARCH_GRAPH_HOP_1024;
-import static dev.nexus.service.jooq.nexus.Tables.SEARCH_GRAPH_HOP_384;
-import static dev.nexus.service.jooq.nexus.Tables.SEARCH_GRAPH_HOP_768;
-import static dev.nexus.service.jooq.nexus.Tables.SEARCH_METADATA_SCOPED_1024;
-import static dev.nexus.service.jooq.nexus.Tables.SEARCH_METADATA_SCOPED_384;
-import static dev.nexus.service.jooq.nexus.Tables.SEARCH_METADATA_SCOPED_768;
-import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SCOPED_1024;
-import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SCOPED_384;
-import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SCOPED_768;
 // nexus-zrcj7: plain_search_<dim> (vectors-009) retires searchWithTokens's raw SQL onto
 // an inlinable schema function, the same generated-function-table idiom as every sibling
 // combined-query shape above.
-import static dev.nexus.service.jooq.nexus.Tables.PLAIN_SEARCH_1024;
-import static dev.nexus.service.jooq.nexus.Tables.PLAIN_SEARCH_384;
-import static dev.nexus.service.jooq.nexus.Tables.PLAIN_SEARCH_768;
 // nexus-zrcj7 (coordinator finding, T2 [24216]): restores the lcogi/x7z7l selectivity-
 // aware two-branch dispatch (vectors-011) -- the HNSW-first fallback is a table-valued
 // function like every sibling. text_gated_search_<dim> (the retired single-materializing-
 // CTE design) was deleted outright (T2 critic follow-up, 2026-09-04): zero production
 // callers once this dispatch existed.
-import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_HNSW_FIRST_1024;
-import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_HNSW_FIRST_384;
-import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_HNSW_FIRST_768;
 // nexus-zrcj7 (T2 [24219] critique finding B, single-gate-eval restored): text_gated_search_by_chash_<dim> ranks
 // ONLY over the text_gate_probe_<dim> chash set (the probe helpers live in LexicalGateProbe) -- no second
 // text-gate evaluation.
-import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_ALLOWED_1024;
-import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_ALLOWED_384;
-import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_ALLOWED_768;
-import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_BY_CHASH_1024;
-import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_BY_CHASH_384;
-import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_BY_CHASH_768;
 // nexus-p89h4 / nexus-6pfgb.25 (vectors-041): the one search function that also tests an EXISTS on the catalog
 // manifest, serving plain search, the dense text gate and the selective chash set.
 import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_ADMITS_CHUNK;
 import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_QUALIFYING_HITS;
-import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_SEARCH_1024;
-import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_SEARCH_384;
-import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_SEARCH_768;
+import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_QUALIFYING_HITS_BY_ID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -373,6 +356,14 @@ public final class PgVectorRepository {
     private final PciIndexSet    pciIndexes;
     /** RDR-227: the sampled check that the planner still reaches a per-collection index; never null. */
     private final PciPlanCheck   planCheck;
+    /**
+     * RDR-229 P3.5c (nexus-p2m1x.25), item 6 "Readers during the stamp": the gate-3 signal. Read on every call, never cached
+     * ({@link Gate3#holds()}): from gate 3 the upsert arbitrates on the id key and every reader selects by {@code collection_id}
+     * (the {@code <name>_by_id} SQL twins), before it the name path stays exactly as it was. Every constructor that takes no
+     * gate leaves {@link Gate3#never()}.
+     */
+    private final Gate3 gate3;
+
 
     /**
      * The RLS-stamping gateway this repository was constructed with (RDR-204 Phase 2,
@@ -415,14 +406,37 @@ public final class PgVectorRepository {
     public PgVectorRepository(TenantScope tenantScope, Embedder docEmbedder,
                               Embedder queryEmbedder) {
         this(tenantScope, docEmbedder, queryEmbedder, GET_ALL_METADATA_MAX_ROWS, PciIndexSet.NONE,
-             PciPlanCheck.production());
+             PciPlanCheck.production(), Gate3.never());
+    }
+
+    /** {@link #PgVectorRepository(TenantScope, Embedder, Embedder)} with the gate-3 signal (RDR-229 P3.5c). */
+    public PgVectorRepository(TenantScope tenantScope, Embedder docEmbedder, Embedder queryEmbedder, Gate3 gate3) {
+        this(tenantScope, docEmbedder, queryEmbedder, GET_ALL_METADATA_MAX_ROWS, PciIndexSet.NONE,
+             PciPlanCheck.production(), gate3);
+    }
+
+    /** The per-collection index set and the gate-3 signal (RDR-229 P3.5c): the production wiring of the embedder-only form (tests). */
+    public PgVectorRepository(TenantScope tenantScope, Embedder docEmbedder, Embedder queryEmbedder,
+                              PciIndexSet pciIndexes, Gate3 gate3) {
+        this(tenantScope, docEmbedder, queryEmbedder, GET_ALL_METADATA_MAX_ROWS, pciIndexes,
+             PciPlanCheck.production(), gate3);
+    }
+
+    /**
+     * The PRODUCTION wiring with the gate-3 signal (RDR-229 P3.5c): {@link #PgVectorRepository(TenantScope, EmbedderRouter,
+     * EmbedderRouter, PciIndexSet)} and {@code gate3}, which Main builds once over the completion check's latched gate 3.
+     */
+    public PgVectorRepository(TenantScope tenantScope, EmbedderRouter docRouter, EmbedderRouter queryRouter,
+                              PciIndexSet pciIndexes, Gate3 gate3) {
+        this(tenantScope, docRouter, queryRouter, GET_ALL_METADATA_MAX_ROWS, pciIndexes,
+             PciPlanCheck.production(), gate3);
     }
 
     /** {@link #PgVectorRepository(TenantScope, Embedder, Embedder)} with the per-collection index set (RDR-227). */
     public PgVectorRepository(TenantScope tenantScope, Embedder docEmbedder,
                               Embedder queryEmbedder, PciIndexSet pciIndexes) {
         this(tenantScope, docEmbedder, queryEmbedder, GET_ALL_METADATA_MAX_ROWS, pciIndexes,
-             PciPlanCheck.production());
+             PciPlanCheck.production(), Gate3.never());
     }
 
     /**
@@ -432,7 +446,7 @@ public final class PgVectorRepository {
      */
     PgVectorRepository(TenantScope tenantScope, Embedder docEmbedder,
                        Embedder queryEmbedder, PciIndexSet pciIndexes, PciPlanCheck planCheck) {
-        this(tenantScope, docEmbedder, queryEmbedder, GET_ALL_METADATA_MAX_ROWS, pciIndexes, planCheck);
+        this(tenantScope, docEmbedder, queryEmbedder, GET_ALL_METADATA_MAX_ROWS, pciIndexes, planCheck, Gate3.never());
     }
 
     /**
@@ -449,12 +463,13 @@ public final class PgVectorRepository {
     PgVectorRepository(TenantScope tenantScope, Embedder docEmbedder,
                        Embedder queryEmbedder, int getAllMetadataMaxRows) {
         this(tenantScope, docEmbedder, queryEmbedder, getAllMetadataMaxRows, PciIndexSet.NONE,
-             PciPlanCheck.production());
+             PciPlanCheck.production(), Gate3.never());
     }
 
     private PgVectorRepository(TenantScope tenantScope, Embedder docEmbedder,
                                Embedder queryEmbedder, int getAllMetadataMaxRows, PciIndexSet pciIndexes,
-                               PciPlanCheck planCheck) {
+                               PciPlanCheck planCheck, Gate3 gate3) {
+        this.gate3         = java.util.Objects.requireNonNull(gate3, "gate3");
         this.tenantScope   = tenantScope;
         this.docEmbedder   = docEmbedder;
         this.queryEmbedder = queryEmbedder;
@@ -477,14 +492,14 @@ public final class PgVectorRepository {
     public PgVectorRepository(TenantScope tenantScope, EmbedderRouter docRouter,
                               EmbedderRouter queryRouter) {
         this(tenantScope, docRouter, queryRouter, GET_ALL_METADATA_MAX_ROWS, PciIndexSet.NONE,
-             PciPlanCheck.production());
+             PciPlanCheck.production(), Gate3.never());
     }
 
     /** {@link #PgVectorRepository(TenantScope, EmbedderRouter, EmbedderRouter)} with the per-collection index set (RDR-227). */
     public PgVectorRepository(TenantScope tenantScope, EmbedderRouter docRouter,
                               EmbedderRouter queryRouter, PciIndexSet pciIndexes) {
         this(tenantScope, docRouter, queryRouter, GET_ALL_METADATA_MAX_ROWS, pciIndexes,
-             PciPlanCheck.production());
+             PciPlanCheck.production(), Gate3.never());
     }
 
     /**
@@ -496,12 +511,13 @@ public final class PgVectorRepository {
     PgVectorRepository(TenantScope tenantScope, EmbedderRouter docRouter,
                        EmbedderRouter queryRouter, int getAllMetadataMaxRows) {
         this(tenantScope, docRouter, queryRouter, getAllMetadataMaxRows, PciIndexSet.NONE,
-             PciPlanCheck.production());
+             PciPlanCheck.production(), Gate3.never());
     }
 
     private PgVectorRepository(TenantScope tenantScope, EmbedderRouter docRouter,
                                EmbedderRouter queryRouter, int getAllMetadataMaxRows, PciIndexSet pciIndexes,
-                               PciPlanCheck planCheck) {
+                               PciPlanCheck planCheck, Gate3 gate3) {
+        this.gate3         = java.util.Objects.requireNonNull(gate3, "gate3");
         this.tenantScope   = tenantScope;
         this.docEmbedder   = docRouter;   // EmbedderRouter implements Embedder (default embed: its local member)
         this.queryEmbedder = queryRouter;
@@ -835,8 +851,12 @@ public final class PgVectorRepository {
      * dropped tenant predicate. Not part of the engine's surface; nothing in main calls it from
      * outside this class.
      */
+    /**
+     * (RDR-229 P3.5c, item 6) The manifest is matched by the collection's id once {@code gate3} holds; a label that resolves to no id
+     * owns nothing. There is no default-gate overload: a caller passes the gate it holds ({@code Gate3.never()} in a test).
+     */
     public static Set<String> liveOwnedChashes(DSLContext ctx, String tenant, String collection,
-                                                List<String> distinctHex) {
+                                                List<String> distinctHex, Gate3 gate3) {
         Set<String> owned = new HashSet<>(distinctHex.size() * 2);
         for (int start = 0; start < distinctHex.size(); start += OWNERSHIP_CHECK_BATCH) {
             List<byte[]> batch = new ArrayList<>(OWNERSHIP_CHECK_BATCH);
@@ -850,7 +870,8 @@ public final class PgVectorRepository {
                     .on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
                         .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)))
                 .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
-                    .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(collection))
+                    .and(CollectionSelector.collectionIs(gate3, tenant, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                                                         CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, collection))
                     .and(CATALOG_DOCUMENT_CHUNKS.CHASH.in(batch))
                     .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                 .fetch(0, String.class));
@@ -885,7 +906,7 @@ public final class PgVectorRepository {
                                    List<Map<String, Object>> metadatas, OwnershipGuard guard) {
         List<String> distinct = new ArrayList<>(new java.util.LinkedHashSet<>(ids));
         Set<String> owned = tenantScope.withTenant(tenant, ctx ->
-            liveOwnedChashes(ctx, tenant, collection, distinct));
+            liveOwnedChashes(ctx, tenant, collection, distinct, gate3));
         List<String> unowned = new ArrayList<>();
         for (String hex : distinct) {
             if (!owned.contains(hex)) {
@@ -911,7 +932,7 @@ public final class PgVectorRepository {
                                                             List<Map<String, Object>> metadatas, OwnershipGuard guard) {
         CatalogRepository.acquireSweepGateShared(ctx, tenant, collection);
         List<String> distinct = new ArrayList<>(new java.util.LinkedHashSet<>(insertChashes));
-        Set<String> owned = liveOwnedChashes(ctx, tenant, collection, distinct);
+        Set<String> owned = liveOwnedChashes(ctx, tenant, collection, distinct, gate3);
         List<String> unowned = new ArrayList<>();
         for (String hex : distinct) {
             if (!owned.contains(hex)) {
@@ -1306,11 +1327,17 @@ public final class PgVectorRepository {
                                 collectionId);
                     }
                     // RDR-225: the four-column primary key (the partition keys are part of it).
-                    // RDR-229 #7 (nexus-p2m1x.20): the name key arbitrates, so a racing insert that trips the leaf's id unique index
-                    // retries once (TwinKeyUpsert).
+                    // RDR-229 P3.5c (nexus-p2m1x.25), item 6: the name key arbitrates until gate 3 holds on the install, the id key
+                    // (tenant_id, collection_id, chash, embedding_model: P3.3c's parent UNIQUE) from then on; Gate3 is read here, per
+                    // attempt, never cached. RDR-229 #7 (nexus-p2m1x.20): either arbiter leaves the other unique key to trip on a
+                    // racing insert, so the statement retries once (TwinKeyUpsert). The id arm also sets the name to the writer's,
+                    // since fk_catalog_chunks_chunk ties the manifest's name to the chunk's until P3.7 (linda 2026-11-22).
+                    final boolean byId = gate3.holds();
                     final var finalInsert = insert;
-                    dev.nexus.service.db.TwinKeyUpsert.run(ctx, "chunks", dev.nexus.service.db.TwinKeyUpsert.Arbiter.NAME_KEY, c ->
-                    finalInsert.onConflict(ch.tenantId(), ch.collection(), ch.chash(), ch.embeddingModel())
+                    dev.nexus.service.db.TwinKeyUpsert.run(ctx, "chunks",
+                        byId ? dev.nexus.service.db.TwinKeyUpsert.Arbiter.ID_KEY : dev.nexus.service.db.TwinKeyUpsert.Arbiter.NAME_KEY, c -> {
+                    var upsert = (byId ? finalInsert.onConflict(ch.tenantId(), ch.collectionId(), ch.chash(), ch.embeddingModel())
+                          : finalInsert.onConflict(ch.tenantId(), ch.collection(), ch.chash(), ch.embeddingModel()))
                           .doUpdate()
                           .set(ch.chunkText(), DSL.excluded(ch.chunkText()))
                           .set(ch.embedding(), DSL.excluded(ch.embedding()))
@@ -1351,8 +1378,12 @@ public final class PgVectorRepository {
                           // DimTables#insertedByThisStatement reads the write-once created_at instead
                           // (a typed field comparison, not a raw SQL string, so RawSqlGateTest needs no
                           // SANCTIONED_STATEMENTS entry).
-                          .returningResult(ch.chash(), DSL.field(DimTables.insertedByThisStatement(ch)))
-                          .fetch())
+                          ;
+                    if (byId) {
+                        upsert = upsert.set(ch.collection(), DSL.excluded(ch.collection()));
+                    }
+                    return upsert.returningResult(ch.chash(), DSL.field(DimTables.insertedByThisStatement(ch)))
+                          .fetch(); })
                           .forEach(r -> {
                               if (!Boolean.TRUE.equals(r.value2())
                                       && finalOriginalAbsentChashes.contains(r.value1())) {
@@ -1531,7 +1562,7 @@ public final class PgVectorRepository {
 
     /** nexus-tko2w: stateless; answers the section_title / section_type / page_number where-keys from the manifest. */
     private ManifestLabelStage labelStage() {
-        return new ManifestLabelStage(tenantScope);
+        return new ManifestLabelStage(tenantScope, gate3);
     }
 
     /** {@link #searchWithTokens} for a {@code where} that carries none of the manifest-answered label keys. */
@@ -1576,14 +1607,16 @@ public final class PgVectorRepository {
         EmbedResult embedResult = embedQuery(tenant, collectionNames.get(0), queryText, dim);
         Vector queryVec = Vector.of(embedResult.embeddings().get(0));
         WherePlan wherePlan = planWhere(where).withManifest(manifest).withExcludeSensitive(excludeSensitive);
-        String[] colls = collectionNames.toArray(String[]::new);
+        // RDR-229 P3.5c: gate 3 is read here, once for the call. From gate 3 every name resolves to its registry id and the
+        // statement is the <name>_by_id twin over all the ids; before it, the name function over the names, as always.
+        CollectionSelector sel = CollectionSelector.of(gate3, tenantScope, tenant, collectionNames);
 
         org.jooq.Table<?> fn = chashAllow == null
-            ? plainSearchFn(dim, queryVec, colls, wherePlan, nResults, model, tenant)
-            : chashAllowedSearchFn(dim, queryVec, chashAllow, colls, wherePlan, nResults, model, tenant);
+            ? plainSearchFn(dim, queryVec, sel, wherePlan, nResults, model, tenant)
+            : chashAllowedSearchFn(dim, queryVec, chashAllow, sel, wherePlan, nResults, model, tenant);
 
         Result<? extends Record> result = runPlainSearchStatement(
-            tenant, model, fn, dim, colls, nResults, PgSession::startupSearchStatementTimeoutMs, false, null,
+            tenant, model, fn, dim, sel, nResults, PgSession::startupSearchStatementTimeoutMs, false, null,
             chashAllow != null, chashAllow == null && wherePlan.manifest() != null ? wherePlan : null);
 
         List<Map<String, Object>> rows = plainSearchRows(result);
@@ -1595,92 +1628,6 @@ public final class PgVectorRepository {
         // RDR-169 G5: surface address triple additively (chash + span always; source_uri opt-in)
         enrichSearchRows(tenant, rows, includeSourceUri, labelStageFollows, excludeSensitive);
         return new Tokened<>(rows, embedResult.tokens(), skippedCollections, ringVector);
-    }
-
-    /**
-     * The generated {@code plain_search_<dim>} table-function call for one dispatch dim.
-     * Shared by {@link #searchWithTokens} and the per-collection fan-out arms
-     * ({@link #searchPerCollection}), so both run the SAME function with the same bind
-     * order, which is what the fan-out's equivalence contract rests on.
-     */
-    private static org.jooq.Table<?> plainSearchFn(int dim, Vector queryVec, String[] colls,
-                                                   WherePlan wherePlan, int nResults,
-                                                   String model, String tenant) {
-        if (wherePlan.manifest() != null) {
-            // nexus-p89h4: the same ranking with an EXISTS on the catalog manifest inside the scan.
-            return manifestSearchFn(dim, queryVec, null, null, colls, wherePlan, nResults, model, tenant);
-        }
-        return switch (dim) {
-            case 384  -> PLAIN_SEARCH_384.call(
-                queryVec, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant,
-                wherePlan.excludeSensitive());
-            case 768  -> PLAIN_SEARCH_768.call(
-                queryVec, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant,
-                wherePlan.excludeSensitive());
-            case 1024 -> PLAIN_SEARCH_1024.call(
-                queryVec, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant,
-                wherePlan.excludeSensitive());
-            default   -> throw new IllegalArgumentException("unsupported dim " + dim);
-        };
-    }
-
-    /**
-     * The generated {@code manifest_search_<dim>} call (vectors-041, nexus-p89h4 and nexus-6pfgb.25): the ranking
-     * of {@code plain_search_<dim>}, of {@code text_gated_search_hnsw_first_<dim>} when {@code queryText} is not
-     * null, and of {@code text_gated_search_by_chash_<dim>} when {@code chashes} is not null, with one more
-     * conjunct: some live manifest occurrence of the chunk passes {@code wherePlan.manifest()} (see {@link
-     * ManifestPushdown}). It returns the same six columns, so every caller reads the result as it read the others.
-     *
-     * @param queryText the text gate (an FTS or trigram match), or null for none
-     * @param chashes   the exact chash set to rank, or null for no set
-     */
-    private static org.jooq.Table<?> manifestSearchFn(int dim, Vector queryVec, String queryText, byte[][] chashes,
-                                                      String[] colls, WherePlan wherePlan, int nResults,
-                                                      String model, String tenant) {
-        ManifestPushdown.Plan m = wherePlan.manifest();
-        return switch (dim) {
-            case 384  -> MANIFEST_SEARCH_384.call(
-                queryVec, queryText, chashes, colls, wherePlan.containment(), wherePlan.jsonPath(),
-                m.containment(), m.jsonPath(), nResults, model, tenant, wherePlan.excludeSensitive());
-            case 768  -> MANIFEST_SEARCH_768.call(
-                queryVec, queryText, chashes, colls, wherePlan.containment(), wherePlan.jsonPath(),
-                m.containment(), m.jsonPath(), nResults, model, tenant, wherePlan.excludeSensitive());
-            case 1024 -> MANIFEST_SEARCH_1024.call(
-                queryVec, queryText, chashes, colls, wherePlan.containment(), wherePlan.jsonPath(),
-                m.containment(), m.jsonPath(), nResults, model, tenant, wherePlan.excludeSensitive());
-            default   -> throw new IllegalArgumentException("unsupported dim " + dim);
-        };
-    }
-
-    /**
-     * The exact rank over an allow-list of chashes (nexus-jypmj, RDR-232): {@code text_gated_search_by_chash_<dim>}
-     * (vectors-031), which despite its name evaluates no text gate. It is the plain-search statement with one more
-     * predicate, {@code chash = ANY(p_chashes)}, and the same tenant, model, collection, live(c) and where
-     * predicates, row shape and order ({@code distance, then id}) as {@code plain_search_<dim>}. The caller runs it
-     * with index scans off ({@link #runPlainSearchStatement}'s {@code forceExact}), so the rank is a scan of the
-     * allowed rows by the primary key, then a sort, never an HNSW walk filtered down to the allowed set.
-     */
-    private static org.jooq.Table<?> chashAllowedSearchFn(int dim, Vector queryVec, byte[][] chashAllow,
-                                                          String[] colls, WherePlan wherePlan, int nResults,
-                                                          String model, String tenant) {
-        if (wherePlan.manifest() != null) {
-            // nexus-p89h4 with nexus-jypmj: the same exact rank over the allow-list with the manifest EXISTS inside the
-            // scan. manifest_search_<dim> applies p_chashes as `chash = ANY(p_chashes)`, the conjunct
-            // text_gated_search_by_chash_<dim> applies, so the allow-list narrows it exactly as it narrows that sibling.
-            return manifestSearchFn(dim, queryVec, null, chashAllow, colls, wherePlan, nResults, model, tenant);
-        }
-        return switch (dim) {
-            case 384  -> TEXT_GATED_SEARCH_BY_CHASH_384.call(
-                queryVec, chashAllow, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant,
-                wherePlan.excludeSensitive());
-            case 768  -> TEXT_GATED_SEARCH_BY_CHASH_768.call(
-                queryVec, chashAllow, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant,
-                wherePlan.excludeSensitive());
-            case 1024 -> TEXT_GATED_SEARCH_BY_CHASH_1024.call(
-                queryVec, chashAllow, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant,
-                wherePlan.excludeSensitive());
-            default   -> throw new IllegalArgumentException("unsupported dim " + dim);
-        };
     }
 
     /**
@@ -1704,11 +1651,11 @@ public final class PgVectorRepository {
      *        budget shrinks while the first attempt runs); false keeps the first bound
      */
     private Result<? extends Record> runPlainSearchStatement(String tenant, String model, org.jooq.Table<?> fn,
-                                                             int dim, String[] colls,
+                                                             int dim, CollectionSelector sel,
                                                              int nResults,
                                                              java.util.function.IntSupplier statementTimeoutMs,
                                                              boolean rebindBeforeExactRerun) {
-        return runPlainSearchStatement(tenant, model, fn, dim, colls, nResults, statementTimeoutMs,
+        return runPlainSearchStatement(tenant, model, fn, dim, sel, nResults, statementTimeoutMs,
                                        rebindBeforeExactRerun, null, false, null);
     }
 
@@ -1724,14 +1671,14 @@ public final class PgVectorRepository {
      *        #exactOnUnderReturn} (nexus-6pfgb.61, nexus-8ptg4)
      */
     private Result<? extends Record> runPlainSearchStatement(String tenant, String model, org.jooq.Table<?> fn,
-                                                             int dim, String[] colls,
+                                                             int dim, CollectionSelector sel,
                                                              int nResults,
                                                              java.util.function.IntSupplier statementTimeoutMs,
                                                              boolean rebindBeforeExactRerun,
                                                              ArmPhases phases,
                                                              boolean forceExact,
                                                              WherePlan manifestWhere) {
-        return runPlainSearchStatement(tenant, model, fn, dim, colls, nResults, statementTimeoutMs,
+        return runPlainSearchStatement(tenant, model, fn, dim, sel, nResults, statementTimeoutMs,
                                        rebindBeforeExactRerun, phases, forceExact, manifestWhere, null);
     }
 
@@ -1743,7 +1690,7 @@ public final class PgVectorRepository {
      * nothing is read as nothing rather than as the exact answer.
      */
     private Result<? extends Record> runPlainSearchStatement(String tenant, String model, org.jooq.Table<?> fn,
-                                                             int dim, String[] colls,
+                                                             int dim, CollectionSelector sel,
                                                              int nResults,
                                                              java.util.function.IntSupplier statementTimeoutMs,
                                                              boolean rebindBeforeExactRerun,
@@ -1759,7 +1706,13 @@ public final class PgVectorRepository {
         // then sends exact ignores ef_search. A statement over several collections cannot use a per-collection
         // index and keeps the serving value. The other HNSW sites (the dense gate, the by-id sites) do not
         // change.
-        final boolean indexed = colls.length == 1 && pciIndexes.hasValidIndex(model, tenant, colls[0]);
+        // RDR-229 P3.5c: from gate 3 the per-collection index is the id-predicate one (P3.4 builds it, the name family retires),
+        // asked by the one resolved id. A selection that resolved no id has none.
+        final String[] colls = sel.nameArray();
+        final Long soleId = sel.byId() && colls.length == 1 ? sel.idOf(colls[0]) : null;
+        final boolean indexed = colls.length == 1
+            && (sel.byId() ? soleId != null && pciIndexes.hasValidIdIndex(model, tenant, soleId)
+                           : pciIndexes.hasValidIndex(model, tenant, colls[0]));
         final boolean walkWide = colls.length == 1 && !indexed;
         // The value the batch sets, as the setter returns it: the one the telemetry and the route label record
         // is the one Postgres was given, never a second computation of it.
@@ -1806,7 +1759,7 @@ public final class PgVectorRepository {
                 if (forceExact) {
                     exact = true;
                 } else if (exactMaxRows > 0) {
-                    probedRows = probeSelectedRows(ctx, dim, colls, model, tenant, exactMaxRows);
+                    probedRows = probeSelectedRows(ctx, dim, sel, model, tenant, exactMaxRows);
                     exact = probedRows <= exactMaxRows;
                 }
                 statementStartNanos = System.nanoTime();
@@ -1833,8 +1786,12 @@ public final class PgVectorRepository {
                         // own index. Never fails the arm. The statement is built only when the arm is sampled, and
                         // the sample's own time is taken out of the arm's statement time.
                         long sampleStart = System.nanoTime();
-                        PciIndexSet.ValidIndex held = pciIndexes.validIndex(model, tenant, colls[0])
-                            .orElseGet(() -> new PciIndexSet.ValidIndex(PciCatalog.indexName(model, tenant, colls[0]),
+                        PciIndexSet.ValidIndex held = (sel.byId()
+                                ? pciIndexes.validIdIndex(model, tenant, soleId)
+                                : pciIndexes.validIndex(model, tenant, colls[0]))
+                            .orElseGet(() -> new PciIndexSet.ValidIndex(sel.byId()
+                                    ? PciCatalog.indexNameById(model, tenant, soleId)
+                                    : PciCatalog.indexName(model, tenant, colls[0]),
                                 java.time.Instant.EPOCH));
                         if (planCheck.sample(ctx, () -> ctx.selectFrom(fn), held, colls[0])) {
                             statementStartNanos += System.nanoTime() - sampleStart;
@@ -1850,7 +1807,7 @@ public final class PgVectorRepository {
                         result = exactSelectFrom(ctx, nResults, fn, rebindBeforeExactRerun ? statementTimeoutMs : null,
                                                  manifestWhere != null, tenant, String.join(",", colls),
                                                  manifestWhere == null ? null
-                                                     : manifestQualifying(ctx, colls, manifestWhere, model, tenant,
+                                                     : manifestQualifying(ctx, sel, manifestWhere, model, tenant,
                                                                           true, null));
                     }
                 }
@@ -1897,9 +1854,9 @@ public final class PgVectorRepository {
      * the nexus-bq06h exact re-run. A SHORT page that carries a manifest predicate is re-run exact too (nexus-6pfgb.61,
      * {@link #exactOnUnderReturn}).
      */
-    private static int probeSelectedRows(DSLContext ctx, int dim, String[] colls, String model, String tenant,
+    private static int probeSelectedRows(DSLContext ctx, int dim, CollectionSelector sel, String model, String tenant,
                                          int limit) {
-        Integer n = probeSelectedRowsQuery(ctx, dim, colls, model, tenant, limit).fetchOne(0, Integer.class);
+        Integer n = probeSelectedRowsQuery(ctx, dim, sel, model, tenant, limit).fetchOne(0, Integer.class);
         return n == null ? 0 : n;
     }
 
@@ -1920,13 +1877,26 @@ public final class PgVectorRepository {
      */
     static org.jooq.Select<? extends org.jooq.Record1<Integer>> probeSelectedRowsQuery(
             DSLContext ctx, int dim, String[] colls, String model, String tenant, int limit) {
+        return probeSelectedRowsQuery(ctx, dim, CollectionSelector.byName(java.util.Arrays.asList(colls)), model, tenant, limit);
+    }
+
+    /**
+     * The probe of {@link #probeSelectedRowsQuery(DSLContext, int, String[], String, String, int)} over a selection: the name
+     * predicate before gate 3, {@code collection_id = ANY(ids)} from it (RDR-229 P3.5c), the same shape either way. A selection
+     * that resolved no id counts no row.
+     */
+    static org.jooq.Select<? extends org.jooq.Record1<Integer>> probeSelectedRowsQuery(
+            DSLContext ctx, int dim, CollectionSelector sel, String model, String tenant, int limit) {
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+        org.jooq.Condition selected = !sel.byId()
+            ? ch.collection().eq(DSL.any(sel.nameArray()))
+            : sel.selectsNothing() ? DSL.falseCondition() : ch.collectionId().eq(DSL.any(sel.idArray()));
         return ctx.selectCount()
                   .from(ctx.selectOne()
                            .from(ch.table())
                            .where(ch.embeddingModel().eq(model))
                            .and(ch.tenantId().eq(tenant))
-                           .and(ch.collection().eq(DSL.any(colls)))
+                           .and(selected)
                            .limit(limit + 1)
                            .asTable("probe"));
     }
@@ -1994,10 +1964,12 @@ public final class PgVectorRepository {
         if (!entry.embeddingModel().equals(target.model()) || entry.dimension() != query.length) {
             throw new IllegalStateException("the collection is no longer the one the index was built for");
         }
-        String[] colls = {target.collection()};
-        org.jooq.Table<?> fn = plainSearchFn(entry.dimension(), Vector.of(query), colls, planWhere(null), k,
+        // RDR-229 P3.5c: the canary measures the index it was targeted at, which P3.4 names by collection (PciReconciler does not yet
+        // build an id target: "none for an id index yet"), so it stays on the name function whatever gate 3 says.
+        CollectionSelector sel = CollectionSelector.byName(List.of(target.collection()));
+        org.jooq.Table<?> fn = plainSearchFn(entry.dimension(), Vector.of(query), sel, planWhere(null), k,
             entry.embeddingModel(), target.tenant());
-        return runPlainSearchStatement(target.tenant(), entry.embeddingModel(), fn, entry.dimension(), colls, k,
+        return runPlainSearchStatement(target.tenant(), entry.embeddingModel(), fn, entry.dimension(), sel, k,
             PciCanaryPolicy.statementTimeoutMs(exact), false, phases, exact, null, hook);
     }
 
@@ -3243,6 +3215,10 @@ public final class PgVectorRepository {
         List<String> skipped = new ArrayList<>();
         List<String> cols = registeredSurvivors(tenant, requested, "searchPerCollection", skipped);
         final String model = requireHomogeneousModel(tenant, cols);
+        // RDR-229 P3.5c: gate 3 is read once for the request, and every label resolved to its id in one read. Each arm then
+        // calls the id twin with its own ONE id (so a per-collection id index proves), as the name arm calls the name function
+        // with its one name. The shared lexical probe takes all the ids, as the name probe takes all the names.
+        final CollectionSelector allSel = CollectionSelector.of(gate3, tenantScope, tenant, cols);
         WherePlan wherePlan = planWhere(where).withManifest(manifest).withExcludeSensitive(excludeSensitive);
 
         // Embed ONCE, before any arm borrows a connection (embed-before-borrow). The vector's width
@@ -3266,7 +3242,7 @@ public final class PgVectorRepository {
         int n = cols.size();
         FanoutMerger merger = new FanoutMerger(n, limit);
         // RDR-134 Step 3: a route that names collections reports a status on every one, and routes the ones it names.
-        final TopicRouteArm topicArm = topicRoute == null ? null : new TopicRouteArm(tenantScope);
+        final TopicRouteArm topicArm = topicRoute == null ? null : new TopicRouteArm(tenantScope, gate3);
         if (topicArm != null) {
             merger.reportRoute();
         }
@@ -3331,7 +3307,7 @@ public final class PgVectorRepository {
                             ArmTask task = tasks.get(slot);
                             if (task.probe()) {
                                 LexicalGateProbe.runShared(tenantScope, share, tenant, model, dims[runnable.get(0)], gateText,
-                                    runnable.stream().map(cols::get).toArray(String[]::new), wherePlan,
+                                    allSel.restrictedTo(runnable.stream().map(cols::get).toList()), wherePlan,
                                     settings.selectiveGateMax(), settings.probeWorkers(), requestDeadlineNanos,
                                     fanoutDeadlineNanos, searchBoundMs, armGate);
                                 continue;
@@ -3342,7 +3318,7 @@ public final class PgVectorRepository {
                             long armStart = System.nanoTime();
                             if (task.lexical()) {
                                 try {
-                                    lexicalLeg.accept(i, runLexicalArm(tenant, model, col, dims[i], queryVec,
+                                    lexicalLeg.accept(i, runLexicalArm(tenant, model, col, allSel.only(col), dims[i], queryVec,
                                         gateText, wherePlan, perCollectionK, requestDeadlineNanos,
                                         fanoutDeadlineNanos, searchBoundMs, armGate, run, chashAllow,
                                         settings.selectiveGateMax(), share));
@@ -3368,7 +3344,7 @@ public final class PgVectorRepository {
                                     }
                                 }
                                 if (rows == null) {
-                                    rows = runArm(tenant, model, col, dims[i], queryVec, wherePlan,
+                                    rows = runArm(tenant, model, col, allSel.only(col), dims[i], queryVec, wherePlan,
                                                   perCollectionK, requestDeadlineNanos,
                                                   fanoutDeadlineNanos, searchBoundMs, armGate, run,
                                                   chashAllow);
@@ -3592,15 +3568,19 @@ public final class PgVectorRepository {
             wanted.add(c + "\u0000" + h);
         }
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+        // RDR-229 P3.5c: gate 3 read once. From it the chunk rows are found by the registry id of the labels the search rows
+        // carry, and keyed by the registry label of the row's id (the row's own name is stale after a one-row rename).
+        final boolean byId = gate3.holds();
         var found = tenantScope.withTenant(tenant, ctx ->
-            ctx.select(ch.collection(), ch.chash(), ch.embedding())
+            ctx.select(byId ? CollectionSelector.labelOf(ch.tenantId(), ch.collectionId()) : ch.collection(),
+                       ch.chash(), ch.embedding())
                .from(ch.table())
                .where(ch.embeddingModel().eq(model))
                .and(ch.tenantId().eq(tenant))
-               .and(ch.collection().in(colls))
+               .and(CollectionSelector.collectionIn(gate3, tenant, ch.collection(), ch.collectionId(), colls))
                .and(ch.chash().in(chashes))
                .and(ch.embedding().isNotNull())
-               .and(liveChunksCondition(ctx, ch))
+               .and(liveChunksCondition(ctx, ch, byId))
                .fetch());
         Map<String, String> encoded = new HashMap<>(found.size() * 2);
         for (var rec : found) {
@@ -3680,19 +3660,19 @@ public final class PgVectorRepository {
      * permit and a connection, so a waiting arm holds neither. The statement bound is computed
      * inside the transaction, at the moment it is set, and recomputed before an exact re-run.
      */
-    private List<Candidate> runArm(String tenant, String model, String collection, int dim, Vector queryVec,
+    private List<Candidate> runArm(String tenant, String model, String collection, CollectionSelector sel, int dim,
+                                   Vector queryVec,
                                    WherePlan wherePlan, int k, long requestDeadlineNanos,
                                    long fanoutDeadlineNanos, int searchBoundMs, Semaphore armGate,
                                    ArmRun run, byte[][] chashAllow) {
-        String[] colls = new String[] {collection};
         org.jooq.Table<?> fn = chashAllow == null
-            ? plainSearchFn(dim, queryVec, colls, wherePlan, k, model, tenant)
-            : chashAllowedSearchFn(dim, queryVec, chashAllow, colls, wherePlan, k, model, tenant);
+            ? plainSearchFn(dim, queryVec, sel, wherePlan, k, model, tenant)
+            : chashAllowedSearchFn(dim, queryVec, chashAllow, sel, wherePlan, k, model, tenant);
         long permitStartNanos = System.nanoTime();
         acquireArmSlot(armGate, requestDeadlineNanos, fanoutDeadlineNanos);
         run.phases.permitWaitNanos = System.nanoTime() - permitStartNanos;
         try {
-            return plainSearchCandidates(runPlainSearchStatement(tenant, model, fn, dim, colls, k, () -> {
+            return plainSearchCandidates(runPlainSearchStatement(tenant, model, fn, dim, sel, k, () -> {
                 ArmBound bound = armBound(requestDeadlineNanos, fanoutDeadlineNanos, System.nanoTime(),
                                           searchBoundMs);
                 run.limiter = bound.limiter();
@@ -3712,12 +3692,12 @@ public final class PgVectorRepository {
      * embedding; nothing here embeds again. The rows have the plain-search shape, so they become
      * {@link Candidate}s the same way.
      */
-    private List<Candidate> runLexicalArm(String tenant, String model, String collection, int dim, Vector queryVec,
+    private List<Candidate> runLexicalArm(String tenant, String model, String collection, CollectionSelector sel, int dim,
+                                          Vector queryVec,
                                           String gateText, WherePlan wherePlan, int k, long requestDeadlineNanos,
                                           long fanoutDeadlineNanos, int searchBoundMs, Semaphore armGate,
                                           ArmRun run, byte[][] chashAllow, int selectiveGateMax,
                                           SharedLexicalProbe share) {
-        String[] colls = new String[] {collection};
         // nexus-bbtc2: what the request's shared probe says this collection's arm does. It waits, holding no arm slot
         // and no connection, for at most the nearer budget; no answer in time means the arm's own probe, which then
         // meets the same budget itself.
@@ -3743,7 +3723,7 @@ public final class PgVectorRepository {
             };
             final SharedLexicalProbe.ArmPlan armPlan = plan;
             return plainSearchCandidates(tenantScope.withTenant(tenant, ctx ->
-                hybridRank(ctx, dim, queryVec, gateText, colls, wherePlan, k, selectiveGateMax, model, tenant,
+                hybridRank(ctx, dim, queryVec, gateText, sel, wherePlan, k, selectiveGateMax, model, tenant,
                            bound, true, chashAllow, armPlan)));
         } finally {
             armGate.release();
@@ -4211,11 +4191,12 @@ public final class PgVectorRepository {
         if (tokensOut != null) tokensOut[0] = hybridEmbed.tokens();
         Vector queryVec = Vector.of(hybridEmbed.embeddings().get(0));
         WherePlan wherePlan = planWhere(where).withManifest(manifest).withExcludeSensitive(excludeSensitive);
-        String[] colls = collectionNames.toArray(String[]::new);
+        // RDR-229 P3.5c: gate 3 read once; from it the text-gated twins run over all the resolved ids.
+        final CollectionSelector sel = CollectionSelector.of(gate3, tenantScope, tenant, collectionNames);
         String gateQueryText = queryText;
 
         Result<? extends Record> result = tenantScope.withTenant(tenant, ctx ->
-            hybridRank(ctx, dim, queryVec, gateQueryText, colls, wherePlan, nResults, selectiveGateMax,
+            hybridRank(ctx, dim, queryVec, gateQueryText, sel, wherePlan, nResults, selectiveGateMax,
                        model, tenant, PgSession::startupSearchStatementTimeoutMs, false, chashAllow, null));
         if (ringOut != null) {
             // nexus-4lnn1.1.7: the recall canary's query ring, by the rule /search follows. The rows are the text-gated
@@ -4245,7 +4226,7 @@ public final class PgVectorRepository {
      *        {@link #runArm}'s are; false keeps the first bound for every statement
      */
     private Result<? extends Record> hybridRank(DSLContext ctx, int dim, Vector queryVec, String rawGateText,
-                                                String[] colls, WherePlan wherePlan, int nResults,
+                                                CollectionSelector sel, WherePlan wherePlan, int nResults,
                                                 int selectiveGateMax, String model, String tenant,
                                                 java.util.function.IntSupplier statementTimeoutMs,
                                                 boolean rebind, byte[][] chashAllow,
@@ -4284,22 +4265,11 @@ public final class PgVectorRepository {
                 // the text gate and `chash = ANY(p_chashes)` as independent conjuncts, which is
                 // text_gated_search_allowed_<dim>, plus the manifest EXISTS inside the scan.
                 return ctx.selectFrom(
-                    manifestSearchFn(dim, queryVec, gateQueryText, chashAllow, colls, wherePlan, nResults, model,
+                    manifestSearchFn(dim, queryVec, gateQueryText, chashAllow, sel, wherePlan, nResults, model,
                                      tenant)).fetch();
             }
-            org.jooq.Table<?> allowedFn = switch (dim) {
-                case 384  -> TEXT_GATED_SEARCH_ALLOWED_384.call(
-                    queryVec, gateQueryText, chashAllow, colls, wherePlan.containment(), wherePlan.jsonPath(),
-                    nResults, model, tenant, wherePlan.excludeSensitive());
-                case 768  -> TEXT_GATED_SEARCH_ALLOWED_768.call(
-                    queryVec, gateQueryText, chashAllow, colls, wherePlan.containment(), wherePlan.jsonPath(),
-                    nResults, model, tenant, wherePlan.excludeSensitive());
-                case 1024 -> TEXT_GATED_SEARCH_ALLOWED_1024.call(
-                    queryVec, gateQueryText, chashAllow, colls, wherePlan.containment(), wherePlan.jsonPath(),
-                    nResults, model, tenant, wherePlan.excludeSensitive());
-                default   -> throw new IllegalArgumentException("unsupported dim " + dim);
-            };
-            return ctx.selectFrom(allowedFn).fetch();
+            return ctx.selectFrom(textGatedAllowedFn(dim, queryVec, gateQueryText, chashAllow, sel, wherePlan, nResults,
+                                                     model, tenant)).fetch();
         }
 
         // T2 [24219] critique finding B (single-gate-eval restored, nexus-x7z7l/
@@ -4318,7 +4288,7 @@ public final class PgVectorRepository {
         } else if (shared instanceof SharedLexicalProbe.RankDense) {
             chashes = null;
         } else {
-            org.jooq.Table<?> probeFn = LexicalGateProbe.textGateProbeFn(dim, gateQueryText, colls, wherePlan, probeCap, model, tenant);
+            org.jooq.Table<?> probeFn = LexicalGateProbe.textGateProbeFn(dim, gateQueryText, sel, wherePlan, probeCap, model, tenant);
             Result<? extends Record> probeResult = ctx.selectFrom(probeFn).fetch();
             int matches = probeResult.size();
             if (rebind) {
@@ -4356,21 +4326,9 @@ public final class PgVectorRepository {
                 // nexus-p89h4: with a manifest predicate the same exact rank also tests the EXISTS, so the cut
                 // that follows never sees a chunk no owner of which passes.
                 return ctx.selectFrom(
-                    manifestSearchFn(dim, queryVec, null, chashes, colls, wherePlan, nResults, model, tenant)).fetch();
+                    manifestSearchFn(dim, queryVec, null, chashes, sel, wherePlan, nResults, model, tenant)).fetch();
             }
-            org.jooq.Table<?> fn = switch (dim) {
-                case 384  -> TEXT_GATED_SEARCH_BY_CHASH_384.call(
-                    queryVec, chashes, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant,
-                    wherePlan.excludeSensitive());
-                case 768  -> TEXT_GATED_SEARCH_BY_CHASH_768.call(
-                    queryVec, chashes, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant,
-                    wherePlan.excludeSensitive());
-                case 1024 -> TEXT_GATED_SEARCH_BY_CHASH_1024.call(
-                    queryVec, chashes, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant,
-                    wherePlan.excludeSensitive());
-                default   -> throw new IllegalArgumentException("unsupported dim " + dim);
-            };
-            return ctx.selectFrom(fn).fetch();
+            return ctx.selectFrom(textGatedByChashFn(dim, queryVec, chashes, sel, wherePlan, nResults, model, tenant)).fetch();
         }
         // HNSW-first for a dense gate: keep HNSW scanning past ef_search
         // (text_gated_search_hnsw_first_<dim>, vectors-011, inlines so these GUCs
@@ -4383,23 +4341,13 @@ public final class PgVectorRepository {
         PgSession.setHnswScanBudget(ctx);
         if (wherePlan.manifest() != null) {
             return exactSelectFrom(ctx, nResults,
-                manifestSearchFn(dim, queryVec, gateQueryText, null, colls, wherePlan, nResults, model, tenant),
-                rebind ? statementTimeoutMs : null, true, tenant, String.join(",", colls),
-                manifestQualifying(ctx, colls, wherePlan, model, tenant, true,
+                manifestSearchFn(dim, queryVec, gateQueryText, null, sel, wherePlan, nResults, model, tenant),
+                rebind ? statementTimeoutMs : null, true, tenant, String.join(",", sel.names()),
+                manifestQualifying(ctx, sel, wherePlan, model, tenant, true,
                                    gateQueryText));
         }
-        org.jooq.Table<?> hnswFirstFn = switch (dim) {
-            case 384  -> TEXT_GATED_SEARCH_HNSW_FIRST_384.call(
-                queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant,
-                wherePlan.excludeSensitive());
-            case 768  -> TEXT_GATED_SEARCH_HNSW_FIRST_768.call(
-                queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant,
-                wherePlan.excludeSensitive());
-            case 1024 -> TEXT_GATED_SEARCH_HNSW_FIRST_1024.call(
-                queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant,
-                wherePlan.excludeSensitive());
-            default   -> throw new IllegalArgumentException("unsupported dim " + dim);
-        };
+        org.jooq.Table<?> hnswFirstFn = textGatedHnswFirstFn(dim, queryVec, gateQueryText, sel, wherePlan, nResults, model,
+                                                             tenant);
         // nexus-bq06h: exactOnUnderReturn wraps ONLY the HNSW-first branch, exactly
         // as it wrapped the retired raw-SQL HNSW-first branch -- the selective branch
         // ranks the complete materialized gate with index scans off (nexus-f3yqd.8,
@@ -4531,8 +4479,9 @@ public final class PgVectorRepository {
     }
 
     /** The exclusion predicate over a chunk-table row: no live owner of the chunk is sensitive. */
-    private static org.jooq.Condition notSensitiveCondition(DimTables.ChunkTable ch) {
-        return ChunkSensitivity.notSensitive(ch.tenantId(), ch.collection(), ch.table().field("chash", byte[].class));
+    private org.jooq.Condition notSensitiveCondition(DimTables.ChunkTable ch) {
+        return ChunkSensitivity.notSensitive(gate3, ch.tenantId(), ch.collection(), ch.collectionId(),
+                                             ch.table().field("chash", byte[].class));
     }
 
     /**
@@ -4642,7 +4591,7 @@ public final class PgVectorRepository {
         // The collection's model (registry row, cached in-process; dimForCollection just resolved it).
         final String model = CollectionRegistry.lookup(tenantScope, tenant, collection).embeddingModel();
         var result = tenantScope.withTenant(tenant, ctx ->
-            getEmbeddingsQuery(ctx, dim, tenant, model, collection, ids).fetch());
+            getEmbeddingsQuery(ctx, dim, tenant, model, collection, ids, gate3).fetch());
 
         Map<String, List<Float>> byChash = new HashMap<>();
         for (var rec : result) {
@@ -4680,6 +4629,12 @@ public final class PgVectorRepository {
      */
     static org.jooq.Select<? extends org.jooq.Record2<String, Vector>> getEmbeddingsQuery(
             DSLContext ctx, int dim, String tenant, String model, String collection, List<String> ids) {
+        return getEmbeddingsQuery(ctx, dim, tenant, model, collection, ids, Gate3.never());
+    }
+
+    /** {@link #getEmbeddingsQuery(DSLContext, int, String, String, String, List)} that selects by collection id once {@code gate3} holds (RDR-229 P3.5c). */
+    static org.jooq.Select<? extends org.jooq.Record2<String, Vector>> getEmbeddingsQuery(
+            DSLContext ctx, int dim, String tenant, String model, String collection, List<String> ids, Gate3 gate3) {
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         return ctx.select(ch.chash(), ch.embedding())
                .from(ch.table())
@@ -4691,10 +4646,10 @@ public final class PgVectorRepository {
                // the hydration loop stores an EMPTY list for that chash rather than
                // omitting it -- violating getEmbeddings' own Chroma-parity "ids not
                // present are OMITTED" contract.
-               .where(chunkScope(ch, tenant, model, collection))
+               .where(chunkScope(ch, tenant, model, collection, gate3))
                .and(ch.chash().in(ids))
                .and(ch.embedding().isNotNull())
-               .and(liveChunksCondition(ctx, ch));
+               .and(liveChunksCondition(ctx, ch, gate3.holds()));
     }
 
     /**
@@ -4769,7 +4724,8 @@ public final class PgVectorRepository {
                                         boolean excludeSensitive) {
         int dim = dimForCollection(tenant, collection);
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
-        org.jooq.Condition finalCond = chunkScope(ch, tenant, collection).and(getWhereCondition(ch, where));
+        org.jooq.Condition finalCond = chunkScope(ch, tenant, collection)
+            .and(getWhereCondition(ch, where, gate3, collection));
 
         if (includeNonLive) {
             var nonLiveResult = tenantScope.withTenant(tenant, ctx -> {
@@ -4794,7 +4750,7 @@ public final class PgVectorRepository {
             return new LinkedHashMap<>(Map.of("ids", nonLiveIds, "metadatas", nonLiveMetas));
         }
 
-        org.jooq.Condition driver = manifestDriverCondition(ch, tenant, collection, where);
+        org.jooq.Condition driver = manifestDriverCondition(ch, tenant, collection, where, gate3);
         var result = tenantScope.withTenant(tenant, ctx -> {
             // nexus-u9dc5: a custom plan per execution, as in the physical-scan branch above.
             PgSession.setSearchPlanCacheMode(ctx);
@@ -4844,6 +4800,16 @@ public final class PgVectorRepository {
      * answers a key per owning document, and a chunk whose owners are all tombstoned is judged on its own row.
      */
     static org.jooq.Condition getWhereCondition(DimTables.ChunkTable ch, Map<String, Object> where) {
+        return getWhereCondition(ch, where, Gate3.never(), null);
+    }
+
+    /**
+     * {@link #getWhereCondition(DimTables.ChunkTable, Map)} for the one collection {@code collection} (RDR-229 P3.5c): from gate 3
+     * the manifest function is handed the collection's label (the request's, a constant of the plan) in place of the chunk row's
+     * own name column, which a one-row rename leaves stale; before it the function reads the row's name as before.
+     */
+    static org.jooq.Condition getWhereCondition(DimTables.ChunkTable ch, Map<String, Object> where, Gate3 gate3,
+                                                String collection) {
         if (where == null || where.isEmpty()) {
             return DSL.trueCondition();
         }
@@ -4856,7 +4822,8 @@ public final class PgVectorRepository {
             }
         }
         if (split.active()) {
-            cond = cond.and(manifestAdmitsCondition(ch, ManifestPushdown.ofExact(split.labels())));
+            cond = cond.and(manifestAdmitsCondition(ch, ManifestPushdown.ofExact(split.labels()),
+                gate3.holds() ? DSL.val(collection) : ch.collection()));
         }
         return cond;
     }
@@ -4867,9 +4834,10 @@ public final class PgVectorRepository {
      * inlines, as {@code nexus.chunk_live_owners} does: the bound path is then a constant of the plan, the guards of
      * the keys it does not name fold away and the jsonpath is parsed once, not per chunk.
      */
-    private static org.jooq.Condition manifestAdmitsCondition(DimTables.ChunkTable ch, ManifestPushdown.Plan plan) {
+    private static org.jooq.Condition manifestAdmitsCondition(DimTables.ChunkTable ch, ManifestPushdown.Plan plan,
+                                                               Field<String> collectionArg) {
         Field<byte[]> rawChash = ch.table().field("chash", byte[].class);
-        var admits = MANIFEST_ADMITS_CHUNK.call(ch.tenantId(), ch.collection(), rawChash, ch.metadata(),
+        var admits = MANIFEST_ADMITS_CHUNK.call(ch.tenantId(), collectionArg, rawChash, ch.metadata(),
             DSL.val((JSONB) null, SQLDataType.JSONB), DSL.val(plan.jsonPath()));
         return DSL.exists(DSL.selectOne().from(admits).where(admits.ADMITTED));
     }
@@ -4894,6 +4862,12 @@ public final class PgVectorRepository {
      */
     static org.jooq.Condition manifestDriverCondition(DimTables.ChunkTable ch, String tenant, String collection,
                                                       Map<String, Object> where) {
+        return manifestDriverCondition(ch, tenant, collection, where, Gate3.never());
+    }
+
+    /** {@link #manifestDriverCondition(DimTables.ChunkTable, String, String, Map)} that reads the manifest by collection id once {@code gate3} holds (RDR-229 P3.5c). */
+    static org.jooq.Condition manifestDriverCondition(DimTables.ChunkTable ch, String tenant, String collection,
+                                                      Map<String, Object> where, Gate3 gate3) {
         if (where == null || where.isEmpty()) {
             return DSL.trueCondition();
         }
@@ -4932,7 +4906,8 @@ public final class PgVectorRepository {
                        .on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
                            .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)))
                    .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
-                       .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(collection))
+                       .and(CollectionSelector.collectionIs(gate3, tenant, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                                                            CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, collection))
                        .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())
                        .and(ownValue))));
         }
@@ -5013,10 +4988,11 @@ public final class PgVectorRepository {
         int dim = dimForCollection(tenant, collection);
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         int cap = getAllMetadataMaxRows;
-        org.jooq.Condition finalCond = chunkScope(ch, tenant, collection).and(getWhereCondition(ch, where));
+        org.jooq.Condition finalCond = chunkScope(ch, tenant, collection)
+            .and(getWhereCondition(ch, where, gate3, collection));
         org.jooq.Condition driver = includeNonLive
             ? DSL.trueCondition()
-            : manifestDriverCondition(ch, tenant, collection, where);
+            : manifestDriverCondition(ch, tenant, collection, where, gate3);
         var result = tenantScope.withTenant(tenant, ctx -> {
             // nexus-u9dc5: a custom plan per execution (see getWhereCondition).
             PgSession.setSearchPlanCacheMode(ctx);
@@ -5077,7 +5053,7 @@ public final class PgVectorRepository {
      */
     public List<Map<String, Object>> listCollections(String tenant) {
         var names = tenantScope.withTenant(tenant, ctx ->
-            listCollectionsQuery(ctx, tenant).fetch());
+            listCollectionsQuery(ctx, tenant, gate3).fetch());
         List<Map<String, Object>> out = new ArrayList<>(names.size());
         for (var rec : names) {
             out.add(Map.of("name", rec.value1()));
@@ -5103,12 +5079,23 @@ public final class PgVectorRepository {
      * (it is also the RLS scope) so the registry read is bounded to the tenant's rows by its key.
      */
     static org.jooq.Select<? extends org.jooq.Record1<String>> listCollectionsQuery(DSLContext ctx, String tenant) {
+        return listCollectionsQuery(ctx, tenant, Gate3.never());
+    }
+
+    /**
+     * {@link #listCollectionsQuery(DSLContext, String)} whose chunk probe joins the registry row by {@code collection_id} once
+     * {@code gate3} holds (RDR-229 P3.5c); the registry's label is what it lists either way.
+     */
+    static org.jooq.Select<? extends org.jooq.Record1<String>> listCollectionsQuery(DSLContext ctx, String tenant,
+                                                                                    Gate3 gate3) {
+        final boolean byId = gate3.holds();
         return ctx.selectDistinct(CATALOG_COLLECTIONS.NAME)
             .from(CATALOG_COLLECTIONS)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
             .and(DSL.exists(ctx.selectOne().from(CHUNKS)
                 .where(CHUNKS.TENANT_ID.eq(CATALOG_COLLECTIONS.TENANT_ID))
-                .and(CHUNKS.COLLECTION.eq(CATALOG_COLLECTIONS.NAME))
+                .and(byId ? CHUNKS.COLLECTION_ID.eq(CATALOG_COLLECTIONS.COLLECTION_ID)
+                          : CHUNKS.COLLECTION.eq(CATALOG_COLLECTIONS.NAME))
                 .and(CHUNKS.EMBEDDING_MODEL.eq(CATALOG_COLLECTIONS.EMBEDDING_MODEL))))
             .orderBy(CATALOG_COLLECTIONS.NAME);
     }
@@ -5212,21 +5199,13 @@ public final class PgVectorRepository {
         JSONB whereJsonb = rb.containment();
         JSONB manifestWhere = rb.manifestContainment();
         String manifestPath = rb.manifestPath();
-        String[] colls = collectionNames.toArray(String[]::new);
+        // RDR-229 P3.5c: gate 3 read once; from it the id twins run over all the resolved ids.
+        final CollectionSelector sel = CollectionSelector.of(gate3, tenantScope, tenant, collectionNames);
+        String[] colls = sel.nameArray();
 
-        org.jooq.Table<?> fn = switch (dim) {
-            case 384  -> SEARCH_METADATA_SCOPED_384.call(
-                queryVec, colls, contentType, author, year, corpus, subtree, whereJsonb, manifestWhere, manifestPath,
-                nResults, model, tenant, excludeSensitive);
-            case 768  -> SEARCH_METADATA_SCOPED_768.call(
-                queryVec, colls, contentType, author, year, corpus, subtree, whereJsonb, manifestWhere, manifestPath,
-                nResults, model, tenant, excludeSensitive);
-            case 1024 -> SEARCH_METADATA_SCOPED_1024.call(
-                queryVec, colls, contentType, author, year, corpus, subtree, whereJsonb, manifestWhere, manifestPath,
-                nResults, model, tenant, excludeSensitive);
-            default   -> throw new IllegalArgumentException("unsupported dim " + dim);
-        };
-        var rows = runCombinedQueryWithChash(tenant, fn, nResults, rb, colls, model, true, excludeSensitive);
+        org.jooq.Table<?> fn = SearchFunctions.metadataScopedFn(dim, sel, queryVec, contentType, author, year, corpus, subtree,
+            whereJsonb, manifestWhere, manifestPath, nResults, model, tenant, excludeSensitive);
+        var rows = runCombinedQueryWithChash(tenant, fn, nResults, rb, sel, model, true, excludeSensitive);
         return new Tokened<>(rows, embed.tokens(), skippedCollections,
                              scopedRingVector(model, embed.embeddings().get(0), collectionNames));
     }
@@ -5345,22 +5324,13 @@ public final class PgVectorRepository {
         JSONB whereJsonb = rb.containment();
         JSONB manifestWhere = rb.manifestContainment();
         String manifestPath = rb.manifestPath();
-        String[] colls = collectionNames.toArray(String[]::new);
+        final CollectionSelector sel = CollectionSelector.of(gate3, tenantScope, tenant, collectionNames);
+        String[] colls = sel.nameArray();
 
-        org.jooq.Table<?> fn = switch (dim) {
-            case 384  -> SEARCH_ASPECT_SCOPED_384.call(
-                queryVec, colls, field, pattern, minConfidence, whereJsonb, manifestWhere, manifestPath,
-                nResults, model, tenant, excludeSensitive);
-            case 768  -> SEARCH_ASPECT_SCOPED_768.call(
-                queryVec, colls, field, pattern, minConfidence, whereJsonb, manifestWhere, manifestPath,
-                nResults, model, tenant, excludeSensitive);
-            case 1024 -> SEARCH_ASPECT_SCOPED_1024.call(
-                queryVec, colls, field, pattern, minConfidence, whereJsonb, manifestWhere, manifestPath,
-                nResults, model, tenant, excludeSensitive);
-            default   -> throw new IllegalArgumentException("unsupported dim " + dim);
-        };
+        org.jooq.Table<?> fn = SearchFunctions.aspectScopedFn(dim, sel, queryVec, field, pattern, minConfidence, whereJsonb,
+            manifestWhere, manifestPath, nResults, model, tenant, excludeSensitive);
         // countable = false: the aspect join can give one occurrence several rows (runCombinedQueryWithChash).
-        var rows = runCombinedQueryWithChash(tenant, fn, nResults, rb, colls, model, false, excludeSensitive);
+        var rows = runCombinedQueryWithChash(tenant, fn, nResults, rb, sel, model, false, excludeSensitive);
         return new Tokened<>(rows, embed.tokens(), skippedCollections,
                              scopedRingVector(model, embed.embeddings().get(0), collectionNames));
     }
@@ -5404,15 +5374,15 @@ public final class PgVectorRepository {
         EmbedResult embed = embedQuery(tenant, collection, queryText, dim);
         Vector queryVec = Vector.of(embed.embeddings().get(0));
 
-        org.jooq.Table<?> fn = switch (dim) {
-            case 384  -> SEARCH_TOPIC_SCOPED_384.call(queryVec, topicLabel, collection, nResults, model, tenant,
-                excludeSensitive);
-            case 768  -> SEARCH_TOPIC_SCOPED_768.call(queryVec, topicLabel, collection, nResults, model, tenant,
-                excludeSensitive);
-            case 1024 -> SEARCH_TOPIC_SCOPED_1024.call(queryVec, topicLabel, collection, nResults, model, tenant,
-                excludeSensitive);
-            default   -> throw new IllegalArgumentException("unsupported dim " + dim);
-        };
+        // RDR-229 P3.5c: gate 3 read once; from it the collection resolves to its id and the id twin runs. A collection that
+        // resolves to no id has no chunks ("a NULL id is no collection"): no rows.
+        final CollectionSelector sel = CollectionSelector.of(gate3, tenantScope, tenant, collection);
+        if (sel.byId() && sel.idOf(collection) == null) {
+            return new Tokened<>(List.of(), embed.tokens(), List.of(),
+                                 QueryVector.alone(model, embed.embeddings().get(0), collection));
+        }
+        org.jooq.Table<?> fn = SearchFunctions.topicScopedFn(dim, sel, collection, queryVec, topicLabel, nResults, model, tenant,
+            excludeSensitive);
         return new Tokened<>(runCombinedQuery(tenant, fn, nResults, excludeSensitive), embed.tokens(), List.of(),
                              QueryVector.alone(model, embed.embeddings().get(0), collection));
     }
@@ -5517,21 +5487,12 @@ public final class PgVectorRepository {
         JSONB manifestWhere = rb.manifestContainment();
         String manifestPath = rb.manifestPath();
         String[] seedArr = seeds.toArray(String[]::new);
-        String[] colls = collectionNames.toArray(String[]::new);
+        final CollectionSelector sel = CollectionSelector.of(gate3, tenantScope, tenant, collectionNames);
+        String[] colls = sel.nameArray();
 
-        org.jooq.Table<?> fn = switch (dim) {
-            case 384  -> SEARCH_GRAPH_HOP_384.call(
-                queryVec, seedArr, colls, linkType, clampedDepth, dir, whereJsonb, manifestWhere, manifestPath,
-                nResults, model, tenant, excludeSensitive);
-            case 768  -> SEARCH_GRAPH_HOP_768.call(
-                queryVec, seedArr, colls, linkType, clampedDepth, dir, whereJsonb, manifestWhere, manifestPath,
-                nResults, model, tenant, excludeSensitive);
-            case 1024 -> SEARCH_GRAPH_HOP_1024.call(
-                queryVec, seedArr, colls, linkType, clampedDepth, dir, whereJsonb, manifestWhere, manifestPath,
-                nResults, model, tenant, excludeSensitive);
-            default   -> throw new IllegalArgumentException("unsupported dim " + dim);
-        };
-        var rows = runCombinedQueryWithChash(tenant, fn, nResults, rb, colls, model, true, excludeSensitive);
+        org.jooq.Table<?> fn = SearchFunctions.graphHopFn(dim, sel, queryVec, seedArr, linkType, clampedDepth, dir, whereJsonb,
+            manifestWhere, manifestPath, nResults, model, tenant, excludeSensitive);
+        var rows = runCombinedQueryWithChash(tenant, fn, nResults, rb, sel, model, true, excludeSensitive);
         return new Tokened<>(rows, embed.tokens(), skippedCollections,
                              scopedRingVector(model, embed.embeddings().get(0), collectionNames));
     }
@@ -5753,7 +5714,7 @@ public final class PgVectorRepository {
      * yields two route (b) rows per occurrence and the count could fall below the page. Its caller passes
      * {@code countable = false}, and a short aspect page always pays the exact re-run (nexus-6pfgb.41 review r2).
      *
-     * @param colls the collection names, which also name the statement in the re-run's log line
+     * @param sel the collections (by id from gate 3, RDR-229 P3.5c), whose names also name the statement in the re-run's log line
      * @param model the collections' embedding model, for the count
      * @param countable whether {@code fn} returns at most one row per (manifest occurrence, chunk row), so the
      *        bounded count may skip the re-run; also false, through {@link RouteBWhere#countable}, for a predicate
@@ -5761,7 +5722,7 @@ public final class PgVectorRepository {
      *        {@link #routeBWhere})
      */
     private List<Map<String, Object>> runCombinedQueryWithChash(
-            String tenant, org.jooq.Table<?> fn, int nResults, RouteBWhere rb, String[] colls, String model,
+            String tenant, org.jooq.Table<?> fn, int nResults, RouteBWhere rb, CollectionSelector sel, String model,
             boolean countable, boolean excludeSensitive) {
         boolean manifestPredicate = rb.hasManifest();
         Result<? extends Record> result = tenantScope.withTenant(tenant, ctx -> {
@@ -5778,9 +5739,9 @@ public final class PgVectorRepository {
             // collection ran ~30s and returned EMPTY in production).
             PgSession.setSearchPlanCacheMode(ctx);
             return manifestPredicate
-                ? exactSelectFrom(ctx, nResults, fn, null, true, tenant, String.join(",", colls),
+                ? exactSelectFrom(ctx, nResults, fn, null, true, tenant, String.join(",", sel.names()),
                                   countable && rb.countable()
-                                      ? manifestQualifying(ctx, colls, new WherePlan(rb.containment(), null,
+                                      ? manifestQualifying(ctx, sel, new WherePlan(rb.containment(), null,
                                                                                      rb.manifest(), excludeSensitive),
                                                                           model, tenant,
                                                                           false, null)
@@ -5881,7 +5842,11 @@ public final class PgVectorRepository {
      * accept the prefix. Routing consumers now ask for {@code live}.
      */
     public List<Map<String, Object>> collectionStats(String tenant, String lifecycleFilter) {
-        org.jooq.Condition lifecycleCond = lifecycleCondition(lifecycleFilter);
+        // RDR-229 P3.5c: gate 3 read once; from it the view joins the registry by the id its trailing collection_id column carries
+        // (vectors-077-82: the view's collection is already the registry's label of that id) and the wire stays byte-identical
+        // (linda Q4): superseded_by is the stored text, so a retired tombstone with no successor reports what it always did.
+        final boolean byId = gate3.holds();
+        org.jooq.Condition lifecycleCond = lifecycleCondition(lifecycleFilter, byId);
         long statsStartNanos = System.nanoTime();
         var result = tenantScope.withTenant(tenant, ctx -> {
             // nexus-mz9jv: the view's inflated cost estimate trips JIT, 190 to 270 ms of compilation for a
@@ -5891,11 +5856,13 @@ public final class PgVectorRepository {
                        COLLECTION_VECTOR_STATS.CHUNK_COUNT, COLLECTION_VECTOR_STATS.LAST_WRITE,
                        CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
                        CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.LIFECYCLE_STATE,
-                       COLLECTION_VECTOR_STATS.STORED_COUNT, CATALOG_COLLECTIONS.SUPERSEDED_BY)
+                       COLLECTION_VECTOR_STATS.STORED_COUNT,
+                       CATALOG_COLLECTIONS.SUPERSEDED_BY)
                .from(COLLECTION_VECTOR_STATS)
                .leftJoin(CATALOG_COLLECTIONS)
                .on(CATALOG_COLLECTIONS.TENANT_ID.eq(COLLECTION_VECTOR_STATS.TENANT_ID)
-                   .and(CATALOG_COLLECTIONS.NAME.eq(COLLECTION_VECTOR_STATS.COLLECTION)))
+                   .and(byId ? CATALOG_COLLECTIONS.COLLECTION_ID.eq(COLLECTION_VECTOR_STATS.COLLECTION_ID)
+                             : CATALOG_COLLECTIONS.NAME.eq(COLLECTION_VECTOR_STATS.COLLECTION)))
                .where(lifecycleCond)
                .orderBy(COLLECTION_VECTOR_STATS.COLLECTION.asc(), COLLECTION_VECTOR_STATS.DIM.asc())
                .fetch();
@@ -5955,12 +5922,15 @@ public final class PgVectorRepository {
      * name. 'live' here is the ROUTING view, so it also requires the row not be superseded; an empty string is
      * the column's "not superseded" value, as NULL is.
      */
-    private static org.jooq.Condition lifecycleCondition(String lifecycleFilter) {
+    private static org.jooq.Condition lifecycleCondition(String lifecycleFilter, boolean byId) {
         org.jooq.Condition byState = (lifecycleFilter == null || lifecycleFilter.isBlank())
             ? org.jooq.impl.DSL.noCondition()
             : CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq(lifecycleFilter);
+        // RDR-229 P3.5c: from gate 3 a tombstone is the row that names its successor by id (superseded_by_id), as the live-label
+        // index and the SQL readers read it; before it, the successor's name.
         return "live".equals(lifecycleFilter)
-            ? byState.and(CATALOG_COLLECTIONS.SUPERSEDED_BY.isNull().or(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")))
+            ? byState.and(byId ? CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.isNull()
+                               : CATALOG_COLLECTIONS.SUPERSEDED_BY.isNull().or(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")))
             : byState;
     }
 
@@ -5986,7 +5956,8 @@ public final class PgVectorRepository {
      * answer from an old engine's full rows.
      */
     public List<Map<String, Object>> collectionRouting(String tenant, String lifecycleFilter) {
-        org.jooq.Condition lifecycleCond = lifecycleCondition(lifecycleFilter);
+        final boolean byId = gate3.holds();   // RDR-229 P3.5c: read once; the registry joins the chunk probe by id from gate 3
+        org.jooq.Condition lifecycleCond = lifecycleCondition(lifecycleFilter, byId);
         long routingStartNanos = System.nanoTime();
         var result = tenantScope.withTenant(tenant, ctx ->
             ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
@@ -5996,7 +5967,8 @@ public final class PgVectorRepository {
                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
                .and(DSL.exists(ctx.selectOne().from(CHUNKS)
                    .where(CHUNKS.TENANT_ID.eq(CATALOG_COLLECTIONS.TENANT_ID))
-                   .and(CHUNKS.COLLECTION.eq(CATALOG_COLLECTIONS.NAME))
+                   .and(byId ? CHUNKS.COLLECTION_ID.eq(CATALOG_COLLECTIONS.COLLECTION_ID)
+                             : CHUNKS.COLLECTION.eq(CATALOG_COLLECTIONS.NAME))
                    .and(CHUNKS.EMBEDDING_MODEL.eq(CATALOG_COLLECTIONS.EMBEDDING_MODEL))))
                .and(lifecycleCond)
                .orderBy(CATALOG_COLLECTIONS.NAME.asc())
@@ -6405,6 +6377,18 @@ SELECT 'scope' AS row_kind, NULL::text AS chash, NULL::text AS bucket,
 FROM scope s
 """;
 
+    /**
+     * {@link #MANIFEST_LESS_CENSUS_SQL} with its four collection predicates read on the id columns, for the engine once gate 3
+     * holds (RDR-229 P3.5c): the live notes' {@code physical_collection}, the chunk's own manifest row, the own-collection count
+     * and the chunk scope. Derived from the published text, which stays byte-identical to the operator's copy; the pin
+     * {@code Rdr229P35cManifestLessCensusByIdSqlTest} fails if a predicate is not rewritten or the text gains one it does not know.
+     */
+    static final String MANIFEST_LESS_CENSUS_BY_ID_SQL = MANIFEST_LESS_CENSUS_SQL
+        .replace("d2.physical_collection = ?", "d2.physical_collection_id = ?")
+        .replace("own_manifest.collection = c.collection", "own_manifest.collection_id = c.collection_id")
+        .replace("m.collection = c.collection", "m.collection_id = c.collection_id")
+        .replace("c.collection = ?", "c.collection_id = ?");
+
     /** The five census buckets, in a stable order — every response carries all five keys. */
     private static final List<String> MANIFEST_LESS_CENSUS_BUCKETS = List.of(
         "superseded", "legacy-unmanifested", "dead-owner", "no-owner", "unclassified");
@@ -6474,6 +6458,13 @@ FROM scope s
             if (statementTimeout != null) {
                 PgSession.setStatementAndLockBounds(ctx, (int) Math.min(statementTimeout.toMillis(), Integer.MAX_VALUE),
                     2_000);
+            }
+            // RDR-229 P3.5c, item 6: from gate 3 the same statement with its four collection predicates on the id columns
+            // (derived from the published text at class load, see MANIFEST_LESS_CENSUS_BY_ID_SQL); the collection's registry id
+            // replaces the name in the two binds. A label with no id binds NULL, which selects no row: no collection.
+            if (gate3.holds()) {
+                Long id = CollectionSelector.of(gate3, ctx, tenant, collection).idOf(collection);
+                return ctx.resultQuery(MANIFEST_LESS_CENSUS_BY_ID_SQL, tenant, id, tenant, id, limit, offset).fetch();
             }
             return ctx.resultQuery(MANIFEST_LESS_CENSUS_SQL, tenant, collection, tenant, collection, limit, offset)
                .fetch();
@@ -6563,7 +6554,11 @@ FROM scope s
         // RDR-236 Phase 3: nothing here reads the chunk row's metadata. The row's title, source_path, catalog_doc_id
         // and doc_id are last-writer-wins on a shared chunk and the Phase 4 sweep removes them; the label is the
         // first 80 characters of the text plus the document the MANIFEST names as the owner (null when none does).
-        org.jooq.Table<?> owner = ChunkOwnerLabel.ownerLateral();
+        // RDR-229 P3.5c: gate 3 read once; from it the owner ranks the chunk's own collection by id, the orphaning record is found
+        // by id, the collection is selected by id, and chunk_is_reapable gets the request's label (a constant) for the name it
+        // resolves, in place of the chunk row's own name, which a one-row rename leaves stale.
+        final boolean byId = gate3.holds();
+        org.jooq.Table<?> owner = ChunkOwnerLabel.ownerLateral(gate3);
         // The instant the grace counts from: the later of the last write and the orphaning record. A
         // scalar subquery on the primary key, tenant-scoped explicitly as well as by RLS; GREATEST
         // skips a NULL, so a chunk with no record reads its last_written_at. Display only: the
@@ -6571,7 +6566,8 @@ FROM scope s
         Field<java.time.OffsetDateTime> ownerlessSince = DSL.greatest(CHUNKS.LAST_WRITTEN_AT,
             DSL.field(DSL.select(CHUNK_ORPHANED_AT.ORPHANED_AT).from(CHUNK_ORPHANED_AT)
                 .where(CHUNK_ORPHANED_AT.TENANT_ID.eq(CHUNKS.TENANT_ID))
-                .and(CHUNK_ORPHANED_AT.COLLECTION.eq(CHUNKS.COLLECTION))
+                .and(byId ? CHUNK_ORPHANED_AT.COLLECTION_ID.eq(CHUNKS.COLLECTION_ID)
+                          : CHUNK_ORPHANED_AT.COLLECTION.eq(CHUNKS.COLLECTION))
                 .and(CHUNK_ORPHANED_AT.CHASH.eq(CHUNKS.CHASH))));
         org.jooq.Condition after = afterChash == null
             ? DSL.noCondition() : CHUNKS.CHASH.gt(dev.nexus.service.db.Chash.fromHex(afterChash).toBytes());
@@ -6581,7 +6577,8 @@ FROM scope s
                        ChunkOwnerLabel.textPrefix())
                .from(CHUNKS)
                .leftJoin(owner).on(DSL.trueCondition())
-               .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(collection)))
+               .where(CHUNKS.TENANT_ID.eq(tenant)
+                   .and(CollectionSelector.collectionIs(gate3, tenant, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, collection)))
                .and(after)
                // RDR-229 P3.5b (the 5x80k EXPLAIN): tenant and collection as the call's constants, not the row's columns (equal
                // under the where above), so the inlined function's registry read runs once per statement, not once per chunk
@@ -6778,6 +6775,7 @@ FROM scope s
         int dim = dimForCollection(tenant, collection);
         if (ids == null || ids.isEmpty()) return 0;
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+        final boolean byId = gate3.holds();   // RDR-229 P3.5c: read once; from gate 3 the manifest guard and the delete select by id
         return tenantScope.withTenant(tenant, ctx -> {
             CollectionRegistry.require(ctx, tenant, collection);   // RDR-229 P3.5a: a request by id reads that id here, FOR KEY SHARE
             // RDR-191 GATE-2 (nexus-mmkqe): NO deleted_at predicate on the join —
@@ -6791,10 +6789,12 @@ FROM scope s
                        .on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
                            .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)))
                    .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(ch.tenantId())
-                          .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(ch.collection()))
+                          .and(byId ? CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID.eq(ch.collectionId())
+                                    : CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(ch.collection()))
                           .and(ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH).eq(ch.chash()))));
             return ctx.deleteFrom(ch.table())
-               .where(ch.collection().eq(collection).and(ch.chash().in(ids)).andNot(stillReferenced))
+               .where(CollectionSelector.collectionIs(gate3, tenant, ch.collection(), ch.collectionId(), collection)
+                   .and(ch.chash().in(ids)).andNot(stillReferenced))
                .execute();
         });
     }
@@ -7409,7 +7409,8 @@ FROM scope s
             throw new IllegalArgumentException("offset must be >= 0 and limit >= 1, got " + offset + "/" + limit);
         }
         var row = tenantScope.withTenant(tenant, ctx -> ctx
-            .select(GC_AUDIT.OPERATION, GC_AUDIT.COLLECTION, GC_AUDIT.CHASH_COUNT, GC_AUDIT.CHASHES, GC_AUDIT.DETAILS)
+            .select(GC_AUDIT.OPERATION, GC_AUDIT.COLLECTION, GC_AUDIT.CHASH_COUNT, GC_AUDIT.CHASHES, GC_AUDIT.DETAILS,
+                    GC_AUDIT.COLLECTION_ID)
             .from(GC_AUDIT)
             .where(GC_AUDIT.TENANT_ID.eq(tenant).and(GC_AUDIT.ID.eq(auditId)))
             .fetchOne());
@@ -7422,7 +7423,29 @@ FROM scope s
                 + " row, not one that moved chunks into quarantine (expected one of "
                 + new java.util.TreeSet<>(QUARANTINING_OPERATIONS) + ")");
         }
-        if (!originCollection.equals(row.value2())) {
+        // RDR-229 P3.5c: from gate 3 the audit row names its collection by the id it was written with (the name is history, and
+        // a one-row rename leaves it stale). One narrow exception (linda R2): a row recorded before collection ids (NULL id) is
+        // compared by its stored name, and the restore goes ahead only if a live collection holds that label now; nothing else acts
+        // on pre-id history.
+        final boolean auditById = gate3.holds();
+        final Long originId = auditById
+            ? CollectionSelector.of(gate3, tenantScope, tenant, originCollection).idOf(originCollection) : null;
+        if (auditById && row.value6() == null) {
+            if (!originCollection.equals(row.value2())) {
+                throw new IllegalArgumentException("gc_audit row " + auditId + " is for collection " + row.value2()
+                    + ", not " + originCollection);
+            }
+            // a LIVE holder explicitly: the ordered idOf above falls back to the newest tombstone, which holds no label for this purpose
+            final String storedLabel = row.value2();
+            Long liveHolder = tenantScope.withTenant(tenant, ctx -> ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID)
+                .from(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+                .and(CATALOG_COLLECTIONS.NAME.eq(storedLabel)).and(CollectionSelector.live())
+                .fetchOne(CATALOG_COLLECTIONS.COLLECTION_ID));
+            if (liveHolder == null) {
+                throw new IllegalArgumentException("gc_audit row " + auditId + ": recorded before collection ids, under label "
+                    + row.value2() + "; no live collection holds " + row.value2());
+            }
+        } else if (auditById ? !row.value6().equals(originId) : !originCollection.equals(row.value2())) {
             throw new IllegalArgumentException("gc_audit row " + auditId + " is for collection " + row.value2()
                 + ", not " + originCollection);
         }
@@ -7559,7 +7582,8 @@ FROM scope s
         List<String> selected = tenantScope.withTenant(tenant, ctx ->
             ctx.select(ChashHex.hex(CHUNKS.CHASH))
                .from(CHUNKS)
-               .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.in(siblings)))
+               .where(CHUNKS.TENANT_ID.eq(tenant)
+                   .and(CollectionSelector.collectionIn(gate3, tenant, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, siblings)))
                .and(fromThisOrigin).and(window).and(past)
                .groupBy(CHUNKS.CHASH)
                .orderBy(CHUNKS.CHASH)
@@ -7646,7 +7670,7 @@ FROM scope s
      * the origin.
      */
     public List<String> resolveQuarantineSiblings(String tenant, String originCollection) {
-        return tenantScope.withTenant(tenant, ctx -> siblingNames(ctx, tenant, originCollection));
+        return tenantScope.withTenant(tenant, ctx -> siblingNames(ctx, tenant, originCollection, gate3));
     }
 
     /**
@@ -7697,7 +7721,7 @@ FROM scope s
             List<String> names = tenantScope.withTenant(tenant, ctx -> {
                 PgSession.setStatementAndLockBounds(ctx, statementTimeoutMs,
                     PgSession.DEFAULT_QUARANTINE_SIBLING_RESOLUTION_LOCK_TIMEOUT_MS);
-                return siblingNames(ctx, tenant, originCollection);
+                return siblingNames(ctx, tenant, originCollection, gate3);
             });
             return new SiblingResolution(names, false);
         } catch (RuntimeException e) {
@@ -7711,7 +7735,8 @@ FROM scope s
         }
     }
 
-    private static List<String> siblingNames(DSLContext ctx, String tenant, String originCollection) {
+    private static List<String> siblingNames(DSLContext ctx, String tenant, String originCollection, Gate3 gate3) {
+        final boolean byId = gate3.holds();   // RDR-229 P3.5c: read once; from gate 3 the registry row joins its chunk rows by id
         String reaperName = dev.nexus.service.db.QuarantineOrigin.PREFIX + originCollection;
         Field<String> originTag = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "origin_collection");
         List<String> found =
@@ -7721,7 +7746,8 @@ FROM scope s
                    .and(CATALOG_COLLECTIONS.NAME.eq(reaperName).or(DSL.exists(
                        DSL.selectOne().from(CHUNKS)
                           .where(CHUNKS.TENANT_ID.eq(CATALOG_COLLECTIONS.TENANT_ID)
-                              .and(CHUNKS.COLLECTION.eq(CATALOG_COLLECTIONS.NAME))
+                              .and(byId ? CHUNKS.COLLECTION_ID.eq(CATALOG_COLLECTIONS.COLLECTION_ID)
+                                        : CHUNKS.COLLECTION.eq(CATALOG_COLLECTIONS.NAME))
                               .and(originTag.eq(originCollection)))))))
                .fetch(CATALOG_COLLECTIONS.NAME);
         var ordered = new ArrayList<String>(found.size());
@@ -8236,7 +8262,8 @@ FROM scope s
             int affected = 0;
             List<String> missing = new ArrayList<>();
             for (int i = 0; i < ids.size(); i++) {
-                int rows = updateMetadataOneRow(ctx, ch, collection, ids.get(i), metadatas.get(i), deleteKeys);
+                int rows = updateMetadataOneRow(ctx, ch, tenant, collection, ids.get(i), metadatas.get(i), deleteKeys,
+                                                gate3);
                 affected += rows;
                 if (rows == 0) missing.add(ids.get(i));
             }
@@ -8303,9 +8330,13 @@ FROM scope s
      * an UPDATE writes, so a chunk the P3.1 stamp has not reached (collection set, {@code collection_id} NULL) is
      * refused (23514) by any UPDATE that leaves the id alone. Correlated on the row's own {@code (tenant_id,
      * collection)}, so one statement shape serves every row; NULL for {@code ''}, as the CHECK wants.
+     *
+     * <p>RDR-229 P3.5c, from gate 3 ({@code byId}): the row already carries its id, so the statement keeps it
+     * ({@code collection_id = collection_id}, which the CHECK passes) instead of deriving it again from the row's own name, which
+     * a one-row rename leaves stale.
      */
-    private static Field<Long> rowCollectionId(DimTables.ChunkTable ch) {
-        return CollectionIds.idOf(ch.tenantId(), ch.collection());
+    private static Field<Long> rowCollectionId(DimTables.ChunkTable ch, boolean byId) {
+        return byId ? ch.collectionId() : CollectionIds.idOf(ch.tenantId(), ch.collection());
     }
 
     /**
@@ -8323,10 +8354,11 @@ FROM scope s
      * @return rows affected (0 or 1) — 0 means no row currently matches
      *         {@code (collection, chash)} under RLS
      */
-    private static int updateMetadataOneRow(DSLContext ctx, DimTables.ChunkTable ch,
+    private static int updateMetadataOneRow(DSLContext ctx, DimTables.ChunkTable ch, String tenant,
                                              String collection, String chash,
                                              Map<String, Object> metadata,
-                                             List<String> deleteKeys) {
+                                             List<String> deleteKeys, Gate3 gate3) {
+        final boolean byId = gate3.holds();   // RDR-229 P3.5c: read once; from gate 3 the row is selected by id and keeps its id
         // Same NUL defense as upsertChunks: jsonb rejects NUL just like text does
         // (nexus-rvfwj, dual-review M2).
         org.jooq.Field<JSONB> incoming = DSL.val(JSONB.jsonb(toJson(sanitizeNulDeep(metadata))));
@@ -8337,8 +8369,9 @@ FROM scope s
         // stamp keep a chunk with no live owner alive forever.
         return ctx.update(ch.table())
                   .set(ch.metadata(), mergeMetadata(ch.metadata(), incoming, deleteKeys))
-                  .set(CHUNKS.COLLECTION_ID, rowCollectionId(ch))
-                  .where(ch.collection().eq(collection).and(ch.chash().eq(chash)))
+                  .set(CHUNKS.COLLECTION_ID, rowCollectionId(ch, byId))
+                  .where(CollectionSelector.collectionIs(gate3, tenant, ch.collection(), ch.collectionId(), collection)
+                      .and(ch.chash().eq(chash)))
                   .execute();
     }
 
@@ -8407,33 +8440,23 @@ FROM scope s
      * both write paths keeps the "identical text -> metadata-only UPDATE,
      * concurrent-delete reroutes to need-embed" contract in exactly one
      * place.
+     *
+     * <p>Write mode (nexus-w94eo / nexus-y8xjh): {@code deleteKeys == null} REPLACES each row's metadata wholesale, the pre-nexus-w94eo
+     * semantics: that is the combined-write caller ({@code CombinedWriteService}) by default, whose insert branch also replaces. A
+     * non-null list (possibly empty) MERGES via {@link #mergeMetadata}, stripping the named keys from the stored value first: that is
+     * {@link #resolveNeedEmbedIdx}'s have-vector branch of {@code upsert-chunks} and the combined write under its {@code
+     * metadata_merge} mode (RDR-223, nexus-z0o2p.13).
+     *
+     * <p>RDR-229 P3.5c, item 6: each row is selected by the collection's id once {@code gate3} holds and keeps its own id on the SET;
+     * {@code tenant} (the one the {@code ctx} is stamped for) names the registry rows the label resolves in, and is unused before
+     * gate 3. The gate is a parameter, not a default: the 6- and 7-argument forms that read the name path are gone.
      */
-    public static List<Integer> batchUpdateMetadata(DSLContext ctx, DimTables.ChunkTable ch,
-                                                       String collection, List<String> ids,
-                                                       List<Map<String, Object>> metadatas,
-                                                       List<Integer> idxToUpdate) {
-        return batchUpdateMetadata(ctx, ch, collection, ids, metadatas, idxToUpdate, null);
-    }
-
-    /**
-     * {@link #batchUpdateMetadata(DSLContext, DimTables.ChunkTable, String, List, List, List)}
-     * with a write mode (nexus-w94eo / nexus-y8xjh). {@code deleteKeys == null} REPLACES
-     * each row's metadata wholesale, the pre-nexus-w94eo semantics: that is the
-     * combined-write caller ({@code CombinedWriteService}) by default, whose insert branch
-     * ({@code CatalogRepository.upsertManifestChunkVectors}) also replaces, so its
-     * metadata-only branch must too or a clean re-index could not clear a sparse key
-     * through that endpoint. A non-null list (possibly empty) MERGES via {@link
-     * #mergeMetadata}, stripping the named keys from the stored value first: that is
-     * {@link #resolveNeedEmbedIdx}'s have-vector branch of {@code upsert-chunks}, which
-     * carries the request's {@code delete_keys}, and the combined write under its
-     * {@code metadata_merge} mode (RDR-223, nexus-z0o2p.13), whose insert branch then
-     * merges with the same list in its own ON CONFLICT.
-     */
-    public static List<Integer> batchUpdateMetadata(DSLContext ctx, DimTables.ChunkTable ch,
+    public static List<Integer> batchUpdateMetadata(DSLContext ctx, DimTables.ChunkTable ch, String tenant,
                                                        String collection, List<String> ids,
                                                        List<Map<String, Object>> metadatas,
                                                        List<Integer> idxToUpdate,
-                                                       List<String> deleteKeys) {
+                                                       List<String> deleteKeys, Gate3 gate3) {
+        final boolean byId = gate3.holds();
         List<Integer> zeroAffected = new ArrayList<>();
         // nexus-hxrcm: one global lock order — sort the indices by the chash they
         // update (see javadoc). Copy: idxToUpdate may be an unmodifiable view.
@@ -8463,8 +8486,10 @@ FROM scope s
                 queries.add(ctx.update(ch.table())
                                .set(ch.metadata(), value)
                                .set(ch.lastWrittenAt(), DimTables.lastWrittenNow())
-                               .set(CHUNKS.COLLECTION_ID, rowCollectionId(ch))
-                               .where(ch.collection().eq(collection).and(ch.chash().eq(ids.get(idx)))));
+                               .set(CHUNKS.COLLECTION_ID, rowCollectionId(ch, byId))
+                               .where(CollectionSelector.collectionIs(gate3, tenant, ch.collection(), ch.collectionId(),
+                                                                      collection)
+                                   .and(ch.chash().eq(ids.get(idx)))));
             }
             int[] affectedCounts = ctx.batch(queries).execute();
             for (int i = 0; i < page.size(); i++) {
@@ -8740,8 +8765,8 @@ FROM scope s
                 // behavior-preserving; see CatalogRepository-sibling PgVectorMetadata
                 // BatchParityTest for the exact-row-state parity this must hold instead.
                 needEmbedIdx.addAll(
-                    batchUpdateMetadata(ctx, ch, collection, dedupIds, dedupMetas, unchangedIdx,
-                            deleteKeys == null ? List.of() : deleteKeys));
+                    batchUpdateMetadata(ctx, ch, tenant, collection, dedupIds, dedupMetas, unchangedIdx,
+                            deleteKeys == null ? List.of() : deleteKeys, gate3));
                 return new NeedEmbedResolution(needEmbedIdx, originalAbsentIdx);
             });
         } catch (RuntimeException e) {
@@ -8818,9 +8843,14 @@ FROM scope s
             }
 
             // 2. Manifest rows in position order.
+            // RDR-229 P3.5c: from gate 3 the collection a manifest row names is the registry's label of its collection_id
+            // (a NULL id is no collection: the row reads as having none and refuses below), never the row's own name.
             var manifest = ctx.select(CATALOG_DOCUMENT_CHUNKS.POSITION,
                                       ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH),
-                                      CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                                      gate3.holds()
+                                          ? CollectionSelector.labelOf(CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
+                                                                       CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID)
+                                          : CATALOG_DOCUMENT_CHUNKS.COLLECTION)
                               .from(CATALOG_DOCUMENT_CHUNKS)
                               .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(tumbler))
                               .orderBy(CATALOG_DOCUMENT_CHUNKS.POSITION.asc())
@@ -9150,14 +9180,20 @@ FROM scope s
      * count is {@link #distinctQualifying}'s: a read of at most the cap, widened to twice the cap only when that read
      * held repeats (nexus-h7kw2).
      */
-    private static java.util.function.IntUnaryOperator manifestQualifying(DSLContext ctx, String[] colls,
+    private static java.util.function.IntUnaryOperator manifestQualifying(DSLContext ctx, CollectionSelector sel,
                                                                          WherePlan wherePlan, String model,
                                                                          String tenant, boolean distinctChunks,
                                                                          String queryText) {
         ManifestPushdown.Plan m = wherePlan.manifest();
-        java.util.function.IntFunction<Result<?>> read = fetchCap -> ctx.selectFrom(MANIFEST_QUALIFYING_HITS.call(
-            colls, wherePlan.containment(), wherePlan.jsonPath(), m.containment(), m.jsonPath(),
-            fetchCap, model, tenant, queryText, wherePlan.excludeSensitive())).fetch();
+        // RDR-229 P3.5c: from gate 3 the count is manifest_qualifying_hits_by_id over the ids; its chunk_collection is the
+        // registry's label, its chunk_collection_id the id, and the distinct key is (collection, chash) as before.
+        java.util.function.IntFunction<Result<?>> read = sel.byId()
+            ? fetchCap -> ctx.selectFrom(MANIFEST_QUALIFYING_HITS_BY_ID.call(
+                sel.idArray(), wherePlan.containment(), wherePlan.jsonPath(), m.containment(), m.jsonPath(),
+                fetchCap, model, tenant, queryText, wherePlan.excludeSensitive())).fetch()
+            : fetchCap -> ctx.selectFrom(MANIFEST_QUALIFYING_HITS.call(
+                sel.nameArray(), wherePlan.containment(), wherePlan.jsonPath(), m.containment(), m.jsonPath(),
+                fetchCap, model, tenant, queryText, wherePlan.excludeSensitive())).fetch();
         if (!distinctChunks) {
             return cap -> read.apply(cap).size();
         }
@@ -9165,8 +9201,9 @@ FROM scope s
             Result<?> rows = read.apply(fetchCap);
             List<String> keys = new ArrayList<>(rows.size());
             for (Record r : rows) {
-                keys.add(r.get(MANIFEST_QUALIFYING_HITS.CHUNK_COLLECTION) + "/"
-                         + java.util.HexFormat.of().formatHex(r.get(MANIFEST_QUALIFYING_HITS.CHUNK_CHASH)));
+                // by column name: the row is the name function's or its _by_id twin's, whose generated field constants differ
+                keys.add(r.get("chunk_collection", String.class) + "/"
+                         + java.util.HexFormat.of().formatHex(r.get("chunk_chash", byte[].class)));
             }
             return keys;
         });
@@ -9383,18 +9420,41 @@ FROM scope s
      */
     private org.jooq.Condition chunkScope(DimTables.ChunkTable ch, String tenant, String collection) {
         return chunkScope(ch, tenant,
-            CollectionRegistry.lookup(tenantScope, tenant, collection).embeddingModel(), collection);
+            CollectionRegistry.lookup(tenantScope, tenant, collection).embeddingModel(), collection, gate3);
     }
 
     static org.jooq.Condition chunkScope(DimTables.ChunkTable ch, String tenant, String model,
                                          String collection) {
-        return ch.embeddingModel().eq(model).and(ch.tenantId().eq(tenant)).and(ch.collection().eq(collection));
+        return chunkScope(ch, tenant, model, collection, Gate3.never());
     }
 
-    private static org.jooq.Condition liveChunksCondition(DSLContext ctx, DimTables.ChunkTable ch) {
+    /**
+     * {@link #chunkScope(DimTables.ChunkTable, String, String, String)} that selects the collection by id once {@code gate3}
+     * holds (RDR-229 P3.5c, item 6): {@code collection_id = (SELECT collection_id FROM catalog_collections WHERE tenant_id = ? AND
+     * name = ?)}, resolved by the same statement so the read pays no extra round trip. The partition scope (model and tenant) is
+     * unchanged. A label that resolves to no id is no collection: the scope selects nothing.
+     */
+    static org.jooq.Condition chunkScope(DimTables.ChunkTable ch, String tenant, String model,
+                                         String collection, Gate3 gate3) {
+        return ch.embeddingModel().eq(model).and(ch.tenantId().eq(tenant))
+            .and(CollectionSelector.collectionIs(gate3, tenant, ch.collection(), ch.collectionId(), collection));
+    }
+
+    private org.jooq.Condition liveChunksCondition(DSLContext ctx, DimTables.ChunkTable ch) {
+        return liveChunksCondition(ctx, ch, gate3.holds());
+    }
+
+    /**
+     * {@code EXISTS} a live owner of the chunk row: {@code chunk_live_owners(tenant, collection, chash)} before gate 3, its
+     * {@code chunk_live_owners_by_id(tenant, collection_id, chash)} twin from it (RDR-229 P3.5c; vectors-077-140). Both are
+     * one-row SQL functions called in FROM so that they inline.
+     */
+    private static org.jooq.Condition liveChunksCondition(DSLContext ctx, DimTables.ChunkTable ch, boolean byId) {
         Field<byte[]> rawChash = ch.table().field("chash", byte[].class);
-        return DSL.exists(ctx.selectOne().from(
-            CHUNK_LIVE_OWNERS.call(ch.tenantId(), ch.collection(), rawChash)));
+        org.jooq.Table<?> owners = byId
+            ? CHUNK_LIVE_OWNERS_BY_ID.call(ch.tenantId(), ch.collectionId(), rawChash)
+            : CHUNK_LIVE_OWNERS.call(ch.tenantId(), ch.collection(), rawChash);
+        return DSL.exists(ctx.selectOne().from(owners));
     }
 
     /** Strip NUL (0x00) — unstorable in Postgres {@code text}/{@code jsonb} (nexus-rvfwj). */

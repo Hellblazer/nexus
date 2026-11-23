@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import dev.nexus.service.datamove.Gate3;
 import dev.nexus.service.PgCatalogProbes;
 import dev.nexus.service.PgContainerHelper;
 import org.jooq.DSLContext;
@@ -113,7 +114,7 @@ class CatalogByTitleIndexTest {
 
     private String planOf(String owner, String contentType, Integer chunkCount) {
         return tenantScope.withTenant(TENANT, ctx -> PgContainerHelper.explainPlanWith(ctx,
-            CatalogRepository.documentsByTitleQuery(ctx, TITLE, owner, contentType, chunkCount),
+            CatalogRepository.documentsByTitleQuery(ctx, TITLE, owner, contentType, chunkCount, Gate3.never()),
             PgContainerHelper.ExplainOptions.ANALYZE_VERBOSE_COSTS_OFF));
     }
 
@@ -133,10 +134,10 @@ class CatalogByTitleIndexTest {
     void theStatementStillAnswersCorrectly_onTheLargeTable() {
         // Non-vacuity of the plan test: it is the same statement, and it finds exactly the three.
         var rows = tenantScope.withTenant(TENANT, ctx ->
-            CatalogRepository.documentsByTitleQuery(ctx, TITLE, null, null, null).fetch());
+            CatalogRepository.documentsByTitleQuery(ctx, TITLE, null, null, null, Gate3.never()).fetch());
         assertThat(rows).hasSize(3);
         var ghosts = tenantScope.withTenant(TENANT, ctx ->
-            CatalogRepository.documentsByTitleQuery(ctx, TITLE, null, null, 0).fetch());
+            CatalogRepository.documentsByTitleQuery(ctx, TITLE, null, null, 0, Gate3.never()).fetch());
         assertThat(ghosts).hasSize(1);
     }
 }

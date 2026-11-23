@@ -22,6 +22,12 @@ import java.util.Set;
 import java.util.concurrent.Semaphore;
 
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATE_PROBE_1024;
+import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATE_PROBE_1024_BY_ID;
+import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATE_PROBE_384_BY_ID;
+import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATE_PROBE_768_BY_ID;
+import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATE_PROBE_BY_COLLECTION_1024_BY_ID;
+import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATE_PROBE_BY_COLLECTION_384_BY_ID;
+import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATE_PROBE_BY_COLLECTION_768_BY_ID;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATE_PROBE_384;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATE_PROBE_768;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATE_PROBE_BY_COLLECTION_1024;
@@ -127,8 +133,22 @@ final class LexicalGateProbe {
     }
 
     /** {@code text_gate_probe_<dim>}: the chashes the text gate admits in {@code colls}, at most {@code cap}. */
-    static Table<?> textGateProbeFn(int dim, String gateQueryText, String[] colls, WherePlan wherePlan, int cap,
+    static Table<?> textGateProbeFn(int dim, String gateQueryText, CollectionSelector sel, WherePlan wherePlan, int cap,
                                     String model, String tenant) {
+        if (sel.byId()) {
+            // RDR-229 P3.5c: gate 3 holds; the twin matches by the resolved ids (vectors-077-100..102).
+            Long[] ids = sel.idArray();
+            return switch (dim) {
+                case 384  -> TEXT_GATE_PROBE_384_BY_ID.call(
+                    gateQueryText, ids, wherePlan.containment(), wherePlan.jsonPath(), cap, model, tenant);
+                case 768  -> TEXT_GATE_PROBE_768_BY_ID.call(
+                    gateQueryText, ids, wherePlan.containment(), wherePlan.jsonPath(), cap, model, tenant);
+                case 1024 -> TEXT_GATE_PROBE_1024_BY_ID.call(
+                    gateQueryText, ids, wherePlan.containment(), wherePlan.jsonPath(), cap, model, tenant);
+                default   -> throw new IllegalArgumentException("unsupported dim " + dim);
+            };
+        }
+        String[] colls = sel.nameArray();
         return switch (dim) {
             case 384  -> TEXT_GATE_PROBE_384.call(
                 gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), cap, model, tenant);
@@ -145,8 +165,21 @@ final class LexicalGateProbe {
      * in {@code colls}, capped per collection; a collection that reached {@code cap} rows is one {@code (collection,
      * NULL)} row.
      */
-    static Table<?> textGateProbeByCollectionFn(int dim, String gateQueryText, String[] colls, WherePlan wherePlan,
+    static Table<?> textGateProbeByCollectionFn(int dim, String gateQueryText, CollectionSelector sel, WherePlan wherePlan,
                                                 int cap, String model, String tenant) {
+        if (sel.byId()) {
+            Long[] ids = sel.idArray();
+            return switch (dim) {
+                case 384  -> TEXT_GATE_PROBE_BY_COLLECTION_384_BY_ID.call(
+                    gateQueryText, ids, wherePlan.containment(), wherePlan.jsonPath(), cap, model, tenant);
+                case 768  -> TEXT_GATE_PROBE_BY_COLLECTION_768_BY_ID.call(
+                    gateQueryText, ids, wherePlan.containment(), wherePlan.jsonPath(), cap, model, tenant);
+                case 1024 -> TEXT_GATE_PROBE_BY_COLLECTION_1024_BY_ID.call(
+                    gateQueryText, ids, wherePlan.containment(), wherePlan.jsonPath(), cap, model, tenant);
+                default   -> throw new IllegalArgumentException("unsupported dim " + dim);
+            };
+        }
+        String[] colls = sel.nameArray();
         return switch (dim) {
             case 384  -> TEXT_GATE_PROBE_BY_COLLECTION_384.call(
                 gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), cap, model, tenant);
@@ -176,7 +209,7 @@ final class LexicalGateProbe {
      * @param workers {@code max_parallel_workers_per_gather} for the statement's transaction ({@link #probeWorkers})
      */
     static void runShared(TenantScope tenantScope, SharedLexicalProbe share, String tenant, String model, int dim,
-                           String gateText, String[] colls,
+                           String gateText, CollectionSelector sel,
                            WherePlan wherePlan, int selectiveGateMax, int workers, long requestDeadlineNanos,
                            long fanoutDeadlineNanos, int searchBoundMs, Semaphore armGate) {
         final long startNanos = System.nanoTime();
@@ -194,7 +227,7 @@ final class LexicalGateProbe {
                     PgSession.setSearchPlanCacheMode(ctx);
                     // The workers a statement may use are the engine's to set, not the function's: see vectors-060.
                     PgSession.setLocal(ctx, "max_parallel_workers_per_gather", Integer.toString(workers));
-                    Table<?> fn = textGateProbeByCollectionFn(dim, gateQueryText, colls, wherePlan, cap, model, tenant);
+                    Table<?> fn = textGateProbeByCollectionFn(dim, gateQueryText, sel, wherePlan, cap, model, tenant);
                     Result<? extends Record> per = ctx.selectFrom(fn).fetch();
                     Map<String, List<byte[]>> rowsOf = new HashMap<>();
                     Set<String> dense = new HashSet<>();

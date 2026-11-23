@@ -143,6 +143,22 @@ BEGIN
 END
 $$;
 
+-- RDR-229 P3.5c (nexus-p2m1x.25): the id twins of the families the original revokes from PUBLIC (vectors-077-100..102 and -137..139 copy
+-- the original's ACL when it was migrated, before this role existed): the gate probes, the by-collection probe and the topic-set search. A
+-- per-class service role needs the same grant on each twin, exactly as nexus_svc has it. Guarded by the catalog, so it runs on any schema.
+DO $$
+DECLARE
+    f record;
+BEGIN
+    FOR f IN SELECT p.oid::pg_catalog.regprocedure AS sig
+               FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+              WHERE n.nspname = 'nexus'
+                AND p.proname ~ '^(text_gate_probe|text_gate_probe_by_collection|search_topic_set)_(384|768|1024)_by_id$' LOOP
+        EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION %s TO ${svcRole}', f.sig);
+    END LOOP;
+END
+$$;
+
 -- RDR-225 (nexus-3wh8d.13): create_tenant_partitions is SECURITY DEFINER with EXECUTE revoked from PUBLIC and
 -- granted to nexus_svc only (vectors-030-1), so a per-class service role needs its own grant, exactly as
 -- nexus_svc has it. The tests' collection seed (PgContainerHelper#insertCollection) calls it for the tenant it

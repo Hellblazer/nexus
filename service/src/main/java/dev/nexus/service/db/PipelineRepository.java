@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import dev.nexus.service.datamove.Gate3;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
@@ -146,11 +147,31 @@ public final class PipelineRepository {
      *  CHECK looks at each updated row, and a row not stamped yet has a name and no id). An id already stored is kept:
      *  the name is not changing, and the registry row may be gone by then (a cutover deletes it), which would null
      *  the id beside a non-empty name. */
-    private static final Field<Long> OWN_ID = DSL.coalesce(PDF_PIPELINE.COLLECTION_ID,
+    private static final Field<Long> OWN_ID_BY_NAME = DSL.coalesce(PDF_PIPELINE.COLLECTION_ID,
         CollectionIds.idOf(PDF_PIPELINE.TENANT_ID, PDF_PIPELINE.COLLECTION));
 
+    /** RDR-229 P3.5c: whether gate 3 holds on the install, read on each statement built (never cached). */
+    private final Gate3 gate3;
+
     public PipelineRepository(TenantScope tenantScope) {
+        this(tenantScope, Gate3.never());
+    }
+
+    /**
+     * RDR-229 P3.5c: from gate 3 a collection is named by {@code collection_id} (the narrowing of a by-document ref, the
+     * per-collection delete, and the id an UPDATE re-asserts, which is the row's own); before it, by the {@code collection} column.
+     * pdf_pipeline is a LEDGER (no FK to the registry: the client deletes the registry row before it asks for the pipeline
+     * cleanup), so from gate 3 a label matches {@code collection_id = registry id of the label} OR the recorded name when no LIVE
+     * registry row holds the row's id ({@link CollectionKey#eqLedger}).
+     */
+    public PipelineRepository(TenantScope tenantScope, Gate3 gate3) {
         this.tenantScope = tenantScope;
+        this.gate3 = java.util.Objects.requireNonNull(gate3, "gate3");
+    }
+
+    /** The id every UPDATE of a row sets (see {@link #OWN_ID_BY_NAME}): after gate 3 every row is stamped, so the row's own id. */
+    private Field<Long> ownId() {
+        return CollectionKey.of(gate3).byId() ? PDF_PIPELINE.COLLECTION_ID : OWN_ID_BY_NAME;
     }
 
     // ── resolution ───────────────────────────────────────────────────────────
@@ -176,7 +197,7 @@ public final class PipelineRepository {
         return tenantScope.withTenant(tenant, ctx -> resolveIn(ctx, tenant, ref));
     }
 
-    private static Long resolveIn(DSLContext ctx, String tenant, PipelineRef ref) {
+    private Long resolveIn(DSLContext ctx, String tenant, PipelineRef ref) {
         if (ref.pipelineId() != null) {
             return ctx.select(PDF_PIPELINE.PIPELINE_ID)
                       .from(PDF_PIPELINE)
@@ -198,14 +219,15 @@ public final class PipelineRepository {
             || (ref.pdfPath() != null && !ref.pdfPath().isBlank());
     }
 
-    private static Condition hashCondition(String tenant, PipelineRef ref) {
+    private Condition hashCondition(String tenant, PipelineRef ref) {
+        CollectionKey k = CollectionKey.of(gate3);
         Condition c = PDF_PIPELINE.TENANT_ID.eq(tenant)
                 .and(PDF_PIPELINE.CONTENT_HASH.eq(ref.contentHash()));
         if (!narrowed(ref)) {
             return c.and(PDF_PIPELINE.KEYED_BY.eq(KEYED_BY_CONTENT_HASH));
         }
         if (ref.collection() != null && !ref.collection().isBlank()) {
-            c = c.and(PDF_PIPELINE.COLLECTION.eq(ref.collection()));
+            c = c.and(k.eqLedger(tenant, PDF_PIPELINE.COLLECTION, PDF_PIPELINE.COLLECTION_ID, ref.collection()));
         }
         if (ref.pdfPath() != null && !ref.pdfPath().isBlank()) {
             c = c.and(PDF_PIPELINE.PDF_PATH.eq(ref.pdfPath()));
@@ -334,7 +356,7 @@ public final class PipelineRepository {
                        .set(PDF_PIPELINE.KEYED_BY, keyedBy)
                        .set(PDF_PIPELINE.RUN_EPOCH, PDF_PIPELINE.RUN_EPOCH.plus(1))
                        .set(PDF_PIPELINE.UPDATED_AT, now)
-                       .set(PDF_PIPELINE.COLLECTION_ID, OWN_ID)
+                       .set(PDF_PIPELINE.COLLECTION_ID, ownId())
                        .where(PDF_PIPELINE.TENANT_ID.eq(tenant)
                                .and(PDF_PIPELINE.PIPELINE_ID.eq(existing)))
                        .returning(PDF_PIPELINE.RUN_EPOCH)
@@ -359,7 +381,7 @@ public final class PipelineRepository {
      *  write from the completed run still holds the old epoch and must be
      *  fenced, nexus-8vu8p). Returns the new epoch, or {@code null} when the
      *  row vanished between the caller's read and this UPDATE. */
-    private static Integer resetLeftoverRow(DSLContext ctx, String tenant, long pipelineId, OffsetDateTime now) {
+    private Integer resetLeftoverRow(DSLContext ctx, String tenant, long pipelineId, OffsetDateTime now) {
         deleteWal(ctx, tenant, pipelineId);
         return ctx.update(PDF_PIPELINE)
            .set(PDF_PIPELINE.STATUS, "running")
@@ -374,7 +396,7 @@ public final class PipelineRepository {
            .set(PDF_PIPELINE.EXTRACTION_META, "")
            .set(PDF_PIPELINE.STARTED_AT, now)
            .set(PDF_PIPELINE.UPDATED_AT, now)
-           .set(PDF_PIPELINE.COLLECTION_ID, OWN_ID)
+           .set(PDF_PIPELINE.COLLECTION_ID, ownId())
            .where(PDF_PIPELINE.TENANT_ID.eq(tenant).and(PDF_PIPELINE.PIPELINE_ID.eq(pipelineId)))
            .returning(PDF_PIPELINE.RUN_EPOCH)
            .fetchOne(PDF_PIPELINE.RUN_EPOCH);
@@ -419,7 +441,7 @@ public final class PipelineRepository {
             if (run == null) return null;
             long id = run.pipelineId();
             var update = ctx.update(PDF_PIPELINE).set(PDF_PIPELINE.UPDATED_AT, now)
-                .set(PDF_PIPELINE.COLLECTION_ID, OWN_ID);
+                .set(PDF_PIPELINE.COLLECTION_ID, ownId());
             for (var entry : fields.entrySet()) {
                 update = update.set(
                     DSL.field(DSL.name("nexus", "pdf_pipeline", entry.getKey()), Integer.class),
@@ -476,7 +498,7 @@ public final class PipelineRepository {
             long id = run.pipelineId();
             start.begin(ctx)
                  .set(PDF_PIPELINE.UPDATED_AT, now)
-                 .set(PDF_PIPELINE.COLLECTION_ID, OWN_ID)
+                 .set(PDF_PIPELINE.COLLECTION_ID, ownId())
                  .where(PDF_PIPELINE.TENANT_ID.eq(tenant)
                          .and(PDF_PIPELINE.PIPELINE_ID.eq(id))
                          .and(only))
@@ -499,7 +521,7 @@ public final class PipelineRepository {
      * {@code null} epoch (a client older than pipeline-003) is unfenced.
      * Returns {@code null} when the ref names no row.
      */
-    private static LockedRun lockRun(DSLContext ctx, String tenant, PipelineRef ref) {
+    private LockedRun lockRun(DSLContext ctx, String tenant, PipelineRef ref) {
         Long id = resolveIn(ctx, tenant, ref);
         if (id == null) return null;
         var row = ctx.select(PDF_PIPELINE.PIPELINE_ID, PDF_PIPELINE.RUN_EPOCH, PDF_PIPELINE.CONTENT_HASH)
@@ -517,7 +539,7 @@ public final class PipelineRepository {
 
     /** {@link #lockRun} for a WAL write, where a ref that names no row is
      *  refused (the FK would refuse the INSERT anyway; this names the reason). */
-    private static long requireRun(DSLContext ctx, String tenant, PipelineRef ref) {
+    private long requireRun(DSLContext ctx, String tenant, PipelineRef ref) {
         LockedRun run = lockRun(ctx, tenant, ref);
         if (run == null) {
             throw new IllegalArgumentException("no pipeline row for " + ref.describe());
@@ -683,7 +705,7 @@ public final class PipelineRepository {
             ctx.update(PDF_PIPELINE)
                .set(PDF_PIPELINE.CHUNKS_UPLOADED, 0)
                .set(PDF_PIPELINE.UPDATED_AT, now)
-               .set(PDF_PIPELINE.COLLECTION_ID, OWN_ID)
+               .set(PDF_PIPELINE.COLLECTION_ID, ownId())
                .where(PDF_PIPELINE.TENANT_ID.eq(tenant).and(PDF_PIPELINE.PIPELINE_ID.eq(id)))
                .execute();
             return reset;
@@ -755,7 +777,7 @@ public final class PipelineRepository {
                .set(PDF_PIPELINE.CHUNKS_UPLOADED, 0)
                .set(PDF_PIPELINE.PAGES_EXTRACTED, 0)
                .set(PDF_PIPELINE.UPDATED_AT, now)
-               .set(PDF_PIPELINE.COLLECTION_ID, OWN_ID)
+               .set(PDF_PIPELINE.COLLECTION_ID, ownId())
                .where(PDF_PIPELINE.TENANT_ID.eq(tenant).and(PDF_PIPELINE.PIPELINE_ID.eq(id)))
                .execute();
             return null;
@@ -792,11 +814,12 @@ public final class PipelineRepository {
      *  Returns the number of pipeline rows removed. */
     public int deleteForCollection(String tenant, String collection) {
         requireNonBlank(collection, "collection");
+        CollectionKey k = CollectionKey.of(gate3);
         return tenantScope.withTenant(tenant, ctx -> {
             RequestedCollectionRead.require(ctx, tenant, collection);   // P3.5a: a request by id reads that id first
             return ctx.deleteFrom(PDF_PIPELINE)
                .where(PDF_PIPELINE.TENANT_ID.eq(tenant)
-                       .and(PDF_PIPELINE.COLLECTION.eq(collection)))
+                       .and(k.eqLedger(tenant, PDF_PIPELINE.COLLECTION, PDF_PIPELINE.COLLECTION_ID, collection)))
                .execute();
         });
     }

@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import dev.nexus.service.datamove.Gate3;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.ChashHex;
 import dev.nexus.service.db.TenantScope;
@@ -377,8 +378,15 @@ final class ManifestLabelStage {
     private static final int LOOKUP_BATCH = PgVectorRepository.SOURCE_URI_JOIN_BATCH;
 
     private final TenantScope tenantScope;
+    /** RDR-229 P3.5c: gate 3, read on every statement built (never cached); from it the manifest rows are matched by collection id. */
+    private final Gate3 gate3;
 
     ManifestLabelStage(TenantScope tenantScope) {
+        this(tenantScope, Gate3.never());
+    }
+
+    ManifestLabelStage(TenantScope tenantScope, Gate3 gate3) {
+        this.gate3 = java.util.Objects.requireNonNull(gate3, "gate3");
         this.tenantScope = tenantScope;
     }
 
@@ -951,7 +959,7 @@ final class ManifestLabelStage {
                 List<Map.Entry<String, String>> entries = new ArrayList<>(e.getValue().entrySet());
                 for (int start = 0; start < entries.size(); start += LOOKUP_BATCH) {
                     var batch = entries.subList(start, Math.min(start + LOOKUP_BATCH, entries.size()));
-                    for (var r : holderProbeQuery(ctx, tenant, e.getKey(), batch).fetch()) {
+                    for (var r : holderProbeQuery(ctx, tenant, e.getKey(), batch, gate3).fetch()) {
                         shared.add(key(e.getKey(), HexFormat.of().formatHex(r.value1())));
                     }
                 }
@@ -968,6 +976,12 @@ final class ManifestLabelStage {
      */
     static ResultQuery<Record1<byte[]>> holderProbeQuery(DSLContext ctx, String tenant, String collection,
                                                          List<Map.Entry<String, String>> chashToOwnerDoc) {
+        return holderProbeQuery(ctx, tenant, collection, chashToOwnerDoc, Gate3.never());
+    }
+
+    /** {@link #holderProbeQuery(DSLContext, String, String, List)} that matches the manifest by collection id once {@code gate3} holds (RDR-229 P3.5c). */
+    static ResultQuery<Record1<byte[]>> holderProbeQuery(DSLContext ctx, String tenant, String collection,
+                                                         List<Map.Entry<String, String>> chashToOwnerDoc, Gate3 gate3) {
         List<Row2<byte[], String>> rows = new ArrayList<>(chashToOwnerDoc.size());
         for (Map.Entry<String, String> k : chashToOwnerDoc) {
             rows.add(DSL.row(Chash.fromHex(k.getKey()).toBytes(), k.getValue()));
@@ -980,7 +994,8 @@ final class ManifestLabelStage {
             .from(probe)
             .where(DSL.exists(DSL.selectOne().from(CATALOG_DOCUMENT_CHUNKS)
                 .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
-                    .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(collection))
+                    .and(CollectionSelector.collectionIs(gate3, tenant, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                                                         CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, collection))
                     .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(pChash))
                     .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.ne(pOwner)))));
     }
@@ -1041,7 +1056,7 @@ final class ManifestLabelStage {
                     for (String hex : batch) {
                         keys.add(Chash.fromHex(hex).toBytes());
                     }
-                    for (var r : occurrenceQuery(ctx, tenant, e.getKey(), keys, select, firstOnly, perChashBound).fetch()) {
+                    for (var r : occurrenceQuery(ctx, tenant, e.getKey(), keys, select, firstOnly, perChashBound, gate3).fetch()) {
                         out.computeIfAbsent(key(e.getKey(), r.get(chashHex)), k -> new ArrayList<>())
                            .add(new Occurrence(r.get(CATALOG_DOCUMENT_CHUNKS.DOC_ID),
                                                r.get(CATALOG_DOCUMENT_CHUNKS.POSITION),
@@ -1099,8 +1114,19 @@ final class ManifestLabelStage {
     static ResultQuery<Record> occurrenceQuery(DSLContext ctx, String tenant, String collection,
                                                List<byte[]> keys, List<Field<?>> select, boolean firstOnly,
                                                int perChashBound) {
+        return occurrenceQuery(ctx, tenant, collection, keys, select, firstOnly, perChashBound, Gate3.never());
+    }
+
+    /**
+     * {@link #occurrenceQuery(DSLContext, String, String, List, List, boolean, int)} that matches the manifest rows by collection id
+     * once {@code gate3} holds (RDR-229 P3.5c, item 6); the statement's shape is unchanged either way. A label that resolves to no
+     * id selects nothing: a NULL id is no collection.
+     */
+    static ResultQuery<Record> occurrenceQuery(DSLContext ctx, String tenant, String collection,
+                                               List<byte[]> keys, List<Field<?>> select, boolean firstOnly,
+                                               int perChashBound, Gate3 gate3) {
         if (firstOnly || perChashBound == Integer.MAX_VALUE) {
-            return unboundedOccurrenceQuery(ctx, tenant, collection, keys, select, firstOnly);
+            return unboundedOccurrenceQuery(ctx, tenant, collection, keys, select, firstOnly, gate3);
         }
         // A repeated key would repeat its rows here (the IN form of the unbounded statement dedupes by itself).
         Map<java.nio.ByteBuffer, byte[]> distinct = new LinkedHashMap<>();
@@ -1121,7 +1147,7 @@ final class ManifestLabelStage {
                     // A tombstoned document owns nothing (nexus-mqd6t): it does not use up the bound.
                     .on(wd.TENANT_ID.eq(wc.TENANT_ID).and(wd.TUMBLER.eq(wc.DOC_ID)).and(wd.DELETED_AT.isNull()))
                 .where(wc.TENANT_ID.eq(tenant)
-                    .and(wc.COLLECTION.eq(collection))
+                    .and(CollectionSelector.collectionIs(gate3, tenant, wc.COLLECTION, wc.COLLECTION_ID, collection))
                     .and(wc.CHASH.eq(kChash)))
                 .orderBy(wc.DOC_ID)
                 .limit(perChashBound))
@@ -1136,7 +1162,8 @@ final class ManifestLabelStage {
             .join(CATALOG_DOCUMENT_CHUNKS)
                 .on(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
                     .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(winDoc))
-                    .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(collection))
+                    .and(CollectionSelector.collectionIs(gate3, tenant, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                                                         CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, collection))
                     .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(kChash)))
             .join(CATALOG_DOCUMENTS)
                 .on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
@@ -1150,7 +1177,7 @@ final class ManifestLabelStage {
 
     private static ResultQuery<Record> unboundedOccurrenceQuery(DSLContext ctx, String tenant, String collection,
                                                                 List<byte[]> keys, List<Field<?>> select,
-                                                                boolean firstOnly) {
+                                                                boolean firstOnly, Gate3 gate3) {
         var head = firstOnly
             ? ctx.select(select).distinctOn(CATALOG_DOCUMENT_CHUNKS.CHASH)
             : ctx.select(select);
@@ -1168,7 +1195,8 @@ final class ManifestLabelStage {
                     .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID))
                     .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
             .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
-                .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(collection))
+                .and(CollectionSelector.collectionIs(gate3, tenant, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                                                     CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, collection))
                 .and(CATALOG_DOCUMENT_CHUNKS.CHASH.in(keys)))
             .orderBy(order);
     }

@@ -614,6 +614,7 @@ public final class PciCatalog {
         }
 
         /** True when a valid id-predicate index exists for exactly this (model, tenant, collection id). */
+        @Override
         public boolean hasValidIdIndex(String model, String tenant, long collectionId) {
             return validIds.contains(idKey(model, tenant, collectionId));
         }
