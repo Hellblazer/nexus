@@ -130,9 +130,10 @@ final class CompletionWatch implements AutoCloseable {
     }
 
     /**
-     * How long close() waits for the thread, in milliseconds: a read of the row on a session of its own plus the cancel statement. Each of the two
-     * gives up after 2 s waiting for a lock and 3 s running, and a server that stalls is cut by the session's 5 s network timeout, so the thread
-     * ends within these bounds whatever holds a lock on the registry.
+     * How long close() waits for the thread, in milliseconds: a read of the row on a session of its own plus the cancel statement, back to back.
+     * Each of the two gives up after 2 s waiting for a lock and 3 s running, and a server that stalls is cut by the session's 5 s network timeout,
+     * so the two together end within 10 s whatever holds a lock on the registry; 12 s leaves room for opening the two sessions. A thread that sees
+     * {@code closed} after its read skips the cancel, so the wait is usually one session's bound or less.
      */
-    private static final long JOIN_MS = 6_000L;
+    private static final long JOIN_MS = 12_000L;
 }
