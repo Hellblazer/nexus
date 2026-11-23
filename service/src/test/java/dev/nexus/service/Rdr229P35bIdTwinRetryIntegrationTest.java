@@ -278,6 +278,10 @@ class Rdr229P35bIdTwinRetryIntegrationTest {
      * One chunk in {@code live}, ready to be moved to {@code quarantine}, and a racer: a chunk of another name that carries the
      * sibling's id and the same chash, so the move's insert meets the id twin and not the name key. Runs {@code fn} under the gate and
      * checks what {@code mode} says.
+     *
+     * <p>RDR-229 P3.7: this race needs no trigger-on twin of the orphan cases. vectors-079 adds its name-from-chunk triggers to
+     * {@code catalog_document_chunks}, {@code chunk_orphaned_at} and {@code topic_assignments} only, never to {@code nexus.chunks}, which this
+     * race writes, so the racer's stale name stands with the trigger on as with it off (linda 2026-11-24: inference accepted).
      */
     private void chunkRace(String tag, MoveFn fn, Mode mode) throws Exception {
         String tenant = tenant(tag), live = collection(tag), quarantine = QUARANTINE + live, racer = "stale-" + tag;
