@@ -702,7 +702,7 @@ public final class NexusService {
         var telemetryRepo = new TelemetryRepository(tenantScope, renameGuard);
         this.scratchRepo  = new ScratchRepository(tenantScope);
         var taxonomyRepo  = new TaxonomyRepository(tenantScope, renameGuard); var taxonomyCoverage = new dev.nexus.service.db.TaxonomyCoverage(tenantScope); // RDR-134 Step 2
-        var taxonomyCentroidRepo = new dev.nexus.service.vectors.TaxonomyCentroidRepository(tenantScope);
+        var taxonomyCentroidRepo = new dev.nexus.service.vectors.TaxonomyCentroidRepository(tenantScope, gate3);
         var aspectRepo    = new AspectRepository(tenantScope, renameGuard);
         var chashRepo     = new ChashRepository(tenantScope, renameGuard);
         var remapRepo     = new RemapRepository(tenantScope);
