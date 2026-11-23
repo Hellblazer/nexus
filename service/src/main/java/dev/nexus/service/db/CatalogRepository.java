@@ -11908,9 +11908,9 @@ public final class CatalogRepository {
             return counts;
         }, ctx -> {
             // the same refusals as the name path (sweep gates, re-embed job, model token, live or populated target), then the one-row body
-            boolean targetRowExists = renameSharedChecks(ctx, tenant, oldName, newName, expectedTargetSupersededBy, newNameEmbeddingModelOrNull);
+            renameSharedChecks(ctx, tenant, oldName, newName, expectedTargetSupersededBy, newNameEmbeddingModelOrNull);
             return renameGuard.oneRow(ctx, tenant, oldName, newName,
-                new OneRowRename.Request(newContentTypeOrNull, newOwnerIdOrNull, targetRowExists, tupleOut,
+                new OneRowRename.Request(newContentTypeOrNull, newOwnerIdOrNull, tupleOut,
                     locked -> renameTargetChecks(locked, tenant, newName, expectedTargetSupersededBy)), oneRowOut);
         });
     }
