@@ -479,6 +479,19 @@ class VectorSensitivityRouteParityTest {
         CLASSIFIED_DEFINITION_READERS.put("text_gate_probe_by_collection_768(p_text text, p_collections text[], p_where jsonb, p_where_path text, p_cap integer, p_embedding_model text, p_tenant text)",
             new Classified("TABLE(collection text, chash bytea)", Exposure.NO_TEXT,
                 "text gate, per collection (vectors-060, nexus-bbtc2); (collection, chash) of the rows whose text matches, no text. The chashes are ranked by text_gated_search_by_chash_<dim>, which carries p_exclude_sensitive, as the probe's are"));
+        // RDR-229 P3.5b (vectors-077-100..139): the id twins of the classified readers above, the same result with the
+        // label parameter replaced by the resolved ids; each is classified as its original is.
+        CLASSIFIED_DEFINITION_READERS.put("manifest_qualifying_hits_by_id(p_collection_ids bigint[], p_where jsonb, p_where_path text, p_manifest_where jsonb, p_manifest_path text, p_cap integer, p_embedding_model text, p_tenant text, p_query_text text, p_exclude_sensitive boolean DEFAULT false)",
+            new Classified("TABLE(hit integer, chunk_collection text, chunk_chash bytea)", Exposure.NO_TEXT,
+                "id twin of manifest_qualifying_hits: text gate over manifest chunks, returns hit, collection and chash key, no text"));
+        for (String dim : List.of("384", "768", "1024")) {
+            CLASSIFIED_DEFINITION_READERS.put("text_gate_probe_" + dim + "_by_id(p_text text, p_collection_ids bigint[], p_where jsonb, p_where_path text, p_cap integer, p_embedding_model text, p_tenant text)",
+                new Classified("SETOF bytea", Exposure.NO_TEXT,
+                    "id twin of text_gate_probe_" + dim + ": the chashes whose text matches, no text; ranked by text_gated_search_by_chash_" + dim + "_by_id, which carries p_exclude_sensitive"));
+            CLASSIFIED_DEFINITION_READERS.put("text_gate_probe_by_collection_" + dim + "_by_id(p_text text, p_collection_ids bigint[], p_where jsonb, p_where_path text, p_cap integer, p_embedding_model text, p_tenant text)",
+                new Classified("TABLE(collection text, chash bytea)", Exposure.NO_TEXT,
+                    "id twin of text_gate_probe_by_collection_" + dim + ": (collection, chash) of the rows whose text matches, no text"));
+        }
     }
 
     @Test

@@ -57,6 +57,7 @@ SharedClusterEmptyDatabaseTest	startEmptyDatabase	INFRA	tests acquireEmptyDataba
 GrantsPgMonitorTest	startDedicated	CLUSTER_STATE	falsifies grants-004 without the migrator's pg_monitor admin option; on a shared cluster nexus_svc already holds pg_monitor (role membership is cluster-wide)
 ReadPathLeafPruningIntegrationTest	startDedicated	CLUSTER_STATE	reads the plans auto_explain writes to the container's server log, and sets auto_explain on a cluster-wide role
 Rdr192LiveCExplainEvidenceIntegrationTest	startDedicated	CLUSTER_STATE	reads auto_explain plans from the container's server log, which a shared cluster fills with every class's output
+Rdr229P35bIdTwinIntegrationTest	startDedicated	CLUSTER_STATE	reads the sixth call's plan from auto_explain in the container's server log, and sets auto_explain on a cluster-wide role
 PgServerLogTest	startDedicated	CLUSTER_STATE	tests the server-log reader against containers whose log it controls
 PgServerLogTest	newContainer	INFRA	builds the container recipe unstarted to pin its wait strategy, and starts one whose wait must fail to read the log tail it prints
 TenantPartitionCreationTs1MeasurementIntegrationTest	startDedicated	CLUSTER_STATE	a latency measurement that creates and drops about 2,500 leaves; wants an idle server and a lock table of its own
@@ -99,3 +100,4 @@ CatalogDocsByAuthorFoldCtypeCTest	newContainer	IMAGE	boots a cluster initdb with
 CatalogDocsBySchemeCtypeCTest	newContainer	IMAGE	boots a cluster initdb with --no-locale -E UTF8 as the local bundle is (C ctype), which the shared en_US.utf8 test cluster cannot be
 ChunkOrphanedAtIndexChangesetIntegrationTest	startEmptyDatabase	MIGRATOR	walks the whole changelog several times as the migration role to show vectors-075-1 (a self-retrying CREATE INDEX CONCURRENTLY changeset) builds, is skipped unrecorded, ends a lock wait at 30 s without failing the boot, and heals an INVALID leftover on the next walk
 CatalogEpochRestartTest	newContainer	NETWORK	publishes a second port for a second postmaster it restarts in place; the container's own postmaster is PID 1 and cannot be restarted without ending the container
+Rdr229P35bSqlReadersIntegrationTest	startEmptyDatabase	WALK	walks to before vectors-068-1 to seed unstamped rows (a NOT VALID CHECK applies to every later write), then fully, and reads the SQL readers on a half-stamped store, with the stamp moves incomplete and complete
