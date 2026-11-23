@@ -114,8 +114,10 @@ final class ManifestReplace {
         }
         // The collection's model, and the superseded-collection refusal the insert helper makes: asked even when
         // every row is kept, so a retired collection still refuses the write.
-        final String embeddingModel = rows.isEmpty() ? null
-            : CollectionRegistry.requireWritable(ctx, tenant, collection).embeddingModel();
+        final CollectionRow lockedRow = rows.isEmpty() ? null : CollectionRegistry.requireWritable(ctx, tenant, collection);
+        final String embeddingModel = lockedRow == null ? null : lockedRow.embeddingModel();
+        // RDR-229 P3.5c, I8: a row whose chunk is not found stores the LOCKED row's current label, never the request's
+        final String lockedLabel = lockedRow == null ? collection : lockedRow.storedLabel(collection);
         // RDR-229 P3.1: the registry's id, read in this transaction; a stored row that lacks it (the stamp has not
         // reached it) differs from the incoming one and is rewritten with it.
         final Long collectionId = rows.isEmpty() ? null : CollectionIds.require(ctx, tenant, collection);
@@ -268,7 +270,7 @@ final class ManifestReplace {
                 DSL.val(in.lineEnd(), SQLDataType.INTEGER).cast(SQLDataType.INTEGER),
                 DSL.val(in.charStart(), SQLDataType.INTEGER).cast(SQLDataType.INTEGER),
                 DSL.val(in.charEnd(), SQLDataType.INTEGER).cast(SQLDataType.INTEGER),
-                DSL.val(ManifestChunkNames.nameFor(chunkNames, in.chashHex(), collection), SQLDataType.VARCHAR).cast(SQLDataType.VARCHAR),
+                DSL.val(ManifestChunkNames.nameFor(chunkNames, in.chashHex(), lockedLabel), SQLDataType.VARCHAR).cast(SQLDataType.VARCHAR),
                 DSL.val(collectionId, SQLDataType.BIGINT).cast(SQLDataType.BIGINT),
                 DSL.val(embeddingModel, SQLDataType.VARCHAR).cast(SQLDataType.VARCHAR),
                 DSL.val(in.sectionTitle(), SQLDataType.VARCHAR).cast(SQLDataType.VARCHAR),

@@ -6229,9 +6229,12 @@ public final class CatalogRepository {
         // refusal. PLAIN and UPSERT_APPEND are the live writers (manifest/write, write_many, append,
         // append_many) and are refused. UPSERT_IMPORT is the fidelity-preserving collection import, which
         // legitimately carries tombstoned collections and keeps the plain registration check.
-        final String embeddingModel = (mode == ManifestInsertMode.UPSERT_IMPORT
+        final CollectionRow lockedRow = mode == ManifestInsertMode.UPSERT_IMPORT
                 ? CollectionRegistry.requireForWrite(ctx, tenant, coll)
-                : CollectionRegistry.requireWritable(ctx, tenant, coll)).embeddingModel();
+                : CollectionRegistry.requireWritable(ctx, tenant, coll);
+        final String embeddingModel = lockedRow.embeddingModel();
+        // RDR-229 P3.5c, I8: a row whose chunk is not found stores the LOCKED row's current label, never the request's
+        final String lockedLabel = lockedRow.storedLabel(coll);
         // RDR-229 P3.1: the registry's id, read in this transaction (never cached), for every row of the call.
         final Long collectionId = CollectionIds.require(ctx, tenant, coll);
         // G17: the name column is the referenced chunk's stored name (a one-row rename leaves it), not the request's label
@@ -6252,7 +6255,7 @@ public final class CatalogRepository {
             insert = insert.values(tenant, docId, i(row,"position"), s(row,"chash"),
                     ni(i(row,"chunk_index"), i(row,"position")),
                     i(row,"line_start"), i(row,"line_end"), i(row,"char_start"), i(row,"char_end"),
-                    ManifestChunkNames.nameFor(chunkNames, s(row,"chash"), coll), collectionId,
+                    ManifestChunkNames.nameFor(chunkNames, s(row,"chash"), lockedLabel), collectionId,
                     embeddingModel,
                     // nexus-tko2w (RDR-108): the per-position section labels and whether they are this
                     // document's own answer (labels_written). A client that predates them sends no label

@@ -81,6 +81,15 @@ public record CollectionRow(
         return collectionId > 0 && !label.isEmpty();
     }
 
+    /**
+     * The label a write STORES for this collection (RDR-229 P3.5c, I8): the row's CURRENT label, read under the write's own lock,
+     * never the label the request carried from the route boundary. {@code requested} when the row carries no label of its own (a row
+     * built without identity).
+     */
+    public String storedLabel(String requested) {
+        return hasIdentity() ? label : requested;
+    }
+
     /** True when the row names a successor: it was renamed away or superseded. */
     public boolean isSuperseded() {
         return !supersededBy.isEmpty();

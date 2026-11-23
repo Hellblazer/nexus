@@ -166,9 +166,14 @@ public final class RemapRepository {
             }
             CollectionRegistry.requireAllForWrite(ctx, tenant, touched);
             var ids = new HashMap<String, Long>();
+            // RDR-229 P3.5c, I8: the names stored are the LOCKED rows' current labels (the batch check's memo), never the request's
+            var names = new HashMap<String, String>();
             for (RemapEntry e : deduped) {
-                ids.computeIfAbsent(e.sourceCollection(), n -> CollectionIds.require(ctx, tenant, n));
-                ids.computeIfAbsent(e.targetCollection(), n -> CollectionIds.require(ctx, tenant, n));
+                for (String n : java.util.List.of(e.sourceCollection(), e.targetCollection())) {
+                    ids.computeIfAbsent(n, k -> CollectionIds.require(ctx, tenant, k));
+                    names.computeIfAbsent(n, k -> CollectionRegistry.requireForWriteIfPresent(ctx, tenant, k)
+                        .map(r -> r.storedLabel(k)).orElse(k));
+                }
             }
             var insert = ctx.insertInto(CHASH_REMAP,
                     CHASH_REMAP.TENANT_ID, CHASH_REMAP.SOURCE_COLLECTION,
@@ -177,14 +182,14 @@ public final class RemapRepository {
                     CHASH_REMAP.PROVENANCE,
                     CHASH_REMAP.SOURCE_COLLECTION_ID, CHASH_REMAP.TARGET_COLLECTION_ID);
             var step = insert.values(tenant,
-                    deduped.get(0).sourceCollection(), deduped.get(0).oldId(),
-                    newChashBytes(deduped.get(0).newChash()), deduped.get(0).targetCollection(),
+                    names.get(deduped.get(0).sourceCollection()), deduped.get(0).oldId(),
+                    newChashBytes(deduped.get(0).newChash()), names.get(deduped.get(0).targetCollection()),
                     now, deduped.get(0).provenance(),
                     ids.get(deduped.get(0).sourceCollection()), ids.get(deduped.get(0).targetCollection()));
             for (int i = 1; i < deduped.size(); i++) {
                 RemapEntry e = deduped.get(i);
-                step = step.values(tenant, e.sourceCollection(), e.oldId(),
-                        newChashBytes(e.newChash()), e.targetCollection(), now, e.provenance(),
+                step = step.values(tenant, names.get(e.sourceCollection()), e.oldId(),
+                        newChashBytes(e.newChash()), names.get(e.targetCollection()), now, e.provenance(),
                         ids.get(e.sourceCollection()), ids.get(e.targetCollection()));
             }
             final var rows = step;

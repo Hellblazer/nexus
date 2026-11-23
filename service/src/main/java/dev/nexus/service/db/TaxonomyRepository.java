@@ -174,11 +174,21 @@ public final class TaxonomyRepository {
      * missing row with blank content_type/owner_id/embedding_model. A no-op for a
      * null/blank collection (unchanged from the stub-insert era).
      */
-    private static void ensureCollectionRegistered(DSLContext ctx, String tenant, String collection) {
-        if (collection == null || collection.isBlank()) return;
+    private static String ensureCollectionRegistered(DSLContext ctx, String tenant, String collection) {
+        if (collection == null || collection.isBlank()) return collection;
         // nexus-i15oc: a taxonomy row filed under a retired (superseded) name strands exactly as a chunk
         // does (nexus-mp8ys), so every live writer refuses it 409 naming the successor.
-        CollectionRegistry.requireWritable(ctx, tenant, collection);
+        // RDR-229 P3.5c, I8: returns the locked row's CURRENT label, which the writer stores, never the request's.
+        return CollectionRegistry.requireWritable(ctx, tenant, collection).storedLabel(collection);
+    }
+
+    /**
+     * The label a write stores for {@code collection} (RDR-229 P3.5c, I8): the locked registry row's CURRENT label, from this
+     * transaction's memo of the row (no second read), else {@code collection} when no row is registered or it is blank.
+     */
+    private static String storedLabel(DSLContext ctx, String tenant, String collection) {
+        if (collection == null || collection.isBlank()) return collection;
+        return CollectionRegistry.requireForWriteIfPresent(ctx, tenant, collection).map(r -> r.storedLabel(collection)).orElse(collection);
     }
 
     /**
@@ -395,13 +405,13 @@ public final class TaxonomyRepository {
                              String terms) {
         OffsetDateTime createdAtTs = parseTs(createdAt);
         return tenantScope.withTenant(tenant, ctx -> {
-            ensureCollectionRegistered(ctx, tenant, collection);
+            final String storedCollection = ensureCollectionRegistered(ctx, tenant, collection);
             // RDR-229 P3.1 stage 2b: the id of the collection, beside its name (null for a blank one).
             return ctx.insertInto(TOPICS,
                     TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.PARENT_ID,
                     TOPICS.COLLECTION, TOPICS.DOC_COUNT, TOPICS.CREATED_AT,
                     TOPICS.REVIEW_STATUS, TOPICS.TERMS, TOPICS.COLLECTION_ID)
-                .values(tenant, label, parentId, collection, docCount, createdAtTs, "pending", terms,
+                .values(tenant, label, parentId, storedCollection, docCount, createdAtTs, "pending", terms,
                         CollectionIds.require(ctx, tenant, collection))
                 .returningResult(TOPICS.ID)
                 .fetchOne()
@@ -792,6 +802,7 @@ public final class TaxonomyRepository {
             // RDR-156 P0.2: ensure collection is registered before the assignment
             // write (assignMany pre-registers distinct collections and passes false)
             if (ensureCollection) ensureCollectionRegistered(ctx, tenant, sourceCollection);
+            final String storedSource = storedLabel(ctx, tenant, sourceCollection);   // I8: the locked row's label
             OffsetDateTime assignedAtTs = assignedAt != null
                 ? parseTs(assignedAt)
                 : OffsetDateTime.now(ZoneOffset.UTC);
@@ -808,7 +819,7 @@ public final class TaxonomyRepository {
                     TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
                     TOPIC_ASSIGNMENTS.EMBEDDING_MODEL,
                     TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID)
-               .values(tenant, docIdBytes(docId), topicId, "projection", similarity, assignedAtTs, sourceCollection,
+               .values(tenant, docIdBytes(docId), topicId, "projection", similarity, assignedAtTs, storedSource,
                        modelOf(ctx, tenant, sourceCollection), CollectionIds.require(ctx, tenant, sourceCollection))
                .onConflict(
                     TOPIC_ASSIGNMENTS.TENANT_ID,
@@ -853,6 +864,7 @@ public final class TaxonomyRepository {
             // pre-registration round trip just because this is the
             // non-projection branch.
             if (ensureCollection) ensureCollectionRegistered(ctx, tenant, sourceCollection);
+            final String storedSource = storedLabel(ctx, tenant, sourceCollection);   // I8: the locked row's label
             ctx.insertInto(TOPIC_ASSIGNMENTS,
                     TOPIC_ASSIGNMENTS.TENANT_ID,
                     TOPIC_ASSIGNMENTS.DOC_ID,
@@ -861,7 +873,7 @@ public final class TaxonomyRepository {
                     TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
                     TOPIC_ASSIGNMENTS.EMBEDDING_MODEL,
                     TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID)
-               .values(tenant, docIdBytes(docId), topicId, assignedBy, sourceCollection,
+               .values(tenant, docIdBytes(docId), topicId, assignedBy, storedSource,
                        modelOf(ctx, tenant, sourceCollection), CollectionIds.require(ctx, tenant, sourceCollection))
                .onConflict(
                    TOPIC_ASSIGNMENTS.TENANT_ID,
@@ -1109,7 +1121,8 @@ public final class TaxonomyRepository {
                 PgSession.setTaxonomyAssignBounds(ctx);
                 // RDR-229 P3.5a: the write's own registry read (a cache hit for a label request); for a request by id, the by-id
                 // read FOR KEY SHARE, so the id cannot be freed and its label taken again under this write
-                CollectionRegistry.requireWritable(ctx, tenant, collection);
+                // RDR-229 P3.5c, I8: the function and the probe name the collection by the LOCKED row's current label, never the request's
+                final String lockedLabel = CollectionRegistry.requireWritable(ctx, tenant, collection).storedLabel(collection);
                 // chunks_<dim>.chash is bytea (RDR-180); the HTTP/route boundary carries
                 // hex text, so the existence probe goes through ChashHex.hex(...) — the
                 // house-blessed jOOQ seam that binds hex->bytes / fetches bytes->hex
@@ -1129,7 +1142,7 @@ public final class TaxonomyRepository {
                 List<String> found = ctx.select(ChashHex.hex(CHUNKS.CHASH)).from(CHUNKS)
                         .where(CHUNKS.EMBEDDING_MODEL.eq(model)
                             .and(CHUNKS.TENANT_ID.eq(tenant))
-                            .and(ck().eq(tenant, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, collection))
+                            .and(ck().eq(tenant, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, lockedLabel))
                             .and(ChashHex.hex(CHUNKS.CHASH).in(chashArr)))
                         .fetch(ChashHex.hex(CHUNKS.CHASH));
                 java.util.Set<String> foundSet = new java.util.HashSet<>(found);
@@ -1138,7 +1151,7 @@ public final class TaxonomyRepository {
                     .distinct()
                     .toList();
 
-                int assigned = assignFromChashesOnePass(ctx, dim, tenant, model, collection, chashArr, false).size();
+                int assigned = assignFromChashesOnePass(ctx, dim, tenant, model, lockedLabel, chashArr, false).size();
                 // Still INSIDE this transaction — the own pass's persisted row(s)
                 // and the doc_count trigger's topics lock are both live here.
                 duringOwnPassHookForTests.run();
@@ -1741,7 +1754,7 @@ public final class TaxonomyRepository {
     public void recordDiscoverCount(String tenant, String collection, int docCount, String discoveredAt) {
         OffsetDateTime discoveredAtTs = parseTs(discoveredAt);
         tenantScope.withTenant(tenant, ctx -> {
-            ensureCollectionRegistered(ctx, tenant, collection);
+            final String storedCollection = ensureCollectionRegistered(ctx, tenant, collection);
             // GREATEST(existing_col, EXCLUDED.col) — references both the table row and
             // EXCLUDED in the same expression; retained as DSL.field() fragments per spec.
             var insert = ctx.insertInto(TAXONOMY_META,
@@ -1750,7 +1763,7 @@ public final class TaxonomyRepository {
                     TAXONOMY_META.LAST_DISCOVER_DOC_COUNT,
                     TAXONOMY_META.LAST_DISCOVER_AT,
                     TAXONOMY_META.COLLECTION_ID)
-               .values(tenant, collection, docCount, discoveredAtTs, CollectionIds.require(ctx, tenant, collection));
+               .values(tenant, storedCollection, docCount, discoveredAtTs, CollectionIds.require(ctx, tenant, collection));
             final boolean byId1 = ck().byId();
             TwinKeyUpsert.run(ctx, "taxonomy_meta", byId1 ? TwinKeyUpsert.Arbiter.ID_KEY : TwinKeyUpsert.Arbiter.NAME_KEY,
                 c -> { Field<?>[] key = byId1 ? META_ID_KEY : META_NAME_KEY; return insert
@@ -3034,7 +3047,8 @@ public final class TaxonomyRepository {
             // children escape the taxonomy-004 partial index (parent_id NOT
             // NULL) so a race here duplicates children rather than 409ing —
             // the same per-collection lock closes both.
-            TaxonomyCollectionLock.lockAndRequireWritable(ctx, tenant, collectionName);   // advisory lock keyed by id, then the key share
+            final CollectionRow lockedRow = TaxonomyCollectionLock.lockAndRequireWritable(ctx, tenant, collectionName);   // advisory lock keyed by id, then the key share
+            final String storedCollection = lockedRow == null ? collectionName : lockedRow.storedLabel(collectionName);   // RDR-229 P3.5c, I8: the stored name is the locked row's label
             // RDR-229 P3.1 stage 2b: the collection's registry id for every child topic written below.
             final Long collectionId = CollectionIds.require(ctx, tenant, collectionName);
             // Delete parent assignments
@@ -3062,13 +3076,13 @@ public final class TaxonomyRepository {
                 long childId = ctx.insertInto(TOPICS,
                         TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.PARENT_ID,
                         TOPICS.COLLECTION, TOPICS.DOC_COUNT, TOPICS.CREATED_AT, TOPICS.TERMS, TOPICS.COLLECTION_ID)
-                    .values(tenant, label, topicId, collectionName, 0, createdAtTs, termsJson, collectionId)
+                    .values(tenant, label, topicId, storedCollection, 0, createdAtTs, termsJson, collectionId)
                     .returningResult(TOPICS.ID)
                     .fetchOne()
                     .get(TOPICS.ID);
                 childIds.add(childId);
 
-                batchInsertAssignments(ctx, tenant, childId, docIds, "split", collectionName);
+                batchInsertAssignments(ctx, tenant, childId, docIds, "split", storedCollection);
             }
 
             // RDR-154 P0 (nexus-i7ivk): no manual parent zero-out. The parent's
@@ -3158,7 +3172,8 @@ public final class TaxonomyRepository {
         return tenantScope.withTenant(tenant, ctx -> {
             // nexus-n2ls1: same guard-then-write shape as persistDiscoveredTopics
             // (delete-then-insert here) — serialize per-collection first.
-            TaxonomyCollectionLock.lockAndRequireWritable(ctx, tenant, collection);   // advisory lock keyed by id, then the key share
+            final CollectionRow lockedRow = TaxonomyCollectionLock.lockAndRequireWritable(ctx, tenant, collection);   // advisory lock keyed by id, then the key share
+            final String storedCollection = lockedRow == null ? collection : lockedRow.storedLabel(collection);   // RDR-229 P3.5c, I8: the stored name is the locked row's label
             // RDR-229 P3.1 stage 2b: the collection's registry id for every topic and assignment written below.
             final Long collectionId = CollectionIds.require(ctx, tenant, collection);
             // REPLACE semantics — clear old rows even when there are no new specs.
@@ -3197,7 +3212,7 @@ public final class TaxonomyRepository {
                         TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION,
                         TOPICS.DOC_COUNT, TOPICS.CREATED_AT, TOPICS.TERMS, TOPICS.REVIEW_STATUS,
                         TOPICS.COLLECTION_ID)
-                    .values(tenant, label, collection, 0, now, terms, reviewStatus, collectionId);
+                    .values(tenant, label, storedCollection, 0, now, terms, reviewStatus, collectionId);
                 // Target-less DO NOTHING (the twin-key rule): the root-label key and its id twin both arbitrate, so a racing root insert
                 // is skipped whichever key it trips, and the select below finds the winner's row.
                 Long topicId = rootInsert
@@ -3219,7 +3234,7 @@ public final class TaxonomyRepository {
                 }
                 topicIds.add(topicId);
 
-                batchInsertAssignments(ctx, tenant, topicId, docIds, assignedBy, collection);
+                batchInsertAssignments(ctx, tenant, topicId, docIds, assignedBy, storedCollection);
             }
 
             // Manual transfers are intentionally NOT batched (nexus-eh89h): they
@@ -3290,7 +3305,8 @@ public final class TaxonomyRepository {
             // nexus-n2ls1: serialize per-collection BEFORE the guard — the guard
             // alone is a TOCTOU race under concurrent discovery (both count 0,
             // both insert, loser 23505 → 409).
-            TaxonomyCollectionLock.lockAndRequireWritable(ctx, tenant, collection);   // advisory lock keyed by id, then the key share
+            final CollectionRow lockedRow = TaxonomyCollectionLock.lockAndRequireWritable(ctx, tenant, collection);   // advisory lock keyed by id, then the key share
+            final String storedCollection = lockedRow == null ? collection : lockedRow.storedLabel(collection);   // RDR-229 P3.5c, I8: the stored name is the locked row's label
             // RDR-229 P3.1 stage 2b: the collection's registry id for every topic written below.
             final Long collectionId = CollectionIds.require(ctx, tenant, collection);
             int existing = ctx.selectCount()
@@ -3330,7 +3346,7 @@ public final class TaxonomyRepository {
                 final var rootInsert = ctx.insertInto(TOPICS,
                         TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION,
                         TOPICS.DOC_COUNT, TOPICS.CREATED_AT, TOPICS.TERMS, TOPICS.COLLECTION_ID)
-                    .values(tenant, label, collection, 0, now, terms, collectionId);
+                    .values(tenant, label, storedCollection, 0, now, terms, collectionId);
                 // Target-less DO NOTHING (the twin-key rule): the root-label key and its id twin both arbitrate, so a racing root insert
                 // is skipped whichever key it trips, and the select below finds the winner's row.
                 Long topicId = rootInsert
@@ -3355,7 +3371,7 @@ public final class TaxonomyRepository {
                 }
                 topicIds.add(topicId);
 
-                batchInsertAssignments(ctx, tenant, topicId, docIds, assignedBy, collection);
+                batchInsertAssignments(ctx, tenant, topicId, docIds, assignedBy, storedCollection);
             }
             log.info("persist_discovered collection={} topics={}", collection, topicIds.size());
             return topicIds;

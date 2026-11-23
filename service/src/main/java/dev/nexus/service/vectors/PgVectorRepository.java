@@ -1320,12 +1320,16 @@ public final class PgVectorRepository {
                     // so a row without it is refused (23514); the conflict arm also stamps a chunk the stamp has not
                     // reached, whose update the CHECK would otherwise refuse. An unregistered name refuses here, 422.
                     final Long collectionId = CollectionIds.require(ctx, tenant, collection);
+                    // RDR-229 P3.5c, I8: the name stored is the LOCKED row's current label (this transaction's memo of the write's
+                    // registry check), never the label the request carried from the route boundary
+                    final String storedCollection = dev.nexus.service.db.CollectionRegistry.requireForWriteIfPresent(ctx, tenant, collection)
+                        .map(r -> r.storedLabel(collection)).orElse(collection);
                     var insert = ctx.insertInto(ch.table())
                         .columns(ch.tenantId(), ch.collection(), ch.chash(), ch.embeddingModel(),
                                  ch.chunkText(), ch.embedding(), ch.metadata(), CHUNKS.COLLECTION_ID);
                     for (int k = 0; k < finalInsertIdx.size(); k++) {
                         int idx = finalInsertIdx.get(k);
-                        insert = insert.values(tenant, collection, dedupIds.get(idx), embeddingModel,
+                        insert = insert.values(tenant, storedCollection, dedupIds.get(idx), embeddingModel,
                                 dedupDocs.get(idx),
                                 Vector.of(embeddings.get(k)),
                                 JSONB.jsonb(toJson(dedupMetas.get(idx))),

@@ -300,6 +300,9 @@ public final class PipelineRepository {
             // RDR-229 P3.1/P3.5a: the collection's registry id, typed 422 when unregistered, read FOR KEY SHARE first (before the
             // pipeline rows resolveIn reads and the insert locks), as every writer's registry check
             final Long collectionId = CollectionIds.require(ctx, tenant, collection);
+            // RDR-229 P3.5c, I8: the name stored is the LOCKED row's current label (the transaction's memo of the check above)
+            final String storedCollection = CollectionRegistry.requireForWriteIfPresent(ctx, tenant, collection)
+                .map(r -> r.storedLabel(collection)).orElse(collection);
             for (int attempt = 0; attempt < 2; attempt++) {
                 Long existing = resolveIn(ctx, tenant, ref);
                 if (existing == null && !documentIdentity) {
@@ -313,7 +316,7 @@ public final class PipelineRepository {
                             PDF_PIPELINE.KEYED_BY,
                             PDF_PIPELINE.STATUS, PDF_PIPELINE.STARTED_AT, PDF_PIPELINE.UPDATED_AT,
                             PDF_PIPELINE.COLLECTION_ID)
-                       .values(tenant, contentHash, pdfPath, collection, keyedBy, "running", now, now,
+                       .values(tenant, contentHash, pdfPath, storedCollection, keyedBy, "running", now, now,
                                collectionId)
                        .onConflictDoNothing()
                        .returning(PDF_PIPELINE.PIPELINE_ID, PDF_PIPELINE.RUN_EPOCH)

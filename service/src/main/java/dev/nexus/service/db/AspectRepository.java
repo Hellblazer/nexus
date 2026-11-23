@@ -191,11 +191,12 @@ public final class AspectRepository {
      * document_highlights default no longer registers itself (RDR-204 §Technical
      * Design step 4).
      */
-    private static void ensureCollectionRegistered(DSLContext ctx, String tenant, String collection) {
-        if (collection == null) return;
+    private static String ensureCollectionRegistered(DSLContext ctx, String tenant, String collection) {
+        if (collection == null) return null;
         // nexus-i15oc: an aspect or highlight row filed under a retired (superseded) name strands
         // exactly as a chunk does (nexus-mp8ys), so every live writer refuses it 409 naming the successor.
-        CollectionRegistry.requireWritable(ctx, tenant, collection);
+        // RDR-229 P3.5c, I8: and returns the locked row's CURRENT label, which the writer stores, never the request's.
+        return CollectionRegistry.requireWritable(ctx, tenant, collection).storedLabel(collection);
     }
 
     /**
@@ -345,7 +346,7 @@ public final class AspectRepository {
         String docId = v.docId();
         double confidence = v.confidence();
         OffsetDateTime extractedAtTs = v.extractedAt();
-        ensureCollectionRegistered(ctx, tenant, collection);
+        final String storedCollection = ensureCollectionRegistered(ctx, tenant, collection);
         // RDR-254: a doc_id naming a trashed or alias document never replaces the row's doc_id (AspectDocIdAttribution).
         Field<String> docIdOnConflict = AspectDocIdAttribution.onConflict(ctx, tenant, docId, EX_DOC_ID_COALESCE);
         var insert = ctx.insertInto(DOCUMENT_ASPECTS,
@@ -368,7 +369,7 @@ public final class AspectRepository {
                 DOCUMENT_ASPECTS.COLLECTION_ID)
             .values(
                 tenant,
-                collection,
+                storedCollection,
                 sourcePath,
                 (String) body.get("problem_formulation"),
                 (String) body.get("proposed_method"),
@@ -901,7 +902,7 @@ public final class AspectRepository {
         tenantScope.withTenant(tenant, ctx -> {
             // hygiene-001: register the SAME nne()-defaulted collection value
             // the INSERT below binds, or a blank collection 404s the FK.
-            ensureCollectionRegistered(ctx, tenant, nne((String) body.get("collection")));
+            final String storedCollection = ensureCollectionRegistered(ctx, tenant, nne((String) body.get("collection")));
             ctx.insertInto(DOCUMENT_HIGHLIGHTS,
                     DOCUMENT_HIGHLIGHTS.TENANT_ID,
                     DOCUMENT_HIGHLIGHTS.DOC_ID,
@@ -917,7 +918,7 @@ public final class AspectRepository {
                     // hygiene-001 (nexus-tk070.p6a follow-on): source_uri/collection
                     // are NOT NULL now.
                     NoteUri.canonical(nne((String) body.get("source_uri"))),
-                    nne((String) body.get("collection")),
+                    storedCollection,
                     highlightsMd,
                     mentionsMd,
                     ingestedAtTs,

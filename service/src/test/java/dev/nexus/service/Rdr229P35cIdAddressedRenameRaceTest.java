@@ -6,6 +6,10 @@ import static dev.nexus.service.CollectionRouteFixture.json;
 import static dev.nexus.service.CollectionRouteFixture.label;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHASH_REMAP;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.PDF_PIPELINE;
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_META;
@@ -54,7 +58,7 @@ class Rdr229P35cIdAddressedRenameRaceTest {
     void startAll() throws Exception {
         fx = new CollectionRouteFixture();
         // P3.4's arbiter indexes exist before any latched upsert: the id arbiter needs them
-        for (String t : List.of("taxonomy_meta", "document_aspects", "topics")) {
+        for (String t : List.of("taxonomy_meta", "document_aspects", "topics", "chash_remap")) {
             ensureArbiterIndex(t);
         }
         fx.gate3.set(true);
@@ -315,5 +319,140 @@ class Rdr229P35cIdAddressedRenameRaceTest {
                 + "\"ingested_at\":\"2026-01-01T00:00:00Z\",\"highlights_md\":\"p35c\"}"));
         assertRefused(r);
         assertThat(highlights(b)).as("the new holder of B got no highlight row").isZero();
+    }
+
+    // ---- I8: a write stores the locked registry row's CURRENT label, never the request's ---------------------------------------------
+
+    /**
+     * RDR-229 P3.5c, census invariant I8 (linda via folio): after a one-row rename X: B to C and a NEW row under B, a write by X
+     * stores the row (label C, id X), never (B, X), and the new holder of B keeps nothing of it. The rename is the DB seam of the
+     * rename-gap tests (P3.7's rename has no route yet); the registry cache is evicted so the route boundary resolves X to C. The
+     * stale-cache variant (the boundary still says B) is the I7 tests above: it is refused 409 before any row is stored.
+     */
+    private long renamedAndLabelTaken(String b) {
+        long x = fx.idOf(b);
+        oneRowRename(b, b + "-moved");
+        fx.register(b);
+        CollectionRegistry.shared().evictTenant(fx.tenant);
+        assertThat(fx.idOf(b)).as("setup: the old label is a new row's").isNotEqualTo(x);
+        return x;
+    }
+
+    private static final String EMBED = EMBEDDING_384;
+
+    /** The label C the stored rows must carry, and that none of them carries B. */
+    private record Renamed(long x, String b, String c) { }
+
+    private Renamed renamed(String stem) {
+        String b = registered("i8-" + stem);
+        long x = renamedAndLabelTaken(b);
+        return new Renamed(x, b, b + "-moved");
+    }
+
+    private void assertLabels(Renamed r, java.util.List<String> storedNames, int newHolderRows) {
+        assertThat(storedNames).as("rows stored under id %d", r.x()).isNotEmpty().allMatch(r.c()::equals);
+        assertThat(newHolderRows).as("the new holder of %s got none", r.b()).isZero();
+    }
+
+    @Test
+    void i8_topicInsert_storesTheRowsCurrentLabel() {
+        Renamed r = renamed("ti");
+        Resp resp = fx.post("/v1/taxonomy/topics/insert", "{\"collection_id\":" + r.x() + ",\"label\":\"i8\",\"doc_count\":1}");
+        assertThat(resp.status()).as(resp.body()).isEqualTo(200);
+        assertLabels(r, fx.asSuperuser(ctx -> ctx.select(TOPICS.COLLECTION).from(TOPICS).where(TOPICS.TENANT_ID.eq(fx.tenant)
+            .and(TOPICS.COLLECTION_ID.eq(r.x()))).fetch(TOPICS.COLLECTION)), topics(r.b()));
+    }
+
+    @Test
+    void i8_metaRecord_storesTheRowsCurrentLabel() {
+        Renamed r = renamed("mr");
+        Resp resp = fx.post("/v1/taxonomy/meta/record", "{\"collection_id\":" + r.x() + ",\"doc_count\":4}");
+        assertThat(resp.status()).as(resp.body()).isEqualTo(200);
+        assertLabels(r, fx.asSuperuser(ctx -> ctx.select(TAXONOMY_META.COLLECTION).from(TAXONOMY_META).where(TAXONOMY_META.TENANT_ID.eq(fx.tenant)
+            .and(TAXONOMY_META.COLLECTION_ID.eq(r.x()))).fetch(TAXONOMY_META.COLLECTION)), metas(r.b()));
+    }
+
+    @Test
+    void i8_centroidUpsert_storesTheRowsCurrentLabel() {
+        Renamed r = renamed("cu");
+        Resp topic = fx.post("/v1/taxonomy/topics/insert", "{\"collection_id\":" + r.x() + ",\"label\":\"i8c\",\"doc_count\":1}");
+        assertThat(topic.status()).as(topic.body()).isEqualTo(200);
+        long topicId = topic.json().path("id").asLong();
+        Resp resp = fx.post("/v1/taxonomy/centroids/upsert", "{\"records\":[{\"collection_id\":" + r.x() + ",\"topic_id\":" + topicId
+            + ",\"label\":\"i8\",\"doc_count\":1,\"embedding\":" + EMBED + "}]}");
+        assertThat(resp.status()).as(resp.body()).isEqualTo(200);
+        assertLabels(r, fx.asSuperuser(ctx -> ctx.select(TAXONOMY_CENTROIDS.COLLECTION).from(TAXONOMY_CENTROIDS)
+            .where(TAXONOMY_CENTROIDS.TENANT_ID.eq(fx.tenant).and(TAXONOMY_CENTROIDS.COLLECTION_ID.eq(r.x()))).fetch(TAXONOMY_CENTROIDS.COLLECTION)),
+            fx.asSuperuser(ctx -> ctx.fetchCount(TAXONOMY_CENTROIDS, TAXONOMY_CENTROIDS.TENANT_ID.eq(fx.tenant).and(TAXONOMY_CENTROIDS.COLLECTION.eq(r.b())))));
+    }
+
+    @Test
+    void i8_persistDiscovered_storesTheRowsCurrentLabel() {
+        Renamed r = renamed("pd");
+        Resp resp = fx.post("/v1/taxonomy/topics/persist_discovered",
+            "{\"collection_id\":" + r.x() + ",\"specs\":[{\"label\":\"found\",\"doc_ids\":[]}]}");
+        assertThat(resp.status()).as(resp.body()).isEqualTo(200);
+        assertLabels(r, fx.asSuperuser(ctx -> ctx.select(TOPICS.COLLECTION).from(TOPICS).where(TOPICS.TENANT_ID.eq(fx.tenant)
+            .and(TOPICS.COLLECTION_ID.eq(r.x()))).fetch(TOPICS.COLLECTION)), topics(r.b()));
+    }
+
+    @Test
+    void i8_aspectsUpsert_storesTheRowsCurrentLabel() {
+        Renamed r = renamed("au");
+        String docId = "own-" + r.c();
+        fx.asSuperuser(ctx -> {
+            CollectionIdSeeds.ownerDocument(ctx, fx.tenant, docId, r.c());
+            return null;
+        });
+        Resp resp = fx.post("/v1/aspects/upsert", "{\"collection_id\":" + r.x() + ",\"source_path\":" + json(PATH) + ",\"doc_id\":" + json(docId)
+            + ",\"confidence\":0.9,\"extracted_at\":\"2026-01-01T00:00:00Z\",\"model_version\":\"v1\",\"extractor_name\":\"ex\","
+            + "\"salient_sentences\":\"[\\\"x\\\"]\"}");
+        assertThat(resp.status()).as(resp.body()).isEqualTo(200);
+        assertLabels(r, fx.asSuperuser(ctx -> ctx.select(DOCUMENT_ASPECTS.COLLECTION).from(DOCUMENT_ASPECTS)
+            .where(DOCUMENT_ASPECTS.TENANT_ID.eq(fx.tenant).and(DOCUMENT_ASPECTS.COLLECTION_ID.eq(r.x()))).fetch(DOCUMENT_ASPECTS.COLLECTION)), aspects(r.b()));
+    }
+
+    @Test
+    void i8_highlightsUpsert_storesTheRowsCurrentLabel() {
+        Renamed r = renamed("hu");
+        Resp resp = fx.post("/v1/aspects/highlights/upsert", "{\"collection_id\":" + r.x() + ",\"doc_id\":\"p35c-i8-doc\","
+            + "\"ingested_at\":\"2026-01-01T00:00:00Z\",\"highlights_md\":\"p35c\"}");
+        assertThat(resp.status()).as(resp.body()).isEqualTo(200);
+        assertLabels(r, fx.asSuperuser(ctx -> ctx.select(DOCUMENT_HIGHLIGHTS.COLLECTION).from(DOCUMENT_HIGHLIGHTS)
+            .where(DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(fx.tenant).and(DOCUMENT_HIGHLIGHTS.COLLECTION_ID.eq(r.x()))).fetch(DOCUMENT_HIGHLIGHTS.COLLECTION)),
+            highlights(r.b()));
+    }
+
+    @Test
+    void i8_upsertChunks_storesTheRowsCurrentLabel() {
+        Renamed r = renamed("uc");
+        Resp resp = fx.post("/v1/vectors/upsert-chunks", "{\"collection_id\":" + r.x() + ",\"ids\":[\"" + Chash.ofText("p35c-i8-chunk").toHex()
+            + "\"],\"documents\":[\"i8 text\"]}");
+        assertThat(resp.status()).as(resp.body()).isEqualTo(200);
+        assertLabels(r, fx.asSuperuser(ctx -> ctx.select(CHUNKS.COLLECTION).from(CHUNKS).where(CHUNKS.TENANT_ID.eq(fx.tenant)
+            .and(CHUNKS.COLLECTION_ID.eq(r.x()))).fetch(CHUNKS.COLLECTION)),
+            fx.asSuperuser(ctx -> ctx.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(fx.tenant).and(CHUNKS.COLLECTION.eq(r.b())))));
+    }
+
+    @Test
+    void i8_pipelineCreate_storesTheRowsCurrentLabel() {
+        Renamed r = renamed("pc");
+        Resp resp = fx.post("/v1/pipeline/create", "{\"collection_id\":" + r.x() + ",\"content_hash\":\"p35c-i8-" + r.x() + "\",\"pdf_path\":\"/i8.pdf\"}");
+        assertThat(resp.status()).as(resp.body()).isEqualTo(200);
+        assertLabels(r, fx.asSuperuser(ctx -> ctx.select(PDF_PIPELINE.COLLECTION).from(PDF_PIPELINE).where(PDF_PIPELINE.TENANT_ID.eq(fx.tenant)
+            .and(PDF_PIPELINE.COLLECTION_ID.eq(r.x()))).fetch(PDF_PIPELINE.COLLECTION)),
+            fx.asSuperuser(ctx -> ctx.fetchCount(PDF_PIPELINE, PDF_PIPELINE.TENANT_ID.eq(fx.tenant).and(PDF_PIPELINE.COLLECTION.eq(r.b())))));
+    }
+
+    @Test
+    void i8_remapRecordBatch_storesTheRowsCurrentLabel() {
+        Renamed r = renamed("rb");
+        String target = registered("i8-rb-target");
+        Resp resp = fx.post("/v1/remap/record_batch", "{\"source_collection_id\":" + r.x() + ",\"entries\":[{\"old_id\":\"i8-old\","
+            + "\"new_chash\":\"" + Chash.ofText("p35c-i8-remap").toHex() + "\",\"target_collection\":" + json(target) + ",\"provenance\":\"i8\"}]}");
+        assertThat(resp.status()).as(resp.body()).isEqualTo(200);
+        assertLabels(r, fx.asSuperuser(ctx -> ctx.select(CHASH_REMAP.SOURCE_COLLECTION).from(CHASH_REMAP).where(CHASH_REMAP.TENANT_ID.eq(fx.tenant)
+            .and(CHASH_REMAP.SOURCE_COLLECTION_ID.eq(r.x()))).fetch(CHASH_REMAP.SOURCE_COLLECTION)),
+            fx.asSuperuser(ctx -> ctx.fetchCount(CHASH_REMAP, CHASH_REMAP.TENANT_ID.eq(fx.tenant).and(CHASH_REMAP.SOURCE_COLLECTION.eq(r.b())))));
     }
 }

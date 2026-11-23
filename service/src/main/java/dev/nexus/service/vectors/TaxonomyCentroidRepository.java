@@ -188,7 +188,8 @@ public final class TaxonomyCentroidRepository {
                 var upsert = ctx.insertInto(ct.table())
                    .columns(ct.tenantId(), ct.collection(), ct.topicId(), ct.embeddingModel(),
                             ct.embedding(), ct.label(), ct.docCount(), TAXONOMY_CENTROIDS.COLLECTION_ID)
-                   .values(tenant, r.collection(), r.topicId(), model,
+                   // RDR-229 P3.5c, I8: the name stored is the LOCKED row's current label, never the request's
+                   .values(tenant, collectionRow.storedLabel(r.collection()), r.topicId(), model,
                            Vector.of(r.embedding()), r.label(), r.docCount(), collectionId);
                 var onConflict = (byId
                        ? upsert.onConflict(ct.tenantId(), ct.collectionId(), ct.topicId(), ct.embeddingModel())
