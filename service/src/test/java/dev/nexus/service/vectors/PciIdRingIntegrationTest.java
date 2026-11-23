@@ -2,8 +2,10 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.datamove.Gate3;
 import dev.nexus.service.db.AdminConnection;
+import dev.nexus.service.db.PgSession.PciSettings;
 import dev.nexus.service.db.TenantScope;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
@@ -134,6 +136,64 @@ class PciIdRingIntegrationTest extends PciIdIndexSupport {
             assertThat(schedule.pending(latched ? idIndex : nameIndex)).as("latched=%s: the measured family is armed", latched)
                 .isEqualTo(PciCanarySchedule.VACUUM);
             assertThat(schedule.pending(latched ? nameIndex : idIndex)).as("and the other is not").isNull();
+        }
+    }
+
+    private PciReconciler withSchedule(PciSettings s, PciCanarySchedule schedule) {
+        var builder = new PciBuilderSession(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS, NONCE, s);
+        var r = new PciReconciler(catalog::read, builder, PciIndexSweep.create(svcDs, s), s, java.time.Clock.systemUTC(),
+            PciReconciler.SET_LOCAL_TENANT, PciReconciler.COUNT_TIMEOUT, Duration.ofSeconds(60), java.util.random.RandomGenerator.getDefault(),
+            tenants -> 0, schedule);
+        r.idBuildGate(() -> gate2);
+        r.retireNameIndexesWhen(() -> gate3);
+        r.buildIdIndexesFirstWhen(() -> pciOffLatch);
+        r.idReadersPresent(() -> readers);
+        return r;
+    }
+
+    /**
+     * The wiring of {@code observeForCanary}: one real pass arms the vacuum trigger (and the same pass's canary run consumes it) of the family the canary measures. A first look records the
+     * baseline, rows are deleted and the leaf is vacuumed, and the next pass (latched or not) runs the vacuum canary on the id index (latched) or the name index
+     * (before), through the reconciler's own call, so a pass that passed the wrong gate value would fail here.
+     */
+    @Test
+    void aRealPassTriggersTheVacuumCanaryOfTheFamilyItMeasures() throws Exception {
+        for (boolean latched : new boolean[] {false, true}) {
+            String tag = latched ? "vacl" : "vacn";
+            String tenant = newTenant(tag);
+            String coll = name(tag);
+            long id = collection(tenant, coll, 300);
+            var vacuumRuns = new java.util.concurrent.CopyOnWriteArrayList<String>();   // the indexes the canary ran for the vacuum trigger
+            var schedule = new PciCanarySchedule((target, trigger) -> {
+                if (PciCanarySchedule.VACUUM.equals(trigger)) {
+                    vacuumRuns.add(target.index());
+                }
+                return new PciCanary.Result(target, trigger, PciCanary.State.GREEN, null, 10, 1.0, 1.0, 0, java.time.Instant.now(), null, null);
+            });
+            PciReconciler r = withSchedule(settings(16), schedule);
+            r.reconcileOnce();                                   // the first look: the baseline
+            gate2 = true;
+            r.reconcileOnce();                                   // builds the id index beside the name index
+            assertThat(validIdIndexed(tenant)).containsExactly(id);
+            String nameIndex = PciCatalog.indexName(M384, tenant, coll);
+            String idIndex = PciCatalog.indexNameById(M384, tenant, id);
+
+            deleteRows(tenant, coll, 40);
+            Thread.sleep(2000);                                  // the statistics of the deletes reach the catalog view
+            var leaf = leaf(tenant);
+            try (java.sql.Connection su = pg.createConnection("")) {
+                su.setAutoCommit(true);
+                PgContainerHelper.vacuumTable(su, leaf.schema(), leaf.name());
+            }
+            Thread.sleep(2000);
+            gate3 = latched;
+            for (int i = 0; i < 6 && vacuumRuns.isEmpty(); i++) {   // the pass that sees the vacuum arms the trigger, and its canary run consumes it
+                r.reconcileOnce();
+                Thread.sleep(500);
+            }
+            assertThat(vacuumRuns).as("latched=%s: the measured family is run for the vacuum, and only it", latched)
+                .containsExactly(latched ? idIndex : nameIndex);
+            gate3 = false;
         }
     }
 }
