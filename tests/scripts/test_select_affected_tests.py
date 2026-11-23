@@ -7,6 +7,7 @@ The last class runs the selector against this checkout, so the composition with
 """
 from __future__ import annotations
 
+import json
 import pathlib
 import subprocess
 import sys
@@ -278,11 +279,118 @@ class TestSelectsEverything:
 
     def test_the_cli_prints_the_tests_dir_and_says_why(self, tree: pathlib.Path) -> None:
         out = subprocess.run(
-            [sys.executable, str(SCRIPT), "--repo", str(tree), "--no-meta", "--no-docs", "tests/conftest.py"],
+            [sys.executable, str(SCRIPT), "--repo", str(tree), "--no-meta", "--no-docs", "--full-closure", "tests/conftest.py"],
             capture_output=True, text=True, check=True,
         )
         assert out.stdout.split() == ["tests"]
         assert "everything" in out.stderr.lower()
+
+
+class TestCap:
+    """A closure over the cap prints the direct tier: the changed tests, the tests that import a changed
+    module themselves, and the file, docs and route hits; the rest is develop CI's."""
+
+    def test_under_the_cap_nothing_changes(self, tree: pathlib.Path) -> None:
+        got = _sel(tree, ["src/nexus/b.py"], cap_pct=100)
+        assert got.capped is None
+        assert "tests/test_direct.py" in got.files
+
+    def test_over_the_cap_prints_the_direct_tier(self, tree: pathlib.Path) -> None:
+        # b.py -> a.py -> tests/test_direct.py: the test is two hops away
+        got = _sel(tree, ["src/nexus/b.py"], cap_pct=5)
+        assert got.capped and "develop CI" in got.capped and "%" in got.capped
+        assert "tests/test_direct.py" not in got.files
+
+    def test_the_direct_tier_keeps_the_direct_importers(self, tree: pathlib.Path) -> None:
+        got = _sel(tree, ["src/nexus/a.py"], cap_pct=5)
+        assert got.capped
+        assert "tests/test_direct.py" in got.files
+
+    def test_the_direct_tier_keeps_a_changed_test_and_a_file_reader(self, tree: pathlib.Path) -> None:
+        _write(tree, "tests/test_reads.py", "import pathlib\nP = pathlib.Path('conf/x.toml')\n")
+        got = _sel(tree, ["src/nexus/b.py", "tests/test_none.py", "conf/x.toml"], cap_pct=5)
+        assert got.capped
+        assert {"tests/test_none.py", "tests/test_reads.py"} <= set(got.files)
+
+    def test_the_direct_tier_drops_a_test_that_names_the_file_only_by_a_glob(self, tree: pathlib.Path) -> None:
+        # a lint that globs a directory is every file's reader: the full selection keeps it, the direct tier does not
+        _write(tree, "tests/test_globs.py", "import pathlib\nL = list(pathlib.Path('.').glob('conf/*.toml'))\n")
+        _write(tree, "tests/test_names.py", "import pathlib\nP = pathlib.Path('conf/x.toml')\n")
+        changed = ["src/nexus/b.py", "conf/x.toml"]
+        assert "tests/test_globs.py" in _sel(tree, changed, cap_pct=100).files
+        got = _sel(tree, changed, cap_pct=5)
+        assert got.capped
+        assert "tests/test_globs.py" not in got.files
+        assert "tests/test_names.py" in got.files
+
+    def test_the_direct_tier_leaves_the_engine_booting_set_to_develop_ci(self, tree: pathlib.Path) -> None:
+        # a service/ main change selects every engine-booting test in the full closure (hundreds of files);
+        # the direct tier keeps the wire-route readers and drops that set
+        _write(tree, "service/src/main/java/dev/nexus/service/http/WidgetHandler.java",
+               'class WidgetHandler { static final String R = "/v1/widgets/{id}"; }\n')
+        _write(tree, "tests/test_boots_engine.py", "import pytest\npytestmark = pytest.mark.t2_tenant\n")
+        _write(tree, "tests/test_widget_wire.py", "def test_x():\n    assert '/v1/widgets/abc'\n")
+        _write(tree, "src/nexus/widget_client.py", "URL = '/v1/widgets'\n")
+        _write(tree, "tests/test_widget_client.py", "import nexus.widget_client\n")
+        changed = ["service/src/main/java/dev/nexus/service/http/WidgetHandler.java"]
+        assert "tests/test_boots_engine.py" in _sel(tree, changed, service_substrate=True, cap_pct=100).files
+        assert "tests/test_widget_client.py" in _sel(tree, changed, cap_pct=100).files
+        got = _sel(tree, changed, service_substrate=True, cap_pct=5)
+        assert got.capped
+        assert "tests/test_boots_engine.py" not in got.files
+        assert "tests/test_widget_wire.py" in got.files
+        # a module that names the route is not a changed module: its importers wait for develop CI
+        assert "tests/test_widget_client.py" not in got.files
+
+    def test_a_nested_conftest_reached_by_the_change_selects_nothing_in_the_direct_tier(self, tree: pathlib.Path) -> None:
+        # tests/sub/conftest.py imports nexus.d: the old rule runs every test below tests/sub/
+        assert "tests/sub/test_in_sub.py" in _sel(tree, ["src/nexus/d.py"]).files
+        got = _sel(tree, ["src/nexus/d.py"], cap_pct=5)
+        assert got.capped
+        assert "tests/sub/test_in_sub.py" not in got.files
+
+    @pytest.mark.parametrize("changed", ["tests/conftest.py", "pyproject.toml", "tests/_plug.py"])
+    def test_run_everything_is_capped_too(self, tree: pathlib.Path, changed: str) -> None:
+        got = _sel(tree, [changed], cap_pct=25)
+        assert got.everything is None
+        assert got.capped
+
+    def test_no_cap_leaves_run_everything(self, tree: pathlib.Path) -> None:
+        assert _sel(tree, ["tests/conftest.py"], cap_pct=None).everything
+
+
+class TestCapAtTheCommandLine:
+    def _run(self, tree: pathlib.Path, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), "--repo", str(tree), "--no-meta", "--no-docs", "--no-cache", *args],
+            capture_output=True, text=True, check=True,
+        )
+
+    def test_the_cap_is_on_by_default_and_says_so(self, tree: pathlib.Path) -> None:
+        out = self._run(tree, "tests/conftest.py")
+        assert out.stdout.split() != ["tests"]
+        assert "direct tier" in out.stderr and "develop CI runs the full suite" in out.stderr
+
+    def test_full_closure_restores_the_old_output(self, tree: pathlib.Path) -> None:
+        out = self._run(tree, "--full-closure", "tests/conftest.py")
+        assert out.stdout.split() == ["tests"]
+        assert "direct tier" not in out.stderr
+
+    def test_full_closure_prints_a_closure_over_the_cap(self, tree: pathlib.Path) -> None:
+        capped = self._run(tree, "--cap-pct", "5", "src/nexus/b.py")
+        full = self._run(tree, "--cap-pct", "5", "--full-closure", "src/nexus/b.py")
+        assert "tests/test_direct.py" not in capped.stdout.split()
+        assert "tests/test_direct.py" in full.stdout.split()
+
+    def test_explain_marks_a_capped_selection(self, tree: pathlib.Path) -> None:
+        assert "CAPPED:" in self._run(tree, "--explain", "tests/conftest.py").stdout
+
+    def test_the_estimate_names_the_workers_and_the_command_uses_n_auto(self, tree: pathlib.Path) -> None:
+        durations = {"tests/test_direct.py::test_x": 8.0}
+        (tree / ".test_durations.json").write_text(json.dumps(durations))
+        out = self._run(tree, "--workers", "4", "src/nexus/a.py")
+        assert "at 4 workers" in out.stderr
+        assert "pytest -n auto" in out.stderr
 
 
 class TestServiceChange:
@@ -346,7 +454,7 @@ class TestExplainAndRange:
 
     def test_files_from_stdin(self, tree: pathlib.Path) -> None:
         out = subprocess.run(
-            [sys.executable, str(SCRIPT), "--repo", str(tree), "--no-meta", "--no-docs", "--files-from", "-"],
+            [sys.executable, str(SCRIPT), "--repo", str(tree), "--no-meta", "--no-docs", "--full-closure", "--files-from", "-"],
             input="src/nexus/d.py\n", capture_output=True, text=True, check=True,
         )
         assert "tests/test_lazy.py" in out.stdout.split()
@@ -361,7 +469,7 @@ class TestExplainAndRange:
         _write(tree, "src/nexus/d.py", "D = 3\n")
         git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "change")
         out = subprocess.run(
-            [sys.executable, str(SCRIPT), "--repo", str(tree), "--no-meta", "--no-docs", "--range", "HEAD~1..HEAD"],
+            [sys.executable, str(SCRIPT), "--repo", str(tree), "--no-meta", "--no-docs", "--full-closure", "--range", "HEAD~1..HEAD"],
             capture_output=True, text=True, check=True,
         )
         assert "tests/test_lazy.py" in out.stdout.split()

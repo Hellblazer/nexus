@@ -34,6 +34,13 @@ A test file is selected when ANY of these holds (over-selecting is fine, under-s
    test classes (stderr) and selects the Python tests and modules that name a ``/v1/...`` wire route the
    changed Java files serve. With no route to derive it says so; the engine classes are the real check.
 
+**Cutoff (Sam 2026-11-23).** When that selection is more than ``DEFAULT_CAP_PCT`` (30%) of the suite's test files,
+the direct tier is printed instead and stderr says so: the changed test files, the tests that import a changed
+module themselves (one hop, not through a conftest), the tests that name a changed file by path or basename, the
+docs readers and the wire-route readers. Left to develop CI, which runs the whole suite after every push: the
+transitive importers, the run-everything triggers, the lints that glob a directory and, on a ``service/`` main
+change, the engine-booting set. ``--full-closure`` prints the whole closure as before; ``--cap-pct N`` moves the cutoff.
+
 Selected paths go to stdout, one per line; every note goes to stderr, so ``pytest $(...)`` is clean. An empty
 stdout means nothing was selected (do not run a bare ``pytest``, which runs everything). The index is cached
 per file (path, size, mtime) in ``.pytest_cache/``. pytest's default ``-m`` deselects integration, slow and
@@ -74,6 +81,10 @@ DOCS_FILES = ("README.md", "CHANGELOG.md", "LICENSE", "LICENSING.md")
 #: The recorded per-test seconds, for the time estimate.
 DURATIONS = ".test_durations.json"
 DEFAULT_WORKERS = 8
+#: A closure larger than this share of the suite's test files is not printed: the direct tier is (Sam 2026-11-23,
+#: "why would we do the expensive horrible thing"). Develop CI runs the whole suite after every push, so the hand
+#: run is a smoke run of what the diff most likely breaks. ``--full-closure`` turns the cap and the clumping off.
+DEFAULT_CAP_PCT = 30.0
 
 _TOKEN_RE = re.compile(
     r"[\w.\-*]+(?:/[\w.\-*]+)+|[\w\-]+\.(?:toml|json|ya?ml|md|sh|sql|xml|txt|py|lock|cfg|ini|tsv|csv|gz|tmpl|j2|html|js|gz)\b"
@@ -438,6 +449,8 @@ class Selection:
     everything: str | None = None
     notes: list[str] = field(default_factory=list)
     changed: list[str] = field(default_factory=list)
+    #: set when the full closure was over the cap and the direct tier was returned in its place
+    capped: str | None = None
     #: lint/census tests that scripts/meta_tests.py runs whatever the diff (its manifest cannot place them).
     #: They carry marks pytest's default -m deselects, so a bare ``pytest <files>`` would run none of them;
     #: ``scripts/meta_tests.py run`` runs them, and ``--include-meta-always`` lists them here.
@@ -529,7 +542,9 @@ def _service_routes(repo: Path, java: list[str]) -> dict[str, str]:
     return routes
 
 
-def _service(repo: Path, idx: Index, changed: list[str], sel: Selection, seeds: dict[str, str], service_substrate: bool) -> None:
+def _service(
+    repo: Path, idx: Index, changed: list[str], sel: Selection, seeds: dict[str, str], service_substrate: bool, wide: Selection
+) -> None:
     svc = [c for c in changed if c.startswith("service/")]
     if not svc:
         return
@@ -562,7 +577,7 @@ def _service(repo: Path, idx: Index, changed: list[str], sel: Selection, seeds: 
         subs = sorted(f for f in idx.files if is_test_file(f) and f in idx.substrate)
         if service_substrate:
             for f in subs:
-                sel.add(f, f"boots the engine substrate; {main_changed[0]} changed (--service-substrate)")
+                wide.add(f, f"boots the engine substrate; {main_changed[0]} changed (--service-substrate)")
         else:
             sel.notes.append(
                 f"service/ main changed: {len(subs)} Python test file(s) boot the engine substrate and run against the "
@@ -630,6 +645,7 @@ def select(
     include_always: bool = False,
     max_depth: int | None = None,
     service_substrate: bool = False,
+    cap_pct: float | None = None,
 ) -> Selection:
     repo = Path(repo)
     changed = sorted({c.strip() for c in changed if c.strip()})
@@ -640,18 +656,28 @@ def select(
         if c in RUN_EVERYTHING:
             sel.everything = sel.everything or f"{c} changed"
 
+    #: tests the full selection keeps and the direct tier leaves to develop CI: those that name a changed file only
+    #: through a directory or a glob (lints that walk the tree), and every test that boots the engine substrate
+    #: when service/src/main changed (a few hundred files; the wire-route readers stay in the direct tier)
+    wide = Selection()
     seeds: dict[str, str] = {}
+    #: the seeds that are themselves changed (a changed module, a module beside changed package data). The rest
+    #: of ``seeds`` are non-test modules that read a changed file or serve a changed route: changed for the full
+    #: closure, but their importers are not in the direct tier (a route named by a hub client would pull in its
+    #: whole fan-in)
+    own: dict[str, str] = {}
     for c in changed:
         if is_test_file(c) and (repo / c).is_file():
             sel.add(c, "the test file itself changed")
         if c.endswith(".py"):
-            seeds[c] = "changed"
+            seeds[c] = own[c] = "changed"
         elif c.startswith("src/nexus/"):
             # Package data (a toml, sql, lua or json beside the code) is read by the package's own modules,
             # often by scanning the directory, so the modules of that directory are changed.
             d = c.rsplit("/", 1)[0] + "/"
             for f in idx.files:
                 if f.startswith(d) and "/" not in f[len(d):]:
+                    own.setdefault(f, f"package data {c} changed")
                     seeds.setdefault(f, f"package data {c} changed")
         # non-Python files: whoever names them
         for f, tok in _file_references(idx, c):
@@ -659,17 +685,76 @@ def select(
                 continue
             why = f'names "{tok}" ({c} changed)'
             if is_test_file(f):
-                sel.add(f, why)
+                (sel if _specific(tok) else wide).add(f, why)
             elif _specific(tok) and tok not in idx.files[f].get("mentions", ()) and ("/" in tok or c.startswith(f.rsplit("/", 1)[0] + "/")):
                 # A module that reads the exact file (by path, or by basename from its own directory tree) is
                 # itself changed. One that scans a directory, a glob or a bare "README.md" is not: that would
                 # seed its whole import closure on every docs or plugin edit.
                 seeds.setdefault(f, why)
 
-    _service(repo, idx, changed, sel, seeds, service_substrate)
+    _service(repo, idx, changed, sel, seeds, service_substrate, wide)
 
+    cl_files, cl_everything = _closure_tier(idx, seeds, max_depth, direct=False)
+
+    late = Selection()
+    if use_docs and any(c.startswith(DOCS_TRIGGERS) or c in DOCS_FILES for c in changed):
+        try:
+            mod = _load_sibling(repo, "select_docs_reader_tests")
+            for f in mod.select(repo.resolve()):
+                late.add(f, "docs reader: a docs/ path changed and this test reads docs/")
+        except Exception as e:  # noqa: BLE001 - a broken selector must read as a note, never as "nothing"
+            late.notes.append(f"docs-reader selection failed ({type(e).__name__}: {e}); run scripts/select_docs_reader_tests.py")
+
+    if use_meta:
+        _meta(repo, changed, base, late, include_always)
+
+    def assemble(tier: dict[str, list[str]], everything: str | None, with_wide: bool) -> Selection:
+        out = Selection(files={f: list(w) for f, w in sel.files.items()}, everything=sel.everything or everything,
+                        notes=list(sel.notes), changed=changed)
+        for f, whys in wide.files.items() if with_wide else ():
+            for why in whys:
+                out.add(f, why)
+        for f, whys in tier.items():
+            for why in whys:
+                out.add(f, why)
+        for f, whys in late.files.items():
+            for why in whys:
+                out.add(f, why)
+        out.notes.extend(late.notes)
+        out.meta_always = dict(late.meta_always)
+        # only tests that exist now can run
+        for f in list(out.files):
+            if not (repo / f).is_file():
+                del out.files[f]
+        return out
+
+    full = assemble(cl_files, cl_everything, True)
+    total = sum(1 for f in idx.files if is_test_file(f))
+    size = total if full.everything else len(full.files)
+    if cap_pct is None or not total or size * 100 <= cap_pct * total:
+        return full
+    d_files, _ = _closure_tier(idx, own, 1, direct=True)
+    # The run-everything triggers (a root conftest, pyproject.toml, uv.lock) are not honoured in the direct tier.
+    direct = assemble(d_files, None, False)
+    direct.everything = None
+    direct.capped = (
+        f"closure is {size * 100 / total:.0f}% of the suite ({size} of {total} test files), over the {cap_pct:g}% cap; "
+        f"printing the direct tier ({len(direct.files)} files); develop CI runs the full suite "
+        "(--full-closure prints the whole closure)"
+    )
+    return direct
+
+
+def _closure_tier(
+    idx: Index, seeds: dict[str, str], max_depth: int | None, direct: bool
+) -> tuple[dict[str, list[str]], str | None]:
+    """The tests the import closure of the seeds reaches (file -> reasons), and the run-everything reason when
+    a tests/ helper the root conftest loads is reached. ``direct`` is the smoke tier: nothing is carried through
+    a conftest, and a run-everything reason is not raised."""
     pred = closure(idx, seeds, max_depth)
     # A deleted file still answers to its module name, so its importers are found by name above.
+    tier = Selection()
+    everything: str | None = None
 
     def chain(f: str) -> str:
         hops = [f]
@@ -679,44 +764,30 @@ def select(
         path = " -> ".join(_display(h) if i else h for i, h in enumerate(hops))
         return f"{path} ({seeds[seed]})" if len(hops) > 1 else seeds[seed]
 
-    def _root(p: dict[str, str | None], f: str) -> str:
-        while p.get(f) is not None:
-            f = p[f]  # type: ignore[assignment]
+    def _root(f: str) -> str:
+        while pred.get(f) is not None:
+            f = pred[f]  # type: ignore[assignment]
         return f
 
     conftests = [f for f in pred if f.endswith("/conftest.py") and f.startswith("tests/")]
     for f in pred:
         if is_test_file(f) and pred[f] is not None:
-            sel.add(f, "imports " + chain(f))
+            tier.add(f, "imports " + chain(f))
     for cf in conftests:
         d = cf.rsplit("/", 1)[0]
         why = f"{cf} is reached by the change ({chain(cf)}); it applies to every test below {d}/"
         if d == "tests":
             # A tests/ helper the root conftest loads selects everything. A src module the root conftest
             # imports does not: that is every src change, and the backstop run covers fixtures that use it.
-            if pred[cf] is not None and _root(pred, cf).startswith("tests/"):
-                sel.everything = sel.everything or f"{_root(pred, cf)} changed and {cf} loads it ({chain(cf)})"
+            if not direct and pred[cf] is not None and _root(cf).startswith("tests/"):
+                everything = everything or f"{_root(cf)} changed and {cf} loads it ({chain(cf)})"
+            continue
+        if direct and pred[cf] is not None:
             continue
         for f in idx.files:
             if is_test_file(f) and f.startswith(d + "/"):
-                sel.add(f, why)
-
-    if use_docs and any(c.startswith(DOCS_TRIGGERS) or c in DOCS_FILES for c in changed):
-        try:
-            mod = _load_sibling(repo, "select_docs_reader_tests")
-            for f in mod.select(repo.resolve()):
-                sel.add(f, "docs reader: a docs/ path changed and this test reads docs/")
-        except Exception as e:  # noqa: BLE001 - a broken selector must read as a note, never as "nothing"
-            sel.notes.append(f"docs-reader selection failed ({type(e).__name__}: {e}); run scripts/select_docs_reader_tests.py")
-
-    if use_meta:
-        _meta(repo, changed, base, sel, include_always)
-
-    # only tests that exist now can run
-    for f in list(sel.files):
-        if not (repo / f).is_file():
-            del sel.files[f]
-    return sel
+                tier.add(f, why)
+    return tier.files, everything
 
 
 def _meta(repo: Path, changed: list[str], base: str | None, sel: Selection, include_always: bool) -> None:
@@ -792,6 +863,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--range", dest="rng", help="a git revision range, e.g. <before>..<after>")
     ap.add_argument("--files-from", help="a file of changed paths, one per line (- for stdin)")
     ap.add_argument("--explain", action="store_true", help="print why each file was picked")
+    ap.add_argument("--cap-pct", type=float, default=DEFAULT_CAP_PCT,
+                    help="when the closure is more than this %% of the suite's test files, print the direct tier "
+                         f"(changed tests, direct importers, file/docs/route hits) instead (default {DEFAULT_CAP_PCT:g})")
+    ap.add_argument("--full-closure", action="store_true",
+                    help="print the whole closure however large: no cap, run-everything honoured "
+                         "(the full suite belongs on lab-remote or develop CI)")
     ap.add_argument("--max-depth", type=int, help="follow imports at most N hops from a changed module (a smoke tier; default: the full closure)")
     ap.add_argument("--service-substrate", action=argparse.BooleanOptionalAction, default=True,
                     help="on a service/src/main change, also select every Python test that boots the engine substrate "
@@ -825,13 +902,16 @@ def main(argv: list[str] | None = None) -> int:
             return 2
     sel = select(repo, changed, base=base, use_meta=not args.no_meta, use_docs=not args.no_docs,
                  use_cache=not args.no_cache, include_always=args.include_meta_always,
-                 max_depth=args.max_depth, service_substrate=args.service_substrate)
+                 max_depth=args.max_depth, service_substrate=args.service_substrate,
+                 cap_pct=None if args.full_closure else args.cap_pct)
 
     files = sorted(sel.files)
     if args.explain:
         sys.stdout.write(f"changed: {len(sel.changed)} path(s)\n")
         if sel.everything:
             sys.stdout.write(f"EVERYTHING: {sel.everything}\n")
+        if sel.capped:
+            sys.stdout.write(f"CAPPED: {sel.capped}\n")
         for f in files:
             sys.stdout.write(f"{f}\n")
             for why in sel.files[f]:
@@ -846,6 +926,8 @@ def main(argv: list[str] | None = None) -> int:
             f"select_affected_tests: selecting everything (prints `tests`): {sel.everything}. "
             "Run the full suite via lab-remote/lab-run, not here.\n"
         )
+    if sel.capped:
+        sys.stderr.write(f"select_affected_tests: {sel.capped}\n")
     for n in sel.notes:
         sys.stderr.write(f"select_affected_tests: {n}\n")
     est = estimate(repo, files, bool(sel.everything))
@@ -853,6 +935,11 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write(
             f"select_affected_tests: {len(files)} file(s), ~{int(est['tests'])} test(s); recorded time "
             f"{est['serial_s']:.0f}s serial, ~{est['serial_s'] / max(args.workers, 1):.0f}s at {args.workers} workers\n"
+        )
+    if files and not sel.everything:
+        sys.stderr.write(
+            f"select_affected_tests: run: uv run pytest -n auto <the {len(files)} path(s) on stdout> "
+            "(a heavy run on a shared host goes through lab-run / lab-remote)\n"
         )
     if not files and not sel.everything:
         sys.stderr.write("select_affected_tests: nothing selected; do not run a bare pytest\n")
