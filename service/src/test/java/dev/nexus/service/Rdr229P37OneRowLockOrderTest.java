@@ -44,15 +44,22 @@ class Rdr229P37OneRowLockOrderTest {
     private static final org.jooq.Table<?> ACTIVITY = DSL.table(DSL.name("pg_catalog", "pg_stat_activity"));
 
     private Rdr229RenameEngine engine;
+    private dev.nexus.service.db.CollectionOneRowRenameTestSupport.Restore productionBound;
 
     @BeforeAll
     void boot() throws Exception {
         engine = new Rdr229RenameEngine();
         Rdr229RenameRestartPrecondition.reach(engine).reached().require();
+        // the tests that park a rename on a lock a test holds would answer 503 rename_busy if a test thread stalled past the production 10 s bound
+        // (folio's r3 review S4); the one test of the bound sets its own, and restores this one
+        productionBound = dev.nexus.service.db.CollectionOneRowRenameTestSupport.rowLockTimeoutMs("60000");
     }
 
     @AfterAll
     void stop() {
+        if (productionBound != null) {
+            productionBound.close();
+        }
         if (engine != null) {
             engine.close();
         }
@@ -481,8 +488,7 @@ class Rdr229P37OneRowLockOrderTest {
         assertThat(before.values().stream().mapToInt(List::size).sum()).as("non-vacuity: A's child rows are there").isPositive();
         assertThat(engine.<Boolean>su(ctx -> dev.nexus.service.datamove.CompletionCheck.readLatch(ctx, dev.nexus.service.datamove.CompletionCheck.GATE3).isPresent()))
             .as("non-vacuity: the latch row").isTrue();
-        dev.nexus.service.db.CollectionOneRowRename.setRowLockTimeoutMsForTests("1000");
-        try (Connection w = engine.pg.createConnection("")) {
+        try (Connection w = engine.pg.createConnection(""); var bound = dev.nexus.service.db.CollectionOneRowRenameTestSupport.rowLockTimeoutMs("1000")) {
             w.setAutoCommit(false);
             DSL.using(w, SQLDialect.POSTGRES).select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
                 .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(a))).forKeyShare().fetch();   // held past the bound
@@ -493,8 +499,6 @@ class Rdr229P37OneRowLockOrderTest {
             assertThat(Rdr229RenameEngine.MAPPER.readTree(r.body()).path("reason").asText()).isEqualTo("rename_busy");
             assertThat(r.headers().firstValue("Retry-After")).as("retryable").hasValue("5");
             w.rollback();
-        } finally {
-            dev.nexus.service.db.CollectionOneRowRename.setRowLockTimeoutMsForTests(null);
         }
         assertThat(engine.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, a))).as("A is where it was").isEqualTo(id);
         assertThat(engine.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, b))).as("nothing is registered under B").isNull();
