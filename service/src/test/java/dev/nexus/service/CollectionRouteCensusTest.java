@@ -290,7 +290,8 @@ class CollectionRouteCensusTest {
         }
         Set<String> excluded = new TreeSet<>();
         for (var ex : CollectionRouteCensus.EXCLUDED) {
-            if (!ex.file().endsWith("Handler.java")) {
+            // the http/ files (the handlers and the selector filter) are the handler census's; this one reads outside http/
+            if (!ex.file().endsWith("Handler.java") && !ex.file().endsWith("Filter.java")) {
                 named.computeIfAbsent(ex.file(), k -> new TreeSet<>()).add(ex.method());
                 excluded.add(ex.file() + "#" + ex.method() + "#" + ex.field());
             }
@@ -359,7 +360,7 @@ class CollectionRouteCensusTest {
                 .contains(ex.evidence());
             assertThat(ex.why()).as("%s#%s names its reason", ex.file(), ex.method()).hasSizeGreaterThan(40)
                 .doesNotContainIgnoringCase("ambiguous").doesNotContainIgnoringCase("not tested");
-            if (ex.file().endsWith("Handler.java")) {
+            if (ex.file().endsWith("Handler.java") || ex.file().endsWith("Filter.java")) {
                 assertThat(handlerSites).as("%s#%s still reads '%s'", ex.file(), ex.method(), ex.field())
                     .contains(ex.file() + "#" + ex.method() + "#" + ex.field());
             }

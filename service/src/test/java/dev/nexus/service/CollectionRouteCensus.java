@@ -479,7 +479,7 @@ final class CollectionRouteCensus {
             "the consumption census's own read of a document write's body, with the census on only (tests): it names each id for "
                 + "the request-level report and resolves nothing; the document routes resolve the id in the write's own "
                 + "transaction (CollectionRegistry.requireIdForWrite)",
-            "CollectionSelectorFilter.java", "Test only: nothing here runs with the census off"),
+            "CollectionSelectorFilter.java", "collectDocumentIds(MAPPER.readTree(in), named)"),
         new Excluded("ChunkKeysAdminHandler.java", "handleSweep", "collection",
             "an operator sweep of the chunk-key migration. The body names the tenant swept (a root credential may name any), and the "
                 + "route boundary resolves an id in the CALLER's tenant, so an id here would be resolved in the wrong tenant: a "
