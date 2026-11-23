@@ -2577,6 +2577,26 @@ public final class PgContainerHelper {
             "databasechangelog_test_index_comment_clear", Map.of("schema", schema, "index", index));
     }
 
+    /**
+     * {@code ALTER TABLE nexus.table DISABLE TRIGGER trigger} (RDR-229 P3.7), through
+     * {@code db.changelog-test-trigger-disable.xml}: the control of a test that shows what a trigger changes by running the same statement
+     * without it. jOOQ has no trigger DDL. Both names go through {@link #requireTestIdentifier}; pair it with {@link #enableTrigger}.
+     */
+    public static void disableTrigger(Connection su, String table, String trigger) throws Exception {
+        requireTestIdentifier(table);
+        requireTestIdentifier(trigger);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-trigger-disable.xml",
+            "databasechangelog_test_trigger_disable", Map.of("table", table, "trigger", trigger));
+    }
+
+    /** {@code ALTER TABLE nexus.table ENABLE TRIGGER trigger}, through {@code db.changelog-test-trigger-enable.xml}; see {@link #disableTrigger}. */
+    public static void enableTrigger(Connection su, String table, String trigger) throws Exception {
+        requireTestIdentifier(table);
+        requireTestIdentifier(trigger);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-trigger-enable.xml",
+            "databasechangelog_test_trigger_enable", Map.of("table", table, "trigger", trigger));
+    }
+
     /** Which text of a product changeset {@link #replayPart} runs. */
     private enum ChangesetPart { FORWARD, ROLLBACK }
 
