@@ -8,10 +8,10 @@
 family	table	file_or_function	line	op	kind	name_columns_written	id_columns	has_check	note
 aspects	aspect_extraction_queue	rdr229-fkvalidate-aspect_extraction_queue [vectors-072-collection-id-fk-twins.xml:292]	289	update	data_move	-	collection_id	yes	sets collection_id
 aspects	aspect_extraction_queue	rdr229-stamp-aspect_extraction_queue [vectors-070-collection-id-stamp-moves.xml:330]	327	update	data_move	-	collection_id	yes	sets collection_id
-aspects	canary_query_ring	nexus.canary_query_ring_upsert [vectors-078-rdr229-p35b-readers-continue.xml:630]	572	update	sql_function	-	collection_id	yes	
-aspects	canary_query_ring	nexus.canary_query_ring_upsert [vectors-078-rdr229-p35b-readers-continue.xml:637]	572	insert	sql_function	collection	collection_id	yes	
-aspects	canary_query_ring	nexus.canary_query_ring_upsert [vectors-078-rdr229-p35b-readers-continue.xml:641]	572	insert	sql_function	collection	collection_id	yes	
-aspects	canary_query_ring	nexus.canary_query_ring_upsert [vectors-078-rdr229-p35b-readers-continue.xml:645]	572	insert	sql_function	collection	collection_id	yes	
+aspects	canary_query_ring	nexus.canary_query_ring_upsert [vectors-078-rdr229-p35b-readers-continue.xml:634]	576	update	sql_function	-	collection_id	yes	
+aspects	canary_query_ring	nexus.canary_query_ring_upsert [vectors-078-rdr229-p35b-readers-continue.xml:641]	576	insert	sql_function	collection	collection_id	yes	
+aspects	canary_query_ring	nexus.canary_query_ring_upsert [vectors-078-rdr229-p35b-readers-continue.xml:645]	576	insert	sql_function	collection	collection_id	yes	
+aspects	canary_query_ring	nexus.canary_query_ring_upsert [vectors-078-rdr229-p35b-readers-continue.xml:649]	576	insert	sql_function	collection	collection_id	yes	
 aspects	canary_query_ring	rdr229-fkvalidate-canary_query_ring [vectors-072-collection-id-fk-twins.xml:268]	265	update	data_move	-	collection_id	yes	sets collection_id
 aspects	canary_query_ring	rdr229-stamp-canary_query_ring [vectors-070-collection-id-stamp-moves.xml:169]	166	update	data_move	-	collection_id	yes	sets collection_id
 aspects	canary_query_ring	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11677	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)
@@ -54,7 +54,7 @@ aspects	document_highlights	service/src/main/java/dev/nexus/service/db/CatalogRe
 aspects	document_highlights	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11742	update	jooq	-	collection_id	yes	
 aspects	document_highlights	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12095	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)
 aspects	document_highlights	service/src/main/java/dev/nexus/service/db/TenantImportLoad.java	335	insert	by-name	collection	collection_id	yes	TenantImportLoad by-name INSERT ... SELECT over TenantExport.TABLES
-catalog	catalog_collections	nexus.catalog_documents_owner_to_collection [vectors-078-rdr229-p35b-readers-continue.xml:319]	258	update	sql_function	superseded_by	superseded_by_id	yes	
+catalog	catalog_collections	nexus.catalog_documents_owner_to_collection [vectors-078-rdr229-p35b-readers-continue.xml:323]	262	update	sql_function	superseded_by	superseded_by_id	yes	
 catalog	catalog_collections	nexus.gc_quarantine_orphans [vectors-077-rdr229-p35b-readers-both.xml:7914]	7757	insert	sql_function	superseded_by	superseded_by_id	yes	
 catalog	catalog_collections	nexus.gc_quarantine_orphans_bounded [vectors-077-rdr229-p35b-readers-both.xml:3551]	3420	insert	sql_function	superseded_by	superseded_by_id	yes	
 catalog	catalog_collections	nexus.gc_restore_rereferenced [vectors-077-rdr229-p35b-readers-both.xml:4366]	4254	insert	sql_function	superseded_by	superseded_by_id	yes	
