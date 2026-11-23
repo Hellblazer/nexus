@@ -8,10 +8,10 @@
 family	table	file_or_function	line	op	kind	name_columns_written	id_columns	has_check	note
 aspects	aspect_extraction_queue	rdr229-fkvalidate-aspect_extraction_queue [vectors-072-collection-id-fk-twins.xml:292]	289	update	data_move	-	collection_id	yes	sets collection_id
 aspects	aspect_extraction_queue	rdr229-stamp-aspect_extraction_queue [vectors-070-collection-id-stamp-moves.xml:330]	327	update	data_move	-	collection_id	yes	sets collection_id
-aspects	canary_query_ring	nexus.canary_query_ring_upsert [vectors-078-rdr229-p35b-readers-continue.xml:634]	576	update	sql_function	-	collection_id	yes	
-aspects	canary_query_ring	nexus.canary_query_ring_upsert [vectors-078-rdr229-p35b-readers-continue.xml:641]	576	insert	sql_function	collection	collection_id	yes	
-aspects	canary_query_ring	nexus.canary_query_ring_upsert [vectors-078-rdr229-p35b-readers-continue.xml:645]	576	insert	sql_function	collection	collection_id	yes	
-aspects	canary_query_ring	nexus.canary_query_ring_upsert [vectors-078-rdr229-p35b-readers-continue.xml:649]	576	insert	sql_function	collection	collection_id	yes	
+aspects	canary_query_ring	nexus.canary_query_ring_upsert [vectors-078-rdr229-p35b-readers-continue.xml:662]	604	update	sql_function	-	collection_id	yes	
+aspects	canary_query_ring	nexus.canary_query_ring_upsert [vectors-078-rdr229-p35b-readers-continue.xml:669]	604	insert	sql_function	collection	collection_id	yes	
+aspects	canary_query_ring	nexus.canary_query_ring_upsert [vectors-078-rdr229-p35b-readers-continue.xml:673]	604	insert	sql_function	collection	collection_id	yes	
+aspects	canary_query_ring	nexus.canary_query_ring_upsert [vectors-078-rdr229-p35b-readers-continue.xml:677]	604	insert	sql_function	collection	collection_id	yes	
 aspects	canary_query_ring	rdr229-fkvalidate-canary_query_ring [vectors-072-collection-id-fk-twins.xml:268]	265	update	data_move	-	collection_id	yes	sets collection_id
 aspects	canary_query_ring	rdr229-stamp-canary_query_ring [vectors-070-collection-id-stamp-moves.xml:169]	166	update	data_move	-	collection_id	yes	sets collection_id
 aspects	canary_query_ring	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11689	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)
@@ -54,8 +54,8 @@ aspects	document_highlights	service/src/main/java/dev/nexus/service/db/CatalogRe
 aspects	document_highlights	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11754	update	jooq	-	collection_id	yes	
 aspects	document_highlights	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12131	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)
 aspects	document_highlights	service/src/main/java/dev/nexus/service/db/TenantImportLoad.java	335	insert	by-name	collection	collection_id	yes	TenantImportLoad by-name INSERT ... SELECT over TenantExport.TABLES
-catalog	catalog_collections	nexus.catalog_documents_owner_to_collection [vectors-078-rdr229-p35b-readers-continue.xml:323]	262	update	sql_function	superseded_by	superseded_by_id	yes	
-catalog	catalog_collections	nexus.gc_quarantine_orphans [vectors-077-rdr229-p35b-readers-both.xml:7914]	7757	insert	sql_function	superseded_by	superseded_by_id	yes	
+catalog	catalog_collections	nexus.catalog_documents_owner_to_collection [vectors-078-rdr229-p35b-readers-continue.xml:351]	290	update	sql_function	superseded_by	superseded_by_id	yes	
+catalog	catalog_collections	nexus.gc_quarantine_orphans [vectors-077-rdr229-p35b-readers-both.xml:7920]	7763	insert	sql_function	superseded_by	superseded_by_id	yes	
 catalog	catalog_collections	nexus.gc_quarantine_orphans_bounded [vectors-077-rdr229-p35b-readers-both.xml:3551]	3420	insert	sql_function	superseded_by	superseded_by_id	yes	
 catalog	catalog_collections	nexus.gc_restore_rereferenced [vectors-077-rdr229-p35b-readers-both.xml:4366]	4254	insert	sql_function	superseded_by	superseded_by_id	yes	
 catalog	catalog_collections	nexus.gc_restore_rereferenced_bounded [vectors-077-rdr229-p35b-readers-both.xml:4760]	4637	insert	sql_function	superseded_by	superseded_by_id	yes	
@@ -147,7 +147,7 @@ catalog	chunk_orphaned_at	nexus.stamp_chunks_on_manifest_update [vectors-077-rdr
 catalog	chunk_orphaned_at	rdr229-stamp-chunk_orphaned_at [vectors-070-collection-id-stamp-moves.xml:254]	251	update	data_move	-	collection_id	yes	sets collection_id
 catalog	chunk_orphaned_at	service/src/main/java/dev/nexus/service/db/CatalogIdStamps.java	116	update	jooq	-	collection_id	yes	
 catalog	chunk_orphaned_at	service/src/main/java/dev/nexus/service/db/CatalogIdStamps.java	137	update	jooq	-	collection_id	yes	
-chunks	chunks	nexus.gc_quarantine_orphans [vectors-077-rdr229-p35b-readers-both.xml:7941]	7757	insert	sql_function	collection	collection_id	yes	
+chunks	chunks	nexus.gc_quarantine_orphans [vectors-077-rdr229-p35b-readers-both.xml:7947]	7763	insert	sql_function	collection	collection_id	yes	
 chunks	chunks	nexus.gc_quarantine_orphans_bounded [vectors-077-rdr229-p35b-readers-both.xml:3579]	3420	insert	sql_function	collection	collection_id	yes	
 chunks	chunks	nexus.gc_quarantine_orphans_floored [vectors-077-rdr229-p35b-readers-both.xml:4068]	3920	update	sql_function	collection	collection_id	yes	
 chunks	chunks	nexus.gc_restore_rereferenced [vectors-077-rdr229-p35b-readers-both.xml:4387]	4254	insert	sql_function	collection	collection_id	yes	
@@ -170,12 +170,12 @@ ops	chash_remap	rdr229-stamp-chash_remap [vectors-070-collection-id-stamp-moves.
 ops	chash_remap	service/src/main/java/dev/nexus/service/db/RemapRepository.java	143	insert	jooq	source_collection,target_collection	source_collection_id,target_collection_id	yes	
 ops	gc_audit	nexus.gc_expire_quarantine [vectors-077-rdr229-p35b-readers-both.xml:2915]	2824	insert	sql_function	collection	collection_id	no	
 ops	gc_audit	nexus.gc_expire_quarantine_bounded [vectors-077-rdr229-p35b-readers-both.xml:3208]	3048	insert	sql_function	collection	collection_id	no	
-ops	gc_audit	nexus.gc_quarantine_orphans [vectors-077-rdr229-p35b-readers-both.xml:8024]	7757	insert	sql_function	collection	collection_id	no	
+ops	gc_audit	nexus.gc_quarantine_orphans [vectors-077-rdr229-p35b-readers-both.xml:8030]	7763	insert	sql_function	collection	collection_id	no	
 ops	gc_audit	nexus.gc_quarantine_orphans_bounded [vectors-077-rdr229-p35b-readers-both.xml:3662]	3420	insert	sql_function	collection	collection_id	no	
 ops	gc_audit	nexus.gc_quarantine_orphans_floored [vectors-077-rdr229-p35b-readers-both.xml:4018]	3920	insert	sql_function	collection	collection_id	no	
 ops	gc_audit	nexus.gc_restore_rereferenced [vectors-077-rdr229-p35b-readers-both.xml:4428]	4254	insert	sql_function	collection	collection_id	no	
 ops	gc_audit	nexus.gc_restore_rereferenced_bounded [vectors-077-rdr229-p35b-readers-both.xml:4830]	4637	insert	sql_function	collection	collection_id	no	
-ops	gc_audit	nexus.purge_trash [vectors-077-rdr229-p35b-readers-both.xml:8866]	8771	insert	sql_function	collection	collection_id	no	
+ops	gc_audit	nexus.purge_trash [vectors-077-rdr229-p35b-readers-both.xml:8872]	8777	insert	sql_function	collection	collection_id	no	
 ops	gc_audit	nexus.quarantine_restore_chunks [vectors-077-rdr229-p35b-readers-both.xml:5422]	5066	insert	sql_function	collection	collection_id	no	
 ops	gc_audit	nexus.reaper_expire_client_quarantine [vectors-077-rdr229-p35b-readers-both.xml:6067]	5921	insert	sql_function	collection	collection_id	no	
 ops	gc_audit	nexus.reaper_expire_quarantine [vectors-077-rdr229-p35b-readers-both.xml:6349]	6259	insert	sql_function	collection	collection_id	no	
