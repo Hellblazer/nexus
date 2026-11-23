@@ -24,7 +24,15 @@ import static org.assertj.core.api.Assertions.assertThat;
 class RenameGuardProductionWiringTest {
 
     private static final Path MAIN = Path.of("src/main/java");
-    private static final Pattern GUARDED_CTOR = Pattern.compile("public\\s+(\\w+)\\s*\\([^)]*\\bRenameGuard\\s+\\w+\\s*\\)");
+    /**
+     * A constructor that takes a {@code RenameGuard} anywhere in its parameter list, whatever its visibility (the class is the file's
+     * own: a method that takes a guard is not one). Matched per file, so a package-private or protected constructor, or a guard that is
+     * not the last parameter, is found too.
+     */
+    private static Pattern guardedCtor(String simpleName) {
+        return Pattern.compile("(?:\\b(?:public|protected|private)\\s+)?\\b" + Pattern.quote(simpleName)
+            + "\\s*\\([^)]*\\bRenameGuard\\s+\\w+[^)]*\\)\\s*\\{");
+    }
 
     private static String code(Path file) throws IOException {
         return Files.readString(file).replaceAll("(?s)/\\*.*?\\*/", "").replaceAll("//[^\\n]*", "");
@@ -43,11 +51,9 @@ class RenameGuardProductionWiringTest {
         List<String> unguardedConstructions = new ArrayList<>();
         var files = mainFiles();
         for (Path f : files) {
-            var m = GUARDED_CTOR.matcher(code(f));
-            while (m.find()) {
-                if (!m.group(1).equals("RenameGuard") && !guarded.contains(m.group(1))) {
-                    guarded.add(m.group(1));
-                }
+            String simple = f.getFileName().toString().replace(".java", "");
+            if (!simple.equals("RenameGuard") && guardedCtor(simple).matcher(code(f)).find() && !guarded.contains(simple)) {
+                guarded.add(simple);
             }
         }
         assertThat(guarded).as("non-vacuity: the classes that take a RenameGuard (catalog, chash, taxonomy, telemetry, aspects)")
