@@ -952,6 +952,14 @@ final class TenantKeyedStateTables {
             + "process-wide configuration, not keyed by tenant");
         notKeyed.put("CompletionBootWork.DbReader.onLatchDeferred", "the hook that asks the completion check to read again soon after the latch "
             + "write gave up (RDR-229 P3.7); a callback, holds no data and no tenant state");
+        notKeyed.put("CompletionBootWork.idReadersPresent", "whether this engine's readers select by id (IdReaders::present in production, a test seam otherwise "
+            + "(RDR-229 P3.7)); a process-wide signal, no tenant state");
+        notKeyed.put("CollectionOneRowRename.Outcome.counts", "the per-table counts one rename answers, a value returned to the caller and never held; "
+            + "no tenant state");
+        notKeyed.put("CompletionBootWork.DbReader.latchWriteFailingSince", "when the gate 3 latch write first failed in the current run of failures, for the "
+            + "keeps-failing warning; process-wide, no tenant state");
+        notKeyed.put("DepartedWriterSpans.UNRESOLVED", "a counter of departed-writer spans that could not be resolved, for the log; process-wide, no tenant state");
+        notKeyed.put("RenameNoOpActivity.NOOPS", "a counter of per-store renames that were a no-op after a one-row rename, for the log; process-wide, no tenant state");
         notKeyed.put("CompletionBootWork.DbReader.p35b", "the supplier of the P3.5b changeset ids the one-row rename waits for "
             + "(P35bChangesets.resource() in production); fixed at construction, schema identifiers, not keyed by tenant");
         notKeyed.put("FkTwins.Holder.ROWS", "the RDR-229 P3.3a id-twin list (db/rdr229/p33a-fk-twins.tsv), parsed once from the classpath; "
