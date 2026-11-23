@@ -103,7 +103,36 @@ final class CollectionRehomeScope {
         return ctx.select(CATALOG_COLLECTIONS.EMBEDDING_MODEL).from(CATALOG_COLLECTIONS)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
             .and(byId ? CATALOG_COLLECTIONS.COLLECTION_ID.eq(id) : CATALOG_COLLECTIONS.NAME.eq(name))
+            .orderBy(CollectionRegistry.labelResolutionOrder()).limit(1)
             .fetchOne(CATALOG_COLLECTIONS.EMBEDDING_MODEL);
+    }
+
+    /**
+     * The manifest rows the chunk update carried to the target through the chunk foreign key, which need the target's id (the
+     * statement is the caller's: {@code ManifestInsertGateTest} pins every manifest writer to its gated, retried method, so the
+     * manifest's columns come in as arguments and this class never names the table). Before gate 3: the rows now naming the
+     * target with another id. From gate 3: the rows of the source's id whose chunk now carries the target's id, whatever name
+     * they hold (after a one-row rename the stored name is no label's), and not the rows of a chunk a collision left behind,
+     * which keep the source's id.
+     */
+    Condition cascadedManifest(String tenant, Field<String> tenantColumn, Field<String> collectionColumn,
+                               Field<byte[]> chashColumn, Field<Long> idColumn, Long targetId) {
+        if (!byId) {
+            return tenantColumn.eq(tenant).and(collectionColumn.eq(target)).and(idColumn.isDistinctFrom(targetId));
+        }
+        var c = CHUNKS.as("rcm");
+        return tenantColumn.eq(tenant).and(idColumn.eq(sourceId))
+            .and(DSL.exists(DSL.selectOne().from(c).where(c.TENANT_ID.eq(tenant))
+                .and(c.COLLECTION.eq(collectionColumn)).and(c.CHASH.eq(chashColumn)).and(c.COLLECTION_ID.eq(targetId))));
+    }
+
+    /** The topic assignments and {@code chunk_orphaned_at} rows the chunk update carried: by name before gate 3, by id from it. */
+    void repairCascaded(DSLContext ctx, String tenant, Long targetId) {
+        if (byId) {
+            CatalogIdStamps.repairCascadedIdsFrom(ctx, tenant, sourceId, targetId);
+        } else {
+            CatalogIdStamps.repairCascadedIds(ctx, tenant, target, targetId);
+        }
     }
 
     /**

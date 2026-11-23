@@ -11958,9 +11958,9 @@ public final class CatalogRepository {
             }
             // The manifest rows the chunk cascade carried to the target (ManifestInsertGateTest: pinned writer).
             ctx.update(CATALOG_DOCUMENT_CHUNKS).set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, targetId)
-                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)).and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(target))
-                .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID.isDistinctFrom(targetId)).execute();
-            CatalogIdStamps.repairCascadedIds(ctx, tenant, target, targetId);
+                .where(scope.cascadedManifest(tenant, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                    CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, targetId)).execute();
+            scope.repairCascaded(ctx, tenant, targetId);
             return new RehomeResult(
                 moved.getOrDefault("chunks", 0),
                 moved.getOrDefault("catalog_documents", 0),
