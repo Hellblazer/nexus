@@ -22,10 +22,15 @@ public final class CollectionRefusals {
 
     /**
      * The registry row of {@code id}, read {@code SELECT ... FOR UPDATE} by {@code collection_id} in {@code ctx}'s transaction. A plain
-     * lock, so it is safe to call on a row this transaction already holds (a verb that took the ordered lock of its rows first,
-     * {@link CollectionTombstones#lockRows(DSLContext, String, long, String...)}): the second {@code FOR UPDATE} of a row one already
-     * holds does not wait. A caller that holds no registry row yet takes this one as its first, before any other registry row, so the
-     * canonical lock order ({@code RenameGuard#runRename}) holds.
+     * lock, so it is safe to call on a row this transaction already holds. Supersede and rename call it SECOND: their own ordered,
+     * bounded lock ({@link CollectionTombstones#lockRows(DSLContext, String, long, String...)}) took the row first, and the second
+     * {@code FOR UPDATE} of a row one holds does not wait. A supersede names its successor by id the same way (the ordered statement
+     * took the successor's row too). The delete calls it FIRST and alone: it holds no registry row yet, takes this one before any
+     * child row, and, being the delete's only registry lock, waits unbounded (see the comment on the statement). The delete takes no
+     * sweep gate before it, and supersede takes none at all.
+     *
+     * <p>The id the request named counts as consumed ({@link ExpectedCollectionIds}) once the row is read, whatever refusal follows, so
+     * a handler that stops passing the id turns the route's census red instead of silent.
      *
      * @param expectedLabel the label the route boundary resolved {@code id} to, which the live row must still bear
      * @return the live row, locked
@@ -36,6 +41,7 @@ public final class CollectionRefusals {
      */
     public static CollectionRow requireSourceById(DSLContext ctx, String tenant, long id, String expectedLabel) {
         WriteRegistryMemo.exempt(ctx, "a retiring verb that locks its source row FOR UPDATE by id");
+        ExpectedCollectionIds.beforeTransactionRead();   // test seam, once per request, before the first by-id read; a no-op in production
         var modelDimension = EMBEDDING_MODELS.DIMENSION.as("model_dimension");
         Record r = ctx.select(
                 CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.COLLECTION_ID,
@@ -55,19 +61,10 @@ public final class CollectionRefusals {
         if (r == null) {
             throw new UnknownCollectionIdException(tenant, id);
         }
-        Long found = r.get(CATALOG_COLLECTIONS.COLLECTION_ID);
-        if (found == null || found != id) {
-            throw new CollectionIdMismatchException(id, found == null ? 0L : found);
-        }
-        String label = r.get(CATALOG_COLLECTIONS.NAME);
-        Integer dimension = r.get(CATALOG_COLLECTIONS.DIMENSION) != null
-            ? r.get(CATALOG_COLLECTIONS.DIMENSION) : r.get(modelDimension);
-        if (dimension == null) {
-            throw new IllegalStateException("collection '" + label + "' for tenant '" + tenant + "' has no resolvable dimension");
-        }
-        CollectionRow row = new CollectionRow(r.get(CATALOG_COLLECTIONS.CONTENT_TYPE), r.get(CATALOG_COLLECTIONS.OWNER_ID),
-            r.get(CATALOG_COLLECTIONS.EMBEDDING_MODEL), dimension, r.get(CATALOG_COLLECTIONS.LIFECYCLE_STATE),
-            r.get(CATALOG_COLLECTIONS.SUPERSEDED_BY), id, label);
+        CollectionRow row = CollectionRegistry.rowOf(r, modelDimension, tenant);
+        // the request's named id is read, in this transaction, whatever refusal follows (ExpectedCollectionIds, the census)
+        ExpectedCollectionIds.consumed(ctx, expectedLabel);
+        String label = row.label();
         if (row.isSuperseded()) {
             throw new CollectionRetiredIdException(tenant, id, label, CollectionSuccessor.of(ctx, tenant, id));
         }
