@@ -90,9 +90,9 @@ class NameKeyDropPassIntegrationTest {
         assertThat(pass.runOnce()).isEqualTo(NameKeyDropPass.Outcome.REGISTERED);
 
         assertThat(rows()).isEqualTo(1);
-        assertThat(su(ctx -> ctx.select(DSL.field(DSL.name("changeset_id"), String.class)).from(DSL.table(DSL.name("nexus", "data_moves")))
-            .where(DSL.field(DSL.name("label"), String.class).eq(NameKeyDropMove.LABEL)).fetchOne(0, String.class)))
-            .isEqualTo("engine:rdr229-name-key-drop:" + VERSION);
+        String changesetId = su(ctx -> ctx.select(DSL.field(DSL.name("changeset_id"), String.class)).from(DSL.table(DSL.name("nexus", "data_moves")))
+            .where(DSL.field(DSL.name("label"), String.class).eq(NameKeyDropMove.LABEL)).fetchOne(0, String.class));
+        assertThat(changesetId).isEqualTo("engine:rdr229-name-key-drop:" + VERSION);
         assertThat(pass.runOnce()).as("a finished pass opens no connection and does nothing").isEqualTo(NameKeyDropPass.Outcome.FINISHED);
     }
 
