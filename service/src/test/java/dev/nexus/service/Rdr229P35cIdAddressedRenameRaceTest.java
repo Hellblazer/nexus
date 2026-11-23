@@ -4,41 +4,46 @@ package dev.nexus.service;
 
 import static dev.nexus.service.CollectionRouteFixture.json;
 import static dev.nexus.service.CollectionRouteFixture.label;
-import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_META;
 import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.nexus.service.CollectionRouteFixture.Resp;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.CollectionRegistry;
-import dev.nexus.service.datamove.IdUniqueIndexPass;
-import org.jooq.Field;
 import org.jooq.impl.DSL;
-
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
 import java.util.List;
-import java.util.concurrent.CompletableFuture;
+import java.util.function.LongConsumer;
 import java.util.function.LongFunction;
 
 /**
- * RDR-229 P3.5c (nexus-p2m1x.25), census invariant I7 (linda): a write transaction under an id-addressed request reaches that id
- * through {@code CollectionIds} and never resolves the label on its own. Each test makes the gap P3.5a's gap tests make, with a
- * one-row rename in it: the route boundary has resolved the id N to the label B, and just before the write's own by-id read B is
- * renamed to C (the registry row keeps N, nothing else is written: P3.7's rename) and a NEW row takes the label B with rows of its
- * own. The request by N must be refused (409 {@code collection_renamed}: N now carries another label) and the new holder
- * of B must keep every row it had, in each path P3.5c switched: the manifest write and append, the taxonomy topic insert, assign and
- * meta record, purge_collection with its meta, and the aspect and highlight writes.
+ * RDR-229 P3.5c (nexus-p2m1x.25), census invariants I7 and I8, in the rename gap P3.5a's round 2 defined (linda's ruling): the route
+ * boundary has resolved the id X to the label B, and just before the write's own by-id registry read X's row is renamed in place to C
+ * (it keeps its id, nothing else is written: P3.7's rename) and a NEW row Y takes the label B. The write then goes ahead, by its id, under
+ * the row's CURRENT label:
+ * <ul>
+ *   <li>I7: it reaches X through {@code CollectionIds}, never resolves the label itself, so the new holder Y of B keeps every row it had
+ *       and gets none;</li>
+ *   <li>I8: every row it files for X carries C, the locked row's current label, never B, the label the request carried from the boundary.</li>
+ * </ul>
+ * The rename is {@link CollectionRouteFixture#renameInPlaceBeforeTheWritesRead} (P3.5a's hook: the rename runs on ANOTHER thread, since the
+ * hook runs on the request's thread, where the carried ids are set, and a setup that read the registry there would read the requested id and
+ * pass by accident). Each test asserts the hook ran and that rows landed (or, for a delete, that X's rows are gone), so none passes vacuously.
  *
- * <p>The setup runs on ANOTHER thread ({@link #elsewhere}): the hook runs on the request's own thread, where the carried ids are set,
- * and a setup that read the registry there would read the requested id and pass by accident.
+ * <p>The sites here are the ones P3.5a's own table-driven test ({@code CollectionRoutesByIdTest}) cannot land rows for on its fixture, or lands
+ * none for: the manifest write and append (a row with no chunk, so the fallback name is the label), assign_from_chashes (both its transactions),
+ * the meta record, and the reads-then-writes of the aspect, highlight and taxonomy deletes. The three foreign keys that tie a child's NAME to
+ * another table's name are dropped first, as P3.7's name-key drop does ({@code Rdr229P37PrerequisitesTest}): with them in place a write under
+ * the new label is refused (23503) until P3.7, which is pinned there and is not what this class measures.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class Rdr229P35cIdAddressedRenameRaceTest {
@@ -53,36 +58,23 @@ class Rdr229P35cIdAddressedRenameRaceTest {
     @BeforeAll
     void startAll() throws Exception {
         fx = new CollectionRouteFixture();
-        // P3.4's arbiter indexes exist before any latched upsert: the id arbiter needs them
-        for (String t : List.of("taxonomy_meta", "document_aspects", "topics")) {
-            ensureArbiterIndex(t);
-        }
-        fx.gate3.set(true);
-    }
-
-    /** The arbiter index P3.4's pass builds for {@code table}, created from its spec if not there yet. */
-    private void ensureArbiterIndex(String table) {
-        var spec = IdUniqueIndexPass.SPECS.stream().filter(x -> x.table().equals(table) && x.unique()).findFirst().orElseThrow();
-        List<Field<?>> cols = java.util.Arrays.stream(spec.columns().split(",\\s*")).<Field<?>>map(c -> DSL.field(DSL.name(c))).toList();
         fx.asSuperuser(ctx -> {
-            var step = ctx.createUniqueIndexIfNotExists(spec.index()).on(DSL.table(DSL.name("nexus", table)), cols);
-            if (spec.predicate() != null) {
-                assertThat(table).as("the only partial arbiter this test builds is topics'").isEqualTo("topics");
-                step.where(TOPICS.PARENT_ID.isNull()).execute();
-            } else {
-                step.execute();
-            }
+            RegistryRenameSupport.dropForeignKeysOntoTheRegistry(ctx);   // P3.7's name-key drop: a one-row rename cascades nowhere
+            ctx.alterTable(CATALOG_DOCUMENT_CHUNKS).dropConstraintIfExists(DSL.name("fk_catalog_chunks_chunk")).execute();
+            ctx.alterTable(TOPIC_ASSIGNMENTS).dropConstraintIfExists(DSL.name("topic_assignments_chunk_fk")).execute();
+            ctx.alterTable(DOCUMENT_HIGHLIGHTS).dropConstraintIfExists(DSL.name("fk_doc_highlights_catalog_doc")).execute();
+            // the name uniques the delete and purge tests would trip: X's stale rows (named B) beside the new holder's (named B). The id
+            // arbiters (built when the gate latches) remain; the name keys go with P3.7 / P4.1
+            ctx.alterTable(DOCUMENT_ASPECTS).dropConstraintIfExists(DSL.name("document_aspects_tenant_col_path_uq")).execute();
+            ctx.alterTable(TAXONOMY_META).dropConstraintIfExists(DSL.name("taxonomy_meta_pk")).execute();
             return null;
         });
+        fx.gate3.set(true);   // latches the gate, and builds the id arbiters the latched upserts infer
     }
 
     @AfterAll
     void stopAll() {
         if (fx != null) fx.close();
-    }
-
-    private static void elsewhere(Runnable setup) {
-        CompletableFuture.runAsync(setup).join();
     }
 
     private String registered(String stem) {
@@ -91,93 +83,92 @@ class Rdr229P35cIdAddressedRenameRaceTest {
         return l;
     }
 
-    /** P3.7's rename, simulated: the registry row of {@code from} takes the name {@code to}, keeps its id, and nothing else is written. */
-    private void oneRowRename(String from, String to) {
-        fx.asSuperuser(ctx -> {
-            ctx.set(DSL.name("session_replication_role"), DSL.inline("replica")).execute();
-            try {
-                int renamed = ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.NAME, to)
-                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(fx.tenant)).and(CATALOG_COLLECTIONS.NAME.eq(from)).execute();
-                assertThat(renamed).as("setup: the registry row was renamed in place").isEqualTo(1);
-            } finally {
-                ctx.set(DSL.name("session_replication_role"), DSL.inline("origin")).execute();
-            }
-            return null;
-        });
-    }
+    /** What one run of a request in the gap left behind. */
+    private record Gap(Resp resp, long x, String c, long y) { }
 
     /**
-     * Runs {@code request} (given the id N of {@code b}) with, just before the write's own by-id read: {@code b} renamed to
-     * {@code c}, a new row registered under {@code b}, and {@code seedNewHolder} run for it. Asserts the setup ran and that N is
-     * still the renamed row's id.
+     * Runs {@code request} (given the id X of {@code b}) with, just before the write's own by-id read: {@code b} renamed to C in place and a
+     * new row Y registered under {@code b} ({@code seedNewHolder} runs for it, by its id). Asserts the hook ran and that X now bears C.
      */
-    private Resp withTheLabelRenamedAwayAndTaken(String b, java.util.function.LongConsumer seedNewHolder, LongFunction<Resp> request) {
-        long id = fx.idOf(b);
-        String c = b + "-moved";
-        // warm the process-wide cache for the label (a by-label lookup fills B -> N's row, and the rename does not evict it), so a
-        // write that went back to the label would hit the cache and the new row alike: only a read of the id refuses it
+    private Gap inTheGap(String b, LongConsumer seedNewHolder, LongFunction<Resp> request) {
+        long x = fx.idOf(b);
+        // warm the process-wide cache for the label: a write that went back to the label would hit the cache and the new row alike
         CollectionRegistry.lookup(new dev.nexus.service.db.TenantScope(fx.svcDs), fx.tenant, b);
-        java.util.concurrent.atomic.AtomicBoolean ran = new java.util.concurrent.atomic.AtomicBoolean();
-        java.util.concurrent.atomic.AtomicBoolean started = new java.util.concurrent.atomic.AtomicBoolean();
-        fx.service.collectionSelectorFilter().testHooks(null, () -> {
-            if (!started.compareAndSet(false, true)) {
-                return;   // the seed requests below pass this hook too: once
-            }
-            elsewhere(() -> {
-                oneRowRename(b, c);
-                fx.register(b);
-                // the new holder is seeded by ITS id: a by-label request would hit the warm cache, which still maps B to the renamed row
-                seedNewHolder.accept(fx.idOf(b));
-                ran.set(true);
-            });
-        }, null, null);
-        try {
-            Resp r = request.apply(id);
-            assertThat(ran.get()).as("setup: the hook ran before the write's own read").isTrue();
-            assertThat(fx.labelOf(id)).as("N is the renamed row's id").isEqualTo(c);
-            assertThat(fx.idOf(b)).as("and the label B is a new row's").isNotEqualTo(id);
-            return r;
-        } finally {
-            fx.service.collectionSelectorFilter().testHooks(null, null, null, null);
+        try (CollectionRouteFixture.RenameGap gap = fx.renameInPlaceBeforeTheWritesRead(List.of(x), List.of(b), "i8-" + (n++),
+                gap0 -> gap0.newHolders().forEach(id -> seedNewHolder.accept(id)))) {
+            Resp r = request.apply(x);
+            assertThat(gap.ran()).as("setup: the rename ran before the write's own by-id read (%s)", r.body()).isTrue();
+            String c = gap.currentLabelOf().get(x);
+            long y = gap.newHolders().iterator().next();
+            assertThat(fx.labelOf(x)).as("X is the renamed row's id").isEqualTo(c);
+            assertThat(fx.idOf(b)).as("and the label B is the new row's").isEqualTo(y).isNotEqualTo(x);
+            return new Gap(r, x, c, y);
         }
     }
 
-    private void assertRefused(Resp r) {
-        assertThat(r.status()).as(r.body()).isEqualTo(409);
-        assertThat(r.reason()).as("the typed refusal: the id now carries another label: %s", r.body()).isEqualTo("collection_renamed");
+    private void assertOk(Gap g) {
+        assertThat(g.resp().status()).as("the write goes ahead by its id, under the row's current label: %s", g.resp().body()).isEqualTo(200);
     }
 
-    // ---- counts of what the new holder of B keeps ------------------------------------------------------------------------------
+    // ---- what the rows say ---------------------------------------------------------------------------------------------------------
 
-    private int topics(String c) {
-        Integer v = fx.asSuperuser(ctx -> ctx.fetchCount(TOPICS, TOPICS.TENANT_ID.eq(fx.tenant).and(TOPICS.COLLECTION.eq(c))));
+    private List<String> names(org.jooq.Field<String> name, org.jooq.Field<Long> id, org.jooq.Table<?> table, org.jooq.Field<String> tenant, long x) {
+        return fx.asSuperuser(ctx -> ctx.select(name).from(table).where(tenant.eq(fx.tenant).and(id.eq(x))).fetch(name));
+    }
+
+    /** Asserts rows of X landed, every one under C, and that none of the new holder's id is among them. */
+    private void assertStored(Gap g, List<String> storedUnderX, int rowsOfTheNewHolder) {
+        assertThat(storedUnderX).as("non-vacuity: rows were filed for id %d", g.x()).isNotEmpty();
+        assertThat(storedUnderX).as("I8: they carry the locked row's current label %s, never the boundary's", g.c()).allMatch(g.c()::equals);
+        assertThat(rowsOfTheNewHolder).as("I7: the new holder of the old label got none").isZero();
+    }
+
+    private int topicsOf(long id) {
+        Integer v = fx.asSuperuser(ctx -> ctx.fetchCount(TOPICS, TOPICS.TENANT_ID.eq(fx.tenant).and(TOPICS.COLLECTION_ID.eq(id))));
         return v;
     }
 
-    private int metas(String c) {
-        Integer v = fx.asSuperuser(ctx -> ctx.fetchCount(TAXONOMY_META, TAXONOMY_META.TENANT_ID.eq(fx.tenant).and(TAXONOMY_META.COLLECTION.eq(c))));
+    private int metasOf(long id) {
+        Integer v = fx.asSuperuser(ctx -> ctx.fetchCount(TAXONOMY_META, TAXONOMY_META.TENANT_ID.eq(fx.tenant).and(TAXONOMY_META.COLLECTION_ID.eq(id))));
         return v;
     }
 
-    private int aspects(String c) {
-        Integer v = fx.asSuperuser(ctx -> ctx.fetchCount(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID.eq(fx.tenant).and(DOCUMENT_ASPECTS.COLLECTION.eq(c))));
+    private int aspectsOf(long id) {
+        Integer v = fx.asSuperuser(ctx -> ctx.fetchCount(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID.eq(fx.tenant).and(DOCUMENT_ASPECTS.COLLECTION_ID.eq(id))));
         return v;
     }
 
-    private int highlights(String c) {
-        Integer v = fx.asSuperuser(ctx -> ctx.fetchCount(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(fx.tenant).and(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(c))));
+    private int highlightsOf(long id) {
+        Integer v = fx.asSuperuser(ctx -> ctx.fetchCount(DOCUMENT_HIGHLIGHTS,
+            DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(fx.tenant).and(DOCUMENT_HIGHLIGHTS.COLLECTION_ID.eq(id))));
         return v;
     }
 
-    private int manifestRows(String c) {
+    private int manifestRowsOf(long id) {
         Integer v = fx.asSuperuser(ctx -> ctx.fetchCount(CATALOG_DOCUMENT_CHUNKS,
-            CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(fx.tenant).and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(c))));
+            CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(fx.tenant).and(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID.eq(id))));
         return v;
     }
 
-    private void seedTopic(long id) {
-        Resp r = fx.post("/v1/taxonomy/topics/insert", "{\"collection_id\":" + id + ",\"label\":\"held\",\"doc_count\":1}");
+    // ---- seeds ---------------------------------------------------------------------------------------------------------------------
+
+    private long seedTopic(long id, String label) {
+        Resp r = fx.post("/v1/taxonomy/topics/insert", "{\"collection_id\":" + id + ",\"label\":" + json(label) + ",\"doc_count\":1}");
         assertThat(r.status()).as("setup: " + r.body()).isEqualTo(200);
+        return r.json().path("id").asLong();
+    }
+
+    private void seedCentroid(long id, long topicId) {
+        Resp r = fx.post("/v1/taxonomy/centroids/upsert", "{\"records\":[{\"collection_id\":" + id + ",\"topic_id\":" + topicId
+            + ",\"label\":\"i8c\",\"doc_count\":1,\"embedding\":" + EMBEDDING_384 + "}]}");
+        assertThat(r.status()).as("setup: " + r.body()).isEqualTo(200);
+    }
+
+    private String seedChunk(long id, String text) {
+        String hex = Chash.ofText(text).toHex();
+        Resp r = fx.post("/v1/vectors/upsert-chunks", "{\"collection_id\":" + id + ",\"ids\":[\"" + hex + "\"],\"documents\":[" + json(text) + "]}");
+        assertThat(r.status()).as("setup: " + r.body()).isEqualTo(200);
+        return hex;
     }
 
     private void seedMeta(long id) {
@@ -198,122 +189,182 @@ class Rdr229P35cIdAddressedRenameRaceTest {
         assertThat(r.status()).as("setup: " + r.body()).isEqualTo(200);
     }
 
-    private void seedDocument(String c) {
+    private void seedDocument() {
         fx.asSuperuser(ctx -> {
             PgContainerHelper.insertCatalogDocument(ctx, fx.tenant, DOC);
             return null;
         });
     }
 
-    // ---- the manifest write and append ------------------------------------------------------------------------------------------
+    // ---- the manifest write and append (a row whose chunk is not found names the collection by the locked row's current label) -------
+
+    private static final String MANIFEST_ROW = "{\"position\":0,\"chash\":\"" + Chash.ofText("p35c-i8-manifest").toHex() + "\"}";
 
     @Test
-    void manifestWrite_underAnIdRenamedAwayBeforeItsRead_isRefused_andWritesNothingToTheNewHolder() {
+    void manifestWrite_underAnIdRenamedInTheGap_filesItsRowsUnderTheCurrentLabel() {
         String b = registered("mw");
-        seedDocument(b);
-        Resp r = withTheLabelRenamedAwayAndTaken(b, id -> { },
-            id -> fx.post("/v1/catalog/manifest/write", "{\"collection_id\":" + id + ",\"doc_id\":\"" + DOC + "\",\"rows\":[]}"));
-        assertRefused(r);
-        assertThat(manifestRows(b)).as("the new holder of B got no manifest row").isZero();
+        seedDocument();
+        Gap g = inTheGap(b, y -> { },
+            x -> fx.post("/v1/catalog/manifest/write", "{\"collection_id\":" + x + ",\"doc_id\":\"" + DOC + "\",\"rows\":[" + MANIFEST_ROW + "]}"));
+        assertOk(g);
+        assertStored(g, names(CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CATALOG_DOCUMENT_CHUNKS,
+            CATALOG_DOCUMENT_CHUNKS.TENANT_ID, g.x()), manifestRowsOf(g.y()));
     }
 
     @Test
-    void manifestAppend_underAnIdRenamedAwayBeforeItsRead_isRefused_andWritesNothingToTheNewHolder() {
+    void manifestAppend_underAnIdRenamedInTheGap_filesItsRowsUnderTheCurrentLabel() {
         String b = registered("ma");
-        seedDocument(b);
-        Resp r = withTheLabelRenamedAwayAndTaken(b, id -> { },
-            id -> fx.post("/v1/catalog/manifest/append", "{\"collection_id\":" + id + ",\"doc_id\":\"" + DOC + "\",\"rows\":[]}"));
-        assertRefused(r);
-        assertThat(manifestRows(b)).as("the new holder of B got no manifest row").isZero();
+        seedDocument();
+        Gap g = inTheGap(b, y -> { },
+            x -> fx.post("/v1/catalog/manifest/append", "{\"collection_id\":" + x + ",\"doc_id\":\"" + DOC + "\",\"rows\":[" + MANIFEST_ROW + "]}"));
+        assertOk(g);
+        assertStored(g, names(CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CATALOG_DOCUMENT_CHUNKS,
+            CATALOG_DOCUMENT_CHUNKS.TENANT_ID, g.x()), manifestRowsOf(g.y()));
     }
 
-    // ---- the taxonomy writes -------------------------------------------------------------------------------------------------------
+    // ---- the taxonomy writes -----------------------------------------------------------------------------------------------------------
 
     @Test
-    void topicInsert_underAnIdRenamedAwayBeforeItsRead_isRefused_andFilesNothingInTheNewHolder() {
+    void topicInsert_underAnIdRenamedInTheGap_filesTheTopicUnderTheCurrentLabel() {
         String b = registered("ti");
-        Resp r = withTheLabelRenamedAwayAndTaken(b, id -> { },
-            id -> fx.post("/v1/taxonomy/topics/insert", "{\"collection_id\":" + id + ",\"label\":\"p35c-i7\",\"doc_count\":1}"));
-        assertRefused(r);
-        assertThat(topics(b)).as("the new holder of B got no topic").isZero();
+        Gap g = inTheGap(b, y -> { },
+            x -> fx.post("/v1/taxonomy/topics/insert", "{\"collection_id\":" + x + ",\"label\":\"p35c-i7\",\"doc_count\":1}"));
+        assertOk(g);
+        assertStored(g, names(TOPICS.COLLECTION, TOPICS.COLLECTION_ID, TOPICS, TOPICS.TENANT_ID, g.x()), topicsOf(g.y()));
     }
 
     @Test
-    void assignFromChashes_underAnIdRenamedAwayBeforeItsRead_isRefused() {
-        String b = registered("af");
-        Resp r = withTheLabelRenamedAwayAndTaken(b, id -> { },
-            id -> fx.post("/v1/taxonomy/assignments/assign_from_chashes", "{\"collection_id\":" + id + ",\"chashes\":[\""
-                + Chash.ofText("p35c-i7-af").toHex() + "\"],\"cross_collection\":false}"));
-        assertRefused(r);
-    }
-
-    @Test
-    void metaRecord_underAnIdRenamedAwayBeforeItsRead_isRefused_andRecordsNothingForTheNewHolder() {
+    void metaRecord_underAnIdRenamedInTheGap_recordsUnderTheCurrentLabel() {
         String b = registered("mr");
-        Resp r = withTheLabelRenamedAwayAndTaken(b, id -> { },
-            id -> fx.post("/v1/taxonomy/meta/record", "{\"collection_id\":" + id + ",\"doc_count\":9}"));
-        assertRefused(r);
-        assertThat(metas(b)).as("the new holder of B got no meta row").isZero();
+        Gap g = inTheGap(b, y -> { },
+            x -> fx.post("/v1/taxonomy/meta/record", "{\"collection_id\":" + x + ",\"doc_count\":9}"));
+        assertOk(g);
+        assertStored(g, names(TAXONOMY_META.COLLECTION, TAXONOMY_META.COLLECTION_ID, TAXONOMY_META, TAXONOMY_META.TENANT_ID, g.x()), metasOf(g.y()));
+    }
+
+    /** X has a chunk and a centroid under B (all seeded before the rename); the own pass assigns the chunk to X's topic. */
+    @Test
+    void assignFromChashes_ownPass_underAnIdRenamedInTheGap_filesItsAssignmentsUnderTheCurrentLabel() {
+        String b = registered("af");
+        long x = fx.idOf(b);
+        String hex = seedChunk(x, "p35c-i8 own pass chunk");
+        seedCentroid(x, seedTopic(x, "i8-own"));
+        Gap g = inTheGap(b, y -> { },
+            id -> fx.post("/v1/taxonomy/assignments/assign_from_chashes",
+                "{\"collection_id\":" + id + ",\"chashes\":[\"" + hex + "\"],\"cross_collection\":false}"));
+        assertOk(g);
+        assertThat(g.resp().json().path("assigned").asInt()).as("the chunk is found by its id and assigned: %s", g.resp().body()).isEqualTo(1);
+        assertStored(g, names(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, TOPIC_ASSIGNMENTS,
+            TOPIC_ASSIGNMENTS.TENANT_ID, g.x()), assignmentsOf(g.y()));
+    }
+
+    /**
+     * The cross pass is its own transaction and the row it reads carries the label too: the request still says B to the end, and a cross pass
+     * that handed B to the function would file X's chunk through the NEW holder of B. Z is a second collection with a centroid (the tenant holds
+     * other tests' centroids too, so the nearest foreign one is whichever ties first); the rows the cross pass files are X's rows whose topic is
+     * not X's own.
+     */
+    @Test
+    void assignFromChashes_crossPass_underAnIdRenamedInTheGap_filesItsAssignmentsUnderTheCurrentLabel() {
+        String b = registered("ax");
+        String z = registered("az");
+        long x = fx.idOf(b);
+        long zId = fx.idOf(z);
+        String hex = seedChunk(x, "p35c-i8 cross pass chunk");
+        long xTopic = seedTopic(x, "i8-x");
+        seedCentroid(x, xTopic);
+        long zTopic = seedTopic(zId, "i8-z");
+        seedCentroid(zId, zTopic);
+        Gap g = inTheGap(b, y -> { },
+            id -> fx.post("/v1/taxonomy/assignments/assign_from_chashes",
+                "{\"collection_id\":" + id + ",\"chashes\":[\"" + hex + "\"],\"cross_collection\":true}"));
+        assertOk(g);
+        assertThat(g.resp().json().path("cross_assigned").asInt()).as("the cross pass assigned the chunk: %s", g.resp().body()).isEqualTo(1);
+        List<String> crossRows = fx.asSuperuser(ctx -> ctx.select(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION).from(TOPIC_ASSIGNMENTS)
+            .where(TOPIC_ASSIGNMENTS.TENANT_ID.eq(fx.tenant).and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID.eq(g.x())).and(TOPIC_ASSIGNMENTS.TOPIC_ID.ne(xTopic)))
+            .fetch(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION));
+        assertThat(crossRows).as("non-vacuity: the cross pass filed a row for X under a foreign topic").isNotEmpty().allMatch(g.c()::equals);
+        assertThat(assignmentsOf(g.y())).as("I7: the new holder of the old label got none").isZero();
+    }
+
+    private int assignmentsOf(long id) {
+        Integer v = fx.asSuperuser(ctx -> ctx.fetchCount(TOPIC_ASSIGNMENTS,
+            TOPIC_ASSIGNMENTS.TENANT_ID.eq(fx.tenant).and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID.eq(id))));
+        return v;
     }
 
     @Test
-    void purgeCollection_underAnIdRenamedAwayBeforeItsRead_isRefused_andPurgesNothingOfTheNewHolder() {
+    void purgeCollection_underAnIdRenamedInTheGap_purgesItsOwnRowsAndLeavesTheNewHolders() {
         String b = registered("pc");
-        Resp r = withTheLabelRenamedAwayAndTaken(b, newId -> {
-            seedTopic(newId);
-            seedMeta(newId);
-        }, id -> fx.post("/v1/taxonomy/purge_collection", "{\"collection_id\":" + id + "}"));
-        assertRefused(r);
-        assertThat(topics(b)).as("the new holder's topic survives the purge").isEqualTo(1);
-        assertThat(metas(b)).as("and its meta row (the purge meta)").isEqualTo(1);
+        long x0 = fx.idOf(b);
+        seedTopic(x0, "doomed");
+        seedMeta(x0);
+        Gap g = inTheGap(b, y -> {
+            seedTopic(y, "held");
+            seedMeta(y);
+        }, x -> fx.post("/v1/taxonomy/purge_collection", "{\"collection_id\":" + x + "}"));
+        assertOk(g);
+        assertThat(topicsOf(g.x())).as("non-vacuity: X's own topic is purged").isZero();
+        assertThat(metasOf(g.x())).as("and its meta row").isZero();
+        assertThat(topicsOf(g.y())).as("I7: the new holder's topic survives the purge").isEqualTo(1);
+        assertThat(metasOf(g.y())).as("and its meta row").isEqualTo(1);
     }
 
-    // ---- the aspect writes -----------------------------------------------------------------------------------------------------------
+    // ---- the aspect and highlight writes ------------------------------------------------------------------------------------------------
 
     @Test
-    void aspectsUpsert_underAnIdRenamedAwayBeforeItsRead_isRefused_andWritesNothingToTheNewHolder() {
+    void aspectsUpsert_underAnIdRenamedInTheGap_filesTheRowUnderTheCurrentLabel() {
         String b = registered("au");
         String docId = "own-" + b;
         fx.asSuperuser(ctx -> {
             CollectionIdSeeds.ownerDocument(ctx, fx.tenant, docId, b);
             return null;
         });
-        Resp r = withTheLabelRenamedAwayAndTaken(b, id -> { },
-            id -> fx.post("/v1/aspects/upsert", "{\"collection_id\":" + id + ",\"source_path\":" + json(PATH) + ",\"doc_id\":" + json(docId)
+        Gap g = inTheGap(b, y -> { },
+            x -> fx.post("/v1/aspects/upsert", "{\"collection_id\":" + x + ",\"source_path\":" + json(PATH) + ",\"doc_id\":" + json(docId)
                 + ",\"confidence\":0.9,\"extracted_at\":\"2026-01-01T00:00:00Z\",\"model_version\":\"v1\",\"extractor_name\":\"ex\","
                 + "\"salient_sentences\":\"[\\\"x\\\"]\"}"));
-        assertRefused(r);
-        assertThat(aspects(b)).as("the new holder of B got no aspect row").isZero();
+        assertOk(g);
+        assertStored(g, names(DOCUMENT_ASPECTS.COLLECTION, DOCUMENT_ASPECTS.COLLECTION_ID, DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, g.x()),
+            aspectsOf(g.y()));
     }
 
     @Test
-    void aspectsDelete_underAnIdRenamedAwayBeforeItsRead_isRefused_andDeletesNothingOfTheNewHolder() {
+    void aspectsDelete_underAnIdRenamedInTheGap_deletesItsOwnRowAndLeavesTheNewHolders() {
         String b = registered("ad");
-        Resp r = withTheLabelRenamedAwayAndTaken(b, newId -> seedAspect(newId),
-            id -> fx.post("/v1/aspects/delete", "{\"collection_id\":" + id + ",\"source_path\":" + json(PATH) + "}"));
-        assertRefused(r);
-        assertThat(aspects(b)).as("the new holder's aspect row survives").isEqualTo(1);
+        seedAspect(fx.idOf(b));
+        Gap g = inTheGap(b, this::seedAspect,
+            x -> fx.post("/v1/aspects/delete", "{\"collection_id\":" + x + ",\"source_path\":" + json(PATH) + "}"));
+        assertOk(g);
+        assertThat(aspectsOf(g.x())).as("non-vacuity: X's own aspect row is deleted").isZero();
+        assertThat(aspectsOf(g.y())).as("I7: the new holder's aspect row survives").isEqualTo(1);
     }
 
     @Test
-    void aspectsSetSalientByKey_underAnIdRenamedAwayBeforeItsRead_isRefused_andChangesNothingOfTheNewHolder() {
+    void aspectsSetSalientByKey_underAnIdRenamedInTheGap_changesItsOwnRowAndLeavesTheNewHolders() {
         String b = registered("as");
-        Resp r = withTheLabelRenamedAwayAndTaken(b, newId -> seedAspect(newId),
-            id -> fx.post("/v1/aspects/salient_sentences/set_by_key",
-                "{\"collection_id\":" + id + ",\"source_path\":" + json(PATH) + ",\"sentences\":[\"changed\"]}"));
-        assertRefused(r);
-        String held = fx.asSuperuser(ctx -> ctx.select(DOCUMENT_ASPECTS.SALIENT_SENTENCES).from(DOCUMENT_ASPECTS)
-            .where(DOCUMENT_ASPECTS.TENANT_ID.eq(fx.tenant).and(DOCUMENT_ASPECTS.COLLECTION.eq(b))).fetchOne(x -> String.valueOf(x.value1())));
-        assertThat(held).as("the new holder's sentences are untouched").contains("held").doesNotContain("changed");
+        seedAspect(fx.idOf(b));
+        Gap g = inTheGap(b, this::seedAspect,
+            x -> fx.post("/v1/aspects/salient_sentences/set_by_key",
+                "{\"collection_id\":" + x + ",\"source_path\":" + json(PATH) + ",\"sentences\":[\"changed\"]}"));
+        assertOk(g);
+        assertThat(salientOf(g.x())).as("non-vacuity: X's own sentences changed").contains("changed");
+        assertThat(salientOf(g.y())).as("I7: the new holder's sentences are untouched").contains("held").doesNotContain("changed");
+    }
+
+    private String salientOf(long id) {
+        return fx.asSuperuser(ctx -> ctx.select(DOCUMENT_ASPECTS.SALIENT_SENTENCES).from(DOCUMENT_ASPECTS)
+            .where(DOCUMENT_ASPECTS.TENANT_ID.eq(fx.tenant).and(DOCUMENT_ASPECTS.COLLECTION_ID.eq(id))).fetchOne(x -> String.valueOf(x.value1())));
     }
 
     @Test
-    void highlightsUpsert_underAnIdRenamedAwayBeforeItsRead_isRefused_andWritesNothingToTheNewHolder() {
+    void highlightsUpsert_underAnIdRenamedInTheGap_filesTheRowUnderTheCurrentLabel() {
         String b = registered("hu");
-        Resp r = withTheLabelRenamedAwayAndTaken(b, id -> { },
-            id -> fx.post("/v1/aspects/highlights/upsert", "{\"collection_id\":" + id + ",\"doc_id\":\"p35c-i7-doc\","
+        Gap g = inTheGap(b, y -> { },
+            x -> fx.post("/v1/aspects/highlights/upsert", "{\"collection_id\":" + x + ",\"doc_id\":\"p35c-i7-doc\","
                 + "\"ingested_at\":\"2026-01-01T00:00:00Z\",\"highlights_md\":\"p35c\"}"));
-        assertRefused(r);
-        assertThat(highlights(b)).as("the new holder of B got no highlight row").isZero();
+        assertOk(g);
+        assertStored(g, names(DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.COLLECTION_ID, DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID,
+            g.x()), highlightsOf(g.y()));
     }
 }
