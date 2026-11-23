@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import dev.nexus.service.datamove.Gate3;
 import dev.nexus.service.vectors.ChunkMetadataKeys;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
@@ -79,6 +80,12 @@ import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
  * collection exactly one model, so no chunk of the collection sits in another). Which {@code limit + 1} rows a capped
  * collection returns is the planner's; its count is {@code limit}, {@code capped} is true, and its examples are drawn from
  * those rows.
+ *
+ * <p><b>RDR-229 P3.5c.</b> The list of examined collections is the registry's own labels and stays on {@code
+ * catalog_collections.name} (label-kept). From gate 3 the per-collection statement names the collection by its id: the label of
+ * the list is resolved to the id of its live registry row, and the document, manifest and chunk rows are matched on their id
+ * columns, so a row whose own name column is stale after a one-row rename is still found. Before gate 3 the statement is the
+ * name statement it was.
  */
 public final class PdfStubMetadataReads {
 
@@ -128,9 +135,15 @@ public final class PdfStubMetadataReads {
         .flatMap(java.util.Set::stream).toList()));
 
     private final CatalogRepository repo;
+    private final Gate3 gate3;
 
     public PdfStubMetadataReads(CatalogRepository repo) {
+        this(repo, Gate3.never());
+    }
+
+    public PdfStubMetadataReads(CatalogRepository repo, Gate3 gate3) {
         this.repo = repo;
+        this.gate3 = java.util.Objects.requireNonNull(gate3, "gate3");
     }
 
     /**
@@ -169,6 +182,13 @@ public final class PdfStubMetadataReads {
      */
     public static Select<Record2<String, Integer>> query(DSLContext ctx, String tenant, String collection, String model,
                                                          int fetchLimit) {
+        return query(ctx, tenant, collection, model, fetchLimit, Gate3.never());
+    }
+
+    /** As {@link #query(DSLContext, String, String, String, int)}, naming the collection by its id when {@code gate3} holds (read once here). */
+    public static Select<Record2<String, Integer>> query(DSLContext ctx, String tenant, String collection, String model,
+                                                         int fetchLimit, Gate3 gate3) {
+        CollectionKey k = CollectionKey.of(gate3);
         var d = CATALOG_DOCUMENTS.as("d");
         var m = CATALOG_DOCUMENT_CHUNKS.as("m");
         var earlier = CATALOG_DOCUMENT_CHUNKS.as("earlier");
@@ -183,13 +203,14 @@ public final class PdfStubMetadataReads {
         Table<?> stubs = ctx.select(source.as("src"))
             .from(d)
             .join(m).on(m.TENANT_ID.eq(d.TENANT_ID).and(m.DOC_ID.eq(d.TUMBLER)))
-            .join(ch).on(ch.TENANT_ID.eq(m.TENANT_ID).and(ch.COLLECTION.eq(m.COLLECTION)).and(ch.CHASH.eq(m.CHASH)))
+            .join(ch).on(ch.TENANT_ID.eq(m.TENANT_ID).and(k.same(ch.COLLECTION, ch.COLLECTION_ID, m.COLLECTION, m.COLLECTION_ID))
+                .and(ch.CHASH.eq(m.CHASH)))
             .where(d.TENANT_ID.eq(tenant)
-                .and(d.PHYSICAL_COLLECTION.eq(collection))
+                .and(k.eq(tenant, d.PHYSICAL_COLLECTION, d.PHYSICAL_COLLECTION_ID, collection))
                 .and(d.DELETED_AT.isNull())
                 .and(format.eq("pdf"))
                 .and(pythonFalsy(DSL.jsonbGetAttribute(d.METADATA, "extraction_method")))
-                .and(m.COLLECTION.eq(collection))
+                .and(k.eq(tenant, m.COLLECTION, m.COLLECTION_ID, collection))
                 .and(ch.TENANT_ID.eq(tenant))
                 .and(ch.EMBEDDING_MODEL.eq(model))
                 .and(carriesNonChunkRowKey(ch.METADATA))
@@ -197,7 +218,8 @@ public final class PdfStubMetadataReads {
                 // one chash per document: only the first position of a chunk a manifest lists twice
                 .and(DSL.notExists(ctx.selectOne().from(earlier)
                     .where(earlier.TENANT_ID.eq(m.TENANT_ID).and(earlier.DOC_ID.eq(m.DOC_ID))
-                        .and(earlier.COLLECTION.eq(m.COLLECTION)).and(earlier.CHASH.eq(m.CHASH))
+                        .and(k.same(earlier.COLLECTION, earlier.COLLECTION_ID, m.COLLECTION, m.COLLECTION_ID))
+                        .and(earlier.CHASH.eq(m.CHASH))
                         .and(earlier.POSITION.lt(m.POSITION)))))
             )
             .limit(fetchLimit)
@@ -261,7 +283,7 @@ public final class PdfStubMetadataReads {
         return repo.tenantScope().withTenant(tenant, ctx -> {
             PgSession.setLocal(ctx, "statement_timeout", Integer.toString(boundMs));
             Map<String, Integer> sources = new LinkedHashMap<>();
-            for (var r : query(ctx, tenant, ref.name(), ref.embeddingModel(), limit + 1).fetch()) {
+            for (var r : query(ctx, tenant, ref.name(), ref.embeddingModel(), limit + 1, gate3).fetch()) {
                 sources.merge(r.value1(), r.value2(), Integer::sum);
             }
             int total = sources.values().stream().mapToInt(Integer::intValue).sum();

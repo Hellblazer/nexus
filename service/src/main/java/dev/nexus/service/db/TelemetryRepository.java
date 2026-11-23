@@ -1,6 +1,7 @@
 package dev.nexus.service.db;
 
 import dev.nexus.service.jooq.nexus.tables.records.RelevanceLogRecord;
+import dev.nexus.service.datamove.Gate3;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.JSONB;
@@ -46,9 +47,20 @@ public final class TelemetryRepository {
                              .withZone(ZoneOffset.UTC);
 
     private final TenantScope tenantScope;
+    private final Gate3 gate3;
 
     public TelemetryRepository(TenantScope tenantScope) {
+        this(tenantScope, Gate3.never());
+    }
+
+    /**
+     * RDR-229 P3.5c: from gate 3 the history readers of a collection (relevance_log, search_telemetry, hook_failures) read the id
+     * where a row carries one and the name where it carries none, and report the registry's current label; before it, the name
+     * columns. A history row is never stamped after the fact, so the name arm stays for the rows with no id.
+     */
+    public TelemetryRepository(TenantScope tenantScope, Gate3 gate3) {
         this.tenantScope = tenantScope;
+        this.gate3 = java.util.Objects.requireNonNull(gate3, "gate3");
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────
@@ -222,6 +234,7 @@ public final class TelemetryRepository {
                                                       String action,
                                                       String sessionId,
                                                       int limit) {
+        CollectionKey k = CollectionKey.of(gate3);
         return tenantScope.withTenant(tenant, ctx -> {
             var cond = noCondition();
             if (query != null && !query.isBlank()) cond = cond.and(RELEVANCE_LOG.QUERY.eq(query));
@@ -233,7 +246,7 @@ public final class TelemetryRepository {
                 RELEVANCE_LOG.ID,
                 RELEVANCE_LOG.QUERY,
                 RELEVANCE_LOG.CHUNK_ID,
-                RELEVANCE_LOG.COLLECTION,
+                k.labelOrName(tenant, RELEVANCE_LOG.COLLECTION, RELEVANCE_LOG.COLLECTION_ID),
                 RELEVANCE_LOG.ACTION,
                 RELEVANCE_LOG.SESSION_ID,
                 RELEVANCE_LOG.TIMESTAMP)
@@ -413,6 +426,7 @@ public final class TelemetryRepository {
      * {@code median_top_distance} (nullable).
      */
     public Map<String, Object> queryCollectionStats(String tenant, String collection, int days) {
+        CollectionKey k = CollectionKey.of(gate3);
         return tenantScope.withTenant(tenant, ctx -> {
             OffsetDateTime cutoff = OffsetDateTime.now(ZoneOffset.UTC).minusDays(days);
 
@@ -420,7 +434,7 @@ public final class TelemetryRepository {
                 count().as("row_count"),
                 sum(when(SEARCH_TELEMETRY.KEPT_COUNT.eq(0), 1).otherwise(0)).as("zero_count"))
                 .from(SEARCH_TELEMETRY)
-                .where(SEARCH_TELEMETRY.COLLECTION.eq(collection)
+                .where(k.eqOrUnstamped(tenant, SEARCH_TELEMETRY.COLLECTION, SEARCH_TELEMETRY.COLLECTION_ID, collection)
                     .and(SEARCH_TELEMETRY.TS.greaterOrEqual(cutoff)))
                 .fetchOne();
 
@@ -431,7 +445,7 @@ public final class TelemetryRepository {
             // Fetch all top_distances for median calculation
             List<Double> distances = ctx.select(SEARCH_TELEMETRY.TOP_DISTANCE)
                 .from(SEARCH_TELEMETRY)
-                .where(SEARCH_TELEMETRY.COLLECTION.eq(collection)
+                .where(k.eqOrUnstamped(tenant, SEARCH_TELEMETRY.COLLECTION, SEARCH_TELEMETRY.COLLECTION_ID, collection)
                     .and(SEARCH_TELEMETRY.TS.greaterOrEqual(cutoff))
                     .and(SEARCH_TELEMETRY.RAW_COUNT.gt(0))
                     .and(SEARCH_TELEMETRY.TOP_DISTANCE.isNotNull()))
@@ -573,6 +587,7 @@ public final class TelemetryRepository {
                                                int days,
                                                List<String> hookNames,
                                                int limit) {
+        CollectionKey k = CollectionKey.of(gate3);
         return tenantScope.withTenant(tenant, ctx -> {
             var cond = noCondition();
             if (days > 0) {
@@ -593,7 +608,7 @@ public final class TelemetryRepository {
             List<Map<String, Object>> rows = ctx.select(
                 HOOK_FAILURES.ID,
                 HOOK_FAILURES.DOC_ID,
-                HOOK_FAILURES.COLLECTION,
+                k.labelOrName(tenant, HOOK_FAILURES.COLLECTION, HOOK_FAILURES.COLLECTION_ID),
                 HOOK_FAILURES.HOOK_NAME,
                 HOOK_FAILURES.ERROR,
                 HOOK_FAILURES.OCCURRED_AT,

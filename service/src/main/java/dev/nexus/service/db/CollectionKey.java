@@ -58,13 +58,38 @@ public final class CollectionKey {
         return byId ? id.eq(CollectionIds.idOf(tenant, value)) : name.eq(value);
     }
 
+    /**
+     * A HISTORY table's read (relevance_log, search_telemetry, hook_failures, gc_audit: rows are never stamped after the fact and a
+     * row may outlive its collection): {@code name = value} before gate 3; after, the row's id where it carries one and its name where
+     * it carries none: {@code id = registry id of value OR (id IS NULL AND name = value)}. An empty or null {@code value} matches
+     * nothing, so the {@code ''} name of a NULL-id row is never found by falling back to the name (linda 2026-11-20).
+     */
+    public Condition eqOrUnstamped(String tenant, Field<String> name, Field<Long> id, String value) {
+        if (!byId) {
+            return name.eq(value);
+        }
+        if (value == null || value.isEmpty()) {
+            return DSL.falseCondition();
+        }
+        return id.eq(CollectionIds.idOf(tenant, value)).or(id.isNull().and(name.eq(value)));
+    }
+
+    /**
+     * A history row's collection as an output column: the registry's current label of its id where the row carries one and the
+     * registry still has it, else the row's own name (a row with no id, or whose collection is gone, keeps what it recorded).
+     * The name column before gate 3.
+     */
+    public Field<String> labelOrName(String tenant, Field<String> name, Field<Long> id) {
+        return byId ? DSL.coalesce(label(tenant, name, id), name) : name;
+    }
+
     /** {@code name IN (values)} before gate 3; {@code id IN (registry ids of values)} after. */
     public Condition in(String tenant, Field<String> name, Field<Long> id, Collection<String> values) {
         if (!byId) {
             return name.in(values);
         }
         var c = CATALOG_COLLECTIONS.as("ckin");
-        return id.in(DSL.select(c.COLLECTION_ID).from(c).where(c.TENANT_ID.eq(tenant)).and(c.NAME.in(values)));
+        return id.in(DSL.select(c.COLLECTION_ID).from(c).where(c.TENANT_ID.eq(tenant)).and(c.NAME.in(values)).and(CollectionIds.live(c)));
     }
 
     /** {@code name LIKE prefix%} before gate 3; the ids of the registry labels that start with {@code prefix} after. */
@@ -92,11 +117,20 @@ public final class CollectionKey {
      * and reads the same Field back, and aliases it ({@code .as("collection")}) only where a name read is wanted.
      */
     public Field<String> label(String tenant, Field<String> name, Field<Long> id) {
+        return label(DSL.val(tenant), name, id);
+    }
+
+    /**
+     * As {@link #label(String, Field, Field)} for a statement that reads rows of every tenant: the registry row is the one of the
+     * row's own tenant. {@code tenant} must be qualified when the row's table is plain SQL and the subselect's own columns
+     * share its name (an unqualified {@code tenant_id} would bind to the registry's).
+     */
+    public Field<String> label(Field<String> tenant, Field<String> name, Field<Long> id) {
         if (!byId) {
             return name;
         }
         var c = CATALOG_COLLECTIONS.as("cklab");
-        return DSL.field(DSL.select(c.NAME).from(c).where(c.TENANT_ID.eq(DSL.val(tenant))).and(c.COLLECTION_ID.eq(id)));
+        return DSL.field(DSL.select(c.NAME).from(c).where(c.TENANT_ID.eq(tenant)).and(c.COLLECTION_ID.eq(id)));
     }
 
     /**
