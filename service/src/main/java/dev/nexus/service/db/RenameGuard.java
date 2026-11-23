@@ -18,6 +18,12 @@ import java.util.function.Function;
  * {@code CatalogRepository.renameCollectionTxn} and the rename of each per-store repository (chash, taxonomy, telemetry, aspects,
  * highlights) take by constructor, and the only way any of them reaches the rename it runs.
  *
+ * <p>Readiness is a dependency of this decision with a contract: {@link RenameReadiness#missing()} is total, cheap and fail-closed. It
+ * never throws, and any read failure or timeout answers a value other than {@code NONE} that names the missing condition, so the
+ * guard never reads a failure as "complete". That behaviour is P3.7's to supply; until then the stub answers the drop move is missing.
+ * The drop move is gated on the latched gate 3, so readiness {@code NONE} implies the latch row exists: "no row with readiness
+ * complete" is a real inconsistency (a partial restore), never a timing window.
+ *
  * <p>{@link #runRename} opens the rename's transaction (the caller's tenant stamp), and as the first statements of it takes
  * {@link RenameLatchLock} shared, asserts the transaction runs at READ COMMITTED, and reads the gate 3 latch row. The row alone
  * decides, and the matching body runs in that same transaction:
@@ -40,17 +46,24 @@ import java.util.function.Function;
  * <ol>
  * <li>{@link RenameLatchLock}, shared: verbs only (a writer never takes it);</li>
  * <li>the sweep gate(s), shared, one per label the acquirer covers, in sorted order;</li>
- * <li>the registry rows, in {@code collection_id} order: {@code FOR UPDATE} for a verb ({@code CollectionTombstones#lockRows}),
+ * <li>the collection tuple lock(s) ({@code CollectionTupleLock}, taken only while the live-tuple unique index is absent), in their
+ *     existing order;</li>
+ * <li>the registry rows, in {@code collection_id} order: {@code FOR UPDATE} for a verb ({@code CollectionTombstones#lockRows}, called
+ *     in {@code CollectionRename#retireAndRegister} right after the tuple locks and before the first row write),
  *     {@code FOR KEY SHARE} for a writer (the foreign key takes it on insert, and the by-id read takes it explicitly);</li>
  * <li>only then the chunk, manifest and child-row work.</li>
  * </ol>
+ * The writers that take advisory locks follow it: a manifest or chunk writer takes its sweep gate shared and then, on insert, its key
+ * share; a registration or mint takes the tuple lock and then writes the registry row (the catalog-051 triggers take the same tuple
+ * lock); none takes a tuple lock and then a gate.
  * {@code FOR UPDATE} conflicts with {@code FOR KEY SHARE}, so a verb waits for the writers in flight on its rows and its re-home
  * includes their rows, and a writer that arrives after it waits, then reads the retired row (409 {@code collection_superseded}) instead of
  * filing rows into it. Both sides take the gate before the row, so a sweep queued for the exclusive gate waits on both shared holders and
  * neither waits on it once it holds its gate: no cycle. The supersede takes no sweep gate, so it takes steps 1 and 3 only.
  *
- * <p>The in-process gate 3 signal plays no part: it is seeded from the row at boot and set after the row commits, so it can only
- * lag the row, and the one-row window opens only once the row is committed.
+ * <p>The latch row decides, except that no row with the readiness complete is {@code latch_row_missing}. The in-process gate 3 signal
+ * plays no part: it is seeded from the row at boot and set after the row commits, so it can only lag the row, and the one-row window
+ * opens only once the row is committed.
  *
  * <p>One public constructor, {@code (readiness, oneRowRename)}: P3.7 supplies its catalog rename ({@link OneRowRename}) where
  * {@code NexusService} builds the guard.
@@ -94,8 +107,10 @@ public final class RenameGuard {
      * example {@code work -> tenantScope.withTenant(tenant, work)}, or a retrying wrapper around that); each call of it is one
      * attempt, and the decision is made afresh in each.
      *
-     * @throws RenameRefusedException when the latch row exists and the one-row rename cannot run yet
-     * @throws IllegalStateException  when the transaction is not READ COMMITTED (the read of the row would be stale)
+     * @throws RenameRefusedException when the latch row exists and the one-row rename cannot run yet, or when there is no row and the
+     *                                readiness is complete
+     * @throws IllegalStateException  when {@code transaction} does not run the work in one transaction (the rename lock is not held
+     *                                after taking it), or the transaction is not READ COMMITTED (the read of the row would be stale)
      */
     public <T> T runRename(Function<Function<DSLContext, T>, T> transaction, Function<DSLContext, T> nameBody,
                            Function<DSLContext, T> oneRowBody) {

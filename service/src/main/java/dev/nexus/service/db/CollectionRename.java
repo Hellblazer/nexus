@@ -69,6 +69,7 @@ final class CollectionRename {
                 new CollectionTupleLock.Tuple(tenant, own.value1(), own.value2(), own.value3(), own.value4()),
                 new CollectionTupleLock.Tuple(tenant, source.value1(), source.value2(), source.value3(), source.value4())));
         }
+        CollectionTombstones.lockRows(ctx, tenant, oldName, newName);   // canonical lock order (RenameGuard#runRename): after the tuple locks above, before any row write
         long successorId = successorId(ctx, tenant, newName);
         int retired = CollectionTombstones.supersede(ctx, tenant, oldName, newName, successorId);
         if (retired == 0 && own != null) {
