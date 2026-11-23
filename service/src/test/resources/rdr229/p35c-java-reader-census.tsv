@@ -7,10 +7,13 @@ file	line	table	name_column	op	via	note
 service/src/main/java/dev/nexus/service/datamove/CompletionCheck.java	808	catalog_collections	superseded_by	expr	literal	-
 service/src/main/java/dev/nexus/service/datamove/CompletionCheck.java	825	catalog_collections	superseded_by	expr	literal	-
 service/src/main/java/dev/nexus/service/datamove/CompletionCheck.java	840	catalog_collections	superseded_by	expr	literal	-
-service/src/main/java/dev/nexus/service/db/AspectQueueDrain.java	322	?	collection	expr	literal	0 candidate tables in the statement
-service/src/main/java/dev/nexus/service/db/AspectQueueDrain.java	331	catalog_documents	physical_collection	expr	alias	-
-service/src/main/java/dev/nexus/service/db/AspectQueueDrain.java	338	catalog_documents	physical_collection	select	alias	-
-service/src/main/java/dev/nexus/service/db/AspectQueueDrain.java	355	catalog_documents	physical_collection	result	alias	-
+service/src/main/java/dev/nexus/service/db/AspectQueueDrain.java	323	?	collection	expr	literal	0 candidate tables in the statement
+service/src/main/java/dev/nexus/service/db/AspectQueueDrain.java	334	catalog_documents	physical_collection	expr	alias	-
+service/src/main/java/dev/nexus/service/db/AspectQueueDrain.java	341	catalog_documents	physical_collection	select	alias	-
+service/src/main/java/dev/nexus/service/db/AspectQueueDrain.java	358	catalog_documents	physical_collection	result	alias	-
+service/src/main/java/dev/nexus/service/db/AspectQueueDrain.java	385	catalog_collections	name	select	alias	-
+service/src/main/java/dev/nexus/service/db/AspectQueueDrain.java	386	catalog_collections	name	result	alias	-
+service/src/main/java/dev/nexus/service/db/AspectQueueDrain.java	386	catalog_collections	name	where	alias	-
 service/src/main/java/dev/nexus/service/db/AspectRepository.java	81	document_aspects	collection	expr	jooq	-
 service/src/main/java/dev/nexus/service/db/AspectRepository.java	93	document_highlights	collection	expr	jooq	-
 service/src/main/java/dev/nexus/service/db/AspectRepository.java	136	document_aspects	collection	expr	jooq	-
