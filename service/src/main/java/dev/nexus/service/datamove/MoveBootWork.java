@@ -476,6 +476,15 @@ public final class MoveBootWork implements AutoCloseable {
                 null);
             case RUNS_COMPLETE -> new Desired("runs complete: " + label + " (verification pending)", done, total, null);
             case WORKING -> {
+                var completing = call.filter(c -> VerifyingFinisher.COMPLETION_RUN.equals(c.runLabel()));
+                if (completing.isPresent()) {
+                    // a validation with no statement bound runs for as long as it takes: show how long, and that it can be cancelled
+                    String running = Duration.between(completing.get().startedAt(), now).toSeconds() < 60 ? "under a minute"
+                        : words(Duration.between(completing.get().startedAt(), now));
+                    yield new Desired("working: " + label + ", validating for " + running + " (no statement bound; the engine log names "
+                        + "its backend, and pg_cancel_backend on it makes the worker retry)", done, total,
+                        new BootWorkRegistry.Step("validation in flight", null, null, null));
+                }
                 String stalled = done == null ? null
                     : call.map(c -> stalledFor(label, done, c.startedAt(), now)).orElse(null);
                 if (stalled != null) {

@@ -47,6 +47,15 @@ import java.util.function.Consumer;
  * {@code on_complete} runs under {@code SET LOCAL lock_timeout} below the move's {@code statement_timeout_ms} on every
  * move, so a lock it cannot get fails fast with 55P03 and no reader queues behind it.
  *
+ * <p><b>A move with no statement bound</b> ({@link DataMove#unbounded}: a validation that blocks no writer, Sam 2026-11-23) does not run
+ * {@code on_complete} in the transaction above. {@link #validateBeforeClaim} runs it first, in a transaction of its own under
+ * {@code lock_timeout} 5 s and {@code statement_timeout} 0 (so no network timeout), holding no row of {@code nexus.data_moves} and no other
+ * move's state; its backend pid and start go to the reporter (status), a stop cancels the statement ({@link #cancelInFlight}), and a boot ends
+ * the backend if the engine died ({@link DataMoveOrphans}). Only then does the claim transaction run, with the cheap re-check and the UPDATE
+ * of {@code completed_at} and no {@code on_complete}. {@code on_complete} is idempotent for these moves (it validates what is not validated yet), so a
+ * restart between the two finds nothing left to do and claims. A move whose {@code on_complete} puts itself back
+ * ({@code completed_at} NULL again, the adoption move) ends as {@link MoveFinisher.Outcome#REOPENED}: no completed event, no listener, no retry reset.
+ *
  * <p>A stop ({@link Context#stopped}) is read before the finish, between tenants, before the table-wide run and before the
  * completion transaction, and ends the finish as {@link Outcome#LEFT_OPEN}; a verification already in flight is not
  * cancelled, it is bounded by {@code verify_statement_timeout_ms}.
@@ -129,7 +138,7 @@ final class VerifyingFinisher implements MoveFinisher {
         if (context.stopped().getAsBoolean()) {
             return Result.leftOpen();
         }
-        return complete(admin, move, context.tenants());
+        return complete(admin, move, context);
     }
 
     // ── verification ───────────────────────────────────────────────────────────────────────────────────────
@@ -243,8 +252,18 @@ final class VerifyingFinisher implements MoveFinisher {
 
     // ── completion ─────────────────────────────────────────────────────────────────────────────────────────
 
-    private Result complete(DSLContext admin, DataMove move, List<String> tenants) {
+    private Result complete(DSLContext admin, DataMove move, Context context) {
+        List<String> tenants = context.tenants();
         String onComplete = move.onComplete();
+        if (move.unbounded() && onComplete != null) {
+            // a validation with no statement bound runs in a transaction of its own BEFORE the claim (linda, 2026-11-23): the claim holds
+            // the move's row lock and a snapshot, and must not hold them for as long as a VALIDATE can take. on_complete is idempotent
+            // (it validates only what is not validated yet), so a restart after it and before the claim finds nothing left to do.
+            Result failed = validateBeforeClaim(admin, move, context);
+            if (failed != null) {
+                return failed;
+            }
+        }
         // a move with no statement bound (a validation that blocks no writer) gets statement_timeout 0, so no network timeout either,
         // and the lock wait the ceiling gives any move
         int statementMs = move.unbounded() ? 0 : move.statementTimeoutMs();
@@ -275,7 +294,7 @@ final class VerifyingFinisher implements MoveFinisher {
                 // the verification again, warm now, under the completion's own bound: a write since the first pass cannot slip
                 // past, and a non-empty or failed re-check rolls this transaction back with the UPDATE above
                 tx.connection(c -> recheck(tx, c, move, tenants));
-                if (onComplete != null) {
+                if (onComplete != null && !move.unbounded()) {
                     if (ChunkFamily.touches(move)) {
                         // only now: the move is known to complete, so no pause or supersede ends a build for nothing
                         // best effort: a savepoint keeps a refused signal from aborting the transaction
@@ -308,8 +327,87 @@ final class VerifyingFinisher implements MoveFinisher {
             }
             return now.get().paused() ? Result.paused(now.get()) : Result.leftOpen();
         }
+        if (onComplete != null && reopenedBy(admin, move.label())) {
+            // the on_complete put the move back (the adoption move does while a leaf is not validated yet): not a completion, so no
+            // event, no listener and no retry reset
+            return Result.reopened();
+        }
         MoveEvents.completed(move.label(), onComplete != null);
         return Result.completed();
+    }
+
+    /** True when the move's own on_complete set {@code completed_at} back to NULL in the transaction that completed it. */
+    private static boolean reopenedBy(DSLContext admin, String label) {
+        return admin.fetchExists(MOVES, DSL.field(DSL.name("label"), String.class).eq(label),
+            DSL.field(DSL.name("completed_at"), SQLDataType.TIMESTAMPWITHTIMEZONE).isNull());
+    }
+
+    /** The completion statement in flight, so {@link #cancelInFlight} can reach it from the thread that stops the engine. */
+    private volatile java.sql.Statement completionStatement;
+
+    @Override
+    public void cancelInFlight() {
+        java.sql.Statement st = completionStatement;
+        if (st != null) {
+            try {
+                st.cancel();
+            } catch (SQLException | RuntimeException e) {
+                log.warn("event=data_move_completion_cancel_failed cause=\"{}\"", FailureHandler.oneLine(e.toString()));
+            }
+        }
+    }
+
+    /**
+     * A move with no statement bound runs its on_complete here, in a transaction of its own under lock_timeout only and statement_timeout
+     * 0, before the claim. The backend's pid and start go to the reporter (status shows how long it has run), and a stop cancels the
+     * statement. PCI builders are ended first for a move over the chunk family, except a per-leaf validation (it only conflicts with a
+     * build on its own leaf, and the lock wait answers that with 55P03).
+     *
+     * @return null on success, otherwise the result that ends the finish
+     */
+    private Result validateBeforeClaim(DSLContext admin, DataMove move, Context context) {
+        if (ChunkFamily.touches(move) && !isLeafValidation(move)) {
+            try {
+                admin.transaction(cfg -> PciBuilders.terminateOrThrow(cfg.dsl(), "reason=data_move_on_complete move=" + move.label(), log));
+            } catch (DataAccessException e) {
+                log.error("event=pci_builders_terminate_failed cause=\"{}\"", FailureHandler.oneLine(e.toString()));
+            }
+        }
+        MoveReporter reporter = context.reporter();
+        try {
+            admin.transaction(cfg -> {
+                DSLContext tx = cfg.dsl();
+                PgSession.setStatementAndLockBounds(tx, 0, DataMove.UNBOUNDED_LOCK_TIMEOUT_MS);
+                Integer pid = tx.select(DSL.function("pg_backend_pid", SQLDataType.INTEGER)).fetchOne(0, Integer.class);
+                log.info("event=data_move_completion label={} pid={}", move.label(), pid);
+                if (reporter != null && pid != null) {
+                    reporter.callStarted(move, COMPLETION_RUN, pid);
+                }
+                tx.connection(c -> MoveSql.runOnComplete(c, move.onComplete(), st -> completionStatement = st));
+            });
+        } catch (DataAccessException e) {
+            SQLException raised = e.getCause(SQLException.class);
+            if (context.stopped().getAsBoolean() && raised != null && "57014".equals(raised.getSQLState())) {
+                return Result.leftOpen();   // the engine stopped it; the next boot validates again
+            }
+            return Result.report(failure(admin, move, FailureHandler.Stage.ON_COMPLETE, null, raised,
+                "on_complete of " + move.label() + " did not complete: "
+                    + FailureHandler.oneLine(raised != null ? "sqlstate=" + raised.getSQLState() + " " + raised.getMessage()
+                        : e.getMessage())));
+        } finally {
+            completionStatement = null;
+            if (reporter != null) {
+                reporter.callEnded(move);
+            }
+        }
+        return null;
+    }
+
+    /** The run label the reporter shows for a completion statement. */
+    static final String COMPLETION_RUN = "completion";
+
+    private static boolean isLeafValidation(DataMove move) {
+        return move.label().startsWith(dev.nexus.service.vectors.Rdr229ChunksFk.LEAF_LABEL_PREFIX);
     }
 
     /** A re-check that ends the completion transaction: carries what {@link #failure} needs. */
