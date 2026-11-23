@@ -20,6 +20,10 @@ import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
  * write transaction before it writes, by each row's STORED {@code collection_id} (an unstamped row, by its label), in one {@code
  * collection_id}-ordered statement (the order a retiring verb locks in). The write then touches only the rows of the collections it
  * holds: a row a verb re-homed while the writer waited is not written, and the read repeats until the doc's rows are all held.
+ *
+ * <p>The read is TOLERANT ({@link RegistryRowLocks#keyShareIfPresent}): a row stamped to a collection that is retired or gone is locked if
+ * it is there and the write goes ahead, so these routes answer what they answered before the read existed (supersede does not re-home
+ * children, so such rows persist; a 409 or 404 here would be a new refusal on a released route).
  */
 final class AspectDocCollectionLocks {
 
@@ -63,7 +67,7 @@ final class AspectDocCollectionLocks {
             if (!grew) {
                 break;   // every collection the doc's rows are in is held
             }
-            CollectionRegistry.requireIdsAndLabelsForWrite(ctx, tenant, ids, labels);
+            RegistryRowLocks.keyShareIfPresent(ctx, tenant, ids, labels);   // tolerant: a row stamped to a retired or gone collection is still written
         }
         return new Held(ids, labels);
     }

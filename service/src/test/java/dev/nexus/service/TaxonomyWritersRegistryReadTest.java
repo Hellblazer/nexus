@@ -169,6 +169,18 @@ class TaxonomyWritersRegistryReadTest {
             .fetchOne(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID));
     }
 
+    /**
+     * Retires {@code name}'s row the way a supersede does: it names its successor and the children stay where they are (a supersede
+     * re-homes nothing). P3.1's CHECK ties {@code superseded_by} to {@code superseded_by_id}.
+     */
+    private void supersede(String name, String successor) {
+        long successorId = fx.idOf(successor);
+        int retired = fx.asSuperuser(ctx -> ctx.update(CATALOG_COLLECTIONS)
+            .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, successor).set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, successorId)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(fx.tenant).and(CATALOG_COLLECTIONS.NAME.eq(name))).execute());
+        assertThat(retired).as("setup: the row was retired").isEqualTo(1);
+    }
+
     // ---- the verb ----------------------------------------------------------------------------------------------------
 
     private int waitingRows() {
@@ -590,5 +602,241 @@ class TaxonomyWritersRegistryReadTest {
         assertThat(r.json().path("topics").asInt(-1)).isEqualTo(1);
         assertThat(r.json().path("assignments").asInt(-1)).as("the projection from the other collection went with its topic").isEqualTo(1);
         assertThat(topicRow(t)).as("purged once the verb let go").isNull();
+    }
+
+    // ==== retired rows: a child stamped to a superseded collection is not refused ========================================
+    // A supersede re-homes no child, so such rows persist, and a released client reaches them by topic id or by document. Each route answers
+    // what it answered before the registry read existed: 200, and the write lands.
+
+    @Timeout(180)
+    @Test
+    void topicWriters_ofATopicStampedToASupersededCollection_answerAsBefore_andWrite() {
+        String home = registered("rt-home");
+        String successor = registered("rt-succ");
+        long update = topic(home, "t-update");
+        long rename = topic(home, "t-rename");
+        long review = topic(home, "t-review");
+        long delete = topic(home, "t-delete");
+        long source = topic(home, "t-merge-source");
+        long target = topic(home, "t-merge-target");
+        supersede(home, successor);
+
+        Resp u = fx.post("/v1/taxonomy/topics/update_label", "{\"topic_id\":" + update + ",\"label\":\"relabelled\"}");
+        Resp rn = fx.post("/v1/taxonomy/topics/rename", "{\"topic_id\":" + rename + ",\"label\":\"renamed-by-hand\"}");
+        Resp mr = fx.post("/v1/taxonomy/topics/mark_reviewed", "{\"topic_id\":" + review + ",\"status\":\"deleted\"}");
+        Resp d = fx.post("/v1/taxonomy/topics/delete", "{\"topic_id\":" + delete + "}");
+        Resp m = fx.post("/v1/taxonomy/topics/merge", "{\"source_id\":" + source + ",\"target_id\":" + target + "}");
+
+        assertThat(List.of(u.status(), rn.status(), mr.status(), d.status(), m.status()))
+            .as("no 409 collection_superseded: %s", List.of(u.body(), rn.body(), mr.body(), d.body(), m.body())).containsOnly(200);
+        assertThat(topicRow(update).label()).isEqualTo("relabelled");
+        assertThat(topicRow(update).collection()).as("a retired row's tombstone label is never restamped onto the topic").isEqualTo(home);
+        assertThat(topicRow(rename)).extracting(TopicRow::label, TopicRow::reviewStatus).containsExactly("renamed-by-hand", "accepted");
+        assertThat(topicRow(review).reviewStatus()).isEqualTo("deleted");
+        assertThat(topicRow(delete)).as("deleted").isNull();
+        assertThat(topicRow(source)).as("merged away").isNull();
+        assertThat(topicRow(target)).as("the merge target stays").isNotNull();
+        assertThat(d.json().path("collection").asText()).as("the delete names the collection the topic bears").isEqualTo(home);
+    }
+
+    @Timeout(180)
+    @Test
+    void purgeDoc_ofAnAssignmentWhoseSourceCollectionIsSuperseded_answersAsBefore_andPurges() {
+        String home = registered("rd-home");
+        String retiredSource = registered("rd-src");
+        String successor = registered("rd-succ");
+        long t = topic(home, "has-a-projection");
+        String doc = doc("rd");
+        projection(t, doc, 0.9, retiredSource);
+        supersede(retiredSource, successor);
+
+        Resp r = fx.post("/v1/taxonomy/assignments/purge_doc", "{\"project\":" + json(home) + ",\"title\":\"" + doc + "\"}");
+
+        assertThat(r.status()).as("no 409 for the source collection the assignment is stamped to: %s", r.body()).isEqualTo(200);
+        assertThat(r.json().path("removed").asInt(-1)).isEqualTo(1);
+        assertThat(assignmentCount(doc, t)).isZero();
+    }
+
+    @Timeout(180)
+    @Test
+    void purgeCollection_ofATopicWhoseAssignmentSourceIsSuperseded_answersAsBefore_andPurges() {
+        String home = registered("rp-home");
+        String retiredSource = registered("rp-src");
+        String successor = registered("rp-succ");
+        long t = topic(home, "doomed");
+        projection(t, doc("rp"), 0.9, retiredSource);
+        supersede(retiredSource, successor);
+
+        Resp r = fx.post("/v1/taxonomy/purge_collection", "{\"collection\":" + json(home) + "}");
+
+        assertThat(r.status()).as("no 409 for the retired source collection: %s", r.body()).isEqualTo(200);
+        assertThat(r.json().path("topics").asInt(-1)).isEqualTo(1);
+        assertThat(r.json().path("assignments").asInt(-1)).isEqualTo(1);
+        assertThat(topicRow(t)).isNull();
+    }
+
+    @Timeout(180)
+    @Test
+    void persistSplit_ofAParentWhoseAssignmentSourceIsSuperseded_answersAsBefore() {
+        String home = registered("rs-home");
+        String retiredSource = registered("rs-src");
+        String successor = registered("rs-succ");
+        long parent = topic(home, "parent");
+        projection(parent, doc("rs"), 0.9, retiredSource);
+        supersede(retiredSource, successor);
+        String spec = "{\"label\":\"child\",\"doc_count\":0,\"created_at\":\"2026-10-22T00:00:00Z\",\"terms_json\":\"[]\",\"doc_ids\":[]}";
+
+        Resp r = fx.post("/v1/taxonomy/topics/persist_split",
+            "{\"topic_id\":" + parent + ",\"collection_name\":" + json(home) + ",\"child_specs\":[" + spec + "]}");
+
+        assertThat(r.status()).as("no 409 for the retired source collection: %s", r.body()).isEqualTo(200);
+    }
+
+    // ==== by-id scoping is the design: what it reaches, and what it leaves ===============================================
+    // purge_doc, purge_collection and prune_projection scope by the registry id (the id is the collection's identity, a name column can be
+    // stale). So they REACH a renamed collection's rows whose name column bears the old label (these three tests), and they do NOT reach the
+    // rows of another id that bears the same name: the existing purgeDoc_byALabel..., pruneProjectionExact_byALabel... and
+    // pruneProjectionPrefix_byAPrefix... tests pin that half.
+
+    @Timeout(180)
+    @Test
+    void purgeDoc_byTheCurrentLabelOfARenamedCollection_reachesItsRowsWhoseNameColumnIsStale() {
+        String b = registered("pdc");
+        long x = fx.idOf(b);
+        long t = topic(b, "own-topic");
+        String doc = doc("pdc");
+        projection(t, doc, 0.9, b);
+        String c = oneRowRename(b);
+        assertThat(topicRow(t).collection()).as("setup: the topic's name column is still the old label").isEqualTo(b);
+        assertThat(sourceName(doc, t)).as("setup: so is the assignment's").isEqualTo(b);
+
+        Resp r = fx.post("/v1/taxonomy/assignments/purge_doc", "{\"project\":" + json(c) + ",\"title\":\"" + doc + "\"}");
+
+        assertThat(r.status()).as(r.body()).isEqualTo(200);
+        assertThat(r.json().path("removed").asInt(-1)).as("reached by the id %s, whatever the name column says", x).isEqualTo(1);
+        assertThat(assignmentCount(doc, t)).isZero();
+        assertThat(topicRow(t)).as("and the topic it left empty was swept").isNull();
+    }
+
+    @Timeout(180)
+    @Test
+    void purgeCollection_byTheCurrentLabelOfARenamedCollection_reachesItsRowsWhoseNameColumnIsStale() {
+        String b = registered("pcc");
+        long t = topic(b, "own-topic");
+        projection(t, doc("pcc"), 0.9, b);
+        String c = oneRowRename(b);
+        assertThat(topicRow(t).collection()).as("setup: the name column is still the old label").isEqualTo(b);
+
+        Resp r = fx.post("/v1/taxonomy/purge_collection", "{\"collection\":" + json(c) + "}");
+
+        assertThat(r.status()).as(r.body()).isEqualTo(200);
+        assertThat(r.json().path("topics").asInt(-1)).isEqualTo(1);
+        assertThat(r.json().path("assignments").asInt(-1)).isEqualTo(1);
+        assertThat(topicRow(t)).isNull();
+    }
+
+    @Timeout(180)
+    @Test
+    void pruneProjectionExact_byTheCurrentLabelOfARenamedCollection_reachesItsRowsWhoseNameColumnIsStale() {
+        String b = registered("pec");
+        long t = topic(b, "own-topic");
+        String doc = doc("pec");
+        projection(t, doc, 0.1, b);
+        String c = oneRowRename(b);
+        assertThat(sourceName(doc, t)).as("setup: the assignment's name column is still the old label").isEqualTo(b);
+
+        Resp r = fx.post("/v1/taxonomy/assignments/prune_projection",
+            "{\"source_collection_prefix\":" + json(c) + ",\"min_similarity\":0.5,\"match\":\"exact\"}");
+
+        assertThat(r.status()).as(r.body()).isEqualTo(200);
+        assertThat(r.json().path("removed").asInt(-1)).isEqualTo(1);
+        assertThat(assignmentCount(doc, t)).isZero();
+    }
+
+    /**
+     * The prefix mode matched the name column before this change, so a projection stamped to a TOMBSTONE that bears the label was pruned
+     * with the live collection's. It still is: the prefix reads every row whose label starts with it, retired ones too. (The tombstone
+     * bears the SAME label, so no other collection's row is reached.)
+     */
+    @Timeout(180)
+    @Test
+    void pruneProjectionPrefix_reachesTheRowsStampedToASameNamedTombstone_asItDidByName() {
+        String b = registered("ppt");
+        long x = fx.idOf(b);
+        long tombstoneTopic = topic(b, "tombstone-topic");
+        String tombstoneDoc = doc("ppt-old");
+        projection(tombstoneTopic, tombstoneDoc, 0.1, b);
+        String successor = registered("ppt-succ");
+        long y = renamedAndRetaken(b);   // x renamed away in place, a new live row y takes the label b
+        String c = fx.labelOf(x);
+        supersede(c, successor);
+        fx.asSuperuser(ctx -> ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.NAME, b)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(fx.tenant).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(x))).execute());   // retired first, so the live-label index is not hit
+        long liveTopic = topic(b, "live-topic");
+        String liveDoc = doc("ppt-live");
+        projection(liveTopic, liveDoc, 0.1, b);
+        assertThat(sourceId(liveDoc, liveTopic)).as("setup: the live row y is the label's holder").isEqualTo(y);
+        assertThat(sourceId(tombstoneDoc, tombstoneTopic)).as("setup: the old projection is stamped to the tombstone").isEqualTo(x);
+
+        Resp r = fx.post("/v1/taxonomy/assignments/prune_projection", "{\"source_collection_prefix\":" + json(b) + ",\"min_similarity\":0.5}");
+
+        assertThat(r.status()).as(r.body()).isEqualTo(200);
+        assertThat(r.json().path("removed").asInt(-1)).as("the live holder's and the same-named tombstone's").isEqualTo(2);
+        assertThat(assignmentCount(liveDoc, liveTopic)).isZero();
+        assertThat(assignmentCount(tombstoneDoc, tombstoneTopic)).isZero();
+    }
+
+    // ==== F2: a bind that matches nothing is a missing topic ============================================================
+
+    @Timeout(180)
+    @Test
+    void deleteTopic_andMergeTopics_ofAMissingTopic_answerNotFound() {
+        long missing = 987_654_321L;
+        String home = registered("mt");
+        long real = topic(home, "real");
+
+        Resp d = fx.post("/v1/taxonomy/topics/delete", "{\"topic_id\":" + missing + "}");
+        Resp m = fx.post("/v1/taxonomy/topics/merge", "{\"source_id\":" + missing + ",\"target_id\":" + real + "}");
+
+        assertThat(d.status()).as("delete of a missing topic: %s", d.body()).isEqualTo(404);
+        assertThat(m.status()).as("merge of a missing source: %s", m.body()).isEqualTo(404);
+        assertThat(topicRow(real)).as("the other topic is untouched").isNotNull();
+    }
+
+    /**
+     * Two deletes of one topic meet behind a verb that holds its collection's row. Both read the topic's home after the verb lets go; the one
+     * that loses the row race finds its bind matching nothing (or the topic gone): it answers not found, not a success for a delete it did not do.
+     */
+    @Timeout(180)
+    @Test
+    void deleteTopic_whenAnotherDeleteOfTheSameTopicWins_answersNotFound_notSuccess() throws Exception {
+        String home = registered("dd");
+        long t = topic(home, "doomed-twice");
+        Future<Resp> first;
+        Future<Resp> second;
+        pool.shutdownNow();
+        pool = Executors.newFixedThreadPool(2);
+        try (Connection verb = fx.pg.createConnection("")) {
+            verb.setAutoCommit(false);
+            lockRow(verb, home);
+            first = pool.submit(() -> fx.post("/v1/taxonomy/topics/delete", "{\"topic_id\":" + t + "}"));
+            second = pool.submit(() -> fx.post("/v1/taxonomy/topics/delete", "{\"topic_id\":" + t + "}"));
+            try {
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
+                while (waitingRows() < 2) {
+                    if (first.isDone() || second.isDone() || System.nanoTime() > deadline) {
+                        throw new AssertionError("both deletes should be waiting for the row the verb holds");
+                    }
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(5));
+                }
+            } finally {
+                verb.rollback();
+            }
+        }
+        List<Integer> statuses = new java.util.ArrayList<>(List.of(first.get(120, TimeUnit.SECONDS).status(), second.get(120, TimeUnit.SECONDS).status()));
+        java.util.Collections.sort(statuses);
+
+        assertThat(statuses).as("one delete did the work, the other found nothing to do").containsExactly(200, 404);
+        assertThat(topicRow(t)).isNull();
     }
 }
