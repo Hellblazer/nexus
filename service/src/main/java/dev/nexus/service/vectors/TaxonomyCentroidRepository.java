@@ -138,6 +138,7 @@ public final class TaxonomyCentroidRepository {
                 // nexus-mp8ys: a centroid under a retired (superseded) name is stranded exactly like a chunk; refused
                 // 409 naming the successor, ahead of the dimension and partition checks.
                 CollectionRow collectionRow = CollectionRegistry.requireWritable(ctx, tenant, r.collection());
+                final String label = collectionRow.label();   // the id is the identity: written under the row's CURRENT label
                 String model = collectionRow.embeddingModel();
                 if (dim != collectionRow.dimension()) {
                     throw new IllegalArgumentException(
@@ -151,7 +152,7 @@ public final class TaxonomyCentroidRepository {
                 // old one (an upsert cannot move a row across partitions) before the new one is written.
                 ctx.deleteFrom(ct.table())
                    .where(ct.tenantId().eq(tenant)
-                       .and(ct.collection().eq(r.collection()))
+                       .and(ct.collection().eq(label))
                        .and(ct.topicId().eq(r.topicId()))
                        .and(ct.embeddingModel().ne(model)))
                    .execute();
@@ -166,9 +167,9 @@ public final class TaxonomyCentroidRepository {
                 ctx.insertInto(ct.table())
                    .columns(ct.tenantId(), ct.collection(), ct.topicId(), ct.embeddingModel(),
                             ct.embedding(), ct.label(), ct.docCount(), TAXONOMY_CENTROIDS.COLLECTION_ID)
-                   .values(tenant, r.collection(), r.topicId(), model,
+                   .values(tenant, label, r.topicId(), model,
                            Vector.of(r.embedding()), r.label(), r.docCount(),
-                           CollectionIds.require(ctx, tenant, r.collection()))
+                           collectionRow.collectionId())
                    .onConflict(ct.tenantId(), ct.collection(), ct.topicId(), ct.embeddingModel())
                    .doUpdate()
                    .set(ct.embedding(), DSL.excluded(ct.embedding()))
@@ -447,12 +448,12 @@ public final class TaxonomyCentroidRepository {
         }
         return tenantScope.withTenant(tenant, ctx -> {
             // RDR-229 P3.5a (nexus-p2m1x.23): the id the request named is read first, before any centroid row is touched
-            dev.nexus.service.db.TaxonomyRepository.consumeRequestedId(ctx, tenant, collection);
+            final Long id = dev.nexus.service.db.TaxonomyRepository.consumeRequestedId(ctx, tenant, collection);
             int deleted = 0;
             for (int dim : DIMS) {
                 DimTables.CentroidTable ct = DimTables.CENTROIDS.get(dim);
                 deleted += ctx.deleteFrom(ct.table())
-                              .where(ct.collection().eq(collection)
+                              .where(ownedBy(ct, id, collection)
                                   .and(ct.topicId().in(topicIds))
                                   .and(ct.embedding().isNotNull()))
                               .execute();
@@ -473,17 +474,30 @@ public final class TaxonomyCentroidRepository {
      */
     public int purgeByCollection(String tenant, String collection) {
         return tenantScope.withTenant(tenant, ctx -> {
-            dev.nexus.service.db.TaxonomyRepository.consumeRequestedId(ctx, tenant, collection);   // RDR-229 P3.5a
+            final Long id = dev.nexus.service.db.TaxonomyRepository.consumeRequestedId(ctx, tenant, collection);   // RDR-229 P3.5a
             int deleted = 0;
             for (int dim : DIMS) {
                 DimTables.CentroidTable ct = DimTables.CENTROIDS.get(dim);
                 deleted += ctx.deleteFrom(ct.table())
-                              .where(ct.collection().eq(collection)
+                              .where(ownedBy(ct, id, collection)
                                   .and(ct.embedding().isNotNull()))
                               .execute();
             }
             return deleted;
         });
+    }
+
+    /**
+     * The centroid rows of one collection: by the registry id the write transaction read (a name column can be stale after a one-row
+     * rename, and the old name may now be another collection's), and by name only for a collection with no registry row (the leftovers
+     * of a deleted one) and a row the stamp has not reached (no id yet).
+     */
+    private static org.jooq.Condition ownedBy(DimTables.CentroidTable ct, Long id, String collection) {
+        if (id == null) {
+            return ct.collection().eq(collection);
+        }
+        org.jooq.Field<Long> idColumn = ct.table().field("collection_id", Long.class);
+        return idColumn.eq(id).or(idColumn.isNull().and(ct.collection().eq(collection)));
     }
 
     // centroidTable(int)/vectorLiteral(float[]): REMOVED (nexus-zrcj7, step 4). Both

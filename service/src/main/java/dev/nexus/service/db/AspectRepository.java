@@ -157,11 +157,11 @@ public final class AspectRepository {
      * document_highlights default no longer registers itself (RDR-204 §Technical
      * Design step 4).
      */
-    private static void ensureCollectionRegistered(DSLContext ctx, String tenant, String collection) {
-        if (collection == null) return;
+    private static String ensureCollectionRegistered(DSLContext ctx, String tenant, String collection) {
+        if (collection == null) return null;
         // nexus-i15oc: an aspect or highlight row filed under a retired (superseded) name strands
         // exactly as a chunk does (nexus-mp8ys), so every live writer refuses it 409 naming the successor.
-        CollectionRegistry.requireWritable(ctx, tenant, collection);
+        return CollectionRegistry.requireWritable(ctx, tenant, collection).label();   // the row's CURRENT label: the id is the identity
     }
 
     /**
@@ -552,9 +552,9 @@ public final class AspectRepository {
      */
     public int deleteAspect(String tenant, String collection, String sourcePath) {
         return tenantScope.withTenant(tenant, ctx -> {
-            RequestedCollectionRead.require(ctx, tenant, collection);   // P3.5a: a request by id reads that id first
+            var row = RequestedCollectionRead.require(ctx, tenant, collection);   // P3.5a: a request by id reads that id first
             return ctx.deleteFrom(DOCUMENT_ASPECTS)
-               .where(DOCUMENT_ASPECTS.COLLECTION.eq(collection)
+               .where(CollectionOwnedRows.of(row, DOCUMENT_ASPECTS.COLLECTION_ID, DOCUMENT_ASPECTS.COLLECTION, collection)
                    .and(DOCUMENT_ASPECTS.SOURCE_PATH.eq(sourcePath)))
                .execute();
         });
@@ -616,11 +616,11 @@ public final class AspectRepository {
      */
     public int setSalientSentencesByKey(String tenant, String collection, String sourcePath, String sentencesJson) {
         return tenantScope.withTenant(tenant, ctx -> {
-            RequestedCollectionRead.require(ctx, tenant, collection);   // P3.5a: a request by id reads that id first
+            var row = RequestedCollectionRead.require(ctx, tenant, collection);   // P3.5a: a request by id reads that id first
             return ctx.update(DOCUMENT_ASPECTS)
                .set(DOCUMENT_ASPECTS.SALIENT_SENTENCES, jsonbOrNull(sentencesJson))
                .set(DOCUMENT_ASPECTS.COLLECTION_ID, ASPECT_OWN_ID)
-               .where(DOCUMENT_ASPECTS.COLLECTION.eq(collection)
+               .where(CollectionOwnedRows.of(row, DOCUMENT_ASPECTS.COLLECTION_ID, DOCUMENT_ASPECTS.COLLECTION, collection)
                    .and(DOCUMENT_ASPECTS.SOURCE_PATH.eq(sourcePath)))
                .execute();
         });
@@ -867,7 +867,7 @@ public final class AspectRepository {
         tenantScope.withTenant(tenant, ctx -> {
             // hygiene-001: register the SAME nne()-defaulted collection value
             // the INSERT below binds, or a blank collection 404s the FK.
-            ensureCollectionRegistered(ctx, tenant, nne((String) body.get("collection")));
+            final String coll = ensureCollectionRegistered(ctx, tenant, nne((String) body.get("collection")));
             ctx.insertInto(DOCUMENT_HIGHLIGHTS,
                     DOCUMENT_HIGHLIGHTS.TENANT_ID,
                     DOCUMENT_HIGHLIGHTS.DOC_ID,
@@ -883,11 +883,11 @@ public final class AspectRepository {
                     // hygiene-001 (nexus-tk070.p6a follow-on): source_uri/collection
                     // are NOT NULL now.
                     NoteUri.canonical(nne((String) body.get("source_uri"))),
-                    nne((String) body.get("collection")),
+                    coll,
                     highlightsMd,
                     mentionsMd,
                     ingestedAtTs,
-                    CollectionIds.require(ctx, tenant, nne((String) body.get("collection"))))   // RDR-229 P3.1; '' gives NULL
+                    CollectionIds.require(ctx, tenant, coll))   // RDR-229 P3.1; '' gives NULL
                 .onConflict(DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID)
                 .doUpdate()
                 .set(DOCUMENT_HIGHLIGHTS.SOURCE_URI,    EX_HL_SOURCE_URI)

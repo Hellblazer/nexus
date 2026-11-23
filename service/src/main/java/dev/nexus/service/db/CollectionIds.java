@@ -103,6 +103,25 @@ public final class CollectionIds {
     }
 
     /**
+     * The label a HISTORY row is filed under: for a request that named the collection by id, the row's CURRENT label (read without a
+     * lock, as {@link #stampHistory} reads the id), so the row never carries the id of one collection beside the name another now
+     * has; otherwise {@code name} as given. A name no row bears is returned as given.
+     */
+    public static String historyLabel(DSLContext ctx, String tenant, String name) {
+        if (name == null || name.isEmpty()) {
+            return name;
+        }
+        OptionalLong requested = ExpectedCollectionIds.of(name);
+        if (requested.isEmpty()) {
+            return name;
+        }
+        String current = ctx.select(CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(requested.getAsLong()))
+            .fetchOne(CATALOG_COLLECTIONS.NAME);
+        return current == null ? name : current;
+    }
+
+    /**
      * The registry's {@code collection_id} for {@code (tenant, name)} to STAMP a history row (a relevance log row, a hook failure:
      * a row about a collection that decides nothing), read in {@code ctx}'s transaction WITHOUT a lock and never refusing: the live row
      * first and the newest tombstone after it ({@link CollectionRegistry#labelResolutionOrder}); {@code null} for {@code ''},
@@ -120,8 +139,11 @@ public final class CollectionIds {
         OptionalLong requested = ExpectedCollectionIds.of(name);
         var read = ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(name));
+        // a request by id stamps THAT id (the id is the identity: the row may have been renamed since the boundary resolved it)
         Long id = requested.isPresent()
-            ? read.and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(requested.getAsLong())).fetchOne(CATALOG_COLLECTIONS.COLLECTION_ID)
+            ? ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(requested.getAsLong()))
+                .fetchOne(CATALOG_COLLECTIONS.COLLECTION_ID)
             : read.orderBy(CollectionRegistry.labelResolutionOrder()).limit(1).fetchOne(CATALOG_COLLECTIONS.COLLECTION_ID);
         if (id == null) {
             org.slf4j.LoggerFactory.getLogger(CollectionIds.class).debug(

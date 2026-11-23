@@ -20,10 +20,15 @@ final class RequestedCollectionRead {
     private RequestedCollectionRead() {
     }
 
-    /** Reads the row of {@code collection} FOR KEY SHARE in {@code ctx}'s transaction; a retired id is refused, a label no row has is not. */
-    static void require(DSLContext ctx, String tenant, String collection) {
+    /**
+     * Reads the row of {@code collection} FOR KEY SHARE in {@code ctx}'s transaction; a retired id is refused, a label no row has is not.
+     * Returns the row (empty for a blank collection or a label no row has) so the write can match the collection's rows by its id
+     * ({@link CollectionOwnedRows}) and stamp its current label.
+     */
+    static java.util.Optional<CollectionRow> require(DSLContext ctx, String tenant, String collection) {
         if (collection != null && !collection.isEmpty()) {
-            CollectionRegistry.requireForWriteIfPresent(ctx, tenant, collection);
+            return CollectionRegistry.requireForWriteIfPresent(ctx, tenant, collection);
         }
+        return java.util.Optional.empty();
     }
 }

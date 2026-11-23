@@ -58,6 +58,11 @@ final class TaxonomyCollectionLock {
         return row;
     }
 
+    /** The label to write under: the locked row's CURRENT label, else {@code asked} (a blank collection has no row). */
+    static String currentLabel(CollectionRow row, String asked) {
+        return row == null ? asked : row.label();
+    }
+
     private static String key(String tenant, long collectionId) {
         return tenant + "/#" + collectionId;
     }

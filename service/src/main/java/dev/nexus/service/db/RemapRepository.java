@@ -136,9 +136,12 @@ public final class RemapRepository {
             }
             CollectionRegistry.requireAllForWrite(ctx, tenant, touched);
             var ids = new HashMap<String, Long>();
+            var current = new HashMap<String, String>();   // each name as asked -> the registry row's CURRENT label (the id is the identity)
             for (RemapEntry e : deduped) {
-                ids.computeIfAbsent(e.sourceCollection(), n -> CollectionIds.require(ctx, tenant, n));
-                ids.computeIfAbsent(e.targetCollection(), n -> CollectionIds.require(ctx, tenant, n));
+                for (String n : new String[] {e.sourceCollection(), e.targetCollection()}) {
+                    current.computeIfAbsent(n, k -> CollectionRegistry.requireForWrite(ctx, tenant, k).label());
+                    ids.computeIfAbsent(n, k -> CollectionIds.require(ctx, tenant, k));
+                }
             }
             var insert = ctx.insertInto(CHASH_REMAP,
                     CHASH_REMAP.TENANT_ID, CHASH_REMAP.SOURCE_COLLECTION,
@@ -147,14 +150,14 @@ public final class RemapRepository {
                     CHASH_REMAP.PROVENANCE,
                     CHASH_REMAP.SOURCE_COLLECTION_ID, CHASH_REMAP.TARGET_COLLECTION_ID);
             var step = insert.values(tenant,
-                    deduped.get(0).sourceCollection(), deduped.get(0).oldId(),
-                    newChashBytes(deduped.get(0).newChash()), deduped.get(0).targetCollection(),
+                    current.get(deduped.get(0).sourceCollection()), deduped.get(0).oldId(),
+                    newChashBytes(deduped.get(0).newChash()), current.get(deduped.get(0).targetCollection()),
                     now, deduped.get(0).provenance(),
                     ids.get(deduped.get(0).sourceCollection()), ids.get(deduped.get(0).targetCollection()));
             for (int i = 1; i < deduped.size(); i++) {
                 RemapEntry e = deduped.get(i);
-                step = step.values(tenant, e.sourceCollection(), e.oldId(),
-                        newChashBytes(e.newChash()), e.targetCollection(), now, e.provenance(),
+                step = step.values(tenant, current.get(e.sourceCollection()), e.oldId(),
+                        newChashBytes(e.newChash()), current.get(e.targetCollection()), now, e.provenance(),
                         ids.get(e.sourceCollection()), ids.get(e.targetCollection()));
             }
             step.onConflict(CHASH_REMAP.TENANT_ID, CHASH_REMAP.SOURCE_COLLECTION, CHASH_REMAP.OLD_ID)
@@ -198,12 +201,12 @@ public final class RemapRepository {
         int deleted = tenantScope.withTenant(tenant, ctx -> {
             // P3.5a: a request naming either leg by id reads that id first, FOR KEY SHARE, in this transaction
             CollectionRegistry.requireAllForWrite(ctx, tenant, java.util.List.of(sourceCollection, targetCollection));   // both legs, id order
-            RequestedCollectionRead.require(ctx, tenant, sourceCollection);
-            RequestedCollectionRead.require(ctx, tenant, targetCollection);
+            var source = RequestedCollectionRead.require(ctx, tenant, sourceCollection);
+            var target = RequestedCollectionRead.require(ctx, tenant, targetCollection);
             return ctx.deleteFrom(CHASH_REMAP)
                .where(CHASH_REMAP.TENANT_ID.eq(tenant)
-                       .and(CHASH_REMAP.SOURCE_COLLECTION.eq(sourceCollection))
-                       .and(CHASH_REMAP.TARGET_COLLECTION.eq(targetCollection)))
+                       .and(CollectionOwnedRows.of(source, CHASH_REMAP.SOURCE_COLLECTION_ID, CHASH_REMAP.SOURCE_COLLECTION, sourceCollection))
+                       .and(CollectionOwnedRows.of(target, CHASH_REMAP.TARGET_COLLECTION_ID, CHASH_REMAP.TARGET_COLLECTION, targetCollection)))
                .execute();
         });
         log.info("event=remap_clear_leg tenant={} source={} target={} deleted={}",
