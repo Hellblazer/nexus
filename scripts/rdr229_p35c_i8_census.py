@@ -48,6 +48,7 @@ BASIS = {
     ("CatalogIdStamps.java", "*"): ("n/a", "the re-home's id repair (P3.5a, R2): it gives the rows the move carried the id of the target the re-home locked; the move, not a request by id, chooses what it writes"),
     ("CollectionMint.java", "*"): ("n/a", "the registry itself: the mint registers the label the caller asked for"),
     ("CollectionRename.java", "*"): ("n/a", "the registry itself: the rename verb"),
+    ("CollectionOneRowRename.java", "*"): ("n/a", "the registry itself: the one-row rename verb (P3.7), inside RenameGuard.runRename under the rename latch, writes the new label on the row it locked FOR UPDATE (CollectionTombstones.lockRowsOfOneRowRename) and repoints the tombstones that name that row's id"),
     ("CollectionTombstones.java", "*"): ("n/a", "the registry itself: a tombstone's superseded_by text is its successor's label, written by the verb under its FOR UPDATE lock (repointTombstones reads the successor row FOR KEY SHARE and writes its current label)"),
     ("TenantImportLoad.java", "*"): ("n/a", "fidelity import: the file's label and the id the import resolved for it are written together; no request names an id"),
 }
