@@ -111,7 +111,7 @@ class StrictWriterCensusTest {
     }
 
     @Test
-    void aSweepGateAfterARegistryRead_isRefused_unlessItIsTheGateOfTheLabelARenameMovedTheWriteOnto() {
+    void aSweepGateAfterARegistryRead_isRefused_evenForTheLabelARenameMovedTheWriteOnto_butAReEntryPasses() {
         DSLContext ctx = txn();
         boolean was = ExpectedCollectionIds.censusOn();
         ExpectedCollectionIds.setCensus(true);
@@ -119,15 +119,35 @@ class StrictWriterCensusTest {
             WriteRegistryMemo.assertGateFirst(ctx, "t", "old");                            // the gate of the boundary label, first
             WriteRegistryMemo.put(ctx, "t", "old", row(7, "new"));                         // the row read under it: now called "new"
             WriteRegistryMemo.put(ctx, "t", "new", row(7, "new"));
-            WriteRegistryMemo.assertGateFirst(ctx, "t", "old");                            // re-entry
-            WriteRegistryMemo.assertGateFirst(ctx, "t", "new");                            // the rename target: the same row, same id
-            WriteRegistryMemo.put(ctx, "t", "other", row(9, "other"));
-            assertThatThrownBy(() -> WriteRegistryMemo.assertGateFirst(ctx, "t", "other"))  // a different collection's gate after the read
+            WriteRegistryMemo.assertGateFirst(ctx, "t", "old");                            // re-entry: waits for nothing
+            assertThatThrownBy(() -> WriteRegistryMemo.assertGateFirst(ctx, "t", "new"))   // the rename target: the write runs again with it first
                 .isInstanceOf(IllegalStateException.class).hasMessageContaining("advisory locks come first");
-            assertThatThrownBy(() -> WriteRegistryMemo.assertGateFirst(ctx, "t", "unread")) // a label no row of this transaction has
+            assertThatThrownBy(() -> WriteRegistryMemo.assertGateFirst(ctx, "t", "other"))
                 .isInstanceOf(IllegalStateException.class);
+            DSLContext next = txn();                                                       // the next attempt, a new transaction: new label first
+            WriteRegistryMemo.assertGateFirst(next, "t", "new");
+            WriteRegistryMemo.put(next, "t", "old", row(7, "new"));
+            WriteRegistryMemo.put(next, "t", "new", row(7, "new"));
+            WriteRegistryMemo.assertGateFirst(next, "t", "new");
         } finally {
             ExpectedCollectionIds.setCensus(was);
         }
+    }
+
+    @Test
+    void renameFollow_runsTheAttemptAgainWithTheRowsCurrentLabel_andGivesUpAfterTooManyRenames() {
+        java.util.List<String> gates = new java.util.ArrayList<>();
+        String result = RenameFollow.run("a", gate -> {
+            gates.add(gate);
+            if (gates.size() == 1) RenameFollow.check(gate, row(1, "b"));   // renamed to b while the attempt waited
+            if (gates.size() == 2) RenameFollow.check(gate, row(1, "c"));   // and again
+            return gate;
+        });
+        assertThat(result).isEqualTo("c");
+        assertThat(gates).containsExactly("a", "b", "c");
+        assertThatThrownBy(() -> RenameFollow.run("a", gate -> {
+            RenameFollow.check(gate, row(1, gate + "x"));
+            return gate;
+        })).isInstanceOf(RenameBusyException.class);
     }
 }

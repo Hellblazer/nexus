@@ -850,7 +850,7 @@ public final class CombinedWriteService {
         // without force never rewrites an existing chash). Logged at debug, not counted.
         List<String> keptDivergent = new ArrayList<>();
         List<Integer> needEmbedIdx = dedupChashes.isEmpty() ? new ArrayList<>()
-            : DeadlockRetry.run(collection + " combined-write metadata refresh", () -> tenantScope.withTenant(tenant, ctx -> {
+            : RenameFollow.run(collection, gate -> DeadlockRetry.run(collection + " combined-write metadata refresh", () -> tenantScope.withTenant(tenant, ctx -> {
                 // nexus-hxrcm residual: SHARED sweep gate first, like every manifest
                 // writer (CatalogRepository.acquireSweepGateShared's writer table). The
                 // UPDATE below touches rows the sweep DELETEs under the EXCLUSIVE half;
@@ -858,15 +858,16 @@ public final class CombinedWriteService {
                 // The wait compounds (sweeps queued ahead times SWEEP_STATEMENT_TIMEOUT_MS,
                 // see that javadoc), not a flat 5 s; the writer side has no lock_timeout
                 // by design, the same trade every manifest writer already makes.
-                CatalogRepository.acquireSweepGateShared(ctx, tenant, collection);
+                CatalogRepository.acquireSweepGateShared(ctx, tenant, gate);   // the label this attempt was given (RenameFollow)
                 // RDR-229 P3.5a (linda's option (b)): the registry check of this write transaction, right after the advisory gate
                 // and before any row is read or written (RenameGuard#runRename's lock order). The metadata UPDATE below writes chunks
                 // BY LABEL; without the read, a label freed and re-taken while this transaction waited for the gate would take
                 // the request's metadata into the new row, and the later per-document transactions would answer 404 after it committed.
-                final String coll = CollectionRegistry.requireWritable(ctx, tenant, collection).label();   // the row's CURRENT label
-                if (!coll.equals(collection)) {
-                    CatalogRepository.acquireSweepGateShared(ctx, tenant, coll);   // a rename landed after the gate above
-                }
+                final CollectionRow lockedRow = CollectionRegistry.requireWritable(ctx, tenant, collection);
+                // a rename landed after the gate above: run the attempt again with the row's current label's gate first, never take
+                // that gate after this registry read (RenameFollow)
+                RenameFollow.check(gate, lockedRow);
+                final String coll = lockedRow.label();   // the row's CURRENT label
                 Map<String, String> existingText =
                     selectExistingText(ctx, ch, tenant, coll, dedupChashes);
                 // RDR-222 Phase 0: reset per DeadlockRetry attempt (a retried attempt
@@ -944,7 +945,7 @@ public final class CombinedWriteService {
                         metadataMode.merge() ? metadataMode.deleteKeys() : null));
                 }
                 return need;
-            }));
+            })));
 
         if (!keptDivergent.isEmpty() && log.isDebugEnabled()) {
             log.debug("event=supplied_vector_kept_divergent_text collection={} kept={} chashes={}",
