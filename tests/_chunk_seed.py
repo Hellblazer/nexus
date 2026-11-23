@@ -43,6 +43,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
@@ -164,6 +165,10 @@ def collection_id_for(tenant_expr: str, collection: str) -> str:
         "(SELECT collection_id FROM nexus.catalog_collections "
         f"WHERE tenant_id = {tenant_expr} AND name = {_lit(collection)})"
     )
+
+
+#: A seed's psql failure that is the twin-key race (see seed_chunks_direct), retried once like the engine's TwinKeyUpsert.
+_ID_TWIN_RACE: re.Pattern[str] = re.compile(r'duplicate key value violates unique constraint "\w+_cid_uq"')
 
 
 def chunks_insert_sql(
@@ -294,12 +299,16 @@ def seed_chunks_direct(
         + "COMMIT;\n"
     )
     state = _pg_state()
-    proc = subprocess.run(
-        [str(Path(state["pg_bin"]) / "psql"), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
-         "-U", "nexus_svc", "-d", state["pg_dbname"], "-v", "ON_ERROR_STOP=1", "-q", "-f", "-"],
-        input=script, capture_output=True, text=True, encoding="utf-8", timeout=130,
-        env={**os.environ, "PGCLIENTENCODING": "UTF8"},
-    )
+    cmd = [str(Path(state["pg_bin"]) / "psql"), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
+           "-U", "nexus_svc", "-d", state["pg_dbname"], "-v", "ON_ERROR_STOP=1", "-q", "-f", "-"]
+    env = {**os.environ, "PGCLIENTENCODING": "UTF8"}
+    proc = subprocess.run(cmd, input=script, capture_output=True, text=True, encoding="utf-8", timeout=130, env=env)
+    if proc.returncode != 0 and _ID_TWIN_RACE.search(proc.stderr):
+        # RDR-229 P3.3b: a chunks leaf holds the name key and its id twin (<leaf>_cid_uq). ON CONFLICT on the name
+        # key absorbs a conflict only on that key, so a concurrent seed of the same row (the indexer writes files from
+        # a thread pool; identical files share a chash) trips the twin as a plain 23505. The engine's
+        # TwinKeyUpsert retries once for the same reason; by now the winner has committed, so the name key arbitrates.
+        proc = subprocess.run(cmd, input=script, capture_output=True, text=True, encoding="utf-8", timeout=130, env=env)
     if proc.returncode != 0:
         raise RuntimeError(
             f"seed_chunks_direct: psql failed ({proc.returncode}) for tenant {tenant!r} "
