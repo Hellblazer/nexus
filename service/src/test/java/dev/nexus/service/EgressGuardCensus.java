@@ -193,6 +193,10 @@ final class EgressGuardCensus {
             "JDBC to the engine's own database (NX_DB_ADMIN_*): the RDR-229 P3.4 id-keyed index pass's dedicated autocommit"
                 + " connection (nexus-p2m1x.22), its url from AdminConnection.url() as LeafIndexPass's is. CREATE INDEX"
                 + " CONCURRENTLY cannot run in a pool's transaction or in a function."));
+        m.put("dev/nexus/service/datamove/NameKeyDropPass.java", Allow.pinned(JDBC_SITE,
+            "JDBC to the engine's own database (NX_DB_ADMIN_*): the RDR-229 P3.7 name-key drop pass's autocommit connection"
+                + " (nexus-p2m1x.27), its url from AdminConnection.url() as IdUniqueIndexPass's is. It reads the migration advisory lock's"
+                + " holder and inserts the one nexus.data_moves row, a global registry only the migrating role can write."));
         m.put("dev/nexus/service/datamove/CallConnection.java", Allow.pinned(JDBC_SITE,
             "JDBC to the engine's own database (NX_DB_ADMIN_*): the data-move worker's dedicated autocommit connection"
                 + " (nexus-f3yqd.2.13), on which one run's CALL of dml_utils' committing entry point runs under a tenant"
