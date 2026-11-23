@@ -59,28 +59,31 @@ public final class CollectionKey {
     }
 
     /**
-     * A HISTORY table's read (relevance_log, search_telemetry, hook_failures, gc_audit: rows are never stamped after the fact and a
-     * row may outlive its collection): {@code name = value} before gate 3; after, the row's id where it carries one and its name where
-     * it carries none: {@code id = registry id of value OR (id IS NULL AND name = value)}. An empty or null {@code value} matches
-     * nothing, so the {@code ''} name of a NULL-id row is never found by falling back to the name (linda 2026-11-20).
+     * A HISTORY table's rows written under {@code value} with NO id (relevance_log, search_telemetry, hook_failures, gc_audit rows a
+     * stamp never reached): {@code id IS NULL AND name = value}. They are pre-id label history, never attributed to the collection
+     * {@code value} names today (a label can pass to another collection), so a read reports them separately and never folds them
+     * into a collection's figures. An empty or null {@code value} matches nothing.
      */
-    public Condition eqOrUnstamped(String tenant, Field<String> name, Field<Long> id, String value) {
-        if (!byId) {
-            return name.eq(value);
-        }
+    public Condition preId(Field<String> name, Field<Long> id, String value) {
         if (value == null || value.isEmpty()) {
             return DSL.falseCondition();
         }
-        return id.eq(CollectionIds.idOf(tenant, value)).or(id.isNull().and(name.eq(value)));
+        return id.isNull().and(name.eq(value));
     }
 
     /**
-     * A history row's collection as an output column: the registry's current label of its id where the row carries one and the
-     * registry still has it, else the row's own name (a row with no id, or whose collection is gone, keeps what it recorded).
-     * The name column before gate 3.
+     * A ledger table's read by label (no FK to the registry; a row may outlive its registry row, as a pdf_pipeline row does when the
+     * client deletes the registry row first): {@code name = value} before gate 3; after, {@code id = registry id of value OR (name =
+     * value AND no LIVE registry row holds the row's id)}, so a row whose collection is gone is still found by the name it recorded,
+     * and a label that has passed to another live collection never reaches the old rows.
      */
-    public Field<String> labelOrName(String tenant, Field<String> name, Field<Long> id) {
-        return byId ? DSL.coalesce(label(tenant, name, id), name) : name;
+    public Condition eqLedger(String tenant, Field<String> name, Field<Long> id, String value) {
+        if (!byId) {
+            return name.eq(value);
+        }
+        var c = CATALOG_COLLECTIONS.as("ckled");
+        return id.eq(CollectionIds.idOf(tenant, value)).or(name.eq(value).andNotExists(DSL.selectOne().from(c)
+            .where(c.TENANT_ID.eq(tenant)).and(c.COLLECTION_ID.eq(id)).and(CollectionIds.live(c))));
     }
 
     /** {@code name IN (values)} before gate 3; {@code id IN (registry ids of values)} after. */
@@ -89,7 +92,9 @@ public final class CollectionKey {
             return name.in(values);
         }
         var c = CATALOG_COLLECTIONS.as("ckin");
-        return id.in(DSL.select(c.COLLECTION_ID).from(c).where(c.TENANT_ID.eq(tenant)).and(c.NAME.in(values)).and(CollectionIds.live(c)));
+        // each label names its preferred row (live first, else the newest tombstone: CollectionIds.idOf), never two
+        return id.in(DSL.select(c.COLLECTION_ID).from(c).where(c.TENANT_ID.eq(tenant)).and(c.NAME.in(values))
+            .and(c.COLLECTION_ID.eq(CollectionIds.idOf(c.TENANT_ID, c.NAME))));
     }
 
     /** {@code name LIKE prefix%} before gate 3; the ids of the registry labels that start with {@code prefix} after. */
@@ -98,7 +103,9 @@ public final class CollectionKey {
             return name.startsWith(prefix);
         }
         var c = CATALOG_COLLECTIONS.as("ckpre");
-        return id.in(DSL.select(c.COLLECTION_ID).from(c).where(c.TENANT_ID.eq(tenant)).and(c.NAME.startsWith(prefix)));
+        // each label names its preferred row, as in(): live first, else the newest tombstone
+        return id.in(DSL.select(c.COLLECTION_ID).from(c).where(c.TENANT_ID.eq(tenant)).and(c.NAME.startsWith(prefix))
+            .and(c.COLLECTION_ID.eq(CollectionIds.idOf(c.TENANT_ID, c.NAME))));
     }
 
     /** The column that identifies the collection in a grouping, a DISTINCT or an ordering: the id after gate 3, the name before. */

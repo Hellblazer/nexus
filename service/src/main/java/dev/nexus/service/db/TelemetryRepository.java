@@ -2,6 +2,7 @@ package dev.nexus.service.db;
 
 import dev.nexus.service.jooq.nexus.tables.records.RelevanceLogRecord;
 import dev.nexus.service.datamove.Gate3;
+import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.JSONB;
@@ -246,24 +247,58 @@ public final class TelemetryRepository {
                 RELEVANCE_LOG.ID,
                 RELEVANCE_LOG.QUERY,
                 RELEVANCE_LOG.CHUNK_ID,
-                k.labelOrName(tenant, RELEVANCE_LOG.COLLECTION, RELEVANCE_LOG.COLLECTION_ID),
+                k.label(tenant, RELEVANCE_LOG.COLLECTION, RELEVANCE_LOG.COLLECTION_ID),
                 RELEVANCE_LOG.ACTION,
                 RELEVANCE_LOG.SESSION_ID,
-                RELEVANCE_LOG.TIMESTAMP)
+                RELEVANCE_LOG.TIMESTAMP,
+                RELEVANCE_LOG.COLLECTION,
+                RELEVANCE_LOG.COLLECTION_ID)
                 .from(RELEVANCE_LOG)
                 .where(cond)
                 .orderBy(RELEVANCE_LOG.TIMESTAMP.desc())
                 .limit(limit)
                 .fetch()
-                .map(r -> Map.<String, Object>of(
-                    "id",         r.value1(),
-                    "query",      r.value2(),
-                    "chunk_id",   r.value3(),
-                    "collection", str(r.value4()),
-                    "action",     r.value5(),
-                    "session_id", str(r.value6()),
-                    "timestamp",  r.value7() != null ? r.value7().toString() : ""));
+                .map(r -> {
+                    Map<String, Object> m = new java.util.LinkedHashMap<>();
+                    m.put("id",         r.value1());
+                    m.put("query",      r.value2());
+                    m.put("chunk_id",   r.value3());
+                    m.put("action",     r.value5());
+                    m.put("session_id", str(r.value6()));
+                    m.put("timestamp",  r.value7() != null ? r.value7().toString() : "");
+                    putHistoryCollection(m, k, r.value4(), r.value8(), r.value9());
+                    return m;
+                });
         });
+    }
+
+    /**
+     * The rename arm's row filter: from gate 3 only rows that carry an id are rewritten (a pre-id row is label history and is
+     * never stamped with the new collection's id, which would attribute it by name); before gate 3 every row, as it was.
+     */
+    private Condition stamped(Field<Long> id) {
+        return CollectionKey.of(gate3).byId() ? id.isNotNull() : noCondition();
+    }
+
+    /**
+     * A history row's collection for a listing. Before gate 3 the row's own name column, as it was. From gate 3 the registry's
+     * CURRENT label of the row's id ({@code label}); a row that carries no id is pre-id label history and says so ({@code pre_id:
+     * true}, the name it recorded, never a registry label); a row whose id the registry no longer has says {@code gone: true}
+     * beside its id and the name it recorded.
+     */
+    private static void putHistoryCollection(Map<String, Object> m, CollectionKey k, String label, String name, Long id) {
+        if (!k.byId()) {
+            m.put("collection", str(label));
+            return;
+        }
+        if (id == null) {
+            m.put("collection", str(name));
+            m.put("pre_id", !str(name).isEmpty());
+            return;
+        }
+        m.put("collection_id", id);
+        m.put("collection", label != null ? label : str(name));
+        if (label == null) m.put("gone", true);
     }
 
     /**
@@ -434,7 +469,7 @@ public final class TelemetryRepository {
                 count().as("row_count"),
                 sum(when(SEARCH_TELEMETRY.KEPT_COUNT.eq(0), 1).otherwise(0)).as("zero_count"))
                 .from(SEARCH_TELEMETRY)
-                .where(k.eqOrUnstamped(tenant, SEARCH_TELEMETRY.COLLECTION, SEARCH_TELEMETRY.COLLECTION_ID, collection)
+                .where(k.eq(tenant, SEARCH_TELEMETRY.COLLECTION, SEARCH_TELEMETRY.COLLECTION_ID, collection)
                     .and(SEARCH_TELEMETRY.TS.greaterOrEqual(cutoff)))
                 .fetchOne();
 
@@ -445,7 +480,7 @@ public final class TelemetryRepository {
             // Fetch all top_distances for median calculation
             List<Double> distances = ctx.select(SEARCH_TELEMETRY.TOP_DISTANCE)
                 .from(SEARCH_TELEMETRY)
-                .where(k.eqOrUnstamped(tenant, SEARCH_TELEMETRY.COLLECTION, SEARCH_TELEMETRY.COLLECTION_ID, collection)
+                .where(k.eq(tenant, SEARCH_TELEMETRY.COLLECTION, SEARCH_TELEMETRY.COLLECTION_ID, collection)
                     .and(SEARCH_TELEMETRY.TS.greaterOrEqual(cutoff))
                     .and(SEARCH_TELEMETRY.RAW_COUNT.gt(0))
                     .and(SEARCH_TELEMETRY.TOP_DISTANCE.isNotNull()))
@@ -455,10 +490,18 @@ public final class TelemetryRepository {
             Double zeroHitRate = rowCount > 0 ? (double) zeroCount / rowCount : null;
             Double median = median(distances);
 
-            return Map.of(
-                "row_count",           rowCount,
-                "zero_hit_rate",       zeroHitRate != null ? zeroHitRate : "null",
-                "median_top_distance", median != null ? median : "null");
+            Map<String, Object> out = new java.util.LinkedHashMap<>();
+            out.put("row_count",           rowCount);
+            out.put("zero_hit_rate",       zeroHitRate != null ? zeroHitRate : "null");
+            out.put("median_top_distance", median != null ? median : "null");
+            if (k.byId()) {
+                // rows written under this label before they carried an id: pre-id label history, reported on their own and
+                // never folded into the rate or the median (a label can pass to another collection)
+                out.put("pre_id_row_count", (long) ctx.fetchCount(SEARCH_TELEMETRY,
+                    k.preId(SEARCH_TELEMETRY.COLLECTION, SEARCH_TELEMETRY.COLLECTION_ID, collection)
+                        .and(SEARCH_TELEMETRY.TENANT_ID.eq(tenant)).and(SEARCH_TELEMETRY.TS.greaterOrEqual(cutoff))));
+            }
+            return out;
         });
     }
 
@@ -608,13 +651,15 @@ public final class TelemetryRepository {
             List<Map<String, Object>> rows = ctx.select(
                 HOOK_FAILURES.ID,
                 HOOK_FAILURES.DOC_ID,
-                k.labelOrName(tenant, HOOK_FAILURES.COLLECTION, HOOK_FAILURES.COLLECTION_ID),
+                k.label(tenant, HOOK_FAILURES.COLLECTION, HOOK_FAILURES.COLLECTION_ID),
                 HOOK_FAILURES.HOOK_NAME,
                 HOOK_FAILURES.ERROR,
                 HOOK_FAILURES.OCCURRED_AT,
                 HOOK_FAILURES.BATCH_DOC_IDS,
                 HOOK_FAILURES.IS_BATCH,
-                HOOK_FAILURES.CHAIN)
+                HOOK_FAILURES.CHAIN,
+                HOOK_FAILURES.COLLECTION,
+                HOOK_FAILURES.COLLECTION_ID)
                 .from(HOOK_FAILURES)
                 .where(cond)
                 .orderBy(HOOK_FAILURES.OCCURRED_AT.desc(), HOOK_FAILURES.ID.desc())
@@ -624,7 +669,7 @@ public final class TelemetryRepository {
                     Map<String, Object> m = new java.util.LinkedHashMap<>();
                     m.put("id",            r.value1());
                     m.put("doc_id",        str(r.value2()));
-                    m.put("collection",    str(r.value3()));
+                    putHistoryCollection(m, k, r.value3(), r.value10(), r.value11());
                     m.put("hook_name",     r.value4());
                     m.put("error",         str(r.value5()));
                     m.put("occurred_at",   utcIso(r.value6()));
@@ -668,12 +713,12 @@ public final class TelemetryRepository {
             int searchCount = ctx.update(SEARCH_TELEMETRY)
                 .set(SEARCH_TELEMETRY.COLLECTION, newName)
                 .set(SEARCH_TELEMETRY.COLLECTION_ID, CollectionIds.idOf(tenant, newName))
-                .where(SEARCH_TELEMETRY.COLLECTION.eq(oldName))
+                .where(SEARCH_TELEMETRY.COLLECTION.eq(oldName).and(stamped(SEARCH_TELEMETRY.COLLECTION_ID)))
                 .execute();
             int hookCount = ctx.update(HOOK_FAILURES)
                 .set(HOOK_FAILURES.COLLECTION, newName)
                 .set(HOOK_FAILURES.COLLECTION_ID, CollectionIds.idOf(tenant, newName))
-                .where(HOOK_FAILURES.COLLECTION.eq(oldName))
+                .where(HOOK_FAILURES.COLLECTION.eq(oldName).and(stamped(HOOK_FAILURES.COLLECTION_ID)))
                 .execute();
             return Map.of("search_telemetry", searchCount, "hook_failures", hookCount);
         });

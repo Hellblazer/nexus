@@ -32,17 +32,18 @@ java	db/IndexRunCensusReads.java catalog_documents select	physical_collection	id
 java	db/IndexRunCensusReads.java chunks where	collection	id	
 java	db/LegacyChunkSurvey.java ? expr	collection	id	
 java	db/LegacyChunkSurvey.java ? join_on	collection	id	
+java	db/LegacyChunkSurvey.java catalog_document_chunks expr	collection	id	
 java	db/LegacyChunkSurvey.java catalog_document_chunks join_on	collection	id	
-java	db/LegacyChunkSurvey.java catalog_document_chunks where	collection	id	
-java	db/LegacyChunkSurvey.java catalog_documents where	physical_collection	id	
+java	db/LegacyChunkSurvey.java catalog_documents expr	physical_collection	id	
+java	db/PdfStubMetadataReads.java ? expr	collection	id	the per-collection statement's manifest filter: by the registry id carried from the list from gate 3, by the label before
+java	db/PdfStubMetadataReads.java ? expr	physical_collection	id	the per-collection statement's document filter: by the registry id carried from the list from gate 3, by the label before
 java	db/PdfStubMetadataReads.java catalog_collections order_by	name	label-kept	lists the registry's own labels of the examined collections, the names the report is keyed by; each is then read by its id
 java	db/PdfStubMetadataReads.java catalog_collections select	name	label-kept	lists the registry's own labels of the examined collections, the names the report is keyed by; each is then read by its id
 java	db/PdfStubMetadataReads.java catalog_document_chunks join_on	collection	id	
 java	db/PdfStubMetadataReads.java catalog_document_chunks where	collection	id	
-java	db/PdfStubMetadataReads.java catalog_documents where	physical_collection	id	
 java	db/PdfStubMetadataReads.java chunks join_on	collection	id	
 java	db/PipelineRepository.java pdf_pipeline expr	collection	id	
-java	db/PipelineRepository.java pdf_pipeline where	collection	id	
+java	db/PipelineRepository.java pdf_pipeline where	collection	both	a ledger (no FK to the registry; the client deletes the registry row before its pipeline cleanup): reads the id where the row's collection is registered and the recorded name where no LIVE registry row holds the row's id
 java	db/ReembedJobRepository.java reembed_jobs expr	source_collection	id	
 java	db/ReembedJobRepository.java reembed_jobs expr	target_collection	id	
 java	db/ReembedJobRepository.java reembed_jobs select	source_collection	id	
@@ -75,10 +76,11 @@ java	db/TaxonomyRepository.java topics expr	collection	id
 java	db/TaxonomyRepository.java topics join_on	collection	id	
 java	db/TaxonomyRepository.java topics select	collection	id	
 java	db/TaxonomyRepository.java topics where	collection	both	reads by id from gate 3; the rename arm (renameCollection / rename*Collection) still rewrites by the name it renames, which P3.7's one-row rename removes (a rename is refused from gate 3 until then)
-java	db/TelemetryRepository.java hook_failures select	collection	both	history table (rows are never stamped after the fact; a row may outlive its collection): reads the id where the row carries one and the name where it carries none, and reports the registry's current label of the id; a NULL id with a '' name is never found
+java	db/TelemetryRepository.java hook_failures select	collection	both	history table (rows are never stamped after the fact; a row may outlive its collection): a collection's figures take the id arm only; rows written under the label with no id are reported separately as pre-id history (pre_id_row_count, a per-row pre_id flag, gone for a dangling id) and never attributed to the label's current holder; a NULL id with a '' name matches nothing
 java	db/TelemetryRepository.java hook_failures where	collection	both	the rename arm (renameCollection) rewrites hook_failures by the name it renames; P3.7's one-row rename removes it (a rename is refused from gate 3 until then); a history table the stamp does not reach
-java	db/TelemetryRepository.java relevance_log select	collection	both	history table (rows are never stamped after the fact; a row may outlive its collection): reads the id where the row carries one and the name where it carries none, and reports the registry's current label of the id; a NULL id with a '' name is never found
-java	db/TelemetryRepository.java search_telemetry where	collection	both	history table (rows are never stamped after the fact; a row may outlive its collection): reads the id where the row carries one and the name where it carries none, and reports the registry's current label of the id; a NULL id with a '' name is never found; its renameCollection arm rewrites by the name it renames (P3.7's one-row rename removes it) and probeIds matches the table's own name conflict key (ts, query_hash, collection) as written, which P4.1 moves
+java	db/TelemetryRepository.java relevance_log select	collection	both	history table (rows are never stamped after the fact; a row may outlive its collection): a collection's figures take the id arm only; rows written under the label with no id are reported separately as pre-id history (pre_id_row_count, a per-row pre_id flag, gone for a dangling id) and never attributed to the label's current holder; a NULL id with a '' name matches nothing
+java	db/TelemetryRepository.java search_telemetry expr	collection	both	the pre-id filter (rows written under the label with no id), reported separately as pre_id_row_count and never folded into a collection's figures
+java	db/TelemetryRepository.java search_telemetry where	collection	both	history table (rows are never stamped after the fact; a row may outlive its collection): a collection's figures take the id arm only; rows written under the label with no id are reported separately as pre-id history (pre_id_row_count, a per-row pre_id flag, gone for a dangling id) and never attributed to the label's current holder; a NULL id with a '' name matches nothing; the rename arm (renameCollection) rewrites by the name it renames, only rows that carry an id (P3.7's one-row rename removes it); probeIds matches the table's own name conflict key (ts, query_hash, collection) as written, which P4.1 moves
 java	db/UriSegmentCensusReads.java catalog_collections expr	name	label-kept	the group's collection is reported as the registry's current label of the row's id ('' for none)
 java	db/UriSegmentCensusReads.java catalog_collections join_on	name	id	
 java	db/UriSegmentCensusReads.java catalog_documents expr	physical_collection	id	
