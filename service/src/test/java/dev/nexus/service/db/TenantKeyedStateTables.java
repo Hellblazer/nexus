@@ -371,6 +371,7 @@ final class TenantKeyedStateTables {
         notKeyed.put("DeadlockRetry.retryListenerForTests", TEST_HOOK);
         notKeyed.put("CollectionSelectorFilter.censusSink", TEST_HOOK);
         notKeyed.put("CollectionRetiredIdException.tenant", "payload of an exception thrown to one caller (RDR-229 P3.5a)");
+        notKeyed.put("CollectionRenamedUnderRequestException.tenant", "payload of an exception thrown to one caller (RDR-229 P3.5a)");
         notKeyed.put("ReembedRunner.tenantSource", "a supplier of the tenant list, re-read from service_tokens at "
             + "the start of every runner pass; the runner keeps nothing per tenant between passes");
         notKeyed.put("ReembedHandler.servedModels", "a supplier of the models the embedder router serves, an "

@@ -226,7 +226,10 @@ public final class CollectionRegistry {
             ExpectedCollectionIds.beforeTransactionRead();
             noteWriteRead(tenant, label);
         }
-        CollectionRow row = fill(ctx, tenant, CATALOG_COLLECTIONS.COLLECTION_ID.eq(collectionId), List.of(), true,
+        // a write's own read locks the row (FOR KEY SHARE); an outside-a-transaction lookup's short read holds no lock past its
+        // own commit, so it takes none: the lock would be useless, and its row lock assigns the short transaction an xid, which
+        // makes it a "write" to the per-transaction census
+        CollectionRow row = fill(ctx, tenant, CATALOG_COLLECTIONS.COLLECTION_ID.eq(collectionId), List.of(), consume,
             () -> new UnknownCollectionIdException(tenant, collectionId));
         if (row.collectionId() != collectionId) {
             throw new CollectionIdMismatchException(collectionId, row.collectionId());
@@ -284,7 +287,7 @@ public final class CollectionRegistry {
             return Optional.of(memo);
         }
         noteWriteRead(tenant, label);
-        CollectionRow row = fillOrNull(ctx, tenant, CATALOG_COLLECTIONS.NAME.eq(label), labelResolutionOrder(), true);
+        CollectionRow row = fillOrNull(ctx, tenant, CATALOG_COLLECTIONS.NAME.eq(label), labelResolutionOrder(), true, false);
         if (row != null) {
             WriteRegistryMemo.put(ctx, tenant, label, row);
         }
@@ -552,15 +555,22 @@ public final class CollectionRegistry {
      */
     private CollectionRow fill(DSLContext ctx, String tenant, Condition where, List<SortField<?>> order, boolean keyShare,
                                java.util.function.Supplier<RuntimeException> missing) {
-        CollectionRow row = fillOrNull(ctx, tenant, where, order, keyShare);
+        CollectionRow row = fillOrNull(ctx, tenant, where, order, keyShare, true);
         if (row == null) {
             throw missing.get();
         }
         return row;
     }
 
-    /** {@link #fill}, answering null for no row instead of throwing. */
-    private CollectionRow fillOrNull(DSLContext ctx, String tenant, Condition where, List<SortField<?>> order, boolean keyShare) {
+    /**
+     * {@link #fill}, answering null for no row instead of throwing. {@code cache} false is a write transaction's own read
+     * ({@link #lockForWrite}): it neither runs the miss seam nor caches the row. The row it reads may be one THIS transaction just
+     * inserted or changed (a rename inserts the new row, then reads it for its id), which would put a row nobody committed into a
+     * cache that has no TTL, and a rollback would leave it there; the seam (a test's supersede) would run again inside the
+     * transaction of the verb it started.
+     */
+    private CollectionRow fillOrNull(DSLContext ctx, String tenant, Condition where, List<SortField<?>> order, boolean keyShare,
+                                     boolean cache) {
         long evictionsBeforeRead;
         synchronized (fillLock) {
             evictionsBeforeRead = evictions[0];
@@ -585,6 +595,9 @@ public final class CollectionRegistry {
         }
         CollectionRow row = rowOf(r, modelDimension, tenant);
         String label = row.label();
+        if (!cache) {
+            return row;
+        }
         Runnable seam = afterMissReadForTests;
         if (seam != null) {
             seam.run();
