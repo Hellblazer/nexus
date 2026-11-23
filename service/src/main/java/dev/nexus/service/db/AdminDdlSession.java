@@ -150,6 +150,14 @@ public final class AdminDdlSession implements AutoCloseable {
      * {@code Refused} 409 {@code constraint_run_in_progress}.
      */
     public static AdminDdlSession open(AdminConnection admin, Settings settings, boolean lock) {
+        return open(admin, settings, lock, SOCKET_TIMEOUT_SECONDS);
+    }
+
+    /**
+     * {@link #open(AdminConnection, Settings, boolean)} with the network timeout the caller needs, in seconds: a session whose statements are
+     * all short (a cancel, a reap, a read of one row) must not wait the half hour a DDL run may, whatever the server does.
+     */
+    public static AdminDdlSession open(AdminConnection admin, Settings settings, boolean lock, int socketTimeoutSeconds) {
         Objects.requireNonNull(admin, "admin");
         Properties props = new Properties();
         props.setProperty("user", admin.user());
@@ -157,7 +165,7 @@ public final class AdminDdlSession implements AutoCloseable {
         props.setProperty("ApplicationName", settings.applicationName());
         props.setProperty("connectTimeout", Integer.toString(BackendReaper.CONNECT_TIMEOUT_SECONDS));
         props.setProperty("loginTimeout", Integer.toString(LOGIN_TIMEOUT_SECONDS));
-        props.setProperty("socketTimeout", Integer.toString(SOCKET_TIMEOUT_SECONDS));
+        props.setProperty("socketTimeout", Integer.toString(socketTimeoutSeconds));
         props.setProperty("tcpKeepAlive", "true");
         props.setProperty("cancelSignalTimeout", "2");   // the driver's own cancel connection: seconds, not its default ten
         Connection conn;
