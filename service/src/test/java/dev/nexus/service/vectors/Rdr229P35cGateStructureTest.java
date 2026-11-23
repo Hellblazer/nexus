@@ -30,8 +30,8 @@ import org.junit.jupiter.api.Test;
  * Guarded sites, the file's whole list: SearchFunctions (every twin call under {@code sel.byId()}), LexicalGateProbe (the probes, under
  * {@code sel.byId()}), PgVectorRepository ({@code chunk_live_owners_by_id} under the {@code byId} of liveChunksCondition and
  * {@code manifest_qualifying_hits_by_id} under {@code sel.byId()}), TopicRouteArm ({@code search_topic_set_by_id} under {@code byId}).
- * The canary statement is not a site: it stays on the name function until its id target lands, and that change builds a
- * {@link CollectionSelector} for {@code canaryStatement}, which adds no twin reference of its own.
+ * The canary statement is not a site: its id target (an id index, once the latch holds) builds a {@link CollectionSelector} for
+ * {@code canaryStatement} over the reconciler's {@code PciCanaryLatch} (a real Gate3 read at call time), which adds no twin reference of its own.
  */
 class Rdr229P35cGateStructureTest {
 

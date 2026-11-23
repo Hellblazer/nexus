@@ -80,6 +80,8 @@ public final class PciQueryRing {
     private final AtomicLong seen = new AtomicLong();
     private final Object flushLock = new Object();
     private final Object lifecycle = new Object();
+    /** The reconciler's latch (gate 3 latched, id readers present), bound by Main once the reconciler exists, read at each admission. */
+    private volatile dev.nexus.service.datamove.Gate3 gate3 = dev.nexus.service.datamove.Gate3.never();
     private volatile Thread writer;       // set once by start()
     private volatile boolean stopped;
 
@@ -101,6 +103,14 @@ public final class PciQueryRing {
         this.queue = new ArrayBlockingQueue<>(capacity);
         this.flushAt = flushAt;
         this.flushEveryNanos = flushEvery.toNanos();
+    }
+
+    /**
+     * Follow {@code latch} for admission: once it holds the name indexes have retired and the collection's valid per-collection index is its id
+     * index, so a query is admitted on that. Before it, on the name index, as ever. The latch is read at each admission, never cached.
+     */
+    public void followLatch(dev.nexus.service.datamove.Gate3 latch) {
+        this.gate3 = Objects.requireNonNull(latch, "latch");
     }
 
     // -- admission, on the request thread, after the response is sent ---------------------------------------------
@@ -128,7 +138,7 @@ public final class PciQueryRing {
         if (query == null || query.collection() == null || query.vector() == null || tenant == null || stopped) {
             return;
         }
-        if (!validIndexes.hasValidIndex(query.model(), tenant, query.collection())) {
+        if (!hasValidIndex(tenant, query)) {
             return;
         }
         Entry entry = new Entry(tenant, query.collection(), query.model(), query.vector().clone());
@@ -142,6 +152,18 @@ public final class PciQueryRing {
                 LockSupport.unpark(w);
             }
         }
+    }
+
+    /** Whether the query's collection has a valid per-collection index of the family the serving path now uses (the id's once latched). */
+    private boolean hasValidIndex(String tenant, QueryVector query) {
+        dev.nexus.service.datamove.Gate3 latch = gate3;
+        if (!latch.holds()) {
+            return validIndexes.hasValidIndex(query.model(), tenant, query.collection());
+        }
+        // The serving path's own pattern: resolve the label to the registry's id through the selector, then ask for that id's index.
+        CollectionSelector sel = CollectionSelector.of(latch, scope, tenant, query.collection());
+        Long id = sel.byId() ? sel.idOf(query.collection()) : null;
+        return id != null && validIndexes.hasValidIdIndex(query.model(), tenant, id);
     }
 
     /** Entries waiting for the writer. */
