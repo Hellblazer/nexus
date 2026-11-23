@@ -91,12 +91,16 @@ final class CollectionRename {
         CollectionTombstones.repointTombstonesNaming(ctx, tenant, java.util.List.of(newName));
     }
 
-    /** Y's id: the id of Y's own tombstone when Y is being revived (it keeps it), else a fresh draw from the sequence. */
+    /**
+     * Y's id: the id of Y's own tombstone when Y is being revived (it keeps it), else a fresh draw from the sequence. Revival
+     * happens only while the name primary key still makes the tombstone's label conflict; once it is gone (RDR-229 G15) the
+     * write inserts a new live row, and a row inserted with the tombstone's id would break the registry's id key.
+     */
     static long successorId(DSLContext ctx, String tenant, String newName) {
         Long own = ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(newName)))
             .fetchOne(CATALOG_COLLECTIONS.COLLECTION_ID);
-        return own != null ? own : CollectionMint.drawId(ctx, tenant);
+        return own != null && CollectionMint.nameKeyExists(ctx) ? own : CollectionMint.drawId(ctx, tenant);
     }
 
     /** X's own content type, owner, model and version (null when X has no row), to tell whether Y's tuple is X's. */
@@ -159,7 +163,12 @@ final class CollectionRename {
                 // UPSERT, not a bare INSERT (nexus-cecqy): the conflict that can reach here is Y's own tombstone from an
                 // earlier rename Y->X (a LIVE Y is refused by the caller). Renaming back onto that retired name REVIVES
                 // it, which is what the round trip means. The conflicting row keeps its own collection_id.
+                // RDR-229 G15 (P3.5c): the arbiter is the LIVE-label name key, WHERE superseded_by = '' AND superseded_by_id IS NULL,
+                // so it infers P3.6's live-label index (the predicate implies the index's own); a label held only by a tombstone
+                // does not conflict and is written as a new live row. P4.1, which drops superseded_by, drops this half of
+                // the predicate. Disposition label-kept: the label is the registry's name.
                 .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+                .where(CollectionIdReads.liveLabelConflict())
                 .doUpdate()
                 .set(CATALOG_COLLECTIONS.CONTENT_TYPE,         DSL.excluded(CATALOG_COLLECTIONS.CONTENT_TYPE))
                 .set(CATALOG_COLLECTIONS.OWNER_ID,             DSL.excluded(CATALOG_COLLECTIONS.OWNER_ID))

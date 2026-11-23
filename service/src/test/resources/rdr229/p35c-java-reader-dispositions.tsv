@@ -9,3 +9,84 @@
 # A NULL id is no collection: an id or both reader never falls back to a '' name (linda 2026-11-20).
 # The two upserts (PgVectorRepository chunks, TaxonomyCentroidRepository taxonomy_centroids, op on_conflict) take the id key as their conflict target from gate 3: disposition id.
 kind	object	name_column	disposition	reason
+java	db/CatalogRepository.java ? expr	physical_collection	id	the moving-row alias of moveUriCollisions; by id from gate 3
+java	db/CatalogRepository.java canary_query_ring expr	collection	both	the COLLECTION_SCOPED_TABLES list carries both columns of each table; readers pick by gate through CollectionScopedTable.named
+java	db/CatalogRepository.java canary_query_ring where	collection	id	
+java	db/CatalogRepository.java catalog_collections expr	superseded_by	id	
+java	db/CatalogRepository.java catalog_collections on_conflict	name	label-kept	the registry's label key; from G15 the conflict target is the live-label key (WHERE superseded_by = '' AND superseded_by_id IS NULL)
+java	db/CatalogRepository.java catalog_collections order_by	name	label-kept	the registry's own label: the caller's label resolves to its registry row
+java	db/CatalogRepository.java catalog_collections result	name	label-kept	the registry's own label: the caller's label resolves to its registry row
+java	db/CatalogRepository.java catalog_collections result	superseded_by	both	rename arm: runs only while gate 3 does not hold (a rename is refused from gate 3 until P3.7's one-row rename replaces this transaction), so it reads the name; P3.7 owns it
+java	db/CatalogRepository.java catalog_collections returning	name	label-kept	the registry's own label: the caller's label resolves to its registry row
+java	db/CatalogRepository.java catalog_collections select	name	label-kept	the registry's own label: the caller's label resolves to its registry row
+java	db/CatalogRepository.java catalog_collections select	superseded_by	both	rename arm: runs only while gate 3 does not hold (a rename is refused from gate 3 until P3.7's one-row rename replaces this transaction), so it reads the name; P3.7 owns it; the other reads of the group take the id from gate 3
+java	db/CatalogRepository.java catalog_collections where	name	label-kept	the registry's own label: the caller's label resolves to its registry row
+java	db/CatalogRepository.java catalog_collections where	superseded_by	both	rename arm: runs only while gate 3 does not hold (a rename is refused from gate 3 until P3.7's one-row rename replaces this transaction), so it reads the name; P3.7 owns it; the other reads of the group take the id from gate 3
+java	db/CatalogRepository.java catalog_document_chunks expr	collection	both	the COLLECTION_SCOPED_TABLES list carries both columns of each table; readers pick by gate through CollectionScopedTable.named
+java	db/CatalogRepository.java catalog_document_chunks join_on	collection	id	
+java	db/CatalogRepository.java catalog_document_chunks where	collection	both	the rename and rehome arms read the manifest rows the chunk cascade just renamed, by name, in the same statement; every other read takes the id from gate 3
+java	db/CatalogRepository.java catalog_documents expr	physical_collection	both	the COLLECTION_SCOPED_TABLES list carries both columns of each table; readers pick by gate through CollectionScopedTable.named
+java	db/CatalogRepository.java catalog_documents group_by	physical_collection	id	
+java	db/CatalogRepository.java catalog_documents select	physical_collection	id	
+java	db/CatalogRepository.java catalog_documents where	physical_collection	both	rename arm: runs only while gate 3 does not hold (a rename is refused from gate 3 until P3.7's one-row rename replaces this transaction), so it reads the name; P3.7 owns it; the other reads of the group take the id from gate 3
+java	db/CatalogRepository.java chunks expr	collection	both	the COLLECTION_SCOPED_TABLES list carries both columns of each table; readers pick by gate through CollectionScopedTable.named
+java	db/CatalogRepository.java chunks join_on	collection	id	
+java	db/CatalogRepository.java chunks on_conflict	collection	id	
+java	db/CatalogRepository.java chunks set_value	collection	id	
+java	db/CatalogRepository.java chunks where	collection	both	two call sites hand the label to ChunkSensitivity.servableUnderExclude, which its own group switches; they take the gate when it does; every other read takes the id from gate 3
+java	db/CatalogRepository.java collection_doc_counts select	physical_collection	id	a view: its label column is derived from the id (P3.5b's redefinition); no id column to select
+java	db/CatalogRepository.java collection_health_meta where	collection	id	a view: its collection column is the registry's label derived from the id (P3.5b's redefinition); no id column to select
+java	db/CatalogRepository.java collection_vector_stats where	collection	id	a view: its collection column is the registry's label derived from the id (P3.5b's redefinition), so the filter by label follows a rename; no id column to select
+java	db/CatalogRepository.java document_aspects expr	collection	both	the COLLECTION_SCOPED_TABLES list carries both columns of each table; readers pick by gate through CollectionScopedTable.named
+java	db/CatalogRepository.java document_aspects where	collection	both	rename arm: runs only while gate 3 does not hold (a rename is refused from gate 3 until P3.7's one-row rename replaces this transaction), so it reads the name; P3.7 owns it; the other reads of the group take the id from gate 3
+java	db/CatalogRepository.java document_highlights expr	collection	both	the COLLECTION_SCOPED_TABLES list carries both columns of each table; readers pick by gate through CollectionScopedTable.named
+java	db/CatalogRepository.java document_highlights where	collection	both	rename arm: runs only while gate 3 does not hold (a rename is refused from gate 3 until P3.7's one-row rename replaces this transaction), so it reads the name; P3.7 owns it; the other reads of the group take the id from gate 3
+java	db/CatalogRepository.java gc_audit expr	collection	both	the COLLECTION_SCOPED_TABLES list carries both columns of each table; readers pick by gate through CollectionScopedTable.named
+java	db/CatalogRepository.java gc_audit select	collection	both	history table: its id is never stamped on an old row, so the read takes the id and, for a row with none, its name
+java	db/CatalogRepository.java hook_failures expr	collection	both	the COLLECTION_SCOPED_TABLES list carries both columns of each table; readers pick by gate through CollectionScopedTable.named
+java	db/CatalogRepository.java reembed_jobs select	source_collection	both	refuseUnderReembedJob is a rename/rehome guard with callers outside this group (Taxonomy, Telemetry, Aspect, Chash) that pass no gate; it keeps the name until they do
+java	db/CatalogRepository.java reembed_jobs select	target_collection	both	as the source column: the guard keeps the name until its outside callers pass the gate
+java	db/CatalogRepository.java reembed_jobs where	source_collection	both	as the source select: the guard keeps the name until its outside callers pass the gate
+java	db/CatalogRepository.java reembed_jobs where	target_collection	both	as the source select: the guard keeps the name until its outside callers pass the gate
+java	db/CatalogRepository.java relevance_log expr	collection	both	the COLLECTION_SCOPED_TABLES list carries both columns of each table; readers pick by gate through CollectionScopedTable.named
+java	db/CatalogRepository.java search_telemetry expr	collection	both	the COLLECTION_SCOPED_TABLES list carries both columns of each table; readers pick by gate through CollectionScopedTable.named
+java	db/CatalogRepository.java taxonomy_centroids expr	collection	both	the COLLECTION_SCOPED_TABLES list carries both columns of each table; readers pick by gate through CollectionScopedTable.named
+java	db/CatalogRepository.java taxonomy_centroids where	collection	id	
+java	db/CatalogRepository.java taxonomy_meta expr	collection	both	the COLLECTION_SCOPED_TABLES list carries both columns of each table; readers pick by gate through CollectionScopedTable.named
+java	db/CatalogRepository.java taxonomy_meta where	collection	id	
+java	db/CatalogRepository.java topic_assignments expr	source_collection	both	the COLLECTION_SCOPED_TABLES list carries both columns of each table; readers pick by gate through CollectionScopedTable.named
+java	db/CatalogRepository.java topic_assignments where	source_collection	both	rename arm: runs only while gate 3 does not hold (a rename is refused from gate 3 until P3.7's one-row rename replaces this transaction), so it reads the name; P3.7 owns it (the pre-count); the delete cascade takes the id from gate 3
+java	db/CatalogRepository.java topics expr	collection	both	the COLLECTION_SCOPED_TABLES list carries both columns of each table; readers pick by gate through CollectionScopedTable.named
+java	db/CatalogRepository.java topics where	collection	id	
+java	db/CollectionIdReads.java catalog_collections expr	superseded_by	both	the one place the name arm (before gate 3) and the id arm (from gate 3) of the catalog readers are spelled; every caller holds the gate
+java	db/CollectionIdReads.java catalog_collections select	name	label-kept	resolves a label to its registry row (idOfLabel) or reads the registry's name of an id (labelOf)
+java	db/CollectionIdReads.java catalog_collections where	name	label-kept	resolves a label to its registry row (idOfLabel) or reads the registry's name of an id (labelOf)
+java	db/CollectionIdReads.java catalog_document_chunks expr	collection	both	the one place the name arm (before gate 3) and the id arm (from gate 3) of the catalog readers are spelled; every caller holds the gate
+java	db/CollectionIdReads.java catalog_documents expr	physical_collection	both	the one place the name arm (before gate 3) and the id arm (from gate 3) of the catalog readers are spelled; every caller holds the gate
+java	db/CollectionIdReads.java chunks expr	collection	both	the one place the name arm (before gate 3) and the id arm (from gate 3) of the catalog readers are spelled; every caller holds the gate
+java	db/CollectionMint.java catalog_collections result	name	label-kept	the registry's own label: the label-taken check, the held-tuple holder's name and the minted row
+java	db/CollectionMint.java catalog_collections select	name	label-kept	the registry's own label: the label-taken check, the held-tuple holder's name and the minted row
+java	db/CollectionMint.java catalog_collections where	name	label-kept	the registry's own label: the label-taken check, the held-tuple holder's name and the minted row
+java	db/CollectionMint.java catalog_collections where	superseded_by	both	the ON CONFLICT inference predicate must stay superseded_by = '' (the tuple index's own) until that index is redefined at P4.1; liveRow and heldBy read superseded_by_id from gate 3
+java	db/CollectionRename.java catalog_collections on_conflict	name	label-kept	the registry label of the rename's source and successor; the G15 on-conflict (nexus-p2m1x.25) names the live-label key, a label-resolving write
+java	db/CollectionRename.java catalog_collections select	superseded_by	both	the revive arm and the retired-row check belong to P3.7's rename; they read the tombstone marker by name (the pre-gate rename)
+java	db/CollectionRename.java catalog_collections where	name	label-kept	resolves the rename's old or new label to its registry row
+java	db/CollectionRename.java catalog_collections where	superseded_by	both	the revive arm and the retired-row check belong to P3.7's rename; they read the tombstone marker by name (the pre-gate rename)
+java	db/CollectionTombstones.java catalog_collections expr	superseded_by	both	the parity check compares the name and id columns by design; repoint finds a tombstone whose successor was deleted by its label alone (its id is its own)
+java	db/CollectionTombstones.java catalog_collections where	name	label-kept	resolves the retiring, successor or deleted label to its registry row
+java	db/CollectionTombstones.java catalog_collections where	superseded_by	both	the CAS and the delete read superseded_by_id from gate 3; repointTombstonesNaming and the parity check read the label by design (a self-id tombstone keeps only the label)
+java	db/DepartedWriterSpans.java ? expr	collection	id	
+java	db/DepartedWriterSpans.java catalog_document_chunks expr	collection	id	
+java	db/DepartedWriterSpans.java catalog_document_chunks result	collection	id	
+java	db/DepartedWriterSpans.java catalog_document_chunks select	collection	id	
+java	db/DepartedWriterSpans.java catalog_document_chunks where	collection	id	
+java	db/DepartedWriterSpans.java chunks join_on	collection	id	
+java	db/DepartedWriterSpans.java chunks set_value	collection	id	
+java	db/DepartedWriterSpans.java chunks where	collection	id	
+java	db/QuarantineOrigin.java catalog_collections expr	name	label-kept	resolves the origin, sibling or quarantine collection's label to its registry row
+java	db/QuarantineOrigin.java catalog_collections expr	superseded_by	id	
+java	db/QuarantineOrigin.java catalog_collections select	name	label-kept	resolves the origin, sibling or quarantine collection's label to its registry row
+java	db/QuarantineOrigin.java catalog_collections where	name	label-kept	resolves the origin, sibling or quarantine collection's label to its registry row
+java	db/QuarantineOrigin.java catalog_collections where	superseded_by	id	
+java	db/QuarantineOrigin.java chunks expr	collection	id	
+java	db/QuarantineOrigin.java chunks where	collection	id	

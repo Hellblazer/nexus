@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import dev.nexus.service.datamove.Gate3;
+import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.impl.DSL;
@@ -35,8 +37,14 @@ public final class CollectionTombstones {
      * @return the number of rows updated (0 means no {@code (tenant, name)} row, or a different target already set)
      */
     static int supersede(DSLContext ctx, String tenant, String name, String supersededBy, Field<OffsetDateTime> stampedAt) {
+        return supersede(ctx, tenant, name, supersededBy, stampedAt, Gate3.never());
+    }
+
+    /** {@link #supersede(DSLContext, String, String, String, Field)} reading the id from gate 3 (RDR-229 P3.5c). */
+    static int supersede(DSLContext ctx, String tenant, String name, String supersededBy, Field<OffsetDateTime> stampedAt,
+                         Gate3 gate3) {
         CollectionIds.require(ctx, tenant, supersededBy);
-        return casSupersede(ctx, tenant, name, supersededBy, CollectionIds.idOf(tenant, supersededBy), stampedAt);
+        return casSupersede(ctx, tenant, name, supersededBy, CollectionIds.idOf(tenant, supersededBy), stampedAt, gate3);
     }
 
     /**
@@ -56,18 +64,28 @@ public final class CollectionTombstones {
      * @return the number of rows updated (0 means no {@code (tenant, fromName)} row, or a different target already set)
      */
     static int supersede(DSLContext ctx, String tenant, String fromName, String toName, long toId) {
-        return casSupersede(ctx, tenant, fromName, toName, DSL.val(toId), DSL.currentOffsetDateTime());
+        return supersede(ctx, tenant, fromName, toName, toId, Gate3.never());
+    }
+
+    /** {@link #supersede(DSLContext, String, String, String, long)} reading the id from gate 3 (RDR-229 P3.5c). */
+    static int supersede(DSLContext ctx, String tenant, String fromName, String toName, long toId, Gate3 gate3) {
+        return casSupersede(ctx, tenant, fromName, toName, DSL.val(toId), DSL.currentOffsetDateTime(), gate3);
     }
 
     private static int casSupersede(DSLContext ctx, String tenant, String name, String supersededBy, Field<Long> successorId,
-                                    Field<OffsetDateTime> stampedAt) {
+                                    Field<OffsetDateTime> stampedAt, Gate3 gate3) {
+        // RDR-229 P3.5c: the row is the caller's label (the registry name stays); "live" and "already this target" read the
+        // id from gate 3. The name arm of a write (the SET) is the dual write's, not a read.
+        Condition live = CollectionIdReads.live(gate3, CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.SUPERSEDED_BY_ID);
+        Condition alreadyThis = gate3.holds() ? CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.eq(successorId)
+            : CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(supersededBy);
         return ctx.update(CATALOG_COLLECTIONS)
             .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, supersededBy)
             .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, successorId)
             // nexus-0svvu (a): stamp only on the transition OUT OF '' (a genuine first supersede); a row that
             // already carries THIS target keeps whatever instant it already has.
             .set(CATALOG_COLLECTIONS.SUPERSEDED_AT,
-                DSL.when(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(""), stampedAt)
+                DSL.when(live, stampedAt)
                    .otherwise(CATALOG_COLLECTIONS.SUPERSEDED_AT))
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
                 .and(CATALOG_COLLECTIONS.NAME.eq(name))
@@ -75,8 +93,7 @@ public final class CollectionTombstones {
                 // It is the one source of the DIFFERENT-target refusal: the loser of a concurrent supersede to
                 // another target matches zero rows, and renameCollectionTxn's emptiness/identity asymmetry
                 // (nexus-2sovp) depends on this CAS staying exactly this strict.
-                .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")
-                    .or(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(supersededBy))))
+                .and(live.or(alreadyThis)))
             .execute();
     }
 
@@ -150,16 +167,21 @@ public final class CollectionTombstones {
      * @return the number of registry rows deleted
      */
     static int deleteRegistryRows(DSLContext ctx, String tenant, List<String> names) {
+        return deleteRegistryRows(ctx, tenant, names, Gate3.never());
+    }
+
+    /** {@link #deleteRegistryRows(DSLContext, String, List)}; from gate 3 a survivor is found by the successor's id alone (RDR-229 P3.5c). */
+    static int deleteRegistryRows(DSLContext ctx, String tenant, List<String> names, Gate3 gate3) {
         if (names.isEmpty()) return 0;
         var d = CATALOG_COLLECTIONS.as("gone");
         Field<Long> goneId = d.COLLECTION_ID;
+        Condition byId = CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.in(
+            DSL.select(goneId).from(d).where(d.TENANT_ID.eq(tenant)).and(d.NAME.in(names)));
         ctx.update(CATALOG_COLLECTIONS)
             .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, CATALOG_COLLECTIONS.COLLECTION_ID)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
             .and(CATALOG_COLLECTIONS.NAME.notIn(names))
-            .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.in(names)
-                .or(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.in(
-                    DSL.select(goneId).from(d).where(d.TENANT_ID.eq(tenant)).and(d.NAME.in(names)))))
+            .and(gate3.holds() ? byId : CATALOG_COLLECTIONS.SUPERSEDED_BY.in(names).or(byId))
             .execute();
         return ctx.deleteFrom(CATALOG_COLLECTIONS)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.in(names))
