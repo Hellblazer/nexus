@@ -117,7 +117,7 @@ final class ImportTestEnv implements AutoCloseable {
         return new ImportTestEnv(pg, ds, service);
     }
 
-    private static NexusService oneRowService(HikariDataSource ds) {
+    private static NexusService oneRowService(HikariDataSource ds) throws java.io.IOException {
         var readiness = new dev.nexus.service.datamove.RenameReadiness() {
             @Override
             public Missing missing() {

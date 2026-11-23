@@ -379,12 +379,26 @@ public final class CompletionCheck {
             return renameMissing(gate3Latched);
         }
 
+        /** As {@link #readinessMissing(boolean)} with the id readers assumed present (a hand-built result, a test). */
+        public RenameReadiness.Missing readinessMissing() {
+            return readinessMissing(true);
+        }
+
         /**
          * As {@link #renameMissing()} with the latch as the caller reads it now: the engine passes the rename window's regime OR the durable latch
          * ({@link CompletionBootWork#gate3Latched()}), which can be newer than this sample (a sample is read before the latch writer flips the regime).
          */
         public RenameReadiness.Missing renameMissing(boolean latched) {
-            return latched ? readinessMissing() : RenameReadiness.Missing.NONE;
+            return renameMissing(latched, true);
+        }
+
+        /**
+         * As above with whether this engine's id readers are present ({@code IdReaders.present()}): a rename that is otherwise ready waits for them
+         * ({@link RenameReadiness.Missing#P35C_READERS_ABSENT}). The one-argument forms assume they are, for a hand-built result and the tests that exercise the
+         * one-row regime; the engine's own readiness and status pass the real value.
+         */
+        public RenameReadiness.Missing renameMissing(boolean latched, boolean idReadersPresent) {
+            return latched ? readinessMissing(idReadersPresent) : RenameReadiness.Missing.NONE;
         }
 
         /**
@@ -392,7 +406,7 @@ public final class CompletionCheck {
          * only once the latch is written, so a complete move implies the row; readiness NONE implies it too, and is never answered from an error
          * ({@link RenameReadiness.Missing#READINESS_UNREADABLE}). The status field ({@link #renameMissing()}) keeps saying none before the latch.
          */
-        public RenameReadiness.Missing readinessMissing() {
+        public RenameReadiness.Missing readinessMissing(boolean idReadersPresent) {
             if (rename.unreadable()) {
                 return RenameReadiness.Missing.READINESS_UNREADABLE;
             }
@@ -402,7 +416,10 @@ public final class CompletionCheck {
             if (rename.listed() == 0) {
                 return RenameReadiness.Missing.P35B_LIST_MISSING;
             }
-            return rename.p35bApplied() ? RenameReadiness.Missing.NONE : RenameReadiness.Missing.P35B_RESTART;
+            if (!rename.p35bApplied()) {
+                return RenameReadiness.Missing.P35B_RESTART;
+            }
+            return idReadersPresent ? RenameReadiness.Missing.NONE : RenameReadiness.Missing.P35C_READERS_ABSENT;
         }
 
         /**

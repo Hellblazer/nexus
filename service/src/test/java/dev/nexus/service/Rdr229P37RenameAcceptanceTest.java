@@ -166,7 +166,8 @@ class Rdr229P37RenameAcceptanceTest {
             assertThat(awaitAdvisoryWaiters(2)).as("(i) and (ii) both wait on the sweep gate").isTrue();
             assertThat(rehome.isDone()).as("(i) a rehome naming B waits for the sweep").isFalse();
             assertThat(rename.isDone()).as("(ii) a rename named B waits for the sweep").isFalse();
-            assertThat(env.su(c -> Rdr229RenameChecks.snapshots(c, w.tenant(), w.a()))).as("no row of B moved while the gate is held").isEqualTo(before);
+            java.util.Map<String, java.util.List<String>> during = env.su(c -> Rdr229RenameChecks.snapshots(c, w.tenant(), w.a()));
+            assertThat(during).as("no row of B moved while the gate is held").isEqualTo(before);
             assertThat(env.<Long>su(c -> Rdr229RenameChecks.registryId(c, w.tenant(), w.b()))).as("B is still B").isEqualTo(w.id());
 
             holder.commit();   // the sweep ends
@@ -343,7 +344,8 @@ class Rdr229P37RenameAcceptanceTest {
             assertThat(r.statusCode()).as(path + ": " + r.body()).isEqualTo(200);
             assertThat(r.body()).as(path + " changes no row").doesNotContainPattern("\"updated\":[1-9]");
         }
-        assertThat(env.su(ctx -> Rdr229RenameChecks.snapshots(ctx, w.tenant(), w.a()))).as("the rows are the same rows (xmin)").isEqualTo(before);
+        java.util.Map<String, java.util.List<String>> after = env.su(ctx -> Rdr229RenameChecks.snapshots(ctx, w.tenant(), w.a()));
+        assertThat(after).as("the rows are the same rows (xmin)").isEqualTo(before);
     }
 
     /** (e)(i) a rehome naming B moves exactly B's rows, by id, and none of another collection's. */

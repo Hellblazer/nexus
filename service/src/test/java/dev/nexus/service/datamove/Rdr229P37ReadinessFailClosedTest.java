@@ -113,7 +113,8 @@ class Rdr229P37ReadinessFailClosedTest {
     void aReadinessReadThatStallsPastTheTimeout_failsClosed() throws Exception {
         try (Connection holder = pg.createConnection(""); Connection c = pg.createConnection("")) {
             holder.setAutoCommit(false);
-            DSL.using(holder, SQLDialect.POSTGRES).lockTable(DSL.table(DSL.name("public", "databasechangelog"))).inAccessExclusiveMode().execute();
+            // an ALTER TABLE holds ACCESS EXCLUSIVE until the rollback (typed DDL; the lock is the point, the column is never committed)
+            DSL.using(holder, SQLDialect.POSTGRES).alterTable(DSL.table(DSL.name("public", "databasechangelog"))).addColumn(DSL.name("zz_stall"), org.jooq.impl.SQLDataType.INTEGER).execute();
             c.setAutoCommit(true);
             DSLContext ctx = DSL.using(c, SQLDialect.POSTGRES);
 
@@ -137,5 +138,31 @@ class Rdr229P37ReadinessFailClosedTest {
             assertThat(r.rename().unreadable()).isFalse();
             assertThat(r.readinessMissing()).as("read, and not ready: the drop move is registered by nothing here").isEqualTo(Missing.NAME_KEY_DROP_MOVE);
         }
+    }
+
+    /**
+     * linda's census, item 2: the rename's read of the latch row is bounded like the readiness read, and a failure or a timeout refuses the rename with
+     * {@code readiness_unreadable} (never a 5xx). A lock on the latch table makes the read stall past the 2 s bound. At the replay, {@code runRename}'s
+     * in-transaction read replaces this connection, which must then be gone entirely.
+     */
+    @Test
+    void theLatchRowReadIsBounded_aStallRefusesTheRenameReadinessUnreadable() throws Exception {
+        var admin = new dev.nexus.service.db.AdminConnection(pg.getJdbcUrl(), pg.getUsername(), pg.getPassword());
+        var work = new CompletionBootWork(new dev.nexus.service.BootWorkRegistry(java.time.Clock.systemUTC()), admin, EMPTY,
+            CompletionCheck.Gate3Source.NOT_INSTALLED, List.of(), CompletionCheck.Gate3LatchWriter.IMMEDIATE, Gate3Latch.of(false, false), Duration.ZERO,
+            () -> Set.of(), new RenameWindow());
+        try (Connection holder = pg.createConnection("")) {
+            holder.setAutoCommit(false);
+            DSL.using(holder, SQLDialect.POSTGRES).alterTable(DSL.table(DSL.name("nexus", "rdr229_gate_latch"))).addColumn(DSL.name("zz_stall"), org.jooq.impl.SQLDataType.INTEGER).execute();   // ACCESS EXCLUSIVE until the rollback
+
+            long start = System.nanoTime();
+            assertThatThrownBy(() -> work.renameReadiness().gate3LatchedUnderLock()).isInstanceOf(RenameRefusedException.class)
+                .extracting(e -> ((RenameRefusedException) e).missing()).isEqualTo(Missing.READINESS_UNREADABLE);
+            Duration took = Duration.ofNanos(System.nanoTime() - start);
+
+            assertThat(took).as("cut by the statement or lock timeout, not left waiting").isLessThan(Duration.ofSeconds(20));
+            holder.rollback();
+        }
+        work.close();
     }
 }

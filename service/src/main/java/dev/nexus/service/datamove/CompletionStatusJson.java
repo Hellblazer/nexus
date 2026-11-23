@@ -39,6 +39,11 @@ final class CompletionStatusJson {
     private CompletionStatusJson() { /* static */ }
 
     static String render(CompletionCheck.Result r) {
+        return render(r, true);
+    }
+
+    /** As above with whether this engine's id readers are present, which the {@code rename_missing} field reports ({@code p35c_readers_absent}). */
+    static String render(CompletionCheck.Result r, boolean idReadersPresent) {
         long holding = (r.gate1() ? 1 : 0) + (r.gate2() ? 1 : 0) + (r.gate3() ? 1 : 0);
         StringBuilder b = new StringBuilder(512);
         b.append("{\"gate1\":").append(r.gate1()).append(",\"gate2\":").append(r.gate2()).append(",\"gate3\":").append(r.gate3())
@@ -78,7 +83,7 @@ final class CompletionStatusJson {
             b.append("],\"what\":").append(HttpUtil.jsonString(CompletionBootWork.validateWaits(w))).append('}');
             first = false;
         }
-        RenameReadiness.Missing missing = r.renameMissing();
+        RenameReadiness.Missing missing = r.renameMissing(r.gate3Latched(), idReadersPresent);
         return b.append("],\"rename_missing\":").append(HttpUtil.jsonString(missing == RenameReadiness.Missing.NONE ? "none"
             : dev.nexus.service.db.RenameRefusedException.wireValue(missing))).append('}').toString();
     }

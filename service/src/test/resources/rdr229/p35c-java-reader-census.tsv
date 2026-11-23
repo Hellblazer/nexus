@@ -4,9 +4,9 @@
 # (jooq constant, alias, helper ch/ct, literal, sql string). table ? is UNRESOLVED (named in the script's output). Writes are P3.1's.
 # The two upserts the RDR names are the on_conflict rows of PgVectorRepository (chunks) and TaxonomyCentroidRepository (taxonomy_centroids).
 file	line	table	name_column	op	via	note
-service/src/main/java/dev/nexus/service/datamove/CompletionCheck.java	939	catalog_collections	superseded_by	expr	literal	-
 service/src/main/java/dev/nexus/service/datamove/CompletionCheck.java	956	catalog_collections	superseded_by	expr	literal	-
-service/src/main/java/dev/nexus/service/datamove/CompletionCheck.java	971	catalog_collections	superseded_by	expr	literal	-
+service/src/main/java/dev/nexus/service/datamove/CompletionCheck.java	973	catalog_collections	superseded_by	expr	literal	-
+service/src/main/java/dev/nexus/service/datamove/CompletionCheck.java	988	catalog_collections	superseded_by	expr	literal	-
 service/src/main/java/dev/nexus/service/db/AspectQueueDrain.java	312	?	collection	expr	literal	0 candidate tables in the statement
 service/src/main/java/dev/nexus/service/db/AspectQueueDrain.java	320	catalog_documents	physical_collection	select	alias	-
 service/src/main/java/dev/nexus/service/db/AspectQueueDrain.java	336	catalog_documents	physical_collection	result	alias	-
@@ -242,14 +242,16 @@ service/src/main/java/dev/nexus/service/db/CollectionMint.java	480	catalog_colle
 service/src/main/java/dev/nexus/service/db/CollectionMint.java	485	catalog_collections	name	select	jooq	-
 service/src/main/java/dev/nexus/service/db/CollectionMint.java	494	catalog_collections	superseded_by	where	jooq	-
 service/src/main/java/dev/nexus/service/db/CollectionMint.java	504	catalog_collections	name	result	jooq	-
-service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	86	catalog_collections	name	where	jooq	-
-service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	107	catalog_collections	name	expr	jooq	-
-service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	116	catalog_collections	name	where	jooq	-
-service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	116	catalog_collections	superseded_by	where	jooq	-
-service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	128	catalog_collections	superseded_by	where	jooq	-
-service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	164	catalog_collections	name	where	jooq	-
-service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	165	catalog_collections	superseded_by	where	jooq	-
-service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	216	catalog_documents	physical_collection	select	alias	-
+service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	90	catalog_collections	name	where	jooq	-
+service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	91	catalog_collections	superseded_by	where	jooq	-
+service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	93	catalog_collections	name	where	alias	-
+service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	114	catalog_collections	name	expr	jooq	-
+service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	123	catalog_collections	name	where	jooq	-
+service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	123	catalog_collections	superseded_by	where	jooq	-
+service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	135	catalog_collections	superseded_by	where	jooq	-
+service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	171	catalog_collections	name	where	jooq	-
+service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	172	catalog_collections	superseded_by	where	jooq	-
+service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	223	catalog_documents	physical_collection	select	alias	-
 service/src/main/java/dev/nexus/service/db/CollectionRegistry.java	281	catalog_collections	superseded_by	select	jooq	-
 service/src/main/java/dev/nexus/service/db/CollectionRegistry.java	286	catalog_collections	name	where	jooq	-
 service/src/main/java/dev/nexus/service/db/CollectionRegistry.java	401	catalog_collections	name	where	jooq	-

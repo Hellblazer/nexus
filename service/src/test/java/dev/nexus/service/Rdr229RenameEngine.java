@@ -138,6 +138,8 @@ final class Rdr229RenameEngine implements AutoCloseable {
         check = new CompletionBootWork(bootWork, admin, CompletionCheck.ReadSet.boot(), this::simulatedGate3, java.util.List.of(),
             window.latchWriter(), dev.nexus.service.datamove.Gate3Latch.readAtBoot(admin), Duration.ZERO,
             this::p35bList, window);   // ZERO: the coverage is read every sample, so a test can dip the live gate 3 after the latch
+        // the one-row regime is exercised here, and this base has no id readers (IdReaders.PRESENT is false until P3.5c): the test-only seam says they are present
+        dev.nexus.service.datamove.CompletionBootWorkTestSupport.idReadersPresent(check, () -> true);
         readiness = counting(check.renameReadiness());
         service = new NexusService(0, ROOT, ds, null, null, null, null, null, null, System::getenv,
             () -> dev.nexus.service.db.PgSession.startupPciSettings().enabled(), null, null, check.gate3(), readiness);

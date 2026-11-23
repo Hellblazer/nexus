@@ -266,7 +266,8 @@ class CompletionBootWorkRenameWindowTest {
         };
         var work = work(reader, window);
         var guard = new dev.nexus.service.db.RenameGuard(Gate3.never(), work.renameReadiness());
-        assertThatThrownBy(() -> guard.pinned(oneRow -> oneRow)).isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> guard.pinned(oneRow -> oneRow)).isInstanceOf(dev.nexus.service.db.RenameRefusedException.class)
+            .extracting(e -> ((dev.nexus.service.db.RenameRefusedException) e).missing()).isEqualTo(RenameReadiness.Missing.READINESS_UNREADABLE);
     }
 
     /**
@@ -295,6 +296,38 @@ class CompletionBootWorkRenameWindowTest {
             work.renameReadiness().missing();
         }
         assertThat(reads.get()).as("the readiness reads no database of its own: it answers from the last sample").isEqualTo(before);
+    }
+
+    /**
+     * linda's census of 19d19081dc, item 1: the readiness waits for P3.5c's readers. Everything else complete and the id readers absent
+     * ({@code IdReaders.present()} is false on this base) is {@code p35c_readers_absent}: in the readiness, in the status field, and as the refusal of a rename
+     * after the latch. The test-only seam makes them present and the same state reads NONE.
+     */
+    @Test
+    void aReadyInstallWhoseReadersAreNotTheIdReadersIsRefusedP35cReadersAbsent_untilTheyArePresent() {
+        var window = new RenameWindow();
+        var reader = new Scripted(CompletionCheck.Gate3LatchWriter.IMMEDIATE) {
+            @Override
+            public CompletionCheck.Result read() {
+                return new CompletionCheck.Result(true, true, true, List.of(), List.of(), true, 0L, List.of(), List.of(), "",
+                    CompletionCheck.Dangling.UNREAD, false, true, false, false, new CompletionCheck.RenameState(true, 1, List.of()));
+            }
+        };
+        reader.row.set(true);
+        var work = work(reader, window);
+        work.publish();
+        var guard = new dev.nexus.service.db.RenameGuard(() -> true, work.renameReadiness());
+
+        assertThat(work.renameReadiness().missing()).as("complete, but the id readers are absent: the default is IdReaders.present(), false here")
+            .isEqualTo(RenameReadiness.Missing.P35C_READERS_ABSENT);
+        assertThat(work.statusJson()).as("the status field says so").contains("\"rename_missing\":\"p35c_readers_absent\"");
+        assertThatThrownBy(() -> guard.pinned(oneRow -> oneRow)).as("a rename after the latch is refused with it").isInstanceOf(dev.nexus.service.db.RenameRefusedException.class)
+            .extracting(e -> ((dev.nexus.service.db.RenameRefusedException) e).wireValue()).isEqualTo("p35c_readers_absent");
+
+        CompletionBootWorkTestSupport.idReadersPresent(work, () -> true);
+
+        assertThat(work.renameReadiness().missing()).as("with the readers present the same state is ready").isEqualTo(RenameReadiness.Missing.NONE);
+        assertThat(work.statusJson()).contains("\"rename_missing\":\"none\"");
     }
 
     /** A bounded poll for the schedule's thread. */

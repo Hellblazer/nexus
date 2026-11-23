@@ -265,4 +265,44 @@ class Rdr229P37OneRowLockOrderTest {
         }
         assertThat(engine.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, a))).as("nothing was registered under A: the INSERT rolled back").isNull();
     }
+
+    /**
+     * linda's census, item 3: every registry row a rename touches is locked in ONE statement ordered by collection_id (the old row, the tombstone at the new
+     * label, the tombstones naming the old label). Two renames onto the SAME empty tombstone, each with tombstones of its own naming its old label, race: with
+     * the locks taken in id order they serialise and one wins; with the tombstones locked later, out of order, they could deadlock (40P01, a 5xx).
+     */
+    @Test
+    void twoRenamesTouchingOverlappingTombstonesInOppositeOrdersDoNotDeadlock() throws Exception {
+        for (int round = 0; round < 3; round++) {
+            String tenant = "p37-lo-e" + round;
+            String token = engine.newTenant(tenant);
+            String a = coll("p37loea" + round);
+            String c = coll("p37loec" + round);
+            String x = coll("p37loex" + round);
+            String z = coll("p37loez" + round);
+            String t1 = coll("p37loet1" + round);
+            String t2 = coll("p37loet2" + round);
+            engine.su(ctx -> {
+                for (String n : List.of(c, a, x, z, t1, t2)) {   // C gets the lowest id, A next: the two renames reach the shared tombstone from opposite ends
+                    PgContainerHelper.insertCollection(ctx, tenant, n);
+                }
+                return null;
+            });
+            for (String[] sup : new String[][] {{x, z}, {t1, a}, {t2, c}}) {
+                var r = engine.call("POST", "/v1/catalog/collections/supersede", token, "{\"name\":\"" + sup[0] + "\",\"superseded_by\":\"" + sup[1] + "\"}");
+                assertThat(r.statusCode()).as("non-vacuity: tombstone " + sup[0] + ": " + r.body()).isEqualTo(200);
+            }
+            var pool = Executors.newFixedThreadPool(2);
+            try {
+                Future<Rdr229RenameEngine.Renamed> r1 = pool.submit(() -> engine.rename(token, a, x));
+                Future<Rdr229RenameEngine.Renamed> r2 = pool.submit(() -> engine.rename(token, c, x));
+                int s1 = r1.get(120, TimeUnit.SECONDS).status();
+                int s2 = r2.get(120, TimeUnit.SECONDS).status();
+                assertThat(List.of(s1, s2)).as("no deadlock (40P01) and no 5xx: each is a rename or a clean refusal").allMatch(s -> s == 200 || s == 404 || s == 409);
+                assertThat(List.of(s1, s2).stream().filter(s -> s == 200).count()).as("exactly one rename took the shared tombstone's label").isEqualTo(1L);
+            } finally {
+                pool.shutdownNow();
+            }
+        }
+    }
 }

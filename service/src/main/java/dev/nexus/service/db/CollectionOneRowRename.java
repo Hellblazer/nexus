@@ -82,8 +82,15 @@ final class CollectionOneRowRename {
                 new CollectionTupleLock.Tuple(tenant, peek.value2(), peek.value3(), peek.value4(), peek.value5()),
                 new CollectionTupleLock.Tuple(tenant, peekContentType, peekOwner, peek.value4(), peek.value5())));
         }
+        // EVERY registry row the rename will touch is locked here, in ONE statement ordered by collection_id (linda's census, item 3): the old row, the
+        // target or the tombstone at the new label (which is deleted), the tombstones whose superseded_by names the old label (repointed) and those that point
+        // at the target tombstone's id (repointed after its delete). Locking the tombstones later, after the rename's own row, would take them out of id order.
+        var target = CATALOG_COLLECTIONS.as("target");
         ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
-            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.in(oldName, newName)))
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.in(oldName, newName)
+                .or(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(oldName))
+                .or(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.in(ctx.select(target.COLLECTION_ID).from(target)
+                    .where(target.TENANT_ID.eq(tenant).and(target.NAME.eq(newName)))))))
             .orderBy(CATALOG_COLLECTIONS.COLLECTION_ID).forUpdate().fetch();
         Record6<Long, String, String, String, String, String> own = readOwn(ctx, tenant, oldName, true);
         if (own == null) {

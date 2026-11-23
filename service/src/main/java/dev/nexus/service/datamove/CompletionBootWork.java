@@ -106,6 +106,13 @@ public final class CompletionBootWork implements AutoCloseable {
     private volatile boolean gate3LatchPciOff;
     /** True once any sample read the readiness as NONE: its facts are monotone, so a later unreadable sample keeps answering NONE. */
     private volatile boolean readyOnce;
+    /**
+     * Whether this engine's readers select by id: {@code IdReaders.present()} (P3.5c flips it). The one-row rename waits for it
+     * ({@link RenameReadiness.Missing#P35C_READERS_ABSENT}). Production reads exactly this and nothing else: the only way to change it is
+     * {@link #idReadersPresent(java.util.function.BooleanSupplier)}, which is package-private and called only from test support in this package
+     * (a Main wiring test pins that no other caller exists).
+     */
+    private volatile java.util.function.BooleanSupplier idReadersPresent = dev.nexus.service.vectors.IdReaders::present;
     private volatile boolean closed;
     private String lastError;
     private ScheduledExecutorService scheduler;
@@ -250,7 +257,7 @@ public final class CompletionBootWork implements AutoCloseable {
      */
     public String statusJson() {
         CompletionCheck.Result r = latest;
-        return r == null ? null : CompletionStatusJson.render(r);
+        return r == null ? null : CompletionStatusJson.render(r, idReadersPresent.getAsBoolean());
     }
 
     /**
@@ -305,7 +312,14 @@ public final class CompletionBootWork implements AutoCloseable {
 
             @Override
             public boolean gate3LatchedUnderLock() {
-                boolean row = reader.latchRowPresent();   // the decision: a fresh read, not the regime, the accessor or the sample
+                boolean row;
+                try {
+                    row = reader.latchRowPresent();   // the decision: a fresh read, not the regime, the accessor or the sample
+                } catch (RuntimeException e) {
+                    // any failure or timeout of the read refuses the rename, naming the unreadable readiness (never a 5xx, never a guess)
+                    log.warn("event=rdr229_latch_row_unreadable cause=\"{}\"", e.toString());
+                    throw new dev.nexus.service.db.RenameRefusedException(Missing.READINESS_UNREADABLE);
+                }
                 if (row) {
                     gate3Latched = true;   // sticky, as the accessor is: the row was seen
                 }
@@ -325,7 +339,7 @@ public final class CompletionBootWork implements AutoCloseable {
             private Missing readinessOrUnreadable() {
                 try {
                     var r = latest();
-                    Missing m = r == null ? Missing.READINESS_UNREADABLE : r.readinessMissing();
+                    Missing m = r == null ? Missing.READINESS_UNREADABLE : r.readinessMissing(idReadersPresent.getAsBoolean());
                     // The facts behind NONE are monotone (a drop move that completed stays complete, a changeset that applied stays applied), so a
                     // sample that timed out after a NONE does not take it back: the last NONE stands until a read says otherwise.
                     return m == Missing.READINESS_UNREADABLE && readyOnce ? Missing.NONE : m;
@@ -457,6 +471,11 @@ public final class CompletionBootWork implements AutoCloseable {
         }
     }
 
+    /** Test seam, package-private and never called by production code: replaces the id-readers signal (a test of the one-row regime injects {@code () -> true}). */
+    void idReadersPresent(java.util.function.BooleanSupplier present) {
+        this.idReadersPresent = Objects.requireNonNull(present, "present");
+    }
+
     /** Test seam: how long after a deferred latch the retry is scheduled. */
     void renameWindowRetry(Duration retry) {
         this.renameWindowRetry = Objects.requireNonNull(retry, "retry");
@@ -501,7 +520,7 @@ public final class CompletionBootWork implements AutoCloseable {
                 return -1;
             }
             latest = result;
-            if (result.readinessMissing() == RenameReadiness.Missing.NONE) {
+            if (result.readinessMissing(idReadersPresent.getAsBoolean()) == RenameReadiness.Missing.NONE) {
                 readyOnce = true;   // see the readiness: NONE is monotone
             }
             if (result.gate3Latched()) {
@@ -691,6 +710,9 @@ public final class CompletionBootWork implements AutoCloseable {
             try (AdminDdlSession r = AdminDdlSession.open(admin, new AdminDdlSession.Settings("nexus-rdr229-gate-latch-rename", 0L,
                     "rdr229 gate latch rename read", "nexus", "rdr229_gate_latch", "none"), false)) {
                 r.setSession("default_transaction_read_only", "on");
+                // bounded like the readiness read: a rename must not wait on a lock or a slow read here (linda's census item 2)
+                r.setSession("statement_timeout", Long.toString(CompletionCheck.READINESS_READ_TIMEOUT_MS));
+                r.setSession("lock_timeout", Long.toString(CompletionCheck.READINESS_READ_TIMEOUT_MS));
                 return CompletionCheck.readLatch(r.ctx(), CompletionCheck.GATE3).isPresent();
             }
         }

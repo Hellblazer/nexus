@@ -73,7 +73,13 @@ public interface RenameReadiness {
          * could not be read): it never answers NONE from an error. Before the latch it is not consulted (a rename is the name path); after it, the rename is
          * refused. Wire value {@code readiness_unreadable} (linda 2026-11-23).
          */
-        READINESS_UNREADABLE
+        READINESS_UNREADABLE,
+        /**
+         * Everything the one-row rename waits for is complete but this engine's readers still select by name ({@code IdReaders.present()} is false: P3.5c
+         * flips it), so a one-row rename would leave a reader on a label that no longer names the collection. Wire value {@code p35c_readers_absent}
+         * (linda's census of 19d19081dc).
+         */
+        P35C_READERS_ABSENT
     }
 
     /** A readiness that never waits and never latches, for tests and for a store gate 3 never reaches. */

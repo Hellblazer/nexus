@@ -23,6 +23,28 @@ class MainPciWiringTest {
         return Files.readString(Path.of("src/main/java/dev/nexus/service/Main.java"));
     }
 
+    /**
+     * linda's census of 19d19081dc, item 1: production builds the rename readiness on {@code IdReaders.present()} and nothing else. The only way to replace the
+     * id-readers signal is {@code CompletionBootWork#idReadersPresent(BooleanSupplier)}, which is package-private and used by test support only: no main source
+     * calls it, so an injected {@code () -> true} can never reach production; and Main builds the check through the one factory that has no such parameter.
+     */
+    @Test
+    void productionBuildsTheReadinessOnIdReadersPresentAlone_noMainSourceCallsTheInjectingSeam() throws Exception {
+        try (var files = Files.walk(Path.of("src/main/java"))) {
+            for (Path f : (Iterable<Path>) files.filter(p -> p.toString().endsWith(".java"))::iterator) {
+                if (f.endsWith("CompletionBootWork.java")) {
+                    continue;
+                }
+                assertThat(code(Files.readString(f))).as(f + " does not call the test-only id-readers seam").doesNotContain("idReadersPresent(");
+            }
+        }
+        String own = code(Files.readString(Path.of("src/main/java/dev/nexus/service/datamove/CompletionBootWork.java")));
+        assertThat(own).as("the default is IdReaders::present").contains("BooleanSupplier idReadersPresent = dev.nexus.service.vectors.IdReaders::present;");
+        assertThat(own).as("the seam is package-private").contains("\n    void idReadersPresent(java.util.function.BooleanSupplier present)");
+        assertThat(own).as("and only the field and that seam assign it").containsPattern("this\\.idReadersPresent = Objects\\.requireNonNull\\(present");
+        assertThat(code(main())).as("Main starts the check through atBoot, which has no id-readers parameter").contains("CompletionBootWork.atBoot(");
+    }
+
     @Test
     void theProductionRepositoryIsHandedTheRealSweep_notNone() throws Exception {
         String src = code(main());   // code only: the right text in a trailing comment must not satisfy the pin
