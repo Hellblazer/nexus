@@ -87,6 +87,41 @@ public final class RenameGuard {
         }
     }
 
+    /** Which rename a transaction may run, as {@link #decideRenamePath(DSLContext)} decides it under {@link RenameLatchLock}. */
+    public enum RenamePath {
+        /** No latch row: the name path (today's rename, a new id). */
+        NAME_PATH,
+        /** The latch row exists and readiness is complete: P3.7's one-row rename, which keeps the id. */
+        ONE_ROW
+    }
+
+    /**
+     * P3.7's dispatcher decision (wren, 2026-11-23), made as the FIRST statement of the caller's transaction: take
+     * {@link RenameLatchLock} shared, then read the gate 3 latch row. No row: {@link RenamePath#NAME_PATH}. The row and readiness
+     * {@code NONE}: {@link RenamePath#ONE_ROW}. The row and readiness not {@code NONE}: refused with the same
+     * {@link RenameRefusedException} as {@link #requireRenameAllowed(DSLContext)}. It branches on the row only, never on the
+     * in-process {@link Gate3}, so the one-row window opens only once the row is committed; in production the two agree, since the
+     * latched Gate3 is seeded from the row at boot and set after the row's commit. {@link #open()} answers the name path and takes
+     * no lock. Taking the shared lock again later in the same transaction (the name path's own
+     * {@link #requireRenameAllowed(DSLContext)}) is harmless.
+     *
+     * @throws RenameRefusedException when the latch row exists and the one-row rename cannot run yet
+     */
+    public RenamePath decideRenamePath(DSLContext ctx) {
+        if (!recheckInTransaction) {
+            return RenamePath.NAME_PATH;
+        }
+        RenameLatchLock.shared(ctx);
+        if (CompletionCheck.readLatch(ctx, CompletionCheck.GATE3).isEmpty()) {
+            return RenamePath.NAME_PATH;
+        }
+        RenameReadiness.Missing missing = readiness.missing();
+        if (missing != RenameReadiness.Missing.NONE) {
+            throw new RenameRefusedException(missing);
+        }
+        return RenamePath.ONE_ROW;
+    }
+
     /**
      * Whether a collection's id survives a rename on this install (R6's {@code ids_stable}, the key P3.5a's rename response
      * carries). Always false in this tree: the rename it runs is the name path, which gives the collection a new id, whatever
