@@ -420,6 +420,11 @@ class RenameRunsOnlyThroughRunRenameTest {
         int n = 0;
         while (calls.find()) n++;
         assertThat(n).as("the definition and its one call").isEqualTo(2);
-        assertThat(methodBody(src, "renameCollectionOutcome")).contains("renameCollectionTxn(");
+        // renameCollectionOutcome has two overloads since row 16: the 7-argument one by label delegates to the one that takes the requested source id
+        int overload = src.indexOf("renameCollectionOutcome(String tenant, String oldName, String newName, Long requestedSourceId");
+        assertThat(overload).as("the overload that takes the requested source id").isGreaterThan(0);
+        int paren = src.indexOf('(', overload);
+        int brace = src.indexOf('{', paren + balanced(src, paren, '(', ')').length() - 1);
+        assertThat(balanced(src, brace, '{', '}')).contains("renameCollectionTxn(");
     }
 }
