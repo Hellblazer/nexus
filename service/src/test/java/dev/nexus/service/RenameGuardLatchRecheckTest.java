@@ -518,11 +518,24 @@ class RenameGuardLatchRecheckTest {
         long bound = Long.parseLong(CompletionCheck.LATCH_LOCK_TIMEOUT_MS);
         assertThat(bound).as("the default lock bound in ms").isPositive().isLessThanOrEqualTo(10_000L);
 
+        // what the four-argument overload actually passes: the bound is the set_config value of its transaction
+        List<Object> setConfigValues = new java.util.concurrent.CopyOnWriteArrayList<>();
         su(ctx -> {
-            CompletionCheck.insertLatch(ctx, CompletionCheck.GATE3, "first", false);
+            var cfg = ctx.configuration().derive();
+            cfg.set(new org.jooq.impl.DefaultExecuteListenerProvider(new org.jooq.impl.DefaultExecuteListener() {
+                @Override public void renderEnd(org.jooq.ExecuteContext ec) {
+                    if (ec.query() != null && ec.sql() != null && ec.sql().contains("set_config")) {
+                        setConfigValues.addAll(ec.query().getBindValues());
+                    }
+                }
+            }));
+            var listening = DSL.using(cfg);
+            CompletionCheck.insertLatch(listening, CompletionCheck.GATE3, "first", false);
             CompletionCheck.insertLatch(ctx, CompletionCheck.GATE3, "second", true);
             return null;
         });
+        assertThat(setConfigValues).as("the four-argument write sets lock_timeout to the default bound, local to its transaction")
+            .contains("lock_timeout", CompletionCheck.LATCH_LOCK_TIMEOUT_MS, true);
         java.util.List<String> versions =
             su(ctx -> ctx.select(DSL.field(DSL.name("engine_version"), String.class)).from(LATCH).fetch(0, String.class));
         assertThat(versions).as("ON CONFLICT DO NOTHING: one row, the first writer's").containsExactly("first");

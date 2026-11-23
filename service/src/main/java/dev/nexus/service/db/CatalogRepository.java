@@ -11439,7 +11439,6 @@ public final class CatalogRepository {
             for (String c : java.util.stream.Stream.of(oldName, newName).sorted().distinct().toList()) {
                 acquireSweepGateShared(ctx, tenant, c);
             }
-            CollectionTombstones.lockRows(ctx, tenant, oldName, newName);   // live at commit: after the gates, as a writer goes gate then key share (no cycle with a sweep)
             // RDR-210 Phase 6 Step 2 (bead nexus-f98bg, ruling 4): a name a re-embed job in a lock state is moving
             // documents out of or into is not renamed underneath it. Read under the sweep gates above, in the
             // rename's own transaction.

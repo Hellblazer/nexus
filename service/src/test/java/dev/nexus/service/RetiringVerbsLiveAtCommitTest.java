@@ -160,12 +160,6 @@ class RetiringVerbsLiveAtCommitTest {
         }
     }
 
-    /** The advisory lock a rename takes on a collection's sweep gate, as {@code CatalogRepository.acquireSweepGateShared} spells it. */
-    private static void holdSweepGate(DSLContext ctx, String collection) {
-        ctx.select(DSL.function("pg_advisory_xact_lock", Object.class,
-            DSL.function("hashtext", Integer.class, DSL.val("sweepgate:" + TENANT + "/" + collection)))).fetch();
-    }
-
     // ---- (i) a writer holds its key share: the verb waits, and its work includes the writer's row -----------------------
 
     @Timeout(120)
@@ -226,14 +220,20 @@ class RetiringVerbsLiveAtCommitTest {
     void aWriterArrivingWhileARenameHoldsTheSourceWaits_thenReadsTheRetiredRow_andWritesNothingIntoIt() throws Exception {
         String x = registered("rn-ii-x");
         String y = label("rn-ii-y");
+        su(ctx -> {
+            writeChunk(ctx, x);   // a chunk of X, committed: the rename's re-home rewrites it, in its child-row phase
+            return null;
+        });
         Future<?> rename;
         Future<String> writer;
         try (Connection gate = pg.createConnection("")) {
             gate.setAutoCommit(false);
-            holdSweepGate(DSL.using(gate, SQLDialect.POSTGRES), x);   // parks the rename on its next lock, after its row locks
+            // X's chunk row held FOR UPDATE parks the rename at its chunk re-home, AFTER it took the gates and X's registry row
+            DSL.using(gate, SQLDialect.POSTGRES).select(CHUNKS.CHASH).from(CHUNKS)
+                .where(CHUNKS.TENANT_ID.eq(TENANT)).and(CHUNKS.COLLECTION.eq(x)).forUpdate().fetch();
             rename = pool.submit(() -> repo.renameCollection(TENANT, x, y));
             try {
-                awaitWaiters(1, rename, "the rename parks on the sweep gate of " + x);
+                awaitWaiters(1, rename, "the rename parks on X's chunk row");
                 writer = pool.submit(writerSeeing(x));
                 awaitWaiters(2, writer, "the writer waits for the key share on " + x);
                 assertThat(writer.isDone()).as("the writer waits for the verb").isFalse();
@@ -245,7 +245,8 @@ class RetiringVerbsLiveAtCommitTest {
         rename.get(60, TimeUnit.SECONDS);
 
         assertThat(writer.get(60, TimeUnit.SECONDS)).as("the writer reads the retired row: the successor's label, the 409's input").isEqualTo(y);
-        assertThat(chunksNamed(x)).as("nothing was written into the retired row").isZero();
+        assertThat(chunksNamed(x)).as("nothing was written into the retired row: the chunk moved to Y").isZero();
+        assertThat(chunksNamed(y)).as("the rename's re-home had X's chunk, and the writer added none").isEqualTo(1);
     }
 
     @Timeout(120)
