@@ -98,11 +98,7 @@ final class PciGate3Coverage implements CompletionCheck.Gate3Source {
     /** The one latched gate-3 signal the near-latch scan's probe and recount read the collection by id from (RDR-229 P3.5c). */
     private final Gate3 readGate;
 
-    /** Gate 3 never holds: the scan reads by name (tests). Production passes the reconciler's signal ({@link PciReconciler#gate3Source}). */
-    PciGate3Coverage(Supplier<PciCatalog.Snapshot> catalog, PciSettings settings, Clock clock) {
-        this(catalog, settings, clock, Gate3.never());
-    }
-
+    /** Every caller names its gate: there is no overload that stands for {@code Gate3.never()} (a gate-less scan reads by name, RDR-229 P3.5c). */
     PciGate3Coverage(Supplier<PciCatalog.Snapshot> catalog, PciSettings settings, Clock clock, Gate3 readGate) {
         this.catalog = catalog;
         this.settings = settings;

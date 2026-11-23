@@ -47,7 +47,7 @@ class PciGate3CoverageScanIntegrationTest extends PciIdIndexSupport {
     }
 
     private PciGate3Coverage coverage(PciSettings s, Clock clock) {
-        return new PciGate3Coverage(catalog::read, s, clock);
+        return new PciGate3Coverage(catalog::read, s, clock, dev.nexus.service.datamove.Gate3.never());
     }
 
     private Optional<CompletionCheck.IdIndexCoverage> read(PciGate3Coverage source, java.util.function.UnaryOperator<DSLContext> via) throws Exception {
@@ -86,7 +86,7 @@ class PciGate3CoverageScanIntegrationTest extends PciIdIndexSupport {
         assertThat(carrying).as("precondition: no chunk row carries the new label").isZero();
 
         var byId = read(new PciGate3Coverage(catalog::read, settings(2), Clock.systemUTC(), () -> true));
-        var byName = read(new PciGate3Coverage(catalog::read, settings(2), Clock.systemUTC()));
+        var byName = read(new PciGate3Coverage(catalog::read, settings(2), Clock.systemUTC(), dev.nexus.service.datamove.Gate3.never()));
 
         assertThat(byId).as("the scan answered").isPresent();
         assertThat(byId.get().planned()).as("by id the renamed collection qualifies and needs an id index").isNotEmpty();
@@ -136,7 +136,7 @@ class PciGate3CoverageScanIntegrationTest extends PciIdIndexSupport {
         collection(tenant, name("slot-c"), 300);
         long d = collection(tenant, name("slot-d"), 900);       // both are over B and below the recount cap; d is the larger, c sorts first
 
-        var wide = new PciGate3Coverage(catalog::read, settings(3), Clock.systemUTC());     // a cap of 3: two held, one free
+        var wide = new PciGate3Coverage(catalog::read, settings(3), Clock.systemUTC(), dev.nexus.service.datamove.Gate3.never());     // a cap of 3: two held, one free
         var read = read(wide).orElseThrow();
 
         assertThat(read.uncovered().stream().filter(k -> k.contains("\0" + tenant + "\0")).toList())
@@ -178,7 +178,7 @@ class PciGate3CoverageScanIntegrationTest extends PciIdIndexSupport {
     @Test
     void aScanThatRunsOutOfItsBudget_isUnknown_andGate3IsFalse() throws Exception {
         aCoveredLeafWithAnUnindexedCollection("budget");
-        var runaway = new PciGate3Coverage(catalog::read, settings(16), new RunawayClock());
+        var runaway = new PciGate3Coverage(catalog::read, settings(16), new RunawayClock(), dev.nexus.service.datamove.Gate3.never());
 
         assertThat(read(runaway)).as("unknown, never 'nothing to cover'").isEmpty();
         var result = evaluate(runaway, c -> c);
