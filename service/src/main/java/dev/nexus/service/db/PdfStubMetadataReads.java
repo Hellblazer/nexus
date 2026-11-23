@@ -312,14 +312,22 @@ public final class PdfStubMetadataReads {
         return new Page(limit, List.copyOf(out));
     }
 
+    /** The gate as it reads now, held for one statement. */
+    private static Gate3 snapshot(Gate3 g) {
+        boolean holds = g.holds();
+        return () -> holds;
+    }
+
     private CollectionStubs readOne(String tenant, CollectionRef ref, int limit, int boundMs) {
         return repo.tenantScope().withTenant(tenant, ctx -> {
             PgSession.setLocal(ctx, "statement_timeout", Integer.toString(boundMs));
             Map<String, Integer> sources = new LinkedHashMap<>();
             // from gate 3 by the registry row's own id (carried from the list), never the label resolved back to an id
-            var statement = CollectionKey.of(gate3).byId()
+            // one reading of gate 3 for the statement: the branch and the gated query agree
+            Gate3 once = snapshot(gate3);
+            var statement = once.holds()
                 ? queryById(ctx, tenant, ref.id(), ref.embeddingModel(), limit + 1)
-                : query(ctx, tenant, ref.name(), ref.embeddingModel(), limit + 1);
+                : query(ctx, tenant, ref.name(), ref.embeddingModel(), limit + 1, once);
             for (var r : statement.fetch()) {
                 sources.merge(r.value1(), r.value2(), Integer::sum);
             }

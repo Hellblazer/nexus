@@ -186,9 +186,9 @@ ops	gc_audit	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	1
 ops	gc_audit	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	14953	insert	jooq	collection	collection_id	no	
 ops	hook_failures	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11704	update	helper	collection	collection_id	no	COLLECTION_SCOPED_TABLES loop (rename/re-home)
 ops	hook_failures	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12122	update	helper	collection	collection_id	no	COLLECTION_SCOPED_TABLES loop (rename/re-home)
-ops	hook_failures	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	1874	insert	jooq	collection	collection_id	no	
-ops	hook_failures	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	1909	insert	jooq	collection	collection_id	no	
-ops	hook_failures	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	2450	insert	jooq	collection	collection_id	no	
+ops	hook_failures	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	1876	insert	jooq	collection	collection_id	no	
+ops	hook_failures	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	1911	insert	jooq	collection	collection_id	no	
+ops	hook_failures	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	2452	insert	jooq	collection	collection_id	no	
 ops	pdf_pipeline	rdr229-stamp-pdf_pipeline [vectors-070-collection-id-stamp-moves.xml:135]	132	update	data_move	-	collection_id	yes	sets collection_id
 ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	307	insert	jooq	collection	collection_id	yes	
 ops	pdf_pipeline	service/src/main/java/dev/nexus/service/db/PipelineRepository.java	354	update	jooq	-	collection_id	yes	
@@ -215,12 +215,12 @@ ops	relevance_log	service/src/main/java/dev/nexus/service/db/CatalogRepository.j
 ops	relevance_log	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	193	insert	jooq	collection	collection_id	no	
 ops	relevance_log	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	220	insert	jooq	collection	collection_id	no	
 ops	relevance_log	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	411	insert	jooq	collection	collection_id	no	
-ops	relevance_log	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	2370	insert	jooq	collection	collection_id	no	
+ops	relevance_log	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	2372	insert	jooq	collection	collection_id	no	
 ops	search_telemetry	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11704	update	helper	collection	collection_id	no	COLLECTION_SCOPED_TABLES loop (rename/re-home)
 ops	search_telemetry	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12122	update	helper	collection	collection_id	no	COLLECTION_SCOPED_TABLES loop (rename/re-home)
 ops	search_telemetry	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	446	insert	jooq	collection	collection_id	no	
-ops	search_telemetry	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	773	insert	jooq	collection	collection_id	no	
-ops	search_telemetry	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	2388	insert	jooq	collection	collection_id	no	
+ops	search_telemetry	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	775	insert	jooq	collection	collection_id	no	
+ops	search_telemetry	service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	2390	insert	jooq	collection	collection_id	no	
 taxonomy	taxonomy_centroids	rdr229-stamp-taxonomy_centroids [vectors-070-collection-id-stamp-moves.xml:271]	268	update	data_move	-	collection_id	yes	sets collection_id
 taxonomy	taxonomy_centroids	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11704	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)
 taxonomy	taxonomy_centroids	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12122	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)

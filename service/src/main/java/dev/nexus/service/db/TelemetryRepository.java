@@ -467,6 +467,10 @@ public final class TelemetryRepository {
      */
     public Map<String, Object> queryCollectionStats(String tenant, String collection, int days) {
         CollectionKey k = CollectionKey.of(gate3);
+        // The history rule (linda 2026-11-23): the id arm, or the stored name when no LIVE registry row holds the row's id, so a deleted
+        // collection's stats are still found by its name; a row with no id is never in the rate or the median (pre_id_row_count only).
+        final Condition ofCollection = k.eqHistory(tenant, SEARCH_TELEMETRY.COLLECTION, SEARCH_TELEMETRY.COLLECTION_ID, collection)
+            .and(k.byId() ? SEARCH_TELEMETRY.COLLECTION_ID.isNotNull() : noCondition());
         return tenantScope.withTenant(tenant, ctx -> {
             OffsetDateTime cutoff = OffsetDateTime.now(ZoneOffset.UTC).minusDays(days);
 
@@ -474,8 +478,7 @@ public final class TelemetryRepository {
                 count().as("row_count"),
                 sum(when(SEARCH_TELEMETRY.KEPT_COUNT.eq(0), 1).otherwise(0)).as("zero_count"))
                 .from(SEARCH_TELEMETRY)
-                .where(k.eq(tenant, SEARCH_TELEMETRY.COLLECTION, SEARCH_TELEMETRY.COLLECTION_ID, collection)
-                    .and(SEARCH_TELEMETRY.TS.greaterOrEqual(cutoff)))
+                .where(ofCollection.and(SEARCH_TELEMETRY.TS.greaterOrEqual(cutoff)))
                 .fetchOne();
 
             long rowCount = agg != null ? ((Number) agg.get("row_count")).longValue() : 0L;
@@ -485,8 +488,7 @@ public final class TelemetryRepository {
             // Fetch all top_distances for median calculation
             List<Double> distances = ctx.select(SEARCH_TELEMETRY.TOP_DISTANCE)
                 .from(SEARCH_TELEMETRY)
-                .where(k.eq(tenant, SEARCH_TELEMETRY.COLLECTION, SEARCH_TELEMETRY.COLLECTION_ID, collection)
-                    .and(SEARCH_TELEMETRY.TS.greaterOrEqual(cutoff))
+                .where(ofCollection.and(SEARCH_TELEMETRY.TS.greaterOrEqual(cutoff))
                     .and(SEARCH_TELEMETRY.RAW_COUNT.gt(0))
                     .and(SEARCH_TELEMETRY.TOP_DISTANCE.isNotNull()))
                 .orderBy(SEARCH_TELEMETRY.TOP_DISTANCE.asc())
