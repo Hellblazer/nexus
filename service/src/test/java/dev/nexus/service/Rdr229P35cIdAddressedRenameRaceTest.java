@@ -42,8 +42,8 @@ import java.util.function.LongFunction;
  * <p>The sites here are the ones P3.5a's own table-driven test ({@code CollectionRoutesByIdTest}) cannot land rows for on its fixture, or lands
  * none for: the manifest write and append (a row with no chunk, so the fallback name is the label), assign_from_chashes (both its transactions),
  * the meta record, and the reads-then-writes of the aspect, highlight and taxonomy deletes. The three foreign keys that tie a child's NAME to
- * another table's name are dropped first, as P3.7's name-key drop does ({@code Rdr229P37PrerequisitesTest}): with them in place a write under
- * the new label is refused (23503) until P3.7, which is pinned there and is not what this class measures.
+ * another table's name are dropped first, as the name-key drops do ({@code Rdr229P37PrerequisitesTest}): with them in place a write under
+ * the new label is refused (23503) until the name keys go (P3.7 for the registry's, P4.1 for the rest), which is pinned there and is not what this class measures.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class Rdr229P35cIdAddressedRenameRaceTest {
@@ -59,7 +59,7 @@ class Rdr229P35cIdAddressedRenameRaceTest {
     void startAll() throws Exception {
         fx = new CollectionRouteFixture();
         fx.asSuperuser(ctx -> {
-            RegistryRenameSupport.dropForeignKeysOntoTheRegistry(ctx);   // P3.7's name-key drop: a one-row rename cascades nowhere
+            RegistryRenameSupport.dropForeignKeysOntoTheRegistry(ctx);   // the registry's name-key drop: a one-row rename cascades nowhere
             ctx.alterTable(CATALOG_DOCUMENT_CHUNKS).dropConstraintIfExists(DSL.name("fk_catalog_chunks_chunk")).execute();
             ctx.alterTable(TOPIC_ASSIGNMENTS).dropConstraintIfExists(DSL.name("topic_assignments_chunk_fk")).execute();
             ctx.alterTable(DOCUMENT_HIGHLIGHTS).dropConstraintIfExists(DSL.name("fk_doc_highlights_catalog_doc")).execute();

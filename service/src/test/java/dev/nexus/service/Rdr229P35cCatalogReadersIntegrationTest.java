@@ -37,11 +37,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *
  * <p>The scratch container is per class and the name keys are dropped once, for the whole class; every test uses its own collection.
  */
-@org.junit.jupiter.api.TestMethodOrder(org.junit.jupiter.api.MethodOrderer.MethodName.class)   // the re-home test needs fk_catalog_chunks_chunk, which underExclude_... drops: it sorts last
 class Rdr229P35cCatalogReadersIntegrationTest extends AtomicWriteTestBase {
-
-    /** Set by the one test that drops {@code fk_catalog_chunks_chunk} (the class shares one database). */
-    private boolean chunkFkDropped;
 
     private final AtomicBoolean latched = new AtomicBoolean();
     private CatalogRepository gated;
@@ -250,7 +246,6 @@ class Rdr229P35cCatalogReadersIntegrationTest extends AtomicWriteTestBase {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             PgContainerHelper.dropCatalogChunksFk(su);
-            chunkFkDropped = true;   // the re-home test below needs the foreign key: it runs before this method (class order by method name)
             int n = DSL.using(su, SQLDialect.POSTGRES).update(CHUNKS).set(CHUNKS.COLLECTION, other.collection())
                 .where(CHUNKS.TENANT_ID.eq(TENANT)).and(CHUNKS.COLLECTION.eq(open.collection())).execute();
             assertThat(n).as("fixture: both chunk rows carry a name that is not their manifest's").isEqualTo(2);
@@ -283,9 +278,20 @@ class Rdr229P35cCatalogReadersIntegrationTest extends AtomicWriteTestBase {
 
     // ---- rehome: the id repair keeps a renamed collection's rows (review F1) ----------------------------------------
 
-    @Test
-    void aRehomeOntoALabelAnotherCollectionRenamedAwayLeavesThatCollectionsRowsItsOwnId() throws Exception {
-        assertThat(chunkFkDropped).as("precondition: fk_catalog_chunks_chunk is still there (underExclude_aStaleChunkNameAfterAOneRowRename_... drops it for the rest of this class)").isFalse();
+    /**
+     * Both with {@code fk_catalog_chunks_chunk} in place and with it dropped (the re-home mover files the manifest rows itself, so the
+     * outcome does not depend on the key's cascade). {@code underExclude_aStaleChunkNameAfterAOneRowRename_...} drops the key for the rest
+     * of the class too, so the first case sees it only when no test has dropped it yet; the second drops it itself.
+     */
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void aRehomeOntoALabelAnotherCollectionRenamedAwayLeavesThatCollectionsRowsItsOwnId(boolean dropTheChunkKey) throws Exception {
+        if (dropTheChunkKey) {
+            try (Connection su = pg.createConnection("")) {
+                su.setAutoCommit(true);
+                PgContainerHelper.dropCatalogChunksFk(su);
+            }
+        }
         Renamed a = renamedCollection();            // A (id1) is now B; its manifest and chunk rows still name A
         Renamed c = renamedCollection();            // C (id2) ...
         String reusedLabel = a.oldLabel();          // ... is renamed to A's old label, which the rows of id1 still carry
