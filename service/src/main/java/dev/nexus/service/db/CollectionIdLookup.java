@@ -40,8 +40,11 @@ final class CollectionIdLookup {
         ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.COLLECTION_ID)
             .from(CATALOG_COLLECTIONS)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.in(distinct))
+            // a label two rows hold (a tombstone beside a live row, G15): the live row, else the newest tombstone, first
+            .orderBy(java.util.stream.Stream.concat(java.util.stream.Stream.of((org.jooq.OrderField<?>) CATALOG_COLLECTIONS.NAME.asc()),
+                CollectionIdReads.liveFirst().stream()).toList())
             .fetch()
-            .forEach(r -> out.put(r.value1(), r.value2()));
+            .forEach(r -> out.putIfAbsent(r.value1(), r.value2()));
         return out;
     }
 }

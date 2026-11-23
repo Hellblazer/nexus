@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 package dev.nexus.service.db;
 
+import dev.nexus.service.datamove.Gate3;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
@@ -101,6 +102,14 @@ final class DepartedWriterSpans {
 
     private static final Logger log = LoggerFactory.getLogger(DepartedWriterSpans.class);
 
+    /** Spans from gate 3 whose collection id could not be resolved (RDR-229 P3.5c): logged at WARN and counted, never kept silently. */
+    private static final java.util.concurrent.atomic.AtomicLong UNRESOLVED = new java.util.concurrent.atomic.AtomicLong();
+
+    /** The count of unresolved spans so far (for tests and the status surface). */
+    static long unresolvedSpans() {
+        return UNRESOLVED.get();
+    }
+
     /** Chashes per statement, the bind budget {@code PgVectorRepository.SOURCE_URI_JOIN_BATCH} also uses. */
     static final int BATCH = 300;
 
@@ -115,17 +124,48 @@ final class DepartedWriterSpans {
      * span for it ({@code null} for a field the manifest row never had).
      */
     record Gone(String collection, byte[] chash, Integer lineStart, Integer lineEnd, Integer charStart,
-                Integer charEnd) {
+                Integer charEnd, Long collectionId) {
 
-        /** The columns a caller selects (or RETURNs) to build {@link Gone}s with {@link #of}. */
+        /**
+         * A row with no id: the name path's shape. From gate 3 {@link #clear} resolves a missing id from the label (RDR-229
+         * P3.5c), so a producer that has not switched still clears; one that has passes {@code collectionId}.
+         */
+        Gone(String collection, byte[] chash, Integer lineStart, Integer lineEnd, Integer charStart, Integer charEnd) {
+            this(collection, chash, lineStart, lineEnd, charStart, charEnd, null);
+        }
+
+        /** The columns a caller selects (or RETURNs) to build {@link Gone}s with {@link #of}, on the name path. */
         static final List<SelectField<?>> COLUMNS = List.of(CATALOG_DOCUMENT_CHUNKS.COLLECTION,
             CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END,
             CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END);
 
+        /** The alias of the label column {@link #columns} selects from gate 3. */
+        private static final String LABEL = "gone_collection";
+
+        /**
+         * {@link #COLUMNS} before gate 3. From gate 3 the collection is the registry's current label of the row's id (a rename
+         * leaves the row's own name column stale), and the id comes along as the seventh column (RDR-229 P3.5c).
+         */
+        static List<SelectField<?>> columns(Gate3 gate3) {
+            if (!gate3.holds()) {
+                return COLUMNS;
+            }
+            var rows = CATALOG_DOCUMENT_CHUNKS;
+            return List.of(CollectionIdReads.labelOf(gate3, rows.TENANT_ID, rows.COLLECTION, rows.COLLECTION_ID).as(LABEL),
+                rows.CHASH, rows.LINE_START, rows.LINE_END, rows.CHAR_START, rows.CHAR_END, rows.COLLECTION_ID);
+        }
+
         static Gone of(Record r) {
-            return new Gone(r.get(CATALOG_DOCUMENT_CHUNKS.COLLECTION), r.get(CATALOG_DOCUMENT_CHUNKS.CHASH),
+            boolean byId = r.field(LABEL) != null;
+            return new Gone(byId ? r.get(LABEL, String.class) : r.get(CATALOG_DOCUMENT_CHUNKS.COLLECTION),
+                r.get(CATALOG_DOCUMENT_CHUNKS.CHASH),
                 r.get(CATALOG_DOCUMENT_CHUNKS.LINE_START), r.get(CATALOG_DOCUMENT_CHUNKS.LINE_END),
-                r.get(CATALOG_DOCUMENT_CHUNKS.CHAR_START), r.get(CATALOG_DOCUMENT_CHUNKS.CHAR_END));
+                r.get(CATALOG_DOCUMENT_CHUNKS.CHAR_START), r.get(CATALOG_DOCUMENT_CHUNKS.CHAR_END),
+                byId ? r.get(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID) : null);
+        }
+
+        Gone withId(Long id) {
+            return new Gone(collection, chash, lineStart, lineEnd, charStart, charEnd, id);
         }
 
         static List<Gone> allOf(Collection<? extends Record> rows) {
@@ -244,29 +284,45 @@ final class DepartedWriterSpans {
      *
      * @return chunk rows updated, 0 when nothing was cleared or the clear failed open
      */
-    static int clear(DSLContext ctx, String tenant, List<Gone> departed) {
+    static int clear(DSLContext ctx, String tenant, List<Gone> departed, Gate3 gate3) {
         if (departed.isEmpty()) return 0;
+        final boolean byId = gate3.holds();
         return guarded(ctx, tenant, "clear", () -> {
             int cleared = 0;
-            Map<String, Map<String, List<Gone>>> byCollection = new LinkedHashMap<>();
+            int unresolved = 0;
+            // RDR-229 P3.5c: from gate 3 a collection is its id. A row that carries none (its producer has not switched) is
+            // resolved from its label; a row with no id at all is no collection and is not cleared.
+            Map<String, Long> resolved = !byId ? Map.of() : CollectionIdLookup.idsOf(ctx, tenant,
+                departed.stream().filter(g -> g.collectionId() == null).map(Gone::collection).toList());
+            Map<Object, Map<String, List<Gone>>> byCollection = new LinkedHashMap<>();
             for (Gone g : departed) {
-                byCollection.computeIfAbsent(g.collection(), k -> new LinkedHashMap<>())
-                    .computeIfAbsent(g.hex(), k -> new ArrayList<>()).add(g);
+                Gone keyed = !byId || g.collectionId() != null ? g : g.withId(resolved.get(g.collection()));
+                Object key = byId ? keyed.collectionId() : keyed.collection();
+                if (key == null) {
+                    unresolved++;   // never kept silently: logged and counted below
+                    continue;
+                }
+                byCollection.computeIfAbsent(key, k -> new LinkedHashMap<>())
+                    .computeIfAbsent(keyed.hex(), k -> new ArrayList<>()).add(keyed);
             }
-            for (Map.Entry<String, Map<String, List<Gone>>> e : byCollection.entrySet()) {
+            for (Map.Entry<Object, Map<String, List<Gone>>> e : byCollection.entrySet()) {
                 List<byte[]> chashes = new ArrayList<>();
                 List<Gone> tuples = new ArrayList<>();
                 for (List<Gone> group : e.getValue().values()) {
                     // a chash's tuples all go in one statement: the writer test reads them together
                     if (!chashes.isEmpty() && (chashes.size() >= BATCH || tuples.size() + group.size() > MAX_TUPLES)) {
-                        cleared += clearBatch(ctx, tenant, e.getKey(), chashes, tuples);
+                        cleared += clearBatch(ctx, tenant, e.getKey(), chashes, tuples, byId);
                         chashes = new ArrayList<>();
                         tuples = new ArrayList<>();
                     }
                     chashes.add(group.get(0).chash());
                     tuples.addAll(group);
                 }
-                if (!chashes.isEmpty()) cleared += clearBatch(ctx, tenant, e.getKey(), chashes, tuples);
+                if (!chashes.isEmpty()) cleared += clearBatch(ctx, tenant, e.getKey(), chashes, tuples, byId);
+            }
+            if (unresolved > 0) {
+                UNRESOLVED.addAndGet(unresolved);
+                log.warn("event=departed_writer_spans_unresolved tenant={} spans={} cause=clear reason=no_collection_id", tenant, unresolved);
             }
             if (cleared > 0) {
                 log.info("event=departed_writer_spans_cleared tenant={} chunks={}", tenant, cleared);
@@ -275,20 +331,40 @@ final class DepartedWriterSpans {
         }, 0);
     }
 
-    private static int clearBatch(DSLContext ctx, String tenant, String collection, List<byte[]> chashes,
-                                  List<Gone> tuples) {
+    private static int clearBatch(DSLContext ctx, String tenant, Object collection, List<byte[]> chashes,
+                                  List<Gone> tuples, boolean byId) {
         @SuppressWarnings("unchecked")
-        Row6<String, byte[], Integer, Integer, Integer, Integer>[] rows = new Row6[tuples.size()];
+        Row6<Object, byte[], Integer, Integer, Integer, Integer>[] rows = new Row6[tuples.size()];
         for (int i = 0; i < rows.length; i++) {
             Gone g = tuples.get(i);
-            rows[i] = DSL.row(DSL.val(g.collection(), SQLDataType.CLOB), DSL.val(g.chash(), SQLDataType.BLOB),
+            rows[i] = DSL.row(asObject(byId ? DSL.val(g.collectionId(), SQLDataType.BIGINT) : DSL.val(g.collection(), SQLDataType.CLOB)),
+                DSL.val(g.chash(), SQLDataType.BLOB),
                 DSL.val(g.lineStart(), SQLDataType.INTEGER), DSL.val(g.lineEnd(), SQLDataType.INTEGER),
                 DSL.val(g.charStart(), SQLDataType.INTEGER), DSL.val(g.charEnd(), SQLDataType.INTEGER));
         }
         Table<?> dep = DSL.values(rows).asTable("dep", DEP_FIELDS);
         Table<?> holders = holders(ctx, tenant,
-            CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(collection).and(CATALOG_DOCUMENT_CHUNKS.CHASH.in(chashes)), false);
-        return update(ctx, tenant, dep, holders);
+            keyIs(byId, CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, collection)
+                .and(CATALOG_DOCUMENT_CHUNKS.CHASH.in(chashes)), false, byId);
+        return update(ctx, tenant, dep, holders, byId);
+    }
+
+    /**
+     * The key the span statements join the two chunk tables on (RDR-229 P3.5c): the collection's name before gate 3, its id from
+     * gate 3. It is the {@code collection} column of the derived tables {@code dep}, {@code span_holders} and {@code span_writers},
+     * whose type follows. A NULL id is no collection: a row without one is never keyed.
+     */
+    @SuppressWarnings("unchecked")
+    private static Field<Object> asObject(Field<?> f) {
+        return (Field<Object>) f;
+    }
+
+    private static Field<Object> keyOf(boolean byId, Field<String> name, Field<Long> id) {
+        return asObject(byId ? id : name);
+    }
+
+    private static Condition keyIs(boolean byId, Field<String> name, Field<Long> id, Object key) {
+        return byId ? id.eq((Long) key) : name.eq((String) key);
     }
 
     /**
@@ -312,14 +388,16 @@ final class DepartedWriterSpans {
      * @param threshold {@code now() - older_than}, the expression the purge itself evaluates
      * @return chunk rows updated
      */
-    static int clearBeforeTrashPurge(DSLContext ctx, String tenant, Field<OffsetDateTime> threshold) {
+    static int clearBeforeTrashPurge(DSLContext ctx, String tenant, Field<OffsetDateTime> threshold, Gate3 gate3) {
+        final boolean byId = gate3.holds();
         return guarded(ctx, tenant, "trash_purge", () -> {
             var aged = CATALOG_DOCUMENT_CHUNKS.as("aged_rows");
             var agedDoc = CATALOG_DOCUMENTS.as("aged_doc");
             var kept = CATALOG_DOCUMENT_CHUNKS.as("kept_rows");
             var keptDoc = CATALOG_DOCUMENTS.as("kept_doc");
             Condition agedRow = agedDoc.DELETED_AT.isNotNull().and(agedDoc.DELETED_AT.le(threshold));
-            Result<Record2<String, byte[]>> candidates = ctx.selectDistinct(aged.COLLECTION, aged.CHASH)
+            Field<Object> agedKey = keyOf(byId, aged.COLLECTION, aged.COLLECTION_ID);
+            Result<Record2<Object, byte[]>> candidates = ctx.selectDistinct(agedKey, aged.CHASH)
                 .from(aged)
                 .join(agedDoc)
                     .on(agedDoc.TENANT_ID.eq(aged.TENANT_ID).and(agedDoc.TUMBLER.eq(aged.DOC_ID)))
@@ -329,23 +407,28 @@ final class DepartedWriterSpans {
                         .join(keptDoc)
                             .on(keptDoc.TENANT_ID.eq(kept.TENANT_ID).and(keptDoc.TUMBLER.eq(kept.DOC_ID)))
                         .where(kept.TENANT_ID.eq(tenant)
-                            .and(kept.COLLECTION.eq(aged.COLLECTION))
+                            .and(CollectionIdReads.same(gate3, kept.COLLECTION, kept.COLLECTION_ID, aged.COLLECTION, aged.COLLECTION_ID))
                             .and(kept.CHASH.eq(aged.CHASH))
                             .and(keptDoc.DELETED_AT.isNull().or(keptDoc.DELETED_AT.gt(threshold)))))))
-                .orderBy(aged.COLLECTION, aged.CHASH)
+                .orderBy(agedKey, aged.CHASH)
                 .fetch();
             int cleared = 0;
-            String collection = null;
+            Object collection = null;
             List<byte[]> chashes = new ArrayList<>();
-            for (Record2<String, byte[]> c : candidates) {
+            for (Record2<Object, byte[]> c : candidates) {
+                if (c.value1() == null) {   // a NULL id is no collection: logged and counted, never kept silently
+                    UNRESOLVED.incrementAndGet();
+                    log.warn("event=departed_writer_spans_unresolved tenant={} cause=trash_purge reason=no_collection_id", tenant);
+                    continue;
+                }
                 if (!c.value1().equals(collection) || chashes.size() >= BATCH) {
-                    if (!chashes.isEmpty()) cleared += trashBatch(ctx, tenant, threshold, collection, chashes);
+                    if (!chashes.isEmpty()) cleared += trashBatch(ctx, tenant, threshold, collection, chashes, byId);
                     chashes = new ArrayList<>();
                     collection = c.value1();
                 }
                 chashes.add(c.value2());
             }
-            if (!chashes.isEmpty()) cleared += trashBatch(ctx, tenant, threshold, collection, chashes);
+            if (!chashes.isEmpty()) cleared += trashBatch(ctx, tenant, threshold, collection, chashes, byId);
             if (cleared > 0) {
                 log.info("event=departed_writer_spans_cleared tenant={} chunks={} cause=trash_purge", tenant, cleared);
             }
@@ -353,26 +436,27 @@ final class DepartedWriterSpans {
         }, 0);
     }
 
-    private static int trashBatch(DSLContext ctx, String tenant, Field<OffsetDateTime> threshold, String collection,
-                                  List<byte[]> chashes) {
+    private static int trashBatch(DSLContext ctx, String tenant, Field<OffsetDateTime> threshold, Object collection,
+                                  List<byte[]> chashes, boolean byId) {
         var aged = CATALOG_DOCUMENT_CHUNKS.as("aged_rows");
         var agedDoc = CATALOG_DOCUMENTS.as("aged_doc");
-        Table<?> dep = ctx.select(aged.COLLECTION, aged.CHASH, aged.LINE_START, aged.LINE_END, aged.CHAR_START,
+        Table<?> dep = ctx.select(keyOf(byId, aged.COLLECTION, aged.COLLECTION_ID), aged.CHASH, aged.LINE_START, aged.LINE_END, aged.CHAR_START,
                 aged.CHAR_END)
             .from(aged)
             .join(agedDoc)
                 .on(agedDoc.TENANT_ID.eq(aged.TENANT_ID).and(agedDoc.TUMBLER.eq(aged.DOC_ID)))
             .where(aged.TENANT_ID.eq(tenant)
-                .and(aged.COLLECTION.eq(collection))
+                .and(keyIs(byId, aged.COLLECTION, aged.COLLECTION_ID, collection))
                 .and(aged.CHASH.in(chashes))
                 .and(agedDoc.DELETED_AT.isNotNull())
                 .and(agedDoc.DELETED_AT.le(threshold)))
             .asTable("dep", DEP_FIELDS);
         // the holders that stay: live, or tombstoned but still inside the grace window
         Table<?> holders = holders(ctx, tenant,
-            CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(collection).and(CATALOG_DOCUMENT_CHUNKS.CHASH.in(chashes))
-                .and(CATALOG_DOCUMENTS.DELETED_AT.isNull().or(CATALOG_DOCUMENTS.DELETED_AT.gt(threshold))), true);
-        return update(ctx, tenant, dep, holders);
+            keyIs(byId, CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, collection)
+                .and(CATALOG_DOCUMENT_CHUNKS.CHASH.in(chashes))
+                .and(CATALOG_DOCUMENTS.DELETED_AT.isNull().or(CATALOG_DOCUMENTS.DELETED_AT.gt(threshold))), true, byId);
+        return update(ctx, tenant, dep, holders, byId);
     }
 
     // ── the position-swap path (an upsert that put another chunk at a held position) ────────────────
@@ -382,11 +466,11 @@ final class DepartedWriterSpans {
      * one of them, as position to {@link Gone}. Fail-open: {@code null} when the read failed (the displaced
      * clear is then skipped).
      */
-    static Map<Integer, Gone> rowsAt(DSLContext ctx, String tenant, String docId, Collection<Integer> positions) {
+    static Map<Integer, Gone> rowsAt(DSLContext ctx, String tenant, String docId, Collection<Integer> positions, Gate3 gate3) {
         if (positions.isEmpty()) return Map.of();
         return guarded(ctx, tenant, "rows_at", () -> {
             Map<Integer, Gone> out = new LinkedHashMap<>();
-            var rows = ctx.select(CATALOG_DOCUMENT_CHUNKS.POSITION).select(Gone.COLUMNS)
+            var rows = ctx.select(CATALOG_DOCUMENT_CHUNKS.POSITION).select(Gone.columns(gate3))
                 .from(CATALOG_DOCUMENT_CHUNKS)
                 .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
                     .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId))
@@ -406,7 +490,7 @@ final class DepartedWriterSpans {
      * @param written  position to the lower-case hex chash the upsert wrote there
      */
     static int clearDisplaced(DSLContext ctx, String tenant, String docId, String collection,
-                              Map<Integer, Gone> prior, Map<Integer, String> written) {
+                              Map<Integer, Gone> prior, Map<Integer, String> written, Gate3 gate3) {
         if (prior == null || prior.isEmpty()) return 0;
         List<Gone> displaced = new ArrayList<>();
         for (Map.Entry<Integer, Gone> e : prior.entrySet()) {
@@ -421,20 +505,23 @@ final class DepartedWriterSpans {
             List<byte[]> keys = new ArrayList<>();
             for (Gone g : displaced) keys.add(g.chash());
             Set<String> stillHeld = new HashSet<>();
-            for (Record r : ctx.select(CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.CHASH)
+            // the label a Gone carries: the registry's current name of the row's id from gate 3 (RDR-229 P3.5c)
+            Field<String> heldLabel = CollectionIdReads.labelOf(gate3, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
+                CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID).as("held_label");
+            for (Record r : ctx.select(heldLabel, CATALOG_DOCUMENT_CHUNKS.CHASH)
                     .from(CATALOG_DOCUMENT_CHUNKS)
                     .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
                         .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId))
                         .and(CATALOG_DOCUMENT_CHUNKS.CHASH.in(keys)))
                     .fetch()) {
-                stillHeld.add(new Gone(r.get(CATALOG_DOCUMENT_CHUNKS.COLLECTION), r.get(CATALOG_DOCUMENT_CHUNKS.CHASH),
+                stillHeld.add(new Gone(r.get(heldLabel), r.get(CATALOG_DOCUMENT_CHUNKS.CHASH),
                     null, null, null, null).pairKey());
             }
             List<Gone> gone = new ArrayList<>();
             for (Gone g : departed(displaced, null, Set.of())) {
                 if (!stillHeld.contains(g.pairKey())) gone.add(g);
             }
-            return clear(ctx, tenant, gone);
+            return clear(ctx, tenant, gone, gate3);
         }, 0);
     }
 
@@ -470,12 +557,13 @@ final class DepartedWriterSpans {
      * @param withDocuments whether {@code rowScope} reads {@code catalog_documents} (the trash purge's live or
      *                      in-grace test), so the holders' documents are joined
      */
-    private static Table<?> holders(DSLContext ctx, String tenant, Condition rowScope, boolean withDocuments) {
+    private static Table<?> holders(DSLContext ctx, String tenant, Condition rowScope, boolean withDocuments, boolean byId) {
         var rows = CATALOG_DOCUMENT_CHUNKS;
         List<Condition> lacks = List.of(
             DSL.condition(DSL.boolOr(rows.LINE_START.isNull())), DSL.condition(DSL.boolOr(rows.LINE_END.isNull())),
             DSL.condition(DSL.boolOr(rows.CHAR_START.isNull())), DSL.condition(DSL.boolOr(rows.CHAR_END.isNull())));
-        List<SelectField<?>> columns = new ArrayList<>(List.of(rows.COLLECTION.as("collection"),
+        Field<Object> key = keyOf(byId, rows.COLLECTION, rows.COLLECTION_ID);
+        List<SelectField<?>> columns = new ArrayList<>(List.of(key.as("collection"),
             rows.CHASH.as("chash"), rows.EMBEDDING_MODEL.as("model")));
         Condition anyLacks = DSL.falseCondition();
         for (int i = 0; i < lacks.size(); i++) {
@@ -489,7 +577,7 @@ final class DepartedWriterSpans {
                 .on(CATALOG_DOCUMENTS.TENANT_ID.eq(rows.TENANT_ID).and(CATALOG_DOCUMENTS.TUMBLER.eq(rows.DOC_ID)));
         return from
             .where(rows.TENANT_ID.eq(tenant).and(rowScope))
-            .groupBy(rows.COLLECTION, rows.CHASH, rows.EMBEDDING_MODEL)
+            .groupBy(key, rows.CHASH, rows.EMBEDDING_MODEL)
             .having(DSL.countDistinct(rows.DOC_ID).eq(1).and(anyLacks))
             .asTable("span_holders");
     }
@@ -505,9 +593,9 @@ final class DepartedWriterSpans {
      * PG ran as a SubPlan scanning the whole departing set each time. Here {@code dep} is read once and joined
      * to the chunk rows once, in a hash join.
      */
-    private static Table<?> writers(DSLContext ctx, String tenant, Table<?> dep) {
+    private static Table<?> writers(DSLContext ctx, String tenant, Table<?> dep, boolean byId) {
         var chunk = CHUNKS.as("writer_chunk");
-        Field<String> depCollection = dep.field("collection", String.class);
+        Field<Object> depCollection = asObject(byId ? dep.field("collection", Long.class) : dep.field("collection", String.class));
         Field<byte[]> depChash = dep.field("chash", byte[].class);
         List<SelectField<?>> columns = new ArrayList<>(List.of(depCollection.as("collection"),
             depChash.as("chash"), chunk.EMBEDDING_MODEL.as("model")));
@@ -520,7 +608,8 @@ final class DepartedWriterSpans {
         }
         return ctx.select(columns).from(dep)
             .join(chunk)
-                .on(chunk.TENANT_ID.eq(tenant).and(chunk.COLLECTION.eq(depCollection)).and(chunk.CHASH.eq(depChash)))
+                .on(chunk.TENANT_ID.eq(tenant).and(keyOf(byId, chunk.COLLECTION, chunk.COLLECTION_ID).eq(depCollection))
+                    .and(chunk.CHASH.eq(depChash)))
             .groupBy(depCollection, depChash, chunk.EMBEDDING_MODEL)
             .asTable("span_writers");
     }
@@ -528,9 +617,9 @@ final class DepartedWriterSpans {
     /**
      * @param dep the departing rows, {@link #DEP_FIELDS}: the writer test reads them
      */
-    private static int update(DSLContext ctx, String tenant, Table<?> dep, Table<?> holders) {
-        Table<?> writers = writers(ctx, tenant, dep);
-        Field<String> collection = holders.field("collection", String.class);
+    private static int update(DSLContext ctx, String tenant, Table<?> dep, Table<?> holders, boolean byId) {
+        Table<?> writers = writers(ctx, tenant, dep, byId);
+        Field<Object> collection = asObject(byId ? holders.field("collection", Long.class) : holders.field("collection", String.class));
         Field<byte[]> chash = holders.field("chash", byte[].class);
         Field<String> model = holders.field("model", String.class);
         // jsonb_delete(jsonb, text) and jsonb_exists(jsonb, text) are the functions behind the "-" and "?"
@@ -557,16 +646,17 @@ final class DepartedWriterSpans {
         // RDR-229 P3.1 stage 2b (nexus-p2m1x.17): the update also sets the collection's id, correlated on the
         // row's own name. chunks carries a NOT VALID CHECK evaluated on every updated row, so an UPDATE that left
         // the id alone would be refused (23514) on a chunk the stamp has not reached, and this clear is fail-open:
-        // the refusal would leave the spans in place and report nothing.
+        // the refusal would leave the spans in place and report nothing. From gate 3 (P3.5c) every row is stamped and the
+        // collection is read by id, so the id stays as it is: re-deriving it from a name a rename left stale would be wrong.
         return ctx.update(CHUNKS)
             .set(CHUNKS.METADATA, stripped)
-            .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(DSL.val(tenant), CHUNKS.COLLECTION))
+            .set(CHUNKS.COLLECTION_ID, byId ? CHUNKS.COLLECTION_ID : CollectionIds.idOf(DSL.val(tenant), CHUNKS.COLLECTION))
             .from(holders.join(writers)
-                .on(writers.field("collection", String.class).eq(collection)
+                .on(asObject(byId ? writers.field("collection", Long.class) : writers.field("collection", String.class)).eq(collection)
                     .and(writers.field("chash", byte[].class).eq(chash))
                     .and(writers.field("model", String.class).eq(model))))
             .where(CHUNKS.TENANT_ID.eq(tenant)
-                .and(CHUNKS.COLLECTION.eq(collection))
+                .and(keyOf(byId, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID).eq(collection))
                 .and(CHUNKS.CHASH.eq(chash))
                 .and(CHUNKS.EMBEDDING_MODEL.eq(model))
                 .and(hasAKey))

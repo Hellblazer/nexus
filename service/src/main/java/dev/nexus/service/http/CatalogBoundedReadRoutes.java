@@ -58,7 +58,7 @@ final class CatalogBoundedReadRoutes {
         this.locatorReads = new CatalogSensitiveLocatorReads(repo);
         this.fillableCount = new ManifestFillableCount(repo);
         this.foreignReads = new ManifestForeignCollectionReads(repo);
-        this.uriSegmentReads = new UriSegmentCensusReads(repo);
+        this.uriSegmentReads = new UriSegmentCensusReads(repo, repo.gate3());
         this.completionCountReads = new CompletionTenantCountReads(repo);
         this.docReads = new CatalogDocReads(repo);
     }

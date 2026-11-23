@@ -1,5 +1,6 @@
 package dev.nexus.service.db;
 
+import dev.nexus.service.datamove.Gate3;
 import dev.nexus.service.vectors.DimTables;
 import org.jooq.DSLContext;
 
@@ -90,16 +91,33 @@ public final class ChashRepository {
         " WHERE tenant_id = current_setting('nexus.tenant', true) AND chash = ?";
 
     private final TenantScope tenantScope;
+    private final Gate3 gate3;
     /** RDR-229 P3.5a: the rename refusal this repository's rename consults first ({@link RenameGuard#open()} never refuses). */
     private final RenameGuard renameGuard;
 
     public ChashRepository(TenantScope tenantScope) {
-        this(tenantScope, RenameGuard.open());
+        this(tenantScope, Gate3.never(), RenameGuard.open());
     }
 
+    /** The rename guard alone: gate 3 never holds (P3.5a's callers and tests). */
     public ChashRepository(TenantScope tenantScope, RenameGuard renameGuard) {
+        this(tenantScope, Gate3.never(), renameGuard);
+    }
+
+    /** RDR-229 P3.5c: from gate 3 on the install the readers name a collection by its id column ({@link CollectionKey}). */
+    public ChashRepository(TenantScope tenantScope, Gate3 gate3) {
+        this(tenantScope, gate3, RenameGuard.open());
+    }
+
+    /** The production constructor: the one gate-3 signal and the one rename guard ({@code NexusService} passes both). */
+    public ChashRepository(TenantScope tenantScope, Gate3 gate3, RenameGuard renameGuard) {
         this.tenantScope = tenantScope;
-        this.renameGuard = renameGuard;
+        this.gate3 = java.util.Objects.requireNonNull(gate3, "gate3");
+        this.renameGuard = java.util.Objects.requireNonNull(renameGuard, "renameGuard");
+    }
+
+    private CollectionKey ck() {
+        return CollectionKey.of(gate3);
     }
 
     /**
@@ -130,6 +148,19 @@ public final class ChashRepository {
     // ── lookup ─────────────────────────────────────────────────────────────────
 
     /**
+     * The lookup probe from gate 3, typed: the collections holding this chash as the registry's current label of each chunk's
+     * {@code collection_id}, joined on the id. Public so {@code ChashProbePlanShapeTest} EXPLAINs exactly the statement {@code lookup} runs
+     * from the latch, as it does {@link #PROBE_SQL} before it.
+     */
+    public static org.jooq.ResultQuery<?> idProbe(DSLContext ctx, String tenant, byte[] chash) {
+        return ctx.select(CATALOG_COLLECTIONS.NAME.as("collection"), CHUNKS.CREATED_AT)
+            .from(CHUNKS).join(CATALOG_COLLECTIONS)
+            .on(CATALOG_COLLECTIONS.TENANT_ID.eq(CHUNKS.TENANT_ID)
+                .and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(CHUNKS.COLLECTION_ID)))
+            .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.CHASH.eq(chash)));
+    }
+
+    /**
      * Return all {@code (collection, created_at)} rows for {@code chash} —
      * the collections whose chunk store actually holds this content.
      *
@@ -146,7 +177,9 @@ public final class ChashRepository {
     public List<Map<String, String>> lookup(String tenant, Chash chash) {
         byte[] bytes = chash.toBytes();
         return tenantScope.withTenant(tenant, ctx -> {
-            var rows = ctx.resultQuery(PROBE_SQL, bytes).fetch();
+            // RDR-229 P3.5c: from gate 3 the collection is the registry's label of the chunk's id (typed, joined on the id);
+            // before it, the published probe over the name column.
+            var rows = ck().byId() ? idProbe(ctx, tenant, bytes).fetch() : ctx.resultQuery(PROBE_SQL, bytes).fetch();
             List<Map<String, String>> result = new ArrayList<>(rows.size());
             for (var r : rows) {
                 OffsetDateTime ts = r.get("created_at", OffsetDateTime.class);
@@ -178,11 +211,16 @@ public final class ChashRepository {
      */
     public Set<String> distinctCollections(String tenant) {
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(384);
-        return tenantScope.withTenant(tenant, ctx ->
-            new HashSet<>(ctx.selectDistinct(ch.collection())
+        return tenantScope.withTenant(tenant, ctx -> {
+            if (ck().byId()) {
+                // DISTINCT collection_id first, then each id's label once (not a correlated label per chunk row)
+                return new HashSet<>(CollectionKey.distinctLabels(ctx, tenant, ch.table(), ch.tenantId().eq(tenant), CHUNKS.COLLECTION_ID));
+            }
+            return new HashSet<>(ctx.selectDistinct(ch.collection())
                              .from(ch.table())
                              .where(ch.tenantId().eq(tenant))
-                             .fetch(ch.collection())));
+                             .fetch(ch.collection()));
+        });
     }
 
     // ── rename_collection ──────────────────────────────────────────────────────
@@ -413,7 +451,7 @@ public final class ChashRepository {
             Integer n = ctx.selectCount()
                            .from(ch.table())
                            .where(ch.tenantId().eq(tenant)
-                               .and(ch.collection().eq(collection)))
+                               .and(ck().eq(tenant, ch.collection(), CHUNKS.COLLECTION_ID, collection)))
                            .fetchOne(0, Integer.class);
             return n != null ? n : 0;
         });
@@ -453,7 +491,7 @@ public final class ChashRepository {
             for (String hex : ctx.selectDistinct(ch.chash())
                                  .from(ch.table())
                                  .where(ch.tenantId().eq(tenant)
-                                     .and(ch.collection().eq(collection)))
+                                     .and(ck().eq(tenant, ch.collection(), CHUNKS.COLLECTION_ID, collection)))
                                  .fetch(ch.chash())) {
                 if (hex != null && !hex.isEmpty()) {
                     result.add(hex);

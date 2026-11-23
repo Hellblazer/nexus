@@ -88,12 +88,21 @@ public final class CombinedWriteService {
     private final TenantScope    tenantScope;
     private final CatalogRepository catalogRepo;
     private final EmbedderRouter docRouter;
+    /** RDR-229 P3.5c: the latched gate 3; from it the existing-text read and the metadata-only UPDATE select the chunk by collection id. */
+    private final dev.nexus.service.datamove.Gate3 gate3;
 
     public CombinedWriteService(TenantScope tenantScope, CatalogRepository catalogRepo,
                                  EmbedderRouter docRouter) {
+        this(tenantScope, catalogRepo, docRouter, dev.nexus.service.datamove.Gate3.never());
+    }
+
+    /** {@link #CombinedWriteService(TenantScope, CatalogRepository, EmbedderRouter)} with the gate-3 signal (RDR-229 P3.5c). */
+    public CombinedWriteService(TenantScope tenantScope, CatalogRepository catalogRepo,
+                                 EmbedderRouter docRouter, dev.nexus.service.datamove.Gate3 gate3) {
         this.tenantScope = tenantScope;
         this.catalogRepo = catalogRepo;
         this.docRouter   = docRouter;
+        this.gate3       = java.util.Objects.requireNonNull(gate3, "gate3");
     }
 
     /**
@@ -869,7 +878,7 @@ public final class CombinedWriteService {
                 RenameFollow.check(gate, lockedRow);
                 final String coll = lockedRow.label();   // the row's CURRENT label
                 Map<String, String> existingText =
-                    selectExistingText(ctx, ch, tenant, coll, dedupChashes);
+                    selectExistingText(ctx, ch, tenant, coll, dedupChashes, gate3);
                 // RDR-222 Phase 0: reset per DeadlockRetry attempt (a retried attempt
                 // re-runs this whole transaction from scratch — see
                 // PgVectorRepository.upsertChunksInternal's identical racedThisWrite
@@ -941,8 +950,8 @@ public final class CombinedWriteService {
                     // Merge mode passes the caller's delete keys (non-null list = MERGE in
                     // SQL: (stored - delete_keys) || incoming); replace mode passes null.
                     need.addAll(PgVectorRepository.batchUpdateMetadata(
-                        ctx, ch, coll, dedupChashes, dedupMetas, metadataOnly,
-                        metadataMode.merge() ? metadataMode.deleteKeys() : null));
+                        ctx, ch, tenant, coll, dedupChashes, dedupMetas, metadataOnly,
+                        metadataMode.merge() ? metadataMode.deleteKeys() : null, gate3));
                 }
                 return need;
             })));
@@ -1076,11 +1085,12 @@ public final class CombinedWriteService {
     }
 
     private static Map<String, String> selectExistingText(DSLContext ctx, DimTables.ChunkTable ch,
-            String tenant, String collection, List<String> chashes) {
+            String tenant, String collection, List<String> chashes, dev.nexus.service.datamove.Gate3 gate3) {
         Map<String, String> out = new HashMap<>();
         ctx.select(ch.chash(), ch.chunkText()).from(ch.table())
            .where(ch.tenantId().eq(tenant)
-                  .and(ch.collection().eq(collection))
+                  .and(dev.nexus.service.vectors.CollectionSelector.collectionIs(gate3, tenant, ch.collection(),
+                                                                                 ch.collectionId(), collection))
                   .and(ch.chash().in(chashes)))
            .fetch()
            .forEach(r -> out.put(r.value1(), r.value2()));

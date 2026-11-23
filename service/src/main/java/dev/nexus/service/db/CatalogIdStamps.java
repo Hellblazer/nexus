@@ -42,7 +42,8 @@ final class CatalogIdStamps {
     static Field<Long> keep(Field<Long> id, Field<String> tenant, Field<String> name) {
         var c = CATALOG_COLLECTIONS.as("kid");
         Field<Long> own = DSL.field(DSL.select(c.COLLECTION_ID).from(c)
-            .where(c.TENANT_ID.eq(tenant)).and(c.NAME.eq(DSL.nullif(name, DSL.inline("")))));
+            .where(c.TENANT_ID.eq(tenant)).and(c.NAME.eq(DSL.nullif(name, DSL.inline(""))))
+            .orderBy(CollectionIdReads.liveFirst(c)).limit(1));  // live first, else the newest tombstone
         return DSL.coalesce(id, own);
     }
 
