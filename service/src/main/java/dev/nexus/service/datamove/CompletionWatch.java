@@ -101,7 +101,7 @@ final class CompletionWatch implements AutoCloseable {
     }
 
     private boolean heldOrGone() {
-        try (var session = DataMoveOrphans.openSession(admin, "watch")) {
+        try (var session = DataMoveOrphans.openSession(admin, "watch", DataMoveOrphans.CANCEL_SOCKET_SECONDS, 2_000, 3_000)) {
             var ctx = session.ctx();
             var row = DataMoveRegistry.reload(ctx, label);
             boolean held = row.isEmpty() || row.get().paused()
@@ -129,6 +129,10 @@ final class CompletionWatch implements AutoCloseable {
         }
     }
 
-    /** How long close() waits for the thread, in milliseconds: a read of the row on a connection of its own, plus the cancel statement. */
+    /**
+     * How long close() waits for the thread, in milliseconds: a read of the row on a session of its own plus the cancel statement. Each of the two
+     * gives up after 2 s waiting for a lock and 3 s running, and a server that stalls is cut by the session's 5 s network timeout, so the thread
+     * ends within these bounds whatever holds a lock on the registry.
+     */
     private static final long JOIN_MS = 6_000L;
 }
