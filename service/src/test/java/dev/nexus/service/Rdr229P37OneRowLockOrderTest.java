@@ -498,7 +498,8 @@ class Rdr229P37OneRowLockOrderTest {
         }
         assertThat(engine.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, a))).as("A is where it was").isEqualTo(id);
         assertThat(engine.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, b))).as("nothing is registered under B").isNull();
-        assertThat(engine.su(ctx -> Rdr229RenameChecks.snapshots(ctx, tenant, a))).as("the child rows are the same rows (xmin)").isEqualTo(before);
+        Map<String, List<String>> after = engine.su(ctx -> Rdr229RenameChecks.snapshots(ctx, tenant, a));
+        assertThat(after).as("the child rows are the same rows (xmin)").isEqualTo(before);
         assertThat(engine.<Boolean>su(ctx -> dev.nexus.service.datamove.CompletionCheck.readLatch(ctx, dev.nexus.service.datamove.CompletionCheck.GATE3).isPresent()))
             .as("the latch row is still there").isTrue();
     }
