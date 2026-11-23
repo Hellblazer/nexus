@@ -392,7 +392,7 @@ class RenameGuardLatchRecheckTest {
      */
     @Test
     void theOneRowOutcomeIsTheAnswer_andBothLabelsLeaveTheRegistryCache() {
-        OneRowRename stub = (ctx, tenant, from, to) ->
+        OneRowRename stub = (ctx, tenant, from, to, request) ->
             new RenameOutcome(Map.of("stub_rows", 1), 777L, "stub-epoch", true);
         var guard = new RenameGuard(() -> Missing.NONE, stub);
         var scope = new TenantScope(svcDs);

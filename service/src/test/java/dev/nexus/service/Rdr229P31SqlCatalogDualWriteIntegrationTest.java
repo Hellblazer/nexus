@@ -266,7 +266,9 @@ class Rdr229P31SqlCatalogDualWriteIntegrationTest {
      * (collections-002). The live scan below flags a writer of a guarded table, and flags none of them.
      */
     private static final Set<String> ADDED_AFTER_DUAL_WRITE = new TreeSet<>(Set.of(
-        "catalog_collection_tuple_duplicates_unscoped", "collection_id_seq_heal", "collection_id_taken", "rdr229_restamp"));
+        "catalog_collection_tuple_duplicates_unscoped", "collection_id_seq_heal", "collection_id_taken", "rdr229_restamp",
+        // RDR-229 P3.7 (vectors-079-1): the child-row name triggers set NEW's name column from the chunk row; none INSERTs or UPDATEs a table
+        "catalog_document_chunks_name_from_chunk", "chunk_orphaned_at_name_from_chunk", "topic_assignments_name_from_chunk"));
 
     /**
      * Functions vectors-069 does not touch whose body a later changeset replaces, each with its changeset:
