@@ -85,6 +85,9 @@ class Rdr229P35cAspectUpsertRaceTest extends AtomicWriteTestBase {
                         .as("round %d: the raced row is stored once", rounds).isEqualTo(1);
                     rounds++;
                 }
+                assertThat(dev.nexus.service.db.DeadlockRetry.lastRetriedContext())
+                    .as("no deadlock: neither writer's wrapped transaction was retried by DeadlockRetry (a retry would end in two clean answers too)")
+                    .isNotEqualTo("aspect.upsert " + collection);
                 assertThat(log.retries()).as("non-vacuity: the race tripped a non-arbiter key within %d rounds, and was retried", CAP)
                     .isNotEmpty();
                 assertThat(log.retries().get(0)).contains("table=document_aspects");
