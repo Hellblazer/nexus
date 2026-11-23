@@ -6,6 +6,7 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.DeadlockRetry;
 import org.jooq.DSLContext;
 import org.jooq.Field;
@@ -409,6 +410,9 @@ class Rdr229P37OneRowLockOrderTest {
                 .as(shape + (shape.equals("self") ? ": S now points at the renamed row"
                     : ": S keeps the live foreign Z it names (P3.5c's repoint rule, af30a9473b: a tombstone whose id names a live collection already has its successor)"))
                 .isEqualTo(shape.equals("self") ? id : pointsAt);
+            assertThat(engine.<Long>su(ctx -> ctx.select(CollectionIds.idOf(tenant, b)).fetchOne(0, Long.class)))
+                .as(shape + ": the renamed label resolves (live first, the history rule) to the renamed row's id: the tombstone that names it, under its own or a foreign id, cannot shadow it")
+                .isEqualTo(id);
         }
     }
 

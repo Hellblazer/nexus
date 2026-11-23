@@ -268,45 +268,65 @@ class Rdr229P35bGcFunctionsIntegrationTest {
         return ctx.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION_ID.eq(id)).and(CHUNKS.CHASH.eq(HexFormat.of().parseHex(hex))));
     }
 
-    private static final String P37_RESTORE = "red until P3.7's prerequisite: gc_restore_rereferenced and quarantine_restore_chunks match a quarantined chunk by "
-        + "its metadata origin_collection, the label at quarantine time, so a restore named by the origin's NEW label restores nothing after a one-row rename "
-        + "(P3.5b's SQL; the callers must pass the stored label, or the functions must match the origin by id)";
+    /** How a quarantined chunk's metadata names its origin besides the label: no id key (written before the id key), the id, or the JSON null marker of a dangling label. */
+    private enum IdTag { NONE, ID, MARKER }
+
+    /** The metadata of a quarantined chunk of {@code live} (registered, so it has an id), the id key as {@code idTag} says. */
+    private static Map<String, Object> quarantineTag(DSLContext ctx, String tenant, String live, IdTag idTag) {
+        Map<String, Object> meta = new LinkedHashMap<>();
+        meta.put("origin_collection", live);
+        meta.put("quarantined_at", TS);
+        if (idTag == IdTag.ID) {
+            meta.put("origin_collection_id", CollectionIds.require(ctx, tenant, live));
+        } else if (idTag == IdTag.MARKER) {
+            meta.put("origin_collection_id", null);
+        }
+        return meta;
+    }
+
+    /** Gate 3 is latched for the duration of {@code work} (the latch is install-wide and this class shares one database, so it is removed after). */
+    private void whileGate3Latched(Consumer<DSLContext> work) throws Exception {
+        su(ctx -> ctx.execute("INSERT INTO nexus.rdr229_gate_latch (gate, latched_at, engine_version) VALUES ('gate3', now(), 'p37-test') ON CONFLICT DO NOTHING"));
+        try {
+            su(work);
+        } finally {
+            su(ctx -> ctx.execute("DELETE FROM nexus.rdr229_gate_latch WHERE gate = 'gate3'"));
+        }
+    }
 
     /** Quarantined chunks r1..r4, each owned again by a manifest row of the origin, all stamped; r5 has no owner. Nothing is unstamped here. */
-    private RestoreStore stampedRestoreStore(String tag) throws Exception {
+    private RestoreStore stampedRestoreStore(String tag, IdTag idTag) throws Exception {
         String tenant = tenant(tag), live = collection(tag), quarantine = QUARANTINE + live;
         List<String> r = hashes(tenant, "sr", 5);
         su(ctx -> {
             PgContainerHelper.insertCollection(ctx, tenant, live);
             PgContainerHelper.insertCollection(ctx, tenant, quarantine);
-            seed(ctx, tenant, quarantine, r, Map.of("origin_collection", live, "quarantined_at", TS));
+            seed(ctx, tenant, quarantine, r, quarantineTag(ctx, tenant, live, idTag));
             PgContainerHelper.ownChunks(ctx, tenant, live, r.subList(0, 4).toArray(String[]::new));
         });
         return new RestoreStore(tenant, live, quarantine, r.subList(0, 4), r.get(4));
     }
 
     /**
-     * Characterisation of the finding (P3.5b's SQL, found by this test): named by the origin's NEW label, gc_restore_rereferenced finds the
-     * origin by id but matches the quarantined chunks by their metadata origin_collection, which is the label at quarantine time, so it
-     * restores nothing. When P3.7's prerequisite is met this stops holding: delete it and enable {@link #renamed_gcRestoreRereferenced_namedByTheNewLabel_restoresOneRowEach}.
+     * Before the latch the origin is still matched by the label tag, so a restore named by the origin's NEW label restores nothing: the one-row rename
+     * only happens from gate 3, so this is the pre-latch rule held as it was, not a gap.
      */
     @Test
-    void renamed_gcRestoreRereferenced_namedByTheNewLabel_restoresNothing_p37Prerequisite() throws Exception {
-        RestoreStore s = stampedRestoreStore("rn-r1");
+    void renamed_gcRestoreRereferenced_beforeTheLatch_namedByTheNewLabel_restoresNothing() throws Exception {
+        RestoreStore s = stampedRestoreStore("rn-r1", IdTag.ID);
         su(ctx -> {
             String neu = renameOrigin(ctx, s.tenant, s.live);
             Long restored = Routines.gcRestoreRereferenced(ctx.configuration(), DIM, s.tenant, s.quarantine, neu);
-            assertThat(restored).as("nothing is restored: the chunks' origin_collection is %s, not %s", s.live, neu).isZero();
+            assertThat(restored).as("nothing is restored before the latch: the chunks' origin_collection is %s, not %s", s.live, neu).isZero();
             assertThat(inCollection(ctx, s.tenant, CollectionIds.require(ctx, s.tenant, s.quarantine), s.quarantine, concat(s.reowned, List.of(s.lone))))
                 .as("every quarantined chunk stays").containsExactlyInAnyOrderElementsOf(concat(s.reowned, List.of(s.lone)));
         });
     }
 
-    @org.junit.jupiter.api.Disabled(P37_RESTORE)
     @Test
     void renamed_gcRestoreRereferenced_namedByTheNewLabel_restoresOneRowEach() throws Exception {
-        RestoreStore s = stampedRestoreStore("rn-r2");
-        su(ctx -> {
+        RestoreStore s = stampedRestoreStore("rn-r2", IdTag.ID);
+        whileGate3Latched(ctx -> {
             String neu = renameOrigin(ctx, s.tenant, s.live);
             long liveId = CollectionIds.require(ctx, s.tenant, neu);
             Long restored = Routines.gcRestoreRereferenced(ctx.configuration(), DIM, s.tenant, s.quarantine, neu);
@@ -319,58 +339,111 @@ class Rdr229P35bGcFunctionsIntegrationTest {
         });
     }
 
+    @Test
+    void renamed_gcRestoreRereferencedBounded_namedByTheNewLabel_restoresOneRowEach() throws Exception {
+        RestoreStore s = stampedRestoreStore("rn-r3", IdTag.ID);
+        whileGate3Latched(ctx -> {
+            String neu = renameOrigin(ctx, s.tenant, s.live);
+            long liveId = CollectionIds.require(ctx, s.tenant, neu);
+            Record row = first(ctx.selectFrom(GC_RESTORE_REREFERENCED_BOUNDED.call(DIM, s.tenant, s.quarantine, neu, 100)).fetch());
+            assertThat(row.get("restored", Long.class)).as("the four re-owned chunks come back under the origin's new label").isEqualTo(4L);
+            assertThat(row.get("remaining", Long.class)).as("nothing restorable is left").isZero();
+            for (String h : s.reowned) {
+                assertThat(rowsOfAChash(ctx, s.tenant, liveId, h)).as("one row for %s on the origin's id", h).isEqualTo(1L);
+            }
+        });
+    }
+
+    /** A marker row (JSON null id: the origin had no registry row) is not restorable by id after the latch, and does not fall back to the label. */
+    @Test
+    void latched_gcRestoreRereferenced_aMarkerRowIsNotRestored() throws Exception {
+        RestoreStore s = stampedRestoreStore("rn-r4", IdTag.MARKER);
+        whileGate3Latched(ctx -> {
+            assertThat(Routines.gcRestoreRereferenced(ctx.configuration(), DIM, s.tenant, s.quarantine, s.live))
+                .as("the label matches the tag, but the id key is the null marker: nothing is restored after the latch").isZero();
+            assertThat(inCollection(ctx, s.tenant, CollectionIds.require(ctx, s.tenant, s.quarantine), s.quarantine, concat(s.reowned, List.of(s.lone))))
+                .as("every quarantined chunk stays").containsExactlyInAnyOrderElementsOf(concat(s.reowned, List.of(s.lone)));
+            Record row = first(ctx.selectFrom(GC_RESTORE_REREFERENCED_BOUNDED.call(DIM, s.tenant, s.quarantine, s.live, 100)).fetch());
+            assertThat(row.get("restored", Long.class)).as("the bounded restore agrees").isZero();
+        });
+    }
+
     /** Four quarantined chunks of {@code live}, the origin already holding the third and the fourth. */
-    private List<String> quarantinedWithTwoAtTheOrigin(String tag, String tenant, String live, String quarantine) throws Exception {
+    private List<String> quarantinedWithTwoAtTheOrigin(String tag, String tenant, String live, String quarantine, IdTag idTag) throws Exception {
         List<String> hexes = hashes(tenant, tag, 4);
         su(ctx -> {
             PgContainerHelper.insertCollection(ctx, tenant, live);
             PgContainerHelper.insertCollection(ctx, tenant, quarantine);
-            seed(ctx, tenant, quarantine, hexes, Map.of("origin_collection", live, "quarantined_at", TS));
+            seed(ctx, tenant, quarantine, hexes, quarantineTag(ctx, tenant, live, idTag));
             seed(ctx, tenant, live, hexes.subList(2, 4), Map.of());
         });
         return hexes;
     }
 
-    private void assertRestoreVerdictsOnARenamedOrigin(String tenant, String named, String quarantine, List<String> hexes, long liveId) throws Exception {
+    private void assertRestoreVerdictsOnARenamedOrigin(DSLContext ctx, String tenant, String named, String quarantine, List<String> hexes, long liveId) {
         String[] chashes = hexes.toArray(String[]::new);
-        su(ctx -> {
-            Map<String, String> done = outcomes(ctx.selectFrom(QUARANTINE_RESTORE_CHUNKS.call(tenant, named, quarantine, chashes, "p37", null, false, false)).fetch());
-            assertThat(done).as("the restore's verdicts, the origin named %s", named)
-                .containsEntry(hexes.get(0), "restored").containsEntry(hexes.get(1), "restored")
-                .containsEntry(hexes.get(2), "present").containsEntry(hexes.get(3), "present");
-            for (String h : hexes) {
-                assertThat(rowsOfAChash(ctx, tenant, liveId, h)).as("one row for %s on the origin's id, no duplicate", h).isEqualTo(1L);
-            }
-        });
+        Map<String, String> done = outcomes(ctx.selectFrom(QUARANTINE_RESTORE_CHUNKS.call(tenant, named, quarantine, chashes, "p37", null, false, false)).fetch());
+        assertThat(done).as("the restore's verdicts, the origin named %s", named)
+            .containsEntry(hexes.get(0), "restored").containsEntry(hexes.get(1), "restored")
+            .containsEntry(hexes.get(2), "present").containsEntry(hexes.get(3), "present");
+        for (String h : hexes) {
+            assertThat(rowsOfAChash(ctx, tenant, liveId, h)).as("one row for %s on the origin's id, no duplicate", h).isEqualTo(1L);
+        }
     }
 
-    /** Characterisation, as above: by the new label the chunks the origin holds are "present" (found by id) and the quarantined ones are "missing". */
+    /** Before the latch, as above: by the new label the chunks the origin holds are "present" (found by id) and the quarantined ones are "missing". */
     @Test
-    void renamed_quarantineRestoreChunks_namedByTheNewLabel_restoresNothing_p37Prerequisite() throws Exception {
+    void renamed_quarantineRestoreChunks_beforeTheLatch_namedByTheNewLabel_restoresNothing() throws Exception {
         String tenant = tenant("rn-q1"), live = collection("rn-q1"), quarantine = QUARANTINE + live;
-        List<String> hexes = quarantinedWithTwoAtTheOrigin("rnq1", tenant, live, quarantine);
+        List<String> hexes = quarantinedWithTwoAtTheOrigin("rnq1", tenant, live, quarantine, IdTag.ID);
         String[] chashes = hexes.toArray(String[]::new);
         su(ctx -> {
             String neu = renameOrigin(ctx, tenant, live);
             Map<String, String> done = outcomes(ctx.selectFrom(QUARANTINE_RESTORE_CHUNKS.call(tenant, neu, quarantine, chashes, "p37", null, false, false)).fetch());
-            assertThat(done).as("the origin is found by id, the quarantined rows are not: their origin_collection is %s", live)
+            assertThat(done).as("before the latch the origin is found by id, the quarantined rows are not: their origin_collection is %s", live)
                 .containsEntry(hexes.get(0), "missing").containsEntry(hexes.get(1), "missing")
                 .containsEntry(hexes.get(2), "present").containsEntry(hexes.get(3), "present");
         });
     }
 
-    @org.junit.jupiter.api.Disabled(P37_RESTORE)
     @Test
     void renamed_quarantineRestoreChunks_namedByTheNewLabel_restoresAndSeesWhatTheOriginHolds() throws Exception {
         String tenant = tenant("rn-q2"), live = collection("rn-q2"), quarantine = QUARANTINE + live;
-        List<String> hexes = quarantinedWithTwoAtTheOrigin("rnq2", tenant, live, quarantine);
-        String[] neu = new String[1];
-        long[] id = new long[1];
-        su(ctx -> {
-            neu[0] = renameOrigin(ctx, tenant, live);
-            id[0] = CollectionIds.require(ctx, tenant, neu[0]);
+        List<String> hexes = quarantinedWithTwoAtTheOrigin("rnq2", tenant, live, quarantine, IdTag.ID);
+        whileGate3Latched(ctx -> {
+            String neu = renameOrigin(ctx, tenant, live);
+            assertRestoreVerdictsOnARenamedOrigin(ctx, tenant, neu, quarantine, hexes, CollectionIds.require(ctx, tenant, neu));
         });
-        assertRestoreVerdictsOnARenamedOrigin(tenant, neu[0], quarantine, hexes, id[0]);
+    }
+
+    /** The reattach plan finds the quarantined chunk the same way: a dry run by the new label predicts the restore, where before it saw "missing". */
+    @Test
+    void renamed_quarantineRestoreChunks_dryRunByTheNewLabelPredictsTheRestore() throws Exception {
+        String tenant = tenant("rn-q3"), live = collection("rn-q3"), quarantine = QUARANTINE + live;
+        List<String> hexes = quarantinedWithTwoAtTheOrigin("rnq3", tenant, live, quarantine, IdTag.ID);
+        String[] chashes = hexes.toArray(String[]::new);
+        whileGate3Latched(ctx -> {
+            String neu = renameOrigin(ctx, tenant, live);
+            Map<String, String> dry = outcomes(ctx.selectFrom(QUARANTINE_RESTORE_CHUNKS.call(tenant, neu, quarantine, chashes, "p37", null, true, false)).fetch());
+            assertThat(dry).containsEntry(hexes.get(0), "would_restore").containsEntry(hexes.get(1), "would_restore")
+                .containsEntry(hexes.get(2), "present").containsEntry(hexes.get(3), "present");
+        });
+    }
+
+    /** A marker row (JSON null id) is not restorable by id after the latch, named by the label it carries or not. */
+    @Test
+    void latched_quarantineRestoreChunks_aMarkerRowIsNotRestored() throws Exception {
+        String tenant = tenant("rn-q4"), live = collection("rn-q4"), quarantine = QUARANTINE + live;
+        List<String> hexes = quarantinedWithTwoAtTheOrigin("rnq4", tenant, live, quarantine, IdTag.MARKER);
+        String[] chashes = hexes.toArray(String[]::new);
+        whileGate3Latched(ctx -> {
+            Map<String, String> done = outcomes(ctx.selectFrom(QUARANTINE_RESTORE_CHUNKS.call(tenant, live, quarantine, chashes, "p37", null, false, false)).fetch());
+            assertThat(done).as("the label matches the tag, but the id key is the null marker: nothing moves after the latch")
+                .containsEntry(hexes.get(0), "missing").containsEntry(hexes.get(1), "missing")
+                .containsEntry(hexes.get(2), "present").containsEntry(hexes.get(3), "present");
+            long quarId = CollectionIds.require(ctx, tenant, quarantine);
+            assertThat(inCollection(ctx, tenant, quarId, quarantine, hexes)).as("every quarantined chunk stays").containsExactlyInAnyOrderElementsOf(hexes);
+        });
     }
 
     // ---- fixtures ---------------------------------------------------------------------------------------------------------------
