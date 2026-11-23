@@ -234,6 +234,69 @@ final class CollectionRouteFixture implements AutoCloseable {
         if (pg != null) pg.stop();
     }
 
+    // ---- the rename in the gap (RDR-229 P3.5a, F1) ----------------------------------------------------------------------
+
+    /**
+     * What {@link #renameInPlaceBeforeTheWritesRead} did: whether the hook fired, the label each renamed id bears now, and the ids of the
+     * new rows that took the old labels. {@link #close()} removes the hook (it clears all four test hooks of the route boundary's filter;
+     * a test that keeps a sink for the per-transaction census installs it again).
+     */
+    public final class RenameGap implements AutoCloseable {
+        private final java.util.concurrent.atomic.AtomicBoolean ran = new java.util.concurrent.atomic.AtomicBoolean();
+        private final java.util.Map<Long, String> currentLabelOf = new java.util.concurrent.ConcurrentHashMap<>();
+        private final java.util.Set<Long> newHolders = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+        /** True once the hook has run, i.e. once a write transaction reached its registry read by id. */
+        public boolean ran() {
+            return ran.get();
+        }
+
+        /** Each renamed id's current label (the fresh label its row bears now). */
+        public java.util.Map<Long, String> currentLabelOf() {
+            return java.util.Collections.unmodifiableMap(new java.util.LinkedHashMap<>(currentLabelOf));
+        }
+
+        /** The ids of the new rows that took the old labels. */
+        public java.util.Set<Long> newHolders() {
+            return java.util.Collections.unmodifiableSet(new java.util.LinkedHashSet<>(newHolders));
+        }
+
+        @Override
+        public void close() {
+            service.collectionSelectorFilter().testHooks(null, null, null, null);
+        }
+    }
+
+    /**
+     * Installs the {@code beforeTransactionRead} hook of the route boundary's filter: the first time a write transaction is about to read a
+     * collection by id, on ANOTHER thread, each of {@code ids} is renamed in place (the registry row keeps its id and takes a fresh label,
+     * {@code label(stem + "-r" + k)}, with a {@code quarantine-} prefix kept) and a new row is registered under each of {@code oldLabels}
+     * (the label the id's row bore, same index). What it did is on the returned handle; close it (try-with-resources) to remove the hook.
+     */
+    public RenameGap renameInPlaceBeforeTheWritesRead(List<Long> ids, List<String> oldLabels, String stem) {
+        if (ids.size() != oldLabels.size()) {
+            throw new IllegalArgumentException("one old label per id: " + ids.size() + " ids, " + oldLabels.size() + " labels");
+        }
+        RenameGap gap = new RenameGap();
+        service.collectionSelectorFilter().testHooks(null, () -> {
+            if (gap.ran.compareAndSet(false, true)) {
+                java.util.concurrent.CompletableFuture.runAsync(() -> {
+                    for (int k = 0; k < ids.size(); k++) {
+                        String old = oldLabels.get(k);
+                        long id = ids.get(k);
+                        String fresh = (old.startsWith("quarantine-") ? "quarantine-" : "") + label(stem + "-r" + k);
+                        asSuperuser(ctx -> ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.NAME, fresh)
+                            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(id)).execute());
+                        gap.currentLabelOf.put(id, fresh);
+                        register(old);   // a new row takes the old label
+                        gap.newHolders.add(idOf(old));
+                    }
+                }).join();
+            }
+        }, null, null);
+        return gap;
+    }
+
     // ---- HTTP ---------------------------------------------------------------------------------------------------------
 
     Resp send(String method, String pathAndQuery, String jsonBody) {
