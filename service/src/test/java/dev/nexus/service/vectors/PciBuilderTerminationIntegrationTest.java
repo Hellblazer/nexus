@@ -675,9 +675,22 @@ class PciBuilderTerminationIntegrationTest {
      * here) and collections-001-2 (RDR-229 P3.8, pending until the re-own move clears duplicate tuples). The tests
      * assert the exact set, so a third self-retrying changeset is a visible change here, not a silent count bump.
      */
-    static final java.util.Set<String> SELF_RETRYING = java.util.Set.of(
-        "db/changelog/aspects-005-retire-aspect-queue-table.xml::aspects-005-2",
-        "db/changelog/collections-001-tuple-unique-index.xml::collections-001-2");
+    /**
+     * The self-retrying changesets a fresh walk leaves pending: aspects-005-2 and collections-001-2 wait for their data moves, and
+     * RDR-229 P3.5b's twelve CONTINUE-gated vectors-078 changesets wait for the stamp moves, read from the shipped list
+     * ({@code dev.nexus.service.P35bContinueChangesets}), never typed here.
+     */
+    static final java.util.Set<String> SELF_RETRYING = selfRetrying();
+
+    private static java.util.Set<String> selfRetrying() {
+        java.util.Set<String> ids = new java.util.TreeSet<>(java.util.List.of(
+            "db/changelog/aspects-005-retire-aspect-queue-table.xml::aspects-005-2",
+            "db/changelog/collections-001-tuple-unique-index.xml::collections-001-2"));
+        for (String id : dev.nexus.service.P35bContinueChangesets.ids()) {
+            ids.add("db/changelog/vectors-078-rdr229-p35b-readers-continue.xml::" + id);
+        }
+        return java.util.Set.copyOf(ids);
+    }
 
     /** The ids the boot named in its {@code event=pci_build_kept_for_retrying} lines. */
     static java.util.Set<String> keptForRetrying(List<String> logs) {
