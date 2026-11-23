@@ -126,7 +126,7 @@ class Rdr229P37PrerequisitesTest extends AtomicWriteTestBase {
     // ---- 1: assign_from_chashes under the new label -----------------------------------------------------------------------------
 
     @Test
-    void assignFromChashes_underTheNewLabel_isRefusedByTheChunkNameKey_andFindsTheChunksByIdOnceItGoes() throws Exception {
+    void assignFromChashes_underTheNewLabel_isAcceptedWithTheChunkNameKeyInPlace_theTriggerStampsTheChunksName() throws Exception {
         String old = label("as");
         registerCollection(old);
         List<String> hexes = List.of(Chash.ofText("p37-as-a-" + seq.incrementAndGet()).toHex(), Chash.ofText("p37-as-b-" + seq.incrementAndGet()).toHex());
@@ -144,16 +144,12 @@ class Rdr229P37PrerequisitesTest extends AtomicWriteTestBase {
         assertThat(stale).as("precondition: no chunk row carries the new label").isZero();
 
         // P3.5b's assign_from_chashes_384 writes source_collection = the caller's label, and topic_assignments_chunk_fk keys that name to the chunk's
-        // own: a chunk still named old refuses the new label. P3.7's name-key drop takes the keys to the registry only, so this key is a P3.7
-        // prerequisite (it goes with P3.7 or P4.1, or the function writes the chunk's stored name). This step documents the refusal.
-        org.assertj.core.api.Assertions.assertThatThrownBy(() -> taxonomy.assignFromChashes(TENANT, neu, hexes, false))
-            .as("a chunk still named %s refuses an assignment that names %s", old, neu)
-            .hasStackTraceContaining("topic_assignments_chunk_fk");
-        // once that key is gone, the same call finds the chunks by id and writes the collection's id
-        su(d -> {
-            d.alterTable(TOPIC_ASSIGNMENTS).dropConstraint(DSL.name("topic_assignments_chunk_fk")).execute();
-            return null;
-        });
+        // own: a chunk still named old would refuse the new label. P3.7's vectors-079 BEFORE INSERT OR UPDATE trigger sets source_collection from the
+        // chunk row the assignment references, so the key stays in place and accepts the write. The key is asserted present (non-vacuity), never dropped.
+        Integer fk = su(d -> d.resultQuery(
+            "SELECT count(*)::int FROM pg_catalog.pg_constraint WHERE conname = 'topic_assignments_chunk_fk' AND conrelid = 'nexus.topic_assignments'::regclass")
+            .fetchOne(0, Integer.class));
+        assertThat(fk).as("non-vacuity: topic_assignments_chunk_fk is in place").isEqualTo(1);
 
         Map<String, Object> out = taxonomy.assignFromChashes(TENANT, neu, hexes, false);
 
@@ -162,6 +158,14 @@ class Rdr229P37PrerequisitesTest extends AtomicWriteTestBase {
         int rows = su(d -> d.fetchCount(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID.eq(TENANT)
             .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID.eq(id)).and(TOPIC_ASSIGNMENTS.TOPIC_ID.eq(topic))));
         assertThat(rows).as("and the assignments carry the collection's id").isEqualTo(2);
+        // the foreign key accepted the write because the vectors-079 trigger stamped the chunk's stored name, not the label the caller named
+        List<String> sourceCollections = su(d -> d.selectDistinct(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION).from(TOPIC_ASSIGNMENTS)
+            .where(TOPIC_ASSIGNMENTS.TENANT_ID.eq(TENANT)).and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID.eq(id)).and(TOPIC_ASSIGNMENTS.TOPIC_ID.eq(topic))
+            .fetch(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION));
+        assertThat(sourceCollections).as("source_collection is the chunks' stored (old) name %s, set by the trigger, not the caller's %s", old, neu)
+            .containsExactly(old);
+        int stillOld = su(d -> d.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(TENANT).and(CHUNKS.COLLECTION.eq(old)).and(CHUNKS.COLLECTION_ID.eq(id))));
+        assertThat(stillOld).as("the chunks still carry the old name").isEqualTo(2);
     }
 
     // ---- 2: the owner trigger by id (form A) for a renamed collection's document ----------------------------------------------------
