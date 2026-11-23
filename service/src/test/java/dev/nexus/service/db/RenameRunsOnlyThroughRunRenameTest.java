@@ -292,7 +292,13 @@ class RenameRunsOnlyThroughRunRenameTest {
                 w.outside().forEach((site, count) -> found.put(f.getFileName() + " | " + site, count));
             }
         }
-        assertThat(total).as("retirement-column writes: exact").isEqualTo(20);
+        // 20 on the name path's side, plus one in P3.7's one-row body: CollectionOneRowRename.apply's tombstone repoint, .set(CATALOG_COLLECTIONS.SUPERSEDED_BY,
+        // newName) (listed in retire-write-allowlist.txt with its reason). The body runs only inside runRename's one-row branch (see
+        // theOneRowBodyIsReachedOnlyThroughRenameGuardOneRow), so the write is inside runRename's transaction though not inside its lexical call.
+        assertThat(total).as("retirement-column writes: exact").isEqualTo(21);
+        assertThat(found).as("the one-row body's one retirement write, by file and site: it is the only one in CollectionOneRowRename.java")
+            .containsEntry("CollectionOneRowRename.java | .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, newName)", 1);
+        assertThat(found.keySet().stream().filter(k -> k.startsWith("CollectionOneRowRename.java | ")).count()).isEqualTo(1);
         assertThat(unlisted(found, allowlist("src/test/resources/retire-write-allowlist.txt")))
             .as("a write of superseded_by or superseded_by_id that is not on the allowlist").isEmpty();
     }
@@ -325,7 +331,76 @@ class RenameRunsOnlyThroughRunRenameTest {
             }
         }
         assertThat(inside).as("the catalog rename's and the aspects rename's own calls: exact").isEqualTo(2);
-        assertThat(outside).as("the document move and rehome, in CatalogRepository: exact").isEqualTo(java.util.Map.of("CatalogRepository.java", 2));
+        // CatalogRepository.java=2: the document move (rewriteCollectionForDoc) and the rehome (rewriteCollection), neither changes a label.
+        // CollectionOneRowRename.java=1: apply's rewriteCollection(ctx, tenant, oldName, newName), the one-row rename's own rewrite of the queued tasks; the body is
+        // reached only through RenameGuard.oneRow inside runRename's one-row branch (theOneRowBodyIsReachedOnlyThroughRenameGuardOneRow), so it is inside runRename's
+        // transaction, though not inside its lexical call. A new caller anywhere else still fails this exact map.
+        assertThat(outside).as("the document move and rehome in CatalogRepository, and the one-row body's own rewrite: exact")
+            .isEqualTo(java.util.Map.of("CatalogRepository.java", 2, "CollectionOneRowRename.java", 1));
+    }
+
+    /**
+     * P3.7's one-row body, {@code CollectionOneRowRename.rename}, runs only as {@code RenameGuard.oneRow}, the one-row branch of a {@code runRename} call:
+     * the pins above list its write sites (the tombstone repoint in the retirement allowlist, the queued-task rewrite in the aspect-task map) as outside
+     * runRename's lexical call, and this is what makes them inside its transaction. Source scan of {@code src/main}: the class is named in no main file but its own
+     * and {@code NexusService}, which constructs it once, as the argument of the one {@code RenameGuard}; the seam's {@code rename} is invoked once, in
+     * {@code RenameGuard.oneRow}; {@code oneRow} is called once, in {@code CatalogRepository}, inside a {@code runRename} call; the body's static
+     * {@code apply} is called by nothing else; and its name write is the one the {@code .set(} scan cannot see (a map entry), pinned here.
+     */
+    @Test
+    void theOneRowBodyIsReachedOnlyThroughRenameGuardOneRow() throws Exception {
+        List<String> naming = new ArrayList<>();
+        List<String> seamCalls = new ArrayList<>();
+        List<String> oneRowCalls = new ArrayList<>();
+        List<String> applyCalls = new ArrayList<>();
+        int files = 0;
+        try (Stream<Path> s = Files.walk(MAIN)) {
+            for (Path f : s.filter(x -> x.toString().endsWith(".java")).toList()) {
+                String src = code(f);
+                String file = f.getFileName().toString();
+                files++;
+                if (src.contains("CollectionOneRowRename")) naming.add(file);
+                if (Pattern.compile("\\boneRowRename\\.rename\\(").matcher(src).find()) seamCalls.add(file);
+                if (src.contains("CollectionOneRowRename.apply(")) applyCalls.add(file);
+                var calls = Pattern.compile("renameGuard\\.oneRow\\(").matcher(src);
+                while (calls.find()) {
+                    int at = calls.start();
+                    List<int[]> spans = new ArrayList<>();
+                    var runs = Pattern.compile("\\.runRename\\(").matcher(src);
+                    while (runs.find()) {
+                        int open = src.indexOf('(', runs.start());
+                        spans.add(new int[] {open, open + balanced(src, open, '(', ')').length()});
+                    }
+                    oneRowCalls.add(file + (spans.stream().anyMatch(sp -> sp[0] <= at && at < sp[1]) ? " (inside runRename)" : " (OUTSIDE runRename)"));
+                }
+            }
+        }
+        assertThat(files).as("non-vacuity: the scan read the sources").isGreaterThan(100);
+        assertThat(naming).as("production code naming the one-row body: itself, and the service that constructs it").containsExactlyInAnyOrder(
+            "CollectionOneRowRename.java", "NexusService.java");
+        String service = code(MAIN.resolve("dev/nexus/service/NexusService.java"));
+        assertThat(service).as("constructed once, as the argument of the one RenameGuard").containsOnlyOnce("new dev.nexus.service.db.CollectionOneRowRename(")
+            .contains("new dev.nexus.service.db.RenameGuard(renameReadiness, new dev.nexus.service.db.CollectionOneRowRename(");
+        assertThat(seamCalls).as("the seam's rename is invoked in RenameGuard only").containsExactly("RenameGuard.java");
+        String guard = code(MAIN.resolve("dev/nexus/service/db/RenameGuard.java"));
+        assertThat(Pattern.compile("oneRowRename\\.rename\\(").matcher(guard).results().count()).as("once").isEqualTo(1);
+        int oneRowDecl = guard.indexOf("Map<String, Integer> oneRow(");   // package-private, so methodBody's modifier pattern does not match it
+        assertThat(oneRowDecl).as("RenameGuard.oneRow is declared").isGreaterThan(0);
+        int oneRowParen = guard.indexOf('(', oneRowDecl);
+        int oneRowBrace = guard.indexOf('{', oneRowParen + balanced(guard, oneRowParen, '(', ')').length() - 1);
+        assertThat(balanced(guard, oneRowBrace, '{', '}')).as("and that one call is in RenameGuard.oneRow").contains("oneRowRename.rename(");
+        assertThat(oneRowCalls).as("RenameGuard.oneRow is called once, by the catalog rename, inside its runRename call")
+            .containsExactly("CatalogRepository.java (inside runRename)");
+        assertThat(applyCalls).as("no production file calls the body's static apply (tests do, to drive it directly)").isEmpty();
+        // the one-row body's own sites, as the scans above count them: the registry name is written by a map entry, which the .set( scan cannot see
+        String body = code(MAIN.resolve("dev/nexus/service/db/CollectionOneRowRename.java"));
+        assertThat(Pattern.compile("set\\.put\\(CATALOG_COLLECTIONS\\.NAME,").matcher(body).results().count())
+            .as("the one-row body's registry name write: one map entry, run inside the guard's one-row branch").isEqualTo(1);
+        assertThat(Pattern.compile("(?<![.\\w])apply\\(").matcher(body).results().count())
+            .as("inside the class, apply is declared once and called once, by the seam's rename").isEqualTo(2);
+        assertThat(nameWrites(body).outside()).as("and no .set(<name column>) write besides, which the name-write scan would count").isEmpty();
+        assertThat(Pattern.compile("AspectTaskRefs\\.rewriteCollection\\(").matcher(body).results().count())
+            .as("the one-row body's queued-task rewrite: the one counted in the aspect-task map").isEqualTo(1);
     }
 
     /** The widened scan has teeth: a write outside runRename in an unlisted file or a larger count is flagged, a write inside is not. */
