@@ -631,6 +631,9 @@ public final class Main {
             return;
         }
         log.info("event=rdr229_gate3_latch_read latched={} pci_off={}", gate3Latch.latched(), gate3Latch.pciOff());
+        // Which accessor a reader uses (P3.5 wires its readers here or later): code that runs before the completion check below exists reads THIS
+        // Gate3Latch (latched(), pciOff()), already read, never a guess; code wired after it reads completionCheck.gate3Latched(), which is seeded
+        // from this same object and sticky once true. The two agree from the first request of the engine, so no reader sees a window.
         service.start();
         // The read half runs in every engine, whatever NX_SEARCH_PCI says: one read now, then one per
         // NX_SEARCH_PCI_SWEEP_SECONDS. Started after the service so the pool is serving; stopped in the
@@ -714,10 +717,10 @@ public final class Main {
             return latest != null && latest.gate2();
         });
         // linda, 2026-11-22: once gate 3 has LATCHED (the check's cached read of the latch row, never the live gate 3) and the id readers are present (IdReaders.PRESENT, a constant P3.5c flips) the name-predicate indexes retire: a name index is dropped where its collection's id index is VALID, and none is built.
-        pciReconciler.retireNameIndexesWhen(() -> completionCheck != null && completionCheck.gate3Latched());
+        pciReconciler.retireNameIndexesWhen(() -> singletonLock != null && (gate3Latch.latched() || completionCheck != null && completionCheck.gate3Latched()));
         // A latch written while NX_SEARCH_PCI was off (its row says pci_off) required no id index, so with PCI on now the reconciler builds them first,
         // as if gate 2 held. Readers stay on the id either way.
-        pciReconciler.buildIdIndexesFirstWhen(() -> completionCheck != null && completionCheck.gate3LatchedPciOff());
+        pciReconciler.buildIdIndexesFirstWhen(() -> gate3Latch.pciOff() || completionCheck != null && completionCheck.gate3LatchedPciOff());
         // nexus-p2m1x.20 (RDR-229 P3.3b): the per-leaf id unique-index pass, after the engine serves. Not the PCI reconciler's: it runs whether
         // NX_SEARCH_PCI is on or off and starts only when gate 1 of the completion check holds (its latest read; no check, no pass).
         var leafIndexPass = startLeafIndexPass(bootWork, adminConnection, completionCheck);

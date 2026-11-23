@@ -5,6 +5,7 @@ package dev.nexus.service;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.nexus.service.datamove.CompletionBootWork;
+import dev.nexus.service.datamove.Gate3Latch;
 import dev.nexus.service.datamove.IdUniqueIndexPass;
 import dev.nexus.service.db.AdminConnection;
 import org.junit.jupiter.api.Test;
@@ -26,7 +27,7 @@ class MainIdUniqueIndexPassGuardTest {
     @Test
     void withACompletionCheckThePassStarts_andReportsNothingAsInProgressYet() {
         var registry = new BootWorkRegistry(Clock.systemUTC());
-        var check = CompletionBootWork.atBoot(registry, UNREACHABLE);   // built, not started: no connection is made
+        var check = CompletionBootWork.atBoot(registry, UNREACHABLE, Gate3Latch.of(false, false));   // built, not started: no connection is made
         IdUniqueIndexPass pass = Main.startIdUniqueIndexPass(registry, UNREACHABLE, check);
         try {
             assertThat(pass).as("the pass starts when there is a check to read gate 2 from").isNotNull();
@@ -56,7 +57,7 @@ class MainIdUniqueIndexPassGuardTest {
         assertThat(src).as("its gate is gate 2 of the check's latest read").containsPattern("latest != null && latest\\.gate2\\(\\)");
         assertThat(src).as("closed at shutdown").contains("idUniqueIndexPass.close();");
         assertThat(src).as("gate 3 requires the arbiters (ruling 4)")
-            .containsPattern("CompletionBootWork\\.atBoot\\(bootWork, admin, gate3,\\s*java\\.util\\.List\\.of\\(dev\\.nexus\\.service\\.datamove\\.IdUniqueIndexPass::allValid\\)\\)");
+            .containsPattern("CompletionBootWork\\.atBoot\\(bootWork, admin, gate3,\\s*java\\.util\\.List\\.of\\(dev\\.nexus\\.service\\.datamove\\.IdUniqueIndexPass::allValid\\),");   // then the latch writer and the boot latch: the extras list is the third argument
     }
 
     /** {@code src} without its comments. */
