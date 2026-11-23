@@ -10494,6 +10494,7 @@ public final class CatalogRepository {
         // step 6), which fires vectors-021-3's chunk-locking trigger; whole transaction retried on 40P01.
         // `counts` is built inside the lambda, so each attempt starts from an empty map.
         return manifestWriteTxn(tenant, "catalog.deleteCollection " + name, ctx -> {
+            CollectionRegistry.exemptFromWriterCensus(ctx, "the collection delete: children first, registry row last (linda Q2)");
             deferManifestChunkFk(ctx);
             // RDR-229 P3.5a: before gate 3 the name columns scope the purge; from it the row's id does, and a label with no row purges nothing
             CollectionPurgeScope scope = CollectionPurgeScope.resolve(ctx, gate3.holds(), tenant, name, onlyId);
