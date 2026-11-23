@@ -110,6 +110,144 @@ class Rdr229P37RenameAcceptanceTest {
         return new Renamed(tenant, token, a, b, id);
     }
 
+    /**
+     * (f) In the one-row regime (latch row present, readiness NONE) a catalog rename through the PUBLIC route against the production-built NexusService and
+     * RenameGuard answers 200, not 409 {@code rename_path_mismatch}, and its effect is the one-row path: the same collection_id under the new label. That
+     * proves P3.7's {@code OneRowRename} is wired in place of {@code OneRowRename.failClosed()}.
+     */
+    @Disabled("waits for tamsin's runRename/OneRowRename 874ff9b5a1")
+    @Test
+    void legF_aCatalogRenameInTheOneRowRegimeAnswers200NotRenamePathMismatch_andKeepsTheId() throws Exception {
+        int n = SEQ.incrementAndGet();
+        String tenant = "t-p37acc-f" + n;
+        String token = env.newTenant(tenant);
+        String a = label("p37accf" + n + "a", 1);
+        String b = label("p37accf" + n + "b", 1);
+        env.su(ctx -> {
+            Rdr229RenameSeeds.full(ctx, tenant, a);
+            return null;
+        });
+        long id = env.su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, a));
+
+        var r = env.callJson("POST", "/v1/catalog/collections/rename", token, "{\"old_name\":\"" + a + "\",\"new_name\":\"" + b + "\"}");
+
+        assertThat(r.statusCode()).as("200, not 409 rename_path_mismatch: " + r.body()).isEqualTo(200);
+        assertThat(r.body()).doesNotContain("rename_path_mismatch");
+        assertThat(env.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, b))).as("the one-row path: the same collection_id under the new label").isEqualTo(id);
+    }
+
+    /**
+     * (g) A sweep holding the sweep gate under the live label B (the gate's key is the label: {@code sweepgate:<tenant>/<label>}, taken here through
+     * the same advisory-lock function the engine takes it with) blocks (i) a rehome naming B and (ii) a rename named B: each waits for the gate and no
+     * row moves while it is held; released, it completes. The sweep-gate key moving to collection_id is not P3.7's (linda): no changeset here.
+     */
+    @Test
+    void legG_aSweepHoldingTheGateUnderTheNewLabelBlocksARehomeAndARenameNamingIt() throws Exception {
+        var w = renamedCollection("g");
+        String other = label("p37accgo" + SEQ.incrementAndGet(), 1);
+        String renameTarget = label("p37accgr" + SEQ.incrementAndGet(), 1);
+        env.su(ctx -> {
+            Rdr229RenameSeeds.chunksAndRing(ctx, w.tenant(), other);
+            return null;
+        });
+        var before = env.su(ctx -> Rdr229RenameChecks.snapshots(ctx, w.tenant(), w.a()));
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(3);
+        var held = new java.util.concurrent.CountDownLatch(1);
+        var release = new java.util.concurrent.CountDownLatch(1);
+        try (java.sql.Connection holder = env.pg.createConnection("")) {
+            holder.setAutoCommit(false);
+            var ctx = org.jooq.impl.DSL.using(holder, org.jooq.SQLDialect.POSTGRES);
+            ctx.select(org.jooq.impl.DSL.function("pg_advisory_xact_lock", Object.class,
+                org.jooq.impl.DSL.function("hashtext", Integer.class, org.jooq.impl.DSL.val("sweepgate:" + w.tenant() + "/" + w.b())))).fetch();   // the sweep, EXCLUSIVE
+            var rehome = pool.submit(() -> env.callJson("POST", "/v1/catalog/collections/rehome", w.token(),
+                "{\"source\":\"" + other + "\",\"target\":\"" + w.b() + "\"}"));
+            var rename = pool.submit(() -> env.callJson("POST", "/v1/catalog/collections/rename", w.token(),
+                "{\"old_name\":\"" + w.b() + "\",\"new_name\":\"" + renameTarget + "\"}"));
+
+            Thread.sleep(2500);   // both requests are in flight and parked on the gate: a bounded wait, the gate is held throughout
+            assertThat(rehome.isDone()).as("(i) a rehome naming B waits for the sweep").isFalse();
+            assertThat(rename.isDone()).as("(ii) a rename named B waits for the sweep").isFalse();
+            assertThat(env.su(c -> Rdr229RenameChecks.snapshots(c, w.tenant(), w.a()))).as("no row of B moved while the gate is held").isEqualTo(before);
+            assertThat(env.<Long>su(c -> Rdr229RenameChecks.registryId(c, w.tenant(), w.b()))).as("B is still B").isEqualTo(w.id());
+
+            holder.commit();   // the sweep ends
+            held.countDown();
+            assertThat(rehome.get(60, java.util.concurrent.TimeUnit.SECONDS).statusCode()).as("released, the rehome completes").isIn(200, 409);
+            assertThat(rename.get(60, java.util.concurrent.TimeUnit.SECONDS).statusCode()).as("released, the rename completes").isIn(200, 409, 404);
+        } finally {
+            release.countDown();
+            pool.shutdownNow();
+        }
+    }
+
+    // ---- the shared checks run in the one-row regime (folio's review of f5da5f0025, item 2) ---------------------------------------
+
+    private record Seeded(String tenant, String token, String a, String b) { }
+
+    private Seeded seeded(String tag) throws Exception {
+        int n = SEQ.incrementAndGet();
+        String tenant = "t-p37acc-" + tag + n;
+        String token = env.newTenant(tenant);
+        String a = label("p37acc" + tag + n + "a", 1);
+        String b = label("p37acc" + tag + n + "b", 1);
+        env.su(ctx -> {
+            Rdr229RenameSeeds.full(ctx, tenant, a);
+            return null;
+        });
+        return new Seeded(tenant, token, a, b);
+    }
+
+    private void assertNotRenamed(Seeded w, String why) {
+        assertThat(env.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, w.tenant(), w.a()))).as("the source is still registered " + why).isNotNull();
+        assertThat(env.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, w.tenant(), w.b()))).as("the target was never created " + why).isNull();
+    }
+
+    /** (i) A rename is refused while a re-embed job holds the collection, in the one-row regime as on the name path. */
+    @Test
+    void sharedCheck_aRenameIsRefusedWhileAReembedJobHoldsTheCollection() throws Exception {
+        var w = seeded("ri");
+        String jobTarget = label("p37accri" + SEQ.incrementAndGet() + "t", 1);
+        env.su(ctx -> {
+            PgContainerHelper.insertCollection(ctx, w.tenant(), jobTarget);
+            return null;
+        });
+        new dev.nexus.service.db.ReembedJobRepository(new dev.nexus.service.db.TenantScope(env.ds)).start(w.tenant(), w.a(), jobTarget, null, false, false);
+
+        var r = env.callJson("POST", "/v1/catalog/collections/rename", w.token(), "{\"old_name\":\"" + w.a() + "\",\"new_name\":\"" + w.b() + "\"}");
+
+        assertThat(r.statusCode()).as("refused: " + r.body()).isEqualTo(409);
+        assertThat(r.body()).contains("cannot rename");
+        assertNotRenamed(w, "(a re-embed job holds it)");
+    }
+
+    /** (ii) A rename naming another model token is refused (409 collection_model_mismatch), as on the name path. */
+    @Test
+    void sharedCheck_aRenameOnAModelTokenMismatchIsRefused() throws Exception {
+        var w = seeded("rm");
+
+        var r = env.callJson("POST", "/v1/catalog/collections/rename", w.token(),
+            "{\"old_name\":\"" + w.a() + "\",\"new_name\":\"" + w.b() + "\",\"embedding_model\":\"bge-base-en-v15-768\"}");
+
+        assertThat(r.statusCode()).as("refused: " + r.body()).isEqualTo(409);
+        assertThat(r.body()).contains("collection_model_mismatch");
+        assertNotRenamed(w, "(the model token differs)");
+    }
+
+    /** (iii) A rename onto a live target is refused, as on the name path. */
+    @Test
+    void sharedCheck_aRenameOntoALiveTargetIsRefused() throws Exception {
+        var w = seeded("rl");
+        env.su(ctx -> {
+            PgContainerHelper.insertCollection(ctx, w.tenant(), w.b());
+            return null;
+        });
+
+        var r = env.callJson("POST", "/v1/catalog/collections/rename", w.token(), "{\"old_name\":\"" + w.a() + "\",\"new_name\":\"" + w.b() + "\"}");
+
+        assertThat(r.statusCode()).as("refused: " + r.body()).isEqualTo(409);
+        assertThat(env.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, w.tenant(), w.a()))).as("the source is still registered").isNotNull();
+    }
+
     /** (b) A manifest write referencing an existing chunk after the rename commits, and the chunk's orphan row is cleared. */
     @Test
     void legB_aManifestWriteOfAnExistingChunkCommits_andClearsItsOrphanRow() throws Exception {
