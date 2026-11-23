@@ -7450,6 +7450,9 @@ $$
     <changeSet id="vectors-077-81" author="nexus-p2m1x.24">
         <comment>RDR-229 P3.5b (nexus-p2m1x.24), form B: nexus.chunk_is_reapable reads both shapes of the collection name, the id where both sides carry one and the name where either lacks one (a NULL id never matches through a '' name). CREATE OR REPLACE of the function body only: same signature, return type, volatility, security and grants. The rollback restores the last definer's text. DATA EFFECT: none; no row is read or written.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
+-- Fix round (linda 2026-11-23, the 5x80k remeasures): r3's body kept. Its callers pass the tenant and collection as constants, so
+-- each registry read is an InitPlan, once per statement; a body that reads the id in a FROM subquery made the planner run the
+-- orphaned_at age check before the manifest NOT EXISTS, 80,000 probes for 4,000 (fixed3), so it is not used.
 CREATE OR REPLACE FUNCTION nexus.chunk_is_reapable(
     p_tenant          text,
     p_collection      text,
@@ -7461,22 +7464,16 @@ LANGUAGE sql
 STABLE
 SECURITY INVOKER
 AS $$
-    -- Fix round (linda 2026-11-23, the 5x80k EXPLAIN): the registry id of p_collection is read once (k.cid), not once per arm; each
-    -- probe stays one index probe on (tenant_id, chash) with the id-or-name match as its filter, as r3 had it. Splitting the two arms
-    -- into separate probes (b6ff7a3cb7) doubled the probes per chunk once a caller inlines this function, so it is not done.
-    -- The orphaned_at probe takes the latest record by ORDER BY ... LIMIT 1: the id-or-name match can name two records of one chunk
-    -- during the stamp.
     SELECT true
-      FROM (SELECT (SELECT cc.collection_id
-                      FROM nexus.catalog_collections cc
-                     WHERE cc.tenant_id = p_tenant
-                       AND cc.name      = p_collection) AS cid) k
      WHERE GREATEST(
                p_last_written_at,
+               -- A scalar subquery on an index probe ((tenant_id, chash), P3.3c's child index, or the primary key): the
+               -- id-or-name match can name two records of one chunk during the stamp, so the latest is taken by
+               -- ORDER BY ... LIMIT 1: one row, as an aggregate would give, read straight from the record.
                (SELECT o.orphaned_at
                   FROM nexus.chunk_orphaned_at o
                  WHERE o.tenant_id  = p_tenant
-                   AND (o.collection_id = k.cid OR (o.collection_id IS NULL AND o.collection = p_collection AND p_collection <> ''))
+                   AND (o.collection_id = (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant AND cc.name = p_collection) OR (o.collection_id IS NULL AND o.collection = p_collection AND p_collection <> ''))
                    AND o.chash      = p_chash
                  ORDER BY o.orphaned_at DESC NULLS LAST
                  LIMIT 1)
@@ -7485,7 +7482,7 @@ AS $$
              SELECT 1
                FROM nexus.catalog_document_chunks m
               WHERE m.tenant_id  = p_tenant
-                AND (m.collection_id = k.cid OR (m.collection_id IS NULL AND m.collection = p_collection AND p_collection <> ''))
+                AND (m.collection_id = (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant AND cc.name = p_collection) OR (m.collection_id IS NULL AND m.collection = p_collection AND p_collection <> ''))
                 AND m.chash      = p_chash
            )
        AND NOT EXISTS (
