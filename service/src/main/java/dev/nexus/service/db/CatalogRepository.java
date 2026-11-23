@@ -9666,7 +9666,7 @@ public final class CatalogRepository {
                        .from(CHUNKS)
                        .where(CollectionIdReads.chunksIs(gate3, tenant, collection).and(CHUNKS_CHASH_HEX.eq(chash))
                            .and(excludeSensitive
-                               ? ChunkSensitivity.servableUnderExclude(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH)
+                               ? ChunkSensitivity.servableUnderExclude(gate3, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, CHUNKS.CHASH)
                                : DSL.trueCondition()))
                        .limit(1).fetchOne();
             if (r == null) return null;
@@ -9736,7 +9736,7 @@ public final class CatalogRepository {
                           .from(CHUNKS)
                           .where(CHUNKS_CHASH_HEX.eq(chash)
                               .and(excludeSensitive
-                                  ? ChunkSensitivity.servableUnderExclude(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH)
+                                  ? ChunkSensitivity.servableUnderExclude(gate3, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, CHUNKS.CHASH)
                                   : DSL.trueCondition()))
                           // Third key `collection ASC` matches the canonical _sort_key
                           // (preferred, newest created_at, deterministic name) so a chash in two
