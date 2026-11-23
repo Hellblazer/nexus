@@ -53,6 +53,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * (plain, manifest, scoped, text-gated; hybrid_search has no engine caller and no twin) returns exactly the rows its name function returns for the same collection,
  * in the same order. Both run on the exact route (index scans off), so neither result is an approximate HNSW walk and the
  * comparison is of the functions, not of two graph walks. Every result is non-empty and the sensitive test is on.
+ * Every twin at every dimension is compared in {@code Rdr229P35bTwinParityIntegrationTest}; this one keeps four families on the
+ * fixture the plan tests below use.
  *
  * <p><b>The id index is provable on the sixth call.</b> A per-collection index keyed on the id
  * ({@code WHERE collection_id = '<id>'::bigint}, the predicate P3.4 rebuilds the indexes with) is a partial index, and
@@ -282,26 +284,38 @@ class Rdr229P35bIdTwinIntegrationTest {
         };
     }
 
-    /** Every row of {@code fn} on the exact route (index scans off), each row as its values' text. */
-    private List<String> exactRows(Table<?> fn) {
+    /** Every row of {@code fn} on the exact route (index scans off), each row's values. */
+    private List<List<Object>> exactValues(Table<?> fn) {
         return scope.withTenant(TENANT, ctx -> {
             PgSession.disableIndexScanForExactFallback(ctx);
             PgSession.setSearchPlanCacheMode(ctx);
-            List<String> out = new ArrayList<>();
+            List<List<Object>> out = new ArrayList<>();
             for (Record r : ctx.selectFrom(fn).fetch()) {
-                out.add(r.intoList().toString());
+                out.add(r.intoList());
             }
             return out;
         });
     }
 
+    /** Every row of {@code fn} as its values' text, without the last {@code dropTrailing} columns (a twin's collection id). */
+    private List<String> exactRows(Table<?> fn, int dropTrailing) {
+        List<String> out = new ArrayList<>();
+        for (List<Object> r : exactValues(fn)) {
+            out.add(r.subList(0, r.size() - dropTrailing).toString());
+        }
+        return out;
+    }
+
     @ParameterizedTest(name = "{0}: the twin returns the name function's rows")
     @EnumSource(Family.class)
     void theTwinReturnsTheNameFunctionsRows_overAStampedStore(Family family) {
-        List<String> named = exactRows(byName(family));
-        List<String> twin = exactRows(byId(family));
+        List<String> named = exactRows(byName(family), 0);
+        // the twin returns the original's columns and a trailing collection id (RDR-229 P3.5b, linda 2026-11-23)
+        List<String> twin = exactRows(byId(family), 1);
         assertThat(named).as("%s: non-vacuity, the name function finds rows", family).isNotEmpty();
         assertThat(twin).as("%s: the twin's rows, in order, are the name function's", family).containsExactlyElementsOf(named);
+        assertThat(exactValues(byId(family)).stream().map(r -> r.get(r.size() - 1)).distinct().toList())
+            .as("%s: the trailing column is the registry id", family).containsExactly(ownId);
     }
 
     // -- the sixth call's plan ---------------------------------------------------------------------------
