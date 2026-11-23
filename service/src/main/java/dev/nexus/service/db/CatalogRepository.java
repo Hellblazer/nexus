@@ -10375,12 +10375,14 @@ public final class CatalogRepository {
         // `counts` is built inside the lambda, so each attempt starts from an empty map.
         return manifestWriteTxn(tenant, "catalog.deleteCollection " + name, ctx -> {
             deferManifestChunkFk(ctx);
+            // RDR-229 P3.5a: before gate 3 the name columns scope the purge; from it the row's id does, and a label with no row purges nothing
+            CollectionPurgeScope scope = CollectionPurgeScope.resolve(ctx, renameGuard.scopesDeletesById(), tenant, name, onlyId);
 
             // RDR-235 (nexus-5r2sc.2.6): the collection's unconsumed aspects tasks (available, claimed and dead)
             // go with it, in this transaction. FIRST statement of the purge: the tuple row locks come before the
             // document_aspects delete at step 5 (the claim-fenced aspect write's own order). Deliberately not in
             // `counts`: the response's key set is a wire contract and the purge reports what it always did.
-            AspectTaskRefs.deleteNaming(ctx, tenant, name);
+            if (!scope.matchesNothing()) AspectTaskRefs.deleteNaming(ctx, tenant, name);
 
             Map<String, Integer> counts = new LinkedHashMap<>();
             List<String> unregisteredSiblings = new ArrayList<>();
@@ -10403,7 +10405,7 @@ public final class CatalogRepository {
             //    depends on chunks preceding topic_assignments (unlike step 1b's
             //    catalog_document_chunks, which has its own documented ordering
             //    reason relative to step 1).
-            counts.put("topic_assignments", ctx.deleteFrom(TOPIC_ASSIGNMENTS).where(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(name)).execute());
+            counts.put("topic_assignments", ctx.deleteFrom(TOPIC_ASSIGNMENTS).where(scope.topicAssignments()).execute());
             // 1. T3 chunk vectors (registry children, fk-002 RESTRICT). RDR-191
             //    (nexus-o8dil.48): one DELETE against the unified nexus.chunks,
             //    not three against chunks_384/768/1024 -- the cascade-count key
@@ -10411,7 +10413,7 @@ public final class CatalogRepository {
             //    "chunks_384"/"chunks_768"/"chunks_1024").
             // RDR-229 P2.5: the collection's own row says whether it is a quarantine collection (same ctx; the
             // row is still there, the registry delete is step 6). A name with no row falls back to its prefix.
-            if (QuarantineOrigin.isQuarantine(ctx, tenant, name)) {
+            if (!scope.matchesNothing() && QuarantineOrigin.isQuarantine(ctx, tenant, name)) {
                 // nexus-wbfpw.71: a deliberate delete of a quarantine collection is the audited manual route
                 // for rows whose origin is gone; the audit row carries the chashes the delete removed.
                 int removed = QuarantineOrigin.deleteQuarantineCollectionRows(ctx, tenant, name);
@@ -10419,12 +10421,12 @@ public final class CatalogRepository {
                 // The rows removed ARE the quarantined chunks; the CLI reads this key to say how many went.
                 counts.put("quarantine_chunks", removed);
             } else {
-                counts.put("chunks", ctx.deleteFrom(CHUNKS).where(CHUNKS.COLLECTION.eq(name)).execute());
+                counts.put("chunks", ctx.deleteFrom(CHUNKS).where(scope.chunks()).execute());
                 // 1a. nexus-wbfpw.68/.71: the origin's rows in its quarantine siblings go with it, one audit row
                 //     per sibling, and a sibling this empties is unregistered the way the ghost sweep would.
                 //     Without this the sibling was stranded: nothing expires rows whose origin is gone.
                 //     keepQuarantine: a caller that re-registers the same name at once (reindex) keeps them.
-                Map<String, Integer> fromSiblings = keepQuarantine
+                Map<String, Integer> fromSiblings = keepQuarantine || scope.matchesNothing()
                     ? Map.of() : QuarantineOrigin.deleteRowsOf(ctx, tenant, name);
                 counts.put("quarantine_chunks", fromSiblings.values().stream().mapToInt(Integer::intValue).sum());
                 for (String sibling : fromSiblings.keySet()) {
@@ -10454,7 +10456,7 @@ public final class CatalogRepository {
             //     would also reach (already-gone rows delete 0), and closes
             //     the gap for rows it would miss.
             counts.put("catalog_document_chunks",
-                ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(name)).execute());
+                ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS).where(scope.manifest()).execute());
             // 2. (chash_index leg RETIRED — RDR-187/nexus-piwya.9: the router
             //    table is dropped; conexus's rdr164 cascade EXPLAIN probe
             //    retargets in lockstep with this removal.)
@@ -10465,10 +10467,10 @@ public final class CatalogRepository {
             //    DELETE CASCADE (a different axis than source_collection, so a
             //    topic_assignments row from ANOTHER collection but pointing at
             //    one of THIS collection's topics can still exist here).
-            counts.put("topics", ctx.deleteFrom(TOPICS).where(TOPICS.COLLECTION.eq(name)).execute());
+            counts.put("topics", ctx.deleteFrom(TOPICS).where(scope.topics()).execute());
             // 3b. taxonomy_meta (fk-003-4 RESTRICT; PK (tenant_id, collection) — explicit DELETE).
             //     topic_links clears via topics(id) ON DELETE CASCADE in step 3, so it needs no row here.
-            counts.put("taxonomy_meta", ctx.deleteFrom(TAXONOMY_META).where(TAXONOMY_META.COLLECTION.eq(name)).execute());
+            counts.put("taxonomy_meta", ctx.deleteFrom(TAXONOMY_META).where(scope.taxonomyMeta()).execute());
             // 4. centroids (CA-6: no FK to topics — explicit DELETE; the cugrk fix).
             //    RDR-191 (nexus-o8dil.48): one DELETE against the unified
             //    nexus.taxonomy_centroids, not three against
@@ -10480,11 +10482,11 @@ public final class CatalogRepository {
             //    when this key is absent) -- the key below MUST stay exactly
             //    "taxonomy_centroids", pinned by
             //    CatalogDeleteCollectionCascadeTest.
-            counts.put("taxonomy_centroids", ctx.deleteFrom(TAXONOMY_CENTROIDS).where(TAXONOMY_CENTROIDS.COLLECTION.eq(name)).execute());
+            counts.put("taxonomy_centroids", ctx.deleteFrom(TAXONOMY_CENTROIDS).where(scope.centroids()).execute());
             // 5. aspect family (fk-003 RESTRICT). Explicit collection delete catches
             //    doc-less (doc_id='') rows fk-001's document cascade cannot reach — the tquoj fix.
-            counts.put("document_aspects",        ctx.deleteFrom(DOCUMENT_ASPECTS).where(DOCUMENT_ASPECTS.COLLECTION.eq(name)).execute());
-            counts.put("document_highlights",     ctx.deleteFrom(DOCUMENT_HIGHLIGHTS).where(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(name)).execute());
+            counts.put("document_aspects",        ctx.deleteFrom(DOCUMENT_ASPECTS).where(scope.aspects()).execute());
+            counts.put("document_highlights",     ctx.deleteFrom(DOCUMENT_HIGHLIGHTS).where(scope.highlights()).execute());
             // 6. catalog documents for this physical collection; fk-001 cascades any
             //    doc-rooted aspect/highlight/manifest rows still present.
             // The ONLY production HARD delete of document rows. fk-001 cascades
@@ -10499,7 +10501,7 @@ public final class CatalogRepository {
             // topic_assignments above; the FK was chosen specifically because it
             // ALSO covers nexus.purge_trash's plpgsql hard-delete path, which no
             // Java step here could reach.
-            counts.put("catalog_documents", ctx.deleteFrom(CATALOG_DOCUMENTS).where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(name)).execute());
+            counts.put("catalog_documents", ctx.deleteFrom(CATALOG_DOCUMENTS).where(scope.documents()).execute());
             // 8. nexus-s80u9 (7.77.0 shakeout N5): a rename retires the old name as a tombstone that names its
             //    successor (renameCollectionTxn step 3). With the successor deleted the tombstone names nothing
             //    and, having been emptied by the re-home, holds nothing: debris the ghost sweep and `nx doctor`
@@ -10509,11 +10511,12 @@ public final class CatalogRepository {
             //    Skipped under keepQuarantine: that flag means the caller re-registers the SAME name straight away
             //    (nx collection reindex), so the tombstones naming it still name a live successor and are the
             //    redirect that `nx collection info A` and the client's superseded-write refusal read.
-            List<String> retiredRemoved = keepQuarantine
+            List<String> retiredRemoved = keepQuarantine || scope.matchesNothing()
                 ? List.of() : retiredPredecessorsOf(ctx, tenant, name);
             // 7. registry row LAST (RESTRICT children are now gone), with the retired predecessors of step 8, in one
             //    delete. RDR-229 P3.1 (R7): a survivor that still names one of these rows (a predecessor that holds
             //    content, or one kept under keepQuarantine) is repaired first, in this transaction.
+            Long rowId = scope.scopedById() ? scope.id() : onlyId;   // the one row to delete, when the delete knows it
             List<String> registryRows = new ArrayList<>(retiredRemoved.size() + 1);
             registryRows.add(name);
             registryRows.addAll(retiredRemoved);
@@ -10523,11 +10526,11 @@ public final class CatalogRepository {
                     CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION)
                 .from(CATALOG_COLLECTIONS)
                 .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(name))
-                .and(onlyId == null ? DSL.trueCondition() : CATALOG_COLLECTIONS.COLLECTION_ID.eq(onlyId))
+                .and(rowId == null ? DSL.trueCondition() : CATALOG_COLLECTIONS.COLLECTION_ID.eq(rowId))
                 .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.ne("quarantine")).and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(""))
                 .fetchOne();
-            counts.put("catalog_collections", onlyId != null
-                ? CollectionTombstones.deleteRegistryRowById(ctx, tenant, name, onlyId, retiredRemoved)
+            counts.put("catalog_collections", scope.matchesNothing() ? 0 : rowId != null
+                ? CollectionTombstones.deleteRegistryRowById(ctx, tenant, name, rowId, retiredRemoved)
                 : CollectionTombstones.deleteRegistryRows(ctx, tenant, registryRows) - retiredRemoved.size());
             if (freed != null) {
                 rederiveOwnersHeldBack(ctx, tenant, freed.value1(), freed.value2(), freed.value3(), freed.value4());

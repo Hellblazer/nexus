@@ -13,7 +13,8 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 
 /**
  * What a collection delete would do to the row it names, decided before it runs (RDR-229 P3.5a, bead nexus-p2m1x.23; the
- * delete contract agreed with bob for P3.12, bead comment 2026-11-22). The delete route asks for a {@link Verdict} and acts only
+ * delete contract agreed with bob for P3.12, bead comment 2026-11-22, with point 4 changed by linda's ruling of 2026-11-23: a
+ * retired label or id is deleted, not refused). The delete route asks for a {@link Verdict} and acts only
  * on {@link Kind#PROCEED}.
  *
  * <p>A label is read by its rows, never through {@link CollectionRegistry#require}, which would raise on a label that two live rows
@@ -29,8 +30,6 @@ public final class CollectionDeletes {
     public enum Kind {
         /** Delete: the row (or no row, for a label nothing registered, which deletes what names it as before). */
         PROCEED,
-        /** The row is retired and its successor has a row: refuse, naming the successor's id; the tombstone stays. */
-        SUPERSEDED,
         /** A label held by more than one live row: refuse, naming every id. Only an id reaches one of them. */
         AMBIGUOUS,
         /** An id given with the request has no row under the label the request names. */
@@ -40,13 +39,12 @@ public final class CollectionDeletes {
     /**
      * @param kind         the decision
      * @param collectionId the id of the row the delete acts on; 0 when the label has no row
-     * @param successorId  the live successor's id, for {@link Kind#SUPERSEDED}
      * @param ids          every live row's id, for {@link Kind#AMBIGUOUS}
      */
-    public record Verdict(Kind kind, long collectionId, long successorId, long[] ids) {
+    public record Verdict(Kind kind, long collectionId, long[] ids) {
 
         static Verdict of(Kind kind, long collectionId) {
-            return new Verdict(kind, collectionId, 0L, new long[0]);
+            return new Verdict(kind, collectionId, new long[0]);
         }
     }
 
@@ -82,7 +80,7 @@ public final class CollectionDeletes {
                 }
             }
             if (live.size() > 1) {
-                return new Verdict(Kind.AMBIGUOUS, 0L, 0L, live.stream().mapToLong(Long::longValue).toArray());
+                return new Verdict(Kind.AMBIGUOUS, 0L, live.stream().mapToLong(Long::longValue).toArray());
             }
             if (row == null && !rows.isEmpty()) {
                 row = rows.get(0);
@@ -91,16 +89,8 @@ public final class CollectionDeletes {
                 return Verdict.of(Kind.PROCEED, 0L);
             }
         }
-        String successor = row.value2();
-        if (successor == null || successor.isEmpty()) {
-            return Verdict.of(Kind.PROCEED, row.value1());
-        }
-        Long successorId = ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
-            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(successor))
-            .orderBy(CATALOG_COLLECTIONS.COLLECTION_ID).limit(1)
-            .fetchOne(CATALOG_COLLECTIONS.COLLECTION_ID);
-        // a tombstone whose successor has no row names nothing: deleting it is today's behaviour
-        return successorId == null ? Verdict.of(Kind.PROCEED, row.value1())
-            : new Verdict(Kind.SUPERSEDED, row.value1(), successorId, new long[0]);
+        // A retired row is deleted like a live one (linda's ruling 2026-11-23, option (b)): the purge is scoped by this row's id
+        // from gate 3 (CollectionPurgeScope), so a tombstone takes its own rows and never its successor's.
+        return Verdict.of(Kind.PROCEED, row.value1());
     }
 }
