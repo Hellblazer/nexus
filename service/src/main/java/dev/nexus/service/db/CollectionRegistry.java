@@ -398,6 +398,99 @@ public final class CollectionRegistry {
         }
     }
 
+    /**
+     * A document batch's registry check: the rows of every collection id in {@code ids} (named in the BODY, {@code physical_collection_id}) and
+     * every label in {@code labels}, {@code FOR KEY SHARE} in ONE statement in {@code collection_id} order, so a batch that mixes ids and labels
+     * cannot take two runs in two orders against a verb that locks in id order. Each id is memoised under its {@code #<id>} key (what
+     * {@link #lockIdForWrite} answers from) and its current label; a label is memoised under itself. The refusals are
+     * {@link #lockIdForWrite}'s for an id (no row {@link UnknownCollectionIdException}, a retired row {@link CollectionRetiredIdException});
+     * a label no row has is not refused here.
+     */
+    void lockIdsAndLabelsForWrite(DSLContext ctx, String tenant, java.util.Collection<Long> ids, java.util.Collection<String> labels) {
+        List<Long> idTodo = new java.util.ArrayList<>();
+        for (Long id : ids) {
+            if (id != null && WriteRegistryMemo.get(ctx, tenant, "#" + id) == null) {
+                idTodo.add(id);
+            }
+        }
+        List<String> labelTodo = new java.util.ArrayList<>();
+        for (String label : labels) {
+            if (label != null && !label.isEmpty() && WriteRegistryMemo.get(ctx, tenant, label) == null) {
+                labelTodo.add(label);
+            }
+        }
+        if (idTodo.isEmpty() && labelTodo.isEmpty()) {
+            return;
+        }
+        if (idTodo.size() + labelTodo.size() == 1 && idTodo.size() == 1) {
+            lockIdForWrite(ctx, tenant, idTodo.get(0));
+            return;
+        }
+        if (idTodo.size() + labelTodo.size() == 1) {
+            lockForWrite(ctx, tenant, labelTodo.get(0));
+            return;
+        }
+        if (!idTodo.isEmpty()) {
+            ExpectedCollectionIds.beforeTransactionRead();
+        }
+        noteWriteRead(tenant, String.join(",", labelTodo) + idTodo);
+        Condition match = DSL.falseCondition();
+        if (!idTodo.isEmpty()) {
+            match = match.or(CATALOG_COLLECTIONS.COLLECTION_ID.in(idTodo));
+        }
+        if (!labelTodo.isEmpty()) {
+            match = match.or(CATALOG_COLLECTIONS.NAME.in(labelTodo));
+        }
+        Field<Integer> modelDimension = EMBEDDING_MODELS.DIMENSION.as("model_dimension");
+        List<CollectionRow> rows = ctx.select(
+                CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.COLLECTION_ID,
+                CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.DIMENSION,
+                CATALOG_COLLECTIONS.LIFECYCLE_STATE, modelDimension,
+                CATALOG_COLLECTIONS.SUPERSEDED_BY)
+            .from(CATALOG_COLLECTIONS)
+            .leftJoin(EMBEDDING_MODELS)
+                .on(EMBEDDING_MODELS.EMBEDDING_MODEL.eq(CATALOG_COLLECTIONS.EMBEDDING_MODEL))
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(match))
+            .orderBy(CATALOG_COLLECTIONS.COLLECTION_ID)
+            .forKeyShare().of(CATALOG_COLLECTIONS)
+            .fetch(r -> rowOf(r, modelDimension, tenant));
+        for (long id : idTodo) {
+            CollectionRow row = rows.stream().filter(r -> r.collectionId() == id).findFirst()
+                .orElseThrow(() -> new UnknownCollectionIdException(tenant, id));
+            if (row.isSuperseded()) {
+                throw new CollectionRetiredIdException(tenant, id, row.label(), CollectionSuccessor.of(ctx, tenant, id));
+            }
+            WriteRegistryMemo.put(ctx, tenant, "#" + id, row);
+            WriteRegistryMemo.put(ctx, tenant, row.label(), row);
+            ExpectedCollectionIds.consumed(ctx, "#" + id);
+        }
+        for (String label : labelTodo) {
+            CollectionRow chosen = null;
+            for (CollectionRow candidate : rows) {
+                if (!candidate.label().equals(label)) {
+                    continue;
+                }
+                if (chosen == null || (chosen.isSuperseded() && !candidate.isSuperseded())
+                    || (chosen.isSuperseded() == candidate.isSuperseded() && candidate.collectionId() > chosen.collectionId())) {
+                    chosen = candidate;
+                }
+            }
+            if (chosen != null) {
+                WriteRegistryMemo.put(ctx, tenant, label, chosen);
+            }
+        }
+        if (!idTodo.isEmpty()) {
+            ExpectedCollectionIds.afterTransactionRead();
+        }
+    }
+
+    /** {@link #lockIdsAndLabelsForWrite} on the process-wide registry. */
+    public static void requireIdsAndLabelsForWrite(DSLContext ctx, String tenant, java.util.Collection<Long> ids,
+                                                   java.util.Collection<String> labels) {
+        SHARED.lockIdsAndLabelsForWrite(ctx, tenant, ids, labels);
+    }
+
     /** {@link #lockAllForWrite} on the process-wide registry. */
     public static void requireAllForWrite(DSLContext ctx, String tenant, java.util.Collection<String> labels) {
         SHARED.lockAllForWrite(ctx, tenant, labels);
@@ -435,6 +528,11 @@ public final class CollectionRegistry {
 
     CollectionRow lockIdForWrite(DSLContext ctx, String tenant, long collectionId) {
         String key = "#" + collectionId;
+        CollectionRow held = WriteRegistryMemo.get(ctx, tenant, key);
+        if (held != null && held.collectionId() == collectionId) {
+            ExpectedCollectionIds.consumed(ctx, key);   // read already, in this transaction, with the batch's other rows (lockIdsAndLabelsForWrite)
+            return held;
+        }
         noteWriteRead(tenant, key);
         ExpectedCollectionIds.beforeTransactionRead();   // test seams, as for a boundary-named id (no-ops in production)
         CollectionRow row = fillOrNull(ctx, tenant, CATALOG_COLLECTIONS.COLLECTION_ID.eq(collectionId), List.of(), true, false);

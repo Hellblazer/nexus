@@ -145,4 +145,47 @@ class MultiCollectionWritersLockOrderTest {
     void aRemapBatchWhoseSourceHasTheLowerId_readsBothRowsInIdOrder_andMeetsAVerbWithoutACycle() throws Exception {
         remapBatchAgainstAVerbHoldingTheLowerRow(false);
     }
+
+    /**
+     * A document batch that names one collection by ID and another by LABEL (the review's mixed batch): its registry rows are read in ONE
+     * statement in id order. Read in two runs (labels, then ids) a batch whose label names the HIGHER id and whose id names the LOWER would hold
+     * the key share of the higher row and wait for the lower, against a verb that holds the lower and wants the higher: a cycle.
+     */
+    @Timeout(180)
+    @Test
+    void aDocumentBatchNamingTheLowerIdByIdAndTheHigherByLabel_readsBothRowsInIdOrder_andMeetsAVerbWithoutACycle() throws Exception {
+        String lo = label("w1-mixed-lo-" + (n++));
+        fx.register(lo);
+        String hi = label("w1-mixed-hi-" + (n++));
+        fx.register(hi);
+        long loId = fx.idOf(lo);
+        assertThat(loId).as("setup: lo was registered first").isLessThan(fx.idOf(hi));
+        String seq = "p35a-mixed-" + (n++);
+        boolean[] verbGot40P01 = new boolean[1];
+        Future<Resp> writer;
+        try (Connection verb = fx.pg.createConnection("")) {
+            verb.setAutoCommit(false);
+            lockRow(verb, lo);   // the verb holds the lower row first
+            writer = pool.submit(() -> fx.post("/v1/catalog/doc/register_many", "{\"owner_prefix\":\"" + seq + "\",\"docs\":["
+                + "{\"title\":\"" + seq + "-a\",\"content_type\":\"knowledge\",\"corpus\":\"knowledge\",\"file_path\":\"" + seq + "-a.md\",\"physical_collection_id\":" + loId + "},"
+                + "{\"title\":\"" + seq + "-b\",\"content_type\":\"knowledge\",\"corpus\":\"knowledge\",\"file_path\":\"" + seq + "-b.md\",\"physical_collection\":" + json(hi) + "}]}"));
+            try {
+                awaitWaiting(writer, "the batch waits for the lower row the verb holds");
+                try {
+                    lockRow(verb, hi);   // the higher row: goes through at once unless the writer holds it (a cycle)
+                } catch (DataAccessException e) {
+                    if ("40P01".equals(e.sqlState())) {
+                        verbGot40P01[0] = true;
+                    } else {
+                        throw e;
+                    }
+                }
+            } finally {
+                verb.rollback();
+            }
+        }
+        Resp r = writer.get(120, TimeUnit.SECONDS);
+        assertThat(verbGot40P01[0]).as("the verb took the higher row while the batch waited: no deadlock was detected on its side").isFalse();
+        assertThat(r.status()).as("the batch was not made the deadlock victim: %s", r.body()).isEqualTo(200);
+    }
 }

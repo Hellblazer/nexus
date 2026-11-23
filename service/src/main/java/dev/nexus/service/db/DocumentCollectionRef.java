@@ -86,10 +86,9 @@ final class DocumentCollectionRef {
     /** {@link #normalize} for a batch: each distinct id is resolved once, in {@code memo}. */
     static List<Map<String, Object>> normalizeAll(DSLContext ctx, String tenant, List<Map<String, Object>> requests) {
         Map<Long, CollectionRow> memo = new HashMap<>();
-        // RDR-229 P3.5a, a batch that touches SEVERAL collections: every row it names is read FOR KEY SHARE before any row work, in the order a
-        // retiring verb locks in. The labels go in one statement ordered by collection_id; the ids go one after another in ascending order. A
-        // batch that mixes both takes two such runs, labels first (the one cycle that leaves is a verb on two rows each side of a
-        // mixed batch, which the writer's deadlock retry absorbs; no document batch is known to mix them).
+        // RDR-229 P3.5a, a batch that touches SEVERAL collections: every row it names, by id or by label, is read FOR KEY SHARE before any row
+        // work, in ONE statement in collection_id order (the order a retiring verb locks in): two runs, ids and then labels, could meet a verb
+        // that holds a row of each in the other order.
         java.util.TreeSet<Long> ids = new java.util.TreeSet<>();
         java.util.LinkedHashSet<String> labels = new java.util.LinkedHashSet<>();
         for (Map<String, Object> request : requests) {
@@ -106,9 +105,9 @@ final class DocumentCollectionRef {
                 }
             }
         }
-        if (labels.size() > 1) {
+        if (ids.size() + labels.size() > 1) {
             try {
-                CollectionRegistry.requireAllForWrite(ctx, tenant, labels);
+                CollectionRegistry.requireIdsAndLabelsForWrite(ctx, tenant, ids, labels);
             } catch (UnregisteredCollectionException unknownLabel) {
                 // a label no row has is not refused here (the typed 422 is the per-document check's, as before)
             }
