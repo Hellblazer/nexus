@@ -8,6 +8,7 @@ import static dev.nexus.service.jooq.nexus.Tables.GC_AUDIT;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.nexus.service.AtomicWriteTestBase;
+import dev.nexus.service.CollectionMintSupport;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.RegistryRenameSupport;
 import dev.nexus.service.datamove.Gate3;
@@ -116,6 +117,58 @@ class Rdr229P35cSharedLabelAndHistoryTest extends AtomicWriteTestBase {
                 .as("gate " + gate + ": getCollection answers the live row").isEqualTo(live);
             java.util.Optional<String> state = tenantScope.withTenant(TENANT, ctx -> CollectionRegistry.lifecycleState(ctx, TENANT, shared));
             assertThat(state.isPresent()).as("lifecycleState reads one row").isTrue();
+        }
+    }
+
+    /** "LEVEL message" for every line logged by anything while {@code body} runs. */
+    private static List<String> captureLogs(Runnable body) {
+        ch.qos.logback.classic.Logger root =
+            (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> logs = new ch.qos.logback.core.read.ListAppender<>();
+        logs.start();
+        root.addAppender(logs);
+        try {
+            body.run();
+            return logs.list.stream().map(e -> e.getLevel() + " " + e.getFormattedMessage()).toList();
+        } finally {
+            root.detachAppender(logs);
+            logs.stop();
+        }
+    }
+
+    private void mint(String name, String owner) {
+        gated.upsertCollection(TENANT, new java.util.LinkedHashMap<>(java.util.Map.of("name", name, "content_type", "knowledge",
+            "owner_id", owner, "embedding_model", MODEL, "model_version", "v1")), true);
+    }
+
+    @Test
+    void mintInfersItsArbiterOnTheIdOnlyTupleIndexThatP41Builds() throws Exception {
+        su(d -> {
+            CollectionMintSupport.dropIndex(d);
+            d.createUniqueIndexIfNotExists(org.jooq.impl.DSL.name(CollectionTupleIndexProbe.INDEX))
+                .on(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                    CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION)
+                .where(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.isNull().and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.ne("quarantine")))
+                .execute();
+            return null;
+        });
+        try {
+            String owner = "idonly-" + seq.incrementAndGet();
+            String first = label("idonlya"), second = label("idonlyb");
+            latched.set(true);
+
+            List<String> logs = captureLogs(() -> {
+                mint(first, owner);
+                mint(second, owner);   // the same tuple: the ON CONFLICT arm answers the first row
+            });
+
+            assertThat(logs).as("the ON CONFLICT predicate implies the id-only index's, so the arbiter is inferred: no fallback")
+                .noneMatch(l -> l.contains("collection_tuple_index_not_inferable"));
+            int rowsOfTuple = su(d -> d.fetchCount(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)
+                .and(CATALOG_COLLECTIONS.OWNER_ID.eq(owner))));
+            assertThat(rowsOfTuple).as("one live row for the tuple: the second mint lost the conflict").isEqualTo(1);
+        } finally {
+            su(d -> { CollectionMintSupport.dropIndex(d); return null; });
         }
     }
 
