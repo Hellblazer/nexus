@@ -126,6 +126,10 @@ class Rdr229P35bBranchPartitionIntegrationTest {
             seed(ctx, REG, REG_LIVE, true);
             seed(ctx, REG, REG_STORED_ONLY, false);
             seed(ctx, MIX, MIX_CHASHES, true);
+            // linda (the re-check of b6ff7a3cb7): a chunk held by two live manifest rows (REG's first), and one held by an
+            // id-stamped and an unstamped manifest row (MIX's first, stamped below by position), pin count(DISTINCT chash)
+            PgContainerHelper.ownChunks(ctx, TENANT, REG, REG_LIVE.get(0));
+            PgContainerHelper.ownChunks(ctx, TENANT, MIX, MIX_CHASHES.get(0));
             seed(ctx, UREG, UREG_CHASHES, true);
             seed(ctx, DANG, DANG_CHASHES, true);
             seed(ctx, BLANK, BLANK_CHASHES, true);
@@ -141,7 +145,18 @@ class Rdr229P35bBranchPartitionIntegrationTest {
             long regId = registryId(ctx, REG);
             stamp(ctx, REG, regId, concat(REG_LIVE, REG_STORED_ONLY), REG_LIVE);
             long mixId = registryId(ctx, MIX);
-            stamp(ctx, MIX, mixId, MIX_CHASHES.subList(0, 3), MIX_CHASHES.subList(0, 2));
+            stamp(ctx, MIX, mixId, MIX_CHASHES.subList(0, 3), MIX_CHASHES.subList(1, 2));
+            stampFirstManifestRow(ctx, MIX, mixId, MIX_CHASHES.get(0));
+            assertThat(ctx.fetchCount(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT)
+                    .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(Chash.fromHex(REG_LIVE.get(0)).toBytes()))
+                    .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID.eq(regId))))
+                .as("non-vacuity: two id-stamped live manifest rows hold REG's first chunk").isEqualTo(2);
+            assertThat(ctx.fetch(DSL.select(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID).from(CATALOG_DOCUMENT_CHUNKS)
+                    .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT))
+                    .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(Chash.fromHex(MIX_CHASHES.get(0)).toBytes())))
+                    .getValues(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID))
+                .as("non-vacuity: MIX's first chunk is held by one stamped and one unstamped manifest row")
+                .containsExactlyInAnyOrder(mixId, null);
             uregId = registryId(ctx, UREG);
             long dangId = registryId(ctx, DANG);
             stamp(ctx, DANG, dangId, DANG_CHASHES, DANG_CHASHES);
@@ -194,7 +209,10 @@ class Rdr229P35bBranchPartitionIntegrationTest {
             now.get(UREG).set(4, null);
             assertThat(now).as("chunk_count, stored_count, last_write and collection_id per collection and dim, as r3")
                 .isEqualTo(r3);
-            assertThat(r3.get(REG).subList(1, 3)).as("non-vacuity: a stored chunk that is not live").containsExactly(3L, 4L);
+            assertThat(r3.get(REG).subList(1, 3)).as("non-vacuity: a stored chunk that is not live, and a chunk two live rows hold counted once")
+                .containsExactly(3L, 4L);
+            assertThat(now.get(MIX).subList(1, 3)).as("a chunk held by a stamped and an unstamped manifest row is counted once")
+                .containsExactly(4L, 4L);
             assertThat(r3.get(BLANK).subList(1, 3)).as("non-vacuity: the '' row with no id is stored, never live")
                 .containsExactly(0L, 1L);
         }
@@ -272,7 +290,19 @@ class Rdr229P35bBranchPartitionIntegrationTest {
         assertThat(ctx.update(CATALOG_DOCUMENT_CHUNKS).set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, id)
             .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT)).and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(collection))
             .and(CATALOG_DOCUMENT_CHUNKS.CHASH.in(bytes(manifestHexes)))
-            .execute()).as("stamped manifest rows of '%s'", collection).isEqualTo(manifestHexes.size());
+            .execute()).as("stamped manifest rows of '%s'", collection).isGreaterThanOrEqualTo(manifestHexes.size());
+    }
+
+    /** Stamps the manifest row of {@code hex} at the lowest position only, leaving any other row of it unstamped. */
+    private static void stampFirstManifestRow(DSLContext ctx, String collection, long id, String hex) {
+        byte[] chash = Chash.fromHex(hex).toBytes();
+        var first = DSL.select(DSL.min(CATALOG_DOCUMENT_CHUNKS.POSITION)).from(CATALOG_DOCUMENT_CHUNKS)
+            .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT)).and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(collection))
+            .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(chash));
+        assertThat(ctx.update(CATALOG_DOCUMENT_CHUNKS).set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, id)
+            .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT)).and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(collection))
+            .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(chash)).and(CATALOG_DOCUMENT_CHUNKS.POSITION.eq(first))
+            .execute()).as("stamped the first manifest row of one chunk of '%s'", collection).isEqualTo(1);
     }
 
     private static long registryId(DSLContext ctx, String name) {
