@@ -352,7 +352,7 @@ class HeavyRoutesRenameGapTest {
     }
 
     /** The one-row rename's own preconditions, on this fixture's throwaway database (see the class comment). */
-    private static CollectionRouteFixture prepared(CollectionRouteFixture f) {
+    static CollectionRouteFixture prepared(CollectionRouteFixture f) {
         f.buildIdTwins();
         f.asSuperuser(ctx -> {
             for (var key : CATALOG_COLLECTIONS.getKeys()) {
