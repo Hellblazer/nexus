@@ -214,7 +214,9 @@ public final class ChashRepository {
         return tenantScope.withTenant(tenant, ctx -> {
             if (ck().byId()) {
                 // DISTINCT collection_id first, then each id's label once (not a correlated label per chunk row)
-                return new HashSet<>(CollectionKey.distinctLabels(ctx, tenant, ch.table(), ch.tenantId().eq(tenant), CHUNKS.COLLECTION_ID));
+                // a dangling id is listed under its stored name, so ghost detection sees it (linda 2026-11-23)
+                return new HashSet<>(CollectionKey.distinctLabelsKeepingDangling(ctx, tenant, ch.table(), ch.tenantId().eq(tenant),
+                    CHUNKS.COLLECTION_ID, ch.collection()));
             }
             return new HashSet<>(ctx.selectDistinct(ch.collection())
                              .from(ch.table())

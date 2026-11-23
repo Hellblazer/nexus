@@ -248,6 +248,30 @@ class Rdr229P35cReadersByIdTest extends AtomicWriteTestBase {
         assertThat(reaperById.describe(TENANT, old, List.of(chash.toHex()))).isEmpty();
     }
 
+    /** linda 2026-11-23: a chunk id no registry row holds is still a collection the chash path lists, under its stored name (ghost detection needs it). */
+    @Test
+    void chashDistinctCollections_listsADanglingIdUnderItsStoredName() throws Exception {
+        var chashById = new ChashRepository(tenantScope, LATCHED);
+        String live = register("dg-live"), ghost = register("dg-ghost");
+        insertChunk(live, Chash.ofText("p35c-dg-live-" + seq.incrementAndGet()));
+        insertChunk(ghost, Chash.ofText("p35c-dg-ghost-" + seq.incrementAndGet()));
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.set(DSL.name("session_replication_role"), DSL.inline("replica")).execute();
+            try {
+                int deleted = ctx.deleteFrom(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(ghost)).execute();
+                assertThat(deleted).as("the registry no longer holds the ghost's id").isEqualTo(1);
+            } finally {
+                ctx.set(DSL.name("session_replication_role"), DSL.inline("origin")).execute();
+            }
+        }
+        assertThat(chashById.distinctCollections(TENANT)).as("the dangling id is listed under its stored name").contains(live, ghost);
+        assertThat(new ReaperRepository(tenantScope, LATCHED).collectionsWithChunks(TENANT, Duration.ofSeconds(30)))
+            .as("the reaper lists it too").contains(live, ghost);
+    }
+
     // ---- ReembedJobRepository, ReembedSourceReader --------------------------------------------------------------
 
     /** A job A to B holds B as a target. B is then renamed (the job row keeps "B" and B's id). A start from the renamed B is refused by id, accepted by name. */
