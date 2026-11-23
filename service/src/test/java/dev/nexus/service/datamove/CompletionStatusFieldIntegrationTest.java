@@ -119,8 +119,17 @@ class CompletionStatusFieldIntegrationTest {
 
         @Override
         public CompletionCheck.Result read() {
+            // The P3.5b list is one changeset this database has applied: the engine's real list (12 changesets the stamp moves gate) is not applied in
+            // this fixture's database, and once every stamp move is complete that is the P3.7 restart entry (CompletionBootWorkReadinessTest pins
+            // it). This test pins the three gates, which are not work, so the list names a changeset that has applied (the restart ran).
             return CompletionCheck.evaluate(ctx, CompletionCheck.ReadSet.p31(), CompletionCheck.Gate3Source.NOT_INSTALLED,
-                CompletionCheck.DIRECT);
+                CompletionCheck.DIRECT, () -> java.util.Set.of(appliedChangesetId()));
+        }
+
+        private String appliedChangesetId() {
+            var table = DSL.table(DSL.name("public", "databasechangelog"));
+            var id = DSL.field(DSL.name("id"), String.class);
+            return ctx.select(id).from(table).where(DSL.field(DSL.name("exectype"), String.class).eq("EXECUTED")).limit(1).fetchOne(id);
         }
 
         @Override
