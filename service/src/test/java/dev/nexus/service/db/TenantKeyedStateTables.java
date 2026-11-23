@@ -376,8 +376,6 @@ final class TenantKeyedStateTables {
             + "aspect_extraction_queue table (nexus-hbnml): install-wide totals and a reason tally, no per-tenant entry");
         notKeyed.put("NexusService.aspectQueueDrain", "the drain object bound once at boot; it keeps its state in a "
             + "per-run tally that dies with the run");
-        notKeyed.put("StatusHandler.catalogEpoch", "a supplier of whether the engine role can read the cluster identity the catalog epoch derives from (RDR-229 P3.11); one process-wide answer, not keyed by tenant");
-        notKeyed.put("CatalogEpoch.NULL_LOGGED", "a once-per-process flag so the unreadable-cluster line logs once (RDR-229 P3.11); holds no tenant");
         notKeyed.put("StatusHandler.aspectQueue", "a supplier of the install-wide drain result; not keyed by tenant");
         notKeyed.put("StatusHandler.catalogEpoch", "a supplier of whether the install's role can read the cluster facts the catalog epoch hashes (RDR-229 P3.11); one install-wide boolean, not keyed by tenant");
         notKeyed.put("CatalogEpoch.NULL_LOGGED", "a once-per-process latch for the WARN that a pg_control member read NULL (RDR-229 P3.11); one install-wide flag, not keyed by tenant");
