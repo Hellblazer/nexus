@@ -978,6 +978,35 @@ class ChunkKeySweepIntegrationTest extends ChunkKeysTestBase {
         assertThat(metadataOf(tenant, taxonomy, taxonomyRows.get(0))).containsKey("title");
     }
 
+    /**
+     * RDR-229 P3.5c (the census evidence pass): from gate 3 the sweep's cursor carries the collection id, and the signature covers it. The
+     * HTTP body used to emit only collection and chash, so a token issued after the latch failed its own signature when it came back and the
+     * sweep restarted with a WARN every time. The body now carries {@code collection_id} (additive); the token a latched call returns is a
+     * continuation.
+     */
+    @Test
+    void aLatchedResumeTokenRoundTripsOverHttp_itCarriesTheCursorsCollectionIdAndIsATakenContinuation() throws Exception {
+        String tenant = "sw-latched";
+        String token = tenantToken(tenant);
+        String live = conformant(tenant);
+        Map<String, Map<String, Object>> rows = new LinkedHashMap<>();
+        for (int i = 1; i <= 4; i++) rows.put("k" + i, legacy(keyed(tenant, live, "k" + i)));
+        seed(tenant, live, rows);
+        latched.set(true);
+        try {
+            JsonNode first = json(sweep(token, applyBody("batch_size", 1, "max_batches", 1)));
+            assertThat(first.path("resume_ignored").asBoolean()).isFalse();
+            assertThat(first.path("done").asBoolean()).as("non-vacuity: the sweep has more to do").isFalse();
+            assertThat(first.path("resume").path("cursor").path("collection_id").isNumber())
+                .as("from gate 3 the cursor names its collection by id: %s", first.path("resume")).isTrue();
+            JsonNode second = json(sweep(token, applyBody("batch_size", 1, "max_batches", 1, "resume", asMap(first.path("resume")))));
+            assertThat(second.path("resume_ignored").asBoolean()).as("the token a latched call returned is a continuation").isFalse();
+            assertThat(second.path("rows_swept").asLong()).as("and it swept the next batch: %s", second).isEqualTo(1L);
+        } finally {
+            latched.set(false);
+        }
+    }
+
     @Test
     void aForgedResumeWithAStringOver65535BytesIsIgnored_notA500() throws Exception {
         // nexus-gy3vq: writeUTF refused strings over 65535 bytes, so such a token made signing throw.
