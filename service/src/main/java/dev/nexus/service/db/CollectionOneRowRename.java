@@ -151,6 +151,7 @@ public final class CollectionOneRowRename implements OneRowRename {
         if (newOwnerId != null) {
             set.put(CATALOG_COLLECTIONS.OWNER_ID, newOwnerId);
         }
+        CollectionRegistry.forgetWriteMemo(ctx);   // a write of the registry row: a row this transaction read under the old label is not the row now
         int renamed = ctx.update(CATALOG_COLLECTIONS).set(set)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(id))
                 .and(CATALOG_COLLECTIONS.NAME.eq(oldName)).and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")))
@@ -163,6 +164,7 @@ public final class CollectionOneRowRename implements OneRowRename {
         // the row's tuple after the rename: refused, naming both, when another live collection holds it (the index raises 23505 first, and the recheck names both)
         CollectionMint.refuseHeldTuple(ctx, tenant, newName, contentType, owner, own.value4(), own.value5(), own.value6(), "", gate3);
 
+        CollectionRegistry.forgetWriteMemo(ctx);   // the tuple check above may have read a row; the tombstones repointed here are rows of the registry too
         ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, newName)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(oldName))
                 // only the tombstones that point at THIS collection: a tombstone that names the old label but another id (a tombstone of an
