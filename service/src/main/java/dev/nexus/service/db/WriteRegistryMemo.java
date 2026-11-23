@@ -107,6 +107,11 @@ final class WriteRegistryMemo {
     /**
      * True when a registry row this transaction holds is named by one of {@code binds}: its label as a string, or its id (also as its {@code #id}
      * key). The census's "the memo holds THIS statement's collection" for a statement whose bind values carry the collection it writes.
+     *
+     * <p>Blind spots (see {@link StrictWriterCensus#bindsACollection}): it returns true on ANY one matching bind, so a statement that binds
+     * several collections is passed when one of them is held; any number equal to a held id counts (a row id or a count can match by chance);
+     * and a statement keyed by a document, topic or alias id binds no collection and never reaches this method. A pass here is not proof that
+     * every collection the statement writes under is held.
      */
     static boolean holdsOneOf(org.jooq.Configuration configuration, java.util.Collection<?> binds) {
         Object m = configuration.data().get(KEY);
