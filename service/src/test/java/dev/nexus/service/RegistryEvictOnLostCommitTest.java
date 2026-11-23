@@ -123,6 +123,22 @@ class RegistryEvictOnLostCommitTest {
         assertThat(CollectionRegistry.cached(fx.tenant, a)).as("no stale entry for a label with no row").isEmpty();
     }
 
+    /** A delete refused with a typed 404 (an id no row has) rolled back before any write: it evicts nothing, so a stale-id caller cannot flush the tenant. */
+    @Test
+    void aDeleteRefusedForAnUnknownIdLeavesTheTenantsCacheAlone() {
+        String a = registered("delete-unknown-a");
+        String b = registered("delete-unknown-b");
+        cache(fx.tenant, a);
+        cache(fx.tenant, b);
+        long unknown = fx.idOf(a) + 1_000_000L;
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> repo.deleteCollectionById(fx.tenant, a, unknown, false))
+            .isInstanceOf(dev.nexus.service.db.UnknownCollectionIdException.class);
+
+        assertThat(CollectionRegistry.cached(fx.tenant, a)).as("the refused id's label is still cached").isPresent();
+        assertThat(CollectionRegistry.cached(fx.tenant, b)).as("and so is every other label of the tenant").isPresent();
+    }
+
     @Test
     void aGhostSweepWhoseCommitIsLostEmptiesTheTenantsCache() {
         String tenant = "row15-sweep-tenant";

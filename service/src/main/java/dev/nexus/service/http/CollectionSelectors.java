@@ -58,8 +58,9 @@ final class CollectionSelectors {
      * @param passesResolvedId the route's handler reads the id the boundary resolved for its FIRST slot ({@link CollectionSelectorFilter#RESOLVED_ID}),
      *                    not only the label: the retiring verbs, which read and lock the source by that id in their own transaction
      *                    ({@link dev.nexus.service.db.CollectionRefusals#requireSourceById}), the delete also to remove the one row of
-     *                    an id when a label is held by several. Every route answers a retired row's id 409 {@code collection_superseded},
-     *                    these included
+     *                    an id when a label is held by several. A supersede's SECOND slot, its successor, is passed the same way
+     *                    ({@link CollectionSelectorFilter#RESOLVED_SUCCESSOR_ID}) and read and locked by that id too. Every route answers a
+     *                    retired row's id 409 {@code collection_superseded}, these included
      * @param writes      the route writes under the collection it names, so a request by id must read that id in the write's own
      *                    transaction ({@link dev.nexus.service.db.ExpectedCollectionIds}); the filter reports a 2xx answer that did not
      */
@@ -68,10 +69,13 @@ final class CollectionSelectors {
 
     /**
      * The routes that write under the collection they name, and must read a named id in their own transaction. The retiring verbs
-     * (supersede, rename, delete) are not here: the lock they take on the row is the retire's, not this read's. A re-home is here: it
-     * retires nothing, it moves rows between two live collections, so it reads both ends FOR KEY SHARE like any writer.
+     * (supersede, rename, delete) are here: their read is {@link dev.nexus.service.db.CollectionRefusals#requireSourceById}, a
+     * {@code FOR UPDATE} by id that counts as the read ({@link dev.nexus.service.db.ExpectedCollectionIds}), so a handler that stops
+     * passing the id it was given answers 2xx with the id unconsumed and the filter reports it. A re-home is here too: it retires
+     * nothing, it moves rows between two live collections, so it reads both ends FOR KEY SHARE like any writer.
      */
     static final java.util.Set<String> WRITES = java.util.Set.of(
+        "/v1/catalog/collections/supersede", "/v1/catalog/collections/rename", "/v1/catalog/collections/delete",
         "/v1/catalog/collections/rehome",
         "/v1/catalog/manifest/write", "/v1/catalog/manifest/append", "/v1/catalog/manifest/append_many",
         "/v1/catalog/manifest/write_many", "/v1/catalog/import/chunk",
@@ -103,8 +107,6 @@ final class CollectionSelectors {
         "/v1/taxonomy/assignments/cross-preview", "/v1/taxonomy/assignments/unassigned",
         "/v1/taxonomy/meta/last_discover_batch", "/v1/taxonomy/centroids/query");
 
-    private static final String VERB = "a retiring verb: it reads and locks its source row by the named id in its own transaction "
-        + "(CollectionRefusals.requireSourceById, FOR UPDATE, behind the sweep gates), which is the retire's lock, not a writer's FOR KEY SHARE read";
     private static final String HISTORY = "a history-table write (T1 852f4c0f): the id is stamped with an unlocked read and a row that "
         + "resolves to nothing is written with a NULL id, never refused";
     private static final String PIPELINE = "a pipeline-run write: it lands on the pdf_pipeline row it resolves by pipeline id or content hash "
@@ -118,9 +120,6 @@ final class CollectionSelectors {
 
     private static Map<String, String> exempt() {
         Map<String, String> e = new LinkedHashMap<>();
-        for (String verb : List.of("supersede", "rename", "delete")) {
-            e.put("/v1/catalog/collections/" + verb, VERB);
-        }
         e.put("/v1/catalog/gc_audit/record", HISTORY);
         e.put("/v1/catalog/index-run/begin", "it stamps the document row it names by tumbler; the collection field is only logged");
         e.put("/v1/catalog/index-run/begin-many", "it stamps the document rows it names by tumbler; the collection field is only logged");
@@ -170,7 +169,7 @@ final class CollectionSelectors {
 
     /** A retiring verb that reads its source by the id the boundary resolved (supersede, rename); the delete is {@link #delete}. */
     private static void retire(Map<String, Route> t, String path, Slot... slots) {
-        t.put(path, new Route(Where.BODY, List.of(slots), true, false));
+        t.put(path, new Route(Where.BODY, List.of(slots), true, WRITES.contains(path)));
     }
 
     private static void either(Map<String, Route> t, String path, Slot... slots) {
@@ -178,7 +177,7 @@ final class CollectionSelectors {
     }
 
     private static void delete(Map<String, Route> t, String path, Slot... slots) {
-        t.put(path, new Route(Where.BODY, List.of(slots), true, false));
+        t.put(path, new Route(Where.BODY, List.of(slots), true, WRITES.contains(path)));
     }
 
     private static Map<String, Route> table() {
