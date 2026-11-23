@@ -157,7 +157,7 @@ class CollectionTombstonesSupersedeToIdTest {
         assertThat(retiredForZ).as("guard: X is already retired for Z").isEqualTo(1);
 
         assertThatThrownBy(() -> scope.withTenant(T, ctx -> {
-            CollectionRename.retireAndRegister(ctx, T, x, y, CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+            CollectionRename.retireAndRegister(ctx, T, x, y, null, CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
                 new java.util.HashMap<>(), new String[4], Gate3.never());
             return null;
         }))
