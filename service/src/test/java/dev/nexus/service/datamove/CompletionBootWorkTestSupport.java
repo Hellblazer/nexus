@@ -17,4 +17,9 @@ public final class CompletionBootWorkTestSupport {
     public static void idReadersPresent(CompletionBootWork work, BooleanSupplier present) {
         work.idReadersPresent(present);
     }
+
+    /** Holds publish back from setting the service's gate 3 signal (the window the readiness belt closes); release with false. */
+    public static void holdGate3Signal(CompletionBootWork work, boolean held) {
+        work.holdGate3SignalForTests(held);
+    }
 }

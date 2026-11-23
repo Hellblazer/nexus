@@ -103,10 +103,10 @@ class CompletionBootWorkReadinessTest {
     }
 
     /**
-     * The rename reads one signal: the service's gate 3 signal (the flag the service's Gate3 reads) is set before the sample is published, and the readiness
-     * answers NONE only while it is set, so a rename that takes the one-row path never meets helpers that still take the label forms. A sample that reads
-     * NONE while the signal is not set (the signal lags: a hand-built result, a reordering) waits as for an unreadable readiness, whatever sample or failed
-     * read follows, until a sample sets the signal.
+     * The rename reads one signal: the service's gate 3 signal (the flag the service's Gate3 reads) is set before the sample is published, and a sample that
+     * read the latch row answers NONE only while the flag is set too, so a rename that takes the one-row path never meets helpers that still take the label
+     * forms. The window is held open here with the test seam (publish cannot produce it): the rename waits as for an unreadable readiness until the signal
+     * is set (tamsin's review r5, linda).
      */
     @Test
     void theReadinessIsNoneOnlyWhileTheServicesGate3SignalIsSet() {
@@ -114,23 +114,38 @@ class CompletionBootWorkReadinessTest {
         var work = work(reader);
         CompletionBootWorkTestSupport.idReadersPresent(work, () -> true);
         var complete = new CompletionCheck.RenameState(true, 1, List.of());
-        reader.next.set(resultLatched(false, complete));   // reads NONE, and says the latch has not been seen
+        CompletionBootWorkTestSupport.holdGate3Signal(work, true);
+        reader.next.set(resultLatched(true, complete));   // reads NONE and the latch row; the signal is held back
         work.publish();
 
         assertThat(work.latest().readinessMissing()).as("non-vacuity: the sample itself reads NONE").isEqualTo(RenameReadiness.Missing.NONE);
-        assertThat(work.gate3Latched()).as("non-vacuity: the service's signal is not set").isFalse();
-        assertThat(work.renameReadiness().missing()).as("none is not answered while the signal is not set (no new wire value: unreadable)")
+        assertThat(work.latest().gate3Latched()).as("non-vacuity: the sample read the latch row").isTrue();
+        assertThat(work.gate3Latched()).as("non-vacuity: the service's signal is held back").isFalse();
+        assertThat(work.renameReadiness().missing()).as("none is not answered while the signal lags the latch row (no new wire value: unreadable)")
             .isEqualTo(RenameReadiness.Missing.READINESS_UNREADABLE);
 
-        reader.next.set(null);   // a failed read after a NONE keeps NONE only once the signal is set
-        work.publish();
-        assertThat(work.renameReadiness().missing()).as("the monotone NONE does not outrun the signal either")
-            .isEqualTo(RenameReadiness.Missing.READINESS_UNREADABLE);
-
-        reader.next.set(resultLatched(true, complete));
+        CompletionBootWorkTestSupport.holdGate3Signal(work, false);
         work.publish();
         assertThat(work.gate3Latched()).as("the sample set the signal").isTrue();
         assertThat(work.renameReadiness().missing()).as("with the signal set the same readiness is NONE").isEqualTo(RenameReadiness.Missing.NONE);
+    }
+
+    /**
+     * A lost latch row (a partial restore) on an install whose name-key drop move completed: the sample reads NONE, has not seen the latch row and the flag
+     * is not set. The readiness keeps its real answer, NONE, so RenameGuard refuses latch_row_missing instead of taking the name path and minting an id
+     * (tamsin's review r5): the belt above waits only when the sample read the latch row.
+     */
+    @Test
+    void aLostLatchRowKeepsItsRealReadiness_soTheGuardRefusesLatchRowMissing() {
+        var reader = new Scripted();
+        var work = work(reader);
+        CompletionBootWorkTestSupport.idReadersPresent(work, () -> true);
+        reader.next.set(resultLatched(false, new CompletionCheck.RenameState(true, 1, List.of())));
+        work.publish();
+
+        assertThat(work.gate3Latched()).as("non-vacuity: no latch row, no signal").isFalse();
+        assertThat(work.renameReadiness().missing()).as("the lost latch row is not hidden behind unreadable").isEqualTo(RenameReadiness.Missing.NONE);
+        // RenameGuard.decide(false, NONE) refuses latch_row_missing; Rdr229P37RestartTest's lost-row case runs that end to end on an engine.
     }
 
     /** The facts behind NONE are monotone: a read that fails after a NONE does not take it back, and one that read something missing does. */
