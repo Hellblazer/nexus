@@ -739,6 +739,8 @@ public final class Main {
         // nexus-p2m1x.20 (RDR-229 P3.3b): the per-leaf id unique-index pass, after the engine serves. Not the PCI reconciler's: it runs whether
         // NX_SEARCH_PCI is on or off and starts only when gate 1 of the completion check holds (its latest read; no check, no pass).
         var leafIndexPass = startLeafIndexPass(bootWork, adminConnection, completionCheck);
+        // RDR-229 P3.7: the name-key drop move is registered by an engine pass once the completion check's latest read says gate 3 is latched (the check stays read only).
+        var nameKeyDropPass = startNameKeyDropPass(adminConnection, completionCheck);
         // nexus-p2m1x.22 (RDR-229 P3.4): the id-keyed UNIQUE arbiters the id-keyed upserts need and the id twins' supporting indexes, after the engine serves, once gate 2 of
         // the completion check holds (its latest read; no check, no pass). Gate 3 requires them.
         var idUniqueIndexPass = startIdUniqueIndexPass(bootWork, adminConnection, completionCheck);
@@ -800,6 +802,9 @@ public final class Main {
             }
             if (leafIndexPass != null) {
                 leafIndexPass.close();   // a build in flight keeps running in Postgres
+            }
+            if (nameKeyDropPass != null) {
+                nameKeyDropPass.close();
             }
             if (idUniqueIndexPass != null) {
                 idUniqueIndexPass.close();   // a build in flight keeps running in Postgres
@@ -925,6 +930,30 @@ public final class Main {
             throw e;
         } catch (Throwable e) {
             log.error("event=leaf_index_pass_not_started cause=\"{}\"", e.toString(), e);
+            return null;
+        }
+    }
+
+    /**
+     * RDR-229 P3.7: the name-key drop move's registration pass, or null when it is not started; never throws. Not started without a completion check (it
+     * registers from the check's latest read, and there is none to read). The row's changeset_id carries the engine's release version ("dev" on an
+     * unreleased build). Package-private so a test can call it.
+     */
+    static dev.nexus.service.datamove.NameKeyDropPass startNameKeyDropPass(dev.nexus.service.db.AdminConnection admin,
+            dev.nexus.service.datamove.CompletionBootWork completionCheck) {
+        if (completionCheck == null) {
+            log.error("event=name_key_drop_pass_not_started reason=no_completion_check");
+            return null;
+        }
+        try {
+            String version = dev.nexus.service.http.VersionHandler.resolveReleaseVersion();
+            var pass = new dev.nexus.service.datamove.NameKeyDropPass(admin, completionCheck::latest, version == null ? "dev" : version);
+            pass.start();
+            return pass;
+        } catch (VirtualMachineError e) {
+            throw e;
+        } catch (Throwable e) {
+            log.error("event=name_key_drop_pass_not_started cause=\"{}\"", e.toString(), e);
             return null;
         }
     }

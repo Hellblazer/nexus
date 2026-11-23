@@ -386,6 +386,17 @@ def _is_standing_condition(entry: dict) -> bool:
     return str(entry.get("id") or "") == STANDING_CONDITION_ID
 
 
+#: The engine's ``boot_work`` id of the RDR-229 restart notice (``CompletionBootWork.RESTART_ENTRY_ID``): the stamps are
+#: complete and a P3.5b changeset waits for one engine restart. It stays visible (``nx doctor``, ``nx daemon service status``)
+#: and is safe to stop, but it is not work: the bundle swap this gate guards IS a restart, and so is the engine replacement of
+#: the same ``nx upgrade``, so counting it would defer the very restart that clears it (linda 2026-11-22, nexus-p2m1x.27).
+RESTART_NOTICE_ID = "rdr229-restart"
+
+
+def _is_restart_notice(entry: dict) -> bool:
+    return str(entry.get("id") or "") == RESTART_NOTICE_ID
+
+
 def engine_busy_reason(config_dir: Path, *, moves_can_run: bool = True) -> str | None:
     """Why the stack should not be bounced now, or ``None`` when it is idle.
 
@@ -396,7 +407,7 @@ def engine_busy_reason(config_dir: Path, *, moves_can_run: bool = True) -> str |
     ``moves_can_run=False`` is for a bundle that lacks pg_background: no data move can run on it, so a
     ``queued:`` or ``working:`` move is waiting for the very swap this gate guards, and counting it as work
     would defer the swap for ever (F33: from 8.2.0 the registered moves were ``queued:`` at the attended
-    ``nx upgrade`` and its bundle swap was deferred on them). Index builds and other entries still count; a standing P3.4 condition (:data:`STANDING_CONDITION_ID`) does not."""
+    ``nx upgrade`` and its bundle swap was deferred on them). Index builds and other entries still count; a standing P3.4 condition (:data:`STANDING_CONDITION_ID`) and the RDR-229 restart notice (:data:`RESTART_NOTICE_ID`) do not."""
     status = _engine_status()
     if status is None:
         if not _service_up(config_dir):
@@ -404,7 +415,7 @@ def engine_busy_reason(config_dir: Path, *, moves_can_run: bool = True) -> str |
         return "the engine is running but its status cannot be read, so whether it is building indexes is unknown"
     work = [
         e for e in (status.get("boot_work") or [])
-        if isinstance(e, dict) and not _is_parked_move(e) and not _is_standing_condition(e)
+        if isinstance(e, dict) and not _is_parked_move(e) and not _is_standing_condition(e) and not _is_restart_notice(e)
         and (moves_can_run or not _is_data_move(e))
     ]
     if work:

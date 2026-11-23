@@ -33,7 +33,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * by design (gate 3 cannot hold until P3.4 builds its id indexes), so an entry for them stays on every install, and on a bundle
  * that lacks pg_background it deferred the very swap that lets the stamp moves run. An older nx reads {@code boot_work} the same
  * way, so the state is never published there; nothing this class reports is work. (The moves themselves, which are work, are
- * {@code boot_work} entries of {@link MoveBootWork}.)
+ * {@code boot_work} entries of {@link MoveBootWork}.) One exception, RDR-229 P3.7: while every stamp move is complete and a P3.5b changeset has
+ * not applied, the engine needs one restart, and the entry {@value #RESTART_ENTRY_ID} says so ({@code nx doctor}), until that restart applies them.
+ * It is visible and safe to stop, but it is NOT work (linda 2026-11-22): both idle rules that count {@code boot_work} entries,
+ * {@code nx upgrade}'s bundle-swap deferral ({@code engine_busy_reason}) and the boot-write harness ({@code boot_work_settled}), skip
+ * it by id, because an upgrade is the restart that clears it.
  *
  * <p><b>It reads and reports; it writes nothing.</b> The session is opened {@code default_transaction_read_only = on}, so a
  * write would raise at the server, and the check itself holds no write. Sam's rule is no boot-time data migrations.
@@ -59,6 +63,8 @@ public final class CompletionBootWork implements AutoCloseable {
     private static final Duration TICK = Duration.ofSeconds(1);
     /** Once gate 3 has latched, how often the coverage read is repeated (it keeps {@code id_index_invalid} current within this period). */
     public static final Duration LATCHED_COVERAGE_PERIOD = Duration.ofMinutes(10);
+    /** How long after the latch write gave up (a rename held the rename lock past its bound) the retry read is scheduled. */
+    public static final Duration LATCH_RETRY = Duration.ofSeconds(1);
     /** How long a table's violating-row count is kept: the scan is bounded, not free. */
     public static final Duration VIOLATOR_TTL = Duration.ofMinutes(10);
 
@@ -72,8 +78,12 @@ public final class CompletionBootWork implements AutoCloseable {
         void close();
     }
 
+    /** The {@code boot_work} id of the restart that applies P3.5b's changesets (RDR-229 P3.7). */
+    public static final String RESTART_ENTRY_ID = "rdr229-restart";
+
     private final BootWorkRegistry registry;
     private final Reader reader;
+    private volatile Duration latchRetry = LATCH_RETRY;
     private final Object sampleLock = new Object();
     private final Clock clock;
     /** Where an event's read runs; null before {@link #start}, when the event only marks that a read is owed. */
@@ -84,6 +94,15 @@ public final class CompletionBootWork implements AutoCloseable {
     private volatile CompletionCheck.Result latest;
     private volatile boolean gate3Latched;
     private volatile boolean gate3LatchPciOff;
+    /** True once any sample read the readiness as NONE: its facts are monotone, so a later unreadable sample keeps answering NONE. */
+    private volatile boolean readyOnce;
+    /**
+     * Whether this engine's readers select by id: {@code IdReaders.present()} (P3.5c flips it). The one-row rename waits for it
+     * ({@link RenameReadiness.Missing#P35C_READERS_ABSENT}). Production reads exactly this and nothing else: the only way to change it is
+     * {@link #idReadersPresent(java.util.function.BooleanSupplier)}, which is package-private and called only from test support in this package
+     * (a Main wiring test pins that no other caller exists).
+     */
+    private volatile java.util.function.BooleanSupplier idReadersPresent = dev.nexus.service.vectors.IdReaders::present;
     private volatile boolean closed;
     private String lastError;
     private ScheduledExecutorService scheduler;
@@ -95,7 +114,7 @@ public final class CompletionBootWork implements AutoCloseable {
      *
      * @param gate3 P3.4's id-index coverage ({@link CompletionCheck.Gate3Source#NOT_INSTALLED} when none)
      * @param gate3Extras the further conditions gate 3 needs ({@link CompletionCheck#evaluate(DSLContext, CompletionCheck.ReadSet, CompletionCheck.Gate3Source, CompletionCheck.ViolatorCounter, java.util.List)})
-     * @param latchWriter the seam the latch row write goes through ({@link CompletionCheck.Gate3LatchWriter}); P3.7 puts it under its rename write lock
+     * @param latchWriter the seam the latch row write goes through ({@link CompletionCheck.Gate3LatchWriter})
      */
     public CompletionBootWork(BootWorkRegistry registry, AdminConnection admin, CompletionCheck.ReadSet readSet,
                               CompletionCheck.Gate3Source gate3, java.util.List<java.util.function.Predicate<DSLContext>> gate3Extras,
@@ -107,10 +126,29 @@ public final class CompletionBootWork implements AutoCloseable {
     public CompletionBootWork(BootWorkRegistry registry, AdminConnection admin, CompletionCheck.ReadSet readSet,
                               CompletionCheck.Gate3Source gate3, java.util.List<java.util.function.Predicate<DSLContext>> gate3Extras,
                               CompletionCheck.Gate3LatchWriter latchWriter, Gate3Latch bootLatch, Duration latchedCoveragePeriod) {
+        this(registry, admin, readSet, gate3, gate3Extras, latchWriter, bootLatch, latchedCoveragePeriod, P35bChangesets.resource());
+    }
+
+    /**
+     * As above, with the P3.5b changeset ids the one-row rename waits for supplied by {@code p35b} ({@link P35bChangesets#resource()} in
+     * production; a test passes its own list). An empty set is refused: a rename waits.
+     */
+    public CompletionBootWork(BootWorkRegistry registry, AdminConnection admin, CompletionCheck.ReadSet readSet,
+                              CompletionCheck.Gate3Source gate3, java.util.function.Supplier<java.util.Set<String>> p35b) {
+        this(registry, admin, readSet, gate3, java.util.List.of(), CompletionCheck.Gate3LatchWriter.IMMEDIATE, Gate3Latch.readAtBoot(admin),
+            LATCHED_COVERAGE_PERIOD, p35b);
+    }
+
+    /** The fullest constructor: every seam, the P3.5b list included. */
+    public CompletionBootWork(BootWorkRegistry registry, AdminConnection admin, CompletionCheck.ReadSet readSet,
+                              CompletionCheck.Gate3Source gate3, java.util.List<java.util.function.Predicate<DSLContext>> gate3Extras,
+                              CompletionCheck.Gate3LatchWriter latchWriter, Gate3Latch bootLatch, Duration latchedCoveragePeriod,
+                              java.util.function.Supplier<java.util.Set<String>> p35b) {
         this(registry, new DbReader(admin, readSet, gate3, gate3Extras, latchWriter, Clock.systemUTC(),
-            Objects.requireNonNull(bootLatch, "bootLatch").latched(), Objects.requireNonNull(latchedCoveragePeriod, "latchedCoveragePeriod")));
+            Objects.requireNonNull(bootLatch, "bootLatch").latched(), Objects.requireNonNull(latchedCoveragePeriod, "latchedCoveragePeriod"), p35b));
         this.gate3Latched = bootLatch.latched();
         this.gate3LatchPciOff = bootLatch.pciOff();
+        ((DbReader) reader).onLatchDeferred = this::scheduleRetry;
     }
 
     /**
@@ -155,7 +193,7 @@ public final class CompletionBootWork implements AutoCloseable {
      */
     public String statusJson() {
         CompletionCheck.Result r = latest;
-        return r == null ? null : CompletionStatusJson.render(r);
+        return r == null ? null : CompletionStatusJson.render(r, idReadersPresent.getAsBoolean());
     }
 
     /**
@@ -180,13 +218,28 @@ public final class CompletionBootWork implements AutoCloseable {
     }
 
     /**
-     * What a rename from gate 3 still waits for, read per call ({@link RenameReadiness}). Until P3.7 registers the name-key drop move
-     * there is no move whose {@code completed_at} could be set, so the answer is true as well as safe: the move is missing. P3.7's code
-     * replaces this with the move's row and the {@code databasechangelog} reads (the P3.5b changesets), from the same snapshot as
-     * {@link #gate3()}. It is only consulted while gate 3 holds, which no release can yet make true.
+     * What a rename from gate 3 still waits for, read per call ({@link RenameReadiness}), from the latest sample:
+     * {@link CompletionCheck.Result#readinessMissing(boolean)}, which does not depend on the latch (NONE implies the latch row exists, since the
+     * drop move is registered only once it is latched). Total, cheap and fail closed (linda 2026-11-23): it answers from the last sample (no read
+     * of its own), never throws, and any error or the absence of a sample is {@code readiness_unreadable}, never NONE. Whether a rename consults
+     * it is {@link dev.nexus.service.db.RenameGuard}'s business: it reads the latch row in its own transaction, and before the latch the rename
+     * is the name path and the answer is not read.
      */
     public RenameReadiness renameReadiness() {
-        return () -> RenameReadiness.Missing.NAME_KEY_DROP_MOVE;
+        return this::readinessOrUnreadable;
+    }
+
+    private RenameReadiness.Missing readinessOrUnreadable() {
+        try {
+            var r = latest();
+            RenameReadiness.Missing m = r == null ? RenameReadiness.Missing.READINESS_UNREADABLE
+                : r.readinessMissing(idReadersPresent.getAsBoolean());
+            // The facts behind NONE are monotone (a drop move that completed stays complete, a changeset that applied stays applied), so a
+            // sample that timed out after a NONE does not take it back: the last NONE stands until a read says otherwise.
+            return m == RenameReadiness.Missing.READINESS_UNREADABLE && readyOnce ? RenameReadiness.Missing.NONE : m;
+        } catch (RuntimeException e) {
+            return readyOnce ? RenameReadiness.Missing.NONE : RenameReadiness.Missing.READINESS_UNREADABLE;
+        }
     }
 
     /** Reads now, outside the schedule, for a consumer that must not wait for the next sample. */
@@ -291,10 +344,38 @@ public final class CompletionBootWork implements AutoCloseable {
         }
         closed = true;
         registry.rdr229Completion(null);
+        registry.finish(RESTART_ENTRY_ID);
         try {
             reader.abort();
         } finally {
             reader.close();
+        }
+    }
+
+    /** Test seam, package-private and never called by production code: replaces the id-readers signal (a test of the one-row regime injects {@code () -> true}). */
+    void idReadersPresent(java.util.function.BooleanSupplier present) {
+        this.idReadersPresent = Objects.requireNonNull(present, "present");
+    }
+
+    /** Test seam: how long after a deferred latch the retry is scheduled. */
+    void latchRetry(Duration retry) {
+        this.latchRetry = Objects.requireNonNull(retry, "retry");
+    }
+
+    /**
+     * The after-commit hint: a latch write that gave up on the rename lock asks for another read after {@link #LATCH_RETRY}, on the schedule's
+     * thread, rather than at the safety poll (nothing before {@link #start}: the first sample reads everything).
+     */
+    private void scheduleRetry() {
+        readOwed.set(true);
+        ScheduledExecutorService sch = scheduler;
+        if (sch == null || closed) {
+            return;
+        }
+        try {
+            sch.schedule(this::requestRead, latchRetry.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (RuntimeException rejected) {
+            // the schedule was shut down by close(): nothing to read for
         }
     }
 
@@ -323,6 +404,10 @@ public final class CompletionBootWork implements AutoCloseable {
                 return -1;
             }
             latest = result;
+            if (result.readinessMissing(idReadersPresent.getAsBoolean()) == RenameReadiness.Missing.NONE) {
+                readyOnce = true;   // see the readiness: NONE is monotone
+            }
+            publishRestartEntry(result);
             if (result.gate3Latched()) {
                 gate3Latched = true;
                 gate3LatchPciOff = gate3LatchPciOff || result.gate3LatchPciOff();
@@ -330,6 +415,25 @@ public final class CompletionBootWork implements AutoCloseable {
             long holding = (result.gate1() ? 1 : 0) + (result.gate2() ? 1 : 0) + (result.gate3() ? 1 : 0);
             return (holding < 3 ? 1 : 0) + (int) result.checks().stream().filter(c -> !c.present()).count()
                 + byTable(result.violators()).size();
+        }
+    }
+
+    /**
+     * RDR-229 P3.7: while every stamp move is complete and a P3.5b changeset has not applied, the engine needs one restart, and says so in
+     * {@code boot_work}, where {@code nx doctor} reads it; it leaves the list when the changesets have applied (the restart ran). Not the
+     * three gates, which are not work ({@link CompletionBootWork}): a restart is the one step an operator takes, and it is what the entry names.
+     */
+    private void publishRestartEntry(CompletionCheck.Result result) {
+        if (result.restartNeeded()) {
+            String what = "restart the engine once: it applies the P3.5b changesets that a collection rename waits for ("
+                + result.rename().missing().size() + " of " + result.rename().listed() + " not applied yet)";
+            if (registry.snapshot().stream().anyMatch(e -> RESTART_ENTRY_ID.equals(e.id()))) {
+                registry.update(RESTART_ENTRY_ID, what, null, null, null);   // keeps startedAt: a sample is not a new run
+            } else {
+                registry.register(RESTART_ENTRY_ID, what, null, null, null, true, "nothing is lost: the restart is the step that applies them");
+            }
+        } else {
+            registry.finish(RESTART_ENTRY_ID);
         }
     }
 
@@ -405,6 +509,9 @@ public final class CompletionBootWork implements AutoCloseable {
         private final java.util.List<java.util.function.Predicate<DSLContext>> gate3Extras;
         private final CompletionCheck.Gate3LatchWriter latchWriter;
         private final CompletionCheck.ViolatorCounter counter;
+        private final java.util.function.Supplier<java.util.Set<String>> p35b;
+        /** Asked when the latch write gave up (the rename lock was held past its bound); set by the owner after construction. */
+        volatile Runnable onLatchDeferred = () -> { };
         private final Clock clock;
         private volatile AdminDdlSession session;
         /** Once the latch is seen, the coverage read (a catalog walk and registry reads over every leaf) is repeated only this often. */
@@ -417,7 +524,9 @@ public final class CompletionBootWork implements AutoCloseable {
 
         DbReader(AdminConnection admin, CompletionCheck.ReadSet readSet, CompletionCheck.Gate3Source gate3,
                  java.util.List<java.util.function.Predicate<DSLContext>> gate3Extras, CompletionCheck.Gate3LatchWriter latchWriter,
-                 Clock clock, boolean latchedAtBoot, Duration latchedCoveragePeriod) {
+                 Clock clock, boolean latchedAtBoot, Duration latchedCoveragePeriod,
+                 java.util.function.Supplier<java.util.Set<String>> p35b) {
+            this.p35b = Objects.requireNonNull(p35b, "p35b");
             this.admin = Objects.requireNonNull(admin, "admin");
             this.readSet = Objects.requireNonNull(readSet, "readSet");
             this.clock = Objects.requireNonNull(clock, "clock");
@@ -441,7 +550,7 @@ public final class CompletionBootWork implements AutoCloseable {
                     s.setSession("default_transaction_read_only", "on");
                     session = s;
                 }
-                CompletionCheck.Result result = CompletionCheck.evaluate(s.ctx(), readSet, gate3, counter, gate3Extras, this::writeLatch);
+                CompletionCheck.Result result = CompletionCheck.evaluate(s.ctx(), readSet, gate3, counter, gate3Extras, this::writeLatch, p35b);
                 latchedSeen = latchedSeen || result.gate3Latched();
                 return result;
             } catch (RuntimeException e) {
@@ -494,6 +603,7 @@ public final class CompletionBootWork implements AutoCloseable {
                     log.warn("event=rdr229_gate3_latch_write_keeps_failing elapsed_since_first_failure_s={} cause=\"{}\"",
                         Duration.between(since, clock.instant()).toSeconds(), e.toString());
                 }
+                onLatchDeferred.run();
                 throw e;
             }
         }

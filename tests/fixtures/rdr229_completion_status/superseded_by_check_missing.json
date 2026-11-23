@@ -78,6 +78,7 @@
       "constraint" : "catalog_collections_superseded_by_id_check",
       "what" : "waits: catalog_collections_superseded_by_id_check is not on catalog_collections yet; registry rows with a blank model_version and no superseded_by_id hold its changeset back (D2's repair move or the superseded_by stamp clears them, then the next boot adds it); the switch is refused until then"
     } ],
-    "validate_waits" : [ ]
+    "validate_waits" : [ ],
+    "rename_missing" : "none"
   }
 }
