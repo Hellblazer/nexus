@@ -544,6 +544,48 @@ class MainPciWiringTest {
     }
 
     /**
+     * RDR-229 P3.5a (nexus-p2m1x.23), review SB1 (linda 2026-11-23): the ONE {@code Gate3} Main hands the service, which hands it on to
+     * the rename guard, the route boundary and the repositories, is the LATCHED signal: the boot latch (read before the service is
+     * built, so the signal has no unset state) until the completion check exists, then the check's {@code gate3Latched()}, which never
+     * returns to false. It is never the live {@code gate3()}, and there is no second lambda. The registry takes no {@code Gate3}.
+     */
+    @Test
+    void theRoutesGate3IsTheLatchedAccessor_oneInstance_neverTheLiveGate3() throws Exception {
+        String src = code(main());
+
+        assertThat(src).as("the signal: the check's latched value once it exists, the boot latch before; elsinore's a46a1bf70e text")
+            .containsPattern("dev\\.nexus\\.service\\.datamove\\.Gate3\\s+gate3\\s*=\\s*\\(\\)\\s*->\\s*\\{\\s*var\\s+c\\s*=\\s*completionRef\\.get\\(\\);"
+                + "\\s*return\\s+c\\s*!=\\s*null\\s*\\?\\s*c\\.gate3Latched\\(\\)\\s*:\\s*bootLatch\\.latched\\(\\);\\s*\\};");
+        assertThat(src.split("Gate3\\s+gate3\\s*=", -1).length - 1).as("one Gate3 instance, no second lambda").isEqualTo(1);
+        assertThat(src).as("never the live gate 3, never a never-latched signal").doesNotContain(".gate3()").doesNotContain("Gate3.never()");
+
+        int latchRead = src.indexOf("Gate3Latch.readAtBoot(adminConnection)");
+        int bootLatch = src.indexOf("final var bootLatch = gate3Latch;");
+        int signal = src.indexOf("Gate3 gate3 =");
+        int service = src.indexOf("new NexusService(port, token, ds,");
+        int start = src.indexOf("service.start();");
+        assertThat(latchRead).as("the boot latch is read").isPositive();
+        assertThat(bootLatch).as("the signal closes over it").isGreaterThan(latchRead);
+        assertThat(signal).isGreaterThan(bootLatch);
+        assertThat(service).as("the latch is read before the service is built: no unset state").isGreaterThan(signal);
+        assertThat(start).isGreaterThan(service);
+        assertThat(src.substring(service, src.indexOf(";", service)))
+            .as("the service takes the one signal and the readiness").containsPattern("gate3,\\s*renameReadiness\\)");
+
+        int check = src.indexOf("var completionCheck = startCompletionBootWork(");
+        int handOver = src.indexOf("completionRef.set(completionCheck);");
+        assertThat(handOver).as("the signal moves to the check's latch as soon as the check is built").isGreaterThan(check);
+
+        assertThat(src).as("an unset readiness fails closed: the drop move is missing")
+            .containsPattern("c\\s*==\\s*null\\s*\\?\\s*dev\\.nexus\\.service\\.datamove\\.RenameReadiness\\.Missing\\.NAME_KEY_DROP_MOVE");
+
+        String service2 = code(Files.readString(Path.of("src/main/java/dev/nexus/service/NexusService.java")));
+        assertThat(service2).contains("new dev.nexus.service.db.RenameGuard(gate3, renameReadiness)")
+            .contains("new CatalogRepository(tenantScope, gate3, renameGuard)")
+            .as("the registry takes no Gate3").contains("CollectionRegistry.shared()").doesNotContain("CollectionRegistry.shared(gate3)");
+    }
+
+    /**
      * RDR-229 P3.3b (nexus-p2m1x.20): the per-leaf id unique-index pass is started once, at main's top level, after the completion check
      * it reads, handed that check's LATEST read of gate 1 (a null read holds nothing), and closed in the shutdown steps; and its method
      * returns null without a completion check, before it builds the pass. P3.3c (nexus-p2m1x.21) deleted the placeholder constant and its
