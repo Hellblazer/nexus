@@ -3143,7 +3143,10 @@ class RawSqlGateTest {
         "drop-policy-if-exists", "validate-constraint",
         // RDR-229 P3.5a (nexus-p2m1x.23): ALTER COLUMN .. DROP IDENTITY (no typed form in jOOQ 3.20.11), behind PgContainerHelper.dropIdentity
         // (the table rendered from a jOOQ Table, the column through requireTestIdentifier)
-        "drop-identity");
+        "drop-identity",
+        // nexus-p2m1x.21 (RDR-229 P3.3c): REVOKE USAGE ON SCHEMA (no typed form), behind PgContainerHelper.revokeSchemaUsage (both names through
+        // requireTestIdentifier)
+        "schema-usage-revoke");
 
     /**
      * The parameterised test changelogs that are NOT on the validated list, each with the reason it is allowed. Every
