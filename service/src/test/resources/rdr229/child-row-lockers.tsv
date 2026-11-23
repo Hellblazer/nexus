@@ -19,7 +19,7 @@ ChunkKeySweep.java	oneBatch	CHUNKS	forUpdate	1	no-registry-lock	background chunk
 CollectionRegistry.java	fillOrNull	CATALOG_COLLECTIONS	forKeyShare	1	registry	the registry row itself: the verb FOR UPDATE, the writer FOR KEY SHARE, the stale-note repair FOR SHARE (registry first)
 CollectionRegistry.java	lockAllForWrite	CATALOG_COLLECTIONS	forKeyShare	1	registry	the registry row itself: the verb FOR UPDATE, the writer FOR KEY SHARE, the stale-note repair FOR SHARE (registry first)
 CollectionRegistry.java	lockIdsAndLabelsForWrite	CATALOG_COLLECTIONS	forKeyShare	1	registry	the registry row itself: the verb FOR UPDATE, the writer FOR KEY SHARE, the stale-note repair FOR SHARE (registry first)
-CollectionTombstones.java	lockRows	CATALOG_COLLECTIONS	forUpdate	1	registry	the registry row itself: the verb FOR UPDATE, the writer FOR KEY SHARE, the stale-note repair FOR SHARE (registry first)
+CollectionTombstones.java	lockWhere	CATALOG_COLLECTIONS	forUpdate	1	registry	the registry row itself: the verb FOR UPDATE, the writer FOR KEY SHARE, the stale-note repair FOR SHARE (registry first)
 CollectionTombstones.java	repointTombstones	CATALOG_COLLECTIONS	forUpdate	1	after-registry	the successor's registry row is read FOR KEY SHARE first (requireIdForWrite), then the tombstone rows FOR UPDATE in collection_id order, the order of a retiring verb's lockRows (folio review F4)
 GroupRules.java	lock	GROUP_RECORDS	forUpdate	1	no-registry-lock	identity group rows, no collection
 GroupRules.java	onJoin	GROUP_RECORDS	forShare	1	no-registry-lock	identity group rows, no collection
