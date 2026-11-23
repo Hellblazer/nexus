@@ -355,7 +355,7 @@ final class DepartedWriterSpans {
         Table<?> holders = holders(ctx, tenant,
             keyIs(byId, CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, collection)
                 .and(CATALOG_DOCUMENT_CHUNKS.CHASH.in(chashes)), false, byId);
-        return update(ctx, tenant, dep, holders, byId);
+        return update(ctx, tenant, collection, chashes, dep, holders, byId);
     }
 
     /**
@@ -465,7 +465,7 @@ final class DepartedWriterSpans {
             keyIs(byId, CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, collection)
                 .and(CATALOG_DOCUMENT_CHUNKS.CHASH.in(chashes))
                 .and(CATALOG_DOCUMENTS.DELETED_AT.isNull().or(CATALOG_DOCUMENTS.DELETED_AT.gt(threshold))), true, byId);
-        return update(ctx, tenant, dep, holders, byId);
+        return update(ctx, tenant, collection, chashes, dep, holders, byId);
     }
 
     // ── the position-swap path (an upsert that put another chunk at a held position) ────────────────
@@ -626,9 +626,41 @@ final class DepartedWriterSpans {
     }
 
     /**
-     * @param dep the departing rows, {@link #DEP_FIELDS}: the writer test reads them
+     * RDR-229 P3.5a row 14 (nexus-p2m1x.23): the registry rows of the collections whose chunk rows this statement may rewrite, read
+     * {@code FOR KEY SHARE} in id order by the id each chunk row STORES (a chunk's label can be one a one-row rename left behind, and
+     * another collection may have taken it since; the stored id is the chunk's collection). A chunk row with no stored id falls back to
+     * the label's rows. Returns the ids whose row is present, and the rows themselves for {@link RegistryRowLocks#forget}; a chunk whose
+     * stored id has no row (the collection is gone) is left out of the statement.
      */
-    private static int update(DSLContext ctx, String tenant, Table<?> dep, Table<?> holders, boolean byId) {
+    private static List<CollectionRow> lockDeparted(DSLContext ctx, String tenant, Object collection, List<byte[]> chashes, boolean byId) {
+        if (byId) {
+            // from gate 3 the batch is keyed by the id the chunk rows store (a NULL id never reaches a batch): that id's row
+            return RegistryRowLocks.keyShareIfPresent(ctx, tenant, List.of((Long) collection), List.of());
+        }
+        String label = (String) collection;
+        List<Long> stored = ctx.selectDistinct(CHUNKS.COLLECTION_ID).from(CHUNKS)
+            .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(label)).and(CHUNKS.CHASH.in(chashes)))
+            .fetch(CHUNKS.COLLECTION_ID);
+        return RegistryRowLocks.keyShareIfPresent(ctx, tenant, stored, stored.contains(null) ? List.of(label) : List.of());
+    }
+
+    /**
+     * @param collection the collection the chunk rows are filed under (the chunk rows are selected by it): its label before gate 3, its id from gate 3
+     * @param chashes    the chunks the statement may rewrite
+     * @param dep        the departing rows, {@link #DEP_FIELDS}: the writer test reads them
+     */
+    private static int update(DSLContext ctx, String tenant, Object collection, List<byte[]> chashes, Table<?> dep,
+                              Table<?> holders, boolean byId) {
+        List<CollectionRow> locked = lockDeparted(ctx, tenant, collection, chashes, byId);
+        try {
+            return update(ctx, tenant, dep, holders, locked.stream().map(CollectionRow::collectionId).toList(), byId);
+        } catch (RuntimeException e) {
+            RegistryRowLocks.forget(ctx, tenant, locked);   // the caller's savepoint rolls the locks back with the failed statement
+            throw e;
+        }
+    }
+
+    private static int update(DSLContext ctx, String tenant, Table<?> dep, Table<?> holders, List<Long> liveIds, boolean byId) {
         Table<?> writers = writers(ctx, tenant, dep, byId);
         Field<Object> collection = asObject(byId ? holders.field("collection", Long.class) : holders.field("collection", String.class));
         Field<byte[]> chash = holders.field("chash", byte[].class);
@@ -661,7 +693,11 @@ final class DepartedWriterSpans {
         // collection is read by id, so the id stays as it is: re-deriving it from a name a rename left stale would be wrong.
         return ctx.update(CHUNKS)
             .set(CHUNKS.METADATA, stripped)
-            .set(CHUNKS.COLLECTION_ID, byId ? CHUNKS.COLLECTION_ID : CollectionIds.idOf(DSL.val(tenant), CHUNKS.COLLECTION))
+            // the stored id wins, as every other id stamp of a ledger or maintenance write does: the label's id fills only an unstamped row.
+            // A row whose label another collection now bears must keep the id of the collection it is in (RDR-229 P3.5a row 14). From gate 3
+            // every row is stamped and the collection is read by id, so the id stays as it is
+            .set(CHUNKS.COLLECTION_ID, byId ? CHUNKS.COLLECTION_ID
+                : DSL.coalesce(CHUNKS.COLLECTION_ID, CollectionIds.idOf(DSL.val(tenant), CHUNKS.COLLECTION)))
             .from(holders.join(writers)
                 .on(asObject(byId ? writers.field("collection", Long.class) : writers.field("collection", String.class)).eq(collection)
                     .and(writers.field("chash", byte[].class).eq(chash))
@@ -670,6 +706,8 @@ final class DepartedWriterSpans {
                 .and(keyOf(byId, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID).eq(collection))
                 .and(CHUNKS.CHASH.eq(chash))
                 .and(CHUNKS.EMBEDDING_MODEL.eq(model))
+                // a chunk whose stored collection has no registry row any more (locked above) is left alone
+                .and(CHUNKS.COLLECTION_ID.isNull().or(CHUNKS.COLLECTION_ID.in(liveIds)))
                 .and(hasAKey))
             .execute();
     }
