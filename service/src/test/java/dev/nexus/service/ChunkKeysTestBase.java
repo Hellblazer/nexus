@@ -48,6 +48,8 @@ abstract class ChunkKeysTestBase extends AtomicWriteTestBase {
         List.of("origin_collection", "quarantined_at", "quarantined_by", "reaper_quarantined_at");
     static final String TAXONOMY_PREFIX = "taxonomy" + "_".repeat(2);
 
+    /** Gate 3 for the engine under test: false unless a test latches it (the sweep then continues by collection id). */
+    protected final java.util.concurrent.atomic.AtomicBoolean latched = new java.util.concurrent.atomic.AtomicBoolean();
     protected NexusService service;
     protected PgVectorRepository vectors;
     private final HttpClient http = TestHttp.client();
@@ -59,10 +61,11 @@ abstract class ChunkKeysTestBase extends AtomicWriteTestBase {
             PgContainerHelper.seedServiceToken(DSL.using(su, SQLDialect.POSTGRES), ROOT,
                 TenantConstants.DEFAULT_TENANT, TokenStore.ROOT_TOKEN_LABEL, TokenStore.SCOPE_ROOT, null, null);
         }
-        vectors = new PgVectorRepository(tenantScope, embedder, embedder);
-        service = new NexusService(0, ROOT, svcDs, null, vectors, null, null, null);
+        vectors = new PgVectorRepository(tenantScope, embedder, embedder, latched::get);
+        service = new NexusService(0, ROOT, svcDs, null, vectors, null, null, null, null, System::getenv, () -> false, null, null, latched::get,
+            () -> dev.nexus.service.datamove.RenameReadiness.Missing.NAME_KEY_DROP_MOVE);
         service.chunkConstraintAdmin(new ChunkConstraintAdmin(
-            new AdminConnection(pg.getJdbcUrl(), pg.getUsername(), pg.getPassword())));
+            new AdminConnection(pg.getJdbcUrl(), pg.getUsername(), pg.getPassword()), latched::get));
         service.start();
     }
 
