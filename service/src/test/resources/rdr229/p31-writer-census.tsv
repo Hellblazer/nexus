@@ -71,12 +71,12 @@ catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CatalogRe
 catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	13859	insert	jooq	superseded_by	superseded_by_id	yes	
 catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionMint.java	172	insert	jooq	superseded_by	superseded_by_id	yes	
 catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionMint.java	251	update	jooq	-	superseded_by_id	yes	
-catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionRename.java	138	insert	jooq	superseded_by	superseded_by_id	yes	
-catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionTombstones.java	79	update	jooq	superseded_by	superseded_by_id	yes	
+catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionRename.java	166	insert	jooq	superseded_by	superseded_by_id	yes	
 catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionTombstones.java	110	update	jooq	superseded_by	superseded_by_id	yes	
-catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionTombstones.java	130	update	jooq	-	superseded_by_id	yes	
-catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionTombstones.java	171	update	jooq	-	superseded_by_id	yes	
-catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionTombstones.java	194	update	jooq	-	superseded_by_id	yes	
+catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionTombstones.java	141	update	jooq	superseded_by	superseded_by_id	yes	
+catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionTombstones.java	161	update	jooq	-	superseded_by_id	yes	
+catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionTombstones.java	202	update	jooq	-	superseded_by_id	yes	
+catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/CollectionTombstones.java	225	update	jooq	-	superseded_by_id	yes	
 catalog	catalog_collections	service/src/main/java/dev/nexus/service/db/TenantImportLoad.java	335	insert	by-name	superseded_by	superseded_by_id	yes	TenantImportLoad by-name INSERT ... SELECT over TenantExport.TABLES
 catalog	catalog_document_chunks	nexus.quarantine_restore_chunks [vectors-069-collection-id-dual-write-functions.xml:2860]	2565	insert	sql_function	collection	collection_id	yes	
 catalog	catalog_document_chunks	rdr229-stamp-catalog_document_chunks [vectors-070-collection-id-stamp-moves.xml:288]	285	update	data_move	-	collection_id	yes	sets collection_id
