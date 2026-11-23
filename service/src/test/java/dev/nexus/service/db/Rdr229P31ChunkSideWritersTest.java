@@ -114,6 +114,51 @@ class Rdr229P31ChunkSideWritersTest extends AtomicWriteTestBase {
         assertThat(after.metadata()).as("the other keys the move wrote survive").contains("quarantined_at");
     }
 
+    /**
+     * linda (census reconciliation, 2026-11-23): before the latch the retag stamps a NULL id with the sibling's, and keeps a stored one. A row whose stored
+     * id is another registered row's (the label was re-registered, or the row was stamped before a rename) must not be rewritten to what the label resolves
+     * to now: {@code DepartedWriterSpans} dropped that shape, and {@code retagRowsOf} keeps the stored id with a COALESCE.
+     */
+    @Test
+    void theRetagKeepsAStoredIdThatDiffersFromTheSiblingsCurrentOne_andStampsOnlyANullId() throws Exception {
+        String from = col("from");
+        String to = col("to");
+        String other = col("other");
+        String sibling = "quarantine-" + from;      // its chunk's stored id will be OTHER's
+        String nullSibling = col("nullsib");        // its chunk is unstamped
+        register(from, "live");
+        register(to, "live");
+        register(other, "live");
+        register(sibling, "quarantine");
+        register(nullSibling, "quarantine");
+        String keptHex = Chash.ofText("retag-keep " + seq.get()).toHex();
+        String nullHex = Chash.ofText("retag-null " + seq.get()).toHex();
+        try (Connection su = pg.createConnection("")) {
+            DSLContext d = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertChunks(d, T, sibling, List.of(keptHex), List.of("keep text"), List.of(new float[384]), List.of(Map.of("origin_collection", from)));
+            PgContainerHelper.insertChunks(d, T, nullSibling, List.of(nullHex), List.of("null text"), List.of(new float[384]), List.of(Map.of("origin_collection", from)));
+        }
+        unstamp(nullSibling);
+        long otherId = registryId(other);
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSL.using(su, SQLDialect.POSTGRES).update(CHUNKS).set(CHUNKS.COLLECTION_ID, otherId)
+                .where(CHUNKS.TENANT_ID.eq(T)).and(CHUNKS.COLLECTION.eq(sibling)).execute();
+        }
+        assertThat(row(sibling, keptHex).collectionId()).as("fixture: the stored id is another row's").isEqualTo(otherId).isNotEqualTo(registryId(sibling));
+        assertThat(row(nullSibling, nullHex).collectionId()).as("fixture: the other row is unstamped").isNull();
+
+        int n = tenantScope.withTenant(T, ctx -> QuarantineOrigin.retagRowsOf(ctx, T, from, to, Gate3.never()));
+
+        assertThat(n).as("both rows retagged").isEqualTo(2);
+        Row kept = row(sibling, keptHex);
+        assertThat(kept.metadata()).as("the tag was retagged").contains("\"origin_collection\": \"" + to + "\"");
+        assertThat(kept.collectionId()).as("the stored id is kept, not rewritten to the sibling's current one").isEqualTo(otherId);
+        Row stamped = row(nullSibling, nullHex);
+        assertThat(stamped.metadata()).contains("\"origin_collection\": \"" + to + "\"");
+        assertThat(stamped.collectionId()).as("a NULL id is stamped with the sibling's").isEqualTo(registryId(nullSibling));
+    }
+
     @Test
     void theRetagOfAnOriginWithNoRegistryRowStillTagsByName_andLeavesTheIdOut() throws Exception {
         String from = col("from");

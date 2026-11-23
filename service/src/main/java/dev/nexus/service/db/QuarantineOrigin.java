@@ -419,12 +419,13 @@ public final class QuarantineOrigin {
             // COALESCE: jsonb_concat(NULL, x) is NULL, which would leave a NULL-metadata row untagged while
             // counting and auditing it as retagged. Only rows whose tag actually changes are returned.
             // Does not touch last_written_at: a retag is maintenance, never a client re-write.
-            // Before gate 3 the row's own id is set too (the sibling's): chunks carries a NOT VALID CHECK evaluated on every updated row,
-            // which refuses a quarantine row the stamp has not reached. From gate 3 the row keeps its own id, selected by it.
+            // Before gate 3 a row the stamp has not reached (NULL id) gets the sibling's id, because chunks carries a NOT VALID CHECK evaluated on
+            // every updated row, which refuses such a row; a stored id is kept, never overwritten by what the label resolves to now (DepartedWriterSpans
+            // dropped the overwriting shape). From gate 3 the row keeps its own id, selected by it.
             var update = ctx.update(CHUNKS)
                 .set(CHUNKS.METADATA, PgVectorRepository.mergeMetadata(
                     DSL.coalesce(CHUNKS.METADATA, DSL.val(EMPTY_OBJECT)), DSL.val(incoming), null));
-            List<String> hex = sorted((byId ? update : update.set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, sibling)))
+            List<String> hex = sorted((byId ? update : update.set(CHUNKS.COLLECTION_ID, DSL.coalesce(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, sibling))))
                 .where(rows.and(byId ? CHUNKS.COLLECTION_ID.eq(sib.id()) : CHUNKS.COLLECTION.eq(sibling))
                     .and(ORIGIN_TAG.isDistinctFrom(to)))
                 .returningResult(ChashHex.hex(CHUNKS.CHASH)).fetch(ChashHex.hex(CHUNKS.CHASH)));
