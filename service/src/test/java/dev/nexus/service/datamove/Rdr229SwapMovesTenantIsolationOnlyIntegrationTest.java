@@ -55,12 +55,6 @@ class Rdr229SwapMovesTenantIsolationOnlyIntegrationTest extends Rdr229SwapMovesR
         }
     }
 
-    /** A relation as {@code regclass} prints it, without the schema and quotes. */
-    private static String bare(String regclass) {
-        String n = regclass.startsWith("nexus.") ? regclass.substring("nexus.".length()) : regclass;
-        return n.startsWith("\"") && n.endsWith("\"") ? n.substring(1, n.length() - 1).replace("\"\"", "\"") : n;
-    }
-
     @Test
     @Order(1)
     void childValidationMovesOverRowsHiddenFromTheSessionAreBlockedAtPreflightNeverPassed() throws Exception {
