@@ -223,3 +223,83 @@ def test_on_windows_a_failed_process_table_keeps_every_generation(tools: Path, m
     lines = gc_core.gc_generations(tools, keep=1, platform="win32")
 
     assert not any(line.startswith("reaped ") for line in lines), lines
+
+
+# ── round 2 (T2 nexus review-ec7da1db1d-scratch-client-closed) ───────────────
+
+def test_ancestry_rides_only_the_begin_and_run_lines(tools: Path, tmp_path: Path) -> None:
+    """F4: the parent chain is on gc_reap_begin and gc_run, not on every line."""
+    gc_core.gc_generations(tools, keep=2, snapshot=_own_row())
+
+    by_event = {r["event"]: r for r in _records(tmp_path)}
+    assert "ancestry" in by_event["gc_reap_begin"] and "ancestry" in by_event["gc_run"]
+    assert "ancestry" not in by_event["gc_reaped"]
+
+
+@pytest.mark.parametrize(("command", "expected"), [
+    ("/usr/local/bin/python3 /x/bin/nx self gc", "python3 /x/bin/nx self gc"),
+    ("nx login --token abc123 --name ok", "nx login --token <redacted> --name ok"),
+    ("nx run --api-key=k123 --password=p -v", "nx run --api-key=<redacted> --password=<redacted> -v"),
+    (
+        "env NX_SERVICE_TOKEN=s3cr3t AWS_SECRET_ACCESS_KEY=k nx gc",
+        "env NX_SERVICE_TOKEN=<redacted> AWS_SECRET_ACCESS_KEY=<redacted> nx gc",
+    ),
+    ("curl -H Authorization:Bearer-x --auth u:p url", "curl -H Authorization:<redacted> --auth <redacted> url"),
+], ids=["basename", "flag-then-value", "flag-equals", "env-like", "auth"])
+def test_parent_commands_are_redacted(command: str, expected: str) -> None:
+    """F4: parent argv can carry tokens. Values after a flag or an env-like key naming
+    token, key, secret, password or auth are redacted, and the program is its basename."""
+    assert gc_core._redact_command(command) == expected
+
+
+def test_a_parent_command_is_truncated() -> None:
+    redacted = gc_core._redact_command("prog " + " ".join(f"arg{i}" for i in range(40)) + " " + "y" * 300)
+    assert len(redacted) <= gc_core.ANCESTRY_COMMAND_MAX_CHARS
+    assert redacted.startswith("prog arg0 arg1")
+
+
+@POSIX
+def test_the_log_is_created_owner_only(tools: Path, tmp_path: Path) -> None:
+    """F4: the record names parent commands; nobody but the owner reads it."""
+    gc_core.gc_generations(tools, keep=3, snapshot=_own_row())
+
+    assert stat.S_IMODE(_log_path(tmp_path).stat().st_mode) == 0o600
+
+
+def test_a_failed_rotation_never_skips_a_record_line(tools: Path, tmp_path: Path, monkeypatch, capsys) -> None:
+    """F2: Windows refuses os.replace on a file another run holds open, and two runs can
+    race the rotation. Neither may cost a record line or silence the recorder."""
+    path = _log_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text("x" * (gc_core.GC_LOG_MAX_BYTES + 1) + "\n")
+
+    def replace_refused(*_a, **_k):
+        raise PermissionError(13, "The process cannot access the file because it is being used by another process")
+
+    setattr_in(monkeypatch, gc_core, "os.replace", replace_refused)
+
+    gc_core.gc_generations(tools, keep=2, snapshot=_own_row())
+
+    events = [json.loads(line)["event"] for line in path.read_text().splitlines()[1:] if line.strip()]
+    assert events == ["gc_reap_begin", "gc_reaped", "gc_run"], events
+    assert "could not write the gc record" not in capsys.readouterr().err
+
+
+def test_a_reap_that_keeps_the_tree_says_so(tools: Path, tmp_path: Path, monkeypatch) -> None:
+    """F3: a begin line with no end line must mean a killed run, so a reap that kept the
+    tree (Windows in use, a refused ledger symlink) ends with gc_reap_kept."""
+    monkeypatch.setattr(gc_core, "_reap", lambda entry, *_a, **_k: [f"kept {entry}: in use (a file is open)"])
+
+    gc_core.gc_generations(tools, keep=2, snapshot=_own_row())
+
+    records = _records(tmp_path)
+    assert [r["event"] for r in records] == ["gc_reap_begin", "gc_reap_kept", "gc_run"], records
+    assert "in use" in records[1]["detail"]
+
+
+def test_a_refused_reap_with_no_output_is_still_closed(tools: Path, tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(gc_core, "_reap", lambda *_a, **_k: [])
+
+    gc_core.gc_generations(tools, keep=2, snapshot=_own_row())
+
+    assert [r["event"] for r in _records(tmp_path)] == ["gc_reap_begin", "gc_reap_kept", "gc_run"]

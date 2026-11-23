@@ -48,6 +48,7 @@ pointed ``current`` at it, which is what makes reaping it safe.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import stat
 import sys
@@ -257,6 +258,7 @@ class _Recorder:
         self._emit_err = emit_err
         self._path: Path | None = None
         self._broken = False
+        self._mode_checked = False
         try:
             self._path = gc_log_path()  # computed once for the run
         except Exception as exc:  # noqa: BLE001 — Path.home() raises RuntimeError with no resolvable home
@@ -275,17 +277,78 @@ class _Recorder:
 
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                if self._path.stat().st_size > GC_LOG_MAX_BYTES:
-                    os.replace(self._path, self._path.with_name(GC_LOG_NAME + ".1"))
-            except FileNotFoundError:
-                pass
-            with self._path.open("a", encoding="utf-8") as fh:
+        except Exception as exc:  # noqa: BLE001 — the record must never break the gc it records
+            self._fail(exc)
+            return
+        self._rotate()
+        try:
+            # 0600: the lines name parent commands. O_APPEND keeps concurrent runs' lines whole.
+            fd = os.open(self._path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+            with os.fdopen(fd, "a", encoding="utf-8") as fh:
+                if not self._mode_checked:
+                    self._mode_checked = True
+                    try:
+                        if sys.platform != "win32" and os.stat(fd).st_mode & 0o077:
+                            os.chmod(fd, 0o600)  # a log an earlier version created 0644
+                    except OSError:
+                        pass
                 fh.write(json.dumps(record, sort_keys=True, default=str) + "\n")
                 fh.flush()
                 os.fsync(fh.fileno())
         except Exception as exc:  # noqa: BLE001 — the record must never break the gc it records
             self._fail(exc)
+
+    def _rotate(self) -> None:
+        """Move a log past :data:`GC_LOG_MAX_BYTES` to ``.1``. In its own try, apart from the
+        write: Windows refuses ``os.replace`` on a file another run holds open, and two runs can
+        race to rotate. A failed rotation costs nothing; the line is still written."""
+        try:
+            if self._path.stat().st_size > GC_LOG_MAX_BYTES:
+                os.replace(self._path, self._path.with_name(GC_LOG_NAME + ".1"))
+        except Exception:  # noqa: BLE001 — rotation is housekeeping; the next run tries again
+            pass
+
+
+#: The most of one parent's command line the record keeps, after redaction.
+ANCESTRY_COMMAND_MAX_CHARS = 200
+_ANCESTRY_MAX_WORDS = 12
+_SECRET_NAME = re.compile(r"token|key|secret|passw|auth", re.IGNORECASE)
+_KEY_VALUE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.-]*)([=:])(.*)$")
+_REDACTED = "<redacted>"
+
+
+def _redact_command(command: str) -> str:
+    """*command* as the record keeps it: the program's basename and its first arguments,
+    each value that follows a flag, or an env-like ``KEY=`` / ``KEY:``, naming a token, key,
+    secret, password or auth replaced by ``<redacted>``, and the whole cut to
+    :data:`ANCESTRY_COMMAND_MAX_CHARS`. Parent argv can carry credentials, and the log is
+    a file on disk."""
+    words = command.split()
+    if not words:
+        return ""
+    out = [os.path.basename(words[0]) or words[0]]
+    redact_next = False
+    for word in words[1:_ANCESTRY_MAX_WORDS]:
+        if redact_next:
+            out.append(_REDACTED)
+            redact_next = False
+        elif word.startswith("-"):
+            name, eq, _value = word.partition("=")
+            if _SECRET_NAME.search(name):
+                if eq:
+                    out.append(f"{name}={_REDACTED}")
+                else:
+                    out.append(word)
+                    redact_next = True
+            else:
+                out.append(word)
+        elif (m := _KEY_VALUE.match(word)) and _SECRET_NAME.search(m.group(1)):
+            out.append(f"{m.group(1)}{m.group(2)}{_REDACTED}")
+        else:
+            out.append(word[:80])
+    if len(words) > _ANCESTRY_MAX_WORDS:
+        out.append("...")
+    return " ".join(out)[:ANCESTRY_COMMAND_MAX_CHARS]
 
 
 def _ancestry(depth: int = 4) -> list[dict]:
@@ -315,7 +378,7 @@ def _ancestry(depth: int = 4) -> list[dict]:
         if r.returncode != 0 or not head or not head[0].isdigit():
             chain.append({"pid": pid, "error": f"rc={r.returncode}"})
             break
-        chain.append({"pid": pid, "command": (head[1] if len(head) > 1 else "")[:500]})
+        chain.append({"pid": pid, "command": _redact_command(head[1] if len(head) > 1 else "")})
         pid = int(head[0])
     return chain
 
@@ -653,8 +716,8 @@ def gc_generations(
     if snapshot is not None:
         census_rec.setdefault("reason", "supplied by the caller")
     common["census"] = census_rec
-    if record is not None:
-        common["ancestry"] = _ancestry()  # the caller chain: a bare ppid is gone once it exits
+    # The caller chain (a bare ppid is gone once it exits): on gc_reap_begin and gc_run only.
+    ancestry = _ancestry() if record is not None else []
     receipt = _layout().RECEIPT_NAME
     prefix = _layout().GENERATION_PREFIX
     entries = sorted(e for e in resolved.iterdir() if e.name.startswith(prefix) and e.is_dir())
@@ -697,7 +760,7 @@ def gc_generations(
             "holders": len(holders.get(str(entry), [])),
         }
         if record is not None:
-            record({**line, "event": "gc_reap_begin"})  # on disk before the delete starts
+            record({**line, "event": "gc_reap_begin", "ancestry": ancestry})  # on disk before the delete starts
         try:
             result = _reap(entry, emit_err, platform)
         except BaseException as exc:
@@ -710,9 +773,16 @@ def gc_generations(
             if record is not None:
                 record({**line, "event": "gc_reaped"})
         else:
-            kept.extend({"generation": str(entry), "detail": out} for out in result)
+            # The reap kept it (Windows: in use; a refused ledger symlink says nothing). Close the
+            # begin line, so a begin with no end means only a run killed mid-delete.
+            detail = "; ".join(result) or "the reap refused and kept it (see stderr)"
+            kept.append({"generation": str(entry), "detail": detail})
+            if record is not None:
+                record({**line, "event": "gc_reap_kept", "detail": detail})
     if record is not None:
-        record({**common, "event": "gc_run", "reaped": reaped, "kept": kept, "holders": holders})
+        record({
+            **common, "event": "gc_run", "reaped": reaped, "kept": kept, "holders": holders, "ancestry": ancestry,
+        })
     return lines
 
 
