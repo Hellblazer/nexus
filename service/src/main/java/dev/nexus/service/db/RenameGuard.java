@@ -45,12 +45,12 @@ public final class RenameGuard {
 
     /**
      * Whether the one-row regime is in force: gate 3 has been LATCHED ({@link RenameReadiness#gate3Latched()}: the rename window's regime or the
-     * durable latch row). Only the latch decides. The live gate 3 is not read: it can drop back (an id index going INVALID), which never returns a
+     * durable latch row). Only the latch decides (and the completed drop move, a durable belt for a restart). The live gate 3 is not read: it can drop back (an id index going INVALID), which never returns a
      * rename to the name path, and it can hold before the latch is written (the latch waits for the renames in flight), which must not start the
      * one-row regime outside the window. {@code gate3} stays a constructor argument as P3.5a's guard has it; nothing here reads it.
      */
     private boolean oneRowRegime() {
-        return readiness.gate3Latched();
+        return readiness.gate3Latched() || readiness.dropMoveComplete();   // the second term is the restart belt, see RenameReadiness#dropMoveComplete
     }
 
     /**

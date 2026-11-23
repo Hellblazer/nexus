@@ -305,6 +305,12 @@ public final class CompletionBootWork implements AutoCloseable {
                 var r = latest();
                 return window.oneRowRegime() || CompletionBootWork.this.gate3Latched() || (r != null && r.gate3Latched());
             }
+
+            @Override
+            public boolean dropMoveComplete() {
+                var r = latest();
+                return r != null && r.rename().dropMoveComplete();
+            }
         };
     }
 

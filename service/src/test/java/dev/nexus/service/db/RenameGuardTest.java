@@ -20,6 +20,11 @@ class RenameGuardTest {
 
     /** A readiness with a fixed answer and a latch fact. */
     private static RenameReadiness readiness(Missing missing, boolean latched) {
+        return readiness(missing, latched, false);
+    }
+
+    /** As above with the drop move's completion (the belt for a restart that reset the latch). */
+    private static RenameReadiness readiness(Missing missing, boolean latched, boolean dropComplete) {
         return new RenameReadiness() {
             @Override
             public Missing missing() {
@@ -29,6 +34,11 @@ class RenameGuardTest {
             @Override
             public boolean gate3Latched() {
                 return latched;
+            }
+
+            @Override
+            public boolean dropMoveComplete() {
+                return dropComplete;
             }
         };
     }
@@ -97,5 +107,16 @@ class RenameGuardTest {
         assertThat(RenameRefusedException.wireValue(Missing.P35B_RESTART)).isEqualTo("restart");
         assertThat(new RenameRefusedException(Missing.P35B_LIST_MISSING).getMessage()).contains("p35b-continue-changesets.txt")
             .doesNotContain("restarts to apply");
+    }
+
+    @Test
+    void afterARestartTheCompletedDropMoveKeepsTheOneRowRegime_whenTheLatchIsResetAndTheLiveGateDipped() {
+        // not latched (reset by the restart), live gate 3 false, the move completed
+        var applied = new RenameGuard(() -> false, readiness(Missing.NONE, false, true));
+        assertThat(applied.<Boolean>pinned(oneRow -> oneRow)).as("one-row, never the name path").isTrue();
+        var pending = new RenameGuard(() -> false, readiness(Missing.P35B_RESTART, false, true));
+        assertThatThrownBy(() -> pending.pinned(oneRow -> "name path ran")).isInstanceOf(RenameRefusedException.class);
+        // control: without the move the same state is the name path
+        assertThat(new RenameGuard(() -> false, readiness(Missing.NONE, false, false)).<Boolean>pinned(oneRow -> oneRow)).isFalse();
     }
 }
