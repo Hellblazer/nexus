@@ -8773,7 +8773,7 @@ FROM scope s
                 final String coll = registered.label();
                 RenameFollow.check(gate, registered);
                 // RDR-225: the (model, tenant, collection) scope, of the registered row
-                final org.jooq.Condition scope = chunkScope(ch, tenant, registered.embeddingModel(), coll);
+                final org.jooq.Condition scope = chunkScope(ch, tenant, registered.embeddingModel(), coll, gate3);   // the latched gate: a one-row rename leaves the stored name stale
                 Map<String, String> existingText = selectExistingChashTextCtx(ctx, ch, scope, dedupIds);
                 ExistencePartition partition = partitionByExistence(dedupIds, existingText.keySet());
                 // Test-only interleaving seam (bead nexus-f0r8p.4) — see
