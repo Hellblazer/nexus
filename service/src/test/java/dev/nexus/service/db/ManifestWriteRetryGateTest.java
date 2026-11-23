@@ -109,6 +109,9 @@ class ManifestWriteRetryGateTest {
         Map.entry("ChunkFamily", "nexus-f3yqd.2.14: the data-move worker's list of chunk-family table names (a name match on"
             + " an on_complete text); it reads no table"),
         Map.entry("ValidateConstraintsJobs", "nexus-f3yqd: names nexus.catalog_document_chunks as a table its refusal reports on; no DML"),
+        Map.entry("CollectionPurgeScope", "RDR-229 P3.5a (nexus-p2m1x.23): builds the WHERE condition a collection delete uses on"
+            + " the manifest's collection or collection_id column; the delete itself is CatalogRepository's (scanned, retried);"
+            + " it runs no statement"),
         Map.entry("TenantExport", "nexus-csayy.1: the tenant export's table registry names the table and its columns;"
             + " it holds no DML"),
         Map.entry("ChashConstraintValidator", "nexus-f3yqd: VALIDATE CONSTRAINT of the chash width CHECK on the table (DDL, "
