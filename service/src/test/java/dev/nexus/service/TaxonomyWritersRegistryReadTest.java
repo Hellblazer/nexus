@@ -4,7 +4,9 @@ package dev.nexus.service;
 
 import dev.nexus.service.CollectionRouteFixture.Resp;
 import dev.nexus.service.db.Chash;
+import dev.nexus.service.db.DeadlockRetry;
 import org.jooq.SQLDialect;
+import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -14,6 +16,7 @@ import org.junit.jupiter.api.Timeout;
 
 import java.sql.Connection;
 import java.util.List;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -64,6 +67,9 @@ class TaxonomyWritersRegistryReadTest {
                 }
             }
             ctx.alterTable(CATALOG_COLLECTIONS).dropConstraint(CATALOG_COLLECTIONS.getPrimaryKey().getName()).cascade().execute();
+            // a one-row rename restamps the chunks' name columns with the rows' own; here they stay at the old label, so an assignment filed under
+            // the current label has no chunk of that name (the fixture of HeavyRoutesRenameGapTest drops this key for the same reason)
+            ctx.alterTable(TOPIC_ASSIGNMENTS).dropConstraintIfExists("topic_assignments_chunk_fk").execute();
             return null;
         });
         pool = Executors.newFixedThreadPool(2);
@@ -134,12 +140,12 @@ class TaxonomyWritersRegistryReadTest {
         assertThat(r.status()).as("setup: " + r.body()).isEqualTo(200);
     }
 
-    private record TopicRow(String label, Long collectionId, String reviewStatus) {
+    private record TopicRow(String label, String collection, Long collectionId, String reviewStatus) {
     }
 
     private TopicRow topicRow(long id) {
-        return fx.asSuperuser(ctx -> ctx.select(TOPICS.LABEL, TOPICS.COLLECTION_ID, TOPICS.REVIEW_STATUS).from(TOPICS)
-            .where(TOPICS.ID.eq(id)).fetchOptional().map(r -> new TopicRow(r.value1(), r.value2(), r.value3())).orElse(null));
+        return fx.asSuperuser(ctx -> ctx.select(TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.COLLECTION_ID, TOPICS.REVIEW_STATUS).from(TOPICS)
+            .where(TOPICS.ID.eq(id)).fetchOptional().map(r -> new TopicRow(r.value1(), r.value2(), r.value3(), r.value4())).orElse(null));
     }
 
     private int count(org.jooq.Table<?> table, org.jooq.Condition where) {
@@ -149,6 +155,12 @@ class TaxonomyWritersRegistryReadTest {
     private int assignmentCount(String doc, long topic) {
         return fx.asSuperuser(ctx -> ctx.fetchCount(TOPIC_ASSIGNMENTS,
             TOPIC_ASSIGNMENTS.DOC_ID.eq(Chash.fromHex(doc).toBytes()).and(TOPIC_ASSIGNMENTS.TOPIC_ID.eq(topic))));
+    }
+
+    private String sourceName(String doc, long topic) {
+        return fx.asSuperuser(ctx -> ctx.select(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION).from(TOPIC_ASSIGNMENTS)
+            .where(TOPIC_ASSIGNMENTS.DOC_ID.eq(Chash.fromHex(doc).toBytes()).and(TOPIC_ASSIGNMENTS.TOPIC_ID.eq(topic)))
+            .fetchOne(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION));
     }
 
     private Long sourceId(String doc, long topic) {
@@ -204,7 +216,7 @@ class TaxonomyWritersRegistryReadTest {
     // ==== misdirect rows: rename-gap tests ===============================================================================
 
     /** One topic of a renamed collection (id x, name column still the old label) and one of the new holder of that label (id y). */
-    private record Gap(String old, long x, long y, long renamedTopic, long holderTopic) {
+    private record Gap(String old, String current, long x, long y, long renamedTopic, long holderTopic) {
     }
 
     private Gap gapWithATopicEach(String stem) {
@@ -215,7 +227,7 @@ class TaxonomyWritersRegistryReadTest {
         long holderTopic = topic(b, "holder-topic");
         assertThat(topicRow(renamedTopic).collectionId()).as("setup: the renamed collection's topic carries its id").isEqualTo(x);
         assertThat(topicRow(holderTopic).collectionId()).as("setup: the new holder's topic carries the holder's id").isEqualTo(y);
-        return new Gap(b, x, y, renamedTopic, holderTopic);
+        return new Gap(b, fx.labelOf(x), x, y, renamedTopic, holderTopic);
     }
 
     @Timeout(180)
@@ -226,9 +238,9 @@ class TaxonomyWritersRegistryReadTest {
         Resp r = fx.post("/v1/taxonomy/topics/update_label", "{\"topic_id\":" + g.renamedTopic + ",\"label\":\"relabelled\"}");
 
         assertThat(r.status()).as(r.body()).isEqualTo(200);
-        assertThat(topicRow(g.renamedTopic).label()).as("the topic took its new label").isEqualTo("relabelled");
-        assertThat(topicRow(g.renamedTopic).collectionId()).as("and kept the id of its collection (not the id its stale name now resolves to)").isEqualTo(g.x);
-        assertThat(topicRow(g.holderTopic)).as("the new holder's topic is untouched").isEqualTo(new TopicRow("holder-topic", g.y, "pending"));
+        assertThat(topicRow(g.renamedTopic)).as("the topic took its new label, kept the id of its collection (not the id its stale name now"
+            + " resolves to) and is filed under the collection's CURRENT label").isEqualTo(new TopicRow("relabelled", g.current, g.x, "pending"));
+        assertThat(topicRow(g.holderTopic)).as("the new holder's topic is untouched").isEqualTo(new TopicRow("holder-topic", g.old, g.y, "pending"));
     }
 
     @Timeout(180)
@@ -240,8 +252,8 @@ class TaxonomyWritersRegistryReadTest {
 
         assertThat(r.status()).as(r.body()).isEqualTo(200);
         assertThat(topicRow(g.renamedTopic)).as("renamed, accepted, and still its own collection's")
-            .isEqualTo(new TopicRow("renamed-by-hand", g.x, "accepted"));
-        assertThat(topicRow(g.holderTopic)).as("the new holder's topic is untouched").isEqualTo(new TopicRow("holder-topic", g.y, "pending"));
+            .isEqualTo(new TopicRow("renamed-by-hand", g.current, g.x, "accepted"));
+        assertThat(topicRow(g.holderTopic)).as("the new holder's topic is untouched").isEqualTo(new TopicRow("holder-topic", g.old, g.y, "pending"));
     }
 
     @Timeout(180)
@@ -252,8 +264,8 @@ class TaxonomyWritersRegistryReadTest {
         Resp r = fx.post("/v1/taxonomy/topics/mark_reviewed", "{\"topic_id\":" + g.renamedTopic + ",\"status\":\"deleted\"}");
 
         assertThat(r.status()).as(r.body()).isEqualTo(200);
-        assertThat(topicRow(g.renamedTopic)).as("reviewed, and still its own collection's").isEqualTo(new TopicRow("renamed-topic", g.x, "deleted"));
-        assertThat(topicRow(g.holderTopic)).as("the new holder's topic is untouched").isEqualTo(new TopicRow("holder-topic", g.y, "pending"));
+        assertThat(topicRow(g.renamedTopic)).as("reviewed, and still its own collection's").isEqualTo(new TopicRow("renamed-topic", g.current, g.x, "deleted"));
+        assertThat(topicRow(g.holderTopic)).as("the new holder's topic is untouched").isEqualTo(new TopicRow("holder-topic", g.old, g.y, "pending"));
     }
 
     /**
@@ -279,7 +291,7 @@ class TaxonomyWritersRegistryReadTest {
         Resp r = fx.post("/v1/taxonomy/topics/update_label", "{\"topic_id\":" + t + ",\"label\":\"relabelled\"}");
 
         assertThat(r.status()).as("not a 23514: %s", r.body()).isEqualTo(200);
-        assertThat(topicRow(t)).isEqualTo(new TopicRow("relabelled", x, "pending"));
+        assertThat(topicRow(t)).as("and filed under the collection's current label").isEqualTo(new TopicRow("relabelled", fx.labelOf(x), x, "pending"));
     }
 
     @Timeout(180)
@@ -291,7 +303,7 @@ class TaxonomyWritersRegistryReadTest {
         Resp r = fx.post("/v1/taxonomy/topics/rename", "{\"topic_id\":" + t + ",\"label\":\"renamed-by-hand\"}");
 
         assertThat(r.status()).as("not a 23514: %s", r.body()).isEqualTo(200);
-        assertThat(topicRow(t)).isEqualTo(new TopicRow("renamed-by-hand", x, "accepted"));
+        assertThat(topicRow(t)).isEqualTo(new TopicRow("renamed-by-hand", fx.labelOf(x), x, "accepted"));
     }
 
     @Timeout(180)
@@ -303,7 +315,7 @@ class TaxonomyWritersRegistryReadTest {
         Resp r = fx.post("/v1/taxonomy/topics/mark_reviewed", "{\"topic_id\":" + t + ",\"status\":\"deleted\"}");
 
         assertThat(r.status()).as("not a 23514: %s", r.body()).isEqualTo(200);
-        assertThat(topicRow(t)).isEqualTo(new TopicRow("orphaned-label-topic", x, "deleted"));
+        assertThat(topicRow(t)).isEqualTo(new TopicRow("orphaned-label-topic", fx.labelOf(x), x, "deleted"));
     }
 
     /**
@@ -436,6 +448,8 @@ class TaxonomyWritersRegistryReadTest {
         assertThat(sourceId(incomingWins, target)).as("the incoming row won: it keeps its source id").isEqualTo(x);
         assertThat(sourceId(existingWins, target)).as("the existing row won: it keeps its source id").isEqualTo(x);
         assertThat(sourceId(moved, target)).as("a row with no conflict moved, keeping its source id").isEqualTo(x);
+        assertThat(List.of(sourceName(incomingWins, target), sourceName(existingWins, target), sourceName(moved, target)))
+            .as("and every merged row is filed under its source collection's CURRENT label, not the old one").containsOnly(c);
         assertThat(topicRow(source)).as("the source topic is gone").isNull();
     }
 
@@ -497,6 +511,51 @@ class TaxonomyWritersRegistryReadTest {
         assertThat(r.status()).as(r.body()).isEqualTo(200);
         assertThat(r.json().path("child_ids")).as("the child was written once the verb let go").hasSize(1);
         assertThat(count(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TOPIC_ID.eq(parent))).as("the parent's assignments were replaced").isZero();
+    }
+
+    /**
+     * The split reads its own collection's row and the parent's source collections in ONE statement in id order (after the advisory lock). The
+     * verb here holds the LOWER source and then wants the split's own, higher row: read in id order the split waits for the lower row holding
+     * nothing, so the verb's second lock goes through; read own-first it would hold the key share of the higher row while it waits for the
+     * lower one, against a verb that wants it: a cycle. Asserts no 40P01 on the verb, a 200 for the split, and no retry absorbed.
+     */
+    @Timeout(180)
+    @Test
+    void persistSplit_whoseParentsSourceHasALowerIdThanItsCollection_readsBothRowsInIdOrder_andMeetsAVerbWithoutACycle() throws Exception {
+        String lowSource = registered("ps-lo-src");   // registered first: the lower id
+        String home = registered("ps-lo-home");
+        assertThat(fx.idOf(lowSource)).as("setup: the source has the lower id").isLessThan(fx.idOf(home));
+        long parent = topicProjectedFrom(home, "parent", lowSource, "ps-lo");
+        String spec = "{\"label\":\"child\",\"doc_count\":0,\"created_at\":\"2026-10-22T00:00:00Z\",\"terms_json\":\"[]\",\"doc_ids\":[]}";
+        ConcurrentLinkedQueue<String> retries = new ConcurrentLinkedQueue<>();
+        DeadlockRetry.setRetryListenerForTests(retries::add);
+        boolean[] verbGot40P01 = new boolean[1];
+        Future<Resp> writer;
+        try (Connection verb = fx.pg.createConnection("")) {
+            verb.setAutoCommit(false);
+            lockRow(verb, lowSource);   // the verb holds the lower row first, as a retiring verb does
+            writer = pool.submit(() -> fx.post("/v1/taxonomy/topics/persist_split",
+                "{\"topic_id\":" + parent + ",\"collection_name\":" + json(home) + ",\"child_specs\":[" + spec + "]}"));
+            try {
+                awaitWaiting(writer, "the split waits for the lower row the verb holds");
+                try {
+                    lockRow(verb, home);   // the higher row: goes through at once unless the split holds it (a cycle)
+                } catch (DataAccessException e) {
+                    if ("40P01".equals(e.sqlState())) {
+                        verbGot40P01[0] = true;
+                    } else {
+                        throw e;
+                    }
+                }
+            } finally {
+                verb.rollback();
+                DeadlockRetry.setRetryListenerForTests(null);
+            }
+        }
+        Resp r = writer.get(120, TimeUnit.SECONDS);
+        assertThat(verbGot40P01[0]).as("the verb took the split's own row while the split waited: no deadlock was detected on its side").isFalse();
+        assertThat(r.status()).as("the split was not made the deadlock victim: %s", r.body()).isEqualTo(200);
+        assertThat(retries).as("the id order prevents the cycle: DeadlockRetry absorbed none").isEmpty();
     }
 
     /** A split names a collection and a topic: the topic must be that collection's, or nothing is deleted or written. */
