@@ -5231,7 +5231,8 @@ def _check_per_collection_indexes(
     """nexus-43ulx.24 (RDR-227 Day 2): are the per-collection partial HNSW indexes being built and usable?
 
     Reads the ``per_collection_indexes`` object of ``GET /v1/status`` (nexus-43ulx.23): the read half's global
-    ``valid`` / ``invalid`` / ``unparsed`` / ``reindex_leftover`` counts, and in ``this_engine`` what this engine's
+    ``valid`` / ``invalid`` / ``unparsed`` / ``reindex_leftover`` counts (and ``valid_id`` / ``invalid_id``, the id-predicate
+    indexes that serve once gate 3 latches, shown as ``+ N by id`` and counted with ``invalid`` for the warning), and in ``this_engine`` what this engine's
     builder is doing
     (``builder_state``, ``failing``, ``last_ddl_pass_at``). The same status body serves the Engine reaper row, so a
     local and a managed engine are judged the same way (HTTP only).
@@ -5310,10 +5311,14 @@ def _check_per_collection_indexes(
     valid, invalid = _status_int(pci.get("valid")), _status_int(pci.get("invalid"))
     unparsed, failing = _status_int(pci.get("unparsed")), _status_int(this_engine.get("failing"))
     leftover = _status_int(pci.get("reindex_leftover"))
+    # RDR-229 P3.4: once gate 3 latches the id-predicate indexes serve and the name ones retire, so ``valid`` alone reads 0.
+    valid_id, invalid_id = _status_int(pci.get("valid_id")), _status_int(pci.get("invalid_id"))
     last_ddl = _instant(this_engine.get("last_ddl_pass_at"))
     ddl_note = ("no DDL pass yet" if last_ddl is None
                 else f"last DDL pass {_span(max(0.0, (now - last_ddl).total_seconds()))} ago")
-    counts = (f"{valid} valid, {invalid} invalid" + (f", {unparsed} unparsed" if unparsed else "")
+    counts = (f"{valid} valid" + (f" + {valid_id} by id" if valid_id else "")
+              + f", {invalid} invalid" + (f" + {invalid_id} by id" if invalid_id else "")
+              + (f", {unparsed} unparsed" if unparsed else "")
               + (f", {leftover} reindex leftover" if leftover else ""))
     expired = pci.get("expired") is True
     building_now = _status_int(this_engine.get("building")) == 1
@@ -5346,9 +5351,9 @@ def _check_per_collection_indexes(
         )]
     off_note = "; builds disabled by NX_SEARCH_PCI=0" if state == "off" else ""
     peer_may_be_building = (state == "standby" and not expired and _instant(pci.get("last_read_at")) is not None
-                            and invalid > 0)
+                            and invalid + invalid_id > 0)
     # The index being built is invalid until its build finishes; on a standby with a fresh read it may be a peer's.
-    warn_invalid = 0 if in_flight or peer_may_be_building else invalid
+    warn_invalid = 0 if in_flight or peer_may_be_building else invalid + invalid_id
 
     sweep_seconds = _status_int(pci.get("sweep_seconds")) or _PCI_DEFAULT_SWEEP_SECONDS
     stall_seconds = _PCI_STALL_SECONDS_PERIODS * sweep_seconds + _PCI_STALL_MARGIN_SECONDS

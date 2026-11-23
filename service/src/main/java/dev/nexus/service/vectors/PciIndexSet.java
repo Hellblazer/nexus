@@ -74,4 +74,9 @@ public interface PciIndexSet {
     default Optional<PciCatalog.Anchor> anchor(String model, String tenant, String collection) {
         return Optional.empty();
     }
+
+    /** {@link #anchor} of the valid id-predicate index of this collection id (RDR-229 P3.4); the default knows none. */
+    default Optional<PciCatalog.Anchor> anchorById(String model, String tenant, long collectionId) {
+        return Optional.empty();
+    }
 }
