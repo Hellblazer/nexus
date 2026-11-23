@@ -87,19 +87,26 @@ class Rdr229P35cIdAddressedRenameRaceTest {
      * {@code c}, a new row registered under {@code b}, and {@code seedNewHolder} run for it. Asserts the setup ran and that N is
      * still the renamed row's id.
      */
-    private Resp withTheLabelRenamedAwayAndTaken(String b, Runnable seedNewHolder, LongFunction<Resp> request) {
+    private Resp withTheLabelRenamedAwayAndTaken(String b, java.util.function.LongConsumer seedNewHolder, LongFunction<Resp> request) {
         long id = fx.idOf(b);
         String c = b + "-moved";
         // warm the process-wide cache for the label (a by-label lookup fills B -> N's row, and the rename does not evict it), so a
         // write that went back to the label would hit the cache and the new row alike: only a read of the id refuses it
         CollectionRegistry.lookup(new dev.nexus.service.db.TenantScope(fx.svcDs), fx.tenant, b);
         java.util.concurrent.atomic.AtomicBoolean ran = new java.util.concurrent.atomic.AtomicBoolean();
-        fx.service.collectionSelectorFilter().testHooks(null, () -> elsewhere(() -> {
-            oneRowRename(b, c);
-            fx.register(b);
-            seedNewHolder.run();
-            ran.set(true);
-        }), null, null);
+        java.util.concurrent.atomic.AtomicBoolean started = new java.util.concurrent.atomic.AtomicBoolean();
+        fx.service.collectionSelectorFilter().testHooks(null, () -> {
+            if (!started.compareAndSet(false, true)) {
+                return;   // the seed requests below pass this hook too: once
+            }
+            elsewhere(() -> {
+                oneRowRename(b, c);
+                fx.register(b);
+                // the new holder is seeded by ITS id: a by-label request would hit the warm cache, which still maps B to the renamed row
+                seedNewHolder.accept(fx.idOf(b));
+                ran.set(true);
+            });
+        }, null, null);
         try {
             Resp r = request.apply(id);
             assertThat(ran.get()).as("setup: the hook ran before the write's own read").isTrue();
@@ -144,23 +151,24 @@ class Rdr229P35cIdAddressedRenameRaceTest {
         return v;
     }
 
-    private void seedTopic(String c) {
-        Resp r = fx.post("/v1/taxonomy/topics/insert", "{\"collection\":" + json(c) + ",\"label\":\"held\",\"doc_count\":1}");
+    private void seedTopic(long id) {
+        Resp r = fx.post("/v1/taxonomy/topics/insert", "{\"collection_id\":" + id + ",\"label\":\"held\",\"doc_count\":1}");
         assertThat(r.status()).as("setup: " + r.body()).isEqualTo(200);
     }
 
-    private void seedMeta(String c) {
-        Resp r = fx.post("/v1/taxonomy/meta/record", "{\"collection\":" + json(c) + ",\"doc_count\":3}");
+    private void seedMeta(long id) {
+        Resp r = fx.post("/v1/taxonomy/meta/record", "{\"collection_id\":" + id + ",\"doc_count\":3}");
         assertThat(r.status()).as("setup: " + r.body()).isEqualTo(200);
     }
 
-    private void seedAspect(String c) {
+    private void seedAspect(long id) {
+        String c = fx.labelOf(id);
         String docId = "own-" + c;
         fx.asSuperuser(ctx -> {
             CollectionIdSeeds.ownerDocument(ctx, fx.tenant, docId, c);
             return null;
         });
-        Resp r = fx.post("/v1/aspects/upsert", "{\"collection\":" + json(c) + ",\"source_path\":" + json(PATH)
+        Resp r = fx.post("/v1/aspects/upsert", "{\"collection_id\":" + id + ",\"source_path\":" + json(PATH)
             + ",\"doc_id\":" + json(docId) + ",\"confidence\":0.9,\"extracted_at\":\"2026-01-01T00:00:00Z\","
             + "\"model_version\":\"v1\",\"extractor_name\":\"ex\",\"salient_sentences\":\"[\\\"held\\\"]\"}");
         assertThat(r.status()).as("setup: " + r.body()).isEqualTo(200);
@@ -179,7 +187,7 @@ class Rdr229P35cIdAddressedRenameRaceTest {
     void manifestWrite_underAnIdRenamedAwayBeforeItsRead_isRefused_andWritesNothingToTheNewHolder() {
         String b = registered("mw");
         seedDocument(b);
-        Resp r = withTheLabelRenamedAwayAndTaken(b, () -> { },
+        Resp r = withTheLabelRenamedAwayAndTaken(b, id -> { },
             id -> fx.post("/v1/catalog/manifest/write", "{\"collection_id\":" + id + ",\"doc_id\":\"" + DOC + "\",\"rows\":[]}"));
         assertRefused(r);
         assertThat(manifestRows(b)).as("the new holder of B got no manifest row").isZero();
@@ -189,7 +197,7 @@ class Rdr229P35cIdAddressedRenameRaceTest {
     void manifestAppend_underAnIdRenamedAwayBeforeItsRead_isRefused_andWritesNothingToTheNewHolder() {
         String b = registered("ma");
         seedDocument(b);
-        Resp r = withTheLabelRenamedAwayAndTaken(b, () -> { },
+        Resp r = withTheLabelRenamedAwayAndTaken(b, id -> { },
             id -> fx.post("/v1/catalog/manifest/append", "{\"collection_id\":" + id + ",\"doc_id\":\"" + DOC + "\",\"rows\":[]}"));
         assertRefused(r);
         assertThat(manifestRows(b)).as("the new holder of B got no manifest row").isZero();
@@ -200,7 +208,7 @@ class Rdr229P35cIdAddressedRenameRaceTest {
     @Test
     void topicInsert_underAnIdRenamedAwayBeforeItsRead_isRefused_andFilesNothingInTheNewHolder() {
         String b = registered("ti");
-        Resp r = withTheLabelRenamedAwayAndTaken(b, () -> { },
+        Resp r = withTheLabelRenamedAwayAndTaken(b, id -> { },
             id -> fx.post("/v1/taxonomy/topics/insert", "{\"collection_id\":" + id + ",\"label\":\"p35c-i7\",\"doc_count\":1}"));
         assertRefused(r);
         assertThat(topics(b)).as("the new holder of B got no topic").isZero();
@@ -209,7 +217,7 @@ class Rdr229P35cIdAddressedRenameRaceTest {
     @Test
     void assignFromChashes_underAnIdRenamedAwayBeforeItsRead_isRefused() {
         String b = registered("af");
-        Resp r = withTheLabelRenamedAwayAndTaken(b, () -> { },
+        Resp r = withTheLabelRenamedAwayAndTaken(b, id -> { },
             id -> fx.post("/v1/taxonomy/assignments/assign_from_chashes", "{\"collection_id\":" + id + ",\"chashes\":[\""
                 + Chash.ofText("p35c-i7-af").toHex() + "\"],\"cross_collection\":false}"));
         assertRefused(r);
@@ -218,7 +226,7 @@ class Rdr229P35cIdAddressedRenameRaceTest {
     @Test
     void metaRecord_underAnIdRenamedAwayBeforeItsRead_isRefused_andRecordsNothingForTheNewHolder() {
         String b = registered("mr");
-        Resp r = withTheLabelRenamedAwayAndTaken(b, () -> { },
+        Resp r = withTheLabelRenamedAwayAndTaken(b, id -> { },
             id -> fx.post("/v1/taxonomy/meta/record", "{\"collection_id\":" + id + ",\"doc_count\":9}"));
         assertRefused(r);
         assertThat(metas(b)).as("the new holder of B got no meta row").isZero();
@@ -227,9 +235,9 @@ class Rdr229P35cIdAddressedRenameRaceTest {
     @Test
     void purgeCollection_underAnIdRenamedAwayBeforeItsRead_isRefused_andPurgesNothingOfTheNewHolder() {
         String b = registered("pc");
-        Resp r = withTheLabelRenamedAwayAndTaken(b, () -> {
-            seedTopic(b);
-            seedMeta(b);
+        Resp r = withTheLabelRenamedAwayAndTaken(b, newId -> {
+            seedTopic(newId);
+            seedMeta(newId);
         }, id -> fx.post("/v1/taxonomy/purge_collection", "{\"collection_id\":" + id + "}"));
         assertRefused(r);
         assertThat(topics(b)).as("the new holder's topic survives the purge").isEqualTo(1);
@@ -246,7 +254,7 @@ class Rdr229P35cIdAddressedRenameRaceTest {
             CollectionIdSeeds.ownerDocument(ctx, fx.tenant, docId, b);
             return null;
         });
-        Resp r = withTheLabelRenamedAwayAndTaken(b, () -> { },
+        Resp r = withTheLabelRenamedAwayAndTaken(b, id -> { },
             id -> fx.post("/v1/aspects/upsert", "{\"collection_id\":" + id + ",\"source_path\":" + json(PATH) + ",\"doc_id\":" + json(docId)
                 + ",\"confidence\":0.9,\"extracted_at\":\"2026-01-01T00:00:00Z\",\"model_version\":\"v1\",\"extractor_name\":\"ex\","
                 + "\"salient_sentences\":\"[\\\"x\\\"]\"}"));
@@ -257,7 +265,7 @@ class Rdr229P35cIdAddressedRenameRaceTest {
     @Test
     void aspectsDelete_underAnIdRenamedAwayBeforeItsRead_isRefused_andDeletesNothingOfTheNewHolder() {
         String b = registered("ad");
-        Resp r = withTheLabelRenamedAwayAndTaken(b, () -> seedAspect(b),
+        Resp r = withTheLabelRenamedAwayAndTaken(b, newId -> seedAspect(newId),
             id -> fx.post("/v1/aspects/delete", "{\"collection_id\":" + id + ",\"source_path\":" + json(PATH) + "}"));
         assertRefused(r);
         assertThat(aspects(b)).as("the new holder's aspect row survives").isEqualTo(1);
@@ -266,7 +274,7 @@ class Rdr229P35cIdAddressedRenameRaceTest {
     @Test
     void aspectsSetSalientByKey_underAnIdRenamedAwayBeforeItsRead_isRefused_andChangesNothingOfTheNewHolder() {
         String b = registered("as");
-        Resp r = withTheLabelRenamedAwayAndTaken(b, () -> seedAspect(b),
+        Resp r = withTheLabelRenamedAwayAndTaken(b, newId -> seedAspect(newId),
             id -> fx.post("/v1/aspects/salient_sentences/set_by_key",
                 "{\"collection_id\":" + id + ",\"source_path\":" + json(PATH) + ",\"sentences\":[\"changed\"]}"));
         assertRefused(r);
@@ -278,7 +286,7 @@ class Rdr229P35cIdAddressedRenameRaceTest {
     @Test
     void highlightsUpsert_underAnIdRenamedAwayBeforeItsRead_isRefused_andWritesNothingToTheNewHolder() {
         String b = registered("hu");
-        Resp r = withTheLabelRenamedAwayAndTaken(b, () -> { },
+        Resp r = withTheLabelRenamedAwayAndTaken(b, id -> { },
             id -> fx.post("/v1/aspects/highlights/upsert", "{\"collection_id\":" + id + ",\"doc_id\":\"p35c-i7-doc\","
                 + "\"ingested_at\":\"2026-01-01T00:00:00Z\",\"highlights_md\":\"p35c\"}"));
         assertRefused(r);
