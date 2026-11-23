@@ -433,4 +433,67 @@ class Rdr229P35cCatalogMovesByIdTest {
         assertThat(heldAgainstAVerbDuring(t, k, () -> moves.moveOwner(t, "1.1", NEW_ROOT, HASH_B, false)))
             .as("a verb's FOR UPDATE on K is refused while the fold runs").isTrue();
     }
+
+    /** The highlight-row arm of the lock set: S's highlights row is filed under another collection K, so the move holds K's registry row too. */
+    @Test
+    void aDocumentMoveHoldsTheRegistryRowOfACollectionItsHighlightRowIsFiledUnder() throws Exception {
+        String t = tenant();
+        latched.set(false);
+        register(t, COLL_A);
+        register(t, COLL_K);
+        curatorOwner(t, "1.1", "pdfs");
+        String s = registered(t, "1.1", "s", "file:///old/a.pdf", "/old/a.pdf", COLL_A);
+        highlight(t, s, COLL_K, "file:///old/a.pdf", "filed under K");
+        long k = idOf(t, COLL_K);
+        latched.set(true);
+
+        assertThat(heldAgainstAVerbDuring(t, k, () -> moves.moveDocument(t, s, "file:///new/a.pdf", "/new/a.pdf", false)))
+            .as("a verb's FOR UPDATE on K is refused while the move runs").isTrue();
+    }
+
+    /**
+     * Once the document rows are held, a collection the move writes in that this transaction does not hold is a refusal (a collection that
+     * arrived between the read of the ids and the document locks): requireCollectionsHeld is called here in a transaction that holds only the
+     * document's own collection, while the document's aspect row is filed under K.
+     */
+    @Test
+    void requireCollectionsHeldRefusesACollectionTheMoveWritesInThatItDoesNotHold() throws Exception {
+        String t = tenant();
+        latched.set(false);
+        register(t, COLL_A);
+        register(t, COLL_K);
+        curatorOwner(t, "1.1", "pdfs");
+        String s = registered(t, "1.1", "s", "file:///old/a.pdf", "/old/a.pdf", COLL_A);
+        aspect(t, s, COLL_K, "/old/a.pdf", "file:///old/a.pdf", "filed under K");
+        long a = idOf(t, COLL_A);
+        latched.set(true);
+        var method = CatalogMoves.class.getDeclaredMethod("requireCollectionsHeld", DSLContext.class, String.class, CollectionKey.class,
+            org.jooq.Condition.class);
+        method.setAccessible(true);
+        var ck = CollectionKey.of(() -> true);
+        org.jooq.Condition docs = CATALOG_DOCUMENTS.TUMBLER.eq(s);
+
+        var scope = new TenantScope(svcDs);
+        assertThatThrownBy(() -> scope.withTenant(t, ctx -> {
+            CollectionRegistry.requireIdForWrite(ctx, t, a);   // only the document's own collection is held
+            try {
+                method.invoke(null, ctx, t, ck, docs);
+            } catch (java.lang.reflect.InvocationTargetException e) {
+                throw (RuntimeException) e.getCause();
+            } catch (ReflectiveOperationException e) {
+                throw new IllegalStateException(e);
+            }
+            return null;
+        })).as("K is written in but not held").isInstanceOf(CatalogRepository.MergeRefused.class).hasMessageContaining("not held");
+
+        scope.withTenant(t, ctx -> {
+            CollectionRegistry.requireIdsAndLabelsForWrite(ctx, t, java.util.List.of(a, idOf(t, COLL_K)), java.util.List.of());   // both held
+            try {
+                method.invoke(null, ctx, t, ck, docs);
+            } catch (ReflectiveOperationException e) {
+                throw new AssertionError("with both held the check passes", e);
+            }
+            return null;
+        });
+    }
 }
