@@ -16,7 +16,7 @@ import java.sql.SQLException;
 import java.util.Properties;
 
 /**
- * Ends the backends a stopped engine left behind, BEFORE the schema migration (nexus-p2m1x.21; linda, 2026-11-23). A validation with no
+ * Ends the backends a stopped engine left behind, BEFORE the schema migration (only this database's and this role's: a backend of another database on the cluster, or of another role, is never signalled) (nexus-p2m1x.21; linda, 2026-11-23). A validation with no
  * statement bound can outlive the engine that started it: the client socket closing does not stop a running VALIDATE, and it holds ROW SHARE on
  * the collection registry and SHARE UPDATE EXCLUSIVE on its leaf for the rest of its run. A migration changeset that takes ACCESS EXCLUSIVE on
  * either would wait behind it and stall the boot. {@link DataMoveWorker#terminateOrphans} does the same after the migration; this runs
@@ -32,10 +32,11 @@ public final class DataMoveOrphans {
     public static final String PREFIX = DataMoveWorker.APPLICATION_NAME_PREFIX;
 
     /**
-     * Cancels the statement a backend is running ({@code pg_cancel_backend}), from a connection of its own: the engine is stopping and a
-     * validation with no statement bound would otherwise run on. Never throws.
+     * Cancels the statement a backend is running ({@code pg_cancel_backend}), from a connection of its own, after checking in the same
+     * statement that the pid is still the backend it was: this database, this role, the same {@code application_name} and the same start. A
+     * pid the server has reused for another session is left alone. Never throws.
      */
-    static void cancelBackend(AdminConnection admin, int pid) {
+    static void cancelBackend(AdminConnection admin, int pid, String applicationName, java.time.OffsetDateTime backendStart) {
         Properties props = new Properties();
         props.setProperty("user", admin.user());
         props.setProperty("password", admin.password());
@@ -43,10 +44,22 @@ public final class DataMoveOrphans {
         props.setProperty("connectTimeout", "3");
         props.setProperty("socketTimeout", "5");
         try (Connection c = DriverManager.getConnection(admin.url(), props)) {
-            DSL.using(c, SQLDialect.POSTGRES).select(DSL.function("pg_cancel_backend", SQLDataType.BOOLEAN, DSL.val(pid))).fetch();
+            var pidField = DSL.field(DSL.name("pid"), Integer.class);
+            DSL.using(c, SQLDialect.POSTGRES).select(DSL.function("pg_cancel_backend", SQLDataType.BOOLEAN, pidField))
+                .from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
+                .where(ours()).and(pidField.eq(pid))
+                .and(DSL.field(DSL.name("application_name"), String.class).eq(applicationName))
+                .and(DSL.field(DSL.name("backend_start"), java.time.OffsetDateTime.class).eq(backendStart))
+                .fetch();
         } catch (SQLException | DataAccessException e) {
             log.warn("event=data_move_completion_cancel_failed pid={} cause=\"{}\"", pid, FailureHandler.oneLine(e.toString()));
         }
+    }
+
+    /** A backend of this database, run by the role this connection is: the ownership check before any signal (never a process that is not ours). */
+    static org.jooq.Condition ours() {
+        return DSL.field(DSL.name("datname"), String.class).eq(DSL.function("current_database", SQLDataType.VARCHAR))
+            .and(DSL.field(DSL.name("usename"), String.class).eq(DSL.currentUser()));
     }
 
     /**
@@ -66,6 +79,7 @@ public final class DataMoveOrphans {
             var rows = ctx.select(pid, name, DSL.function("pg_terminate_backend", SQLDataType.BOOLEAN, pid))
                 .from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
                 .where(DSL.condition(DSL.function("starts_with", SQLDataType.BOOLEAN, name, DSL.val(PREFIX))))
+                .and(ours())
                 .and(pid.ne(DSL.function("pg_backend_pid", SQLDataType.INTEGER)))
                 .fetch();
             for (var r : rows) {
