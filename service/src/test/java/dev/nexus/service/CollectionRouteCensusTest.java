@@ -68,7 +68,7 @@ class CollectionRouteCensusTest {
         Map.entry("AspectHandler.java", Map.of("collection", 4)),
         Map.entry("CatalogHandler.java", Map.of("collection", 10, "prefer_collection", 1)),
         Map.entry("ChashHandler.java", Map.of("collection", 2)),
-        Map.entry("ChunkKeysAdminHandler.java", Map.of("collection", 3)),
+        Map.entry("ChunkKeysAdminHandler.java", Map.of("collection", 3, "collection_id", 2)),
         Map.entry("CollectionSelectorFilter.java", Map.of("physical_collection_id", 1)),
         Map.entry("PipelineHandler.java", Map.of("collection", 4)),
         Map.entry("ReembedHandler.java", Map.of("source_collection", 2, "target_collection", 2)),

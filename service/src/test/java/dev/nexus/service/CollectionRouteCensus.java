@@ -490,6 +490,11 @@ final class CollectionRouteCensus {
             "the sweep's own resume token: a {collection, chash} cursor the previous call returned, read back verbatim, not a "
                 + "request's collection",
             "ChunkKeysAdminHandler.java", "resume.cursor must be {collection, chash}"),
+        new Excluded("ChunkKeysAdminHandler.java", "resume", "collection_id",
+            "the same resume token's collection id (RDR-229 P3.5c): from gate 3 the token carries the cursor's collection_id because "
+                + "the signature covers it; it is read back verbatim and checked against the signed token, not resolved as a request's "
+                + "collection",
+            "ChunkKeysAdminHandler.java", "resume.cursor.collection_id must be a non-negative integer"),
         new Excluded("TaxonomyHandler.java", "handlePruneProjection", "source_collection_prefix",
             "a name prefix matched against the projection's source collections: it names no single registry row, so no id can "
                 + "stand for it",
