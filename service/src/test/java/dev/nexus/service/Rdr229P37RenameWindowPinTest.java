@@ -74,8 +74,10 @@ class Rdr229P37RenameWindowPinTest {
             engine.gate3(true);
             Future<Boolean> flip = pool.submit(() -> engine.completion().gate3Latched());
 
-            assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(2), () -> latchRows() > 0 || flip.isDone() || readiness.gate3Latched()))
-                .as("the latch waits for the open rename: no row, no regime, and the sample has not returned").isFalse();
+            Rdr229RenameEngine.await(Duration.ofSeconds(2), () -> latchRows() > 0 || flip.isDone() || readiness.gate3Latched());
+            assertThat(latchRows()).as("the latch waits for the open rename: no row").isZero();
+            assertThat(readiness.gate3Latched()).as("no regime").isFalse();
+            assertThat(flip.isDone()).as("and the sample has not returned: " + (flip.isDone() ? flip.resultNow() : "")).isFalse();
 
             release.countDown();
             assertThat(open.get(30, TimeUnit.SECONDS)).as("the open rename never saw the latch").isFalse();

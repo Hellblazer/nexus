@@ -124,7 +124,7 @@ class Rdr229P37RenameWindowTest {
         });
         long idBefore = engine.su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, oldName));
         long chunksBefore = engine.su(ctx -> Rdr229RenameChecks.naming(ctx, tenant, "chunks", "collection", oldName));
-        assertThat(engine.completion().gate3()).as("non-vacuity: gate 3 holds").isTrue();
+        assertThat(engine.completion().gate3()).as("non-vacuity: gate 3 holds [" + engine.completion().gate3Why() + "]").isTrue();
         assertThat(engine.moveCompleted(Rdr229RenameEngine.DROP_LABEL))
             .as("non-vacuity: the name-key drop move has no completed_at (the worker is stopped)").isFalse();
         assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(30), () -> engine.moveRows(Rdr229RenameEngine.DROP_LABEL) == 1))
@@ -190,7 +190,7 @@ class Rdr229P37RenameWindowTest {
         long chunksBefore = engine.su(ctx -> Rdr229RenameChecks.naming(ctx, tenant, "chunks", "collection", oldName));
         engine.gate3(false);
         assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(10), () -> !engine.completion().gate3()))
-            .as("non-vacuity: the live gate 3 dropped back").isTrue();
+            .as("non-vacuity: the live gate 3 dropped back [" + engine.completion().gate3Why() + "]").isTrue();
         assertThat(engine.completion().gate3Latched()).as("while the latch holds").isTrue();
         String why = " [readiness " + engine.readiness().map(Object::toString).orElse("unreadable") + "]";
 

@@ -139,8 +139,8 @@ final class Rdr229RenameEngine implements AutoCloseable {
         // as Main wires it: the latch row is written under the rename window's write lock and the one-row regime flips with it
         var window = new dev.nexus.service.datamove.RenameWindow();
         check = new CompletionBootWork(bootWork, admin, CompletionCheck.ReadSet.boot(), this::simulatedGate3, java.util.List.of(),
-            window.latchWriter(), dev.nexus.service.datamove.Gate3Latch.readAtBoot(admin), CompletionBootWork.LATCHED_COVERAGE_PERIOD,
-            this::p35bList, window);
+            window.latchWriter(), dev.nexus.service.datamove.Gate3Latch.readAtBoot(admin), Duration.ZERO,
+            this::p35bList, window);   // ZERO: the coverage is read every sample, so a test can dip the live gate 3 after the latch
         readiness = counting(check.renameReadiness());
         service = new NexusService(0, ROOT, ds, null, null, null, null, null, null, System::getenv,
             () -> dev.nexus.service.db.PgSession.startupPciSettings().enabled(), null, null, check.gate3(), readiness);
