@@ -160,6 +160,9 @@ public final class PipelineRepository {
     /**
      * RDR-229 P3.5c: from gate 3 a collection is named by {@code collection_id} (the narrowing of a by-document ref, the
      * per-collection delete, and the id an UPDATE re-asserts, which is the row's own); before it, by the {@code collection} column.
+     * pdf_pipeline is a LEDGER (no FK to the registry: the client deletes the registry row before it asks for the pipeline
+     * cleanup), so from gate 3 a label matches {@code collection_id = registry id of the label} OR the recorded name when no LIVE
+     * registry row holds the row's id ({@link CollectionKey#eqLedger}).
      */
     public PipelineRepository(TenantScope tenantScope, Gate3 gate3) {
         this.tenantScope = tenantScope;
@@ -224,7 +227,7 @@ public final class PipelineRepository {
             return c.and(PDF_PIPELINE.KEYED_BY.eq(KEYED_BY_CONTENT_HASH));
         }
         if (ref.collection() != null && !ref.collection().isBlank()) {
-            c = c.and(k.eq(tenant, PDF_PIPELINE.COLLECTION, PDF_PIPELINE.COLLECTION_ID, ref.collection()));
+            c = c.and(k.eqLedger(tenant, PDF_PIPELINE.COLLECTION, PDF_PIPELINE.COLLECTION_ID, ref.collection()));
         }
         if (ref.pdfPath() != null && !ref.pdfPath().isBlank()) {
             c = c.and(PDF_PIPELINE.PDF_PATH.eq(ref.pdfPath()));
@@ -815,7 +818,7 @@ public final class PipelineRepository {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.deleteFrom(PDF_PIPELINE)
                .where(PDF_PIPELINE.TENANT_ID.eq(tenant)
-                       .and(k.eq(tenant, PDF_PIPELINE.COLLECTION, PDF_PIPELINE.COLLECTION_ID, collection)))
+                       .and(k.eqLedger(tenant, PDF_PIPELINE.COLLECTION, PDF_PIPELINE.COLLECTION_ID, collection)))
                .execute());
     }
 

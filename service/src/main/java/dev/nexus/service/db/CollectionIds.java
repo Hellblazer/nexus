@@ -27,11 +27,13 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
  * ({@code (NULLIF(name, '') IS NULL) = (id IS NULL)}), so both shapes give NULL for it without reading the registry,
  * even if a registry row is literally named {@code ''}.
  *
- * <p><b>Which row.</b> The LIVE registry row of the name: {@code superseded_by = '' AND superseded_by_id IS NULL}, the
- * predicate of P3.6's live-label unique index. Once a tombstone and a live row can share a label, a bare
- * {@code WHERE name = ?} returns two rows and the scalar subselect errors (21000); the live row is the one a label names.
- * A name that only a tombstone carries resolves to NULL (a retired label names no collection). A superseded or
- * quarantine row has an id too; a write to one is decided by the writer's own checks, not here.
+ * <p><b>Which row.</b> The LIVE registry row of the name first ({@code superseded_by = '' AND superseded_by_id IS NULL}, the
+ * predicate of P3.6's live-label unique index), else the newest tombstone: {@code ORDER BY (live) DESC, collection_id DESC
+ * LIMIT 1} (linda's corrected Q3: no resolver filters strictly to live). Once a tombstone and a live row can share a label a bare
+ * {@code WHERE name = ?} returns two rows and the scalar subselect errors (21000); the ordering picks one. A label only
+ * tombstones carry still names its own (newest) retired row, so the writers that legitimately file rows under a retired
+ * collection (the fidelity imports, the T2 rename verbs, an own-name stamp of a row that stayed in a superseded collection) keep
+ * working. A superseded or quarantine row has an id too; a write to one is decided by the writer's own checks, not here.
  *
  * <p><b>Two shapes.</b>
  * <ul>
@@ -70,7 +72,8 @@ public final class CollectionIds {
         var c = CATALOG_COLLECTIONS.as("cid");
         return DSL.when(name.isNull().or(name.eq("")), DSL.castNull(Long.class))
             .otherwise(DSL.field(DSL.select(c.COLLECTION_ID).from(c)
-                .where(c.TENANT_ID.eq(tenant)).and(c.NAME.eq(name)).and(live(c))));
+                .where(c.TENANT_ID.eq(tenant)).and(c.NAME.eq(name))
+                .orderBy(DSL.field(live(c)).desc(), c.COLLECTION_ID.desc()).limit(1)));
     }
 
     /** The registry row is live: the predicate of P3.6's live-label partial unique index, so it can infer that index. */
@@ -92,7 +95,7 @@ public final class CollectionIds {
         Long id = ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID)
             .from(CATALOG_COLLECTIONS)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(name))
-            .and(live(CATALOG_COLLECTIONS))
+            .orderBy(DSL.field(live(CATALOG_COLLECTIONS)).desc(), CATALOG_COLLECTIONS.COLLECTION_ID.desc()).limit(1)
             .fetchOne(CATALOG_COLLECTIONS.COLLECTION_ID);
         if (id == null) {
             throw new UnregisteredCollectionException(tenant, name);

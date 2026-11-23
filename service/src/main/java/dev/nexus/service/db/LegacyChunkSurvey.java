@@ -78,7 +78,13 @@ public final class LegacyChunkSurvey {
     }
 
     /** One chunk that is not 32 bytes: its tenant, collection, model, chash (hex), reason and owners. */
-    public record Bad(String tenant, String collection, String model, String chashHex, String reason, Owners owners) {}
+    public record Bad(String tenant, String collection, String model, String chashHex, String reason, Owners owners,
+                      Long collectionId) {
+        /** A chunk read by name (before gate 3): no collection id. */
+        public Bad(String tenant, String collection, String model, String chashHex, String reason, Owners owners) {
+            this(tenant, collection, model, chashHex, reason, owners, null);
+        }
+    }
 
     /** Counts per reason among a table's bad rows, the first {@code cap} of them in key order; {@code capped} only when more exist. */
     public record Counts(Map<String, Long> byReason, boolean capped) {}
@@ -202,13 +208,16 @@ public final class LegacyChunkSurvey {
         Field<String> label = k.label(DSL.field(DSL.name("lcs", "tenant_id"), SQLDataType.CLOB), collection,
             DSL.field(DSL.name("lcs", "collection_id"), SQLDataType.BIGINT)).as("collection_label");
         Field<String> model = DSL.field(DSL.name("embedding_model"), SQLDataType.CLOB);
-        var rows = ctx.select(tenant, k.byId() ? label : collection, model, chash, reason.as("reason")).from(from)
+        Field<Long> idOut = DSL.field(DSL.name("lcs", "collection_id"), SQLDataType.BIGINT);
+        var rows = ctx.select(tenant, k.byId() ? label : collection, model, chash, reason.as("reason"),
+                k.byId() ? idOut : DSL.castNull(Long.class)).from(from)
             .where(scope.and(width(chash).ne(CHASH_BYTES)))
             .orderBy(tenant, k.key(collection, collectionId), chash, model).limit(plusOne(cap));
         List<Bad> out = new ArrayList<>();
         for (Record r : rows.fetch()) {
             out.add(new Bad(r.get(tenant), r.get(k.byId() ? label : collection), r.get(model),
-                HexFormat.of().formatHex(r.get(chash)), r.get("reason", String.class), Owners.unknown()));
+                HexFormat.of().formatHex(r.get(chash)), r.get("reason", String.class), Owners.unknown(),
+                k.byId() ? r.get(5, Long.class) : null));
         }
         return out;
     }
@@ -354,9 +363,11 @@ public final class LegacyChunkSurvey {
         List<Bad> withOwners = new ArrayList<>(listed.size());
         for (Bad bad : listed) {
             Owners o = stage(scope, tenant, b, Owners.unknown(),
-                ctx -> owners(ctx, tenant, bad.collection(), bad.model(), HexFormat.of().parseHex(bad.chashHex()), DEFAULT_OWNER_CAP, b.gate, gate3));
+                ctx -> bad.collectionId() != null
+                    ? ownersById(ctx, tenant, bad.collectionId(), bad.model(), HexFormat.of().parseHex(bad.chashHex()), DEFAULT_OWNER_CAP, b.gate)
+                    : owners(ctx, tenant, bad.collection(), bad.model(), HexFormat.of().parseHex(bad.chashHex()), DEFAULT_OWNER_CAP, b.gate, gate3));
             if (o.owners() == null) b.partial = true;   // never an empty list that was not looked up
-            withOwners.add(new Bad(bad.tenant(), bad.collection(), bad.model(), bad.chashHex(), bad.reason(), o));
+            withOwners.add(new Bad(bad.tenant(), bad.collection(), bad.model(), bad.chashHex(), bad.reason(), o, bad.collectionId()));
         }
         return new TenantDetail(chunkCounts, manifestCounts, docs, List.copyOf(withOwners), capped, b.partial);
     }
@@ -383,13 +394,33 @@ public final class LegacyChunkSurvey {
     public static Owners owners(DSLContext ctx, String tenant, String collection, String model, byte[] chash, int cap, Gate gate,
                                 Gate3 gate3) {
         CollectionKey k = CollectionKey.of(gate3);
+        return ownersOf(ctx, tenant, model, chash, cap, gate,
+            (m, d) -> k.eq(tenant, m.COLLECTION, m.COLLECTION_ID, collection),
+            (m, d) -> k.eq(tenant, d.PHYSICAL_COLLECTION, d.PHYSICAL_COLLECTION_ID, collection));
+    }
+
+    /**
+     * The owners of {@code (collection_id, model, chash)}: the collection named by its registry id, which a report that already
+     * holds it ({@link Bad#collectionId()}) passes instead of its label. A label resolves back to an id by name, which for a retired
+     * collection or a label a tombstone shares with a live row names the wrong row; the id names its own.
+     */
+    public static Owners ownersById(DSLContext ctx, String tenant, long collectionId, String model, byte[] chash, int cap, Gate gate) {
+        return ownersOf(ctx, tenant, model, chash, cap, gate,
+            (m, d) -> m.COLLECTION_ID.eq(collectionId), (m, d) -> d.PHYSICAL_COLLECTION_ID.eq(collectionId));
+    }
+
+    private static Owners ownersOf(DSLContext ctx, String tenant, String model, byte[] chash, int cap, Gate gate,
+            java.util.function.BiFunction<dev.nexus.service.jooq.nexus.tables.CatalogDocumentChunks,
+                dev.nexus.service.jooq.nexus.tables.CatalogDocuments, Condition> manifestCollection,
+            java.util.function.BiFunction<dev.nexus.service.jooq.nexus.tables.CatalogDocumentChunks,
+                dev.nexus.service.jooq.nexus.tables.CatalogDocuments, Condition> documentCollection) {
         var m = CATALOG_DOCUMENT_CHUNKS;
         var d = CATALOG_DOCUMENTS;
         List<Owner> out = new ArrayList<>();
         if (!gate.next(ctx)) return Owners.unknown();
         for (Record r : ctx.selectDistinct(d.TUMBLER, d.TITLE, d.FILE_PATH, d.SOURCE_URI).from(m).join(d)
                 .on(d.TENANT_ID.eq(m.TENANT_ID)).and(d.TUMBLER.eq(m.DOC_ID))
-                .where(m.TENANT_ID.eq(tenant)).and(k.eq(tenant, m.COLLECTION, m.COLLECTION_ID, collection)).and(m.EMBEDDING_MODEL.eq(model)).and(m.CHASH.eq(chash))
+                .where(m.TENANT_ID.eq(tenant)).and(manifestCollection.apply(m, d)).and(m.EMBEDDING_MODEL.eq(model)).and(m.CHASH.eq(chash))
                 .orderBy(d.TUMBLER).limit(plusOne(cap)).fetch()) {
             out.add(new Owner(r.get(d.TUMBLER), r.get(d.TITLE), source(r.get(d.SOURCE_URI), r.get(d.FILE_PATH)), "manifest"));
         }
@@ -398,7 +429,7 @@ public final class LegacyChunkSurvey {
             Field<String> stamp = DSL.jsonbGetAttributeAsText(d.METADATA, "doc_id");
             String hex = HexFormat.of().formatHex(chash);
             for (Record r : ctx.select(d.TUMBLER, d.TITLE, d.FILE_PATH, d.SOURCE_URI).from(d)
-                    .where(d.TENANT_ID.eq(tenant)).and(k.eq(tenant, d.PHYSICAL_COLLECTION, d.PHYSICAL_COLLECTION_ID, collection)).and(d.DELETED_AT.isNull())
+                    .where(d.TENANT_ID.eq(tenant)).and(documentCollection.apply(m, d)).and(d.DELETED_AT.isNull())
                     .and(d.FILE_PATH.eq("")).and(stamp.eq(hex)).orderBy(d.TUMBLER).limit(plusOne(cap)).fetch()) {
                 if (out.stream().noneMatch(o -> o.docId().equals(r.get(d.TUMBLER)))) {
                     out.add(new Owner(r.get(d.TUMBLER), r.get(d.TITLE), source(r.get(d.SOURCE_URI), r.get(d.FILE_PATH)), "note"));

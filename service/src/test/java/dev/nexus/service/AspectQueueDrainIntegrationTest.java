@@ -265,6 +265,28 @@ class AspectQueueDrainIntegrationTest {
             assertThat(byId.run().moved()).isEqualTo(1);
             assertThat(JSON.readTree(tasks(fx).get("a.2").get(TUPLES.BODY)).get("collection").asText())
                 .as("from gate 3: the registry's current label of the document's id").isEqualTo(renamed);
+
+            // a document with no home: the queue row's own collection_id (the table kept the column), not its stale name
+            fx.su(ctx -> {
+                ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE)
+                    .values("drain-a", "a.3", "Test Doc a.3").execute();
+                ctx.set(DSL.name("session_replication_role"), DSL.inline("replica")).execute();
+                try {
+                    ctx.insertInto(QUEUE, DSL.field(DSL.name("tenant_id")), DSL.field(DSL.name("collection")),
+                            DSL.field(DSL.name("collection_id")), DSL.field(DSL.name("source_path")), DSL.field(DSL.name("doc_id")),
+                            DSL.field(DSL.name("status")), DSL.field(DSL.name("enqueued_at")), DSL.field(DSL.name("content_hash")))
+                        .values(DSL.val(TENANT_A), DSL.val(COLL_A), CollectionIds.idOf(TENANT_A, renamed), DSL.val("/a/3.md"),
+                            DSL.val("a.3"), DSL.val("pending"), DSL.val(OffsetDateTime.now()), DSL.val("h3"))
+                        .execute();
+                } finally {
+                    ctx.set(DSL.name("session_replication_role"), DSL.inline("origin")).execute();
+                }
+                return null;
+            });
+            assertThat(byId.run().moved()).isEqualTo(1);
+            assertThat(JSON.readTree(tasks(fx).get("a.3").get(TUPLES.BODY)).get("collection").asText())
+                .as("no home: the queue row's collection_id names the registry's current label, not the stale name")
+                .isEqualTo(renamed);
         }
     }
 
