@@ -309,6 +309,10 @@ class Rdr229AspOpsDualWriteTest {
         String src = "docs__aspops-tel-src__bge-base-en-v15-768__v1";
         su(d -> { PgContainerHelper.insertCollection(d, T, src); return null; });
         repo.logSearchBatch(T, List.<Object[]>of(new Object[]{"2026-06-01T11:00:00Z", "h-rename", src, 1, 1, 0.1, 0.5}));
+        // the registry rename comes first (the old row becomes the tombstone that names its successor), as the rename path does it: the
+        // telemetry rename takes the id of the row that now bears the new name (RDR-229 P3.5c, linda 2026-11-23), not idOf(newName)
+        su(d -> d.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, COLL2).set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, id2)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(T)).and(CATALOG_COLLECTIONS.NAME.eq(src)).execute());
         repo.renameCollection(T, src, COLL2);
         assertThat(searchId("h-rename")).isEqualTo(id2);
     }
