@@ -689,6 +689,7 @@ public final class TenantImportSessions implements AutoCloseable {
         String failure = null;
         TenantImportReport report = null;
         Error fatal = null;
+        boolean commitUnconfirmed = false;   // the COMMIT reached the client as an exception: PostgreSQL may have applied it
         try {
             PgSession.setLocal(s.ctx, "statement_timeout", Long.toString(config.loadMax().toMillis()));
             Map<String, Long> staged = new HashMap<>();
@@ -709,6 +710,7 @@ public final class TenantImportSessions implements AutoCloseable {
             try {
                 s.held.commit();
             } catch (SQLException e) {
+                commitUnconfirmed = true;
                 throw new TenantImportLoad.LoadFailedException("the commit was not confirmed (" + e.getMessage()
                     + "); read /v1/tenant/import-marker to learn whether it landed");
             }
@@ -737,12 +739,16 @@ public final class TenantImportSessions implements AutoCloseable {
         } finally {
             s.gate.release();
         }
-        if (committed) {
+        if (committed || commitUnconfirmed) {
+            // Row 15 addendum: an unconfirmed COMMIT may still have been applied, so the tenant's cached state is emptied for it as
+            // for a confirmed one (evicting is always safe); it is reported failed, as before.
             try {
                 onCommitted.accept(s.tenant);
             } catch (RuntimeException e) {
                 log.warn("event=import_post_commit_hook_failed session={} tenant={} error={}", s.id, s.tenant, e.getMessage());
             }
+        }
+        if (committed) {
             log.info("event=import_committed session={} tenant={} rows={} dropped={}", s.id, s.tenant,
                 s.report.insertedRows(), s.report.droppedRows());
         } else {
