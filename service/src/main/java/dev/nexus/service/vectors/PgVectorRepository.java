@@ -8536,7 +8536,10 @@ FROM scope s
                 queries.add(ctx.update(ch.table())
                                .set(ch.metadata(), value)
                                .set(ch.lastWrittenAt(), DimTables.lastWrittenNow())
-                               .set(CHUNKS.COLLECTION_ID, rowCollectionId(ch, byId))
+                               // the stored id wins (RDR-229 P3.5a row 14): a row whose label a one-row rename left behind, and another collection has
+                               // since taken, must keep the id of the collection it is in; the label's id fills only an unstamped row. From gate 3
+                               // every row is stamped and keeps its id
+                               .set(CHUNKS.COLLECTION_ID, byId ? ch.collectionId() : DSL.coalesce(ch.collectionId(), rowCollectionId(ch, false)))
                                .where(CollectionSelector.collectionIs(gate3, tenant, ch.collection(), ch.collectionId(),
                                                                       collection)
                                    .and(ch.chash().eq(ids.get(idx)))));
