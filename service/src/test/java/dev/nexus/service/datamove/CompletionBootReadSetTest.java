@@ -17,7 +17,7 @@ import java.nio.file.Path;
 
 /**
  * RDR-229 P3.3a, P3.3c and Phase 3 blocking row 13 (nexus-p2m1x.19, nexus-p2m1x.21, nexus-p2m1x.22): what a running engine's completion check reads. {@code Main} builds the reporter only through
- * {@link CompletionBootWork#atBoot}, which reads {@link CompletionCheck.ReadSet#boot()}, which is blocking row 13.s set (P3.3c.s, and in gate 2 the quarantine-origin backfill); so reverting {@code Main} to P3.1's
+ * {@link CompletionBootWork#atBoot}, which reads {@link CompletionCheck.ReadSet#boot()}, which is blocking row 13's set (P3.3c's, and in gate 2 the quarantine-origin backfill); so reverting {@code Main} to P3.1's
  * set, or the factory to {@code p31()}, fails here without a database.
  */
 class CompletionBootReadSetTest {
@@ -25,7 +25,7 @@ class CompletionBootReadSetTest {
     private static final Path MAIN = Path.of("src", "main", "java", "dev", "nexus", "service", "Main.java");
 
     @Test
-    void theBootReadSetIsRow13sSet_whichKeepsP33asGate1AndAddsTheSwapValidationAndBackfillLabelsToGate2() {
+    void theBootReadSetIsTheBackfillSet_whichKeepsP33asGate1AndAddsTheSwapValidationAndBackfillLabelsToGate2() {
         assertThat(CompletionCheck.ReadSet.boot()).isEqualTo(CompletionCheck.ReadSet.quarantineOriginBackfill());
         assertThat(CompletionCheck.ReadSet.boot().gate1Labels()).containsAll(FkTwins.labels()).containsAll(StampLabels.all()).hasSize(23)
             .isEqualTo(CompletionCheck.ReadSet.p33a().gate1Labels());
