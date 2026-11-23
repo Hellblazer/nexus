@@ -3,6 +3,7 @@
 # op is the clause the column sits in (where, join_on, select, group_by, order_by, on_conflict, ...); via says how it was found
 # (jooq constant, alias, helper ch/ct, literal, sql string). table ? is UNRESOLVED (named in the script's output). Writes are P3.1's.
 # The two upserts the RDR names are the on_conflict rows of PgVectorRepository (chunks) and TaxonomyCentroidRepository (taxonomy_centroids).
+# metadata label keys: origin_collection
 file	line	table	name_column	op	via	note
 service/src/main/java/dev/nexus/service/datamove/CompletionCheck.java	858	catalog_collections	superseded_by	expr	literal	-
 service/src/main/java/dev/nexus/service/datamove/CompletionCheck.java	875	catalog_collections	superseded_by	expr	literal	-

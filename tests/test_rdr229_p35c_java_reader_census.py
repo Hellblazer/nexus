@@ -19,6 +19,7 @@ _REPO = Path(__file__).parent.parent
 _SCRIPT = _REPO / "scripts" / "rdr229_p35c_java_reader_census.py"
 _RES = _REPO / "service" / "src" / "test" / "resources" / "rdr229"
 _CENSUS = _RES / "p35c-java-reader-census.tsv"
+_EXCLUDED = _RES / "p35c-java-reader-census-excluded.tsv"
 _DISPOSITIONS = _RES / "p35c-java-reader-dispositions.tsv"
 _JAVA = "service/src/main/java/dev/nexus/service/"
 
@@ -236,4 +237,50 @@ def test_the_scanner_finds_each_form_of_a_metadata_key_read(tmp_path):
     flagged = {r[1] for r in rows}
     for needle in ('"title"', "ID_KEY)", "key);", "new String[]", "origin_collection_id' IS NULL"):
         assert not (set(map(str, at(needle))) & flagged), needle
-    assert "id-key reads (not rows) 2" in stdout and "variable-key reads (not rows) 1" in stdout, stdout
+    assert "id-key reads (not rows) 2" in stdout and "variable-key reads (not rows; the sidecar lists them) 1" in stdout and "UNREVIEWED variable-key read" in stdout, stdout
+
+
+# ---- the variable-key reads: none silently dropped (nexus-p2m1x.25) ---------------------------------------------------------
+
+_EX_HEADER = ["file", "line", "method", "accessor", "status", "reason"]
+_EX_STATUS = {"excluded", "n-a (R4)"}
+
+
+def _excluded() -> list[list[str]]:
+    lines = [ln for ln in _EXCLUDED.read_text().splitlines() if ln and not ln.startswith("#")]
+    assert lines[0].split("\t") == _EX_HEADER
+    return [ln.split("\t") for ln in lines[1:]]
+
+
+def test_every_variable_key_read_is_listed_with_a_status_and_a_reason():
+    rows = _excluded()
+    assert len(rows) >= 15, f"only {len(rows)} variable-key reads listed: the script stopped seeing them"
+    for r in rows:
+        assert len(r) == len(_EX_HEADER), r
+        assert r[4] in _EX_STATUS, f"{r[0]}:{r[1]} is {r[4]!r}: read the site and give it a status and a reason in EXCLUSIONS"
+        assert r[5].strip() not in ("", "-"), r
+        assert (_REPO / r[0]).is_file(), r
+    assert "UNREVIEWED" not in _run().stdout
+    # the label keys, in writing: the census header names the jsonb key it scans for, the sidecar names tuples.body 'collection' (R4)
+    assert "# metadata label keys: origin_collection" in _CENSUS.read_text().splitlines()
+    assert "tuples.body 'collection'" in _EXCLUDED.read_text()
+    (aspect,) = [r for r in rows if r[0].endswith("db/AspectTaskRefs.java")]
+    assert aspect[4] == "n-a (R4)" and "R4" in aspect[5]
+
+
+def test_the_sidecar_agrees_with_a_source_scan_of_the_accessor_calls():
+    """Independent of the script's call tree: every line that calls jsonbGetAttribute(AsText) with a key that is neither a string literal
+    nor an UPPER_CASE constant is a sidecar row, and every such sidecar row is such a line."""
+    import re
+    accessor = re.compile(r"jsonbGetAttribute(?:AsText)?\(")
+    literal_key = re.compile(r"jsonbGetAttribute(?:AsText)?\([^()]*(?:\([^()]*\))*[^()]*,\s*(?:\"[^\"]*\"|[A-Z][A-Z0-9_.]*)\s*\)")
+    found = set()
+    for p in sorted((_REPO / "service/src/main/java").rglob("*.java")):
+        for i, ln in enumerate(p.read_text().splitlines(), 1):
+            if ln.strip().startswith(("//", "*", "/*")):
+                continue
+            if accessor.search(ln) and not literal_key.search(ln):
+                found.add((p.relative_to(_REPO).as_posix(), i))
+    listed = {(r[0], int(r[1])) for r in _excluded() if r[3].startswith("jsonbGetAttribute")}
+    assert found == listed, f"scan only: {sorted(found - listed)}; sidecar only: {sorted(listed - found)}"
+    assert len(found) >= 10
