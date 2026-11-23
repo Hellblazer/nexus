@@ -6,6 +6,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.nexus.service.vectors.Rdr229ChunksFk;
 import dev.nexus.service.vectors.Rdr229SwapMove;
+import org.jooq.Field;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -52,8 +54,10 @@ class Rdr229ValidationBoundsCensusIntegrationTest extends DataMoveIntegrationBas
 
     @BeforeAll
     void captureTheWalk() {
-        ctx().resultQuery("SELECT label, statement_timeout_ms, on_complete FROM nexus.data_moves ORDER BY label")
-            .fetch().forEach(r -> booted.add(new Booted(r.get(0, String.class), r.get(1, Integer.class), r.get(2, String.class))));
+        Field<String> label = DSL.field(DSL.name("label"), String.class);
+        ctx().select(label, DSL.field(DSL.name("statement_timeout_ms"), Integer.class), DSL.field(DSL.name("on_complete"), String.class))
+            .from(table("nexus", "data_moves")).orderBy(label)
+            .fetch().forEach(r -> booted.add(new Booted(r.value1(), r.value2(), r.value3())));
     }
 
     private static int count(String needle, String text) {

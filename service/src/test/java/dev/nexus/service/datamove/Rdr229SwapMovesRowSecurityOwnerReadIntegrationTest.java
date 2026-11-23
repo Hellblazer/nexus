@@ -7,6 +7,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import dev.nexus.service.IdKeyIndexProbe;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.vectors.LeafIndexPass;
+import dev.nexus.service.vectors.Rdr229ChunksFk;
 import dev.nexus.service.vectors.Rdr229SwapMove;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
@@ -27,12 +28,13 @@ import java.util.List;
 class Rdr229SwapMovesRowSecurityOwnerReadIntegrationTest extends Rdr229SwapMovesRowSecurityBase {
 
     /**
-     * A chunk whose (tenant_id, collection_id, embedding_model) has no registry row, under a tenant the session does not name. The swap's
-     * composite is added and validated in its on_complete (the referencing table is partitioned, so it is not NOT VALID): it must refuse with
-     * 23503, a permanent failure, and the transaction rolls back whole.
+     * A chunk whose (tenant_id, collection_id, embedding_model) has no registry row, under a tenant the session does not name. The swap no
+     * longer adds the composite (nexus-p2m1x.21): it completes, and the orphan chunk's LEAF validation move runs {@code VALIDATE CONSTRAINT} of
+     * the leaf's key as the finisher's session (NOSUPERUSER, NOBYPASSRLS owner, FORCE RLS). It must refuse with 23503, a permanent failure of
+     * that move, before any claim, and the composite must never appear (the adoption move fails loud naming the failed leaf move).
      */
     @Test
-    void aChunkWithNoRegistryRowIsRefusedByTheSwapsCompositeAsTheFinisherSessionRunsIt() throws Exception {
+    void aChunkWithNoRegistryRowIsRefusedByItsLeafValidationAsTheFinisherSessionRunsIt() throws Exception {
         seed("rls-chunk");
         assertTheSessionIsTheProductionShape();
         String tenant = "p33c-rls-orphan-chunk";
@@ -42,16 +44,25 @@ class Rdr229SwapMovesRowSecurityOwnerReadIntegrationTest extends Rdr229SwapMoves
         registerSwaps();
 
         runSwaps(new VerifyingFinisher());
-
-        var chunks = moves(LABEL_F.eq(LeafIndexPass.swapLabel("chunks"))).get(0);
-        assertThat(chunks.get("completed_at")).as("the swap did not complete over an orphan chunk").isNull();
-        assertThat(chunks.get("failed_at")).as("a permanent refusal").isNotNull();
-        assertThat((String) chunks.get("failure")).as("by the composite's own check").contains("sqlstate=23503");
-        assertThat(compositeOnId()).as("rolled back: no composite").isEmpty();
-        for (String child : CHILD_ID_COLUMN.keySet()) {
-            assertThat(idTwins(child)).as("rolled back: no id twin on " + child).isEmpty();
+        assertThat(completedAt(LeafIndexPass.swapLabel("chunks"))).as("the swap adds no composite, so over an orphan chunk it completes").isNotNull();
+        var w = productionWorker(new VerifyingFinisher());
+        for (int i = 0; i < 4; i++) {
+            w.runCycle();
         }
-        assertThat(registeredBySwap()).as("and no validation move").isEmpty();
+
+        var refused = leafMoves().stream().filter(m -> m.get("failed_at") != null).toList();
+        assertThat(refused).as("the orphan chunk's leaf validation was refused").isNotEmpty();
+        for (var move : refused) {
+            assertThat(move.get("completed_at")).as(move.get("label") + " did not complete over an orphan chunk").isNull();
+            assertThat((String) move.get("failure")).as("by the key's own validation, as the finisher's role runs it").contains("sqlstate=23503");
+            String leaf = ((String) move.get("label")).substring(Rdr229ChunksFk.LEAF_LABEL_PREFIX.length());
+            assertThat(leafFks().stream().filter(f -> f.leaf().equals(leaf)).toList()).as(leaf + ": its key is still NOT VALID").isNotEmpty()
+                .allSatisfy(f -> assertThat(f.validated()).isFalse());
+        }
+        assertThat(compositeOnId()).as("the composite never appears over an orphan chunk").isEmpty();
+        var adopt = adoptMoves().get(0);
+        assertThat(adopt.get("completed_at")).as("the adoption move did not complete").isNull();
+        assertThat((String) adopt.get("failure")).as("it fails loud, naming the failed leaf move").contains(Rdr229ChunksFk.LEAF_LABEL_PREFIX);
     }
 
     /**
