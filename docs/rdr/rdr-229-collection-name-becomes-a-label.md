@@ -358,7 +358,7 @@ still hold (`-9`, `-12`, `-13`) are noted in T2
      `commands/catalog_cmds/doctor.py:1145`,
      `commands/catalog_cmds/integrity.py:651`, `commands/doctor.py:1646`,
      `commands/enrich.py:1768`, `commands/store.py:1045`, `exporter.py:1904`,
-     `health.py:11236`, `mcp/core.py:4300`, `search_engine.py:916`.
+     `health.py:11236`, `mcp/core.py:4298`, `search_engine.py:914`.
      *T2 `229-research-19`.*
   2. *Client, second ring outside the census* (89 calls): see T2
      `229-research-20` for the count by helper. Since the draft, note
@@ -387,7 +387,7 @@ still hold (`-9`, `-12`, `-13`) are noted in T2
      `FILE_ROUTED_PREFIXES` tests (`aspect_readers.py`, `aspect_worker.py`,
      `catalog/recovery_bundle.py`, `commands/catalog_cmds/backfill.py`,
      `exporter.py`), and six tests on other content-type prefix constants
-     (`aspect_extractor.py:1024/1039`, `scoring.py:532`, `health.py:12516`,
+     (`aspect_extractor.py:1025/1041`, `scoring.py:533`, `health.py:12645`,
      `commands/catalog_cmds/doctor.py:1570`,
      `upgrade_ladder/rungs/note_tags_array.py:131`). The routing class
      (item 1) is wider than these shapes. The routing census (T2
@@ -405,18 +405,18 @@ still hold (`-9`, `-12`, `-13`) are noted in T2
      35 reads, and the SQL gate 11 name-parsing expressions in 3 functions over
      119 live functions, `CollectionNameSqlLiveBodyGateTest.java:138`). The
      `quarantine-` prefix (12):
-     `CatalogRepository.java:9829-9830` (new-row lifecycle in
+     `CatalogRepository.java:9873` (new-row lifecycle in
      `upsertCollection`), `:10241`, `:13528-13529`
      (`lifecycleStateForImport`); `QuarantineOrigin.java:85/162/171` (the
      predicate itself at `:73`); `VectorHandler.java:2592`;
      `PgVectorRepository.java:7419/7438`; `ChunkReaper.java:280/877/879`.
-     Names are rendered with the prefix at `ChunkReaper.java:1035` and
+     Names are rendered with the prefix at `ChunkReaper.java:1043` and
      `PgVectorRepository.java:7549`. A content-type prefix (2):
      `NoteUri.java:178` (`isFileRoutedCollection`, called at
      `CatalogRepository.java:4399`) and `:194`, over
      `FILE_ROUTED_PREFIXES` (`NoteUri.java:22`, RDR-231); both route by
      content type (`NoteUri.isNote` is called at
-     `CatalogRepository.java:4206/4215/4393`).
+     `CatalogRepository.java:4242/4251/4456/4463`).
      *T2 `229-research-22`, `229-research-34`.*
   5. *Live SQL* (11 expressions in three functions):
      `nexus.chash_conformance_report(dim)`,
@@ -488,7 +488,7 @@ still hold (`-9`, `-12`, `-13`) are noted in T2
   key or leaf name holds the name. *T2 `229-research-14`, re-run in
   `229-research-27`.*
 - **✅ Verified** (source search) — `renameCollectionTxn`
-  (`CatalogRepository.java:11134-11484`) never updates a registry name in
+  (`CatalogRepository.java:11461-11772`) never updates a registry name in
   place; it inserts, rewrites fourteen tables, retags and tombstones. The
   RDR-227 per-collection index is keyed by name in its predicate
   (`PciBuilderSession.java:116-118`) and its name hash
@@ -638,7 +638,9 @@ writers fill both, readers and constraints switch to the id, and only then
 does Phase 4 drop the name columns and the parsers. Up to P3.4 the old
 path still works, so each of those steps ships on its own and can stop.
 P3.5 and P3.7 ship in one engine cut, because P3.5a's rename refusal
-ends only when a move that P3.7 ships and registers completes (P3.7);
+ends only when the name-key drop move that P3.7 ships and registers has
+completed and every P3.5b changeset has applied, which needs a restart
+(`RenameReadiness.java:28-39`; T2 `229-research-301`; P3.7);
 P3.6 ships on its own. From P3.7 the referencing tables' name columns are dead until P4.1 drops
 them (item 7), so an engine downgraded past P3.7 reads stale names; the
 safe downgrade point is still open (Contradiction Check). On each install, readers leave the name path only once every
@@ -1094,10 +1096,16 @@ The key moves table by table in strangler order:
   one. Readers (engine repositories, SQL functions, client caches) key on
   the id, on each install only once the completion check's gates pass
   ("Readers during the stamp", below; T2 `229-research-43`,
-  `229-research-52`). Every engine route that takes a collection accepts
-  `collection_id`; a label is still accepted at the route boundary and
-  resolved to the id once, by `CollectionRegistry`, which is keyed by id
-  with a label index beside it. Responses carry both.
+  `229-research-52`). Every collection-taking route in the census accepts
+  `collection_id` or a label. The route boundary turns an id into its
+  label once, and handlers never read the id; each write reads the row by
+  its id inside its own transaction (`CollectionSelectors.java:10-22`; T2
+  `229-research-309`). `CollectionRegistry` is keyed by id with a label
+  index beside it and has no gate of its own (`CollectionRegistry.java:99-104`;
+  T2 `229-research-308`). The rename answer carries the id and the label
+  (`CatalogHandler.java:2989-3001`; T2 `229-research-306`). Client caches
+  stay on the label until the answer's `ids_stable` is true
+  (`http_catalog_client.py:524`; T2 `229-research-307`).
 - **Contract (Phase 4).** All eight name keys to the registry, the two
   composites and the six plain ones, are already gone, dropped before
   P3.7's one-row rename by the name-key drop move (Switch). Before any of
@@ -1118,7 +1126,7 @@ The key moves table by table in strangler order:
   re-creates that index on `superseded_by_id` (item 7). Before any of
   that, an engine release retires the Java name path (P4.0): the name
   readers, the rename's fourteen-table rewrite and the name-based arms of
-  `COLLECTION_SCOPED_TABLES` (`CatalogRepository.java:10733-10760`). Until
+  `COLLECTION_SCOPED_TABLES` (`CatalogRepository.java:11060`). Until
   that release the dual path stays in Java. That engine carries a boot
   floor, because a release reaches an install whatever its moves have
   done: it serves migration-only until gate 3 of the completion check
@@ -1163,7 +1171,7 @@ while the engine serves:
   is `superseded_by`, which is `TEXT NOT NULL DEFAULT ''`
   (`catalog-001-baseline.xml:208`) and empty on a live row: the engine
   writes `.set(CATALOG_COLLECTIONS.SUPERSEDED_BY, "")` to make a row current
-  (`CatalogRepository.java:9922`) and the new name on a rename's tombstone
+  (`CatalogRepository.java:10089`) and the new name on a rename's tombstone
   (`:11477`). Its CHECK is `(superseded_by = '') = (superseded_by_id IS
   NULL)`, added `NOT VALID` in P3.1 and validated with the stamp. The
   stamp fills it from the text column: a non-empty `superseded_by`
@@ -1234,8 +1242,8 @@ while the engine serves:
   writer of `taxonomy_centroids` because it matched named tables only. One
   writes through a helper: `TaxonomyCentroidRepository.upsertCentroids`
   runs `ctx.insertInto(ct.table())` with `ct = DimTables.CENTROIDS.get(dim)`
-  (`TaxonomyCentroidRepository.java:147-156`), the same shape that writes
-  chunks at `PgVectorRepository.java:1283`, and `TenantImportLoad.java:256`
+  (`TaxonomyCentroidRepository.java:149`, the `ct` table, and `:166`, the insert), the same shape that writes
+  chunks at `PgVectorRepository.java:1308`, and `TenantImportLoad.java:256`
   inserts into any table by name (T2 `229-research-48`). The 109 was a lower
   bound. P3.1's acceptance re-runs the writer census over helper-routed and
   by-name writes and finds every writer of `taxonomy_centroids` before its
@@ -1298,7 +1306,7 @@ while the engine serves:
   and the plain `(tenant_id, <id column>)` supporting indexes. The code says
   these support P3.3a's id-twin foreign keys except
   `idx_catalog_chunks_collection_id`, the id twin of an index the R2 anti-join
-  reads (`IdUniqueIndexPass.java:50-52`, `:153-155`; `Main.java:726`; T2
+  reads (`IdUniqueIndexPass.java:50-52`, `:155`; `Main.java:944`; T2
   `229-research-266`, `229-research-289`). They are not in the boot walk.
   The P3.4 changelog adds only the latch table, `vectors-080-1` (T2
   `229-research-265`). `IdUniqueIndexPass.java:51-52` gives the reason: "an upgrade boot may write
@@ -1360,7 +1368,7 @@ while the engine serves:
 - *The name path keeps working after P3.3c.* Both writers name the name
   key as their conflict target: `insert.onConflict(ch.tenantId(),
   ch.collection(), ch.chash(), ch.embeddingModel())`
-  (`PgVectorRepository.java:1327`) and `.onConflict(ct.tenantId(),
+  (`PgVectorRepository.java:1324`) and `.onConflict(ct.tenantId(),
   ct.collection(), ct.topicId(), ct.embeddingModel())`
   (`TaxonomyCentroidRepository.java:172`). PostgreSQL infers "All
   table_name unique indexes that ... contain exactly the conflict_target"
@@ -1456,7 +1464,7 @@ while the engine serves:
     (`to_regclass` of its `driving_schema` and `driving_table` is NULL)
     counts as complete. That is how `aspect_extraction_queue` ends: once
     emptied, "the next boot's guard drops the emptied table"
-    (`Main.java:674-676`), and a move on a missing table fails with 42P01
+    (`Main.java:705`), and a move on a missing table fails with 42P01
     as "permanent" (`MovePreflight.java:67-71`,
     `DataMoveFailureClassifier.java:153-154`); nx doctor still shows its
     `failed:` row. Inferred, not read: the check decides it from those two
@@ -1469,7 +1477,7 @@ while the engine serves:
     other label with no row stays incomplete. A stamp label is complete only
     while its table's CHECKs are present and validated. A P3.3c validation
     label is complete only while its child's id key is present and
-    validated (`CompletionCheck.java:57-58`; linda, nexus-p2m1x.21 comment
+    validated (`CompletionCheck.java:61-64`; linda, nexus-p2m1x.21 comment
     2026-11-22 10:44; T2 `229-research-104`). A move whose
     `on_complete` found an orphan (a name set, an id NULL, and no registry
     row of the row's tenant) completes with the CHECK left `NOT VALID`, so
@@ -1516,7 +1524,7 @@ while the engine serves:
        clause is not applicable (T2 `229-research-262`). An empty plan is not a
        pass while live collections are registered: "no collection requires an
        id-predicate index while live collections are registered, so nothing
-       says they are covered" (`CompletionCheck.java:490-500`; T2
+       says they are covered" (`CompletionCheck.java:531`; T2
        `229-research-264`). The one exception is `nothingToIndex`: when no live
        collection has an index or reaches `B` rows, the clause passes
        (`PciGate3Coverage.java:66-69`, `CompletionCheck.java:177-195`; T2
@@ -1528,13 +1536,16 @@ while the engine serves:
        (`ArbiterTwins.java:45-46`; T2 `229-research-268`). That changeset is
        not in this tree: `ArbiterTwins.java:39-41` ties the replacing writer to
        P3.5b's form A, and vectors-078 comes with P3.5b (T2 `229-research-269`). Then
-       `CollectionRegistry` and the jOOQ readers move to the id (P3.5a,
-       P3.5c), the check registers P3.7's name-key drop move (Switch), the
+       the readers move to the id: `CollectionRegistry` is keyed by id
+       (P3.5a; T2 `229-research-308`), and the jOOQ readers switch with the
+       latched gate 3 (P3.5c). The check registers P3.7's name-key drop move (Switch), the
        rename becomes one row (P3.7) once that move also has `completed_at`
        set, and the check registers P4.1's drop move once P4.1's release
        is installed.
-    Until gate 3, `CollectionRegistry` hands readers the name, the jOOQ
-    readers read the name columns, and `renameCollectionTxn` keeps
+    Until gate 3, each caller takes the name key from the `Gate3` it is
+    given (the registry holds no gate; T2 `229-research-300`,
+    `229-research-308`), the jOOQ readers read the name columns, and
+    `renameCollectionTxn` keeps
     rewriting the fourteen `COLLECTION_SCOPED_TABLES`. From gate 3 until
     the one-row rename can run, that is until P3.7's name-key drop move
     has `completed_at` set and every P3.5b changeset has applied (below),
@@ -1543,8 +1554,12 @@ while the engine serves:
     a new id that its index on the old id does not select (T2
     `229-research-53`, `229-research-63`). The engine therefore refuses a
     rename in that window: gate 3 holds and not both of those. The typed
-    error names the missing condition, the move while it has no
-    `completed_at`, else the restart that applies P3.5b's changesets. The
+    error is 409 `rename_refused` with `missing` `name_key_drop_move` while
+    the move has no `completed_at`, else `restart`, for the P3.5b changesets
+    that have not applied (`RenameRefusedException.java:44-53`,
+    `HttpUtil.java:643-647`; T2 `229-research-301`, `229-research-303`).
+    The latch row decides the path, not the in-process signal
+    (`RenameGuard.java:74-76`; T2 `229-research-302`). The
     window is that move's run, a short pass over the registry and its
     `on_complete`, and, where a P3.5b changeset has not applied, the time
     to that restart (inferred, not read). The refusal, the drop move's
@@ -1589,7 +1604,7 @@ while the engine serves:
     and the worker acts on it (`case COMPLETED -> ...`,
     `DataMoveWorker.java:562`). So the engine re-reads the check when the
     worker records a `completed_at`, and when a reconciler pass ends
-    (`Main.java:708`; T2 `229-research-274`), and a 60 s safety
+    (`Main.java:721`; T2 `229-research-274`), and a 60 s safety
     poll reads again when no event came in that time, in case one was
     missed. The count of rows that keep a CHECK `NOT VALID` is a bounded
     scan, so it is cached for 10 minutes per table. The gates the
@@ -1774,7 +1789,7 @@ stale note that the stale-note repair rewrites to `nx-note://<collection>/`
 aspect tasks, which name their collection in the task body: "a collection
 rename ... has to rewrite or delete the tasks itself, in the same
 transaction" (`AspectTaskRefs.java:23-26`, called at
-`CatalogRepository.java:11393`; T2 `229-research-37`). The one-row rename needs every
+`CatalogRepository.java:11485`; T2 `229-research-37`). The one-row rename needs every
 reader off the referencing tables' name columns (P3.5) and every
 per-collection index off the name (P3.4). From P3.7 those columns are dead:
 unread, and no longer rewritten by a rename, so they hold the label each row
@@ -1967,7 +1982,7 @@ has. The routing class is 24 sites plus the `taxonomy__` half of the 12
 `test_the_routing_class_is_measured_not_listed` pins the 36) (T2 `229-research-34`,
 `229-research-39`, `229-research-49`):
 
-- *Listing rows in hand.* `health.py:12516` and
+- *Listing rows in hand.* `health.py:12642`, `:12645` and
   `commands/catalog_cmds/doctor.py:1570` filter `t3.list_collections()`
   rows, which already carry `content_type`; they read it from the row.
 - *A collection name on this install.* These read the client row cache
@@ -2064,7 +2079,7 @@ has. The routing class is 24 sites plus the `taxonomy__` half of the 12
 class (item 1) is not repointed. These classify a source_uri string over
 RDR-231's frozen prefix list (`rdr__`, `docs__`, `code__`):
 - in the engine, `NoteUri.isNote`, its `fileRouted` and `NoteUri.canonical`
-  (callers `CatalogRepository.java:4206/4215/4393`);
+  (callers `CatalogRepository.java:4242/4251/4416/4456`);
 - on the client, `aspect_readers.is_note_uri`, `canonical_note_uri` and
   `_collection_is_file_routed` (`aspect_readers.py:126`; callers
   `exporter.py:927`, `commands/catalog_cmds/reconcile_stale.py:380`,
@@ -2799,7 +2814,7 @@ its acceptance is that test green plus the census pin it lowers.
   that P3.4 is complete on the install.
   The name indexes retire (`REPLACED_BY_ID`) only once gate 3 has latched,
   `IdReaders.PRESENT` is true, and the engine holds its singleton lock
-  (`Main.java:720`; `PciReconciler.java:643-650`). It is `false` in this release, and P3.5c flips
+  (`Main.java:265`; `PciReconciler.java:643-650`). It is `false` in this release, and P3.5c flips
   it (`IdReaders.java:18`; T2 `229-research-270`). Until the retire ends, the
   id indexes get a budget of their own, the same `NX_SEARCH_PCI_MAX_PER_LEAF`,
   so a leaf at the cap holds the cap's worth of name indexes and the cap's
@@ -2817,7 +2832,7 @@ its acceptance is that test green plus the census pin it lowers.
   (`lock_timeout` and `statement_timeout`). A failed attempt is retried with
   backoff, 500 ms doubling to 30 s, and after 5 minutes in all without an
   answer the engine exits with status 1 rather than serve on a guess
-  (`Gate3Latch.java:28-32, 69-70, 78-94`, `Main.java:620-631`; T2
+  (`Gate3Latch.java:28-32, 69-70, 78-94`, `Main.java:612-625`; T2
   `229-research-257`, `229-research-280`). The latch stays held for P3.5's
   readers and for P3.7's one-row rename and its refusal (P3.7). P3.5's readers,
   that rename and the name-index retire go by the latched value, never by the
@@ -2849,21 +2864,31 @@ its acceptance is that test green plus the census pin it lowers.
   can run (P3.7).
   - P3.5a Registry and routes: `CollectionRegistry` keyed by id with a
     label index; every collection-taking route accepts `collection_id` and
-    a label; responses carry both. Client caches keyed by id, which they
+    a label; the rename answer carries both (`CatalogHandler.java:2989-3001`;
+    T2 `229-research-306`). Client caches keyed by id, which they
     trust as stable only once P3.7's name-key drop move has `completed_at`
     set on the install (item 6): until then a rename gives the collection a
     new id, and from gate 3 until P3.7's one-row rename can run (that move
     complete and every P3.5b changeset applied) the engine refuses a
     rename, with a typed error that names the missing condition, the move
     or the restart. The refusal ships in P3.7's engine cut, which is
-    P3.5's (P3.7).
+    P3.5's (P3.7). In this tree `ids_stable` is false
+    (`RenameGuard.java:239`), so a rename still gives a new id, and the
+    client keys its caches by label (`http_catalog_client.py:524`; T2
+    `229-research-307`). The typed answers on these routes are 404
+    `unknown_collection_id`; 409 `collection_superseded` for a retired id,
+    naming its successor by `superseded_by_id`; 409 `collection_id_mismatch`
+    when the request's id and label no longer name one collection; and 503
+    `rename_busy` when a rename or supersede cannot lock its registry row
+    within 10 s, with nothing changed (`CollectionTombstones.java:36,63`;
+    `HttpUtil.java:603-657`; T2 `229-research-304`, `229-research-305`).
   - P3.5b SQL readers: the plpgsql functions, the views keyed on names
     (`collection_vector_stats`, `live_chunks`) and triggers that fire on a
     name column (`catalog-044`'s `AFTER INSERT OR UPDATE OF
     physical_collection, deleted_at ON nexus.catalog_documents`) read the
     id (T2 `229-research-37`).
   - P3.5c Java readers: the jOOQ queries on the name columns read the id,
-    and the two upserts (`PgVectorRepository.java:1327`,
+    and the two upserts (`PgVectorRepository.java:1324`,
     `TaxonomyCentroidRepository.java:172`) take the id key as their
     conflict target, from gate 3 on the install (item 6). It also owns the
     reader contract for a tombstone that names no successor, whose
@@ -2980,7 +3005,7 @@ its acceptance is that test green plus the census pin it lowers.
   of the name columns that P3.5 switched at gate 3, `renameCollectionTxn`'s
   fourteen-table rewrite (the one-row rename of P3.7 is the only rename
   left), and the name-based arms of `COLLECTION_SCOPED_TABLES`
-  (`CatalogRepository.java:10733-10760`), which keep serving delete and
+  (`CatalogRepository.java:11060`), which keep serving delete and
   re-home by id. Until this release the dual path stays in Java. It keeps
   P3.1 to P3.7's changesets, moves, completion check and index passes, so
   an install that jumps from before P3.1 to this release still reaches
@@ -2992,7 +3017,7 @@ its acceptance is that test green plus the census pin it lowers.
   read and write with a typed error that names the floor. It does not
   exit at boot, as the engine's other refusals do (`ChunksIsolationCheck`
   "refuses to serve"), because the move worker and the reconciler start
-  only after `service.start()` (`Main.java:620`, `:646`, `:681`), so an
+  only after `service.start()` (`Main.java:652`, `:678`, `:710-711`), so an
   exiting engine would never run the moves its floor waits for (inferred,
   not read; T2 `229-research-59`). The check is re-read when the move
   worker records a `completed_at` and when a reconciler pass ends, so the
@@ -3438,7 +3463,7 @@ and each has a bead that verifies it before the work that depends on it
 | API Call | Library | Verification |
 | --- | --- | --- |
 | `GET /v1/catalog/collections/list` with `content_type` and `lifecycle_state` filters | nexus engine | Source Search (RDR-204 Phase 2) |
-| `GET /v1/catalog/collections/for_tuple` | nexus engine | Source Search (`CatalogRepository.java:10500-10553`, `http_catalog_client.py:3845-3891`; T2 `229-research-29`) |
+| `GET /v1/catalog/collections/for_tuple` | nexus engine | Source Search (`CatalogRepository.java:10793`, `http_catalog_client.py:3911`; T2 `229-research-29`) |
 | `catalog_document_chunks.embedding_model` | nexus schema | Source Search (`vectors-030` lines 786-791) |
 | `ALTER TABLE ... ADD CONSTRAINT ... NOT VALID` then `VALIDATE CONSTRAINT` on a partitioned referencing table | PostgreSQL 17 | Source Search (fk-002 and vectors-030 already use it on `nexus.chunks`) |
 
@@ -3690,3 +3715,4 @@ large, and moved under a ratchet.
 - 2026-11-22: Phase 3 wording, matching reviewed stacked code and linda's rulings (grant 3; nexus-p2m1x.20, .21, .31, .35): P3.3b's pass adds the id key and P3.3c's `on_complete` checks it and adds the child keys, the manifest child key is DEFERRABLE INITIALLY DEFERRED, the chunk_orphaned_at index is vectors-075's self-healing boot changeset, and TwinKeyUpsert is the retry rule for name/id unique pairs until P4.1; item 10 and P3.11: the by-id restore ships in the P3.5+P3.7 cut, not P4.1, with the minted-label relabel, the stripped unmapped quarantine origin id, catalog_epoch's derivation and the booted-schema parity; P4.1's design notes (G1, G7, views first, RESTRICT drops, the deferral and trigger notes). P3.R: the rest of Phase 3 is one engine cut (Sam's ruling, T2 `nexus/sam-ruling-rdr229-compress-phase3-2026-11-22`). P3.4, P3.5 and P3.7 follow when their code is reviewed and stacked. Two decisions moved on linda's rulings: the by-id restore from P4.1 to the P3.5+P3.7 cut, and the catalog epoch placed in the P3.5+P3.7 cut (it replaces the 11-20 cut-C1 timing; the RDR had placed it nowhere) (bead nexus-p2m1x.31, comments 08:24 and 08:49; bead nexus-p2m1x.35, comment 17:42; T2 `229-research-116`). No test criterion changed in this entry.
 - 2026-11-22: test lists (Sam's ruling, T2 `nexus/sam-ruling-rdr229-test-lists-and-stack-wal-2026-11-23`, answering linda's ask rdr229-rdr-test-lists): the P3.3b, P3.3c and P3.11 Test sentences gain the tests the reviewed code carries (an unattached parent key, a new leaf, `NX_SEARCH_PCI=0`, moves blocked; a swap refused without the id key, the EXPLAIN of a chunk DELETE; the booted-schema parity, the rename and minted-label restores), and the parity test is green at P3.3, not P3.1 (T2 `229-research-113`; tests `LeafIndexPassIntegrationTest`, `Rdr229SwapMovesIntegrationTest`, `Rdr229SwapMovesAfterTheSwapIntegrationTest`, `TenantExportRegistryParityTest`, `Rdr229RestoreByIdTest`, `Rdr229RestoreMintedRelabelTest`).
 - 2026-11-23: P3.4 folded from the stacked code (grant 3, nexus-p2m1x.22): the gate 3 latch row (`vectors-080-1`) and its boot read, the PCI clause read from the database with the PCI-off case and the B-row coverage, the runtime id arbiters after gate 2 and not in the boot walk, the name-index retire behind the latch, `IdReaders.PRESENT` and the singleton lock, the held entries (`id-unique-index-held`), gate 3 implying gate 2, the PCI clause's B-row cap per leaf, the latch's hold for P3.5's readers and P3.7's one-row rename and its refusal, the per-leaf budget with its bound, the canary twin's wait for `vectors-078-8`, and linda's rulings on nexus-p2m1x.22. Builds run beside the name index, not as rebuilds. P3.4's Test sentence gains "before the latch" (Sam, ask rdr229-p34-test-latch, 2026-11-23).
+- 2026-11-23: P3.5a folded from the stacked code (grant 3, nexus-p2m1x.23): the refusal's wire values (`rename_refused` with `name_key_drop_move` or `restart`), the latch row deciding the path, the registry keyed by id with no gate, the route boundary's id-to-label turn, the typed 404, 409 and 503 answers, `ids_stable` false in this tree, and the citations moved by the stack. Not changed: the P3.5 Test sentence's "the check sees gate 3 hold", which is shared with P3.5b and P3.5c (T2 `229-research-300`, `-302`, `-308`).
