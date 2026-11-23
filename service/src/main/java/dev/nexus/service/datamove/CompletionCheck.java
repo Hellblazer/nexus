@@ -160,11 +160,11 @@ public final class CompletionCheck {
         }
 
         /**
-         * P3.5c's read set (RDR-229 Phase 3 blocking row 13, nexus-p2m1x.22): P3.3c's, and in gate 2 the quarantine-origin backfill
+         * Blocking row 13.s read set (RDR-229 Phase 3, the quarantine-origin backfill, nexus-p2m1x.22): P3.3c's, and in gate 2 the quarantine-origin backfill
          * ({@link QuarantineOriginBackfill#LABEL}), registered after the chunks stamp, so gate 3 cannot latch while a quarantine chunk the
          * move would write still lacks its origin id.
          */
-        public static ReadSet p35c() {
+        public static ReadSet quarantineOriginBackfill() {
             List<String> gate2 = new ArrayList<>(p33c().gate2Labels());
             gate2.add(QuarantineOriginBackfill.LABEL);
             return new ReadSet(p33c().gate1Labels(), gate2);
@@ -176,7 +176,7 @@ public final class CompletionCheck {
          * that pins it ({@code CompletionBootReadSetTest}).
          */
         public static ReadSet boot() {
-            return p35c();
+            return quarantineOriginBackfill();
         }
     }
 
