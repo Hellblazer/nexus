@@ -161,11 +161,7 @@ class SweepAndPurgeRegistryFirstTest {
     }
 
     private int waitingRows() {
-        return waitingRows(fx);
-    }
-
-    private static int waitingRows(CollectionRouteFixture f) {
-        return f.asSuperuser(ctx -> ctx.fetchCount(DSL.table(DSL.name("pg_catalog", "pg_locks")),
+        return fx.asSuperuser(ctx -> ctx.fetchCount(DSL.table(DSL.name("pg_catalog", "pg_locks")),
             DSL.field(DSL.name("granted"), Boolean.class).isFalse()
                 .and(DSL.field(DSL.name("locktype"), String.class).in("tuple", "transactionid"))));
     }
@@ -235,13 +231,11 @@ class SweepAndPurgeRegistryFirstTest {
                 .where(CATALOG_COLLECTIONS.TENANT_ID.eq(fxIntact.tenant)).and(CATALOG_COLLECTIONS.NAME.eq(b)).forUpdate().fetch();
             purge = pool.submit(() -> fxIntact.post("/v1/catalog/purge-trash", "{\"older_than_days\":30,\"dry_run\":false}"));
             try {
-                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
-                while (waitingRows(fxIntact) < 1) {
-                    if (purge.isDone() || System.nanoTime() > deadline) {
-                        throw new AssertionError("the trash purge never showed waiting on the collection's row (done: " + purge.isDone() + ")");
-                    }
-                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(5));
-                }
+                // a backend in a lock wait whose statement is the registry row read FOR KEY SHARE: the purge's wait on the verb's lock on that row
+                // (not any ungranted lock in the database)
+                assertThat(PgActivityProbe.waitsOnALock(fxIntact.pg, "%key share%catalog_collections%"))
+                    .as("the trash purge waits on the registry row the verb holds, read FOR KEY SHARE (done: %s)", purge.isDone()).isTrue();
+                assertThat(purge.isDone()).as("and has not finished").isFalse();
                 assertThat(manifestRows(fxIntact, doc)).as("nothing was purged while the verb held the row").isEqualTo(1);
             } finally {
                 verb.rollback();
