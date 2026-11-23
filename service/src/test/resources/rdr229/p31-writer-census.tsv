@@ -173,8 +173,8 @@ chunks	chunks	service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	4
 chunks	chunks	service/src/main/java/dev/nexus/service/db/TenantImportLoad.java	349	insert	by-name	collection	collection_id	yes	TenantImportLoad by-name INSERT ... SELECT over TenantExport.TABLES	unproven	
 chunks	chunks	service/src/main/java/dev/nexus/service/vectors/ChunkKeySweep.java	1017	update	jooq	-	collection_id	yes		unproven	oneBatch
 chunks	chunks	service/src/main/java/dev/nexus/service/vectors/PgVectorRepository.java	1331	insert	helper	collection	collection_id	yes	ch.table() helper	require	upsertChunksInternal
-chunks	chunks	service/src/main/java/dev/nexus/service/vectors/PgVectorRepository.java	8449	update	helper	-	collection_id	yes	ch.table() helper	unproven	updateMetadataOneRow
-chunks	chunks	service/src/main/java/dev/nexus/service/vectors/PgVectorRepository.java	8565	update	helper	-	collection_id	yes	ch.table() helper	unproven	batchUpdateMetadata
+chunks	chunks	service/src/main/java/dev/nexus/service/vectors/PgVectorRepository.java	8450	update	helper	-	collection_id	yes	ch.table() helper	unproven	updateMetadataOneRow
+chunks	chunks	service/src/main/java/dev/nexus/service/vectors/PgVectorRepository.java	8566	update	helper	-	collection_id	yes	ch.table() helper	unproven	batchUpdateMetadata
 ops	chash_remap	rdr229-stamp-chash_remap [vectors-070-collection-id-stamp-moves.xml:118]	115	update	data_move	-	source_collection_id,target_collection_id	yes	sets source_collection_id,target_collection_id	move	
 ops	chash_remap	service/src/main/java/dev/nexus/service/db/RemapRepository.java	176	insert	jooq	source_collection,target_collection	source_collection_id,target_collection_id	yes		require	recordBatch
 ops	gc_audit	nexus.gc_expire_quarantine [vectors-083-restore-by-origin-id.xml:2209]	2115	insert	sql_function	collection	collection_id	no		sql	
