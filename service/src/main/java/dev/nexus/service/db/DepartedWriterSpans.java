@@ -127,8 +127,8 @@ final class DepartedWriterSpans {
                 Integer charEnd, Long collectionId) {
 
         /**
-         * A row with no id: the name path's shape. From gate 3 {@link #clear} resolves a missing id from the label (RDR-229
-         * P3.5c), so a producer that has not switched still clears; one that has passes {@code collectionId}.
+         * A row with no id: the name path's shape. From gate 3 {@link #clear} does not resolve a missing id from the label (RDR-229
+         * P3.5c, linda 2026-11-23): such a span is counted unresolved and left alone; a producer that has switched passes {@code collectionId}.
          */
         Gone(String collection, byte[] chash, Integer lineStart, Integer lineEnd, Integer charStart, Integer charEnd) {
             this(collection, chash, lineStart, lineEnd, charStart, charEnd, null);
@@ -164,10 +164,6 @@ final class DepartedWriterSpans {
                 byId ? r.get(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID) : null);
         }
 
-        Gone withId(Long id) {
-            return new Gone(collection, chash, lineStart, lineEnd, charStart, charEnd, id);
-        }
-
         static List<Gone> allOf(Collection<? extends Record> rows) {
             List<Gone> out = new ArrayList<>(rows.size());
             for (Record r : rows) out.add(of(r));
@@ -181,6 +177,11 @@ final class DepartedWriterSpans {
 
         String pairKey() {
             return collection + "\u0000" + hex();
+        }
+
+        /** The pair by the collection's id (from gate 3): a label can name two registry rows, an id names one. */
+        String idPairKey() {
+            return collectionId + "\u0000" + hex();
         }
 
         private String tupleKey() {
@@ -290,13 +291,11 @@ final class DepartedWriterSpans {
         return guarded(ctx, tenant, "clear", () -> {
             int cleared = 0;
             int unresolved = 0;
-            // RDR-229 P3.5c: from gate 3 a collection is its id. A row that carries none (its producer has not switched) is
-            // resolved from its label; a row with no id at all is no collection and is not cleared.
-            Map<String, Long> resolved = !byId ? Map.of() : CollectionIdLookup.idsOf(ctx, tenant,
-                departed.stream().filter(g -> g.collectionId() == null).map(Gone::collection).toList());
+            // RDR-229 P3.5c: from gate 3 a collection is its id. A span with no collection_id is NOT resolved by its stored name (a stale
+            // label may name another collection now): it is counted unresolved and logged at WARN below, and left alone (linda 2026-11-23).
             Map<Object, Map<String, List<Gone>>> byCollection = new LinkedHashMap<>();
             for (Gone g : departed) {
-                Gone keyed = !byId || g.collectionId() != null ? g : g.withId(resolved.get(g.collection()));
+                Gone keyed = g;
                 Object key = byId ? keyed.collectionId() : keyed.collection();
                 if (key == null) {
                     unresolved++;   // never kept silently: logged and counted below
@@ -505,21 +504,22 @@ final class DepartedWriterSpans {
             List<byte[]> keys = new ArrayList<>();
             for (Gone g : displaced) keys.add(g.chash());
             Set<String> stillHeld = new HashSet<>();
-            // the label a Gone carries: the registry's current name of the row's id from gate 3 (RDR-229 P3.5c)
-            Field<String> heldLabel = CollectionIdReads.labelOf(gate3, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
-                CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID).as("held_label");
-            for (Record r : ctx.select(heldLabel, CATALOG_DOCUMENT_CHUNKS.CHASH)
+            // From gate 3 the held pair and the displaced pair are keyed by (collection_id, hex), never (label, hex): a label can name two
+            // rows. Before it, by the stored name, as it was.
+            final boolean idKeyed = gate3.holds();
+            for (Record r : ctx.select(CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CATALOG_DOCUMENT_CHUNKS.CHASH)
                     .from(CATALOG_DOCUMENT_CHUNKS)
                     .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
                         .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId))
                         .and(CATALOG_DOCUMENT_CHUNKS.CHASH.in(keys)))
                     .fetch()) {
-                stillHeld.add(new Gone(r.get(heldLabel), r.get(CATALOG_DOCUMENT_CHUNKS.CHASH),
-                    null, null, null, null).pairKey());
+                var held = new Gone(r.get(CATALOG_DOCUMENT_CHUNKS.COLLECTION), r.get(CATALOG_DOCUMENT_CHUNKS.CHASH),
+                    null, null, null, null, r.get(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID));
+                stillHeld.add(idKeyed ? held.idPairKey() : held.pairKey());
             }
             List<Gone> gone = new ArrayList<>();
             for (Gone g : departed(displaced, null, Set.of())) {
-                if (!stillHeld.contains(g.pairKey())) gone.add(g);
+                if (!stillHeld.contains(idKeyed ? g.idPairKey() : g.pairKey())) gone.add(g);
             }
             return clear(ctx, tenant, gone, gate3);
         }, 0);
