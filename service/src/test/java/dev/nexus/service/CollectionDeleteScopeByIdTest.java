@@ -214,8 +214,7 @@ class CollectionDeleteScopeByIdTest {
      */
     @Test
     void afterAOneRowRename_aDeleteOfTheNewLabelPurgesTheOldNamedChildRowsByItsId() {
-        // Gate 3 is latched for the whole class (startAll). The fixture's id-twin build, fx.buildIdTwins(), does not exist on this
-        // base; the merge that brings it calls it here, before the latch, so the id columns this test reads are the built ones.
+        // Gate 3 is latched for the whole class (startAll), after fx.buildIdTwins(), so the id columns this test reads are built.
         String x = registered("every-x");
         String host = registered("every-host");
         Resp hostTopic = fx.post("/v1/taxonomy/topics/insert", "{\"collection\":" + json(host) + ",\"label\":\"every-host-topic\",\"doc_count\":1}");
