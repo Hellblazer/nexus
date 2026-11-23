@@ -122,6 +122,19 @@ class PciIndexSweepTest {
         assertThat(reads).as("1000 questions, no read").hasValue(1);
     }
 
+    /** RDR-229 P3.4: after the latch the id indexes serve and the name indexes are gone: the sweep's line and set-change log must not read 0. */
+    @Test
+    void aLeafWithOnlyIdIndexes_isCountedAndLogged_asTheIdFamily() {
+        sweep = new PciIndexSweep(() -> snapshot(PciCatalog.Index.byId(HASH_A, true, 7L, null), PciCatalog.Index.byId(HASH_B, true, 8L, null)),
+            SETTINGS);
+
+        assertThat(sweep.refresh()).isTrue();
+
+        assertThat(sweep.status().valid()).as("the name count stays the name count").isZero();
+        assertThat(lines("pci_sweep")).containsExactly("event=pci_sweep valid=0 valid_id=2 invalid=0 unparsed=0 reindex_leftover=0");
+        assertThat(lines("pci_sweep_set_changed")).singleElement().asString().contains("added_count=2").contains(":id=7:").contains(":id=8:");
+    }
+
     @Test
     void aSuccessfulRead_replacesTheSet_keepsTheCountsAndTheReadTime_andLogsPciSweep() {
         Instant now = Instant.parse("2026-10-09T12:00:00Z");
@@ -141,7 +154,7 @@ class PciIndexSweepTest {
         assertThat(s.unparsed()).isEqualTo(1);
         assertThat(s.lastReadAt()).isEqualTo(now);
         assertThat(s.reindexLeftover()).isZero();
-        assertThat(lines("pci_sweep")).containsExactly("event=pci_sweep valid=1 invalid=1 unparsed=1 reindex_leftover=0");
+        assertThat(lines("pci_sweep")).containsExactly("event=pci_sweep valid=1 valid_id=0 invalid=1 unparsed=1 reindex_leftover=0");
     }
 
     @Test
@@ -173,7 +186,7 @@ class PciIndexSweepTest {
         assertThat(s.unparsed()).as("unparsed excludes leftovers: no double count").isEqualTo(1);
         assertThat(s.reindexLeftover()).isEqualTo(1);
         assertThat(sweep.hasValidIndex(M, T, "c1")).isTrue();
-        assertThat(lines("pci_sweep")).containsExactly("event=pci_sweep valid=1 invalid=0 unparsed=1 reindex_leftover=1");
+        assertThat(lines("pci_sweep")).containsExactly("event=pci_sweep valid=1 valid_id=0 invalid=0 unparsed=1 reindex_leftover=1");
     }
 
     @Test
