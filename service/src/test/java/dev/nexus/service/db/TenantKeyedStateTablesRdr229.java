@@ -128,6 +128,13 @@ final class TenantKeyedStateTablesRdr229 {
             + "over every tenant (CompletionBootWork.latest), and holds no tenant data itself");
         notKeyed.put("StatusHandler.rdr229Completion", "the same supplier, bound once at boot by the status route; a "
             + "callback over the engine-wide completion state, not keyed by tenant");
+        notKeyed.put("BootWorkRegistry.dataMovesNeedOperator", "the data moves in the needs-an-operator state, replaced whole by "
+            + "each sample of the move reporter: registry labels, counts, two times, an SQLSTATE and the move's own bound, "
+            + "no tenant data, and emptied when the reporter closes");
+        notKeyed.put("StatusHandler.dataMovesNeedOperator", "the supplier of /v1/status's data_moves_need_operator, bound once "
+            + "at boot; it reads the registry list above and holds no tenant data itself");
+        notKeyed.put("MoveRetryPolicy.OnCompleteRuns.byLabel", "the same run table, by registry label; two counts a label, "
+            + "no tenant data");
         notKeyed.put("DataMoveWorker.onMoveCompleted", "the listener the engine hands the worker at boot "
             + "(CompletionBootWork::onMoveCompleted), run when a move records completed_at; a callback, no data");
         notKeyed.put("PciReconciler.passEnded", "the listener the engine hands the reconciler at boot "

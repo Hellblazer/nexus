@@ -127,7 +127,14 @@ final class MoveReasons {
         if (needsOperator) {
             body = body.substring(0, operator.start());
         }
+        boolean indexBuilds = body.contains("; " + MoveRetryPolicy.INDEX_BUILDS_NOTE);
+        if (indexBuilds) {   // a fixed note the retry policy adds: kept, and the run's own text is read without it
+            body = body.replace("; " + MoveRetryPolicy.INDEX_BUILDS_NOTE, "");
+        }
         out.append(phrase(body));
+        if (indexBuilds) {
+            out.append("; ").append(MoveRetryPolicy.INDEX_BUILDS_NOTE);
+        }
         if (needsOperator || text.contains("needs an operator")) {
             out.append("; needs an operator");
         }
@@ -225,6 +232,25 @@ final class MoveReasons {
             return "the pass could not run (see the engine log)";
         }
         return "stopped for a reason kept in the engine log" + state;
+    }
+
+    /** Whether a blocked reason carries the retry policy's "needs an operator" ending ({@link MoveRetryPolicy#blockedReason}). */
+    static boolean needsOperator(String reason) {
+        return reason != null && NEEDS_OPERATOR.matcher(reason.strip()).find();
+    }
+
+    /** Whether a blocked reason says each retry ends in-flight index builds ({@link MoveRetryPolicy#INDEX_BUILDS_NOTE}). */
+    static boolean terminatesIndexBuilds(String reason) {
+        return reason != null && reason.contains(MoveRetryPolicy.INDEX_BUILDS_NOTE);
+    }
+
+    /** The five-character SQLSTATE a reason carries ({@code sqlstate=57014}), or null: a code, so safe on {@code /v1/status}. */
+    static String sqlstateOf(String reason) {
+        if (reason == null) {
+            return null;
+        }
+        Matcher m = SQLSTATE.matcher(reason);
+        return m.find() ? m.group(1) : null;
     }
 
     /** {@code " sqlstate=XXXXX"} when the reason carries one, else empty. */

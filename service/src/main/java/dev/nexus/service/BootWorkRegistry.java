@@ -82,6 +82,38 @@ public final class BootWorkRegistry {
     }
 
     /**
+     * One data move that needs an operator (RDR-246, nexus-p2m1x.22), for {@code /v1/status}'s
+     * {@code data_moves_need_operator_moves}: its worker has failed it transiently {@code retries} times in a row (at least
+     * the retry policy's limit) and keeps trying. Nothing a run, a tenant or the server wrote: the label, a count, two
+     * times, an SQLSTATE and the move's own {@code statement_timeout_ms}.
+     *
+     * @param lastAttemptAt the move's {@code last_transient_at}
+     * @param nextRetryAt   {@code lastAttemptAt} plus the retry policy's backoff for {@code retries}, so a client never
+     *                      duplicates the formula
+     * @param sqlstate      the SQLSTATE of the last transient error, or null when its text names none
+     * @param terminatesIndexBuilds whether each retry ends in-flight index builds (PCI, leaf, id-unique): a run of lock or
+     *                      statement timeouts at {@code on_complete} on a chunk-family move
+     */
+    public record NeedsOperator(String label, int retries, Instant lastAttemptAt, Instant nextRetryAt, String sqlstate,
+                                int statementTimeoutMs, boolean terminatesIndexBuilds) { }
+
+    private volatile List<NeedsOperator> dataMovesNeedOperator = List.of();
+
+    /**
+     * The data moves in the needs-an-operator state now, replaced whole by each sample of the move reporter (an empty list
+     * clears it, as a move completing or its count resetting does). Held here beside {@code boot_work}, as
+     * {@link #rdr229Completion}, because the status route reads this registry; it is NOT work and never an entry.
+     */
+    public void dataMovesNeedOperator(List<NeedsOperator> moves) {
+        this.dataMovesNeedOperator = List.copyOf(Objects.requireNonNull(moves, "moves"));
+    }
+
+    /** The moves in the needs-an-operator state, in the order the reporter sampled them; empty when there are none. */
+    public List<NeedsOperator> dataMovesNeedOperator() {
+        return dataMovesNeedOperator;
+    }
+
+    /**
      * Announce work. An id already registered is replaced, as a new run of the same work: it keeps its place in the
      * order and gets a new {@code startedAt} and no step.
      */

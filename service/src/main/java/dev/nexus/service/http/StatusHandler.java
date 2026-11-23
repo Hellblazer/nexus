@@ -223,6 +223,26 @@ public final class StatusHandler implements HttpHandler {
         return this;
     }
 
+    private volatile Supplier<java.util.List<dev.nexus.service.BootWorkRegistry.NeedsOperator>> dataMovesNeedOperator;
+
+    /**
+     * RDR-246 (nexus-p2m1x.22), [additive]: bind the source of {@code data_moves_need_operator}, the data moves whose worker has
+     * failed them transiently {@code MoveRetryPolicy.NEEDS_OPERATOR_AT} times in a row, or lock- or statement-timed-out at
+     * {@code on_complete} {@code MoveRetryPolicy.NEEDS_OPERATOR_AT_ON_COMPLETE} times in a row. Present whenever bound:
+     * {@code data_moves_need_operator} (a boolean), {@code data_moves_need_operator_labels} (their labels) and
+     * {@code data_moves_need_operator_moves}, one object each: {@code label}, {@code retries}, {@code last_attempt_at} and
+     * {@code next_retry_at} (ISO-8601 UTC; the engine computes the second, so a client does not repeat the backoff),
+     * {@code sqlstate} (null when unknown), {@code statement_timeout_ms} and {@code terminates_index_builds} (each retry ends
+     * in-flight index builds). No run, tenant or server text. The moves keep
+     * retrying; this says a human should look. A supplier answers from memory
+     * ({@link dev.nexus.service.BootWorkRegistry#dataMovesNeedOperator()}). Unbound, the keys are omitted.
+     */
+    public StatusHandler dataMovesNeedOperator(
+            Supplier<java.util.List<dev.nexus.service.BootWorkRegistry.NeedsOperator>> dataMovesNeedOperator) {
+        this.dataMovesNeedOperator = dataMovesNeedOperator;
+        return this;
+    }
+
     private volatile boolean testTenantResetRoute;
 
     /**
@@ -688,6 +708,11 @@ public final class StatusHandler implements HttpHandler {
         // nexus-f3yqd.3, [additive]: the heavy work in flight; [] when idle. Always present.
         appendBootWork(body, bootWork == null ? java.util.List.of() : bootWork.get());
 
+        // RDR-246 (nexus-p2m1x.22), [additive]: the data moves that need an operator; beside boot_work, never in it.
+        if (dataMovesNeedOperator != null) {
+            appendDataMovesNeedOperator(body, dataMovesNeedOperator.get());
+        }
+
         // RDR-229 P3.1 (fix round A), [additive]: the completion check's state; absent until it has read.
         Supplier<String> completion = rdr229Completion;
         String completionJson = completion == null ? null : completion.get();
@@ -794,6 +819,27 @@ public final class StatusHandler implements HttpHandler {
                 body.append(",\"reason_class\":").append(HttpUtil.jsonString(e.reasonClass()));
             }
             body.append('}');
+        }
+        body.append(']');
+    }
+
+    private static void appendDataMovesNeedOperator(StringBuilder body,
+                                                    java.util.List<dev.nexus.service.BootWorkRegistry.NeedsOperator> moves) {
+        body.append(",\"data_moves_need_operator\":").append(!moves.isEmpty()).append(",\"data_moves_need_operator_labels\":[");
+        for (int i = 0; i < moves.size(); i++) {
+            body.append(i == 0 ? "" : ",").append(HttpUtil.jsonString(moves.get(i).label()));
+        }
+        body.append("],\"data_moves_need_operator_moves\":[");
+        for (int i = 0; i < moves.size(); i++) {
+            var m = moves.get(i);
+            body.append(i == 0 ? "" : ",").append("{\"label\":").append(HttpUtil.jsonString(m.label()))
+                .append(",\"retries\":").append(m.retries()).append(",\"last_attempt_at\":");
+            appendSeconds(body, m.lastAttemptAt());
+            body.append(",\"next_retry_at\":");
+            appendSeconds(body, m.nextRetryAt());
+            body.append(",\"sqlstate\":").append(m.sqlstate() == null ? "null" : HttpUtil.jsonString(m.sqlstate()))
+                .append(",\"statement_timeout_ms\":").append(m.statementTimeoutMs())
+                .append(",\"terminates_index_builds\":").append(m.terminatesIndexBuilds()).append('}');
         }
         body.append(']');
     }
