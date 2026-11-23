@@ -44,8 +44,10 @@ import java.util.List;
  * transient blocked state and retries, RDR-246 fail-fast): (0) chunks only, wait for the child index (see {@code requireChildIndex}: 55P03, transient); (a) refuse when the table has no valid unique key on the id columns
  * (SQLSTATE 55000, permanent); (b) chunks only, add the three child id keys beside their name keys, {@code NOT VALID},
  * {@code ON UPDATE CASCADE}, each with its name key's ON DELETE action (the manifest's is DEFERRABLE INITIALLY DEFERRED, see the comment in {@code chunksOnComplete}); (c) chunks only, register the three
- * validation moves, after their constraints exist in this transaction; (d) chunks only, add the RDR-225 composite on the id, which
- * validates directly because PostgreSQL takes no NOT VALID on a partitioned referencing table. It drops nothing: the name primary
+ * validation moves, after their constraints exist in this transaction; (d) chunks only, the RDR-225 composite on the id by the per-leaf
+ * route ({@link Rdr229ChunksFk}): every leaf of chunks gets its own key {@code NOT VALID} and a validation move, and an adoption move is
+ * registered that adds the parent constraint once every leaf has a validated key, which PostgreSQL 17 adopts with no scan. The composite used
+ * to be added here, validated in the statement: a write block that grows with the rows. It drops nothing: the name primary
  * keys, the three name child keys and {@code chunks_collection_fk} stay (P3.7 and P4.1). Every step is guarded by what the catalog
  * holds, so a second pass adds and registers nothing.
  *
@@ -307,22 +309,16 @@ public final class Rdr229SwapMove {
     }
 
     private static String chunksOnComplete() {
-        StringBuilder sql = new StringBuilder("DO $swap$\nBEGIN\n").append(requireChildIndex())
-            .append(requireIdKey("chunks", "chash"));
+        StringBuilder sql = new StringBuilder("DO $swap$\nDECLARE\n").append(Rdr229ChunksFk.RECONCILE_DECLARE).append("BEGIN\n")
+            .append(requireChildIndex()).append(requireIdKey("chunks", "chash"));
         // the child id keys first (see CHILDREN for their actions and the manifest key's deferral), then the validation moves,
         // registered after the constraints they validate exist in this transaction
         CHILDREN.forEach(c -> sql.append(childKey(c)));
         CHILDREN.forEach(c -> sql.append(validationMove(c)));
-        // the RDR-225 composite on the id: added without NOT VALID, so it validates here (the referencing table is partitioned)
-        sql.append("""
-                IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint
-                                WHERE conrelid = 'nexus.chunks'::pg_catalog.regclass AND conname = '%s') THEN
-                    ALTER TABLE nexus.chunks ADD CONSTRAINT %s
-                        FOREIGN KEY (tenant_id, collection_id, embedding_model)
-                        REFERENCES nexus.catalog_collections (tenant_id, collection_id, embedding_model)
-                        ON DELETE RESTRICT;
-                END IF;
-            """.formatted(COMPOSITE_CONSTRAINT, COMPOSITE_CONSTRAINT));
+        // the RDR-225 composite on the id is NOT added here. PostgreSQL 17 has no NOT VALID key on a partitioned table, so adding it
+        // validated it in this statement, a write block that grows with the rows. Each leaf gets its own key NOT VALID and a validation
+        // move, and an adoption move adds the parent constraint once every leaf has a validated key (Rdr229ChunksFk).
+        sql.append(Rdr229ChunksFk.swapSteps());
         return sql.append("END\n$swap$").toString();
     }
 }
