@@ -16,8 +16,10 @@ import org.slf4j.LoggerFactory;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -43,7 +45,10 @@ import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_MODELS;
  * <ul>
  *   <li>it holds a name-predicate index, of any validity, or an id-predicate index of any validity; or</li>
  *   <li>it has at least {@code B} rows ({@code NX_SEARCH_PCI_BUILD_MIN_ROWS}, the planner's threshold) and no index of either kind: a collection that
- *       was renamed (a new id) or has just crossed {@code B} is required before its index exists, so gate 3 cannot latch ahead of it.</li>
+ *       was renamed (a new id) or has just crossed {@code B} is required before its index exists, so gate 3 cannot latch ahead of it. A leaf
+ *       builds at most {@code NX_SEARCH_PCI_MAX_PER_LEAF} id indexes, so of the collections that qualify only as many as the leaf has free
+ *       slots (the cap less the collections that already hold an index and are required) are required, taken in the planner's order: the
+ *       largest by a recount at {@code 10 * B}, then by name.</li>
  * </ul>
  * It is <i>covered</i> when its id-predicate index is VALID. So a name index or an INVALID id index with no VALID id index is uncovered, and
  * <b>dropping name indexes cannot flip gate 3</b> ({@code REPLACED_BY_ID}, after the latch): a collection whose name index is gone but whose id
@@ -248,9 +253,19 @@ final class PciGate3Coverage implements CompletionCheck.Gate3Source {
                     }
                     continue;
                 }
+                // The planner builds at most NX_SEARCH_PCI_MAX_PER_LEAF id indexes on a leaf, the ones that already stand (of any validity) first,
+                // then the largest of those that qualify. A leaf with more qualifying collections than free slots can never be covered whole, so
+                // the clause asks for as many as the planner would build, in the planner's own order, and no more (critic S-a).
+                int occupied = 0;
+                List<Reg> qualifying = new ArrayList<>();
+                Map<String, Integer> counted = new HashMap<>();
                 for (Reg r : registry.values()) {
                     String key = PciCatalog.idKey(leaf.model(), leaf.tenant(), r.id());
-                    if (!r.live() || r.superseded() || held.contains(key)) {
+                    if (!r.live() || r.superseded()) {
+                        continue;
+                    }
+                    if (held.contains(key)) {
+                        occupied++;
                         continue;
                     }
                     if (!clock.instant().isBefore(until)) {
@@ -259,8 +274,25 @@ final class PciGate3Coverage implements CompletionCheck.Gate3Source {
                     Integer n = PgVectorRepository.probeSelectedRowsQuery(tx, dim, new String[] {r.name()},
                             leaf.model(), leaf.tenant(), b).fetchOne(0, Integer.class);
                     if (n != null && n >= b) {
-                        found.add(key);
+                        qualifying.add(r);
+                        counted.put(r.name(), n);
                     }
+                }
+                int free = Math.max(0, settings.maxPerLeaf() - occupied);
+                if (qualifying.size() > free) {
+                    // Every count stops at B, so they tie: recount higher, as the planner does, and take the largest first, then by name.
+                    int rankCap = PciReconciler.RANK_CAP_FACTOR * b;
+                    for (Reg r : qualifying) {
+                        if (!clock.instant().isBefore(until)) {
+                            throw new IllegalStateException("the near-latch scan ran out of its budget of " + SCAN_BUDGET + ": unknown");
+                        }
+                        counted.put(r.name(), PciLeafCounting.count(tx, dim, r.name(), leaf.model(), leaf.tenant(), rankCap));
+                    }
+                    qualifying.sort(java.util.Comparator.<Reg>comparingInt(r -> counted.get(r.name())).reversed()
+                        .thenComparing(Reg::name));
+                }
+                for (Reg r : qualifying.subList(0, Math.min(free, qualifying.size()))) {
+                    found.add(PciCatalog.idKey(leaf.model(), leaf.tenant(), r.id()));
                 }
             }
         });
