@@ -50,6 +50,15 @@ final class CollectionRouteFixture implements AutoCloseable {
 
     static final String TENANT = "p35a-routes";
     static final String TOKEN = "tok-p35a-routes-0123456789abcdef0000";
+
+    /**
+     * This engine's tenant and token. The standard engine is {@link #TENANT}; the local-embed variant has its own, because the
+     * route boundary's id index is the process-wide registry cache, keyed by tenant and id, and two engines here each have
+     * their own database whose identity column starts at 1. One tenant on both would let an id of one database resolve to a
+     * row of the other. (Production has one database per JVM: EngineSingletonLock.)
+     */
+    final String tenant;
+    final String token;
     static final ObjectMapper MAPPER = new ObjectMapper();
 
     final AtomicBoolean gate3 = new AtomicBoolean(false);
@@ -128,13 +137,16 @@ final class CollectionRouteFixture implements AutoCloseable {
      *                   the census rows that name it; every other row runs on the standard engine.
      */
     CollectionRouteFixture(boolean localEmbed) throws Exception {
+        this.tenant = localEmbed ? TENANT + "-local" : TENANT;
+        this.token = localEmbed ? "tok-p35a-routes-local-0123456789abcdef" : TOKEN;
+        dev.nexus.service.db.CollectionRegistry.shared().evictTenant(tenant);   // an earlier class's rows, same tenant, another database
         pg = PgContainerHelper.start();
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.applyProductSchema(su);
         }
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            PgContainerHelper.seedServiceToken(DSL.using(su, SQLDialect.POSTGRES), TOKEN, TENANT, "p35a-routes");
+            PgContainerHelper.seedServiceToken(DSL.using(su, SQLDialect.POSTGRES), token, tenant, "p35a-routes");
         }
         var cfg = new HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());
@@ -151,7 +163,7 @@ final class CollectionRouteFixture implements AutoCloseable {
         java.util.function.Function<String, String> env = localEmbed
             ? name -> "NX_ENGINE_LOCAL".equals(name) ? "1" : null
             : System::getenv;
-        service = new NexusService(0, TOKEN, svcDs, router, repo, null, null, null, null, env, () -> false,
+        service = new NexusService(0, token, svcDs, router, repo, null, null, null, null, env, () -> false,
             localEmbed ? new RecordingExecutor() : null, null, gate, readiness);
         service.start();
         http = TestHttp.client();
@@ -162,6 +174,7 @@ final class CollectionRouteFixture implements AutoCloseable {
 
     @Override
     public void close() {
+        dev.nexus.service.db.CollectionRegistry.shared().evictTenant(tenant);
         if (service != null) service.stop();
         if (svcDs != null) svcDs.close();
         if (pg != null) pg.stop();
@@ -172,7 +185,7 @@ final class CollectionRouteFixture implements AutoCloseable {
     Resp send(String method, String pathAndQuery, String jsonBody) {
         try {
             var b = TestHttp.request("http://127.0.0.1:" + service.getPort() + pathAndQuery)
-                .header("Authorization", "Bearer " + TOKEN)
+                .header("Authorization", "Bearer " + token)
                 .header("Content-Type", "application/json");
             HttpRequest req = "GET".equals(method) ? b.GET().build()
                 : b.method(method, HttpRequest.BodyPublishers.ofString(jsonBody == null ? "" : jsonBody)).build();
@@ -200,14 +213,14 @@ final class CollectionRouteFixture implements AutoCloseable {
 
     /** Registers each label (a live registry row, no chunks) as the tenant; idempotent. */
     void register(String... labels) {
-        CollectionIdSeeds.register(pg, TENANT, labels);
+        CollectionIdSeeds.register(pg, tenant, labels);
     }
 
     /** The registry id of {@code label}, or null when no row has it, read as the superuser straight from the table. */
     Long idOf(String label) {
         try (Connection su = pg.createConnection("")) {
             return DSL.using(su, SQLDialect.POSTGRES).select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
-                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(label))
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(label))
                 .fetchOne(CATALOG_COLLECTIONS.COLLECTION_ID);
         } catch (java.sql.SQLException e) {
             throw new IllegalStateException(e);
@@ -222,7 +235,7 @@ final class CollectionRouteFixture implements AutoCloseable {
     String labelOf(long id) {
         try (Connection su = pg.createConnection("")) {
             return DSL.using(su, SQLDialect.POSTGRES).select(CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS)
-                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(id))
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(id))
                 .fetchOne(CATALOG_COLLECTIONS.NAME);
         } catch (java.sql.SQLException e) {
             throw new IllegalStateException(e);
@@ -233,7 +246,7 @@ final class CollectionRouteFixture implements AutoCloseable {
     String supersededBy(String label) {
         try (Connection su = pg.createConnection("")) {
             return DSL.using(su, SQLDialect.POSTGRES).select(CATALOG_COLLECTIONS.SUPERSEDED_BY).from(CATALOG_COLLECTIONS)
-                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(label))
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(label))
                 .fetchOne(CATALOG_COLLECTIONS.SUPERSEDED_BY);
         } catch (java.sql.SQLException e) {
             throw new IllegalStateException(e);
