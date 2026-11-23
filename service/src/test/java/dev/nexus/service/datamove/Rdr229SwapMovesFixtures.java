@@ -13,6 +13,7 @@ import dev.nexus.service.VectorSeeds;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.DrivingTableIsolationCheck;
 import dev.nexus.service.vectors.LeafIndexPass;
+import dev.nexus.service.vectors.Rdr229ChunksFk;
 import dev.nexus.service.vectors.Rdr229SwapMove;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
@@ -139,6 +140,11 @@ abstract class Rdr229SwapMovesFixtures extends DataMoveIntegrationBase {
                 ctx().alterTable(table("nexus", "chunks")).dropConstraint(DSL.name(fk.name())).execute();
             }
         }
+        // the per-leaf keys the swap adds to the leaves of chunks (nexus-p2m1x.21), named <leaf>_cid_fk and not adopted by a parent key
+        ctx().execute("DO $d$ DECLARE r record; BEGIN FOR r IN SELECT k.conrelid::pg_catalog.regclass AS rel, k.conname "
+            + "FROM pg_catalog.pg_constraint k JOIN pg_catalog.pg_partition_tree('nexus.chunks'::pg_catalog.regclass) pt ON pt.relid = k.conrelid "
+            + "WHERE pt.isleaf AND k.contype = 'f' AND k.conname LIKE '%" + Rdr229ChunksFk.LEAF_CONSTRAINT_SUFFIX + "' LOOP "
+            + "EXECUTE 'ALTER TABLE ' || r.rel || ' DROP CONSTRAINT ' || pg_catalog.quote_ident(r.conname); END LOOP; END $d$");
         IdKeyIndexProbe.reset(ctx());
     }
 
@@ -210,9 +216,58 @@ abstract class Rdr229SwapMovesFixtures extends DataMoveIntegrationBase {
         return ctx().selectFrom(table("nexus", "data_moves")).where(where).orderBy(LABEL_F).fetch().intoMaps();
     }
 
-    /** Every move except the two swaps: what the swap's on_complete registered. */
+    /**
+     * Every move except the two swaps, the per-leaf validation moves and the adoption move: the three child validation moves the swap's
+     * on_complete registered. The per-leaf route's moves (nexus-p2m1x.21) are {@link #leafMoves} and {@link #adoptMoves}.
+     */
     List<Map<String, Object>> registeredBySwap() {
-        return moves(LABEL_F.ne(CHUNKS_SWAP).and(LABEL_F.ne(CENTROIDS_SWAP)));
+        return moves(LABEL_F.ne(CHUNKS_SWAP).and(LABEL_F.ne(CENTROIDS_SWAP)).and(LABEL_F.notLike(Rdr229ChunksFk.LEAF_LABEL_PREFIX + "%"))
+            .and(LABEL_F.ne(Rdr229ChunksFk.ADOPT_LABEL)));
+    }
+
+    /** One validation move per chunks leaf that had no validated key when the swap (or the adoption move) looked. */
+    List<Map<String, Object>> leafMoves() {
+        return moves(LABEL_F.like(Rdr229ChunksFk.LEAF_LABEL_PREFIX + "%"));
+    }
+
+    List<Map<String, Object>> adoptMoves() {
+        return moves(LABEL_F.eq(Rdr229ChunksFk.ADOPT_LABEL));
+    }
+
+    /** The relation names of the leaves of nexus.chunks, sorted. */
+    List<String> chunkLeaves() {
+        return ctx().resultQuery("SELECT c.relname FROM pg_catalog.pg_partition_tree('nexus.chunks'::pg_catalog.regclass) pt "
+            + "JOIN pg_catalog.pg_class c ON c.oid = pt.relid WHERE pt.isleaf ORDER BY c.relname").fetch(0, String.class);
+    }
+
+    /** The foreign keys of the leaves of chunks to the registry: leaf, name, validated, conparentid (0 when no parent key adopted it). */
+    record LeafFk(String leaf, String name, boolean validated, long parentId) { }
+
+    List<LeafFk> leafFks() {
+        return ctx().resultQuery("SELECT c.relname, k.conname, k.convalidated, k.conparentid::bigint "
+                + "FROM pg_catalog.pg_partition_tree('nexus.chunks'::pg_catalog.regclass) pt "
+                + "JOIN pg_catalog.pg_class c ON c.oid = pt.relid "
+                + "JOIN pg_catalog.pg_constraint k ON k.conrelid = pt.relid AND k.contype = 'f' "
+                + "AND k.confrelid = 'nexus.catalog_collections'::pg_catalog.regclass "
+                + "AND k.conkey = ARRAY[(SELECT a.attnum FROM pg_catalog.pg_attribute a WHERE a.attrelid = pt.relid AND a.attname = 'tenant_id'), "
+                + "(SELECT a.attnum FROM pg_catalog.pg_attribute a WHERE a.attrelid = pt.relid AND a.attname = 'collection_id'), "
+                + "(SELECT a.attnum FROM pg_catalog.pg_attribute a WHERE a.attrelid = pt.relid AND a.attname = 'embedding_model')]::pg_catalog.int2[] "
+                + "WHERE pt.isleaf ORDER BY c.relname, k.conname")
+            .fetch(r -> new LeafFk(r.get(0, String.class), r.get(1, String.class), r.get(2, Boolean.class), r.get(3, Long.class)));
+    }
+
+    /**
+     * The swaps, then cycles until the composite exists (the leaf validation moves and the adoption move the swap registered are worked
+     * along the way, each a worker cycle apart from the swap that registers them), at most twelve.
+     */
+    void runUntilComposite(VerifyingFinisher finisher) {
+        var w = productionWorker(finisher);
+        for (int i = 0; i < 12; i++) {
+            w.runCycle();
+            if (!compositeOnId().isEmpty()) {
+                return;
+            }
+        }
     }
 
     // ── the catalog, by what a key keys and references ─────────────────────────────────────────────────────

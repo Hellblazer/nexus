@@ -170,9 +170,15 @@ class Rdr229SwapMovesIntegrationTest extends Rdr229SwapMovesFixtures {
             .as("the three validation moves, once each, after a second pass")
             .containsExactlyInAnyOrder("catalog_document_chunks", "chunk_orphaned_at", "topic_assignments");
 
+        assertThat(compositeOnId()).as("the swap no longer adds the composite (nexus-p2m1x.21): its adoption move does, after every leaf validates")
+            .isEmpty();
+        assertThat(adoptMoves()).as("the adoption move is registered once, after a second pass").hasSize(1);
+        assertThat(leafMoves()).as("one validation move per leaf of chunks").hasSize(chunkLeaves().size());
+
+        runUntilComposite(new VerifyingFinisher());
         var composite = compositeOnId();
-        assertThat(composite).as("the composite from chunks to catalog_collections on the id").hasSize(1);
-        assertThat(composite.get(0).validated()).as("is validated directly by the swap").isTrue();
+        assertThat(composite).as("the composite from chunks to catalog_collections on the id, added by the adoption move").hasSize(1);
+        assertThat(composite.get(0).validated()).as("adopted from the validated leaf keys: validated").isTrue();
         assertNameKeysStay();
     }
 
@@ -288,8 +294,12 @@ class Rdr229SwapMovesIntegrationTest extends Rdr229SwapMovesFixtures {
         runSwaps(finisher);
 
         assertThat(settings).as("the completion transaction of both swaps ran, after their verification phase").hasSizeGreaterThanOrEqualTo(2);
-        assertThat(settings).as("statement_timeout 1400 ms and lock_timeout 700 ms, the bounds on_complete runs under")
-            .allSatisfy(s -> assertThat(s).containsExactly("1400ms", "700ms"));
+        // the moves the swap registered run in the same cycles: a validation that blocks no writer has no statement bound and a 5 s lock
+        // wait ("0", "5s"); every other completion, the swaps and the adoption move included, runs under 1400 ms and 700 ms
+        assertThat(settings).as("only the two bound pairs occur: 1400/700 ms (a step that blocks writers) and 0/5 s (a validation)")
+            .allSatisfy(s -> assertThat(s).isIn(List.of("1400ms", "700ms"), List.of("0", "5s")));
+        assertThat(settings.stream().filter(s -> s.equals(List.of("1400ms", "700ms"))).count())
+            .as("both swaps completed under statement_timeout 1400 ms and lock_timeout 700 ms").isGreaterThanOrEqualTo(2);
     }
 
     // ── 7: a lock the swap cannot get ──────────────────────────────────────────────────────────────────────

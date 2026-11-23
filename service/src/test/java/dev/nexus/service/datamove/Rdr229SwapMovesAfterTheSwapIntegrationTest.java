@@ -145,6 +145,7 @@ class Rdr229SwapMovesAfterTheSwapIntegrationTest extends Rdr229SwapMovesFixtures
         for (String child : List.of("topic_assignments", "chunk_orphaned_at")) {
             assertThat(idTwins(child).get(0).deferrable()).as(child + " id key is unchanged: not deferrable").isFalse();
         }
+        runUntilComposite(new VerifyingFinisher());   // the composite is the adoption move's now (nexus-p2m1x.21)
         assertThat(compositeOnId().get(0).deferrable()).as("the composite is unchanged: not deferrable").isFalse();
 
         String tenant = t.catalogDocumentChunks();
@@ -499,6 +500,7 @@ class Rdr229SwapMovesAfterTheSwapIntegrationTest extends Rdr229SwapMovesFixtures
         for (String child : CHILD_ID_COLUMN.keySet()) {
             assertThat(idTwins(child)).as("and adds the id twin on " + child).hasSize(1);
         }
+        runUntilComposite(new VerifyingFinisher());   // the composite is the adoption move's now (nexus-p2m1x.21)
         assertThat(compositeOnId()).hasSize(1);
     }
 }
