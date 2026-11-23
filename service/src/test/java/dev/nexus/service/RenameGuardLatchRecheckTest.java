@@ -523,8 +523,9 @@ class RenameGuardLatchRecheckTest {
             CompletionCheck.insertLatch(ctx, CompletionCheck.GATE3, "second", true);
             return null;
         });
-        assertThat(su(ctx -> ctx.select(DSL.field(DSL.name("engine_version"), String.class)).from(LATCH).fetch(0, String.class)))
-            .as("ON CONFLICT DO NOTHING: one row, the first writer's").containsExactly("first");
+        java.util.List<String> versions =
+            su(ctx -> ctx.select(DSL.field(DSL.name("engine_version"), String.class)).from(LATCH).fetch(0, String.class));
+        assertThat(versions).as("ON CONFLICT DO NOTHING: one row, the first writer's").containsExactly("first");
     }
 
     /** The open guard takes no lock and reads no row: what a repository built without a guard gets. */
