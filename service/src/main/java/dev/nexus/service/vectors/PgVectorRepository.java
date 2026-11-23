@@ -7447,7 +7447,13 @@ FROM scope s
                 throw new IllegalArgumentException("gc_audit row " + auditId + " is for collection " + row.value2()
                     + ", not " + originCollection);
             }
-            if (originId == null) {
+            // a LIVE holder explicitly: the ordered idOf above falls back to the newest tombstone, which holds no label for this purpose
+            final String storedLabel = row.value2();
+            Long liveHolder = tenantScope.withTenant(tenant, ctx -> ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID)
+                .from(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+                .and(CATALOG_COLLECTIONS.NAME.eq(storedLabel)).and(CollectionSelector.live())
+                .fetchOne(CATALOG_COLLECTIONS.COLLECTION_ID));
+            if (liveHolder == null) {
                 throw new IllegalArgumentException("gc_audit row " + auditId + ": recorded before collection ids, under label "
                     + row.value2() + "; no live collection holds " + row.value2());
             }
