@@ -8,6 +8,7 @@ import dev.nexus.service.P31CheckReplay;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.RetiredAspectQueueTable;
 import dev.nexus.service.vectors.LeafIndexPass;
+import dev.nexus.service.vectors.Rdr229ChunksFk;
 import dev.nexus.service.vectors.Rdr229SwapMove;
 import org.jooq.DSLContext;
 import org.jooq.Field;
@@ -804,6 +805,18 @@ class CompletionCheckIntegrationTest {
             MoveSql.runOnComplete(su, Rdr229SwapMove.spec(table).onComplete());
             complete(LeafIndexPass.swapLabel(table));
         }
+        // the composite on the id is the adoption move's (nexus-p2m1x.21): run each leaf validation move's on_complete, then the adoption move's,
+        // the text the registry holds, as the worker would
+        Field<String> onComplete = DSL.field(DSL.name("on_complete"), String.class);
+        Field<String> moveLabel = DSL.field(DSL.name("label"), String.class);
+        for (String text : ctx.select(onComplete).from(DSL.table(DSL.name("nexus", "data_moves")))
+                .where(moveLabel.like(Rdr229ChunksFk.LEAF_LABEL_PREFIX + "%")).fetch(onComplete)) {
+            MoveSql.runOnComplete(su, text);
+        }
+        String adopt = ctx.select(onComplete).from(DSL.table(DSL.name("nexus", "data_moves")))
+            .where(moveLabel.eq(Rdr229ChunksFk.ADOPT_LABEL)).fetchOne(onComplete);
+        assertThat(adopt).as("the chunks swap registered the adoption move").isNotNull();
+        MoveSql.runOnComplete(su, adopt);
         for (String child : Rdr229SwapMove.CHILD_TABLES) {
             complete(Rdr229SwapMove.validationLabel(child));
             validate(child, Rdr229SwapMove.childKeyConstraint(child));
