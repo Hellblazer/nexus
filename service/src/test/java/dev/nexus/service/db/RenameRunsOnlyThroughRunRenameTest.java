@@ -252,8 +252,15 @@ class RenameRunsOnlyThroughRunRenameTest {
             }
         }
         java.util.Map<String, Integer> allowed = allowlist("src/test/resources/rename-name-write-allowlist.txt");
-        assertThat(inside).as("the primitives' own name writes, inside runRename: exact").isEqualTo(10);
-        assertThat(outside.values().stream().mapToInt(Integer::intValue).sum()).as("sites outside runRename: exact").isEqualTo(31);
+        // The telemetry rename's two name writes (search_telemetry, hook_failures) went into the generic helper TelemetryRepository.retag
+        // (RDR-229 P3.5c: retagged by id), whose .set(<field parameter>, ...) the column scan cannot see: 10 became 8. They stay covered by
+        // the pin that retag is declared once and called only inside runRename.
+        assertThat(inside).as("the primitives' own name writes, inside runRename: exact").isEqualTo(8);
+        NameWrites retag = writes(Pattern.compile("\\bretag\\("), code(MAIN.resolve("dev/nexus/service/db/TelemetryRepository.java")));
+        assertThat(retag.inside()).as("TelemetryRepository.retag is called by the rename's two tables, inside its runRename call").isEqualTo(2);
+        assertThat(retag.outside().keySet()).as("and nowhere else: the one text outside runRename is its own declaration")
+            .hasSize(1).allMatch(site -> site.contains("DSLContext ctx"));
+        assertThat(outside.values().stream().mapToInt(Integer::intValue).sum()).as("sites outside runRename: exact").isEqualTo(28);
         assertThat(unlisted(outside, allowed)).as("a name-column write outside runRename that is not on the allowlist").isEmpty();
     }
 
@@ -285,7 +292,7 @@ class RenameRunsOnlyThroughRunRenameTest {
                 w.outside().forEach((site, count) -> found.put(f.getFileName() + " | " + site, count));
             }
         }
-        assertThat(total).as("retirement-column writes: exact").isEqualTo(18);
+        assertThat(total).as("retirement-column writes: exact").isEqualTo(20);
         assertThat(unlisted(found, allowlist("src/test/resources/retire-write-allowlist.txt")))
             .as("a write of superseded_by or superseded_by_id that is not on the allowlist").isEmpty();
     }
