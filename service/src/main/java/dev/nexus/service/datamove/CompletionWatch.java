@@ -70,6 +70,9 @@ final class CompletionWatch implements AutoCloseable {
             }
             try {
                 if (heldOrGone()) {
+                    if (closed) {
+                        return;   // the validation has ended: the backend may be on its claim now, and must not be cancelled for the old statement
+                    }
                     fired = true;
                     DataMoveOrphans.cancelBackend(admin, pid, applicationName, backendStart);
                     return;
@@ -98,9 +101,21 @@ final class CompletionWatch implements AutoCloseable {
         }
     }
 
+    /**
+     * Ends the watch and WAITS for its thread (bounded): a watch in the middle of reading the move's row must not cancel the pooled connection after
+     * the validation has ended and the same session has moved on to the claim, which would be a spurious 57014 there.
+     */
     @Override
     public void close() {
         closed = true;
         thread.interrupt();
+        try {
+            thread.join(JOIN_MS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
+
+    /** How long close() waits for the thread, in milliseconds: a read of the row on a connection of its own, plus the cancel statement. */
+    private static final long JOIN_MS = 6_000L;
 }

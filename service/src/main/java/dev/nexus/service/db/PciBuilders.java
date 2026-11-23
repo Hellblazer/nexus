@@ -89,6 +89,33 @@ public final class PciBuilders {
     }
 
     /**
+     * Ends those builder backends of {@code pids} that are still, in this very statement, builder-named backends of this database run by the calling
+     * role (a pid the server has reused, or a backend of another role, is left alone). For the caller that knows which builds block it and must
+     * end those and no others (RDR-229's adoption move, nexus-p2m1x.21).
+     *
+     * @param pids the backends the caller found blocking it
+     * @param why  the {@code reason=...} fields of the log line
+     * @return how many backends were signalled
+     */
+    public static int terminatePidsOrThrow(DSLContext ctx, java.util.Collection<Integer> pids, String why, Logger log) {
+        var pid = DSL.field(DSL.name("pid"), Integer.class);
+        int terminated = 0;
+        for (Boolean ended : ctx
+                .select(DSL.function("pg_terminate_backend", SQLDataType.BOOLEAN, pid))
+                .from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
+                .where(backends())
+                .and(pid.in(pids))
+                .and(DSL.field(DSL.name("usename"), String.class).eq(DSL.currentUser()))
+                .fetch(0, Boolean.class)) {
+            if (Boolean.TRUE.equals(ended)) {
+                terminated++;
+            }
+        }
+        log.info("event=pci_builders_terminated count={} {}", terminated, why);
+        return terminated;
+    }
+
+    /**
      * {@link #terminate} without the swallow, for a caller inside a transaction: a failed statement aborts the transaction
      * unless the caller runs this in a nested one (a savepoint) and catches what it throws.
      *
