@@ -17,7 +17,7 @@ import java.nio.file.Path;
 
 /**
  * RDR-229 P3.3a, P3.3c and Phase 3 blocking row 13 (nexus-p2m1x.19, nexus-p2m1x.21, nexus-p2m1x.22): what a running engine's completion check reads. {@code Main} builds the reporter only through
- * {@link CompletionBootWork#atBoot}, which reads {@link CompletionCheck.ReadSet#boot()}, which is P3.5c's set (P3.3c's, and in gate 2 the quarantine-origin backfill); so reverting {@code Main} to P3.1's
+ * {@link CompletionBootWork#atBoot}, which reads {@link CompletionCheck.ReadSet#boot()}, which is blocking row 13.s set (P3.3c.s, and in gate 2 the quarantine-origin backfill); so reverting {@code Main} to P3.1's
  * set, or the factory to {@code p31()}, fails here without a database.
  */
 class CompletionBootReadSetTest {
@@ -25,8 +25,8 @@ class CompletionBootReadSetTest {
     private static final Path MAIN = Path.of("src", "main", "java", "dev", "nexus", "service", "Main.java");
 
     @Test
-    void theBootReadSetIsP35csSet_whichKeepsP33asGate1AndAddsTheSwapValidationAndBackfillLabelsToGate2() {
-        assertThat(CompletionCheck.ReadSet.boot()).isEqualTo(CompletionCheck.ReadSet.p35c());
+    void theBootReadSetIsRow13sSet_whichKeepsP33asGate1AndAddsTheSwapValidationAndBackfillLabelsToGate2() {
+        assertThat(CompletionCheck.ReadSet.boot()).isEqualTo(CompletionCheck.ReadSet.quarantineOriginBackfill());
         assertThat(CompletionCheck.ReadSet.boot().gate1Labels()).containsAll(FkTwins.labels()).containsAll(StampLabels.all()).hasSize(23)
             .isEqualTo(CompletionCheck.ReadSet.p33a().gate1Labels());
         assertThat(CompletionCheck.ReadSet.boot().gate2Labels()).as("gate 2: both swaps and the three child validations, from their owners")
@@ -52,7 +52,7 @@ class CompletionBootReadSetTest {
     void mainStartsTheReporterThroughTheFactory_andNamesNoReadSetOfItsOwn() throws IOException {
         String main = Files.readString(MAIN);
         assertThat(main).as("Main starts the completion reporter through the one factory").contains("CompletionBootWork.atBoot(");
-        assertThat(main).as("and names no read set itself").doesNotContain("ReadSet.p31(").doesNotContain("ReadSet.p33a(").doesNotContain("ReadSet.p33c(").doesNotContain("ReadSet.p35c(")
+        assertThat(main).as("and names no read set itself").doesNotContain("ReadSet.p31(").doesNotContain("ReadSet.p33a(").doesNotContain("ReadSet.p33c(").doesNotContain("ReadSet.quarantineOriginBackfill(")
             .doesNotContain("new dev.nexus.service.datamove.CompletionBootWork(");
     }
 }
