@@ -394,6 +394,7 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
 
             assertThat(alive(builder)).as("the build that blocked the lock was ended").isFalse();
             assertThat(logged(log, "event=rdr229_adoption_ended_builders ended=1")).as("and the engine log says which, and why").isTrue();
+            assertThat(logged(log, "gone=true")).as("the ended builder had left the server when the pass returned, so the next attempt could not meet its lock").isTrue();
             assertThat((String) adoptMoves().get(0).get("last_transient")).as("the pass itself is the 55P03 that backs off")
                 .contains(Rdr229ChunksFk.LOCK_FAILED_MARKER);
             assertThat(compositeOnId()).isEmpty();
@@ -401,7 +402,9 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
             backoffHasPassed(Rdr229ChunksFk.ADOPT_LABEL);
             w.runCycle();
 
-            assertThat(compositeOnId()).as("the next pass took the lock and adopted").hasSize(1);
+            var adopt = adoptMoves().get(0);
+            assertThat(compositeOnId()).as("the next pass took the lock and adopted (last_transient: %s, retries: %s)", adopt.get("last_transient"),
+                adopt.get("transient_retries")).hasSize(1);
         } finally {
             releaseAdoptionBuilderLog(log);
         }
