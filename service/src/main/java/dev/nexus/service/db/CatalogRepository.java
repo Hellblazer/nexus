@@ -2933,6 +2933,8 @@ public final class CatalogRepository {
         // transaction retried on 40P01. The holder is assigned once per attempt, at the end of the
         // lambda, and the VACUUM below runs only after the committed attempt returns.
         Map<String, Object> out = manifestWriteTxn(tenant, "catalog.purgeTrash", ctx -> {
+            // RDR-229 P3.5a (row 14): the registry rows of the collections the purge reaches, FOR KEY SHARE in id order, before it deletes
+            TrashPurgeRegistryReads.lockCollectionsOfAgedTombstones(ctx, tenant, agedThreshold(olderThanDays));
             long chunks384  = strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(384), olderThanDays);
             long chunks768  = strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(768), olderThanDays);
             long chunks1024 = strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(1024), olderThanDays);
