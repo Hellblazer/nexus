@@ -248,26 +248,54 @@ advisory and selection mechanisms in `ci.yml` (258-research-13, 258-research-14)
   selectors. *Source: 258-research-13.*
 - **✅ Verified** (source search): what each Phase-1 check guards, from its own
   docstring. *Source: 258-research-14.*
+- **✅ Verified** (source search): the accounting label is not a safe unit for
+  demotion. Of 856 items the census labelled accounting, 18 were followed by a
+  fix in `src/` or `service/src/main/`, and three checks in that class caught
+  real product defects: `test_answer_shape_query_envelope` (fix f278defe1a),
+  `TaxonomyCoverageTest` (fix 2413db4999, coverage past its 30 s bound on a fresh
+  install) and `test_hooks_json_verb_release_floor` (fix 47bc97a20f, older CLIs
+  exit 2 on new hook verbs and block prompts). The label is a file-name and
+  message regex, so it holds some product tests; the 22-of-22 sample measured
+  label agreement, not product catch. None of the 18 followed a red in the five
+  Phase-1 checks. *Source: 258-research-15.*
+- **✅ Verified** (source search): the release PR into main runs wire pairing
+  (`tests/test_wire_contract_pairing_lint.py` is in test-lint, pytest-gate fails
+  on it, and main's protection requires pytest-gate). The engine release does
+  not: `engine-service-release.yml` has no pairing check, the engine-release
+  skill's tag step checks only Service CI's Java tests and the native trip-wire,
+  and `check_engine_release_floor.py` reads `## Unshipped`, which cannot see an
+  undeclared commit. Engines are tagged from develop. *Source: 258-research-16.*
+- **✅ Verified** (source search): on the 124-run replay, the shipped selector
+  `scripts/select_affected_tests.py` (transitive import closure plus file
+  references and meta/docs rules) misses no diff-caused red when run with
+  `--service-substrate`. Of 36 misses, none is diff-caused under that flag; the
+  one diff-caused miss without it (run 44843227733, `test_doctor_cmd` after the
+  vectors-064/065 data move) is selected with it. *Source: 258-research-17.*
 
 ### Critical Assumptions
 
-- [ ] CA-1: An accounting red does not hide a product defect, so demoting the
-  class to a report loses no product catch. — **Status**: Verified for the
-  window (22 of 22 sampled accounting runs had no product fix; 258-research-1);
-  re-checked by Phase 0's report on each check before it is demoted.
-  — **Method**: Source Search
+- [ ] CA-1: An accounting red does not hide a product defect, so demoting a
+  check to a report loses no product catch. — **Status**: Refuted as a
+  statement about the class; holds for each of the five Phase-1 checks
+  (258-research-15). Three checks the census labelled accounting caught product
+  defects, so demotion is decided check by check from Phase 0's report, never by
+  the class label. — **Method**: Source Search
 - [ ] CA-2: The release PR into main and the engine-release workflow both run
   the wire-pairing check, so moving its blocking role there still stops an
   undeclared both-halves change before any user receives it. — **Status**:
-  Unverified. — **Method**: Source Search, at Phase 1 step 5, before the change.
+  Half false (258-research-16): the release PR runs it; the engine release does
+  not, and engines are tagged from develop. Phase 1 step 5 therefore keeps
+  pairing blocking on develop until the engine-release workflow runs the check.
+  — **Method**: Source Search
 - [ ] CA-3: A check that reports instead of failing is still acted on.
   Fowler's warning about forgotten quarantines says it may not be.
   — **Status**: Unverified; measured by the Day-2 metrics and the review
   cadence. — **Method**: Spike (one review cycle).
-- [ ] CA-4: Direct-import selection on develop pushes misses few failures that
-  the full run would catch. The integration selector exists, but the evidence
-  has no miss rate for it. — **Status**: Unverified. — **Method**: Spike (a
-  shadow window, Phase 5).
+- [ ] CA-4: `scripts/select_affected_tests.py`, run with `--service-substrate`
+  on any diff that touches `service/`, misses few failures that the full run
+  would catch. — **Status**: Holds on the 124-run replay: no diff-caused miss
+  under the flag (258-research-17); the Phase 5 shadow window measures it live.
+  — **Method**: Source Search (replay), then Spike (shadow window).
 
 ## Proposed Solution
 
@@ -283,8 +311,10 @@ failing the build) or *accounting* (class A: it reports its value and trend as a
 fitness function in warning mode, is reviewed on a cadence, and fails only on a
 large regression past an explicit alarm line written in the check). Grounds: the
 warn mode of fitness functions (258-research-9); CA-1; the red census
-(258-research-1). The class of each named check, from strand C's inventory
-(258-research-5):
+(258-research-1). A check's class is decided from what it caught, in Phase 0's
+report, not from the census's name-based label: three checks that label calls
+accounting caught product defects (258-research-15). The class of each named
+check, from strand C's inventory (258-research-5):
 
 | Check | Class | Why |
 | --- | --- | --- |
@@ -342,8 +372,9 @@ test with its age. Grounds: Fowler and Gradle (258-research-10); flakes are
 (258-research-13).
 
 **(f) Test selection on develop pushes.** A develop push runs the tests the
-change selects (files it touches, plus tests that directly import a changed
-module, the rule `select_affected_integration_tests.py` already uses); the full
+change selects with `scripts/select_affected_tests.py` (the transitive import
+closure of the changed files, file references, and the meta and docs rules),
+with `--service-substrate` mandatory when the diff touches `service/`; the full
 suite and every class-A check run on a schedule and on the release PR into main.
 Grounds: post-submit runs for the broad set (258-research-11); the existing
 selector (258-research-13). The Machalica result is for a predictive selector,
@@ -397,7 +428,7 @@ alarm_line: <set by Sam>   verdict: report   (fails only when value > alarm_line
 | --- | --- | --- |
 | Report mode for class A | `ci.yml` mcpb/constraints warn-on-develop; `ddl_ratchet.py --advisory`; storage-touch report mode | Reuse: same pattern, extended to each class-A check |
 | Nightly quarantine and full run | `local-service-gate-nightly.yml` | Extend: one more nightly job, same caching and concurrency rules |
-| Develop-push selection | `select_affected_integration_tests.py`, `select_docs_reader_tests.py` | Extend: the direct-import rule applied to the unit shards |
+| Develop-push selection | `scripts/select_affected_tests.py` (hand pre-push run since 2026-11-23), `select_affected_integration_tests.py`, `select_docs_reader_tests.py` | Reuse: the transitive selector, with `--service-substrate` for `service/` diffs |
 | Red and catch counts | strand B's one-off scripts (session scratchpad) | Replace with one committed script; the scratchpad copies are not durable |
 | Gate inventory | none; each docstring names its incident | Extend: three header lines per check |
 
@@ -524,7 +555,7 @@ not that decision unless he says so.
 
 ### Prerequisites
 
-- [ ] CA-2 verified by source search before Phase 1 step 5.
+- [x] CA-2 checked by source search (258-research-16): half false; Phase 1 step 5 follows the fallback.
 - [ ] Sam's answers to the Finalization Gate questions (alarm lines, N, review
   cadence, quarantine deadline, metric targets).
 
@@ -578,9 +609,10 @@ which is an inference, not a measured fact; Phase 0's report checks it.
 
 #### Step 5: Wire pairing (21) [Sam]
 
-After CA-2 holds: report on develop, block on the release PR into main and in
-the engine release. If CA-2 fails: keep blocking on develop and only simplify
-the ledger entries.
+CA-2 is half false (258-research-16): the engine release does not run pairing.
+So pairing keeps blocking on develop and only the ledger entries are simplified,
+until a pairing check is added to `engine-service-release.yml`; then it reports
+on develop and blocks on the release PR into main and in the engine release.
 
 ### Phase 2: Ceilings become budgets [Sam]
 
@@ -750,3 +782,5 @@ per-module classification is left to Phase 0 rather than listed here.
   https://research.google/pubs/state-of-mutation-testing-at-google/
 
 ## Revision History
+
+- 2026-11-23: critical assumptions checked by source search (258-research-15, -16, -17). CA-1 refuted for the class, holds for the five Phase-1 checks, so demotion is per check; CA-2 half false, so wire pairing stays blocking on develop; CA-4 holds for select_affected_tests.py with --service-substrate.
