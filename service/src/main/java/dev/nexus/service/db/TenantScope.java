@@ -328,6 +328,7 @@ public final class TenantScope {
 
             T result = work.apply(ctx);
 
+            ExpectedCollectionIds.beforeCommit(ctx);   // the per-transaction census (a test seam; one flag read in production)
             conn.commit();
             return result;
 

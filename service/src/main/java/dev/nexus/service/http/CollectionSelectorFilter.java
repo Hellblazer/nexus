@@ -110,6 +110,7 @@ public final class CollectionSelectorFilter extends Filter {
     private volatile Runnable beforeTransactionRead;
     private volatile Runnable afterTransactionRead;
     private volatile java.util.function.Consumer<String> unconsumedSink;
+    private volatile java.util.function.Consumer<String> censusSink;
 
     /** Sets this filter's test seams (any may be null); {@code afterTransactionRead} runs with the by-id read's lock held. */
     public void testHooks(Runnable afterResolve, Runnable beforeTransactionRead, Runnable afterTransactionRead,
@@ -118,6 +119,16 @@ public final class CollectionSelectorFilter extends Filter {
         this.beforeTransactionRead = beforeTransactionRead;
         this.afterTransactionRead = afterTransactionRead;
         this.unconsumedSink = unconsumedSink;
+        ExpectedCollectionIds.setCensus(unconsumedSink != null);   // the per-transaction census runs only while a test listens
+    }
+
+    /**
+     * Sets the sink of the per-transaction census's counts (a test seam, null in production): one line per write route request that
+     * named an id, {@code "<path> examined=<n> exempt=<n> unknown=<n>"}, with the census on, so a test can refuse a pass that
+     * examined no write transaction (the vacuous-gate rule).
+     */
+    public void censusSink(java.util.function.Consumer<String> sink) {
+        this.censusSink = sink;
     }
 
     /** How the filter reads rows: a seam, so a test can hand it a row the registry never would. */
@@ -218,12 +229,28 @@ public final class CollectionSelectorFilter extends Filter {
     private void reportUnconsumed(HttpExchange exchange) {
         List<String> left = ExpectedCollectionIds.unconsumed();
         int status = exchange.getResponseCode();
-        if (left.isEmpty() || status < 200 || status >= 300) {
+        String path = exchange.getRequestURI().getPath();
+        java.util.function.Consumer<String> sink = unconsumedSink;
+        java.util.function.Consumer<String> counts = censusSink;
+        if (counts != null && status >= 200 && status < 300) {
+            int[] n = ExpectedCollectionIds.censusCounts();
+            counts.accept(path + " examined=" + n[0] + " exempt=" + n[1] + " unknown=" + n[2]);
+        }
+        if (status < 200 || status >= 300) {
             return;
         }
-        String path = exchange.getRequestURI().getPath();
+        // the per-transaction census: a transaction that wrote and read none of the named ids (the request-level check below
+        // passes when ANY transaction of the request read one)
+        for (String finding : ExpectedCollectionIds.censusFindings()) {
+            log.error("event=collection_id_not_consumed_by_write_transaction path={} finding={}", LogText.escapeControl(path), finding);
+            if (sink != null) {
+                sink.accept(path + " " + finding);
+            }
+        }
+        if (left.isEmpty()) {
+            return;
+        }
         log.error("event=collection_id_not_consumed path={} labels={} status={}", LogText.escapeControl(path), left.size(), status);
-        java.util.function.Consumer<String> sink = unconsumedSink;
         if (sink != null) {
             sink.accept(path + " " + left);
         }

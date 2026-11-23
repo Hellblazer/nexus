@@ -2,8 +2,14 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
-import java.util.HashMap;
+import org.jooq.DSLContext;
+import org.jooq.exception.DataAccessException;
+import org.jooq.impl.DSL;
+
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
@@ -21,14 +27,23 @@ import java.util.TreeSet;
  *       {@link UnknownCollectionIdException}, a retired row {@link CollectionRetiredIdException}, a row of another label
  *       {@link CollectionIdMismatchException}, a live row answers under its own label;</li>
  *   <li>{@link CollectionIds#idOf(String, String)} gives a subselect on the id as well as the label, so a statement carrying it
- *       writes NULL (the P3.1 CHECK refuses it) when the label is no longer the id's;</li>
+ *       writes NULL (the P3.1 CHECK refuses it) when the label is no longer the id's. It takes no lock and records no
+ *       consumption: it is the stamp of a history row (a log, never a decision), and the write that must be live at commit reads
+ *       the id through {@link CollectionRegistry#requireForWrite};</li>
  *   <li>the cache readers ({@link CollectionRegistry#cached}, {@code isKnown}) answer a miss, and the lifecycle readers read by
  *       id, so no fast path answers from the label.</li>
  * </ul>
  *
  * <p><b>Consumption.</b> A named id is <i>consumed</i> only by one of the in-transaction reads above on the write's own context,
  * never by an outside-a-transaction lookup. After the handler the filter reports a named id of a write route that was not
- * consumed ({@link #unconsumed()}): a write that went on by label.
+ * consumed ({@link #unconsumed()}): a write that went on by label. With the census on ({@link #setCensus}, a test seam) it also
+ * reports, per transaction, a transaction that wrote and read none of the named ids ({@link #censusFindings()}): consumption by
+ * the request is not consumption by every write transaction of it. A transaction is told by its jOOQ configuration, which every
+ * context derived from the transaction's own shares. A history write (a log row, never a decision) does not read the id and
+ * says so ({@link #historyWrite}); it is counted as exempt, not as examined.
+ *
+ * <p>A request by label has no carrier: the label read {@code FOR KEY SHARE} is the transaction's own
+ * ({@link CollectionRegistry#requireForWrite}), memoised on the transaction's configuration, and there is nothing to carry.
  *
  * <p>A {@link ThreadLocal}, not an exchange attribute: the HTTP server keeps exchange attributes on the shared context, where
  * two requests would see each other's (see {@code RequestContext}). The boundary filter sets it just before the handler runs on
@@ -43,9 +58,15 @@ public final class ExpectedCollectionIds {
         final Set<String> consumed = new HashSet<>();
         Runnable beforeTransactionRead;
         Runnable afterTransactionRead;
-        /** The rows the by-id read returned in the transaction {@link #memoCtx} (its lock is held, so a second read adds nothing). */
-        final Map<String, CollectionRow> memo = new HashMap<>();
-        Object memoCtx;
+        /** Census only: the labels each transaction (by its configuration) read, in the order the transactions ended. */
+        final Map<Object, Set<String>> readByTransaction = new IdentityHashMap<>();
+        /** Census only: the transactions that declared a history write. */
+        final Set<Object> historyTransactions = Collections.newSetFromMap(new IdentityHashMap<>());
+        /** Census only: the transactions that wrote, with what each read, as the findings and the counts are built from them. */
+        final List<String> findings = new ArrayList<>();
+        int writeTransactions;
+        int exemptTransactions;
+        int unknownTransactions;
 
         Carrier(Map<String, Long> ids, Runnable beforeTransactionRead, Runnable afterTransactionRead) {
             this.ids = Map.copyOf(ids);
@@ -53,6 +74,9 @@ public final class ExpectedCollectionIds {
             this.afterTransactionRead = afterTransactionRead;
         }
     }
+
+    /** True while a test has the per-transaction census on; false in production, so no transaction pays for it. */
+    private static volatile boolean census;
 
     private static final ThreadLocal<Carrier> CURRENT = new ThreadLocal<>();
 
@@ -98,37 +122,99 @@ public final class ExpectedCollectionIds {
     }
 
     /**
-     * Records that a write route had nothing to write under {@code label} (an empty batch, a document with no rows), so no
-     * transaction read its id and none needed to: there is nothing for the id to protect. The one other way an id is consumed.
+     * Records that a write route had nothing to write under {@code label} (an empty batch), so no transaction read its id and none
+     * needed to: there is nothing for the id to protect. The one other way an id is consumed. It is a claim nothing checks at run
+     * time, so it is made only by an early return that comes BEFORE the first {@code withTenant} of its method, and never for a
+     * document or row that a later transaction still deletes or stamps (an empty rows list still deletes the stored manifest rows):
+     * {@code NothingToWriteSourceScanTest} reads the source and fails on a call that is not such an early return.
      */
     public static void nothingToWrite(String label) {
-        consumed(label);
-    }
-
-    /** Records that the write's own transaction read {@code label}'s id. */
-    static void consumed(String label) {
         Carrier c = CURRENT.get();
         if (c != null) {
             c.consumed.add(label);
         }
     }
 
-    /** The row the by-id read of {@code label} already returned in this transaction ({@code ctx}), or null. */
-    static CollectionRow memoized(Object ctx, String label) {
-        Carrier c = CURRENT.get();
-        return c == null || c.memoCtx != ctx ? null : c.memo.get(label);
-    }
-
-    /** Keeps the row of a by-id read for the rest of the transaction {@code ctx}; a different transaction starts a fresh memo. */
-    static void memoize(Object ctx, String label, CollectionRow row) {
+    /**
+     * Records that the write's own transaction {@code ctx} read {@code label}'s id. The census keeps which transaction read it.
+     */
+    static void consumed(DSLContext ctx, String label) {
         Carrier c = CURRENT.get();
         if (c != null) {
-            if (c.memoCtx != ctx) {
-                c.memo.clear();
-                c.memoCtx = ctx;
+            c.consumed.add(label);
+            if (census && c.ids.containsKey(label)) {
+                c.readByTransaction.computeIfAbsent(ctx.configuration(), k -> new HashSet<>()).add(label);
             }
-            c.memo.put(label, row);
         }
+    }
+
+    /**
+     * A history write (a relevance log row, a hook failure: a row about a collection that decides nothing) stamps the id without
+     * locking it and is never refused (linda's ruling: history tables are exempt from {@code FOR KEY SHARE}). The census counts the
+     * transaction as exempt, and the id as consumed for the request, so a route whose only collection write is a history write is not
+     * reported.
+     */
+    static void historyWrite(DSLContext ctx, String label) {
+        Carrier c = CURRENT.get();
+        if (c != null) {
+            c.consumed.add(label);
+            if (census) {
+                c.historyTransactions.add(ctx.configuration());
+            }
+        }
+    }
+
+    /** Turns the per-transaction census on or off. A test seam; {@code CollectionSelectorFilter#testHooks} sets it with its sink. */
+    public static void setCensus(boolean on) {
+        census = on;
+    }
+
+    /**
+     * Run by {@link TenantScope} just before a transaction commits, and only with the census on and a request that named an id on
+     * this thread: if the transaction wrote (it was assigned a transaction id), it must have read one of the named ids, or have
+     * declared a history write. The finding is kept for {@link #censusFindings()}; nothing is thrown, so the census cannot change an
+     * answer.
+     */
+    static void beforeCommit(DSLContext ctx) {
+        Carrier c = census ? CURRENT.get() : null;
+        if (c == null) {
+            return;
+        }
+        Object tx = ctx.configuration();
+        boolean wrote;
+        try {
+            wrote = Boolean.TRUE.equals(ctx.select(DSL.field("txid_current_if_assigned() IS NOT NULL", Boolean.class))
+                .fetchOne(0, Boolean.class));
+        } catch (DataAccessException e) {
+            c.unknownTransactions++;
+            return;
+        }
+        if (!wrote) {
+            return;
+        }
+        if (c.historyTransactions.contains(tx)) {
+            c.exemptTransactions++;
+            return;
+        }
+        c.writeTransactions++;
+        if (c.readByTransaction.getOrDefault(tx, Set.of()).isEmpty()) {
+            c.findings.add("a write transaction read none of " + new TreeSet<>(c.ids.keySet()));
+        }
+    }
+
+    /** The per-transaction findings of this request: a write transaction that read none of the named ids. Empty when none. */
+    public static List<String> censusFindings() {
+        Carrier c = CURRENT.get();
+        return c == null ? List.of() : List.copyOf(c.findings);
+    }
+
+    /**
+     * What the per-transaction census looked at in this request, for a test to print and to refuse a vacuous pass:
+     * {examined write transactions, exempt (history) write transactions, transactions it could not read}.
+     */
+    public static int[] censusCounts() {
+        Carrier c = CURRENT.get();
+        return c == null ? new int[3] : new int[] {c.writeTransactions, c.exemptTransactions, c.unknownTransactions};
     }
 
     /** Runs the test seam, once, before a write transaction's by-id read. */

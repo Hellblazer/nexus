@@ -29,6 +29,11 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
  * <p><b>Which row.</b> The registry row of the name whatever its lifecycle: a superseded or quarantine row has an id
  * too, and a write to one is decided by the writer's own checks, not here.
  *
+ * <p><b>The write transaction's registry check.</b> {@link #require} reads the row {@code FOR KEY SHARE} through
+ * {@link CollectionRegistry#requireForWrite}, once per transaction, for a label and an id alike (RDR-229 P3.5a): it is the check
+ * every writer runs before any child row, and it makes a verb's {@code FOR UPDATE} wait for the writer. {@link #stampHistory} is its
+ * unlocked twin for history rows.
+ *
  * <p><b>Two shapes.</b>
  * <ul>
  *   <li>{@link #idOf(String, String)} and {@link #idOf(Field, Field)}: a scalar subselect to use as a value in the
@@ -57,8 +62,8 @@ public final class CollectionIds {
         long requested = ExpectedCollectionIds.of(name).orElse(0L);
         if (requested > 0) {
             // the request named this label by id: the statement names the id too, so a row whose label is no longer the id's
-            // gets NULL, which the P3.1 CHECK refuses; the write is by id, and that is the consumption
-            ExpectedCollectionIds.consumed(name);
+            // gets NULL, which the P3.1 CHECK refuses. It is a stamp and not a read of the registry row: no lock and no consumption
+            // (the write that must be live at commit calls require, which reads the id FOR KEY SHARE)
             var c = CATALOG_COLLECTIONS.as("cid");
             return DSL.field(DSL.select(c.COLLECTION_ID).from(c)
                 .where(c.TENANT_ID.eq(tenant)).and(c.COLLECTION_ID.eq(requested)).and(c.NAME.eq(name)));
@@ -92,17 +97,35 @@ public final class CollectionIds {
         if (name == null || name.isEmpty()) {
             return null;
         }
-        OptionalLong requested = ExpectedCollectionIds.of(name);
-        if (requested.isPresent()) {
-            // the request named this label by id: the row of that id, FOR KEY SHARE, in this transaction (never the label's)
-            return CollectionRegistry.shared().readRequested(ctx, tenant, name, requested.getAsLong(), true).collectionId();
+        // the write transaction's registry check (RDR-229 P3.5a, linda's option (b)): the row FOR KEY SHARE, once per transaction,
+        // the row of the named id for a request by id and the row the label resolves to for a request by label
+        return CollectionRegistry.requireForWrite(ctx, tenant, name).collectionId();
+    }
+
+    /**
+     * The registry's {@code collection_id} for {@code (tenant, name)} to STAMP a history row (a relevance log row, a hook failure:
+     * a row about a collection that decides nothing), read in {@code ctx}'s transaction WITHOUT a lock and never refusing: the live row
+     * first and the newest tombstone after it ({@link CollectionRegistry#labelResolutionOrder}); {@code null} for {@code ''},
+     * {@code null} or a name no row has, which the caller writes as NULL beside the label (history tables carry no CHECK). A request
+     * that named the label by id stamps THAT id when the row of the id still has the label. Marks the transaction a history write for
+     * the census ({@link ExpectedCollectionIds#historyWrite}). History writes are exempt from {@code FOR KEY SHARE} and from refusal:
+     * a history write during a parked supersede does not wait for it.
+     */
+    public static Long stampHistory(DSLContext ctx, String tenant, String name) {
+        Objects.requireNonNull(tenant, "tenant");
+        if (name == null || name.isEmpty()) {
+            return null;
         }
-        Long id = ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID)
-            .from(CATALOG_COLLECTIONS)
-            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(name))
-            .fetchOne(CATALOG_COLLECTIONS.COLLECTION_ID);
+        ExpectedCollectionIds.historyWrite(ctx, name);
+        OptionalLong requested = ExpectedCollectionIds.of(name);
+        var read = ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(name));
+        Long id = requested.isPresent()
+            ? read.and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(requested.getAsLong())).fetchOne(CATALOG_COLLECTIONS.COLLECTION_ID)
+            : read.orderBy(CollectionRegistry.labelResolutionOrder()).limit(1).fetchOne(CATALOG_COLLECTIONS.COLLECTION_ID);
         if (id == null) {
-            throw new UnregisteredCollectionException(tenant, name);
+            org.slf4j.LoggerFactory.getLogger(CollectionIds.class).debug(
+                "event=history_row_without_registry_id tenant={} collection={} (written with a NULL id beside the label)", tenant, name);
         }
         return id;
     }

@@ -213,16 +213,17 @@ public final class CollectionRegistry {
      *         (a registry defect, or an in-place rename in the gap, which Phase 3 does not have before P3.7)
      */
     CollectionRow readRequested(DSLContext ctx, String tenant, String label, long collectionId, boolean consume) {
-        CollectionRow memo = ExpectedCollectionIds.memoized(ctx, label);
-        if (memo != null) {
+        CollectionRow memo = WriteRegistryMemo.get(ctx, tenant, label);
+        if (memo != null && memo.collectionId() == collectionId) {
             if (consume) {
-                ExpectedCollectionIds.consumed(label);
+                ExpectedCollectionIds.consumed(ctx, label);
             }
             return memo;
         }
         if (consume) {
             ExpectedCollectionIds.beforeTransactionRead();
         }
+        noteWriteRead(tenant, label);
         CollectionRow row = fill(ctx, tenant, CATALOG_COLLECTIONS.COLLECTION_ID.eq(collectionId), List.of(), true,
             () -> new UnknownCollectionIdException(tenant, collectionId));
         if (row.collectionId() != collectionId) {
@@ -235,12 +236,77 @@ public final class CollectionRegistry {
             throw new CollectionRetiredIdException(tenant, collectionId, row.label(),
                 CollectionSuccessor.of(ctx, tenant, collectionId));
         }
-        ExpectedCollectionIds.memoize(ctx, label, row);
+        WriteRegistryMemo.put(ctx, tenant, label, row);
         if (consume) {
-            ExpectedCollectionIds.consumed(label);
+            ExpectedCollectionIds.consumed(ctx, label);
             ExpectedCollectionIds.afterTransactionRead();
         }
         return row;
+    }
+
+    /**
+     * The registry check of a WRITE transaction (RDR-229 P3.5a, linda's option (b)): the row of {@code label} read {@code FOR KEY
+     * SHARE} in {@code ctx}'s own transaction, once, whatever the request names. A request by {@code collection_id} reads that id
+     * ({@link #readRequested}); a request by label reads the row the label resolves to ({@link #labelResolutionOrder}, the live row
+     * first), and a read of the same label later in the transaction answers from {@link WriteRegistryMemo}. The lock is what makes
+     * the write live at commit: a verb that retires the row ({@code CollectionTombstones#lockRows}, {@code FOR UPDATE}) waits for
+     * every writer holding it, and a writer that arrives after the verb reads the retired row. It is the same lock the foreign key
+     * takes on the first child insert, taken first, so it stays ahead of the write's child-row locks in every writer.
+     *
+     * <p>A reader (a transaction that writes nothing under the collection) keeps {@link #resolveLabel}, which answers from the cache
+     * and takes no lock. A write that runs outside any transaction of its own has no registry check to make here.
+     *
+     * @throws UnregisteredCollectionException if no row has the label (a request by label); the id errors of {@link #readRequested}
+     *         for a request by id
+     */
+    public CollectionRow requireForWriteRow(DSLContext ctx, String tenant, String label) {
+        return lockForWrite(ctx, tenant, label).orElseThrow(() -> new UnregisteredCollectionException(tenant, label));
+    }
+
+    /**
+     * {@link #requireForWriteRow} for a write that never refused an unregistered label (the deletes: a label no row has removes
+     * nothing and answers 200): empty when a request by label finds no row, with nothing to lock. A request by id still answers its
+     * typed 404 or 409. A retired row of a label is returned, as {@link #resolveLabel} returns it: only a request by its id is refused.
+     */
+    public Optional<CollectionRow> requireForWriteIfPresent(DSLContext ctx, String tenant, String label) {
+        return lockForWrite(ctx, tenant, label);
+    }
+
+    private Optional<CollectionRow> lockForWrite(DSLContext ctx, String tenant, String label) {
+        OptionalLong requested = ExpectedCollectionIds.of(label);
+        if (requested.isPresent()) {
+            return Optional.of(readRequested(ctx, tenant, label, requested.getAsLong(), true));
+        }
+        CollectionRow memo = WriteRegistryMemo.get(ctx, tenant, label);
+        if (memo != null) {
+            return Optional.of(memo);
+        }
+        noteWriteRead(tenant, label);
+        CollectionRow row = fillOrNull(ctx, tenant, CATALOG_COLLECTIONS.NAME.eq(label), labelResolutionOrder(), true);
+        if (row != null) {
+            WriteRegistryMemo.put(ctx, tenant, label, row);
+        }
+        return Optional.ofNullable(row);
+    }
+
+    /** Test seam: called with {@code tenant|label} before every {@code FOR KEY SHARE} read of a write transaction; null in production. */
+    static volatile java.util.function.Consumer<String> writeReadHookForTests;
+
+    private static void noteWriteRead(String tenant, String label) {
+        java.util.function.Consumer<String> hook = writeReadHookForTests;
+        if (hook != null) {
+            hook.accept(tenant + '|' + label);
+        }
+    }
+
+    /** {@link #requireForWriteRow} on the process-wide registry. */
+    public static CollectionRow requireForWrite(DSLContext ctx, String tenant, String label) {
+        return SHARED.requireForWriteRow(ctx, tenant, label);
+    }
+
+    /** {@link #requireForWriteIfPresent} on the process-wide registry. */
+    public static Optional<CollectionRow> requireForWriteIfPresent(DSLContext ctx, String tenant, String label) {
+        return SHARED.requireForWriteIfPresent(ctx, tenant, label);
     }
 
     /**
@@ -365,6 +431,15 @@ public final class CollectionRegistry {
      */
     private CollectionRow fill(DSLContext ctx, String tenant, Condition where, List<SortField<?>> order, boolean keyShare,
                                java.util.function.Supplier<RuntimeException> missing) {
+        CollectionRow row = fillOrNull(ctx, tenant, where, order, keyShare);
+        if (row == null) {
+            throw missing.get();
+        }
+        return row;
+    }
+
+    /** {@link #fill}, answering null for no row instead of throwing. */
+    private CollectionRow fillOrNull(DSLContext ctx, String tenant, Condition where, List<SortField<?>> order, boolean keyShare) {
         long evictionsBeforeRead;
         synchronized (fillLock) {
             evictionsBeforeRead = evictions[0];
@@ -385,7 +460,7 @@ public final class CollectionRegistry {
         // FOR KEY SHARE names the registry row alone: PostgreSQL refuses a row lock on the nullable side of the outer join
         Record r = keyShare ? read.forKeyShare().of(CATALOG_COLLECTIONS).fetchOne() : read.fetchOne();
         if (r == null) {
-            throw missing.get();
+            return null;
         }
         String label = r.get(CATALOG_COLLECTIONS.NAME);
         // RDR-204 Phase 2 follow-up (bead nexus-ft04v.16, hygiene-002 finding):
@@ -568,11 +643,14 @@ public final class CollectionRegistry {
      * into its origin and so refuses a retired origin too ({@code PgVectorRepository#checkRestoreOrigin}).
      * Callers: the manifest row writers (plain and append modes) and the taxonomy centroid upsert.
      *
+     * <p>The registry check of a write transaction: the row is read {@code FOR KEY SHARE}, once per transaction, for a label request
+     * as for an id request ({@link #requireForWrite}).
+     *
      * @throws UnregisteredCollectionException if no row exists for the pair
      * @throws CollectionSupersededException if the row names a successor
      */
     public static CollectionRow requireWritable(DSLContext ctx, String tenant, String collection) {
-        return refuseIfSuperseded(tenant, collection, require(ctx, tenant, collection));
+        return refuseIfSuperseded(tenant, collection, requireForWrite(ctx, tenant, collection));
     }
 
     /**
