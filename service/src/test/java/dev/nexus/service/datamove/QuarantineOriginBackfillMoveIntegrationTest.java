@@ -47,12 +47,17 @@ class QuarantineOriginBackfillMoveIntegrationTest extends DataMoveIntegrationBas
     private static final String T1 = "qob-a";
     private static final String T2 = "qob-b";
 
+    private static final String STAMP_LABEL = StampLabels.labelFor("chunks");
+
     private static Map<String, Object> registered;
+    private static Map<String, Object> stampRegistered;
 
     @BeforeAll
     void captureRegistration() {
         Record row = ctx().selectFrom(table("nexus", "data_moves")).where(LABEL.eq(LABEL_TEXT)).fetchOne();
         registered = row == null ? null : new LinkedHashMap<>(row.intoMap());
+        Record stamp = ctx().selectFrom(table("nexus", "data_moves")).where(LABEL.eq(STAMP_LABEL)).fetchOne();
+        stampRegistered = stamp == null ? null : new LinkedHashMap<>(stamp.intoMap());
     }
 
     @AfterEach
@@ -60,16 +65,22 @@ class QuarantineOriginBackfillMoveIntegrationTest extends DataMoveIntegrationBas
         for (String t : List.of(T1, T2)) {
             StampMoveSeeds.clean(ctx(), t);
         }
-        for (String run : new ArrayList<>(activeRuns(LABEL_TEXT))) {
-            ctx().select(DSL.function(DSL.name("dml_utils", "archive_migration_run"), SQLDataType.BIGINT, DSL.val(run))).fetch();
+        for (String label : List.of(LABEL_TEXT, STAMP_LABEL)) {
+            for (String run : new ArrayList<>(activeRuns(label))) {
+                ctx().select(DSL.function(DSL.name("dml_utils", "archive_migration_run"), SQLDataType.BIGINT, DSL.val(run))).fetch();
+            }
         }
     }
 
     // ── helpers ─────────────────────────────────────────────────────────────────────────────────────────────
 
     private void register(Map<String, Object> changes) {
-        assertThat(registered).as("the walk registers the move " + LABEL_TEXT).isNotNull();
-        Map<String, Object> row = new LinkedHashMap<>(registered);
+        insertMove(registered, LABEL_TEXT, changes);
+    }
+
+    private void insertMove(Map<String, Object> captured, String label, Map<String, Object> changes) {
+        assertThat(captured).as("the walk registers the move " + label).isNotNull();
+        Map<String, Object> row = new LinkedHashMap<>(captured);
         row.putAll(changes);
         List<Field<?>> columns = new ArrayList<>();
         List<Object> values = new ArrayList<>();
@@ -292,6 +303,89 @@ class QuarantineOriginBackfillMoveIntegrationTest extends DataMoveIntegrationBas
         assertThat(marker.value1()).as("the marker as the gate-3 clause reads it: the key exists").isTrue();
         assertThat(marker.value2()).as("and as siblingNames reads it: no id").isNull();
         assertThat(verificationRows(T1)).isZero();
+    }
+
+    // ── one rule for collection_id (linda, 2026-11-23) ─────────────────────────────────────────────────────
+
+    /** The SET of the chunks stamp's registered template: {@code collection_id = COALESCE(t.collection_id, <lookup by name>)}. */
+    private static String stampFill() {
+        assertThat(stampRegistered).as("the walk registers " + STAMP_LABEL).isNotNull();
+        String template = stampRegistered.get("template").toString();
+        int set = template.indexOf(" SET ");
+        int where = template.indexOf(" WHERE ", set);
+        assertThat(set).as("the stamp's template has a SET").isPositive();
+        return template.substring(set + " SET ".length(), where);
+    }
+
+    private void unstamp(String tenant, String key) {
+        P31CheckReplay.lift(ctx(), StampMoveSeeds.CHECK_CHANGESET.get("chunks"));
+        try {
+            ctx().update(CHUNKS).set(CHUNKS.COLLECTION_ID, (Long) null)
+                .where(CHUNKS.TENANT_ID.eq(tenant)).and(CHUNKS.CHASH.eq(HexFormat.of().parseHex(chash(tenant, key)))).execute();
+        } finally {
+            P31CheckReplay.restore(ctx(), StampMoveSeeds.CHECK_CHANGESET.get("chunks"));
+        }
+    }
+
+    /**
+     * The backfill writes a row's collection_id only where the chunks stamp has not, and by the stamp's own rule: the two registered templates
+     * carry the same fill text (read from the registry rows the walk wrote, so an edit to either is seen here), and on the same unstamped row
+     * the stamp and the backfill set the same id. vectors-070-15 is applied on every install and cannot change, so the text is the stamp's,
+     * copied once and pinned here.
+     */
+    @Test
+    void theBackfillSetsCollectionIdByTheChunksStampsOwnRule_theSameTextAndTheSameIdOnTheSameRow() throws Exception {
+        String fill = stampFill();
+        assertThat(fill).as("non-vacuity: the stamp's fill").startsWith("collection_id = COALESCE(t.collection_id, (SELECT cc.collection_id");
+        assertThat(registered.get("template").toString()).as("the backfill's template carries the stamp's fill, word for word").contains(fill);
+
+        live(T1, "live");
+        quarantineCollection(T1, "q");
+        chunk(T1, quarantine(T1, "q"), "same", tagged(name(T1, "live")));
+        unstamp(T1, "same");
+        assertThat(collectionIdOf(T1, "same")).as("non-vacuity: unstamped").isNull();
+
+        insertMove(stampRegistered, STAMP_LABEL, java.util.Collections.singletonMap("on_complete", null));   // the fill only: no VALIDATE here
+        assertThat(productionWorker().runCycle()).isEqualTo(1);
+        assertThat(completedAt(STAMP_LABEL)).as("the stamp ran").isNotNull();
+        Long byStamp = collectionIdOf(T1, "same");
+        assertThat(byStamp).as("the stamp's id").isNotNull();
+
+        unstamp(T1, "same");
+        register(Map.of());
+        assertThat(productionWorker().runCycle()).isEqualTo(1);
+        assertThat(completedAt(LABEL_TEXT)).isNotNull();
+        assertThat(collectionIdOf(T1, "same")).as("the backfill sets the id the stamp set").isEqualTo(byStamp);
+    }
+
+    // ── gate 2 ──────────────────────────────────────────────────────────────────────────────────────────────
+
+    /** Through CompletionCheck.evaluate: the label with no row and the label open keep gate 2 false; once the move completes it holds. */
+    @Test
+    void gate2WaitsForTheBackfill_noRowAndOpenAreIncomplete_completedIsComplete() throws Exception {
+        var readSet = new CompletionCheck.ReadSet(List.of(), List.of(LABEL_TEXT));
+        java.util.function.Supplier<CompletionCheck.Result> eval = () ->
+            CompletionCheck.evaluate(ctx(), readSet, CompletionCheck.Gate3Source.NOT_INSTALLED, CompletionCheck.DIRECT);
+        java.util.function.Function<CompletionCheck.Result, CompletionCheck.LabelState> state = r ->
+            r.labels().stream().filter(l -> l.label().equals(LABEL_TEXT)).findFirst().orElseThrow();
+
+        CompletionCheck.Result none = eval.get();
+        assertThat(none.gate2()).as("no row: gate 2 waits").isFalse();
+        assertThat(state.apply(none).status()).isEqualTo(CompletionCheck.Status.INCOMPLETE);
+        assertThat(state.apply(none).why()).contains("no row");
+
+        live(T1, "live");
+        quarantineCollection(T1, "q");
+        chunk(T1, quarantine(T1, "q"), "g", tagged(name(T1, "live")));
+        register(Map.of());
+        CompletionCheck.Result open = eval.get();
+        assertThat(open.gate2()).as("open: gate 2 waits").isFalse();
+        assertThat(state.apply(open).why()).isEqualTo("open");
+
+        assertThat(productionWorker().runCycle()).isEqualTo(1);
+        CompletionCheck.Result done = eval.get();
+        assertThat(state.apply(done).status()).as("completed").isEqualTo(CompletionCheck.Status.COMPLETE);
+        assertThat(done.gate2()).as("and gate 2 holds on it").isTrue();
     }
 
     // ── resumable ───────────────────────────────────────────────────────────────────────────────────────────
