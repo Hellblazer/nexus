@@ -51,7 +51,7 @@ class MoveNeedsOperatorIntegrationTest extends DataMoveIntegrationBase {
     private static final String CHUNK_FAMILY_ON_COMPLETE = "on-complete-chunks.sql";
     private static final Duration PAST_ANY_BACKOFF = Duration.ofMinutes(16);
 
-    private final HttpClient http = HttpClient.newHttpClient();
+    private final HttpClient http = TestHttp.client();
 
     /** One {@code event=data_move_needs_operator} line. */
     record Event(String level, Map<String, String> fields) {
