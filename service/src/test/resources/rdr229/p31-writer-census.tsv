@@ -229,10 +229,10 @@ taxonomy	taxonomy_meta	rdr229-fkvalidate-taxonomy_meta [vectors-072-collection-i
 taxonomy	taxonomy_meta	rdr229-stamp-taxonomy_meta [vectors-070-collection-id-stamp-moves.xml:220]	217	update	data_move	-	collection_id	yes	sets collection_id
 taxonomy	taxonomy_meta	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11725	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)
 taxonomy	taxonomy_meta	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12143	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)
-taxonomy	taxonomy_meta	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	1736	update	jooq	collection	collection_id	yes	
-taxonomy	taxonomy_meta	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	1760	insert	jooq	collection	collection_id	yes	
-taxonomy	taxonomy_meta	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	2306	insert	jooq	collection	collection_id	yes	
-taxonomy	taxonomy_meta	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	2562	insert	jooq	collection	collection_id	yes	
+taxonomy	taxonomy_meta	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	1733	update	jooq	collection	collection_id	yes	
+taxonomy	taxonomy_meta	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	1757	insert	jooq	collection	collection_id	yes	
+taxonomy	taxonomy_meta	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	2303	insert	jooq	collection	collection_id	yes	
+taxonomy	taxonomy_meta	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	2559	insert	jooq	collection	collection_id	yes	
 taxonomy	taxonomy_meta	service/src/main/java/dev/nexus/service/db/TenantImportLoad.java	349	insert	by-name	collection	collection_id	yes	TenantImportLoad by-name INSERT ... SELECT over TenantExport.TABLES
 taxonomy	topic_assignments	nexus.assign_from_chashes_1024 [vectors-077-rdr229-p35b-readers-both.xml:140]	48	insert	sql_function	source_collection	source_collection_id	yes	
 taxonomy	topic_assignments	nexus.assign_from_chashes_1024 [vectors-077-rdr229-p35b-readers-both.xml:187]	48	insert	sql_function	source_collection	source_collection_id	yes	
@@ -246,14 +246,14 @@ taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/CatalogIdS
 taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/CatalogIdStamps.java	132	update	jooq	-	source_collection_id	yes	
 taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11725	update	helper	source_collection	source_collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)
 taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12143	update	helper	source_collection	source_collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)
-taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	589	insert	jooq	source_collection	source_collection_id	yes	
-taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	812	insert	jooq	source_collection	source_collection_id	yes	
-taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	868	insert	jooq	source_collection	source_collection_id	yes	
-taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	1730	update	jooq	source_collection	source_collection_id	yes	
-taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	2234	insert	jooq	source_collection	source_collection_id	yes	
-taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	2473	insert	jooq	source_collection	source_collection_id	yes	
-taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	3253	insert	jooq	source_collection	source_collection_id	yes	
-taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	3417	insert	jooq	source_collection	source_collection_id	yes	
+taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	586	insert	jooq	source_collection	source_collection_id	yes	
+taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	809	insert	jooq	source_collection	source_collection_id	yes	
+taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	865	insert	jooq	source_collection	source_collection_id	yes	
+taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	1727	update	jooq	source_collection	source_collection_id	yes	
+taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	2231	insert	jooq	source_collection	source_collection_id	yes	
+taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	2470	insert	jooq	source_collection	source_collection_id	yes	
+taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	3248	insert	jooq	source_collection	source_collection_id	yes	
+taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	3411	insert	jooq	source_collection	source_collection_id	yes	
 taxonomy	topic_assignments	service/src/main/java/dev/nexus/service/db/TenantImportLoad.java	349	insert	by-name	source_collection	source_collection_id	yes	TenantImportLoad by-name INSERT ... SELECT over TenantExport.TABLES
 taxonomy	topics	nexus.topics_doc_count_recount_del [vectors-069-collection-id-dual-write-functions.xml:5911]	5852	update	sql_function	collection	collection_id	yes	
 taxonomy	topics	nexus.topics_doc_count_recount_ins [vectors-069-collection-id-dual-write-functions.xml:5736]	5660	update	sql_function	collection	collection_id	yes	
@@ -262,14 +262,14 @@ taxonomy	topics	rdr229-fkvalidate-topics [vectors-072-collection-id-fk-twins.xml
 taxonomy	topics	rdr229-stamp-topics [vectors-070-collection-id-stamp-moves.xml:237]	234	update	data_move	-	collection_id	yes	sets collection_id
 taxonomy	topics	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11725	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)
 taxonomy	topics	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12143	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)
-taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	410	insert	jooq	collection	collection_id	yes	
-taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	425	update	jooq	-	collection_id	yes	
-taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	437	update	jooq	-	collection_id	yes	
-taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	450	update	jooq	-	collection_id	yes	
-taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	1721	update	jooq	collection	collection_id	yes	
-taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	2178	insert	jooq	collection	collection_id	yes	
-taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	2401	insert	jooq	collection	collection_id	yes	
-taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	3076	insert	jooq	collection	collection_id	yes	
-taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	3211	insert	jooq	collection	collection_id	yes	
-taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	3346	insert	jooq	collection	collection_id	yes	
+taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	407	insert	jooq	collection	collection_id	yes	
+taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	422	update	jooq	-	collection_id	yes	
+taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	434	update	jooq	-	collection_id	yes	
+taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	447	update	jooq	-	collection_id	yes	
+taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	1718	update	jooq	collection	collection_id	yes	
+taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	2175	insert	jooq	collection	collection_id	yes	
+taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	2398	insert	jooq	collection	collection_id	yes	
+taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	3072	insert	jooq	collection	collection_id	yes	
+taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	3206	insert	jooq	collection	collection_id	yes	
+taxonomy	topics	service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java	3340	insert	jooq	collection	collection_id	yes	
 taxonomy	topics	service/src/main/java/dev/nexus/service/db/TenantImportLoad.java	349	insert	by-name	collection	collection_id	yes	TenantImportLoad by-name INSERT ... SELECT over TenantExport.TABLES

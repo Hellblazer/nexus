@@ -182,10 +182,7 @@ public final class TaxonomyRepository {
         return CollectionRegistry.requireWritable(ctx, tenant, collection).storedLabel(collection);
     }
 
-    /**
-     * The label a write stores for {@code collection} (RDR-229 P3.5c, I8): the locked registry row's CURRENT label, from this
-     * transaction's memo of the row (no second read), else {@code collection} when no row is registered or it is blank.
-     */
+    /** I8 (RDR-229 P3.5c): the label a write stores: the locked row's CURRENT label from the transaction's memo, else {@code collection}. */
     private static String storedLabel(DSLContext ctx, String tenant, String collection) {
         if (collection == null || collection.isBlank()) return collection;
         return CollectionRegistry.requireForWriteIfPresent(ctx, tenant, collection).map(r -> r.storedLabel(collection)).orElse(collection);
@@ -3047,8 +3044,7 @@ public final class TaxonomyRepository {
             // children escape the taxonomy-004 partial index (parent_id NOT
             // NULL) so a race here duplicates children rather than 409ing —
             // the same per-collection lock closes both.
-            final CollectionRow lockedRow = TaxonomyCollectionLock.lockAndRequireWritable(ctx, tenant, collectionName);   // advisory lock keyed by id, then the key share
-            final String storedCollection = lockedRow == null ? collectionName : lockedRow.storedLabel(collectionName);   // RDR-229 P3.5c, I8: the stored name is the locked row's label
+            final CollectionRow lockedRow = TaxonomyCollectionLock.lockAndRequireWritable(ctx, tenant, collectionName); final String storedCollection = lockedRow == null ? collectionName : lockedRow.storedLabel(collectionName);   // I8: the locked row's label
             // RDR-229 P3.1 stage 2b: the collection's registry id for every child topic written below.
             final Long collectionId = CollectionIds.require(ctx, tenant, collectionName);
             // Delete parent assignments
@@ -3172,8 +3168,7 @@ public final class TaxonomyRepository {
         return tenantScope.withTenant(tenant, ctx -> {
             // nexus-n2ls1: same guard-then-write shape as persistDiscoveredTopics
             // (delete-then-insert here) — serialize per-collection first.
-            final CollectionRow lockedRow = TaxonomyCollectionLock.lockAndRequireWritable(ctx, tenant, collection);   // advisory lock keyed by id, then the key share
-            final String storedCollection = lockedRow == null ? collection : lockedRow.storedLabel(collection);   // RDR-229 P3.5c, I8: the stored name is the locked row's label
+            final CollectionRow lockedRow = TaxonomyCollectionLock.lockAndRequireWritable(ctx, tenant, collection); final String storedCollection = lockedRow == null ? collection : lockedRow.storedLabel(collection);   // I8: the locked row's label
             // RDR-229 P3.1 stage 2b: the collection's registry id for every topic and assignment written below.
             final Long collectionId = CollectionIds.require(ctx, tenant, collection);
             // REPLACE semantics — clear old rows even when there are no new specs.
@@ -3305,8 +3300,7 @@ public final class TaxonomyRepository {
             // nexus-n2ls1: serialize per-collection BEFORE the guard — the guard
             // alone is a TOCTOU race under concurrent discovery (both count 0,
             // both insert, loser 23505 → 409).
-            final CollectionRow lockedRow = TaxonomyCollectionLock.lockAndRequireWritable(ctx, tenant, collection);   // advisory lock keyed by id, then the key share
-            final String storedCollection = lockedRow == null ? collection : lockedRow.storedLabel(collection);   // RDR-229 P3.5c, I8: the stored name is the locked row's label
+            final CollectionRow lockedRow = TaxonomyCollectionLock.lockAndRequireWritable(ctx, tenant, collection); final String storedCollection = lockedRow == null ? collection : lockedRow.storedLabel(collection);   // I8: the locked row's label
             // RDR-229 P3.1 stage 2b: the collection's registry id for every topic written below.
             final Long collectionId = CollectionIds.require(ctx, tenant, collection);
             int existing = ctx.selectCount()
