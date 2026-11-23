@@ -41,6 +41,11 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
 
+    @org.junit.jupiter.api.AfterEach
+    void releaseParked() throws Exception {
+        releaseWhatTheTestParked();
+    }
+
     // ── helpers ─────────────────────────────────────────────────────────────────────────────────────────────
 
     /** {@code seq_scan, seq_tup_read} of every leaf of chunks, by leaf, as the statistics views show them. */
@@ -55,54 +60,9 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
         return out;
     }
 
-    /**
-     * The tenant's leaves the way the service creates them: {@code nexus.create_tenant_partitions} called as {@code nexus_svc} (when the role
-     * exists in the fixture; the migrating role otherwise). The function is SECURITY DEFINER, so the leaves belong to its owner, the migrating role.
-     */
-    private void createTenantLeaves(String tenant) throws Exception {
-        try (Connection c = pg.createConnection("")) {
-            boolean svc = DSL.using(c, SQLDialect.POSTGRES).fetchExists(DSL.table(DSL.name("pg_catalog", "pg_roles")),
-                DSL.field(DSL.name("rolname"), String.class).eq("nexus_svc"));
-            if (svc) {
-                MoveSql.runOnComplete(c, "SET ROLE nexus_svc");
-            }
-            var regclass = new org.jooq.impl.DefaultDataType<>(SQLDialect.POSTGRES, Object.class, "regclass");
-            DSL.using(c, SQLDialect.POSTGRES).select(DSL.function(DSL.name("nexus", "create_tenant_partitions"), SQLDataType.INTEGER,
-                DSL.val("nexus.chunks").cast(regclass), DSL.val(tenant), DSL.val(true))).fetchOne();
-        }
-    }
 
-    private static void sleepMs(long ms) {
-        try {
-            Thread.sleep(ms);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException(e);
-        }
-    }
 
-    /** Runs {@code sql} (a registry on_complete) in one transaction on a session of its own, closed on return so its statistics are flushed. */
-    private void runOnCompleteOnOwnSession(String sql) throws Exception {
-        try (Connection c = pg.createConnection("")) {
-            c.setAutoCommit(false);
-            try {
-                MoveSql.runOnComplete(c, sql);
-                c.commit();
-            } catch (SQLException | RuntimeException e) {
-                c.rollback();
-                throw e;
-            }
-        }
-    }
 
-    private static String sqlState(Throwable t) {
-        for (Throwable c = t; c != null; c = c.getCause()) {
-            if (c instanceof SQLException se) {
-                return se.getSQLState();
-            }
-        }
-        return null;
-    }
 
     private void assertEveryLeafHasOneValidatedAdoptedKey() {
         var fks = leafFks();
@@ -219,7 +179,7 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
     /**
      * A leaf created after the validations: the parent step does NOT add the composite (it would scan the new leaf and build a second key
      * there). It adds the new leaf's key NOT VALID, queues the leaf's validation move and re-opens itself (no scan); the next call, with the
-     * work queued, does the same and adds nothing; once the leaf validates, the step adds the composite.
+     * work queued, raises 55P03 and adds nothing; once the leaf validates, the step adds the composite.
      */
     @Test
     void aLeafAddedAfterTheValidationsMakesTheParentStepDeferWithNoScanThenComplete() throws Exception {
@@ -262,8 +222,10 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
                 .as("%s: not the late leaf either", late).isZero();
         }
 
-        // 2: the work is queued and nothing changes: the step returns, writes nothing that matters (it re-opens itself) and adds no composite
-        runOnCompleteOnOwnSession(onCompleteOf(Rdr229ChunksFk.ADOPT_LABEL));
+        // 2: the work is already queued and nothing is new: the step raises 55P03 (a backed-off transient, not a re-open every poll), takes no lock on
+        // chunks and adds no composite
+        assertThatThrownBy(() -> runOnCompleteOnOwnSession(onCompleteOf(Rdr229ChunksFk.ADOPT_LABEL)))
+            .as("a leaf move is queued and has not run").satisfies(t -> assertThat(sqlState(t)).isEqualTo("55P03"));
         assertThat(compositeOnId()).as("still deferred while the new leaf's move has not run").isEmpty();
 
         // 3: the leaf validates and the step completes
@@ -494,7 +456,8 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
 
         var adopt = adoptMoves().get(0);
         assertThat(adopt.get("failed_at")).as("the adoption move failed, loud").isNotNull();
-        assertThat((String) adopt.get("failure")).as("naming the leaf move").contains(failed).contains("failed");
+        assertThat((String) adopt.get("failure")).as("naming the leaf move, and saying the adoption move needs re-arming too").contains(failed).contains("failed")
+            .contains("re-arm this move");
         assertThat(compositeOnId()).isEmpty();
     }
 
@@ -530,70 +493,9 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
 
     // ── 7: the lock a validation waits on, and what the status shows ────────────────────────────────────────
 
-    private record Held(Connection connection, String leaf, String label, DataMoveWorker worker) { }
 
-    /** Connections a test parks a lock on: released after each test whatever happened. */
-    private final List<Connection> parked = new java.util.ArrayList<>();
 
-    @org.junit.jupiter.api.AfterEach
-    void releaseWhatTheTestParked() throws Exception {
-        for (Connection c : parked) {
-            try {
-                c.rollback();
-                c.close();
-            } catch (SQLException ignored) {
-                // closing a connection that is already gone is what this is for
-            }
-        }
-        parked.clear();
-        // no data-move or holder backend survives the test with a statement running (a parked VALIDATE would hold a leaf for the next migration)
-        Field<String> application = DSL.field(DSL.name("application_name"), String.class);
-        Field<String> state = DSL.field(DSL.name("state"), String.class);
-        Field<Integer> pid = DSL.field(DSL.name("pid"), Integer.class);
-        long deadline = System.nanoTime() + 10_000L * 1_000_000L;
-        List<Integer> running;
-        do {
-            running = ctx().select(pid).from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
-                .where(application.like("nexus-data-move-%")).and(state.eq("active")).and(pid.ne(pid(su))).fetch(pid);
-            if (!running.isEmpty()) {
-                for (int p : running) {
-                    ctx().select(DSL.function("pg_cancel_backend", SQLDataType.BOOLEAN, DSL.val(p))).fetch();
-                }
-                sleepMs(200);
-            }
-        } while (!running.isEmpty() && System.nanoTime() < deadline);
-        assertThat(running).as("no nexus-data-move- backend is still running a statement after the test").isEmpty();
-    }
 
-    /** Pauses every move but one leaf validation, and holds ACCESS EXCLUSIVE on that leaf from a session of the test's own. */
-    private Held holdOneLeaf() throws Exception {
-        seed("held");
-        registerSwaps();
-        runSwaps(new VerifyingFinisher());
-        String leaf = chunkLeaves().get(0);
-        String label = Rdr229ChunksFk.LEAF_LABEL_PREFIX + leaf;
-        pause("rdr229-%");
-        resume(label);
-        // the worker first: building one re-runs the migration, whose ALTERs on the leaves would wait on the lock taken next
-        var worker = productionWorker(new VerifyingFinisher());
-        Connection c = pg.createConnection("");
-        parked.add(c);
-        c.setAutoCommit(false);
-        MoveSql.runOnComplete(c, "LOCK TABLE nexus." + quote(leaf) + " IN ACCESS EXCLUSIVE MODE");
-        return new Held(c, leaf, label, worker);
-    }
-
-    private static int completionPid(DataMoveWorker w, String label, long timeoutMs) {
-        long end = System.nanoTime() + timeoutMs * 1_000_000L;
-        while (System.nanoTime() < end) {
-            var call = w.states().call(label);
-            if (call.isPresent() && VerifyingFinisher.COMPLETION_RUN.equals(call.get().runLabel())) {
-                return call.get().pid();
-            }
-            sleepMs(50);
-        }
-        return -1;
-    }
 
     /**
      * The production leaf on_complete that cannot get the leaf's lock waits the 5 s lock wait of a validation, not 700 ms, then fails 55P03
@@ -717,11 +619,5 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
         }
     }
 
-    private static String quote(String ident) {
-        return "\"" + ident.replace("\"", "\"\"") + "\"";
-    }
 
-    private static int pid(Connection c) {
-        return DSL.using(c, SQLDialect.POSTGRES).select(DSL.function("pg_backend_pid", SQLDataType.INTEGER)).fetchOne(0, Integer.class);
-    }
 }
