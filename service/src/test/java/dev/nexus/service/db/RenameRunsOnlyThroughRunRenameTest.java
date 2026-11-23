@@ -122,25 +122,43 @@ class RenameRunsOnlyThroughRunRenameTest {
         return args.size() >= 3 && args.get(args.size() - 1).equals(args.get(args.size() - 2));
     }
 
-    private static final Pattern NAME_WRITE =
-        Pattern.compile("\\.set\\(\\s*[A-Za-z_]\\w*\\.(?:COLLECTION|PHYSICAL_COLLECTION|SOURCE_COLLECTION)\\s*,");
+    /**
+     * The writes the scan sees: {@code .set(<T>.COLLECTION | PHYSICAL_COLLECTION | SOURCE_COLLECTION, ...)}, a write of the registry's
+     * own {@code CATALOG_COLLECTIONS.NAME}, and the accessor form {@code .set(<t>.collection(), ...)} of {@code DimTables} and
+     * {@code CollectionScopedTable}. Out of scope: raw SQL in string literals (the raw-SQL gate counts those) and writes that build the
+     * column by name at run time.
+     */
+    private static final Pattern NAME_WRITE = Pattern.compile("\\.set\\(\\s*(?:[A-Za-z_]\\w*\\.(?:COLLECTION|PHYSICAL_COLLECTION|SOURCE_COLLECTION)"
+        + "|CATALOG_COLLECTIONS\\.NAME|[A-Za-z_]\\w*\\.collection\\(\\))\\s*,");
 
-    /** The collection-name column writes of {@code src} (already {@link #strip stripped}): {@code [outside runRename, inside]}. */
-    static int[] nameWrites(String src) {
+    /**
+     * The collection-name column writes of {@code src} (already {@link #strip stripped}): the site texts (the {@code .set(...)} call,
+     * whitespace collapsed) of those outside any runRename call, with how many times each occurs, and the number inside one.
+     */
+    static NameWrites nameWrites(String src) {
         List<int[]> spans = new ArrayList<>();
         var calls = Pattern.compile("\\.runRename\\(").matcher(src);
         while (calls.find()) {
             int open = src.indexOf('(', calls.start());
             spans.add(new int[] {open, open + balanced(src, open, '(', ')').length()});
         }
-        int outside = 0, inside = 0;
+        java.util.Map<String, Integer> outside = new java.util.TreeMap<>();
+        int inside = 0;
         var writes = NAME_WRITE.matcher(src);
         while (writes.find()) {
             int at = writes.start();
-            if (spans.stream().anyMatch(sp -> sp[0] <= at && at < sp[1])) inside++; else outside++;
+            if (spans.stream().anyMatch(sp -> sp[0] <= at && at < sp[1])) {
+                inside++;
+            } else {
+                String site = balanced(src, src.indexOf('(', at), '(', ')');
+                outside.merge((".set" + site).replaceAll("\\s+", " "), 1, Integer::sum);
+            }
         }
-        return new int[] {outside, inside};
+        return new NameWrites(outside, inside);
     }
+
+    /** The sites outside runRename (text to count) and the number of writes inside runRename calls. */
+    record NameWrites(java.util.Map<String, Integer> outside, int inside) { }
 
     /** The files of {@code counts} whose outside count differs from {@code allowed} (a missing entry is zero), as {@code file: found vs listed}. */
     static List<String> unlisted(java.util.Map<String, Integer> counts, java.util.Map<String, Integer> allowed) {
@@ -210,30 +228,64 @@ class RenameRunsOnlyThroughRunRenameTest {
         assertThat(opensOutsideRunRename(twice, "renameCollection")).isEqualTo("more than one runRename call");
     }
 
-    /** The widened scan: no write of a collection-name column outside runRename that the allowlist does not name. */
+    /**
+     * The widened scan: no write of a collection-name column outside runRename that the allowlist does not name, keyed by file and site
+     * text, with exact counts. The numbers pinned here (all sites, and those inside runRename) change only when a write is added or
+     * removed, which is the moment to look.
+     */
     @Test
     void everyNameColumnWriteOutsideRunRenameIsOnTheAllowlist() throws Exception {
         java.util.Map<String, Integer> outside = new java.util.TreeMap<>();
-        int total = 0, inside = 0;
+        int inside = 0;
         try (Stream<Path> s = Files.walk(MAIN)) {
             for (Path f : s.filter(x -> x.toString().endsWith(".java")).toList()) {
-                int[] w = nameWrites(code(f));
-                total += w[0] + w[1];
-                inside += w[1];
-                if (w[0] > 0) outside.put(f.getFileName().toString(), w[0]);
+                NameWrites w = nameWrites(code(f));
+                inside += w.inside();
+                w.outside().forEach((site, count) -> outside.put(f.getFileName() + " | " + site, count));
             }
         }
         java.util.Map<String, Integer> allowed = new java.util.TreeMap<>();
         for (String line : Files.readAllLines(Path.of("src/test/resources/rename-name-write-allowlist.txt"))) {
             if (line.isBlank() || line.startsWith("#")) continue;
-            String[] cols = line.split("\\|");
-            assertThat(cols).as("file | count | reason: %s", line).hasSize(3);
-            assertThat(cols[2].trim()).as("a reason for %s", cols[0]).isNotBlank();
-            allowed.put(cols[0].trim(), Integer.parseInt(cols[1].trim()));
+            String[] cols = line.split("\\|", 4);
+            assertThat(cols).as("file | count | site | reason: %s", line).hasSize(4);
+            assertThat(cols[3].trim()).as("a reason for %s", cols[0]).isNotBlank();
+            allowed.put(cols[0].trim() + " | " + cols[2].trim(), Integer.parseInt(cols[1].trim()));
         }
-        assertThat(total).as("non-vacuity: name-column writes scanned").isGreaterThanOrEqualTo(30);
-        assertThat(inside).as("non-vacuity: the primitives' own name bodies, inside runRename").isGreaterThanOrEqualTo(8);
+        assertThat(inside).as("the primitives' own name writes, inside runRename: exact").isEqualTo(10);
+        assertThat(outside.values().stream().mapToInt(Integer::intValue).sum()).as("sites outside runRename: exact").isEqualTo(28);
         assertThat(unlisted(outside, allowed)).as("a name-column write outside runRename that is not on the allowlist").isEmpty();
+    }
+
+    /**
+     * The aspect task bodies name their collection in a JSON field, which the column scan cannot see: {@code AspectTaskRefs.rewriteCollection}
+     * and its per-document form are called, outside runRename, only by the document move and rehome (a move changes no label), and
+     * inside it by the catalog rename and the aspects rename.
+     */
+    @Test
+    void theAspectTaskRewriteIsCalledInsideRunRenameOrByTheMovesOnly() throws Exception {
+        java.util.Map<String, Integer> outside = new java.util.TreeMap<>();
+        int inside = 0;
+        try (Stream<Path> s = Files.walk(MAIN)) {
+            for (Path f : s.filter(x -> x.toString().endsWith(".java")).toList()) {
+                String src = code(f);
+                if (f.getFileName().toString().equals("AspectTaskRefs.java")) continue;
+                List<int[]> spans = new ArrayList<>();
+                var calls = Pattern.compile("\\.runRename\\(").matcher(src);
+                while (calls.find()) {
+                    int open = src.indexOf('(', calls.start());
+                    spans.add(new int[] {open, open + balanced(src, open, '(', ')').length()});
+                }
+                var rewrites = Pattern.compile("AspectTaskRefs\\.rewriteCollection(?:ForDoc)?\\(").matcher(src);
+                while (rewrites.find()) {
+                    int at = rewrites.start();
+                    if (spans.stream().anyMatch(sp -> sp[0] <= at && at < sp[1])) inside++;
+                    else outside.merge(f.getFileName().toString(), 1, Integer::sum);
+                }
+            }
+        }
+        assertThat(inside).as("the catalog rename's and the aspects rename's own calls: exact").isEqualTo(2);
+        assertThat(outside).as("the document move and rehome, in CatalogRepository: exact").isEqualTo(java.util.Map.of("CatalogRepository.java", 2));
     }
 
     /** The widened scan has teeth: a write outside runRename in an unlisted file or a larger count is flagged, a write inside is not. */
@@ -245,10 +297,22 @@ class RenameRunsOnlyThroughRunRenameTest {
                 int b() { return renameGuard.runRename(scope, t, c -> c.update(T).set(T.COLLECTION, x).execute(), c -> 0); }
             }
             """);
-        assertThat(nameWrites(src)).as("one outside, one inside").containsExactly(1, 1);
-        assertThat(unlisted(java.util.Map.of("R.java", 1), java.util.Map.of())).as("an unlisted file").hasSize(1);
-        assertThat(unlisted(java.util.Map.of("R.java", 2), java.util.Map.of("R.java", 1))).as("a larger count").hasSize(1);
-        assertThat(unlisted(java.util.Map.of("R.java", 1), java.util.Map.of("R.java", 1))).as("listed and equal").isEmpty();
+        NameWrites w = nameWrites(src);
+        assertThat(w.inside()).as("one inside").isEqualTo(1);
+        assertThat(w.outside()).as("one outside, keyed by its site text").containsExactly(java.util.Map.entry(".set(T.COLLECTION, x)", 1));
+        assertThat(unlisted(java.util.Map.of("R.java | .set(T.COLLECTION, x)", 1), java.util.Map.of())).as("an unlisted site").hasSize(1);
+        assertThat(unlisted(java.util.Map.of("R.java | .set(T.COLLECTION, x)", 2), java.util.Map.of("R.java | .set(T.COLLECTION, x)", 1)))
+            .as("a larger count").hasSize(1);
+        assertThat(unlisted(java.util.Map.of("R.java | .set(T.COLLECTION, newName)", 1), java.util.Map.of("R.java | .set(T.COLLECTION, x)", 1)))
+            .as("an allowed site swapped for a label-changing one in the same file").hasSize(2);
+        assertThat(unlisted(java.util.Map.of("R.java | .set(T.COLLECTION, x)", 1), java.util.Map.of("R.java | .set(T.COLLECTION, x)", 1)))
+            .as("listed and equal").isEmpty();
+        String names = strip("""
+            class R {
+                void a() { ctx.update(C).set(CATALOG_COLLECTIONS.NAME, n).execute(); ctx.update(t.table()).set(t.collection(), n).execute(); }
+            }
+            """);
+        assertThat(nameWrites(names).outside()).as("the registry's own name and the accessor form are seen").hasSize(2);
 
         String txResult = strip("""
             class R {
