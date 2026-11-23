@@ -290,6 +290,39 @@ class AspectQueueDrainIntegrationTest {
         }
     }
 
+    /**
+     * RDR-229 P3.5c (linda 2026-11-23, census L2): from gate 3 a queued row with no home document and no collection id resolves its stored
+     * name to a LIVE registry row. One that does is dispatched under that name; one that names nothing is skipped with a WARN, counted, and
+     * left in the table: never dispatched under a label nothing holds.
+     */
+    @Test
+    void aQueuedRowWithNoIdResolvesItsNameToALiveRow_orIsSkippedAndLeftInTheTable() throws Exception {
+        String nobody = "knowledge__drain-nobody__minilm-l6-v2-384__v1";
+        try (Fixture fx = new Fixture(ctx -> {
+            PgContainerHelper.insertCollection(ctx, TENANT_A, COLL_A);
+            // two documents with no home, two queue rows with no collection_id: one names a registered live collection, one names nothing
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "a.live");
+            PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, "a.nobody");
+            row(ctx, TENANT_A, COLL_A, "a.live", "/a/live.md", "pending", null, "hl");
+            row(ctx, TENANT_A, nobody, "a.nobody", "/a/nobody.md", "pending", null, "hn");
+        })) {
+            long before = AspectQueueDrain.skippedNoLiveCollection();
+            AspectQueueDrain latched = new AspectQueueDrain(fx.scope, fx.tuples,
+                new AspectQueueDrain.AdminCensus(new AdminConnection(fx.pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS)),
+                () -> List.of(TENANT_A, TENANT_B), () -> true);
+
+            latched.run();
+
+            var tasks = tasks(fx);
+            assertThat(tasks).as("the row whose name a live registry row holds is dispatched, the other is not")
+                .containsKey("a.live").doesNotContainKey("a.nobody");
+            assertThat(JSON.readTree(tasks.get("a.live").get(TUPLES.BODY)).get("collection").asText()).isEqualTo(COLL_A);
+            assertThat(AspectQueueDrain.skippedNoLiveCollection()).as("counted").isEqualTo(before + 1);
+            int left = fx.su(ctx -> ctx.fetchCount(QUEUE, DSL.field(DSL.name("doc_id")).eq("a.nobody")));
+            assertThat(left).as("and left in the table").isEqualTo(1);
+        }
+    }
+
     // ── rows that cannot move ───────────────────────────────────────────────
 
     @Test
