@@ -345,11 +345,11 @@ class Rdr229P37RenameAcceptanceTest {
 
     /**
      * (c2) folio 2026-11-23: deleting the renamed collection B itself, after a real one-row rename A to B, leaves no row under B's id in any child
-     * table, although B's rows still carry the name A. The base's delete purges by label (c3b0bc4152), so it would leave them; P3.5a's id-scoped
+     * table, although B's rows still carry the name A. The base's delete purges by label (c3b0bc4152), so it would leave them; P3.5a slice B's CollectionPurgeScope (12cd3722cd)
      * purge closes it.
      */
     @Test
-    @Disabled("waits on P3.5a's id-scoped purge (c3b0bc4152 purges by label)")
+    @Disabled("enabled when P3.5a's CollectionPurgeScope (12cd3722cd) is on the base")
     void legC2_deletingTheRenamedCollectionLeavesNoRowUnderItsIdInAnyChildTable() throws Exception {
         var w = renamedCollection("c2");
         assertThat(childRowsUnderId(w.tenant(), w.id()).values().stream().mapToLong(Long::longValue).sum())
