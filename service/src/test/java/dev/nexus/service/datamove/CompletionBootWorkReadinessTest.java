@@ -26,6 +26,12 @@ class CompletionBootWorkReadinessTest {
             CompletionCheck.Dangling.UNREAD, false, true, false, false, rename);
     }
 
+    /** {@link #result} with the latch as the sample reports it. */
+    private static CompletionCheck.Result resultLatched(boolean latched, CompletionCheck.RenameState rename) {
+        return new CompletionCheck.Result(true, true, true, List.of(), List.of(), true, 0L, List.of(), List.of(), "",
+            CompletionCheck.Dangling.UNREAD, false, latched, false, false, rename);
+    }
+
     /** A reader that answers whatever {@code next} holds: a result, or a failure when it holds null. */
     private static final class Scripted implements CompletionBootWork.Reader {
         final AtomicReference<CompletionCheck.Result> next = new AtomicReference<>();
@@ -94,6 +100,37 @@ class CompletionBootWorkReadinessTest {
         assertThat(work.renameReadiness().missing()).as("with the readers absent the same state waits for them")
             .isEqualTo(RenameReadiness.Missing.P35C_READERS_ABSENT);
         assertThat(work.statusJson()).contains("\"rename_missing\":\"p35c_readers_absent\"");
+    }
+
+    /**
+     * The rename reads one signal: the service's gate 3 signal (the flag the service's Gate3 reads) is set before the sample is published, and the readiness
+     * answers NONE only while it is set, so a rename that takes the one-row path never meets helpers that still take the label forms. A sample that reads
+     * NONE while the signal is not set (the signal lags: a hand-built result, a reordering) waits as for an unreadable readiness, whatever sample or failed
+     * read follows, until a sample sets the signal.
+     */
+    @Test
+    void theReadinessIsNoneOnlyWhileTheServicesGate3SignalIsSet() {
+        var reader = new Scripted();
+        var work = work(reader);
+        CompletionBootWorkTestSupport.idReadersPresent(work, () -> true);
+        var complete = new CompletionCheck.RenameState(true, 1, List.of());
+        reader.next.set(resultLatched(false, complete));   // reads NONE, and says the latch has not been seen
+        work.publish();
+
+        assertThat(work.latest().readinessMissing()).as("non-vacuity: the sample itself reads NONE").isEqualTo(RenameReadiness.Missing.NONE);
+        assertThat(work.gate3Latched()).as("non-vacuity: the service's signal is not set").isFalse();
+        assertThat(work.renameReadiness().missing()).as("none is not answered while the signal is not set (no new wire value: unreadable)")
+            .isEqualTo(RenameReadiness.Missing.READINESS_UNREADABLE);
+
+        reader.next.set(null);   // a failed read after a NONE keeps NONE only once the signal is set
+        work.publish();
+        assertThat(work.renameReadiness().missing()).as("the monotone NONE does not outrun the signal either")
+            .isEqualTo(RenameReadiness.Missing.READINESS_UNREADABLE);
+
+        reader.next.set(resultLatched(true, complete));
+        work.publish();
+        assertThat(work.gate3Latched()).as("the sample set the signal").isTrue();
+        assertThat(work.renameReadiness().missing()).as("with the signal set the same readiness is NONE").isEqualTo(RenameReadiness.Missing.NONE);
     }
 
     /** The facts behind NONE are monotone: a read that fails after a NONE does not take it back, and one that read something missing does. */

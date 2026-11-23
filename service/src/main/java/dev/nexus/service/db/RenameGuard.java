@@ -72,8 +72,10 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
  * neither waits on it once it holds its gate: no cycle. The supersede takes no sweep gate, so it takes steps 1 and 3 only.
  *
  * <p>The latch row decides, except that no row with the readiness complete is {@code latch_row_missing}. The in-process gate 3 signal
- * plays no part: it is seeded from the row at boot and set after the row commits, so it can only lag the row, and the one-row window
- * opens only once the row is committed.
+ * is not read here, but the readiness this guard reads is tied to it: {@code CompletionBootWork} sets the signal before it publishes the
+ * sample the readiness is read from, and answers NONE only while the signal is set, so a rename that takes the one-row path always sees
+ * the signal set, and the one-row body's helpers (which follow the service's {@code Gate3}) take the same id forms the readers take.
+ * Across engines there is no window: {@code EngineSingletonLock} (nexus-5tykh) allows one engine per database.
  *
  * <p>One public constructor, {@code (readiness, oneRowRename)}: P3.7 supplies its catalog rename ({@link OneRowRename}) where
  * {@code NexusService} builds the guard.
