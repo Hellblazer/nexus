@@ -128,6 +128,16 @@ public final class TaxonomyRepository {
      * null/blank collection (unchanged from the stub-insert era).
      */
     /** The CURRENT label of the registry row {@code collection} names in this write transaction, else {@code collection} as given. */
+    /**
+     * The {@code topics} rows of the collection whose registry row the transaction holds: those stamped with its id, and those the stamp has
+     * not reached that bear its current label. A collection renamed in place keeps the old label in its children's name columns, so a
+     * match by the current label alone misses the collection's own rows.
+     */
+    private static org.jooq.Condition ownTopics(CollectionRow row, String currentLabel) {
+        return row == null ? TOPICS.COLLECTION.eq(currentLabel)
+            : CollectionOwnedRows.of(java.util.Optional.of(row), TOPICS.COLLECTION_ID, TOPICS.COLLECTION, currentLabel);
+    }
+
     private static String labelNow(DSLContext ctx, String tenant, String collection) {
         if (collection == null || collection.isBlank()) return collection;
         return CollectionRegistry.requireForWriteIfPresent(ctx, tenant, collection).map(CollectionRow::label).orElse(collection);
@@ -3150,15 +3160,18 @@ public final class TaxonomyRepository {
         return tenantScope.withTenant(tenant, ctx -> {
             // nexus-n2ls1: same guard-then-write shape as persistDiscoveredTopics
             // (delete-then-insert here) — serialize per-collection first.
-            final String coll = TaxonomyCollectionLock.currentLabel(TaxonomyCollectionLock.lockAndRequireWritable(ctx, tenant, collection), collection);   // advisory lock keyed by id, then the key share
+            final CollectionRow lockedRow = TaxonomyCollectionLock.lockAndRequireWritable(ctx, tenant, collection);   // advisory lock keyed by id, then the key share
+            final String coll = TaxonomyCollectionLock.currentLabel(lockedRow, collection);
             // RDR-229 P3.1 stage 2b: the collection's registry id for every topic and assignment written below.
             final Long collectionId = CollectionIds.require(ctx, tenant, coll);
-            // REPLACE semantics — clear old rows even when there are no new specs.
+            // REPLACE semantics — clear old rows even when there are no new specs. The collection's own rows are found by its id (a rename
+            // leaves their name column at the old label), by name only for a row the id stamp has not reached (CollectionOwnedRows)
+            final org.jooq.Condition ownTopics = ownTopics(lockedRow, coll);
             ctx.deleteFrom(TOPIC_ASSIGNMENTS)
                .where(TOPIC_ASSIGNMENTS.TOPIC_ID.in(
-                   select(TOPICS.ID).from(TOPICS).where(TOPICS.COLLECTION.eq(coll))))
+                   select(TOPICS.ID).from(TOPICS).where(ownTopics)))
                .execute();
-            ctx.deleteFrom(TOPICS).where(TOPICS.COLLECTION.eq(coll)).execute();
+            ctx.deleteFrom(TOPICS).where(ownTopics).execute();
 
             OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
             List<Long> topicIds = new ArrayList<>();
@@ -3281,12 +3294,13 @@ public final class TaxonomyRepository {
             // nexus-n2ls1: serialize per-collection BEFORE the guard — the guard
             // alone is a TOCTOU race under concurrent discovery (both count 0,
             // both insert, loser 23505 → 409).
-            final String coll = TaxonomyCollectionLock.currentLabel(TaxonomyCollectionLock.lockAndRequireWritable(ctx, tenant, collection), collection);   // advisory lock keyed by id, then the key share
+            final CollectionRow lockedRow = TaxonomyCollectionLock.lockAndRequireWritable(ctx, tenant, collection);   // advisory lock keyed by id, then the key share
+            final String coll = TaxonomyCollectionLock.currentLabel(lockedRow, collection);
             // RDR-229 P3.1 stage 2b: the collection's registry id for every topic written below.
             final Long collectionId = CollectionIds.require(ctx, tenant, coll);
             int existing = ctx.selectCount()
                 .from(TOPICS)
-                .where(TOPICS.COLLECTION.eq(coll))
+                .where(ownTopics(lockedRow, coll))
                 .fetchOne(0, Integer.class);
             if (existing > 0) {
                 log.info("discover_skip_existing collection={} existing_topics={}",

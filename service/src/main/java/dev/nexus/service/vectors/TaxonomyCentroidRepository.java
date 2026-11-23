@@ -150,11 +150,14 @@ public final class TaxonomyCentroidRepository {
                 DimTables.CentroidTable ct = DimTables.CENTROIDS.get(dim);
                 // nexus-2qryr, RDR-225: a re-embed under a new model deletes the row stored under the
                 // old one (an upsert cannot move a row across partitions) before the new one is written.
+                // The collection's own rows are found by its id (a rename in place leaves their name column at the old label, so a match by
+                // the current label misses them and the upsert below would meet the leaf's id unique index), by name only for a row the stamp
+                // has not reached: the row of this topic under another model, or under a stale label, is replaced by the write below.
                 ctx.deleteFrom(ct.table())
                    .where(ct.tenantId().eq(tenant)
-                       .and(ct.collection().eq(label))
+                       .and(ownedBy(ct, collectionRow.collectionId(), label))
                        .and(ct.topicId().eq(r.topicId()))
-                       .and(ct.embeddingModel().ne(model)))
+                       .and(ct.embeddingModel().ne(model).or(ct.collection().ne(label))))
                    .execute();
                 // RDR-229 P3.1 stage 2b (nexus-p2m1x.17): the collection's registry id, read in this transaction,
                 // set beside the name on insert and on the conflict arm. taxonomy_centroids carries NOT VALID
