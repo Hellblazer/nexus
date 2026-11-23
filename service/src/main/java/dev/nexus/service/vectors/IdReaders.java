@@ -9,7 +9,10 @@ package dev.nexus.service.vectors;
  * {@code collection_id} and the search statements call the {@code <name>_by_id} twins, so the name-index retire ({@code REPLACED_BY_ID},
  * {@code PciReconcilePlanner}) may run once the latch holds. It stays {@code false} for as long as any reader still selects by name after the
  * latch: dropping the name-predicate per-collection indexes would leave that reader without them. {@code Rdr229P35cIdReadersPinTest} holds
- * the value to what the readers do, in both directions. {@link PciIdBuilds} reads it through {@link #present()}; a test controls the
+ * the value to what the census readers' dispositions say: it fails on a census reader with no disposition and on one whose disposition is
+ * not an id read (only {@code id} and {@code both} count; {@code label-kept} is the registry's own label). It does not see the by-label SQL
+ * calls of the reaper and the chunk reaper (17 census rows, {@code holds-until-P4.1}, nexus-p2m1x.35): those are P4.1's to retire before the
+ * name columns go. {@link PciIdBuilds} reads it through {@link #present()}; a test controls the
  * reconciler through its injectable supplier.
  */
 public final class IdReaders {
