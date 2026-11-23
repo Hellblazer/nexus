@@ -812,10 +812,10 @@ public final class PciReconciler {
     }
 
     /**
-     * The leaf's statistics, just committed, to the canary's vacuum trigger: the leaf's valid indexes the plan is not
-     * dropping.
+     * The leaf's statistics, just committed, to the canary's vacuum trigger: the leaf's valid indexes of the family the canary measures
+     * ({@link #canaryFamily}) that the plan is not dropping.
      */
-    private void observeForCanary(Leaf leaf, Planned planned) {
+    private void observeForCanary(Leaf leaf, Planned planned, boolean latched) {
         PciAnchorReads.LeafStats stats = planned.anchors().stats();
         if (canary == null || stats == null) {
             return;
@@ -826,9 +826,13 @@ public final class PciReconciler {
                 dropping.add(d.name());
             }
         }
-        List<String> names = leaf.indexes().stream()
-            .filter(i -> i.parsed() && i.valid() && !dropping.contains(i.name())).map(Index::name).toList();
-        canary.observeLeaf(leafId(leaf), names, stats);
+        canary.observeLeaf(leafId(leaf), canaryFamily(leaf, dropping, latched), stats);
+    }
+
+    /** The names of the leaf's valid indexes the canary measures and the plan keeps: the id-predicate ones once the latch holds, the name-predicate ones before. */
+    static List<String> canaryFamily(Leaf leaf, Set<String> dropping, boolean latched) {
+        return leaf.indexes().stream()
+            .filter(i -> (latched ? i.idParsed() : i.parsed()) && i.valid() && !dropping.contains(i.name())).map(Index::name).toList();
     }
 
     /**
@@ -960,7 +964,7 @@ public final class PciReconciler {
         ledger.apply(leaf, planned.anchors());
         planned.idLabels().forEach((id, name) -> tally.idLabels.put(PciCatalog.idKey(leaf.model(), leaf.tenant(), id), name));
         tally.looks.add(new PciReindexState.Look(leaf, planned.dimension(), planned.anchors().readings()));
-        observeForCanary(leaf, planned);
+        observeForCanary(leaf, planned, tally.gate3);
         noteLeaf(leaf, tally, (int) planned.actions().stream().filter(a -> a instanceof Build).count());
         execute(pass, leaf, planned.dimension(), planned.anchors().writes(), planned.actions(), tally);
         return true;
