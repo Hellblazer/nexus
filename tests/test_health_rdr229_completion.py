@@ -43,7 +43,7 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures" / "rdr229_completion_sta
 #: Every key the engine's field carries; the module reads each of them, and a key the engine adds that is not here fails the shape test.
 FIELD_KEYS = {
     "gate1", "gate2", "gate3", "gates_holding", "gates_total", "summary", "gate3_why", "gate3_latched", "id_index_invalid",
-    "gate3_latch_pci_off", "labels_total", "labels_incomplete", "checks_missing", "validate_waits",
+    "gate3_latch_pci_off", "labels_total", "labels_incomplete", "checks_missing", "validate_waits", "rename_missing",
 }
 
 #: A number in front of what it counts: the shape of every tenant count the old status text carried.
@@ -322,3 +322,21 @@ def test_the_sweep_has_the_row_and_hands_it_the_status_it_already_fetched(monkey
 
     assert SUMMARY_LABEL in [r.label for r in rows]
     assert "_check_rdr229_completion" in Path(health.__file__).read_text(encoding="utf-8")
+
+
+def test_a_rename_the_engine_refuses_is_one_informational_row_naming_what_it_waits_for():
+    """RDR-229 P3.7: ``rename_missing`` other than ``none`` is one ok row naming the wait; ``none`` and an older engine add none."""
+    h = rdr229_completion_health
+    base = _fixture("restart_needed")
+    rows = h.check_rdr229_completion(base, counts_reader=lambda: {})
+    rename = [r for r in rows if r.label == h.RENAME_LABEL]
+    assert base["rdr229_completion"]["rename_missing"] == "restart", "non-vacuity: the fixture waits on the restart"
+    assert len(rename) == 1 and rename[0].ok and "restart" in rename[0].detail
+    for value in ("none", None):
+        field = dict(base["rdr229_completion"])
+        if value is None:
+            field.pop("rename_missing")
+        else:
+            field["rename_missing"] = value
+        assert not [r for r in h.check_rdr229_completion({**base, "rdr229_completion": field}, counts_reader=lambda: {})
+                    if r.label == h.RENAME_LABEL]
