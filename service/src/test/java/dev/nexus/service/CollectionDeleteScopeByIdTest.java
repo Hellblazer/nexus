@@ -46,8 +46,16 @@ class CollectionDeleteScopeByIdTest {
     void startAll() throws Exception {
         fx = new CollectionRouteFixture();
         fx.gate3.set(true);
-        // the name-key drop move, as far as this class needs it: the name keys' foreign keys depend on the primary key
+        // the name-key drop move, as far as this class needs it. Every inbound foreign key on a registry key that
+        // holds `name` goes first: the primary key's cascade does not reach the ones on the other name-keyed unique
+        // keys (observed: chunks_collection_fk on (tenant_id, name, embedding_model) refused the in-place rename).
         fx.asSuperuser(ctx -> {
+            for (var key : CATALOG_COLLECTIONS.getKeys()) {
+                if (!key.getFields().contains(CATALOG_COLLECTIONS.NAME)) continue;
+                for (var fk : key.getReferences()) {
+                    ctx.alterTable(fk.getTable()).dropConstraintIfExists(fk.getName()).execute();
+                }
+            }
             ctx.alterTable(CATALOG_COLLECTIONS).dropConstraint(CATALOG_COLLECTIONS.getPrimaryKey().getName()).cascade().execute();
             return null;
         });
