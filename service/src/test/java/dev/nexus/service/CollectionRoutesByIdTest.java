@@ -168,20 +168,37 @@ class CollectionRoutesByIdTest {
     }
 
     private Resp call(Route route, Mode mode, Prepared p) {
-        String extras = route.extras().replace("{NEW}", p.fresh(mode != Mode.LABEL));
+        String fresh = p.fresh(mode != Mode.LABEL);
+        String extras = route.extras().replace("{NEW}", fresh);
         if (route.where() == Where.QUERY) {
             String sel = new ArrayList<>(selectors(route, mode, p)).stream().collect(Collectors.joining("&"));
             return p.f.send(route.method(), route.path() + "?" + sel + extras, null);
         }
-        String sel = String.join(",", selectors(route, mode, p));
-        Slot first = route.slots().get(0);
-        if (first.nested()) {
-            // The selector is per record: it and the extras are the one element of the request array.
-            String record = "{" + sel + (extras.isBlank() ? "" : "," + extras) + "}";
-            return p.f.send(route.method(), route.path(), "{\"" + first.nestedIn() + "\":[" + record + "]}");
+        // A selector is a top-level field, or a field of each element of one request array (the centroid upsert's records, a
+        // remap batch's entries); a row can have both. The route's extras are top-level, its elementExtras sit beside the nested
+        // selector in the one element.
+        List<String> top = new ArrayList<>();
+        List<String> element = new ArrayList<>();
+        String array = "";
+        for (int k = 0; k < route.slots().size(); k++) {
+            Slot slot = route.slots().get(k);
+            String sel = selector(route, slot, k, mode, p);
+            if (slot.nested()) {
+                element.add(sel);
+                array = slot.nestedIn();
+            } else {
+                top.add(sel);
+            }
         }
-        String body = "{" + sel + (extras.isBlank() ? "" : "," + extras) + "}";
-        return p.f.send(route.method(), route.path(), body);
+        List<String> parts = new ArrayList<>(top);
+        if (!extras.isBlank()) {
+            parts.add(extras);
+        }
+        if (!element.isEmpty()) {
+            String elementExtras = route.elementExtras().replace("{NEW}", fresh);
+            parts.add("\"" + array + "\":[{" + String.join(",", element) + (elementExtras.isBlank() ? "" : "," + elementExtras) + "}]");
+        }
+        return p.f.send(route.method(), route.path(), "{" + String.join(",", parts) + "}");
     }
 
     private List<String> selectors(Route route, Mode mode, Prepared p) {
@@ -414,5 +431,31 @@ class CollectionRoutesByIdTest {
             assertThat(byId.status()).as("gate3=%s, an unknown id: %s", gate3, byId.body()).isEqualTo(404);
             assertThat(byId.reason()).isEqualTo("unknown_collection_id");
         }
+    }
+
+    /**
+     * SB3 (review of ede4ca3c2d, F6a): {@code POST /v1/catalog/gc_audit/record} reads {@code collection} from its body (the repository,
+     * {@code recordGcAudit}), and the route table and census missed it, so a client that sent {@code collection_id} got an audit row
+     * with no collection. By id, the row records the collection's label, the same as by label; the list route finds it by either.
+     */
+    @Test
+    void aGcAuditRecordByIdIsFiledUnderTheCollectionsLabel() {
+        fx.gate3.set(false);
+        String label = CollectionRouteFixture.label("gc-audit");
+        fx.register(label);
+        long id = fx.idOf(label);
+        Resp byId = fx.post("/v1/catalog/gc_audit/record", "{\"operation\":\"sb3-by-id\",\"collection_id\":" + id + "}");
+        assertThat(byId.status()).as(byId.body()).isEqualTo(200);
+        Resp byLabel = fx.post("/v1/catalog/gc_audit/record", "{\"operation\":\"sb3-by-label\",\"collection\":" + json(label) + "}");
+        assertThat(byLabel.status()).as(byLabel.body()).isEqualTo(200);
+
+        JsonNode listed = fx.get("/v1/catalog/gc_audit/list?collection_id=" + id).json().path("entries");
+        List<String> operations = new ArrayList<>();
+        listed.forEach(e -> {
+            assertThat(e.path("collection").asText()).as("the row records the label: %s", e).isEqualTo(label);
+            operations.add(e.path("operation").asText());
+        });
+        assertThat(operations).containsExactlyInAnyOrder("sb3-by-id", "sb3-by-label");
+        assertThat(fx.get("/v1/catalog/gc_audit/list?collection=" + enc(label)).json().path("entries")).hasSize(2);
     }
 }

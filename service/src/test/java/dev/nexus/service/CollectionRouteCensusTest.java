@@ -6,7 +6,9 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
@@ -28,6 +30,19 @@ import static org.assertj.core.api.Assertions.assertThat;
  * collection field, or a new site for an old one, fails here until a row or an exclusion says what the by-id contract
  * does with it. It also requires every row's path to be dispatched by the handler file the row names, and the row's
  * handler method to exist, so a row cannot outlive its route.
+ *
+ * <p><b>What finds a route (RDR-229 P3.5a, linda's ruling D1).</b> Not the literals of the handler files alone: a request map can
+ * be read in a repository ({@code CatalogRepository.recordGcAudit} reads {@code collection}, the document routes read
+ * {@code physical_collection}). Three scans, each non-vacuous:
+ * <ol>
+ *   <li>every read of a collection-named request field in a handler is made by a method a row, a helper or an exclusion names;</li>
+ *   <li>the same in every other main source file, by the request-map reads ({@code s(map, "..."), body.get("...")});</li>
+ *   <li>every call that resolves a collection through the registry, in any main file, is counted per file ({@link
+ *       CollectionRouteCensus#RESOLVING}), whatever the field is called, so a repository that starts to resolve a collection from
+ *       a request fails here even if it reads it under a name no scan knows. The document resolver's callers are pinned to the
+ *       methods the document routes reach.</li>
+ * </ol>
+ * Every excluded site names its reason and a fragment of source that must still be there; none is "ambiguous, not tested".
  *
  * <p>Both directions are non-vacuous: the examined file and site counts are asserted, and a synthetic source with a new
  * field shows the scan sees it.
@@ -63,8 +78,127 @@ class CollectionRouteCensusTest {
         "VectorHandler.java", Map.of("collection", 14, "collections", 6, "quarantine_collection", 3,
             "origin_collection", 3));
 
+    /** {@code src} with its comments blanked. A comment marker inside a string literal is not one (the earlier regex took it for one). */
     static String blank(String src) {
-        return src.replaceAll("(?s)/\\*.*?\\*/", "").replaceAll("//[^\\n]*", "");
+        return scan(src)[0];
+    }
+
+    /**
+     * {@code {code, masked}}: {@code src} with its comments blanked, and that with the content of every string and character
+     * literal replaced by {@code x}. Same length as {@code src}, so a position in one is a position in the other: the masked text is
+     * for finding declarations and matching braces, the code text for reading a literal.
+     */
+    static String[] scan(String src) {
+        int n = src.length();
+        char[] code = src.toCharArray();
+        char[] masked = src.toCharArray();
+        int i = 0;
+        while (i < n) {
+            char c = src.charAt(i);
+            char next = i + 1 < n ? src.charAt(i + 1) : '\0';
+            if (c == '/' && next == '/') {
+                int j = src.indexOf('\n', i);
+                j = j < 0 ? n : j;
+                for (int k = i; k < j; k++) {
+                    code[k] = ' ';
+                    masked[k] = ' ';
+                }
+                i = j;
+            } else if (c == '/' && next == '*') {
+                int j = src.indexOf("*/", i + 2);
+                j = j < 0 ? n : j + 2;
+                for (int k = i; k < j; k++) {
+                    if (src.charAt(k) != '\n') {
+                        code[k] = ' ';
+                        masked[k] = ' ';
+                    }
+                }
+                i = j;
+            } else if (src.startsWith("\"\"\"", i)) {
+                int j = src.indexOf("\"\"\"", i + 3);
+                j = j < 0 ? n : j + 3;
+                for (int k = i + 3; k < j - 3; k++) {
+                    if (src.charAt(k) != '\n') {
+                        masked[k] = 'x';
+                    }
+                }
+                i = j;
+            } else if (c == '"' || c == '\'') {
+                int j = i + 1;
+                while (j < n && src.charAt(j) != c) {
+                    j += src.charAt(j) == '\\' ? 2 : 1;
+                }
+                for (int k = i + 1; k < Math.min(j, n); k++) {
+                    masked[k] = 'x';
+                }
+                i = j + 1;
+            } else {
+                i++;
+            }
+        }
+        return new String[] {new String(code), new String(masked)};
+    }
+
+    /** A method declaration, in masked source: group 1 is its name. Calls and control statements do not match (no {@code ;} or brace before the open brace). */
+    private static final Pattern DECL = Pattern.compile(
+        "(?m)^[ \\t]+(?:@\\w+\\s+)*(?:(?:private|public|protected|static|final|synchronized)\\s+)*(?:<[^>]+>\\s+)?"
+            + "[\\w.\\[\\]]+(?:<[^;{}()]*>)?\\s+(\\w+)\\s*\\([^;{}]*\\)\\s*(?:throws\\s+[\\w., ]+)?\\{");
+
+    /** The reads of a collection-named field from a request map in a non-handler: a keyed helper or a map receiver, then the literal. */
+    private static final Pattern READ_MAP = Pattern.compile(
+        "(?:\\b(?:s|optString|optionalString|optStr|requireString|str)\\(\\s*\\w+\\s*,\\s*"
+            + "|\\b(?:body|fields|d|audit|req|request|m|update|spec)\\.(?:get|getOrDefault|containsKey|remove)\\(\\s*)"
+            + "\"([a-z_]*collection[a-z_]*)\"");
+
+    /** A call that resolves a collection through the registry or the id helpers. */
+    private static final Pattern RESOLVE_CALL = Pattern.compile(
+        "\\b(?:CollectionRegistry|CollectionIds|CatalogIdStamps|DocumentCollectionRef|registry)\\s*\\.\\s*"
+            + "(?:require\\w*|lookup\\w*|resolve\\w*|idOf|requireMemo|normalize\\w*|lifecycleState)\\s*\\(");
+
+    private static final Path MAIN_DIR = Path.of("src/main/java/dev/nexus/service");
+
+    /** One declaration of a method, and the extent of its body in the masked source. */
+    private record Decl(String name, int start, int end) { }
+
+    private static List<Decl> declarations(String masked) {
+        List<Decl> out = new ArrayList<>();
+        Matcher m = DECL.matcher(masked);
+        while (m.find()) {
+            int depth = 0;
+            int j = m.end() - 1;
+            for (; j < masked.length(); j++) {
+                char c = masked.charAt(j);
+                if (c == '{') {
+                    depth++;
+                } else if (c == '}' && --depth == 0) {
+                    break;
+                }
+            }
+            out.add(new Decl(m.group(1), m.start(), j));
+        }
+        return out;
+    }
+
+    /** The method a position is in: the last declaration that starts before it, or {@code ?}. */
+    private static String enclosing(List<Decl> decls, int position) {
+        String name = "?";
+        for (Decl d : decls) {
+            if (d.start() < position) {
+                name = d.name();
+            }
+        }
+        return name;
+    }
+
+    /** Every main source file, by its path under {@link #MAIN_DIR}, with its code and masked text. */
+    private static Map<String, String[]> mainSources() throws Exception {
+        Map<String, String[]> out = new TreeMap<>();
+        try (Stream<Path> walk = Files.walk(MAIN_DIR)) {
+            for (Path p : (Iterable<Path>) walk.filter(f -> f.toString().endsWith(".java"))::iterator) {
+                out.put(MAIN_DIR.relativize(p).toString().replace('\\', '/'), scan(Files.readString(p)));
+            }
+        }
+        return out;
     }
 
     static Map<String, Integer> fieldReads(String src) {
@@ -98,22 +232,230 @@ class CollectionRouteCensusTest {
         assertThat(found).as("a handler read site was added or removed: classify it in CollectionRouteCensus, then change PINNED")
             .isEqualTo(PINNED);
 
-        Set<String> accounted = new HashSet<>();
-        for (var route : CollectionRouteCensus.ROUTES) {
-            for (var slot : route.slots()) {
-                accounted.add(route.handler() + "#" + slot.labelField());
-            }
+        // Every site is made by a method the census names: a row's handler method, a helper a row calls, or an exclusion.
+        Map<String, Set<String>> named = new TreeMap<>();
+        for (var route : CollectionRouteCensus.allRoutes()) {
+            named.computeIfAbsent(route.handler(), k -> new TreeSet<>()).add(route.readsId());
+        }
+        for (var rename : CollectionRouteCensus.STORE_RENAMES) {
+            named.computeIfAbsent(rename.handler(), k -> new TreeSet<>()).add(rename.readsId());
+        }
+        for (var helper : CollectionRouteCensus.HELPERS) {
+            named.computeIfAbsent(helper.file(), k -> new TreeSet<>()).add(helper.method());
         }
         for (var ex : CollectionRouteCensus.EXCLUDED) {
-            accounted.add(ex.handler() + "#" + ex.field());
+            named.computeIfAbsent(baseName(ex.file()), k -> new TreeSet<>()).add(ex.method());
         }
-        for (var file : found.entrySet()) {
-            for (String field : file.getValue().keySet()) {
-                assertThat(accounted).as("%s reads '%s': a census row names it as a slot, or CollectionRouteCensus.EXCLUDED "
-                        + "says why the by-id contract leaves it", file.getKey(), field)
-                    .contains(file.getKey() + "#" + field);
+        Map<String, Set<String>> unaccounted = new TreeMap<>();
+        Set<String> sites = new TreeSet<>();
+        for (var e : mainSources().entrySet()) {
+            if (!e.getKey().startsWith("http/")) {
+                continue;
+            }
+            String file = baseName(e.getKey());
+            List<Decl> decls = declarations(e.getValue()[1]);
+            Matcher m = READ.matcher(e.getValue()[0]);
+            while (m.find()) {
+                String method = enclosing(decls, m.start());
+                sites.add(file + "#" + method + "#" + m.group(1));
+                if (!named.getOrDefault(file, Set.of()).contains(method)) {
+                    unaccounted.computeIfAbsent(file, k -> new TreeSet<>()).add(method + " reads '" + m.group(1) + "'");
+                }
             }
         }
+        assertThat(sites).as("non-vacuity: the (file, method, field) sites examined in the handlers").hasSizeGreaterThanOrEqualTo(70);
+        assertThat(unaccounted).as("a handler method reads a collection field that no row, helper or exclusion of "
+            + "CollectionRouteCensus names: add its route as a row (and to CollectionSelectors), or EXCLUDED with the reason").isEmpty();
+    }
+
+    private static String baseName(String path) {
+        return path.substring(path.lastIndexOf('/') + 1);
+    }
+
+    /**
+     * The same accounting for every main source file that is not a handler: a repository or helper that reads a collection-named
+     * field from a request map. Found here, not in the handlers: {@code CatalogRepository.recordGcAudit} (the audit row's
+     * {@code collection}, SB3), the document routes' {@code physical_collection}, the aspect repository's upserts. A method is
+     * accounted for by a row's {@code repo} entry or an exclusion; an exclusion's site must exist, so none outlives its code.
+     */
+    @Test
+    void everyCollectionFieldARepositoryReadsFromARequestMapIsARowsOrAnExclusionsMethod() throws Exception {
+        Map<String, Set<String>> named = new TreeMap<>();
+        for (var route : CollectionRouteCensus.allRoutes()) {
+            if (!route.repo().isEmpty()) {
+                String[] parts = route.repo().split("#");
+                named.computeIfAbsent(parts[0], k -> new TreeSet<>()).addAll(List.of(parts[1].split(",")));
+            }
+        }
+        Set<String> excluded = new TreeSet<>();
+        for (var ex : CollectionRouteCensus.EXCLUDED) {
+            if (!ex.file().endsWith("Handler.java")) {
+                named.computeIfAbsent(ex.file(), k -> new TreeSet<>()).add(ex.method());
+                excluded.add(ex.file() + "#" + ex.method() + "#" + ex.field());
+            }
+        }
+        Map<String, Set<String>> unaccounted = new TreeMap<>();
+        Set<String> sites = new TreeSet<>();
+        Map<String, Set<String>> declared = new TreeMap<>();
+        int files = 0;
+        for (var e : mainSources().entrySet()) {
+            if (e.getKey().startsWith("http/")) {
+                continue;
+            }
+            files++;
+            String file = baseName(e.getKey());
+            List<Decl> decls = declarations(e.getValue()[1]);
+            for (Decl d : decls) {
+                declared.computeIfAbsent(file, k -> new TreeSet<>()).add(d.name());
+            }
+            Matcher m = READ_MAP.matcher(e.getValue()[0]);
+            while (m.find()) {
+                String method = enclosing(decls, m.start());
+                sites.add(file + "#" + method + "#" + m.group(1));
+                if (!named.getOrDefault(file, Set.of()).contains(method)) {
+                    unaccounted.computeIfAbsent(file, k -> new TreeSet<>()).add(method + " reads '" + m.group(1) + "'");
+                }
+            }
+        }
+        assertThat(files).as("non-vacuity: the non-handler sources examined").isGreaterThan(250);
+        assertThat(sites).as("non-vacuity: the request-map read sites examined outside the handlers").hasSizeGreaterThanOrEqualTo(12);
+        assertThat(sites).as("the gc_audit record route's read is found, in the repository (SB3)")
+            .contains("CatalogRepository.java#recordGcAudit#collection");
+        assertThat(sites).as("the document routes' reads are found, in the repository")
+            .contains("CatalogRepository.java#upsertDocument#physical_collection",
+                "CatalogRepository.java#registerDocumentWithOutcome#physical_collection",
+                "CatalogRepository.java#resolveOrRegister#physical_collection");
+        assertThat(unaccounted).as("a repository method reads a collection field from a request map that no row's repo entry "
+            + "or exclusion of CollectionRouteCensus names").isEmpty();
+        assertThat(sites).as("every exclusion names a method that still reads its field").containsAll(excluded);
+        for (var e : named.entrySet()) {
+            assertThat(declared.getOrDefault(e.getKey(), Set.of())).as("%s declares every method the census names in it", e.getKey())
+                .containsAll(e.getValue());
+        }
+    }
+
+    /**
+     * Every excluded site keeps its reason true: the evidence fragment is still in the source it names, and the exclusion's own
+     * handler site exists (a handler exclusion is one of the sites the handler scan found).
+     */
+    @Test
+    void everyExclusionsEvidenceIsStillInTheSource() throws Exception {
+        Map<String, String[]> sources = mainSources();
+        Set<String> handlerSites = new TreeSet<>();
+        for (var e : sources.entrySet()) {
+            if (e.getKey().startsWith("http/")) {
+                List<Decl> decls = declarations(e.getValue()[1]);
+                Matcher m = READ.matcher(e.getValue()[0]);
+                while (m.find()) {
+                    handlerSites.add(baseName(e.getKey()) + "#" + enclosing(decls, m.start()) + "#" + m.group(1));
+                }
+            }
+        }
+        assertThat(CollectionRouteCensus.EXCLUDED).as("non-vacuity: the exclusions").hasSizeGreaterThanOrEqualTo(10);
+        for (var ex : CollectionRouteCensus.EXCLUDED) {
+            String key = sources.keySet().stream().filter(k -> baseName(k).equals(ex.evidenceFile())).findFirst().orElseThrow();
+            assertThat(sources.get(key)[0]).as("%s#%s: its reason rests on '%s'", ex.file(), ex.method(), ex.evidence())
+                .contains(ex.evidence());
+            assertThat(ex.why()).as("%s#%s names its reason", ex.file(), ex.method()).hasSizeGreaterThan(40)
+                .doesNotContainIgnoringCase("ambiguous").doesNotContainIgnoringCase("not tested");
+            if (ex.file().endsWith("Handler.java")) {
+                assertThat(handlerSites).as("%s#%s still reads '%s'", ex.file(), ex.method(), ex.field())
+                    .contains(ex.file() + "#" + ex.method() + "#" + ex.field());
+            }
+        }
+    }
+
+    /** A helper's rows call it: a row that names a helper in {@code usedBy} does, so the helper's sites are theirs. */
+    @Test
+    void everyHelperIsCalledByTheRowsThatClaimIt() throws Exception {
+        Map<String, String[]> sources = mainSources();
+        for (var helper : CollectionRouteCensus.HELPERS) {
+            String key = "http/" + helper.file();
+            List<Decl> decls = declarations(sources.get(key)[1]);
+            assertThat(decls.stream().map(Decl::name)).as("%s declares %s", helper.file(), helper.method()).contains(helper.method());
+            Pattern call = Pattern.compile("\\b" + Pattern.quote(helper.method()) + "\\s*\\(");
+            for (String user : helper.usedBy()) {
+                boolean calls = decls.stream().filter(d -> d.name().equals(user))
+                    .anyMatch(d -> call.matcher(sources.get(key)[1].substring(d.start(), d.end() + 1)).find());
+                assertThat(calls).as("%s#%s calls %s", helper.file(), user, helper.method()).isTrue();
+            }
+        }
+    }
+
+    /**
+     * The scan by resolver call: every main file that resolves a collection through the registry, with its number of call sites,
+     * is {@link CollectionRouteCensus#RESOLVING}, whatever field it reads. A repository that starts resolving a collection from a
+     * request, under any name, changes a count here.
+     */
+    @Test
+    void everyCallThatResolvesACollectionIsCountedPerFile() throws Exception {
+        Map<String, Integer> found = new TreeMap<>();
+        int files = 0;
+        for (var e : mainSources().entrySet()) {
+            files++;
+            Matcher m = RESOLVE_CALL.matcher(e.getValue()[0]);
+            int n = 0;
+            while (m.find()) {
+                n++;
+            }
+            if (n > 0) {
+                found.put(e.getKey(), n);
+            }
+        }
+        Map<String, Integer> census = new TreeMap<>();
+        CollectionRouteCensus.RESOLVING.forEach((k, v) -> census.put(k, v.sites()));
+        assertThat(files).as("non-vacuity: the main sources examined").isGreaterThan(300);
+        assertThat(found.values().stream().mapToInt(Integer::intValue).sum()).as("non-vacuity: the resolver call sites examined")
+            .isGreaterThanOrEqualTo(100);
+        assertThat(found).as("a file gained or lost a call that resolves a collection: say which route it serves in "
+            + "CollectionRouteCensus.RESOLVING, add the route if it is new, and change the count").isEqualTo(census);
+    }
+
+    /**
+     * The document routes' resolver: the methods of {@code CatalogRepository} that call {@code DocumentCollectionRef.normalize} are
+     * exactly the ones the document rows name as reached, each row's handler calls the first of them, and the table has no entry for a
+     * document route (the boundary would turn the id back into a label before the write).
+     */
+    @Test
+    void theDocumentRoutesAreTheMethodsThatCallTheDocumentResolver() throws Exception {
+        Map<String, String[]> sources = mainSources();
+        String[] repo = sources.get("db/CatalogRepository.java");
+        List<Decl> decls = declarations(repo[1]);
+        Set<String> callers = new TreeSet<>();
+        Matcher m = Pattern.compile("\\bDocumentCollectionRef\\s*\\.\\s*normalize\\w*\\s*\\(").matcher(repo[0]);
+        while (m.find()) {
+            callers.add(enclosing(decls, m.start()));
+        }
+        assertThat(callers).as("the repository methods that resolve a document request's collection id").containsExactlyInAnyOrder(
+            "upsertDocument", "doImportDocument", "importDocumentsBatch", "registerDocumentWithOutcome",
+            "registerDocumentManyWithOutcome", "updateDocument", "updateDocumentsMany", "resolveOrRegister");
+
+        Set<String> reached = new TreeSet<>();
+        assertThat(CollectionRouteCensus.DOCUMENT_ROUTES).as("non-vacuity: the document routes").hasSize(7);
+        for (var route : CollectionRouteCensus.DOCUMENT_ROUTES) {
+            assertThat(route.resolver()).isEqualTo(CollectionRouteCensus.Resolver.WRITE);
+            List<String> methods = List.of(route.repo().split("#")[1].split(","));
+            reached.addAll(methods);
+            String handler = blank(sources.get("http/" + route.handler())[0]);
+            List<Decl> hd = declarations(sources.get("http/" + route.handler())[1]);
+            boolean calls = hd.stream().filter(d -> d.name().equals(route.readsId()))
+                .anyMatch(d -> handler.substring(d.start(), d.end() + 1).contains("repo." + methods.get(0) + "("));
+            assertThat(calls).as("%s: %s calls repo.%s", route.label(), route.readsId(), methods.get(0)).isTrue();
+        }
+        assertThat(reached).as("every method that resolves the id is reached by a document row").containsAll(callers);
+        assertThat(CollectionRouteCensusView.lines()).as("no document route is a row of the route table")
+            .noneMatch(l -> l.contains("physical_collection_id"));
+    }
+
+    /** What the census examined, so a pass over nothing cannot look like a pass. */
+    @Test
+    void theCensusSaysWhatItExamined() {
+        int boundary = (int) CollectionRouteCensus.ROUTES.stream()
+            .filter(r -> r.resolver() == CollectionRouteCensus.Resolver.BOUNDARY).count();
+        assertThat(boundary).as("rows the route boundary resolves").isEqualTo(CollectionRouteCensus.ROUTES.size())
+            .isGreaterThanOrEqualTo(100);
+        assertThat(CollectionRouteCensus.allRoutes()).as("every census route").hasSize(boundary + 7);
+        assertThat(CollectionRouteCensus.EXCLUDED).as("excluded sites, each with a reason and evidence").hasSizeGreaterThanOrEqualTo(14);
     }
 
     /**
@@ -124,7 +466,7 @@ class CollectionRouteCensusTest {
     @Test
     void exactlyTheEmbedAndReembedRowsRunOnTheLocalEmbedEngine() {
         Set<String> local = new TreeSet<>();
-        for (var route : CollectionRouteCensus.ROUTES) {
+        for (var route : CollectionRouteCensus.allRoutes()) {
             if (route.engine() == CollectionRouteCensus.Engine.LOCAL_EMBED) {
                 local.add(route.label());
             }
@@ -135,32 +477,36 @@ class CollectionRouteCensusTest {
 
     /**
      * A selector can sit inside each element of a request array (the centroid upsert reads "collection" from every element of
-     * "records"). The census names that array, the row has one slot, the id twin keeps the convention's spelling, and the
-     * handler source really names the array. Exactly one row is nested.
+     * "records", a remap batch "target_collection" from every entry, the document batches "physical_collection" from every doc). The
+     * census names that array, a row has at most one array, the id twin keeps the convention's spelling, and the handler source
+     * really names the array. These are the nested rows.
      */
     @Test
-    void theNestedSelectorRowIsTheCentroidUpsertAndItsHandlerReadsTheArray() throws Exception {
+    void theNestedSelectorRowsNameTheirArrayAndTheirHandlersReadIt() throws Exception {
         Set<String> nested = new TreeSet<>();
-        for (var route : CollectionRouteCensus.ROUTES) {
+        for (var route : CollectionRouteCensus.allRoutes()) {
+            Set<String> arrays = new TreeSet<>();
             for (var slot : route.slots()) {
                 if (slot.nested()) {
                     nested.add(route.label());
-                    assertThat(route.slots()).as("%s: a nested row has exactly one slot", route.label()).hasSize(1);
+                    arrays.add(slot.nestedIn());
                     assertThat(slot.idField()).isEqualTo(expectedIdField(slot));
                     String src = blank(Files.readString(HTTP_DIR.resolve(route.handler())));
                     assertThat(src).as("%s: %s names the array '%s'", route.label(), route.handler(), slot.nestedIn())
                         .contains("\"" + slot.nestedIn() + "\"");
                 }
             }
+            assertThat(arrays).as("%s: one array of selectors at most", route.label()).hasSizeLessThanOrEqualTo(1);
         }
-        assertThat(nested).containsExactly("POST /v1/taxonomy/centroids/upsert");
+        assertThat(nested).containsExactly("POST /v1/catalog/doc/register_many", "POST /v1/catalog/update_many",
+            "POST /v1/remap/record_batch", "POST /v1/taxonomy/centroids/upsert");
     }
 
     @Test
     void everyRowIsDispatchedByItsHandlerAndItsMethodExists() throws Exception {
-        assertThat(CollectionRouteCensus.ROUTES).as("non-vacuity").hasSizeGreaterThanOrEqualTo(80);
+        assertThat(CollectionRouteCensus.allRoutes()).as("non-vacuity").hasSizeGreaterThanOrEqualTo(80);
         Set<String> seen = new HashSet<>();
-        for (var route : CollectionRouteCensus.ROUTES) {
+        for (var route : CollectionRouteCensus.allRoutes()) {
             assertThat(seen.add(route.label())).as("%s is listed twice", route.label()).isTrue();
             String prefix = CollectionRouteCensus.PREFIX.get(route.handler());
             assertThat(prefix).as("no path prefix for %s", route.handler()).isNotNull();
@@ -218,14 +564,14 @@ class CollectionRouteCensusTest {
      */
     @Test
     void noRouteTakesACollectionIdUnderAnotherSpelling() throws Exception {
-        for (var route : CollectionRouteCensus.ROUTES) {
+        for (var route : CollectionRouteCensus.allRoutes()) {
             for (var slot : route.slots()) {
                 assertThat(slot.idField()).as("%s: the id twin of '%s'", route.label(), slot.labelField())
                     .isEqualTo(expectedIdField(slot));
             }
         }
         Set<String> allowed = new HashSet<>(CollectionRouteCensus.ID_NAMES_OTHER_THAN_SLOTS);
-        for (var route : CollectionRouteCensus.ROUTES) {
+        for (var route : CollectionRouteCensus.allRoutes()) {
             for (var slot : route.slots()) {
                 allowed.add(slot.idField());
             }
