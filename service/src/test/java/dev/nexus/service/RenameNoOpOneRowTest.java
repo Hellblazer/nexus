@@ -256,6 +256,15 @@ class RenameNoOpOneRowTest {
                     ctx.alterTable(fk.getTable()).dropConstraintIfExists(fk.getName()).execute();
                 }
             }
+            // The chunk table's own name-keyed keys too: topic_assignments_chunk_fk joins a topic assignment to its chunk
+            // by (tenant, collection, chash), so a per-store rename run alone (the control, before the latch) would
+            // otherwise meet chunks the catalog rename has not yet moved; a real cascade renames the chunks first.
+            for (var key : dev.nexus.service.jooq.nexus.Tables.CHUNKS.getKeys()) {
+                if (!key.getFields().contains(dev.nexus.service.jooq.nexus.Tables.CHUNKS.COLLECTION)) continue;
+                for (var fk : key.getReferences()) {
+                    ctx.alterTable(fk.getTable()).dropConstraintIfExists(fk.getName()).execute();
+                }
+            }
             return null;
         });
     }
