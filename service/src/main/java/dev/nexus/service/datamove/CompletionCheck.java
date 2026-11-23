@@ -59,7 +59,8 @@ import java.util.TreeSet;
  * <ol>
  *   <li>every stamp move and every P3.3a id-twin validation move ({@link FkTwins}) is complete: P3.3b's pass starts. A P3.3a label is
  *       complete only while its twin foreign key is present and validated, as a stamp label is only while its CHECKs are;</li>
- *   <li>also both P3.3c swap moves and the three child validation moves ({@link ReadSet#p33c()}): P3.4's builds start. The swap
+ *   <li>also both P3.3c swap moves and the three child validation moves ({@link ReadSet#p33c()}), and the quarantine-origin backfill
+ *       ({@link ReadSet#quarantineOriginBackfill()}): P3.4's builds start. The swap
  *       of chunks is complete only while the RDR-225 composite on the id is present and validated, and a child validation label
  *       only while its id key into the chunks id key is present and validated (the twin rule of P3.3a's labels);</li>
  *   <li>also P3.4 complete on the install, per residual S-2 (nexus-p2m1x.40) and linda's rulings of 2026-11-22: the PCI clause
@@ -160,9 +161,9 @@ public final class CompletionCheck {
         }
 
         /**
-         * Blocking row 13.s read set (RDR-229 Phase 3, the quarantine-origin backfill, nexus-p2m1x.22): P3.3c's, and in gate 2 the quarantine-origin backfill
-         * ({@link QuarantineOriginBackfill#LABEL}), registered after the chunks stamp, so gate 3 cannot latch while a quarantine chunk the
-         * move would write still lacks its origin id.
+         * The read set of RDR-229 Phase 3 blocking row 13 (nexus-p2m1x.22): P3.3c's, and in gate 2 the quarantine-origin backfill
+         * ({@link QuarantineOriginBackfill#LABEL}), so gate 3 cannot latch while a quarantine chunk the move would write still lacks its
+         * origin id.
          */
         public static ReadSet quarantineOriginBackfill() {
             List<String> gate2 = new ArrayList<>(p33c().gate2Labels());
