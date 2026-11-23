@@ -5208,9 +5208,9 @@ def _check_engine_reaper(
 def _check_per_collection_indexes(
     engine_status: object = _ENGINE_STATUS_UNSET, *, now: datetime | None = None,
 ) -> list[HealthResult]:
-    """nexus-43ulx.24 (RDR-227 Day 2): ``nexus.health_pci_indexes.check_per_collection_indexes``, the per-collection partial HNSW
+    """nexus-43ulx.24 (RDR-227 Day 2): ``nexus.pci_indexes_health.check_per_collection_indexes``, the per-collection partial HNSW
     index row. Named ``_check_*`` here for the same reason as :func:`_check_data_moves`."""
-    from nexus.health_pci_indexes import check_per_collection_indexes  # noqa: PLC0415 — deferred: that module imports this one
+    from nexus.pci_indexes_health import check_per_collection_indexes  # noqa: PLC0415 — deferred: that module imports this one
 
     return check_per_collection_indexes(engine_status, now=now)
 
