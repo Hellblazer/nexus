@@ -37,6 +37,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *
  * <p>The scratch container is per class and the name keys are dropped once, for the whole class; every test uses its own collection.
  */
+@org.junit.jupiter.api.TestMethodOrder(org.junit.jupiter.api.MethodOrderer.MethodName.class)   // the re-home test needs fk_catalog_chunks_chunk, which underExclude_... drops: it sorts last
 class Rdr229P35cCatalogReadersIntegrationTest extends AtomicWriteTestBase {
 
     private final AtomicBoolean latched = new AtomicBoolean();
