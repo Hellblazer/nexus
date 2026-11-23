@@ -5,6 +5,7 @@ package dev.nexus.service;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.Chash;
+import dev.nexus.service.datamove.CompletionCheck;
 import dev.nexus.service.db.SchemaMigrator;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.jooq.nexus.Routines;
@@ -29,14 +30,10 @@ import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.TestMethodOrder;
 import org.testcontainers.containers.PostgreSQLContainer;
 
-import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.sql.Connection;
-import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HexFormat;
@@ -68,6 +65,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  * the same tenant and name. The form A changesets are not known by id here, so the tests assert behaviour: the trigger's definition
  * and the owner it derives.
  *
+ * <p>The complete state. The form A gate is the completion check's own rule for a stamp label ({@link CompletionCheck}: the move is
+ * complete, and its table's CHECKs are present and validated), so a store is complete only once {@link #completeTheStamps} has
+ * stamped every row the stamp moves would reach, validated every CHECK as their {@code on_complete} does, and set
+ * {@code completed_at}. Setting {@code completed_at} alone leaves the store half stamped, which the completion check does not count
+ * complete, and the gate must not either; the test that pins that leaves an orphan row behind.
+ *
  * <p>Diverging name columns. Between a chunk and its manifest row the name columns can differ only once the name key between
  * them ({@code fk_catalog_chunks_chunk}, a foreign key on the name columns) is gone. That key stays until P4.1 (P3.7's name-key
  * drop takes only the keys to the registry, not the child keys between chunk and manifest), so the fixture drops it itself and
@@ -83,7 +86,6 @@ class Rdr229P35bSqlReadersIntegrationTest {
     private static final String MASTER_CHANGELOG = "db/changelog/db.changelog-master.xml";
     private static final String FIRST = "vectors-068-1";
     private static final String TENANT = "p35b-sql";
-    private static final String CHECKS_LIST = "db/rdr229/p31-checks.tsv";
 
     /** Half stamped: four chunks, each with its manifest row. */
     private static final String HALF = "p35b-half";
@@ -97,6 +99,11 @@ class Rdr229P35bSqlReadersIntegrationTest {
     private static final String OWNED = "code__p35bowner__bge-base-en-v15-768__v1";
     private static final String STALE_NAME = "p35b-stale-name-before-rename";
     private static final String TRIGGER = "catalog_documents_owner_to_collection";
+    /** A document naming a collection that has no registry row: an orphan the catalog_documents stamp cannot give an id. */
+    private static final String GHOST = "p35b-ghost-collection";
+    private static final Table<?> JOURNAL = DSL.table(DSL.name("public", "databasechangelog"));
+    private static final Table<?> MOVES = DSL.table(DSL.name("nexus", "data_moves"));
+    private static final Field<String> MOVE_LABEL = DSL.field(DSL.name("label"), String.class);
 
     private static final List<String> HALF_CHASHES = labels("half-1", "half-2", "half-3", "half-4");
     private static final List<String> DIVERGED_CHASHES = labels("div-1");
@@ -258,9 +265,71 @@ class Rdr229P35bSqlReadersIntegrationTest {
         }
     }
 
-    /** RED: once every {@code rdr229-stamp-*} move is complete and the next boot has run, the trigger fires on the id column. */
+    /**
+     * Every {@code completed_at} is set, but one stamp CHECK is still NOT VALID because an orphan row keeps it from validating: the
+     * completion check counts that table's label incomplete, so the form A gate must hold and all twelve changesets stay unrecorded. A
+     * gate that read {@code completed_at} alone applied them here (the review's ship-blocker). A stamp label with no row is the same:
+     * the gate waits for the row. Once the orphan is gone and the CHECK validated, and the row is back, the twelve are still unapplied
+     * only until the next migrate, which is the test after this one.
+     */
     @Test
     @Order(5)
+    void everyCompletedAtSet_butACheckStaysNotValid_orAStampLabelHasNoRow_allTwelveStayUnapplied() throws Exception {
+        List<String> twelve = Rdr229CompleteStamps.continueList();
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            // an orphan: a document that names a collection with no registry row, written while its CHECK is lifted
+            P31CheckReplay.lift(ctx, P31CheckReplay.CATALOG_DOCUMENTS);
+            try {
+                ctx.insertInto(CATALOG_DOCUMENTS)
+                    .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT).set(CATALOG_DOCUMENTS.TUMBLER, "1.9.1")
+                    .set(CATALOG_DOCUMENTS.TITLE, "p35b orphan").set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, GHOST)
+                    .execute();
+            } finally {
+                P31CheckReplay.restore(ctx, P31CheckReplay.CATALOG_DOCUMENTS);
+            }
+            removeBlankRows(ctx);
+            Rdr229CompleteStamps.stampEveryRow(ctx);
+            Rdr229CompleteStamps.setEveryStampCompletedAt(ctx);
+            Rdr229CompleteStamps.validateEveryCheck(su, ctx, "catalog_documents_physical_collection_id_check");
+            assertThat(incompleteStampMoves(ctx)).as("non-vacuity: every stamp move has completed_at").isZero();
+            var states = stampLabelStates(ctx);
+            assertThat(states).as("non-vacuity: the completion check reads the stamp labels").hasSizeGreaterThan(10);
+            assertThat(states.stream().filter(s -> !s.satisfied()).map(CompletionCheck.LabelState::label).toList())
+                .as("the completion check counts exactly the catalog_documents stamp incomplete (its CHECK cannot validate over the orphan)")
+                .containsExactly("rdr229-stamp-catalog_documents");
+        }
+        SchemaMigrator.migrate(ds);
+        assertThat(recordedOf(twelve)).as("a CHECK stays NOT VALID: the gate holds and none of the twelve is recorded").isEmpty();
+        try (Connection su = pg.createConnection("")) {
+            assertThat(triggerDefinition(DSL.using(su, SQLDialect.POSTGRES))).as("and the trigger is still on the name")
+                .doesNotContain("physical_collection_id");
+        }
+
+        // the orphan goes and its CHECK validates: now one label has no row
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.deleteFrom(CATALOG_DOCUMENTS).where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT))
+                .and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(GHOST)).execute();
+            Rdr229CompleteStamps.validateEveryCheck(su, ctx);
+            assertThat(stampLabelStates(ctx).stream().filter(s -> !s.satisfied()).toList())
+                .as("non-vacuity: with the orphan gone every stamp label is complete").isEmpty();
+            // the move row of one label goes (renamed, so it comes back as it was): the label has no row
+            assertThat(ctx.update(MOVES).set(MOVE_LABEL, "held-p35b-taxonomy_meta").where(MOVE_LABEL.eq("rdr229-stamp-taxonomy_meta")).execute())
+                .as("non-vacuity: the move row is there to take away").isEqualTo(1);
+            assertThat(stampLabelStates(ctx).stream().filter(s -> !s.satisfied()).map(CompletionCheck.LabelState::label).toList())
+                .as("the completion check counts a label with no row incomplete").containsExactly("rdr229-stamp-taxonomy_meta");
+            SchemaMigrator.migrate(ds);
+            assertThat(recordedOf(twelve)).as("a stamp label has no row: the gate holds and none of the twelve is recorded").isEmpty();
+            ctx.update(MOVES).set(MOVE_LABEL, "rdr229-stamp-taxonomy_meta").where(MOVE_LABEL.eq("held-p35b-taxonomy_meta")).execute();
+            assertThat(stampLabelStates(ctx).stream().filter(s -> !s.satisfied()).toList())
+                .as("the row is back: every stamp label is complete again").isEmpty();
+        }
+    }
+
+    /** RED: once every {@code rdr229-stamp-*} move is complete and the next boot has run, the trigger fires on the id column. */
+    @Test
+    @Order(6)
     void stampsComplete_nextBoot_ownerTriggerFiresOnTheIdColumn() throws Exception {
         completeStampsAndMigrate();
         try (Connection su = pg.createConnection("")) {
@@ -278,7 +347,7 @@ class Rdr229P35bSqlReadersIntegrationTest {
      * {@code physical_collection_id} is the registry's. The owner derivation reads the registry row and the documents by id.
      */
     @Test
-    @Order(6)
+    @Order(7)
     void stampsComplete_ownerIsDerivedById_forADocumentWithAStaleName() throws Exception {
         completeStampsAndMigrate();
         try (Connection su = pg.createConnection("")) {
@@ -310,7 +379,7 @@ class Rdr229P35bSqlReadersIntegrationTest {
      * to show the probe sees a dependency.
      */
     @Test
-    @Order(7)
+    @Order(8)
     void p41NameColumnDrop_noFormAObjectDependsOnANameColumn() throws Exception {
         completeStampsAndMigrate();
         List<String> formAViews = List.of("collection_health_meta", "collection_doc_counts", "topics_with_counts");
@@ -351,7 +420,7 @@ class Rdr229P35bSqlReadersIntegrationTest {
      * Both report one entry written and the ring holds one row for the digest, carrying the registry's id (linda 2026-11-22).
      */
     @Test
-    @Order(8)
+    @Order(9)
     void stampsComplete_canaryUpsert_twoWritersOneDigest_endInOneRow() throws Exception {
         completeStampsAndMigrate();
         String model;
@@ -397,9 +466,162 @@ class Rdr229P35bSqlReadersIntegrationTest {
         }
     }
 
+    /**
+     * The row of the name key already holds the entry under another collection id (a stale stamp): the UPDATE by id finds nothing and
+     * the INSERT meets the name primary key. The entry must not count as written, and the row is left as it is: restamping it would read
+     * the name column (which a form A reader no longer does), and once P3.7 renames a collection the name key's row may belong to the
+     * collection that label was renamed away from. The function says so with a WARNING. A handler that refreshed by id again counted the
+     * entry written (vectors-078-8 before this round) with nothing written.
+     */
+    @Test
+    @Order(10)
+    void stampsComplete_canaryUpsert_aNameKeyRowOnAnotherId_isNotCounted_andNotTouched() throws Exception {
+        completeStampsAndMigrate();
+        String vector = "[" + String.join(",", java.util.Collections.nCopies(384, "0.25")) + "]";
+        byte[] digest = MessageDigest.getInstance("SHA-256").digest("p35b-canary-other-id".getBytes(StandardCharsets.UTF_8));
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            String model = ctx.select(CATALOG_COLLECTIONS.EMBEDDING_MODEL).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(HALF))
+                .fetchOne(CATALOG_COLLECTIONS.EMBEDDING_MODEL);
+            long otherId = registryId(ctx, DIVERGED);
+            assertThat(ctx.fetchCount(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)
+                    .and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(otherId)).and(CATALOG_COLLECTIONS.EMBEDDING_MODEL.eq(model))))
+                .as("non-vacuity: the other registry row has the ring row's model, so the id twin foreign key accepts it").isEqualTo(1);
+            assertThat(upsertCanary(su, model, vector, digest)).as("the entry is written").isEqualTo(1);
+            var ring = DSL.table(DSL.name("nexus", "canary_query_ring"));
+            var ringId = DSL.field(DSL.name("collection_id"), Long.class);
+            var mine = DSL.field(DSL.name("tenant_id"), String.class).eq(TENANT)
+                .and(DSL.field(DSL.name("vector_digest"), byte[].class).eq(digest));
+            ctx.update(ring).set(ringId, otherId).where(mine).execute();
+            assertThat(ctx.fetchCount(ring, mine.and(ringId.eq(otherId)))).as("non-vacuity: the name key row carries another id").isEqualTo(1);
+
+            List<String> warnings = new ArrayList<>();
+            assertThat(upsertCanary(su, model, vector, digest, warnings)).as("the entry is not written, so not counted").isEqualTo(0);
+            assertThat(warnings).as("and it says so").anyMatch(w -> w.contains("was not written") && w.contains("another or no collection id"));
+            assertThat(ctx.fetchCount(ring, mine)).as("one ring row for the digest").isEqualTo(1);
+            assertThat(ctx.fetchCount(ring, mine.and(ringId.eq(otherId)))).as("its id is untouched").isEqualTo(1);
+        }
+    }
+
+    /** As above where the row of the name key has no collection id at all (its CHECK lifted to write it, then restored NOT VALID). */
+    @Test
+    @Order(11)
+    void stampsComplete_canaryUpsert_aNameKeyRowWithNoId_isNotCounted_andNotTouched() throws Exception {
+        completeStampsAndMigrate();
+        String vector = "[" + String.join(",", java.util.Collections.nCopies(384, "0.75")) + "]";
+        byte[] digest = MessageDigest.getInstance("SHA-256").digest("p35b-canary-null-id".getBytes(StandardCharsets.UTF_8));
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            String model = ctx.select(CATALOG_COLLECTIONS.EMBEDDING_MODEL).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(HALF))
+                .fetchOne(CATALOG_COLLECTIONS.EMBEDDING_MODEL);
+            assertThat(upsertCanary(su, model, vector, digest)).as("the entry is written").isEqualTo(1);
+            var ring = DSL.table(DSL.name("nexus", "canary_query_ring"));
+            var ringId = DSL.field(DSL.name("collection_id"), Long.class);
+            var mine = DSL.field(DSL.name("tenant_id"), String.class).eq(TENANT)
+                .and(DSL.field(DSL.name("vector_digest"), byte[].class).eq(digest));
+            P31CheckReplay.lift(ctx, "vectors-068-12"); // canary_query_ring_collection_id_check
+            try {
+                ctx.update(ring).set(ringId, (Long) null).where(mine).execute();
+            } finally {
+                P31CheckReplay.restore(ctx, "vectors-068-12");
+            }
+            assertThat(ctx.fetchCount(ring, mine.and(ringId.isNull()))).as("non-vacuity: the name key row has no id").isEqualTo(1);
+
+            List<String> warnings = new ArrayList<>();
+            assertThat(upsertCanary(su, model, vector, digest, warnings)).as("the entry is not written, so not counted").isEqualTo(0);
+            assertThat(warnings).as("and it says so").anyMatch(w -> w.contains("was not written"));
+            assertThat(ctx.fetchCount(ring, mine)).as("one ring row for the digest").isEqualTo(1);
+            assertThat(ctx.fetchCount(ring, mine.and(ringId.isNull()))).as("its id is untouched").isEqualTo(1);
+            ctx.deleteFrom(ring).where(mine).execute();
+            PgContainerHelper.validateConstraintStandalone(su, ring, "canary_query_ring_collection_id_check");
+        }
+    }
+
+    // ---- T5: the registry INSERT branch of the owner trigger (vectors-078-1, -2) ---------------------------------------------
+
+    /**
+     * {@code catalog_collection_doc_owner} finds documents through the registry row of the label it is given. On a registry INSERT the
+     * BEFORE trigger hands it the new row's name before the row exists, and a document can carry only an id some registry row already
+     * has, so a label that no registry row holds derives no owner from documents: the INSERT branch is dead for a fresh label, by design
+     * (the by-name reader used to find documents that still carried the label under another id). The next test covers the one other way in.
+     */
+    @Test
+    @Order(12)
+    void stampsComplete_registryInsert_ofAFreshLabel_derivesNoOwnerFromDocuments() throws Exception {
+        completeStampsAndMigrate();
+        String holder = "code__p35bholder__bge-base-en-v15-768__v1";
+        String stale = "code__p35bstale__bge-base-en-v15-768__v1";
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, TENANT, holder);
+            ctx.insertInto(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT).set(CATALOG_DOCUMENTS.TUMBLER, "1.16.5")
+                .set(CATALOG_DOCUMENTS.TITLE, "p35b document of the holder under a stale label")
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, stale)
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, registryId(ctx, holder))
+                .execute();
+            assertThat(ownerOf(ctx, holder)).as("non-vacuity: the document owns the holder's tumbler segment").isEqualTo("1-16");
+            PgContainerHelper.insertCollection(ctx, TENANT, stale);
+            assertThat(ownerOf(ctx, stale))
+                .as("a document that names this label under another id derives nothing for the new row: no registry row held the label")
+                .isEqualTo("p35bstale");
+        }
+    }
+
+    /**
+     * The one way a registry INSERT could still find documents is a label a tombstone (a superseded row) holds: the tombstone's registry
+     * row carries the documents and the new row of the same name would read them. {@code catalog_collections_pk (tenant_id, name)} stands
+     * until P4.1, so a tombstone and a live row cannot share a name and the INSERT is refused: the branch is dead today for every label.
+     * When P4.1 replaces the key this test is the one to revisit.
+     */
+    @Test
+    @Order(13)
+    void stampsComplete_registryInsert_ofALabelATombstoneHolds_isRefusedByTheNamePrimaryKey() throws Exception {
+        completeStampsAndMigrate();
+        String holder = "code__p35bholder__bge-base-en-v15-768__v1";
+        String tomb = "code__p35btomb__bge-base-en-v15-768__v1";
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, TENANT, holder);
+            PgContainerHelper.insertCollection(ctx, TENANT, tomb);
+            long tombId = registryId(ctx, tomb);
+            ctx.insertInto(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT).set(CATALOG_DOCUMENTS.TUMBLER, "1.17.3")
+                .set(CATALOG_DOCUMENTS.TITLE, "p35b document of the tombstone")
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, tomb).set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, tombId)
+                .execute();
+            ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, holder)
+                .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, registryId(ctx, holder))
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(tombId)).execute();
+            assertThat(ctx.fetchCount(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)
+                    .and(CATALOG_COLLECTIONS.NAME.eq(tomb)).and(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.isNotNull())))
+                .as("non-vacuity: the label is held by a tombstone").isEqualTo(1);
+            PgContainerHelper.insertCollection(ctx, TENANT, tomb); // ON CONFLICT DO NOTHING: the key refuses the second row
+            assertThat(ctx.fetchCount(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT).and(CATALOG_COLLECTIONS.NAME.eq(tomb))))
+                .as("the name primary key keeps the label to its one row, so no live row can read the tombstone's documents").isEqualTo(1);
+        }
+    }
+
     /** One entry for {@code HALF} through the generated routine, on the caller's connection (and so inside its open transaction). */
     private static int upsertCanary(Connection c, String model, String vector, byte[] digest) {
-        Integer written = Routines.canaryQueryRingUpsert(DSL.using(c, SQLDialect.POSTGRES).configuration(), TENANT,
+        return upsertCanary(c, model, vector, digest, new ArrayList<>());
+    }
+
+    /** As above, with the server's warnings of the call added to {@code warnings}. */
+    private static int upsertCanary(Connection c, String model, String vector, byte[] digest, List<String> warnings) {
+        var listener = new org.jooq.impl.DefaultExecuteListener() {
+            @Override
+            public void warning(org.jooq.ExecuteContext ctx) {
+                for (java.sql.SQLWarning w = ctx.sqlWarning(); w != null; w = w.getNextWarning()) {
+                    warnings.add(w.getMessage());
+                }
+            }
+        };
+        var configuration = DSL.using(c, SQLDialect.POSTGRES).configuration()
+            .derive(new org.jooq.impl.DefaultExecuteListenerProvider(listener));
+        Integer written = Routines.canaryQueryRingUpsert(configuration, TENANT,
             new String[] {HALF}, new String[] {model}, new String[] {vector}, new byte[][] {digest});
         return written == null ? 0 : written;
     }
@@ -465,27 +687,49 @@ class Rdr229P35bSqlReadersIntegrationTest {
 
     // ---- fixtures ------------------------------------------------------------------------------------------------------
 
+    /** Brings the store to the completion check's complete state (see the class comment), then migrates: the next boot. */
     private void completeStampsAndMigrate() throws Exception {
         if (stampsCompleted) {
             return;
         }
         try (Connection su = pg.createConnection("")) {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            var moves = DSL.table(DSL.name("nexus", "data_moves"));
-            var label = DSL.field(DSL.name("label"), String.class);
-            int completed = ctx.update(moves).set(DSL.field(DSL.name("completed_at"), OffsetDateTime.class), OffsetDateTime.now())
-                .where(label.like("rdr229-stamp-%")).execute();
-            assertThat(completed).as("non-vacuity: the walk registered the stamp moves").isGreaterThan(0);
+            ctx.deleteFrom(CATALOG_DOCUMENTS).where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT))
+                .and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(GHOST)).execute();
+            removeBlankRows(ctx);
+            Rdr229CompleteStamps.complete(su, ctx);
+            assertThat(ctx.fetchCount(MOVES, MOVE_LABEL.like("rdr229-stamp-%"))).as("non-vacuity: the walk registered the stamp moves")
+                .isGreaterThan(10);
             assertThat(incompleteStampMoves(ctx)).as("every stamp move is complete").isZero();
         }
         SchemaMigrator.migrate(ds); // the next boot
         stampsCompleted = true;
     }
 
+    /**
+     * The '' fixture rows of {@link #BLANK} go before the stamp: a chunk with no collection has no id to stamp, and a real store's
+     * {@code chunks_collection_id_not_null} could not validate over it.
+     */
+    private static void removeBlankRows(DSLContext ctx) {
+        ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT))
+            .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(BLANK)).execute();
+        ctx.deleteFrom(CHUNKS).where(CHUNKS.TENANT_ID.eq(TENANT)).and(CHUNKS.COLLECTION.eq(BLANK)).execute();
+    }
+
     private static int incompleteStampMoves(DSLContext ctx) {
-        var moves = DSL.table(DSL.name("nexus", "data_moves"));
-        return ctx.fetchCount(moves, DSL.field(DSL.name("label"), String.class).like("rdr229-stamp-%")
-            .and(DSL.field(DSL.name("completed_at"), OffsetDateTime.class).isNull()));
+        return Rdr229CompleteStamps.incompleteStampMoves(ctx);
+    }
+
+    private static List<CompletionCheck.LabelState> stampLabelStates(DSLContext ctx) {
+        return Rdr229CompleteStamps.stampLabelStates(ctx);
+    }
+
+    /** The ids of {@code ids} that databasechangelog records. */
+    private List<String> recordedOf(List<String> ids) throws Exception {
+        try (Connection c = ds.getConnection()) {
+            Field<String> id = DSL.field(DSL.name("id"), String.class);
+            return DSL.using(c, SQLDialect.POSTGRES).select(id).from(JOURNAL).where(id.in(ids)).fetch(id);
+        }
     }
 
     private static String triggerDefinition(DSLContext ctx) {
@@ -585,17 +829,9 @@ class Rdr229P35bSqlReadersIntegrationTest {
     /** (table, name column) of every NAME_ID and SUPERSEDED row of the one list of the expand's id columns. */
     private static List<String[]> nameColumns() throws IOException {
         List<String[]> out = new ArrayList<>();
-        try (InputStream in = Rdr229P35bSqlReadersIntegrationTest.class.getClassLoader().getResourceAsStream(CHECKS_LIST)) {
-            assertThat(in).as("%s is on the classpath", CHECKS_LIST).isNotNull();
-            BufferedReader reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8));
-            for (String line = reader.readLine(); line != null; line = reader.readLine()) {
-                if (line.isBlank() || line.startsWith("#") || line.startsWith("table\t")) {
-                    continue;
-                }
-                String[] f = line.split("\t", -1);
-                if (f[4].equals("NAME_ID") || f[4].equals("SUPERSEDED")) {
-                    out.add(new String[] {f[0], f[1]});
-                }
+        for (String[] f : Rdr229CompleteStamps.checkRows()) {
+            if (f[4].equals("NAME_ID") || f[4].equals("SUPERSEDED")) {
+                out.add(new String[] {f[0], f[1]});
             }
         }
         return out;
