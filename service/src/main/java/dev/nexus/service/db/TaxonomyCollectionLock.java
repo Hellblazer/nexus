@@ -8,9 +8,8 @@ import static org.jooq.impl.DSL.function;
 import static org.jooq.impl.DSL.val;
 
 /** The per-(tenant, collection) advisory lock of {@link TaxonomyRepository}'s persist paths (moved out of it to keep it under its size ceiling, RDR-229 P3.5c).
- * The lock key is the tenant and the collection NAME, while the readers now name a collection by its id: after P3.7's one-row rename a
- * persist under the old label and one under the new label take different keys and are not serialized by this lock (the id arbiter's
- * DO NOTHING absorbs the root-topic case). P3.7 re-keys it on the id. */
+ * The lock is keyed by the resolved registry row's collection id (linda 2026-11-23), so a persist under a collection's old label and one under
+ * its new label after a one-row rename take the same key and serialize; a label with no registry row keeps the name key. */
 final class TaxonomyCollectionLock {
 
     private TaxonomyCollectionLock() {}
@@ -45,8 +44,12 @@ final class TaxonomyCollectionLock {
         // Typed-DSL function composition (house rule: no raw string-SQL —
         // RawSqlGateTest): SELECT pg_advisory_xact_lock(hashtext(:key)).
         // hashtext returns int4, implicitly widened to the bigint overload.
+        // The key is the registry row's id, read now in this transaction (live-first for a shared label); a label with no registry row has
+        // no id and takes the name key, as it always did.
+        Long id = ctx.select(CollectionIds.idOf(tenant, collection)).fetchOne(0, Long.class);
+        String key = id != null ? tenant + "#id/" + id : tenant + "/" + collection;
         ctx.select(function("pg_advisory_xact_lock", Object.class,
-                   function("hashtext", Integer.class, val(tenant + "/" + collection))))
+                   function("hashtext", Integer.class, val(key))))
            .fetch();
     }
 }
