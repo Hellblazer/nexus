@@ -430,6 +430,12 @@ final class Rdr229RenameEngine implements AutoCloseable {
         if (who.statusCode() != 200) {
             throw new IllegalStateException("whoami for " + tenant + " answered " + who.statusCode() + ": " + who.body());
         }
+        // the tenant's ghost sweep (RDR-204) runs at its first catalog request and deletes a registry row that holds nothing: a test that seeds bare rows
+        // afterwards (an empty tombstone is the point of some) must not meet it, so the sweep runs here, on an empty tenant
+        HttpResponse<String> warm = call("GET", "/v1/catalog/collections/list", token, null);
+        if (warm.statusCode() != 200) {
+            throw new IllegalStateException("the first catalog request for " + tenant + " answered " + warm.statusCode() + ": " + warm.body());
+        }
         return token;
     }
 

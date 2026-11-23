@@ -108,8 +108,9 @@ class Rdr229P37LabelReservedTest {
 
         repo.upsertChunks(w.tenant(), w.b(), List.of(w.chash()), List.of("rewritten text"), List.of(Map.of()), true);
 
-        assertThat(engine.<Long>su(ctx -> Rdr229RenameChecks.naming(ctx, w.tenant(), "chunks", "collection_id", String.valueOf(w.id()))))
-            .as("one row for the chash under B's id").isEqualTo(1L);
+        long underB = engine.su(ctx -> (long) ctx.fetchCount(dev.nexus.service.jooq.nexus.Tables.CHUNKS,
+            dev.nexus.service.jooq.nexus.Tables.CHUNKS.TENANT_ID.eq(w.tenant()).and(dev.nexus.service.jooq.nexus.Tables.CHUNKS.COLLECTION_ID.eq(w.id()))));
+        assertThat(underB).as("one row for the chash under B's id").isEqualTo(1L);
     }
 
     @Test
@@ -185,7 +186,8 @@ class Rdr229P37LabelReservedTest {
         assertThat(sup.statusCode()).as("non-vacuity: T is a populated tombstone: " + sup.body()).isEqualTo(200);
 
         var revive = engine.call("POST", "/v1/catalog/collections/upsert", token,
-            "{\"name\":\"" + t + "\",\"content_type\":\"knowledge\",\"embedding_model\":\"" + MODEL + "\",\"model_version\":\"v1\"}");
+            "{\"name\":\"" + t + "\",\"content_type\":\"knowledge\",\"owner_id\":\"p37lrrvt" + n + "\",\"embedding_model\":\"" + MODEL
+                + "\",\"model_version\":\"v1\"}");
 
         assertThat(revive.statusCode()).as("the revive is not refused label_reserved: " + revive.body()).isEqualTo(200);
     }
@@ -283,6 +285,12 @@ class Rdr229P37LabelReservedTest {
                 long idB = Rdr229RenameChecks.registryId(ctx, tenant, b);
                 ctx.update(dev.nexus.service.jooq.nexus.Tables.CHUNKS).set(dev.nexus.service.jooq.nexus.Tables.CHUNKS.COLLECTION_ID, idB)
                     .where(dev.nexus.service.jooq.nexus.Tables.CHUNKS.TENANT_ID.eq(tenant)).and(dev.nexus.service.jooq.nexus.Tables.CHUNKS.COLLECTION.eq(a)).execute();
+                // a registry row with no row of its own can exist only once the name keys are gone (the drop move's effect, as ImportTestEnv#startOneRow does it)
+                var keys = new java.util.ArrayList<>(dev.nexus.service.datamove.NameKeyDropMove.NAME_KEYS);
+                keys.add(dev.nexus.service.datamove.NameKeyDropMove.QUEUE_KEY);
+                for (var k : keys) {
+                    ctx.alterTableIfExists(org.jooq.impl.DSL.table(org.jooq.impl.DSL.name("nexus", k.table()))).dropConstraintIfExists(org.jooq.impl.DSL.name(k.constraint())).execute();
+                }
                 ctx.deleteFrom(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
                     .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(a))).execute();
                 return null;
