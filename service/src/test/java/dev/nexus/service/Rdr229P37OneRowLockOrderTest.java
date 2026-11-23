@@ -388,4 +388,62 @@ class Rdr229P37OneRowLockOrderTest {
                 .as(shape + ": S now points at the renamed row").isEqualTo(id);
         }
     }
+
+    /**
+     * folio's r3 critique F1 (linda: a ship-blocker). X is renamed onto Y, an empty tombstone of X. The rename parks on a writer's KEY SHARE on X (X's id is
+     * below Y's, so it holds no lock on Y yet); meanwhile Y is revived through the route and a chunk is filed under it. Once the writer commits, the rename
+     * locks Y, runs the target checks again under the lock, finds Y live and refuses 409: Y keeps its row, its id and its chunk, and X is where it was. Without
+     * the recheck the rename acted on the target it read before the lock and deleted the live Y.
+     */
+    @Test
+    void aTargetRevivedWhileTheRenameWaits_isRefusedUnderTheLock_andKeepsItsRowItsIdAndItsChunk() throws Exception {
+        String tenant = "p37-lo-h";
+        String token = engine.newTenant(tenant);
+        String x = coll("p37lohx");
+        String y = coll("p37lohy");
+        engine.su(ctx -> {
+            PgContainerHelper.insertCollection(ctx, tenant, x);   // X first: X's id is below Y's
+            PgContainerHelper.insertCollection(ctx, tenant, y);
+            return null;
+        });
+        var sup = engine.call("POST", "/v1/catalog/collections/supersede", token, "{\"name\":\"" + y + "\",\"superseded_by\":\"" + x + "\"}");
+        assertThat(sup.statusCode()).as("non-vacuity: Y is an empty tombstone of X: " + sup.body()).isEqualTo(200);
+        long xId = engine.su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, x));
+        long yId = engine.su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, y));
+        assertThat(xId).as("non-vacuity: the rename reaches X's row before Y's").isLessThan(yId);
+        String chash = dev.nexus.service.db.Chash.ofText("filed under the revived target").toHex();
+        var pool = Executors.newFixedThreadPool(1);
+        try (Connection w = engine.pg.createConnection("")) {
+            w.setAutoCommit(false);
+            DSL.using(w, SQLDialect.POSTGRES).select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(x))).forKeyShare().fetch();   // a writer on X
+            int base = lockWaiters();
+            Future<Rdr229RenameEngine.Renamed> rename = pool.submit(() -> engine.rename(token, x, y));
+            assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(30), () -> lockWaiters() > base)).as("the rename parks on X").isTrue();
+            assertThat(waitingQueries()).as("at its ordered FOR UPDATE").anyMatch(q -> q.contains("for update") && q.contains("catalog_collections"));
+
+            var revive = engine.call("POST", "/v1/catalog/collections/upsert", token, "{\"name\":\"" + y + "\",\"content_type\":\"knowledge\",\"owner_id\":\"p37lohy\","
+                + "\"embedding_model\":\"" + MODEL + "\",\"model_version\":\"v1\"}");
+            assertThat(revive.statusCode()).as("Y is revived through the route while the rename waits: " + revive.body()).isEqualTo(200);
+            engine.su(ctx -> {
+                PgContainerHelper.insertChunks(ctx, tenant, y, List.of(chash), List.of("a write into the revived Y"), List.of(new float[384]), List.of(Map.of()));
+                return null;
+            });
+            assertThat(rename.isDone()).as("the rename is still parked").isFalse();
+            w.commit();
+
+            var r = rename.get(60, TimeUnit.SECONDS);
+            assertThat(r.status()).as("refused under the lock: " + r).isEqualTo(409);
+            assertThat(r.body()).contains("already exists");
+        } finally {
+            pool.shutdownNow();
+        }
+        assertThat(engine.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, y))).as("Y keeps its row and its id").isEqualTo(yId);
+        assertThat(engine.<String>su(ctx -> ctx.select(CATALOG_COLLECTIONS.SUPERSEDED_BY).from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(yId))).fetchOne(CATALOG_COLLECTIONS.SUPERSEDED_BY)))
+            .as("and stays live").isEmpty();
+        assertThat(engine.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, x))).as("X was not renamed").isEqualTo(xId);
+        assertThat(engine.<Long>su(ctx -> (long) ctx.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION_ID.eq(yId))
+            .and(CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(chash)))))).as("the write into Y is still Y's").isEqualTo(1L);
+    }
 }

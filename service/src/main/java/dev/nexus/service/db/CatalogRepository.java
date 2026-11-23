@@ -11683,6 +11683,16 @@ public final class CatalogRepository {
                 }
             }
         }
+        return renameTargetChecks(ctx, tenant, newName, expectedTargetSupersededBy);
+    }
+
+    /**
+     * The target half of {@link #renameSharedChecks}: the live-target refusal, the emptiness of a retired target and the identity belt. The one-row
+     * rename runs it again under its registry row locks (folio's r3 critique F1, linda): what it read before the lock may have changed while it waited.
+     *
+     * @return whether a row of the new label exists (a retired, empty one)
+     */
+    private boolean renameTargetChecks(DSLContext ctx, String tenant, String newName, String expectedTargetSupersededBy) {
         // nexus-cecqy: LIVE target, not merely "a row exists". Since step 3 retires X
         // as a superseded tombstone instead of deleting it, a round-trip rename
         // (X->Y then Y->X) finds X's tombstone sitting at the target. A tombstone is
@@ -11961,7 +11971,8 @@ public final class CatalogRepository {
             // the same refusals as the name path (sweep gates, re-embed job, model token, live or populated target), then the one-row body
             boolean targetRowExists = renameSharedChecks(ctx, tenant, oldName, newName, expectedTargetSupersededBy, newNameEmbeddingModelOrNull);
             return renameGuard.oneRow(ctx, tenant, oldName, newName,
-                new OneRowRename.Request(newContentTypeOrNull, newOwnerIdOrNull, targetRowExists, tupleOut), oneRowOut);
+                new OneRowRename.Request(newContentTypeOrNull, newOwnerIdOrNull, targetRowExists, tupleOut,
+                    locked -> renameTargetChecks(locked, tenant, newName, expectedTargetSupersededBy)), oneRowOut);
         });
     }
 
