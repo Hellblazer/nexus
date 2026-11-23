@@ -147,6 +147,20 @@ abstract class Rdr229SwapMovesFixtures extends DataMoveIntegrationBase {
                 ctx().alterTable(table("nexus", f.leaf())).dropConstraintIfExists(DSL.name(f.name())).execute();
             }
         }
+        // an id unique index that backs no constraint and hangs under no parent index (a leaf made while the parent had no key) would make the
+        // probe's reset call nexus_test.drop_index, which this fixture's database does not carry: drop those here
+        for (var key : IdKeyIndexProbe.KEYS) {
+            for (var idx : IdKeyIndexProbe.indexes(ctx(), key)) {
+                if (idx.constraint() == null && idx.parentIndex() == null) {
+                    int dot = idx.index().indexOf('.');
+                    try {
+                        runSql("DROP INDEX IF EXISTS " + quote(idx.index().substring(0, dot)) + "." + quote(idx.index().substring(dot + 1)));
+                    } catch (SQLException e) {
+                        throw new IllegalStateException(e);
+                    }
+                }
+            }
+        }
         IdKeyIndexProbe.reset(ctx());
     }
 
