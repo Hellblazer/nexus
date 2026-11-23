@@ -399,12 +399,19 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
                 .contains(Rdr229ChunksFk.LOCK_FAILED_MARKER);
             assertThat(compositeOnId()).isEmpty();
 
-            backoffHasPassed(Rdr229ChunksFk.ADOPT_LABEL);
-            w.runCycle();
-
-            var adopt = adoptMoves().get(0);
-            assertThat(compositeOnId()).as("the next pass took the lock and adopted (last_transient: %s, retries: %s)", adopt.get("last_transient"),
-                adopt.get("transient_retries")).hasSize(1);
+            // the retry is driven through what the worker reads: the row's backoff (last_transient_at plus 30 s) and its in-memory state; a pass that
+            // re-opens the move (completed_at NULL, registered_at now) is not an adoption, and the pass after it takes the move again
+            StringBuilder passes = new StringBuilder();
+            for (int attempt = 1; attempt <= 3 && compositeOnId().isEmpty(); attempt++) {
+                backoffHasPassed(Rdr229ChunksFk.ADOPT_LABEL);
+                int worked = w.runCycle();
+                var row = adoptMoves().get(0);
+                passes.append(String.format("%n pass %d: worked=%d state=%s completed_at=%s registered_at=%s paused_at=%s retries=%s last_transient=%s", attempt, worked,
+                    w.states().state(Rdr229ChunksFk.ADOPT_LABEL).map(st -> st.kind().toString()).orElse("none"), row.get("completed_at"), row.get("registered_at"),
+                    row.get("paused_at"), row.get("transient_retries"), row.get("last_transient")));
+                assertThat(worked).as("the worker claimed the adoption move on pass %d (its backoff was moved back, nothing else is due)%s", attempt, passes).isGreaterThanOrEqualTo(1);
+            }
+            assertThat(compositeOnId()).as("the next pass took the lock and adopted%s", passes).hasSize(1);
         } finally {
             releaseAdoptionBuilderLog(log);
         }
