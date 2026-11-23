@@ -91,8 +91,13 @@ class CollectionRetiredIdAuxRoutesTest {
 
     /** What the hook does in the gap: frees the id by deleting {@code a}, takes the label again as a new row Z, and files {@code hex} in Z. */
     private Runnable freeTheIdAndTakeTheLabel(String a, String hex, AtomicInteger deleteStatus) {
+        return freeTheIdAndTakeTheLabel(a, hex, deleteStatus, false);
+    }
+
+    /** As above; {@code keepQuarantine} deletes {@code a} with {@code keep_quarantine}, which leaves its rows in its quarantine sibling. */
+    private Runnable freeTheIdAndTakeTheLabel(String a, String hex, AtomicInteger deleteStatus, boolean keepQuarantine) {
         return () -> elsewhere(() -> {
-            deleteStatus.set(fx.post(DELETE, "{\"name\":" + json(a) + "}").status());
+            deleteStatus.set(fx.post(DELETE, "{\"name\":" + json(a) + (keepQuarantine ? ",\"keep_quarantine\":true" : "") + "}").status());
             fx.register(a);
             if (hex != null) {
                 seedChunk(a, hex);
@@ -138,8 +143,12 @@ class CollectionRetiredIdAuxRoutesTest {
 
     /** Runs {@code request} with the label of {@code a} taken again, inside the write's transaction and before its SQL function. */
     private Resp withTheLabelTakenBeforeTheMove(String a, String hex, Supplier<Resp> request) {
+        return withTheLabelTakenBeforeTheMove(a, hex, false, request);
+    }
+
+    private Resp withTheLabelTakenBeforeTheMove(String a, String hex, boolean keepQuarantine, Supplier<Resp> request) {
         AtomicInteger deleteStatus = new AtomicInteger();
-        GcCollectionReads.setBeforeMoveForTests(freeTheIdAndTakeTheLabel(a, hex, deleteStatus));
+        GcCollectionReads.setBeforeMoveForTests(freeTheIdAndTakeTheLabel(a, hex, deleteStatus, keepQuarantine));
         Resp r = request.get();
         assertThat(deleteStatus.get()).as("setup: the hook ran, freeing the id").isEqualTo(200);
         return r;
@@ -197,16 +206,14 @@ class CollectionRetiredIdAuxRoutesTest {
         assertUnknownId(r, x);
     }
 
-    /**
-     * The restore needs a quarantine sibling that holds the chunk, or it runs no transaction at all: the engine makes one by moving an
-     * orphan with the orphans route. The window frees the origin's id and takes its label again as Z; the restore's function would put the
-     * chunk into Z, and the read after it refuses and rolls the restore back, so the chunk stays in its quarantine.
-     */
-    @Test
-    void gcQuarantineRestore_byAnIdFreedAfterTheLookupsRestoresNothingIntoTheNewHolder() {
-        String a = registered("qrestore-gap");
+    /** A collection {@code a} (by label {@code a}, id {@code x}) whose one aged orphan {@code hex} the engine moved into {@code quarantine-a}; each step asserted. */
+    private record Quarantined(String a, long x, String hex) {
+    }
+
+    private Quarantined aQuarantinedChunk(String stem) {
+        String a = registered(stem);
         long x = fx.idOf(a);
-        String hex = Chash.ofText("aux-qrestore-" + a).toHex();
+        String hex = Chash.ofText("aux-" + stem + "-" + a).toHex();
         seedChunk(a, hex);
         assertThat(chunksOf(a, hex)).as("setup: the chunk is in the origin").isEqualTo(1);
         Resp moved = fx.post("/v1/vectors/gc/quarantine-orphans", "{\"collection_id\":" + x
@@ -215,13 +222,43 @@ class CollectionRetiredIdAuxRoutesTest {
         assertThat(moved.json().path("moved").asLong(-1)).as("setup: the route moved the aged orphan: %s", moved.body()).isEqualTo(1);
         assertThat(chunksOf("quarantine-" + a, hex)).as("setup: the chunk is in the quarantine sibling").isEqualTo(1);
         assertThat(chunksOf(a, hex)).as("setup: and no longer in the origin").isZero();
+        return new Quarantined(a, x, hex);
+    }
 
-        Resp r = withTheLabelTakenBeforeTheMove(a, null, () -> fx.post("/v1/vectors/gc/quarantine-restore",
-            "{\"origin_collection_id\":" + x + ",\"chashes\":[\"" + hex + "\"]}"));
+    private Resp restoreByTheOldId(Quarantined q) {
+        return fx.post("/v1/vectors/gc/quarantine-restore", "{\"origin_collection_id\":" + q.x() + ",\"chashes\":[\"" + q.hex() + "\"]}");
+    }
 
-        assertUnknownId(r, x);
-        assertThat(chunksOf(a, hex)).as("nothing was restored into the new holder of the label").isZero();
-        assertThat(chunksOf("quarantine-" + a, hex)).as("the chunk is still in its quarantine").isEqualTo(1);
+    /**
+     * The restore needs a quarantine sibling that holds the chunk, or it runs no transaction at all: the engine makes one by moving an
+     * orphan with the orphans route. The window frees the origin's id (its delete keeps the quarantine rows) and takes its label again
+     * as Z; the restore's function runs against Z and would put the chunk into it, and the read after it refuses and rolls the restore
+     * back, so the chunk stays in its quarantine.
+     */
+    @Test
+    void gcQuarantineRestore_byAnIdFreedAfterTheLookupsRestoresNothingIntoTheNewHolder() {
+        Quarantined q = aQuarantinedChunk("qrestore-gap");
+
+        Resp r = withTheLabelTakenBeforeTheMove(q.a(), null, true, () -> restoreByTheOldId(q));
+
+        assertUnknownId(r, q.x());
+        assertThat(chunksOf(q.a(), q.hex())).as("nothing was restored into the new holder of the label").isZero();
+        assertThat(chunksOf("quarantine-" + q.a(), q.hex())).as("the chunk is still in its quarantine").isEqualTo(1);
+    }
+
+    /**
+     * The same window, with the id's delete taking the origin's quarantine rows and unregistering the sibling (the delete's default):
+     * the restore's function itself refuses, 22023, because the sibling is not a registered quarantine collection. The answer for an
+     * id that names no row is still the typed 404, and the new holder of the label has nothing restored into it.
+     */
+    @Test
+    void gcQuarantineRestore_byAnIdWhoseDeleteTookTheSiblingAnswers404NotThe22023() {
+        Quarantined q = aQuarantinedChunk("qrestore-gone");
+
+        Resp r = withTheLabelTakenBeforeTheMove(q.a(), null, false, () -> restoreByTheOldId(q));
+
+        assertUnknownId(r, q.x());
+        assertThat(chunksOf(q.a(), q.hex())).as("nothing was restored into the new holder of the label").isZero();
     }
 
     /** With no sibling the restore opens no transaction and writes nothing: the id is accounted for, not reported as unread. */

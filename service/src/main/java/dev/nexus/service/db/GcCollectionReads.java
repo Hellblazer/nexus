@@ -49,6 +49,16 @@ public final class GcCollectionReads {
         }
     }
 
+    /**
+     * Reads {@code origin} only when the request named it by id: for a function that refused the origin and so left no read to answer a
+     * freed id. A request by label reads nothing here, so the function's own refusal stands.
+     */
+    public static void readIfNamedById(DSLContext ctx, String tenant, String origin) {
+        if (ExpectedCollectionIds.of(origin).isPresent()) {
+            CollectionIds.require(ctx, tenant, origin);
+        }
+    }
+
     /** {@link #read} of the origin alone. */
     public static void read(DSLContext ctx, String tenant, String origin) {
         read(ctx, tenant, origin, null);
