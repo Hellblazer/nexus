@@ -43,6 +43,25 @@ import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
  */
 public final class CollectionOneRowRename implements OneRowRename {
 
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(CollectionOneRowRename.class);
+
+    /**
+     * The registry row lock bound, in milliseconds as the GUC text (linda's Q1 ruling on folio's r3 critique): a one-row rename that cannot lock its registry
+     * rows in this time answers {@link OneRowRenameBusyException} (503 {@code rename_busy}) and changes nothing. Writers get no timeout. Matches slice C's
+     * {@code CollectionTombstones.lockRows} bound; replace with {@code CollectionTombstones.lockRows} at the replay.
+     */
+    public static final String ROW_LOCK_TIMEOUT_MS = "10000";
+
+    /** A registry row lock wait longer than this is logged, with its time (slice C's {@code RegistryLockWait.SLOW_MS}). */
+    static final long SLOW_LOCK_WAIT_MS = 1000;
+
+    private static volatile String rowLockTimeoutMs = ROW_LOCK_TIMEOUT_MS;
+
+    /** Test hook: a shorter bound, so a busy test answers in a second; pass {@code null} to restore {@link #ROW_LOCK_TIMEOUT_MS}. */
+    public static void setRowLockTimeoutMsForTests(String ms) {
+        rowLockTimeoutMs = ms == null ? ROW_LOCK_TIMEOUT_MS : ms;
+    }
+
     /** Gate 3 for the helpers this body calls: it runs only on the one-row path, which {@link RenameGuard#runRename} takes only once the latch row exists. */
     private static final dev.nexus.service.datamove.Gate3 LATCHED = () -> true;
 
@@ -101,13 +120,7 @@ public final class CollectionOneRowRename implements OneRowRename {
         // at the target tombstone's id (repointed after its delete), and every tombstone whose superseded_by names the NEW label whatever id it carries:
         // repointTombstonesNaming below updates them all, a self-pointing or unstamped one included (linda's census pass 2). Locking the tombstones later,
         // after the rename's own row, would take them out of id order.
-        var target = CATALOG_COLLECTIONS.as("target");
-        ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
-            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.in(oldName, newName)
-                .or(CATALOG_COLLECTIONS.SUPERSEDED_BY.in(oldName, newName))
-                .or(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.in(ctx.select(target.COLLECTION_ID).from(target)
-                    .where(target.TENANT_ID.eq(tenant).and(target.NAME.eq(newName)))))))
-            .orderBy(CATALOG_COLLECTIONS.COLLECTION_ID).forUpdate().fetch();
+        lockRegistryRows(ctx, tenant, oldName, newName);
         Record6<Long, String, String, String, String, String> own = readOwn(ctx, tenant, oldName, true);
         if (own == null) {
             throw notLive(oldName, newName);
@@ -183,6 +196,43 @@ public final class CollectionOneRowRename implements OneRowRename {
         // other gate-3 reader (linda's census pass 2; the 4-argument form passes Gate3.never())
         QuarantineOrigin.retagRowsOf(ctx, tenant, oldName, newName, LATCHED);
         return new Outcome(id, counts);
+    }
+
+    /**
+     * EVERY registry row the rename will touch, {@code FOR UPDATE} in ONE statement ordered by collection_id (see the call site), with the wait bounded by
+     * {@link #rowLockTimeoutMs}: set local to this statement and the previous {@code lock_timeout} restored after it. On a timeout nothing has been written,
+     * the transaction rolls back, and {@link OneRowRenameBusyException} says so. A wait over {@link #SLOW_LOCK_WAIT_MS} is logged with its time.
+     * Matches slice C lockRows; replace with CollectionTombstones.lockRows at the replay.
+     */
+    private static void lockRegistryRows(DSLContext ctx, String tenant, String oldName, String newName) {
+        String previous = ctx.select(DSL.function("current_setting", String.class, DSL.val("lock_timeout"))).fetchOne(0, String.class);
+        String bound = rowLockTimeoutMs;
+        ctx.select(DSL.function("set_config", String.class, DSL.val("lock_timeout"), DSL.val(bound), DSL.val(true))).fetch();
+        long started = System.nanoTime();
+        var target = CATALOG_COLLECTIONS.as("target");
+        try {
+            ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.in(oldName, newName)
+                    .or(CATALOG_COLLECTIONS.SUPERSEDED_BY.in(oldName, newName))
+                    .or(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.in(ctx.select(target.COLLECTION_ID).from(target)
+                        .where(target.TENANT_ID.eq(tenant).and(target.NAME.eq(newName)))))))
+                .orderBy(CATALOG_COLLECTIONS.COLLECTION_ID).forUpdate().fetch();
+        } catch (org.jooq.exception.DataAccessException e) {
+            if ("55P03".equals(e.sqlState())) {
+                logIfSlow(tenant, oldName, newName, started, "timed_out");
+                throw new OneRowRenameBusyException(bound + " ms");
+            }
+            throw e;
+        }
+        logIfSlow(tenant, oldName, newName, started, "locked");
+        ctx.select(DSL.function("set_config", String.class, DSL.val("lock_timeout"), DSL.val(previous), DSL.val(true))).fetch();
+    }
+
+    private static void logIfSlow(String tenant, String oldName, String newName, long startedNanos, String outcome) {
+        long waitMs = (System.nanoTime() - startedNanos) / 1_000_000;
+        if (waitMs > SLOW_LOCK_WAIT_MS) {
+            log.info("event=registry_row_lock_wait role=verb outcome={} wait_ms={} tenant={} collections={},{}", outcome, waitMs, tenant, oldName, newName);
+        }
     }
 
     /**

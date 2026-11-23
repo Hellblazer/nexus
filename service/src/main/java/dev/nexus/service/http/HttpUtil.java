@@ -635,6 +635,18 @@ public final class HttpUtil {
                 + "}");
             return true;
         }
+        // RDR-229 P3.7 (linda's Q1 ruling on folio's r3 critique): the one-row rename could not lock its registry rows within its bound; nothing
+        // changed. Retryable. Matches slice C's rename_busy (RenameBusyException); the replay replaces this arm with slice C's.
+        var oneRowBusy = oneRowRenameBusy(e);
+        if (oneRowBusy != null) {
+            log.warn("event={}_rename_busy {}", event, context);
+            exchange.getResponseHeaders().set("Retry-After", Long.toString(dev.nexus.service.db.OneRowRenameBusyException.RETRY_AFTER_SECONDS));
+            send(exchange, 503,
+                "{\"error\":" + jsonString(oneRowBusy.getMessage())
+                + ",\"reason\":\"" + RENAME_BUSY_REASON + "\""
+                + ",\"retry_after_seconds\":" + dev.nexus.service.db.OneRowRenameBusyException.RETRY_AFTER_SECONDS + "}");
+            return true;
+        }
         // RDR-229 P3.5a (linda Q-A): a per-store rename in the one-row regime whose label pair does not match the registry.
         if (renameNotInRegistry(e) != null) {
             log.warn("event={}_rename_not_in_registry {}", event, context);
@@ -948,6 +960,19 @@ public final class HttpUtil {
 
     /** {@code reason} on the 409 for a rename that reached the one-row regime with no one-row rename to run. Wire contract. */
     static final String RENAME_PATH_MISMATCH_REASON = "rename_path_mismatch";
+
+    /** {@code reason} on the 503 for a one-row rename that could not lock its registry rows within its bound (slice C's value). Wire contract. */
+    static final String RENAME_BUSY_REASON = "rename_busy";
+
+    /** The {@link dev.nexus.service.db.OneRowRenameBusyException} in {@code t}'s cause chain, or null. */
+    static dev.nexus.service.db.OneRowRenameBusyException oneRowRenameBusy(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof dev.nexus.service.db.OneRowRenameBusyException r) {
+                return r;
+            }
+        }
+        return null;
+    }
 
     /** {@code reason} on the 409 for a per-store rename whose label pair does not match the registry in the one-row regime. Wire contract. */
     static final String RENAME_NOT_IN_REGISTRY_REASON = "rename_not_in_registry";
