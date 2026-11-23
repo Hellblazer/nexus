@@ -781,6 +781,7 @@ public final class CompletionCheck {
      * {@link RenameState#UNREADABLE} and never an exception or a NONE (a sample that threw would leave the last answer standing; this one says so).
      */
     private static RenameState readRenameState(DSLContext ctx, Map<String, Move> moves, java.util.function.Supplier<Set<String>> p35b) {
+        Integer original = networkTimeoutOf(ctx);   // the session's own bound, read before setLocal binds the short one
         try {
             Set<String> listed = p35b.get();
             return ctx.transactionResult(cfg -> {
@@ -793,12 +794,24 @@ public final class CompletionCheck {
             log.warn("event=rdr229_rename_readiness_unreadable cause=\"{}\"", e.toString());
             return RenameState.UNREADABLE;
         } finally {
-            // the session outlives this read (CompletionBootWork keeps it between samples): its short read bound does not
-            try {
-                ctx.connection(c -> PgSession.restoreNetworkTimeout(c, 0));
-            } catch (DataAccessException e) {
-                // a connection that cannot be reached fails its next read on its own
+            // the session outlives this read (CompletionBootWork keeps it between samples): its short read bound does not, and the
+            // session's own socket bound (AdminDdlSession's 35 minutes) is what comes back, not "none"
+            if (original != null) {
+                try {
+                    ctx.connection(c -> PgSession.restoreNetworkTimeout(c, original));
+                } catch (DataAccessException e) {
+                    // a connection that cannot be reached fails its next read on its own
+                }
             }
+        }
+    }
+
+    /** The network (socket read) timeout of the connection {@code ctx} runs on, or null when it cannot be read. */
+    private static Integer networkTimeoutOf(DSLContext ctx) {
+        try {
+            return ctx.connectionResult(java.sql.Connection::getNetworkTimeout);
+        } catch (DataAccessException e) {
+            return null;
         }
     }
 
