@@ -49,9 +49,14 @@ def _receipted(tools: Path, name: str, version: str = VERSION) -> Path:
 
 
 def _ps(stub_bin: Path, body: str) -> None:
+    """A stub ``ps`` that answers the census with *body*. The table lists the
+    process that ran it (``$PPID``, gc_core) as a real ``ps`` does: gc counts a
+    census as working only when its own pid is there. The parent-chain lookup
+    (``ps -o ppid=,command= -p``) is answered with an empty, failing row."""
     stub_bin.mkdir(parents=True, exist_ok=True)
     ps = stub_bin / "ps"
-    ps.write_text("#!/bin/sh\n" + body + "\n")
+    self_row = "" if "exit " in body else "echo \"$PPID python3 gc_core.py\"\n"
+    ps.write_text("#!/bin/sh\ncase \"$*\" in *ppid=*) exit 1;; esac\n" + self_row + body + "\n")
     ps.chmod(ps.stat().st_mode | stat.S_IXUSR)
 
 
@@ -133,10 +138,10 @@ def test_a_reap_writes_one_line_per_reaped_generation_and_a_summary(bed) -> None
     assert line["stamp"] == "20261121T000000Z"
     assert line["reason"]
     assert line["holders"] == 0
-    assert line["census"] == "ok"
+    assert line["census"]["state"] == "ok"
     assert line["caller"] == "bootstrap"
     summary = [r for r in records if r["event"] == "gc_run"]
-    assert len(summary) == 1 and summary[0]["reaped"] == 1 and summary[0]["census"] == "ok", records
+    assert len(summary) == 1 and summary[0]["reaped"] == 1 and summary[0]["census"]["state"] == "ok", records
 
 
 def test_a_run_that_deletes_nothing_writes_one_summary_line(bed) -> None:
@@ -149,7 +154,7 @@ def test_a_run_that_deletes_nothing_writes_one_summary_line(bed) -> None:
     assert [r["event"] for r in records] == ["gc_run"], records
     summary = records[0]
     assert summary["reaped"] == 0
-    assert summary["census"] == "ok"
+    assert summary["census"]["state"] == "ok"
     assert {"generation": str(old), "detail": "held by 33870"} in summary["kept"], summary
 
 
@@ -160,7 +165,8 @@ def test_a_failed_census_is_recorded_as_failed(bed) -> None:
     _bootstrap_reap(tools, old)
 
     (summary,) = _log(config)
-    assert summary["event"] == "gc_run" and summary["census"] == "failed" and summary["reaped"] == 0, summary
+    assert summary["event"] == "gc_run" and summary["census"]["state"] == "failed" and summary["reaped"] == 0, summary
+    assert summary["census"]["reason"] == "rc=1", summary
 
 
 def test_the_log_is_appended_never_rewritten(bed) -> None:
@@ -173,16 +179,44 @@ def test_the_log_is_appended_never_rewritten(bed) -> None:
     assert [r["event"] for r in _log(config)] == ["gc_run", "gc_run"]
 
 
-def test_the_self_gc_caller_is_named(bed) -> None:
-    """``nx self gc`` (the SessionStart sweep) names itself, so a reap in the log
-    says which caller ran it."""
+@pytest.mark.parametrize(("hook_env", "expected"), [(None, "self-gc"), ("self-gc-hook", "self-gc-hook")],
+                         ids=["by-hand", "from-the-hook"])
+def test_the_self_gc_caller_and_runner_are_named(bed, monkeypatch, hook_env, expected) -> None:
+    """A hand ``nx self gc`` and the SessionStart hook's are told apart, and the
+    record names the nx that ran the reap (its generation and version)."""
     tools, stub_bin, config, old, _new = bed
     _ps(stub_bin, "echo '  999 /usr/bin/vim unrelated.txt'")
     (tools / "previous").unlink()
+    if hook_env is None:
+        monkeypatch.delenv("NX_GC_CALLER", raising=False)
+    else:
+        monkeypatch.setenv("NX_GC_CALLER", hook_env)
 
     assert self_cmd.perform_self_gc(keep=1) is not None
 
-    assert {r["caller"] for r in _log(config)} == {"self-gc"}
+    records = _log(config)
+    assert {r["caller"] for r in records} == {expected}
+    runner = records[-1]["runner"]
+    assert runner["prefix"] == sys.prefix
+    assert runner["version"] == self_cmd._running_version()
+
+
+def test_the_session_start_hook_names_itself_to_gc(monkeypatch, tmp_path: Path) -> None:
+    from nexus.hooks import self_gc  # noqa: PLC0415 — test-local
+    from tests._module_seam import setattr_in  # noqa: PLC0415 — test-local
+
+    seen: dict = {}
+
+    def fake_run(argv, **kw):
+        seen.update(kw.get("env") or {})
+
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setattr("nexus.util.nx_argv.which_off_cwd", lambda name, **_k: "/usr/local/bin/nx")
+    setattr_in(monkeypatch, self_gc, "subprocess.run", fake_run)
+
+    self_gc.run({})
+
+    assert seen.get("NX_GC_CALLER") == "self-gc-hook", seen
 
 
 def test_a_dry_run_writes_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -195,10 +195,23 @@ def _claimed_recently(tree: Path, marker: str, minutes: int) -> bool:
         return False
 
 
-def census_is_empty(view: str) -> bool:
-    """True when *view* holds no process row: ``ps`` failed, timed out or is not
-    on PATH, since a real table always lists ``ps`` itself (see :func:`plan`)."""
-    return not any((head := line.split(maxsplit=1)) and head[0].isdigit() for line in view.splitlines())
+def census_state(view: str, *, own_pid: int | None = None) -> tuple[bool, str]:
+    """``(ok, why)`` for a process table.
+
+    POSITIVE, not merely non-empty: when *own_pid* is given (gc took the table
+    itself) the table must list that pid, because ``ps`` always lists the process
+    that ran it. A ``ps`` that lists a subset (a sandbox, a pid namespace) is a
+    failed census, as is an empty table (``ps`` failed, timed out or is not on
+    PATH). A table a caller hands in (*own_pid* None) need only have rows."""
+    pids = {
+        int(head[0]) for line in view.splitlines()
+        if (head := line.split(maxsplit=1)) and head[0].isdigit()
+    }
+    if not pids:
+        return False, "empty table"
+    if own_pid is not None and own_pid not in pids:
+        return False, f"own pid {own_pid} not in the table ({len(pids)} rows)"
+    return True, f"{len(pids)} rows"
 
 
 #: The append-only record of every gc run, under the nexus config directory's
@@ -207,10 +220,20 @@ def census_is_empty(view: str) -> bool:
 #: MCP servers ran from went with no trace of which run removed them.
 GC_LOG_NAME = "install-gc.log"
 
-#: Who ran the reap, set by ``self_cmd._reap_generations`` (``self-gc``,
-#: ``self-install``, ``bootstrap``); empty for a direct ``gc.sh`` caller such as
-#: ``scripts/reinstall-tool.sh``, which the record's ``ppid`` then points at.
+#: The record rotates to ``install-gc.log.1`` past this size (one previous file kept).
+GC_LOG_MAX_BYTES = 1_000_000
+
+#: Who ran the reap, set by ``self_cmd._reap_generations`` (``self-gc-hook`` from
+#: the SessionStart hook, ``self-gc`` by hand, ``self-install``, ``bootstrap``);
+#: empty for a direct ``gc.sh`` caller such as ``scripts/reinstall-tool.sh``,
+#: which the record's ``ancestry`` then names.
 GC_CALLER_ENV = "NX_GC_CALLER"
+
+#: The nx that ran the reap: its generation (``sys.prefix``) and version, set by
+#: ``self_cmd._reap_generations``. gc_core itself runs under whatever ``python3``
+#: gc.sh found, which says nothing about the install.
+GC_RUNNER_PREFIX_ENV = "NX_GC_RUNNER_PREFIX"
+GC_RUNNER_VERSION_ENV = "NX_GC_RUNNER_VERSION"
 
 
 def gc_log_path() -> Path:
@@ -222,19 +245,79 @@ def gc_log_path() -> Path:
     return base / "logs" / GC_LOG_NAME
 
 
-def _record(records: list[dict], emit_err) -> None:
-    """Append *records* as JSON lines. Never fails the reap it describes: a log
-    that cannot be written is one line on stderr."""
-    import json  # noqa: PLC0415 — stdlib, only when a run is recorded
+class _Recorder:
+    """Appends JSON lines to the gc record AS THE RUN GOES, each one flushed and
+    fsynced before the caller moves on: a ``gc_reap_begin`` line is on disk
+    before its delete starts, so a run killed mid-``rmtree`` still says what it
+    was deleting. Never fails the reap it describes: the first failure (an
+    unwritable directory, an unresolvable home) is one stderr line, and the
+    recorder stays quiet after it."""
 
-    try:
-        path = gc_log_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as fh:
-            for rec in records:
-                fh.write(json.dumps(rec, sort_keys=True) + "\n")
-    except OSError as exc:
-        emit_err(f"nexus: could not write the gc record to {gc_log_path()}: {exc}")
+    def __init__(self, emit_err) -> None:
+        self._emit_err = emit_err
+        self._path: Path | None = None
+        self._broken = False
+        try:
+            self._path = gc_log_path()  # computed once for the run
+        except Exception as exc:  # noqa: BLE001 — Path.home() raises RuntimeError with no resolvable home
+            self._fail(exc)
+
+    def _fail(self, exc: BaseException) -> None:
+        if not self._broken:
+            self._broken = True
+            where = str(self._path) if self._path is not None else "the nexus config directory"
+            self._emit_err(f"nexus: could not write the gc record to {where}: {exc}")
+
+    def __call__(self, record: dict) -> None:
+        if self._broken or self._path is None:
+            return
+        import json  # noqa: PLC0415 — stdlib, only when a run is recorded
+
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                if self._path.stat().st_size > GC_LOG_MAX_BYTES:
+                    os.replace(self._path, self._path.with_name(GC_LOG_NAME + ".1"))
+            except FileNotFoundError:
+                pass
+            with self._path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, sort_keys=True, default=str) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+        except Exception as exc:  # noqa: BLE001 — the record must never break the gc it records
+            self._fail(exc)
+
+
+def _ancestry(depth: int = 4) -> list[dict]:
+    """The gc process's parent chain, ``[{pid, command}]`` from the parent up,
+    read with ``ps -o ppid=,command= -p`` (POSIX). A bare ppid is gone once that
+    process exits; the command line is what names the caller afterwards. Best
+    effort: a failing ``ps`` ends the chain with an ``error`` entry."""
+    if sys.platform == "win32":
+        return []
+    import subprocess  # noqa: PLC0415 — stdlib, only for the record
+
+    chain: list[dict] = []
+    pid = os.getppid()
+    for _ in range(depth):
+        if pid <= 1:
+            break
+        try:
+            r = subprocess.run(  # noqa: S603 — fixed argv
+                ("ps", "-o", "ppid=,command=", "-p", str(pid)),
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2,
+            )
+        except Exception as exc:  # noqa: BLE001 — diagnostics only
+            chain.append({"pid": pid, "error": f"{type(exc).__name__}: {exc}"})
+            break
+        line = r.stdout.strip()
+        head = line.split(maxsplit=1)
+        if r.returncode != 0 or not head or not head[0].isdigit():
+            chain.append({"pid": pid, "error": f"rc={r.returncode}"})
+            break
+        chain.append({"pid": pid, "command": (head[1] if len(head) > 1 else "")[:500]})
+        pid = int(head[0])
+    return chain
 
 
 def plan(
@@ -246,6 +329,7 @@ def plan(
     grace_minutes: int = DEFAULT_BUILD_GRACE_MINUTES,
     claim_minutes: int = DEFAULT_BUILD_CLAIM_MINUTES,
     platform: str | None = None,
+    census_ok: bool | None = None,
 ) -> list[tuple[str, Path, str]]:
     """Decide what happens to every ``gen-*`` entry, deleting nothing.
 
@@ -287,7 +371,7 @@ def plan(
     # a per-generation re-read could reap against a state that never existed at
     # any instant.
     view = census.ps_snapshot() if snapshot is None else snapshot
-    # AN EMPTY VIEW IS A FAILED CENSUS, NOT AN EMPTY BOX. ps_snapshot answers ""
+    # A FAILED CENSUS IS NOT AN EMPTY BOX (census_state). ps_snapshot answers ""
     # when ps fails, times out or is not on PATH, and a real table always lists
     # ps itself. Read as "no holders", that reaped every complete generation
     # outside the window and the pointers, live MCP servers' included
@@ -295,7 +379,9 @@ def plan(
     # next HTTP client build failed on its vanished CA bundle). Complete
     # generations are kept instead and said so; receipt-less wreckage, which
     # nothing runs from, still goes.
-    census_failed = census_is_empty(view)
+    if census_ok is None:
+        census_ok = census_state(view, own_pid=os.getpid() if snapshot is None else None)[0]
+    census_failed = not census_ok
 
     out: list[tuple[str, Path, str]] = []
     index = 0
@@ -326,7 +412,7 @@ def plan(
             continue
 
         if census_failed and ((entry / receipt).is_file() or layout.is_link(entry, platform=platform)):
-            out.append(("keep", entry, "process census unavailable (ps gave no process table); not reaped"))
+            out.append(("keep", entry, "process census unavailable (no process table, or one without gc's own pid); not reaped"))
             continue
 
         holders = census.generation_holder_pids(entry, snapshot=view, platform=platform)
@@ -539,55 +625,94 @@ def gc_generations(
         raise GCError("--keep 0 would retain no generations; refusing")
 
     resolved = _layout().tools_dir() if root is None else Path(root)
+    record = None if dry_run else _Recorder(emit_err)
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    runner = {
+        "prefix": os.environ.get(GC_RUNNER_PREFIX_ENV, ""),
+        "version": os.environ.get(GC_RUNNER_VERSION_ENV, ""),
+        "executable": sys.executable,
+    }
+    common = {
+        "ts": now, "tools": str(resolved), "keep": keep, "caller": os.environ.get(GC_CALLER_ENV, ""),
+        "pid": os.getpid(), "ppid": os.getppid(), "runner": runner, "self_generation": self_generation,
+    }
     if not resolved.is_dir():
+        if record is not None:
+            record({**common, "event": "gc_run", "skipped": "tools directory missing", "reaped": 0})
         return []
 
     # One view for the plan and the record, so the record says what the plan saw.
-    view = _census().ps_snapshot() if snapshot is None else snapshot
-    census = "failed" if census_is_empty(view) else "ok"
+    # A table gc takes itself must list gc's own pid (census_state); one a caller
+    # hands in need only have rows.
+    census = _census()
+    info: dict = {}
+    view = census.ps_snapshot(info=info) if snapshot is None else snapshot
+    ok, why = census_state(view, own_pid=os.getpid() if snapshot is None else None)
+    rows = sum(1 for row in view.splitlines() if row.split(maxsplit=1)[:1] and row.split()[0].isdigit())
+    census_rec = {"state": "ok" if ok else "failed", "why": why, "rows": rows, **info}
+    if snapshot is not None:
+        census_rec.setdefault("reason", "supplied by the caller")
+    common["census"] = census_rec
+    if record is not None:
+        common["ancestry"] = _ancestry()  # the caller chain: a bare ppid is gone once it exits
     receipt = _layout().RECEIPT_NAME
     prefix = _layout().GENERATION_PREFIX
-    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    common = {
-        "ts": now, "tools": str(resolved), "keep": keep, "census": census,
-        "caller": os.environ.get(GC_CALLER_ENV, ""), "pid": os.getpid(), "ppid": os.getppid(),
-    }
+    entries = sorted(e for e in resolved.iterdir() if e.name.startswith(prefix) and e.is_dir())
+    holders = {}
+    if ok:
+        for entry in entries:
+            try:
+                pids = census.generation_holder_pids(entry, snapshot=view, platform=platform)
+            except ValueError:
+                continue
+            if pids:
+                holders[str(entry)] = pids
 
     lines: list[str] = []
-    records: list[dict] = []
     kept: list[dict] = []
+    reaped = 0
     for action, entry, detail in plan(
         resolved, keep=keep, self_generation=self_generation, snapshot=view,
-        grace_minutes=grace_minutes, claim_minutes=claim_minutes, platform=platform,
+        grace_minutes=grace_minutes, claim_minutes=claim_minutes, platform=platform, census_ok=ok,
     ):
         if action == "skip":
             continue
         if action == "keep":
             lines.append(f"kept {entry}: {detail}")
             kept.append({"generation": str(entry), "detail": detail})
-        elif dry_run:
+            continue
+        if dry_run:
             lines.append(f"would reap {entry}")
-        else:
-            # Read before the delete: the receipt goes with the tree.
-            complete = (entry / receipt).is_file() or _layout().is_link(entry, platform=platform)
+            continue
+        # Read before the delete: the receipt goes with the tree.
+        complete = (entry / receipt).is_file() or _layout().is_link(entry, platform=platform)
+        reason = (
+            f"outside the keep window ({keep}), not current, previous or the running installer, "
+            "and no live holder in the process census"
+            if complete else "receipt-less build wreckage past its grace window"
+        )
+        stamp = entry.name[len(prefix):] if entry.name.startswith(prefix) else entry.name
+        line = {
+            **common, "generation": str(entry), "stamp": stamp, "reason": reason,
+            "holders": len(holders.get(str(entry), [])),
+        }
+        if record is not None:
+            record({**line, "event": "gc_reap_begin"})  # on disk before the delete starts
+        try:
             result = _reap(entry, emit_err, platform)
-            lines.extend(result)
-            if any(line.startswith("reaped ") for line in result):
-                reason = (
-                    f"outside the keep window ({keep}), not current, previous or the running installer, "
-                    "and no live holder in the process census"
-                    if complete else "receipt-less build wreckage past its grace window"
-                )
-                records.append({
-                    **common, "event": "gc_reaped", "generation": str(entry),
-                    "stamp": entry.name[len(prefix):] if entry.name.startswith(prefix) else entry.name,
-                    "reason": reason, "holders": 0,
-                })
-            else:
-                kept.extend({"generation": str(entry), "detail": line} for line in result)
-    if not dry_run:
-        records.append({**common, "event": "gc_run", "reaped": len(records), "kept": kept})
-        _record(records, emit_err)
+        except BaseException as exc:
+            if record is not None:
+                record({**line, "event": "gc_reap_failed", "error": f"{type(exc).__name__}: {exc}"})
+            raise
+        lines.extend(result)
+        if any(out.startswith("reaped ") for out in result):
+            reaped += 1
+            if record is not None:
+                record({**line, "event": "gc_reaped"})
+        else:
+            kept.extend({"generation": str(entry), "detail": out} for out in result)
+    if record is not None:
+        record({**common, "event": "gc_run", "reaped": reaped, "kept": kept, "holders": holders})
     return lines
 
 

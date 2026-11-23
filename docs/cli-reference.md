@@ -5359,14 +5359,18 @@ where the reap used to say nothing about them. `nx doctor`'s Holders row names
 each held generation's size on disk and the remedy: end those sessions, then
 `nx self gc`.
 
-When the process census cannot be taken (`ps` fails, times out or is not on
-PATH, so the table comes back empty), no complete generation is reaped: each
-is kept with `kept <gen>: process census unavailable`. Every run except
-`--dry-run`, from this verb, the SessionStart hook, `nx self install` or the
-bootstrap, appends JSON lines to `~/.config/nexus/logs/install-gc.log` (under
-`NEXUS_CONFIG_DIR` when set): a `gc_reaped` line per removed generation (path,
-stamp, reason, holders seen, `census` ok or failed, `caller`) and a `gc_run`
-summary of what was kept and why.
+When the process census cannot be trusted (`ps` fails, times out or is not on
+PATH, or its table does not list the cleanup's own process), no complete
+generation is reaped: each is kept with `kept <gen>: process census
+unavailable`. Every run except `--dry-run`, from this verb, the SessionStart
+hook, `nx self install` or the bootstrap, appends JSON lines to
+`~/.config/nexus/logs/install-gc.log` (under `NEXUS_CONFIG_DIR` when set) as
+it goes: `gc_reap_begin` before each delete, `gc_reaped` (or
+`gc_reap_failed`) after it, and a `gc_run` summary. They carry the reason, the
+holder count and a holder map, the census (state, why, `ps` duration, rows),
+`caller` (`self-gc-hook`, `self-gc`, `self-install`, `bootstrap`), the nx that
+ran the reap, and the parent process chain. The file rotates to
+`install-gc.log.1` past 1 MB.
 
 | Flag | Description |
 |------|-------------|

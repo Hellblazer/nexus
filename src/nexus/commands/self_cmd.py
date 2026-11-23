@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import subprocess
 import sys
 import urllib.parse
@@ -2229,8 +2230,22 @@ def _sh(install_dir: Path, snippet: str, *, check: bool = True) -> str:
     return r.stdout
 
 
-#: gc_core.GC_CALLER_ENV, restated: the install cores are loaded by path, not imported.
+#: gc_core's GC_CALLER_ENV / GC_RUNNER_*_ENV, restated: the install cores are loaded by path, not imported.
 _GC_CALLER_ENV = "NX_GC_CALLER"
+_GC_RUNNER_PREFIX_ENV = "NX_GC_RUNNER_PREFIX"
+_GC_RUNNER_VERSION_ENV = "NX_GC_RUNNER_VERSION"
+
+
+def _gc_record_env(caller: str) -> dict[str, str]:
+    """What gc_core's durable record says about this run: the caller, and the nx that ran it (its
+    generation and version). gc_core itself runs under whatever ``python3`` gc.sh finds."""
+    from importlib.metadata import PackageNotFoundError, version as dist_version  # noqa: PLC0415 — stdlib, deferred
+
+    try:
+        version = dist_version("conexus")
+    except PackageNotFoundError:
+        version = ""
+    return {_GC_CALLER_ENV: caller, _GC_RUNNER_PREFIX_ENV: sys.prefix, _GC_RUNNER_VERSION_ENV: version}
 
 
 def _reap_generations(
@@ -2245,24 +2260,27 @@ def _reap_generations(
     where they are, which is the safe direction. *remove_launchers* is Windows
     only (see :func:`_windows_reap`)."""
     # *caller* names this run in gc_core's durable record (``<config>/logs/install-gc.log``).
+    record_env = _gc_record_env(caller)
     if _is_windows():
-        prior = os.environ.get(_GC_CALLER_ENV)
-        os.environ[_GC_CALLER_ENV] = caller
+        prior = {name: os.environ.get(name) for name in record_env}
+        os.environ.update(record_env)
         try:
             return _windows_reap(
                 tools, keep=keep, self_generation=self_generation, dry_run=dry_run,
                 remove_launchers=remove_launchers,
             )
         finally:
-            if prior is None:
-                os.environ.pop(_GC_CALLER_ENV, None)
-            else:
-                os.environ[_GC_CALLER_ENV] = prior
+            for name, value in prior.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
     self_arg = f' --self "{self_generation}"' if self_generation is not None else ""
     dry_arg = " --dry-run" if dry_run else ""
     out = _sh(
         install_dir,
-        f'export {_GC_CALLER_ENV}="{caller}"; nx_gc_generations --keep {int(keep)}{dry_arg}{self_arg} "{tools}"',
+        "".join(f'export {name}={shlex.quote(value)}; ' for name, value in record_env.items())
+        + f'nx_gc_generations --keep {int(keep)}{dry_arg}{self_arg} "{tools}"',
         check=False,
     )
     return [line for line in out.splitlines() if line.strip()]
@@ -2341,7 +2359,9 @@ def perform_self_gc(*, keep: int = 3, dry_run: bool = False) -> list[str] | None
         else None
     )
     return _reap_generations(
-        install_dir, tools, keep=keep, self_generation=self_generation, dry_run=dry_run, caller="self-gc",
+        install_dir, tools, keep=keep, self_generation=self_generation, dry_run=dry_run,
+        # The SessionStart hook says so (self-gc-hook); a hand ``nx self gc`` is self-gc.
+        caller=os.environ.get(_GC_CALLER_ENV) or "self-gc",
     )
 
 

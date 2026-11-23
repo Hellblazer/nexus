@@ -98,7 +98,7 @@ def win(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(self_cmd, "_is_windows", lambda platform=None: True)
     # The Windows process table cannot be read off Windows, and an empty one is a failed census that
     # reaps nothing: give the reap a table that names no generation.
-    monkeypatch.setattr(gc_core._census(), "ps_snapshot", lambda **_k: "999 C:/Windows/notepad.exe\n")
+    monkeypatch.setattr(gc_core._census(), "ps_snapshot", lambda **_k: f"{os.getpid()} python gc_core.py\n999 C:/Windows/notepad.exe\n")
     setattr_in(monkeypatch, "nexus._install.layout_core", "os.path.realpath", lambda s, **_kw: s)
     monkeypatch.setattr(
         gen_core.LinkOps, "create",

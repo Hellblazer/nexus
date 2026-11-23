@@ -107,6 +107,8 @@ def run(payload: dict | None) -> HookResult:  # noqa: ARG001 — reads no stdin,
             encoding="utf-8",
             errors="replace",
             stdin=subprocess.DEVNULL,
+            # gc's durable record (install-gc.log) tells this sweep apart from a hand `nx self gc`.
+            env={**os.environ, "NX_GC_CALLER": "self-gc-hook"},
         )
     except OSError:
         pass

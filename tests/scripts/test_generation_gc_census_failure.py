@@ -35,7 +35,9 @@ from tests.scripts.test_generation_gc import _gen, _names, _point, _sh
 def _ps_script(bin_dir: Path, body: str) -> None:
     bin_dir.mkdir(parents=True, exist_ok=True)
     ps = bin_dir / "ps"
-    ps.write_text("#!/bin/sh\n" + body + "\n")
+    # A working stub lists the process that ran it ($PPID, gc_core), as a real ps does.
+    self_row = "" if "exit " in body else "echo \"$PPID python3 gc_core.py\"\n"
+    ps.write_text("#!/bin/sh\n" + self_row + body + "\n")
     ps.chmod(ps.stat().st_mode | stat.S_IXUSR)
 
 
