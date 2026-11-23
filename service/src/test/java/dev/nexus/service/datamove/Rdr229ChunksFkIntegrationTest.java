@@ -438,26 +438,44 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
 
     // ── 6: the adoption move's states ───────────────────────────────────────────────────────────────────────
 
-    /** While leaves wait, the adoption move re-opens itself: no completion event, no listener call, no retry counted, and the composite is not there. */
+    /**
+     * A leaf with no validated key yet (here: leaves created after every existing leaf validated) makes the adoption move re-open itself in its
+     * first pass: that is no completion (no event, no listener call), counts no retry, adds no composite, and bumps its registered_at. Every
+     * other move is paused, so the listener can only hear the adoption move, and one cycle is run so the leaf moves it registers do not.
+     */
     @Test
-    void theAdoptionMoveThatReopensItselfIsNotACompletionAndCountsNoRetry() {
+    void theAdoptionMoveThatReopensItselfIsNotACompletionAndCountsNoRetry() throws Exception {
         seed("reopen");
         registerSwaps();
         runSwaps(new VerifyingFinisher());
-        pause(Rdr229ChunksFk.LEAF_LABEL_PREFIX + "%");
+        for (LeafFk f : leafFks()) {
+            runSql("ALTER TABLE nexus." + quote(f.leaf()) + " VALIDATE CONSTRAINT " + quote(f.name()));
+        }
+        pause("rdr229-%");
+        resume(Rdr229ChunksFk.ADOPT_LABEL);
+        var before = adoptMoves().get(0);
+        String lateTenant = "p33c-reopen-leaf-" + System.nanoTime();
+        tenantsUsed.add(lateTenant);
+        createTenantLeaves(lateTenant);
+        List<String> lateLeaves = chunkLeaves().stream().filter(l -> leafFks().stream().noneMatch(f -> f.leaf().equals(l))).toList();
+        assertThat(lateLeaves).as("non-vacuity: leaves with no key").isNotEmpty();
         var completions = new AtomicInteger();
         var w = productionWorker(new VerifyingFinisher());
         w.onMoveCompleted(completions::incrementAndGet);
 
-        for (int i = 0; i < 3; i++) {
-            w.runCycle();
-        }
+        w.runCycle();
 
-        assertThat(completions.get()).as("nothing completed: the adoption move re-opened itself each time").isZero();
+        assertThat(completions.get()).as("nothing completed: the adoption move re-opened itself").isZero();
         var adopt = adoptMoves().get(0);
         assertThat(adopt.get("completed_at")).as("still open").isNull();
         assertThat(adopt.get("failed_at")).isNull();
         assertThat((Integer) adopt.get("transient_retries")).as("a wait for a leaf is no failure: no retry counted").isZero();
+        assertThat((java.time.OffsetDateTime) adopt.get("registered_at")).as("it sorts after the leaf moves it just queued")
+            .isAfter((java.time.OffsetDateTime) before.get("registered_at"));
+        for (String late : lateLeaves) {
+            assertThat(leafMoves().stream().map(m -> (String) m.get("label")).toList()).as("the move of late leaf %s was queued", late)
+                .contains(Rdr229ChunksFk.LEAF_LABEL_PREFIX + late);
+        }
         assertThat(compositeOnId()).isEmpty();
     }
 
@@ -512,7 +530,40 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
 
     // ── 7: the lock a validation waits on, and what the status shows ────────────────────────────────────────
 
-    private record Held(Connection connection, String leaf, String label) { }
+    private record Held(Connection connection, String leaf, String label, DataMoveWorker worker) { }
+
+    /** Connections a test parks a lock on: released after each test whatever happened. */
+    private final List<Connection> parked = new java.util.ArrayList<>();
+
+    @org.junit.jupiter.api.AfterEach
+    void releaseWhatTheTestParked() throws Exception {
+        for (Connection c : parked) {
+            try {
+                c.rollback();
+                c.close();
+            } catch (SQLException ignored) {
+                // closing a connection that is already gone is what this is for
+            }
+        }
+        parked.clear();
+        // no data-move or holder backend survives the test with a statement running (a parked VALIDATE would hold a leaf for the next migration)
+        Field<String> application = DSL.field(DSL.name("application_name"), String.class);
+        Field<String> state = DSL.field(DSL.name("state"), String.class);
+        Field<Integer> pid = DSL.field(DSL.name("pid"), Integer.class);
+        long deadline = System.nanoTime() + 10_000L * 1_000_000L;
+        List<Integer> running;
+        do {
+            running = ctx().select(pid).from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
+                .where(application.like("nexus-data-move-%")).and(state.eq("active")).and(pid.ne(pid(su))).fetch(pid);
+            if (!running.isEmpty()) {
+                for (int p : running) {
+                    ctx().select(DSL.function("pg_cancel_backend", SQLDataType.BOOLEAN, DSL.val(p))).fetch();
+                }
+                sleepMs(200);
+            }
+        } while (!running.isEmpty() && System.nanoTime() < deadline);
+        assertThat(running).as("no nexus-data-move- backend is still running a statement after the test").isEmpty();
+    }
 
     /** Pauses every move but one leaf validation, and holds ACCESS EXCLUSIVE on that leaf from a session of the test's own. */
     private Held holdOneLeaf() throws Exception {
@@ -523,10 +574,13 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
         String label = Rdr229ChunksFk.LEAF_LABEL_PREFIX + leaf;
         pause("rdr229-%");
         resume(label);
+        // the worker first: building one re-runs the migration, whose ALTERs on the leaves would wait on the lock taken next
+        var worker = productionWorker(new VerifyingFinisher());
         Connection c = pg.createConnection("");
+        parked.add(c);
         c.setAutoCommit(false);
         MoveSql.runOnComplete(c, "LOCK TABLE nexus." + quote(leaf) + " IN ACCESS EXCLUSIVE MODE");
-        return new Held(c, leaf, label);
+        return new Held(c, leaf, label, worker);
     }
 
     private static int completionPid(DataMoveWorker w, String label, long timeoutMs) {
@@ -550,7 +604,7 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
     void aLeafValidationBehindAHeldAccessExclusiveWaitsAboutFiveSecondsThenBlocksOn55P03() throws Exception {
         Held held = holdOneLeaf();
         try (Connection holder = held.connection()) {
-            var w = productionWorker(new VerifyingFinisher());
+            var w = held.worker();
             long started = System.nanoTime();
             var cycle = CompletableFuture.runAsync(w::runCycle);
             int pid = completionPid(w, held.label(), 3_000);
@@ -578,7 +632,7 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
     void stoppingTheWorkerCancelsAValidationWaitingOnALock() throws Exception {
         Held held = holdOneLeaf();
         try (Connection holder = held.connection()) {
-            var w = productionWorker(new VerifyingFinisher());
+            var w = held.worker();
             var cycle = CompletableFuture.runAsync(w::runCycle);
             assertThat(completionPid(w, held.label(), 3_000)).as("the validation is waiting").isPositive();
             long stopAt = System.nanoTime();
