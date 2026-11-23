@@ -312,9 +312,11 @@ class QuarantineOriginBackfillMoveIntegrationTest extends DataMoveIntegrationBas
         assertThat(stampRegistered).as("the walk registers " + STAMP_LABEL).isNotNull();
         String template = stampRegistered.get("template").toString();
         int set = template.indexOf(" SET ");
-        int where = template.indexOf(" WHERE ", set);
+        // the SET ends at the subselect's closing parens, before the top-level WHERE (the first " WHERE " is the subselect's own)
+        int end = template.indexOf(")) WHERE ", set);
         assertThat(set).as("the stamp's template has a SET").isPositive();
-        return template.substring(set + " SET ".length(), where);
+        assertThat(end).as("and a top-level WHERE after the fill").isGreaterThan(set);
+        return template.substring(set + " SET ".length(), end + 2);
     }
 
     private void unstamp(String tenant, String key) {
@@ -336,7 +338,9 @@ class QuarantineOriginBackfillMoveIntegrationTest extends DataMoveIntegrationBas
     @Test
     void theBackfillSetsCollectionIdByTheChunksStampsOwnRule_theSameTextAndTheSameIdOnTheSameRow() throws Exception {
         String fill = stampFill();
-        assertThat(fill).as("non-vacuity: the stamp's fill").startsWith("collection_id = COALESCE(t.collection_id, (SELECT cc.collection_id");
+        assertThat(fill).as("non-vacuity: the stamp's whole fill, its lookup predicate included")
+            .startsWith("collection_id = COALESCE(t.collection_id, (SELECT cc.collection_id")
+            .contains("cc.tenant_id = t.tenant_id AND cc.name = t.collection").endsWith("))");
         assertThat(registered.get("template").toString()).as("the backfill's template carries the stamp's fill, word for word").contains(fill);
 
         live(T1, "live");
