@@ -5361,6 +5361,10 @@ public final class CatalogRepository {
             // nexus-jypmj.1.13: physical_collection of every non-seed node the walk saw (filled only when a
             // scope predicate is present); a seed need not appear on any edge and is never judged.
             Map<String, String> collectionOf = new java.util.HashMap<>();
+            // RDR-229 P3.5a: from gate 3 a collection set matches the document's collection id, not its stored name (a document keeps
+            // its old name after a one-row rename); the ids of the set's labels, and each node's id, are read only then.
+            final java.util.Set<Long> scopeIds = scope != null && gate3.holds() ? scope.idsOf(ctx, tenant) : null;
+            Map<String, Long> collectionIdOf = new java.util.HashMap<>();
             // nexus-jypmj.18: the best role among the links from the previous BFS level into each non-seed
             // node (see linkRole / mergeRole).
             Map<String, String> roleOf = new java.util.HashMap<>();
@@ -5385,7 +5389,8 @@ public final class CatalogRepository {
                                        CATALOG_LINKS.FROM_SPAN, CATALOG_LINKS.TO_SPAN, CATALOG_LINKS.CREATED_BY, CATALOG_LINKS.CREATED_AT, F_LNK_META,
                                        // nexus-jypmj.1.13: both endpoints' collections ride the join the
                                        // walk already makes, so the scope predicate costs no extra query.
-                                       fromDocs.PHYSICAL_COLLECTION, toDocs.PHYSICAL_COLLECTION)
+                                       fromDocs.PHYSICAL_COLLECTION, toDocs.PHYSICAL_COLLECTION,
+                                       fromDocs.PHYSICAL_COLLECTION_ID, toDocs.PHYSICAL_COLLECTION_ID)
                               .from(CATALOG_LINKS)
                               .join(fromDocs).on(fromDocs.TUMBLER.eq(CATALOG_LINKS.FROM_TUMBLER))
                               .join(toDocs).on(toDocs.TUMBLER.eq(CATALOG_LINKS.TO_TUMBLER))
@@ -5402,6 +5407,8 @@ public final class CatalogRepository {
                     if (scope != null) {
                         collectionOf.putIfAbsent(fromT, r.value10());
                         collectionOf.putIfAbsent(toT, r.value11());
+                        collectionIdOf.putIfAbsent(fromT, r.value12());
+                        collectionIdOf.putIfAbsent(toT, r.value13());
                     }
                     if (!visited.contains(fromT)) { next.add(fromT); visited.add(fromT); depthOf.put(fromT, d + 1); }
                     if (!visited.contains(toT))   { next.add(toT);   visited.add(toT);   depthOf.put(toT, d + 1); }
@@ -5427,7 +5434,7 @@ public final class CatalogRepository {
             int droppedOutOfScope = 0;
             List<String> candidates = new ArrayList<>(visited.size());
             for (String t : visited) {
-                if (scope != null && !seedSet.contains(t) && !scope.admits(collectionOf.get(t), t)) {
+                if (scope != null && !seedSet.contains(t) && !scope.admits(collectionOf.get(t), collectionIdOf.get(t), scopeIds, t)) {
                     droppedOutOfScope++;
                 } else {
                     candidates.add(t);

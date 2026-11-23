@@ -506,16 +506,20 @@ final class CollectionRouteCensus {
         new Excluded("AspectRepository.java", "doImportHighlight", "collection", etl("highlight"),
             "AspectRepository.java", "doImportHighlight"),
         new Excluded("GraphScopeFilter.java", "parse", "collections",
-            "the traversal's scope filter ({collections: [...]} or {subtree}), a set of labels tested against each document's "
-                + "physical_collection VALUE (GraphScopeFilter.admits, a binary search of the label); it looks no row up in the "
-                + "registry and selects none. The client builds the list from a corpus or a collection name. Reported to linda as a "
-                + "route that takes labels only, not widened here",
-            "GraphScopeFilter.java", "binarySearch(collections, collection)"),
+            "the traversal's scope filter ({collections: [...]} or {subtree}): a set of labels, which stay labels on the wire. What they "
+                + "match is a document's stored name before gate 3 (GraphScopeFilter.admits, a binary search of its "
+                + "physical_collection), and from gate 3 the registry id: graphBFS resolves each label with GraphScopeFilter.idsOf "
+                + "(CollectionRegistry, ordered by labelResolutionOrder) and matches physical_collection_id, so a document keeps "
+                + "matching its collection's NEW label after a one-row rename (TraverseScopeAfterOneRowRenameTest). A label no row "
+                + "has names no collection. It selects no registry row by id, so no id spelling is taken",
+            "CatalogRepository.java", "scope.idsOf(ctx, tenant)"),
         new Excluded("TopicRoute.java", "parse", "collections",
-            "the topic route's own subset of the REQUEST's collections, checked by label against the request's list ({@code "
-                + "topic_route.collections names '...', which is not in collections}); the request's own collections field is a row "
-                + "and is resolved from collection_ids before the route is parsed, so this names no registry row of its own",
-            "TopicRoute.java", "which is not in collections"),
+            "the topic route's own subset of the REQUEST's collections: each name must be in the request's list and is compared, as a "
+                + "label, with the request's own collection strings (PgVectorRepository: topicRoute.routes(col), col an element of the "
+                + "request's list). It reads no stored name column, and the request's collections field is a row, resolved from "
+                + "collection_ids before the route is parsed, so after a rename the list and the route name the same current label; "
+                + "it names no registry row of its own",
+            "PgVectorRepository.java", "topicRoute.routes(col)"),
         new Excluded("TargetSelection.java", "fromMap", "collection_id",
             "reads the list route's OUTPUT row (CatalogRepository.listCollections' map), not a request",
             "TargetSelection.java", "public static CollectionRow fromMap"));
