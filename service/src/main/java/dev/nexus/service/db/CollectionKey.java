@@ -135,12 +135,14 @@ public final class CollectionKey {
 
     private static Condition noRegistryRow(String tenant, Field<Long> id) {
         var c = CATALOG_COLLECTIONS.as("ckgone");
-        return DSL.notExists(DSL.selectOne().from(c).where(c.TENANT_ID.eq(tenant)).and(c.COLLECTION_ID.eq(id)));
+        // a LIVE registry row: a tombstone (superseded) is a collection that no longer exists under its label (linda 2026-11-23)
+        return DSL.notExists(DSL.selectOne().from(c).where(c.TENANT_ID.eq(tenant)).and(c.COLLECTION_ID.eq(id))
+            .and(c.SUPERSEDED_BY.eq("")).and(c.SUPERSEDED_BY_ID.isNull()));
     }
 
     /**
      * A caller's value {@code v} against a ledger row that carries both a stored name and an id but no registry foreign key: {@code
-     * id = idOf(v)}, or {@code name = v} when no registry row has the row's id (the collection is gone, and its stored name is its
+     * id = idOf(v)}, or {@code name = v} when no LIVE registry row has the row's id (the collection is gone or retired to a tombstone, and its stored name is its
      * last label). The id arm finds a renamed collection under its new label; the name arm reaches only gone history, so a stale name
      * never matches a different live collection that now holds the label. Before gate 3: {@code name = v}.
      */
@@ -150,10 +152,16 @@ public final class CollectionKey {
 
     /** A ledger row's collection as an output: the live registry label of its id, else its stored name (its last label); the name before gate 3. */
     public Field<String> labelOrName(String tenant, Field<String> name, Field<Long> id) {
-        return byId ? DSL.coalesce(label(tenant, name, id), name) : name;
+        if (!byId) {
+            return name;
+        }
+        var c = CATALOG_COLLECTIONS.as("ckll");
+        // the LIVE row's name only: a tombstone's own name is the stored last label, which the row already carries
+        return DSL.coalesce(DSL.field(DSL.select(c.NAME).from(c).where(c.TENANT_ID.eq(DSL.val(tenant))).and(c.COLLECTION_ID.eq(id))
+            .and(c.SUPERSEDED_BY.eq("")).and(c.SUPERSEDED_BY_ID.isNull())), name);
     }
 
-    /** True when no registry row has the ledger row's id (the collection no longer exists); false before gate 3, where nothing is read by id. */
+    /** True when no LIVE registry row has the ledger row's id (the collection no longer exists, or is a tombstone); false before gate 3, where nothing is read by id. */
     public Field<Boolean> gone(String tenant, Field<Long> id) {
         return byId ? DSL.field(noRegistryRow(tenant, id)) : DSL.inline(false);
     }

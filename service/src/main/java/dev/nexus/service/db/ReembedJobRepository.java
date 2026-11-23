@@ -961,7 +961,7 @@ public final class ReembedJobRepository {
         var labels = new java.util.HashMap<Long, String>();
         if (!ids.isEmpty()) {
             var c = dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
-            ctx.select(c.COLLECTION_ID, c.NAME).from(c).where(c.TENANT_ID.eq(tenant)).and(c.COLLECTION_ID.in(ids))
+            ctx.select(c.COLLECTION_ID, c.NAME).from(c).where(c.TENANT_ID.eq(tenant)).and(c.COLLECTION_ID.in(ids)).and(c.SUPERSEDED_BY.eq("")).and(c.SUPERSEDED_BY_ID.isNull())
                 .forEach(x -> labels.put(x.value1(), x.value2()));
         }
         return rows.stream().map(r -> {
