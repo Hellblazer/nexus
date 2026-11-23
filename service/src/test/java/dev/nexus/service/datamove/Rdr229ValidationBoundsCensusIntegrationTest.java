@@ -144,7 +144,7 @@ class Rdr229ValidationBoundsCensusIntegrationTest extends DataMoveIntegrationBas
             .contains("ADD CONSTRAINT " + Rdr229ChunksFk.PARENT_CONSTRAINT + " " + Rdr229ChunksFk.FK_DEFINITION + ";");
         assertThat(adopt).as("and a leaf key too").contains(Rdr229ChunksFk.FK_DEFINITION + " NOT VALID");
         assertThat(adopt).as("the parent key is added only after the registry-wide lock and the leaf check").containsSubsequence(
-            "LOCK TABLE nexus.chunks IN SHARE ROW EXCLUSIVE MODE", "IF pending THEN", "ADD CONSTRAINT " + Rdr229ChunksFk.PARENT_CONSTRAINT);
+            P33cSql.stmt("lock.table", "nexus.chunks", "SHARE ROW EXCLUSIVE"), "IF pending THEN", "ADD CONSTRAINT " + Rdr229ChunksFk.PARENT_CONSTRAINT);
     }
 
     @Test
