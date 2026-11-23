@@ -74,6 +74,17 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
      */
     @Test
     void theBootReapEndsOnlyThisDatabasesAndThisRolesDataMoveBackends() throws Exception {
+        foreignBackendsSurvive(() -> DataMoveOrphans.terminateLeftover(adminConnection));
+    }
+
+    /** The worker's own sweep after the migration ({@code terminateOrphans}) has the same ownership check. */
+    @Test
+    void theWorkersOrphanSweepEndsOnlyThisDatabasesAndThisRolesDataMoveBackends() throws Exception {
+        var worker = productionWorker(new VerifyingFinisher());
+        foreignBackendsSurvive(worker::terminateOrphans);
+    }
+
+    private void foreignBackendsSurvive(java.util.concurrent.Callable<Integer> sweep) throws Exception {
         String suffix = Long.toString(System.nanoTime());
         String otherDb = "p33c_other_db_" + suffix;
         String otherRole = "p33c_other_role_" + suffix;
@@ -85,7 +96,7 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
              Connection otherUser = open(adminConnection.url(), otherRole, "p33c_pw", "nexus-data-move-otherrole-" + suffix)) {
             assertThat(alive(ours) && alive(otherDatabase) && alive(otherUser)).as("precondition: three backends with a data-move name").isTrue();
 
-            int ended = DataMoveOrphans.terminateLeftover(adminConnection);
+            int ended = sweep.call();
 
             assertThat(ended).as("it ended at least ours").isGreaterThanOrEqualTo(1);
             assertThat(alive(ours)).as("this database's backend of this role: ended").isFalse();
@@ -119,8 +130,8 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
             assertThat(sleeper.isDone()).as("a start or a name that is not this backend's: nothing was cancelled").isFalse();
 
             DataMoveOrphans.cancelBackend(adminConnection, victimPid, application, start);
-            assertThatThrownBy(() -> sleeper.get(10, TimeUnit.SECONDS)).as("the backend it was aimed at: its statement was cancelled")
-                .hasRootCauseInstanceOf(SQLException.class);
+            assertThatThrownBy(() -> sleeper.get(10, TimeUnit.SECONDS)).as("the backend it was aimed at: its statement was cancelled (57014)")
+                .satisfies(t -> assertThat(sqlState(t)).isEqualTo("57014"));
         }
     }
 
@@ -301,7 +312,7 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
         assertThat((Integer) adopt.get("transient_retries")).as("and the timeout counts toward the needs-an-operator threshold").isGreaterThanOrEqualTo(1);
         String reason = (String) adopt.get("last_transient");
         assertThat(reason).as("the reason is the adoption's own, from its on_complete and not from the re-check, and names the bound, the leaf count and the remedy")
-            .contains("adoption timed out at 1000 ms over " + VerifyingFinisher.chunkLeafCount(ctx()) + " leaves")
+            .contains("adoption timed out at 1000 ms over " + chunkLeaves().size() + " leaves")
             .contains("raise statement_timeout_ms on " + Rdr229ChunksFk.ADOPT_LABEL + " for one attempt in a quiet window")
             .doesNotContain("verification in the completion transaction");
         assertThat(MoveReasons.publicForm(reason)).as("and the status keeps it").contains("adoption timed out at 1000 ms over");
@@ -342,25 +353,140 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
         assertThat(leafFks().stream().filter(f -> !f.validated()).toList()).as("the new leaves got their keys, NOT VALID").isNotEmpty();
     }
 
-    /** Leaf validations spare the index builders; the adoption ends them only when it is about to add the composite. */
+    // ── index builders (linda 2026-11-23, option b) ─────────────────────────────────────────────────────────
+
+    /** A session shaped like a running build: builder-named, in an open transaction holding SHARE UPDATE EXCLUSIVE on {@code leaf}. */
+    private Connection realBuilder(String leaf) throws Exception {
+        Connection b = openAsWorker(PciBuilderSession.APPLICATION_NAME_PREFIX + "p33c-real-" + System.nanoTime());
+        parked.add(b);
+        b.setAutoCommit(false);
+        MoveSql.runOnComplete(b, "LOCK TABLE nexus." + quote(leaf) + " IN SHARE UPDATE EXCLUSIVE MODE");
+        return b;
+    }
+
+    private void backoffHasPassed(String label) {
+        ctx().update(table("nexus", "data_moves")).set(DSL.field(DSL.name("last_transient_at"), OffsetDateTime.class), OffsetDateTime.now().minusHours(2))
+            .where(LABEL_F.eq(label)).execute();
+    }
+
+    private ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> captureAdoptionBuilderLog() {
+        var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(AdoptionBuilders.class);
+        var appender = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        appender.start();
+        logger.addAppender(appender);
+        return appender;
+    }
+
+    private void releaseAdoptionBuilderLog(ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> appender) {
+        ((ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(AdoptionBuilders.class)).detachAppender(appender);
+    }
+
+    private static boolean logged(ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> appender, String text) {
+        return appender.list.stream().anyMatch(e -> e.getFormattedMessage().contains(text));
+    }
+
+    /**
+     * Every leaf is ready and a real build holds SHARE UPDATE EXCLUSIVE on one of them: the first pass times out behind it, ends exactly that builder
+     * (and logs which), and fails 55P03; the next pass, after the backoff, takes the lock and adopts.
+     */
     @Test
-    void leafValidationsSpareTheIndexBuildersAndTheAdoptionEndsThemOnlyToAdd() throws Exception {
-        seed("builders");
+    void aRealBuilderThatBlocksTheLockIsEndedAndTheNextPassAdopts() throws Exception {
+        seed("builderkill");
         registerSwaps();
         runSwaps(new VerifyingFinisher());
-        try (Connection builder = openAsWorker(PciBuilderSession.APPLICATION_NAME_PREFIX + "p33c-test")) {
-            // the three child validations (over the chunk family's other tables) do end builders, by design; only the leaf validations are under test
-            pause(Rdr229ChunksFk.ADOPT_LABEL);
-            pause("rdr229-fkvalidate-%-chunk-fk");
-            productionWorker(new VerifyingFinisher()).runCycle();   // every leaf validation runs
-            assertThat(leafFks()).allSatisfy(f -> assertThat(f.validated()).isTrue());
-            assertThat(alive(builder)).as("the leaf validations ended no index builder").isTrue();
+        validateEveryLeafByHand();
+        pause("rdr229-%");
+        resume(Rdr229ChunksFk.ADOPT_LABEL);
+        var log = captureAdoptionBuilderLog();
+        try (Connection builder = realBuilder(chunkLeaves().get(0))) {
+            var w = productionWorker(new VerifyingFinisher());
 
-            resume(Rdr229ChunksFk.ADOPT_LABEL);
+            w.runCycle();
+
+            assertThat(alive(builder)).as("the build that blocked the lock was ended").isFalse();
+            assertThat(logged(log, "event=rdr229_adoption_ended_builders ended=1")).as("and the engine log says which, and why").isTrue();
+            assertThat((String) adoptMoves().get(0).get("last_transient")).as("the pass itself is the 55P03 that backs off")
+                .contains(Rdr229ChunksFk.LOCK_FAILED_MARKER);
+            assertThat(compositeOnId()).isEmpty();
+
+            backoffHasPassed(Rdr229ChunksFk.ADOPT_LABEL);
+            w.runCycle();
+
+            assertThat(compositeOnId()).as("the next pass took the lock and adopted").hasSize(1);
+        } finally {
+            releaseAdoptionBuilderLog(log);
+        }
+    }
+
+    /** A pass that defers for a leaf ends no builder, however live: it never reached the lock. */
+    @Test
+    void aDeferringPassEndsNoBuilder() throws Exception {
+        seed("builderdefer");
+        registerSwaps();
+        runSwaps(new VerifyingFinisher());
+        var fks = leafFks();
+        assertThat(fks).hasSizeGreaterThanOrEqualTo(2);
+        for (LeafFk f : fks.subList(1, fks.size())) {
+            runSql("ALTER TABLE nexus." + quote(f.leaf()) + " VALIDATE CONSTRAINT " + quote(f.name()));
+        }
+        pause("rdr229-%");
+        resume(Rdr229ChunksFk.ADOPT_LABEL);
+        var log = captureAdoptionBuilderLog();
+        try (Connection builder = realBuilder(fks.get(fks.size() - 1).leaf())) {
             productionWorker(new VerifyingFinisher()).runCycle();
 
-            assertThat(compositeOnId()).as("the adoption added the composite").hasSize(1);
-            assertThat(alive(builder)).as("and ended the builder, which would hold a conflicting lock, to do it").isFalse();
+            assertThat((String) adoptMoves().get(0).get("last_transient")).as("it deferred on the paused leaf, not on the lock").contains("paused");
+            assertThat(alive(builder)).as("and the live build was not touched").isTrue();
+            assertThat(log.list).as("nothing was logged about builders").noneMatch(e -> e.getFormattedMessage().contains("rdr229_adoption"));
+        } finally {
+            releaseAdoptionBuilderLog(log);
+        }
+    }
+
+    /** A blocker that is not a builder (a plain session holding a lock) is never ended: the pass is a plain 55P03 with its backoff. */
+    @Test
+    void aBlockerThatIsNotABuilderIsNeverEnded() throws Exception {
+        seed("builderplain");
+        registerSwaps();
+        runSwaps(new VerifyingFinisher());
+        validateEveryLeafByHand();
+        pause("rdr229-%");
+        resume(Rdr229ChunksFk.ADOPT_LABEL);
+        var log = captureAdoptionBuilderLog();
+        try (Connection plain = openAsWorker("p33c-plain-session")) {
+            parked.add(plain);
+            plain.setAutoCommit(false);
+            MoveSql.runOnComplete(plain, "LOCK TABLE nexus." + quote(chunkLeaves().get(0)) + " IN SHARE UPDATE EXCLUSIVE MODE");
+
+            productionWorker(new VerifyingFinisher()).runCycle();
+
+            assertThat(alive(plain)).as("the session that is not a builder is untouched").isTrue();
+            assertThat((String) adoptMoves().get(0).get("last_transient")).as("a plain 55P03 on the lock").contains(Rdr229ChunksFk.LOCK_FAILED_MARKER);
+            assertThat(logged(log, "event=rdr229_adoption_ended_builders")).as("no builder was ended").isFalse();
+            assertThat(logged(log, "event=rdr229_adoption_blocked_by_others")).as("and the log says it was left alone").isTrue();
+            assertThat(compositeOnId()).isEmpty();
+        } finally {
+            releaseAdoptionBuilderLog(log);
+        }
+    }
+
+    /** Leaf validations spare a live build on another leaf (a build on the leaf itself would make its validation wait out the lock wait instead). */
+    @Test
+    void leafValidationsSpareALiveBuilderOnAnotherLeaf() throws Exception {
+        seed("builderspare");
+        registerSwaps();
+        runSwaps(new VerifyingFinisher());
+        var leaves = chunkLeaves();
+        assertThat(leaves).hasSizeGreaterThanOrEqualTo(2);
+        String built = leaves.get(0);
+        pause(Rdr229ChunksFk.ADOPT_LABEL);
+        pause("rdr229-fkvalidate-%-chunk-fk");   // the child validations (over other chunk-family tables) end builders by design
+        pause(Rdr229ChunksFk.LEAF_LABEL_PREFIX + built);
+        try (Connection builder = realBuilder(built)) {
+            productionWorker(new VerifyingFinisher()).runCycle();
+
+            assertThat(leafFks().stream().filter(f -> !f.leaf().equals(built))).as("the other leaves validated").allSatisfy(f -> assertThat(f.validated()).isTrue());
+            assertThat(alive(builder)).as("and the live build was not ended by their validation").isTrue();
         }
     }
 
@@ -380,6 +506,176 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
         assertThat(compositeOnId()).hasSize(1);
         assertThat(leafFks()).as("no leaf key was added or changed").isEqualTo(before);
         assertThat(leafFks()).allSatisfy(f -> assertThat(f.parentId()).isNotZero());
+    }
+
+    /**
+     * Each guard of the rerun alone keeps it quiet, and without both it fails: the skip when the composite exists, and the match that counts a key
+     * attached to the parent. Variants of the registered text with one guard, then the other, then both taken out.
+     */
+    @Test
+    void eachRerunGuardAloneKeepsTheSwapQuietAndWithoutBothItFails() throws Exception {
+        seed("guards");
+        registerSwaps();
+        runUntilComposite(new VerifyingFinisher());
+        assertThat(compositeOnId()).hasSize(1);
+        String text = onCompleteOf(CHUNKS_SWAP);
+        String compositeGuard = "IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = 'nexus.chunks'::pg_catalog.regclass AND conname = '"
+            + Rdr229ChunksFk.PARENT_CONSTRAINT + "') THEN";
+        String attachedClause = " AND k.confdelsetcols IS NULL";
+        assertThat(text).as("the composite guard is in the text").contains(compositeGuard);
+        assertThat(text).as("and so is the match clause the attached-key rule sits beside").contains(attachedClause);
+        String withoutCompositeGuard = text.replace(compositeGuard, "IF true THEN");
+        String withoutAttachedMatch = text.replace(attachedClause, " AND k.conparentid = 0" + attachedClause);
+        String withoutEither = withoutAttachedMatch.replace(compositeGuard, "IF true THEN");
+
+        runSql(withoutCompositeGuard);   // the match on an attached key is enough
+        runSql(withoutAttachedMatch);    // the composite guard is enough
+        assertThatThrownBy(() -> runSql(withoutEither)).as("with neither guard the rerun adds a key that is there (duplicate_object)")
+            .satisfies(t -> assertThat(sqlState(t)).isEqualTo("42710"));
+    }
+
+    // ── the claim, and the lock wait after the lock ─────────────────────────────────────────────────────────
+
+    /**
+     * A leaf's key that is NOT VALID again between its VALIDATE and its claim (an operator, a restore) is not a completed validation: the claim raises
+     * 55P03, the move stays open, and the next run validates the key and claims.
+     */
+    @Test
+    void aClaimWhoseLeafKeyWasInvalidatedAfterTheValidationDoesNotCompleteAndTheNextRunValidatesAgain() throws Exception {
+        seed("claimcheck");
+        registerSwaps();
+        runSwaps(new VerifyingFinisher());
+        String leaf = chunkLeaves().get(0);
+        String label = Rdr229ChunksFk.LEAF_LABEL_PREFIX + leaf;
+        String key = leaf + Rdr229ChunksFk.LEAF_CONSTRAINT_SUFFIX;
+        pause("rdr229-%");
+        resume(label);
+        var finisher = new VerifyingFinisher();
+        var once = new java.util.concurrent.atomic.AtomicBoolean();
+        finisher.afterValidateHook = () -> {
+            if (once.compareAndSet(false, true)) {
+                try {
+                    runSql("ALTER TABLE nexus." + quote(leaf) + " DROP CONSTRAINT " + quote(key));
+                    runSql("ALTER TABLE nexus." + quote(leaf) + " ADD CONSTRAINT " + quote(key) + " " + Rdr229ChunksFk.FK_DEFINITION + " NOT VALID");
+                } catch (SQLException e) {
+                    throw new IllegalStateException(e);
+                }
+            }
+        };
+
+        productionWorker(finisher).runCycle();
+
+        var row = moves(LABEL_F.eq(label)).get(0);
+        assertThat(row.get("completed_at")).as("the claim did not complete over a key that is NOT VALID").isNull();
+        assertThat(row.get("failed_at")).isNull();
+        assertThat((String) row.get("last_transient")).as("the claim raised the 55P03 of the leaf claim check").contains("leaf validation claim").contains("55P03");
+        assertThat(leafFks().stream().filter(f -> f.leaf().equals(leaf)).toList()).singleElement().satisfies(f -> assertThat(f.validated()).isFalse());
+
+        backoffHasPassed(label);
+        productionWorker(new VerifyingFinisher()).runCycle();
+
+        assertThat(completedAt(label)).as("the next run validated the key again and claimed").isNotNull();
+        assertThat(leafFks().stream().filter(f -> f.leaf().equals(leaf)).toList()).singleElement().satisfies(f -> assertThat(f.validated()).isTrue());
+    }
+
+    /** Runs the adoption's text under the bounds the finisher gives it (1400 ms, 700 ms) on a session of the test's own. */
+    private void runAdoptionUnderProductionBounds(String text) throws Exception {
+        try (Connection c = pg.createConnection("")) {
+            c.setAutoCommit(false);
+            try {
+                MoveSql.runOnComplete(c, "SET LOCAL statement_timeout = 1400");
+                MoveSql.runOnComplete(c, "SET LOCAL lock_timeout = '700ms'");
+                MoveSql.runOnComplete(c, text);
+                c.commit();
+            } catch (SQLException | RuntimeException e) {
+                c.rollback();
+                throw e;
+            }
+        }
+    }
+
+    /** Holds ROW EXCLUSIVE on the registry from a session of the test's own for {@code ms}; the returned future ends when it has been released. */
+    private CompletableFuture<Void> holdRegistryFor(long ms) throws SQLException {
+        Connection holder = pg.createConnection("");
+        parked.add(holder);
+        holder.setAutoCommit(false);
+        MoveSql.runOnComplete(holder, "LOCK TABLE nexus.catalog_collections IN ROW EXCLUSIVE MODE");
+        return CompletableFuture.runAsync(() -> {
+            sleepMs(ms);
+            try {
+                holder.commit();
+            } catch (SQLException e) {
+                throw new IllegalStateException(e);
+            }
+        });
+    }
+
+    /**
+     * After its lock on chunks the adoption puts its lock wait back to the move's 700 ms, so the ADD can wait out a short reader of the registry (the
+     * ADD takes ACCESS EXCLUSIVE there). The control is the same text with the restore taken out: the ADD then waits only the 200 ms of the lock and fails.
+     */
+    @Test
+    void theLockWaitIsRestoredAfterTheLockSoTheAddCanWaitOutAShortRegistryHolder() throws Exception {
+        seed("restore");
+        registerSwaps();
+        runSwaps(new VerifyingFinisher());
+        validateEveryLeafByHand();
+        String text = onCompleteOf(Rdr229ChunksFk.ADOPT_LABEL);
+        String restore = "PERFORM pg_catalog.set_config('lock_timeout', lock_wait, true);";
+        assertThat(text).as("the restore is in the text").contains(restore);
+
+        var first = holdRegistryFor(400);
+        assertThatThrownBy(() -> runAdoptionUnderProductionBounds(text.replace(restore, "")))
+            .as("without the restore the ADD waits only 200 ms").satisfies(t -> assertThat(sqlState(t)).isEqualTo("55P03"));
+        first.get(5, TimeUnit.SECONDS);
+        assertThat(compositeOnId()).isEmpty();
+
+        var second = holdRegistryFor(400);
+        runAdoptionUnderProductionBounds(text);
+        second.get(5, TimeUnit.SECONDS);
+
+        assertThat(compositeOnId()).as("with it, the ADD waited the holder out and the composite is there").hasSize(1);
+    }
+
+    /** A leaf key that cannot get its lock waits the short 200 ms of the adoption, not the move's 700 ms. */
+    @Test
+    void aLeafKeyThatCannotGetItsLockFailsInTheShortWait() throws Exception {
+        seed("keywait");
+        registerSwaps();
+        runSwaps(new VerifyingFinisher());
+        validateEveryLeafByHand();
+        String leaf = chunkLeaves().get(0);
+        ctx().alterTable(table("nexus", leaf)).dropConstraint(DSL.name(leaf + Rdr229ChunksFk.LEAF_CONSTRAINT_SUFFIX)).execute();
+        Connection writer = pg.createConnection("");
+        parked.add(writer);
+        writer.setAutoCommit(false);
+        MoveSql.runOnComplete(writer, "LOCK TABLE nexus." + quote(leaf) + " IN ROW EXCLUSIVE MODE");
+
+        long start = System.nanoTime();
+        assertThatThrownBy(() -> runAdoptionUnderProductionBounds(onCompleteOf(Rdr229ChunksFk.ADOPT_LABEL)))
+            .satisfies(t -> assertThat(sqlState(t)).isEqualTo("55P03"));
+        long elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+
+        assertThat(elapsed).as("the key's own 200 ms wait, not the move's 700 ms").isBetween(150L, 600L);
+    }
+
+    /** A watch that has been closed cancels nothing, even for a move that is paused (the claim that follows a validation must not be cancelled for it). */
+    @Test
+    void aClosedWatchCancelsNothing() throws Exception {
+        seed("watchclose");
+        registerSwaps();
+        runSwaps(new VerifyingFinisher());
+        String label = Rdr229ChunksFk.LEAF_LABEL_PREFIX + chunkLeaves().get(0);
+        pause(label);
+        String application = "nexus-data-move-watchclose-" + System.nanoTime();
+        try (Connection victim = openAsWorker(application)) {
+            var watch = CompletionWatch.start(adminConnection, label, pid(victim), application, backendStart(victim));
+            watch.close();
+            sleepMs(2_500);
+
+            assertThat(watch.fired()).as("a closed watch did not fire although its move is paused").isFalse();
+            MoveSql.runOnComplete(victim, "SELECT pg_sleep(0.3)");   // would raise 57014 had it been cancelled
+        }
     }
 
     // ── the evidence that the worker role's validation is set-based ─────────────────────────────────────────
