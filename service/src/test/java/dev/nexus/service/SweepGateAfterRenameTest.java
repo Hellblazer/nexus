@@ -39,7 +39,7 @@ class SweepGateAfterRenameTest {
     int n;
 
     @BeforeAll
-    void startAll() {
+    void startAll() throws Exception {
         fx = new CollectionRouteFixture();
         fx.gate3.set(true);
         executor = Executors.newCachedThreadPool();
