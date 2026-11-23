@@ -272,6 +272,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-253](rdr-253-session-identity.md) | Session Identity: Named Seats That Outlive Sessions, a Binding Log, One Resolver, and Fenced Identity State | Architecture | Accepted | 2026-11-16 |
 | [RDR-254](rdr-254-identity-when-a-path-moves.md) | Identity When a Path Moves: Repo Owners and Curator Documents Keep Their Identity Across a Move | Architecture | Closed | 2026-11-19 |
 | [RDR-256](rdr-256-index-agent-sessions-as-a-searchable-corpus.md) | Index agent sessions as a searchable, expandable corpus | Feature | Accepted | 2026-11-21 |
+| [RDR-258](rdr-258-test-apparatus-costs-more-than-it-protects.md) | The test apparatus costs more than it protects: repo-accounting checks report instead of fail, gates retire on evidence, tests check behaviour | Architecture | Draft | 2026-11-23 |
 
 > RDR-216 is unused on `develop`: drafted, gated BLOCKED, then abandoned 2026-09-19 without landing. Its measurements survive in T2 as `nexus_rdr/216-research-1` through `-19` and in `nexus/manticore-auto-chunking-analysis-2026-09-19`; the record itself never merged.
 
