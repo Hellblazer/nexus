@@ -105,8 +105,6 @@ def _dispositions() -> dict[tuple[str, str, str], tuple[str, str]]:
     return out
 
 
-@pytest.mark.xfail(strict=True, reason="RDR-229 P3.5c (nexus-p2m1x.25) test-first: the dispositions are filled as P3.5c switches each "
-                   "reader; strict, so the run fails the day this passes and the mark comes off in that commit")
 def test_every_census_reader_has_a_disposition_and_every_disposition_a_reader():
     readers = {("java", _row_object(r), r[3]) for r in _rows()}
     disp = _dispositions()
