@@ -84,6 +84,12 @@ public final class CollectionOneRowRename implements OneRowRename {
         // The tuple locks are keyed on the row's tuple, so the row is read once WITHOUT a lock to name them, then locked and read again.
         Record6<Long, String, String, String, String, String> peek = readOwn(ctx, tenant, oldName, false);
         if (peek == null) {
+            if (sourceId != null) {
+                // the label names no live row now. The request named the source by id, so say why that is typed: an id with no row, a retired one, or one the
+                // label was renamed away from (its row is locked with the others first, in id order, as below)
+                CollectionTombstones.lockRowsOfOneRowRename(ctx, tenant, oldName, newName, sourceId);
+                CollectionRefusals.requireSourceById(ctx, tenant, sourceId, oldName);
+            }
             throw notLive(oldName, newName);
         }
         String peekContentType = newContentType != null ? newContentType : peek.value2();

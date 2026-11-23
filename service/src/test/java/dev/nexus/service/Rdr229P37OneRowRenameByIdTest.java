@@ -6,6 +6,10 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.nexus.service.db.CollectionIdMismatchException;
+import dev.nexus.service.db.CollectionOneRowRename;
+import dev.nexus.service.db.CollectionRetiredIdException;
+import dev.nexus.service.db.OneRowRename;
 import org.jooq.DSLContext;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
@@ -27,7 +31,8 @@ import java.util.Map;
  * <p>One booted engine for the class, taken through {@link Rdr229RenameRestartPrecondition} (gate 3's latch set, the name-key drop move run, P3.5b's changesets
  * applied). The race is staged with the route boundary's {@code afterResolve} seam: it runs after the id was resolved to its label and before the handler, so
  * the registry is changed exactly where a concurrent request would change it. Each refusal test then asserts the registry rows are byte-for-byte as the seam left
- * them (id, label, owner, successor, xmin): nothing was written, the new holder of the label is untouched.
+ * them (id, label, owner, successor, xmin): nothing was written, the new holder of the label is untouched. A retired id, and a label freed and not registered
+ * again, cannot be staged through the route, so those two drive the body as the rename transaction calls it.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class Rdr229P37OneRowRenameByIdTest {
@@ -168,10 +173,29 @@ class Rdr229P37OneRowRenameByIdTest {
         assertThat(registry(w.tenant())).as("nothing was written: the new holder of A was not renamed").isEqualTo(staged[0]);
     }
 
-    // ---- (d) ---------------------------------------------------------------------------------------------------------------
+    // ---- (d) and (e): the body called as the rename transaction calls it ---------------------------------------------------------
+    // A retired id never reaches the body through the route (the handler reads the label's row first and refuses a retired source itself), and a label
+    // that is freed and NOT registered again is a 404 from the handler's own read; both are in the window only between the handler's read and the
+    // transaction, which the seam cannot stage, so the body is driven directly in a transaction of its own, as RenameGuard#oneRow calls it.
+
+    private void bodyRefused(World w, long id, String label, String target, Class<? extends RuntimeException> refusal,
+                             java.util.function.Consumer<RuntimeException> details) {
+        List<String> before = registry(w.tenant());
+        RuntimeException thrown = null;
+        try {
+            engine.scope().withTenant(w.tenant(), ctx -> new CollectionOneRowRename().rename(ctx, w.tenant(), label, target,
+                new OneRowRename.Request(id, null, null, new String[5], c -> false)));
+        } catch (RuntimeException e) {
+            thrown = e;
+        }
+        assertThat(thrown).as("the one-row body refused the stale pair").isInstanceOf(refusal);
+        details.accept(thrown);
+        assertThat(registry(w.tenant())).as("nothing was written").isEqualTo(before);
+        assertThat(engine.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, w.tenant(), target))).as("no row bears the rename's target").isNull();
+    }
 
     @Test
-    void anIdRetiredBetweenResolveAndTransaction_isRefusedAs409Superseded_namingTheSuccessor_andNothingIsWritten() throws Exception {
+    void anIdRetiredBeforeTheTransaction_isRefusedAsRetired_namingTheSuccessor_andNothingIsWritten() throws Exception {
         World w = world("d");
         String successor = coll(w.ownerA() + "succ", 1);
         engine.su(ctx -> {
@@ -179,25 +203,38 @@ class Rdr229P37OneRowRenameByIdTest {
             return null;
         });
         long successorId = engine.su(ctx -> Rdr229RenameChecks.registryId(ctx, w.tenant(), successor));
-        String target = coll(w.ownerA() + "to", 2);
-        @SuppressWarnings("unchecked") List<String>[] staged = new List[1];
-        // id 1 is superseded by the successor (it keeps the label A as a tombstone) and the label A is registered again (id 3)
-        stage(ctx -> {
+        engine.su(ctx -> {
             ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, successor).set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, successorId)
                 .set(CATALOG_COLLECTIONS.SUPERSEDED_AT, OffsetDateTime.now())
                 .where(CATALOG_COLLECTIONS.TENANT_ID.eq(w.tenant())).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(w.idA())).execute();
-            PgContainerHelper.insertCollection(ctx, w.tenant(), w.a());
-        }, staged, w.tenant());
+            return null;
+        });
 
-        var r = engine.renameById(w.token(), w.idA(), target, Map.of());
+        bodyRefused(w, w.idA(), w.a(), coll(w.ownerA() + "to", 2), CollectionRetiredIdException.class, e -> {
+            var retired = (CollectionRetiredIdException) e;
+            assertThat(retired.collectionId()).isEqualTo(w.idA());
+            assertThat(retired.successor()).as("the live successor, found by id").hasValueSatisfying(s -> {
+                assertThat(s.id()).isEqualTo(successorId);
+                assertThat(s.label()).isEqualTo(successor);
+            });
+        });
+    }
 
-        assertThat(staged[0]).as("non-vacuity: the seam ran: the tombstone, the successor and the new A").hasSize(3);
-        assertThat(r.status()).as("a retired id: " + r).isEqualTo(409);
-        assertThat(r.reason()).as(r.toString()).isEqualTo("collection_superseded");
-        var body = MAPPER.readTree(r.body());
-        assertThat(body.path("collection_id").asLong(-1)).as(r.toString()).isEqualTo(w.idA());
-        assertThat(body.path("superseded_by").asText()).as("the body names the live successor: " + r).isEqualTo(successor);
-        assertThat(body.path("successor_collection_id").asLong(-1)).as(r.toString()).isEqualTo(successorId);
-        assertThat(registry(w.tenant())).as("nothing was written: the new holder of A was not renamed").isEqualTo(staged[0]);
+    @Test
+    void aLabelFreedAndNotRegisteredAgain_isRefusedAsMismatchNamingTheCurrentLabel_notAsNotLive() throws Exception {
+        World w = world("e");
+        String a2 = coll(w.ownerA() + "away", 1);
+        engine.su(ctx -> {
+            ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.NAME, a2).set(CATALOG_COLLECTIONS.OWNER_ID, w.ownerA() + "away")
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(w.tenant())).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(w.idA())).execute();
+            return null;
+        });
+
+        bodyRefused(w, w.idA(), w.a(), coll(w.ownerA() + "to", 2), CollectionIdMismatchException.class, e -> {
+            var mismatch = (CollectionIdMismatchException) e;
+            assertThat(mismatch.labelDisagreement()).isTrue();
+            assertThat(mismatch.requestedLabel()).isEqualTo(w.a());
+            assertThat(mismatch.currentLabel()).isEqualTo(a2);
+        });
     }
 }
