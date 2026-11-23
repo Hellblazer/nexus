@@ -25,8 +25,7 @@ import org.junit.jupiter.api.Test;
  *       gate ({@code byId}: the {@link CollectionSelector#byId()} the caller built from the held Gate3, or {@code gate3.holds()});</li>
  *   <li>no main code hands a literal {@code () -> true} (or a captured boolean) to a {@code Gate3} parameter: production passes the
  *       one held gate on, so a reader can never be switched on by a lambda the latch does not own;</li>
- *   <li>no production caller reaches a {@code Gate3.never()}-default overload that a test keeps (the only entry is the one
- *       {@code PciReconciler} call that elsinore's wiring commit replaces; a stale entry fails here).</li>
+ *   <li>no production caller reaches a {@code Gate3.never()}-default overload that a test keeps (PciIdBuilds.plan's eleven-argument form).</li>
  * </ol>
  * Guarded sites, the file's whole list: SearchFunctions (every twin call under {@code sel.byId()}), LexicalGateProbe (the probes, under
  * {@code sel.byId()}), PgVectorRepository ({@code chunk_live_owners_by_id} under the {@code byId} of liveChunksCondition and
@@ -106,7 +105,9 @@ class Rdr229P35cGateStructureTest {
     @Test
     void noMainCodeHandsALiteralTrueToAGate3() throws IOException {
         Pattern literal = Pattern.compile("(?:Gate3|CollectionSelector|collectionIs|collectionIn|ownerLateral|batchUpdateMetadata"
-            + "|liveOwnedChashes)[^;]*\\(\\)\\s*->\\s*(?:true|byId)\\b|\\bGate3\\s+\\w+\\s*=\\s*\\(\\)\\s*->");
+            + "|liveOwnedChashes)[^;]*\\(\\)\\s*->\\s*(?:true|byId)\\b"
+            // a Gate3 variable bound to a lambda is the production signal only when it reads the LATCHED accessor (Main's one instance)
+            + "|\\bGate3\\s+\\w+\\s*=\\s*\\(\\)\\s*->(?![^;]*\\bgate3Latched\\(\\))");
         List<String> offenders = new ArrayList<>();
         int scanned = 0;
         for (Path file : mainFiles()) {
@@ -137,8 +138,8 @@ class Rdr229P35cGateStructureTest {
                 }
             }
         }
-        // PciReconciler's call is replaced by elsinore's wiring commit (it owns the Gate3 there); a stale entry fails here.
-        assertThat(callers).containsExactly("PciReconciler.java");
+        // PciReconciler's call carries the reconciler's Gate3 since the assembly's wiring commit: no caller is left.
+        assertThat(callers).isEmpty();
     }
 
     /** The number of top-level arguments of the call whose argument list starts at {@code from}. */

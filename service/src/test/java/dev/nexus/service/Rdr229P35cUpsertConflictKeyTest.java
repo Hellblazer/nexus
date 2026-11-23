@@ -71,11 +71,12 @@ import java.util.stream.Stream;
  *
  * <p>Fixture. The state is the one a name-path rename leaves in the window the RDR names: the registry holds two names A and B,
  * B carries id Y, and a stored row names A (so the name foreign key holds) and id Y. A write for B resolves to Y and finds that
- * row by the id key only. The id unique key (P3.3b/P3.3c build it per leaf; this tree has neither) is created by the id-key and
- * id-key tests over the partitioned parent and dropped again, so the guards keep the name key alone as their arbiter.
+ * row by the id key only. P3.3c's per-leaf id unique indexes exist on {@code chunks} and {@code taxonomy_centroids} (the manifest
+ * table has no id key until P3.3c's deferred one), so before the latch the id key is enforced though it is not the arbiter: the
+ * id-key test also builds the parent id unique over the partitioned table, and drops it again.
  *
- * <p>Tests: guards (pass once the constructors exist, and the name key is today's behaviour), id-key (fail until the conflict
- * target moves), (no flip: the gate is monotone).
+ * <p>Tests: guards (the name key is the arbiter before the latch; a write under another name for the same id is refused by the id
+ * unique), the id-key arm (the conflict target is the id from the latch). There is no flip-back case: the gate is monotone.
  */
 class Rdr229P35cUpsertConflictKeyTest extends AtomicWriteTestBase {
 
@@ -154,9 +155,17 @@ class Rdr229P35cUpsertConflictKeyTest extends AtomicWriteTestBase {
 
         /** Removes what every write of {@code key} left, so a later id unique key can be built. */
         abstract void delete(String key) throws Exception;
+
+        /** True when a write the id unique refuses throws it; false when the path counts it as a failed row and returns. */
+        abstract boolean refusalThrows();
     }
 
     private class Chunks extends Upsert {
+        @Override
+        boolean refusalThrows() {
+            return true;
+        }
+
         @Override
         String newKey() {
             return Chash.ofText("p35c chunk " + seq.incrementAndGet()).toHex();
@@ -204,6 +213,11 @@ class Rdr229P35cUpsertConflictKeyTest extends AtomicWriteTestBase {
     /** The manifest path: the same chunk rows, written by {@code CatalogRepository} behind a document's manifest rows. */
     private class ManifestChunks extends Chunks {
         @Override
+        boolean refusalThrows() {
+            return false;   // writeManifestMany reports a refused row as a failure (write_manifest_many_failures), it does not throw
+        }
+
+        @Override
         void write(Gate3 gate3, String collection, String key, String text) {
             var catalog = catalogRepository(tenantScope, gate3);
             var combined = new CombinedWriteService(tenantScope, catalog, new EmbedderRouter(embedder, "document"));
@@ -224,6 +238,11 @@ class Rdr229P35cUpsertConflictKeyTest extends AtomicWriteTestBase {
     }
 
     private class Centroids extends Upsert {
+        @Override
+        boolean refusalThrows() {
+            return true;
+        }
+
         @Override
         String newKey() {
             return Long.toString(7_000L + seq.incrementAndGet());
@@ -293,22 +312,33 @@ class Rdr229P35cUpsertConflictKeyTest extends AtomicWriteTestBase {
     }
 
     /**
-     * GUARD: with {@link Gate3#never()} the arbiter is the name key and nothing else, so a write under a DIFFERENT name for the
-     * same collection id inserts a second row. (No id unique key exists here: it is built only inside {@link #withIdKeys}.)
+     * GUARD: before the latch the arbiter is the name key, so a write under a DIFFERENT name for the same collection id finds no
+     * row to update and tries to insert a second row for the id; P3.3c's id unique index refuses that (23505). A write that returns
+     * the refusal as a failed row (the manifest path) leaves the stored row as it was. Never two rows for one id, never the
+     * replacement taking the stored row: that is the id-key arm, and it waits for the latch.
      */
     @ParameterizedTest
     @MethodSource("upserts")
-    void beforeGate3AWriteUnderAnotherNameWithTheSameIdInsertsASecondRow(Upsert u) throws Exception {
+    void beforeGate3AWriteUnderAnotherNameWithTheSameIdIsRefusedByTheIdUnique(Upsert u) throws Exception {
         String a = register("ga");
         String b = register("gb");
         String key = u.newKey();
         u.seedNamedAWithIdOfB(a, b, key, "seed");
         try {
-            u.write(Gate3.never(), b, key, "replacement");
+            Throwable thrown = org.assertj.core.api.Assertions.catchThrowable(() -> u.write(Gate3.never(), b, key, "replacement"));
 
+            if (u.refusalThrows()) {
+                assertThat(thrown).as("the id unique refuses the second row for the id").isNotNull();
+                Throwable root = thrown;
+                while (root.getCause() != null) root = root.getCause();
+                assertThat(root).isInstanceOf(org.postgresql.util.PSQLException.class);
+                assertThat(((org.postgresql.util.PSQLException) root).getSQLState()).as("unique_violation").isEqualTo("23505");
+            } else {
+                assertThat(thrown).as("the path reports the refused row as a failure and returns").isNull();
+            }
             assertThat(u.rowsOfId(registryId(b), key))
-                .as("the name key (B, key) has no row, so the write inserts; two rows now carry one collection id")
-                .hasSize(2);
+                .as("one row for the id, and it is the seed: the name arbiter did not take it, the id unique refused the insert")
+                .containsExactly(Map.entry(a, "seed"));
         } finally {
             u.delete(key);
         }
