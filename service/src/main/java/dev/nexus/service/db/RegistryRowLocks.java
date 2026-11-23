@@ -74,6 +74,11 @@ final class RegistryRowLocks {
     }
 
     private static String memoKey(long collectionId) {
+        return heldKey(collectionId);
+    }
+
+    /** The memo key of a row held but not answerable as live by id: no label or id lookup uses it. */
+    static String heldKey(long collectionId) {
         return "~held#" + collectionId;
     }
 }

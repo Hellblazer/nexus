@@ -326,10 +326,10 @@ public final class ReembedJobRepository {
     public record Started(Job job, Optional<Job> revived) {}
 
     /**
-     * {@link #start}, and with {@code markRevived} the earlier job that went {@code target -> source} is marked {@code revived} in the
+     * {@link #start}, and with {@code markRevived} true the earlier job that went {@code target -> source} is marked {@code revived} in the
      * SAME transaction (RDR-229 P3.5a row 14): after both ends' rows are locked, matched by the locked rows' ids, so a one-row rename
      * between the mark and the start cannot send the mark to another job. A start that loses leaves the earlier job unmarked; the
-     * retry marks it ({@link #markRevived} is idempotent).
+     * retry marks it ({@link #markRevivedIn} is idempotent).
      */
     public Started startMarking(String tenant, String source, String target, Long tokenCap, boolean keepSource,
                                 boolean forceDelete, boolean markRevived) {
@@ -833,22 +833,12 @@ public final class ReembedJobRepository {
      * result is empty, so a retry of a start whose first attempt revived the target but lost the start or the mark
      * heals the mark and a repeat changes nothing. An older finished job is never reached past a revived one.
      *
+     * <p>Runs only inside {@link #startMarking}'s transaction, which holds both ends' registry rows: the earlier job is the one whose ends
+     * are those rows (matched by id, so a one-row rename between the mark and the start cannot send the mark to another job). There is no
+     * standalone mark: the one that was is gone, because a mark outside the start could not be made atomic with it.
+     *
      * @return the updated row, or empty when there is no such job or it is already marked
      */
-    public Optional<Job> markRevived(String tenant, String earlierSource, String earlierTarget) {
-        return scope.withTenant(tenant, ctx -> {
-            // both ends' rows FOR KEY SHARE in id order, then the earlier job is matched by their ids; an end with no row has no job to mark
-            CollectionRegistry.requireAllForWrite(ctx, tenant, List.of(earlierSource, earlierTarget));
-            Optional<CollectionRow> source = CollectionRegistry.requireForWriteIfPresent(ctx, tenant, earlierSource);
-            Optional<CollectionRow> target = CollectionRegistry.requireForWriteIfPresent(ctx, tenant, earlierTarget);
-            if (source.isEmpty() || target.isEmpty()) {
-                return Optional.<Job>empty();
-            }
-            return markRevivedIn(ctx, tenant, source.get(), target.get());
-        });
-    }
-
-    /** {@link #markRevived} inside a transaction that holds both rows: the earlier job is the one whose ends are those rows. */
     private static Optional<Job> markRevivedIn(DSLContext ctx, String tenant, CollectionRow earlierSource, CollectionRow earlierTarget) {
         var latest = ctx.select(REEMBED_JOBS.JOB_ID, REEMBED_JOBS.DISPOSITION).from(REEMBED_JOBS)
             .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
