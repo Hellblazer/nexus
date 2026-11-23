@@ -9,6 +9,11 @@
 # A NULL id is no collection: an id or both reader never falls back to a '' name (linda 2026-11-20).
 # The two upserts (PgVectorRepository chunks, TaxonomyCentroidRepository taxonomy_centroids, op on_conflict) take the id key as their conflict target from gate 3: disposition id.
 kind	object	name_column	disposition	reason
+java	datamove/CompletionCheck.java catalog_collections expr	superseded_by	both	not a collection-name read: the completion check's own probes of the registry's tombstone pointer (superseded_by) beside its id twin (superseded_by_id), which gate 3 is computed from, so they cannot wait on gate 3; unchanged
+java	db/AspectQueueDrain.java ? expr	collection	both	the retired queue's own collection name, the fallback when the document has no home; the queue has an id column only on an install that kept the table, so the name stays the fallback after gate 3
+java	db/AspectQueueDrain.java catalog_documents expr	physical_collection	id	
+java	db/AspectQueueDrain.java catalog_documents result	physical_collection	id	
+java	db/AspectQueueDrain.java catalog_documents select	physical_collection	id	
 java	db/AspectRepository.java document_aspects expr	collection	id	
 java	db/AspectRepository.java document_aspects select	collection	id	
 java	db/AspectRepository.java document_aspects where	collection	both	reads by id from gate 3; the rename arm (renameCollection / rename*Collection) still rewrites by the name it renames, which P3.7's one-row rename removes
@@ -21,6 +26,23 @@ java	db/ChashRepository.java catalog_document_chunks where	collection	both	reads
 java	db/ChashRepository.java chunks result	collection	id	
 java	db/ChashRepository.java chunks select	collection	id	the published name probe (PROBE_SQL) stays the name arm; from gate 3 a typed join on collection_id to the registry reports the current label
 java	db/ChashRepository.java chunks where	collection	both	reads by id from gate 3; the rename arm (renameCollection / rename*Collection) still rewrites by the name it renames, which P3.7's one-row rename removes
+java	db/IndexRunCensusReads.java catalog_collections select	name	label-kept	resolves the labels of the failed documents' collections (read as the registry's current label of the document's id) to their embedding models
+java	db/IndexRunCensusReads.java catalog_collections where	name	label-kept	resolves the labels of the failed documents' collections (read as the registry's current label of the document's id) to their embedding models
+java	db/IndexRunCensusReads.java catalog_documents select	physical_collection	id	
+java	db/IndexRunCensusReads.java chunks where	collection	id	
+java	db/LegacyChunkSurvey.java ? expr	collection	id	
+java	db/LegacyChunkSurvey.java ? join_on	collection	id	
+java	db/LegacyChunkSurvey.java catalog_document_chunks join_on	collection	id	
+java	db/LegacyChunkSurvey.java catalog_document_chunks where	collection	id	
+java	db/LegacyChunkSurvey.java catalog_documents where	physical_collection	id	
+java	db/PdfStubMetadataReads.java catalog_collections order_by	name	label-kept	lists the registry's own labels of the examined collections, the names the report is keyed by; each is then read by its id
+java	db/PdfStubMetadataReads.java catalog_collections select	name	label-kept	lists the registry's own labels of the examined collections, the names the report is keyed by; each is then read by its id
+java	db/PdfStubMetadataReads.java catalog_document_chunks join_on	collection	id	
+java	db/PdfStubMetadataReads.java catalog_document_chunks where	collection	id	
+java	db/PdfStubMetadataReads.java catalog_documents where	physical_collection	id	
+java	db/PdfStubMetadataReads.java chunks join_on	collection	id	
+java	db/PipelineRepository.java pdf_pipeline expr	collection	id	
+java	db/PipelineRepository.java pdf_pipeline where	collection	id	
 java	db/ReembedJobRepository.java reembed_jobs expr	source_collection	id	
 java	db/ReembedJobRepository.java reembed_jobs expr	target_collection	id	
 java	db/ReembedJobRepository.java reembed_jobs result	source_collection	id	Job's source and target: the live registry label of the row's id, else the stored name (history with no registry FK, linda 2026-11-23); the stored name is the fallback only for a gone collection
@@ -58,7 +80,19 @@ java	db/TaxonomyRepository.java topics expr	collection	id
 java	db/TaxonomyRepository.java topics join_on	collection	id	
 java	db/TaxonomyRepository.java topics select	collection	id	
 java	db/TaxonomyRepository.java topics where	collection	both	reads by id from gate 3; the rename arm (renameCollection / rename*Collection) still rewrites by the name it renames, which P3.7's one-row rename removes
+java	db/TelemetryRepository.java hook_failures select	collection	both	history table (rows are never stamped after the fact; a row may outlive its collection): reads the id where the row carries one and the name where it carries none, and reports the registry's current label of the id; a NULL id with a '' name is never found
+java	db/TelemetryRepository.java hook_failures where	collection	both	the rename arm (renameCollection) rewrites hook_failures by the name it renames; P3.7's one-row rename removes it (a rename is refused from gate 3 until then); a history table the stamp does not reach
+java	db/TelemetryRepository.java relevance_log select	collection	both	history table (rows are never stamped after the fact; a row may outlive its collection): reads the id where the row carries one and the name where it carries none, and reports the registry's current label of the id; a NULL id with a '' name is never found
+java	db/TelemetryRepository.java search_telemetry where	collection	both	history table (rows are never stamped after the fact; a row may outlive its collection): reads the id where the row carries one and the name where it carries none, and reports the registry's current label of the id; a NULL id with a '' name is never found; its renameCollection arm rewrites by the name it renames (P3.7's one-row rename removes it) and probeIds matches the table's own name conflict key (ts, query_hash, collection) as written, which P4.1 moves
+java	db/UriSegmentCensusReads.java catalog_collections expr	name	label-kept	the group's collection is reported as the registry's current label of the row's id ('' for none)
+java	db/UriSegmentCensusReads.java catalog_collections join_on	name	id	
+java	db/UriSegmentCensusReads.java catalog_documents expr	physical_collection	id	
+java	db/UriSegmentCensusReads.java document_aspects expr	collection	id	
+java	db/UriSegmentCensusReads.java document_highlights expr	collection	id	
+java	reembed/TargetSelection.java gc_audit select	collection	both	not a read: the SQL text of an operator hint in a refusal message, naming the history table's own collection column (a row with a NULL id keeps its name); the message text is a wire string
+java	vectors/ReaperRepository.java catalog_collections select	name	id	
 java	vectors/ReaperRepository.java catalog_collections select	name	label-kept	lifecycleStates keys the registry's lifecycle by label: the registry's own name column is the key the reaper looks its collections up by
+java	vectors/ReaperRepository.java catalog_collections where	name	id	
 java	vectors/ReaperRepository.java catalog_collections where	name	label-kept	resolves the quarantine collection's label and the origin label a chunk's metadata carries (origin_collection, a label written at move time) to their registry rows
 java	vectors/ReaperRepository.java chunks expr	collection	id	
 java	vectors/ReaperRepository.java chunks order_by	collection	id	

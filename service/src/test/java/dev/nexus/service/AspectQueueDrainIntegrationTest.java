@@ -8,6 +8,7 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.AdminConnection;
 import dev.nexus.service.db.AspectQueueDrain;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.SchemaMigrator;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.db.TupleRepository;
@@ -33,6 +34,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.TUPLES;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -213,6 +215,56 @@ class AspectQueueDrainIntegrationTest {
             AspectQueueDrain.Result gone = fx.drain().run();
             assertThat(gone.tablePresent()).isFalse();
             assertThat(gone.rowsRetained()).isZero();
+        }
+    }
+
+    /**
+     * RDR-229 P3.5c: from gate 3 a document's home is the registry's current label of its {@code physical_collection_id}. The
+     * registry row of COLL_A is renamed in place after the migration (FK triggers off: P3.7's one-row rename leaves the document
+     * row saying COLL_A with the id), so the task a drain writes carries COLL_A before the latch and the new label after it.
+     */
+    @Test
+    void aDocumentsHomeIsReadByItsIdFromGate3() throws Exception {
+        String renamed = "knowledge__drain-a-renamed__minilm-l6-v2-384__v1";
+        try (Fixture fx = new Fixture(ctx -> {
+            PgContainerHelper.insertCollection(ctx, TENANT_A, COLL_A);
+            doc(ctx, TENANT_A, "a.1", COLL_A);
+            row(ctx, TENANT_A, COLL_A, "a.1", "/a/1.md", "pending", null, "h1");
+        })) {
+            fx.su(ctx -> {
+                ctx.set(DSL.name("session_replication_role"), DSL.inline("replica")).execute();
+                try {
+                    ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.NAME, renamed)
+                        .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A)).and(CATALOG_COLLECTIONS.NAME.eq(COLL_A)).execute();
+                } finally {
+                    ctx.set(DSL.name("session_replication_role"), DSL.inline("origin")).execute();
+                }
+                return null;
+            });
+            AspectQueueDrain.Result byName = fx.drain().run();
+            assertThat(byName.moved()).isEqualTo(1);
+            assertThat(JSON.readTree(tasks(fx).get("a.1").get(TUPLES.BODY)).get("collection").asText())
+                .as("before the latch: the document's own name column").isEqualTo(COLL_A);
+
+            fx.su(ctx -> {
+                // a document row the stamp reached: name COLL_A, the id of the renamed registry row
+                ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE,
+                        CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
+                    .values(DSL.val(TENANT_A), DSL.val("a.2"), DSL.val("Test Doc a.2"), DSL.val(COLL_A), CollectionIds.idOf(TENANT_A, renamed)).execute();
+                ctx.insertInto(QUEUE, DSL.field(DSL.name("tenant_id")), DSL.field(DSL.name("collection")),
+                        DSL.field(DSL.name("collection_id")), DSL.field(DSL.name("source_path")), DSL.field(DSL.name("doc_id")),
+                        DSL.field(DSL.name("status")), DSL.field(DSL.name("enqueued_at")), DSL.field(DSL.name("content_hash")))
+                    .values(DSL.val(TENANT_A), DSL.val(renamed), CollectionIds.idOf(TENANT_A, renamed), DSL.val("/a/2.md"),
+                        DSL.val("a.2"), DSL.val("pending"), DSL.val(OffsetDateTime.now()), DSL.val("h2"))
+                    .execute();
+                return null;
+            });
+            AspectQueueDrain byId = new AspectQueueDrain(fx.scope, fx.tuples,
+                new AspectQueueDrain.AdminCensus(new AdminConnection(fx.pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS)),
+                () -> List.of(TENANT_A, TENANT_B), () -> true);
+            assertThat(byId.run().moved()).isEqualTo(1);
+            assertThat(JSON.readTree(tasks(fx).get("a.2").get(TUPLES.BODY)).get("collection").asText())
+                .as("from gate 3: the registry's current label of the document's id").isEqualTo(renamed);
         }
     }
 

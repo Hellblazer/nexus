@@ -7,9 +7,10 @@ file	line	table	name_column	op	via	note
 service/src/main/java/dev/nexus/service/datamove/CompletionCheck.java	773	catalog_collections	superseded_by	expr	literal	-
 service/src/main/java/dev/nexus/service/datamove/CompletionCheck.java	790	catalog_collections	superseded_by	expr	literal	-
 service/src/main/java/dev/nexus/service/datamove/CompletionCheck.java	805	catalog_collections	superseded_by	expr	literal	-
-service/src/main/java/dev/nexus/service/db/AspectQueueDrain.java	312	?	collection	expr	literal	0 candidate tables in the statement
-service/src/main/java/dev/nexus/service/db/AspectQueueDrain.java	320	catalog_documents	physical_collection	select	alias	-
-service/src/main/java/dev/nexus/service/db/AspectQueueDrain.java	336	catalog_documents	physical_collection	result	alias	-
+service/src/main/java/dev/nexus/service/db/AspectQueueDrain.java	322	?	collection	expr	literal	0 candidate tables in the statement
+service/src/main/java/dev/nexus/service/db/AspectQueueDrain.java	331	catalog_documents	physical_collection	expr	alias	-
+service/src/main/java/dev/nexus/service/db/AspectQueueDrain.java	333	catalog_documents	physical_collection	select	alias	-
+service/src/main/java/dev/nexus/service/db/AspectQueueDrain.java	350	catalog_documents	physical_collection	result	alias	-
 service/src/main/java/dev/nexus/service/db/AspectRepository.java	81	document_aspects	collection	expr	jooq	-
 service/src/main/java/dev/nexus/service/db/AspectRepository.java	93	document_highlights	collection	expr	jooq	-
 service/src/main/java/dev/nexus/service/db/AspectRepository.java	123	document_aspects	collection	expr	jooq	-
@@ -293,18 +294,17 @@ service/src/main/java/dev/nexus/service/db/DepartedWriterSpans.java	533	?	collec
 service/src/main/java/dev/nexus/service/db/DepartedWriterSpans.java	563	chunks	collection	set_value	jooq	-
 service/src/main/java/dev/nexus/service/db/DepartedWriterSpans.java	565	chunks	collection	join_on	literal	-
 service/src/main/java/dev/nexus/service/db/DepartedWriterSpans.java	569	chunks	collection	where	jooq	-
-service/src/main/java/dev/nexus/service/db/IndexRunCensusReads.java	204	catalog_documents	physical_collection	select	alias	-
-service/src/main/java/dev/nexus/service/db/IndexRunCensusReads.java	398	catalog_collections	name	select	jooq	-
-service/src/main/java/dev/nexus/service/db/IndexRunCensusReads.java	399	catalog_collections	name	where	jooq	-
-service/src/main/java/dev/nexus/service/db/IndexRunCensusReads.java	438	chunks	collection	where	jooq	-
-service/src/main/java/dev/nexus/service/db/LegacyChunkSurvey.java	158	?	collection	expr	literal	0 candidate tables in the statement
-service/src/main/java/dev/nexus/service/db/LegacyChunkSurvey.java	174	?	collection	expr	literal	0 candidate tables in the statement
-service/src/main/java/dev/nexus/service/db/LegacyChunkSurvey.java	204	?	collection	join_on	alias	c is not bound to a table in this file
-service/src/main/java/dev/nexus/service/db/LegacyChunkSurvey.java	204	catalog_document_chunks	collection	join_on	alias	-
-service/src/main/java/dev/nexus/service/db/LegacyChunkSurvey.java	218	?	collection	join_on	alias	c is not bound to a table in this file
-service/src/main/java/dev/nexus/service/db/LegacyChunkSurvey.java	218	catalog_document_chunks	collection	join_on	alias	-
-service/src/main/java/dev/nexus/service/db/LegacyChunkSurvey.java	333	catalog_document_chunks	collection	where	alias	-
-service/src/main/java/dev/nexus/service/db/LegacyChunkSurvey.java	342	catalog_documents	physical_collection	where	alias	-
+service/src/main/java/dev/nexus/service/db/IndexRunCensusReads.java	230	catalog_documents	physical_collection	select	alias	-
+service/src/main/java/dev/nexus/service/db/IndexRunCensusReads.java	424	catalog_collections	name	select	jooq	-
+service/src/main/java/dev/nexus/service/db/IndexRunCensusReads.java	425	catalog_collections	name	where	jooq	-
+service/src/main/java/dev/nexus/service/db/IndexRunCensusReads.java	471	chunks	collection	where	jooq	-
+service/src/main/java/dev/nexus/service/db/LegacyChunkSurvey.java	200	?	collection	expr	literal	0 candidate tables in the statement
+service/src/main/java/dev/nexus/service/db/LegacyChunkSurvey.java	239	?	collection	join_on	alias	c is not bound to a table in this file
+service/src/main/java/dev/nexus/service/db/LegacyChunkSurvey.java	239	catalog_document_chunks	collection	join_on	alias	-
+service/src/main/java/dev/nexus/service/db/LegacyChunkSurvey.java	260	?	collection	join_on	alias	c is not bound to a table in this file
+service/src/main/java/dev/nexus/service/db/LegacyChunkSurvey.java	260	catalog_document_chunks	collection	join_on	alias	-
+service/src/main/java/dev/nexus/service/db/LegacyChunkSurvey.java	392	catalog_document_chunks	collection	where	alias	-
+service/src/main/java/dev/nexus/service/db/LegacyChunkSurvey.java	401	catalog_documents	physical_collection	where	alias	-
 service/src/main/java/dev/nexus/service/db/ManifestFill.java	263	catalog_document_chunks	collection	select	alias	-
 service/src/main/java/dev/nexus/service/db/ManifestFill.java	268	catalog_document_chunks	collection	group_by	alias	-
 service/src/main/java/dev/nexus/service/db/ManifestFill.java	269	catalog_document_chunks	collection	order_by	alias	-
@@ -326,16 +326,16 @@ service/src/main/java/dev/nexus/service/db/ManifestReplace.java	184	chunks	colle
 service/src/main/java/dev/nexus/service/db/ManifestReplace.java	271	catalog_document_chunks	collection	set_value	literal	-
 service/src/main/java/dev/nexus/service/db/ManifestReplace.java	286	chunk_orphaned_at	collection	expr	jooq	-
 service/src/main/java/dev/nexus/service/db/ManifestReplace.java	288	chunk_orphaned_at	collection	order_by	jooq	-
-service/src/main/java/dev/nexus/service/db/PdfStubMetadataReads.java	159	catalog_collections	name	select	alias	-
-service/src/main/java/dev/nexus/service/db/PdfStubMetadataReads.java	161	catalog_collections	name	order_by	alias	-
-service/src/main/java/dev/nexus/service/db/PdfStubMetadataReads.java	186	catalog_document_chunks	collection	join_on	alias	-
-service/src/main/java/dev/nexus/service/db/PdfStubMetadataReads.java	186	chunks	collection	join_on	alias	-
-service/src/main/java/dev/nexus/service/db/PdfStubMetadataReads.java	188	catalog_documents	physical_collection	where	alias	-
-service/src/main/java/dev/nexus/service/db/PdfStubMetadataReads.java	192	catalog_document_chunks	collection	where	alias	-
-service/src/main/java/dev/nexus/service/db/PdfStubMetadataReads.java	200	catalog_document_chunks	collection	where	alias	-
-service/src/main/java/dev/nexus/service/db/PipelineRepository.java	150	pdf_pipeline	collection	expr	jooq	-
-service/src/main/java/dev/nexus/service/db/PipelineRepository.java	208	pdf_pipeline	collection	where	jooq	-
-service/src/main/java/dev/nexus/service/db/PipelineRepository.java	798	pdf_pipeline	collection	where	jooq	-
+service/src/main/java/dev/nexus/service/db/PdfStubMetadataReads.java	172	catalog_collections	name	select	alias	-
+service/src/main/java/dev/nexus/service/db/PdfStubMetadataReads.java	174	catalog_collections	name	order_by	alias	-
+service/src/main/java/dev/nexus/service/db/PdfStubMetadataReads.java	206	catalog_document_chunks	collection	join_on	alias	-
+service/src/main/java/dev/nexus/service/db/PdfStubMetadataReads.java	206	chunks	collection	join_on	alias	-
+service/src/main/java/dev/nexus/service/db/PdfStubMetadataReads.java	209	catalog_documents	physical_collection	where	alias	-
+service/src/main/java/dev/nexus/service/db/PdfStubMetadataReads.java	213	catalog_document_chunks	collection	where	alias	-
+service/src/main/java/dev/nexus/service/db/PdfStubMetadataReads.java	221	catalog_document_chunks	collection	where	alias	-
+service/src/main/java/dev/nexus/service/db/PipelineRepository.java	151	pdf_pipeline	collection	expr	jooq	-
+service/src/main/java/dev/nexus/service/db/PipelineRepository.java	227	pdf_pipeline	collection	where	jooq	-
+service/src/main/java/dev/nexus/service/db/PipelineRepository.java	818	pdf_pipeline	collection	where	jooq	-
 service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	184	chunks	collection	expr	jooq	-
 service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	185	catalog_collections	name	select	jooq	-
 service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	189	catalog_collections	name	expr	alias	-
@@ -444,13 +444,14 @@ service/src/main/java/dev/nexus/service/db/TelemetryRepository.java	2434	search_
 service/src/main/java/dev/nexus/service/db/TenantImportLoad.java	238	catalog_collections	name	select	alias	-
 service/src/main/java/dev/nexus/service/db/TenantImportLoad.java	242	catalog_collections	name	join_on	alias	-
 service/src/main/java/dev/nexus/service/db/TenantImportLoad.java	242	catalog_collections	superseded_by	join_on	alias	-
-service/src/main/java/dev/nexus/service/db/UriSegmentCensusReads.java	83	catalog_collections	name	join_on	alias	-
-service/src/main/java/dev/nexus/service/db/UriSegmentCensusReads.java	99	catalog_documents	physical_collection	expr	alias	-
-service/src/main/java/dev/nexus/service/db/UriSegmentCensusReads.java	101	catalog_documents	physical_collection	expr	alias	-
-service/src/main/java/dev/nexus/service/db/UriSegmentCensusReads.java	103	document_aspects	collection	expr	alias	-
-service/src/main/java/dev/nexus/service/db/UriSegmentCensusReads.java	105	document_aspects	collection	expr	alias	-
-service/src/main/java/dev/nexus/service/db/UriSegmentCensusReads.java	107	document_highlights	collection	expr	alias	-
-service/src/main/java/dev/nexus/service/db/UriSegmentCensusReads.java	109	document_highlights	collection	expr	alias	-
+service/src/main/java/dev/nexus/service/db/UriSegmentCensusReads.java	91	catalog_collections	name	expr	alias	-
+service/src/main/java/dev/nexus/service/db/UriSegmentCensusReads.java	95	catalog_collections	name	join_on	alias	-
+service/src/main/java/dev/nexus/service/db/UriSegmentCensusReads.java	117	catalog_documents	physical_collection	expr	alias	-
+service/src/main/java/dev/nexus/service/db/UriSegmentCensusReads.java	119	catalog_documents	physical_collection	expr	alias	-
+service/src/main/java/dev/nexus/service/db/UriSegmentCensusReads.java	121	document_aspects	collection	expr	alias	-
+service/src/main/java/dev/nexus/service/db/UriSegmentCensusReads.java	123	document_aspects	collection	expr	alias	-
+service/src/main/java/dev/nexus/service/db/UriSegmentCensusReads.java	125	document_highlights	collection	expr	alias	-
+service/src/main/java/dev/nexus/service/db/UriSegmentCensusReads.java	127	document_highlights	collection	expr	alias	-
 service/src/main/java/dev/nexus/service/reembed/TargetSelection.java	214	gc_audit	collection	select	sql	-
 service/src/main/java/dev/nexus/service/vectors/ChunkConstraintAdmin.java	342	chunks	collection	select	jooq	-
 service/src/main/java/dev/nexus/service/vectors/ChunkKeySweep.java	427	chunks	collection	select	jooq	-
