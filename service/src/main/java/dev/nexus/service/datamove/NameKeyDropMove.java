@@ -118,8 +118,8 @@ public final class NameKeyDropMove {
         if (snapshot == null || !snapshot.gate3Latched()) {   // the latch, not the live gate 3: a dip after it must not strand renames at name_key_drop_move
             return false;
         }
-        var moves = DSL.table(DSL.name("nexus", "data_moves"));
-        return admin.insertInto(moves,
+        // the table is named inline: TwinKeyUpsertCoverageCensusTest tables an upsert by the insertInto argument and refuses an unresolved one
+        return admin.insertInto(DSL.table(DSL.name("nexus", "data_moves")),
                 DSL.field(DSL.name("label"), String.class), DSL.field(DSL.name("template"), String.class),
                 DSL.field(DSL.name("driving_schema"), String.class), DSL.field(DSL.name("driving_table"), String.class),
                 DSL.field(DSL.name("chunk_size"), SQLDataType.INTEGER), DSL.field(DSL.name("sleep_ms"), SQLDataType.INTEGER),
