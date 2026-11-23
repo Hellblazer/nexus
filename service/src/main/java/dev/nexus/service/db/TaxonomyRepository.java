@@ -1145,7 +1145,8 @@ public final class TaxonomyRepository {
                 PgSession.setTaxonomyAssignBounds(ctx);
                 // RDR-229 P3.5a: the write's own registry read (a cache hit for a label request); for a request by id, the by-id
                 // read FOR KEY SHARE, so the id cannot be freed and its label taken again under this write
-                CollectionRegistry.requireWritable(ctx, tenant, collection);
+                // RDR-229 P3.5c, I8: the function files the assignments under the LOCKED row's current label, never the label the request carried
+                final String coll = CollectionRegistry.requireWritable(ctx, tenant, collection).label();
                 // chunks_<dim>.chash is bytea (RDR-180); the HTTP/route boundary carries
                 // hex text, so the existence probe goes through ChashHex.hex(...) — the
                 // house-blessed jOOQ seam that binds hex->bytes / fetches bytes->hex
@@ -1174,7 +1175,7 @@ public final class TaxonomyRepository {
                     .distinct()
                     .toList();
 
-                int assigned = assignFromChashesOnePass(ctx, dim, tenant, model, collection, chashArr, false).size();
+                int assigned = assignFromChashesOnePass(ctx, dim, tenant, model, coll, chashArr, false).size();
                 // Still INSIDE this transaction — the own pass's persisted row(s)
                 // and the doc_count trigger's topics lock are both live here.
                 duringOwnPassHookForTests.run();
@@ -1192,7 +1193,9 @@ public final class TaxonomyRepository {
                 () -> tenantScope.withTenant(tenant, ctx -> {
                     // Same bound discipline as the own pass, in its OWN transaction.
                     PgSession.setTaxonomyAssignBounds(ctx);
-                    return assignFromChashesOnePass(ctx, dim, tenant, model, collection, chashArr, true).size();
+                    // I8 again: this pass is its own transaction, so it reads the row (FOR KEY SHARE) and files under its current label too
+                    final String coll = CollectionRegistry.requireWritable(ctx, tenant, collection).label();
+                    return assignFromChashesOnePass(ctx, dim, tenant, model, coll, chashArr, true).size();
                 }));
         }
 
