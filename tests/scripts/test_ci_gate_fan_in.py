@@ -146,7 +146,10 @@ def test_each_check_prints_exactly_what_it_prints_on_its_own(tmp_path: Path) -> 
 def test_a_check_that_cannot_start_is_a_failure_and_the_rest_still_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                                                                        capsys: pytest.CaptureFixture[str]) -> None:
     gate = _load()
-    monkeypatch.setattr(gate.sys, "executable", str(tmp_path / "no-such-python"))
+    def cannot_exec(argv, **kwargs):  # what subprocess raises for a missing or non-executable interpreter
+        raise FileNotFoundError(2, "No such file or directory", argv[0])
+
+    monkeypatch.setattr(gate.subprocess, "run", cannot_exec)
     code = gate.main(["--reports-dir", str(tmp_path), "--suite", "python_unit", "--shards", "1"])
     out = capsys.readouterr().out
     assert code == 1
@@ -178,3 +181,81 @@ def test_no_report_on_disk_hands_the_check_the_literal_pattern_like_the_shell_di
     gate = _load()
     args = gate.parse_args(["--reports-dir", str(tmp_path / "none"), "--suite", "python_unit", "--shards", "6"])
     assert gate.build_checks(args)[0].argv[-1] == str(tmp_path / "none" / "*" / "nx-ddl-report.json")
+
+
+def _groups(out: str) -> dict[str, str]:
+    """Each check's text between its ::group:: and ::endgroup:: markers."""
+    found: dict[str, str] = {}
+    lines = out.splitlines(keepends=True)
+    name = None
+    for line in lines:
+        if line.startswith("::group::"):
+            name, found[line[len("::group::"):].rstrip("\n")] = line[len("::group::"):].rstrip("\n"), ""
+        elif line.startswith("::endgroup::"):
+            name = None
+        elif name is not None:
+            found[name] += line
+    return found
+
+
+def test_each_check_sits_in_its_own_group_and_a_failure_is_annotated(tmp_path: Path) -> None:
+    reports = tmp_path / "reports"
+    _seed(reports, provisioned=40)
+    ddl, touch = _ceilings(tmp_path, ddl_per_test=74)
+    out = _gate(tmp_path, reports, ddl, touch).stdout
+    groups = _groups(out)
+    assert list(groups) == [DDL_NAME, STORAGE_NAME, COLLECTION_NAME], out
+    assert out.count("::endgroup::") == 3
+    # the check's own text is untouched inside its group
+    assert groups[DDL_NAME] == _direct("scripts/ddl_ratchet.py", "fan-in", "--suite", "python_unit", "--shards", str(SHARDS),
+                                       "--report", *sorted(str(p) for p in reports.glob("*/nx-ddl-report.json")),
+                                       "--ceilings", str(ddl))
+    assert groups[STORAGE_NAME] == _direct("-m", "tests._storage_touch_fan_in", str(reports), "--suite", "python_unit",
+                                           "--shards", str(SHARDS), "--ceiling-file", str(touch))
+    assert groups[COLLECTION_NAME] == _direct("-m", "tests._shard_collection", str(reports), "--shards", str(SHARDS))
+    errors = [ln for ln in out.splitlines() if ln.startswith("::error")]
+    assert errors == [f"::error title=pytest-gate::{DDL_NAME} failed (exit 10)",
+                      f"::error title=pytest-gate::{STORAGE_NAME} failed (exit 1)"], errors
+    # each annotation follows its group's endgroup, so it is not folded away
+    assert out.index("::endgroup::") < out.index(errors[0])
+
+
+def test_a_passing_gate_emits_no_error_annotation(tmp_path: Path) -> None:
+    reports = tmp_path / "reports"
+    _seed(reports)
+    ddl, touch = _ceilings(tmp_path)
+    assert "::error" not in _gate(tmp_path, reports, ddl, touch).stdout
+
+
+def test_a_check_that_runs_too_long_is_failed_and_the_rest_still_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                                    capsys: pytest.CaptureFixture[str]) -> None:
+    gate = _load()
+    sleeper = tmp_path / "sleeper"
+    sleeper.write_text("#!/bin/sh\nexec sleep 30\n")
+    sleeper.chmod(0o755)
+    monkeypatch.setattr(gate.sys, "executable", str(sleeper))
+    monkeypatch.setattr(gate, "CHECK_TIMEOUT_S", 0.3)
+    code = gate.main(["--reports-dir", str(tmp_path), "--suite", "python_unit", "--shards", "1"])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert out.count("::error title=pytest-gate::") == 3 and out.count("failed (timed out)") == 3, out
+    assert out.count("::endgroup::") == 3, "every check ran, the later ones after the first timed out"
+    assert "3 of 3" in out and "(timed out)" in out
+
+
+def test_the_checks_run_from_the_repo_root_whatever_the_callers_directory(tmp_path: Path) -> None:
+    reports = tmp_path / "reports"
+    _seed(reports)
+    ddl, touch = _ceilings(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    run = subprocess.run(
+        [sys.executable, str(SCRIPT), "--reports-dir", str(reports), "--suite", "python_unit", "--shards", str(SHARDS),
+         "--ddl-ceilings", str(ddl), "--storage-touch-ceilings", str(touch)],
+        cwd=elsewhere, capture_output=True, text=True, timeout=120, check=False)
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert "all 3 checks passed" in run.stdout
+
+
+def test_the_script_derives_the_repo_root_from_its_own_path() -> None:
+    assert _load().ROOT == REPO

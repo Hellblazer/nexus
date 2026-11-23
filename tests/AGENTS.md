@@ -273,7 +273,9 @@ the substrate (it boots lazily; such a shard still writes its report, with `work
 `check --suite python_unit --report <one shard's report> --advisory` prints the same comparison for one
 shard and always exits 0. In `ci.yml` each 3.12 `test` shard exports `NX_DDL_REPORT_DIR`, runs the advisory
 check and uploads the report (kept 7 days); `pytest-gate` downloads all of them and runs the fan-in after
-its verdict step. The Java steps of
+its verdict step, as one step of `scripts/ci_gate_fan_in.py` that also runs the storage-touch fan-in and the
+shard-collection check and reports every one that failed (GitHub skips the steps after a failed one, so as
+separate steps an overage in the first hid the next). The Java steps of
 `service-ci.yml` pass `-Dnexus.ddl.run=<run id>-<suite>` to mvn and the same id to `check --run`, so the
 persistent pool workspace's older `service/target/ddl-counts` files are never read; they are `--advisory`
 exactly while their ceilings are still `"measure"` (pending nexus-0ty8z's DDL cut), and

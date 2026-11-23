@@ -2154,6 +2154,9 @@ jobs:
       # and cost a CI cycle to find. The script runs them in this order, each printing its own verdict, and
       # fails once naming every check that failed. tests/scripts/test_ci_gate_fan_in.py pins what it runs and
       # that each verdict is the check's own; the two wiring tests keep this line honest.
+      # Scope: the step still runs only after the verdict step above passed. A red sibling job (a 3.13 leg, lint,
+      # the mode census) therefore skips it, and that skip is deliberate and pinned by the wiring tests: a red
+      # 3.12 shard uploads no report anyway. "Every ceiling" means every ceiling of a run whose verdict passed.
       #
       # 1. nexus-ekp7w: the DDL/bytes ratchet (scripts/ddl_ratchet.py fan-in), described above. `--advisory`
       #    and `--bytes-advisory` go to it alone.

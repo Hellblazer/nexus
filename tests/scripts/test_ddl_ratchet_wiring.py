@@ -55,6 +55,12 @@ def _armed(ceilings_text: str) -> bool:
     return isinstance(marker, str) and bool(marker.strip())
 
 
+#: The three whole-run checks, however a step spells the call (`-m tests._x`, `tests/_x.py`, extra spaces).
+_WHOLE_RUN_CHECKS = (r"ddl_ratchet\.py\s+fan-in", r"tests[./]_storage_touch_fan_in", r"tests[./]_shard_collection")
+#: Test-only flags of the gate script: CI must run it against the committed ceilings.
+_TEST_ONLY_FLAGS = ("--ddl-ceilings", "--storage-touch-ceilings")
+
+
 def python_wiring_problems(ci_text: str, ceilings_text: str) -> list[str]:
     doc = yaml.safe_load(ci_text)
     armed = _armed(ceilings_text)
@@ -133,11 +139,13 @@ def python_wiring_problems(ci_text: str, ceilings_text: str) -> list[str]:
                 or downloads_[0].get("with", {}).get("path") != reports_dir.group(1)):
             problems.append("pytest-gate: the fan-in does not read every downloaded shard report "
                             "(--reports-dir must be the directory the download step writes to)")
+        for flag in _TEST_ONLY_FLAGS:
+            if flag in run:
+                problems.append(f"pytest-gate: the fan-in passes {flag}, a test-only flag: CI must judge the committed ceilings")
         # The three checks live in the gate script alone: a standalone step would run one of them a second
         # time, and the script's all-checks-evaluated guarantee is moot where a step can still be skipped.
         for other in _steps(doc, "pytest-gate"):
-            if other is not step and any(m_ in str(other.get("run", ""))
-                                         for m_ in ("ddl_ratchet.py fan-in", "tests._storage_touch_fan_in", "tests._shard_collection")):
+            if other is not step and any(re.search(m_, str(other.get("run", ""))) for m_ in _WHOLE_RUN_CHECKS):
                 problems.append(f"pytest-gate: {other.get('name', '?')!r} runs a whole-run check outside the gate script, "
                                 "so a failure before it would hide that check's verdict again")
         verdict = [i for i, s in enumerate(_steps(doc, "pytest-gate")) if 'echo "pytest-gate: PASS"' in str(s.get("run", ""))]
@@ -259,12 +267,14 @@ _DOWNLOAD_IF = "- name: Fetch every shard's DDL report\n        if: needs.change
         (_UPLOAD_IF, _UPLOAD_IF + "\n        continue-on-error: true", "is continue-on-error but the gate is armed"),
         ("--suite python_unit --shards 6 ${{", "--suite python_unit --shards 6 --advisory ${{", "the gate is switched off"),
         ("--reports-dir ddl-reports", "--reports-dir elsewhere", "does not read every downloaded shard report"),
+        ("--reports-dir ddl-reports", "--ddl-ceilings tests/ddl_ceiling.toml --reports-dir ddl-reports", "test-only flag"),
+        ("--reports-dir ddl-reports", "--storage-touch-ceilings x.toml --reports-dir ddl-reports", "test-only flag"),
         ("          path: ddl-reports\n", "          path: downloaded\n", "does not read every downloaded shard report"),
-        (_FAN_IN_IF, "- name: A standalone shard check\n        run: python3 -m tests._shard_collection ddl-reports --shards 6\n      " + _FAN_IN_IF,
+        (_FAN_IN_IF, "- name: A standalone shard check\n        run: python3 tests/_shard_collection.py ddl-reports --shards 6\n      " + _FAN_IN_IF,
          "outside the gate script"),
         (_FAN_IN_IF, "- name: A standalone storage-touch check\n        run: python3 -m tests._storage_touch_fan_in ddl-reports --suite python_unit --shards 6\n      " + _FAN_IN_IF,
          "outside the gate script"),
-        (_FAN_IN_IF, "- name: A standalone DDL check\n        run: python3 scripts/ddl_ratchet.py fan-in --suite python_unit --shards 6 --report x.json\n      " + _FAN_IN_IF,
+        (_FAN_IN_IF, "- name: A standalone DDL check\n        run: python3 scripts/ddl_ratchet.py   fan-in --suite python_unit --shards 6 --report x.json\n      " + _FAN_IN_IF,
          "outside the gate script"),
         ("&& '--bytes-advisory' || ''", "&& '' || ''", "--bytes-advisory condition is not the test job's"),
         ("vars.NX_CI_POOL == 'off' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && '--bytes-advisory'",
@@ -276,7 +286,7 @@ _DOWNLOAD_IF = "- name: Fetch every shard's DDL report\n        if: needs.change
          "armed fan-in swallows a red", "armed download swallows a red",
          "armed shard check swallows a red", "armed report upload swallows a red", "armed fan-in back to advisory",
          "fan-in reads another directory", "download writes to another directory", "standalone shard-collection step",
-         "standalone storage-touch step", "standalone DDL step",
+         "standalone storage-touch step", "standalone DDL step", "test-only DDL ceilings flag", "test-only storage ceilings flag",
          "hosted run gated on WAL", "bytes-advisory condition drifts from runs-on"],
 )
 def test_the_python_wiring_lint_catches_each_rot(old: str, new: str, expect: str) -> None:
