@@ -173,6 +173,37 @@ class Rdr229P35cSharedLabelAndHistoryTest extends AtomicWriteTestBase {
     }
 
     @Test
+    void quarantineRowsOfAnOriginAreFoundAndDeletedByTheOriginsIdFromTheLatch_notByItsStaleLabelTag() throws Exception {
+        String origin = label("qorg");
+        long originId = registerRow(origin, "", null, "qorg-owner");
+        String sibling = "quarantine-" + origin;
+        String byId = Chash.ofText("q by id " + seq.incrementAndGet()).toHex();
+        String byLabelOnly = Chash.ofText("q by label " + seq.incrementAndGet()).toHex();
+        su(d -> {
+            PgContainerHelper.insertCollection(d, TENANT, sibling);
+            d.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.LIFECYCLE_STATE, "quarantine")
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(sibling)).execute();
+            // one row tagged by the origin's id (its label tag is the stale one), one tagged by the label alone (written before the id key)
+            PgContainerHelper.insertChunks(d, TENANT, sibling, List.of(byId, byLabelOnly), List.of("a", "b"),
+                List.of(new float[384], new float[384]),
+                List.of(Map.of("origin_collection", "stale-" + origin, QuarantineOrigin.ORIGIN_ID_KEY, originId),
+                    Map.of("origin_collection", origin + "-renamed")));
+            RegistryRenameSupport.rename(d, TENANT, origin, origin + "-renamed");   // the one-row rename: the id stays, the stored labels go stale
+            return null;
+        });
+        latched.set(true);
+
+        Map<String, Integer> removed = tenantScope.withTenant(TENANT, ctx ->
+            QuarantineOrigin.deleteRowsOf(ctx, TENANT, origin + "-renamed", gated.gate3()));
+
+        assertThat(removed).as("exactly the row the origin's id tags: one row under the sibling").containsValue(1).hasSize(1);
+        int surviving = su(d -> d.fetchCount(dev.nexus.service.jooq.nexus.Tables.CHUNKS,
+            dev.nexus.service.jooq.nexus.Tables.CHUNKS.TENANT_ID.eq(TENANT)
+                .and(dev.nexus.service.jooq.nexus.Tables.CHUNKS.COLLECTION.eq(sibling))));
+        assertThat(surviving).as("the row tagged by a label that names no current label survives").isEqualTo(1);
+    }
+
+    @Test
     void theRegistryMissReadAnswersTheLiveRowOfASharedLabel_whicheverRowWasWrittenLast() throws Exception {
         for (boolean tombstoneLast : new boolean[] {false, true}) {
             String shared = label("fill" + tombstoneLast);
