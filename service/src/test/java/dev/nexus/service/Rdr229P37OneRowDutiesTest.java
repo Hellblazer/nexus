@@ -64,6 +64,66 @@ class Rdr229P37OneRowDutiesTest {
     }
 
     /**
+     * linda's ruling (2026-11-23): under the latched gate the one-row rename retags a label-tagged quarantine row by the origin's id it already knows,
+     * because by then the registry row carries the new label and {@code CollectionIds.idOf(tenant, <old label>)} finds nothing. The row carries the
+     * origin tag by label AND by id ({@code origin_collection_id}), the shape every quarantine write has from the latch on. The mutant run (the
+     * {@code tagged} clause of {@code QuarantineOrigin.rowsOf} back at {@code taggedWith(byId, tenant, origin)}) is on the bead.
+     *
+     * <p>elsinore's note: from the latch a row with no {@code origin_collection_id} is no sibling of the label's holder, and there is no label fallback, so
+     * the second row, tagged by label alone, is skipped and keeps naming A.
+     */
+    @Test
+    void aOneRowRenameRetagsALabelTaggedQuarantineRowByTheKnownId_andSkipsOneTaggedByLabelAlone() throws Exception {
+        String tenant = "p37-duty-i";
+        String token = engine.newTenant(tenant);
+        String a = "knowledge__p37dutyia__minilm-l6-v2-384__v1";
+        String b = "knowledge__p37dutyib__minilm-l6-v2-384__v1";
+        String sibling = "quarantine-" + a;
+        engine.su(ctx -> {
+            PgContainerHelper.insertCollection(ctx, tenant, a);
+            PgContainerHelper.insertCollection(ctx, tenant, sibling);
+            return null;
+        });
+        long id = engine.su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, a));
+        long siblingId = engine.su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, sibling));
+        byte[] tagged = engine.su(ctx -> {
+            byte[] h = Rdr229ChildNameWorld.chunk(ctx, tenant, sibling, siblingId, "minilm-l6-v2-384", 384, "by-id");
+            ctx.update(CHUNKS).set(CHUNKS.METADATA, org.jooq.JSONB.valueOf("{\"origin_collection\": \"" + a + "\", \"origin_collection_id\": " + id
+                    + ", \"quarantined_at\": \"2026-01-01T00:00:00Z\"}"))
+                .where(CHUNKS.TENANT_ID.eq(tenant)).and(CHUNKS.COLLECTION_ID.eq(siblingId)).and(CHUNKS.CHASH.eq(h)).execute();
+            return h;
+        });
+        byte[] labelOnly = engine.su(ctx -> {
+            byte[] h = Rdr229ChildNameWorld.chunk(ctx, tenant, sibling, siblingId, "minilm-l6-v2-384", 384, "label-only");
+            ctx.update(CHUNKS).set(CHUNKS.METADATA, org.jooq.JSONB.valueOf("{\"origin_collection\": \"" + a + "\", \"quarantined_at\": \"2026-01-01T00:00:00Z\"}"))
+                .where(CHUNKS.TENANT_ID.eq(tenant)).and(CHUNKS.COLLECTION_ID.eq(siblingId)).and(CHUNKS.CHASH.eq(h)).execute();
+            return h;
+        });
+        assertThat(engine.gate3Holds()).as("non-vacuity: gate 3 is latched, so the id-keyed readers are the ones that run").isTrue();
+        assertThat(engine.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, a))).as("non-vacuity: A is registered under the id the tag names").isEqualTo(id);
+
+        var r = engine.rename(token, a, b);
+
+        assertThat(r.status()).as("the one-row rename: " + r).isEqualTo(200);
+        assertThat(engine.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, b))).as("non-vacuity: one-row, the id is kept, A's label no longer resolves").isEqualTo(id);
+        assertThat(engine.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, a))).isNull();
+        JsonNode retagged = Rdr229RenameEngine.MAPPER.readTree(engine.<String>su(ctx -> ctx.select(CHUNKS.METADATA).from(CHUNKS).where(CHUNKS.TENANT_ID.eq(tenant))
+            .and(CHUNKS.COLLECTION_ID.eq(siblingId)).and(CHUNKS.CHASH.eq(tagged)).fetchOne(0, String.class)));
+        assertThat(retagged.path("origin_collection").asText()).as("the row found by the known id names the new label as its origin").isEqualTo(b);
+        assertThat(retagged.path(dev.nexus.service.db.QuarantineOrigin.ORIGIN_ID_KEY).asText()).as("its origin id is the renamed collection's, unchanged")
+            .isEqualTo(String.valueOf(id));
+        assertThat(retagged.path("quarantined_at").asText()).as("and every other key survives").isEqualTo("2026-01-01T00:00:00Z");
+        JsonNode skipped = Rdr229RenameEngine.MAPPER.readTree(engine.<String>su(ctx -> ctx.select(CHUNKS.METADATA).from(CHUNKS).where(CHUNKS.TENANT_ID.eq(tenant))
+            .and(CHUNKS.COLLECTION_ID.eq(siblingId)).and(CHUNKS.CHASH.eq(labelOnly)).fetchOne(0, String.class)));
+        assertThat(skipped.path("origin_collection").asText()).as("a row tagged by label alone is no sibling from the latch: not retagged by label").isEqualTo(a);
+        assertThat(skipped.has(dev.nexus.service.db.QuarantineOrigin.ORIGIN_ID_KEY)).isFalse();
+        assertThat(engine.<Integer>su(ctx -> ctx.fetchCount(dev.nexus.service.jooq.nexus.Tables.GC_AUDIT,
+                dev.nexus.service.jooq.nexus.Tables.GC_AUDIT.TENANT_ID.eq(tenant)
+                    .and(dev.nexus.service.jooq.nexus.Tables.GC_AUDIT.OPERATION.eq(dev.nexus.service.db.QuarantineOrigin.OP_RETAG)))))
+            .as("one retag audit row, for the one sibling that lost a row").isEqualTo(1);
+    }
+
+    /**
      * folio's r3 review F4 (census pass 2 item 3): a quarantine sibling found by its ATTRIBUTES, not by the {@code quarantine-<origin>} name or a tag. Its
      * untagged row is the origin's by the rule in QuarantineOrigin's class doc (same owner, model and version, content type {@code quarantine-<type>}, no
      * other live twin). The one-row rename has already moved the origin's registry row to B when it retags, so the sibling is found through the origin's
