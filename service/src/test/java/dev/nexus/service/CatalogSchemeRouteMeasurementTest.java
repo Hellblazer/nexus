@@ -88,16 +88,18 @@ class CatalogSchemeRouteMeasurementTest extends Rdr241RouteTestBase {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(seed, TENANT, COLL);   // P3.1: a document names a registered collection, by id
+            Long collId = dev.nexus.service.db.CollectionIds.require(seed, TENANT, COLL);
             OffsetDateTime deletedAt = OffsetDateTime.parse("2026-10-01T12:00:00+00:00");
             int total = LIVE + DELETED;
             for (int lo = 0; lo < total; lo += 1000) {
                 var step = seed.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
                     CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.CONTENT_TYPE,
                     CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.SOURCE_URI,
-                    CATALOG_DOCUMENTS.METADATA, CATALOG_DOCUMENTS.DELETED_AT);
+                    CATALOG_DOCUMENTS.METADATA, CATALOG_DOCUMENTS.DELETED_AT, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID);
                 for (int i = lo; i < Math.min(total, lo + 1000); i++) {
                     step = step.values(TENANT, "7." + i + ".1", "Doc " + i, "prose", "/fx/" + i + ".md", COLL, uri(i),
-                        JSONB.valueOf("{}"), i < LIVE ? null : deletedAt);
+                        JSONB.valueOf("{}"), i < LIVE ? null : deletedAt, collId);
                 }
                 step.execute();
             }
