@@ -59,6 +59,7 @@ DANGLING_LABEL = "RDR-229 dangling tombstones"
 SELF_ID_LABEL = "RDR-229 self-id tombstones"
 ID_INDEX_LABEL = "RDR-229 id-predicate index"
 LATCH_POSTURE_LABEL = "RDR-229 gate 3 latch posture"
+RENAME_LABEL = "RDR-229 collection rename"
 NOT_KNOWN = (
     "not known: the engine has not reported its RDR-229 completion state yet (it has not read it, or it predates the check)"
 )
@@ -148,6 +149,25 @@ def _latch_posture_row(field: dict[str, Any]) -> HealthResult | None:
             "on the id either way."
         ),
     )
+
+
+#: What a collection rename waits for, by the engine's ``rename_missing`` value (RDR-229 P3.7; the 409 ``rename_refused`` spelling).
+RENAME_WAITS: dict[str, str] = {
+    "name_key_drop_move": "the name-key drop move (rdr229-name-key-drop), which the engine registers once gate 3 has latched and runs as a data move",
+    "p35b_list_missing": "the list of P3.5b changesets this build must carry, which is missing from the build",
+    "restart": "an engine restart, which applies the P3.5b changesets the one-row rename waits for",
+    "readiness_unreadable": "a readable rename readiness: the engine could not read it on its last check",
+    "p35c_readers_absent": "an engine whose readers select by id (P3.5c); this build's do not",
+}
+
+
+def _rename_row(field: dict[str, Any]) -> HealthResult | None:
+    """What a collection rename waits for, or ``None`` when the engine says nothing (an older engine) or ``none``."""
+    missing = field.get("rename_missing")
+    if not isinstance(missing, str) or missing in ("", "none"):
+        return None
+    what = RENAME_WAITS.get(missing, f"the condition the engine names {missing!r}")
+    return HealthResult(label=RENAME_LABEL, ok=True, detail=f"a collection rename is refused (409 rename_refused, missing={missing}) until {what}.")
 
 
 def _check_row(constraint: str, what: str, counts: dict[str, Any] | None = None) -> HealthResult:
@@ -311,6 +331,9 @@ def check_rdr229_completion(
     posture_row = _latch_posture_row(field)
     if posture_row is not None:
         rows.append(posture_row)
+    rename_row = _rename_row(field)
+    if rename_row is not None:
+        rows.append(rename_row)
     for c in _dicts(field.get("checks_missing")):
         constraint = c.get("constraint")
         if isinstance(constraint, str) and constraint:
