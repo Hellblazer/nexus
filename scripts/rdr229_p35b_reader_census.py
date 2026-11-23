@@ -19,6 +19,13 @@ topic_assignments, chunk_orphaned_at), so its redefinition reads both shapes in 
 CONTINUE changeset that names one); A otherwise, a CONTINUE-gated redefinition on the stamp moves' completion.
 parse: 'split_part' or 'quarantine' when the body parses a collection name (the RDR's SQL census pin).
 
+METADATA KEYS (nexus-p2m1x.25, the second reader class). A collection label can also be read through a key of a jsonb column, with no
+name column in sight: metadata ->> 'origin_collection'. The name_column of such a row is "metadata.<key>" (the keys are LABEL_KEYS, with
+the writer that proves each; ID_KEYS are the id twins, never a row). The forms: X->>'k', X->'k', X#>>'{k,...}', X#>'{k,...}',
+jsonb_extract_path_text / jsonb_extract_path / jsonb_exists / jsonb_object_field(_text)(X, 'k', ...) and X ? 'k', over any jsonb value
+(a column, an alias.column, a parameter), read from the literal-keeping text of the statement. The key reads stay in a function's
+statement the same way a name-column read does, so one object statement is one row per (statement, name column or metadata key).
+
 What it does not read: SQL the engine builds in Java (P3.5a and P3.5c), and objects created from Java at runtime. The
 engine test Rdr229P35bReaderCensusLiveCatalogTest compares this file's object set with pg_catalog of a migrated
 database, so an object this parse misses fails there.
@@ -54,6 +61,20 @@ for _line in CHECKS.read_text().splitlines():
     if _col != "-":
         NAME_COLS.add(_col)
 NAME_COLS = sorted(NAME_COLS)
+# jsonb keys that carry a collection LABEL, each with the writer that proves it:
+#   origin_collection  chunks.metadata: the quarantine move writes it into every chunk it takes (vectors-077 gc_quarantine_orphans,
+#                      gc_quarantine_orphans_bounded and reaper_quarantine_chunks, as jsonb_build_object('origin_collection', ...);
+#                      the earlier definers write it the same way; QuarantineOrigin.retagRowsOf and RestoreIdFill write it from Java).
+# Not labels: quarantined_at / quarantine_expires_at / reaper_quarantined_at (timestamps), quarantined_by (the actor 'engine-reaper'),
+# co_discovered_by (an actor). gc_audit.details carries an origin_collection too but is only written, never read back by key.
+LABEL_KEYS = ("origin_collection",)
+ID_KEYS = ("origin_collection_id",)   # the id twin: noted in the output, never a row
+META_FORMS = (
+    r"(?<![\w$.])(?:[\w$]+\.)?[\w$]+\)?\s*(?:->>|->)\s*'(\w+)'",
+    r"(?<![\w$.])(?:[\w$]+\.)?[\w$]+\)?\s*#>>?\s*'\{(\w+)[,}]",
+    r"\bjsonb_(?:extract_path(?:_text)?|exists|object_field(?:_text)?)\(\s*(?:[\w$]+\.)?[\w$]+\s*,\s*'(\w+)'",
+    r"(?<![\w$.])(?:[\w$]+\.)?[\w$]+\s*\?\??\s*'(\w+)'",
+)
 CHUNK_FAMILY = re.compile(
     r"\bnexus\.(chunks(?:_[a-z0-9_]+)?|catalog_document_chunks|topic_assignments|chunk_orphaned_at)\b", re.I)
 SQL_KEYWORDS = {"where", "join", "on", "left", "right", "inner", "outer", "cross", "using", "group", "order", "limit",
@@ -220,6 +241,19 @@ def reads(stmt):
     return sorted(set(out))
 
 
+def meta_reads(stmt):
+    """(offset, key) of each read of a LABEL_KEYS key in one statement whose literals are kept (comments blanked)."""
+    out = set()
+    for pat in META_FORMS:
+        for mm in re.finditer(pat, stmt):
+            if mm.group(1) in LABEL_KEYS:
+                out.add((mm.start(), mm.group(1)))
+    return out
+
+
+id_key_reads = collections.Counter()   # object -> reads of an ID_KEYS key (noted, never a row)
+
+
 # ---------------------------------------------------------------- live objects
 master = re.sub(r"<!--.*?-->", "", (RES / "db/changelog/db.changelog-master.xml").read_text(), flags=re.S)
 includes = re.findall(r'<include\s+file="([^"]+)"', master)
@@ -337,6 +371,12 @@ for key in sorted(live):
     sbody = strip_sql(body)
     for off, st in statements(sbody):
         cols = sorted({c for _, c in reads(st)})
+        raw_st = code[off:off + len(st)]   # the same statement with its literals kept, for the metadata-key forms
+        cols += sorted("metadata." + k for _, k in meta_reads(raw_st))
+        for pat in META_FORMS:
+            for mm in re.finditer(pat, raw_st):
+                if mm.group(1) in ID_KEYS:
+                    id_key_reads[obj] += 1
         if not cols:
             continue
         line = bline + sbody.count("\n", 0, off + len(st) - len(st.lstrip()))
@@ -369,6 +409,7 @@ if __name__ == "__main__":
     print("rows", len(rows), "objects", sum(objs.values()), dict(objs))
     print("form", dict(collections.Counter(f for _, f in {(r[1], r[5]) for r in rows})))
     print("columns", dict(collections.Counter(r[4] for r in rows)))
+    print("id-key reads (never rows)", sum(id_key_reads.values()), "in", len(id_key_reads), "objects")
     print("live objects scanned", dict(collections.Counter(k[0] for k in live)), "name-parsing bodies", parse_count)
     if "--write" in sys.argv:
         OUT.parent.mkdir(parents=True, exist_ok=True)

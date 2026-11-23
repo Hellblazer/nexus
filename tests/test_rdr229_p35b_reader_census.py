@@ -55,7 +55,7 @@ def test_a_write_is_not_a_read():
     # an INSERT's column list and an UPDATE's SET target are P3.1's writer census, never a reader row
     for r in rows:
         assert r[4] in {"collection", "physical_collection", "source_collection", "target_collection", "superseded_by",
-                        "catalog_collections.name"}, r
+                        "catalog_collections.name"} or r[4].startswith("metadata."), r
 
 
 _DISPOSITIONS = _REPO / "service" / "src" / "test" / "resources" / "rdr229" / "p35b-reader-dispositions.tsv"
@@ -63,6 +63,8 @@ _VOCABULARY = {"id", "both", "label-kept", "parse-removed", "writer-kept", "name
 _TWIN = "_by_id"  # the id-path twin of a name-kept search function (linda 2026-11-22)
 # P4.1 (nexus-p2m1x.35) redefines these views without their name arm, then drops the name columns with RESTRICT (linda 2026-11-22)
 _P41_REDEFINE_VIEWS = {"nexus.collection_vector_stats", "nexus.live_chunks"}
+# nexus-p2m1x.25 (linda 2026-11-24): a metadata-key row (name_column "metadata.<key>") may be n-a; it is refused on a column reader
+_VOCABULARY = _VOCABULARY | {"n-a"}
 
 
 def _dispositions() -> dict[tuple[str, str, str], tuple[str, str]]:
@@ -103,10 +105,16 @@ def _rule_breaches(dispositions, forms, parses, writers=frozenset()) -> list[str
         where = f"{kind} {obj} {col}"
         if disposition not in _VOCABULARY:
             out.append(f"{where}: {disposition!r} is not one of {sorted(_VOCABULARY)}")
-        elif disposition == "label-kept" and col != "catalog_collections.name":
+        elif disposition == "label-kept" and col != "catalog_collections.name" and not col.startswith("metadata."):
             out.append(f"{where}: label-kept is only for a read of the registry label (linda 2026-11-22)")
         elif disposition == "label-kept" and not reason:
             out.append(f"{where}: label-kept needs a one-line reason")
+        elif disposition == "label-kept" and col.startswith("metadata.") and not (reason.startswith("VIOLATING") or "nexus-p2m1x.35" in reason):
+            out.append(f"{where}: label-kept on a metadata key needs the R1 reaper reason (nexus-p2m1x.35) or a VIOLATING reason (linda 2026-11-24)")
+        elif disposition == "n-a" and not col.startswith("metadata."):
+            out.append(f"{where}: n-a is only for a metadata-key row (name_column metadata.<key>), never a column reader (linda 2026-11-24)")
+        elif disposition == "n-a" and not reason:
+            out.append(f"{where}: n-a needs a reason")
         elif disposition == "both" and forms.get((kind, obj)) != "B":
             out.append(f"{where}: both is the form-B shape; a form-A reader reads the id")
         elif disposition == "parse-removed" and parses.get((kind, obj), "-") == "-":
@@ -146,13 +154,19 @@ def test_the_rules_refuse_what_they_name():
         ("function", "f_a", "target_collection"): ("name-kept", "f_a_by_id"),            # name-kept on form A
         ("view", "v_b", "superseded_by"): ("name-kept", "no twin named"),                 # name-kept without its twin
         ("function", "f_c_by_id", "collection"): ("id-twin", ""),                         # its original is not name-kept
+        ("function", "f_a", "metadata.origin_collection"): ("n-a", ""),                  # n-a with no reason
+        ("view", "v_b", "metadata.origin_collection"): ("label-kept", "no ruling cited"),  # label-kept on a key, no R1 or VIOLATING reason
         ("function", "f_d", "collection"): ("id-twin", ""),                               # not a <name>_by_id
+        ("function", "f_d", "superseded_by"): ("n-a", "a reason"),                       # n-a on a column reader
     }
     assert len(_rule_breaches(bad, forms, parses, frozenset())) == len(bad)
     assert _rule_breaches({("function", "f_a", "collection"): ("writer-kept", "stamps an id")}, forms, parses,
                           frozenset({"f_a"})) == []
     good = {("function", "f_a", "catalog_collections.name"): ("label-kept", "looks up the user's label"),
-            ("view", "v_b", "collection"): ("both", "")}
+            ("view", "v_b", "collection"): ("both", ""),
+            ("function", "f_a", "metadata.origin_collection"): ("n-a", "a file's labels are mapped to fresh ids, no live read"),
+            ("view", "v_b", "metadata.origin_collection"): ("label-kept", "R1 reaper ruling (nexus-p2m1x.35): holds until P4.1"),
+            ("function", "f_g", "metadata.origin_collection"): ("label-kept", "VIOLATING: label match after the latch; P3.7 switches it to id")}
     assert _rule_breaches(good, forms, parses) == []
     twin_forms = {("function", "f_e"): "B", ("function", "f_e_by_id"): "B"}
     twins = {("function", "f_e", "collection"): ("name-kept", "the id path is nexus.f_e_by_id"),
@@ -229,3 +243,47 @@ def test_the_live_name_readers_are_pinned_for_p41_to_lower():
     objects = {(r[0], r[1]) for r in live}
     assert len(objects) == _LIVE_NAME_READERS_PIN, (
         f"{len(objects)} live SQL objects read a collection name column (pin {_LIVE_NAME_READERS_PIN}); P4.1 lowers it to 0")
+
+
+# ---- the metadata-key reads (nexus-p2m1x.25): the scanner on a planted changelog -----------------------------------------------
+
+_PLANTED = """<?xml version="1.0"?>
+<databaseChangeLog><changeSet id="p-1" author="t"><sql splitStatements="false">
+CREATE OR REPLACE FUNCTION nexus.planted(p_origin text) RETURNS bigint LANGUAGE plpgsql AS $f$
+BEGIN
+    PERFORM 1 FROM nexus.chunks c WHERE c.metadata->>'origin_collection' = p_origin;
+    PERFORM 1 FROM nexus.chunks c WHERE COALESCE((c.metadata)->'origin_collection', 'x') = 'y';
+    PERFORM 1 FROM nexus.chunks c WHERE c.metadata #>> '{origin_collection}' = p_origin;
+    PERFORM 1 FROM nexus.chunks c WHERE jsonb_extract_path_text(c.metadata, 'origin_collection') = p_origin;
+    PERFORM 1 FROM nexus.chunks c WHERE jsonb_exists(c.metadata, 'origin_collection');
+    PERFORM 1 FROM nexus.chunks c WHERE c.metadata ? 'origin_collection';
+    PERFORM 1 FROM nexus.chunks c WHERE c.metadata->>'quarantined_at' IS NOT NULL;
+    PERFORM 1 FROM nexus.chunks c WHERE c.metadata->>'origin_collection_id' IS NOT NULL;
+    UPDATE nexus.chunks c SET metadata = c.metadata || jsonb_build_object('origin_collection', p_origin) WHERE c.tenant_id = 't';
+    RETURN 1;
+END $f$;
+</sql></changeSet></databaseChangeLog>
+"""
+
+
+def test_the_scanner_finds_each_form_of_a_metadata_key_read(tmp_path):
+    res = tmp_path / "service/src/main/resources"
+    (res / "db/changelog").mkdir(parents=True)
+    (res / "db/rdr229").mkdir(parents=True)
+    (res / "db/rdr229/p31-checks.tsv").write_text((_REPO / "service/src/main/resources/db/rdr229/p31-checks.tsv").read_text())
+    (res / "db/changelog/db.changelog-master.xml").write_text(
+        '<databaseChangeLog><include file="db/changelog/planted.xml"/></databaseChangeLog>')
+    (res / "db/changelog/planted.xml").write_text(_PLANTED)
+    proc = subprocess.run([sys.executable, str(_SCRIPT), str(tmp_path), "--write"], capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stderr[-1500:]
+    out = tmp_path / "service/src/test/resources/rdr229/p35b-reader-census.tsv"
+    rows = [ln.split("\t") for ln in out.read_text().splitlines() if ln and not ln.startswith("#")][1:]
+    lines = _PLANTED.splitlines()
+    hit = {int(r[2].split(":")[1]) for r in rows if r[1] == "nexus.planted" and r[4] == "metadata.origin_collection"}
+    # one row per (statement, column): each read statement of the function is a row, the id key, another key and the jsonb_build_object WRITE are not
+    want = {n for n, ln in enumerate(lines, 1) if "PERFORM" in ln and "origin_collection" in ln and "origin_collection_id" not in ln}
+    assert len(want) == 6
+    # statement_at is the line the statement starts on: its PERFORM, except the first, which starts at the BEGIN above it
+    first = min(want)
+    assert hit == (want - {first}) | {first - 1}, (hit, want, rows)
+    assert "id-key reads (never rows) 1 in 1 objects" in proc.stdout, proc.stdout
