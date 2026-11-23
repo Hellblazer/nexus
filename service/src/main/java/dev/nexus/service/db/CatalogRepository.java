@@ -4544,14 +4544,11 @@ public final class CatalogRepository {
         // are AND hold a share lock on them until this transaction ends, so a concurrent upsertCollection that would retype
         // one waits for the repair to commit instead of landing between this read and the UPDATE. Sorted by name, as
         // lockDocumentRowsSorted sorts by tumbler, so two repairs (or a repair and an upsert) take them in one order.
-        java.util.Set<String> stillKnowledge = new java.util.HashSet<>(ctx.select(CATALOG_COLLECTIONS.NAME)
-            .from(CATALOG_COLLECTIONS)
-            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
-                   .and(CATALOG_COLLECTIONS.NAME.in(chosen.stream().map(StaleNote::collection).distinct().toList()))
-                   .and(CATALOG_COLLECTIONS.CONTENT_TYPE.eq("knowledge")))
-            .orderBy(CATALOG_COLLECTIONS.NAME)
-            .forShare()
-            .fetch(CATALOG_COLLECTIONS.NAME));
+        // The read goes through CollectionRegistry (FOR SHARE, in collection_id order, recorded in the transaction's memo for the writer census).
+        java.util.Set<String> stillKnowledge = new java.util.HashSet<>();
+        for (CollectionRow r : CollectionRegistry.readSharedForWrite(ctx, tenant, chosen.stream().map(StaleNote::collection).distinct().toList())) {
+            if ("knowledge".equals(r.contentType())) stillKnowledge.add(r.label());
+        }
         lockDocumentRowsSorted(ctx, tenant, true, chosen.stream().map(StaleNote::tumbler).toArray(String[]::new));
         noteUriRepairStage("locked");
         // Re-read under the lock: a row that moved or died since the census is left to the next pass.
@@ -7326,7 +7323,7 @@ public final class CatalogRepository {
                         droppedByDoc.put(docId, dropped);
                         if (sweep && !dropped.isEmpty()) {
                             long tSweepStart = System.nanoTime();
-                            sweepOutcome[0] = runSweepTransaction(tenant, docId, docCollection[0], dropped);
+                            sweepOutcome[0] = runSweepTransaction(tenant, docId, collection, dropped);   // the request's own name: the id it named, if any, decides the row
                             sweepNanosTotal[0] += (System.nanoTime() - tSweepStart);
                         }
                     }
@@ -7819,9 +7816,15 @@ public final class CatalogRepository {
     private Map<String, Object> runSweepTransaction(String tenant, String docId, String collection,
                                                      List<String> dropped) {
         try {
-            return tenantScope.withTenant(tenant, ctx -> {
-                acquireSweepGateExclusive(ctx, tenant, collection);
-                List<String> sweptChashes = sweepChunks(ctx, tenant, collection, dropped);
+            // RDR-229 P3.5a (row 14): the sweep deletes chunks of a collection, so it reads that collection's registry row FOR KEY SHARE after
+            // its gate, like every writer, and sweeps under the row's CURRENT label: a request that named the collection by id reaches the
+            // row of that id (a rename since, with the old label retaken, no longer points the sweep at the new holder); a row gone or
+            // retired skips the sweep (the typed refusal is caught below, fail-open). The gate is the label's, so a row that now bears another
+            // label sends the attempt round again under that label's gate (RenameFollow), as the manifest writers do.
+            return RenameFollow.run(collection, gate -> tenantScope.withTenant(tenant, ctx -> {
+                acquireSweepGateExclusive(ctx, tenant, gate);
+                final String coll = sweepLabel(ctx, tenant, collection, gate);
+                List<String> sweptChashes = sweepChunks(ctx, tenant, coll, dropped);
                 int swept = sweptChashes.size();
                 int kept = dropped.size() - swept;
                 // nexus-wbfpw.13: unconditional — a run that keeps every
@@ -7829,7 +7832,7 @@ public final class CatalogRepository {
                 // the response map below always carries `kept`. One line per
                 // sweep run, every run.
                 log.info("event=write_manifest_many_swept tenant={} doc_id={} collection={} dropped={} swept={} kept={}",
-                          tenant, docId, collection, dropped.size(), swept, kept);
+                          tenant, docId, coll, dropped.size(), swept, kept);
                 if (swept > 0) {
                     // nexus-sybbh: audit the reap IN THE SAME TRANSACTION as the sweep
                     // DELETE above (same ctx, not yet committed) — this is the exact
@@ -7837,7 +7840,7 @@ public final class CatalogRepository {
                     // with zero forensic trace. actor="engine" distinguishes this
                     // server-driven producer from the CLIENT-attributed rows
                     // recordGcAudit writes for `nx t3 gc`.
-                    insertGcAuditRow(ctx, tenant, "sweep_superseded_chunks", collection, "engine", false,
+                    insertGcAuditRow(ctx, tenant, "sweep_superseded_chunks", coll, "engine", false,
                         sweptChashes, Map.of("doc_id", docId, "dropped", dropped.size()));
                 }
                 Map<String, Object> out = new LinkedHashMap<>();
@@ -7848,7 +7851,7 @@ public final class CatalogRepository {
                 out.put("errored", false);
                 putSweptChashes(out, sweptChashes);
                 return out;
-            });
+            }));
         } catch (Exception e) {
             String reason = classifySweepFailureReason(e);
             log.warn("event=write_manifest_many_sweep_gate_failed tenant={} doc_id={} collection={} dropped={} reason={} error={}",
@@ -7863,6 +7866,17 @@ public final class CatalogRepository {
             putSweptChashes(out, List.of());
             return out;
         }
+    }
+
+    /** The label a sweep of {@code collection} runs under: the current label of the registry row it reads FOR KEY SHARE (by id when the request named one). */
+    private static String sweepLabel(DSLContext ctx, String tenant, String collection, String gate) {
+        java.util.OptionalLong named = ExpectedCollectionIds.of(collection);
+        if (named.isPresent()) {
+            CollectionRow row = CollectionRegistry.requireIdForWrite(ctx, tenant, named.getAsLong());
+            RenameFollow.check(gate, row);
+            return row.label();
+        }
+        return registryFirst(ctx, tenant, collection, gate);
     }
 
     /**
@@ -8731,6 +8745,14 @@ public final class CatalogRepository {
             // document's rows whichever collection they name), and the gate is per collection.
             acquireIndexRunLock(ctx, tenant, docId);
             final Gate3 spansGate = DepartedWriterSpans.pinned(gate3);   // read once for the pass
+            // RDR-229 P3.5a (row 14): the document's manifest rows are collection-scoped rows, so their collections' registry rows are read
+            // FOR KEY SHARE, in id order, after the advisory lock and before the rows (the canonical order). Any state: a purge clears a retired
+            // collection's rows too. By id for a stamped row, by label for one the stamp has not reached.
+            var held = ctx.selectDistinct(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                .from(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId).and(liveParentDoc(ctx, tenant))).fetch();   // a tombstoned document's purge is refused below, whatever it locked
+            CollectionRegistry.lockForCleanup(ctx, tenant,
+                held.stream().map(r -> r.value1()).filter(java.util.Objects::nonNull).toList(),
+                held.stream().filter(r -> r.value1() == null && r.value2() != null && !r.value2().isEmpty()).map(r -> r.value2()).toList());
             var removed = DepartedWriterSpans.Gone.allOf(ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS)
                              .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId))
                              .returningResult(DepartedWriterSpans.Gone.columns(spansGate))
