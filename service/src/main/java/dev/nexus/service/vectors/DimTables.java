@@ -68,6 +68,8 @@ public final class DimTables {
         Table<?> table,
         Field<String> tenantId,
         Field<String> collection,
+        // RDR-229 P3.5c (nexus-p2m1x.25): the registry id beside the name; a reader selects it from gate 3 (CollectionSelector).
+        Field<Long> collectionId,
         Field<String> chash,
         // RDR-225 (nexus-3wh8d.13): text NOT NULL, the second partition key and the fourth column of
         // the primary key and of every referencing foreign key. Every typed INSERT supplies it from
@@ -111,6 +113,7 @@ public final class DimTables {
                 t,
                 t.field("tenant_id", String.class),
                 t.field("collection", String.class),
+                t.field("collection_id", Long.class),
                 // RDR-180: bytea column carried as hex in Java — the
                 // ChashHex converted type binds/fetches through the codec,
                 // so every repository site stays hex-string-shaped.
@@ -156,6 +159,8 @@ public final class DimTables {
         Table<?> table,
         Field<String> tenantId,
         Field<String> collection,
+        // RDR-229 P3.5c (nexus-p2m1x.25): the registry id beside the name; a reader selects it from gate 3 (CollectionSelector).
+        Field<Long> collectionId,
         Field<Long> topicId,
         // RDR-225 (nexus-3wh8d.13): the model partition key and the fourth column of the primary key.
         Field<String> embeddingModel,
@@ -169,6 +174,7 @@ public final class DimTables {
                 t,
                 t.field("tenant_id", String.class),
                 t.field("collection", String.class),
+                t.field("collection_id", Long.class),
                 t.field("topic_id", Long.class),
                 t.field("embedding_model", String.class),
                 (Field<Vector>) t.field(embeddingColumn(dim)),
