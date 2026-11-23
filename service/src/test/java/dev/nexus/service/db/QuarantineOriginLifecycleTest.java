@@ -49,6 +49,14 @@ class QuarantineOriginLifecycleTest extends AtomicWriteTestBase {
         Map<String, Object> meta = new LinkedHashMap<>();
         meta.put("origin_collection", origin);
         try (Connection su = pg.createConnection("")) {
+            // the origin tag names its collection by id as well when the origin is registered (what the SQL move and a retag write); from gate 3 a
+            // label-only tag is no sibling (linda ruling b)
+            Long originId = DSL.using(su, SQLDialect.POSTGRES).select(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.COLLECTION_ID)
+                .from(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+                .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+                .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(origin))
+                .fetchOne(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.COLLECTION_ID);
+            if (originId != null) meta.put(QuarantineOrigin.ORIGIN_ID_KEY, originId);
             PgContainerHelper.insertChunks(DSL.using(su, SQLDialect.POSTGRES), tenant, sibling, List.of(hex),
                 List.of(seed), List.of(new float[384]), List.of(meta));
         }

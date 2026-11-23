@@ -66,9 +66,13 @@ class RenameGuardProductionWiringTest {
             int at = -1;
             while ((at = src.indexOf("RenameGuard.open()", at + 1)) >= 0) {
                 if (!f.getFileName().toString().equals("RenameGuard.java")) {
-                    boolean inOwnOneArgConstructor = guarded.contains(own)
-                        && src.lastIndexOf("public " + own + "(TenantScope tenantScope) {", at) >= 0
-                        && src.indexOf("}", src.lastIndexOf("public " + own + "(TenantScope tenantScope) {", at)) > at;
+                    // the one-argument constructor, and P3.5c's two-argument one that adds the gate (a test convenience: main builds every guarded
+                    // repository with a guard, which the construction check below pins)
+                    boolean inOwnOneArgConstructor = false;
+                    for (String sig : List.of("public " + own + "(TenantScope tenantScope) {", "public " + own + "(TenantScope tenantScope, Gate3 gate3) {")) {
+                        int sigAt = src.lastIndexOf(sig, at);
+                        if (guarded.contains(own) && sigAt >= 0 && src.indexOf("}", sigAt) > at) inOwnOneArgConstructor = true;
+                    }
                     if (!inOwnOneArgConstructor) {
                         openUses.add(f + "@" + at);
                     }

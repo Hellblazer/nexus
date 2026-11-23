@@ -26,6 +26,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
@@ -62,6 +63,26 @@ class VectorSensitivityRouteParityTest {
     private static final Path MAIN = Path.of("src/main/java/dev/nexus/service");
     private static final Path VECTOR_HANDLER = MAIN.resolve("http/VectorHandler.java");
     private static final Path VECTOR_REPO = MAIN.resolve("vectors/PgVectorRepository.java");
+    /** P3.5c moved the search statements' function calls out of PgVectorRepository (its size ceiling): they are the repository's for this census. */
+    private static final Path VECTOR_SEARCH_FUNCTIONS = MAIN.resolve("vectors/SearchFunctions.java");
+
+    private static boolean isRepo(Path p) {
+        return p.equals(VECTOR_REPO) || p.equals(VECTOR_SEARCH_FUNCTIONS);
+    }
+
+    /**
+     * PgVectorRepository's source with SearchFunctions' members folded into its class body: the census reads the members of ONE top-level class,
+     * and the search statements' function calls moved out of it (P3.5c, the size ceiling) without moving out of the repository's behaviour.
+     */
+    private static String repoSource() throws java.io.IOException {
+        String repo = Files.readString(VECTOR_REPO);
+        String fn = Files.readString(VECTOR_SEARCH_FUNCTIONS);
+        Matcher decl = Pattern.compile("(?m)^(?:public\\s+)?(?:final\\s+)?class\\s+SearchFunctions\\b[^{]*\\{").matcher(fn);
+        if (!decl.find()) throw new AssertionError("SearchFunctions' class declaration not found");
+        String body = fn.substring(decl.end(), fn.lastIndexOf('}'));
+        // the repository calls them qualified (SearchFunctions.plainSearchFn(...)); the census follows unqualified calls inside one class
+        return (repo.substring(0, repo.lastIndexOf('}')) + "\n" + body + "\n}\n").replace("SearchFunctions.", "");
+    }
     private static final Pattern TEXT_COLUMN = Pattern.compile("[(,]\\s*(content|chunk_text)\\s+text\\b");
 
     PostgreSQLContainer<?> pg;
@@ -582,7 +603,7 @@ class VectorSensitivityRouteParityTest {
 
     @Test
     void theSinksExemptedForHavingNoCallerAreStillSinksReachedByNoRouteAndCalledByNoMainSource() throws Exception {
-        String repoSrc = Files.readString(VECTOR_REPO);
+        String repoSrc = repoSource();
         Set<String> sinks = ChunkTextRouteCensus.allSinks(repoSrc, textFunctionNames);
         Set<String> reachedByRoutes = new TreeSet<>();
         for (var f : findings()) {
@@ -679,7 +700,7 @@ class VectorSensitivityRouteParityTest {
 
     /** The census over the real sources; the behaviour test uses it to check it holds a recipe per derived route. */
     static List<ChunkTextRouteCensus.Finding> findings(Set<String> textFunctions) throws Exception {
-        return ChunkTextRouteCensus.census(Files.readString(VECTOR_HANDLER), Files.readString(VECTOR_REPO),
+        return ChunkTextRouteCensus.census(Files.readString(VECTOR_HANDLER), repoSource(),
                                            textFunctions, EXEMPT_SINKS.keySet());
     }
 
@@ -729,7 +750,7 @@ class VectorSensitivityRouteParityTest {
 
     @Test
     void theExemptSinksAreStillSinksAndEachIsReachedByExactlyItsNamedRoute() throws Exception {
-        Set<String> sinks = ChunkTextRouteCensus.allSinks(Files.readString(VECTOR_REPO), textFunctionNames);
+        Set<String> sinks = ChunkTextRouteCensus.allSinks(repoSource(), textFunctionNames);
         assertThat(sinks).containsAll(EXEMPT_SINKS.keySet());
         Map<String, Set<String>> routesBySink = new TreeMap<>();
         for (var f : findings()) {
@@ -772,7 +793,7 @@ class VectorSensitivityRouteParityTest {
         int files = 0;
         try (var walk = Files.walk(MAIN)) {
             for (Path p : (Iterable<Path>) walk.filter(f -> f.toString().endsWith(".java"))::iterator) {
-                if (p.equals(VECTOR_REPO)) continue;
+                if (isRepo(p)) continue;
                 files++;
                 found.addAll(ChunkTextRouteCensus.textReaders(p.getFileName().toString(),
                                                               Files.readString(p), textFunctionNames));
