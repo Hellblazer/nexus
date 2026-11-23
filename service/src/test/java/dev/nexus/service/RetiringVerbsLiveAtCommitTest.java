@@ -482,9 +482,10 @@ class RetiringVerbsLiveAtCommitTest {
     // ---- a writer arrives while the verb is queued behind a holder; the verb's bound --------------------------------------
 
     /**
-     * PostgreSQL lets a new {@code FOR KEY SHARE} locker join a row while a {@code FOR UPDATE} waits for the earlier ones: the verb
-     * waits for BOTH writers, and its repoint includes both rows. The second writer's key share does not wait (a bound on it would
-     * make the test fail rather than hang).
+     * The observed fairness (the engine run of this test is green): a new {@code FOR KEY SHARE} locker JOINS a row while a
+     * {@code FOR UPDATE} waits for the earlier holder, it does not queue behind the verb. So the verb waits for BOTH writers, and its
+     * repoint includes both rows. The second writer's key share does not wait (a 3 s lock bound on it makes the test fail rather than
+     * hang if it did). This is why a verb can be starved by overlapping writers, and why it carries a bound.
      */
     @Timeout(120)
     @Test
@@ -516,49 +517,40 @@ class RetiringVerbsLiveAtCommitTest {
     }
 
     /**
-     * Steady overlapping writers (two sessions that hand the key share to each other, so the row is never free) starve the verb; its
-     * bound (here 1 s) turns that into 503 {@code rename_busy}: a typed refusal, nothing changed, within the bound and not a hang.
+     * The verb's bound: one writer keeps its key share on X longer than the (shortened, 1 s) bound, so the verb answers
+     * {@link dev.nexus.service.db.RenameBusyException} (503 {@code rename_busy}) within the bound plus slack and not a hang, X stays
+     * live, Y is never registered, and nothing changed.
      */
     @Timeout(120)
     @Test
-    void aVerbStarvedByAStreamOfWritersAnswersRenameBusyWithinItsBound_andChangesNothing() throws Exception {
+    void aVerbWhoseRowIsHeldPastItsBoundAnswersRenameBusy_andChangesNothing() throws Exception {
         dev.nexus.service.db.CollectionTombstones.setRowLockTimeoutMsForTests("1000");
         try {
-            String x = registered("st-x");
-            String y = label("st-y");
+            String x = registered("bd-x");
+            String y = label("bd-y");
             Future<?> rename;
-            long started = System.nanoTime();
-            try (Connection a = pg.createConnection(""); Connection b = pg.createConnection("")) {
-                a.setAutoCommit(false);
-                b.setAutoCommit(false);
-                Connection holding = a, joining = b;
-                keyShare(DSL.using(holding, SQLDialect.POSTGRES), x);
+            long started;
+            try (Connection holder = pg.createConnection("")) {
+                holder.setAutoCommit(false);
+                keyShare(DSL.using(holder, SQLDialect.POSTGRES), x);   // one writer, still in flight when the bound passes
+                started = System.nanoTime();
                 rename = pool.submit(() -> repo.renameCollection(TENANT, x, y));
-                awaitWaiting(Wait.ROW, 1, rename, "the rename queues behind the stream");
-                while (!rename.isDone() && System.nanoTime() - started < TimeUnit.SECONDS.toNanos(30)) {
-                    DSLContext next = DSL.using(joining, SQLDialect.POSTGRES);
-                    next.select(DSL.function("set_config", String.class, DSL.val("lock_timeout"), DSL.val("3000"), DSL.val(true))).fetch();
-                    keyShare(next, x);   // the next holder joins before the current one lets go: the row is never free
-                    holding.commit();
-                    Connection t = holding;
-                    holding = joining;
-                    joining = t;
+                Throwable failure = null;
+                try {
+                    rename.get(30, TimeUnit.SECONDS);   // the holder has not committed: only the bound can end the wait
+                } catch (java.util.concurrent.ExecutionException e) {
+                    failure = e.getCause();
+                } finally {
+                    holder.rollback();
                 }
-                holding.rollback();
-            }
-            Throwable failure = null;
-            try {
-                rename.get(30, TimeUnit.SECONDS);
-            } catch (java.util.concurrent.ExecutionException e) {
-                failure = e.getCause();
-            }
-            long elapsedMs = (System.nanoTime() - started) / 1_000_000;
+                long elapsedMs = (System.nanoTime() - started) / 1_000_000;
 
-            assertThat(failure).as("the verb answered instead of hanging").isNotNull();
-            boolean busy = false;
-            for (Throwable c = failure; c != null; c = c.getCause()) busy |= c instanceof dev.nexus.service.db.RenameBusyException;
-            assertThat(busy).as("rename_busy, got %s", failure).isTrue();
-            assertThat(elapsedMs).as("within the bound plus slack, not a hang").isLessThan(20_000);
+                assertThat(failure).as("the verb answered instead of hanging").isNotNull();
+                boolean busy = false;
+                for (Throwable c = failure; c != null; c = c.getCause()) busy |= c instanceof dev.nexus.service.db.RenameBusyException;
+                assertThat(busy).as("rename_busy, got %s", failure).isTrue();
+                assertThat(elapsedMs).as("within the bound plus slack").isGreaterThanOrEqualTo(900).isLessThan(20_000);
+            }
             assertThat(supersededBy(x)).as("nothing changed: X is live").isEmpty();
             boolean yRegistered = su(ctx -> ctx.fetchExists(ctx.selectOne().from(CATALOG_COLLECTIONS)
                 .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(y))));
