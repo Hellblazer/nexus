@@ -10,6 +10,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import dev.nexus.service.db.CollectionScopedTableSites;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -357,28 +358,58 @@ class Rdr229P37RenameAcceptanceTest {
 
     /**
      * (c2) folio 2026-11-23: deleting the renamed collection B itself, after a real one-row rename A to B, leaves no row under B's id in any child
-     * table, although B's rows still carry the name A. The base carries P3.5a slice B's CollectionPurgeScope (replayed as 05305cb5f6 and 45f6b8fb29), which
-     * resolves the delete to B's id from gate 3 and purges every child table by that id, so the rows that still carry the name A go too.
+     * table that the delete purges, although B's rows still carry the name A. The base carries P3.5a slice B's CollectionPurgeScope (replayed as 05305cb5f6
+     * and 45f6b8fb29), which resolves the delete to B's id from gate 3 and purges every content table by that id, so the rows that still carry the name A go
+     * too. All fourteen tables of the registry are read (folio's r3 confirmation review S3); the four audit tables stay, by design, and are pinned as they were.
      */
     @Test
     void legC2_deletingTheRenamedCollectionLeavesNoRowUnderItsIdInAnyChildTable() throws Exception {
         var w = renamedCollection("c2");
-        assertThat(childRowsUnderId(w.tenant(), w.id()).values().stream().mapToLong(Long::longValue).sum())
-            .as("non-vacuity: B's child rows are there under B's id").isPositive();
+        env.su(ctx -> {
+            Rdr229RenameSeeds.ring(ctx, w.tenant(), w.b());   // the seeds file no ring row of B's: its id is the registry's, the name B is the current one
+            return null;
+        });
+        env.su(ctx -> ctx.insertInto(dev.nexus.service.jooq.nexus.Tables.GC_AUDIT)
+            .set(dev.nexus.service.jooq.nexus.Tables.GC_AUDIT.TENANT_ID, w.tenant())
+            .set(dev.nexus.service.jooq.nexus.Tables.GC_AUDIT.OPERATION, "p37_legc2")
+            .set(dev.nexus.service.jooq.nexus.Tables.GC_AUDIT.COLLECTION, w.a())      // the name it was written under, before the rename
+            .set(dev.nexus.service.jooq.nexus.Tables.GC_AUDIT.COLLECTION_ID, w.id())
+            .set(dev.nexus.service.jooq.nexus.Tables.GC_AUDIT.ACTOR, "test")
+            .set(dev.nexus.service.jooq.nexus.Tables.GC_AUDIT.DRY_RUN, false)
+            .set(dev.nexus.service.jooq.nexus.Tables.GC_AUDIT.CHASH_COUNT, 0).execute());   // the seeds file no audit row of gc_audit
+        var seeded = childRowsUnderId(w.tenant(), w.id());
+        assertThat(seeded).as("non-vacuity: every collection-scoped table, all of them read from the registry, holds a row under B's id")
+            .hasSize(CollectionScopedTableSites.all().size()).allSatisfy((table, n) -> assertThat(n).as(table).isPositive());
 
         var r = env.callJson("POST", "/v1/catalog/collections/delete", w.token(), "{\"name\":\"" + w.b() + "\"}");
 
         assertThat(r.statusCode()).as("the delete of B answers: " + r.body()).isEqualTo(200);
         var left = childRowsUnderId(w.tenant(), w.id());
-        assertThat(left).as("no row is left under B's id in any child table, whatever name it carries: " + left)
-            .allSatisfy((table, n) -> assertThat(n).as(table).isZero());
+        // The four audit tables are the delete's to leave, by design and on the base's name path too: CollectionPurgeScope purges the content tables and the
+        // collection's registry row (the ring goes with it, by its foreign key), and the audit rows stay as the record of what happened to the collection
+        // (gc_audit's own reason, and AUDIT_ONLY_TABLES' "an audit breadcrumb, no data"). They are read, so a change in that is a visible decision.
+        var auditLeftByDesign = java.util.Set.of("relevance_log", "search_telemetry", "hook_failures", "gc_audit");
+        assertThat(left.keySet().stream().filter(t -> !auditLeftByDesign.contains(t)).toList())
+            .as("non-vacuity: the content tables are the ten of the fourteen the delete purges").hasSize(CollectionScopedTableSites.all().size() - auditLeftByDesign.size());
+        assertThat(left).as("no row is left under B's id in any content table, whatever name it carries: " + left)
+            .allSatisfy((table, n) -> {
+                if (auditLeftByDesign.contains(table)) {
+                    assertThat(n).as(table + " (audit, left by the delete on purpose)").isEqualTo(seeded.get(table));
+                } else {
+                    assertThat(n).as(table).isZero();
+                }
+            });
     }
 
-    /** Rows per child table (Rdr229RenameChecks.CHILD_SITES) whose id column is {@code id}, whatever their name column says. */
+    /**
+     * Rows per table of {@code CatalogRepository.COLLECTION_SCOPED_TABLES} (every one, read through {@link CollectionScopedTableSites}, not a copy of the list)
+     * whose id column is {@code id}, whatever the table's name column says (folio's r3 confirmation review S3: the nine of
+     * {@code Rdr229RenameChecks.CHILD_SITES} left five out).
+     */
     private Map<String, Long> childRowsUnderId(String tenant, long id) {
         return env.su(ctx -> {
             Map<String, Long> out = new TreeMap<>();
-            for (var s : Rdr229RenameChecks.CHILD_SITES) {
+            for (var s : CollectionScopedTableSites.all()) {
                 out.put(s.table(), ctx.selectCount().from(org.jooq.impl.DSL.table(org.jooq.impl.DSL.name("nexus", s.table())))
                     .where(org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("tenant_id"), String.class).eq(tenant))
                     .and(org.jooq.impl.DSL.field(org.jooq.impl.DSL.name(s.idColumn()), Long.class).eq(id))
