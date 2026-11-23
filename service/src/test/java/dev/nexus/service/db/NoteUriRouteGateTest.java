@@ -141,7 +141,6 @@ class NoteUriRouteGateTest {
                 + "document_aspects and document_highlights; its spelling-aware rewrite is pinned by nexus-ql5m5"),
         exempt(CAT, "rehomeCollection", Cls.MOVE, "re-home: files a source collection's rows under a target; moves rows, takes no caller URI"),
         exempt(CAT, "moveScopedTable", Cls.MOVE, "re-home's per-table row mover, called by rehomeCollection"),
-        exempt(CAT, "movableAtSource", Cls.MOVE, "re-home's per-table movability predicate, shared by moveScopedTable and rehomeStatus"),
         exempt(CAT, "rehomeStatus", Cls.MOVE, "re-home's remaining/stuck count read, polled after a re-home"),
         exempt(CAT, "completeMove", Cls.MOVE, "the re-embed move of one document and its satellites into the sibling collection (nexus-bivz3.4)"),
         exempt(CAT, "failureDetail", Cls.MOVE, "renders the per-document move failure; named so a source_uri mention added there is tolerated"),

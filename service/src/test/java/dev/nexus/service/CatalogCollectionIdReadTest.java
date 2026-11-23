@@ -202,16 +202,18 @@ class CatalogCollectionIdReadTest {
     // ---- read-only -----------------------------------------------------------------------------------------------
 
     /**
-     * Read-only: the id is a response field and not a request one. A get by id alone is still a 400, and a
-     * {@code ?collection_id=} on list and for_tuple changes nothing about the answer.
+     * From RDR-229 P3.5a a get takes {@code collection_id} in place of the name and answers that row; list and for_tuple
+     * still take no id, so a {@code ?collection_id=} on them changes nothing about the answer.
      */
     @Test
-    void noRouteTakesAnIdAsInput() throws Exception {
+    void getTakesAnIdAndListAndForTupleIgnoreOne() throws Exception {
         long id = registryId(NUMBERED);
         long otherId = id + 1_000_000L;
 
         var byIdOnly = get("/v1/catalog/collections/get?collection_id=" + id);
-        assertThat(byIdOnly.statusCode()).as("name is still required; collection_id is not read").isEqualTo(400);
+        assertThat(byIdOnly.statusCode()).as("a get by collection_id alone answers that row: %s", byIdOnly.body()).isEqualTo(200);
+        Map<String, Object> byIdRow = mapper.readValue(byIdOnly.body(), MAP_T);
+        assertThat(byIdRow.get("name")).as("the row of that id").isEqualTo(NUMBERED);
 
         var listPlain = get("/v1/catalog/collections/list");
         var listWithId = get("/v1/catalog/collections/list?collection_id=" + otherId);
