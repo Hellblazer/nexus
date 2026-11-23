@@ -139,4 +139,38 @@ class RenameGapSeededChildRowsTest {
         assertThat(rows.get(0).value1()).as("under the row's current label").isEqualTo(c);
         assertThat(rows.get(0).value2()).as("with the new count").isEqualTo(7);
     }
+
+    @Test
+    void readRebuildOldState_byAnIdWhoseRowWasRenamed_stillReadsTheCollectionsOwnTopicsAndManualAssignments() {
+        String b = registered("oldstate");
+        long x = fx.idOf(b);
+        long topic = seedTopic(b, "seed-topic");
+        String doc = dev.nexus.service.db.Chash.ofText("rgs-manual-" + b).toHex();
+        Resp assigned = fx.post("/v1/taxonomy/assignments/assign",
+            "{\"doc_id\":\"" + doc + "\",\"topic_id\":" + topic + ",\"assigned_by\":\"manual\"}");
+        assertThat(assigned.status()).as("setup: " + assigned.body()).isEqualTo(200);
+        oneRowRename(b);
+
+        Resp r = fx.get("/v1/taxonomy/rebuild/old_state?collection_id=" + x);
+
+        assertThat(r.status()).as(r.body()).isEqualTo(200);
+        assertThat(r.json().path("old_topic_map")).as("the topic stored under the old label is the collection's, found by its id").hasSize(1);
+        assertThat(r.json().path("old_topic_map").get(0).path("id").asLong()).isEqualTo(topic);
+        assertThat(r.json().path("manual_assignments")).as("and its manual assignment").hasSize(1);
+        assertThat(r.json().path("manual_assignments").get(0).path("doc_id").asText()).isEqualTo(doc);
+    }
+
+    @Test
+    void lastDiscoverCount_byAnIdWhoseRowWasRenamed_stillReadsTheCollectionsOwnMetaRow() {
+        String b = registered("lastcount");
+        long x = fx.idOf(b);
+        Resp recorded = fx.post("/v1/taxonomy/meta/record", "{\"collection\":" + json(b) + ",\"doc_count\":5}");
+        assertThat(recorded.status()).as("setup: " + recorded.body()).isEqualTo(200);
+        oneRowRename(b);
+
+        Resp r = fx.get("/v1/taxonomy/meta/last_count?collection_id=" + x);
+
+        assertThat(r.status()).as("the meta row stored under the old label is found by the id: %s", r.body()).isEqualTo(200);
+        assertThat(r.json().path("count").asInt(-1)).isEqualTo(5);
+    }
 }

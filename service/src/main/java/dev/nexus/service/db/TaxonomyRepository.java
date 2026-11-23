@@ -128,6 +128,15 @@ public final class TaxonomyRepository {
      * null/blank collection (unchanged from the stub-insert era).
      */
     /** The CURRENT label of the registry row {@code collection} names in this write transaction, else {@code collection} as given. */
+    /** The registry row of {@code label}, read without a lock for a READER; empty for a label with no row (its name columns are all there is). */
+    private static java.util.Optional<CollectionRow> rowOfLabel(DSLContext ctx, String tenant, String label) {
+        try {
+            return java.util.Optional.of(CollectionRegistry.shared().resolveLabel(ctx, tenant, label));
+        } catch (UnregisteredCollectionException none) {
+            return java.util.Optional.empty();
+        }
+    }
+
     /**
      * The {@code topics} rows of the collection whose registry row the transaction holds: those stamped with its id, and those the stamp has
      * not reached that bear its current label. A collection renamed in place keeps the old label in its children's name columns, so a
@@ -1754,9 +1763,12 @@ public final class TaxonomyRepository {
     /** Get the last discover doc_count for rebalance check. */
     public Optional<Integer> getLastDiscoverDocCount(String tenant, String collection) {
         return tenantScope.withTenant(tenant, ctx -> {
+            // by the collection's registry id, a name only for a row the id stamp has not reached (CollectionOwnedRows): a one-row rename
+            // leaves the name column at the old label, so a match by the current label alone reads nothing
             var rows = ctx.select(TAXONOMY_META.LAST_DISCOVER_DOC_COUNT)
                 .from(TAXONOMY_META)
-                .where(TAXONOMY_META.COLLECTION.eq(collection))
+                .where(CollectionOwnedRows.of(rowOfLabel(ctx, tenant, collection), TAXONOMY_META.COLLECTION_ID, TAXONOMY_META.COLLECTION,
+                    collection))
                 .fetch();
             return rows.isEmpty() ? Optional.empty()
                 : Optional.of(rows.get(0).get(TAXONOMY_META.LAST_DISCOVER_DOC_COUNT));
@@ -3097,10 +3109,12 @@ public final class TaxonomyRepository {
      */
     public Map<String, Object> readRebuildOldState(String tenant, String collection) {
         return tenantScope.withTenant(tenant, ctx -> {
+            // the collection's own topics by its registry id (see getLastDiscoverDocCount), by name only for a row the stamp has not reached
+            final org.jooq.Condition ownTopics = ownTopics(rowOfLabel(ctx, tenant, collection).orElse(null), collection);
             List<Map<String, Object>> oldTopicMap = ctx.select(
                     TOPICS.ID, TOPICS.LABEL, TOPICS.REVIEW_STATUS)
                 .from(TOPICS)
-                .where(TOPICS.COLLECTION.eq(collection))
+                .where(ownTopics)
                 .fetch()
                 .map(r -> {
                     Map<String, Object> m = new LinkedHashMap<>();
@@ -3114,7 +3128,7 @@ public final class TaxonomyRepository {
                 .from(TOPIC_ASSIGNMENTS)
                 .join(TOPICS).on(TOPICS.ID.eq(TOPIC_ASSIGNMENTS.TOPIC_ID))
                 .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("manual")
-                    .and(TOPICS.COLLECTION.eq(collection)))
+                    .and(ownTopics))
                 .fetch()
                 .map(r -> {
                     // RDR-194 P3c: compiler-silent Map<String,Object> put site

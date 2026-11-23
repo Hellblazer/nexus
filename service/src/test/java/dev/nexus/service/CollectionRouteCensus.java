@@ -565,7 +565,7 @@ final class CollectionRouteCensus {
         java.util.Map.entry("db/RequestedCollectionRead.java", new Resolving(1, "the by-id read of the aspect delete, salient-sentences write, pipeline delete and remap leg clear")),
         java.util.Map.entry("db/RestoreIdFill.java", new Resolving(1, "the gc quarantine restore route")),
         java.util.Map.entry("db/TaxonomyCoverage.java", new Resolving(1, "the taxonomy coverage read of the vector search routes")),
-        java.util.Map.entry("db/TaxonomyRepository.java", new Resolving(27, "the /v1/taxonomy rows and the taxonomy ETL; assign_many reads its source collections at once (requireAllForWrite); mergeTopics reads the topic's collection FOR KEY SHARE first; the assign writers stamp the source collection's current label (labelNow)")),
+        java.util.Map.entry("db/TaxonomyRepository.java", new Resolving(28, "the /v1/taxonomy rows and the taxonomy ETL; assign_many reads its source collections at once (requireAllForWrite); mergeTopics reads the topic's collection FOR KEY SHARE first; the assign writers stamp the source collection's current label (labelNow); the readers readRebuildOldState and getLastDiscoverDocCount read the registry row (unlocked) to match the collection by id")),
         java.util.Map.entry("db/TaxonomyCollectionLock.java", new Resolving(1, "the taxonomy persist routes (split, rebuild, discovered): the advisory lock keyed by id, then the registry check")),
         java.util.Map.entry("db/TelemetryRepository.java", new Resolving(6, "the /v1/telemetry rows, the rename route and the telemetry ETL")),
         java.util.Map.entry("db/TupleRepository.java", new Resolving(3, "the tuple space's collection-keyed tuples; no collection route")),
