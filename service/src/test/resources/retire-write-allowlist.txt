@@ -1,0 +1,19 @@
+# RDR-229 P3.5a (linda, live at commit): every jOOQ write of catalog_collections.superseded_by or superseded_by_id in src/main, keyed by FILE
+# AND SITE TEXT (the .set(...) call, comments stripped, string literals blanked, whitespace collapsed). A verb that retires or revives a
+# registry row must take its rows FOR UPDATE first (CollectionTombstones.lockRows, after the rename lock and the gates and tuple locks); a new
+# write of these columns fails RenameRunsOnlyThroughRunRenameTest until it is listed here with its reason, which is the moment to ask whether
+# it is such a verb. Scope: jOOQ .set(<T>.SUPERSEDED_BY | SUPERSEDED_BY_ID, ...) only; writes built with DSL.field(name) and raw SQL in string
+# literals are out of scope (the raw-SQL gate counts the latter). Format: <file> | <count> | <site text> | <reason>
+CatalogRepository.java | 1 | .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, "") | collection upsert (register or revive): clears the markers under NO KEY UPDATE, compatible with a writer's key share; an upsert revive is not a retiring verb
+CatalogRepository.java | 1 | .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, DSL.castNull(Long.class)) | the same upsert: the id marker is cleared with the name
+CatalogRepository.java | 4 | .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, CatalogIdStamps.keepSupersededId()) | updates that restate the row's own id for the CHECK and change nothing about retirement
+CollectionMint.java | 1 | .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, "") | a mint writes a new live row
+CollectionRename.java | 1 | .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, "") | the revive of Y inside retireAndRegister, after lockRows has locked Y
+CollectionRename.java | 1 | .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, (Long) null) | the same revive
+CollectionTombstones.java | 2 | .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, supersededBy) | casSupersede (the retire, run under lockRows by the supersede verb and by the rename's retireAndRegister) and stampTombstone (an import or restore stamping a tombstone)
+CollectionTombstones.java | 2 | .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, CATALOG_COLLECTIONS.COLLECTION_ID) | a tombstone with no successor points at itself: what a delete leaves (the delete is not a retiring verb, Q2) and a stamp with a missing successor
+CollectionTombstones.java | 1 | .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, DSL.coalesce(successor, CATALOG_COLLECTIONS.COLLECTION_ID)) | stampTombstone: the successor's id, or the row's own
+CollectionTombstones.java | 1 | .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, registered) | repointTombstonesNaming: a tombstone takes its successor's id once that row is registered
+CollectionTombstones.java | 1 | .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, successorId) | casSupersede: the successor's id, in the same statement as the name
+RestoreIdFill.java | 1 | .set(t.SUPERSEDED_BY_ID, mapped) | the restore's id fill: an import path maps ids, it retires nothing
+RestoreIdFill.java | 1 | .set(t.SUPERSEDED_BY_ID, registered) | the restore's id fill
