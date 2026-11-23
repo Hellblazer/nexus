@@ -26,8 +26,11 @@ final class CollectionSelectors {
     private CollectionSelectors() {
     }
 
-    /** Where the collection fields of a route travel. */
-    enum Where { QUERY, BODY }
+    /**
+     * Where the collection fields of a route travel. {@link #EITHER}: the route answers a GET, whose fields are in the query string,
+     * and a POST, whose fields are in the body (the pipeline's {@code /pages} and {@code /chunks}); the method says which.
+     */
+    enum Where { QUERY, BODY, EITHER }
 
     /**
      * One collection-valued field and its id twin.
@@ -114,6 +117,10 @@ final class CollectionSelectors {
         t.put(path, new Route(Where.BODY, List.of(slots), false, WRITES.contains(path)));
     }
 
+    private static void either(Map<String, Route> t, String path, Slot... slots) {
+        t.put(path, new Route(Where.EITHER, List.of(slots), false));
+    }
+
     private static void delete(Map<String, Route> t, String path, Slot... slots) {
         t.put(path, new Route(Where.BODY, List.of(slots), true, false));
     }
@@ -135,6 +142,7 @@ final class CollectionSelectors {
         get(t, "/v1/catalog/resolve_span", coll());
         get(t, "/v1/catalog/resolve_chash", one("prefer_collection", "prefer_collection_id"));
         get(t, "/v1/catalog/gc_audit/list", coll());
+        post(t, "/v1/catalog/gc_audit/record", coll());
         post(t, "/v1/catalog/index-run/begin", coll());
         post(t, "/v1/catalog/index-run/begin-many", coll());
         post(t, "/v1/catalog/manifest/write", coll());
@@ -205,9 +213,21 @@ final class CollectionSelectors {
         get(t, "/v1/remap/entries", one("source_collection", "source_collection_id"));
         get(t, "/v1/remap/count", one("source_collection", "source_collection_id"));
         post(t, "/v1/remap/clear_leg", one("source_collection", "source_collection_id"), one("target_collection", "target_collection_id"));
-        post(t, "/v1/remap/record_batch", one("source_collection", "source_collection_id"));
+        post(t, "/v1/remap/record_batch", one("source_collection", "source_collection_id"), nested("entries", "target_collection", "target_collection_id"));
         post(t, "/v1/pipeline/create", coll());
         post(t, "/v1/pipeline/delete_collection", coll());
+        get(t, "/v1/pipeline/state", coll());
+        post(t, "/v1/pipeline/progress", coll());
+        post(t, "/v1/pipeline/extraction_meta", coll());
+        post(t, "/v1/pipeline/complete", coll());
+        post(t, "/v1/pipeline/fail", coll());
+        either(t, "/v1/pipeline/pages", coll());
+        either(t, "/v1/pipeline/chunks", coll());
+        post(t, "/v1/pipeline/mark_uploaded", coll());
+        post(t, "/v1/pipeline/reset_uploaded", coll());
+        get(t, "/v1/pipeline/counts", coll());
+        post(t, "/v1/pipeline/clear_wal", coll());
+        post(t, "/v1/pipeline/delete", coll());
         post(t, "/v1/telemetry/relevance/log", coll());
         get(t, "/v1/telemetry/search/stats", coll());
         post(t, "/v1/telemetry/hook_failures/record", coll());

@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import static dev.nexus.service.db.CatalogRows.*;
 import static dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
@@ -822,12 +823,13 @@ public final class CatalogRepository {
      * every column and left {@code deleted_at} set — the row was written and
      * then stayed invisible to every reader, silently.
      */
-    public void upsertDocument(String tenant, Map<String, Object> d) {
-        String metaJson = jsonOrNull(d.get("metadata"));
+    public void upsertDocument(String tenant, Map<String, Object> request) {
+        String metaJson = jsonOrNull(request.get("metadata"));
         // nexus-rfvyy.6.6: strict, and before any write: a non-boolean flag is a 400, never read as false.
-        final boolean incomingSensitive = sensitiveFlag(d);
+        final boolean incomingSensitive = sensitiveFlag(request);
         UniqueRaceRetry.run("upsertDocument", DOCUMENT_NON_ARBITRATED, () ->
         tenantScope.withTenant(tenant, ctx -> {
+            final Map<String, Object> d = DocumentCollectionRef.normalize(ctx, tenant, request);   // RDR-229 P3.5a D1: the id, resolved in this transaction
             // nexus-0ehwe arbiter class / nexus-z3ssg shape. This statement arbitrates
             // the ADDRESS key (tenant_id, tumbler) and sets source_uri from the excluded
             // row, so it can violate ux_catalog_documents_live_source_uri on BOTH arms:
@@ -843,7 +845,7 @@ public final class CatalogRepository {
                     CATALOG_DOCUMENTS.BIB_SEMANTIC_SCHOLAR_ID, CATALOG_DOCUMENTS.BIB_OPENALEX_ID, CATALOG_DOCUMENTS.BIB_DOI, CATALOG_DOCUMENTS.BIB_ENRICHED_AT, CATALOG_DOCUMENTS.SENSITIVE)
                .values(tenant, s(d,"tumbler"), s(d,"title"), s(d,"author"), i(d,"year"),
                        nne(s(d,"content_type")), nne(s(d,"file_path")), nne(s(d,"corpus")),
-                       nne(s(d,"physical_collection")), CollectionIds.require(ctx, tenant, s(d,"physical_collection")), ni(i(d,"chunk_count"), 0),
+                       nne(s(d,"physical_collection")), DocumentCollectionRef.idOf(ctx, tenant, d), ni(i(d,"chunk_count"), 0),
                        nne(s(d,"head_hash")), tsOrNull(s(d,"indexed_at")),
                        jsonbVal(metaJson),
                        nd(dbl(d,"source_mtime")), nne(s(d,"alias_of")), sourceUriOf(d),
@@ -1136,7 +1138,7 @@ public final class CatalogRepository {
     }
 
     /** As above; {@code bornOnly} (set by resolve_or_register alone, never by a request body) makes the flag one that only a NEW row takes. */
-    public RegisterOutcome registerDocumentWithOutcome(String tenant, String ownerPrefix, Map<String, Object> fields, boolean bornOnly) {
+    public RegisterOutcome registerDocumentWithOutcome(String tenant, String ownerPrefix, Map<String, Object> request, boolean bornOnly) {
         if (TenantConstants.isWildcard(tenant)) {
             throw new IllegalArgumentException(
                 "tenant '*' is a reserved sentinel and cannot own catalog entries");
@@ -1145,10 +1147,11 @@ public final class CatalogRepository {
         // value is a 400, never read as false. A re-registration of a LIVE row writes none of the request's
         // other fields, so the flag is raised on the matched row explicitly (raiseSensitivity), and a request
         // that carries no flag, or false, never lowers it.
-        final boolean requestedSensitive = sensitiveFlag(fields);
+        final boolean requestedSensitive = sensitiveFlag(request);
         final boolean raiseOnMatch = requestedSensitive && !bornOnly;   // resolve_or_register: only a NEW row takes the flag
         return UniqueRaceRetry.run("registerDocument", OWNER_NON_ARBITRATED, () ->
         tenantScope.withTenant(tenant, ctx -> {
+            final Map<String, Object> fields = DocumentCollectionRef.normalize(ctx, tenant, request);   // RDR-229 P3.5a D1
             // Ensure owner row exists. Resolve-first (nexus-0ehwe arbiter class): the
             // blind DO-NOTHING upsert this replaces named only the address key and was
             // exposed to catalog_owners' other two. Same round-trip count — this SELECT
@@ -1230,8 +1233,7 @@ public final class CatalogRepository {
                        nne(s(fields,"content_type", "")),
                        nne(s(fields,"file_path", "")),
                        nne(s(fields,"corpus", "")),
-                       nne(s(fields,"physical_collection", "")),
-                       CollectionIds.require(ctx, tenant, s(fields,"physical_collection", "")),
+                       nne(s(fields,"physical_collection", "")), DocumentCollectionRef.idOf(ctx, tenant, fields),
                        ni(i(fields,"chunk_count"), 0),
                        nne(s(fields,"head_hash", "")),
                        tsOrNull(s(fields,"indexed_at", "")),
@@ -1351,16 +1353,17 @@ public final class CatalogRepository {
      * correct for batch-level accounting but is not two independent mints.
      */
     public java.util.List<RegisterOutcome> registerDocumentManyWithOutcome(
-            String tenant, String ownerPrefix, java.util.List<java.util.Map<String, Object>> docs) {
+            String tenant, String ownerPrefix, java.util.List<java.util.Map<String, Object>> requested) {
         if (TenantConstants.isWildcard(tenant)) {
             throw new IllegalArgumentException(
                 "tenant '*' is a reserved sentinel and cannot own catalog entries");
         }
-        if (docs == null || docs.isEmpty()) {
+        if (requested == null || requested.isEmpty()) {
             return java.util.List.of();
         }
         return UniqueRaceRetry.run("registerDocumentMany", OWNER_NON_ARBITRATED, () ->
         tenantScope.withTenant(tenant, ctx -> {
+            final java.util.List<java.util.Map<String, Object>> docs = DocumentCollectionRef.normalizeAll(ctx, tenant, requested);   // RDR-229 P3.5a D1
             // nexus-oub13: per-step wall timing — the live duoak.11 re-gate
             // measured ~38s/page client-side with no way to tell which step
             // (or whether the server at all) was the sink. One structured
@@ -1523,8 +1526,7 @@ public final class CatalogRepository {
                             nne(s(fields, "content_type", "")),
                             nne(s(fields, "file_path", "")),
                             nne(s(fields, "corpus", "")),
-                            nne(s(fields, "physical_collection", "")),
-                            CatalogIdStamps.requireMemo(ctx, tenant, s(fields, "physical_collection", ""), collectionIds),
+                            nne(s(fields, "physical_collection", "")), DocumentCollectionRef.idOf(ctx, tenant, fields, collectionIds),
                             ni(i(fields, "chunk_count"), 0),
                             nne(s(fields, "head_hash", "")),
                             tsOrNull(s(fields, "indexed_at", "")),
@@ -2016,7 +2018,7 @@ public final class CatalogRepository {
      */
     private static final Set<String> UPDATABLE_DOC_COLUMNS = Set.of(
         "title", "author", "year", "content_type", "file_path", "corpus",
-        "physical_collection", "chunk_count", "head_hash", "indexed_at",
+        "physical_collection", "physical_collection_id", "chunk_count", "head_hash", "indexed_at",
         "meta", "metadata", "source_mtime", "alias_of", "source_uri",
         "bib_year", "bib_authors", "bib_venue", "bib_citation_count",
         "bib_semantic_scholar_id", "bib_openalex_id", "bib_doi", "bib_enriched_at");
@@ -2032,9 +2034,10 @@ public final class CatalogRepository {
      * document already holds is refused before anything is written ({@link SourceUriCollision}, 409). The alias is
      * resolved once, and shared with the SET builder; an update that is not a move resolves it only in the SET builder.
      */
-    public int updateDocument(String tenant, String tumbler, Map<String, Object> fields) {
-        if (fields.isEmpty()) return 0;
+    public int updateDocument(String tenant, String tumbler, Map<String, Object> request) {
+        if (request.isEmpty()) return 0;
         return tenantScope.withTenant(tenant, ctx -> {
+            final Map<String, Object> fields = DocumentCollectionRef.normalize(ctx, tenant, request);   // RDR-229 P3.5a D1: the move's id, resolved in this transaction
             String movedTo = moveTarget(fields);
             Map<String, String> resolved = null;
             if (movedTo != null) {
@@ -2097,9 +2100,10 @@ public final class CatalogRepository {
      *         {@code 1} updated, {@code 0} not found/tombstoned/no-op,
      *         {@code -1} malformed entry (build-time rejection, never sent).
      */
-    public List<Integer> updateDocumentsMany(String tenant, List<Map<String, Object>> updates) {
-        if (updates.isEmpty()) return List.of();
+    public List<Integer> updateDocumentsMany(String tenant, List<Map<String, Object>> requested) {
+        if (requested.isEmpty()) return List.of();
         return tenantScope.withTenant(tenant, ctx -> {
+            final List<Map<String, Object>> updates = DocumentCollectionRef.normalizeAll(ctx, tenant, requested);   // RDR-229 P3.5a D1
             Integer[] resultSlots = new Integer[updates.size()];
             var queries = new ArrayList<Query>();
             var queryIndexes = new ArrayList<Integer>();  // index into `updates` for each entry in `queries`
@@ -2305,7 +2309,7 @@ public final class CatalogRepository {
         for (var e : fields.entrySet()) {
             if (e.getValue() == null) continue;
             // Strip deleted_at — must not be settable via updateDocument
-            if ("deleted_at".equals(e.getKey())) continue;
+            if ("deleted_at".equals(e.getKey()) || DocumentCollectionRef.ID.equals(e.getKey())) continue;   // the id is stamped below, from the resolved row
             // metadata is a jsonb column: callers pass it as an object (or JSON
             // string) under "meta"/"metadata". A bare set() of a Map fails with
             // "LinkedHashMap is not supported in dialect POSTGRES"; JSON-encode and
@@ -2401,7 +2405,7 @@ public final class CatalogRepository {
         Object movedColl = fields.get("physical_collection");
         if (movedColl != null && !CatalogIdStamps.liveDocumentExists(ctx, tenant, target)) return null;   // unknown tumbler: no-op
         more = more.set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, movedColl != null
-            ? DSL.val(CollectionIds.require(ctx, tenant, String.valueOf(movedColl)), Long.class) : CatalogIdStamps.keepDocumentId());
+            ? DSL.val(DocumentCollectionRef.idOf(ctx, tenant, fields, String.valueOf(movedColl)), Long.class) : CatalogIdStamps.keepDocumentId());
         // AND deleted_at IS NULL: refuse to update tombstoned documents
         return more.where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
                           .and(CATALOG_DOCUMENTS.TUMBLER.eq(target))
@@ -13226,12 +13230,13 @@ public final class CatalogRepository {
      * on {@code tumbler} (the conflict key) within a chunk, last occurrence
      * wins.
      */
-    public int importDocumentsBatch(String tenant, List<Map<String, Object>> rows) {
-        if (rows == null || rows.isEmpty()) return 0;
+    public int importDocumentsBatch(String tenant, List<Map<String, Object>> requested) {
+        if (requested == null || requested.isEmpty()) return 0;
         // nexus-rfvyy.6.6: strict, for EVERY row, before any write: a non-boolean flag refuses the whole batch.
-        final boolean[] rowFlag = new boolean[rows.size()];
-        for (int r = 0; r < rows.size(); r++) rowFlag[r] = sensitiveFlag(rows.get(r));
+        final boolean[] rowFlag = new boolean[requested.size()];
+        for (int r = 0; r < requested.size(); r++) rowFlag[r] = sensitiveFlag(requested.get(r));
         return tenantScope.withTenant(tenant, ctx -> {
+            final List<Map<String, Object>> rows = DocumentCollectionRef.normalizeAll(ctx, tenant, requested);   // RDR-229 P3.5a D1
             var unique = new java.util.LinkedHashMap<String, Map<String, Object>>(rows.size());
             // The dedupe keeps the LAST copy of a tumbler, so the flag is OR-ed over every copy first: a batch
             // carrying [sensitive:true, sensitive:false] for one tumbler must not insert (or leave) it plain.
@@ -13260,7 +13265,7 @@ public final class CatalogRepository {
             // RDR-229 P3.1: every row's collection is resolved, and an unregistered one refused (typed, 422), before the
             // first INSERT of the batch.
             final Map<String, Long> collectionIds = new HashMap<>();
-            for (var d : deduped) CatalogIdStamps.requireMemo(ctx, tenant, s(d, "physical_collection"), collectionIds);
+            for (var d : deduped) DocumentCollectionRef.idOf(ctx, tenant, d, collectionIds);
             final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
             for (int start = 0; start < deduped.size(); start += chunkSize) {
                 var batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
@@ -13276,7 +13281,7 @@ public final class CatalogRepository {
                     guardDocumentIdentity(ctx, tenant, s(d, "tumbler"), sourceUriOf(d));
                     insert = insert.values(tenant, s(d,"tumbler"), s(d,"title"), s(d,"author"), i(d,"year"),
                             nne(s(d,"content_type")), nne(s(d,"file_path")), nne(s(d,"corpus")),
-                            nne(s(d,"physical_collection")), CatalogIdStamps.requireMemo(ctx, tenant, s(d,"physical_collection"), collectionIds), ni(i(d,"chunk_count"), 0),
+                            nne(s(d,"physical_collection")), DocumentCollectionRef.idOf(ctx, tenant, d, collectionIds), ni(i(d,"chunk_count"), 0),
                             nne(s(d,"head_hash")), tsOrNull(s(d,"indexed_at")),
                             jsonbVal(metaJson),
                             nd(dbl(d,"source_mtime")), nne(s(d,"alias_of")), sourceUriOf(d),
@@ -13335,10 +13340,10 @@ public final class CatalogRepository {
         });
     }
 
-    private void doImportDocument(DSLContext ctx, String tenant, Map<String, Object> d) {
-        String metaJson = jsonOrNull(d.get("metadata"));
-        final boolean incomingSensitive = sensitiveFlag(d);
-        {
+    private void doImportDocument(DSLContext ctx, String tenant, Map<String, Object> request) {
+        String metaJson = jsonOrNull(request.get("metadata"));
+        final boolean incomingSensitive = sensitiveFlag(request);
+        {   final Map<String, Object> d = DocumentCollectionRef.normalize(ctx, tenant, request);   // RDR-229 P3.5a D1
             // nexus-0ehwe arbiter class: address-arbitrated, and the DO UPDATE arm sets
             // source_uri — so both arms are exposed to ux_catalog_documents_live_source_uri.
             guardDocumentIdentity(ctx, tenant, s(d, "tumbler"), sourceUriOf(d));
@@ -13350,7 +13355,7 @@ public final class CatalogRepository {
                     CATALOG_DOCUMENTS.BIB_SEMANTIC_SCHOLAR_ID, CATALOG_DOCUMENTS.BIB_OPENALEX_ID, CATALOG_DOCUMENTS.BIB_DOI, CATALOG_DOCUMENTS.BIB_ENRICHED_AT, CATALOG_DOCUMENTS.SENSITIVE)
                .values(tenant, s(d,"tumbler"), s(d,"title"), s(d,"author"), i(d,"year"),
                        nne(s(d,"content_type")), nne(s(d,"file_path")), nne(s(d,"corpus")),
-                       nne(s(d,"physical_collection")), CollectionIds.require(ctx, tenant, s(d,"physical_collection")), ni(i(d,"chunk_count"), 0),
+                       nne(s(d,"physical_collection")), DocumentCollectionRef.idOf(ctx, tenant, d), ni(i(d,"chunk_count"), 0),
                        nne(s(d,"head_hash")), tsOrNull(s(d,"indexed_at")),
                        jsonbVal(metaJson),
                        nd(dbl(d,"source_mtime")), nne(s(d,"alias_of")), sourceUriOf(d),
@@ -14061,6 +14066,15 @@ public final class CatalogRepository {
     }
 
     /**
+     * RDR-229 P3.5a D1: the shape check of a document request's collection ({@code physical_collection} and
+     * {@code physical_collection_id} together, or an id that is not a JSON integer, is an {@link IllegalArgumentException}), for a
+     * route that writes another row before the document and must refuse first. The transaction repeats it.
+     */
+    public static void checkDocumentCollection(Map<String, Object> request) {
+        DocumentCollectionRef.check(request);
+    }
+
+    /**
      * The request's {@code sensitive} flag, strictly: absent or JSON null is {@code false}, a JSON boolean is
      * itself, and anything else (a number, a string, a list) is an {@link IllegalArgumentException}, which the
      * handler ladder maps to a 400. {@link #bool} would read {@code 1} or {@code "yes"} as false, and for a
@@ -14475,6 +14489,9 @@ public final class CatalogRepository {
 
         ResolveOutcome found = UniqueRaceRetry.run("resolveOrRegister", DOCUMENT_NON_ARBITRATED, () ->
         tenantScope.withTenant(tenant, ctx -> {
+            // RDR-229 P3.5a D1: a request that names its collection by id is checked (both fields, unknown, retired) whether or not
+            // the document is found; the register below resolves the same id again, in its own transaction, and stamps that row.
+            DocumentCollectionRef.normalize(ctx, tenant, req);
             var hit = ctx.select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.YEAR)
                          .from(CATALOG_DOCUMENTS)
                          .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.SOURCE_URI.eq(key))
@@ -14509,6 +14526,7 @@ public final class CatalogRepository {
         if (sourceMtime != null) fields.put("source_mtime", sourceMtime);
         if (contentType != null) fields.put("content_type", contentType);
         if (physicalCollection != null) fields.put("physical_collection", physicalCollection);
+        if (req.containsKey(DocumentCollectionRef.ID)) fields.put(DocumentCollectionRef.ID, req.get(DocumentCollectionRef.ID));
         if (sensitive) fields.put("sensitive", true);   // born flagged and audited (register_set) by the register
         RegisterOutcome minted = registerDocumentWithOutcome(tenant, ownerPrefix, fields, sensitive);
         // a concurrent registration of the same source_uri under another owner wins the unique index: the answer is theirs
@@ -14666,186 +14684,6 @@ public final class CatalogRepository {
         m.put("index_started_at",   nne(utcIso((java.time.OffsetDateTime) raw.get("index_started_at"))));
         // nexus-rfvyy.6.5 (RDR-243): always a JSON boolean, never null (the column is NOT NULL DEFAULT false).
         m.put("sensitive",          Boolean.TRUE.equals(raw.get("sensitive")));
-        return m;
-    }
-
-    /**
-     * Owner row PLUS {@code next_seq} (nexus-0ehwe item 3).
-     *
-     * <p>next_seq was exposed on NO read path: not {@code ownerByPrefix},
-     * not {@code /owners/show}, not {@code /owners/list}. The only way to tell
-     * a drifted owner from a healthy one was to attempt a real registration and
-     * see whether it 409'd — a MUTATION used as a diagnostic. That is why the
-     * original wedge (nexus-pbawi) took a long investigation to localize, and
-     * why "how many other owners are already wedged?" was unanswerable.
-     *
-     * <p>An overload rather than a signature change: {@code ownerRow} has seven
-     * callers and most have no next_seq in scope.
-     */
-    private static Map<String, Object> ownerRow(String prefix, String name, String type,
-                                                  String repo, String desc, String root, String head,
-                                                  Long nextSeq) {
-        Map<String, Object> m = ownerRow(prefix, name, type, repo, desc, root, head);
-        m.put("next_seq", nextSeq == null ? 0L : nextSeq);
-        return m;
-    }
-
-    /**
-     * nexus-cw262: {@code listOwners(tenant, includeDeactivated)} overload — carries
-     * BOTH next_seq and deactivated_at. An overload rather than a signature change to
-     * the 8-arg (nextSeq-only) form above for the same reason that one is itself an
-     * overload of the 7-arg base: {@code ownerRow} has many callers and most have
-     * neither next_seq nor deactivated_at in scope.
-     */
-    private static Map<String, Object> ownerRow(String prefix, String name, String type,
-                                                  String repo, String desc, String root, String head,
-                                                  Long nextSeq, OffsetDateTime deactivatedAt) {
-        Map<String, Object> m = ownerRow(prefix, name, type, repo, desc, root, head, nextSeq);
-        m.put("deactivated_at", deactivatedAt);
-        return m;
-    }
-
-    /**
-     * nexus-cw262: {@code ownersByType(tenant, type, includeDeactivated)} overload —
-     * deactivated_at without next_seq (the {@code /owners/by_type} route never
-     * selected next_seq; not changing that here).
-     */
-    private static Map<String, Object> ownerRow(String prefix, String name, String type,
-                                                  String repo, String desc, String root, String head,
-                                                  OffsetDateTime deactivatedAt) {
-        Map<String, Object> m = ownerRow(prefix, name, type, repo, desc, root, head);
-        m.put("deactivated_at", deactivatedAt);
-        return m;
-    }
-
-    private static Map<String, Object> ownerRow(String prefix, String name, String type,
-                                                  String repo, String desc, String root, String head) {
-        Map<String, Object> m = new LinkedHashMap<>();
-        m.put("tumbler_prefix", prefix);
-        m.put("name",           name);
-        m.put("owner_type",     type);
-        m.put("repo_hash",      repo);
-        m.put("description",    desc);
-        m.put("repo_root",      nne(root));
-        m.put("head_hash",      head);
-        return m;
-    }
-
-    private static Map<String, Object> linkRow(Long id, String from, String to, String type,
-                                                 String fromSpan, String toSpan,
-                                                 String createdBy, java.time.OffsetDateTime createdAt, Object meta) {
-        Map<String, Object> m = new LinkedHashMap<>();
-        m.put("id",           id);
-        m.put("from_tumbler", from);
-        m.put("to_tumbler",   to);
-        m.put("link_type",    type);
-        m.put("from_span",    fromSpan);
-        m.put("to_span",      toSpan);
-        m.put("created_by",   createdBy);
-        // nexus-cefa1.2: created_at is timestamptz now (catalog-031-2-links-created-at);
-        // stays nullable on the wire exactly as the pre-migration nullable TEXT column
-        // did — no nne() forcing to "" here, unlike collRow's NOT-NULL-DEFAULT-'' columns.
-        m.put("created_at",   utcIso(createdAt));
-        if (meta != null) {
-            try {
-                m.put("metadata", MAPPER.readValue(meta.toString(), MAP_TYPE));
-            } catch (Exception e) { m.put("metadata", null); }
-        } else { m.put("metadata", null); }
-        return m;
-    }
-
-    private static Map<String, Object> collRow(String name, String ctype, String owner,
-                                                 String embd, String mver, String dname,
-                                                 Boolean legcy, String supBy, String supAt, String crAt) {
-        Map<String, Object> m = new LinkedHashMap<>();
-        m.put("name",                 name);
-        m.put("content_type",         nne(ctype));
-        m.put("owner_id",             nne(owner));
-        m.put("embedding_model",      nne(embd));
-        m.put("model_version",        nne(mver));
-        m.put("display_name",         nne(dname));
-        // nexus-cefa1.2: legacy_grandfathered is boolean now (catalog-031-3-collections-
-        // legacy-bool) — a real JSON boolean on the wire; Python's _coerce_legacy_
-        // grandfathered already normalizes via bool(x), which accepts either shape, so
-        // this is a compatible wire-format tightening, not a break.
-        m.put("legacy_grandfathered", legcy != null ? legcy : Boolean.FALSE);
-        m.put("superseded_by",        nne(supBy));
-        m.put("superseded_at",        nne(supAt));
-        m.put("created_at",           nne(crAt));
-        return m;
-    }
-
-    /**
-     * {@link #collRow} plus {@code dimension} and {@code lifecycle_state} (RDR-204
-     * Phase 2, bead nexus-ft04v.24) plus {@code aspects_enabled} (RDR bead
-     * nexus-l46pu) — used ONLY by {@link #listCollections(String, String,
-     * String)}. {@link #collectionForTuple} is out of both beads' scope; it
-     * appends only {@code lifecycle_state} to {@link #collRow}'s 10 keys (RDR-229 P2.5); every key {@link #collRow}
-     * already sets is untouched here, this only appends three keys at the end.
-     * {@link #getCollection} carries {@code aspects_enabled} too, via the
-     * sibling helper {@link #collRowWithAspects}, but not {@code dimension}/
-     * {@code lifecycle_state}.
-     *
-     * @param dimension      {@code catalog_collections.dimension} — nullable (a
-     *                       collection can be registered before its stats dimension
-     *                       is known; see hygiene-002's own walk comments), passed
-     *                       through as-is (JSON {@code null}, not coerced to 0)
-     * @param lifecycleState {@code catalog_collections.lifecycle_state} — NOT NULL
-     *                       on any real row since hygiene-002, but {@code nne()}'d
-     *                       for defensive consistency with every other string field here
-     * @param collectionId   {@code catalog_collections.collection_id} (RDR-229 P3.5a,
-     *                       nexus-p2m1x.23), read-only: always a number on an engine that has
-     *                       the column (the identity is NOT NULL, vectors-068-1); a NULL would
-     *                       pass through as an explicit {@code null}, defensively, never omitted.
-     *                       Not stable across a rename until P3.7's name-key drop and R6's
-     *                       {@code ids_stable} signal
-     * @param aspectsEnabled {@code catalog_collections.aspects_enabled} — {@code BOOLEAN
-     *                       NULL}, no default, since catalog-040's round-2 fix (Finding A,
-     *                       T2 critique-nexus-l46pu-round2-2026-09-27): {@code null} means
-     *                       "nobody has set this yet" and is passed through AS {@code null}
-     *                       on the wire, never coerced to {@code false} — coercing it would
-     *                       make an untouched row indistinguishable from an explicit
-     *                       {@code false}, which is exactly the ship-blocker this column
-     *                       shape exists to avoid. The client's opinion test keys on the
-     *                       value being a bool, not on key presence.
-     */
-    private static Map<String, Object> collRowWithLifecycle(String name, String ctype, String owner,
-                                                 String embd, String mver, String dname,
-                                                 Boolean legcy, String supBy, String supAt, String crAt,
-                                                 Integer dimension, String lifecycleState,
-                                                 Boolean aspectsEnabled, Long collectionId) {
-        Map<String, Object> m = collRow(name, ctype, owner, embd, mver, dname, legcy, supBy, supAt, crAt);
-        m.put("dimension",       dimension);
-        m.put("lifecycle_state", nne(lifecycleState));
-        m.put("aspects_enabled", aspectsEnabled);
-        m.put("collection_id",   collectionId);
-        return m;
-    }
-
-    /**
-     * {@link #collRow} plus {@code aspects_enabled} (RDR bead nexus-l46pu,
-     * follow-up to nexus-kk4ut: the tenant-wide docs__ aspect-extraction
-     * opt-in) — used by {@link #getCollection}. Kept as its own helper rather
-     * than folded into {@link #collRowWithLifecycle} because {@code
-     * getCollection} deliberately does NOT carry {@code dimension}/{@code
-     * lifecycle_state} (those stay {@link #listCollections(String, String,
-     * String)}-only, per that method's own javadoc) — {@code aspects_enabled}
-     * is the one field both single-row and list reads now share.
-     *
-     * <p>{@code aspectsEnabled} is passed through AS-IS, {@code null} included
-     * (see {@link #collRowWithLifecycle}'s javadoc for why: coercing a
-     * {@code null} read to {@code false} was the round-2 ship-blocker, Finding
-     * A, T2 critique-nexus-l46pu-round2-2026-09-27). {@code collectionId} (RDR-229
-     * P3.5a) is always a number on an engine that has the column (the identity is
-     * NOT NULL, vectors-068-1); see {@link #collRowWithLifecycle}.
-     */
-    private static Map<String, Object> collRowWithAspects(String name, String ctype, String owner,
-                                                 String embd, String mver, String dname,
-                                                 Boolean legcy, String supBy, String supAt, String crAt,
-                                                 Boolean aspectsEnabled, Long collectionId) {
-        Map<String, Object> m = collRow(name, ctype, owner, embd, mver, dname, legcy, supBy, supAt, crAt);
-        m.put("aspects_enabled", aspectsEnabled);
-        m.put("collection_id",   collectionId);
         return m;
     }
 
@@ -15015,7 +14853,7 @@ public final class CatalogRepository {
      * since Postgres timestamptz stores full microsecond precision ({@code
      * TIMESTAMPWITHTIMEZONE(6)}).
      */
-    private static String utcIso(java.time.OffsetDateTime ts) {
+    static String utcIso(java.time.OffsetDateTime ts) {
         return ts == null ? null : INDEXED_AT_FMT.format(ts.withOffsetSameInstant(java.time.ZoneOffset.UTC));
     }
 

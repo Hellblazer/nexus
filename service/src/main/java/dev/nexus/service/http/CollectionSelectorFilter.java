@@ -175,7 +175,8 @@ public final class CollectionSelectorFilter extends Filter {
         HttpExchange next = exchange;
         Resolver resolver = new Resolver(tenant);
         try {
-            if (route.where() == CollectionSelectors.Where.QUERY) {
+            if (route.where() == CollectionSelectors.Where.QUERY
+                || (route.where() == CollectionSelectors.Where.EITHER && !hasBody(exchange.getRequestMethod()))) {
                 String rewritten = rewriteQuery(route, resolver, exchange.getRequestURI().getRawQuery());
                 if (rewritten != null) {
                     next = new WithQuery(exchange, rewritten);
