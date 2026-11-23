@@ -130,10 +130,12 @@ final class CompletionWatch implements AutoCloseable {
     }
 
     /**
-     * How long close() waits for the thread, in milliseconds: a read of the row on a session of its own plus the cancel statement, back to back.
-     * Each of the two gives up after 2 s waiting for a lock and 3 s running, and a server that stalls is cut by the session's 5 s network timeout,
-     * so the two together end within 10 s whatever holds a lock on the registry; 12 s leaves room for opening the two sessions. A thread that sees
-     * {@code closed} after its read skips the cancel, so the wait is usually one session's bound or less.
+     * How long close() waits for the thread, in milliseconds: one session's bound, not two. close() sets {@code closed} before it joins, and the
+     * thread reads {@code closed} between its read and its cancel, so a close during the read skips the cancel and a close after that check finds
+     * the read done: the read's session and the cancel's are never both outstanding. A session ends within 2 s of a lock wait or, when the server
+     * stalls, at the 5 s network timeout ({@link DataMoveOrphans#CANCEL_SOCKET_SECONDS}). The interrupt cuts a stalled connect at once (the driver
+     * waits for its connect helper) but not a statement already sent, which is a read on the thread's own socket; that is the case this bounds,
+     * about 5 s (CompletionWatchCloseBoundIntegrationTest). 8 s is that bound with 3 s for opening and closing the session.
      */
-    private static final long JOIN_MS = 12_000L;
+    private static final long JOIN_MS = 8_000L;
 }
