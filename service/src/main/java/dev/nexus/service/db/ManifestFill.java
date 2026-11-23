@@ -9,6 +9,7 @@ import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.Record2;
+import org.jooq.Record3;
 import org.jooq.Result;
 import org.jooq.Select;
 import org.jooq.Table;
@@ -19,6 +20,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.List;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 
@@ -163,9 +165,9 @@ public final class ManifestFill {
             // one read: the fillable rows of the window per collection, whose sum is the pick and whose keys are the gates
             var perCollection = fillableByCollection(ctx, tenant, kind, after, last).fetch();
             int picked = 0;
-            for (var r : perCollection) picked += r.value2();
+            for (var r : perCollection) picked += r.value3();
             int filled = dryRun || picked == 0 ? 0
-                : apply(ctx, tenant, kind, after, last, perCollection.getValues(0, String.class), skipLocked);
+                : apply(ctx, tenant, kind, after, last, gateLabels(ctx, tenant, perCollection), skipLocked);
             return new Batch(window.size(), picked, filled, last);
         }));
     }
@@ -256,17 +258,38 @@ public final class ManifestFill {
      * ones the batch gates (a collection with no fillable row in the window is never waited for). Public so a
      * plan-shape test can explain the exact statement.
      */
-    public static Select<Record2<String, Integer>> fillableByCollection(DSLContext ctx, String tenant, Kind kind,
-                                                                        Cursor after, Cursor last) {
+    public static Select<Record3<String, Long, Integer>> fillableByCollection(DSLContext ctx, String tenant, Kind kind,
+                                                                              Cursor after, Cursor last) {
         var row = CATALOG_DOCUMENT_CHUNKS;
         var doc = CATALOG_DOCUMENTS;
-        return ctx.select(row.COLLECTION, DSL.count())
+        return ctx.select(row.COLLECTION, row.COLLECTION_ID, DSL.count())
             .from(ManifestFillableCount.joined(row, doc))
             .where(ManifestFillableCount.candidates(ctx, tenant, kind, row, doc)
                 .and(ManifestFillableCount.strict(kind, doc))
                 .and(after(row, after)).and(through(row, last)))
-            .groupBy(row.COLLECTION)
-            .orderBy(row.COLLECTION);
+            .groupBy(row.COLLECTION, row.COLLECTION_ID)
+            .orderBy(row.COLLECTION, row.COLLECTION_ID);
+    }
+
+    /**
+     * The labels whose sweep gates a batch takes (RDR-229 P3.5a, linda's sweep-gate audit): a taker's key is the label its
+     * collection answers to NOW, which after a one-row rename is not the name its rows store, so a row's collection is
+     * keyed by the registry label of its {@code collection_id}, else (no id, or no registry row for it) by the stored name.
+     * Distinct and in label order, as every taker's acquisition order is.
+     */
+    private static List<String> gateLabels(DSLContext ctx, String tenant, Result<Record3<String, Long, Integer>> perCollection) {
+        java.util.Set<Long> ids = new java.util.HashSet<>();
+        for (var r : perCollection) if (r.value2() != null) ids.add(r.value2());
+        java.util.Map<Long, String> labelOf = ids.isEmpty() ? java.util.Map.of()
+            : ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID, CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.COLLECTION_ID.in(ids))
+                .fetchMap(CATALOG_COLLECTIONS.COLLECTION_ID, CATALOG_COLLECTIONS.NAME);
+        java.util.TreeSet<String> labels = new java.util.TreeSet<>();
+        for (var r : perCollection) {
+            String live = r.value2() == null ? null : labelOf.get(r.value2());
+            labels.add(live != null ? live : r.value1());
+        }
+        return List.copyOf(labels);
     }
 
     /** The rows strictly after {@code after} in key order; no condition for the start. */
