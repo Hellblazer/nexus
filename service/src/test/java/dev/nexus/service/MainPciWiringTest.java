@@ -522,7 +522,9 @@ class MainPciWiringTest {
         String failure = src.substring(latchRead, listener);
         assertThat(failure).contains("rdr229_gate3_latch_boot_read_failed").contains("System.exit(1)");
         assertThat(src).as("a latch the check never read is never guessed: the reporter is handed the one read at boot")
-            .contains("CompletionCheck.Gate3LatchWriter.IMMEDIATE, gate3Latch");
+            .contains("IdUniqueIndexPass::allValid), gate3Latch,");
+        assertThat(src).as("RDR-229 P3.7: the latch row is written under the rename window's lock, so the one-row regime begins with it")
+            .contains("new dev.nexus.service.datamove.RenameWindow()").doesNotContain("Gate3LatchWriter.IMMEDIATE");
         assertThat(src).as("a latch written while PCI was off makes the reconciler build the id indexes first")
             .contains("pciReconciler.buildIdIndexesFirstWhen(() -> completionCheck != null && completionCheck.gate3LatchedPciOff())");
         int gate = src.indexOf("pciReconciler.idBuildGate(");

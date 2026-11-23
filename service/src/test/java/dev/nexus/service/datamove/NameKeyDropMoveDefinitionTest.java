@@ -96,9 +96,15 @@ class NameKeyDropMoveDefinitionTest {
         return new CompletionCheck.RenameState(dropped, listed, missing);
     }
 
-    private static CompletionCheck.Result result(boolean gate3, CompletionCheck.RenameState rename) {
+    /** A result whose latch is {@code latched} (P3.4's latch row, an input of the check, not derived from the live gate 3). */
+    private static CompletionCheck.Result result(boolean gate3, boolean latched, CompletionCheck.RenameState rename) {
         return new CompletionCheck.Result(true, true, gate3, List.of(), List.of(), true, 0L, List.of(), List.of(), "",
-            CompletionCheck.Dangling.UNREAD, rename);
+            CompletionCheck.Dangling.UNREAD, false, latched, false, false, rename);
+    }
+
+    /** A result that holds gate 3 as it is latched: the two agree, as they do on the evaluation that writes the latch. */
+    private static CompletionCheck.Result result(boolean gate3, CompletionCheck.RenameState rename) {
+        return result(gate3, gate3, rename);
     }
 
     @Test
@@ -116,20 +122,21 @@ class NameKeyDropMoveDefinitionTest {
 
     @Test
     void renameMissing_keysOnTheLatchedGate3_aDipOfTheLiveGate3NeverReadsAsTheNamePath() {
-        assertThat(result(false, RenameState(true, 3, List.of("a"))).withGate3Latched(true).renameMissing())
+        assertThat(result(false, true, RenameState(true, 3, List.of("a"))).renameMissing())
             .as("the live gate 3 dropped back but it was latched: the restart is still awaited, not NONE (the name path)")
             .isEqualTo(RenameReadiness.Missing.P35B_RESTART);
-        assertThat(result(false, RenameState(true, 0, List.of())).withGate3Latched(true).renameMissing())
+        assertThat(result(false, true, RenameState(true, 0, List.of())).renameMissing())
             .isEqualTo(RenameReadiness.Missing.P35B_LIST_MISSING);
-        assertThat(result(false, RenameState(false, 3, List.of())).withGate3Latched(true).renameMissing())
+        assertThat(result(false, true, RenameState(false, 3, List.of())).renameMissing())
             .as("latched with the move incomplete: the move is awaited, whatever the live gate says")
             .isEqualTo(RenameReadiness.Missing.NAME_KEY_DROP_MOVE);
-        assertThat(result(false, RenameState(true, 3, List.of())).withGate3Latched(true).renameMissing())
+        assertThat(result(false, true, RenameState(true, 3, List.of())).renameMissing())
             .as("applied: NONE, and the guard reads the latch to take the one-row path").isEqualTo(RenameReadiness.Missing.NONE);
         assertThat(result(false, RenameState(false, 3, List.of("a"))).renameMissing())
             .as("control: never latched and no completed move, the live gate 3 false is the name path").isEqualTo(RenameReadiness.Missing.NONE);
-        assertThat(result(true, RenameState(false, 3, List.of())).gate3Latched())
-            .as("a result built by hand carries the live gate 3 as its latch").isTrue();
+        assertThat(result(true, false, RenameState(false, 3, List.of())).renameMissing())
+            .as("the live gate 3 holds but the latch row is not written (the latch waits for the renames in flight): the name path, nothing awaited")
+            .isEqualTo(RenameReadiness.Missing.NONE);
     }
 
     @Test
@@ -149,13 +156,13 @@ class NameKeyDropMoveDefinitionTest {
         var provider = (org.jooq.tools.jdbc.MockDataProvider) ctx -> new org.jooq.tools.jdbc.MockResult[] {
             new org.jooq.tools.jdbc.MockResult(1)};
         var ctx = DSL.using(new org.jooq.tools.jdbc.MockConnection(provider), SQLDialect.POSTGRES);
-        var dipped = result(false, RenameState(false, 3, List.of())).withGate3Latched(true);
+        var dipped = result(false, true, RenameState(false, 3, List.of()));
         assertThat(NameKeyDropMove.registerIfAbsent(dipped, ctx, "1.2.3"))
             .as("the live gate 3 dipped after it was latched: the move is still registered").isTrue();
         assertThat(NameKeyDropMove.registerIfAbsent(result(false, RenameState(false, 3, List.of())), ctx, "1.2.3"))
             .as("control: never latched, nothing is registered").isFalse();
-        assertThat(NameKeyDropMove.registerIfAbsent(result(true, RenameState(false, 3, List.of())), ctx, "1.2.3"))
-            .as("control: a hand-built result with gate 3 holding carries it as the latch").isTrue();
+        assertThat(NameKeyDropMove.registerIfAbsent(result(true, false, RenameState(false, 3, List.of())), ctx, "1.2.3"))
+            .as("control: the live gate 3 holds but the latch is not written: nothing is registered").isFalse();
     }
 
     @Test

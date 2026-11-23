@@ -926,8 +926,12 @@ final class TenantKeyedStateTables {
             + "tenant identity, and a reset only makes a count stale until it expires");
         notKeyed.put("CompletionCheck.RenameState.missing", RESULT + "; the P3.5b changeset ids (db/rdr229/p35b-continue-changesets.txt) that "
             + "databasechangelog does not yet record, schema identifiers fixed by the build, no tenant's");
-        notKeyed.put("CompletionBootWork.renameWindowWait", "how long the gate 3 latch waits for pinned renames (RDR-229 P3.7); "
+        notKeyed.put("RenameWindow.regime", "whether the gate 3 latch was written by this process (RDR-229 P3.7): the latch is install-wide, a "
+            + "single boolean for the whole engine, not a tenant's state");
+        notKeyed.put("RenameWindow.wait", "how long the gate 3 latch waits for pinned renames (RDR-229 P3.7); "
             + "process-wide configuration, not keyed by tenant");
+        notKeyed.put("RenameWindow.onBusy", "the hook that asks the completion check to read again soon (RDR-229 P3.7); a callback, "
+            + "holds no data and no tenant state");
         notKeyed.put("CompletionBootWork.renameWindowRetry", "how long after a deferred latch the next read is scheduled (RDR-229 P3.7); "
             + "process-wide configuration, not keyed by tenant");
         notKeyed.put("CompletionBootWork.scheduler", "the reporter's own single-thread schedule (the safety poll and the deferred-latch "

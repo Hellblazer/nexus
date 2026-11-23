@@ -424,6 +424,11 @@ public final class CompletionBootWork implements AutoCloseable {
         }
     }
 
+    /** Test seam: how long after a deferred latch the retry is scheduled. */
+    void renameWindowRetry(Duration retry) {
+        this.renameWindowRetry = Objects.requireNonNull(retry, "retry");
+    }
+
     /** Asks for another read after {@link #RENAME_WINDOW_RETRY} on the schedule's thread (nothing before {@link #start}: the first sample reads everything). */
     private void scheduleRetry() {
         readOwed.set(true);

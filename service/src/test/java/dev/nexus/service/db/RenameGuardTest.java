@@ -43,26 +43,50 @@ class RenameGuardTest {
         };
     }
 
+    /** A readiness whose latch fact is read from {@code latched} on each call. */
+    private static RenameReadiness flapping(Missing missing, java.util.function.BooleanSupplier latched) {
+        return new RenameReadiness() {
+            @Override
+            public Missing missing() {
+                return missing;
+            }
+
+            @Override
+            public boolean gate3Latched() {
+                return latched.getAsBoolean();
+            }
+        };
+    }
+
     @Test
-    void gate3IsReadOnceInsideThePin_andThePathItGaveIsTheOneTheRenameRuns() {
+    void theLatchIsReadOnceInsideThePin_andThePathItGaveIsTheOneTheRenameRuns() {
         AtomicInteger reads = new AtomicInteger();
-        // a flap: the first read says false, every later one true. Before the fix the refusal and the path read gate 3 separately.
-        var guard = new RenameGuard(() -> reads.incrementAndGet() > 1, readiness(Missing.NAME_KEY_DROP_MOVE, false));
+        // a flap: the first read says not latched, every later one latched. The refusal and the path must follow one decision.
+        var guard = new RenameGuard(() -> true, flapping(Missing.NAME_KEY_DROP_MOVE, () -> reads.incrementAndGet() > 1));
 
         Boolean path = guard.pinned(oneRow -> oneRow);
 
-        assertThat(reads.get()).as("gate 3 is read exactly once per rename").isEqualTo(1);
-        assertThat(path).as("the rename ran on the path of that one read (false: the name path), not refused by the later true").isFalse();
+        assertThat(reads.get()).as("the regime is decided exactly once per rename").isEqualTo(1);
+        assertThat(path).as("the rename ran on the path of that one read (false: the name path), not refused by the later latched").isFalse();
 
-        var other = new RenameGuard(() -> reads.incrementAndGet() % 2 == 0, readiness(Missing.NONE, false));
+        var other = new RenameGuard(() -> true, flapping(Missing.NONE, () -> reads.incrementAndGet() % 2 == 0));
         reads.set(0);
-        assertThat(other.<Boolean>pinned(oneRow -> oneRow)).as("a first read of false is the name path whatever follows").isFalse();
+        assertThat(other.<Boolean>pinned(oneRow -> oneRow)).as("a first read of not latched is the name path whatever follows").isFalse();
+    }
+
+    @Test
+    void theLiveGate3AloneNeverStartsTheOneRowRegime_theLatchWaitsForTheRenamesInFlight() {
+        // gate 3 holds live but the latch row is not written yet (the writer is waiting for a pinned rename): still the name path
+        var guard = new RenameGuard(() -> true, readiness(Missing.NAME_KEY_DROP_MOVE, false));
+        assertThat(guard.<Boolean>pinned(oneRow -> oneRow)).isFalse();
+        guard.requireRenameAllowed();
+        assertThat(guard.idsStable()).isFalse();
     }
 
     @Test
     void fromGate3ARenameIsRefusedUntilNothingIsMissing_thenItRunsOneRow() {
         for (Missing missing : new Missing[] {Missing.NAME_KEY_DROP_MOVE, Missing.P35B_LIST_MISSING, Missing.P35B_RESTART}) {
-            var guard = new RenameGuard(() -> true, readiness(missing, false));
+            var guard = new RenameGuard(() -> true, readiness(missing, true));
             assertThatThrownBy(() -> guard.pinned(oneRow -> "ran")).isInstanceOf(RenameRefusedException.class)
                 .extracting(e -> ((RenameRefusedException) e).missing()).isEqualTo(missing);
         }

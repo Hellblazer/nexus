@@ -867,9 +867,11 @@ public final class Main {
         try {
             // RDR-229 P3.4 (linda, 2026-11-22): gate 3 also requires IdUniqueIndexPass's runtime-built indexes (the
             // arbiters the id-keyed upserts need, and the id twins' supporting indexes); read only after gate 2 and complete PCI coverage.
+            // RDR-229 P3.7: the latch row is written under the rename window's write lock (bounded 30 s), and the one-row regime switches in
+            // the same critical section, so the durable latch and the rename path begin together (RenameWindow, CompletionBootWork#renameReadiness).
             var check = dev.nexus.service.datamove.CompletionBootWork.atBoot(bootWork, admin, gate3,
-                java.util.List.of(dev.nexus.service.datamove.IdUniqueIndexPass::allValid),
-                dev.nexus.service.datamove.CompletionCheck.Gate3LatchWriter.IMMEDIATE, gate3Latch);
+                java.util.List.of(dev.nexus.service.datamove.IdUniqueIndexPass::allValid), gate3Latch,
+                new dev.nexus.service.datamove.RenameWindow());
             check.start();
             return check;
         } catch (VirtualMachineError e) {

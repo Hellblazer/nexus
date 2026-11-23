@@ -9,33 +9,52 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * RDR-229 P3.7 (nexus-p2m1x.27), the rename window of {@link CompletionBootWork#publish} (O-5), review item 5: the flip of gate 3 to true
- * takes the write lock under a bounded wait, and reads again under it. Hermetic: a scripted reader, no database.
+ * RDR-229 P3.7 (nexus-p2m1x.27), the rename window (O-5) over P3.4's latch writer seam ({@link CompletionCheck.Gate3LatchWriter}): the row write and
+ * the one-row regime begin together inside the window's write lock, a pinned rename defers the latch (bounded) and the retry latches by itself, and a
+ * lost flip self-heals from the durable accessor. Hermetic: a scripted reader that calls the writer as {@link CompletionCheck#evaluate} does, no database.
  */
 class CompletionBootWorkRenameWindowTest {
 
-    /** A reader that answers from a script, one result per read, the last one repeating. */
+    /**
+     * A reader that behaves like the real check around the latch: when its gate 3 holds and no row exists it calls the writer with a row write that
+     * records into {@code events}; the result's latch is the row's existence after that call, and a writer that throws leaves it unlatched.
+     */
     private static final class Scripted implements CompletionBootWork.Reader {
-        final AtomicInteger reads = new AtomicInteger();
-        final boolean[] gate3;
+        final CompletionCheck.Gate3LatchWriter writer;
+        final List<String> events = java.util.Collections.synchronizedList(new ArrayList<>());
+        final AtomicBoolean row = new AtomicBoolean();
+        volatile boolean gate3 = true;
 
-        Scripted(boolean... gate3) {
-            this.gate3 = gate3;
+        Scripted(CompletionCheck.Gate3LatchWriter writer) {
+            this.writer = writer;
         }
 
         @Override
         public CompletionCheck.Result read() {
-            boolean g = gate3[Math.min(reads.getAndIncrement(), gate3.length - 1)];
-            return new CompletionCheck.Result(true, true, g, List.of(), List.of(), true, 0L, List.of(), List.of(), g ? "" : "no id index");
+            boolean latched = row.get();
+            if (gate3 && !latched) {
+                try {
+                    writer.latch(() -> {
+                        row.set(true);
+                        events.add("row");
+                    });
+                } catch (RuntimeException e) {
+                    events.add("writer threw");
+                }
+                latched = row.get();
+            }
+            return new CompletionCheck.Result(true, true, gate3, List.of(), List.of(), true, 0L, List.of(), List.of(), gate3 ? "" : "no id index",
+                CompletionCheck.Dangling.UNREAD, false, latched, false, false, CompletionCheck.RenameState.NOT_READ);
         }
 
         @Override
@@ -45,80 +64,54 @@ class CompletionBootWorkRenameWindowTest {
         public void close() { }
     }
 
-    private static CompletionBootWork work(Scripted reader) {
-        return new CompletionBootWork(new BootWorkRegistry(Clock.systemUTC()), reader, Clock.systemUTC(), Runnable::run);
+    private static CompletionBootWork work(Scripted reader, RenameWindow window) {
+        return new CompletionBootWork(new BootWorkRegistry(Clock.systemUTC()), reader, Clock.systemUTC(), Runnable::run, window);
     }
 
     @Test
-    void theFlipReadsAgainUnderTheLock_andPublishesGate3OnlyIfItStillHolds() {
-        // the first read says gate 3 holds; by the time the lock is taken it has dropped again (an id index went INVALID while a rename ran)
-        var reader = new Scripted(true, false);
-        var work = work(reader);
-
-        work.publish();
-
-        assertThat(reader.reads.get()).as("the flip re-read under the lock").isEqualTo(2);
-        assertThat(work.latest().gate3()).as("gate 3 is published as the fresh read found it: not holding").isFalse();
-        assertThat(work.gate3().holds()).isFalse();
-
-        // control: it still holds on the second read, so it flips
-        var steady = new Scripted(true, true);
-        var work2 = work(steady);
-        work2.publish();
-        assertThat(work2.latest().gate3()).isTrue();
-        assertThat(work2.latest().gate3Latched()).as("and it is latched").isTrue();
-        assertThat(steady.reads.get()).isEqualTo(2);
-        assertThat(work.latest().gate3Latched()).as("the first work never latched: its fresh read said no").isFalse();
-    }
-
-    @Test
-    void onceLatched_theLiveGate3CanDropWithoutTheLatchGoing_andNoPinnedRenameBlocksAnotherSample() throws Exception {
-        var reader = new Scripted(true, true, false, false, true);
-        var work = work(reader);
-        work.publish();   // read 1 + the re-read under the lock: latched
-        assertThat(work.gate3Latched().holds()).isTrue();
-
-        // a rename is open: after the latch no sample waits for it (every rename is one-row or refused now)
+    void theLatchWriterWritesTheRowThenFlipsTheRegime_insideTheWriteLock() throws Exception {
+        var window = new RenameWindow();
+        var inside = new ArrayList<String>();
         ExecutorService pool = Executors.newSingleThreadExecutor();
-        CountDownLatch inside = new CountDownLatch(1);
-        CountDownLatch release = new CountDownLatch(1);
         try {
-            Future<?> rename = pool.submit(() -> work.renameReadiness().pinned(() -> {
-                inside.countDown();
+            var reader = new Scripted(writeRow -> window.latchWriter().latch(() -> {
+                // inside the write lock: the regime is not on yet, and a pin from another thread cannot get in
+                inside.add("regime before row: " + window.oneRowRegime());
+                Future<String> blocked = pool.submit(() -> window.pinned(() -> "ran"));
                 try {
-                    release.await(30, TimeUnit.SECONDS);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
+                    blocked.get(200, TimeUnit.MILLISECONDS);
+                    inside.add("pin ran inside the lock");
+                } catch (java.util.concurrent.TimeoutException expected) {
+                    inside.add("pin waits");
+                } catch (Exception e) {
+                    throw new IllegalStateException(e);
                 }
-                return null;
+                writeRow.run();
+                inside.add("regime after row, before release: " + window.oneRowRegime());
             }));
-            assertThat(inside.await(10, TimeUnit.SECONDS)).isTrue();
-            work.renameWindowWait(Duration.ofMillis(100));
+            var work = work(reader, window);
 
-            int result = work.publish();   // the live gate 3 is now false
+            work.publish();
 
-            assertThat(result).as("the sample went through while a rename was open: no flip to wait for").isNotEqualTo(-1);
-            assertThat(work.gate3().holds()).as("the live gate 3 dropped").isFalse();
-            assertThat(work.gate3Latched().holds()).as("the latch stays").isTrue();
+            assertThat(reader.events).containsExactly("row");
+            assertThat(inside).as("order inside the lock: the row is written with the regime off and a pin waiting; the flip comes after")
+                .containsExactly("regime before row: false", "pin waits", "regime after row, before release: false");
+            assertThat(window.oneRowRegime()).as("one volatile write after the row: the regime is on").isTrue();
+            assertThat(work.gate3Latched()).as("marlowe's accessor reads the row").isTrue();
             assertThat(work.renameReadiness().gate3Latched()).isTrue();
-            release.countDown();
-            rename.get(10, TimeUnit.SECONDS);
-            work.publish();
-            work.publish();
-            assertThat(work.gate3().holds()).as("the live gate 3 is back").isTrue();
-            assertThat(work.gate3Latched().holds()).isTrue();
+            assertThat(work.renameReadiness().pinned(() -> work.renameReadiness().gate3Latched()))
+                .as("a rename that starts after the latch is in the one-row regime").isTrue();
         } finally {
-            release.countDown();
             pool.shutdownNow();
         }
     }
 
     @Test
-    void aRenameThatHoldsTheWindowLongerThanTheWaitPublishesTheSampleWithoutGate3_andTheRetryIsScheduled() throws Exception {
-        var reader = new Scripted(true);
-        var registry = new BootWorkRegistry(Clock.systemUTC());
-        var work = new CompletionBootWork(registry, reader);
-        work.renameWindowWait(Duration.ofMillis(150));
+    void aPinnedRenameDefersTheLatchPastTheWait_theWriterThrowsNothingIsLatched_andTheRetryLatchesByItself() throws Exception {
+        var window = new RenameWindow();
+        window.wait(Duration.ofMillis(150));
+        var reader = new Scripted(window.latchWriter());
+        var work = new CompletionBootWork(new BootWorkRegistry(Clock.systemUTC()), reader, Clock.systemUTC(), null, window);
         work.renameWindowRetry(Duration.ofMillis(100));
         ExecutorService pool = Executors.newSingleThreadExecutor();
         CountDownLatch inside = new CountDownLatch(1);
@@ -135,19 +128,22 @@ class CompletionBootWorkRenameWindowTest {
             }));
             assertThat(inside.await(10, TimeUnit.SECONDS)).as("a pinned rename is open").isTrue();
 
-            // the first sample runs on the schedule's thread with the rename open: 150 ms wait, then the sample is published without gate 3
-            work.start(Duration.ofSeconds(60));   // the safety poll is a minute: only the scheduled retry can latch in this test
-            assertThat(Rdr229Await.until(Duration.ofSeconds(10), () -> work.latest() != null))
-                .as("the sample is published although a rename holds the window (the moves, CHECKs and counts are current)").isTrue();
-            assertThat(work.latest().gate1()).as("the rest of the sample is the fresh read").isTrue();
-            assertThat(work.latest().gate3()).as("gate 3 reads as not holding, so the readers keep the name key").isFalse();
-            assertThat(work.gate3Latched()).as("and the latch is deferred").isFalse();
+            // the first sample runs on the schedule's thread with the rename open; the safety poll is a minute, so only the retry can latch
+            work.start(Duration.ofSeconds(60));
+            assertThat(await(Duration.ofSeconds(10), () -> work.latest() != null)).as("the sample is published").isTrue();
+            assertThat(reader.events).as("the writer gave up: the row was not written").containsExactly("writer threw");
+            assertThat(work.latest().gate3()).as("the rest of the sample is the fresh read: gate 3 holds live").isTrue();
+            assertThat(work.latest().gate3Latched()).as("but nothing is latched").isFalse();
+            assertThat(work.gate3Latched()).isFalse();
+            assertThat(window.oneRowRegime()).as("and the regime is off: the rename in flight is a name-path rename").isFalse();
+            assertThat(work.renameReadiness().gate3Latched()).isFalse();
 
             release.countDown();
             rename.get(10, TimeUnit.SECONDS);
-            assertThat(Rdr229Await.until(Duration.ofSeconds(10), work::gate3Latched))
+            assertThat(await(Duration.ofSeconds(10), work::gate3Latched))
                 .as("the retry the check scheduled latches it, with no event and well before the 60 s poll").isTrue();
-            assertThat(work.gate3().holds()).isTrue();
+            assertThat(reader.events).containsExactly("writer threw", "row");
+            assertThat(window.oneRowRegime()).isTrue();
         } finally {
             release.countDown();
             pool.shutdownNow();
@@ -155,17 +151,68 @@ class CompletionBootWorkRenameWindowTest {
         }
     }
 
-    /** A bounded poll for the schedule's thread. */
-    private static final class Rdr229Await {
-        static boolean until(Duration timeout, java.util.function.BooleanSupplier condition) throws InterruptedException {
-            long deadline = System.nanoTime() + timeout.toNanos();
-            while (!condition.getAsBoolean()) {
-                if (System.nanoTime() >= deadline) {
-                    return false;
+    @Test
+    void aLostFlipSelfHeals_theRowIsWrittenButTheRegimeNeverFlipped_yetEveryCheckReadsLatchedFromTheRow() {
+        // a writer of another origin (here: the immediate one) leaves the regime off; the row says latched, and P3.7 reads the accessor on every check
+        var window = new RenameWindow();
+        var reader = new Scripted(CompletionCheck.Gate3LatchWriter.IMMEDIATE);
+        var work = work(reader, window);
+
+        work.publish();
+
+        assertThat(window.oneRowRegime()).as("non-vacuity: the flip was lost").isFalse();
+        assertThat(work.gate3Latched()).isTrue();
+        assertThat(work.renameReadiness().gate3Latched()).as("self-healed from the durable accessor").isTrue();
+    }
+
+    @Test
+    void afterTheLatch_theLiveGate3CanDropWithoutTheLatchGoing_andNoPinnedRenameBlocksAnotherSample() throws Exception {
+        var window = new RenameWindow();
+        window.wait(Duration.ofMillis(100));
+        var reader = new Scripted(window.latchWriter());
+        var work = work(reader, window);
+        work.publish();
+        assertThat(work.gate3Latched()).isTrue();
+
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        CountDownLatch inside = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        try {
+            Future<?> rename = pool.submit(() -> work.renameReadiness().pinned(() -> {
+                inside.countDown();
+                try {
+                    release.await(30, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
                 }
-                Thread.sleep(20);
-            }
-            return true;
+                return null;
+            }));
+            assertThat(inside.await(10, TimeUnit.SECONDS)).isTrue();
+            reader.gate3 = false;
+
+            int result = work.publish();   // the latch exists: the writer is not called, so nothing waits for the pinned rename
+
+            assertThat(result).isNotEqualTo(-1);
+            assertThat(work.gate3().holds()).as("the live gate 3 dropped").isFalse();
+            assertThat(work.gate3Latched()).as("the latch stays").isTrue();
+            assertThat(work.renameReadiness().gate3Latched()).isTrue();
+            release.countDown();
+            rename.get(10, TimeUnit.SECONDS);
+        } finally {
+            release.countDown();
+            pool.shutdownNow();
         }
+    }
+
+    /** A bounded poll for the schedule's thread. */
+    private static boolean await(Duration timeout, java.util.function.BooleanSupplier condition) throws InterruptedException {
+        long deadline = System.nanoTime() + timeout.toNanos();
+        while (!condition.getAsBoolean()) {
+            if (System.nanoTime() >= deadline) {
+                return false;
+            }
+            Thread.sleep(20);
+        }
+        return true;
     }
 }
