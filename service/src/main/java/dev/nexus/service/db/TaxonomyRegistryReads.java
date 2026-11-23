@@ -49,6 +49,16 @@ final class TaxonomyRegistryReads {
     private TaxonomyRegistryReads() {
     }
 
+    /**
+     * TEST SEAM: runs once the first (unlocked) topic-set read is done and the rows below the collection's own are held, before its own row is
+     * read: the place a one-row rename lands in the gap the second read exists for. Null in production.
+     */
+    private static volatile Runnable afterFirstReadHookForTests;
+
+    static void setAfterFirstReadHookForTests(Runnable hook) {
+        afterFirstReadHookForTests = hook;
+    }
+
     /** The collection ids and the labels (of rows no id has reached) a write must read. */
     record Names(Set<Long> ids, Set<String> labels) {
         static Names empty() {
@@ -205,6 +215,10 @@ final class TaxonomyRegistryReads {
         Set<Long> heldIds = new HashSet<>();
         Set<String> heldLabels = new HashSet<>();
         lockBelow(ctx, tenant, ownId, beforeOwn, heldIds);
+        Runnable gap = afterFirstReadHookForTests;
+        if (gap != null) {
+            gap.run();
+        }
         Optional<CollectionRow> row = own == null ? Optional.empty() : CollectionRegistry.requireForWriteIfPresent(ctx, tenant, own);
         row.ifPresent(r -> heldIds.add(r.collectionId()));
         lockRest(ctx, tenant, () -> afterOwn.apply(row), heldIds, heldLabels);
@@ -325,8 +339,9 @@ final class TaxonomyRegistryReads {
     /**
      * The registry rows of every collection whose label starts with {@code prefix}, live or retired, read {@code FOR KEY SHARE} in one
      * id-ordered statement (a collection registered meanwhile is not among the rows the write reaches: it deletes by the held ids). Retired
-     * rows are included, so a child stamped to a tombstone that bears the label is pruned as it was when the prefix matched the name column
-     * (a tombstone's label is its own, so a row is reached only by a label that starts with the prefix; until P4.1 a tombstone keeps its label taken). Returns each row.
+     * rows are included, so a child stamped to a tombstone whose label starts with the prefix is pruned with the live collections', as it
+     * was when the prefix matched the name column (this keeps that behaviour). Until P4.1 a tombstone keeps its label taken, so no live
+     * row bears the same label as a tombstone. Returns each row.
      */
     static List<CollectionRow> registryFirstOfPrefix(DSLContext ctx, String tenant, String prefix) {
         List<String> labels = labelsStarting(ctx, tenant, prefix);
