@@ -245,7 +245,10 @@ public final class CompletionCheck {
             this(dropMoveComplete, listed, missing, false);
         }
 
-        /** The state could not be read (a failure or a timeout): the readiness is {@code readiness_unreadable}, never NONE. */
+        /**
+         * The state could not be read (a failure or a timeout): this sample's readiness is {@code readiness_unreadable}, never NONE; an engine whose earlier
+         * sample read NONE keeps answering NONE ({@code CompletionBootWork#renameReadiness}, monotone).
+         */
         public static final RenameState UNREADABLE = new RenameState(false, 0, List.of(), true);
 
         /** Not read yet, or built by hand: the drop move incomplete and no list. */
