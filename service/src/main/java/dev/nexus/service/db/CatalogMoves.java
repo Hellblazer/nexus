@@ -187,6 +187,7 @@ public final class CatalogMoves {
             throw refuse("the holder of " + newUri + " changed while the move was starting (" + candidate + " then " + t
                 + "); run it again");
         }
+        requireCollectionsHeld(ctx, tenant, ck, CATALOG_DOCUMENTS.TUMBLER.in(t == null ? List.of(s) : List.of(s, t)));
 
         var sRow = ctx.select(CATALOG_DOCUMENTS.SOURCE_URI, CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.ALIAS_OF,
                 CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
@@ -268,23 +269,20 @@ public final class CatalogMoves {
      * locked is caught by {@link #rekeyHighlights}. A label with no registry row is left to the check that follows (the 422 as before).
      */
     private static void lockCollectionsOfDocuments(DSLContext ctx, String tenant, CollectionKey ck, org.jooq.Condition docCond) {
+        var docs = ctx.select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
+            .from(CATALOG_DOCUMENTS).where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(docCond)).fetch();
+        List<String> matched = docs.stream().map(r -> r.value1()).toList();
         if (ck.byId()) {
-            // From gate 3 by the documents' own collection ids, in id order (a retiring verb's order). A lock that cannot be taken fails the
-            // move, before any write: an id no registry row holds is UnknownCollectionIdException, a retired row CollectionRetiredIdException
-            // (nothing is skipped; linda 2026-11-23).
-            List<Long> ids = ctx.selectDistinct(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID).from(CATALOG_DOCUMENTS)
-                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(docCond).and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID.isNotNull()))
-                .orderBy(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
-                .fetch(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID);
-            for (long id : ids) {
-                CollectionRegistry.requireIdForWrite(ctx, tenant, id);
-            }
+            // From gate 3 by collection ids, ALL of them in ONE id-ordered statement (a retiring verb's order, before any document row is locked):
+            // the documents' own collections, and the collections of the rows the move writes besides: the documents' aspect and highlight
+            // rows (each carries its own collection) and the documents that name a matched one as alias_of. A lock that cannot be taken fails
+            // the move, before any write: an id no registry row holds is UnknownCollectionIdException, a retired row CollectionRetiredIdException
+            // (nothing is skipped; linda 2026-11-23). The ids are read first, unlocked, then locked at once; requireCollectionsHeld checks them
+            // again once the document rows are held.
+            CollectionRegistry.requireIdsAndLabelsForWrite(ctx, tenant, collectionIdsOf(ctx, tenant, docs, matched), List.of());
             return;
         }
-        var docs = ctx.select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION).from(CATALOG_DOCUMENTS)
-            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(docCond).and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.ne("")))
-            .fetch();
-        List<String> labels = docs.stream().map(r -> r.value2()).distinct().toList();
+        List<String> labels = docs.stream().map(r -> r.value2()).filter(l -> l != null && !l.isEmpty()).distinct().toList();
         if (labels.isEmpty()) {
             return;
         }
@@ -298,10 +296,59 @@ public final class CatalogMoves {
             java.util.Set<String> registered = new java.util.HashSet<>(ctx.select(CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS)
                 .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.in(labels)).fetch(CATALOG_COLLECTIONS.NAME));
             for (var d : docs) {
-                if (!registered.contains(d.value2())) {
+                if (d.value2() != null && !d.value2().isEmpty() && !registered.contains(d.value2())) {
                     LOG.warn("event=catalog_move_unregistered_collection tenant={} doc_id={} collection={}: the move goes ahead without a registry lock",
                         tenant, d.value1(), d.value2());
                 }
+            }
+        }
+    }
+
+    /**
+     * The collection ids a move on {@code matched} (the documents of {@code docs}) writes in: those documents' own, and those of their aspect and
+     * highlight rows and of the documents whose alias_of names one of them (any owner, any collection).
+     */
+    private static java.util.SortedSet<Long> collectionIdsOf(DSLContext ctx, String tenant,
+            org.jooq.Result<? extends org.jooq.Record3<String, String, Long>> docs, List<String> matched) {
+        java.util.SortedSet<Long> ids = new java.util.TreeSet<>();
+        docs.forEach(r -> { if (r.value3() != null) ids.add(r.value3()); });
+        for (List<String> chunk : chunks(matched)) {
+            ids.addAll(ctx.selectDistinct(DOCUMENT_ASPECTS.COLLECTION_ID).from(DOCUMENT_ASPECTS)
+                .where(DOCUMENT_ASPECTS.TENANT_ID.eq(tenant).and(DOCUMENT_ASPECTS.DOC_ID.in(chunk)).and(DOCUMENT_ASPECTS.COLLECTION_ID.isNotNull()))
+                .fetch(DOCUMENT_ASPECTS.COLLECTION_ID));
+            ids.addAll(ctx.selectDistinct(DOCUMENT_HIGHLIGHTS.COLLECTION_ID).from(DOCUMENT_HIGHLIGHTS)
+                .where(DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant).and(DOCUMENT_HIGHLIGHTS.DOC_ID.in(chunk)).and(DOCUMENT_HIGHLIGHTS.COLLECTION_ID.isNotNull()))
+                .fetch(DOCUMENT_HIGHLIGHTS.COLLECTION_ID));
+            ids.addAll(ctx.selectDistinct(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID).from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.ALIAS_OF.in(chunk)).and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID.isNotNull()))
+                .fetch(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID));
+        }
+        return ids;
+    }
+
+    /**
+     * Once the document rows are held: every collection the move writes in must be one whose registry row this transaction already holds (taken
+     * by {@link #lockCollectionsOfDocuments} before any document row). A document re-homed, or an aspect, highlight or alias row filed under a
+     * collection that arrived between that read and the document locks, names one it does not hold; the move is refused (run it again), never
+     * carried on under a lock it does not have, and nothing was written (linda 2026-11-23, CM-FIX). Before gate 3 the labels are exact and
+     * the pre-latch skip stays as it is.
+     */
+    private static void requireCollectionsHeld(DSLContext ctx, String tenant, CollectionKey ck, org.jooq.Condition docCond) {
+        if (!ck.byId()) {
+            return;
+        }
+        var docs = ctx.select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
+            .from(CATALOG_DOCUMENTS).where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(docCond)).fetch();
+        java.util.SortedSet<Long> ids = collectionIdsOf(ctx, tenant, docs, docs.stream().map(r -> r.value1()).toList());
+        if (ids.isEmpty()) {
+            return;
+        }
+        var names = ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID, CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.COLLECTION_ID.in(ids))).fetchMap(CATALOG_COLLECTIONS.COLLECTION_ID, CATALOG_COLLECTIONS.NAME);
+        for (long id : ids) {
+            String label = names.get(id);
+            if (label == null || !(WriteRegistryMemo.get(ctx, tenant, "#" + id) != null || CollectionRegistry.holdsRow(ctx, tenant, label))) {
+                throw refuse("a collection the move writes in (id " + id + ") changed while the move was starting and its registry row is not held; run it again");
             }
         }
     }
@@ -620,6 +667,7 @@ public final class CatalogMoves {
         }
         var hook = lockOrderHookForTests;
         if (hook != null) hook.accept(List.copyOf(lockOrder));
+        requireCollectionsHeld(ctx, tenant, ck, cond);
 
         // The plan: what step 3 rewrites, and the refusal for a URI another live row holds. Both are decided before the
         // first write, so a refusal (and its dry run) leaves nothing behind.
