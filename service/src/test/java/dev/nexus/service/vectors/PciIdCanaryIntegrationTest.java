@@ -175,7 +175,7 @@ class PciIdCanaryIntegrationTest extends PciIdIndexSupport {
         assertThat(result.meanRecall()).as("the recall is recorded").isNotNull().isGreaterThan(0.0);
 
         // the statement it sends is the id twin: its plan walks the id-predicate index, which a name-predicate statement cannot use
-        PciCanary.Leg leg = repo.canaryStatements(() -> gate3).hnsw(result.target(), query(0), 10, true);
+        PciCanary.Leg leg = repo.canaryStatements(() -> gate3 && readers).hnsw(result.target(), query(0), 10, true);
         assertThat(leg.routedExact()).isFalse();
         assertThat(leg.plan()).as("the plan of the id canary's statement").contains(idIndex).doesNotContain(nameIndex);
 
@@ -185,7 +185,7 @@ class PciIdCanaryIntegrationTest extends PciIdIndexSupport {
     }
 
     private void assertThatRefused(PgVectorRepository repo, PciCanary.Target target) {
-        org.assertj.core.api.Assertions.assertThatThrownBy(() -> repo.canaryStatements(() -> gate3).hnsw(target, query(0), 10, false))
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> repo.canaryStatements(() -> gate3 && readers).hnsw(target, query(0), 10, false))
             .isInstanceOf(IllegalStateException.class).hasMessageContaining("latch no longer holds");
     }
 }
