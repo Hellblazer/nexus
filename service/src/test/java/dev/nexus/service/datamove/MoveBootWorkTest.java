@@ -496,4 +496,23 @@ class MoveBootWorkTest {
         assertThat(entry("r").what()).startsWith("blocked: r:");
         assertThat(entry("r").reasonClass()).isEqualTo("missing_prerequisite");
     }
+
+    // ── a validation with no statement bound (nexus-p2m1x.21) ───────────────────────────────────────────────
+
+    @Test
+    void aValidationWithNoStatementBoundShowsHowLongItHasRunAndThatItCanBeCancelled() {
+        var m = move("m");
+        reader.open = List.of(m);
+        states.working(m);
+        states.callStarted(m, VerifyingFinisher.COMPLETION_RUN, 4242);
+        var w = work(Duration.ofMinutes(15));
+
+        w.publish();
+        assertThat(entry("m").what()).startsWith("working: m, validating for under a minute").contains("pg_cancel_backend");
+        assertThat(entry("m").step().what()).isEqualTo("validation in flight");
+
+        clock.advance(Duration.ofMinutes(5));
+        w.publish();
+        assertThat(entry("m").what()).as("the elapsed time, and never the stalled text of a CALL").startsWith("working: m, validating for 5 m");
+    }
 }
