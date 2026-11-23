@@ -49,6 +49,10 @@ AS $fn$
     -- already exists. The one way in is a label a tombstone (a superseded row of that name) still holds, whose documents the new row
     -- would read as the by-name read did; catalog_collections_pk (tenant_id, name) keeps a tombstone and a live row from sharing a name
     -- until P4.1 replaces it, so that cannot happen today (Rdr229P35bSqlReadersIntegrationTest pins both).
+    -- So under form A the derivation has nothing it could find, and that is not lost behaviour (linda 2026-11-23): the gate
+    -- requires every P3.1 stamp CHECK validated, so no document carries a name without its id, and a fresh registration's id is
+    -- on no document yet; the registry row keeps its slug owner and raises no notice (Catalog051OwnerGuardTest's form A variant).
+    -- P4.1 revisits this where it replaces catalog_collections_pk.
     SELECT o.seg
       FROM (
           SELECT split_part(d.tumbler, '.', 1) || '-' || split_part(d.tumbler, '.', 2) AS seg,
