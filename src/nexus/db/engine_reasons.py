@@ -60,15 +60,11 @@ UNKNOWN_COLLECTION_ID_REASON: str = "unknown_collection_id"
 
 #: A collection route resolved a ``collection_id`` to a registry row of another id (HTTP 500, RDR-229 P3.5a): a registry
 #: inconsistency, an engine defect. Also carries ``collection_id`` (the id sent) and ``resolved_collection_id``. Not a caller
-#: mistake and not retryable.
+#: mistake and not retryable. The same reason answers HTTP 409 when a request sent BOTH an id and a label and, by the time of the
+#: write, the row of the id no longer bears that label: the body then carries ``collection_id``, ``requested_label`` and
+#: ``current_label``. (A request by id alone is never refused for its label: the id is the identity, and a rename that lands between
+#: the route boundary and the write changes nothing about where the write goes.)
 COLLECTION_ID_MISMATCH_REASON: str = "collection_id_mismatch"
-
-#: A collection route named a ``collection_id`` whose row now carries another label than the one the engine resolved at the route
-#: boundary (HTTP 409, RDR-229 P3.5a): a one-row rename landed between the boundary and the write's registry read. An ordinary
-#: race, not an engine defect, and nothing was written. Also carries ``collection_id``, ``requested_label`` and ``current_label``.
-#: The client has no typed error for it: it reads as a generic 409 (never retried by the gateway ladder), and a caller may read the
-#: collection again and retry.
-COLLECTION_RENAMED_REASON: str = "collection_renamed"
 
 #: A collection rename (the catalog's, or a per-store ``rename_collection`` route) refused from gate 3 until the one-row rename
 #: can run (HTTP 409, RDR-229 P3.5a). Also carries ``missing``: ``name_key_drop_move`` while the move has no ``completed_at``,
