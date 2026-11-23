@@ -329,9 +329,21 @@ class CollectionVerbsByIdGapTest {
             .fetchOne(CATALOG_COLLECTIONS.SUPERSEDED_AT));
     }
 
+    /**
+     * The transaction id that last wrote the row of {@code label} ({@code xmin}): any UPDATE of the row, even one that sets the values it
+     * already has (the owner re-derive, a CAS that rewrites its own target), gives it a new tuple version and a new xmin. A test that
+     * says "nothing was written" compares it before and after.
+     */
+    private String xmin(String label) {
+        return fx.asSuperuser(ctx -> String.valueOf(ctx.select(org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("xmin"), Object.class))
+            .from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(fx.tenant)).and(CATALOG_COLLECTIONS.NAME.eq(label))
+            .fetchOne(0)));
+    }
+
     /** A request by id that arrives after another identical supersede already retired the source to the same target: today's 200, nothing written. */
     @Test
-    void aByIdRetryToTheSameTargetAnswers200UpdatedOne_andWritesAndLeavesNothingUnconsumed() {
+    void aByIdRetryToTheSameTargetAnswers200UpdatedOne_andWritesNothingAndLeavesNothingUnconsumed() {
         for (boolean successorById : new boolean[] {true, false}) {
             String a = registered("idem-a-" + successorById);
             String b = registered("idem-b-" + successorById);
@@ -339,8 +351,18 @@ class CollectionVerbsByIdGapTest {
             long y = fx.idOf(b);
             AtomicInteger fired = new AtomicInteger();
             AtomicInteger retireStatus = new AtomicInteger();
+            // what the first supersede (the hook's) left: the retry must leave exactly this, both rows included (the successor's
+            // owner re-derive is an UPDATE of its row too)
+            java.util.concurrent.atomic.AtomicReference<java.util.List<Object>> left = new java.util.concurrent.atomic.AtomicReference<>();
+            Runnable retire = retireInTheGap(a, b, fired, retireStatus);
+            Runnable retireThenNote = () -> {
+                retire.run();
+                if (left.get() == null && retireStatus.get() == 200) {
+                    elsewhere(() -> left.set(java.util.List.of(supersededAt(a), xmin(a), xmin(b))));
+                }
+            };
             java.util.List<String> unconsumed = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
-            fx.service.collectionSelectorFilter().testHooks(retireInTheGap(a, b, fired, retireStatus), null, null, unconsumed::add);
+            fx.service.collectionSelectorFilter().testHooks(retireThenNote, null, null, unconsumed::add);
             Resp r;
             try {
                 r = fx.post("/v1/catalog/collections/supersede", "{\"collection_id\":" + x
@@ -355,7 +377,9 @@ class CollectionVerbsByIdGapTest {
             assertThat(r.json().path("updated").asInt(-1)).as(why).isEqualTo(1);
             assertThat(fx.supersededBy(a)).as(why).isEqualTo(b);
             assertThat(supersededById(a)).as(why).isEqualTo(y);
-            assertThat(supersededAt(a)).as("a retry re-stamps nothing. " + why).isNotNull();
+            assertThat(left.get()).as("setup: the state after the first supersede was read. " + why).isNotNull();
+            assertThat(java.util.List.<Object>of(supersededAt(a), xmin(a), xmin(b)))
+                .as("a retry re-stamps nothing and writes neither row (no UPDATE, no owner re-derive). " + why).isEqualTo(left.get());
             assertThat(unconsumed).as("every named id was read in the verb's own transaction. " + why).isEmpty();
         }
     }
@@ -374,7 +398,14 @@ class CollectionVerbsByIdGapTest {
         long ysId = fx.idOf(ys);
         AtomicInteger fired = new AtomicInteger();
         AtomicInteger retireStatus = new AtomicInteger();
-        fx.service.collectionSelectorFilter().testHooks(null, retireInTheGap(a, xs, fired, retireStatus), null, null);
+        java.util.concurrent.atomic.AtomicReference<String> xminAfterHook = new java.util.concurrent.atomic.AtomicReference<>();
+        Runnable retire = retireInTheGap(a, xs, fired, retireStatus);
+        fx.service.collectionSelectorFilter().testHooks(null, () -> {
+            retire.run();
+            if (xminAfterHook.get() == null) {
+                elsewhere(() -> xminAfterHook.set(xmin(a)));
+            }
+        }, null, null);
         Resp r;
         try {
             r = fx.post("/v1/catalog/collections/supersede", "{\"collection_id\":" + x + ",\"superseded_by_id\":" + ysId + "}");
@@ -387,6 +418,7 @@ class CollectionVerbsByIdGapTest {
         assertThat(r.reason()).isEqualTo("collection_superseded");
         assertThat(fx.supersededBy(a)).as("superseded_by is the first successor's").isEqualTo(xs);
         assertThat(supersededById(a)).as("and so is superseded_by_id").isEqualTo(xsId);
+        assertThat(xmin(a)).as("the refused request wrote nothing to the source after the first supersede").isEqualTo(xminAfterHook.get());
     }
 
     /**
@@ -455,12 +487,104 @@ class CollectionVerbsByIdGapTest {
         String body = "{\"name\":" + json(a) + ",\"superseded_by\":" + json(b) + "}";
         assertThat(fx.post("/v1/catalog/collections/supersede", body).status()).isEqualTo(200);
         java.time.OffsetDateTime stamped = supersededAt(a);
+        String sourceVersion = xmin(a);
+        String successorVersion = xmin(b);
 
         Resp again = fx.post("/v1/catalog/collections/supersede", body);
 
         assertThat(again.status()).as(again.body()).isEqualTo(200);
         assertThat(again.json().path("updated").asInt(-1)).isEqualTo(1);
         assertThat(supersededAt(a)).as("not re-stamped").isEqualTo(stamped);
+        assertThat(xmin(a)).as("the handler's shortcut re-runs no UPDATE of the source").isEqualTo(sourceVersion);
+        assertThat(xmin(b)).as("or of the successor").isEqualTo(successorVersion);
+    }
+
+    // ---- the handler's label guards do not pre-empt the verb's typed answer for an end named by id (row 16 F3) ---------------------
+
+    /** Guard 1: the source's id freed in the gap, its label not taken again. The handler's label read would answer a plain 404. */
+    @Test
+    void aSupersedeByASourceIdFreedInTheGapAnswersTheTypedUnknownIdNotTheLabelGuardsPlain404() {
+        String a = registered("g1-a");
+        String b = registered("g1-b");
+        long x = fx.idOf(a);
+        AtomicInteger fired = new AtomicInteger();
+        fx.service.collectionSelectorFilter().testHooks(() -> {
+            if (fired.getAndIncrement() == 0) {
+                elsewhere(() -> assertThat(fx.post(DELETE, "{\"name\":" + json(a) + "}").status()).isEqualTo(200));
+            }
+        }, null, null, null);
+        Resp r;
+        try {
+            r = fx.post("/v1/catalog/collections/supersede", "{\"collection_id\":" + x + ",\"superseded_by\":" + json(b) + "}");
+        } finally {
+            noHooks();
+        }
+
+        assertThat(fx.exists(a)).as("setup: the label is free").isFalse();
+        assertRefusedAsUnknownId(r, x);
+    }
+
+    /** Guard 2: the source retired in the gap to another successor. The chain guard's plain 409 names no reason; the verb's does. */
+    @Test
+    void aSupersedeByASourceIdRetiredInTheGapToAnotherTargetAnswersTheTypedSuperseded409NotTheChainGuardsPlainOne() {
+        String a = registered("g2-a");
+        String b = registered("g2-b");
+        String c = registered("g2-c");
+        long x = fx.idOf(a);
+        AtomicInteger fired = new AtomicInteger();
+        AtomicInteger retireStatus = new AtomicInteger();
+        fx.service.collectionSelectorFilter().testHooks(retireInTheGap(a, c, fired, retireStatus), null, null, null);
+        Resp r;
+        try {
+            r = fx.post("/v1/catalog/collections/supersede", "{\"collection_id\":" + x + ",\"superseded_by\":" + json(b) + "}");
+        } finally {
+            noHooks();
+        }
+
+        assertThat(retireStatus.get()).as("setup").isEqualTo(200);
+        assertThat(r.status()).as(r.body()).isEqualTo(409);
+        assertThat(r.reason()).isEqualTo("collection_superseded");
+        assertThat(r.json().path("collection_id").asLong(-1)).isEqualTo(x);
+        assertThat(fx.supersededBy(a)).isEqualTo(c);
+    }
+
+    /** Guard 3: the successor retired in the gap. The target guard's plain 409 names no reason; the verb's does, with the successor's id. */
+    @Test
+    void aSupersedeByASuccessorIdRetiredInTheGapAnswersTheTypedSuperseded409NotTheTargetGuardsPlainOne() {
+        String a = registered("g3-a");
+        String b = registered("g3-b");
+        String c = registered("g3-c");
+        long y = fx.idOf(b);
+        AtomicInteger fired = new AtomicInteger();
+        AtomicInteger retireStatus = new AtomicInteger();
+        fx.service.collectionSelectorFilter().testHooks(retireInTheGap(b, c, fired, retireStatus), null, null, null);
+        Resp r;
+        try {
+            r = fx.post("/v1/catalog/collections/supersede", "{\"name\":" + json(a) + ",\"superseded_by_id\":" + y + "}");
+        } finally {
+            noHooks();
+        }
+
+        assertThat(retireStatus.get()).as("setup").isEqualTo(200);
+        assertThat(r.status()).as(r.body()).isEqualTo(409);
+        assertThat(r.reason()).isEqualTo("collection_superseded");
+        assertThat(r.json().path("collection_id").asLong(-1)).isEqualTo(y);
+        assertThat(fx.supersededBy(a)).as("the source was not retired").isEmpty();
+    }
+
+    /** A successor named by LABEL keeps guard 3 when only the source came by id: the two-hop chain refusal still applies. */
+    @Test
+    void aSupersedeByASourceIdToARetiredSuccessorLabelIsStillRefusedByTheTargetGuard() {
+        String a = registered("g3l-a");
+        String b = registered("g3l-b");
+        String c = registered("g3l-c");
+        assertThat(fx.post("/v1/catalog/collections/supersede",
+            "{\"name\":" + json(b) + ",\"superseded_by\":" + json(c) + "}").status()).as("setup: b is retired").isEqualTo(200);
+
+        Resp r = fx.post("/v1/catalog/collections/supersede", "{\"collection_id\":" + fx.idOf(a) + ",\"superseded_by\":" + json(b) + "}");
+
+        assertThat(r.status()).as(r.body()).isEqualTo(409);
+        assertThat(fx.supersededBy(a)).as("no two-hop chain was built").isEmpty();
     }
 
     // ---- retired between the handler's reads and the verb's lock (code 6) -----------------------------------------------------------
