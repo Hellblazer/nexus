@@ -56,14 +56,16 @@ class CollectionSelectorTableTest {
     }
 
     @Test
-    void onlyTheDeleteHandsItsHandlerTheResolvedId() {
+    void onlyTheRetiringVerbsHandTheirHandlerTheResolvedId() {
         List<String> passes = new ArrayList<>();
         for (Map.Entry<String, CollectionSelectors.Route> e : CollectionSelectors.ROUTES.entrySet()) {
             if (e.getValue().passesResolvedId()) {
                 passes.add(e.getKey());
             }
         }
-        assertThat(passes).containsExactly("/v1/catalog/collections/delete");
+        // the delete, and (row 16) the supersede and the rename: each reads and locks its source by that id in its own transaction
+        assertThat(passes).containsExactlyInAnyOrder("/v1/catalog/collections/delete", "/v1/catalog/collections/supersede",
+            "/v1/catalog/collections/rename");
     }
 
     @Test
