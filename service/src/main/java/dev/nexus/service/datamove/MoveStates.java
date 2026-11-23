@@ -28,13 +28,16 @@ public final class MoveStates implements MoveReporter {
      * worker reported the move, which is what a retry waits from. {@code firstBlockedAt} is when the move was first
      * blocked in the run of blocked passes and retries it is in (a retry in flight is {@link Kind#WORKING}, so
      * {@code since} restarts with it); null until the move has been blocked, and cleared when it is paused, failed or its
-     * runs complete. {@code needsOperator} is whether the last blocked reason said "needs an operator"
-     * ({@link MoveRetryPolicy#blockedReason}: the retry policy's one rule), and {@code terminatesIndexBuilds} whether it also
-     * said each retry ends in-flight index builds; both are kept while the move is retried ({@link Kind#WORKING}) and cleared
-     * by a blocked reason without them, and by a failed, paused or runs-complete report.
+     * runs complete. The last four describe the move's latest counted transient failure
+     * ({@link FailureHandler.PageInfo}): {@code needsOperator} whether the move is in the needs-an-operator state it left
+     * ({@link MoveRetryPolicy#needsOperator}, with the early rule latched), {@code step} the stage it failed in (null before this
+     * process has seen one), {@code boundMs} the bound a timeout missed ({@link FailureHandler.PageInfo#NO_BOUND} for none) and
+     * {@code terminatesIndexBuilds} whether that attempt ended the in-flight index builds. They are kept while the move is
+     * retried ({@link Kind#WORKING}), replaced by the next failure, and cleared by a failed, paused or runs-complete report.
      */
     public record State(String label, Kind kind, String reason, String pausedBy, Instant since, Instant updatedAt,
-                        Instant firstBlockedAt, boolean needsOperator, boolean terminatesIndexBuilds) { }
+                        Instant firstBlockedAt, boolean needsOperator, String step, int boundMs,
+                        boolean terminatesIndexBuilds) { }
 
     /** A CALL in flight for a move: the run, the server backend that holds it, and when it began. */
     public record CallInFlight(String runLabel, int pid, Instant startedAt) { }
@@ -42,12 +45,14 @@ public final class MoveStates implements MoveReporter {
     private final Clock clock;
     private final Map<String, State> byLabel = new ConcurrentHashMap<>();
     private final Map<String, CallInFlight> calls = new ConcurrentHashMap<>();
+    /** The moves whose needs-an-operator page this process has logged, so the worker's and the sampler's never double up. */
+    private final java.util.Set<String> announced = ConcurrentHashMap.newKeySet();
 
     public MoveStates(Clock clock) {
         this.clock = Objects.requireNonNull(clock, "clock");
     }
 
-    private void put(String label, Kind kind, String maskable, String pausedBy) {
+    private void put(String label, Kind kind, String maskable, String pausedBy, FailureHandler.PageInfo page) {
         String reason = SecretMask.mask(maskable);
         State old = byLabel.get(label);
         Instant now = clock.instant();
@@ -60,42 +65,54 @@ public final class MoveStates implements MoveReporter {
             case WORKING -> old != null ? old.firstBlockedAt() : null;
             case FAILED, PAUSED, RUNS_COMPLETE -> null;
         };
-        boolean needs = switch (kind) {
-            case BLOCKED -> MoveReasons.needsOperator(reason);
-            case WORKING -> old != null && old.needsOperator();
-            case FAILED, PAUSED, RUNS_COMPLETE -> false;
-        };
-        boolean builds = switch (kind) {
-            case BLOCKED -> MoveReasons.terminatesIndexBuilds(reason);
-            case WORKING -> old != null && old.terminatesIndexBuilds();
-            case FAILED, PAUSED, RUNS_COMPLETE -> false;
-        };
-        byLabel.put(label, new State(label, kind, reason, pausedBy, since, now, firstBlocked, needs, builds));
+        // the page: a blocked report brings its own (none: the move is not in the state this report knows of), a retry in
+        // flight keeps the last, anything else clears it
+        boolean needs = false;
+        String step = null;
+        int bound = FailureHandler.PageInfo.NO_BOUND;
+        boolean builds = false;
+        if (kind == Kind.BLOCKED && page != null) {
+            needs = page.needsOperator();
+            step = page.step();
+            bound = page.boundMs();
+            builds = page.terminatesIndexBuilds();
+        } else if (kind == Kind.WORKING && old != null) {
+            needs = old.needsOperator();
+            step = old.step();
+            bound = old.boundMs();
+            builds = old.terminatesIndexBuilds();
+        }
+        byLabel.put(label, new State(label, kind, reason, pausedBy, since, now, firstBlocked, needs, step, bound, builds));
     }
 
     @Override
     public void working(DataMove move) {
-        put(move.label(), Kind.WORKING, null, null);
+        put(move.label(), Kind.WORKING, null, null, null);
     }
 
     @Override
     public void blocked(DataMove move, String reason) {
-        put(move.label(), Kind.BLOCKED, Objects.requireNonNull(reason, "reason"), null);
+        put(move.label(), Kind.BLOCKED, Objects.requireNonNull(reason, "reason"), null, null);
+    }
+
+    /** A blocked report that also says what the failure means for the needs-an-operator state; null page: nothing. */
+    public void blocked(DataMove move, String reason, FailureHandler.PageInfo page) {
+        put(move.label(), Kind.BLOCKED, Objects.requireNonNull(reason, "reason"), null, page);
     }
 
     @Override
     public void failed(DataMove move, String reason) {
-        put(move.label(), Kind.FAILED, Objects.requireNonNull(reason, "reason"), null);
+        put(move.label(), Kind.FAILED, Objects.requireNonNull(reason, "reason"), null, null);
     }
 
     @Override
     public void paused(DataMove move) {
-        put(move.label(), Kind.PAUSED, null, move.pausedBy());
+        put(move.label(), Kind.PAUSED, null, move.pausedBy(), null);
     }
 
     @Override
     public void runsComplete(DataMove move) {
-        put(move.label(), Kind.RUNS_COMPLETE, null, null);
+        put(move.label(), Kind.RUNS_COMPLETE, null, null, null);
     }
 
     @Override
@@ -112,6 +129,21 @@ public final class MoveStates implements MoveReporter {
     public void forget(String label) {
         byLabel.remove(label);
         calls.remove(label);
+        announced.remove(label);
+    }
+
+    /**
+     * Whether this call is the first to announce the move's needs-an-operator page in this process: true once per label until
+     * {@link #retainAnnounced} or {@link #forget} drops it. The worker (on the failure that enters the state) and the status
+     * sampler (a move already in it when this process started) both ask, so the page is logged once between them.
+     */
+    public boolean announce(String label) {
+        return announced.add(label);
+    }
+
+    /** Forgets the announcement of every move not in {@code listed}: it left the state, and entering it again pages again. */
+    public void retainAnnounced(java.util.Collection<String> listed) {
+        announced.retainAll(listed);
     }
 
     /** The CALL now in flight for the move, if any. */
