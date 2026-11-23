@@ -248,6 +248,7 @@ public final class CollectionMint {
         if (display == null || display.isBlank() || display.equals(row.get("display_name"))) {
             return row;
         }
+        CollectionRegistry.forgetWriteMemo(ctx);   // a write of the registry row: a row this transaction read is not the row now
         ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.DISPLAY_NAME, display)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq((String) row.get("name"))).execute();
         row.put("display_name", display);

@@ -65,6 +65,7 @@ public final class CollectionTupleLock {
         if (tuples.isEmpty()) {
             return List.of();
         }
+        WriteRegistryMemo.assertNoneHeld(ctx, "a tuple lock");
         List<Long> locked = new ArrayList<>(new TreeSet<>(keys(ctx, tuples)));
         for (long k : locked) {
             ctx.select(DSL.function("pg_advisory_xact_lock", SQLDataType.VARCHAR, DSL.val(k))).fetch();

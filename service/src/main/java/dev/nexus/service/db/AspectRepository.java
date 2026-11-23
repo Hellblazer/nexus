@@ -670,9 +670,26 @@ public final class AspectRepository {
      * landed count, since each surviving row independently satisfied the
      * confidence gate.
      */
+    /**
+     * RDR-229 P3.5a: the registry rows of every collection a batch names, read FOR KEY SHARE in one statement in {@code collection_id}
+     * order (a retiring verb's order) before the batch registers the ones that are missing and writes. A name no row has is skipped here:
+     * the registration below creates it.
+     */
+    static void lockCollectionsInIdOrder(DSLContext ctx, String tenant, java.util.Collection<String> collections) {
+        WriteRegistryMemo.assertNoneHeld(ctx, "a multi-collection batch");   // the batch is the transaction's first registry read
+        var named = collections.stream().filter(c -> c != null && !c.isEmpty()).toList();
+        if (named.size() > 1) {
+            try {
+                CollectionRegistry.requireAllForWrite(ctx, tenant, named);
+            } catch (UnregisteredCollectionException unknown) {
+                // registered by the loop that follows
+            }
+        }
+    }
+
     public int importAspectsBatch(String tenant, List<Map<String, Object>> rows) {
         if (rows == null || rows.isEmpty()) return 0;
-        return tenantScope.withTenant(tenant, ctx -> {
+        return DeadlockRetry.run("aspects.importAspectsBatch", () -> tenantScope.withTenant(tenant, ctx -> {
             List<Map<String, Object>> kept = new ArrayList<>();
             for (var body : rows) {
                 double confidence = body.containsKey("confidence") && body.get("confidence") != null
@@ -687,6 +704,7 @@ public final class AspectRepository {
                 String c = (String) body.get("collection");
                 if (c != null) collections.add(c);
             }
+            lockCollectionsInIdOrder(ctx, tenant, collections);
             var collectionIds = new java.util.HashMap<String, Long>();
             for (String c : collections) {
                 ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, c);
@@ -771,7 +789,7 @@ public final class AspectRepository {
                       .execute();
             }
             return kept.size();
-        });
+        }));
     }
 
     private int doImportAspect(DSLContext ctx, String tenant, Map<String, Object> body) {
@@ -993,7 +1011,7 @@ public final class AspectRepository {
      */
     public int importHighlightsBatch(String tenant, List<Map<String, Object>> rows) {
         if (rows == null || rows.isEmpty()) return 0;
-        return tenantScope.withTenant(tenant, ctx -> {
+        return DeadlockRetry.run("aspects.importHighlightsBatch", () -> tenantScope.withTenant(tenant, ctx -> {
             List<Map<String, Object>> kept = new ArrayList<>();
             for (var body : rows) {
                 String docId = (String) body.get("doc_id");
@@ -1008,6 +1026,7 @@ public final class AspectRepository {
             for (var body : kept) {
                 collections.add(nne((String) body.get("collection")));
             }
+            lockCollectionsInIdOrder(ctx, tenant, collections);
             var collectionIds = new java.util.HashMap<String, Long>();
             for (String c : collections) {
                 ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, c);
@@ -1055,7 +1074,7 @@ public final class AspectRepository {
                       .execute();
             }
             return kept.size();
-        });
+        }));
     }
 
     private int doImportHighlight(DSLContext ctx, String tenant, Map<String, Object> body) {

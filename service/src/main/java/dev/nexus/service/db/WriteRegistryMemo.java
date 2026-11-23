@@ -49,8 +49,46 @@ final class WriteRegistryMemo {
         map(ctx).put(key(tenant, label), row);
     }
 
+    /**
+     * Lock order's first half, checked (RDR-229 P3.5a, linda 6(c)): an advisory lock (a sweep gate, the index-run lock, the taxonomy
+     * collection lock, a tuple lock, the re-embed start guard) is taken BEFORE the registry row, never after. A transaction that
+     * already holds a registry key share and then waits for an advisory lock can close a cycle with a verb that holds the lock and wants
+     * the row. It fails only while the census is on ({@link ExpectedCollectionIds#censusOn}, the engine suites), where it is the
+     * assertion that every transaction of every writer honours the order; a production transaction pays nothing.
+     */
+    static void assertNoneHeld(DSLContext ctx, String lock) {
+        if (!ExpectedCollectionIds.censusOn()) {
+            return;
+        }
+        Object m = ctx.configuration().data().get(KEY);
+        if (m != null && !((Map<?, ?>) m).isEmpty()) {
+            throw new IllegalStateException("lock order: " + lock + " is taken after this transaction read a registry row ("
+                + ((Map<?, ?>) m).keySet() + "); advisory locks come first, then the registry row");
+        }
+    }
+
+    private static final String EXEMPT = "nexus.collection-registry.write-exempt";
+
+    /**
+     * Tags this transaction exempt from {@link StrictWriterCensus}: it is a verb that locks the registry row itself, a background writer that
+     * waits for no lock, or it wrote the registry row. {@code why} is for the reader of the call site.
+     */
+    static void exempt(DSLContext ctx, String why) {
+        ctx.configuration().data().put(EXEMPT, why);
+    }
+
+    /** True when this transaction holds a registry row (the memo has an entry) or is tagged exempt. */
+    static boolean heldOrExempt(org.jooq.Configuration configuration) {
+        if (configuration.data().containsKey(EXEMPT)) {
+            return true;
+        }
+        Object m = configuration.data().get(KEY);
+        return m != null && !((Map<?, ?>) m).isEmpty();
+    }
+
     /** Drops every entry of this transaction: it changed the registry, or rolled back to a savepoint. */
     static void forget(DSLContext ctx) {
+        exempt(ctx, "the transaction wrote the registry row");
         Object m = ctx.configuration().data().get(KEY);
         if (m != null) {
             ((Map<?, ?>) m).clear();

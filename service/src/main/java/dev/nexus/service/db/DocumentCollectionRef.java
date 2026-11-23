@@ -86,6 +86,36 @@ final class DocumentCollectionRef {
     /** {@link #normalize} for a batch: each distinct id is resolved once, in {@code memo}. */
     static List<Map<String, Object>> normalizeAll(DSLContext ctx, String tenant, List<Map<String, Object>> requests) {
         Map<Long, CollectionRow> memo = new HashMap<>();
+        // RDR-229 P3.5a, a batch that touches SEVERAL collections: every row it names is read FOR KEY SHARE before any row work, in the order a
+        // retiring verb locks in. The labels go in one statement ordered by collection_id; the ids go one after another in ascending order. A
+        // batch that mixes both takes two such runs, labels first (the one cycle that leaves is a verb on two rows each side of a
+        // mixed batch, which the writer's deadlock retry absorbs; no document batch is known to mix them).
+        java.util.TreeSet<Long> ids = new java.util.TreeSet<>();
+        java.util.LinkedHashSet<String> labels = new java.util.LinkedHashSet<>();
+        for (Map<String, Object> request : requests) {
+            if (request.get(ID) instanceof Resolved) {
+                continue;
+            }
+            if (request.containsKey(ID)) {
+                check(request);
+                ids.add(((Number) request.get(ID)).longValue());
+            } else {
+                String label = CatalogRepository.s(request, LABEL);
+                if (label != null && !label.isEmpty()) {
+                    labels.add(label);
+                }
+            }
+        }
+        if (labels.size() > 1) {
+            try {
+                CollectionRegistry.requireAllForWrite(ctx, tenant, labels);
+            } catch (UnregisteredCollectionException unknownLabel) {
+                // a label no row has is not refused here (the typed 422 is the per-document check's, as before)
+            }
+        }
+        for (long id : ids) {
+            memo.computeIfAbsent(id, k -> resolve(ctx, tenant, k));
+        }
         List<Map<String, Object>> out = new ArrayList<>(requests.size());
         for (Map<String, Object> request : requests) {
             out.add(normalize(ctx, tenant, request, memo));

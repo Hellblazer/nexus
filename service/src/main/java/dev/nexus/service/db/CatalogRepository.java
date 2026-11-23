@@ -6073,6 +6073,20 @@ public final class CatalogRepository {
      * #acquireIndexRunLock}'s raw {@code ctx.execute}.
      */
     public static void acquireSweepGateShared(DSLContext ctx, String tenant, String collection) {
+        WriteRegistryMemo.assertNoneHeld(ctx, "the sweep gate of " + collection);
+        takeSweepGateShared(ctx, tenant, collection);
+    }
+
+    /**
+     * The shared sweep gate of a collection a RENAME moved the write onto, taken after the registry read that found the move. The
+     * only call that may follow a registry read: the exclusive half is taken by the sweep's own transaction, which reads no
+     * registry row under a lock, so a shared holder with a key share is no link of a cycle.
+     */
+    static void acquireSweepGateSharedAfterRename(DSLContext ctx, String tenant, String collection) {
+        takeSweepGateShared(ctx, tenant, collection);
+    }
+
+    private static void takeSweepGateShared(DSLContext ctx, String tenant, String collection) {
         ctx.select(DSL.function("pg_advisory_xact_lock_shared", Object.class,
                    DSL.function("hashtext", Integer.class, DSL.val("sweepgate:" + tenant + "/" + collection))))
            .fetch();
@@ -6093,6 +6107,7 @@ public final class CatalogRepository {
      * skip — this method itself does not catch anything.
      */
     private static void acquireSweepGateExclusive(DSLContext ctx, String tenant, String collection) {
+        WriteRegistryMemo.assertNoneHeld(ctx, "the exclusive sweep gate of " + collection);
         // nexus-u9zkn: statement_timeout goes through PgSession.setLocal so its network (read) bound is
         // set with it; lock_timeout is a lock-wait bound with no read-bound counterpart.
         ctx.select(DSL.function("set_config", String.class,
@@ -8813,6 +8828,7 @@ public final class CatalogRepository {
      * pipeline; this lock is the belt for a MIS-sequenced or out-of-band writer.
      */
     private static void acquireIndexRunLock(DSLContext ctx, String tenant, String docId) {
+        WriteRegistryMemo.assertNoneHeld(ctx, "the index-run lock of " + docId);
         // nexus-zrcj7: typed jOOQ function(...) composition (house rule --
         // RawSqlGateTest), mirroring acquireSweepGateShared's idiom exactly.
         // The key text is built with plain Java string concatenation (a VALUE,
@@ -10634,6 +10650,7 @@ public final class CatalogRepository {
      * which aborted the whole supersede.
      */
     private static void rederiveOwner(DSLContext ctx, String tenant, String name) {
+        CollectionRegistry.forgetWriteMemo(ctx);   // a write of the registry row: a row this transaction read is not the row now
         ctx.update(CATALOG_COLLECTIONS)
            .set(CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.OWNER_ID)
            .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, CatalogIdStamps.keepSupersededId())
@@ -10749,6 +10766,7 @@ public final class CatalogRepository {
             } catch (UnregisteredCollectionException none) {
                 return 0;   // no such label: nothing to change, as before
             }
+            CollectionRegistry.forgetWriteMemo(ctx);   // a write of the registry row
             return ctx.update(CATALOG_COLLECTIONS)
                .set(CATALOG_COLLECTIONS.ASPECTS_ENABLED, enabled)
                .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, CatalogIdStamps.keepSupersededId())
@@ -12478,6 +12496,7 @@ public final class CatalogRepository {
                         // A disputed row keeps its flag: the remedy RDR-204 gives it is a re-index under the
                         // current profile, which "dormant" would hide.
                         if (!dryRun) {
+                            CollectionRegistry.forgetWriteMemo(ctx);   // a write of the registry row
                             ctx.update(CATALOG_COLLECTIONS)
                                .set(CATALOG_COLLECTIONS.LIFECYCLE_STATE, "dormant")
                                .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, CatalogIdStamps.keepSupersededId())
@@ -12491,6 +12510,7 @@ public final class CatalogRepository {
                         // clears it once the collection holds chunks again. A dormant row carries no dimension
                         // (RDR-204), so the stored one fills it when there is exactly one.
                         if (!dryRun) {
+                            CollectionRegistry.forgetWriteMemo(ctx);   // a write of the registry row
                             var update = ctx.update(CATALOG_COLLECTIONS)
                                 .set(CATALOG_COLLECTIONS.LIFECYCLE_STATE, "live")
                                 .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, CatalogIdStamps.keepSupersededId());
