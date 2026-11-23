@@ -93,6 +93,7 @@ java	db/CollectionRename.java catalog_collections select	superseded_by	both	the 
 java	db/CollectionRename.java catalog_collections where	name	label-kept	resolves the rename's old or new label to its registry row
 java	db/CollectionRename.java catalog_collections where	superseded_by	both	the revive arm and the retired-row check belong to P3.7's rename; they read the tombstone marker by name (the pre-gate rename)
 java	db/CollectionTombstones.java catalog_collections expr	superseded_by	both	the parity check compares the name and id columns by design; repoint finds a tombstone whose successor was deleted by its label alone (its id is its own)
+java	db/CollectionTombstones.java catalog_collections expr	name	label-kept	the retiring verbs' registry row lock (lockRows, lockRowsOfOneRowRename) names the rows by their labels: the verb holds labels before it holds ids, and it locks the row, it does not read a collection through it
 java	db/CollectionTombstones.java catalog_collections select	name	label-kept	resolves a label to its registry row, or reads the registry's name of an id
 java	db/CollectionTombstones.java catalog_collections where	name	label-kept	resolves the retiring, successor or deleted label to its registry row
 java	db/CollectionTombstones.java catalog_collections where	superseded_by	both	the CAS and the delete read superseded_by_id from gate 3; repointTombstonesNaming and the parity check read the label by design (a self-id tombstone keeps only the label)
