@@ -160,12 +160,23 @@ public final class CompletionCheck {
         }
 
         /**
+         * P3.5c's read set (RDR-229 Phase 3 blocking row 13, nexus-p2m1x.22): P3.3c's, and in gate 2 the quarantine-origin backfill
+         * ({@link QuarantineOriginBackfill#LABEL}), registered after the chunks stamp, so gate 3 cannot latch while a quarantine chunk the
+         * move would write still lacks its origin id.
+         */
+        public static ReadSet p35c() {
+            List<String> gate2 = new ArrayList<>(p33c().gate2Labels());
+            gate2.add(QuarantineOriginBackfill.LABEL);
+            return new ReadSet(p33c().gate1Labels(), gate2);
+        }
+
+        /**
          * The read set a running engine reads: the one factory {@link CompletionBootWork#atBoot} and {@link #evaluate(DSLContext)} share, so the
          * boot wiring and the default cannot name different sets. It is the newest phase's set; a later step changes this one line and the test
          * that pins it ({@code CompletionBootReadSetTest}).
          */
         public static ReadSet boot() {
-            return p33c();
+            return p35c();
         }
     }
 
