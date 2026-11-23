@@ -150,6 +150,13 @@ public final class CollectionTombstones {
     }
 
     /**
+     * What {@link #supersede(DSLContext, String, String, Long, String, Long, Field, Gate3)} answers for a source named by id that was
+     * already retired to the requested successor: nothing was written, so the caller answers today's {@code updated:1} and does none of
+     * the work a real supersede follows with (the successor's owner re-derive).
+     */
+    static final int ALREADY_SUPERSEDED = -1;
+
+    /**
      * {@link #supersede(DSLContext, String, String, Long, String, Field, Gate3)} for a request that also named the SUCCESSOR by
      * {@code collection_id} ({@code requestedSuccessorId}, null when it was named by label): the successor's row is locked in the same
      * ordered statement as the source's and read by that id, and an id that is gone (404 {@code unknown_collection_id}), retired (409
@@ -183,7 +190,7 @@ public final class CollectionTombstones {
                 if (requestedSuccessorId != null) {
                     ExpectedCollectionIds.consumed(ctx, supersededBy);   // the successor's id counts as read: its row is locked above
                 }
-                return 1;
+                return ALREADY_SUPERSEDED;
             }
         }
         Field<Long> successor;

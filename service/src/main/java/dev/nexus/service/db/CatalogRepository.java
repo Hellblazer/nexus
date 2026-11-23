@@ -10850,6 +10850,7 @@ public final class CatalogRepository {
                     LabelReserved.requireFree(ctx, tenant, supersededBy);   // linda 2026-11-23, addendum 8: the successor's label becomes live
                 }
                 int n = CollectionTombstones.supersede(ctx, tenant, name, requestedSourceId, supersededBy, requestedSuccessorId, stampedAt, gate3);
+                if (n == CollectionTombstones.ALREADY_SUPERSEDED) return 1;   // an idempotent retry by id: nothing written, nothing to re-derive
                 // catalog-051-2 (RDR-229): the retired row no longer holds its tuple, so a slug-owned successor whose documents
                 // name that owner (a re-home moves them while the source stays live) can take it now. The same no-op write
                 // as renameCollectionTxn's: it fires catalog-044's BEFORE trigger on UPDATE OF owner_id.

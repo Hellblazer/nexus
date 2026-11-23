@@ -2649,6 +2649,8 @@ public final class CatalogHandler implements HttpHandler {
         // pointing at its own name: permanently excluded from collectionForTuple (which
         // skips anything with superseded_by set) with nothing to redirect to. Its sibling
         // handleCollectionRename refuses the identical old==new case for the same reason.
+        Long sourceId = resolvedSourceId(body);
+        Long successorId = resolvedSuccessorId(body);
         if (name.equals(supersededBy)) {
             HttpUtil.send(exchange, 400,
                 "{\"error\":" + MAPPER.writeValueAsString(
@@ -2656,10 +2658,15 @@ public final class CatalogHandler implements HttpHandler {
         }
         // Guard 1 — old_name must be registered. Superseding a name that does not exist
         // is a typo on an explicit destructive-ish action; it must fail loud, not no-op.
-        Map<String, Object> oldRow = repo.getCollection(tenant, name);
-        if (oldRow == null) {
-            HttpUtil.send(exchange, 404,
-                "{\"error\":" + MAPPER.writeValueAsString("collection not found: " + name) + "}"); return;
+        // Guards 1 and 2 read the SOURCE by its label, and guard 3 the successor by its label: a request that named that end by id skips
+        // them (the label's holder now may not be the row of the id), so the verb's typed by-id answer is the one given (row 16).
+        Map<String, Object> oldRow = null;
+        if (sourceId == null) {
+            oldRow = repo.getCollection(tenant, name);
+            if (oldRow == null) {
+                HttpUtil.send(exchange, 404,
+                    "{\"error\":" + MAPPER.writeValueAsString("collection not found: " + name) + "}"); return;
+            }
         }
         // Guard 3 — superseded_by must name a registered, LIVE collection. This used to
         // be repo.collectionExists(tenant, supersededBy) — "a row exists, tombstone
@@ -2686,13 +2693,13 @@ public final class CatalogHandler implements HttpHandler {
         // c29vr) and the rename TARGET guard (nexus-cecqy/nexus-v6za0) already read
         // getCollection()+superseded_by directly, not collectionExists. This was the last
         // remaining direct repo.collectionExists call in this handler.
-        Map<String, Object> targetRow = repo.getCollection(tenant, supersededBy);
-        if (targetRow == null) {
+        Map<String, Object> targetRow = successorId == null ? repo.getCollection(tenant, supersededBy) : null;
+        if (successorId == null && targetRow == null) {
             HttpUtil.send(exchange, 404,
                 "{\"error\":" + MAPPER.writeValueAsString(
                     "superseded_by names an unregistered collection: " + supersededBy) + "}"); return;
         }
-        Object targetSupersededObj = targetRow.get("superseded_by");
+        Object targetSupersededObj = targetRow == null ? null : targetRow.get("superseded_by");
         String targetRetiredBy = targetSupersededObj instanceof String s ? s : "";
         if (!targetRetiredBy.isEmpty()) {
             HttpUtil.send(exchange, 409,
@@ -2705,7 +2712,7 @@ public final class CatalogHandler implements HttpHandler {
         // is idempotent, not a chain: the canonical rename now tombstones X -> Y itself
         // (nexus-cecqy) and its caller then issues supersede(X, Y), which must succeed.
         // A DIFFERENT target would rewrite the supersession chain unaudited.
-        Object current = oldRow.get("superseded_by");
+        Object current = oldRow == null ? null : oldRow.get("superseded_by");
         String currentBy = current instanceof String s ? s : "";
         if (!currentBy.isEmpty()) {
             if (!currentBy.equals(supersededBy)) {
@@ -2719,16 +2726,14 @@ public final class CatalogHandler implements HttpHandler {
             // its CollectionSuperseded message on a non-zero count) but do NOT re-run the
             // UPDATE — re-stamping superseded_at would move the supersession's recorded
             // instant every time the operation is retried.
-            // A request that named a source or a successor by id skips this label read: the row read above is the label's holder now,
-            // which may not be the row of the id, so the verb decides under the lock, by id (row 16).
-            if (resolvedSourceId(body) == null && resolvedSuccessorId(body) == null) {
+            // A successor named by id skips this label shortcut: the verb decides under the lock, by id (row 16; a source by id has no oldRow).
+            if (successorId == null) {
                 HttpUtil.send(exchange, 200, "{\"updated\":1}"); return;
             }
         }
         // row 16: a request by collection_id has its source read and locked by that id in the verb's own transaction (the route boundary
         // left the id it resolved in the body)
-        // (and a successor named by id is read and locked by that id there too, in the same ordered statement as the source)
-        int updated = repo.supersedeCollection(tenant, name, resolvedSourceId(body), supersededBy, resolvedSuccessorId(body),
+        int updated = repo.supersedeCollection(tenant, name, sourceId, supersededBy, successorId,
             supersededAt != null ? supersededAt : "");
         if (updated == 0) {
             // The UPDATE carries guard 2's precondition in its WHERE, so zero rows here
