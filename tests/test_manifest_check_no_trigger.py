@@ -42,6 +42,9 @@ NAMING_ALLOWED = {
     "service/src/test/java/dev/nexus/service/db/TenantKeyedStateTables.java",
     "service/src/test/java/dev/nexus/service/db/ManifestWriteRetryGateTest.java",
     "tests/test_manifest_check_no_trigger.py",
+    # the per-leaf FK census (nexus-p2m1x.21) lists every engine file that holds an ADD or VALIDATE CONSTRAINT with its exact counts, these classes
+    # among them (the boot-time admin validators, kept at their 30 minute bound); it is a test of the engine classes and runs nothing
+    "service/src/test/java/dev/nexus/service/datamove/Rdr229ValidationBoundsCensusIntegrationTest.java",
     # the catalog TTL step's scan lists these classes among the ones that name its own
     "tests/test_catalog_ttl_check_no_trigger.py",
     # the chunk routes' own scan lists the one class that borrows its comparison; the file name is spelled in two parts

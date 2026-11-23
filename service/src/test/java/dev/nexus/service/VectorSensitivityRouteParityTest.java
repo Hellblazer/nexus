@@ -668,9 +668,6 @@ class VectorSensitivityRouteParityTest {
             + "counts and keys come out, no text");
         OTHER_TEXT_READERS.put("LegacyChunkSurvey.java#manifestReason", "the reason expression of a manifest row: classifies it by its chunk's text with the same sha256 "
             + "prefix test; the callers take counts and documents only");
-        OTHER_TEXT_READERS.put("Rdr229SwapMove.java#chunksVerification", "the chunks swap's verification SQL (RDR-229 P3.3c): "
-            + "pg_catalog.count(c.chunk_text) is a warm-up arm that runs only in the READ ONLY first pass and pages the heap in; "
-            + "the move reads one count, no text leaves the database");
         // found when the census began reading string literals and field initialisers (nexus-rfvyy.7.17)
         OTHER_TEXT_READERS.put("CatalogRepository.java#chunkRow", "map builder resolveSpan (GATED above) calls with "
             + "the values it read; it reads nothing itself");
