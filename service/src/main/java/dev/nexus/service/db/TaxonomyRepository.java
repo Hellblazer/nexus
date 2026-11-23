@@ -3032,8 +3032,11 @@ public final class TaxonomyRepository {
     public List<Long> persistDiscoveredTopics(String tenant, String collection,
                                                List<Map<String, Object>> specs) {
         if (specs == null || specs.isEmpty()) {
-            // linda's ruling (RDR-229 P3.5a): every writer reads its collection's row FOR KEY SHARE first, with nothing to write too, so a 200
-            // holds only for a live row (a freed id is 404, a retired one 409)
+            // linda's ruling (RDR-229 P3.5a): a writer reads its collection's row FOR KEY SHARE first when the request named it BY ID, with nothing
+            // to write too, so a 200 holds only for a live row (a freed id is 404, a retired one 409); by label it opens no transaction and answers 200 []
+            if (!ExpectedCollectionIds.named(collection)) {
+                return List.of();
+            }
             return tenantScope.withTenant(tenant, ctx -> {
                 TaxonomyCollectionLock.lockAndRequireWritable(ctx, tenant, collection);
                 return List.<Long>of();

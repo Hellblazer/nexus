@@ -446,7 +446,11 @@ public final class TaxonomyCentroidRepository {
      */
     public int deleteByIds(String tenant, String collection, List<Long> topicIds) {
         if (topicIds == null || topicIds.isEmpty()) {
-            // linda's ruling: the row is read even with nothing to delete, so a 200 holds only for a live row (a freed id is 404)
+            // linda's ruling: a request by id reads the row even with nothing to delete, so a 200 holds only for a live row (a freed id is 404);
+            // by label it opens no transaction
+            if (!dev.nexus.service.db.ExpectedCollectionIds.named(collection)) {
+                return 0;
+            }
             return tenantScope.withTenant(tenant, ctx -> {
                 dev.nexus.service.db.TaxonomyRepository.consumeRequestedId(ctx, tenant, collection);
                 return 0;

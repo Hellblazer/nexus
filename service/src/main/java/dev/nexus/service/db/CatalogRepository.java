@@ -4144,6 +4144,13 @@ public final class CatalogRepository {
      */
     private static volatile java.util.function.Consumer<String> noteUriRepairHookForTests;
 
+    /** Test-only: runs once between the census and the registry lock of the apply, where no lock of the repair's is held yet; clear with null. */
+    private static volatile Runnable noteUriCensusedHookForTests;
+
+    public static void setNoteUriCensusedHookForTests(Runnable hook) {
+        noteUriCensusedHookForTests = hook;
+    }
+
     /** Test-only: install (or clear with {@code null}) the {@link #noteUriRepairHookForTests} hook. */
     public static void setNoteUriRepairHookForTests(java.util.function.Consumer<String> hook) {
         noteUriRepairHookForTests = hook;
@@ -4295,6 +4302,8 @@ public final class CatalogRepository {
                 java.util.Set<String> named = only == null ? null : new java.util.HashSet<>(only);
                 List<StaleNote> selected = named == null ? rewrite
                     : rewrite.stream().filter(c -> named.contains(c.tumbler())).toList();
+                Runnable censused = noteUriCensusedHookForTests;
+                if (censused != null) censused.run();
                 Rewritten done = rewriteStaleNotes(ctx, tenant, selected.subList(0, Math.min(limit, selected.size())));
                 out.put("rewritten", done.rows());
                 out.put("remaining", selected.size() - done.rows());

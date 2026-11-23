@@ -280,6 +280,41 @@ class NoteUriRepairContentTypeTest {
         assertThat(docUri(f.tenant, "n1")).isEqualTo(f.nx(label, "alpha"));
     }
 
+    /**
+     * The re-read filter of the write half ({@code rewriteStaleNotes}: the collections that are STILL knowledge, read FOR SHARE) is what keeps a
+     * row out that stopped being a note collection between the census and the lock. The flip runs at the census seam, after the census read and before the
+     * repair takes the registry row, so nothing of the repair's is held and the flip commits at once (no self-wait on the repair's own thread). The
+     * census still counted the row; the run ends at the filter, before the "checked" stage, and writes nothing.
+     */
+    @Test
+    void apply_aRowThatStoppedBeingKnowledgeBetweenTheCensusAndTheLockIsKeptOutByTheReReadFilter() throws Exception {
+        Fx f = new Fx("filter");
+        String label = registerLabel(f.tenant, "knowledge");
+        seedNote(f.tenant, "n1", label, f.nx(f.x1, "alpha"));
+        java.util.List<String> stages = new java.util.ArrayList<>();
+        CatalogRepository.setNoteUriRepairHookForTests(stages::add);
+        CatalogRepository.setNoteUriCensusedHookForTests(() -> {
+            try {
+                setContentType(f.tenant, label, "docs");
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        });
+
+        Map<String, Object> r;
+        try {
+            r = repo.repairStaleNoteUris(f.tenant, true, 1000, 5);
+        } finally {
+            CatalogRepository.setNoteUriCensusedHookForTests(null);
+            CatalogRepository.setNoteUriRepairHookForTests(null);
+        }
+
+        assertThat(r.get("rewrite")).as("the census ran before the flip and counted the row").isEqualTo(1);
+        assertThat(r.get("rewritten")).as("the re-read filter kept the retyped row out").isEqualTo(0);
+        assertThat(stages).as("the run reached the lock and ended at the filter, before the holder check").containsExactly("locked");
+        assertThat(docUri(f.tenant, "n1")).isEqualTo(f.nx(f.x1, "alpha"));
+    }
+
     @Test
     void apply_aRetypeOfTheCollectionBlocksUntilTheRepairCommits_andTheRowIsRewrittenOnceAsKnowledge() throws Exception {
         Fx f = new Fx("share-lock");

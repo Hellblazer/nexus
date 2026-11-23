@@ -523,6 +523,7 @@ final class TenantKeyedStateTables {
             "CatalogRepository.afterMovePreconditionHookForTests",
             "CatalogRepository.beforeReadHookForTests",
             "CatalogRepository.noteUriRepairHookForTests",
+            "CatalogRepository.noteUriCensusedHookForTests",
             "ReembedJobRepository.lockRetryHookForTests",
             "ReembedRunner.phaseHookForTests",
             "NexusService.reembedServedModelsForTests",

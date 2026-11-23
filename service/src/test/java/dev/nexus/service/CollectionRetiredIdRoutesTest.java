@@ -397,6 +397,18 @@ class CollectionRetiredIdRoutesTest {
         }
     }
 
+    /** linda's ruling covers writers addressed by ID only: by LABEL an empty batch opens no transaction and answers 200, as it did for released clients. */
+    @Test
+    void anEmptyPersistDiscoveredAndAnEmptyCentroidDelete_byAnUnregisteredLabel_answer200() {
+        String nobody = label("empty-by-label-" + (n++));
+        Resp discovered = fx.post("/v1/taxonomy/topics/persist_discovered", "{\"collection\":" + json(nobody) + ",\"specs\":[]}");
+        assertThat(discovered.status()).as(discovered.body()).isEqualTo(200);
+        assertThat(discovered.json().path("topic_ids")).as("an empty batch by an unregistered label is 200 []: %s", discovered.body()).isEmpty();
+        Resp deleted = fx.post("/v1/taxonomy/centroids/delete", "{\"collection\":" + json(nobody) + ",\"topic_ids\":[]}");
+        assertThat(deleted.status()).as(deleted.body()).isEqualTo(200);
+        assertThat(deleted.json().path("deleted").asInt(-1)).isZero();
+    }
+
     @Test
     void upsertChunks_byAnIdFreedAfterTheLookupsLandsNothingInTheNewHolder() {
         String a = registered("gap-upsert");
