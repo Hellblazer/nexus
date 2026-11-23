@@ -119,6 +119,9 @@ final class ManifestReplace {
         // RDR-229 P3.1: the registry's id, read in this transaction; a stored row that lacks it (the stamp has not
         // reached it) differs from the incoming one and is rewritten with it.
         final Long collectionId = rows.isEmpty() ? null : CollectionIds.require(ctx, tenant, collection);
+        // G17: a manifest row's name column is the referenced chunk's stored name, which a one-row rename leaves (see ManifestChunkNames)
+        final Map<String, String> chunkNames = gate3.holds()
+            ? ManifestChunkNames.of(ctx, tenant, collectionId, incoming.stream().map(Incoming::chashHex).toList()) : Map.of();
 
         List<Stored> stored = new ArrayList<>();
         for (Record r : ctx.select(CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
@@ -196,7 +199,7 @@ final class ManifestReplace {
                 .execute();
         }
         if (!toUpdate.isEmpty()) {
-            update(ctx, tenant, docId, collection, collectionId, embeddingModel, toUpdate);
+            update(ctx, tenant, docId, collection, collectionId, embeddingModel, toUpdate, chunkNames);
         }
         if (!toInsert.isEmpty()) {
             CatalogRepository.insertManifestChunkRows(ctx, tenant, docId, collection, toInsert,
@@ -211,11 +214,15 @@ final class ManifestReplace {
         // stamp's fourth column never differs from the clear's three.
         if (!incoming.isEmpty()) {
             List<Row3<String, String, byte[]>> listed = new ArrayList<>();
+            List<Row3<String, Long, byte[]>> listedById = new ArrayList<>();
             Set<String> seen = new HashSet<>();
             for (Incoming in : incoming) {
-                if (seen.add(in.chashHex())) listed.add(DSL.row(tenant, collection, HexFormat.of().parseHex(in.chashHex())));
+                if (!seen.add(in.chashHex())) continue;
+                listed.add(DSL.row(tenant, collection, HexFormat.of().parseHex(in.chashHex())));
+                listedById.add(DSL.row(tenant, collectionId, HexFormat.of().parseHex(in.chashHex())));
             }
-            clearRecords(ctx, listed);
+            // from gate 3 the orphan records are matched by the collection's id: their name is the chunk's stored one, not this label
+            if (gate3.holds()) clearRecordsById(ctx, listedById); else clearRecords(ctx, listed);
         }
         return before;
     }
@@ -243,7 +250,7 @@ final class ManifestReplace {
 
     /** One UPDATE ... FROM (VALUES ...): every payload column from the incoming row, so one statement-level trigger run. */
     private static void update(DSLContext ctx, String tenant, String docId, String collection, Long collectionId,
-                               String embeddingModel, List<Incoming> changed) {
+                               String embeddingModel, List<Incoming> changed, Map<String, String> chunkNames) {
         @SuppressWarnings("unchecked")
         Row14<Integer, byte[], Integer, Integer, Integer, Integer, Integer, String, Long, String, String, String,
             Integer, Boolean>[] values = changed.stream().map(in -> DSL.row(
@@ -254,7 +261,7 @@ final class ManifestReplace {
                 DSL.val(in.lineEnd(), SQLDataType.INTEGER).cast(SQLDataType.INTEGER),
                 DSL.val(in.charStart(), SQLDataType.INTEGER).cast(SQLDataType.INTEGER),
                 DSL.val(in.charEnd(), SQLDataType.INTEGER).cast(SQLDataType.INTEGER),
-                DSL.val(collection, SQLDataType.VARCHAR).cast(SQLDataType.VARCHAR),
+                DSL.val(ManifestChunkNames.nameFor(chunkNames, in.chashHex(), collection), SQLDataType.VARCHAR).cast(SQLDataType.VARCHAR),
                 DSL.val(collectionId, SQLDataType.BIGINT).cast(SQLDataType.BIGINT),
                 DSL.val(embeddingModel, SQLDataType.VARCHAR).cast(SQLDataType.VARCHAR),
                 DSL.val(in.sectionTitle(), SQLDataType.VARCHAR).cast(SQLDataType.VARCHAR),
@@ -283,6 +290,16 @@ final class ManifestReplace {
             .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId))
                 .and(CATALOG_DOCUMENT_CHUNKS.POSITION.eq(v.field("position", Integer.class))))
             .execute();
+    }
+
+    /** {@link #clearRecords} keyed by {@code (tenant, collection_id, chash)} (RDR-229 P3.5c, from gate 3). */
+    private static void clearRecordsById(DSLContext ctx, List<Row3<String, Long, byte[]>> keys) {
+        var key = DSL.row(CHUNK_ORPHANED_AT.TENANT_ID, CHUNK_ORPHANED_AT.COLLECTION_ID, CHUNK_ORPHANED_AT.CHASH);
+        var locked = ctx.selectOne().from(CHUNK_ORPHANED_AT).where(key.in(keys))
+            .orderBy(CHUNK_ORPHANED_AT.TENANT_ID, CHUNK_ORPHANED_AT.COLLECTION_ID, CHUNK_ORPHANED_AT.CHASH)
+            .forUpdate()
+            .fetch();
+        if (!locked.isEmpty()) ctx.deleteFrom(CHUNK_ORPHANED_AT).where(key.in(keys)).execute();
     }
 
     /** Deletes the orphaning records of {@code keys}, the rows locked first in key order (the stamp upserts' order). */

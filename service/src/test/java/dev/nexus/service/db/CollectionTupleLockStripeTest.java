@@ -182,7 +182,7 @@ class CollectionTupleLockStripeTest {
         assertThat(held.await(10, TimeUnit.SECONDS)).isTrue();
         CompletableFuture<Void> registration = CompletableFuture.runAsync(() -> scope.withTenant(T, ctx -> {
             CollectionMint.refuseHeldTuple(ctx, T, "knowledge__derivation__" + MODEL + "__v1", "knowledge", owner, MODEL, "v1",
-                "live", "");
+                "live", "", Gate3.never());
             return null;
         }));
         Thread.sleep(1500);
@@ -326,7 +326,7 @@ class CollectionTupleLockStripeTest {
             int held = scope.withTenant(T, ctx -> {
                 CollectionMint.refuseLiveTupleConflicts(ctx, T, freshRows("indexed-", 50), Gate3.never());
                 CollectionMint.refuseHeldTuple(ctx, T, "knowledge__indexed-one__" + MODEL + "__v1", "knowledge", "indexed-one",
-                    MODEL, "v1", "live", "");
+                    MODEL, "v1", "live", "", Gate3.never());
                 return advisoryLocksHeld(ctx);
             });
             assertThat(held).isZero();

@@ -6,6 +6,8 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.nexus.service.PgContainerHelper;
+import dev.nexus.service.RegistryRenameSupport;
+import dev.nexus.service.datamove.Gate3;
 import org.jooq.DSLContext;
 import org.jooq.Record3;
 import org.jooq.SQLDialect;
@@ -31,8 +33,8 @@ import java.util.Map;
  * conflict: the write inserts a new live row with its own id, where it used to revive the tombstone and keep its id.
  *
  * <p>Until P4.1 the name is still the primary key, a second arbiter beside the index, and a retired label still conflicts on it
- * and is revived. The first test is that state (the behaviour today, the guard); the second drops the key, as P3.7 and P4.1 do,
- * and requires the new row. The order is fixed, since the second changes the schema for the rest of the class.
+ * and is revived. The first test is that state (the behaviour today, the guard); the second drops the key as P4.1 will (P3.7 drops
+ * only the foreign keys onto the name; P4.1 drops the primary key and the (tenant, name, model) unique) and requires the new row. The order is fixed, since the second changes the schema for the rest of the class.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -82,28 +84,13 @@ class Rdr229P35cCollectionRenameReviveTest {
     private static Map<String, Integer> retire(DSLContext dsl, String from, String to) {
         Map<String, Integer> counts = new LinkedHashMap<>();
         CollectionRename.retireAndRegister(dsl, TENANT, from, to, CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
-            counts, new String[5]);
+            counts, new String[5], Gate3.never());
         return counts;
     }
 
-    /** Drops the foreign keys onto the registry and then its name primary key, as P3.7 and P4.1 do (typed, from pg_constraint). */
+    /** Drops the foreign keys onto the registry and then its name primary key and the (tenant, name, model) unique, as P4.1 will. */
     private static void dropNameKey(Connection su, DSLContext dsl) throws Exception {
-        var con = DSL.table(DSL.name("pg_catalog", "pg_constraint"));
-        var cls = DSL.table(DSL.name("pg_catalog", "pg_class"));
-        var nsp = DSL.table(DSL.name("pg_catalog", "pg_namespace"));
-        var target = DSL.function("to_regclass", Object.class, DSL.val("nexus.catalog_collections"));
-        for (Record3<String, String, String> fk : dsl
-                .select(DSL.field(DSL.name("pg_namespace", "nspname"), String.class),
-                        DSL.field(DSL.name("pg_class", "relname"), String.class),
-                        DSL.field(DSL.name("pg_constraint", "conname"), String.class))
-                .from(con)
-                .join(cls).on(DSL.field(DSL.name("pg_class", "oid")).eq(DSL.field(DSL.name("pg_constraint", "conrelid"))))
-                .join(nsp).on(DSL.field(DSL.name("pg_namespace", "oid")).eq(DSL.field(DSL.name("pg_class", "relnamespace"))))
-                .where(DSL.field(DSL.name("pg_constraint", "contype"), String.class).eq("f"))
-                .and(DSL.field(DSL.name("pg_constraint", "confrelid")).eq(target))
-                .fetch()) {
-            PgContainerHelper.dropConstraint(su, DSL.table(DSL.name(fk.value1(), fk.value2())), fk.value3());
-        }
+        RegistryRenameSupport.dropForeignKeysOntoTheRegistry(dsl);
         PgContainerHelper.dropConstraint(su, CATALOG_COLLECTIONS, "catalog_collections_pk");
         PgContainerHelper.dropConstraint(su, CATALOG_COLLECTIONS, "catalog_collections_tenant_name_model_uq");
     }

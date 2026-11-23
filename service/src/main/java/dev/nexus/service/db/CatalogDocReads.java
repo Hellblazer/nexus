@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import dev.nexus.service.datamove.Gate3;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
@@ -211,16 +212,16 @@ public final class CatalogDocReads {
     // ── statements ──────────────────────────────────────────────────────────
 
     /** The page statement: the document fields plus the window total, in tumbler order. Public so a plan test explains the product's own. */
-    public static ResultQuery<Record> pageQuery(DSLContext ctx, Condition where, int limit, int offset) {
-        List<SelectField<?>> fields = new ArrayList<>(List.of(CatalogRepository.documentFields()));
+    public static ResultQuery<Record> pageQuery(DSLContext ctx, Condition where, int limit, int offset, Gate3 gate3) {
+        List<SelectField<?>> fields = new ArrayList<>(List.of(CatalogRepository.documentFields(gate3)));
         fields.add(TOTAL);
         return ctx.select(fields).from(CATALOG_DOCUMENTS).where(where)
             .orderBy(CATALOG_DOCUMENTS.TUMBLER).limit(limit).offset(offset);
     }
 
     /** The page without the window total: the document fields in tumbler order. Public so a measurement can compare the two forms. */
-    public static ResultQuery<Record> pageRowsQuery(DSLContext ctx, Condition where, int limit, int offset) {
-        return ctx.select(CatalogRepository.documentFields()).from(CATALOG_DOCUMENTS).where(where)
+    public static ResultQuery<Record> pageRowsQuery(DSLContext ctx, Condition where, int limit, int offset, Gate3 gate3) {
+        return ctx.select(CatalogRepository.documentFields(gate3)).from(CATALOG_DOCUMENTS).where(where)
             .orderBy(CATALOG_DOCUMENTS.TUMBLER).limit(limit).offset(offset);
     }
 
@@ -235,7 +236,7 @@ public final class CatalogDocReads {
         return repo.tenantScope().withTenant(tenant, ctx -> {
             PgSession.setLocal(ctx, "statement_timeout", Integer.toString(Integer.getInteger(
                 CatalogRepository.FILLABLE_COUNT_TIMEOUT_PROPERTY, CatalogRepository.FILLABLE_COUNT_TIMEOUT_MS)));
-            var rows = pageQuery(ctx, where, limit, offset).fetch();
+            var rows = pageQuery(ctx, where, limit, offset, repo.gate3()).fetch();
             int count;
             if (!rows.isEmpty()) {
                 count = rows.get(0).get(TOTAL);
