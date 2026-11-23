@@ -8,8 +8,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.nexus.service.db.DeadlockRetry;
 import org.jooq.DSLContext;
+import org.jooq.Field;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -74,10 +76,21 @@ class Rdr229P37OneRowLockOrderTest {
             .fetch(0, String.class).stream().map(q -> q == null ? "" : q.toLowerCase()).toList());
     }
 
-    /** Backends of this database waiting for an ADVISORY lock (pg_locks, not granted). */
-    private int advisoryWaiters() {
+    /**
+     * Backends waiting for THIS sweep gate (pg_locks, not granted): the advisory lock of this database whose key is the gate's, {@code hashtext} of
+     * {@code sweepgate:<tenant>/<label>} as {@link #gate} takes it, a one-argument (bigint) advisory lock whose low 32 bits are pg_locks' {@code objid}.
+     * Filtered by database and key so another test's advisory waiter in the cluster is not counted (folio's r3 review F6).
+     */
+    private int advisoryWaiters(String tenant, String label) {
+        var pgDatabase = DSL.table(DSL.name("pg_catalog", "pg_database"));
+        var thisDatabase = DSL.select(DSL.field(DSL.name("pg_database", "oid"), Long.class)).from(pgDatabase)
+            .where(DSL.field(DSL.name("pg_database", "datname"), String.class).eq(DSL.function("current_database", String.class)));
+        Field<Long> key = DSL.function("hashtext", Long.class, DSL.val("sweepgate:" + tenant + "/" + label)).cast(SQLDataType.BIGINT)
+            .bitAnd(DSL.inline(4294967295L));
         return engine.su(ctx -> ctx.fetchCount(DSL.table(DSL.name("pg_catalog", "pg_locks")),
-            DSL.field(DSL.name("locktype"), String.class).eq("advisory").and(DSL.field(DSL.name("granted"), Boolean.class).isFalse())));
+            DSL.field(DSL.name("locktype"), String.class).eq("advisory").and(DSL.field(DSL.name("granted"), Boolean.class).isFalse())
+                .and(DSL.field(DSL.name("database"), Long.class).eq(DSL.field(thisDatabase)))
+                .and(DSL.field(DSL.name("objid"), Long.class).cast(SQLDataType.BIGINT).eq(key))));
     }
 
     /**
@@ -151,7 +164,7 @@ class Rdr229P37OneRowLockOrderTest {
         try (Connection h = engine.pg.createConnection(""); Connection w = engine.pg.createConnection("")) {
             h.setAutoCommit(false);
             DSL.using(h, SQLDialect.POSTGRES).select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
-                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(t))).forUpdate().fetch();   // stalls the rename after its name UPDATE
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(t))).forUpdate().fetch();   // T names A, so it is in the rename's ordered FOR UPDATE: the rename stalls there
             int base = lockWaiters();
             long retriesBefore = DeadlockRetry.retryAttemptCount();
             Future<Rdr229RenameEngine.Renamed> rename = pool.submit(() -> engine.rename(token, a, b));
@@ -207,7 +220,7 @@ class Rdr229P37OneRowLockOrderTest {
             w.setAutoCommit(false);
             DSLContext wc = DSL.using(w, SQLDialect.POSTGRES);
             gate(wc, "pg_advisory_xact_lock_shared", tenant, a).fetch();   // the writer holds only the shared gate
-            int advisoryBase = advisoryWaiters();
+            int advisoryBase = advisoryWaiters(tenant, a);
 
             s.setAutoCommit(false);
             Future<?> sweep = pool.submit(() -> {
@@ -215,10 +228,10 @@ class Rdr229P37OneRowLockOrderTest {
                 s.commit();
                 return null;
             });
-            assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(30), () -> advisoryWaiters() > advisoryBase)).as("the sweep is queued behind the writer").isTrue();
+            assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(30), () -> advisoryWaiters(tenant, a) > advisoryBase)).as("the sweep is queued behind the writer").isTrue();
             long retriesBefore = DeadlockRetry.retryAttemptCount();
             Future<Rdr229RenameEngine.Renamed> rename = pool.submit(() -> engine.rename(token, a, b));
-            assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(30), () -> advisoryWaiters() > advisoryBase + 1))
+            assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(30), () -> advisoryWaiters(tenant, a) > advisoryBase + 1))
                 .as("the rename queues behind the sweep, on the ADVISORY gate (pg_locks)").isTrue();
 
             // only now does the writer take its registry row lock and write: with the rename holding no row, this is granted at once
@@ -259,7 +272,7 @@ class Rdr229P37OneRowLockOrderTest {
         try (Connection h = engine.pg.createConnection("")) {
             h.setAutoCommit(false);
             DSL.using(h, SQLDialect.POSTGRES).select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
-                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(t))).forUpdate().fetch();   // stalls the rename after its name UPDATE
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(t))).forUpdate().fetch();   // T names A, so it is in the rename's ordered FOR UPDATE: the rename stalls there
             int base = lockWaiters();
             long retriesBefore = DeadlockRetry.retryAttemptCount();
             Future<Rdr229RenameEngine.Renamed> rename = pool.submit(() -> engine.rename(token, a, b));
@@ -317,11 +330,11 @@ class Rdr229P37OneRowLockOrderTest {
             try (Connection g = engine.pg.createConnection("")) {
                 g.setAutoCommit(false);
                 gate(DSL.using(g, SQLDialect.POSTGRES), "pg_advisory_xact_lock", tenant, a).fetch();   // both renames queue here, past the handler
-                int advisoryBase = advisoryWaiters();
+                int advisoryBase = advisoryWaiters(tenant, a);
                 long retriesBefore = DeadlockRetry.retryAttemptCount();
                 Future<Rdr229RenameEngine.Renamed> r1 = pool.submit(() -> engine.rename(token, a, x));
                 Future<Rdr229RenameEngine.Renamed> r2 = pool.submit(() -> engine.rename(token, a, y));
-                assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(30), () -> advisoryWaiters() >= advisoryBase + 2))
+                assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(30), () -> advisoryWaiters(tenant, a) >= advisoryBase + 2))
                     .as("non-vacuity: both renames passed the handler and wait on the sweep gate inside their transactions").isTrue();
                 g.commit();   // released together into the registry row locks
                 var o1 = r1.get(120, TimeUnit.SECONDS);
