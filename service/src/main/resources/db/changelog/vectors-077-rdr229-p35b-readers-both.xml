@@ -6998,7 +6998,7 @@ BEGIN
                       JOIN pg_catalog.pg_namespace ns ON ns.oid = ic.relnamespace
                       JOIN pg_catalog.pg_index ix ON ix.indexrelid = ic.oid
                      WHERE ns.nspname = 'nexus' AND ic.relname = v_p35b_con AND ix.indisunique
-                       AND ix.indrelid = 'nexus.chunk_orphaned_at'::regclass
+                       AND coalesce(pg_catalog.pg_partition_root(ix.indrelid), ix.indrelid) = 'nexus.chunk_orphaned_at'::regclass
                        AND (SELECT pg_catalog.array_agg(a.attname::text ORDER BY a.attname)
                               FROM pg_catalog.pg_attribute a
                              WHERE a.attrelid = ix.indrelid AND a.attnum = ANY (ix.indkey))
@@ -7135,7 +7135,7 @@ BEGIN
                       JOIN pg_catalog.pg_namespace ns ON ns.oid = ic.relnamespace
                       JOIN pg_catalog.pg_index ix ON ix.indexrelid = ic.oid
                      WHERE ns.nspname = 'nexus' AND ic.relname = v_p35b_con AND ix.indisunique
-                       AND ix.indrelid = 'nexus.chunk_orphaned_at'::regclass
+                       AND coalesce(pg_catalog.pg_partition_root(ix.indrelid), ix.indrelid) = 'nexus.chunk_orphaned_at'::regclass
                        AND (SELECT pg_catalog.array_agg(a.attname::text ORDER BY a.attname)
                               FROM pg_catalog.pg_attribute a
                              WHERE a.attrelid = ix.indrelid AND a.attnum = ANY (ix.indkey))
