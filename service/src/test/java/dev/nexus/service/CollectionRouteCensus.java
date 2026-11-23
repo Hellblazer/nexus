@@ -555,6 +555,7 @@ final class CollectionRouteCensus {
         java.util.Map.entry("db/CombinedWriteService.java", new Resolving(6, "the manifest write, append and write_many routes; the metadata refresh transaction's registry check (requireWritable) is the sixth")),
         java.util.Map.entry("db/DepartedWriterSpans.java", new Resolving(1, "the manifest write routes' departed-writer fill")),
         java.util.Map.entry("db/DocumentCollectionRef.java", new Resolving(6, "the document routes: the one resolver of physical_collection_id; a document request's id is read FOR KEY SHARE in the write's transaction (requireIdForWrite); a request by label takes the key share first too (requireForWriteIfPresent); a batch reads its labels in one statement in id order")),
+        java.util.Map.entry("db/GraphScopeFilter.java", new Resolving(1, "the graph traversal's scope: each collection label of a graph request resolved to its registry id (CollectionRegistry.shared().resolveLabel; a read, no lock)")),
         java.util.Map.entry("db/GcCollectionReads.java", new Resolving(3, "the four /v1/vectors/gc writes: the origin and a by-id sibling, read in the write's transaction; the origin again when the restore function refused it")),
         java.util.Map.entry("db/ManifestReplace.java", new Resolving(3, "the manifest write routes; an empty manifest reads the registry row too (requireForWriteIfPresent)")),
         java.util.Map.entry("db/PipelineRepository.java", new Resolving(2, "the /v1/pipeline create and delete_collection rows")),

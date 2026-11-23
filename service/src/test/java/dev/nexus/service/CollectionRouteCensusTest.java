@@ -153,7 +153,7 @@ class CollectionRouteCensusTest {
 
     /** A call that resolves a collection through the registry or the id helpers. */
     private static final Pattern RESOLVE_CALL = Pattern.compile(
-        "\\b(?:CollectionRegistry|CollectionIds|CatalogIdStamps|DocumentCollectionRef|registry)\\s*\\.\\s*"
+        "\\b(?:CollectionRegistry\\s*\\.\\s*shared\\s*\\(\\s*\\)|CollectionRegistry|CollectionIds|CatalogIdStamps|DocumentCollectionRef|registry)\\s*\\.\\s*"
             + "(?:require\\w*|lookup\\w*|resolve\\w*|idOf|requireMemo|normalize\\w*|lifecycleState)\\s*\\(");
 
     private static final Path MAIN_DIR = Path.of("src/main/java/dev/nexus/service");
