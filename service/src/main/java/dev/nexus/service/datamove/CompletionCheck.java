@@ -584,11 +584,13 @@ public final class CompletionCheck {
             Boolean validated = twinValidated.get(twin.get().constraint());
             if (validated == null) {
                 return tables.contains(table)
-                    ? new LabelState(label, table, Status.INCOMPLETE, "foreign key " + twin.get().constraint() + " is missing")
+                    ? new LabelState(label, table, Status.INCOMPLETE, "foreign key " + twin.get().constraint() + " is missing"
+                        + waitingOn(ctx, label))
                     : new LabelState(label, table, Status.COMPLETE, "");
             }
             return validated ? new LabelState(label, table, Status.COMPLETE, "")
-                : new LabelState(label, table, Status.INCOMPLETE, "foreign key " + twin.get().constraint() + " is NOT VALID");
+                : new LabelState(label, table, Status.INCOMPLETE, "foreign key " + twin.get().constraint() + " is NOT VALID"
+                    + waitingOn(ctx, label));
         }
         if (table == null || !checksByTable.containsKey(table)) {
             return new LabelState(label, table, Status.COMPLETE, "");
@@ -615,6 +617,30 @@ public final class CompletionCheck {
         // no count in the text: it goes out on the unauthenticated /v1/status (GET /v1/catalog/rdr229_completion_counts has the caller's own)
         return new LabelState(label, table, Status.INCOMPLETE, "CHECK "
             + waiting.stream().map(Violators::constraint).collect(java.util.stream.Collectors.joining(", ")) + " is NOT VALID");
+    }
+
+    /**
+     * For the chunks swap label only: the work that really holds its composite, which is not the swap (it completed) but the per-leaf validation
+     * moves and the adoption move it registered. Counts and the one fixed label only: the status is unauthenticated, so no leaf or tenant is named.
+     */
+    private static String waitingOn(DSLContext ctx, String label) {
+        if (!label.equals(LeafIndexPass.swapLabel("chunks"))) {
+            return "";
+        }
+        try {
+            var r = ctx.fetchOne("SELECT count(*) FILTER (WHERE label LIKE ? AND completed_at IS NULL), "
+                + "count(*) FILTER (WHERE label = ? AND completed_at IS NULL) FROM nexus.data_moves",
+                dev.nexus.service.vectors.Rdr229ChunksFk.LEAF_LABEL_PREFIX + "%", dev.nexus.service.vectors.Rdr229ChunksFk.ADOPT_LABEL);
+            long leaves = r == null ? 0 : r.get(0, Long.class);
+            boolean adopt = r != null && r.get(1, Long.class) > 0;
+            if (leaves == 0 && !adopt) {
+                return "";
+            }
+            return "; waiting on " + (leaves > 0 ? leaves + " leaf validation move(s)" : "")
+                + (leaves > 0 && adopt ? " and " : "") + (adopt ? "the adoption move " + dev.nexus.service.vectors.Rdr229ChunksFk.ADOPT_LABEL : "");
+        } catch (org.jooq.exception.DataAccessException e) {
+            return "";
+        }
     }
 
     /** A move row, as far as the check reads it. */
