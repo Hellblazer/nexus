@@ -6080,6 +6080,20 @@ public final class CatalogRepository {
     }
 
     /**
+     * The sweep gate EXCLUSIVE with no bound of its own, for a {@code /v1/vectors/gc} write that takes in Java the gate its SQL function
+     * takes first (RDR-229 P3.5a, {@link GcCollectionReads}): the lock order is the gate, then the registry row, then the function, so the
+     * gate has to be held before the row is read. The function's own take of the same key is a no-op (advisory locks are re-entrant in a
+     * transaction), and the route's lock and statement bounds, set before this call, govern the wait exactly as they governed the
+     * function's.
+     */
+    public static void acquireSweepGateExclusiveHeldByGc(DSLContext ctx, String tenant, String collection) {
+        WriteRegistryMemo.assertGateFirst(ctx, tenant, collection);
+        ctx.select(DSL.function("pg_advisory_xact_lock", Object.class,
+                   DSL.function("hashtext", Integer.class, DSL.val("sweepgate:" + tenant + "/" + collection))))
+           .fetch();
+    }
+
+    /**
      * EXCLUSIVE half of the gate, taken ONLY by the sweep's own transaction
      * ({@link #runSweepTransaction}) — never inside a manifest-insert
      * transaction, which would deadlock a shared-to-exclusive upgrade
@@ -11953,7 +11967,9 @@ public final class CatalogRepository {
             try {
                 CollectionRegistry.requireAllForWrite(ctx, tenant, List.of(source, target));
             } catch (UnregisteredCollectionException none) {
-                // a label with no row: the refusal below names the end, as it always did
+                // a label with no row (the single-label path of requireAllForWrite refuses it): the helper below refuses that end as it always did.
+                // It reads the other end one row after the first, not in id order; harmless, because this path always ends in that refusal
+                // and the transaction takes no write before it.
             }
             final CollectionRow sourceRow = lockedLiveCollection(ctx, tenant, source, "source");
             final CollectionRow targetRow = lockedLiveCollection(ctx, tenant, target, "target");
