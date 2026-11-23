@@ -7161,12 +7161,12 @@ FROM scope s
         // collection's registration now happens INSIDE
         // nexus.gc_restore_rereferenced, guarded on there being a restore to
         // perform (see catalog-024-quarantine-collection-registration.xml).
-        return tenantScope.withTenant(tenant, ctx -> {
+        return GcCollectionReads.attempt(GcCollectionReads.Gate.NONE, originCollection, quarantineCollection, gate -> tenantScope.withTenant(tenant, ctx -> {
             GcCollectionReads.beforeMove();
             // P3.5a: the function takes no sweep gate (catalog-042), so the rows are read first, then it runs with their current labels
             var labels = GcCollectionReads.enter(ctx, tenant, GcCollectionReads.Gate.NONE, originCollection, originCollection, quarantineCollection);
             return Routines.gcRestoreRereferenced(ctx.configuration(), dim, tenant, labels.sibling(), labels.origin());
-        });
+        }));
     }
 
     /**
@@ -7228,7 +7228,7 @@ FROM scope s
                                                               String originCollection, int rowLimit,
                                                               int statementTimeoutMs, int lockTimeoutMs,
                                                               int dim, LedgerMarker<RestoreBoundedOutcome> marker) {
-        return tenantScope.withTenant(tenant, ctx -> {
+        return GcCollectionReads.attempt(GcCollectionReads.Gate.NONE, originCollection, quarantineCollection, gate -> tenantScope.withTenant(tenant, ctx -> {
             PgSession.setStatementAndLockBounds(ctx, statementTimeoutMs, lockTimeoutMs);
             GcCollectionReads.beforeMove();
             var labels = GcCollectionReads.enter(ctx, tenant, GcCollectionReads.Gate.NONE, originCollection, originCollection, quarantineCollection);
@@ -7241,7 +7241,7 @@ FROM scope s
             var outcome = new RestoreBoundedOutcome(restored, remaining);
             marker.mark(ctx, outcome);
             return outcome;
-        });
+        }));
     }
 
     /**
@@ -7942,7 +7942,7 @@ FROM scope s
                                                          Long sourceAuditId, QuarantineRestoreOutcome.Source source,
                                                          String nextAfter, KeyedRestore keyed) {
         try {
-            return GcCollectionReads.attempt(siblings.isEmpty() ? GcCollectionReads.Gate.NONE : GcCollectionReads.Gate.ORIGIN,
+            return GcCollectionReads.attemptRestore(siblings.isEmpty() ? GcCollectionReads.Gate.NONE : GcCollectionReads.Gate.ORIGIN,
                                              originCollection, null, gate -> tenantScope.withTenant(tenant, ctx -> {
                 var byChash = new java.util.LinkedHashMap<String, QuarantineRestoreOutcome.Row>();
                 for (String h : hex) byChash.putIfAbsent(h, missingRow(h));
@@ -8041,7 +8041,7 @@ FROM scope s
                                             String[] hex, String actor, boolean dryRun, boolean reattach,
                                             Long sourceAuditId) {
         try {
-            return GcCollectionReads.attempt(GcCollectionReads.Gate.ORIGIN, originCollection, quarantineCollection, gate -> tenantScope.withTenant(tenant, ctx -> {
+            return GcCollectionReads.attemptRestore(GcCollectionReads.Gate.ORIGIN, originCollection, quarantineCollection, gate -> tenantScope.withTenant(tenant, ctx -> {
                 PgSession.setStatementAndLockBounds(ctx, PgSession.DEFAULT_GC_RESTORE_BOUNDED_STATEMENT_TIMEOUT_MS,
                                                     PgSession.DEFAULT_GC_RESTORE_BOUNDED_LOCK_TIMEOUT_MS);
                 GcCollectionReads.beforeMove();
@@ -8152,7 +8152,7 @@ FROM scope s
                                            String cutoff, double floorFraction, int floorMinChunks,
                                            boolean force, int statementTimeoutMs) {
         int dim = dimForCollection(tenant, originCollection);
-        var rec = tenantScope.withTenant(tenant, ctx -> {
+        var rec = GcCollectionReads.attempt(GcCollectionReads.Gate.NONE, originCollection, quarantineCollection, gate -> tenantScope.withTenant(tenant, ctx -> {
             if (statementTimeoutMs > 0) {
                 PgSession.setStatementAndLockBounds(ctx, statementTimeoutMs, 2_000);
             }
@@ -8164,7 +8164,7 @@ FROM scope s
                     floorFraction, floorMinChunks, force))
                .fetchOne();
             return expired;
-        });
+        }));
         return new ExpireOutcome(rec.get(GC_EXPIRE_QUARANTINE.EXPIRED), rec.get(GC_EXPIRE_QUARANTINE.REFUSED));
     }
 

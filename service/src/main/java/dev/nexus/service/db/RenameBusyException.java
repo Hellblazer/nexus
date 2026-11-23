@@ -22,6 +22,16 @@ public final class RenameBusyException extends RuntimeException {
             + "; nothing was changed, retry shortly");
     }
 
+    private RenameBusyException(String message, Throwable cause) {
+        super(message, cause);
+    }
+
+    /** A gc route's read of the collection's registry row ended at its bound because a retiring verb held the row. */
+    static RenameBusyException registryRowHeld(Throwable cause) {
+        return new RenameBusyException("the collection's registry row is held by a rename or supersede in progress: the write waited and gave up; "
+            + "nothing was changed, retry shortly", cause);
+    }
+
     private RenameBusyException(String message, boolean verbatim) {
         super(message);
     }

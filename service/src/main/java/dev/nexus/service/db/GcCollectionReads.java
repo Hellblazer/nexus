@@ -52,8 +52,42 @@ public final class GcCollectionReads {
     public record Labels(String origin, String sibling) {
     }
 
-    /** Runs {@code attempt} (one transaction, taking the gate of the label it is given) and again when the row turned out to be renamed. */
+    /**
+     * The registry wait of {@link #enter} ended by a bound (a verb held the row past the statement bound, or a lock timeout): carries the
+     * database error, whose SQLSTATE the restore routes read ({@code asRestoreBusy}); every other gc route answers it as
+     * {@link RenameBusyException} ({@link #attempt}).
+     */
+    public static final class RegistryWaitTimedOut extends RuntimeException {
+        RegistryWaitTimedOut(Throwable cause) {
+            super("the collection's registry row is held by a retiring verb: " + cause.getMessage(), cause);
+        }
+    }
+
+    private static volatile int registryReadBoundMs = 25_000;
+
+    /** Test-only: the statement bound of a registry read on a route that sets none, in ms; clear with 25000. Never set by production code. */
+    public static void setRegistryReadBoundForTests(int ms) {
+        registryReadBoundMs = ms;
+    }
+
+    /**
+     * Runs {@code attempt} (one transaction, taking the gate of the label it is given) and again when the row turned out to be renamed. A
+     * registry row held past the read's bound answers {@link RenameBusyException} (503 {@code rename_busy}, retryable): the typed busy of the
+     * quarantine, expire and restore-rereferenced routes, keyed or not.
+     */
     public static <T> T attempt(Gate gate, String origin, String sibling, java.util.function.Function<String, T> attempt) {
+        try {
+            return attemptRestore(gate, origin, sibling, attempt);
+        } catch (RegistryWaitTimedOut busy) {
+            throw RenameBusyException.registryRowHeld(busy);
+        }
+    }
+
+    /**
+     * {@link #attempt} for the quarantine RESTORE routes: a registry wait ended by the route's statement bound propagates with its SQLSTATE,
+     * which {@code PgVectorRepository#asRestoreBusy} answers as the typed 503 {@code quarantine_restore_busy} those routes always had.
+     */
+    public static <T> T attemptRestore(Gate gate, String origin, String sibling, java.util.function.Function<String, T> attempt) {
         return RenameFollow.run(gate == Gate.SIBLING && sibling != null ? sibling : origin, attempt);
     }
 
@@ -73,10 +107,28 @@ public final class GcCollectionReads {
             CatalogRepository.acquireSweepGateExclusiveHeldByGc(ctx, tenant, gateLabel);
         }
         ctx.select(DSL.function("set_config", String.class, DSL.val("lock_timeout"), DSL.val("0"), DSL.val(true))).fetch();
+        // A route that sets no statement bound of its own (the unbounded forms) gets one for the registry reads, so a row a verb holds ends the
+        // wait as a typed busy answer instead of hanging the request; a route with a bound keeps it (restore: the 25 s, 503 quarantine_restore_busy)
+        boolean noStatementBound = "0".equals(ctx.fetchValue(DSL.function("current_setting", String.class, DSL.val("statement_timeout"))));
+        if (noStatementBound) {
+            PgSession.setLocal(ctx, "statement_timeout", Integer.toString(registryReadBoundMs));
+        }
         boolean siblingById = sibling != null && ExpectedCollectionIds.of(sibling).isPresent();
-        CollectionRegistry.requireAllForWrite(ctx, tenant, siblingById ? java.util.List.of(origin, sibling) : java.util.List.of(origin));
-        CollectionRow originRow = CollectionRegistry.requireForWrite(ctx, tenant, origin);
-        CollectionRow siblingRow = siblingById ? CollectionRegistry.requireForWrite(ctx, tenant, sibling) : null;
+        CollectionRow originRow;
+        CollectionRow siblingRow;
+        try {
+            CollectionRegistry.requireAllForWrite(ctx, tenant, siblingById ? java.util.List.of(origin, sibling) : java.util.List.of(origin));
+            originRow = CollectionRegistry.requireForWrite(ctx, tenant, origin);
+            siblingRow = siblingById ? CollectionRegistry.requireForWrite(ctx, tenant, sibling) : null;
+        } catch (org.jooq.exception.DataAccessException e) {
+            if (SqlConstraints.isLockNotAvailable(e) || "57014".equals(e.sqlState())) {
+                throw new RegistryWaitTimedOut(e);
+            }
+            throw e;
+        }
+        if (noStatementBound) {
+            PgSession.setLocal(ctx, "statement_timeout", "0");
+        }
         if (gate == Gate.ORIGIN) {
             RenameFollow.check(gateLabel, originRow);
         } else if (gate == Gate.SIBLING && siblingRow != null) {
