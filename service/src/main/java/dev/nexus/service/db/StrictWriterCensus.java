@@ -90,7 +90,7 @@ final class StrictWriterCensus {
                 return;
             }
             examined++;
-            if (WriteRegistryMemo.heldOrExempt(c.configuration())) {
+            if (WriteRegistryMemo.isExempt(c.configuration())) {
                 return;
             }
             String where = "?";
@@ -101,13 +101,44 @@ final class StrictWriterCensus {
                     break;
                 }
             }
-            String finding = m.group(1) + " @ " + where;
-            FOUND.add(finding);
-            if ("strict".equals(mode)) {
-                throw new IllegalStateException("registry check missing: a write of " + m.group(1) + " in a transaction that read no registry row ("
-                    + where + "); read the collection's row FOR KEY SHARE first, or tag the transaction exempt with the reason");
+            if (!WriteRegistryMemo.holdsAny(c.configuration())) {
+                String finding = m.group(1) + " @ " + where;
+                FOUND.add(finding);
+                report("NO_REGISTRY_READ " + finding);
+                if ("strict".equals(mode)) {
+                    throw new IllegalStateException("registry check missing: a write of " + m.group(1) + " in a transaction that read no registry row ("
+                        + where + "); read the collection's row FOR KEY SHARE first, or tag the transaction exempt with the reason");
+                }
+                log.warn("event=writer_census_violation table={} at={}", m.group(1), where);
+                return;
             }
-            log.warn("event=writer_census_violation table={} at={}", m.group(1), where);
+            // The transaction holds some registry row. When the statement binds the collection it writes (its label or id), that row must be one
+            // of those held; a statement that binds none is not judged (a write keyed by a document or a pipeline id names no collection).
+            java.util.List<Object> binds = c.query() == null ? java.util.List.of() : c.query().getBindValues();
+            boolean namesACollection = binds.stream().anyMatch(b -> b instanceof String || b instanceof Long);
+            if (namesACollection && !WriteRegistryMemo.holdsOneOf(c.configuration(), binds)) {
+                String finding = m.group(1) + " @ " + where + " [holds another collection's row, or the statement binds no held collection]";
+                FOUND.add(finding);
+                report("OTHER_COLLECTION " + finding);
+                log.warn("event=writer_census_other_collection table={} at={}", m.group(1), where);
+            }
+        }
+    }
+
+    /**
+     * Writes a finding where a run can read it: one line to the file named by {@code -Dnexus.writer.census.report} (default
+     * {@code target/writer-census-violations.txt}, under the engine module). A recording run's findings are read from there after the suite.
+     */
+    private static synchronized void report(String line) {
+        try {
+            java.nio.file.Path path = java.nio.file.Path.of(System.getProperty("nexus.writer.census.report", "target/writer-census-violations.txt"));
+            if (path.getParent() != null) {
+                java.nio.file.Files.createDirectories(path.getParent());
+            }
+            java.nio.file.Files.writeString(path, line + System.lineSeparator(), java.nio.file.StandardOpenOption.CREATE,
+                java.nio.file.StandardOpenOption.APPEND);
+        } catch (java.io.IOException e) {
+            log.warn("event=writer_census_report_failed error={}", e.toString());
         }
     }
 }

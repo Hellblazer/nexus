@@ -99,18 +99,40 @@ final class WriteRegistryMemo {
         ctx.configuration().data().put(EXEMPT, why);
     }
 
-    /** True when this transaction holds a registry row (the memo has an entry) or is tagged exempt. */
-    static boolean heldOrExempt(org.jooq.Configuration configuration) {
-        if (configuration.data().containsKey(EXEMPT)) {
-            return true;
+    /**
+     * True when a registry row this transaction holds is named by one of {@code binds}: its label as a string, or its id (also as its {@code #id}
+     * key). The census's "the memo holds THIS statement's collection" for a statement whose bind values carry the collection it writes.
+     */
+    static boolean holdsOneOf(org.jooq.Configuration configuration, java.util.Collection<?> binds) {
+        Object m = configuration.data().get(KEY);
+        if (m == null) {
+            return false;
         }
+        for (Object held : ((Map<?, ?>) m).values()) {
+            if (held instanceof CollectionRow row) {
+                for (Object b : binds) {
+                    if (row.label().equals(b) || (b instanceof Number n && n.longValue() == row.collectionId())) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    /** True when this transaction is tagged exempt. */
+    static boolean isExempt(org.jooq.Configuration configuration) {
+        return configuration.data().containsKey(EXEMPT);
+    }
+
+    /** True when this transaction holds a registry row (the memo has an entry). */
+    static boolean holdsAny(org.jooq.Configuration configuration) {
         Object m = configuration.data().get(KEY);
         return m != null && !((Map<?, ?>) m).isEmpty();
     }
 
     /** Drops every entry of this transaction: it changed the registry, or rolled back to a savepoint. */
     static void forget(DSLContext ctx) {
-        exempt(ctx, "the transaction wrote the registry row");
         Object m = ctx.configuration().data().get(KEY);
         if (m != null) {
             ((Map<?, ?>) m).clear();

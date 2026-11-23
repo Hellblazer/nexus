@@ -53,22 +53,35 @@ class StrictWriterCensusTest {
     }
 
     @Test
-    void aWriteAfterARegistryRead_aTaggedExemptTransaction_andARegistryWriter_pass() {
+    void aWriteAfterTheReadOfItsCollection_andAWriteInATaggedExemptTransaction_pass() {
         StrictWriterCensus.setModeForTests("strict");
         DSLContext read = txn();
-        WriteRegistryMemo.put(read, "t", "x", new CollectionRow("code", "o", "voyage-code-3", 1024, "live"));
+        WriteRegistryMemo.put(read, "t", "x", row(7, "x"));   // the statement binds the label "x"
         writeChunk(read);
 
         DSLContext exempt = txn();
         WriteRegistryMemo.exempt(exempt, "a background writer");
         writeChunk(exempt);
 
-        DSLContext registryWriter = txn();
-        WriteRegistryMemo.forget(registryWriter);
-        writeChunk(registryWriter);
-
         assertThat(StrictWriterCensus.violations()).isEmpty();
-        assertThat(StrictWriterCensus.examined()).as("non-vacuity: the census looked at the three writes").isEqualTo(3);
+        assertThat(StrictWriterCensus.examined()).as("non-vacuity: the census looked at the two writes").isEqualTo(2);
+    }
+
+    @Test
+    void aTransactionThatWroteTheRegistryRow_isNoLongerExemptForTheWritesAfterIt() {
+        StrictWriterCensus.setModeForTests("strict");
+        DSLContext registryWriter = txn();
+        WriteRegistryMemo.forget(registryWriter);   // dropped the memo after its own UPDATE of the row: it holds nothing now
+        assertThatThrownBy(() -> writeChunk(registryWriter)).hasStackTraceContaining("registry check missing");
+    }
+
+    @Test
+    void aWriteThatBindsAnotherCollectionThanTheOneHeld_isRecordedButDoesNotThrow() {
+        StrictWriterCensus.setModeForTests("strict");
+        DSLContext ctx = txn();
+        WriteRegistryMemo.put(ctx, "t", "held", row(9, "held"));
+        writeChunk(ctx);   // binds "x" and "t"; the row held is "held"
+        assertThat(StrictWriterCensus.violations()).singleElement().asString().contains("holds another collection");
     }
 
     @Test
