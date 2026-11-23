@@ -37,4 +37,17 @@ class Rdr229P35cDepartedSpansNullIdTest extends AtomicWriteTestBase {
         tenantScope.withTenant(TENANT, ctx -> DepartedWriterSpans.clear(ctx, TENANT, List.of(span(name, null)), Gate3.never()));
         assertThat(DepartedWriterSpans.unresolvedSpans()).as("before the latch the name is the key: not unresolved").isEqualTo(beforeName);
     }
+
+    /** A pass reads the gate once: a signal that flips between two reads answers the same to everything the pass hands it to (folio F1). */
+    @Test
+    void aPassReadsTheGateOnce_aSignalThatFlipsBetweenReadsAnswersTheSameToTheWholePass() {
+        int[] reads = {0};
+        Gate3 flipsAtTheSecondRead = () -> reads[0]++ >= 1;
+        Gate3 pass = DepartedWriterSpans.pinned(flipsAtTheSecondRead);
+        boolean first = pass.holds();
+        boolean second = pass.holds();
+        assertThat(reads[0]).as("the live signal was read exactly once").isEqualTo(1);
+        assertThat(first).isEqualTo(second);
+        assertThat(flipsAtTheSecondRead.holds()).as("non-vacuity: the live signal does flip on a second read").isTrue();
+    }
 }

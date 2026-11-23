@@ -206,6 +206,11 @@ public final class CollectionTombstones {
         // written is the row's current one and the row cannot be retired under the statement
         String label = CollectionRegistry.requireIdForWrite(ctx, tenant, toId).label();
         WriteRegistryMemo.forget(ctx);   // the statement below writes registry rows
+        // the tombstones' rows FOR UPDATE, in collection_id order (a retiring verb's order, CollectionTombstones.lockRows), before the update
+        // (folio review F4: the update used to take them in whatever order it met them)
+        ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.eq(fromId))
+            .orderBy(CATALOG_COLLECTIONS.COLLECTION_ID).forUpdate().fetch();
         return ctx.update(CATALOG_COLLECTIONS)
             .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, toId)
             .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, label)
