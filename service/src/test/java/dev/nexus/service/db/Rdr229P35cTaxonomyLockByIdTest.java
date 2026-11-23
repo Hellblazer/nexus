@@ -40,7 +40,7 @@ class Rdr229P35cTaxonomyLockByIdTest extends AtomicWriteTestBase {
         registerCollection(unrelated);
         CountDownLatch held = new CountDownLatch(1), release = new CountDownLatch(1);
         CompletableFuture<Void> holder = CompletableFuture.runAsync(() -> tenantScope.withTenant(TENANT, ctx -> {
-            TaxonomyCollectionLock.lockTaxonomyCollection(ctx, TENANT, oldLabel);
+            TaxonomyCollectionLock.lockAndRequireWritable(ctx, TENANT, oldLabel);
             held.countDown();
             try {
                 release.await(30, TimeUnit.SECONDS);
@@ -58,12 +58,12 @@ class Rdr229P35cTaxonomyLockByIdTest extends AtomicWriteTestBase {
             }
 
             tenantScope.withTenant(TENANT, ctx -> {
-                TaxonomyCollectionLock.lockTaxonomyCollection(ctx, TENANT, unrelated);
+                TaxonomyCollectionLock.lockAndRequireWritable(ctx, TENANT, unrelated);
                 return null;
             });   // an unrelated collection takes its lock at once
 
             assertThatThrownBy(() -> tenantScope.withTenant(TENANT, ctx -> {
-                TaxonomyCollectionLock.lockTaxonomyCollection(ctx, TENANT, newLabel);
+                TaxonomyCollectionLock.lockAndRequireWritable(ctx, TENANT, newLabel);
                 return null;
             })).as("the same collection under its new label waits for the first, and times out (lock timeout) while it is held")
                 .hasStackTraceContaining("lock timeout");
