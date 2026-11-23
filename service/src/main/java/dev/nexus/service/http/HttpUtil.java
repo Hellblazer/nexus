@@ -384,10 +384,17 @@ public final class HttpUtil {
      *   <li>{@code rename_refused} (409): a collection rename (the catalog's, or a per-store {@code rename_collection} route)
      *       while gate 3 holds and the one-row rename cannot run yet, RDR-229 P3.5a ({@link #RENAME_REFUSED_REASON}). The body
      *       carries {@code missing}: {@code name_key_drop_move} while the name-key drop move has no {@code completed_at},
-     *       else {@code restart} (a P3.5b changeset has not applied). Nothing was renamed. The collection routes also answer
+     *       else {@code restart} (a P3.5b changeset has not applied), or {@code latch_row_missing} when the readiness says the
+     *       move is complete but the install has no gate 3 latch row (an inconsistency, as after a partial restore; never the
+     *       name path). Nothing was renamed. The collection routes also answer
      *       404 {@code unknown_collection_id} ({@link #UNKNOWN_COLLECTION_ID_REASON}, naming {@code collection_id}) for an id
      *       no row has, from {@code CollectionSelectorFilter}, and the delete answers 409
      *       {@code collection_label_ambiguous} ({@link #COLLECTION_LABEL_AMBIGUOUS_REASON}, listing {@code collection_ids}).</li>
+     *   <li>{@code rename_path_mismatch} (409): a catalog rename reached the one-row regime with no one-row rename to run
+     *       ({@link #RENAME_PATH_MISMATCH_REASON}, RDR-229 P3.5a). Nothing was renamed.</li>
+     *   <li>{@code rename_not_in_registry} (409): a per-store rename in the one-row regime, where it is a no-op because the
+     *       registry rename moved the label, found the registry did not ({@link #RENAME_NOT_IN_REGISTRY_REASON}): the new label
+     *       is not a live row, or the old one still is. Nothing was changed.</li>
      *   <li>{@code collection_superseded} (409): a chunk write (upsert-chunks, or the combined
      *       write_many / append / append_many) named a collection whose row carries {@code superseded_by}
      *       ({@link #COLLECTION_SUPERSEDED_REASON}, nexus-mp8ys). {@code error} carries the same value; the body
@@ -595,6 +602,14 @@ public final class HttpUtil {
                 + ",\"reason\":\"" + RENAME_REFUSED_REASON + "\""
                 + ",\"missing\":" + jsonString(renameRefused.wireValue())
                 + "}");
+            return true;
+        }
+        // RDR-229 P3.5a (linda Q-A): a per-store rename in the one-row regime whose label pair does not match the registry.
+        if (renameNotInRegistry(e) != null) {
+            log.warn("event={}_rename_not_in_registry {}", event, context);
+            send(exchange, 409,
+                "{\"error\":" + jsonString(renameNotInRegistry(e).getMessage())
+                + ",\"reason\":\"" + RENAME_NOT_IN_REGISTRY_REASON + "\"}");
             return true;
         }
         // RDR-229 P3.5a (linda R-A): a catalog rename reached the one-row regime with no one-row rename to run
@@ -874,6 +889,19 @@ public final class HttpUtil {
 
     /** {@code reason} on the 409 for a rename that reached the one-row regime with no one-row rename to run. Wire contract. */
     static final String RENAME_PATH_MISMATCH_REASON = "rename_path_mismatch";
+
+    /** {@code reason} on the 409 for a per-store rename whose label pair does not match the registry in the one-row regime. Wire contract. */
+    static final String RENAME_NOT_IN_REGISTRY_REASON = "rename_not_in_registry";
+
+    /** The {@link dev.nexus.service.db.RenameNotInRegistryException} in {@code t}'s cause chain, or null. */
+    static dev.nexus.service.db.RenameNotInRegistryException renameNotInRegistry(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof dev.nexus.service.db.RenameNotInRegistryException r) {
+                return r;
+            }
+        }
+        return null;
+    }
 
     /** The {@link dev.nexus.service.db.RenamePathMismatchException} in {@code t}'s cause chain, or null. */
     static dev.nexus.service.db.RenamePathMismatchException renamePathMismatch(Throwable t) {

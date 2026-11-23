@@ -397,8 +397,8 @@ public final class CompletionCheck {
     private static final org.jooq.Table<?> LATCH = DSL.table(DSL.name("nexus", "rdr229_gate_latch"));
     private static final Field<String> LATCH_GATE = DSL.field(DSL.name("gate"), String.class);
 
-    /** A writer that inserts on the {@code ctx} it is given (a connection that is not read only). */
-    public static LatchWriter latchOnCtx(String engineVersion) {
+    /** A writer that inserts on the {@code ctx} it is given (a connection that is not read only, and not inside a transaction). Package-private: for the check's tests. */
+    static LatchWriter latchOnCtx(String engineVersion) {
         return (ctx, gate, pciOff) -> insertLatch(ctx, gate, engineVersion, pciOff);
     }
 
@@ -415,11 +415,11 @@ public final class CompletionCheck {
      *
      * <p><b>Starvation.</b> PostgreSQL queues a waiting exclusive request ahead of every shared request that arrives after it, so the
      * write waits only for the renames that were in flight when it queued, and a rename that starts while it waits queues behind it
-     * (a stall of at most the bound, for renames, not an unbounded one). It can therefore starve only if, on every attempt, some rename
-     * that began before the attempt is still running when the bound passes: a rename longer than the bound, overlapping each pass. Gate
-     * 3 latches once per install and attempts are a pass apart, so that needs a long rename at the same point on each pass; until the
-     * row is written every rename is the name path, so none is ever blocked for more than the bound. The bound is 10 s so a stuck
-     * rename costs the others at most that, and is not tuned to the longest rename.
+     * (a stall of at most the bound, for renames, not an unbounded one). It can therefore starve only under sustained overlapping
+     * renames each longer than the bound (a bulk rename campaign, several in parallel), so that on every attempt some rename that began
+     * before it is still running when the bound passes. Until the row is written every rename is the name path, so the delay is
+     * harmless; {@code CompletionBootWork} logs a warning with the time since the first failure when the write keeps timing out across
+     * passes. The bound is 10 s so a stuck rename costs the others at most that, and is not tuned to the longest rename.
      *
      * <p><b>The {@code ctx} must not be inside an outer transaction</b> ({@code latchOnCtx} included): the transaction here would be a
      * savepoint, and the advisory lock, taken in it, would outlive it until the outer one ends, holding every rename behind it.
@@ -442,7 +442,7 @@ public final class CompletionCheck {
     }
 
     /** How long the latch write waits for in-flight renames, in milliseconds, as the GUC text (see the starvation note above). */
-    static final String LATCH_LOCK_TIMEOUT_MS = "10000";
+    public static final String LATCH_LOCK_TIMEOUT_MS = "10000";
 
     /**
      * The latch row of {@code gate}: empty when there is none (or the table does not exist yet), else its {@code pci_off}. A failed read throws:

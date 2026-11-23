@@ -409,6 +409,8 @@ public final class CompletionBootWork implements AutoCloseable {
         private volatile AdminDdlSession session;
         /** Once the latch is seen, the coverage read (a catalog walk and registry reads over every leaf) is repeated only this often. */
         private volatile boolean latchedSeen;
+        /** When the latch write first failed in the current run of failures; null when the last write succeeded or none has failed. */
+        private volatile java.time.Instant latchWriteFailingSince;
         private final Duration latchedCoveragePeriod;
         private volatile java.time.Instant coverageAt;
         private volatile java.util.Optional<CompletionCheck.IdIndexCoverage> coverage;
@@ -473,13 +475,27 @@ public final class CompletionBootWork implements AutoCloseable {
          * ({@code INSERT ... ON CONFLICT DO NOTHING}); a failure is the check's to log, and the next read tries again.
          */
         private void writeLatch(DSLContext readCtx, String gate, boolean pciOff) {
-            latchWriter.latch(() -> {
-                String version = dev.nexus.service.http.VersionHandler.resolveReleaseVersion();
-                try (AdminDdlSession w = AdminDdlSession.open(admin, new AdminDdlSession.Settings("nexus-rdr229-gate-latch", 0L,
-                        "rdr229 gate latch", "nexus", "rdr229_gate_latch", "none"), false)) {
-                    CompletionCheck.insertLatch(w.ctx(), gate, version == null ? "dev" : version, pciOff);
+            try {
+                latchWriter.latch(() -> {
+                    String version = dev.nexus.service.http.VersionHandler.resolveReleaseVersion();
+                    try (AdminDdlSession w = AdminDdlSession.open(admin, new AdminDdlSession.Settings("nexus-rdr229-gate-latch", 0L,
+                            "rdr229 gate latch", "nexus", "rdr229_gate_latch", "none"), false)) {
+                        CompletionCheck.insertLatch(w.ctx(), gate, version == null ? "dev" : version, pciOff);
+                    }
+                });
+                latchWriteFailingSince = null;
+            } catch (RuntimeException e) {
+                // The write waits for renames in flight and gives up at its lock bound; the next pass tries again. A failure that keeps
+                // coming means a rename (or a stuck writer) outlasts every attempt: say for how long.
+                var since = latchWriteFailingSince;
+                if (since == null) {
+                    latchWriteFailingSince = clock.instant();
+                } else {
+                    log.warn("event=rdr229_gate3_latch_write_keeps_failing elapsed_since_first_failure_s={} cause=\"{}\"",
+                        Duration.between(since, clock.instant()).toSeconds(), e.toString());
                 }
-            });
+                throw e;
+            }
         }
 
         @Override

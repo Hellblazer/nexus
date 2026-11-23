@@ -7,12 +7,11 @@ import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.datamove.CompletionCheck;
 import dev.nexus.service.datamove.RenameReadiness.Missing;
 import dev.nexus.service.db.AspectRepository;
-import dev.nexus.service.db.CatalogRepository;
-import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.ChashRepository;
 import dev.nexus.service.db.OneRowRename;
 import dev.nexus.service.db.RenameGuard;
 import dev.nexus.service.db.RenameNoOpActivity;
+import dev.nexus.service.db.RenameNotInRegistryException;
 import dev.nexus.service.db.TaxonomyRepository;
 import dev.nexus.service.db.TelemetryRepository;
 import dev.nexus.service.db.TenantScope;
@@ -32,26 +31,28 @@ import java.sql.Connection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
-import java.util.function.Consumer;
 import java.util.function.Function;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
-import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * RDR-229 P3.5a (bead nexus-p2m1x.23), linda's ruling: in the one-row regime the per-store renames (chash, taxonomy, telemetry,
- * aspects, highlights) are a no-op that answers success. The registry rename has already moved the label; the content's name columns
- * stay at the old label (the keys of the one-row regime depend on them), so a rewrite would break them.
+ * RDR-229 P3.5a (bead nexus-p2m1x.23), linda's rulings: in the one-row regime the per-store renames (chash, taxonomy, telemetry,
+ * aspects, highlights) are a no-op that answers success, when the registry rename has moved the label (Q-A); the content's name
+ * columns stay at the old label (the keys of the one-row regime depend on them), so a rewrite would break them. When the registry did
+ * not move it, each is the typed 409 {@code rename_not_in_registry} and changes nothing.
  *
  * <p>P3.7's real one-row rename is not on this base, so the regime is simulated: the latch row is written, readiness is complete, and
  * the registry row is renamed in place as the superuser with its content left at the old label (the name keys' inbound foreign keys
- * dropped first, as {@code CollectionDeleteScopeByIdTest} does). The rows each rename would have touched are compared by
- * {@code xmin} before and after: an UPDATE of any row, even to the same values, writes a new row version, so an equal {@code xmin}
- * list means no row was written. The control is the same call before the latch, which rewrites as it did before.
+ * dropped first, as {@code CollectionDeleteScopeByIdTest} does). Every table a store's name body would touch is compared by {@code xmin}
+ * before and after: an UPDATE of any row, even to the same values, writes a new row version, so an equal {@code xmin} list means no
+ * row was written. The quarantine retag rows of the chash rename and the queued aspect task bodies are not seeded here.
+ * The control is the same call before the latch, which rewrites as it did before.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class RenameNoOpOneRowTest {
@@ -59,13 +60,15 @@ class RenameNoOpOneRowTest {
     private static final String TENANT = "rename-noop-tenant";
     private static final String SVC_ROLE = "svc_rename_noop";
     private static final String SVC_PASS = "svc_rename_noop_pass";
-    private static final String MODEL = "bge-base-en-v15-768";
-    private static final String TS = "2026-01-01T00:00:00.000000Z";
     private static final org.jooq.Table<?> LATCH = DSL.table(DSL.name("nexus", "rdr229_gate_latch"));
+
+    /** The key set of each map-answering route's name path, which the one-row answer must have too. */
+    private static final Map<String, Set<String>> KEYS = Map.of(
+        "taxonomy", Set.of("topics", "assignments", "meta"),
+        "telemetry", Set.of("search_telemetry", "hook_failures"));
 
     PostgreSQLContainer<?> pg;
     HikariDataSource svcDs;
-    CatalogRepository catalog;
     ChashRepository chash;
     TaxonomyRepository taxonomy;
     TelemetryRepository telemetry;
@@ -74,8 +77,11 @@ class RenameNoOpOneRowTest {
     /** Main's readiness input. */
     final AtomicReference<Missing> readiness = new AtomicReference<>(Missing.NAME_KEY_DROP_MOVE);
 
-    /** One per-store rename: how its content is seeded under a label, its call, and the tables (with their name column) it rewrites. */
-    private record Store(String name, Consumer<String> seed, BiFunction<String, String, Object> rename, List<String> tables) { }
+    /**
+     * One per-store rename: its call, every table (with its name column) its name body would touch, and the ones it rewrites by an
+     * explicit UPDATE (the rest follow by foreign key cascade, which the one-row simulation has dropped).
+     */
+    private record Store(String name, BiFunction<String, String, Object> rename, Map<String, String> touched, List<String> direct) { }
 
     private List<Store> stores;
 
@@ -93,17 +99,6 @@ class RenameNoOpOneRowTest {
             PgContainerHelper.ensureTenantPartitions(ctx, TENANT);
             return null;
         });
-        // the name-key drop move, as far as this class needs it: every inbound foreign key on a registry key that holds `name`
-        // (CollectionDeleteScopeByIdTest), so the registry row can be renamed in place with its content left at the old label
-        su(ctx -> {
-            for (var key : CATALOG_COLLECTIONS.getKeys()) {
-                if (!key.getFields().contains(CATALOG_COLLECTIONS.NAME)) continue;
-                for (var fk : key.getReferences()) {
-                    ctx.alterTable(fk.getTable()).dropConstraintIfExists(fk.getName()).execute();
-                }
-            }
-            return null;
-        });
         var config = new HikariConfig();
         config.setJdbcUrl(pg.getJdbcUrl());
         config.setUsername(SVC_ROLE);
@@ -114,21 +109,25 @@ class RenameNoOpOneRowTest {
 
         var guard = new RenameGuard(readiness::get, OneRowRename.failClosed());
         var scope = new TenantScope(svcDs);
-        catalog = new CatalogRepository(scope, dev.nexus.service.datamove.Gate3.never(), guard);
         chash = new ChashRepository(scope, guard);
         taxonomy = new TaxonomyRepository(scope, guard);
         telemetry = new TelemetryRepository(scope, guard);
         aspects = new AspectRepository(scope, guard);
         stores = List.of(
-            new Store("chash", this::seedChash, (o, nw) -> chash.renameCollection(TENANT, o, nw), List.of("chunks")),
-            new Store("taxonomy", this::seedTaxonomy, (o, nw) -> taxonomy.renameCollection(TENANT, o, nw),
-                List.of("topics", "taxonomy_meta")),
-            new Store("telemetry", this::seedTelemetry, (o, nw) -> telemetry.renameCollection(TENANT, o, nw),
+            new Store("chash", (o, nw) -> chash.renameCollection(TENANT, o, nw),
+                Map.of("chunks", "collection", "catalog_document_chunks", "collection", "chunk_orphaned_at", "collection",
+                    "topic_assignments", "source_collection"),
+                List.of("chunks", "catalog_document_chunks")),
+            new Store("taxonomy", (o, nw) -> taxonomy.renameCollection(TENANT, o, nw),
+                Map.of("topics", "collection", "taxonomy_meta", "collection", "topic_assignments", "source_collection"),
+                List.of("topics", "taxonomy_meta", "topic_assignments")),
+            new Store("telemetry", (o, nw) -> telemetry.renameCollection(TENANT, o, nw),
+                Map.of("search_telemetry", "collection", "hook_failures", "collection"),
                 List.of("search_telemetry", "hook_failures")),
-            new Store("aspects", this::seedAspect, (o, nw) -> aspects.renameAspectCollection(TENANT, o, nw),
-                List.of("document_aspects")),
-            new Store("highlights", this::seedHighlight, (o, nw) -> aspects.renameHighlightsCollection(TENANT, o, nw),
-                List.of("document_highlights")));
+            new Store("aspects", (o, nw) -> aspects.renameAspectCollection(TENANT, o, nw),
+                Map.of("document_aspects", "collection"), List.of("document_aspects")),
+            new Store("highlights", (o, nw) -> aspects.renameHighlightsCollection(TENANT, o, nw),
+                Map.of("document_highlights", "collection"), List.of("document_highlights")));
     }
 
     @AfterAll
@@ -154,76 +153,53 @@ class RenameNoOpOneRowTest {
         }
     }
 
-    private String register(String stem) {
-        String name = "lr-" + stem + "-" + n.incrementAndGet();
-        Map<String, Object> m = new LinkedHashMap<>();
-        m.put("name", name);
-        m.put("content_type", "knowledge");
-        m.put("owner_id", "own-" + name);
-        m.put("embedding_model", MODEL);
-        m.put("model_version", "v1");
-        catalog.upsertCollection(TENANT, m, true);
-        return name;
+    /** A conformant label no other row of this class has, with the model the seeds use. */
+    private String label(String stem) {
+        return "knowledge__" + stem + "-" + n.incrementAndGet() + "__minilm-l6-v2-384__v1";
     }
 
-    private String document() {
-        String tumbler = "9.1." + n.incrementAndGet();
-        su(ctx -> ctx.insertInto(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.TENANT_ID, TENANT).set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
-            .set(CATALOG_DOCUMENTS.TITLE, "fixture " + tumbler).execute());
-        return tumbler;
-    }
-
-    private void seedChash(String collection) {
-        String hex = Chash.ofText(collection + "/chunk").toHex();
+    /** A collection with a row in every table that carries a collection name. */
+    private String seeded(String stem) {
+        String coll = label(stem);
         su(ctx -> {
-            PgContainerHelper.insertChunks(ctx, TENANT, collection, List.of(hex), List.of("noop text"), List.of(new float[768]),
-                List.of(Map.<String, Object>of()));
+            RenameSeeds.seed(ctx, TENANT, coll, "p" + n.incrementAndGet());
             return null;
         });
+        return coll;
     }
 
-    private void seedTaxonomy(String collection) {
-        taxonomy.insertTopic(TENANT, "noop-topic", null, collection, 1, TS, null);
-        taxonomy.recordDiscoverCount(TENANT, collection, 3, TS);
-    }
-
-    private void seedTelemetry(String collection) {
-        telemetry.importSearchRow(TENANT, TS, "noop-hash-" + n.incrementAndGet(), collection, 2, 1, 0.5, 0.4);
-        telemetry.recordHookFailure(TENANT, "noop-doc", collection, "noop-hook", "noop error", TS, null, false, "single");
-    }
-
-    private void seedAspect(String collection) {
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("collection", collection);
-        body.put("source_path", "noop/" + n.incrementAndGet() + ".pdf");
-        body.put("problem_formulation", "p");
-        body.put("proposed_method", "m");
-        body.put("experimental_results", "r");
-        body.put("confidence", 0.9);
-        body.put("extracted_at", TS);
-        body.put("model_version", "v1");
-        body.put("extractor_name", "noop-extractor");
-        body.put("doc_id", document());
-        aspects.upsertAspect(TENANT, body);
-    }
-
-    private void seedHighlight(String collection) {
-        aspects.upsertHighlight(TENANT, Map.of("doc_id", document(), "collection", collection,
-            "source_uri", "file:///noop/" + n.incrementAndGet(), "highlights_md", "- a highlight", "ingested_at", TS));
+    /** A bare registry row (the target of a name-path rename). */
+    private String registered(String stem) {
+        String coll = label(stem);
+        su(ctx -> {
+            PgContainerHelper.insertCollection(ctx, TENANT, coll);
+            return null;
+        });
+        return coll;
     }
 
     /** Each row of the tenant in {@code table}: its row version ({@code xmin}) and the name column it carries, sorted. */
-    private List<String> versions(String table) {
+    private List<String> versions(String table, String nameColumn) {
         Field<String> xmin = DSL.field(DSL.name("xmin")).cast(SQLDataType.VARCHAR);
-        Field<String> collection = DSL.field(DSL.name("collection"), String.class);
-        return su(ctx -> ctx.select(xmin, collection).from(DSL.table(DSL.name("nexus", table)))
+        Field<String> name = DSL.field(DSL.name(nameColumn), String.class);
+        return su(ctx -> ctx.select(xmin, name).from(DSL.table(DSL.name("nexus", table)))
             .where(DSL.field(DSL.name("tenant_id"), String.class).eq(TENANT))
             .fetch().map(r -> r.value1() + "|" + r.value2()).stream().sorted().toList());
     }
 
-    private int rowsNamed(String table, String label) {
+    private int rowsNamed(String table, String nameColumn, String label) {
         return su(ctx -> ctx.fetchCount(DSL.table(DSL.name("nexus", table)),
-            DSL.field(DSL.name("tenant_id"), String.class).eq(TENANT).and(DSL.field(DSL.name("collection"), String.class).eq(label))));
+            DSL.field(DSL.name("tenant_id"), String.class).eq(TENANT).and(DSL.field(DSL.name(nameColumn), String.class).eq(label))));
+    }
+
+    /** Every touched table's versions, for {@code store}. */
+    private Map<String, List<String>> snapshot(Store s) {
+        Map<String, List<String>> out = new LinkedHashMap<>();
+        s.touched().forEach((table, column) -> {
+            out.put(table, versions(table, column));
+            assertThat(out.get(table)).as("%s: non-vacuity: %s holds rows", s.name(), table).isNotEmpty();
+        });
+        return out;
     }
 
     private static boolean zero(Object counts) {
@@ -243,31 +219,62 @@ class RenameNoOpOneRowTest {
         return counts instanceof Map<?, ?> m && m.values().stream().anyMatch(v -> v instanceof Integer i && i > 0);
     }
 
-    /** P3.7's state, as far as this base can make it: the latch row, readiness complete, the registry row renamed in place. */
+    private static void assertKeySet(Store s, Object answer) {
+        if (answer instanceof Map<?, ?> m) {
+            assertThat(m.keySet()).as("%s: the answer's keys are the name path's", s.name()).isEqualTo(KEYS.get(s.name()));
+        } else {
+            assertThat(KEYS).as("%s answers a bare count", s.name()).doesNotContainKey(s.name());
+        }
+    }
+
+    /**
+     * P3.7's state, as far as this base can make it: the latch row, readiness complete, the name keys' inbound foreign keys dropped, and
+     * the registry row renamed in place (the content keeps the old label).
+     */
     private void oneRowRename(String from, String to) {
-        su(ctx -> {
-            CompletionCheck.insertLatch(ctx, CompletionCheck.GATE3, "test-engine", false);
-            return null;
-        });
-        readiness.set(Missing.NONE);
+        latchAndDropKeys();
         int moved = su(ctx -> ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.NAME, to)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(from)).execute());
         assertThat(moved).as("setup: the registry row took its new label").isEqualTo(1);
     }
 
-    // ---- the one-row regime: a no-op that answers success ---------------------------------------------------------------
+    private void latchAndDropKeys() {
+        dropNameKeys();
+        su(ctx -> {
+            CompletionCheck.insertLatch(ctx, CompletionCheck.GATE3, "test-engine", false);
+            return null;
+        });
+        readiness.set(Missing.NONE);
+    }
+
+    /** The name-key drop move, as far as this class needs it: every inbound foreign key on a registry key that holds {@code name}. */
+    private void dropNameKeys() {
+        su(ctx -> {
+            for (var key : CATALOG_COLLECTIONS.getKeys()) {
+                if (!key.getFields().contains(CATALOG_COLLECTIONS.NAME)) continue;
+                for (var fk : key.getReferences()) {
+                    ctx.alterTable(fk.getTable()).dropConstraintIfExists(fk.getName()).execute();
+                }
+            }
+            return null;
+        });
+    }
+
+    private static boolean notInRegistry(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof RenameNotInRegistryException) return true;
+        }
+        return false;
+    }
+
+    // ---- the one-row regime, the registry rename happened: a no-op that answers success -------------------------------
 
     @Test
     void afterAOneRowRename_aPerStoreRenameOfOldToNewChangesNothingAndAnswersZero() {
         for (Store s : stores) {
-            String from = register(s.name() + "-a");
-            String to = "lr-" + s.name() + "-b-" + n.incrementAndGet();
-            s.seed().accept(from);
-            Map<String, List<String>> before = new LinkedHashMap<>();
-            for (String t : s.tables()) {
-                before.put(t, versions(t));
-                assertThat(before.get(t)).as("%s: non-vacuity: %s holds a row to be left alone", s.name(), t).isNotEmpty();
-            }
+            String from = seeded(s.name() + "-a");
+            String to = label(s.name() + "-b");
+            Map<String, List<String>> before = snapshot(s);
             oneRowRename(from, to);
             long noops = RenameNoOpActivity.total();
 
@@ -276,12 +283,54 @@ class RenameNoOpOneRowTest {
 
             assertThat(zero(answer)).as("%s: success with zero rows changed, got %s", s.name(), answer).isTrue();
             assertThat(zero(again)).as("%s: and again, got %s", s.name(), again).isTrue();
-            for (String t : s.tables()) {
-                assertThat(versions(t)).as("%s: every row of %s is the same row version, still naming %s", s.name(), t, from)
-                    .isEqualTo(before.get(t));
-                assertThat(rowsNamed(t, to)).as("%s: nothing was filed under the new label", s.name()).isZero();
-            }
-            assertThat(RenameNoOpActivity.total()).as("%s: each no-op is counted", s.name()).isEqualTo(noops + 2);
+            assertKeySet(s, answer);
+            s.touched().forEach((table, column) -> {
+                assertThat(versions(table, column)).as("%s: every row of %s is the same row version, still naming %s", s.name(), table, from)
+                    .isEqualTo(before.get(table));
+                assertThat(rowsNamed(table, column, to)).as("%s: nothing in %s was filed under the new label", s.name(), table).isZero();
+            });
+            assertThat(RenameNoOpActivity.total()).as("%s: each no-op is counted, once committed", s.name()).isEqualTo(noops + 2);
+            beforeTheLatch();
+        }
+    }
+
+    // ---- the registry rename did not happen: a typed 409 and nothing changed (linda's Q-A) ----------------------------------
+
+    /** Both labels are live registry rows: the registry rename did not happen. */
+    @Test
+    void whenTheRegistryRenameDidNotHappen_aPerStoreRenameIsRefusedAndChangesNothing() {
+        for (Store s : stores) {
+            String from = seeded(s.name() + "-live-a");
+            String to = registered(s.name() + "-live-b");
+            Map<String, List<String>> before = snapshot(s);
+            latchAndDropKeys();
+            long noops = RenameNoOpActivity.total();
+
+            assertThatThrownBy(() -> s.rename().apply(from, to)).as("%s: both labels live", s.name())
+                .satisfies(t -> assertThat(notInRegistry(t)).as("%s: rename_not_in_registry, got %s", s.name(), t).isTrue());
+
+            s.touched().forEach((table, column) -> assertThat(versions(table, column))
+                .as("%s: %s is untouched", s.name(), table).isEqualTo(before.get(table)));
+            assertThat(RenameNoOpActivity.total()).as("%s: a refusal is not a no-op", s.name()).isEqualTo(noops);
+            beforeTheLatch();
+        }
+    }
+
+    /** The registry renamed A to B, and the call names a label that is not B: the new label is not a live row. */
+    @Test
+    void aTypoedNewLabelIsRefused_andChangesNothing() {
+        for (Store s : stores) {
+            String from = seeded(s.name() + "-typo-a");
+            String to = label(s.name() + "-typo-b");
+            Map<String, List<String>> before = snapshot(s);
+            oneRowRename(from, to);
+            String typo = to + "x";
+
+            assertThatThrownBy(() -> s.rename().apply(from, typo)).as("%s: a label no registry row has", s.name())
+                .satisfies(t -> assertThat(notInRegistry(t)).as("%s: rename_not_in_registry, got %s", s.name(), t).isTrue());
+
+            s.touched().forEach((table, column) -> assertThat(versions(table, column))
+                .as("%s: %s is untouched", s.name(), table).isEqualTo(before.get(table)));
             beforeTheLatch();
         }
     }
@@ -290,22 +339,23 @@ class RenameNoOpOneRowTest {
 
     @Test
     void beforeTheLatch_theSameCallRewritesTheNameColumnsAsToday() {
+        dropNameKeys();   // whatever order the tests run in, the foreign keys are as the one-row tests leave them
         for (Store s : stores) {
-            String from = register(s.name() + "-c");
-            String to = register(s.name() + "-d");   // the primitives re-point rows at a registered target, as their callers register it
-            s.seed().accept(from);
+            String from = seeded(s.name() + "-c");
+            String to = registered(s.name() + "-d");   // the primitives re-point rows at a registered target, as their callers register it
             long noops = RenameNoOpActivity.total();
-            for (String t : s.tables()) {
-                assertThat(rowsNamed(t, from)).as("%s: non-vacuity: %s holds a row under the old label", s.name(), t).isPositive();
-            }
+            s.direct().forEach(table -> assertThat(rowsNamed(table, s.touched().get(table), from))
+                .as("%s: non-vacuity: %s holds a row under the old label", s.name(), table).isPositive());
 
             Object answer = s.rename().apply(from, to);
 
             assertThat(someChanged(answer)).as("%s: rows changed, got %s", s.name(), answer).isTrue();
-            for (String t : s.tables()) {
-                assertThat(rowsNamed(t, from)).as("%s: %s no longer names the old label", s.name(), t).isZero();
-                assertThat(rowsNamed(t, to)).as("%s: %s names the new label", s.name(), t).isPositive();
-            }
+            assertKeySet(s, answer);
+            s.direct().forEach(table -> {
+                String column = s.touched().get(table);
+                assertThat(rowsNamed(table, column, from)).as("%s: %s no longer names the old label", s.name(), table).isZero();
+                assertThat(rowsNamed(table, column, to)).as("%s: %s names the new label", s.name(), table).isPositive();
+            });
             assertThat(RenameNoOpActivity.total()).as("%s: the name path is not a no-op", s.name()).isEqualTo(noops);
         }
     }

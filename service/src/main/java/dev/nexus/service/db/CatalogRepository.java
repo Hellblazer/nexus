@@ -10918,11 +10918,12 @@ public final class CatalogRepository {
         // no row yet (a new target) keeps the prefix rule.
         QuarantineOrigin.requireNotQuarantine(tenantScope, tenant, "rename", oldName);
         QuarantineOrigin.requireNotQuarantine(tenantScope, tenant, "rename", newName);
-        String[] tuple = new String[5];
+        String[] tuple = new String[5]; RenameOutcome[] oneRow = new RenameOutcome[1];   // oneRow: set when P3.7's body ran
         String[] epoch = new String[1];   // baton's CatalogEpoch, read inside the transaction's tenant scope
         Map<String, Integer> counts = CollectionMint.refusingRace(tenantScope, tenant,
             () -> renameCollectionTxn(tenant, oldName, newName, expectedTargetSupersededBy, newContentType, newOwnerId,
-                newNameEmbeddingModel, tuple, epoch), CollectionMint.recheckOf(tenant, tuple));
+                newNameEmbeddingModel, tuple, epoch, oneRow), CollectionMint.recheckOf(tenant, tuple));
+        if (oneRow[0] != null) return renameGuard.committedOneRow(tenant, oldName, newName, oneRow[0]);   // the path taken, not a count key
         long renamedId = 0;
         // Post-commit (nexus-h8rf6 wave review): the rename RETIRES the old registry row —
         // evict it so a later same-named collection re-registers.
@@ -11418,12 +11419,12 @@ public final class CatalogRepository {
                                                         String expectedTargetSupersededBy,
                                                         String newContentTypeOrNull, String newOwnerIdOrNull,
                                                         String newNameEmbeddingModelOrNull, String[] tupleOut,
-                                                        String[] epochOut) {
+                                                        String[] epochOut, RenameOutcome[] oneRowOut) {
         // nexus-wbfpw.66: UPDATEs catalog_document_chunks.collection, which fires
         // vectors-021-3's chunk-locking trigger; whole transaction retried on 40P01. `counts` is
         // built inside the lambda, so each attempt starts from an empty map.
         return renameGuard.runRename(work -> manifestWriteTxn(tenant, "catalog.renameCollection " + oldName, work), ctx -> {
-            Map<String, Integer> counts = new LinkedHashMap<>();
+            Map<String, Integer> counts = new LinkedHashMap<>(); oneRowOut[0] = null;   // a retried attempt decides afresh
             // nexus-11gh6 rev 2 §3.2 (Hal Q1: gate the Java collection-move
             // paths in this bead). The rename below bulk-repoints
             // catalog_document_chunks.collection (and chunks_<dim>.collection via
@@ -11724,7 +11725,7 @@ public final class CatalogRepository {
             // it), and carried out with the result; a retried attempt overwrites it.
             epochOut[0] = CatalogEpoch.of(ctx, tenant).orElse(null);
             return counts;
-        }, ctx -> renameGuard.oneRowCounts(ctx, tenant, oldName, newName, epochOut));   // P3.7's OneRowRename; fail-closed until it is wired
+        }, ctx -> renameGuard.oneRow(ctx, tenant, oldName, newName, oneRowOut));   // P3.7's OneRowRename; fail-closed until it is wired
     }
 
     // ══════════════════════════════════════════════════════════════════════════

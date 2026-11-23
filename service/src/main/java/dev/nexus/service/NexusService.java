@@ -654,12 +654,13 @@ public final class NexusService {
                         dev.nexus.service.reembed.ReembedRunner.Settings reembedSettings) throws IOException {
         this(port, token, dataSource, docEmbedderRouter, pgVectorRepository, reranker, localEmbedActivitySupplier,
                 tupleTemplateRegistry, sweepSchedulerOverride, env, pciEnabled, reembedExecutorOverride, reembedSettings,
-                dev.nexus.service.datamove.Gate3.never(), dev.nexus.service.datamove.RenameReadiness.ready());
+                dev.nexus.service.datamove.Gate3.never(), () -> dev.nexus.service.datamove.RenameReadiness.Missing.NAME_KEY_DROP_MOVE);
     }
 
     /**
      * RDR-229 P3.5a (nexus-p2m1x.23): the gate-3 signal and what a rename from gate 3 waits for, each read per call. The
-     * constructors above pass {@code Gate3.never()} and {@code RenameReadiness.ready()}. Package-private. The service builds one
+     * constructors above pass {@code Gate3.never()} and a readiness that says the drop move is missing (the state before any latch; a
+     * ready readiness with no latch row is refused as an inconsistency). Package-private. The service builds one
      * {@code RenameGuard} over them for every rename primitive, and a {@code CollectionRegistry} over {@code gate3} for the
      * route boundary.
      */

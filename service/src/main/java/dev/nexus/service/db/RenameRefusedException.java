@@ -29,6 +29,8 @@ public final class RenameRefusedException extends RuntimeException {
                 + "install; the move is the missing condition";
             case P35B_RESTART -> "a collection rename is refused until the engine restarts to apply the P3.5b changesets; "
                 + "the restart is the missing condition";
+            case LATCH_ROW_MISSING -> "a collection rename is refused: the rename readiness says the name-key drop move is complete but "
+                + "this install has no gate 3 latch row (as after a partial restore); the latch row is the missing condition";
             case NONE -> "";
         };
     }
@@ -48,6 +50,7 @@ public final class RenameRefusedException extends RuntimeException {
         return switch (missing) {
             case NAME_KEY_DROP_MOVE -> "name_key_drop_move";
             case P35B_RESTART -> "restart";
+            case LATCH_ROW_MISSING -> "latch_row_missing";
             case NONE -> "";
         };
     }

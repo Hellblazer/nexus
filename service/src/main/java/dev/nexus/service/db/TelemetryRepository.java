@@ -655,7 +655,9 @@ public final class TelemetryRepository {
         CollectionLabel.validateUserLabel(newName);
         // RDR-210 Phase 6 Step 2 (bead nexus-f98bg): one transaction for the guard and both updates, so a
         // refusal leaves neither table touched. Refused while a re-embed job holds either name.
-        return renameGuard.runRename(tenantScope, tenant, ctx -> {
+        boolean[] noop = new boolean[1];   // set by the committed attempt when the one-row regime made this a no-op
+        Map<String, Integer> answer = renameGuard.runRename(tenantScope, tenant, ctx -> {
+            noop[0] = false;
             CatalogRepository.refuseUnderReembedJob(ctx, tenant, "rename", oldName, newName);
             int searchCount = ctx.update(SEARCH_TELEMETRY)
                 .set(SEARCH_TELEMETRY.COLLECTION, newName)
@@ -669,9 +671,12 @@ public final class TelemetryRepository {
                 .execute();
             return Map.of("search_telemetry", searchCount, "hook_failures", hookCount);
         }, ctx -> {
-            RenameNoOpActivity.record("telemetry", oldName, newName);   // the registry rename moved the label: nothing to rewrite
+            RenameGuard.requireRegistryRenamed(ctx, tenant, oldName, newName);   // the registry rename moved the label: nothing to rewrite
+            noop[0] = true;
             return Map.of("search_telemetry", 0, "hook_failures", 0);
         });
+        if (noop[0]) RenameNoOpActivity.record("telemetry", oldName, newName);   // counted once committed
+        return answer;
     }
 
     /**
