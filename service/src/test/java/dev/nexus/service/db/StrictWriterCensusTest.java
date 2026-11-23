@@ -10,6 +10,7 @@ import org.jooq.tools.jdbc.MockResult;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.MEMORY;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -82,6 +83,53 @@ class StrictWriterCensusTest {
         WriteRegistryMemo.put(ctx, "t", "held", row(9, "held"));
         writeChunk(ctx);   // binds "x" and "t"; the row held is "held"
         assertThat(StrictWriterCensus.violations()).singleElement().asString().contains("holds another collection");
+    }
+
+    /** The statement binds the tenant and a tumbler, which are Strings too: they name no collection, so a held row of another is no finding. */
+    @Test
+    void aStatementThatBindsNoCollectionColumn_isNotJudgedAgainstTheHeldRows() {
+        StrictWriterCensus.setModeForTests("strict");
+        DSLContext ctx = txn();
+        WriteRegistryMemo.put(ctx, "t", "held", row(9, "held"));
+        ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.CHUNK_COUNT, 3)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq("t")).and(CATALOG_DOCUMENTS.TUMBLER.eq("1.2.3")).execute();
+        assertThat(StrictWriterCensus.examined()).as("non-vacuity: the census looked at the write").isEqualTo(1);
+        assertThat(StrictWriterCensus.violations()).as("a statement keyed by a tumbler names no collection").isEmpty();
+    }
+
+    /** The same table, bound to a collection label or id column: judged, and recorded when the row held is another's. */
+    @Test
+    void aStatementThatBindsACollectionLabelOrIdColumn_isStillJudgedAgainstTheHeldRows() {
+        StrictWriterCensus.setModeForTests("strict");
+        DSLContext byLabel = txn();
+        WriteRegistryMemo.put(byLabel, "t", "held", row(9, "held"));
+        byLabel.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.CHUNK_COUNT, 3)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq("t")).and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq("elsewhere")).execute();
+        DSLContext byId = txn();
+        WriteRegistryMemo.put(byId, "t", "held", row(9, "held"));
+        byId.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.CHUNK_COUNT, 3)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq("t")).and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID.eq(99L)).execute();
+        DSLContext held = txn();
+        WriteRegistryMemo.put(held, "t", "held", row(9, "held"));
+        held.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.CHUNK_COUNT, 3)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq("t")).and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq("held")).execute();
+        assertThat(StrictWriterCensus.violations()).as("the label and the id of another collection are found, the held one is not").hasSize(2)
+            .allSatisfy(v -> assertThat(v).contains("holds another collection"));
+    }
+
+    /** The rule itself, on what jOOQ renders: a bound collection column (compared, assigned or inserted) counts, a tenant or a tumbler does not. */
+    @Test
+    void bindsACollection_readsTheRenderedStatement() {
+        DSLContext dsl = DSL.using(SQLDialect.POSTGRES);
+        assertThat(StrictWriterCensus.bindsACollection(dsl.update(CHUNKS).set(CHUNKS.COLLECTION, "x").where(CHUNKS.TENANT_ID.eq("t")).getSQL()))
+            .as("an assigned collection column").isTrue();
+        assertThat(StrictWriterCensus.bindsACollection(dsl.deleteFrom(CATALOG_DOCUMENTS).where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID.in(1L, 2L)).getSQL()))
+            .as("an id column in a list").isTrue();
+        assertThat(StrictWriterCensus.bindsACollection(dsl.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION).values("t", "x").getSQL()))
+            .as("an insert that lists a collection column").isTrue();
+        assertThat(StrictWriterCensus.bindsACollection(dsl.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.CHUNK_COUNT, 1)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq("t")).and(CATALOG_DOCUMENTS.TUMBLER.eq("1.2")).getSQL()))
+            .as("the tenant and a tumbler name no collection").isFalse();
     }
 
     @Test
