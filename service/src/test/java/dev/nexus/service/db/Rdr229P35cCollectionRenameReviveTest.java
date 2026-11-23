@@ -83,7 +83,7 @@ class Rdr229P35cCollectionRenameReviveTest {
 
     private static Map<String, Integer> retire(DSLContext dsl, String from, String to) {
         Map<String, Integer> counts = new LinkedHashMap<>();
-        CollectionRename.retireAndRegister(dsl, TENANT, from, to, CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+        CollectionRename.retireAndRegister(dsl, TENANT, from, to, null, CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
             counts, new String[5], Gate3.never());
         return counts;
     }
