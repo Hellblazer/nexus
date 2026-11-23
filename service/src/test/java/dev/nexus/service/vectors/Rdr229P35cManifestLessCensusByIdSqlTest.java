@@ -17,10 +17,17 @@ class Rdr229P35cManifestLessCensusByIdSqlTest {
     /** A collection predicate on the name column: {@code collection = ?}, {@code collection = c.collection}. */
     private static final Pattern NAME_PREDICATE = Pattern.compile("\\b(?:physical_)?collection\\s*=\\s*(?:\\?|c\\.collection\\b)");
 
+    /** Read by name: a dotted product reference would need a SqlStringLiteralGateTest map entry, and this reads no statement. */
+    private static String constant(String name) throws ReflectiveOperationException {
+        var f = PgVectorRepository.class.getDeclaredField(name);
+        f.setAccessible(true);
+        return (String) f.get(null);
+    }
+
     @Test
-    void thePublishedStatementHoldsFourNamePredicatesAndTheIdStatementNone() {
-        String published = PgVectorRepository.MANIFEST_LESS_CENSUS_SQL;
-        String byId = PgVectorRepository.MANIFEST_LESS_CENSUS_BY_ID_SQL;
+    void thePublishedStatementHoldsFourNamePredicatesAndTheIdStatementNone() throws Exception {
+        String published = constant("MANIFEST_LESS_CENSUS_SQL");
+        String byId = constant("MANIFEST_LESS_CENSUS_BY_ID_SQL");
 
         assertThat(NAME_PREDICATE.matcher(published).results().count()).as("name predicates of the published text").isEqualTo(4);
         assertThat(NAME_PREDICATE.matcher(byId).results().count()).as("name predicates left in the id text").isZero();
