@@ -54,6 +54,16 @@ final class CollectionRehomeScope {
             target == null ? null : CollectionPurgeScope.idOfLabel(ctx, tenant, target));
     }
 
+    /**
+     * The scope of one attempt, built from the registry rows the transaction holds {@code FOR KEY SHARE}: the rows' CURRENT labels and
+     * ids, so a name that was freed and taken again between the route and the lock selects nothing of the new holder's. Before gate 3
+     * the name columns scope the rows, by the labels the locked rows hold now.
+     */
+    static CollectionRehomeScope ofLocked(boolean gate3Holds, CollectionRow sourceRow, CollectionRow targetRow) {
+        return new CollectionRehomeScope(sourceRow.label(), targetRow.label(), gate3Holds,
+            sourceRow.collectionId(), targetRow.collectionId());
+    }
+
     String source() { return source; }
 
     String target() { return target; }

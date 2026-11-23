@@ -547,7 +547,7 @@ final class CollectionRouteCensus {
         java.util.Map.entry("db/AspectRepository.java", new Resolving(12, "the /v1/aspects rows and the aspect ETL; the aspect upsert's write stamps the registry row's current label (requireWritable)")),
         java.util.Map.entry("db/CatalogIdStamps.java", new Resolving(1, "the catalog writers' memoized label lookup")),
         java.util.Map.entry("db/CatalogMoves.java", new Resolving(1, "/v1/catalog/documents/move, the owners move")),
-        java.util.Map.entry("db/CatalogRepository.java", new Resolving(27, "the document routes (DocumentCollectionRef), the collection routes (set_aspects_enabled reads its row in its write) and the catalog writers, and registryFirst, the manifest writers' registry check after their advisory locks")),
+        java.util.Map.entry("db/CatalogRepository.java", new Resolving(29, "the document routes (DocumentCollectionRef), the collection routes (set_aspects_enabled reads its row in its write) and the catalog writers, and registryFirst, the manifest writers' registry check after their advisory locks; the re-home reads both ends FOR KEY SHARE (requireAllForWrite, then each locked row) and scopes by those rows")),
         java.util.Map.entry("db/ChashRepository.java", new Resolving(3, "/v1/chash rename_collection and the chash read routes")),
         java.util.Map.entry("db/CollectionIds.java", new Resolving(1, "the write transaction's registry check: CollectionIds.require reads the row FOR KEY SHARE through CollectionRegistry.requireForWrite")),
         java.util.Map.entry("db/CollectionRehomeScope.java", new Resolving(1, "the /v1/catalog/collections/rehome routes: the target label's registry id")),

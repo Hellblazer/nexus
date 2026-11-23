@@ -11938,11 +11938,27 @@ public final class CatalogRepository {
             // moves a collection a re-embed job is draining or filling out from under the job. Refused, 409 naming
             // the job, whichever role the held name has (the source being moved out, the target being moved onto).
             refuseUnderReembedJob(ctx, tenant, "rehome", source, target);
-            requireLiveCollection(ctx, source, "source");
-            requireLiveCollection(ctx, target, "target");
+            // RDR-229 P3.5a (a re-home is a WRITER, not a retiring verb: it retires nothing): both registry rows FOR KEY SHARE in one
+            // statement in id order (a retiring verb's order), AFTER the gates above and before any row work. The scope is built from
+            // these locked rows, never from a name lookup, so a request by id whose id was freed and its label taken again in the gap
+            // is the typed 404, a retired row the typed 409, and a concurrent supersede or rename of either end waits for this
+            // transaction (it takes the row FOR UPDATE; the gates it shares with us do not exclude it).
+            try {
+                CollectionRegistry.requireAllForWrite(ctx, tenant, List.of(source, target));
+            } catch (UnregisteredCollectionException none) {
+                // a label with no row: the refusal below names the end, as it always did
+            }
+            final CollectionRow sourceRow = lockedLiveCollection(ctx, tenant, source, "source");
+            final CollectionRow targetRow = lockedLiveCollection(ctx, tenant, target, "target");
+            if (sourceRow.collectionId() == targetRow.collectionId()) {
+                throw new RehomeRefused("source and target are the same collection: " + sourceRow.label());
+            }
+            // the id is the identity: the rows are read and written under the locked rows' CURRENT labels
+            final String src = sourceRow.label();
+            final String tgt = targetRow.label();
             // RDR-229 P3.5a (linda's ruling R-B): before gate 3 the name columns scope every read and write of this
-            // re-home; from it the ids the two labels resolve to do (a one-row rename leaves the names stale).
-            CollectionRehomeScope scope = CollectionRehomeScope.resolve(ctx, gate3.holds(), tenant, source, target);
+            // re-home; from it the ids of the locked rows do (a one-row rename leaves the names stale).
+            CollectionRehomeScope scope = CollectionRehomeScope.ofLocked(gate3.holds(), sourceRow, targetRow);
             // RDR-225 (nexus-3wh8d.13): the chunk UPDATE below files the source's chunk rows under the
             // target, and a chunk keeps its collection's embedding model (the composite foreign key to
             // catalog_collections, and the partition the row lives in). Across models that UPDATE cannot
@@ -11955,7 +11971,7 @@ public final class CatalogRepository {
                     && ctx.fetchExists(ctx.selectOne().from(CHUNKS).where(scope.sourceChunks()))) {
                 // The typed exception, not RehomeRefused: HttpUtil.sendTypedDbError answers it as a 409
                 // carrying reason=collection_model_mismatch, the contract the route documents.
-                throw new CollectionModelMismatchException(source, sourceModel, target, targetModel);
+                throw new CollectionModelMismatchException(src, sourceModel, tgt, targetModel);
             }
             // nexus-4lnn1.1.2 (RDR-230): the recall canary's query ring names its collection AND its model through a
             // foreign key to the registry, so its rows cannot move to a collection of another model, and they are
@@ -11970,14 +11986,14 @@ public final class CatalogRepository {
             // RDR-231: the move rewrites note URIs from source to target (moveScopedTable). If a live
             // document would land on a URI a live document already holds, nothing moves: chunks and
             // manifest rows move by table and are keyed by chash, so one document cannot be held back.
-            scope.requireUrisFree(ctx, tenant, "re-homing " + source + " onto " + target);
+            scope.requireUrisFree(ctx, tenant, "re-homing " + src + " onto " + tgt);
 
             Map<String, Integer> moved = new LinkedHashMap<>();
             Map<String, Integer> leftBehind = new LinkedHashMap<>();
             // RDR-235 (nexus-5r2sc.2.6): the source's unconsumed aspects tasks (available, claimed and dead) are
             // re-homed with it, every one movable (a task's id comes from its doc_id, so none can collide). BEFORE
             // the loop, which writes document_aspects: the tuple row locks come first.
-            moved.put(ASPECT_TASKS_KEY, scope.sourceMatchesNothing() ? 0 : AspectTaskRefs.rewriteCollection(ctx, tenant, source, target));
+            moved.put(ASPECT_TASKS_KEY, scope.sourceMatchesNothing() ? 0 : AspectTaskRefs.rewriteCollection(ctx, tenant, src, tgt));
             // RDR-229 P3.1: the moved rows take the target's id with its name; the rows the chunk cascade carried
             // (the manifest, the topic assignments, chunk_orphaned_at) are given it afterwards.
             final Long targetId = scope.targetId(ctx, tenant);
@@ -12059,16 +12075,24 @@ public final class CatalogRepository {
     }
 
     /** Refuse unless {@code name} is a registered, live (non-superseded) collection. */
-    private void requireLiveCollection(DSLContext ctx, String name, String role) {
-        boolean live = ctx.fetchExists(
-            ctx.selectOne().from(CATALOG_COLLECTIONS)
-               .where(CATALOG_COLLECTIONS.NAME.eq(name)
-                   .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(""))));
-        if (!live) {
+    /**
+     * The registry row of {@code name} as the re-home's transaction holds it ({@code FOR KEY SHARE}, from
+     * {@link CollectionRegistry#requireAllForWrite}), refused the way {@link #requireLiveCollection} refuses when there is none or it is
+     * a tombstone. A request by id has already answered its typed 404 or 409 in the read.
+     */
+    private static CollectionRow lockedLiveCollection(DSLContext ctx, String tenant, String name, String role) {
+        CollectionRow row;
+        try {
+            row = CollectionRegistry.requireForWrite(ctx, tenant, name);
+        } catch (UnregisteredCollectionException none) {
+            row = null;
+        }
+        if (row == null || row.isSuperseded()) {
             throw new RehomeRefused(role + " collection " + name
                 + " is not a registered live collection; a re-home moves between two live "
                 + "registry rows and never creates, revives or retires one.");
         }
+        return row;
     }
 
     /**

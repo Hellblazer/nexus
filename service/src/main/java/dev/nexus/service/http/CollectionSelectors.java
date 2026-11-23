@@ -66,9 +66,11 @@ final class CollectionSelectors {
 
     /**
      * The routes that write under the collection they name, and must read a named id in their own transaction. The retiring verbs
-     * (supersede, rehome, rename, delete) are not here: the lock they take on the row is the retire's, not this read's.
+     * (supersede, rename, delete) are not here: the lock they take on the row is the retire's, not this read's. A re-home is here: it
+     * retires nothing, it moves rows between two live collections, so it reads both ends FOR KEY SHARE like any writer.
      */
     static final java.util.Set<String> WRITES = java.util.Set.of(
+        "/v1/catalog/collections/rehome",
         "/v1/catalog/manifest/write", "/v1/catalog/manifest/append", "/v1/catalog/manifest/append_many",
         "/v1/catalog/manifest/write_many", "/v1/catalog/import/chunk",
         "/v1/vectors/upsert-chunks", "/v1/vectors/store-delete", "/v1/vectors/update-metadata",
@@ -114,7 +116,7 @@ final class CollectionSelectors {
 
     private static Map<String, String> exempt() {
         Map<String, String> e = new LinkedHashMap<>();
-        for (String verb : List.of("supersede", "rehome", "rename", "delete")) {
+        for (String verb : List.of("supersede", "rename", "delete")) {
             e.put("/v1/catalog/collections/" + verb, VERB);
         }
         e.put("/v1/catalog/gc_audit/record", HISTORY);
