@@ -23,6 +23,12 @@ public final class DataMoveOrphans {
 
     private DataMoveOrphans() { /* static */ }
 
+    /** The network timeout of the cancel's and the watch's sessions, in seconds (their statements take milliseconds). */
+    static final int CANCEL_SOCKET_SECONDS = 5;
+
+    /** The network timeout of the boot reaper's session, in seconds: a stalled server must not stall the boot, which the reaper never fails. */
+    static final int REAPER_SOCKET_SECONDS = 10;
+
     /** Every move session's name starts with this (the worker names its registry session, so its completion transactions, with it). */
     public static final String PREFIX = DataMoveWorker.APPLICATION_NAME_PREFIX;
 
@@ -32,7 +38,7 @@ public final class DataMoveOrphans {
      * pid the server has reused for another session is left alone. Never throws.
      */
     static void cancelBackend(AdminConnection admin, int pid, String applicationName, java.time.OffsetDateTime backendStart) {
-        try (AdminDdlSession session = openSession(admin, "cancel")) {
+        try (AdminDdlSession session = openSession(admin, "cancel", CANCEL_SOCKET_SECONDS, 2_000, 3_000)) {
             var pidField = DSL.field(DSL.name("pid"), Integer.class);
             session.ctx().select(DSL.function("pg_cancel_backend", SQLDataType.BOOLEAN, pidField))
                 .from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
@@ -47,11 +53,22 @@ public final class DataMoveOrphans {
 
     /**
      * A short session on the admin values, from the one sanctioned opener ({@link AdminDdlSession#open}, whose URL is the admin's), named
-     * {@code nexus-data-move-<purpose>}. It takes no run lock and alters nothing. Throws {@link AdminDdlSession.Refused} when it cannot connect.
+     * {@code nexus-data-move-<purpose>}. It takes no run lock and alters nothing. Its network timeout is {@code socketSeconds} and every
+     * statement it runs gives up after {@code lockMs} waiting for a lock and {@code statementMs} running. Throws {@link AdminDdlSession.Refused}
+     * when it cannot connect.
      */
-    static AdminDdlSession openSession(AdminConnection admin, String purpose) {
-        return AdminDdlSession.open(admin, new AdminDdlSession.Settings(PREFIX + purpose, 0L, "data move " + purpose, "nexus", "data_moves", "none"),
-            false);
+    static AdminDdlSession openSession(AdminConnection admin, String purpose, int socketSeconds, int lockMs, int statementMs) {
+        AdminDdlSession session = AdminDdlSession.open(admin,
+            new AdminDdlSession.Settings(PREFIX + purpose, 0L, "data move " + purpose, "nexus", "data_moves", "none"), false, socketSeconds);
+        try {
+            // the session's own bounds, so a statement behind a lock, or a server that stalls, ends with an error and not with the network timeout
+            session.ctx().set(DSL.name("lock_timeout"), DSL.inline(lockMs + "ms")).execute();
+            session.ctx().set(DSL.name("statement_timeout"), DSL.inline(statementMs + "ms")).execute();
+            return session;
+        } catch (RuntimeException e) {
+            session.close();
+            throw e;
+        }
     }
 
     /** A backend of this database, run by the role this connection is: the ownership check before any signal (never a process that is not ours). */
@@ -64,7 +81,7 @@ public final class DataMoveOrphans {
      * @return how many backends were ended; -1 when the database could not be reached (logged, never fatal: the boot goes on)
      */
     public static int terminateLeftover(AdminConnection admin) {
-        try (AdminDdlSession session = openSession(admin, "boot-reaper")) {
+        try (AdminDdlSession session = openSession(admin, "boot-reaper", REAPER_SOCKET_SECONDS, 3_000, 8_000)) {
             var ctx = session.ctx();
             var pid = DSL.field(DSL.name("pid"), Integer.class);
             var name = DSL.field(DSL.name("application_name"), String.class);
