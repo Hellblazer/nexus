@@ -143,6 +143,9 @@ public final class CollectionOneRowRename implements OneRowRename {
         if (targetRowExists) {
             deleteRetiredTarget(ctx, tenant, oldName, newName);
         }
+        // remembered BEFORE the UPDATE (folio's r3 review F5): a 23505 the UPDATE raises on the live-tuple index then finds the tuple, and the caller's race
+        // recheck (CollectionMint#recheckOf) names the holder instead of a generic 409
+        CollectionMint.remember(tuple, newName, contentType, owner, own.value4(), own.value5());
         Map<Field<?>, Object> set = new LinkedHashMap<>();
         set.put(CATALOG_COLLECTIONS.NAME, newName);
         if (newContentType != null) {
@@ -161,7 +164,6 @@ public final class CollectionOneRowRename implements OneRowRename {
         }
         counts.put("catalog_collections_renamed", renamed);
         // the row's tuple after the rename: refused, naming both, when another live collection holds it (the index raises 23505 first, and the recheck names both)
-        CollectionMint.remember(tuple, newName, contentType, owner, own.value4(), own.value5());
         CollectionMint.refuseHeldTuple(ctx, tenant, newName, contentType, owner, own.value4(), own.value5(), own.value6(), "", LATCHED);
 
         ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, newName)
