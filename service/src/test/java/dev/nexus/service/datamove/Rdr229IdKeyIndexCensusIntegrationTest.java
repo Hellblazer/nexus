@@ -35,6 +35,8 @@ class Rdr229IdKeyIndexCensusIntegrationTest extends Rdr229SwapMovesFixtures {
         registerSwaps();
         runSwaps(new VerifyingFinisher());
         assertThat(completedAt(CHUNKS_SWAP)).as("precondition: the chunks swap completed, so P3.3c's keys exist").isNotNull();
+        runUntilComposite(new VerifyingFinisher());   // the composite is the adoption move's (nexus-p2m1x.21)
+        assertThat(compositeOnId()).as("precondition: the adoption move added the composite").hasSize(1);
         // the supporting indexes are runtime builds (IdUniqueIndexPass; linda 2026-11-22: out of the boot walk), arbiters included
         IdIndexCatalogReads.recordWaitedChangesets(ctx());   // the state after P3.5b's form-A boot (the canary twin waits for it)
         new IdUniqueIndexPass(adminConnection, new dev.nexus.service.BootWorkRegistry(java.time.Clock.systemUTC()), () -> true).runOnce();
