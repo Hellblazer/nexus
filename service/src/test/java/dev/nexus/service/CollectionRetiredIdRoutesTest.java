@@ -178,7 +178,7 @@ class CollectionRetiredIdRoutesTest {
         long x = fx.idOf(a);
         Resp r = fx.post("/v1/taxonomy/topics/insert", "{\"collection_id\":" + x + ",\"label\":\"gap-topic\",\"doc_count\":1}");
         assertThat(r.status()).as(r.body()).isEqualTo(200);
-        assertThat(fx.asSuperuser(ctx -> ctx.fetchCount(TOPICS, TOPICS.COLLECTION.eq(a).and(TOPICS.COLLECTION_ID.eq(x)))))
+        assertThat((int) (Integer) fx.asSuperuser(ctx -> ctx.fetchCount(TOPICS, TOPICS.COLLECTION.eq(a).and(TOPICS.COLLECTION_ID.eq(x)))))
             .as("the topic is filed under the label and the id of the row asked for").isEqualTo(1);
     }
 
@@ -213,7 +213,7 @@ class CollectionRetiredIdRoutesTest {
         assertThat(r.status()).as(r.body()).isEqualTo(404);
         assertThat(r.reason()).isEqualTo("unknown_collection_id");
         assertThat(r.json().path("collection_id").asLong(-1)).isEqualTo(x);
-        assertThat(fx.asSuperuser(ctx -> ctx.fetchCount(TOPICS, TOPICS.COLLECTION.eq(a)))).as("nothing landed in the new holder of the label")
+        assertThat((int) (Integer) fx.asSuperuser(ctx -> ctx.fetchCount(TOPICS, TOPICS.COLLECTION.eq(a)))).as("nothing landed in the new holder of the label")
             .isZero();
     }
 
@@ -242,7 +242,7 @@ class CollectionRetiredIdRoutesTest {
         assertThat(r.reason()).isEqualTo("collection_superseded");
         assertThat(r.json().path("superseded_by").asText()).isEqualTo(b);
         assertThat(r.json().path("successor_collection_id").asLong(-1)).isEqualTo(fx.idOf(b));
-        assertThat(fx.asSuperuser(ctx -> ctx.fetchCount(TOPICS, TOPICS.COLLECTION.eq(a)))).isZero();
+        assertThat((int) (Integer) fx.asSuperuser(ctx -> ctx.fetchCount(TOPICS, TOPICS.COLLECTION.eq(a)))).isZero();
     }
 
     @Test
