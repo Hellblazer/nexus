@@ -78,7 +78,54 @@ final class CollectionSelectors {
         "/v1/taxonomy/centroids/delete", "/v1/taxonomy/centroids/purge",
         "/v1/aspects/delete", "/v1/aspects/salient_sentences/set_by_key", "/v1/aspects/upsert", "/v1/aspects/highlights/upsert",
         "/v1/remap/clear_leg", "/v1/remap/record_batch", "/v1/pipeline/create", "/v1/pipeline/delete_collection",
-        "/v1/telemetry/relevance/log", "/v1/telemetry/hook_failures/record");
+        "/v1/telemetry/relevance/log", "/v1/telemetry/hook_failures/record",
+        // RDR-229 P3.5a W2 (nexus-p2m1x.23): routes the hand-kept list had missed. Each reads the named id in its own write transaction
+        "/v1/catalog/collections/set_aspects_enabled", "/v1/vectors/reembed/jobs",
+        "/v1/vectors/gc/quarantine-orphans", "/v1/vectors/gc/restore-rereferenced", "/v1/vectors/gc/expire-quarantine",
+        "/v1/vectors/gc/quarantine-restore");
+
+    /**
+     * The POST routes that name a collection and only read: nothing is written under the collection or anywhere, so a request by id
+     * has no write to guard. {@code CollectionRouteClassificationTest} holds every POST and DELETE route of the table to be in exactly
+     * one of {@link #WRITES}, this set and {@link #EXEMPT}.
+     */
+    static final java.util.Set<String> READS = java.util.Set.of(
+        "/v1/catalog/collections/rehome/status",
+        "/v1/vectors/search", "/v1/vectors/query", "/v1/vectors/search-per-collection", "/v1/vectors/hybrid-search",
+        "/v1/vectors/search-metadata-scoped", "/v1/vectors/search-topic-scoped", "/v1/vectors/search-graph-hop",
+        "/v1/vectors/search-aspect-scoped", "/v1/vectors/get", "/v1/vectors/get-all-metadata", "/v1/vectors/store-get",
+        "/v1/vectors/get-embeddings", "/v1/vectors/store-list", "/v1/vectors/embed", "/v1/vectors/manifest-less-census",
+        "/v1/vectors/reapable", "/v1/vectors/reembed/plan",
+        "/v1/taxonomy/assignments/cross-preview", "/v1/taxonomy/assignments/unassigned",
+        "/v1/taxonomy/meta/last_discover_batch", "/v1/taxonomy/centroids/query");
+
+    private static final String VERB = "a retiring verb: it takes the row's lock itself (FOR UPDATE, behind the sweep gates), which is the "
+        + "retire's, not a writer's FOR KEY SHARE read";
+    private static final String HISTORY = "a history-table write (T1 852f4c0f): the id is stamped with an unlocked read and a row that "
+        + "resolves to nothing is written with a NULL id, never refused";
+    private static final String PIPELINE = "a pipeline-run write: it lands on the pdf_pipeline row it resolves by pipeline id or content hash "
+        + "and on that row's own pages and chunks (a work queue); it writes no chunk, manifest or registry row of the collection";
+
+    /**
+     * The POST and DELETE routes that name a collection and are neither a {@link #WRITES} nor a {@link #READS} route, each with the
+     * reason a request by id has nothing to guard there.
+     */
+    static final Map<String, String> EXEMPT = exempt();
+
+    private static Map<String, String> exempt() {
+        Map<String, String> e = new LinkedHashMap<>();
+        for (String verb : List.of("supersede", "rehome", "rename", "delete")) {
+            e.put("/v1/catalog/collections/" + verb, VERB);
+        }
+        e.put("/v1/catalog/gc_audit/record", HISTORY);
+        e.put("/v1/catalog/index-run/begin", "it stamps the document row it names by tumbler; the collection field is only logged");
+        e.put("/v1/catalog/index-run/begin-many", "it stamps the document rows it names by tumbler; the collection field is only logged");
+        for (String op : List.of("progress", "extraction_meta", "complete", "fail", "pages", "chunks", "mark_uploaded",
+                "reset_uploaded", "clear_wal", "delete")) {
+            e.put("/v1/pipeline/" + op, PIPELINE);
+        }
+        return Map.copyOf(e);
+    }
 
     /** The routes by full path. */
     static final Map<String, Route> ROUTES = Map.copyOf(table());
