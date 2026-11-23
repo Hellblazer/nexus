@@ -86,6 +86,14 @@ final class TaxonomyRegistryReads {
             return collectionId != null ? collectionId : row.map(CollectionRow::collectionId).orElse(null);
         }
 
+        /**
+         * What the topic's {@code collection} column takes in an UPDATE: the locked row's CURRENT label (a one-row rename leaves the column at
+         * the old one), else the column as it is (a topic in no collection, or whose label no row holds).
+         */
+        org.jooq.Field<String> nameToWrite() {
+            return row.<org.jooq.Field<String>>map(r -> org.jooq.impl.DSL.val(r.label())).orElse(TOPICS.COLLECTION);
+        }
+
         /** The home's CURRENT label: the locked row's, else the name the topic bears. */
         String currentLabel() {
             return row.map(CollectionRow::label).orElse(label);
@@ -181,6 +189,27 @@ final class TaxonomyRegistryReads {
         row.ifPresent(r -> heldIds.add(r.collectionId()));
         lockRest(ctx, tenant, others, heldIds, heldLabels);
         return row;
+    }
+
+    /**
+     * The first half of a write that takes an advisory lock before its registry rows ({@link TaxonomyCollectionLock}, whose callback runs
+     * between the lock and the collection's own row): reads, in ONE statement in {@code collection_id} order, the rows {@code others} names
+     * and the collection's own row (by its label), so the writer holds no row while it waits for a lower one. A collection the request named
+     * by id keeps its own by-id read (it consumes the request's id), so the rows below {@code ownId} are read first and the rest after it
+     * ({@link #registryFirstRest}): the same order in two runs. Returns the ids held.
+     */
+    static Set<Long> registryFirstBeforeOwn(DSLContext ctx, String tenant, String own, Long ownId, Supplier<Names> others) {
+        Set<Long> held = new HashSet<>();
+        if (ExpectedCollectionIds.named(own)) {
+            lockBelow(ctx, tenant, ownId, others, held);
+            return held;
+        }
+        Names n = others.get();
+        List<String> labels = new ArrayList<>(n.labels());
+        labels.add(own);
+        CollectionRegistry.requireIdsAndLabelsForWrite(ctx, tenant, n.ids(), labels);
+        held.addAll(n.ids());
+        return held;
     }
 
     /**
