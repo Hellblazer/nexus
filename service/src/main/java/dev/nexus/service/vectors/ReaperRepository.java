@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import dev.nexus.service.datamove.Gate3;
+import dev.nexus.service.db.CollectionKey;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.TenantScope;
 
@@ -50,9 +52,20 @@ public class ReaperRepository {   // not final: ChunkReaperIntegrationTest raise
     public record Expiry(long expired, long protectedCount) {}
 
     private final TenantScope tenantScope;
+    private final Gate3 gate3;
 
     public ReaperRepository(TenantScope tenantScope) {
+        this(tenantScope, Gate3.never());
+    }
+
+    /** RDR-229 P3.5c: from gate 3 on the install the readers name a collection by its id column ({@link CollectionKey}). */
+    public ReaperRepository(TenantScope tenantScope, Gate3 gate3) {
         this.tenantScope = tenantScope;
+        this.gate3 = java.util.Objects.requireNonNull(gate3, "gate3");
+    }
+
+    private org.jooq.Condition inCollection(String tenant, String collection) {
+        return CollectionKey.of(gate3).eq(tenant, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, collection);
     }
 
     /**
@@ -63,10 +76,12 @@ public class ReaperRepository {   // not final: ChunkReaperIntegrationTest raise
     public List<String> collectionsWithChunks(String tenant, Duration statementTimeout) {
         return tenantScope.withTenant(tenant, ctx -> {
             PgSession.setStatementAndLockBounds(ctx, (int) statementTimeout.toMillis(), 2_000);
-            return ctx.selectDistinct(CHUNKS.COLLECTION).from(CHUNKS)
-                .where(CHUNKS.TENANT_ID.eq(tenant))
-                .orderBy(CHUNKS.COLLECTION)
-                .fetch(CHUNKS.COLLECTION);
+            var raw = CollectionKey.of(gate3).label(tenant, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID);
+            var lbl = raw.as("collection");
+            return ctx.selectDistinct(lbl).from(CHUNKS)
+                .where(CHUNKS.TENANT_ID.eq(tenant).and(raw.isNotNull()))
+                .orderBy(lbl)
+                .fetch(lbl);
         });
     }
 
@@ -126,7 +141,7 @@ public class ReaperRepository {   // not final: ChunkReaperIntegrationTest raise
             ctx.select(CHUNKS.CHASH, ChunkOwnerLabel.title(), ChunkOwnerLabel.filePath(), ChunkOwnerLabel.textPrefix())
                .from(CHUNKS)
                .leftJoin(ChunkOwnerLabel.ownerLateral()).on(DSL.trueCondition())
-               .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(collection)).and(CHUNKS.CHASH.in(keys)))
+               .where(CHUNKS.TENANT_ID.eq(tenant).and(inCollection(tenant, collection)).and(CHUNKS.CHASH.in(keys)))
                .orderBy(CHUNKS.CHASH)
                .fetch(r -> new ChunkLabel(HexFormat.of().formatHex(r.value1()),
                    ChunkOwnerLabel.blankToNull(r.value2()), ChunkOwnerLabel.blankToNull(r.value3()),
@@ -169,7 +184,7 @@ public class ReaperRepository {   // not final: ChunkReaperIntegrationTest raise
             PgSession.setStatementAndLockBounds(ctx, statementTimeoutMs, 2_000);
             // No ORDER BY: SELECT DISTINCT cannot order by an expression it rebinds. Sorted below instead.
             return ctx.selectDistinct(origin).from(CHUNKS)
-                .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(quarantineCollection))
+                .where(CHUNKS.TENANT_ID.eq(tenant).and(inCollection(tenant, quarantineCollection))
                     .and(engineOwned).and(origin.isNotNull()))
                 .fetch(origin).stream().sorted().toList();
         });
@@ -211,7 +226,7 @@ public class ReaperRepository {   // not final: ChunkReaperIntegrationTest raise
         return tenantScope.withTenant(tenant, ctx -> {
             PgSession.setStatementAndLockBounds(ctx, statementTimeoutMs, 2_000);
             return ctx.selectDistinct(origin).from(CHUNKS)
-                .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(quarantineCollection))
+                .where(CHUNKS.TENANT_ID.eq(tenant).and(inCollection(tenant, quarantineCollection))
                     .and(clientMoved).and(origin.isNotNull())
                     .and(DSL.exists(DSL.selectOne().from(CATALOG_COLLECTIONS)
                         .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)

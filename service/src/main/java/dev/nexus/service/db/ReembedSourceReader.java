@@ -4,6 +4,7 @@ package dev.nexus.service.db;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.nexus.service.datamove.Gate3;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
@@ -51,42 +52,53 @@ public final class ReembedSourceReader {
     }
 
     private final TenantScope scope;
+    private final Gate3 gate3;
 
     public ReembedSourceReader(TenantScope scope) {
+        this(scope, Gate3.never());
+    }
+
+    /** RDR-229 P3.5c: from gate 3 on the install the readers name a collection by its id column ({@link CollectionKey}). */
+    public ReembedSourceReader(TenantScope scope, Gate3 gate3) {
         this.scope = scope;
+        this.gate3 = java.util.Objects.requireNonNull(gate3, "gate3");
+    }
+
+    private CollectionKey ck() {
+        return CollectionKey.of(gate3);
     }
 
     // The document shapes, defined once for the pass, the cutover's checks and the plan, so the plan cannot count a
     // different set than the cutover acts on. Each is a condition on CATALOG_DOCUMENTS (unaliased) rows.
 
     /** A manifest row of the document names {@code source}. */
-    private static Condition namesSource(DSLContext ctx, String tenant, String source) {
+    private Condition namesSource(DSLContext ctx, String tenant, String source) {
         var d = CATALOG_DOCUMENTS;
         var c = CATALOG_DOCUMENT_CHUNKS;
         return DSL.exists(ctx.selectOne().from(c)
-            .where(c.TENANT_ID.eq(tenant)).and(c.DOC_ID.eq(d.TUMBLER)).and(c.COLLECTION.eq(source)));
+            .where(c.TENANT_ID.eq(tenant)).and(c.DOC_ID.eq(d.TUMBLER)).and(ck().eq(tenant, c.COLLECTION, c.COLLECTION_ID, source)));
     }
 
     /** A candidate's shape: a manifest row names {@code source}, or there is no manifest and the document is homed there. */
-    private static Condition candidateShape(DSLContext ctx, String tenant, String source) {
+    private Condition candidateShape(DSLContext ctx, String tenant, String source) {
         var d = CATALOG_DOCUMENTS;
         var c = CATALOG_DOCUMENT_CHUNKS;
         Condition hasNoManifest = DSL.notExists(ctx.selectOne().from(c)
             .where(c.TENANT_ID.eq(tenant)).and(c.DOC_ID.eq(d.TUMBLER)));
-        return namesSource(ctx, tenant, source).or(hasNoManifest.and(d.PHYSICAL_COLLECTION.eq(source)));
+        return namesSource(ctx, tenant, source).or(hasNoManifest.and(ck().eq(tenant, d.PHYSICAL_COLLECTION, d.PHYSICAL_COLLECTION_ID, source)));
     }
 
     /** A soft-deleted document whose manifest names {@code source} or that is homed there. */
-    private static Condition tombstonedShape(DSLContext ctx, String tenant, String source) {
+    private Condition tombstonedShape(DSLContext ctx, String tenant, String source) {
         var d = CATALOG_DOCUMENTS;
         return d.TENANT_ID.eq(tenant).and(d.DELETED_AT.isNotNull())
-            .and(namesSource(ctx, tenant, source).or(d.PHYSICAL_COLLECTION.eq(source)));
+            .and(namesSource(ctx, tenant, source).or(ck().eq(tenant, d.PHYSICAL_COLLECTION, d.PHYSICAL_COLLECTION_ID, source)));
     }
 
     /** A live document homed at {@code source} that is not a candidate: its manifest names only other collections. */
-    private static Condition liveHomedElsewhereShape(DSLContext ctx, String tenant, String source) {
+    private Condition liveHomedElsewhereShape(DSLContext ctx, String tenant, String source) {
         var d = CATALOG_DOCUMENTS;
-        return d.TENANT_ID.eq(tenant).and(d.DELETED_AT.isNull()).and(d.PHYSICAL_COLLECTION.eq(source))
+        return d.TENANT_ID.eq(tenant).and(d.DELETED_AT.isNull()).and(ck().eq(tenant, d.PHYSICAL_COLLECTION, d.PHYSICAL_COLLECTION_ID, source))
             .and(DSL.not(candidateShape(ctx, tenant, source)));
     }
 
@@ -146,9 +158,9 @@ public final class ReembedSourceReader {
     public Residue residue(String tenant, String source) {
         return scope.withTenant(tenant, ctx -> new Residue(
             ctx.fetchCount(DOCUMENT_ASPECTS,
-                DOCUMENT_ASPECTS.TENANT_ID.eq(tenant).and(DOCUMENT_ASPECTS.COLLECTION.eq(source))),
+                DOCUMENT_ASPECTS.TENANT_ID.eq(tenant).and(ck().eq(tenant, DOCUMENT_ASPECTS.COLLECTION, DOCUMENT_ASPECTS.COLLECTION_ID, source))),
             ctx.fetchCount(DOCUMENT_HIGHLIGHTS,
-                DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant).and(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(source))),
+                DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant).and(ck().eq(tenant, DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.COLLECTION_ID, source))),
             // RDR-235 (nexus-5r2sc.2.6): the unconsumed aspects tasks naming the source; the source's purge deletes them.
             AspectTaskRefs.countNaming(ctx, tenant, source)));
     }
@@ -239,12 +251,12 @@ public final class ReembedSourceReader {
             var d = CATALOG_DOCUMENTS;
             var c = CATALOG_DOCUMENT_CHUNKS;
             var m = REEMBED_JOB_MOVES;
-            Condition namesSourceRow = c.TENANT_ID.eq(tenant).and(c.COLLECTION.eq(source));
+            Condition namesSourceRow = c.TENANT_ID.eq(tenant).and(ck().eq(tenant, c.COLLECTION, c.COLLECTION_ID, source));
             long manifestRows = ctx.fetchCount(c, namesSourceRow);
             List<String> manifestDocIds = ctx.selectDistinct(c.DOC_ID).from(c).where(namesSourceRow)
                 .orderBy(c.DOC_ID).limit(PARITY_SAMPLE).fetch(c.DOC_ID);
 
-            Condition homed = d.TENANT_ID.eq(tenant).and(d.DELETED_AT.isNull()).and(d.PHYSICAL_COLLECTION.eq(source));
+            Condition homed = d.TENANT_ID.eq(tenant).and(d.DELETED_AT.isNull()).and(ck().eq(tenant, d.PHYSICAL_COLLECTION, d.PHYSICAL_COLLECTION_ID, source));
             long liveHomed = ctx.fetchCount(d, homed);
             List<String> homedDocIds = ctx.select(d.TUMBLER).from(d).where(homed).orderBy(d.TUMBLER)
                 .limit(PARITY_SAMPLE).fetch(d.TUMBLER);
@@ -255,9 +267,9 @@ public final class ReembedSourceReader {
             // A moved document agrees when its row is homed at the target and every manifest row it has (a document
             // with no chunks has none) names the target.
             Condition agrees = DSL.exists(ctx.selectOne().from(d)
-                    .where(d.TENANT_ID.eq(tenant)).and(d.TUMBLER.eq(m.DOC_ID)).and(d.PHYSICAL_COLLECTION.eq(target)))
+                    .where(d.TENANT_ID.eq(tenant)).and(d.TUMBLER.eq(m.DOC_ID)).and(ck().eq(tenant, d.PHYSICAL_COLLECTION, d.PHYSICAL_COLLECTION_ID, target)))
                 .and(DSL.notExists(ctx.selectOne().from(c)
-                    .where(c.TENANT_ID.eq(tenant)).and(c.DOC_ID.eq(m.DOC_ID)).and(c.COLLECTION.ne(target))));
+                    .where(c.TENANT_ID.eq(tenant)).and(c.DOC_ID.eq(m.DOC_ID)).and(ck().eq(tenant, c.COLLECTION, c.COLLECTION_ID, target).not())));
             long agreeing = ctx.fetchCount(m, moved.and(agrees));
             List<String> disagreeing = ctx.select(m.DOC_ID).from(m).where(moved.and(DSL.not(agrees)))
                 .orderBy(m.DOC_ID).limit(PARITY_SAMPLE).fetch(m.DOC_ID);
@@ -309,15 +321,15 @@ public final class ReembedSourceReader {
             var od = CATALOG_DOCUMENTS.as("plan_owner_docs");
             Select<Record1<byte[]>> owned = ctx.selectDistinct(oc.CHASH).from(oc).join(od)
                 .on(od.TENANT_ID.eq(oc.TENANT_ID).and(od.TUMBLER.eq(oc.DOC_ID)))
-                .where(oc.TENANT_ID.eq(tenant).and(oc.COLLECTION.eq(source)).and(od.DELETED_AT.isNull()));
+                .where(oc.TENANT_ID.eq(tenant).and(ck().eq(tenant, oc.COLLECTION, oc.COLLECTION_ID, source)).and(od.DELETED_AT.isNull()));
             long chunks = ctx.fetchCount(owned);
-            long stored = ctx.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(source)));
+            long stored = ctx.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(tenant).and(ck().eq(tenant, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, source)));
 
             Field<Integer> bytes = DSL.octetLength(CHUNKS.CHUNK_TEXT);
             Field<Integer> estimate = DSL.when(bytes.isNull().or(bytes.eq(0)), DSL.inline(0))
                 .otherwise(DSL.greatest(bytes.div(4), DSL.inline(1)));
             BigDecimal tokens = ctx.select(DSL.coalesce(DSL.sum(estimate), BigDecimal.ZERO)).from(CHUNKS)
-                .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(source)).and(CHUNKS.CHASH.in(owned)))
+                .where(CHUNKS.TENANT_ID.eq(tenant).and(ck().eq(tenant, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, source)).and(CHUNKS.CHASH.in(owned)))
                 .fetchOne(0, BigDecimal.class);
 
             DeleteCounts removal = deleteCounts(ctx, tenant, source);
@@ -347,14 +359,14 @@ public final class ReembedSourceReader {
         return scope.withTenant(tenant, ctx -> deleteCounts(ctx, tenant, source));
     }
 
-    private static DeleteCounts deleteCounts(DSLContext ctx, String tenant, String source) {
+    private DeleteCounts deleteCounts(DSLContext ctx, String tenant, String source) {
         long quarantine = QuarantineOrigin.countRowsOf(ctx, tenant, source);
 
         Select<Record1<Long>> sourceTopics = ctx.select(TOPICS.ID).from(TOPICS)
-            .where(TOPICS.TENANT_ID.eq(tenant).and(TOPICS.COLLECTION.eq(source)));
+            .where(TOPICS.TENANT_ID.eq(tenant).and(ck().eq(tenant, TOPICS.COLLECTION, TOPICS.COLLECTION_ID, source)));
         long foreignAssignments = ctx.fetchCount(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID.eq(tenant)
             .and(TOPIC_ASSIGNMENTS.TOPIC_ID.in(sourceTopics))
-            .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.ne(source)));
+            .and(ck().eq(tenant, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, source).not()));
         long links = ctx.fetchCount(TOPIC_LINKS, TOPIC_LINKS.TENANT_ID.eq(tenant)
             .and(TOPIC_LINKS.FROM_TOPIC_ID.in(sourceTopics).or(TOPIC_LINKS.TO_TOPIC_ID.in(sourceTopics))));
 
@@ -363,18 +375,18 @@ public final class ReembedSourceReader {
         var md = CATALOG_DOCUMENTS.as("plan_matched_docs");
         var mc = CATALOG_DOCUMENT_CHUNKS.as("plan_matched_chunks");
         Condition matchedShape = DSL.exists(ctx.selectOne().from(mc)
-                .where(mc.TENANT_ID.eq(tenant)).and(mc.DOC_ID.eq(md.TUMBLER)).and(mc.COLLECTION.eq(source)))
+                .where(mc.TENANT_ID.eq(tenant)).and(mc.DOC_ID.eq(md.TUMBLER)).and(ck().eq(tenant, mc.COLLECTION, mc.COLLECTION_ID, source)))
             .or(DSL.notExists(ctx.selectOne().from(mc)
                 .where(mc.TENANT_ID.eq(tenant)).and(mc.DOC_ID.eq(md.TUMBLER)))
-                .and(md.PHYSICAL_COLLECTION.eq(source)));
+                .and(ck().eq(tenant, md.PHYSICAL_COLLECTION, md.PHYSICAL_COLLECTION_ID, source)));
         Function<Field<String>, Condition> moved = docId -> DSL.exists(ctx.selectOne().from(md)
             .where(md.TENANT_ID.eq(tenant)).and(md.TUMBLER.eq(docId)).and(md.DELETED_AT.isNull())
             .and(matchedShape));
         long unmatched =
             ctx.fetchCount(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID.eq(tenant)
-                .and(DOCUMENT_ASPECTS.COLLECTION.eq(source)).and(DSL.not(moved.apply(DOCUMENT_ASPECTS.DOC_ID))))
+                .and(ck().eq(tenant, DOCUMENT_ASPECTS.COLLECTION, DOCUMENT_ASPECTS.COLLECTION_ID, source)).and(DSL.not(moved.apply(DOCUMENT_ASPECTS.DOC_ID))))
             + ctx.fetchCount(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant)
-                .and(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(source))
+                .and(ck().eq(tenant, DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.COLLECTION_ID, source))
                 .and(DSL.not(moved.apply(DOCUMENT_HIGHLIGHTS.DOC_ID))))
             // RDR-235 (nexus-5r2sc.2.6): and the unconsumed aspects tasks naming the source whose document the job does not move.
             + AspectTaskRefs.countNamingWhereDoc(ctx, tenant, source, docId -> DSL.not(moved.apply(docId)));
@@ -396,7 +408,7 @@ public final class ReembedSourceReader {
             List<Map<String, Object>> out = new ArrayList<>();
             for (var r : ctx.select(CHUNKS.CHASH, CHUNKS.CHUNK_TEXT, CHUNKS.METADATA).from(CHUNKS)
                 .where(CHUNKS.TENANT_ID.eq(tenant))
-                .and(CHUNKS.COLLECTION.eq(source))
+                .and(ck().eq(tenant, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, source))
                 .and(CHUNKS.CHASH.in(keys))
                 .fetch()) {
                 Map<String, Object> chunk = new LinkedHashMap<>();
