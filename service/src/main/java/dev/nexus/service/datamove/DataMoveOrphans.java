@@ -1,0 +1,62 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+package dev.nexus.service.datamove;
+
+import dev.nexus.service.db.AdminConnection;
+import org.jooq.SQLDialect;
+import org.jooq.exception.DataAccessException;
+import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.SQLException;
+import java.util.Properties;
+
+/**
+ * Ends the backends a stopped engine left behind, BEFORE the schema migration (nexus-p2m1x.21; linda, 2026-11-23). A validation with no
+ * statement bound can outlive the engine that started it: the client socket closing does not stop a running VALIDATE, and it holds ROW SHARE on
+ * the collection registry and SHARE UPDATE EXCLUSIVE on its leaf for the rest of its run. A migration changeset that takes ACCESS EXCLUSIVE on
+ * either would wait behind it and stall the boot. {@link DataMoveWorker#terminateOrphans} does the same after the migration; this runs
+ * first. The caller holds the engine singleton lock, so no live engine owns one of these backends.
+ */
+public final class DataMoveOrphans {
+
+    private static final Logger log = LoggerFactory.getLogger(DataMoveOrphans.class);
+
+    private DataMoveOrphans() { /* static */ }
+
+    /** Every move session's name starts with this (the worker names its registry session, so its completion transactions, with it). */
+    public static final String PREFIX = DataMoveWorker.APPLICATION_NAME_PREFIX;
+
+    /**
+     * @return how many backends were ended; -1 when the database could not be reached (logged, never fatal: the boot goes on)
+     */
+    public static int terminateLeftover(AdminConnection admin) {
+        Properties props = new Properties();
+        props.setProperty("user", admin.user());
+        props.setProperty("password", admin.password());
+        props.setProperty("ApplicationName", PREFIX + "boot-reaper");
+        props.setProperty("connectTimeout", "3");
+        props.setProperty("socketTimeout", "10");
+        try (Connection c = DriverManager.getConnection(admin.url(), props)) {
+            var ctx = DSL.using(c, SQLDialect.POSTGRES);
+            var pid = DSL.field(DSL.name("pid"), Integer.class);
+            var name = DSL.field(DSL.name("application_name"), String.class);
+            var rows = ctx.select(pid, name, DSL.function("pg_terminate_backend", SQLDataType.BOOLEAN, pid))
+                .from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
+                .where(DSL.condition(DSL.function("starts_with", SQLDataType.BOOLEAN, name, DSL.val(PREFIX))))
+                .and(pid.ne(DSL.function("pg_backend_pid", SQLDataType.INTEGER)))
+                .fetch();
+            for (var r : rows) {
+                log.warn("event=data_move_leftover_ended pid={} application_name=\"{}\"", r.value1(), r.value2());
+            }
+            return rows.size();
+        } catch (SQLException | DataAccessException e) {
+            log.warn("event=data_move_leftover_not_ended cause=\"{}\"", FailureHandler.oneLine(e.toString()));
+            return -1;
+        }
+    }
+}
