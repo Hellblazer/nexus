@@ -846,7 +846,12 @@ final class TenantKeyedStateTables {
             "PciCanary.Result.redSample",
             "PciCanary.Result.redQueries",
             "PciReconciler.Tally.droppedIndexes",
-            "PciReconciler.Tally.builtTargets")) {
+            "PciReconciler.Tally.builtTargets",
+            // the id canary's ring keys: one pass's (model, tenant, id) to label, from the leaf counting transactions, dropped with the pass
+            "PciReconciler.Tally.idLabels",
+            "PciReconciler.Planned.idLabels",
+            // the latch the id canary's statements read: a supplier over the reconciler's own gate 3 latch, no tenant state
+            "PciReconciler.CanaryLatch.source")) {
             notKeyed.put(f, PCI_OFF);
         }
         // nexus-4lnn1.1.5 (RDR-230 Technical Design 7): the maintenance snapshot (counts on /v1/status, entries on

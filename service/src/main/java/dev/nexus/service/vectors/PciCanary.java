@@ -49,8 +49,17 @@ final class PciCanary implements PciCanarySchedule.Runner {
 
     private static final Logger log = LoggerFactory.getLogger(PciCanary.class);
 
-    /** The index a run measures. {@code index} is the name the router's set holds for it. */
-    record Target(String leaf, String tenant, String model, String collection, String index) { }
+    /**
+     * The index a run measures. {@code index} is the name the router's set holds for it. {@code collectionId} is null for a name-predicate index and the
+     * id of the index's predicate for an id-predicate index (then {@code collection} is that id's current label, for the ring): the statement selects
+     * through the id twin of the serving search, as the serving path does once gate 3 has latched.
+     */
+    record Target(String leaf, String tenant, String model, String collection, String index, Long collectionId) {
+        /** A name-predicate target. */
+        Target(String leaf, String tenant, String model, String collection, String index) {
+            this(leaf, tenant, model, collection, index, null);
+        }
+    }
 
     /** One row of a page: the chunk's id (its chash, hex) and its distance from the query. */
     record Hit(String id, double distance) { }
