@@ -566,8 +566,9 @@ public final class TaxonomyRepository {
             var home = TaxonomyRegistryReads.registryFirstOfTopics(ctx, tenant, true, List.of(topicId));
             if (home.isEmpty()) return Optional.<String>empty();
             // Assignments cascade via FK ON DELETE CASCADE
-            ctx.deleteFrom(TOPICS).where(TOPICS.ID.eq(topicId).and(home.get().ownsTopic())).execute();
-            return Optional.of(home.get().currentLabel());
+            // the bind matched nothing: the topic was deleted or re-homed after the home was read, so it is a missing topic, as it was before
+            int deleted = ctx.deleteFrom(TOPICS).where(TOPICS.ID.eq(topicId).and(home.get().ownsTopic())).execute();
+            return deleted == 0 ? Optional.<String>empty() : Optional.of(home.get().currentLabel());
         });
     }
 
@@ -654,9 +655,11 @@ public final class TaxonomyRepository {
             // move (INSERT) and source purge (DELETE) above each fire the
             // statement-level triggers, which recompute target.doc_count from the
             // live assignment rows; the trigger is the sole writer.
-            ctx.deleteFrom(TOPICS).where(TOPICS.ID.eq(sourceId).and(home.get().ownsTopic())).execute();
+            // the bind matched nothing: the source topic was deleted or re-homed after the home was read, a missing topic as before. The
+            // assignment statements above were confined to the same home, so they moved nothing either
+            int deleted = ctx.deleteFrom(TOPICS).where(TOPICS.ID.eq(sourceId).and(home.get().ownsTopic())).execute();
 
-            return Optional.of(collection);
+            return deleted == 0 ? Optional.<String>empty() : Optional.of(collection);
         });
     }
 
@@ -1568,9 +1571,12 @@ public final class TaxonomyRepository {
         }
         return tenantScope.withTenant(tenant, ctx -> {
             final byte[] doc = docIdBytes(title);
-            final org.jooq.Condition projectTopics = TaxonomyRegistryReads.topicsNamedBy(ctx, tenant, project);
-            var row = TaxonomyRegistryReads.registryFirstAround(ctx, tenant, project, () -> TaxonomyRegistryReads.sourcesOf(ctx, tenant,
-                TOPIC_ASSIGNMENTS.DOC_ID.eq(doc).and(TOPIC_ASSIGNMENTS.TOPIC_ID.in(select(TOPICS.ID).from(TOPICS).where(projectTopics)))));
+            // the topics are judged twice: from an unlocked guess for the lock order, then from the row as locked (the write acts on that one)
+            var row = TaxonomyRegistryReads.registryFirstAround(ctx, tenant, project,
+                () -> TaxonomyRegistryReads.sourcesOf(ctx, tenant, TOPIC_ASSIGNMENTS.DOC_ID.eq(doc)
+                    .and(TOPIC_ASSIGNMENTS.TOPIC_ID.in(select(TOPICS.ID).from(TOPICS).where(TaxonomyRegistryReads.topicsNamedBy(ctx, tenant, project))))),
+                locked -> TaxonomyRegistryReads.sourcesOf(ctx, tenant, TOPIC_ASSIGNMENTS.DOC_ID.eq(doc)
+                    .and(TOPIC_ASSIGNMENTS.TOPIC_ID.in(select(TOPICS.ID).from(TOPICS).where(ownTopics(locked.orElse(null), project))))));
             final org.jooq.Condition ownTopics = ownTopics(row.orElse(null), project);
             int removed = ctx.deleteFrom(TOPIC_ASSIGNMENTS)
                 .where(TOPIC_ASSIGNMENTS.DOC_ID.eq(doc)
@@ -1704,8 +1710,12 @@ public final class TaxonomyRepository {
             // RDR-229 P3.5a (nexus-p2m1x.23): the rows the purge reaches are read in one id-ordered run, the collection's own among them: the
             // doomed topics' assignments carry the source collections of the documents projected onto them (other collections' chunks), and
             // those collections' registry rows are read FOR KEY SHARE too, before any delete
-            final Long purgedId = TaxonomyRegistryReads.registryFirstAround(ctx, tenant, collection, () -> TaxonomyRegistryReads.sourcesOf(ctx, tenant,
-                TOPIC_ASSIGNMENTS.TOPIC_ID.in(select(TOPICS.ID).from(TOPICS).where(TaxonomyRegistryReads.topicsNamedBy(ctx, tenant, collection)))))
+            // the doomed topics are judged twice: from an unlocked guess for the lock order, then from the row as locked (the delete acts on that one)
+            final Long purgedId = TaxonomyRegistryReads.registryFirstAround(ctx, tenant, collection,
+                () -> TaxonomyRegistryReads.sourcesOf(ctx, tenant, TOPIC_ASSIGNMENTS.TOPIC_ID.in(
+                    select(TOPICS.ID).from(TOPICS).where(TaxonomyRegistryReads.topicsNamedBy(ctx, tenant, collection)))),
+                locked -> TaxonomyRegistryReads.sourcesOf(ctx, tenant, TOPIC_ASSIGNMENTS.TOPIC_ID.in(
+                    select(TOPICS.ID).from(TOPICS).where(ownTopics(locked.orElse(null), collection)))))
                 .map(CollectionRow::collectionId).orElse(null);
             final org.jooq.Condition topicsOf = purgedId == null ? TOPICS.COLLECTION_ID.isNull().and(TOPICS.COLLECTION.eq(collection))
                 : TOPICS.COLLECTION_ID.eq(purgedId).or(TOPICS.COLLECTION_ID.isNull().and(TOPICS.COLLECTION.eq(collection)));

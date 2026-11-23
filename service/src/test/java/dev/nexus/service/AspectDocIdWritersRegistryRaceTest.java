@@ -142,6 +142,17 @@ class AspectDocIdWritersRegistryRaceTest {
         assertThat(repo.upsertHighlight(TENANT, body)).as("setup: the highlight row was written").isTrue();
     }
 
+    /**
+     * Retires {@code name}'s row the way a supersede does: it names its successor, and the children stay where they are (a supersede
+     * re-homes nothing). P3.1's CHECK ties {@code superseded_by} to {@code superseded_by_id}.
+     */
+    private void supersede(String name, String successor, long successorId) {
+        int retired = asSuperuser(ctx -> ctx.update(CATALOG_COLLECTIONS)
+            .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, successor).set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, successorId)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT).and(CATALOG_COLLECTIONS.NAME.eq(name))).execute());
+        assertThat(retired).as("setup: the row was retired").isEqualTo(1);
+    }
+
     private void lockRow(Connection verb, String name) {
         DSL.using(verb, SQLDialect.POSTGRES).select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(name)).forUpdate().fetch();
@@ -262,6 +273,46 @@ class AspectDocIdWritersRegistryRaceTest {
             () -> repo.deleteHighlight(TENANT, doc));
 
         assertThat(deleted).as("the delete followed the re-homed row").isTrue();
+        int left = asSuperuser(ctx -> ctx.fetchCount(DOCUMENT_HIGHLIGHTS,
+            DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(TENANT).and(DOCUMENT_HIGHLIGHTS.DOC_ID.eq(doc))));
+        assertThat(left).isZero();
+    }
+
+    // ── a row stamped to a retired collection: the routes answer what they answered before the read existed ──
+
+    @Timeout(180)
+    @Test
+    void setSalientSentences_ofARowStampedToASupersededCollection_stillWrites_noRefusal() {
+        String retired = "race-asp-retired-" + (n++);
+        String successor = "race-asp-succ-" + (n++);
+        register(retired);
+        long successorId = register(successor);
+        String doc = "race-asp-retired-doc-" + (n++);
+        seedAspect(retired, doc);
+        supersede(retired, successor, successorId);
+
+        int updated = repo.setSalientSentences(TENANT, doc, "[\"retired still writes\"]");
+
+        assertThat(updated).as("a supersede re-homes no child: the write lands, with no 409 for the retired id").isEqualTo(1);
+        var data = asSuperuser(ctx -> ctx.select(DOCUMENT_ASPECTS.SALIENT_SENTENCES).from(DOCUMENT_ASPECTS)
+            .where(DOCUMENT_ASPECTS.TENANT_ID.eq(TENANT).and(DOCUMENT_ASPECTS.DOC_ID.eq(doc))).fetchOne(DOCUMENT_ASPECTS.SALIENT_SENTENCES));
+        assertThat(data.data()).contains("retired still writes");
+    }
+
+    @Timeout(180)
+    @Test
+    void deleteHighlight_ofARowStampedToASupersededCollection_stillDeletes_noRefusal() {
+        String retired = "race-hl-retired-" + (n++);
+        String successor = "race-hl-succ-" + (n++);
+        register(retired);
+        long successorId = register(successor);
+        String doc = "race-hl-retired-doc-" + (n++);
+        seedHighlight(retired, doc);
+        supersede(retired, successor, successorId);
+
+        boolean deleted = repo.deleteHighlight(TENANT, doc);
+
+        assertThat(deleted).as("no 409 for the retired id: the delete lands").isTrue();
         int left = asSuperuser(ctx -> ctx.fetchCount(DOCUMENT_HIGHLIGHTS,
             DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(TENANT).and(DOCUMENT_HIGHLIGHTS.DOC_ID.eq(doc))));
         assertThat(left).isZero();
