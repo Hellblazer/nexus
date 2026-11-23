@@ -95,9 +95,10 @@ public final class Rdr229ChunksFk {
             + " AND k.conkey = " + attnums(rel, "tenant_id", "collection_id", "embedding_model")
             + " AND k.confkey = " + attnums("'nexus.catalog_collections'::pg_catalog.regclass", "tenant_id", "collection_id", "embedding_model")
             + " AND k.confupdtype = 'a' AND k.confdeltype = 'r' AND k.confmatchtype = 's' AND NOT k.condeferrable AND NOT k.condeferred"
-            // not attached to another key already, no SET NULL / SET DEFAULT column list (PG15+), no PERIOD (PG18+: the column does not
-            // exist before it, so it is read through to_jsonb)
-            + " AND k.conparentid = 0 AND k.confdelsetcols IS NULL"
+            // a key already attached to the parent (conparentid set) is a match too: the leaf is done, and a re-run of the swap's steps after the
+            // composite exists must add nothing (a second ADD of <leaf>_cid_fk is 42710). No SET NULL / SET DEFAULT column list (PG15+), no PERIOD
+            // (PG18+: the column does not exist before it, so it is read through to_jsonb)
+            + " AND k.confdelsetcols IS NULL"
             + " AND NOT COALESCE((pg_catalog.to_jsonb(k) ->> 'conperiod')::pg_catalog.bool, false))";
     }
 
@@ -116,6 +117,8 @@ public final class Rdr229ChunksFk {
             l             record;
             n             bigint;
             pending       boolean := false;
+            changed       boolean := false;
+            lock_wait     pg_catalog.text;
             paused_first  text;
             paused_count  integer := 0;
             is_failed     boolean;
@@ -125,7 +128,8 @@ public final class Rdr229ChunksFk {
 
     /**
      * PL/pgSQL (no DECLARE, no BEGIN): for every leaf of nexus.chunks without a validated matching key, add the key NOT VALID if the leaf has
-     * none, and register its validation move or re-open a finished one. Sets {@code pending} when any leaf needed it. Idempotent; the leaf's
+     * none, and register its validation move or re-open a finished one. Sets {@code pending} when any leaf needed it and {@code changed} when this call
+     * wrote anything (a key added, a move registered or re-opened). Idempotent; the leaf's
      * catalog is the only input. With {@code strict} (the adoption move) a leaf whose validation move is failed or superseded raises
      * SQLSTATE 55000 naming it (the adoption cannot go on until an operator re-arms it, and it must not wait on it for ever), and a paused one
      * is counted ({@code paused_count}, the first named in {@code paused_first}) for the caller to raise 55P03 with, saying first that they are paused.
@@ -139,7 +143,7 @@ public final class Rdr229ChunksFk {
                       FROM nexus.data_moves m WHERE m.label = %1$s;
                     IF is_failed OR is_superseded THEN
                         RAISE EXCEPTION USING MESSAGE = 'rdr229 adoption of %2$s is stuck: the validation move ' || %1$s || ' is '
-                                || CASE WHEN is_failed THEN 'failed' ELSE 'superseded' END || '; re-arm it to go on',
+                                || CASE WHEN is_failed THEN 'failed' ELSE 'superseded' END || '; re-arm it (an operator clears its failed_at and failure), and then re-arm this move, which fails with it',
                             ERRCODE = 'object_not_in_prerequisite_state';
                     END IF;
                     IF is_paused THEN
@@ -158,6 +162,7 @@ public final class Rdr229ChunksFk {
                     pending := true;
                     IF NOT %2$s THEN
                         EXECUTE pg_catalog.format('ALTER TABLE %%I.%%I ADD CONSTRAINT %%I %3$s NOT VALID', l.ns, l.leaf, l.leaf || '%4$s');
+                        changed := true;
                     END IF;
                     INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms,
                                                   statement_timeout_ms, verification, on_complete, changeset_id, registered_at)
@@ -169,7 +174,15 @@ public final class Rdr229ChunksFk {
                            (SELECT s.changeset_id FROM nexus.data_moves s WHERE s.label = '%10$s'),
                            pg_catalog.clock_timestamp()
                      WHERE NOT EXISTS (SELECT 1 FROM nexus.data_moves m WHERE m.label = %5$s);
+                    GET DIAGNOSTICS n = ROW_COUNT;
+                    IF n > 0 THEN
+                        changed := true;
+                    END IF;
                     UPDATE nexus.data_moves SET completed_at = NULL WHERE label = %5$s AND completed_at IS NOT NULL;
+                    GET DIAGNOSTICS n = ROW_COUNT;
+                    IF n > 0 THEN
+                        changed := true;
+                    END IF;
             %11$s    END LOOP;
             """.formatted(hasValidatedMatch("pt.relid"), hasMatch("l.rel"), FK_DEFINITION, LEAF_CONSTRAINT_SUFFIX, labelExpr,
                 REGISTRY_TEMPLATE, DataMove.NO_STATEMENT_BOUND_MS, REGISTRY_VERIFICATION, leafOnComplete(),
@@ -193,7 +206,9 @@ public final class Rdr229ChunksFk {
 
     /** PL/pgSQL for the swap's own on_complete: the leaf keys and moves, then the adoption move (registered once, after the leaves). */
     public static String swapSteps() {
-        return reconcileLeaves(false) + registerAdoptMove();
+        // a re-run after the composite exists (an operator re-arms the swap) adds nothing: the leaves' attached keys match, and the guard says so
+        return "    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = 'nexus.chunks'::pg_catalog.regclass AND conname = '"
+            + PARENT_CONSTRAINT + "') THEN\n" + reconcileLeaves(false) + "    END IF;\n" + registerAdoptMove();
     }
 
     private static String registerAdoptMove() {
@@ -213,24 +228,32 @@ public final class Rdr229ChunksFk {
     }
 
     /**
-     * The adoption move's on_complete (one DO block, no EXCEPTION clause). It takes SHARE ROW EXCLUSIVE on chunks (every partition) first, so
-     * no leaf is created between its check and the key it adds (a leaf is created with ACCESS EXCLUSIVE on its model partition, which this
-     * lock conflicts with); the lock wait is the move's 700 ms. Done when the composite exists. Otherwise: reconcile the leaves; if any
-     * has no validated matching key the move re-opens itself (completed_at back to NULL, and registered_at now, so it sorts after the leaf
-     * moves just queued) and returns, which the finisher reads as "not done", not as a completion; a leaf move that is failed or superseded
-     * raises 55000 naming it; one that is paused raises 55P03 naming the leaf. With every leaf validated it adds the parent constraint, which
-     * PostgreSQL adopts leaf by leaf with no scan.
+     * The adoption move's on_complete (one DO block, no EXCEPTION clause), in three stages so that a pass that cannot finish costs nothing:
+     * <ol>
+     *   <li><b>Without a lock on chunks:</b> done when the composite exists. Otherwise reconcile the leaves from the catalog. A leaf move that
+     *       is failed or superseded raises 55000 naming it; paused ones raise 55P03 naming the first. If work was just queued (a key added, a
+     *       move registered or re-opened) the move re-opens itself (completed_at NULL, registered_at now, so it sorts after the leaf moves
+     *       it queued) and returns: the finisher reads that as "not done", not as a completion. If every pending leaf already has its move
+     *       queued it raises 55P03 (a backed-off transient: the framework's 30 s doubling to 15 min), so a leaf blocked behind a build is
+     *       not polled every ten seconds.</li>
+     *   <li><b>Every leaf looks ready:</b> SHARE ROW EXCLUSIVE on chunks and every partition, under its own 200 ms lock wait (it bounds how long
+     *       a queued request stalls the writers behind it; on a timeout the move backs off and retries). A leaf is created with ACCESS
+     *       EXCLUSIVE on its model partition, which this conflicts with, so none appears after the recheck below. The lock wait goes back to the
+     *       move's own afterwards.</li>
+     *   <li><b>Under the lock:</b> reconcile again (a leaf that appeared meanwhile is queued and the move re-opens), then end the index builders
+     *       (only now, about to add: a deferring pass ends none) and add the parent constraint, which PostgreSQL adopts leaf by leaf with no scan.</li>
+     * </ol>
      */
     public static String adoptOnComplete() {
+        String reconcile = reconcileLeaves(true);
         return "DO $adopt$\nDECLARE\n" + RECONCILE_DECLARE + "BEGIN\n"
             + """
                 IF EXISTS (SELECT 1 FROM pg_catalog.pg_constraint
                             WHERE conrelid = 'nexus.chunks'::pg_catalog.regclass AND conname = '%1$s') THEN
                     RETURN;
                 END IF;
-                LOCK TABLE nexus.chunks IN SHARE ROW EXCLUSIVE MODE;
             """.formatted(PARENT_CONSTRAINT)
-            + reconcileLeaves(true)
+            + reconcile
             + """
                 IF paused_count > 0 THEN
                     RAISE EXCEPTION USING MESSAGE = 'rdr229 adoption of %2$s is waiting on paused leaf validation moves: first ' || paused_first
@@ -238,11 +261,50 @@ public final class Rdr229ChunksFk {
                         ERRCODE = 'lock_not_available';
                 END IF;
                 IF pending THEN
+                    IF changed THEN
+                        UPDATE nexus.data_moves SET completed_at = NULL, registered_at = pg_catalog.clock_timestamp() WHERE label = '%1$s';
+                        RETURN;
+                    END IF;
+                    RAISE EXCEPTION USING MESSAGE = 'rdr229 adoption of %2$s is waiting: a leaf validation move is queued and has not validated its leaf',
+                        ERRCODE = 'lock_not_available';
+                END IF;
+                lock_wait := pg_catalog.current_setting('lock_timeout');
+                PERFORM pg_catalog.set_config('lock_timeout', '%4$dms', true);
+                LOCK TABLE nexus.chunks IN SHARE ROW EXCLUSIVE MODE;
+                PERFORM pg_catalog.set_config('lock_timeout', lock_wait, true);
+                pending := false;
+                changed := false;
+                paused_count := 0;
+                paused_first := NULL;
+            """.formatted(ADOPT_LABEL, PARENT_CONSTRAINT, FK_DEFINITION, LOCK_WAIT_MS)
+            + reconcile
+            + """
+                IF pending THEN
                     UPDATE nexus.data_moves SET completed_at = NULL, registered_at = pg_catalog.clock_timestamp() WHERE label = '%1$s';
                     RETURN;
                 END IF;
+                PERFORM pg_catalog.pg_terminate_backend(a.pid) FROM pg_catalog.pg_stat_activity a
+                 WHERE a.application_name LIKE '%4$s%%' AND a.datname = pg_catalog.current_database() AND a.pid <> pg_catalog.pg_backend_pid();
                 ALTER TABLE nexus.chunks ADD CONSTRAINT %2$s %3$s;
-            """.formatted(ADOPT_LABEL, PARENT_CONSTRAINT, FK_DEFINITION)
+            """.formatted(ADOPT_LABEL, PARENT_CONSTRAINT, FK_DEFINITION, PciBuilderSession.APPLICATION_NAME_PREFIX)
             + "END\n$adopt$";
+    }
+
+    /** The adoption's own lock wait for SHARE ROW EXCLUSIVE on chunks, in milliseconds (the move's is 700): it bounds the writer stall behind a queued request. */
+    public static final int LOCK_WAIT_MS = 200;
+
+    /**
+     * A leaf validation move's claim check, a DO block the finisher runs in the claim transaction: raises 55P03 (so the claim does not complete
+     * and the move runs its VALIDATE again) unless the leaf's key to the registry is there, validated and the exact match the adoption looks for.
+     * A leaf that is gone passes (its own on_complete has already failed 42P01).
+     *
+     * @param label a validation move's label ({@link #LEAF_LABEL_PREFIX} and the leaf's table name); the leaf is in schema nexus
+     */
+    public static String leafClaimCheck(String label) {
+        String leaf = label.substring(LEAF_LABEL_PREFIX.length());
+        return "DO $chk$ DECLARE r pg_catalog.regclass; BEGIN r := pg_catalog.to_regclass(pg_catalog.quote_ident('nexus') || '.' || "
+            + "pg_catalog.quote_ident('" + leaf.replace("'", "''") + "')); IF r IS NOT NULL AND NOT " + hasValidatedMatch("r")
+            + " THEN RAISE EXCEPTION USING MESSAGE = 'rdr229 leaf validation claim: the key of ' || r::pg_catalog.text || ' to the registry is "
+            + "missing or not validated', ERRCODE = 'lock_not_available'; END IF; END $chk$";
     }
 }
