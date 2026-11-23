@@ -10,15 +10,17 @@ import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.DeadlockRetry;
 import dev.nexus.service.vectors.Rdr229ChunksFk;
 import org.jooq.DSLContext;
+import org.jooq.Field;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.sql.Connection;
 import java.sql.SQLException;
-import java.sql.Statement;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
@@ -41,26 +43,33 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
 
     // ── helpers ─────────────────────────────────────────────────────────────────────────────────────────────
 
-    private void pause(String labelLike) {
-        ctx().execute("UPDATE nexus.data_moves SET paused_at = now(), paused_by = 'p33c-test' WHERE label LIKE ?", labelLike);
-    }
-
-    private void resume(String labelLike) {
-        ctx().execute("UPDATE nexus.data_moves SET paused_at = NULL, paused_by = NULL WHERE label LIKE ?", labelLike);
-    }
-
-    private String onCompleteOf(String label) {
-        return ctx().fetchOne("SELECT on_complete FROM nexus.data_moves WHERE label = ?", label).get(0, String.class);
-    }
-
     /** {@code seq_scan, seq_tup_read} of every leaf of chunks, by leaf, as the statistics views show them. */
     private Map<String, long[]> leafScans() {
         Map<String, long[]> out = new TreeMap<>();
-        ctx().resultQuery("SELECT s.relname, s.seq_scan, s.seq_tup_read FROM pg_catalog.pg_stat_user_tables s "
-                + "WHERE s.schemaname = 'nexus' AND s.relname IN (SELECT c.relname FROM pg_catalog.pg_partition_tree('nexus.chunks'::pg_catalog.regclass) pt "
-                + "JOIN pg_catalog.pg_class c ON c.oid = pt.relid WHERE pt.isleaf)")
-            .fetch().forEach(r -> out.put(r.get(0, String.class), new long[] {r.get(1, Long.class), r.get(2, Long.class)}));
+        Field<String> relname = DSL.field(DSL.name("relname"), String.class);
+        Field<Long> seq = DSL.field(DSL.name("seq_scan"), Long.class);
+        Field<Long> tup = DSL.field(DSL.name("seq_tup_read"), Long.class);
+        ctx().select(relname, seq, tup).from(DSL.table(DSL.name("pg_catalog", "pg_stat_user_tables")))
+            .where(DSL.field(DSL.name("schemaname"), String.class).eq("nexus")).and(relname.in(chunkLeaves()))
+            .fetch().forEach(r -> out.put(r.value1(), new long[] {r.value2(), r.value3()}));
         return out;
+    }
+
+    /**
+     * The tenant's leaves the way the service creates them: {@code nexus.create_tenant_partitions} called as {@code nexus_svc} (when the role
+     * exists in the fixture; the migrating role otherwise). The function is SECURITY DEFINER, so the leaves belong to its owner, the migrating role.
+     */
+    private void createTenantLeaves(String tenant) throws Exception {
+        try (Connection c = pg.createConnection("")) {
+            boolean svc = DSL.using(c, SQLDialect.POSTGRES).fetchExists(DSL.table(DSL.name("pg_catalog", "pg_roles")),
+                DSL.field(DSL.name("rolname"), String.class).eq("nexus_svc"));
+            if (svc) {
+                MoveSql.runOnComplete(c, "SET ROLE nexus_svc");
+            }
+            var regclass = new org.jooq.impl.DefaultDataType<>(SQLDialect.POSTGRES, Object.class, "regclass");
+            DSL.using(c, SQLDialect.POSTGRES).select(DSL.function(DSL.name("nexus", "create_tenant_partitions"), SQLDataType.INTEGER,
+                DSL.val("nexus.chunks").cast(regclass), DSL.val(tenant), DSL.val(true))).fetchOne();
+        }
     }
 
     private static void sleepMs(long ms) {
@@ -105,14 +114,11 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
             assertThat(ofLeaf.get(0).parentId()).as("%s: adopted by the parent key (conparentid set)", leaf).isNotZero();
         }
         assertThat(fks.stream().filter(f -> f.parentId() == 0)).as("no chunks leaf key is left standing alone (conparentid 0)").isEmpty();
-        long middle = ctx().fetchOne("SELECT count(*) FROM pg_catalog.pg_partition_tree('nexus.chunks'::pg_catalog.regclass) pt "
-            + "WHERE NOT pt.isleaf AND pt.level > 0").get(0, Long.class);
-        long middleWithKey = ctx().fetchOne("SELECT count(*) FROM pg_catalog.pg_partition_tree('nexus.chunks'::pg_catalog.regclass) pt "
-            + "WHERE NOT pt.isleaf AND pt.level > 0 AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint k WHERE k.conrelid = pt.relid "
-            + "AND k.contype = 'f' AND k.conparentid <> 0 AND pg_catalog.pg_get_constraintdef(k.oid) LIKE 'FOREIGN KEY (tenant_id, collection_id, "
-            + "embedding_model) REFERENCES nexus.catalog_collections%')").get(0, Long.class);
-        assertThat(middle).as("non-vacuity: chunks has model partitions between the parent and its leaves").isPositive();
-        assertThat(middleWithKey).as("every model partition got the key from the parent ADD, attached to it").isEqualTo(middle);
+        List<String> middle = chunkModelPartitions();
+        var middleKeys = compositeKeysOn(middle);
+        long middleWithKey = middleKeys.stream().filter(f -> f.parentId() != 0).map(LeafFk::leaf).distinct().count();
+        assertThat(middle).as("non-vacuity: chunks has model partitions between the parent and its leaves").isNotEmpty();
+        assertThat(middleWithKey).as("every model partition got the key from the parent ADD, attached to it").isEqualTo((long) middle.size());
     }
 
     // ── 1 ───────────────────────────────────────────────────────────────────────────────────────────────────
@@ -225,18 +231,14 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
         assertThat(leafFks()).allSatisfy(f -> assertThat(f.validated()).isTrue());
         int leavesBefore = chunkLeaves().size();
 
-        // the leaf comes after the validations, through the engine's own function
+        // the leaves come after the validations, the production way: the service role's create_tenant_partitions (SECURITY DEFINER, so they belong
+        // to the migrating role and the grants changeset a later migration runs can touch them). One tenant gets a leaf under every model partition.
         String lateTenant = "p33c-late-leaf-" + System.nanoTime();
         tenantsUsed.add(lateTenant);
-        List<String> modelPartitions = IdKeyIndexProbe.modelPartitions(ctx(), IdKeyIndexProbe.CHUNKS);
-        assertThat(modelPartitions).as("non-vacuity: chunks has a model partition").isNotEmpty();
-        String modelPartition = modelPartitions.get(0);
-        var regclass = new org.jooq.impl.DefaultDataType<>(SQLDialect.POSTGRES, Object.class, "regclass");
-        Boolean created = ctx().select(DSL.function(DSL.name("nexus", "partition_ensure_leaf"), org.jooq.impl.SQLDataType.BOOLEAN,
-            DSL.val("nexus.chunks").cast(regclass), DSL.val(modelPartition).cast(regclass), DSL.val(lateTenant), DSL.val(true))).fetchOne(0, Boolean.class);
-        assertThat(created).as("the late leaf was created").isTrue();
-        assertThat(chunkLeaves()).as("one more leaf").hasSize(leavesBefore + 1);
-        String lateLeaf = chunkLeaves().stream().filter(l -> leafFks().stream().noneMatch(f -> f.leaf().equals(l))).findFirst().orElseThrow();
+        createTenantLeaves(lateTenant);
+        assertThat(chunkLeaves()).as("the late tenant's leaves are there").hasSizeGreaterThan(leavesBefore);
+        List<String> lateLeaves = chunkLeaves().stream().filter(l -> leafFks().stream().noneMatch(f -> f.leaf().equals(l))).toList();
+        assertThat(lateLeaves).as("non-vacuity: leaves with no key").isNotEmpty();
 
         sleepMs(11_000);
         Map<String, long[]> before = leafScans();
@@ -246,15 +248,19 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
         sleepMs(1_500);
         Map<String, long[]> after = leafScans();
         assertThat(compositeOnId()).as("deferred: no composite while a leaf has no validated key").isEmpty();
-        assertThat(leafFks().stream().filter(f -> f.leaf().equals(lateLeaf)).toList()).as("the late leaf got its key, NOT VALID")
-            .singleElement().satisfies(f -> assertThat(f.validated()).isFalse());
-        assertThat(leafMoves().stream().map(m -> (String) m.get("label")).toList()).as("and its validation move")
-            .contains(Rdr229ChunksFk.LEAF_LABEL_PREFIX + lateLeaf);
+        for (String late : lateLeaves) {
+            assertThat(leafFks().stream().filter(f -> f.leaf().equals(late)).toList()).as("%s: the late leaf got its key, NOT VALID", late)
+                .singleElement().satisfies(f -> assertThat(f.validated()).isFalse());
+            assertThat(leafMoves().stream().map(m -> (String) m.get("label")).toList()).as("and its validation move")
+                .contains(Rdr229ChunksFk.LEAF_LABEL_PREFIX + late);
+        }
         for (var e : before.entrySet()) {
             assertThat(after.get(e.getKey())[0] - e.getValue()[0]).as("%s: the deferred step scanned nothing", e.getKey()).isZero();
         }
-        assertThat(after.getOrDefault(lateLeaf, new long[] {0, 0})[0] - before.getOrDefault(lateLeaf, new long[] {0, 0})[0])
-            .as("not the late leaf either").isZero();
+        for (String late : lateLeaves) {
+            assertThat(after.getOrDefault(late, new long[] {0, 0})[0] - before.getOrDefault(late, new long[] {0, 0})[0])
+                .as("%s: not the late leaf either", late).isZero();
+        }
 
         // 2: the work is queued and nothing changes: the step returns, writes nothing that matters (it re-opens itself) and adds no composite
         runOnCompleteOnOwnSession(onCompleteOf(Rdr229ChunksFk.ADOPT_LABEL));
@@ -287,16 +293,20 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
 
         try (Connection holder = pg.createConnection(""); Connection writer = pg.createConnection("")) {
             holder.setAutoCommit(false);
-            try (Statement st = holder.createStatement()) {
+            {
                 // the PRODUCTION leaf on_complete of every leaf, under the bounds the finisher gives a validation (no statement bound, 5 s lock wait),
                 // in a transaction that stays open
-                st.execute("SET LOCAL statement_timeout = 0");
-                st.execute("SET LOCAL lock_timeout = '5s'");
+                MoveSql.runOnComplete(holder, "SET LOCAL statement_timeout = 0");
+                MoveSql.runOnComplete(holder, "SET LOCAL lock_timeout = '5s'");
                 for (var m : leafMoves()) {
                     MoveSql.runOnComplete(holder, (String) m.get("on_complete"));
                 }
-                long held = ctx().fetchOne("SELECT count(*) FROM pg_catalog.pg_locks l WHERE l.pid = " + pid(holder)
-                    + " AND l.locktype = 'relation' AND l.mode = 'ShareUpdateExclusiveLock' AND l.granted").get(0, Long.class);
+                int holderPid = pid(holder);
+                long held = ctx().fetchCount(DSL.table(DSL.name("pg_catalog", "pg_locks")),
+                    DSL.field(DSL.name("pid"), Integer.class).eq(holderPid),
+                    DSL.field(DSL.name("locktype"), String.class).eq("relation"),
+                    DSL.field(DSL.name("mode"), String.class).eq("ShareUpdateExclusiveLock"),
+                    DSL.field(DSL.name("granted"), Boolean.class).isTrue());
                 assertThat(held).as("non-vacuity: the VALIDATE's SHARE UPDATE EXCLUSIVE locks are held").isGreaterThanOrEqualTo(leafFks().size());
 
                 long retriesBefore = DeadlockRetry.retryAttemptCount();
@@ -310,7 +320,7 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
                             try {
                                 writer.setAutoCommit(false);
                                 DSLContext w = DSL.using(writer, SQLDialect.POSTGRES);
-                                w.execute("SET LOCAL lock_timeout = '2s'");
+                                MoveSql.runOnComplete(writer, "SET LOCAL lock_timeout = '2s'");
                                 PgContainerHelper.insertChunks(w, tenant, collection, List.of(hex), List.of("w"), List.of(new float[768]), List.of(Map.of()));
                                 writer.commit();
                             } catch (SQLException | RuntimeException e) {
@@ -341,10 +351,8 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
     @Test
     void negativeControl_conflictingLockOrderIsSeenByTheRetryCounters() throws Exception {
         try (Connection a = pg.createConnection(""); Connection b = pg.createConnection(""); Connection setup = pg.createConnection("")) {
-            try (Statement st = setup.createStatement()) {
-                st.execute("CREATE TABLE IF NOT EXISTS nexus.p33c_dl_a (x int)");
-                st.execute("CREATE TABLE IF NOT EXISTS nexus.p33c_dl_b (x int)");
-            }
+            MoveSql.runOnComplete(setup, "CREATE TABLE IF NOT EXISTS nexus.p33c_dl_a (x int)");
+            MoveSql.runOnComplete(setup, "CREATE TABLE IF NOT EXISTS nexus.p33c_dl_b (x int)");
             long retriesBefore = DeadlockRetry.retryAttemptCount();
             AtomicInteger attemptsA = new AtomicInteger();
             AtomicInteger attemptsB = new AtomicInteger();
@@ -355,22 +363,20 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
             fb.get(30, TimeUnit.SECONDS);
             assertThat(attemptsA.get() + attemptsB.get()).as("one session was the deadlock victim and ran again").isEqualTo(3);
             assertThat(DeadlockRetry.retryAttemptCount() - retriesBefore).as("and DeadlockRetry counted its retry").isGreaterThanOrEqualTo(1);
-            try (Statement st = setup.createStatement()) {
-                st.execute("DROP TABLE IF EXISTS nexus.p33c_dl_a, nexus.p33c_dl_b");
-            }
+            MoveSql.runOnComplete(setup, "DROP TABLE IF EXISTS nexus.p33c_dl_a, nexus.p33c_dl_b");
         }
     }
 
     private static void opposite(Connection c, String first, String second, AtomicInteger attempts, CyclicBarrier firstLockTaken) {
         DeadlockRetry.run("p33c-negative-control", () -> {
             int attempt = attempts.incrementAndGet();
-            try (Statement st = c.createStatement()) {
+            try {
                 c.setAutoCommit(false);
-                st.execute("LOCK TABLE nexus." + first + " IN ACCESS EXCLUSIVE MODE");
+                MoveSql.runOnComplete(c, "LOCK TABLE nexus." + first + " IN ACCESS EXCLUSIVE MODE");
                 if (attempt == 1) {
                     firstLockTaken.await(10, TimeUnit.SECONDS);   // both hold their first lock before either asks for the second
                 }
-                st.execute("LOCK TABLE nexus." + second + " IN ACCESS EXCLUSIVE MODE");
+                MoveSql.runOnComplete(c, "LOCK TABLE nexus." + second + " IN ACCESS EXCLUSIVE MODE");
                 c.commit();
             } catch (SQLException | InterruptedException | java.util.concurrent.TimeoutException | java.util.concurrent.BrokenBarrierException e) {
                 try {
@@ -401,7 +407,7 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
         assertThat(leafFks()).as("precondition: every leaf key validated").allSatisfy(f -> assertThat(f.validated()).isTrue());
         String leaf = chunkLeaves().get(0);
         String mismatch = "p33c_mismatch_" + difference.toLowerCase(java.util.Locale.ROOT);
-        ctx().execute("ALTER TABLE nexus." + quote(leaf) + " DROP CONSTRAINT " + quote(leaf + Rdr229ChunksFk.LEAF_CONSTRAINT_SUFFIX));
+        ctx().alterTable(table("nexus", leaf)).dropConstraint(DSL.name(leaf + Rdr229ChunksFk.LEAF_CONSTRAINT_SUFFIX)).execute();
         String columns = difference.equals("COLUMN_ORDER") ? "(collection_id, tenant_id, embedding_model)" : "(tenant_id, collection_id, embedding_model)";
         String actions = switch (difference) {
             case "NO_ACTION" -> "ON DELETE NO ACTION";
@@ -409,25 +415,24 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
             default -> "ON DELETE RESTRICT";
         };
         try {
-            ctx().execute("ALTER TABLE nexus." + quote(leaf) + " ADD CONSTRAINT " + quote(mismatch) + " FOREIGN KEY " + columns
+            runSql("ALTER TABLE nexus." + quote(leaf) + " ADD CONSTRAINT " + quote(mismatch) + " FOREIGN KEY " + columns
                 + " REFERENCES nexus.catalog_collections " + columns + " " + actions);
             resume(Rdr229ChunksFk.ADOPT_LABEL);
 
             runOnCompleteOnOwnSession(onCompleteOf(Rdr229ChunksFk.ADOPT_LABEL));
 
             assertThat(compositeOnId()).as("%s: the composite is not added over a key PostgreSQL would not adopt", difference).isEmpty();
-            var own = ctx().resultQuery("SELECT convalidated FROM pg_catalog.pg_constraint WHERE conrelid = ('nexus.' || quote_ident(?))::pg_catalog.regclass "
-                + "AND conname = ?", leaf, leaf + Rdr229ChunksFk.LEAF_CONSTRAINT_SUFFIX).fetch(0, Boolean.class);
+            String ownName = leaf + Rdr229ChunksFk.LEAF_CONSTRAINT_SUFFIX;
+            List<Boolean> own = compositeKeysOn(List.of(leaf)).stream().filter(f -> f.name().equals(ownName)).map(LeafFk::validated).toList();
             assertThat(own).as("%s: the leaf's own key was queued, NOT VALID", difference).containsExactly(false);
             assertThat(completedAt(Rdr229ChunksFk.LEAF_LABEL_PREFIX + leaf)).as("and its validation move is open").isNull();
 
             runUntilComposite(new VerifyingFinisher());
             assertThat(compositeOnId()).as("%s: the composite arrives once the leaf's own key validated", difference).hasSize(1);
-            long parent = ctx().fetchOne("SELECT conparentid::bigint FROM pg_catalog.pg_constraint WHERE conrelid = ('nexus.' || quote_ident(?))::pg_catalog.regclass "
-                + "AND conname = ?", leaf, leaf + Rdr229ChunksFk.LEAF_CONSTRAINT_SUFFIX).get(0, Long.class);
-            assertThat(parent).as("%s: the matching key was adopted", difference).isNotZero();
+            List<Long> parents = compositeKeysOn(List.of(leaf)).stream().filter(f -> f.name().equals(ownName)).map(LeafFk::parentId).toList();
+            assertThat(parents).as("%s: the matching key was adopted", difference).singleElement().isNotEqualTo(0L);
         } finally {
-            ctx().execute("ALTER TABLE nexus." + quote(leaf) + " DROP CONSTRAINT IF EXISTS " + quote(mismatch));
+            ctx().alterTable(table("nexus", leaf)).dropConstraintIfExists(DSL.name(mismatch)).execute();
         }
     }
 
@@ -463,7 +468,8 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
         registerSwaps();
         runSwaps(new VerifyingFinisher());
         String failed = (String) leafMoves().get(0).get("label");
-        ctx().execute("UPDATE nexus.data_moves SET failed_at = now(), failure = 'planted' WHERE label = ?", failed);
+        ctx().update(table("nexus", "data_moves")).set(DSL.field(DSL.name("failed_at"), OffsetDateTime.class), OffsetDateTime.now())
+            .set(DSL.field(DSL.name("failure"), String.class), "planted").where(LABEL_F.eq(failed)).execute();
         pause(Rdr229ChunksFk.LEAF_LABEL_PREFIX + "%");
 
         productionWorker(new VerifyingFinisher()).runCycle();
@@ -519,9 +525,7 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
         resume(label);
         Connection c = pg.createConnection("");
         c.setAutoCommit(false);
-        try (Statement st = c.createStatement()) {
-            st.execute("LOCK TABLE nexus." + quote(leaf) + " IN ACCESS EXCLUSIVE MODE");
-        }
+        MoveSql.runOnComplete(c, "LOCK TABLE nexus." + quote(leaf) + " IN ACCESS EXCLUSIVE MODE");
         return new Held(c, leaf, label);
     }
 
@@ -551,7 +555,8 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
             var cycle = CompletableFuture.runAsync(w::runCycle);
             int pid = completionPid(w, held.label(), 3_000);
             assertThat(pid).as("the completion's backend is recorded for the status while it waits").isPositive();
-            String application = ctx().fetchOne("SELECT application_name FROM pg_catalog.pg_stat_activity WHERE pid = ?", pid).get(0, String.class);
+            String application = ctx().select(DSL.field(DSL.name("application_name"), String.class))
+                .from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity"))).where(DSL.field(DSL.name("pid"), Integer.class).eq(pid)).fetchOne(0, String.class);
             assertThat(application).as("the session carries the data-move name, so a boot can reap it").startsWith("nexus-data-move-");
             cycle.get(30, TimeUnit.SECONDS);
             long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
@@ -619,30 +624,26 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
     void theWorkerRoleOwnsTheRegistryAndEveryLeafAndAProductionLeafValidateIsSetBased() throws Exception {
         seed("owner");
         registerSwaps();
-        // a leaf created after the migration, as the service role does it (when that role exists in this fixture; the owner otherwise)
+        // a leaf created after the migration, the way the service creates it (nexus_svc calling the SECURITY DEFINER function)
         String lateTenant = "p33c-owner-leaf-" + System.nanoTime();
         tenantsUsed.add(lateTenant);
-        try (Connection c = pg.createConnection("")) {
-            boolean svc = DSL.using(c, SQLDialect.POSTGRES).fetchExists(DSL.table(DSL.name("pg_catalog", "pg_roles")),
-                DSL.field(DSL.name("rolname"), String.class).eq("nexus_svc"));
-            if (svc) {
-                try (Statement st = c.createStatement()) {
-                    st.execute("SET ROLE nexus_svc");
-                }
-            }
-            DSL.using(c, SQLDialect.POSTGRES).execute("SELECT nexus.create_tenant_partitions('nexus.chunks'::pg_catalog.regclass, ?, true)", lateTenant);
-        }
+        createTenantLeaves(lateTenant);
         String worker = adminConnection.user();
-        var owners = ctx().resultQuery("SELECT c.relname || ' (' || pg_catalog.pg_get_userbyid(c.relowner) || ')' FROM pg_catalog.pg_class c "
-                + "WHERE (c.oid = 'nexus.catalog_collections'::pg_catalog.regclass OR c.oid IN (SELECT pt.relid FROM "
-                + "pg_catalog.pg_partition_tree('nexus.chunks'::pg_catalog.regclass) pt WHERE pt.isleaf)) AND pg_catalog.pg_get_userbyid(c.relowner) <> ?",
-            worker).fetch(0, String.class);
+        Field<String> relname = DSL.field(DSL.name("c", "relname"), String.class);
+        Field<String> owner = DSL.function(DSL.name("pg_catalog", "pg_get_userbyid"), String.class, DSL.field(DSL.name("c", "relowner")));
+        List<String> relations = new java.util.ArrayList<>(chunkLeaves());
+        relations.add("catalog_collections");
+        List<String> owners = ctx().select(relname, owner)
+            .from(DSL.table(DSL.name("pg_catalog", "pg_class")).as("c"))
+            .join(DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n")).on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("c", "relnamespace"))))
+            .where(DSL.field(DSL.name("n", "nspname"), String.class).eq("nexus")).and(relname.in(relations)).and(owner.ne(worker))
+            .fetch(r -> r.value1() + " (" + r.value2() + ")");
         assertThat(owners).as("tables not owned by %s, the role the data-move worker runs as", worker).isEmpty();
         assertThat(chunkLeaves()).as("non-vacuity: chunks has leaves").hasSizeGreaterThanOrEqualTo(2);
 
         runSwaps(new VerifyingFinisher());
         String leaf = chunkLeaves().get(0);
-        long rows = ctx().fetchOne("SELECT count(*) FROM nexus." + quote(leaf)).get(0, Long.class);
+        long rows = ctx().fetchCount(table("nexus", leaf));
         assertThat(rows).as("non-vacuity: the leaf has rows, so a per-row fallback would probe the registry").isPositive();
         String text = onCompleteOf(Rdr229ChunksFk.LEAF_LABEL_PREFIX + leaf);
         java.util.Properties props = new java.util.Properties();
@@ -651,9 +652,11 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
         try (Connection c = java.sql.DriverManager.getConnection(adminConnection.url(), props)) {
             c.setAutoCommit(false);
             MoveSql.runOnComplete(c, text);
-            var stat = DSL.using(c, SQLDialect.POSTGRES).fetchOne("SELECT coalesce(idx_scan, 0) FROM pg_catalog.pg_stat_xact_user_tables "
-                + "WHERE schemaname = 'nexus' AND relname = 'catalog_collections'");
-            long probes = stat == null ? 0L : stat.get(0, Long.class);
+            Field<Long> idxScan = DSL.field(DSL.name("idx_scan"), Long.class);
+            Long scanned = DSL.using(c, SQLDialect.POSTGRES).select(idxScan).from(DSL.table(DSL.name("pg_catalog", "pg_stat_xact_user_tables")))
+                .where(DSL.field(DSL.name("schemaname"), String.class).eq("nexus")).and(DSL.field(DSL.name("relname"), String.class).eq("catalog_collections"))
+                .fetchOne(idxScan);
+            long probes = scanned == null ? 0L : scanned;
             c.rollback();
             assertThat(probes).as("the VALIDATE as %s probed the registry by index %d times for %d rows: 0 is the set-based check", worker, probes, rows)
                 .isZero();
@@ -664,10 +667,7 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
         return "\"" + ident.replace("\"", "\"\"") + "\"";
     }
 
-    private static int pid(Connection c) throws SQLException {
-        try (Statement st = c.createStatement(); var rs = st.executeQuery("SELECT pg_backend_pid()")) {
-            rs.next();
-            return rs.getInt(1);
-        }
+    private static int pid(Connection c) {
+        return DSL.using(c, SQLDialect.POSTGRES).select(DSL.function("pg_backend_pid", SQLDataType.INTEGER)).fetchOne(0, Integer.class);
     }
 }

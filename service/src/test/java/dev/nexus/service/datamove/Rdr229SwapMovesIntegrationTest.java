@@ -280,7 +280,7 @@ class Rdr229SwapMovesIntegrationTest extends Rdr229SwapMovesFixtures {
         var finisher = new VerifyingFinisher();
         finisher.recheckHook = tx -> {
             // the completion's UPDATE has set completed_at to this transaction's now(): the one row it matches is the move being completed
-            String label = tx.fetchOne("SELECT label FROM nexus.data_moves WHERE completed_at = now()").get(0, String.class);
+            String label = tx.select(LABEL_F).from(table("nexus", "data_moves")).where(COMPLETED_AT.eq(DSL.currentOffsetDateTime())).fetchOne(LABEL_F);
             settings.put(label, List.of(
                 tx.select(DSL.function(DSL.name("current_setting"), String.class, DSL.inline("statement_timeout"))).fetchOne(0, String.class),
                 tx.select(DSL.function(DSL.name("current_setting"), String.class, DSL.inline("lock_timeout"))).fetchOne(0, String.class)));
