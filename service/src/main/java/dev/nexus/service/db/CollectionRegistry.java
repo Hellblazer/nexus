@@ -828,7 +828,7 @@ public final class CollectionRegistry {
     }
 
     /** The {@link CollectionRow} of one registry record, with the model's dimension where the row's own is NULL. */
-    private static CollectionRow rowOf(Record r, Field<Integer> modelDimension, String tenant) {
+    static CollectionRow rowOf(Record r, Field<Integer> modelDimension, String tenant) {
         String label = r.get(CATALOG_COLLECTIONS.NAME);
         // RDR-204 Phase 2 follow-up (bead nexus-ft04v.16, hygiene-002 finding):
         // catalog_collections.dimension is NULL BY DESIGN for a walked zero-chunk row

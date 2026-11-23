@@ -2194,6 +2194,9 @@ public final class NexusService {
         }
         catalogRepo.close();
         server.stop(0);
+        // row 15, critic S6: the registry's caches are process-wide and carry no database identity, so a stopped engine leaves none of
+        // its rows behind for a repository (or an engine) on another database in this JVM; start() empties them too
+        dev.nexus.service.db.CollectionRegistry.evictAll();
         log.info("event=service_stopped");
     }
 

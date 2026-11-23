@@ -39,6 +39,11 @@ class RegistryCacheAcrossEnginesTest {
     private static final TypeReference<Map<String, Object>> MAP_T = new TypeReference<>() {};
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
+    @FunctionalInterface
+    private interface ThrowingRunnable {
+        void run() throws Exception;
+    }
+
     /** One engine on its own database. */
     private static final class Engine implements AutoCloseable {
         final PostgreSQLContainer<?> pg;
@@ -47,6 +52,11 @@ class RegistryCacheAcrossEnginesTest {
         final HttpClient http = TestHttp.client();
 
         Engine() throws Exception {
+            this(() -> { });
+        }
+
+        /** {@code beforeStart} runs after the database exists and before the engine starts: the test's way to put another database's row in the caches. */
+        Engine(ThrowingRunnable beforeStart) throws Exception {
             pg = PgContainerHelper.start();
             try (Connection su = pg.createConnection("")) {
                 PgContainerHelper.applyProductSchema(su);
@@ -63,6 +73,7 @@ class RegistryCacheAcrossEnginesTest {
             cfg.setAutoCommit(true);
             ds = new com.zaxxer.hikari.HikariDataSource(cfg);
             service = new NexusService(0, TOKEN, ds);
+            beforeStart.run();
             service.start();
             get("/v1/catalog/collections/list");   // the tenant's once-per-process ghost sweep runs before anything is registered
         }
@@ -114,18 +125,54 @@ class RegistryCacheAcrossEnginesTest {
             var first = a.get("/v1/catalog/collections/get?collection_id=" + sharedId);
             assertThat(first.statusCode()).as("A answers its own row by id: %s", first.body()).isEqualTo(200);
             assertThat(MAPPER.readValue(first.body(), MAP_T).get("name")).isEqualTo("a-label");
-        }
-        try (Engine b = new Engine()) {
-            b.register("b-label", "owner-b");
-            if (b.id("b-label") != sharedId) {
-                b.setId("b-label", sharedId);
+            // A is still running when B's database is created and B starts, so A's row is in the caches when B's start() runs
+            // (creating B's database empties them, so A caches again just before B starts)
+            try (Engine b = new Engine(() -> a.get("/v1/catalog/collections/get?collection_id=" + sharedId))) {
+                b.register("b-label", "owner-b");
+                if (b.id("b-label") != sharedId) {
+                    b.setId("b-label", sharedId);
+                }
+                assertThat(b.id("b-label")).as("non-vacuity: the two databases give one id to two labels").isEqualTo(sharedId);
+
+                var answer = b.get("/v1/catalog/collections/get?collection_id=" + sharedId);
+
+                assertThat(answer.statusCode()).as("B answers the id from its own database: %s", answer.body()).isEqualTo(200);
+                assertThat(MAPPER.readValue(answer.body(), MAP_T).get("name")).as("B's row, not A's cached label").isEqualTo("b-label");
             }
-            assertThat(b.id("b-label")).as("non-vacuity: the two databases give one id to two labels").isEqualTo(sharedId);
+        }
+    }
 
-            var answer = b.get("/v1/catalog/collections/get?collection_id=" + sharedId);
+    /** Stopping an engine empties the caches, so a repository built on another database afterwards is answered from its own (critic S6). */
+    @Test
+    void stoppingAnEngineEmptiesTheRegistryCaches() throws Exception {
+        try (Engine a = new Engine()) {
+            a.register("stop-label", "owner-stop");
+            long id = a.id("stop-label");
+            assertThat(a.get("/v1/catalog/collections/get?collection_id=" + id).statusCode()).isEqualTo(200);
+            assertThat(dev.nexus.service.db.CollectionRegistry.cached(TENANT, "stop-label"))
+                .as("non-vacuity: the by-id read cached the row").isPresent();
+            a.service.stop();
+            assertThat(dev.nexus.service.db.CollectionRegistry.cached(TENANT, "stop-label"))
+                .as("the stopped engine's row is gone from the process-wide cache").isEmpty();
+        }
+    }
 
-            assertThat(answer.statusCode()).as("B answers the id from its own database: %s", answer.body()).isEqualTo(200);
-            assertThat(MAPPER.readValue(answer.body(), MAP_T).get("name")).as("B's row, not A's cached label").isEqualTo("b-label");
+    /** A test database created after an engine ran starts with empty caches, with no engine started on it (a repository-only class). */
+    @Test
+    void aTestDatabaseCreatedAfterAnEngineRanStartsWithEmptyRegistryCaches() throws Exception {
+        try (Engine a = new Engine()) {
+            a.register("fresh-label", "owner-fresh");
+            long id = a.id("fresh-label");
+            assertThat(a.get("/v1/catalog/collections/get?collection_id=" + id).statusCode()).isEqualTo(200);
+            assertThat(dev.nexus.service.db.CollectionRegistry.cached(TENANT, "fresh-label"))
+                .as("non-vacuity: the by-id read cached the row").isPresent();
+            PostgreSQLContainer<?> other = PgContainerHelper.start();
+            try {
+                assertThat(dev.nexus.service.db.CollectionRegistry.cached(TENANT, "fresh-label"))
+                    .as("the caches were emptied when the second database was created").isEmpty();
+            } finally {
+                other.stop();
+            }
         }
     }
 }
