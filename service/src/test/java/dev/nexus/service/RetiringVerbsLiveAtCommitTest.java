@@ -560,8 +560,9 @@ class RetiringVerbsLiveAtCommitTest {
             assertThat(busy).as("rename_busy, got %s", failure).isTrue();
             assertThat(elapsedMs).as("within the bound plus slack, not a hang").isLessThan(20_000);
             assertThat(supersededBy(x)).as("nothing changed: X is live").isEmpty();
-            assertThat(su(ctx -> ctx.fetchExists(ctx.selectOne().from(CATALOG_COLLECTIONS)
-                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(y))))).as("and Y was not registered").isFalse();
+            boolean yRegistered = su(ctx -> ctx.fetchExists(ctx.selectOne().from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(y))));
+            assertThat(yRegistered).as("and Y was not registered").isFalse();
         } finally {
             dev.nexus.service.db.CollectionTombstones.setRowLockTimeoutMsForTests(null);
         }
