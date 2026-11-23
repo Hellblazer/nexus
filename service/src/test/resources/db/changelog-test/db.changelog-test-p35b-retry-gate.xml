@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-229 P3.5b (nexus-p2m1x.24): the racing writer of the id twin retry tests (Rdr229P35bIdTwinRetryIntegrationTest), in Liquibase
+    XML instead of Java SQL strings (Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included). jOOQ OSS has no CREATE FUNCTION
+    and no CREATE TRIGGER. No parameter: what a case wants is a row of nexus_test.p35b_retry_gate_cfg, written by the test through jOOQ.
+
+    A BEFORE INSERT trigger on nexus.chunks and on nexus.chunk_orphaned_at looks up the collection each inserted row names in the
+    cfg table. A row that has no entry is let through. For one that has, the trigger counts the attempt through a sequence that a rolled-back
+    attempt cannot undo, and on the attempt numbered delete_on it deletes the row of the collection racer with the same tenant and chash:
+    the committed row of a writer that won the race and is gone by the retry. Until then that row is still there, so the insert is refused
+    by the id twin, a unique key the insert's own ON CONFLICT arbiter does not name (the arbiter is the name key, which the racer's name
+    does not match). An attempt number no insert reaches leaves the racer in place for good.
+
+    The body holds dollar quotes, hence splitStatements="false". Applied once to the test's own database, never to the product schema.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="p35b-retry-gate" author="nexus-p2m1x.24">
+        <sql splitStatements="false" stripComments="false">
+CREATE SEQUENCE IF NOT EXISTS nexus_test.p35b_retry_gate_seq;
+
+CREATE TABLE IF NOT EXISTS nexus_test.p35b_retry_gate_cfg (
+    target    text   NOT NULL,
+    racer     text   NOT NULL,
+    delete_on bigint NOT NULL
+);
+
+CREATE OR REPLACE FUNCTION nexus_test.p35b_retry_gate() RETURNS trigger AS $$
+DECLARE
+    v_racer     text;
+    v_delete_on bigint;
+BEGIN
+    SELECT g.racer, g.delete_on INTO v_racer, v_delete_on
+      FROM nexus_test.p35b_retry_gate_cfg g
+     WHERE g.target = NEW.collection
+     LIMIT 1;
+    IF FOUND AND nextval('nexus_test.p35b_retry_gate_seq') = v_delete_on THEN
+        EXECUTE format('DELETE FROM %I.%I WHERE tenant_id = $1 AND collection = $2 AND chash = $3',
+                       TG_TABLE_SCHEMA, TG_TABLE_NAME)
+            USING NEW.tenant_id, v_racer, NEW.chash;
+    END IF;
+    RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+
+CREATE TRIGGER p35b_retry_gate_trigger BEFORE INSERT ON nexus.chunks
+FOR EACH ROW EXECUTE FUNCTION nexus_test.p35b_retry_gate();
+
+CREATE TRIGGER p35b_retry_gate_trigger BEFORE INSERT ON nexus.chunk_orphaned_at
+FOR EACH ROW EXECUTE FUNCTION nexus_test.p35b_retry_gate();
+        </sql>
+    </changeSet>
+</databaseChangeLog>
