@@ -245,10 +245,11 @@ public final class CompletionBootWork implements AutoCloseable {
     /** The readiness over {@code r} (null: no sample), monotone and fail closed as {@link #renameReadiness()} says; never throws. */
     private RenameReadiness.Missing readinessOf(CompletionCheck.Result r) {
         RenameReadiness.Missing m = readinessSampled(r);
-        if (m == RenameReadiness.Missing.NONE && !gate3Latched) {
+        if (m == RenameReadiness.Missing.NONE && r != null && r.gate3Latched() && !gate3Latched) {
             // The one-row body's helpers follow the service's Gate3 signal (the flag), and the readers take the id forms only once it holds: a rename must
-            // not take the one-row path before it does. publish sets the flag before the sample, so this is a belt (a hand-built result, a reordering); the
-            // wire enum has no value for it, so the rename waits as for an unreadable readiness.
+            // not take the one-row path before it does. Only a sample that read the latch row and a flag not yet set wait here (publish sets the flag
+            // before the sample, so this is a belt); every other case keeps its own reason, so a lost latch row still reaches RenameGuard's
+            // latch_row_missing refusal (tamsin's review r5). The wire enum has no value for it, so the rename waits as for an unreadable readiness.
             if (signalWaitLogged.compareAndSet(false, true)) {
                 log.warn("event=rename_waits_gate3_signal detail=\"the readiness reads none but the service's gate 3 signal is not set; a rename waits for it\"");
             }
@@ -258,6 +259,13 @@ public final class CompletionBootWork implements AutoCloseable {
     }
 
     private final AtomicBoolean signalWaitLogged = new AtomicBoolean();
+
+    /** Test seam: while set, publish leaves the service's gate 3 signal as it is, so a test can stand in the window the belt closes. */
+    private volatile boolean signalHeldForTests;
+
+    void holdGate3SignalForTests(boolean held) {
+        this.signalHeldForTests = held;
+    }
 
     private RenameReadiness.Missing readinessSampled(CompletionCheck.Result r) {
         try {
@@ -440,7 +448,7 @@ public final class CompletionBootWork implements AutoCloseable {
             // The service's Gate3 signal (the flag below, which Main's Gate3 reads) is set BEFORE the sample is published and before readyOnce: volatile
             // writes are seen in program order, so a rename that reads the readiness as NONE from this sample also sees the flag, and its one-row body's
             // helpers take the id forms the readers take (RenameGuard's one-row decision and every helper read the same signal). readinessOf adds the belt.
-            if (result.gate3Latched()) {
+            if (result.gate3Latched() && !signalHeldForTests) {
                 gate3Latched = true;
                 gate3LatchPciOff = gate3LatchPciOff || result.gate3LatchPciOff();
             }
