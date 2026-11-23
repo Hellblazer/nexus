@@ -110,7 +110,8 @@ def test_setup_reports_only_the_rule_the_user_settings_lack(prose: Prose) -> Non
     out = brief_ok(prose, "setup")
     report = json.loads(out)
     # only the computed rules come back: nothing else in the file is printed, and the file is left as it was
-    assert "canary" not in out.lower() and "Bash(ls:*)" not in out
+    # the planted tokens, not the bare word: a checkout path can contain "canary" (a worktree named for the id canary failed on it)
+    assert "canary-value-7f3a" not in out and "CANARY_TOKEN" not in out and "Bash(ls:*)" not in out
     assert (config / "settings.json").read_bytes() == before
     assert report["allow_rules"]["settings_found"] is True
     assert report["allow_rules"]["missing"] == [first[1]]
