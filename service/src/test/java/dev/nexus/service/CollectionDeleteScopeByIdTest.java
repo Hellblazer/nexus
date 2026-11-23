@@ -104,8 +104,8 @@ class CollectionDeleteScopeByIdTest {
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(fx.tenant)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(id)).execute());
         assertThat(fx.exists(x)).as("setup: x no longer has a registry row").isFalse();
         assertThat(fx.idOf(y)).as("setup: y is the same row").isEqualTo(id);
-        assertThat(fx.asSuperuser(ctx -> ctx.fetchCount(CHUNKS, CHUNKS.COLLECTION.eq(x))))
-            .as("setup: the content still carries the old name").isEqualTo(1);
+        int oldNamed = fx.asSuperuser(ctx -> ctx.fetchCount(CHUNKS, CHUNKS.COLLECTION.eq(x)));
+        assertThat(oldNamed).as("setup: the content still carries the old name").isEqualTo(1);
 
         Resp byOld = fx.post(DELETE, "{\"name\":" + json(x) + "}");
 
