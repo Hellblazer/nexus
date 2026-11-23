@@ -234,16 +234,6 @@ final class MoveReasons {
         return "stopped for a reason kept in the engine log" + state;
     }
 
-    /** Whether a blocked reason carries the retry policy's "needs an operator" ending ({@link MoveRetryPolicy#blockedReason}). */
-    static boolean needsOperator(String reason) {
-        return reason != null && NEEDS_OPERATOR.matcher(reason.strip()).find();
-    }
-
-    /** Whether a blocked reason says each retry ends in-flight index builds ({@link MoveRetryPolicy#INDEX_BUILDS_NOTE}). */
-    static boolean terminatesIndexBuilds(String reason) {
-        return reason != null && reason.contains(MoveRetryPolicy.INDEX_BUILDS_NOTE);
-    }
-
     /** The five-character SQLSTATE a reason carries ({@code sqlstate=57014}), or null: a code, so safe on {@code /v1/status}. */
     static String sqlstateOf(String reason) {
         if (reason == null) {

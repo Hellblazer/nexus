@@ -10,9 +10,10 @@ The engine's move worker reports each open or failed data move as a ``/v1/status
   retry cap (about four hours), when the engine drops the class and the row is red. The class is the engine's field,
   never read from the words; an engine that predates it sends none, and its blocked move stays red.
 * A move listed in the status's ``data_moves_need_operator_moves`` (its worker has failed it transiently 20 times in a row,
-  or hit a lock or statement timeout at ``on_complete`` 3 times in a row; the engine decides, ``MoveRetryPolicy``) is a red
-  row whatever state its entry shows, naming the label, the bound it missed, its last attempt and its next retry. The
-  move keeps retrying; the row says a person should look. An engine without the field shows such a move as the plain
+  or hit a lock or statement timeout at ``on_complete`` 3 times in a row, which then stays latched until the move completes
+  or its count resets; the engine decides, ``MoveRetryPolicy``) is a red
+  row whatever state its entry shows, naming the label, the step and bound it missed (a bound only for a lock or statement
+  timeout), its last attempt and its next retry (or that a retry is running now). The move keeps retrying; the row says a person should look. An engine without the field shows such a move as the plain
   ``blocked:`` row it always did.
 * ``stalled:``: a CALL that has completed no chunk for a long time; a warning, since a slow chunk looks the same.
 * ``paused:``: an operator holds the move; a note, never red.
@@ -104,34 +105,57 @@ def _needs_operator(status: dict[str, Any]) -> dict[str, dict[str, Any]]:
     }
 
 
+#: SQLSTATEs that mean a bound was missed: a lock timeout and a statement timeout. Any other SQLSTATE names no bound.
+_TIMEOUT_SQLSTATES = ("55P03", "57014")
+
+
+def _int(value: object) -> int | None:
+    """``value`` when it is an int (a bool is not one), else ``None``."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 def _needs_operator_row(label: str, info: dict[str, Any], entry: dict[str, Any]) -> HealthResult:
-    """The red row for a move in the needs-an-operator state: the label, the bound, when it last ran and when it runs next."""
-    retries, bound = info.get("retries"), info.get("statement_timeout_ms")
+    """The red row for a move in the needs-an-operator state: the label, the step and bound it missed, when it last ran and
+    when it runs next (or that a retry is running now)."""
+    retries, bound = _int(info.get("retries")), _int(info.get("bound_ms"))
     sqlstate = info.get("sqlstate") if isinstance(info.get("sqlstate"), str) else None
+    step = info.get("step") if isinstance(info.get("step"), str) and info.get("step") else None
     builds = info.get("terminates_index_builds") is True
-    parts = [f"needs an operator: {label} has failed {retries if isinstance(retries, int) else 'many'} times in a row"]
-    if sqlstate:
-        parts.append(f"sqlstate {sqlstate}")
-    if isinstance(bound, int) and not isinstance(bound, bool):
-        parts.append(f"bound missed: statement_timeout_ms {bound} ms")
+    parts = [f"needs an operator: {label} has failed {retries if retries is not None else 'many'} times in a row"]
+    if step and sqlstate in _TIMEOUT_SQLSTATES and bound is not None:
+        parts.append(f"step {step} missed its {bound} ms bound (SQLSTATE {sqlstate})")
+    elif step and sqlstate:
+        parts.append(f"step {step} failed with SQLSTATE {sqlstate}")
+    elif step:
+        parts.append(f"step {step} failed")
+    elif sqlstate:
+        parts.append(f"SQLSTATE {sqlstate}")
     last, nxt = info.get("last_attempt_at"), info.get("next_retry_at")
     parts.append(f"last attempt {last if isinstance(last, str) else 'unknown'}")
-    parts.append(f"next retry {nxt if isinstance(nxt, str) else 'unknown'}")
+    if info.get("retry_in_progress") is True:
+        parts.append("a retry is in progress now")
+    else:
+        parts.append(f"next retry {nxt if isinstance(nxt, str) else 'unknown'}")
     if builds:
-        parts.append("each retry ends in-flight index builds")
+        parts.append("each attempt ends in-flight index builds")
+    reset = _RETRY_NOW.format(label=label)
     return HealthResult(
         label=f"Data move {label}", ok=False, detail="; ".join(parts) + _counts(entry),
         fix_suggestions=[
             "The engine keeps retrying this move by itself, and nothing committed is lost, but the retries are not "
             "getting anywhere. "
             + (
-                "Each retry re-runs the warm-up and ends the in-flight index builds (PCI, leaf, id-unique), so waiting "
+                "Each attempt re-runs the warm-up and ends the in-flight index builds (PCI, leaf, id-unique), so waiting "
                 "costs those builds. " if builds else ""
             )
             + "The engine log has the page: event=data_move_needs_operator (label, step, SQLSTATE and the bound that "
             "step missed), and event=data_move_blocked has the full reason of each retry. Fix what it names (a lock "
             "holder, a bound too short for the table); the next retry time above says whether to wait or act",
-            _RETRY_NOW.format(label=label),
+            (
+                "Resetting the retry count starts another attempt at once, and that attempt ends the in-flight index "
+                "builds again, so fix the cause first (raise the bound, or let the builds finish); then: " + reset
+                if builds else reset
+            ),
         ],
     )
 

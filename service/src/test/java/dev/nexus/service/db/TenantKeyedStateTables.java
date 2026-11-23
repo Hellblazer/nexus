@@ -995,8 +995,13 @@ final class TenantKeyedStateTables {
             + "no tenant data, and emptied when the reporter closes");
         notKeyed.put("StatusHandler.dataMovesNeedOperator", "the supplier of /v1/status's data_moves_need_operator, bound once "
             + "at boot; it reads the registry list above and holds no tenant data itself");
-        notKeyed.put("MoveRetryPolicy.OnCompleteRuns.byLabel", "the same run table, by registry label; two counts a label, "
-            + "no tenant data");
+        notKeyed.put("MoveRetryPolicy.OnCompleteRuns.byLabel", "per move label, the length of the run of on_complete lock or "
+            + "statement timeouts this process has seen and whether it latched the needs-an-operator state: a registry label, "
+            + "two counts and a flag, no tenant data; dropped when the move completes or leaves the open set, and a restart "
+            + "starts it again");
+        notKeyed.put("MoveStates.announced", "the registry labels of the moves whose needs-an-operator page this process has "
+            + "logged, so the worker and the status sampler log one page between them; labels only, no tenant data, dropped "
+            + "when the move leaves the state or is forgotten");
         notKeyed.put("DataMoveWorker.onMoveCompleted", "the listener the engine hands the worker at boot "
             + "(CompletionBootWork::onMoveCompleted), run when a move records completed_at; a callback, no data");
         notKeyed.put("PciReconciler.passEnded", "the listener the engine hands the reconciler at boot "
