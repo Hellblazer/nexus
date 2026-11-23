@@ -233,7 +233,10 @@ public final class AspectRepository {
         if (claimId == null) {
             // No fence: the payload gates run before a transaction opens, as ever.
             ValidUpsert valid = validateUpsert(body);
-            if (valid == null) return -1L;
+            if (valid == null) {
+                ExpectedCollectionIds.nothingToWrite(body.get("collection") instanceof String c ? c : null);
+                return -1L;
+            }
             return DeadlockRetry.run("aspect.upsert " + valid.collection(),
                 () -> tenantScope.withTenant(tenant, ctx -> writeAspect(ctx, tenant, body, valid)));
         }
@@ -249,7 +252,11 @@ public final class AspectRepository {
             var claimRow = TupleRepository.lockLiveClaimRow(ctx, tenant, claimId, claimant);
             requireClaimOnTaskFor(claimRow, claimId, body.get("doc_id") instanceof String d ? d : null);
             ValidUpsert valid = validateUpsert(body);
-            return valid == null ? -1L : writeAspect(ctx, tenant, body, valid);
+            if (valid == null) {
+                ExpectedCollectionIds.nothingToWrite(body.get("collection") instanceof String c ? c : null);
+                return -1L;
+            }
+            return writeAspect(ctx, tenant, body, valid);
         }));
     }
 
