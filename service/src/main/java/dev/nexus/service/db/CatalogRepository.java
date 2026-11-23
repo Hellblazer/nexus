@@ -10405,7 +10405,7 @@ public final class CatalogRepository {
      * rename onto a live target is refused, so it never moves quarantine rows between models.
      */
     public Map<String, Integer> deleteCollection(String tenant, String name) {
-        return deleteCollection(tenant, name, false);
+        return deleteCollection(tenant, name, false, null, false);   // the re-embed runner's own delete of its source: not refused for the job it belongs to
     }
 
     /**
@@ -10419,7 +10419,7 @@ public final class CatalogRepository {
      *                       ({@link #retiredPredecessorsOf}), for the same reason: the name comes back.
      */
     public Map<String, Integer> deleteCollection(String tenant, String name, boolean keepQuarantine) {
-        return deleteCollection(tenant, name, keepQuarantine, null);
+        return deleteCollection(tenant, name, keepQuarantine, null, true);
     }
 
     /**
@@ -10429,7 +10429,7 @@ public final class CatalogRepository {
      * Its label-scoped purge and its two transactions are described in {@link CollectionDeletes}.
      */
     public Map<String, Integer> deleteCollectionById(String tenant, String name, long collectionId, boolean keepQuarantine) {
-        return deleteCollection(tenant, name, keepQuarantine, collectionId);
+        return deleteCollection(tenant, name, keepQuarantine, collectionId, true);
     }
 
     /** What a delete of {@code label} (or of the id the route boundary resolved to it) would do: see {@link CollectionDeletes}. */
@@ -10437,8 +10437,8 @@ public final class CatalogRepository {
         return CollectionDeletes.verdict(tenantScope, tenant, label, resolvedId);
     }
 
-    private Map<String, Integer> deleteCollection(String tenant, String name, boolean keepQuarantine, Long onlyId) {
-        DeleteOutcome outcome = deleteCollectionTxn(tenant, name, keepQuarantine, onlyId);
+    private Map<String, Integer> deleteCollection(String tenant, String name, boolean keepQuarantine, Long onlyId, boolean refuseWhenBusy) {
+        DeleteOutcome outcome = deleteCollectionTxn(tenant, name, keepQuarantine, onlyId, refuseWhenBusy);
         Map<String, Integer> counts = outcome.counts();
         // A quarantine sibling this delete emptied and unregistered: same post-commit eviction as the name itself.
         for (String sibling : outcome.unregisteredSiblings()) {
@@ -10491,7 +10491,7 @@ public final class CatalogRepository {
     private record DeleteOutcome(Map<String, Integer> counts, List<String> unregisteredSiblings,
                                  List<String> retiredRemoved) {}
 
-    private DeleteOutcome deleteCollectionTxn(String tenant, String name, boolean keepQuarantine, Long onlyId) {
+    private DeleteOutcome deleteCollectionTxn(String tenant, String name, boolean keepQuarantine, Long onlyId, boolean refuseWhenBusy) {
         // nexus-wbfpw.66: DELETEs catalog_document_chunks rows (step 1b, and the fk-001 cascade of
         // step 6), which fires vectors-021-3's chunk-locking trigger; whole transaction retried on 40P01.
         // `counts` is built inside the lambda, so each attempt starts from an empty map.
@@ -10505,7 +10505,7 @@ public final class CatalogRepository {
             // go with it, in this transaction. FIRST statement of the purge: the tuple row locks come before the
             // document_aspects delete at step 5 (the claim-fenced aspect write's own order). Deliberately not in
             // `counts`: the response's key set is a wire contract and the purge reports what it always did.
-            if (!scope.matchesNothing()) { AspectTaskRefs.deleteNaming(ctx, tenant, name); CollectionDeleteFence.lockForDelete(ctx, tenant, name, scope, keepQuarantine, onlyId); }
+            if (!scope.matchesNothing()) { AspectTaskRefs.deleteNaming(ctx, tenant, name); CollectionDeleteFence.lockForDelete(ctx, tenant, name, scope, keepQuarantine, onlyId, refuseWhenBusy); }
 
             Map<String, Integer> counts = new LinkedHashMap<>();
             List<String> unregisteredSiblings = new ArrayList<>();
