@@ -222,8 +222,8 @@ public final class CollectionRegistry {
         }
         if (consume) {
             ExpectedCollectionIds.beforeTransactionRead();
+            noteWriteRead(tenant, label);
         }
-        noteWriteRead(tenant, label);
         CollectionRow row = fill(ctx, tenant, CATALOG_COLLECTIONS.COLLECTION_ID.eq(collectionId), List.of(), true,
             () -> new UnknownCollectionIdException(tenant, collectionId));
         if (row.collectionId() != collectionId) {
@@ -290,7 +290,12 @@ public final class CollectionRegistry {
     }
 
     /** Test seam: called with {@code tenant|label} before every {@code FOR KEY SHARE} read of a write transaction; null in production. */
-    static volatile java.util.function.Consumer<String> writeReadHookForTests;
+    private static volatile java.util.function.Consumer<String> writeReadHookForTests;
+
+    /** Test-only: install (or clear with {@code null}) the hook run before each write-transaction registry read, to count them. */
+    public static void setWriteReadHookForTests(java.util.function.Consumer<String> hook) {
+        writeReadHookForTests = hook;
+    }
 
     private static void noteWriteRead(String tenant, String label) {
         java.util.function.Consumer<String> hook = writeReadHookForTests;

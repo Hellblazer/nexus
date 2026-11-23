@@ -82,7 +82,18 @@ class CollectionRoutesByIdTest {
         fxLocal = new CollectionRouteFixture(true);
         fx.service.collectionSelectorFilter().testHooks(null, null, null, unconsumed::add);
         fxLocal.service.collectionSelectorFilter().testHooks(null, null, null, unconsumed::add);
+        fx.service.collectionSelectorFilter().censusSink(censusLines::add);
+        fxLocal.service.collectionSelectorFilter().censusSink(censusLines::add);
     }
+
+    /**
+     * What the per-transaction census looked at, one line per write-route request by id that answered 2xx:
+     * {@code "<path> examined=<write transactions> exempt=<history write transactions> unknown=<transactions it could not read>"}.
+     */
+    private final java.util.concurrent.ConcurrentLinkedQueue<String> censusLines = new java.util.concurrent.ConcurrentLinkedQueue<>();
+
+    /** Every write route this class sent by id, with what became of it: the paths that answered 2xx are the ones examined. */
+    private final java.util.concurrent.ConcurrentHashMap<String, Integer> byIdStatus = new java.util.concurrent.ConcurrentHashMap<>();
 
     /** What the route boundary reported: a write route that answered 2xx without reading a named id in its own transaction. */
     private final java.util.concurrent.ConcurrentLinkedQueue<String> unconsumed = new java.util.concurrent.ConcurrentLinkedQueue<>();
@@ -94,10 +105,43 @@ class CollectionRoutesByIdTest {
     private static final java.util.Set<String> MUST_CONSUME = java.util.Set.of("/v1/taxonomy/topics/insert", "/v1/vectors/store-delete",
         "/v1/vectors/update-metadata", "/v1/taxonomy/centroids/upsert");
 
+    /**
+     * The non-vacuity and the counts of the consumption census (the vacuous-gate rule): the examined and the skipped, printed, and a
+     * floor on the examined. A write route by id that answered something other than 2xx (a heavy route the fixture cannot build a
+     * document or a job for) is skipped: it is not examined by this census and the line says so. The floor: every route of
+     * {@link #MUST_CONSUME} answered 2xx and at least one write transaction of the whole run was examined (a request whose write
+     * transaction the per-transaction census could not read counts as unknown, not examined).
+     */
     @AfterAll
-    void stopAll() {
-        if (fx != null) fx.close();
-        if (fxLocal != null) fxLocal.close();
+    void censusCountsAndFloor() {
+        java.util.Set<String> writes = new java.util.TreeSet<>(MUST_CONSUME);
+        java.util.Set<String> examinedPaths = new java.util.TreeSet<>();
+        java.util.List<String> skipped = new ArrayList<>();
+        byIdStatus.forEach((path, status) -> {
+            if (status >= 200 && status < 300) examinedPaths.add(path); else skipped.add(path + "=" + status);
+        });
+        java.util.Collections.sort(skipped);
+        int transactions = 0;
+        int exempt = 0;
+        int unknown = 0;
+        for (String line : censusLines) {
+            for (String part : line.split(" ")) {
+                if (part.startsWith("examined=")) transactions += Integer.parseInt(part.substring(9));
+                if (part.startsWith("exempt=")) exempt += Integer.parseInt(part.substring(7));
+                if (part.startsWith("unknown=")) unknown += Integer.parseInt(part.substring(8));
+            }
+        }
+        System.err.printf("by_id_census routes_examined=%d routes_skipped=%d write_transactions_examined=%d exempt_history_transactions=%d "
+            + "unreadable_transactions=%d%n  examined=%s%n  skipped=%s%n", examinedPaths.size(), skipped.size(), transactions, exempt,
+            unknown, examinedPaths, skipped);
+        try {
+            assertThat(examinedPaths).as("non-vacuity: the routes pinned to answer 2xx by id did").containsAll(writes);
+            assertThat(transactions + exempt).as("non-vacuity: the per-transaction census examined at least one write transaction")
+                .isPositive();
+        } finally {
+            if (fx != null) fx.close();
+            if (fxLocal != null) fxLocal.close();
+        }
     }
 
     private CollectionRouteFixture fixtureFor(Route route) {
@@ -273,6 +317,7 @@ class CollectionRoutesByIdTest {
         Resp byLabel = call(route, Mode.LABEL, p);
         unconsumed.clear();
         Resp byId = call(route, Mode.ID, p);
+        byIdStatus.merge(route.path(), byId.status(), (a, b) -> a >= 200 && a < 300 ? a : b);
         // the consumption census: a write route that answers 2xx for an id must have read that id in its own transaction
         // (the filter reports one that did not); the four named routes must answer 200, so this cannot pass by never running
         assertThat(unconsumed).as("%s answered %d by id without reading the id in its own transaction", route.label(), byId.status())

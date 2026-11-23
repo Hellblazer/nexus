@@ -252,8 +252,7 @@ public final class AspectRepository {
             requireClaimOnTaskFor(claimRow, claimId, body.get("doc_id") instanceof String d ? d : null);
             ValidUpsert valid = validateUpsert(body);
             if (valid == null) {
-                ExpectedCollectionIds.nothingToWrite(body.get("collection") instanceof String c ? c : null);
-                return -1L;
+                return -1L;   // nothing to write; the registry read at the head of this transaction already consumed a named id
             }
             return writeAspect(ctx, tenant, body, valid);
         }));

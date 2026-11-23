@@ -149,6 +149,58 @@ class CollectionRetiredIdRoutesTest {
         assertThat(r.json().path("successor_collection_id").asLong(-1)).isEqualTo(fx.idOf(c));
     }
 
+    @Test
+    void d3_anIdWithNoRowIsStillThe404() {
+        Resp r = fx.get("/v1/catalog/collections/get?collection_id=" + CollectionRouteCensus.UNKNOWN_ID);
+        assertThat(r.status()).isEqualTo(404);
+        assertThat(r.reason()).isEqualTo("unknown_collection_id");
+    }
+
+    // ---- F6: a3ebfe6605, the boundary reads the process-wide cache (restored: P3.5a review F6 found these gone) -------------------
+
+    /**
+     * a3ebfe6605 made the route boundary read the registry cache every evict reaches, not a cache of its own. Revert it and a
+     * request by id keeps a row the delete evicted: this fails on the last GET, which answers 200 with the re-registered row's
+     * label for an id that row never had. The sequence: GET by id fills the cache; delete X by label; register X again (a new
+     * row, a new id); GET by the old id must not return the new row.
+     */
+    @Test
+    void f6_afterADeleteAndAReRegistration_theOldIdDoesNotReturnTheNewRow() {
+        String x = registered("f6-del");
+        long oldId = fx.idOf(x);
+        Resp first = fx.get("/v1/catalog/collections/get?collection_id=" + oldId);
+        assertThat(first.status()).as("setup: the GET by id fills the cache: %s", first.body()).isEqualTo(200);
+
+        assertThat(fx.post(DELETE, "{\"name\":" + json(x) + "}").status()).isEqualTo(200);
+        fx.register(x);
+        long newId = fx.idOf(x);
+        assertThat(newId).as("setup: the re-registration is a new row").isNotEqualTo(oldId);
+
+        Resp stale = fx.get("/v1/catalog/collections/get?collection_id=" + oldId);
+        assertThat(stale.status()).as("the old id has no row: %s", stale.body()).isEqualTo(404);
+        assertThat(stale.reason()).isEqualTo("unknown_collection_id");
+        Resp fresh = fx.get("/v1/catalog/collections/get?collection_id=" + newId);
+        assertThat(fresh.status()).as(fresh.body()).isEqualTo(200);
+        assertThat(fresh.json().path("name").asText()).isEqualTo(x);
+    }
+
+    /** The same revert, by a rename: the cached row of the old id must not outlive the rename that retired it. */
+    @Test
+    void f6_afterARename_theOldIdIsTheRetiredRowAndNotTheCachedLiveOne() {
+        String from = registered("f6-ren");
+        String to = label("retired-f6-ren-to-" + (n++));
+        long oldId = fx.idOf(from);
+        assertThat(fx.get("/v1/catalog/collections/get?collection_id=" + oldId).status()).as("setup: fills the cache").isEqualTo(200);
+
+        Resp ren = fx.post("/v1/catalog/collections/rename", "{\"old_name\":" + json(from) + ",\"new_name\":" + json(to) + "}");
+        assertThat(ren.status()).as("setup: " + ren.body()).isEqualTo(200);
+        assertThat(fx.idOf(to)).as("setup: the name path gives the collection a new id").isNotEqualTo(oldId);
+
+        Resp r = fx.get("/v1/catalog/collections/get?collection_id=" + oldId);
+        assertThat(r.status()).as("a cached live row would answer 200: %s", r.body()).isEqualTo(409);
+        assertThat(r.json().path("superseded_by").asText()).isEqualTo(to);
+    }
+
     // ---- a retired id on the chunk and manifest writes writes nothing --------------------------------------------------------------
 
     @Test
@@ -401,6 +453,73 @@ class CollectionRetiredIdRoutesTest {
         assertThat(chunksOf(a, hex)).as("the new holder's chunk is still there").isEqualTo(1);
     }
 
+    // ---- W1 (review F1, C1, C2, F5): the writes that used to go on by label before any registry read -----------------------------
+
+    /** What the hook does in the gap, as a retirement: supersedes {@code a} by {@code b}, on another thread. */
+    private Runnable retireInTheGap(CollectionRouteFixture f, String a, String b, AtomicInteger status) {
+        return () -> elsewhere(() -> status.set(f.post("/v1/catalog/collections/supersede",
+            "{\"name\":" + json(a) + ",\"superseded_by\":" + json(b) + "}").status()));
+    }
+
+    private String chunkMetadata(CollectionRouteFixture f, String collection, String hex) {
+        byte[] chash = java.util.HexFormat.of().parseHex(hex);
+        return f.asSuperuser(ctx -> ctx.select(CHUNKS.METADATA).from(CHUNKS)
+            .where(CHUNKS.COLLECTION.eq(collection).and(CHUNKS.CHASH.eq(chash))).fetchOne(CHUNKS.METADATA).data());
+    }
+
+    /**
+     * Review F1(a) and C1: every chash the request names is already stored with the same text (a re-index), so the batch
+     * transaction is skipped and the only write is the metadata-only UPDATE of {@code resolveNeedEmbedIdx}'s own transaction,
+     * by label. X is freed and its label taken by Z, which holds the same chash and text, just before that transaction's registry
+     * read (the hook fires at the head of the transaction, after its sweep gate). The write answers 404 and the request's metadata
+     * merges into nothing of Z's. With the registry read missing from that transaction the UPDATE merges into Z and the answer is 200.
+     */
+    @Test
+    void upsertChunks_everyChashAlreadyStored_byAnIdFreedBeforeTheMetadataTransaction_mergesNothingIntoTheNewHolder() {
+        String a = registered("w1-present");
+        long x = fx.idOf(a);
+        String hex = Chash.ofText("w1-present-" + a).toHex();
+        seedChunk(a, hex);   // X holds it ("retired text"); the hook files the same chash and text in the row that takes the label
+        Resp r = withTheLabelTakenBeforeTheWritesRead(a, hex, () -> fx.post("/v1/vectors/upsert-chunks",
+            "{\"collection_id\":" + x + ",\"ids\":[\"" + hex + "\"],\"documents\":[\"retired text\"],\"metadatas\":[{\"w1_key\":\"merged\"}]}"));
+        assertUnknownId(r, x);
+        assertThat(chunkMetadata(fx, a, hex)).as("the new holder's chunk took none of the request's metadata").doesNotContain("w1_key");
+    }
+
+    /**
+     * Review C2: an empty manifest is not a no-op. {@code manifest/write} with no rows deletes the document's stored manifest rows
+     * and clears their spans, by label. The id is retired just before the write transaction's registry read: the write answers 409
+     * and the stored manifest row is still there. (Before, it answered 200 and cleared it.)
+     */
+    @Test
+    void aManifestWriteWithNoRows_byAnIdRetiredBeforeTheWriteTransaction_is409_andClearsNothing() {
+        String a = registered("w1-empty-a");
+        String b = registered("w1-empty-b");
+        long x = fx.idOf(a);
+        String hex = Chash.ofText("w1-empty-" + a).toHex();
+        String doc = "w1-empty-doc-" + a;
+        seedChunk(a, hex);
+        fx.asSuperuser(ctx -> {
+            CollectionIdSeeds.ownerDocument(ctx, fx.tenant, doc, a);
+            CollectionIdSeeds.manifestRows(ctx, fx.tenant, doc, a, 0, hex);
+            return null;
+        });
+        AtomicInteger status = new AtomicInteger();
+        hooks(null, retireInTheGap(fx, a, b, status), null);
+        Resp r;
+        try {
+            r = fx.post("/v1/catalog/manifest/write", "{\"collection_id\":" + x + ",\"doc_id\":" + json(doc) + ",\"rows\":[]}");
+        } finally {
+            noHooks();
+        }
+        assertThat(status.get()).as("setup: the hook retired the row").isEqualTo(200);
+        assertThat(r.status()).as(r.body()).isEqualTo(409);
+        assertThat(r.reason()).isEqualTo("collection_superseded");
+        int rows = fx.asSuperuser(ctx -> ctx.fetchCount(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS,
+            dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(doc)));
+        assertThat(rows).as("the document's stored manifest row was not deleted").isEqualTo(1);
+    }
+
     // ---- write_many and append_many answer the typed 404 and 409, not a 200 with every document failed ---------------------------
 
     private String writeManyBody(long id) {
@@ -459,6 +578,122 @@ class CollectionRetiredIdRoutesTest {
         assertThat(retired.json().path("superseded_by").asText()).isEqualTo(c);
     }
 
+    private void seedChunkIn(CollectionRouteFixture f, String collection, String hex) {
+        f.asSuperuser(ctx -> {
+            PgContainerHelper.insertChunks(ctx, f.tenant, collection, List.of(hex), List.of("retired text"),
+                List.of(new float[384]), List.of(Map.<String, Object>of()));
+            return null;
+        });
+    }
+
+    /**
+     * Review F1(b): {@code write_many} with a chunk already stored with the same text runs the combined writer's metadata refresh
+     * transaction, by label, before any per-document transaction. X is freed and Z takes the label with the same chash and text
+     * just before that transaction's registry read: the write answers 404 and Z's chunk takes none of the metadata. (Before, the refresh
+     * merged it into Z, committed, and the per-document transaction answered 404 after it.)
+     */
+    @Test
+    void writeMany_withAChashAlreadyStored_byAnIdFreedBeforeTheRefreshTransaction_mergesNothingIntoTheNewHolder() {
+        String a = label("retired-wm-refresh-" + (n++));
+        fxLocal.register(a);
+        long x = fxLocal.idOf(a);
+        String hex = Chash.ofText("w1-wm-refresh-" + a).toHex();
+        seedChunkIn(fxLocal, a, hex);
+        AtomicInteger deleteStatus = new AtomicInteger();
+        fxLocal.service.collectionSelectorFilter().testHooks(null, () -> elsewhere(() -> {
+            deleteStatus.set(fxLocal.post(DELETE, "{\"name\":" + json(a) + "}").status());
+            fxLocal.register(a);
+            seedChunkIn(fxLocal, a, hex);
+        }), null, null);
+        Resp r;
+        try {
+            r = fxLocal.post("/v1/catalog/manifest/write_many", "{\"collection_id\":" + x + ",\"chunks\":[{\"chash\":\"" + hex
+                + "\",\"text\":\"retired text\",\"metadata\":{\"w1_key\":\"merged\"}}],\"docs\":[]}");
+        } finally {
+            fxLocal.service.collectionSelectorFilter().testHooks(null, null, null, null);
+        }
+        assertThat(deleteStatus.get()).as("setup: the hook freed the id").isEqualTo(200);
+        assertUnknownId(r, x);
+        assertThat(chunkMetadata(fxLocal, a, hex)).as("the new holder's chunk took none of the request's metadata").doesNotContain("w1_key");
+    }
+
+    /**
+     * Review F5: the window after the pre-check. The pre-check ({@code refuseRowsUnderSupersededCollection}) has passed; the id is
+     * retired just before the first per-document transaction's registry read (a manifest-only request has no refresh transaction, so
+     * that is the first write transaction the hook sees). The per-document catch used to record the typed refusal as the document's
+     * failure and answer 200; it answers 409 now, and nothing is written.
+     */
+    @Test
+    void writeMany_byAnIdRetiredAfterThePreCheck_answers409NotA200WithTheDocumentFailed() {
+        String a = label("retired-wm-doc-a-" + (n++));
+        String b = label("retired-wm-doc-b-" + (n++));
+        fxLocal.register(a, b);
+        long x = fxLocal.idOf(a);
+        String hex = Chash.ofText("w1-wm-doc-" + a).toHex();
+        String doc = "w1-wm-doc-" + a;
+        seedChunkIn(fxLocal, a, hex);
+        fxLocal.asSuperuser(ctx -> {
+            CollectionIdSeeds.ownerDocument(ctx, fxLocal.tenant, doc, a);
+            return null;
+        });
+        AtomicInteger status = new AtomicInteger();
+        fxLocal.service.collectionSelectorFilter().testHooks(null, retireInTheGap(fxLocal, a, b, status), null, null);
+        Resp r;
+        try {
+            r = fxLocal.post("/v1/catalog/manifest/write_many", "{\"collection_id\":" + x + ",\"docs\":[{\"doc_id\":" + json(doc)
+                + ",\"rows\":[{\"position\":0,\"chash\":\"" + hex + "\",\"chunk_index\":0}]}]}");
+        } finally {
+            fxLocal.service.collectionSelectorFilter().testHooks(null, null, null, null);
+        }
+        assertThat(status.get()).as("setup: the hook retired the row").isEqualTo(200);
+        assertThat(r.status()).as(r.body()).isEqualTo(409);
+        assertThat(r.reason()).isEqualTo("collection_superseded");
+        int rows = fxLocal.asSuperuser(ctx -> ctx.fetchCount(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS,
+            dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(doc)));
+        assertThat(rows).as("no manifest row was written").isZero();
+    }
+
+    /**
+     * Sensitivity of the gap tests (review: removing a read left them green, because a later read in the same transaction still saw the
+     * freed id). The write transaction reads the registry row ONCE (memoised), so the count of reads a request makes, which the
+     * registry reports through its test hook, is what goes to zero when the read is taken out; the gap tests above go red then too, but
+     * this names the cause. Every route here answers 200 by a live id, and each makes at least one read, no more than one per write
+     * transaction (the upsert has two: the metadata transaction and the batch insert).
+     */
+    @Test
+    void aWriteByAnIdReadsTheRegistryRowInItsWriteTransactions_oncePerTransaction() {
+        String a = registered("w1-reads");
+        long x = fx.idOf(a);
+        String hex = Chash.ofText("w1-reads-" + a).toHex();
+        seedChunk(a, hex);
+        java.util.concurrent.ConcurrentLinkedQueue<String> reads = new java.util.concurrent.ConcurrentLinkedQueue<>();
+        dev.nexus.service.db.CollectionRegistry.setWriteReadHookForTests(reads::add);
+        try {
+            Resp topic = fx.post("/v1/taxonomy/topics/insert", "{\"collection_id\":" + x + ",\"label\":\"w1-reads\",\"doc_count\":1}");
+            assertThat(topic.status()).as(topic.body()).isEqualTo(200);
+            assertThat(reads.size()).as("topics/insert: one write transaction, one read").isEqualTo(1);
+            reads.clear();
+
+            Resp meta = fx.post("/v1/vectors/update-metadata", "{\"collection_id\":" + x + ",\"ids\":[\"" + hex + "\"],\"metadatas\":[{\"k\":\"v\"}]}");
+            assertThat(meta.status()).as(meta.body()).isEqualTo(200);
+            assertThat(reads.size()).as("update-metadata: one write transaction, one read").isEqualTo(1);
+            reads.clear();
+
+            Resp del = fx.post("/v1/vectors/store-delete", "{\"collection_id\":" + x + ",\"ids\":[\"" + Chash.ofText("w1-none-" + a).toHex() + "\"]}");
+            assertThat(del.status()).as(del.body()).isEqualTo(200);
+            assertThat(reads.size()).as("store-delete: one write transaction, one read").isEqualTo(1);
+            reads.clear();
+
+            String fresh = Chash.ofText("w1-reads-fresh-" + a).toHex();
+            Resp up = fx.post("/v1/vectors/upsert-chunks", "{\"collection_id\":" + x + ",\"ids\":[\"" + hex + "\",\"" + fresh
+                + "\"],\"documents\":[\"retired text\",\"new text\"]}");
+            assertThat(up.status()).as(up.body()).isEqualTo(200);
+            assertThat(reads.size()).as("upsert-chunks: the metadata transaction and the batch insert read once each").isEqualTo(2);
+        } finally {
+            dev.nexus.service.db.CollectionRegistry.setWriteReadHookForTests(null);
+        }
+    }
+
     // ---- FOR KEY SHARE ----------------------------------------------------------------------------------------------------------------
 
     /**
@@ -478,9 +713,11 @@ class CollectionRetiredIdRoutesTest {
             delete[0] = CompletableFuture.supplyAsync(() -> fx.post(DELETE, "{\"name\":" + json(a) + "}"));
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
             while (System.nanoTime() < deadline) {
+                // the specific wait: a backend whose statement is the DELETE of a catalog_collections row and that waits on a lock
                 int ungranted = fx.asSuperuser(ctx -> ctx.selectCount()
-                    .from(org.jooq.impl.DSL.table(org.jooq.impl.DSL.name("pg_catalog", "pg_locks")))
-                    .where(org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("granted"), Boolean.class).isFalse())
+                    .from(org.jooq.impl.DSL.table(org.jooq.impl.DSL.name("pg_catalog", "pg_stat_activity")))
+                    .where(org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("wait_event_type"), String.class).eq("Lock"))
+                    .and(org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("query"), String.class).likeIgnoreCase("delete%catalog_collections%"))
                     .fetchOne(0, int.class));
                 if (ungranted > 0) {
                     waited.set(true);
@@ -496,7 +733,7 @@ class CollectionRetiredIdRoutesTest {
         } finally {
             noHooks();
         }
-        assertThat(waited.get()).as("the delete of the row was waiting while the write's transaction was open (pg_locks)").isTrue();
+        assertThat(waited.get()).as("the DELETE of the registry row was waiting on a lock while the write's transaction was open (pg_stat_activity)").isTrue();
         assertThat(write.status()).as(write.body()).isEqualTo(200);
         Resp deleted = delete[0].get(30, TimeUnit.SECONDS);
         assertThat(deleted.status()).as("the delete went through once the write had committed: %s", deleted.body()).isEqualTo(200);
