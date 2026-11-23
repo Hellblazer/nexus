@@ -335,4 +335,57 @@ class Rdr229P37OneRowLockOrderTest {
             }
         }
     }
+
+    /**
+     * linda's census pass 2: {@code repointTombstonesNaming(newName)} updates EVERY tombstone whose superseded_by names the new label, a self-pointing one (a
+     * delete of the row it named leaves its own id) or one carrying another collection's id included, so those rows are in the rename's one ordered FOR UPDATE.
+     * Held FOR SHARE by another transaction, such a tombstone makes the rename wait at that select, not at the later repoint UPDATE (where it waited when the
+     * lock set left it out); once released, the rename repoints it onto the renamed row's id, and no deadlock retry was spent.
+     */
+    @Test
+    void aTombstoneNamingTheNewLabelUnderItsOwnOrAForeignId_isLockedInTheOneOrderedStatement() throws Exception {
+        for (String shape : List.of("self", "foreign")) {
+            String tenant = "p37-lo-g" + shape;
+            String token = engine.newTenant(tenant);
+            String a = coll("p37loga" + shape);
+            String b = coll("p37logb" + shape);
+            String s = coll("p37logs" + shape);
+            String z = coll("p37logz" + shape);
+            engine.su(ctx -> {
+                for (String n : List.of(a, s, z)) {
+                    PgContainerHelper.insertCollection(ctx, tenant, n);
+                }
+                return null;
+            });
+            long id = engine.su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, a));
+            long sid = engine.su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, s));
+            long pointsAt = shape.equals("self") ? sid : engine.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, z));
+            engine.su(ctx -> ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, b).set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, pointsAt)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(sid))).execute());   // S names B, no row of B exists
+            var pool = Executors.newFixedThreadPool(1);
+            try (Connection h = engine.pg.createConnection("")) {
+                h.setAutoCommit(false);
+                DSL.using(h, SQLDialect.POSTGRES).select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(sid))).forShare().fetch();
+                int base = lockWaiters();
+                long retriesBefore = DeadlockRetry.retryAttemptCount();
+                Future<Rdr229RenameEngine.Renamed> rename = pool.submit(() -> engine.rename(token, a, b));
+                assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(30), () -> lockWaiters() > base)).as(shape + ": the rename waits on S").isTrue();
+                List<String> waiting = waitingQueries();
+                assertThat(waiting).as(shape + ": at the ordered FOR UPDATE of the registry rows, not at the repoint UPDATE: " + waiting)
+                    .anyMatch(q -> q.contains("for update") && q.contains("catalog_collections"))
+                    .noneMatch(q -> q.stripLeading().startsWith("update"));
+                assertThat(rename.isDone()).isFalse();
+                h.commit();
+                var r = rename.get(60, TimeUnit.SECONDS);
+                assertThat(r.status()).as(shape + ": the rename: " + r).isEqualTo(200);
+                assertNoDeadlockRetrySince(retriesBefore, shape + ": the rename and the holder of S");
+            } finally {
+                pool.shutdownNow();
+            }
+            assertThat(engine.<Long>su(ctx -> ctx.select(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(sid))).fetchOne(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID)))
+                .as(shape + ": S now points at the renamed row").isEqualTo(id);
+        }
+    }
 }
