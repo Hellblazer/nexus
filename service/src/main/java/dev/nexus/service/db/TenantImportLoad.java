@@ -214,21 +214,26 @@ final class TenantImportLoad {
         }
         Field<String> aName = DSL.field(DSL.name("a", "name"), String.class);
         Field<String> bName = DSL.field(DSL.name("b", "name"), String.class);
+        // live = superseded_by = '' AND superseded_by_id IS NULL (RDR-229 P3.5c, linda 2026-11-23), the staged file's own columns when it
+        // has them (a file from before P3.1 has no id: its default is NULL, so the id term holds)
         Condition bothLive = DSL.trueCondition();
         for (String alias : List.of("a", "b")) {
-            bothLive = bothLive.and(stagedOrDefault(tp, alias, "superseded_by", "").eq(""))
-                .and(stagedOrDefault(tp, alias, "lifecycle_state", "live").ne("quarantine"));
+            bothLive = bothLive.and(stagedLive(tp, alias));
         }
-        Condition aLive = stagedOrDefault(tp, "a", "superseded_by", "").eq("")
-            .and(stagedOrDefault(tp, "a", "lifecycle_state", "live").ne("quarantine"));
+        Condition aLive = stagedLive(tp, "a");
         if (!CollectionMint.tupleIndexExists(ctx)) {
             CollectionTupleLock.lock(ctx, ctx.selectDistinct(tupleOfA).from(a).where(aLive).fetch().stream()
                 .map(r -> new CollectionTupleLock.Tuple(tenant, r.get(0, String.class), r.get(1, String.class),
                     r.get(2, String.class), r.get(3, String.class)))
                 .toList());
         }
+        // The check reports the conflicting pair it finds, so the pair it reports is a function of the data: ordered by the staged ids when
+        // the file carries them, by the labels when it does not (a file from before P3.1).
+        List<Field<?>> twinOrder = tp.loadColumns().contains("collection_id")
+            ? List.of(DSL.field(DSL.name("a", "collection_id")), DSL.field(DSL.name("b", "collection_id")), aName, bName)
+            : List.of(aName, bName);
         Record twin = ctx.select(aName, bName, tupleOfA.get(0), tupleOfA.get(1), tupleOfA.get(2), tupleOfA.get(3))
-            .from(a).join(b).on(sameTuple.and(aName.lt(bName))).where(bothLive).limit(1).fetchOne();
+            .from(a).join(b).on(sameTuple.and(aName.lt(bName))).where(bothLive).orderBy(twinOrder).limit(1).fetchOne();
         if (twin != null) {
             throw new LoadFailedException(CollectionMint.conflictInBackup(twin.get(1, String.class), twin.get(0, String.class),
                 twin.get(2, String.class), twin.get(3, String.class), twin.get(4, String.class), twin.get(5, String.class))
@@ -239,13 +244,22 @@ final class TenantImportLoad {
             .from(a).join(t).on(t.TENANT_ID.eq(tenant)
                 .and(t.CONTENT_TYPE.eq(tupleOfA.get(0))).and(t.OWNER_ID.eq(tupleOfA.get(1)))
                 .and(t.EMBEDDING_MODEL.eq(tupleOfA.get(2))).and(t.MODEL_VERSION.eq(tupleOfA.get(3)))
-                .and(t.SUPERSEDED_BY.eq("")).and(t.LIFECYCLE_STATE.ne("quarantine")).and(t.NAME.ne(aName)))
-            .where(aLive).limit(1).fetchOne();
+                .and(t.SUPERSEDED_BY.eq("")).and(t.SUPERSEDED_BY_ID.isNull())
+                .and(t.LIFECYCLE_STATE.ne("quarantine")).and(t.NAME.ne(aName)))
+            .where(aLive).orderBy(t.COLLECTION_ID, aName).limit(1).fetchOne();
         if (held != null) {
             throw new LoadFailedException(CollectionMint.conflictInBackup(held.get(0, String.class), held.get(1, String.class),
                 held.get(2, String.class), held.get(3, String.class), held.get(4, String.class), held.get(5, String.class))
                 .getMessage());
         }
+    }
+
+    /** A staged registry row that is live: not superseded by name or by id, and not in quarantine. */
+    private static Condition stagedLive(TablePlan tp, String alias) {
+        Condition idNull = tp.loadColumns().contains("superseded_by_id")
+            ? DSL.field(DSL.name(alias, "superseded_by_id"), Long.class).isNull() : DSL.trueCondition();
+        return stagedOrDefault(tp, alias, "superseded_by", "").eq("").and(idNull)
+            .and(stagedOrDefault(tp, alias, "lifecycle_state", "live").ne("quarantine"));
     }
 
     /** The staged column of {@code alias}, or, when the file lacks it, the column's default as a constant. */
