@@ -343,6 +343,39 @@ class Rdr229P37RenameAcceptanceTest {
         assertThat(env.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, w.tenant(), w.b()))).as("and B is still registered").isEqualTo(w.id());
     }
 
+    /**
+     * (c2) folio 2026-11-23: deleting the renamed collection B itself, after a real one-row rename A to B, leaves no row under B's id in any child
+     * table, although B's rows still carry the name A. The base's delete purges by label (c3b0bc4152), so it would leave them; P3.5a's id-scoped
+     * purge closes it.
+     */
+    @Test
+    @Disabled("waits on P3.5a's id-scoped purge (c3b0bc4152 purges by label)")
+    void legC2_deletingTheRenamedCollectionLeavesNoRowUnderItsIdInAnyChildTable() throws Exception {
+        var w = renamedCollection("c2");
+        assertThat(childRowsUnderId(w.tenant(), w.id()).values().stream().mapToLong(Long::longValue).sum())
+            .as("non-vacuity: B's child rows are there under B's id").isPositive();
+
+        var r = env.callJson("POST", "/v1/catalog/collections/delete", w.token(), "{\"name\":\"" + w.b() + "\"}");
+
+        assertThat(r.statusCode()).as("the delete of B answers: " + r.body()).isEqualTo(200);
+        assertThat(childRowsUnderId(w.tenant(), w.id())).as("no row is left under B's id in any child table, whatever name it carries")
+            .allSatisfy((table, n) -> assertThat(n).as(table).isZero());
+    }
+
+    /** Rows per child table (Rdr229RenameChecks.CHILD_SITES) whose id column is {@code id}, whatever their name column says. */
+    private Map<String, Long> childRowsUnderId(String tenant, long id) {
+        return env.su(ctx -> {
+            Map<String, Long> out = new TreeMap<>();
+            for (var s : Rdr229RenameChecks.CHILD_SITES) {
+                out.put(s.table(), ctx.selectCount().from(org.jooq.impl.DSL.table(org.jooq.impl.DSL.name("nexus", s.table())))
+                    .where(org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("tenant_id"), String.class).eq(tenant))
+                    .and(org.jooq.impl.DSL.field(org.jooq.impl.DSL.name(s.idColumn()), Long.class).eq(id))
+                    .fetchOne(0, Long.class));
+            }
+            return out;
+        });
+    }
+
     /** (d) each per-store rename route, called with A to B after a real one-row rename: success, zero rows changed, rows unchanged (the no-op is P3.5a slice C's). */
     @Test
     void legD_theFivePerStoreRenameRoutesAreANoOpAfterAOneRowRename() throws Exception {
