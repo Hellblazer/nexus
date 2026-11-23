@@ -7,7 +7,7 @@
 # data_move (a registered nexus.data_moves template; file column is 'label [changelog:template line]', line the INSERT's; note says whether it sets the id, is superseded or handled, or is a VIOLATION).
 # registry: require (a registry read, key share, in the method that holds the statement), history (a history table: stamped unlocked, exempt), verb (a verb that locks the
 # registry row itself), sql (a SQL function), move (a data move's template), unproven (the scan sees no registry read in the method: its caller may read it first).
-# unproven-ceiling: 94
+# unproven-ceiling: 93
 family	table	file_or_function	line	op	kind	name_columns_written	id_columns	has_check	note	registry	method
 aspects	aspect_extraction_queue	rdr229-fkvalidate-aspect_extraction_queue [vectors-072-collection-id-fk-twins.xml:292]	289	update	data_move	-	collection_id	yes	sets collection_id	move	
 aspects	aspect_extraction_queue	rdr229-stamp-aspect_extraction_queue [vectors-070-collection-id-stamp-moves.xml:330]	327	update	data_move	-	collection_id	yes	sets collection_id	move	
@@ -26,10 +26,10 @@ aspects	document_aspects	rdr229-residue-document-aspects [catalog-049-note-uri-r
 aspects	document_aspects	rdr229-stamp-document_aspects [vectors-070-collection-id-stamp-moves.xml:186]	183	update	data_move	-	collection_id	yes	sets collection_id	move	
 aspects	document_aspects	service/src/main/java/dev/nexus/service/db/AspectRepository.java	354	insert	jooq	collection	collection_id	yes		require	writeAspect
 aspects	document_aspects	service/src/main/java/dev/nexus/service/db/AspectRepository.java	624	update	jooq	collection	collection_id	yes		verb	renameAspectCollection
-aspects	document_aspects	service/src/main/java/dev/nexus/service/db/AspectRepository.java	644	update	jooq	-	collection_id	yes		unproven	setSalientSentences
-aspects	document_aspects	service/src/main/java/dev/nexus/service/db/AspectRepository.java	657	update	jooq	-	collection_id	yes		require	setSalientSentencesByKey
-aspects	document_aspects	service/src/main/java/dev/nexus/service/db/AspectRepository.java	745	insert	jooq	collection	collection_id	yes		require	importAspectsBatch
-aspects	document_aspects	service/src/main/java/dev/nexus/service/db/AspectRepository.java	826	insert	jooq	collection	collection_id	yes		require	doImportAspect
+aspects	document_aspects	service/src/main/java/dev/nexus/service/db/AspectRepository.java	646	update	jooq	-	collection_id	yes		require	setSalientSentences
+aspects	document_aspects	service/src/main/java/dev/nexus/service/db/AspectRepository.java	661	update	jooq	-	collection_id	yes		require	setSalientSentencesByKey
+aspects	document_aspects	service/src/main/java/dev/nexus/service/db/AspectRepository.java	749	insert	jooq	collection	collection_id	yes		require	importAspectsBatch
+aspects	document_aspects	service/src/main/java/dev/nexus/service/db/AspectRepository.java	830	insert	jooq	collection	collection_id	yes		require	doImportAspect
 aspects	document_aspects	service/src/main/java/dev/nexus/service/db/CatalogMoves.java	480	update	jooq	-	collection_id	yes		unproven	moveAspects
 aspects	document_aspects	service/src/main/java/dev/nexus/service/db/CatalogMoves.java	517	update	jooq	-	collection_id	yes		unproven	moveAspects
 aspects	document_aspects	service/src/main/java/dev/nexus/service/db/CatalogMoves.java	892	update	jooq	-	collection_id	yes		unproven	rewrite
@@ -45,10 +45,10 @@ aspects	document_highlights	rdr229-p31-residue-document-highlights [catalog-052-
 aspects	document_highlights	rdr229-p31-residue-document-highlights [catalog-052-residue-moves-supersede.xml:243]	240	update	data_move	-	collection_id	yes	sets collection_id	move	
 aspects	document_highlights	rdr229-residue-document-highlights [catalog-049-note-uri-residue.xml:1538]	1506	update	data_move	-	collection_id	yes	superseded by rdr229-p31-residue-document-highlights	move	
 aspects	document_highlights	rdr229-stamp-document_highlights [vectors-070-collection-id-stamp-moves.xml:203]	200	update	data_move	-	collection_id	yes	sets collection_id	move	
-aspects	document_highlights	service/src/main/java/dev/nexus/service/db/AspectRepository.java	909	insert	jooq	collection	collection_id	yes		require	upsertHighlight
-aspects	document_highlights	service/src/main/java/dev/nexus/service/db/AspectRepository.java	1064	insert	jooq	collection	collection_id	yes		require	importHighlightsBatch
-aspects	document_highlights	service/src/main/java/dev/nexus/service/db/AspectRepository.java	1110	insert	jooq	collection	collection_id	yes		require	doImportHighlight
-aspects	document_highlights	service/src/main/java/dev/nexus/service/db/AspectRepository.java	1152	update	jooq	collection	collection_id	yes		verb	renameHighlightsCollection
+aspects	document_highlights	service/src/main/java/dev/nexus/service/db/AspectRepository.java	913	insert	jooq	collection	collection_id	yes		require	upsertHighlight
+aspects	document_highlights	service/src/main/java/dev/nexus/service/db/AspectRepository.java	1072	insert	jooq	collection	collection_id	yes		require	importHighlightsBatch
+aspects	document_highlights	service/src/main/java/dev/nexus/service/db/AspectRepository.java	1118	insert	jooq	collection	collection_id	yes		require	doImportHighlight
+aspects	document_highlights	service/src/main/java/dev/nexus/service/db/AspectRepository.java	1160	update	jooq	collection	collection_id	yes		verb	renameHighlightsCollection
 aspects	document_highlights	service/src/main/java/dev/nexus/service/db/CatalogMoves.java	248	update	jooq	-	collection_id	yes		unproven	documentMove
 aspects	document_highlights	service/src/main/java/dev/nexus/service/db/CatalogMoves.java	562	update	jooq	-	collection_id	yes		unproven	rekeyHighlights
 aspects	document_highlights	service/src/main/java/dev/nexus/service/db/CatalogMoves.java	896	update	jooq	-	collection_id	yes		unproven	rewrite
