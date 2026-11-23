@@ -235,6 +235,17 @@ class TestServiceChange:
         got = _sel(tree, changed, service_substrate=True)
         assert "tests/test_boots_engine.py" in got.files
 
+    def test_the_cli_selects_the_engine_tests_by_default(self, tree: pathlib.Path) -> None:
+        """The flag defaults on at the command line: the replay's one diff-caused miss was missed only without it."""
+        _write(tree, "service/src/main/java/dev/nexus/service/Util.java", "class Util {}\n")
+        _write(tree, "tests/test_boots_engine.py", "import pytest\npytestmark = pytest.mark.t2_tenant\n")
+        base = [sys.executable, str(SCRIPT), "--repo", str(tree), "--no-meta", "--no-docs", "--no-cache"]
+        path = "service/src/main/java/dev/nexus/service/Util.java"
+        on = subprocess.run([*base, path], capture_output=True, text=True, check=True).stdout
+        off = subprocess.run([*base, "--no-service-substrate", path], capture_output=True, text=True, check=True).stdout
+        assert "tests/test_boots_engine.py" in on.split()
+        assert "tests/test_boots_engine.py" not in off.split()
+
     def test_a_service_change_with_no_route_says_so(self, tree: pathlib.Path) -> None:
         _write(tree, "service/src/main/java/dev/nexus/service/Util.java", "class Util {}\n")
         got = _sel(tree, ["service/src/main/java/dev/nexus/service/Util.java"])

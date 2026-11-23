@@ -517,7 +517,7 @@ def _service(repo: Path, idx: Index, changed: list[str], sel: Selection, seeds: 
         else:
             sel.notes.append(
                 f"service/ main changed: {len(subs)} Python test file(s) boot the engine substrate and run against the "
-                "changed engine; add --service-substrate to select them (the routes below are the cheap derivation)"
+                "changed engine; not selected (--no-service-substrate; the routes below are the cheap derivation)"
             )
     routes = _service_routes(repo, main_java)
     if not routes:
@@ -744,8 +744,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--files-from", help="a file of changed paths, one per line (- for stdin)")
     ap.add_argument("--explain", action="store_true", help="print why each file was picked")
     ap.add_argument("--max-depth", type=int, help="follow imports at most N hops from a changed module (a smoke tier; default: the full closure)")
-    ap.add_argument("--service-substrate", action="store_true",
-                    help="on a service/src/main change, also select every Python test that boots the engine substrate")
+    ap.add_argument("--service-substrate", action=argparse.BooleanOptionalAction, default=True,
+                    help="on a service/src/main change, also select every Python test that boots the engine substrate "
+                         "(default on: the 124-run replay's one diff-caused miss was missed only without it, "
+                         "nexus_rdr/258-research-17; --no-service-substrate takes the cheap route derivation instead)")
     ap.add_argument("--no-meta", action="store_true")
     ap.add_argument("--include-meta-always", action="store_true",
                     help="also list the lint/census tests meta_tests.py runs whatever the diff (default: left to meta_tests.py run)")
