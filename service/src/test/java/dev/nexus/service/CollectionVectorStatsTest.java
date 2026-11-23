@@ -252,11 +252,12 @@ class CollectionVectorStatsTest {
                 DSL.using(su, SQLDialect.POSTGRES), "nexus", "collection_vector_stats");
             assertThat(cols)
                 .as("collection_vector_stats must expose EXACTLY " +
-                    "(tenant_id, collection, dim, chunk_count, last_write, stored_count) in order — " +
+                    "(tenant_id, collection, dim, chunk_count, last_write, stored_count, collection_id) in order — " +
                     "no deleted_at, no data-plane payload; stored_count appended by the RDR-192 " +
-                    "Step 5 amendment (vectors-019-5)")
+                    "Step 5 amendment (vectors-019-5), collection_id by RDR-229 P3.5b (vectors-077-98: the " +
+                    "registry's id of the row, so a reader can follow a one-row rename)")
                 .containsExactly("tenant_id", "collection", "dim", "chunk_count", "last_write",
-                                 "stored_count");
+                                 "stored_count", "collection_id");
         }
     }
 
