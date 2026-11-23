@@ -417,6 +417,76 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
         }
     }
 
+    /**
+     * A builder-NAMED backend of another role that holds the blocking lock is not this engine's builder: the pass that timed out behind it ends
+     * nothing and says so. Without the {@code usename} term of AdoptionBuilders the blocker would count as a builder, the pass would log an ended
+     * builder (ended=0, since the signal's own role check refuses it) and the first assertion on the log below would fail.
+     */
+    @Test
+    void aBuilderNamedBackendOfAnotherRoleThatBlocksTheLockIsNotEnded() throws Exception {
+        seed("builderotherrole");
+        registerSwaps();
+        runSwaps(new VerifyingFinisher());
+        validateEveryLeafByHand();
+        pause("rdr229-%");
+        resume(Rdr229ChunksFk.ADOPT_LABEL);
+        var worker = productionWorker(new VerifyingFinisher());   // before the lock: building one re-runs the migration
+        var log = captureAdoptionBuilderLog();
+        try (Connection other = open(pg.getJdbcUrl(), pg.getUsername(), pg.getPassword(), PciBuilderSession.APPLICATION_NAME_PREFIX + "p33c-otherrole-" + System.nanoTime())) {
+            parked.add(other);
+            other.setAutoCommit(false);
+            lock(other, chunkLeaves().get(0), PgContainerHelper.LockMode.SHARE_UPDATE_EXCLUSIVE);
+
+            worker.runCycle();
+
+            assertThat(logged(log, "event=rdr229_adoption_blocked_by_others")).as("the engine log says the blocker is not one of its builders").isTrue();
+            assertThat(logged(log, "event=rdr229_adoption_ended_builders")).as("and ends nothing").isFalse();
+            assertThat(alive(other)).as("the other role's session is untouched").isTrue();
+            assertThat((String) adoptMoves().get(0).get("last_transient")).as("the pass is the plain 55P03 that backs off").contains(Rdr229ChunksFk.LOCK_FAILED_MARKER);
+        } finally {
+            releaseAdoptionBuilderLog(log);
+        }
+    }
+
+    /**
+     * The signal itself checks ownership, in the statement that sends it: of three builder-named backends, the calling role's in this database is
+     * ended; another role's in this database and the same role's in another database are not. Without the {@code usename} term the signal at the
+     * other role's backend is refused by the server (an error); without the database term the other database's backend is ended.
+     */
+    @Test
+    void terminatingPidsEndsOnlyBuildersOfThisDatabaseAndThisRole() throws Exception {
+        String suffix = Long.toString(System.nanoTime());
+        String otherDb = "p33c_builder_db_" + suffix;
+        PgContainerHelper.createDatabase(su, otherDb);
+        String otherUrl = adminConnection.url().replaceFirst("(jdbc:postgresql://[^/]+/)[^?]+", "$1" + otherDb);
+        String name = PciBuilderSession.APPLICATION_NAME_PREFIX + "p33c-term-";
+        try (Connection caller = openAsWorker("p33c-term-caller-" + suffix);
+             Connection mine = openAsWorker(name + "mine-" + suffix);
+             Connection otherRole = open(pg.getJdbcUrl(), pg.getUsername(), pg.getPassword(), name + "role-" + suffix);
+             Connection otherDatabase = open(otherUrl, adminConnection.user(), adminConnection.password(), name + "db-" + suffix)) {
+            int ended = dev.nexus.service.db.PciBuilders.terminatePidsOrThrow(DSL.using(caller, SQLDialect.POSTGRES),
+                List.of(pid(mine), pid(otherRole), pid(otherDatabase)), "reason=p33c-test", org.slf4j.LoggerFactory.getLogger(Rdr229ChunksFkHardeningIntegrationTest.class));
+
+            assertThat(ended).as("only the calling role's builder of this database was signalled").isEqualTo(1);
+            assertThat(waitUntilDead(mine)).as("it is gone").isTrue();
+            assertThat(alive(otherRole)).as("another role's builder-named backend in this database: left alone").isTrue();
+            assertThat(alive(otherDatabase)).as("the same role's builder-named backend in another database: left alone").isTrue();
+        } finally {
+            PgContainerHelper.dropDatabaseIfExists(su, otherDb);
+        }
+    }
+
+    private boolean waitUntilDead(Connection c) throws SQLException {
+        long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (System.nanoTime() < end) {
+            if (!alive(c)) {
+                return true;
+            }
+            sleepMs(50);
+        }
+        return false;
+    }
+
     /** A pass that defers for a leaf ends no builder, however live: it never reached the lock. */
     @Test
     void aDeferringPassEndsNoBuilder() throws Exception {
@@ -675,6 +745,44 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
             sleepMs(2_500);
 
             assertThat(watch.fired()).as("a closed watch did not fire although its move is paused").isFalse();
+            sleep(victim, 0.3);   // would raise 57014 had it been cancelled
+        }
+    }
+
+    /**
+     * A watch closed while it is between reading a paused move and acting on it: the read has told it to cancel, and the close comes after. Nothing is
+     * cancelled (the check after the read), and close() returns only once the watch's thread has ended (the join), so the session cannot be cancelled
+     * later for a validation that is over. The hook holds the thread in that window for 400 ms, past an interrupt. Without the check after the read the
+     * thread cancels the victim when the hook returns: fired() is true and the sleep below raises 57014. Without the join close() returns at once, while
+     * the thread is still in the hook: ended() is false.
+     */
+    @Test
+    void aWatchClosedBetweenItsReadAndItsCancelCancelsNothingAndHasEndedWhenCloseReturns() throws Exception {
+        seed("watchmid");
+        registerSwaps();
+        runSwaps(new VerifyingFinisher());
+        String label = Rdr229ChunksFk.LEAF_LABEL_PREFIX + chunkLeaves().get(0);
+        pause(label);
+        String application = "nexus-data-move-watchmid-" + System.nanoTime();
+        var read = new java.util.concurrent.CountDownLatch(1);
+        try (Connection victim = openAsWorker(application)) {
+            var watch = CompletionWatch.start(adminConnection, label, pid(victim), application, backendStart(victim), () -> {
+                read.countDown();
+                long end = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(400);
+                while (System.nanoTime() < end) {
+                    try {
+                        Thread.sleep(20);
+                    } catch (InterruptedException ignored) {
+                        // the close interrupts the thread: the window stays open for the whole 400 ms
+                    }
+                }
+            });
+            assertThat(read.await(15, TimeUnit.SECONDS)).as("the watch read the paused move").isTrue();
+
+            watch.close();
+
+            assertThat(watch.ended()).as("close() returned only after the watch's thread had ended").isTrue();
+            assertThat(watch.fired()).as("the close came after the read and before the cancel: nothing was cancelled").isFalse();
             sleep(victim, 0.3);   // would raise 57014 had it been cancelled
         }
     }
