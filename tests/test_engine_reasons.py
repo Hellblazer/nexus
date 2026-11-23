@@ -56,6 +56,7 @@ def test_the_quarantine_restore_busy_reason_equals_the_engines() -> None:
         "TENANT_CREATION_BUSY_REASON",
         "COLLECTION_SUPERSEDED_REASON",
         "UNKNOWN_COLLECTION_ID_REASON",
+        "COLLECTION_ID_MISMATCH_REASON",
         "RENAME_REFUSED_REASON",
         "COLLECTION_LABEL_AMBIGUOUS_REASON",
     ],
