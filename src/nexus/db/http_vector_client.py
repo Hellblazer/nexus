@@ -58,7 +58,12 @@ from nexus.db.gateway_backoff import (
 )
 from nexus.db.client_identity import client_identity_headers
 from nexus.collection_errors import superseded_write_error_from_body
-from nexus.db.engine_reasons import QUARANTINE_RESTORE_BUSY_REASON, UNREGISTERED_COLLECTION_REASON, error_reason
+from nexus.db.engine_reasons import (
+    QUARANTINE_RESTORE_BUSY_REASON,
+    RENAME_BUSY_REASON,
+    UNREGISTERED_COLLECTION_REASON,
+    error_reason,
+)
 from nexus.logging_setup import emit_import_time_warning
 from nexus.rate_brake import DEADLINE_OUTCOME_HEADER, is_deadline_abort, parse_retry_after
 from nexus.redact import redact_credentials
@@ -2403,7 +2408,8 @@ def _keyed_sweep_post(path: str, body: dict, *, tenant: str, gate_busy: bool, bu
     * A 2xx is the result (a replay included).
     * A 422 ``idempotency_key_reused`` or a 400 ``idempotency_key_malformed`` /
       ``idempotency_key_unsupported`` raises :class:`IdempotencyKeyRefusedError`, never resent.
-    * A 503 ``sweep_gate_busy`` (*gate_busy* forms) or ``request_claim_contended``: nothing ran.
+    * A 503 ``sweep_gate_busy`` (*gate_busy* forms), ``request_claim_contended`` or a typed ``rename_busy`` (the collection's registry row
+      held by a rename or supersede past the engine's bound, RDR-229 P3.5a): nothing ran.
       Waits ``Retry-After`` (5 s and 1 s when absent) and resends under the same key.
     * A 409 ``request_in_flight``, a 502/504, any other 503 (after honouring its ``Retry-After``, at
       most :data:`_RETRY_AFTER_BEFORE_POLL_MAX_S`: the managed edge answers its own 503 for a request
@@ -2481,7 +2487,11 @@ def _keyed_sweep_post(path: str, body: dict, *, tenant: str, gate_busy: bool, bu
                 typed_busy = busy_reason is not None and exc.reason == busy_reason
                 if typed_busy and not (isinstance(exc.engine_body, dict) and exc.engine_body.get("nothing_moved") is True):
                     raise
-                busy = exc.code == 503 and (error in not_run or typed_busy)
+                # RDR-229 P3.5a: a gc route that met its collection's registry row held by a rename or supersede answers 503
+                # rename_busy after the engine's bound, with Retry-After. The transaction rolled back and nothing ran: the same
+                # key is resent after the wait, as for sweep_gate_busy.
+                renamed_busy = exc.code == 503 and exc.reason == RENAME_BUSY_REASON
+                busy = exc.code == 503 and (error in not_run or typed_busy or renamed_busy)
                 ambiguous = (
                     (exc.code == 409 and error == "request_in_flight")
                     or exc.code in (502, 504)

@@ -78,7 +78,7 @@ RENAME_REFUSED_REASON: str = "rename_refused"
 RENAME_PATH_MISMATCH_REASON: str = "rename_path_mismatch"
 
 #: A catalog rename or a collection supersede could not lock its registry row within 10 s because writers still held it (HTTP 503,
-#: RDR-229 P3.5a), with ``Retry-After`` and ``retry_after_seconds``. Nothing was changed; retry shortly. Writers have no such bound.
+#: RDR-229 P3.5a), with ``Retry-After`` and ``retry_after_seconds``. Nothing was changed; retry shortly. Also what the unbounded gc routes answer after 25 s when a rename or supersede holds the collection's registry row (quarantine-orphans, restore-rereferenced, expire-quarantine); ingest writers have no such bound.
 RENAME_BUSY_REASON: str = "rename_busy"
 
 #: A per-store ``rename_collection`` route (chash, taxonomy, telemetry, aspects, highlights) in the one-row regime, where it is a
