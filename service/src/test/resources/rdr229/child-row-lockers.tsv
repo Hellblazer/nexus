@@ -39,7 +39,7 @@ MemoryRepository.java	replaceMemory	MEMORY	forUpdate	2	no-registry-lock	T2 memor
 PipelineRepository.java	lockRun	PDF_PIPELINE	forUpdate	1	no-registry-lock	the pdf_pipeline row of a run; create takes the key share first, the other run routes name no collection write
 ReembedJobRepository.java	advanceAfterBatch	REEMBED_JOBS	forUpdate	1	no-registry-lock	re-embed job rows; the job start reads the collections first (round 2 item: requireAllForWrite)
 ReembedJobRepository.java	advanceAfterBatch	REEMBED_JOB_MOVES	forUpdate	1	no-registry-lock	re-embed job rows; the job start reads the collections first (round 2 item: requireAllForWrite)
-ReembedJobRepository.java	markRevivedIn	REEMBED_JOBS	forUpdate	1	no-registry-lock	re-embed job rows, inside a transaction that already read both ends' registry rows (start after requireAllForWrite, markRevived after requireAllForWrite)
+ReembedJobRepository.java	markRevivedIn	REEMBED_JOBS	forUpdate	1	no-registry-lock	re-embed job rows, inside startMarking's transaction, which already read both ends' registry rows (requireAllForWrite); it has no other caller
 ReembedJobRepository.java	recordMoveInTxn	REEMBED_JOBS	forUpdate	1	no-registry-lock	re-embed job rows, inside the per-document move transaction that read the registry (writeManifestMany)
 ReembedJobRepository.java	recordMoveInTxn	REEMBED_JOB_MOVES	forUpdate	1	no-registry-lock	re-embed job rows, inside the per-document move transaction that read the registry (writeManifestMany)
 RequestLedger.java	read	?	forUpdate	1	no-registry-lock	request ledger rows, no collection
