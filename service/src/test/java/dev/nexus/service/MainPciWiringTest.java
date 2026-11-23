@@ -28,8 +28,8 @@ class MainPciWiringTest {
         String src = code(main());   // code only: the right text in a trailing comment must not satisfy the pin
         assertThat(src).as("the sweep is built from the pool and the validated settings")
             .contains("PciIndexSweep.create(ds, dev.nexus.service.db.PgSession.startupPciSettings())");
-        assertThat(src).as("the repository takes the sweep as its index set")
-            .containsPattern("new PgVectorRepository\\(tenantScope,\\s*docEmbedRouter,\\s*qryEmbedRouter,\\s*pciSweep\\)");
+        assertThat(src).as("the repository takes the sweep as its index set, and the one gate 3 signal (RDR-229 P3.5c)")
+            .containsPattern("new PgVectorRepository\\(tenantScope,\\s*docEmbedRouter,\\s*qryEmbedRouter,\\s*pciSweep,\\s*gate3\\)");
         assertThat(src).as("Main never names the empty set").doesNotContain("PciIndexSet.NONE");
     }
 
