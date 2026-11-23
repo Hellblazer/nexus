@@ -64,12 +64,16 @@ final class CollectionPurgeScope {
         if (onlyId != null) {
             return byId(name, onlyId);
         }
-        Long id = ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+        return byId(name, idOfLabel(ctx, tenant, name));
+    }
+
+    /** The id of the registry row {@code name} resolves to (the live one first, else the newest tombstone), or {@code null}: no row. */
+    static Long idOfLabel(DSLContext ctx, String tenant, String name) {
+        return ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(name))
             .orderBy(CollectionRegistry.labelResolutionOrder())
             .limit(1)
             .fetchOne(CATALOG_COLLECTIONS.COLLECTION_ID);
-        return byId(name, id);
     }
 
     /** True when this delete has no id to scope by and so removes nothing. */
