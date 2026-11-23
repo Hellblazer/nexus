@@ -26,7 +26,7 @@ public final class IdReaders {
      * {@link #PRESENT}, read through a method so a caller compiled against an older value never holds an inlined copy of the constant: the
      * production default of the retire's guard calls this, and a recompile of this class alone is enough to flip it.
      */
-    static boolean present() {
+    public static boolean present() {
         return PRESENT;
     }
 }
