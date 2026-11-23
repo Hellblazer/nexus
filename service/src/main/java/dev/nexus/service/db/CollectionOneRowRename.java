@@ -56,9 +56,17 @@ public final class CollectionOneRowRename implements OneRowRename {
 
     private static volatile String rowLockTimeoutMs = ROW_LOCK_TIMEOUT_MS;
 
-    /** Test hook: a shorter bound, so a busy test answers in a second; pass {@code null} to restore {@link #ROW_LOCK_TIMEOUT_MS}. */
-    public static void setRowLockTimeoutMsForTests(String ms) {
+    /**
+     * Test seam, package-private: a tests-only class of this package ({@code CollectionOneRowRenameTestSupport}) reaches it, so no production caller can move
+     * the bound. A shorter bound makes a busy test answer in a second, a longer one keeps a test that parks the rename on a hand-held lock from going 503
+     * when its own thread is slow; {@code null} restores {@link #ROW_LOCK_TIMEOUT_MS}.
+     *
+     * @return the bound in force before the call, as the GUC text, to restore
+     */
+    static String setRowLockTimeoutMsForTests(String ms) {
+        String previous = rowLockTimeoutMs;
         rowLockTimeoutMs = ms == null ? ROW_LOCK_TIMEOUT_MS : ms;
+        return previous;
     }
 
     /** Gate 3 for the helpers this body calls: it runs only on the one-row path, which {@link RenameGuard#runRename} takes only once the latch row exists. */
