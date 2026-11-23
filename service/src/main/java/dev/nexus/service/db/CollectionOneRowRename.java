@@ -13,6 +13,7 @@ import java.util.Map;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
 
@@ -51,7 +52,7 @@ public final class CollectionOneRowRename implements OneRowRename {
 
     @Override
     public RenameOutcome rename(DSLContext ctx, String tenant, String oldLabel, String newLabel, Request request) {
-        Outcome o = apply(ctx, tenant, oldLabel, newLabel, request.newContentType(), request.newOwnerId(), request.targetRowExists(),
+        Outcome o = apply(ctx, tenant, oldLabel, newLabel, request.newContentType(), request.newOwnerId(), request.targetUnderLock(),
             request.tupleOut());
         // read here, inside the rename's own tenant scope (CatalogEpoch.of is empty outside it); the id survived, so ids are stable
         return new RenameOutcome(o.counts(), o.collectionId(), CatalogEpoch.of(ctx, tenant).orElse(null), true);
@@ -60,7 +61,8 @@ public final class CollectionOneRowRename implements OneRowRename {
     /**
      * @param newContentType the client's content type for the new label, or null to keep the row's
      * @param newOwnerId     the client's owner, or null to keep the row's
-     * @param targetRowExists a row of the new label exists (the caller established it is an empty tombstone)
+     * @param targetUnderLock the caller's target checks, run here under the registry row locks: they refuse a live or populated target and answer
+     *                        whether a retired row of the new label exists now (folio's r3 critique F1)
      * @param tuple          receives the row's tuple for the caller's race recheck ({@link CollectionMint#recheckOf})
      *
      * <p>The CALLER takes the sweep gates (SHARED, sorted, keyed by the old and the new label) and runs the shared checks before this body, in the same
@@ -73,7 +75,7 @@ public final class CollectionOneRowRename implements OneRowRename {
     record Outcome(long collectionId, Map<String, Integer> counts) { }
 
     static Outcome apply(DSLContext ctx, String tenant, String oldName, String newName, String newContentType,
-                                      String newOwnerId, boolean targetRowExists, String[] tuple) {
+                                      String newOwnerId, OneRowRename.TargetCheck targetUnderLock, String[] tuple) {
         // LOCK ORDER (linda's canonical order, via tamsin; runRename's javadoc on slice C states it once): the rename lock (RenameLatchLock SHARED, taken by the
         // caller), then the sweep gate(s) SHARED (the shared checks the caller runs before this body), then the collection tuple lock(s), then the registry rows
         // in collection_id order, FOR UPDATE, then the child rows. Every advisory lock comes before any row lock. The id writers hold FOR KEY SHARE on the
@@ -116,13 +118,17 @@ public final class CollectionOneRowRename implements OneRowRename {
                 + " changed attributes while this one ran; nothing was renamed, so try again");
         }
         long id = own.value1();
+        // folio's r3 critique F1 (linda: a ship-blocker): the caller's target checks ran before any lock, and this rename may have waited here while a
+        // registration revived the tombstone at the new label and a writer filed rows under it. Run them again now that every row of the new label is locked,
+        // so a target that became live or populated is refused, and decide the delete from what they read now.
+        boolean targetRowExists = targetUnderLock.underLock(ctx);
         // linda 2026-11-23, addendum 8: a label a collection was renamed away from is reserved until P4.1, unless this very collection takes it back
         LabelReserved.requireFree(ctx, tenant, newName, id);
         String contentType = peekContentType;
         String owner = peekOwner;
         Map<String, Integer> counts = new LinkedHashMap<>();
         if (targetRowExists) {
-            CollectionTombstones.deleteRegistryRows(ctx, tenant, List.of(newName), LATCHED);
+            deleteRetiredTarget(ctx, tenant, oldName, newName);
         }
         Map<Field<?>, Object> set = new LinkedHashMap<>();
         set.put(CATALOG_COLLECTIONS.NAME, newName);
@@ -177,6 +183,28 @@ public final class CollectionOneRowRename implements OneRowRename {
         // other gate-3 reader (linda's census pass 2; the 4-argument form passes Gate3.never())
         QuarantineOrigin.retagRowsOf(ctx, tenant, oldName, newName, LATCHED);
         return new Outcome(id, counts);
+    }
+
+    /**
+     * Deletes the retired row(s) of the new label BY ID (linda's ruling on folio's r3 F1): the ids of the rows this rename holds FOR UPDATE, never a delete by
+     * label. A belt under the caller's checks: a live row of the label, or one that still holds chunks, is refused and nothing is deleted.
+     */
+    private static void deleteRetiredTarget(DSLContext ctx, String tenant, String oldName, String newName) {
+        var rows = ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID, CATALOG_COLLECTIONS.SUPERSEDED_BY).from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(newName)))
+            .orderBy(CATALOG_COLLECTIONS.COLLECTION_ID).fetch();
+        if (rows.stream().anyMatch(r -> r.value2() == null || r.value2().isEmpty())) {
+            throw new CatalogRepository.CollectionMergeRefused("renaming " + oldName + " to " + newName + ": target collection already exists: " + newName
+                + " (it became live while this rename ran); nothing was renamed");
+        }
+        List<Long> ids = rows.map(r -> r.value1());
+        if (ctx.fetchExists(ctx.selectOne().from(CHUNKS).where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION_ID.in(ids))))) {
+            throw new CatalogRepository.CollectionMergeRefused("renaming " + oldName + " to " + newName + ": the retired target " + newName
+                + " holds chunks; renaming onto it would merge two collections, so nothing was renamed");
+        }
+        for (long targetId : ids) {
+            CollectionTombstones.deleteRegistryRowById(ctx, tenant, newName, targetId, List.of(), LATCHED);
+        }
     }
 
     private static Record6<Long, String, String, String, String, String> readOwn(DSLContext ctx, String tenant, String oldName, boolean forUpdate) {
