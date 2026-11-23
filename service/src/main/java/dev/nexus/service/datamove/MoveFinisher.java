@@ -26,7 +26,8 @@ public interface MoveFinisher {
      * What the finisher is given: the move, the tenants the pass ran it for (empty for a table with no tenant scope), the
      * admin connection of the pass, and the admin values, so it can open the dedicated per-tenant connections the
      * verification runs on and the separate table-wide one ({@link CallConnection#open}); {@code stopped} says whether the
-     * worker has been stopped, which a finisher reads between its steps and answers with {@link Outcome#LEFT_OPEN}.
+     * worker has been stopped, which a finisher reads between its steps and answers with {@link Outcome#LEFT_OPEN}; {@code reporter}
+     * (null for none) is told the backend and start of a validation that runs before the claim, for the status.
      */
     record Context(DataMove move, List<String> tenants, DSLContext admin, AdminConnection adminConnection,
                    String applicationName, BooleanSupplier stopped, MoveReporter reporter) {
@@ -36,12 +37,14 @@ public interface MoveFinisher {
             this(move, tenants, admin, adminConnection, applicationName, stopped, null);
         }
 
+        /** A context whose worker is never stopped (a test, or a finisher run on its own). */
         public Context(DataMove move, List<String> tenants, DSLContext admin, AdminConnection adminConnection,
                        String applicationName) {
             this(move, tenants, admin, adminConnection, applicationName, () -> false, null);
         }
     }
 
+    /** How the finish ended. */
     enum Outcome {
         /** The move is complete in the registry ({@code completed_at} set). */
         COMPLETED,
@@ -101,9 +104,9 @@ public interface MoveFinisher {
 
     Result finish(Context context);
 
-    /** Does nothing: the runs are done and the move stays open. */
     /** Cancels a completion statement in flight (the engine is stopping); a finisher with none does nothing. */
     default void cancelInFlight() { }
 
+    /** Does nothing: the runs are done and the move stays open. */
     MoveFinisher RUNS_ONLY = context -> Result.leftOpen();
 }
