@@ -32,6 +32,8 @@ import java.util.Map;
  * with {@code tenant_id}, and a registration is rare). The history tables ({@link #HISTORY_NOT_PROBED}: {@code chash_remap}, {@code reembed_jobs}) are never
  * probed: their name does not arbitrate a write, so a leftover row there blocks nothing. The check is one statement of {@code EXISTS}es, each joined to the
  * registry by id; the tables' existing unique indexes answer the name probe and no index is added ({@code LabelReservedPlanTest} shows the plans).
+ * {@code pdf_pipeline} has no index led by {@code (tenant_id, collection)}: its probe is bounded to one tenant's rows by a tenant-led index, accepted
+ * because a registration is rare (linda 2026-11-23). If registration latency shows it, the index goes in P3.4's runtime index pass, not a changeset.
  *
  * <p><b>Import and restore paths</b> (folio's review SB2, linda): the per-collection import ({@code POST /v1/catalog/import/collection},
  * {@code CatalogRepository#importCollectionsBatchReport} and {@code #importCollection}) checks every fresh row: a refused row of the batch report (rule
