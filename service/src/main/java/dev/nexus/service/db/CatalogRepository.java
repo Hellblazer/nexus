@@ -5409,7 +5409,7 @@ public final class CatalogRepository {
                 var rows = ctx.select(CATALOG_LINKS.ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE,
                                        CATALOG_LINKS.FROM_SPAN, CATALOG_LINKS.TO_SPAN, CATALOG_LINKS.CREATED_BY, CATALOG_LINKS.CREATED_AT, F_LNK_META,
                                        // nexus-jypmj.1.13: both endpoints' collections ride the join the
-                                       // walk already makes, so the scope predicate costs no extra query.
+                                       // walk already makes, so the scope predicate costs no extra query. From gate3 it scopes by the id (collectionIdOf).
                                        fromDocs.PHYSICAL_COLLECTION, toDocs.PHYSICAL_COLLECTION,
                                        fromDocs.PHYSICAL_COLLECTION_ID, toDocs.PHYSICAL_COLLECTION_ID)
                               .from(CATALOG_LINKS)
@@ -7609,6 +7609,7 @@ public final class CatalogRepository {
         var moving = CATALOG_DOCUMENTS.as("moving");
         var holder = CATALOG_DOCUMENTS.as("holder");
         Field<String> rewritten = NoteUri.moveTo(moving.SOURCE_URI, source, target);
+        // the holder's label is its stored name on purpose, gate3 or not (the 409 text only; a rename is refused from gate3)
         return ctx.select(moving.TUMBLER, holder.SOURCE_URI, holder.TUMBLER,
                 holder.PHYSICAL_COLLECTION)
             .from(moving).join(holder).on(holder.TENANT_ID.eq(tenant).and(holder.SOURCE_URI.eq(rewritten)))
@@ -12093,7 +12094,7 @@ public final class CatalogRepository {
             // than fail the whole re-home on the foreign key. It is a derived cache that refills from live queries.
             if (!sourceModel.equals(targetModel)) {
                 ctx.deleteFrom(CANARY_QUERY_RING).where(CANARY_QUERY_RING.TENANT_ID.eq(tenant))
-                    .and(scope.atSource(CANARY_QUERY_RING.COLLECTION, CANARY_QUERY_RING.COLLECTION_ID))
+                    .and(scope.atSource(CANARY_QUERY_RING.COLLECTION, CANARY_QUERY_RING.COLLECTION_ID))   // by the id from gate3 (CollectionRehomeScope)
                     .execute();
             }
             // RDR-231: the move rewrites note URIs from source to target (moveScopedTable). If a live

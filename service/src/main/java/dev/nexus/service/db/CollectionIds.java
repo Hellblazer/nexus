@@ -68,12 +68,13 @@ public final class CollectionIds {
         }
         long requested = ExpectedCollectionIds.of(name).orElse(0L);
         if (requested > 0) {
-            // the request named this label by id: the statement names the id too, so a row whose label is no longer the id's
-            // gets NULL, which the P3.1 CHECK refuses. It is a stamp and not a read of the registry row: no lock and no consumption
-            // (the write that must be live at commit calls require, which reads the id FOR KEY SHARE)
+            // the request named this label by id: the statement names the id, whatever label the row bears now (an id-only write proceeds
+            // under the row's CURRENT label, P3.5a round 2; a label the client sent beside the id that the row no longer bears was refused
+            // 409 by the write's own by-id read). It is a stamp and not a read of the registry row: no lock and no consumption (the
+            // write that must be live at commit calls require, which reads the id FOR KEY SHARE)
             var c = CATALOG_COLLECTIONS.as("cid");
             return DSL.field(DSL.select(c.COLLECTION_ID).from(c)
-                .where(c.TENANT_ID.eq(tenant)).and(c.COLLECTION_ID.eq(requested)).and(c.NAME.eq(name)));
+                .where(c.TENANT_ID.eq(tenant)).and(c.COLLECTION_ID.eq(requested)));
         }
         return idOf(DSL.val(tenant), DSL.val(name));
     }

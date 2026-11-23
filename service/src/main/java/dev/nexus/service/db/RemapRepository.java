@@ -234,12 +234,14 @@ public final class RemapRepository {
         int deleted = tenantScope.withTenant(tenant, ctx -> {
             // P3.5a: a request naming either leg by id reads that id first, FOR KEY SHARE, in this transaction
             CollectionRegistry.requireAllForWrite(ctx, tenant, java.util.List.of(sourceCollection, targetCollection));   // both legs, id order
-            var source = RequestedCollectionRead.require(ctx, tenant, sourceCollection);
-            var target = RequestedCollectionRead.require(ctx, tenant, targetCollection);
+            RequestedCollectionRead.require(ctx, tenant, sourceCollection);
+            RequestedCollectionRead.require(ctx, tenant, targetCollection);
+            // the rows of each leg by the history rule (CollectionKey#eqHistory): the id of the row each leg names (the requested id for a
+            // request by id), and the stored name of a row whose collection is gone, so the dangling rows of a deleted collection clear too
             return ctx.deleteFrom(CHASH_REMAP)
                .where(CHASH_REMAP.TENANT_ID.eq(tenant)
-                       .and(CollectionOwnedRows.of(source, CHASH_REMAP.SOURCE_COLLECTION_ID, CHASH_REMAP.SOURCE_COLLECTION, sourceCollection))
-                       .and(CollectionOwnedRows.of(target, CHASH_REMAP.TARGET_COLLECTION_ID, CHASH_REMAP.TARGET_COLLECTION, targetCollection)))
+                       .and(sourceIs(tenant, sourceCollection))
+                       .and(targetIs(tenant, targetCollection)))
                .execute();
         });
         log.info("event=remap_clear_leg tenant={} source={} target={} deleted={}",
