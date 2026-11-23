@@ -513,6 +513,7 @@ final class DepartedWriterSpans {
                         .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId))
                         .and(CATALOG_DOCUMENT_CHUNKS.CHASH.in(keys)))
                     .fetch()) {
+                // the held pair is keyed by the id from gate3 (idKeyed); the name rides along for the pre-latch key
                 var held = new Gone(r.get(CATALOG_DOCUMENT_CHUNKS.COLLECTION), r.get(CATALOG_DOCUMENT_CHUNKS.CHASH),
                     null, null, null, null, r.get(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID));
                 stillHeld.add(idKeyed ? held.idPairKey() : held.pairKey());
