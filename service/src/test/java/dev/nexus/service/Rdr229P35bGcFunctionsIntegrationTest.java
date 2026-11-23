@@ -253,6 +253,126 @@ class Rdr229P35bGcFunctionsIntegrationTest {
         });
     }
 
+    // ---- a renamed origin: the restores called by its NEW label (P3.7's one-row rename: the children keep the old one) ---------------
+
+    /** The registry row of {@code live} takes {@code live + "-renamed"} in place (the id stays); every chunk and manifest row keeps the old label. */
+    private String renameOrigin(DSLContext ctx, String tenant, String live) {
+        String neu = live + "-renamed";
+        int n = ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.NAME, neu)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(live)).execute();
+        assertThat(n).as("the origin's registry row is renamed in place").isEqualTo(1);
+        return neu;
+    }
+
+    private static long rowsOfAChash(DSLContext ctx, String tenant, long id, String hex) {
+        return ctx.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION_ID.eq(id)).and(CHUNKS.CHASH.eq(HexFormat.of().parseHex(hex))));
+    }
+
+    private static final String P37_RESTORE = "red until P3.7's prerequisite: gc_restore_rereferenced and quarantine_restore_chunks match a quarantined chunk by "
+        + "its metadata origin_collection, the label at quarantine time, so a restore named by the origin's NEW label restores nothing after a one-row rename "
+        + "(P3.5b's SQL; the callers must pass the stored label, or the functions must match the origin by id)";
+
+    /** Quarantined chunks r1..r4, each owned again by a manifest row of the origin, all stamped; r5 has no owner. Nothing is unstamped here. */
+    private RestoreStore stampedRestoreStore(String tag) throws Exception {
+        String tenant = tenant(tag), live = collection(tag), quarantine = QUARANTINE + live;
+        List<String> r = hashes(tenant, "sr", 5);
+        su(ctx -> {
+            PgContainerHelper.insertCollection(ctx, tenant, live);
+            PgContainerHelper.insertCollection(ctx, tenant, quarantine);
+            seed(ctx, tenant, quarantine, r, Map.of("origin_collection", live, "quarantined_at", TS));
+            PgContainerHelper.ownChunks(ctx, tenant, live, r.subList(0, 4).toArray(String[]::new));
+        });
+        return new RestoreStore(tenant, live, quarantine, r.subList(0, 4), r.get(4));
+    }
+
+    /**
+     * Characterisation of the finding (P3.5b's SQL, found by this test): named by the origin's NEW label, gc_restore_rereferenced finds the
+     * origin by id but matches the quarantined chunks by their metadata origin_collection, which is the label at quarantine time, so it
+     * restores nothing. When P3.7's prerequisite is met this stops holding: delete it and enable {@link #renamed_gcRestoreRereferenced_namedByTheNewLabel_restoresOneRowEach}.
+     */
+    @Test
+    void renamed_gcRestoreRereferenced_namedByTheNewLabel_restoresNothing_p37Prerequisite() throws Exception {
+        RestoreStore s = stampedRestoreStore("rn-r1");
+        su(ctx -> {
+            String neu = renameOrigin(ctx, s.tenant, s.live);
+            Long restored = Routines.gcRestoreRereferenced(ctx.configuration(), DIM, s.tenant, s.quarantine, neu);
+            assertThat(restored).as("nothing is restored: the chunks' origin_collection is %s, not %s", s.live, neu).isZero();
+            assertThat(inCollection(ctx, s.tenant, CollectionIds.require(ctx, s.tenant, s.quarantine), s.quarantine, concat(s.reowned, List.of(s.lone))))
+                .as("every quarantined chunk stays").containsExactlyInAnyOrderElementsOf(concat(s.reowned, List.of(s.lone)));
+        });
+    }
+
+    @org.junit.jupiter.api.Disabled(P37_RESTORE)
+    @Test
+    void renamed_gcRestoreRereferenced_namedByTheNewLabel_restoresOneRowEach() throws Exception {
+        RestoreStore s = stampedRestoreStore("rn-r2");
+        su(ctx -> {
+            String neu = renameOrigin(ctx, s.tenant, s.live);
+            long liveId = CollectionIds.require(ctx, s.tenant, neu);
+            Long restored = Routines.gcRestoreRereferenced(ctx.configuration(), DIM, s.tenant, s.quarantine, neu);
+            assertThat(restored).as("the four re-owned chunks come back under the origin's new label").isEqualTo(4L);
+            for (String h : s.reowned) {
+                assertThat(rowsOfAChash(ctx, s.tenant, liveId, h)).as("one row for %s on the origin's id", h).isEqualTo(1L);
+            }
+            assertThat(inCollection(ctx, s.tenant, CollectionIds.require(ctx, s.tenant, s.quarantine), s.quarantine, concat(s.reowned, List.of(s.lone))))
+                .as("quarantine keeps the chunk with no owner").containsExactly(s.lone);
+        });
+    }
+
+    /** Four quarantined chunks of {@code live}, the origin already holding the third and the fourth. */
+    private List<String> quarantinedWithTwoAtTheOrigin(String tag, String tenant, String live, String quarantine) throws Exception {
+        List<String> hexes = hashes(tenant, tag, 4);
+        su(ctx -> {
+            PgContainerHelper.insertCollection(ctx, tenant, live);
+            PgContainerHelper.insertCollection(ctx, tenant, quarantine);
+            seed(ctx, tenant, quarantine, hexes, Map.of("origin_collection", live, "quarantined_at", TS));
+            seed(ctx, tenant, live, hexes.subList(2, 4), Map.of());
+        });
+        return hexes;
+    }
+
+    private void assertRestoreVerdictsOnARenamedOrigin(String tenant, String named, String quarantine, List<String> hexes, long liveId) throws Exception {
+        String[] chashes = hexes.toArray(String[]::new);
+        su(ctx -> {
+            Map<String, String> done = outcomes(ctx.selectFrom(QUARANTINE_RESTORE_CHUNKS.call(tenant, named, quarantine, chashes, "p37", null, false, false)).fetch());
+            assertThat(done).as("the restore's verdicts, the origin named %s", named)
+                .containsEntry(hexes.get(0), "restored").containsEntry(hexes.get(1), "restored")
+                .containsEntry(hexes.get(2), "present").containsEntry(hexes.get(3), "present");
+            for (String h : hexes) {
+                assertThat(rowsOfAChash(ctx, tenant, liveId, h)).as("one row for %s on the origin's id, no duplicate", h).isEqualTo(1L);
+            }
+        });
+    }
+
+    /** Characterisation, as above: by the new label the chunks the origin holds are "present" (found by id) and the quarantined ones are "missing". */
+    @Test
+    void renamed_quarantineRestoreChunks_namedByTheNewLabel_restoresNothing_p37Prerequisite() throws Exception {
+        String tenant = tenant("rn-q1"), live = collection("rn-q1"), quarantine = QUARANTINE + live;
+        List<String> hexes = quarantinedWithTwoAtTheOrigin("rnq1", tenant, live, quarantine);
+        String[] chashes = hexes.toArray(String[]::new);
+        su(ctx -> {
+            String neu = renameOrigin(ctx, tenant, live);
+            Map<String, String> done = outcomes(ctx.selectFrom(QUARANTINE_RESTORE_CHUNKS.call(tenant, neu, quarantine, chashes, "p37", null, false, false)).fetch());
+            assertThat(done).as("the origin is found by id, the quarantined rows are not: their origin_collection is %s", live)
+                .containsEntry(hexes.get(0), "missing").containsEntry(hexes.get(1), "missing")
+                .containsEntry(hexes.get(2), "present").containsEntry(hexes.get(3), "present");
+        });
+    }
+
+    @org.junit.jupiter.api.Disabled(P37_RESTORE)
+    @Test
+    void renamed_quarantineRestoreChunks_namedByTheNewLabel_restoresAndSeesWhatTheOriginHolds() throws Exception {
+        String tenant = tenant("rn-q2"), live = collection("rn-q2"), quarantine = QUARANTINE + live;
+        List<String> hexes = quarantinedWithTwoAtTheOrigin("rnq2", tenant, live, quarantine);
+        String[] neu = new String[1];
+        long[] id = new long[1];
+        su(ctx -> {
+            neu[0] = renameOrigin(ctx, tenant, live);
+            id[0] = CollectionIds.require(ctx, tenant, neu[0]);
+        });
+        assertRestoreVerdictsOnARenamedOrigin(tenant, neu[0], quarantine, hexes, id[0]);
+    }
+
     // ---- fixtures ---------------------------------------------------------------------------------------------------------------
 
     /** A collection of one case: the label the caller names it by, and the sibling the moves write to. */
