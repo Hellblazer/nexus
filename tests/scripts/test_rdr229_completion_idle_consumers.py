@@ -124,3 +124,75 @@ def test_control_a_standing_condition_alone_would_defer_without_the_skip(monkeyp
     status["boot_work"].append({**_HELD_ENTRY, "id": "some-other-entry"})
     assert _busy(monkeypatch, tmp_path, status) is not None
     assert not _harness.boot_work_settled(status)
+
+
+# ---- the restart notice (RDR-229 P3.7, nexus-p2m1x.27; linda 2026-11-22) -------------------------------------------------
+# Unlike the three gates, the engine does publish the restart entry (CompletionBootWork.RESTART_ENTRY_ID): the stamps are done and a
+# P3.5b changeset waits for one restart. It stays in boot_work, safe to stop and visible to nx doctor, but it is not work for either
+# idle rule: nx upgrade's bundle swap and engine replacement are the restart that clears it, and the harness boots once.
+
+_RESTART_ENTRY = {
+    "id": "rdr229-restart",
+    "what": "restart the engine once: it applies the P3.5b changesets that a collection rename waits for (2 of 2 not applied yet)",
+    "started_at": "2026-11-22T12:00:00Z", "done": None, "total": None, "unit": None, "safe_to_stop": True,
+    "on_stop": "nothing is lost: the restart is the step that applies them", "step": None,
+}
+
+
+@pytest.mark.parametrize("state", _STATES)
+def test_the_restart_notice_does_not_defer_the_bundle_swap_and_does_not_hold_the_harness(state, monkeypatch, tmp_path):
+    status = json.loads(json.dumps(_fixture(state)))
+    status["boot_work"].append(dict(_RESTART_ENTRY))
+    assert [e for e in status["boot_work"] if e["id"] == "rdr229-restart"], "non-vacuity: the notice is in boot_work"
+    assert _busy(monkeypatch, tmp_path, status) is None
+    assert _harness.boot_work_settled(status)
+    assert _harness.status_says_idle(200, status)
+
+
+def test_the_restart_notice_is_still_visible_and_never_renders_as_bare_safe_to_stop():
+    from nexus.progress.boot_work import render
+
+    lines = render([dict(_RESTART_ENTRY)], now=1_800_000_000.0)
+    assert any("restart the engine once" in line for line in lines)
+    assert any("nothing is lost" in line for line in lines)
+
+
+def test_control_other_work_beside_the_restart_notice_still_defers_the_swap_and_holds_the_harness(monkeypatch, tmp_path):
+    status = json.loads(json.dumps(_fixture("all_stamps_done_gate3_waiting")))
+    status["boot_work"] += [dict(_RESTART_ENTRY), {**_OLD_ENTRY, "id": "pci-build:x", "what": "building an index"}]
+    assert _busy(monkeypatch, tmp_path, status) is not None
+    assert not _harness.boot_work_settled(status)
+
+
+def test_the_restart_needed_status_the_engine_publishes_is_idle_for_both_rules(monkeypatch, tmp_path):
+    """The status of an install whose stamps are done and whose P3.5b changesets wait for a restart: the one entry in
+    ``boot_work`` is ``rdr229-restart`` and ``rename_missing`` says ``restart``. (Written by hand from the engine's shape: the
+    Java fixture test renders the three states above; this one's entry is ``CompletionBootWork.publishRestartEntry``'s.)"""
+    status = _fixture("restart_needed")
+    assert [e["id"] for e in status["boot_work"]] == ["rdr229-restart"], "non-vacuity: the restart entry is the only work listed"
+    assert status["rdr229_completion"]["rename_missing"] == "restart"
+    assert _busy(monkeypatch, tmp_path, status) is None
+    assert _harness.boot_work_settled(status)
+    assert _harness.status_says_idle(200, status)
+
+
+def test_the_restart_needed_fixture_follows_the_engines_arithmetic():
+    """CompletionCheck.Result#renameMissing answers NONE until gate 3 is latched (or the drop move completed), so a status that says
+    ``restart`` has gate 3 holding or latched: the fixture holds all three gates and lists the restart entry as the one piece of work."""
+    c = _fixture("restart_needed")["rdr229_completion"]
+    assert c["rename_missing"] == "restart"
+    assert c["gate3"] is True and c["gates_holding"] == 3 and c["gate3_why"] == ""
+
+
+def test_the_restart_entry_id_is_the_engines_in_both_idle_rules():
+    """The id the engine publishes (CompletionBootWork.RESTART_ENTRY_ID) is the one both idle rules skip: a rename of it on one side only
+    would put the restart notice back into the work count and defer the swap it is waiting for."""
+    java = (_REPO / "service" / "src" / "main" / "java" / "dev" / "nexus" / "service" / "datamove" / "CompletionBootWork.java").read_text()
+    import re
+
+    m = re.search(r'RESTART_ENTRY_ID\s*=\s*"([^"]+)"', java)
+    assert m, "non-vacuity: the engine's constant was found"
+    assert pg_bundle_refresh.RESTART_NOTICE_ID == m.group(1)
+    assert _harness.RESTART_NOTICE_ID == m.group(1)
+    assert _RESTART_ENTRY["id"] == m.group(1)
+

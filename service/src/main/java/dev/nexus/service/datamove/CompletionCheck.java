@@ -230,6 +230,34 @@ public final class CompletionCheck {
     }
 
     /**
+     * RDR-229 P3.7: the two facts besides gate 3 that end the rename refusal. {@code dropMoveComplete}: the name-key drop move
+     * ({@link NameKeyDropMove#LABEL}) has {@code completed_at}; a label with no row is incomplete, like every label. {@code listed}
+     * and {@code missing}: the P3.5b changeset ids the list names ({@link P35bChangesets}) and those {@code databasechangelog} does
+     * not record as applied. A missing or empty list is refused: {@link #p35bApplied} is false then.
+     */
+    public record RenameState(boolean dropMoveComplete, int listed, List<String> missing, boolean unreadable) {
+        public RenameState {
+            missing = List.copyOf(missing);
+        }
+
+        /** A state that was read. */
+        public RenameState(boolean dropMoveComplete, int listed, List<String> missing) {
+            this(dropMoveComplete, listed, missing, false);
+        }
+
+        /** The state could not be read (a failure or a timeout): the readiness is {@code readiness_unreadable}, never NONE. */
+        public static final RenameState UNREADABLE = new RenameState(false, 0, List.of(), true);
+
+        /** Not read yet, or built by hand: the drop move incomplete and no list. */
+        public static final RenameState NOT_READ = new RenameState(false, 0, List.of());
+
+        /** Every changeset of a non-empty list has applied. */
+        public boolean p35bApplied() {
+            return listed > 0 && missing.isEmpty();
+        }
+    }
+
+    /**
      * R7's pre-flight (RDR-229 item 6, "dangling tombstones"; linda's ruling 2026-11-21): the registry's tombstones whose
      * {@code superseded_by} names no row of their tenant, by content type, and the tombstones the stamp resolved to its fallback
      * (their {@code superseded_by_id} is their own {@code collection_id}: retired, no successor). Counts only: {@code /v1/status}
@@ -279,11 +307,22 @@ public final class CompletionCheck {
      *                                gate 3 has latched
      * @param gate3LatchPciOff        the latch row says gate 3 latched while per-collection indexing was off ({@code pci_off}): no id index was required
      *                                then, so with PCI on the engine builds them first
+     * @param rename                  RDR-229 P3.7: what the one-row rename waits for besides gate 3 ({@link RenameState})
      */
     public record Result(boolean gate1, boolean gate2, boolean gate3, List<LabelState> labels, List<CheckState> checks,
                          boolean supersededByCheckPresent, long supersededByWaiting, List<Violators> violators,
                          List<String> gate3Uncovered, String gate3Why, Dangling dangling, boolean gate3PciNotApplicable,
-                         boolean gate3Latched, boolean idIndexInvalid, boolean gate3LatchPciOff) {
+                         boolean gate3Latched, boolean idIndexInvalid, boolean gate3LatchPciOff,
+                         RenameState rename) {
+
+        /** As above with no rename read. */
+        public Result(boolean gate1, boolean gate2, boolean gate3, List<LabelState> labels, List<CheckState> checks,
+                      boolean supersededByCheckPresent, long supersededByWaiting, List<Violators> violators,
+                      List<String> gate3Uncovered, String gate3Why, Dangling dangling, boolean gate3PciNotApplicable,
+                      boolean gate3Latched, boolean idIndexInvalid, boolean gate3LatchPciOff) {
+            this(gate1, gate2, gate3, labels, checks, supersededByCheckPresent, supersededByWaiting, violators, gate3Uncovered,
+                gate3Why, dangling, gate3PciNotApplicable, gate3Latched, idIndexInvalid, gate3LatchPciOff, RenameState.NOT_READ);
+        }
 
         /** As above with the latch row not saying PCI was off. */
         public Result(boolean gate1, boolean gate2, boolean gate3, List<LabelState> labels, List<CheckState> checks,
@@ -291,7 +330,7 @@ public final class CompletionCheck {
                       List<String> gate3Uncovered, String gate3Why, Dangling dangling, boolean gate3PciNotApplicable,
                       boolean gate3Latched, boolean idIndexInvalid) {
             this(gate1, gate2, gate3, labels, checks, supersededByCheckPresent, supersededByWaiting, violators, gate3Uncovered,
-                gate3Why, dangling, gate3PciNotApplicable, gate3Latched, idIndexInvalid, false);
+                gate3Why, dangling, gate3PciNotApplicable, gate3Latched, idIndexInvalid, false, RenameState.NOT_READ);
         }
 
         /** As above with neither a latch nor an INVALID id index. */
@@ -299,7 +338,15 @@ public final class CompletionCheck {
                       boolean supersededByCheckPresent, long supersededByWaiting, List<Violators> violators,
                       List<String> gate3Uncovered, String gate3Why, Dangling dangling, boolean gate3PciNotApplicable) {
             this(gate1, gate2, gate3, labels, checks, supersededByCheckPresent, supersededByWaiting, violators, gate3Uncovered,
-                gate3Why, dangling, gate3PciNotApplicable, false, false);
+                gate3Why, dangling, gate3PciNotApplicable, false, false, false, RenameState.NOT_READ);
+        }
+
+        /** As above with a rename read and the latch, PCI and INVALID-index fields at their defaults. */
+        public Result(boolean gate1, boolean gate2, boolean gate3, List<LabelState> labels, List<CheckState> checks,
+                      boolean supersededByCheckPresent, long supersededByWaiting, List<Violators> violators,
+                      List<String> gate3Uncovered, String gate3Why, Dangling dangling, RenameState rename) {
+            this(gate1, gate2, gate3, labels, checks, supersededByCheckPresent, supersededByWaiting, violators, gate3Uncovered,
+                gate3Why, dangling, false, false, false, false, rename);
         }
 
         /** As above with the PCI clause applicable. */
@@ -307,15 +354,80 @@ public final class CompletionCheck {
                       boolean supersededByCheckPresent, long supersededByWaiting, List<Violators> violators,
                       List<String> gate3Uncovered, String gate3Why, Dangling dangling) {
             this(gate1, gate2, gate3, labels, checks, supersededByCheckPresent, supersededByWaiting, violators, gate3Uncovered,
-                gate3Why, dangling, false, false, false);
+                gate3Why, dangling, false, false, false, false, RenameState.NOT_READ);
         }
 
-        /** As above with no dangling-tombstone read (a caller that built the result by hand). */
+        /** As above with no dangling-tombstone read and no rename read (a caller that built the result by hand). */
         public Result(boolean gate1, boolean gate2, boolean gate3, List<LabelState> labels, List<CheckState> checks,
                       boolean supersededByCheckPresent, long supersededByWaiting, List<Violators> violators,
                       List<String> gate3Uncovered, String gate3Why) {
             this(gate1, gate2, gate3, labels, checks, supersededByCheckPresent, supersededByWaiting, violators, gate3Uncovered,
-                gate3Why, Dangling.UNREAD);
+                gate3Why, Dangling.UNREAD, RenameState.NOT_READ);
+        }
+
+        /**
+         * The first thing a rename still waits for, the one answer the refusal, {@code GET /v1/status} and the in-process readiness
+         * share ({@link RenameReadiness}): {@link RenameReadiness.Missing#NONE} until gate 3 has been latched (the rename is the name path
+         * and nothing is awaited), then the name-key drop move, then a missing or empty P3.5b list (a restart cannot fix it), then the
+         * restart that applies P3.5b's changesets.
+         *
+         * <p><b>Keyed on the latched gate 3, not the live one.</b> The live gate 3 can drop back (an id index going INVALID) after it held,
+         * and that is never a reason to return to the name path: the readers have switched to the id and, once the drop move has run, the
+         * name keys are gone. From the latch a rename is one-row or refused.
+         */
+        public RenameReadiness.Missing renameMissing() {
+            return renameMissing(gate3Latched);
+        }
+
+        /** As {@link #readinessMissing(boolean)} with the id readers assumed present (a hand-built result, a test). */
+        public RenameReadiness.Missing readinessMissing() {
+            return readinessMissing(true);
+        }
+
+        /**
+         * As {@link #renameMissing()} with the latch as the caller reads it now: the engine passes the rename window's regime OR the durable latch
+         * ({@link CompletionBootWork#gate3Latched()}), which can be newer than this sample (a sample is read before the latch writer flips the regime).
+         */
+        public RenameReadiness.Missing renameMissing(boolean latched) {
+            return renameMissing(latched, true);
+        }
+
+        /**
+         * As above with whether this engine's id readers are present ({@code IdReaders.present()}): a rename that is otherwise ready waits for them
+         * ({@link RenameReadiness.Missing#P35C_READERS_ABSENT}). The one-argument forms assume they are, for a hand-built result and the tests that exercise the
+         * one-row regime; the engine's own readiness and status pass the real value.
+         */
+        public RenameReadiness.Missing renameMissing(boolean latched, boolean idReadersPresent) {
+            return latched ? readinessMissing(idReadersPresent) : RenameReadiness.Missing.NONE;
+        }
+
+        /**
+         * What the one-row rename waits for, whether or not gate 3 has latched (linda 2026-11-23): total, and fail closed. The drop move is registered
+         * only once the latch is written, so a complete move implies the row; readiness NONE implies it too, and is never answered from an error
+         * ({@link RenameReadiness.Missing#READINESS_UNREADABLE}). The status field ({@link #renameMissing()}) keeps saying none before the latch.
+         */
+        public RenameReadiness.Missing readinessMissing(boolean idReadersPresent) {
+            if (rename.unreadable()) {
+                return RenameReadiness.Missing.READINESS_UNREADABLE;
+            }
+            if (!rename.dropMoveComplete()) {
+                return RenameReadiness.Missing.NAME_KEY_DROP_MOVE;
+            }
+            if (rename.listed() == 0) {
+                return RenameReadiness.Missing.P35B_LIST_MISSING;
+            }
+            if (!rename.p35bApplied()) {
+                return RenameReadiness.Missing.P35B_RESTART;
+            }
+            return idReadersPresent ? RenameReadiness.Missing.NONE : RenameReadiness.Missing.P35C_READERS_ABSENT;
+        }
+
+        /**
+         * Whether a restart is what an install waits for: every stamp move is complete (gate 1) and the P3.5b list names changesets
+         * that have not all applied. A missing or empty list is no restart's to fix, so it does not count.
+         */
+        public boolean restartNeeded() {
+            return gate1 && rename.listed() > 0 && !rename.p35bApplied();
         }
 
         public List<LabelState> incomplete() {
@@ -469,9 +581,26 @@ public final class CompletionCheck {
      */
     static Result evaluate(DSLContext ctx, ReadSet readSet, Gate3Source gate3, ViolatorCounter counter,
                            List<java.util.function.Predicate<DSLContext>> gate3Extras, LatchWriter latchWriter) {
+        return evaluate(ctx, readSet, gate3, counter, gate3Extras, latchWriter, P35bChangesets.resource());
+    }
+
+    /**
+     * As above, with the P3.5b changeset ids the one-row rename waits for supplied by {@code p35b} (the resource {@link P35bChangesets} reads
+     * in production; a test passes its own list).
+     */
+    static Result evaluate(DSLContext ctx, ReadSet readSet, Gate3Source gate3, ViolatorCounter counter,
+                           java.util.function.Supplier<Set<String>> p35b) {
+        return evaluate(ctx, readSet, gate3, counter, List.of(), LatchWriter.NONE, p35b);
+    }
+
+    /** The evaluation proper: the latch writer and the P3.5b list are both supplied. */
+    static Result evaluate(DSLContext ctx, ReadSet readSet, Gate3Source gate3, ViolatorCounter counter,
+                           List<java.util.function.Predicate<DSLContext>> gate3Extras, LatchWriter latchWriter,
+                           java.util.function.Supplier<Set<String>> p35b) {
         Objects.requireNonNull(gate3Extras, "gate3Extras");
         Objects.requireNonNull(latchWriter, "latchWriter");
         Objects.requireNonNull(readSet, "readSet");
+        Objects.requireNonNull(p35b, "p35b");
         Objects.requireNonNull(gate3, "gate3");
         Objects.requireNonNull(counter, "counter");
         Map<String, Move> moves = readMoves(ctx);
@@ -564,7 +693,7 @@ ith no origin_collection_id key keeps gate 3 shut: after the latch a row with no
         }
         return new Result(gate1, gate2, gate3Holds, List.copyOf(states.values()), List.copyOf(checks), supersededByPresent,
             waiting, List.copyOf(violators), List.copyOf(uncovered), why, danglingTombstones(ctx, tables, null), pciNotApplicable,
-            latch.isPresent(), idInvalid, latch.orElse(false));
+            latch.isPresent(), idInvalid, latch.orElse(false), readRenameState(ctx, moves, p35b));
     }
 
     /** The most quarantine chunks without the origin key the probe counts: it stops there (it needs existence, and a count to report). */
@@ -636,6 +765,48 @@ ith no origin_collection_id key keeps gate 3 shut: after the latch a row with no
             }
         }
         return true;
+    }
+
+    /**
+     * The bound on the readiness reads (the databasechangelog read), as {@code SET LOCAL statement_timeout}, per completion SAMPLE and not per rename: a
+     * rename answers from the last sample and reads nothing of its own.
+     */
+    public static final long READINESS_READ_TIMEOUT_MS = 2000L;
+
+    /**
+     * {@link #renameState} under {@link #READINESS_READ_TIMEOUT_MS}, total: any failure or timeout, of the list or of the database, is
+     * {@link RenameState#UNREADABLE} and never an exception or a NONE (a sample that threw would leave the last answer standing; this one says so).
+     */
+    private static RenameState readRenameState(DSLContext ctx, Map<String, Move> moves, java.util.function.Supplier<Set<String>> p35b) {
+        try {
+            Set<String> listed = p35b.get();
+            return ctx.transactionResult(cfg -> {
+                DSLContext tx = cfg.dsl();
+                tx.select(DSL.function("set_config", String.class, DSL.val("statement_timeout"), DSL.val(Long.toString(READINESS_READ_TIMEOUT_MS)), DSL.val(true)))
+                    .fetch();
+                return renameState(tx, moves, listed);
+            });
+        } catch (RuntimeException e) {
+            log.warn("event=rdr229_rename_readiness_unreadable cause=\"{}\"", e.toString());
+            return RenameState.UNREADABLE;
+        }
+    }
+
+    /** P3.7: the name-key drop move's completion (a label with no row is incomplete) and the P3.5b changesets not yet in databasechangelog. */
+    private static RenameState renameState(DSLContext ctx, Map<String, Move> moves, Set<String> listed) {
+        boolean dropped = complete(ctx, NameKeyDropMove.LABEL, moves, new HashSet<>());
+        if (listed.isEmpty()) {
+            return new RenameState(dropped, 0, List.of());
+        }
+        Set<String> missing = new TreeSet<>(listed);
+        var log = DSL.table(DSL.name("public", "databasechangelog"));
+        if (ctx.fetchExists(DSL.selectOne().where(DSL.function("to_regclass", Object.class, DSL.val("public.databasechangelog")).isNotNull()))) {
+            Field<String> id = DSL.field(DSL.name("id"), String.class);
+            Field<String> execType = DSL.field(DSL.name("exectype"), String.class);
+            missing.removeAll(ctx.select(id).from(log).where(id.in(listed)).and(execType.in("EXECUTED", "RERAN", "MARK_RAN"))
+                .fetch(id));
+        }
+        return new RenameState(dropped, listed.size(), List.copyOf(missing));
     }
 
     // ---- one label ---------------------------------------------------------------------------------------------------
