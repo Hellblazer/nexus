@@ -127,6 +127,11 @@ public final class CollectionSelectorFilter extends Filter {
         ExpectedCollectionIds.setCensus(unconsumedSink != null);   // the per-transaction census runs only while a test listens
     }
 
+    /** The routes that write under a collection they name by id (a test reads it to say which routes a census must have run); the table's own set. */
+    public static java.util.Set<String> writeRoutePaths() {
+        return CollectionSelectors.WRITES;
+    }
+
     /**
      * Sets the sink of the per-transaction census's counts (a test seam, null in production): one line per write route request that
      * named an id, {@code "<path> examined=<n> exempt=<n> unknown=<n>"}, with the census on, so a test can refuse a pass that

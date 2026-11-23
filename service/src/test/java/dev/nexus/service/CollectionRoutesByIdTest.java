@@ -8,6 +8,7 @@ import dev.nexus.service.CollectionRouteCensus.Slot;
 import dev.nexus.service.CollectionRouteCensus.Tier;
 import dev.nexus.service.CollectionRouteCensus.Where;
 import dev.nexus.service.CollectionRouteFixture.Resp;
+import dev.nexus.service.http.CollectionSelectorFilter;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DynamicContainer;
@@ -568,6 +569,12 @@ class CollectionRoutesByIdTest {
         return counts;
     }
 
+    /** The WRITES routes the rename-in-the-gap check cannot run, each with its reason. A route not here and not HEAVY must reach its by-id read. */
+    private static final java.util.Map<String, String> RENAME_GAP_EXCLUDED = java.util.Map.of(
+        "/v1/telemetry/relevance/log", "a history write: it stamps the id with an unlocked read and reads no registry row FOR KEY SHARE, so no "
+            + "write transaction reads the id (the stamp itself is checked by the schema read: the row carries the current label)",
+        "/v1/telemetry/hook_failures/record", "a history write, as the relevance log");
+
     private final java.util.Map<String, Integer> renameGapLanded = new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.concurrent.atomic.AtomicInteger renameGapRan = new java.util.concurrent.atomic.AtomicInteger();
 
@@ -604,6 +611,14 @@ class CollectionRoutesByIdTest {
                 }
                 if (!gap.ran()) {
                     System.err.println("rename_gap " + path + " skipped: the route reached no registry read by id (" + r.status() + ")");
+                    // A route that writes under a collection it names by id (CollectionSelectorFilter.writeRoutePaths) must reach that read here,
+                    // or it is on the named exclusion list with its reason: a route that needs a document, a chunk or a job this fixture does
+                    // not build is HEAVY by the census's own classification.
+                    if (CollectionSelectorFilter.writeRoutePaths().contains(path) && route.tier() != Tier.HEAVY && !RENAME_GAP_EXCLUDED.containsKey(path)) {
+                        throw new AssertionError(route.label() + " is a WRITES route that takes an id and answered " + r.status() + " without reading it in a "
+                            + "write transaction (" + r.body() + "): the rename-in-the-gap check did not run for it; make the fixture reach it or name it "
+                            + "(with its reason) as an exclusion");
+                    }
                     return;
                 }
                 renameGapRan.incrementAndGet();
@@ -615,7 +630,16 @@ class CollectionRoutesByIdTest {
             }));
         }
         nodes.add(DynamicTest.dynamicTest("non-vacuity: routes ran the rename and the named writers landed rows", () -> {
-            assertThat(renameGapRan.get()).as("routes that ran the rename-in-the-gap").isGreaterThanOrEqualTo(10);
+            // every WRITES route that takes an id and is not HEAVY (a document, a chunk or a job this fixture does not build) must have run it
+            long mustRun = CollectionRouteCensus.ROUTES.stream()
+                .filter(rt -> rt.tier() != Tier.RENAME && rt.tier() != Tier.HEAVY && CollectionSelectorFilter.writeRoutePaths().contains(rt.path())
+                    && !RENAME_GAP_EXCLUDED.containsKey(rt.path())
+                    && !rt.path().endsWith("/collections/delete") && !rt.path().endsWith("/collections/supersede")
+                    && !rt.path().endsWith("/collections/rehome"))
+                .count();
+            assertThat(mustRun).as("non-vacuity: the WRITES routes this check must run").isPositive();
+            assertThat(renameGapRan.get()).as("routes that ran the rename-in-the-gap (at least every non-HEAVY WRITES route)")
+                .isGreaterThanOrEqualTo((int) mustRun);
             for (String must : List.of("/v1/taxonomy/topics/insert", "/v1/taxonomy/centroids/upsert")) {
                 assertThat(renameGapLanded.getOrDefault(must, 0)).as("rows %s filed under the renamed id", must).isPositive();
             }
