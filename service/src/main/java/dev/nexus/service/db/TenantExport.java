@@ -443,12 +443,17 @@ public final class TenantExport {
             .trigger("trg_catalog_chunks_clear_orphan_on_insert",
                 "AFTER INSERT REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT")
             .trigger("trg_catalog_document_chunks_chunk_index_default", "BEFORE INSERT FOR EACH ROW")
+            // RDR-229 P3.7 (vectors-079): sets the row's name from the chunk it references, when the row has a collection id. An exported row's name
+            // already equals its chunk's (the chunk name key held it, and this trigger since), so a load replaces nothing.
+            .trigger("trg_catalog_document_chunks_name_from_chunk", "BEFORE INSERT OR UPDATE FOR EACH ROW")
             
             .importComputedRef("tenant_id,collection_id,chash,embedding_model", "chunks",
                 "tenant_id,collection_id,chash,embedding_model")
             .build(),
         derived("chunk_orphaned_at").pk("tenant_id text", "collection text", "chash bytea")
             .fk(CHUNK_KEY, "chunks", CHUNK_KEY)
+            // RDR-229 P3.7 (vectors-079): the same name-from-chunk rule as the manifest's; a load replaces nothing: its rows carry their chunk's name.
+            .trigger("trg_chunk_orphaned_at_name_from_chunk", "BEFORE INSERT OR UPDATE FOR EACH ROW")
             .importComputedRef("tenant_id,collection_id,chash,embedding_model", "chunks",
                 "tenant_id,collection_id,chash,embedding_model")
             .build(),
@@ -506,6 +511,8 @@ public final class TenantExport {
                 "AFTER DELETE REFERENCING OLD TABLE AS old_rows FOR EACH STATEMENT")
             .trigger("trg_topic_assignments_doc_count_ins",
                 "AFTER INSERT REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT")
+            // RDR-229 P3.7 (vectors-079): the same name-from-chunk rule on source_collection; a load replaces nothing: its rows carry their chunk's name.
+            .trigger("trg_topic_assignments_name_from_chunk", "BEFORE INSERT OR UPDATE FOR EACH ROW")
             
             .importComputedRef("tenant_id,source_collection_id", "catalog_collections", "tenant_id,collection_id")
             .importComputedRef("tenant_id,source_collection_id,doc_id,embedding_model", "chunks",
