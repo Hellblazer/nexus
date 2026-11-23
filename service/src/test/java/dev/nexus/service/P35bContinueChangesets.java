@@ -16,16 +16,16 @@ import java.util.Set;
  * vectors-078 ids are read from the shipped list ({@value #LIST}, kept equal to the file by
  * {@code tests/test_rdr229_p35b_continue_list.py}), never typed here, so a test that counts the walk's skips follows the list.
  */
-final class P35bContinueChangesets {
+public final class P35bContinueChangesets {
 
-    static final String LIST = "db/rdr229/p35b-continue-changesets.txt";
+    public static final String LIST = "db/rdr229/p35b-continue-changesets.txt";
     /** P3.8's self-retrying changeset: waits for its data move on a fresh install. */
     static final String COLLECTIONS_WAIT = "collections-001-2";
 
     private P35bContinueChangesets() {}
 
     /** The ids in {@value #LIST}, in file order; blank and {@code #} lines skipped. A missing or empty list is an error. */
-    static List<String> ids() {
+    public static List<String> ids() {
         try (InputStream in = P35bContinueChangesets.class.getClassLoader().getResourceAsStream(LIST)) {
             if (in == null) {
                 throw new IllegalStateException("classpath resource missing: " + LIST);
