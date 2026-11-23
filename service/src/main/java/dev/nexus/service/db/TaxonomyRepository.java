@@ -22,7 +22,6 @@ import java.util.Map;
 import java.util.Optional;
 
 import static dev.nexus.service.db.JsonbSupport.jsonbRequired;
-import static dev.nexus.service.db.TaxonomyCollectionLock.lockTaxonomyCollection;
 import static dev.nexus.service.db.TaxonomyBatchRows.*;
 import static dev.nexus.service.jooq.nexus.Tables.*;
 import static org.jooq.impl.DSL.*;
