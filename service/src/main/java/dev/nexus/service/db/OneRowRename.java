@@ -18,21 +18,19 @@ import org.jooq.DSLContext;
 public interface OneRowRename {
 
     /**
-     * What the catalog rename hands the one-row body beyond the two labels (RDR-229 P3.7): what the client derived for the new label, whether the caller's
-     * shared checks found a retired row of the new label (they established it is empty), and where the row's tuple is reported for the caller's race
-     * recheck ({@link CollectionMint#recheckOf}).
+     * What the catalog rename hands the one-row body beyond the two labels (RDR-229 P3.7): what the client derived for the new label, the caller's target checks
+     * (run again under the registry row locks), and where the row's tuple is reported for the caller's race recheck ({@link CollectionMint#recheckOf}).
      *
      * @param newContentType  the client's content type for the new label, or null to keep the row's
      * @param newOwnerId      the client's owner, or null to keep the row's
-     * @param targetRowExists a row of the new label exists (an empty tombstone), as the shared checks read it BEFORE any registry row lock
      * @param tupleOut        receives the row's tuple after the rename (five slots)
      * @param targetUnderLock the caller's target checks (live target, emptiness, identity), run again by the body once it holds the registry row locks;
      *                        it refuses as the shared checks do and answers whether a retired row of the new label exists now (folio's r3 critique F1)
      */
-    record Request(String newContentType, String newOwnerId, boolean targetRowExists, String[] tupleOut, TargetCheck targetUnderLock) {
+    record Request(String newContentType, String newOwnerId, String[] tupleOut, TargetCheck targetUnderLock) {
         /** No client attributes, no retired target, nowhere to report a tuple: for a test of the seam. */
         public static Request bare() {
-            return new Request(null, null, false, new String[5], ctx -> false);
+            return new Request(null, null, new String[5], ctx -> false);
         }
     }
 
