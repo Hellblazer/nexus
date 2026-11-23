@@ -194,7 +194,7 @@ class Rdr229SwapMovesAfterTheSwapIntegrationTest extends Rdr229SwapMovesFixtures
         }
     }
 
-    // ── 10: the verification's warm-up runs in the READ ONLY pass, not in the completion's re-check ─────────
+    // ── 10: the verification reads the catalogs only ─────────
 
     /** What one run of {@code verification} scanned, read from the transaction's own statistics before it is rolled back. */
     private record Scans(long chunksTree, long registry, long rows) { }
@@ -225,14 +225,14 @@ class Rdr229SwapMovesAfterTheSwapIntegrationTest extends Rdr229SwapMovesFixtures
     }
 
     /**
-     * The warm-up arms run in the finisher's first pass, which is READ ONLY, and not in the completion transaction's re-check, which is
-     * read-write and runs the same text under what is left of 1400 ms: there they would scan the whole heap a second time for nothing.
-     * Measured by the transaction's own scan counters over {@code nexus.chunks} and its leaves and over the registry: a READ ONLY run
-     * scans both, a read-write run scans neither (the leaf-key arm reads the catalogs only), and both return no row.
+     * The chunks swap's verification reads the catalogs only, in the READ ONLY first pass and in the read-write re-check alike. It once
+     * carried two warm-up scans of the whole chunks heap for the composite's inline validation, which grew with the rows and would time out
+     * under the 60 s verify bound; the composite is added leaf by leaf now (nexus-p2m1x.21). Measured by the transaction's own scan counters
+     * over {@code nexus.chunks} and its leaves and over the registry: neither run scans either, and both return no row.
      */
     @Test
-    void theWarmUpArmsScanInTheReadOnlyPassAndNotInTheReadWriteRecheck() throws Exception {
-        seed("warm");
+    void theVerificationScansNeitherTheChunksHeapNorTheRegistryInEitherPass() throws Exception {
+        seed("noscan");
         registerSwaps();
         String verification = (String) moves(LABEL_F.eq(CHUNKS_SWAP)).get(0).get("verification");
 
@@ -241,8 +241,8 @@ class Rdr229SwapMovesAfterTheSwapIntegrationTest extends Rdr229SwapMovesFixtures
 
         assertThat(readOnly.rows()).as("the verification finds no row on a good store").isZero();
         assertThat(readWrite.rows()).isZero();
-        assertThat(readOnly.chunksTree()).as("READ ONLY pass: the warm-up scanned nexus.chunks (the heap arm and the anti-join)").isGreaterThanOrEqualTo(2);
-        assertThat(readOnly.registry()).as("READ ONLY pass: the warm-up scanned the registry (the anti-join)").isPositive();
+        assertThat(readOnly.chunksTree()).as("READ ONLY pass: nexus.chunks is not scanned").isZero();
+        assertThat(readOnly.registry()).as("READ ONLY pass: the registry is not scanned").isZero();
         assertThat(readWrite.chunksTree()).as("read-write re-check: nexus.chunks is not scanned").isZero();
         assertThat(readWrite.registry()).as("read-write re-check: the registry is not scanned").isZero();
     }
