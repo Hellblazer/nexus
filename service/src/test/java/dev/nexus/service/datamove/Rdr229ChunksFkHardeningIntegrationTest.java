@@ -388,7 +388,10 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
         resume(Rdr229ChunksFk.ADOPT_LABEL);
         var log = captureAdoptionBuilderLog();
         try (Connection builder = realBuilder(chunkLeaves().get(0))) {
-            var w = productionWorker(new VerifyingFinisher());
+            // a clock the test moves: the worker's blocked state keeps its time and the row's backoff is read from the clock too, so "after the backoff"
+            // is one advance and no sleep
+            var clock = new DataMoveFailureIntegrationTest.MutableClock();
+            var w = worker(installed(), 0, new DataMoveFailureHandler(adminConnection, WORKER_NAME, clock), new VerifyingFinisher(), true, clock);
 
             w.runCycle();
 
@@ -399,18 +402,15 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
                 .contains(Rdr229ChunksFk.LOCK_FAILED_MARKER);
             assertThat(compositeOnId()).isEmpty();
 
-            // the retry is driven through what the worker reads: the row's backoff (last_transient_at plus 30 s) and its in-memory state; a pass that
-            // re-opens the move (completed_at NULL, registered_at now) is not an adoption, and the pass after it takes the move again
-            StringBuilder passes = new StringBuilder();
-            for (int attempt = 1; attempt <= 3 && compositeOnId().isEmpty(); attempt++) {
-                backoffHasPassed(Rdr229ChunksFk.ADOPT_LABEL);
-                int worked = w.runCycle();
-                var row = adoptMoves().get(0);
-                passes.append(String.format("%n pass %d: worked=%d state=%s completed_at=%s registered_at=%s paused_at=%s retries=%s last_transient=%s", attempt, worked,
-                    w.states().state(Rdr229ChunksFk.ADOPT_LABEL).map(st -> st.kind().toString()).orElse("none"), row.get("completed_at"), row.get("registered_at"),
-                    row.get("paused_at"), row.get("transient_retries"), row.get("last_transient")));
-                assertThat(worked).as("the worker claimed the adoption move on pass %d (its backoff was moved back, nothing else is due)%s", attempt, passes).isGreaterThanOrEqualTo(1);
-            }
+            // the first failure was recorded at clock time with retries 1, so the retry is due 30 s later; one minute passes, and the single pass that
+            // follows takes the move (the worker's blocked state waits only blockedRetry, 10 ms)
+            clock.advance(java.time.Duration.ofMinutes(1));
+            int worked = w.runCycle();
+            var row = adoptMoves().get(0);
+            String passes = String.format("%n worked=%d state=%s completed_at=%s registered_at=%s paused_at=%s retries=%s last_transient=%s", worked,
+                w.states().state(Rdr229ChunksFk.ADOPT_LABEL).map(st -> st.kind().toString()).orElse("none"), row.get("completed_at"), row.get("registered_at"),
+                row.get("paused_at"), row.get("transient_retries"), row.get("last_transient"));
+            assertThat(worked).as("the worker claimed the adoption move after the backoff%s", passes).isGreaterThanOrEqualTo(1);
             assertThat(compositeOnId()).as("the next pass took the lock and adopted%s", passes).hasSize(1);
         } finally {
             releaseAdoptionBuilderLog(log);
