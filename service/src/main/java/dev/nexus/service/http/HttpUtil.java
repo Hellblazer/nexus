@@ -587,6 +587,30 @@ public final class HttpUtil {
                 + "}");
             return true;
         }
+        // RDR-229 P3.5a: a request that named a collection by collection_id, read by that id inside the handler's transaction
+        // (ExpectedCollectionIds): no row is the typed 404, a retired row the typed 409 naming its successor by
+        // superseded_by_id (the body the route boundary sends for the same id), and a registry row of another id a typed 500.
+        var unknownId = causeOf(e, dev.nexus.service.db.UnknownCollectionIdException.class);
+        if (unknownId != null) {
+            log.warn("event={}_unknown_collection_id {} tenant={} collection_id={}", event, context, unknownId.tenant(),
+                unknownId.collectionId());
+            send(exchange, 404, CollectionSelectorFilter.unknownBody(unknownId.collectionId()));
+            return true;
+        }
+        var retiredId = causeOf(e, dev.nexus.service.db.CollectionRetiredIdException.class);
+        if (retiredId != null) {
+            log.warn("event={}_collection_superseded {} tenant={} collection_id={}", event, context, retiredId.tenant(),
+                retiredId.collectionId());
+            send(exchange, 409, CollectionSupersededBody.of(retiredId.collectionId(), retiredId.label(), retiredId.successor()));
+            return true;
+        }
+        var idMismatch = causeOf(e, dev.nexus.service.db.CollectionIdMismatchException.class);
+        if (idMismatch != null) {
+            log.error("event={}_collection_id_mismatch {} requested={} resolved={}", event, context, idMismatch.requested(),
+                idMismatch.resolved());
+            send(exchange, 500, CollectionSelectorFilter.mismatchBody(idMismatch.requested(), idMismatch.resolved()));
+            return true;
+        }
         // RDR-229 P3.5a: a rename (the catalog's or one of the per-store rename_collection routes) from gate 3 until the
         // one-row rename can run. Raised by the shared rename primitive before anything is written; 409 naming the
         // missing condition, the name-key drop move or the restart that applies P3.5b's changesets.
@@ -856,12 +880,22 @@ public final class HttpUtil {
         return null;
     }
 
+    /** The first {@code type} in {@code t}'s cause chain, or null. */
+    private static <T extends Throwable> T causeOf(Throwable t, Class<T> type) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (type.isInstance(c)) {
+                return type.cast(c);
+            }
+        }
+        return null;
+    }
+
     /** {@code reason} of the 404 for a {@code collection_id} no row of the tenant has (RDR-229 P3.5a). Wire contract. */
     static final String UNKNOWN_COLLECTION_ID_REASON = "unknown_collection_id";
 
     /**
      * {@code reason} of the 500 for a registry row that is not the row of the {@code collection_id} asked for (RDR-229 P3.5a):
-     * an engine invariant, refused before any write can land in another collection. Wire contract.
+     * a registry inconsistency, an engine defect and never a caller mistake. Wire contract.
      */
     static final String COLLECTION_ID_MISMATCH_REASON = "collection_id_mismatch";
 

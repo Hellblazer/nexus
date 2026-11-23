@@ -43,6 +43,8 @@ final class CollectionDeleteRoute {
         Map<String, Object> out = new LinkedHashMap<>();
         switch (verdict.kind()) {
             case UNKNOWN -> HttpUtil.send(exchange, 404, CollectionSelectorFilter.unknownBody(verdict.collectionId()));
+            case SUPERSEDED -> HttpUtil.send(exchange, 409, CollectionSupersededBody.of(verdict.collectionId(), name,
+                java.util.Optional.ofNullable(verdict.successor())));
             case AMBIGUOUS -> {
                 out.put("error", "collection '" + name + "' is held by " + verdict.ids().length + " live rows (collection_ids "
                     + java.util.Arrays.toString(verdict.ids()) + "); delete one of them by its collection_id");
