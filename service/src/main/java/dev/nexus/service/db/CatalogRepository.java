@@ -12414,7 +12414,7 @@ public final class CatalogRepository {
     public GhostSweepResult sweepGhostsAndMarkDormant(String tenant, boolean dryRun) {
         List<SweptRow> rows = tenantScope.withTenant(tenant, ctx -> {
             var nameAndState = ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.LIFECYCLE_STATE,
-                    CATALOG_COLLECTIONS.SUPERSEDED_BY)
+                    CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.COLLECTION_ID)
                 .from(CATALOG_COLLECTIONS)
                 .fetch();
             java.util.Set<String> registered = new java.util.HashSet<>();
@@ -12467,7 +12467,9 @@ public final class CatalogRepository {
                     // vectors are model-partitioned, so a collection has one.
                     List<Integer> storedDims = ctx.select(COLLECTION_VECTOR_STATS.DIM)
                         .from(COLLECTION_VECTOR_STATS)
-                        .where(COLLECTION_VECTOR_STATS.COLLECTION.eq(name))
+                        // RDR-229 P3.5b (linda's (iii)): by the row's own id, before the latch too (the view gives an unstamped
+                        // chunk its registry row's id), so the read reaches the manifest's id index, not a tenant scan by label
+                        .where(COLLECTION_VECTOR_STATS.COLLECTION_ID.eq(r.value4()))
                         .fetch(COLLECTION_VECTOR_STATS.DIM);
                     if ("live".equals(lifecycleState) && storedDims.isEmpty()) {
                         // Only a LIVE row is marked dormant (nexus-b0y6w class d). A row already dormant is not
