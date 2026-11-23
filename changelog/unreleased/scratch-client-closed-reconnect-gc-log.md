@@ -1,0 +1,3 @@
+### Added
+
+- **Every generation cleanup leaves a record in `~/.config/nexus/logs/install-gc.log`.** The SessionStart sweep (`nx self gc`), `nx self install` and the bootstrap rebuild all reap through one rule set, and the sweep discarded its output, so a generation removed under a live session left no trace. Each run now appends JSON lines to that file (under `NEXUS_CONFIG_DIR` when set): one `gc_reaped` line per removed generation (path, stamp, reason, holders seen, whether the process census worked, which caller ran it) and one `gc_run` summary naming what it kept and why. A run that removes nothing still writes the summary; `--dry-run` writes nothing. The file is append-only and apart from the rotating hook log.

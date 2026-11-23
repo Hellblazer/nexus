@@ -195,6 +195,48 @@ def _claimed_recently(tree: Path, marker: str, minutes: int) -> bool:
         return False
 
 
+def census_is_empty(view: str) -> bool:
+    """True when *view* holds no process row: ``ps`` failed, timed out or is not
+    on PATH, since a real table always lists ``ps`` itself (see :func:`plan`)."""
+    return not any((head := line.split(maxsplit=1)) and head[0].isdigit() for line in view.splitlines())
+
+
+#: The append-only record of every gc run, under the nexus config directory's
+#: ``logs/``. Apart from hook.log, which rotates on nearly every write: the
+#: SessionStart sweep discards its output, and on 2026-11-21/22 generations live
+#: MCP servers ran from went with no trace of which run removed them.
+GC_LOG_NAME = "install-gc.log"
+
+#: Who ran the reap, set by ``self_cmd._reap_generations`` (``self-gc``,
+#: ``self-install``, ``bootstrap``); empty for a direct ``gc.sh`` caller such as
+#: ``scripts/reinstall-tool.sh``, which the record's ``ppid`` then points at.
+GC_CALLER_ENV = "NX_GC_CALLER"
+
+
+def gc_log_path() -> Path:
+    """``$NEXUS_CONFIG_DIR/logs/install-gc.log``, else under ``~/.config/nexus``:
+    ``nexus.config.nexus_config_dir``'s rule, restated because this file runs with
+    nexus absent."""
+    override = os.environ.get("NEXUS_CONFIG_DIR", "").strip()
+    base = Path(override) if override else Path.home() / ".config" / "nexus"
+    return base / "logs" / GC_LOG_NAME
+
+
+def _record(records: list[dict], emit_err) -> None:
+    """Append *records* as JSON lines. Never fails the reap it describes: a log
+    that cannot be written is one line on stderr."""
+    import json  # noqa: PLC0415 — stdlib, only when a run is recorded
+
+    try:
+        path = gc_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            for rec in records:
+                fh.write(json.dumps(rec, sort_keys=True) + "\n")
+    except OSError as exc:
+        emit_err(f"nexus: could not write the gc record to {gc_log_path()}: {exc}")
+
+
 def plan(
     root: Path,
     *,
@@ -253,9 +295,7 @@ def plan(
     # next HTTP client build failed on its vanished CA bundle). Complete
     # generations are kept instead and said so; receipt-less wreckage, which
     # nothing runs from, still goes.
-    census_failed = not any(
-        (head := line.split(maxsplit=1)) and head[0].isdigit() for line in view.splitlines()
-    )
+    census_failed = census_is_empty(view)
 
     out: list[tuple[str, Path, str]] = []
     index = 0
@@ -502,19 +542,52 @@ def gc_generations(
     if not resolved.is_dir():
         return []
 
+    # One view for the plan and the record, so the record says what the plan saw.
+    view = _census().ps_snapshot() if snapshot is None else snapshot
+    census = "failed" if census_is_empty(view) else "ok"
+    receipt = _layout().RECEIPT_NAME
+    prefix = _layout().GENERATION_PREFIX
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    common = {
+        "ts": now, "tools": str(resolved), "keep": keep, "census": census,
+        "caller": os.environ.get(GC_CALLER_ENV, ""), "pid": os.getpid(), "ppid": os.getppid(),
+    }
+
     lines: list[str] = []
+    records: list[dict] = []
+    kept: list[dict] = []
     for action, entry, detail in plan(
-        resolved, keep=keep, self_generation=self_generation, snapshot=snapshot,
+        resolved, keep=keep, self_generation=self_generation, snapshot=view,
         grace_minutes=grace_minutes, claim_minutes=claim_minutes, platform=platform,
     ):
         if action == "skip":
             continue
         if action == "keep":
             lines.append(f"kept {entry}: {detail}")
+            kept.append({"generation": str(entry), "detail": detail})
         elif dry_run:
             lines.append(f"would reap {entry}")
         else:
-            lines.extend(_reap(entry, emit_err, platform))
+            # Read before the delete: the receipt goes with the tree.
+            complete = (entry / receipt).is_file() or _layout().is_link(entry, platform=platform)
+            result = _reap(entry, emit_err, platform)
+            lines.extend(result)
+            if any(line.startswith("reaped ") for line in result):
+                reason = (
+                    f"outside the keep window ({keep}), not current, previous or the running installer, "
+                    "and no live holder in the process census"
+                    if complete else "receipt-less build wreckage past its grace window"
+                )
+                records.append({
+                    **common, "event": "gc_reaped", "generation": str(entry),
+                    "stamp": entry.name[len(prefix):] if entry.name.startswith(prefix) else entry.name,
+                    "reason": reason, "holders": 0,
+                })
+            else:
+                kept.extend({"generation": str(entry), "detail": line} for line in result)
+    if not dry_run:
+        records.append({**common, "event": "gc_run", "reaped": len(records), "kept": kept})
+        _record(records, emit_err)
     return lines
 
 

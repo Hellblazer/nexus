@@ -351,7 +351,7 @@ def perform_self_install(
         if after_flip is not None:
             after_flip(generation)
     finally:
-        for line in _reap_generations(install_dir, tools, keep=keep, self_generation=host):
+        for line in _reap_generations(install_dir, tools, keep=keep, self_generation=host, caller="self-install"):
             click.echo(line)
 
     # A HYBRID BOX CONVERGES HERE, NOT IN THE elif ABOVE. A generation layout
@@ -909,7 +909,7 @@ def _reap_superseded(
     host = running_generation()
     self_generation = host if _same_dir(host.parent, tools) and _is_generation_name(host.name) else None
     for line in _reap_generations(
-        install_dir, tools, keep=1, self_generation=self_generation, remove_launchers=False,
+        install_dir, tools, keep=1, self_generation=self_generation, remove_launchers=False, caller="bootstrap",
     ):
         click.echo(line)
 
@@ -2229,9 +2229,14 @@ def _sh(install_dir: Path, snippet: str, *, check: bool = True) -> str:
     return r.stdout
 
 
+#: gc_core.GC_CALLER_ENV, restated: the install cores are loaded by path, not imported.
+_GC_CALLER_ENV = "NX_GC_CALLER"
+
+
 def _reap_generations(
     install_dir: Path, tools: Path, *, keep: int,
     self_generation: Path | None, dry_run: bool = False, remove_launchers: bool = True,
+    caller: str = "",
 ) -> list[str]:
     """Run gc.sh's reap once and return its report lines (``reaped``,
     ``would reap``, ``kept ...: held by ...``). The four never-delete rules
@@ -2239,16 +2244,25 @@ def _reap_generations(
     generation and never raises: a reap that cannot run leaves the trees
     where they are, which is the safe direction. *remove_launchers* is Windows
     only (see :func:`_windows_reap`)."""
+    # *caller* names this run in gc_core's durable record (``<config>/logs/install-gc.log``).
     if _is_windows():
-        return _windows_reap(
-            tools, keep=keep, self_generation=self_generation, dry_run=dry_run,
-            remove_launchers=remove_launchers,
-        )
+        prior = os.environ.get(_GC_CALLER_ENV)
+        os.environ[_GC_CALLER_ENV] = caller
+        try:
+            return _windows_reap(
+                tools, keep=keep, self_generation=self_generation, dry_run=dry_run,
+                remove_launchers=remove_launchers,
+            )
+        finally:
+            if prior is None:
+                os.environ.pop(_GC_CALLER_ENV, None)
+            else:
+                os.environ[_GC_CALLER_ENV] = prior
     self_arg = f' --self "{self_generation}"' if self_generation is not None else ""
     dry_arg = " --dry-run" if dry_run else ""
     out = _sh(
         install_dir,
-        f'nx_gc_generations --keep {int(keep)}{dry_arg}{self_arg} "{tools}"',
+        f'export {_GC_CALLER_ENV}="{caller}"; nx_gc_generations --keep {int(keep)}{dry_arg}{self_arg} "{tools}"',
         check=False,
     )
     return [line for line in out.splitlines() if line.strip()]
@@ -2327,7 +2341,7 @@ def perform_self_gc(*, keep: int = 3, dry_run: bool = False) -> list[str] | None
         else None
     )
     return _reap_generations(
-        install_dir, tools, keep=keep, self_generation=self_generation, dry_run=dry_run,
+        install_dir, tools, keep=keep, self_generation=self_generation, dry_run=dry_run, caller="self-gc",
     )
 
 
