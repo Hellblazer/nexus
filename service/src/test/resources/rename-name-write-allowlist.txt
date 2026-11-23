@@ -20,6 +20,7 @@ CatalogRepository.java | 1 | .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, tgt) | the
 CollectionMint.java | 1 | .set(CATALOG_COLLECTIONS.NAME, choice.label()) | a mint names a NEW registry row (an insert), not a rename of an existing one
 ManifestReplace.java | 1 | .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, v.field("", String.class)) | the manifest replace writes each row's own collection
 ReembedJobRepository.java | 1 | .set(REEMBED_JOBS.SOURCE_COLLECTION, sourceRow.label()) | a re-embed job row records its source collection on insert, by the current label of the registry row the start locked
+ReembedJobRepository.java | 1 | .set(REEMBED_JOBS.SOURCE_COLLECTION, row.value1()) | a resumed job (reenter) takes the labels its two collection ids carry now, read from the registry in the same statement's transaction: it copies a label into the job row, and renames no collection (RDR-229 P3.5c)
 TaxonomyRepository.java | 1 | .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, coll) | the assignment's own source collection, by the current label of the registry row the write locked
 TaxonomyRepository.java | 2 | .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, field("" + "" + "" + "", String.class)) | topic assignment upserts and imports: the row's own source collection
 TaxonomyRepository.java | 2 | .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, field("", String.class)) | topic assignment upserts and imports: the row's own source collection
