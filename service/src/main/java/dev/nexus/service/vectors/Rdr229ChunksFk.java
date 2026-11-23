@@ -116,7 +116,8 @@ public final class Rdr229ChunksFk {
             l             record;
             n             bigint;
             pending       boolean := false;
-            paused_names  text;
+            paused_first  text;
+            paused_count  integer := 0;
             is_failed     boolean;
             is_paused     boolean;
             is_superseded boolean;
@@ -127,7 +128,7 @@ public final class Rdr229ChunksFk {
      * none, and register its validation move or re-open a finished one. Sets {@code pending} when any leaf needed it. Idempotent; the leaf's
      * catalog is the only input. With {@code strict} (the adoption move) a leaf whose validation move is failed or superseded raises
      * SQLSTATE 55000 naming it (the adoption cannot go on until an operator re-arms it, and it must not wait on it for ever), and a paused one
-     * is collected in {@code paused_names} for the caller to raise 55P03 with.
+     * is counted ({@code paused_count}, the first named in {@code paused_first}) for the caller to raise 55P03 with, saying first that they are paused.
      */
     static String reconcileLeaves(boolean strict) {
         String labelExpr = "'" + LEAF_LABEL_PREFIX + "' || l.leaf";
@@ -142,7 +143,8 @@ public final class Rdr229ChunksFk {
                             ERRCODE = 'object_not_in_prerequisite_state';
                     END IF;
                     IF is_paused THEN
-                        paused_names := COALESCE(paused_names || ', ', '') || l.leaf;
+                        paused_first := COALESCE(paused_first, l.leaf);
+                        paused_count := paused_count + 1;
                     END IF;
             """.formatted(labelExpr, PARENT_CONSTRAINT) : "";
         return """
@@ -230,8 +232,9 @@ public final class Rdr229ChunksFk {
             """.formatted(PARENT_CONSTRAINT)
             + reconcileLeaves(true)
             + """
-                IF paused_names IS NOT NULL THEN
-                    RAISE EXCEPTION USING MESSAGE = 'rdr229 adoption of %2$s is waiting: the validation move of leaf ' || paused_names || ' is paused',
+                IF paused_count > 0 THEN
+                    RAISE EXCEPTION USING MESSAGE = 'rdr229 adoption of %2$s is waiting on paused leaf validation moves: first ' || paused_first
+                            || ' (' || paused_count || ' paused in all)',
                         ERRCODE = 'lock_not_available';
                 END IF;
                 IF pending THEN
