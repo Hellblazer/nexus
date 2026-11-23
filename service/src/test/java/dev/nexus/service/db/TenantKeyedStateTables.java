@@ -143,7 +143,7 @@ final class TenantKeyedStateTables {
             + "settable by a test): no tenant's data");
         for (String f : List.of("NexusService.tenantScope", "TaxonomyCentroidRepository.tenantScope",
             "PgVectorRepository.tenantScope", "ReaperRepository.tenantScope", "WhoamiHandler.tenantScope",
-            "RemapRepository.tenantScope", "CombinedWriteService.tenantScope", "TaxonomyRepository.tenantScope",
+            "RemapRepository.tenantScope", "CombinedWriteService.tenantScope", "TaxonomyRepository.tenantScope", "TaxonomyAnalytics.tenantScope",
             "TupleRepository.tenantScope", "TelemetryRepository.tenantScope", "LadderRepository.tenantScope",
             "PlanRepository.tenantScope", "MemoryRepository.tenantScope", "PipelineRepository.tenantScope",
             "CatalogRepository.tenantScope", "CatalogLinksRepository.tenantScope", "ChashRepository.tenantScope", "AspectRepository.tenantScope",

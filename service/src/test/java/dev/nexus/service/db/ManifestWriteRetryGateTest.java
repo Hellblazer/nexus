@@ -113,6 +113,8 @@ class ManifestWriteRetryGateTest {
             + " it holds no DML"),
         Map.entry("ChashConstraintValidator", "nexus-f3yqd: VALIDATE CONSTRAINT of the chash width CHECK on the table (DDL, "
             + "and a SELECT count of its non-conformant rows); it changes no row"),
+        Map.entry("StrictWriterCensus", "nexus-p2m1x.23: the strict writer census (a test seam over the jOOQ write call) names the table as one"
+            + " of the collection-scoped tables whose writes it judges; it executes no DML of its own"),
         Map.entry("ManifestCheck", "nexus-6pfgb.42: names the constraints and builds the predicates of the two manifest CHECKs"
             + " (jOOQ conditions over unqualified column names); it writes nothing"),
         Map.entry("ManifestCheckAdmin", "nexus-6pfgb.42: the operator step's census (a jOOQ SELECT count grouped by tenant) and"

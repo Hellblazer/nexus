@@ -115,7 +115,7 @@ public final class GcCollectionReads {
         ctx.select(DSL.function("set_config", String.class, DSL.val("lock_timeout"), DSL.val("0"), DSL.val(true))).fetch();
         // A route that sets no statement bound of its own (the unbounded forms) gets one for the registry reads, so a row a verb holds ends the
         // wait as a typed busy answer instead of hanging the request; a route with a bound keeps it (restore: the 25 s, 503 quarantine_restore_busy)
-        boolean noStatementBound = "0".equals(ctx.fetchValue(DSL.function("current_setting", String.class, DSL.val("statement_timeout"))));
+        boolean noStatementBound = "0".equals(PgSession.currentStatementTimeout(ctx));
         if (noStatementBound) {
             PgSession.setLocal(ctx, "statement_timeout", Integer.toString(registryReadBoundMs));
         }
