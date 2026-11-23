@@ -242,7 +242,7 @@ collection ids (stamp-before-build), build each per-collection index on the
 id, then the bounded drop of the shared leaf graph" (nexus-f3yqd.8, comment
 of 2026-11-12; RDR-247 Revision History; T2 `229-research-35`). Phase 3
 follows that order. RDR-229 owns the stamp (P3.1) and the per-collection
-index rebuild on the id (P3.4). A collection's rows are stamped before its
+index build on the id (P3.4). A collection's rows are stamped before its
 index is built on the id, so no index is built twice. RDR-247 owns the
 bounded drop of the shared leaf graph, which is not in this RDR. The stamp
 cannot stop at new rows, the cost comparison's option (c): D3's chunks
@@ -1089,7 +1089,7 @@ The key moves table by table in strangler order:
   primary key swap cannot drop `(tenant_id, name)` while a key references
   it (T2 `229-research-61`). P3.7's one-row rename waits for its
   `completed_at`. Every
-  per-collection index is rebuilt with `WHERE collection_id = <id>` and a
+  per-collection index is built with `WHERE collection_id = <id>` beside its name index, and a
   name hashed from model, tenant and id, so a label change never strands
   one. Readers (engine repositories, SQL functions, client caches) key on
   the id, on each install only once the completion check's gates pass
@@ -1289,7 +1289,18 @@ while the engine serves:
   stamp-before-build order of Sam's RDR-247 ruling (Scope boundary with
   RDR-247). Built after the swap and the validations, they are not ended
   by those moves' chunk-family `on_complete`, which ends builds in flight
-  (RDR-246). So an index is built a second time only after a kill.
+  (RDR-246). So an index is built a second time only after a kill. The
+  id-keyed unique arbiters are built at run time as well, after the engine
+  serves and once gate 2 holds: `IdUniqueIndexPass` builds
+  the eight twin indexes of the ten `ArbiterTwins` entries that name one
+  (`ArbiterTwins.java:75-77`; the other two come from P3.3b/c's parent
+  UNIQUE), and the plain `(tenant_id, <id column>)` indexes that support the
+  id foreign keys (`Main.java:726`; T2 `229-research-266`). They are not in the boot walk.
+  The P3.4 changelog adds only the latch table, `vectors-080-1` (T2
+  `229-research-265`). `IdUniqueIndexPass.java:50-53` gives the reason: "an
+  upgrade boot may write at most 64 MiB, and the RDR builds no index on a
+  user-data-growing table inside it." Gate 3 requires each of them VALID (T2
+  `229-research-267`).
 - *The switch is P3.3b's pass and P3.3c's `on_complete`.* The id key is added beside the
   name primary key, not in its place. P3.3b's pass adds it, by the route
   PostgreSQL documents for a partitioned table: `ALTER TABLE ONLY` the
@@ -1360,9 +1371,9 @@ while the engine serves:
   (`TwinKeyUpsert.java:26-31`; fixed at 70a97c92bc on
   origin/integration/rdr229-phase3-stack-r2; T2 `229-research-107`). An upsert
   in a plpgsql body takes a column-matched plpgsql retry instead; that retry
-  and the census of targeted upserts (`ArbiterTwins.ALL`, bead
-  nexus-p2m1x.20, comment 19:38) are not on the stack yet (T2
-  `229-research-106`). The arbiter is the caller's, and it flips at P3.5c. A
+  is not on the stack yet (T2 `229-research-106`). The census of upserts on
+  a twin-key table is on the stack (`TwinKeyUpsertCoverageCensusTest`, commits
+  62d40cc1db and 8e7aa44ad7, bead nexus-p2m1x.20; T2 `229-research-275`). The arbiter is the caller's, and it flips at P3.5c. A
   `DO NOTHING` site with no conflict target needs none of this. The
   child keys cascade names only (`ON UPDATE CASCADE`,
   vectors-030:1017-1051), and `chunk_orphaned_at` is not among the
@@ -1471,26 +1482,38 @@ while the engine serves:
     remains; otherwise it returns text and writes nothing. The down-step
     pause (Risks) covers the reruns, since their labels start
     `rdr229-stamp-`. The runbook (`docs/runbooks/rdr-229-p31-rollback.md`,
-    "Orphan rows") and the doctor name this step. The gates, in order:
+    "Orphan rows") and the doctor name this step. The gates, in order (a gate holds only if the one before it does, so gate 3
+    implies gate 2; T2 `229-research-260`):
     1. Every stamp move and every P3.3a move complete: P3.3b's pass
        starts.
     2. Also both swap moves and the three child validation moves complete:
        P3.4's builds start.
-    3. Also P3.4 complete on the install, read from `PciCatalog`, whose
-       index records carry `valid`, "`pg_index.indisvalid`", and the
-       collection "its predicate selects" (`PciCatalog.java:349-350`).
-       P3.4 is complete when every collection the planner would index
-       (live, not superseded, enough rows, not backed off, within the cap
-       ranking) has a VALID id-predicate index, read from the registry and
-       the index catalog and never from the existence of name indexes,
-       because the planner drops a name index before it builds, so counting
-       them passes early (residual S-2). `CompletionCheck.Gate3Source`
-       supplies the planned set and the valid and INVALID id-indexed sets;
-       until P3.4 ships one, `Gate3Source.NOT_INSTALLED` answers nothing and
-       gate 3 cannot hold. A planner that plans no collection while live
-       collections are registered does not pass either: an empty plan over
-       a populated registry is a planner that found nothing, so nothing says
-       they are covered. Then
+    3. Also P3.4 complete on the install. The PCI clause is read from the
+       database, never from the reconciler's in-process plan, so a standby
+       computes the same answer (T2 `229-research-261`). Each live,
+       unsuperseded collection that the planner would index needs a VALID
+       id-predicate index if it holds a name-predicate index or an
+       id-predicate index of any validity, or if it has at least `B` rows
+       (`B` is the planner's build threshold, `NX_SEARCH_PCI_BUILD_MIN_ROWS`)
+       and no index of either kind
+       (`PciGate3Coverage.java:41-51`; T2 `229-research-263`). A collection
+       whose name index is gone but whose id index is VALID stays covered, so
+       the retire of name indexes does not flip the clause. Validity is
+       `pg_index.indisvalid`, read through `PciCatalog` (`PciCatalog.java:356-357`).
+       Coverage is decided by the id index, never by a name index's existence,
+       because the planner drops a name index before it builds (residual S-2). With `NX_SEARCH_PCI=0` the
+       clause is not applicable (T2 `229-research-262`). An empty plan is not a
+       pass while live collections are registered: "no collection requires an
+       id-predicate index while live collections are registered, so nothing
+       says they are covered" (`CompletionCheck.java:490-500`; T2
+       `229-research-264`). The source is `PciGate3Coverage`, wired as
+       `PciReconciler.gate3Source()`; `Gate3Source.NOT_INSTALLED` answers
+       nothing. Gate 3 also needs every runtime id index VALID
+       (`IdUniqueIndexPass.allValid`, T2 `229-research-267`). The canary twin
+       waits for changeset `vectors-078-8`, and gate 3 waits with it
+       (`ArbiterTwins.java:45-46`; T2 `229-research-268`). That changeset is
+       not in this tree: `ArbiterTwins.java:37-41` ties the replacing writer to
+       P3.5b's form A, and vectors-078 comes with P3.5b (T2 `229-research-269`). Then
        `CollectionRegistry` and the jOOQ readers move to the id (P3.5a,
        P3.5c), the check registers P3.7's name-key drop move (Switch), the
        rename becomes one row (P3.7) once that move also has `completed_at`
@@ -1551,8 +1574,8 @@ while the engine serves:
     and returns `Result.completed()` (`VerifyingFinisher.java:244-287`),
     and the worker acts on it (`case COMPLETED -> ...`,
     `DataMoveWorker.java:562`). So the engine re-reads the check when the
-    worker records a `completed_at`, and, inferred, not read, when a
-    reconciler pass ends, since gate 3 reads `PciCatalog`, and a 60 s safety
+    worker records a `completed_at`, and when a reconciler pass ends
+    (`Main.java:708`; T2 `229-research-274`), and a 60 s safety
     poll reads again when no event came in that time, in case one was
     missed. The count of rows that keep a CHECK `NOT VALID` is a bounded
     scan, so it is cached for 10 minutes per table. The gates the
@@ -2099,7 +2122,7 @@ list stays complete because of one fact, one repair and one rule:
 | Surrogate key | `catalog_collections`, the fk-002 / fk-003 / vectors-030 / vectors-054 foreign keys | New column and constraints; the fk-002 `NOT VALID` then validate pattern is reused for every switch. |
 | Row cache | Engine `CollectionRegistry` (keyed by tenant and name), client `mcp_infra._collections_cache`, client registration cache | Change: key by `collection_id`, with a label index for the route boundary. |
 | Rename | `CatalogRepository.renameCollectionTxn`, `COLLECTION_SCOPED_TABLES` | Replace: a one-row label update plus the note-URI and aspect-task rewrites (`AspectTaskRefs`); `COLLECTION_SCOPED_TABLES` keeps serving delete and rehome, keyed by id. |
-| Per-collection index | `PciBuilderSession`, `PciCatalog` | Change: predicate and name hash on `collection_id`; every existing index rebuilt. |
+| Per-collection index | `PciBuilderSession`, `PciCatalog` | Change: a second build on `collection_id` (predicate and name hash) beside the name index. The name index retires only once gate 3 has latched and the readers select by id (P3.5c). |
 | Stamp and key swap (Phase 3) | RDR-246: `nexus.data_moves`, `DataMoveWorker`, dml_utils, `MoveBootWork` | Reuse: one registered move per table (per tenant and leaf) for the stamp, one per foreign key for each validation (P3.3a, P3.3c), and one per table whose P3.3c `on_complete` checks the id key beside the name key; no new mover. |
 | Per-leaf unique index builds | `PciReconciler`, `PciBuilderSession`, `PciBootWork` | New code in the reconciler's pattern (P3.3b): the reconciler builds per-collection HNSW indexes (`PciBuilderSession.java:115-118`), not per-leaf unique indexes. Background `CREATE INDEX CONCURRENTLY` after serve, `boot_work`, INVALID leftovers dropped and rebuilt. |
 | Recovery bundle | `catalog/recovery_bundle.py` | Extend: the format carries the registry row; the name path stays for N minor releases (Open Item O1). |
@@ -2746,19 +2769,47 @@ its acceptance is that test green plus the census pin it lowers.
     the swap, a chunk and a centroid upsert on the name target still succeed,
     and a name-path rename leaves every child row with the new id; EXPLAIN
     of a chunk DELETE after the swap uses `idx_chunk_orphaned_at_tenant_chash`.
-- P3.4 After P3.3: rebuild every per-collection index on `collection_id`
-  (predicate and name hash) through the PCI reconciler, which reports in
-  `boot_work` and rebuilds a killed build from the start; each collection's
-  index is built only once none of its rows has a null id
-  (stamp-before-build, Scope boundary with RDR-247), and no build starts
-  until gate 2 of the completion check (both swaps and every validation
-  move complete), so a chunk-family `on_complete` cannot end it (item 6);
-  `PciCatalog` reads the id back from the predicate, and its records are
-  what gate 3 reads to tell that P3.4 is complete on the install. Test: a
-  collection with a row whose `collection_id` is null gets no index on the
-  id; readers and the rename stay on the name path while any collection
-  the planner would index lacks a valid id-predicate index (item 6, gate 3).
-  The bounded drop of the
+- P3.4 After P3.3: build every per-collection index on `collection_id`
+  (predicate and name hash) beside its name index, through the PCI
+  reconciler, which reports in `boot_work` and rebuilds a killed build from
+  the start (a killed build is left INVALID, `PciCatalog.java:588`; T2
+  `229-research-273`). Each collection's index is built only once none of
+  its rows has a null id (stamp-before-build, Scope boundary with RDR-247),
+  and no build starts until gate 2 of the completion check (both swaps and
+  every validation move complete), so a chunk-family `on_complete` cannot
+  end it (item 6; `Main.java:712-716`; T2 `229-research-276`). The step also
+  builds the eight id-keyed arbiters and their supporting indexes at run
+  time, in `IdUniqueIndexPass`, after the engine serves (item 6; T2
+  `229-research-266`). `PciCatalog` reads the id back from the predicate, and
+  its records are what gate 3's PCI clause reads from the database to tell
+  that P3.4 is complete on the install.
+  The name indexes retire (`REPLACED_BY_ID`) only once gate 3 has latched and
+  `IdReaders.PRESENT` is true. It is `false` in this release, and P3.5c flips
+  it (`IdReaders.java:18`; T2 `229-research-270`). Until the retire ends, the
+  id indexes get the same `NX_SEARCH_PCI_MAX_PER_LEAF` budget of their own, so
+  a leaf at the cap holds the cap's worth of name indexes and the cap's worth
+  of id indexes, a stated exception to the cap (S-2's second option; T2
+  `229-research-271`).
+  The gate 3 latch is one row, `nexus.rdr229_gate_latch` (`vectors-080-1`).
+  The completion check writes it the first time gate 3 holds, with
+  `INSERT ... ON CONFLICT DO NOTHING` and the `pci_off` posture
+  (`CompletionCheck.java:410-415`; T2 `229-research-255`). The engine reads it
+  at boot, before the service starts. A failed read is retried with backoff,
+  500 ms doubling to 30 s, and after 5 minutes without an answer the engine
+  exits rather than serve on a guess (`Gate3Latch.java:23-32`, `Main.java:626-634`;
+  T2 `229-research-257`). Readers and the name-index retire go by the latched
+  value, never the live gate 3 (`CompletionBootWork.java:200-203`; T2
+  `229-research-256`). A later INVALID id index is reported as
+  `id_index_invalid` and does not unlatch (T2 `229-research-258`). A row from
+  before a database restore is not carried by the restore of an older backup:
+  a restored install reads "not latched" and latches again once gate 3 holds
+  (`vectors-080-rdr229-gate-latch.xml:19-20`; T2 `229-research-259`). An
+  install that latched while `NX_SEARCH_PCI=0` has `pci_off` set; when PCI is
+  turned on, the reconciler builds the id indexes first, and readers stay on
+  the id either way (`Main.java:718-720`; T2 `229-research-272`).
+  Test: a collection with a row whose `collection_id` is null gets no index on
+  the id; readers and the rename stay on the name path while any collection
+  the planner would index lacks a valid id-predicate index (item 6, gate 3). The bounded drop of the
   shared leaf graph that follows is RDR-247's.
 - P3.5 Readers switch to the id, as three beads; "P3.5" elsewhere means
   all three. P3.5 ships in one engine cut with P3.7, which holds the
@@ -3613,3 +3664,4 @@ large, and moved under a ratchet.
   P3.1's cut and the single-role install. No decision or criterion changed.
 - 2026-11-22: Phase 3 wording, matching reviewed stacked code and linda's rulings (grant 3; nexus-p2m1x.20, .21, .31, .35): P3.3b's pass adds the id key and P3.3c's `on_complete` checks it and adds the child keys, the manifest child key is DEFERRABLE INITIALLY DEFERRED, the chunk_orphaned_at index is vectors-075's self-healing boot changeset, and TwinKeyUpsert is the retry rule for name/id unique pairs until P4.1; item 10 and P3.11: the by-id restore ships in the P3.5+P3.7 cut, not P4.1, with the minted-label relabel, the stripped unmapped quarantine origin id, catalog_epoch's derivation and the booted-schema parity; P4.1's design notes (G1, G7, views first, RESTRICT drops, the deferral and trigger notes). P3.R: the rest of Phase 3 is one engine cut (Sam's ruling, T2 `nexus/sam-ruling-rdr229-compress-phase3-2026-11-22`). P3.4, P3.5 and P3.7 follow when their code is reviewed and stacked. Two decisions moved on linda's rulings: the by-id restore from P4.1 to the P3.5+P3.7 cut, and the catalog epoch placed in the P3.5+P3.7 cut (it replaces the 11-20 cut-C1 timing; the RDR had placed it nowhere) (bead nexus-p2m1x.31, comments 08:24 and 08:49; bead nexus-p2m1x.35, comment 17:42; T2 `229-research-116`). No test criterion changed in this entry.
 - 2026-11-22: test lists (Sam's ruling, T2 `nexus/sam-ruling-rdr229-test-lists-and-stack-wal-2026-11-23`, answering linda's ask rdr229-rdr-test-lists): the P3.3b, P3.3c and P3.11 Test sentences gain the tests the reviewed code carries (an unattached parent key, a new leaf, `NX_SEARCH_PCI=0`, moves blocked; a swap refused without the id key, the EXPLAIN of a chunk DELETE; the booted-schema parity, the rename and minted-label restores), and the parity test is green at P3.3, not P3.1 (T2 `229-research-113`; tests `LeafIndexPassIntegrationTest`, `Rdr229SwapMovesIntegrationTest`, `Rdr229SwapMovesAfterTheSwapIntegrationTest`, `TenantExportRegistryParityTest`, `Rdr229RestoreByIdTest`, `Rdr229RestoreMintedRelabelTest`).
+- 2026-11-23: P3.4 folded from the stacked code (grant 3, nexus-p2m1x.22): the gate 3 latch row (`vectors-080-1`) and its boot read, the PCI clause read from the database with the PCI-off case and the B-row coverage, the runtime id arbiters after gate 2 and not in the boot walk, the name-index retire behind `IdReaders.PRESENT`, the 2x per-leaf budget, and the canary twin's wait for `vectors-078-8`.
