@@ -284,6 +284,40 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
     }
 
     /**
+     * The adoption that outgrows its tight bound (about 2000 leaves in production; here a 150 ms bound and a held writer, so the statement timer
+     * fires inside the lock wait) is a transient: the move stays open, nothing fails, the retry is counted, and the recorded reason names the
+     * bound and the leaf count and says what to do, in the form the status shows.
+     */
+    @Test
+    void anAdoptionThatTimesOutUnderItsBoundRecordsTheBoundTheLeafCountAndTheRemedy() throws Exception {
+        seed("timeout");
+        registerSwaps();
+        runSwaps(new VerifyingFinisher());
+        validateEveryLeafByHand();
+        ctx().update(table("nexus", "data_moves")).set(DSL.field(DSL.name("statement_timeout_ms"), Integer.class), 150)
+            .where(LABEL_F.eq(Rdr229ChunksFk.ADOPT_LABEL)).execute();
+        pause("rdr229-%");
+        resume(Rdr229ChunksFk.ADOPT_LABEL);
+        Connection writer = pg.createConnection("");
+        parked.add(writer);
+        writer.setAutoCommit(false);
+        MoveSql.runOnComplete(writer, "LOCK TABLE nexus." + quote(chunkLeaves().get(0)) + " IN ROW EXCLUSIVE MODE");
+
+        productionWorker(new VerifyingFinisher()).runCycle();
+
+        var adopt = adoptMoves().get(0);
+        assertThat(adopt.get("failed_at")).as("a timeout is a transient, never a failure").isNull();
+        assertThat(adopt.get("completed_at")).as("the move stays open").isNull();
+        assertThat((Integer) adopt.get("transient_retries")).as("and the timeout counts toward the needs-an-operator threshold").isGreaterThanOrEqualTo(1);
+        String reason = (String) adopt.get("last_transient");
+        assertThat(reason).as("the reason names the bound, the leaf count and the remedy")
+            .contains("adoption timed out at 150 ms over " + VerifyingFinisher.chunkLeafCount(ctx()) + " leaves")
+            .contains("raise statement_timeout_ms on " + Rdr229ChunksFk.ADOPT_LABEL + " for one attempt in a quiet window");
+        assertThat(MoveReasons.publicForm(reason)).as("and the status keeps it").contains("adoption timed out at 150 ms over");
+        assertThat(compositeOnId()).isEmpty();
+    }
+
+    /**
      * A leaf created while the adoption holds its lock waits for it (the lock conflicts with the ACCESS EXCLUSIVE a leaf's creation takes on its
      * model partition), and the adoption then sees it: it queues the new leaf and does not add the composite over it.
      */

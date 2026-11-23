@@ -197,6 +197,9 @@ final class MoveReasons {
         if (lower.contains("verification connection carries nexus.tenant")) {
             return "the table-wide verification connection carried a tenant setting, so it was not trusted";
         }
+        if (lower.startsWith("adoption timed out at ")) {
+            return text;   // the bound in ms, a leaf count and what to do: no collection, tenant or index is named
+        }
         if (lower.startsWith("on_complete of ") && lower.contains("did not complete")) {
             return "on_complete did not complete" + state;
         }
