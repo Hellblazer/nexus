@@ -173,7 +173,9 @@ public final class CollectionOneRowRename implements OneRowRename {
             .set(DOCUMENT_HIGHLIGHTS.COLLECTION_ID, CatalogIdStamps.keepHighlightId())
             .where(DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant).and(DOCUMENT_HIGHLIGHTS.COLLECTION_ID.eq(id)))
             .and(NoteUri.namesCollection(DOCUMENT_HIGHLIGHTS.SOURCE_URI, oldName)).execute());
-        QuarantineOrigin.retagRowsOf(ctx, tenant, oldName, newName);
+        // the latched gate (this body runs only past the latch): quarantine rows found by the collection's id and siblings by the registry's label, as every
+        // other gate-3 reader (linda's census pass 2; the 4-argument form passes Gate3.never())
+        QuarantineOrigin.retagRowsOf(ctx, tenant, oldName, newName, LATCHED);
         return new Outcome(id, counts);
     }
 
