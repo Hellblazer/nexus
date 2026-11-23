@@ -210,6 +210,7 @@ final class TenantKeyedStateTables {
         TenantKeyedStateTablesRdr229.fillCompletionCheck(notKeyed);   // RDR-229 P3.1 (nexus-p2m1x.17): the boot-time completion check is engine-wide
         TenantKeyedStateTablesRdr229.fillLeafIndexPass(notKeyed);   // RDR-229 P3.3b (nexus-p2m1x.20): the per-leaf id unique-index pass is engine-wide
         TenantKeyedStateTablesRdr229.fillIdUniqueIndexPass(notKeyed);   // RDR-229 P3.4 (nexus-p2m1x.22): the id-keyed index pass is engine-wide
+        TenantKeyedStateTablesRdr229.fillRegistryRowReads(notKeyed);   // RDR-229 P3.5a (nexus-p2m1x.23): per-transaction registry-row read records
         // nexus-f3yqd.2.18: the engine's own database passwords, set once at startup; the engine's, so no tenant's
         notKeyed.put("SecretMask.SECRETS", "the engine's own database passwords (the admin and the application role), added once "
             + "at startup; process-wide credentials of the engine, never a tenant's, and nothing a tenant's reset has to clear");

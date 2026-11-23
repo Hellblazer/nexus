@@ -8,7 +8,7 @@ import static dev.nexus.service.db.TenantKeyedStateTables.RESULT;
 
 /**
  * The RDR-229 engine-wide entries of {@link TenantKeyedStateTables}: the boot-time completion check (P3.1), the per-leaf
- * unique-index pass (P3.3b) and the id-keyed index pass (P3.4), each holding no per-tenant state. Split out so the table stays
+ * unique-index pass (P3.3b), the id-keyed index pass (P3.4) and the per-transaction registry-row reads (P3.5a), each holding no per-tenant state. Split out so the table stays
  * under the test file-size cap.
  */
 final class TenantKeyedStateTablesRdr229 {
@@ -132,6 +132,22 @@ final class TenantKeyedStateTablesRdr229 {
             + "(CompletionBootWork::onMoveCompleted), run when a move records completed_at; a callback, no data");
         notKeyed.put("PciReconciler.passEnded", "the listener the engine hands the reconciler at boot "
             + "(CompletionBootWork::onReconcilerPassEnded), run when a pass ends; a callback, no data");
+    }
+
+    private static final String REGISTRY_READ_PER_TRANSACTION = "the RDR-229 P3.5a registry-row read of one write: a record built inside "
+        + "one request's own scoped transaction to say which collections that transaction locks, bound to typed locals there and dropped "
+        + "when the transaction ends; never a field of a long-lived object, never held across requests, so a tenant's reset has "
+        + "nothing to clear; ";
+
+    /** RDR-229 P3.5a row 14 (nexus-p2m1x.23): the per-transaction sets of collection ids and labels a topic or aspect write locks. */
+    static void fillRegistryRowReads(Map<String, String> notKeyed) {
+        notKeyed.put("TaxonomyRegistryReads.Names.ids", REGISTRY_READ_PER_TRANSACTION + "the stored collection ids a topic write reads");
+        notKeyed.put("TaxonomyRegistryReads.Names.labels", REGISTRY_READ_PER_TRANSACTION + "the labels of rows no id has reached yet, "
+            + "which the same write reads by label");
+        notKeyed.put("AspectDocCollectionLocks.Held.ids", REGISTRY_READ_PER_TRANSACTION + "the stored collection ids an aspect or "
+            + "highlight write holds");
+        notKeyed.put("AspectDocCollectionLocks.Held.labels", REGISTRY_READ_PER_TRANSACTION + "the labels of unstamped rows the same "
+            + "write holds");
     }
 
     private static final String DATA_MOVE_REPORT_SESSION_COMPLETION = "the completion check's own read-only admin "
