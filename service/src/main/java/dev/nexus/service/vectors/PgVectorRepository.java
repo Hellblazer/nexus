@@ -6950,9 +6950,11 @@ FROM scope s
                                                                LedgerMarker<QuarantineBoundedOutcome> marker) {
         return tenantScope.withTenant(tenant, ctx -> {
             PgSession.setStatementAndLockBounds(ctx, statementTimeoutMs, lockTimeoutMs);
+            dev.nexus.service.db.GcCollectionReads.beforeMove();
             var rec = ctx.selectFrom(GC_QUARANTINE_ORPHANS_BOUNDED.call(
                     dim, tenant, collection, quarantineCollection, quarantinedAt, sampleLimit, rowLimit))
                .fetchOne();
+            dev.nexus.service.db.GcCollectionReads.read(ctx, tenant, collection, quarantineCollection);   // P3.5a: after the function's sweep gate
             runAfterSweepSqlHook();
             long moved = rec.get(GC_QUARANTINE_ORPHANS_BOUNDED.MOVED);
             long remaining = rec.get(GC_QUARANTINE_ORPHANS_BOUNDED.REMAINING);
@@ -7036,10 +7038,12 @@ FROM scope s
                     PgSession.DEFAULT_GC_QUARANTINE_BOUNDED_STATEMENT_TIMEOUT_MS,
                     PgSession.DEFAULT_GC_QUARANTINE_BOUNDED_LOCK_TIMEOUT_MS);
             }
+            dev.nexus.service.db.GcCollectionReads.beforeMove();
             var rec = ctx.selectFrom(GC_QUARANTINE_ORPHANS_FLOORED.call(
                     dim, tenant, collection, quarantineCollection, quarantinedAt, sampleLimit, rowLimit,
                     floorFraction, floorMinChunks, force, quarantineExpiresAt))
                .fetchOne();
+            dev.nexus.service.db.GcCollectionReads.read(ctx, tenant, collection, quarantineCollection);   // P3.5a: after the function's sweep gate
             runAfterSweepSqlHook();
             JSONB sampleJson = rec.get(GC_QUARANTINE_ORPHANS_FLOORED.SAMPLE);
             Long moved = rec.get(GC_QUARANTINE_ORPHANS_FLOORED.MOVED);
@@ -7067,9 +7071,11 @@ FROM scope s
         // (the pre-fix shape) left a permanently-orphaned projection row behind
         // for every zero-orphan pass; do not reintroduce it.
         return tenantScope.withTenant(tenant, ctx -> {
+            dev.nexus.service.db.GcCollectionReads.beforeMove();
             var rec = ctx.selectFrom(GC_QUARANTINE_ORPHANS.call(
                     dim, tenant, collection, quarantineCollection, quarantinedAt, sampleLimit))
                .fetchOne();
+            dev.nexus.service.db.GcCollectionReads.read(ctx, tenant, collection, quarantineCollection);   // P3.5a: after the function's sweep gate
             long moved = rec.get(GC_QUARANTINE_ORPHANS.MOVED);
             JSONB sampleJson = rec.get(GC_QUARANTINE_ORPHANS.SAMPLE);
             return new QuarantineOutcome(moved,
@@ -7143,8 +7149,12 @@ FROM scope s
         // collection's registration now happens INSIDE
         // nexus.gc_restore_rereferenced, guarded on there being a restore to
         // perform (see catalog-024-quarantine-collection-registration.xml).
-        return tenantScope.withTenant(tenant, ctx ->
-            Routines.gcRestoreRereferenced(ctx.configuration(), dim, tenant, quarantineCollection, originCollection));
+        return tenantScope.withTenant(tenant, ctx -> {
+            dev.nexus.service.db.GcCollectionReads.beforeMove();
+            long restored = Routines.gcRestoreRereferenced(ctx.configuration(), dim, tenant, quarantineCollection, originCollection);
+            dev.nexus.service.db.GcCollectionReads.read(ctx, tenant, originCollection, quarantineCollection);   // P3.5a: after the function's sweep gate
+            return restored;
+        });
     }
 
     /**
@@ -7208,9 +7218,11 @@ FROM scope s
                                                               int dim, LedgerMarker<RestoreBoundedOutcome> marker) {
         return tenantScope.withTenant(tenant, ctx -> {
             PgSession.setStatementAndLockBounds(ctx, statementTimeoutMs, lockTimeoutMs);
+            dev.nexus.service.db.GcCollectionReads.beforeMove();
             var rec = ctx.selectFrom(GC_RESTORE_REREFERENCED_BOUNDED.call(
                     dim, tenant, quarantineCollection, originCollection, rowLimit))
                .fetchOne();
+            dev.nexus.service.db.GcCollectionReads.read(ctx, tenant, originCollection, quarantineCollection);   // P3.5a: after the function's sweep gate
             runAfterSweepSqlHook();
             long restored = rec.get(GC_RESTORE_REREFERENCED_BOUNDED.RESTORED);
             long remaining = rec.get(GC_RESTORE_REREFERENCED_BOUNDED.REMAINING);
@@ -7467,7 +7479,7 @@ FROM scope s
         var source = new QuarantineRestoreOutcome.Source(auditId, operation, row.value3(), listed.size(),
                                                          offset, next);
         if (slice.isEmpty()) {
-            return markedOnly(tenant, new QuarantineRestoreOutcome(List.of(), null, dryRun, source, null), keyed);
+            return markedOnly(tenant, originCollection, new QuarantineRestoreOutcome(List.of(), null, dryRun, source, null), keyed);
         }
         String[] hex = canonicalChashes(slice);
         List<String> siblings = resolveRestoreSiblings(tenant, originCollection,
@@ -7557,8 +7569,8 @@ FROM scope s
         org.jooq.Condition past = after == null
             ? DSL.noCondition() : CHUNKS.CHASH.gt(dev.nexus.service.db.Chash.fromHex(after).toBytes());
         if (siblings.isEmpty()) {
-            return markedOnly(tenant, new QuarantineRestoreOutcome(List.of(), null, dryRun, null, null, List.of(),
-                                                                    siblings), keyed);
+            return markedOnly(tenant, originCollection, new QuarantineRestoreOutcome(List.of(), null, dryRun, null, null,
+                                                                    List.of(), siblings), keyed);
         }
         // Distinct chashes in order: the same chunk can sit in two siblings (the reaper's and a client's), and the
         // cursor pages by chash, so a chash is selected once however many siblings hold it.
@@ -7572,8 +7584,8 @@ FROM scope s
                .limit(limit)
                .fetch(r -> r.value1()));
         if (selected.isEmpty()) {
-            return markedOnly(tenant, new QuarantineRestoreOutcome(List.of(), null, dryRun, null, null, List.of(),
-                                                                    siblings), keyed);
+            return markedOnly(tenant, originCollection, new QuarantineRestoreOutcome(List.of(), null, dryRun, null, null,
+                                                                    List.of(), siblings), keyed);
         }
         String next = selected.size() == limit ? selected.get(selected.size() - 1) : null;
         // The cursor goes in with the call, so the outcome the keyed marker stores is the outcome the caller gets.
@@ -7788,6 +7800,9 @@ FROM scope s
             return restoreAcrossKeyed(tenant, originCollection, siblings, hex, actor, reattach, sourceAuditId, source,
                                       nextAfter, keyed);
         }
+        if (siblings.isEmpty()) {
+            dev.nexus.service.db.ExpectedCollectionIds.nothingToWrite(originCollection);   // P3.5a: no sibling, no transaction, nothing to write
+        }
         var byChash = new java.util.LinkedHashMap<String, QuarantineRestoreOutcome.Row>();
         for (String h : hex) byChash.putIfAbsent(h, missingRow(h));
         var auditIds = new ArrayList<Long>();
@@ -7871,10 +7886,17 @@ FROM scope s
      * a keyed call: the ledger row is committed by the marker, and without it the key would read {@code in_flight}
      * until its lease lapsed and the caller would get no body. Unkeyed it is the outcome itself.
      */
-    private QuarantineRestoreOutcome markedOnly(String tenant, QuarantineRestoreOutcome outcome, KeyedRestore keyed) {
-        if (keyed == null) return outcome;
+    private QuarantineRestoreOutcome markedOnly(String tenant, String originCollection, QuarantineRestoreOutcome outcome,
+                                                KeyedRestore keyed) {
+        if (keyed == null) {
+            // P3.5a: no transaction and no sibling to restore from: nothing is written under the origin, so its id has nothing to guard
+            dev.nexus.service.db.ExpectedCollectionIds.nothingToWrite(originCollection);
+            return outcome;
+        }
         try {
             return tenantScope.withTenant(tenant, ctx -> {
+                // P3.5a: the ledger transaction reads the origin's row too (no function ran, so no gate is held and the order is free)
+                dev.nexus.service.db.GcCollectionReads.read(ctx, tenant, originCollection);
                 runAfterSweepSqlHook();
                 keyed.marker().mark(ctx, outcome);
                 return outcome;
@@ -7913,6 +7935,7 @@ FROM scope s
                     }
                     PgSession.setStatementAndLockBounds(ctx, (int) Math.min(remaining, Integer.MAX_VALUE),
                                                         PgSession.DEFAULT_GC_RESTORE_BOUNDED_LOCK_TIMEOUT_MS);
+                    dev.nexus.service.db.GcCollectionReads.beforeMove();
                     var rows = ctx.selectFrom(QUARANTINE_RESTORE_CHUNKS.call(
                             tenant, originCollection, sibling, pending.toArray(String[]::new), actor, sourceAuditId,
                             false, reattach))
@@ -7925,6 +7948,7 @@ FROM scope s
                 var outcome = new QuarantineRestoreOutcome(List.copyOf(byChash.values()),
                     auditIds.isEmpty() ? null : auditIds.get(0), false, source, nextAfter, List.copyOf(auditIds),
                     List.copyOf(siblings));
+                dev.nexus.service.db.GcCollectionReads.read(ctx, tenant, originCollection);   // P3.5a: once per transaction, after any function's sweep gate (none ran with no sibling)
                 runAfterSweepSqlHook();
                 keyed.marker().mark(ctx, outcome);
                 return outcome;
@@ -7986,9 +8010,12 @@ FROM scope s
             return tenantScope.withTenant(tenant, ctx -> {
                 PgSession.setStatementAndLockBounds(ctx, PgSession.DEFAULT_GC_RESTORE_BOUNDED_STATEMENT_TIMEOUT_MS,
                                                     PgSession.DEFAULT_GC_RESTORE_BOUNDED_LOCK_TIMEOUT_MS);
-                return ctx.selectFrom(QUARANTINE_RESTORE_CHUNKS.call(
+                dev.nexus.service.db.GcCollectionReads.beforeMove();
+                var restored = ctx.selectFrom(QUARANTINE_RESTORE_CHUNKS.call(
                         tenant, originCollection, quarantineCollection, hex, actor, sourceAuditId, dryRun, reattach))
                    .fetch();
+                dev.nexus.service.db.GcCollectionReads.read(ctx, tenant, originCollection);   // P3.5a: after the function's sweep gate
+                return restored;
             });
         } catch (RuntimeException e) {
             throw asRestoreBusy(e);
@@ -8094,10 +8121,13 @@ FROM scope s
             if (statementTimeoutMs > 0) {
                 PgSession.setStatementAndLockBounds(ctx, statementTimeoutMs, 2_000);
             }
-            return ctx.selectFrom(GC_EXPIRE_QUARANTINE.call(
+            dev.nexus.service.db.GcCollectionReads.beforeMove();
+            var expired = ctx.selectFrom(GC_EXPIRE_QUARANTINE.call(
                     dim, tenant, quarantineCollection, originCollection, cutoff,
                     floorFraction, floorMinChunks, force))
                .fetchOne();
+            dev.nexus.service.db.GcCollectionReads.read(ctx, tenant, originCollection, quarantineCollection);   // P3.5a: after the function's sweep gate
+            return expired;
         });
         return new ExpireOutcome(rec.get(GC_EXPIRE_QUARANTINE.EXPIRED), rec.get(GC_EXPIRE_QUARANTINE.REFUSED));
     }
@@ -8163,10 +8193,12 @@ FROM scope s
                                                           LedgerMarker<ExpireBoundedOutcome> marker) {
         return tenantScope.withTenant(tenant, ctx -> {
             PgSession.setStatementAndLockBounds(ctx, statementTimeoutMs, lockTimeoutMs);
+            dev.nexus.service.db.GcCollectionReads.beforeMove();
             var rec = ctx.selectFrom(GC_EXPIRE_QUARANTINE_BOUNDED.call(
                     dim, tenant, quarantineCollection, originCollection, cutoff,
                     floorFraction, floorMinChunks, force, rowLimit, countRefused))
                .fetchOne();
+            dev.nexus.service.db.GcCollectionReads.read(ctx, tenant, originCollection, quarantineCollection);   // P3.5a: after the function's sweep gate
             runAfterSweepSqlHook();
             var outcome = new ExpireBoundedOutcome(
                 rec.get(GC_EXPIRE_QUARANTINE_BOUNDED.EXPIRED), rec.get(GC_EXPIRE_QUARANTINE_BOUNDED.REFUSED),
