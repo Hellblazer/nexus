@@ -1,5 +1,4 @@
 ### Fixed
 
 - The aspect and taxonomy routes that read the registry rows of the collections their child rows are stamped to (`aspects/salient_sentences/set`, `aspects/highlights/delete`, `topics/update_label`, `rename`, `mark_reviewed`, `delete`, `merge`, `persist_split`, `assignments/purge_doc`, `purge_collection`) no longer answer 409 `collection_superseded` or 404 `unknown_collection_id` for a row stamped to a retired or gone collection (RDR-229 P3.5a). A supersede re-homes no child, so such rows persist, and the routes answer 200 and write, as they did before the read existed. The collection a request names keeps its refusal.
-- `assignments/prune_projection` in its prefix form prunes the weak projections stamped to a retired collection that bears a matching label, as it did when it matched the name column (RDR-229 P3.5a).
 - `topics/delete` and `topics/merge` answer 404 when the topic is gone or filed under another collection by the time they delete it, not a success for a delete they did not make (RDR-229 P3.5a).
