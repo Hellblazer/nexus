@@ -129,6 +129,30 @@ def test_closed_client_is_rebuilt_on_the_next_call(store):
     assert not store._client.is_closed
 
 
+def test_a_client_swapped_mid_send_retries_on_the_replacement(store, monkeypatch):
+    """Folio, 2026-11-23T07:26:11Z: one scratch call's 401 heal swapped (and closed) the client while a
+    concurrent call was sending on the old one, and that call failed once with 'client has been closed'.
+    The send now retries once on the replacement."""
+    real_live_client = store._live_client
+    stale = store._client
+    calls = {"n": 0}
+
+    def swapped_after_the_check():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            store._replace_client()  # the concurrent heal lands between the check and the send
+            return stale
+        return real_live_client()
+
+    monkeypatch.setattr(store, "_live_client", swapped_after_the_check)
+
+    id_ = store.put("sent during a concurrent heal")
+
+    assert stale.is_closed
+    assert calls["n"] == 2
+    assert store.get(id_) is not None
+
+
 def test_owner_close_is_not_undone(store):
     """``close()`` by the owner stays closed: the reopen is for a client the
     store lost, never for one its owner shut."""
