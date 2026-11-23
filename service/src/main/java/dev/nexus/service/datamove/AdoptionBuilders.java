@@ -37,6 +37,44 @@ final class AdoptionBuilders {
 
     private AdoptionBuilders() { /* static */ }
 
+    /** How long a signalled builder gets to leave the server: its locks are released only when the backend has exited, not when it is signalled. */
+    static final long GONE_WAIT_MS = 2_000;
+
+    /**
+     * Waits, bounded by {@link #GONE_WAIT_MS}, until none of {@code pids} is a backend any more, so the next attempt does not meet the lock of a
+     * backend that was signalled and is still exiting. The activity view's snapshot is dropped before each read (it is cached per transaction).
+     *
+     * @return whether they are all gone
+     */
+    private static boolean waitUntilGone(DSLContext admin, Set<Integer> pids) {
+        long end = System.nanoTime() + GONE_WAIT_MS * 1_000_000L;
+        Field<Integer> pid = DSL.field(DSL.name("pid"), Integer.class);
+        while (true) {
+            try {
+                if (noneLeft(admin, pid, pids)) {
+                    return true;
+                }
+            } catch (DataAccessException e) {
+                log.warn("event=rdr229_adoption_builders_gone_unchecked cause=\"{}\"", FailureHandler.oneLine(e.toString()));
+                return false;
+            }
+            if (System.nanoTime() >= end) {
+                return false;
+            }
+            try {
+                Thread.sleep(20);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+    }
+
+    private static boolean noneLeft(DSLContext admin, Field<Integer> pid, Set<Integer> pids) {
+        admin.select(DSL.function("pg_stat_clear_snapshot", Object.class)).fetch();
+        return admin.fetchCount(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")), pid.in(pids)) == 0;
+    }
+
     /** @return how many builders it ended (0 when a blocker was not a builder, or nothing blocked any more) */
     static int endBlockingBuilders(DSLContext admin) {
         try {
@@ -88,7 +126,8 @@ final class AdoptionBuilders {
             String why = "reason=rdr229_adoption_blocked pids=" + leavesOf.keySet() + " leaves=" + leaves + " indexes=" + indexes
                 + " (they hold SHARE UPDATE EXCLUSIVE and the adoption's SHARE ROW EXCLUSIVE on chunks timed out behind them; the next attempt after the backoff takes the lock)";
             int ended = admin.transactionResult(cfg -> PciBuilders.terminatePidsOrThrow(cfg.dsl(), leavesOf.keySet(), why, log));
-            log.info("event=rdr229_adoption_ended_builders ended={} pids={} leaves={} indexes={}", ended, leavesOf.keySet(), leaves, indexes);
+            boolean gone = waitUntilGone(admin, leavesOf.keySet());
+            log.info("event=rdr229_adoption_ended_builders ended={} pids={} leaves={} indexes={} gone={}", ended, leavesOf.keySet(), leaves, indexes, gone);
             return ended;
         } catch (DataAccessException e) {
             log.warn("event=rdr229_adoption_builders_not_ended cause=\"{}\"", FailureHandler.oneLine(e.toString()));
