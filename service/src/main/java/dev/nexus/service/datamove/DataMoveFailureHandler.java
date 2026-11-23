@@ -38,6 +38,8 @@ public final class DataMoveFailureHandler implements FailureHandler {
     private final String applicationName;
     private final Clock clock;
     private final Duration recorderWait;
+    /** Per move, the run of {@code on_complete} bounds this process has seen; in memory (the row keeps no stage). */
+    private final MoveRetryPolicy.OnCompleteRuns runs = new MoveRetryPolicy.OnCompleteRuns();
 
     public DataMoveFailureHandler(AdminConnection admin, String applicationName, Clock clock) {
         this(admin, applicationName, clock, RECORDER_WAIT);
@@ -108,10 +110,22 @@ public final class DataMoveFailureHandler implements FailureHandler {
     private Disposition transientFailure(Failure f, DataMoveFailureClassifier.Verdict verdict, Instant now) {
         String reason = verdict.reason();
         OptionalInt retries = withAdmin(f, ctx -> MoveFailureRecords.recordTransient(ctx, f.move().label(), now, reason));
-        return retries.isPresent()
-            ? Disposition.blocked(MoveRetryPolicy.blockedReason(retries.getAsInt(), now, reason), verdict.sqlstate(),
-                retries.getAsInt())
-            : Disposition.blocked(reason, verdict.sqlstate(), Disposition.NOT_COUNTED);
+        if (retries.isEmpty()) {
+            return Disposition.blocked(reason, verdict.sqlstate(), Disposition.NOT_COUNTED);
+        }
+        int count = retries.getAsInt();
+        var run = runs.record(f.move().label(), count, MoveRetryPolicy.isOnCompleteBound(f.stage(), verdict.sqlstate()));
+        boolean indexBuilds = run.run() >= MoveRetryPolicy.NEEDS_OPERATOR_AT_ON_COMPLETE && ChunkFamily.touches(f.move());
+        if (MoveRetryPolicy.entersNeedsOperator(count - 1, run.before(), count, run.run())) {
+            // the count is bumped by one UPDATE and the run by one thread per move, so exactly one failure enters the state:
+            // the page fires once per transition
+            MoveEvents.needsOperator(f.move().label(), MoveRetryPolicy.step(f.stage()), verdict.sqlstate(),
+                MoveRetryPolicy.boundMs(f.stage(), f.move(), verdict.sqlstate()), count, indexBuilds,
+                indexBuilds ? "each retry ends in-flight index builds (PCI, leaf, id-unique)"
+                    : "the move has failed transiently " + count + " times in a row and keeps retrying");
+        }
+        return Disposition.blocked(MoveRetryPolicy.blockedReason(count, run.run(), indexBuilds, now, reason),
+            verdict.sqlstate(), count);
     }
 
     /** Runs {@code write} on the pass's admin connection, or on a short one of its own when the pass has none. */
