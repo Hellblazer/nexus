@@ -266,7 +266,7 @@ def scan_java(p):
         return hit
 
     # TABLE.COLUMN and alias.COLUMN
-    for mm in re.finditer(r"(?<![\w$.])(?:Tables\.)?([A-Za-z_][A-Za-z0-9_]*)\.([A-Z][A-Z0-9_]*)\b(?!\s*\()", m):
+    for mm in re.finditer(r"(?:(?<![\w$.])|(?<=\bTables\.))([A-Za-z_][A-Za-z0-9_]*)\.([A-Z][A-Z0-9_]*)\b(?!\s*\()", m):   # also the fully qualified dev.nexus.service.jooq.nexus.Tables.X.NAME
         var, col = mm.group(1), mm.group(2)
         pos = mm.start(1)
         if var.isupper():

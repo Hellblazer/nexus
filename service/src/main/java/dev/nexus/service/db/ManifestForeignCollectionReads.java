@@ -7,12 +7,14 @@ import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.Record5;
 import org.jooq.Select;
+import dev.nexus.service.datamove.Gate3;
 import org.jooq.impl.DSL;
 
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 
@@ -65,32 +67,58 @@ public final class ManifestForeignCollectionReads {
     /**
      * The statement's row filter: a live document with a physical collection, and a manifest row of the tenant that
      * names a different one. {@code <>} is false for a NULL on either side, so a ghost document (no collection) and a
-     * row with no collection are never findings.
+     * row with no collection are never findings. From gate 3 the collections are compared by their ids (RDR-229 P3.5c): a one-row
+     * rename leaves the stored names stale, so a name comparison would call a renamed collection's own rows foreign; a manifest row with
+     * no collection id is not a finding ({@code differ} is NULL-distinct, so it is excluded explicitly).
      */
-    private static Condition foreign(String tenant) {
+    private static Condition foreign(String tenant, CollectionKey k) {
         var d = CATALOG_DOCUMENTS;
         var m = CATALOG_DOCUMENT_CHUNKS;
         return d.TENANT_ID.eq(tenant)
             .and(m.TENANT_ID.eq(tenant))
             .and(d.DELETED_AT.isNull())
-            .and(d.PHYSICAL_COLLECTION.ne(""))
-            .and(m.COLLECTION.ne(d.PHYSICAL_COLLECTION));
+            .and(k.present(d.PHYSICAL_COLLECTION, d.PHYSICAL_COLLECTION_ID))
+            .and(k.byId() ? m.COLLECTION_ID.isNotNull() : DSL.noCondition())
+            .and(k.differ(m.COLLECTION, m.COLLECTION_ID, d.PHYSICAL_COLLECTION, d.PHYSICAL_COLLECTION_ID));
+    }
+
+    /** {@link #listQuery(DSLContext, String, int, Gate3)} on the name columns (before gate 3). */
+    public static Select<Record5<String, String, String[], Integer, Integer>> listQuery(
+            DSLContext ctx, String tenant, int fetchLimit) {
+        return listQuery(ctx, tenant, fetchLimit, Gate3.never());
     }
 
     /**
      * The one statement: {@code fetchLimit} rows of (tumbler, physical collection, other collections, chunk count,
      * total), the caller passing {@code limit + 1}; the total is the same on every row. Public so a plan-shape test can
-     * explain the exact statement the route runs.
+     * explain the exact statement the route runs. From gate 3 the collections are the registry's CURRENT labels of the ids
+     * (a left join to the registry; a dangling id keeps its stored name), and the document is grouped by its collection id.
      */
     public static Select<Record5<String, String, String[], Integer, Integer>> listQuery(
-            DSLContext ctx, String tenant, int fetchLimit) {
+            DSLContext ctx, String tenant, int fetchLimit, Gate3 gate3) {
         var d = CATALOG_DOCUMENTS;
         var m = CATALOG_DOCUMENT_CHUNKS;
-        Field<String[]> others = DSL.arrayAggDistinct(m.COLLECTION).orderBy(m.COLLECTION);
-        return ctx.select(d.TUMBLER, d.PHYSICAL_COLLECTION, others, DSL.count(), DSL.count().over())
-            .from(d.join(m).on(m.TENANT_ID.eq(d.TENANT_ID).and(m.DOC_ID.eq(d.TUMBLER))))
-            .where(foreign(tenant))
-            .groupBy(d.TUMBLER, d.PHYSICAL_COLLECTION)
+        CollectionKey k = CollectionKey.of(gate3);
+        if (!k.byId()) {
+            Field<String[]> others = DSL.arrayAggDistinct(m.COLLECTION).orderBy(m.COLLECTION);
+            return ctx.select(d.TUMBLER, d.PHYSICAL_COLLECTION, others, DSL.count(), DSL.count().over())
+                .from(d.join(m).on(m.TENANT_ID.eq(d.TENANT_ID).and(m.DOC_ID.eq(d.TUMBLER))))
+                .where(foreign(tenant, k))
+                .groupBy(d.TUMBLER, d.PHYSICAL_COLLECTION)
+                .orderBy(d.TUMBLER)
+                .limit(fetchLimit);
+        }
+        var mc = CATALOG_COLLECTIONS.as("fcr_m");
+        var dc = CATALOG_COLLECTIONS.as("fcr_d");
+        Field<String> otherLabel = DSL.coalesce(mc.NAME, m.COLLECTION);
+        Field<String> ownLabel = DSL.coalesce(dc.NAME, d.PHYSICAL_COLLECTION);
+        Field<String[]> others = DSL.arrayAggDistinct(otherLabel).orderBy(otherLabel);
+        return ctx.select(d.TUMBLER, ownLabel, others, DSL.count(), DSL.count().over())
+            .from(d.join(m).on(m.TENANT_ID.eq(d.TENANT_ID).and(m.DOC_ID.eq(d.TUMBLER)))
+                .leftJoin(mc).on(mc.TENANT_ID.eq(m.TENANT_ID).and(mc.COLLECTION_ID.eq(m.COLLECTION_ID)))
+                .leftJoin(dc).on(dc.TENANT_ID.eq(d.TENANT_ID).and(dc.COLLECTION_ID.eq(d.PHYSICAL_COLLECTION_ID))))
+            .where(foreign(tenant, k))
+            .groupBy(d.TUMBLER, d.PHYSICAL_COLLECTION_ID, ownLabel)
             .orderBy(d.TUMBLER)
             .limit(fetchLimit);
     }
@@ -106,7 +134,7 @@ public final class ManifestForeignCollectionReads {
         return repo.tenantScope().withTenant(tenant, ctx -> {
             PgSession.setLocal(ctx, "statement_timeout", Integer.toString(Integer.getInteger(
                 CatalogRepository.FILLABLE_COUNT_TIMEOUT_PROPERTY, CatalogRepository.FILLABLE_COUNT_TIMEOUT_MS)));
-            var rows = listQuery(ctx, tenant, limit + 1).fetch();
+            var rows = listQuery(ctx, tenant, limit + 1, repo.gate3()).fetch();
             // The total is the window count over the grouped rows, before the LIMIT: count and capped share one snapshot.
             int count = rows.isEmpty() ? 0 : rows.get(0).value5();
             boolean capped = count > limit;
