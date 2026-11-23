@@ -930,6 +930,48 @@ def run_doctor(inst: Install, a: argparse.Namespace, env: dict[str, str], label:
                       "rc": r.returncode}
 
 
+#: The open data moves in the registry, oldest first: not completed, not failed, not paused, not superseded.
+_OPEN_MOVES_SQL = (
+    "select d.label, d.driving_schema, d.driving_table, d.chunk_size, d.sleep_ms, d.registered_at::text "
+    "from nexus.data_moves d where d.completed_at is null and d.failed_at is null and d.paused_at is null "
+    "and not exists (select 1 from nexus.data_moves s where s.supersedes = d.label) order by d.registered_at, d.label")
+
+
+def open_moves(inst: Install) -> list[dict]:
+    """Each open data move with the row count of the table it walks (``dml_utils`` cuts the whole driving table
+    into chunks by primary key, so the move takes ceil(rows / chunk_size) chunks whatever the predicate selects)."""
+    out: list[dict] = []
+    for label, schema, table, chunk, sleep, registered in inst.sql(_OPEN_MOVES_SQL) or []:
+        counted = inst.sql(f'select count(*) from "{schema}"."{table}"')
+        out.append({"label": label, "table": f"{schema}.{table}", "rows": int((counted or [["0"]])[0][0]),
+                    "chunk_size": int(chunk), "registered_sleep_ms": int(sleep), "registered_at": registered})
+    return out
+
+
+def check_move_pacing(moves: list[dict], sleep_override_ms: int | None, max_wait: float) -> dict:
+    """What the open moves cost in pauses alone: per move ceil(rows / chunk_size) chunks x the pause after each
+    (``sleep_override_ms`` when set, else the move's registered ``sleep_ms``); the worker runs them one after
+    another, so the figures add. Raises HarnessError, naming the moves, when the sum exceeds ``max_wait``: that run
+    would end as an idle that never came. Returns the estimate for the report."""
+    rows = []
+    for m in moves:
+        chunks = -(-int(m["rows"]) // max(1, int(m["chunk_size"])))
+        sleep = m["registered_sleep_ms"] if sleep_override_ms is None else sleep_override_ms
+        rows.append({**m, "chunks": chunks, "effective_sleep_ms": sleep, "pause_s": round(chunks * sleep / 1000.0, 1)})
+    total = round(sum(r["pause_s"] for r in rows), 1)
+    est = {"sleep_override_ms": sleep_override_ms, "pause_s_total": total, "max_wait_s": max_wait, "moves": rows}
+    if total > max_wait:
+        worst = sorted(rows, key=lambda r: r["pause_s"], reverse=True)[:3]
+        raise HarnessError(
+            f"the open data moves pause {total:.0f} s between chunks (pace: "
+            f"{'the registered sleep_ms' if sleep_override_ms is None else f'NX_DATA_MOVE_SLEEP_MS={sleep_override_ms}'}), "
+            f"more than --max-wait {max_wait:.0f} s, so this run could never reach idle. Largest: "
+            + "; ".join(f"{r['label']} {r['rows']} rows / {r['chunk_size']} per chunk x {r['effective_sleep_ms']} ms = "
+                         f"{r['pause_s']:.0f} s" for r in worst)
+            + ". Lower --data-move-sleep-ms or raise --max-wait.")
+    return est
+
+
 #: The engine setting that overrides every registered data move's ``sleep_ms`` (DataMoveWorker.SLEEP_ENV).
 DATA_MOVE_SLEEP_ENV = "NX_DATA_MOVE_SLEEP_MS"
 
@@ -998,6 +1040,10 @@ def measure_boot(inst: Install, a: argparse.Namespace, env: dict[str, str], labe
             failure = f"the engine exited while booting (nx daemon service start had returned {rc})"
             break
         time.sleep(0.5)
+    if "ready" in marks and not failure and label == "upgrade":
+        # The moves are registered by now (Liquibase ran before the bind). A pacing that cannot finish inside
+        # --max-wait fails here, not 40 minutes later as an idle that never came.
+        rec["move_pacing"] = check_move_pacing(open_moves(inst), a.data_move_sleep_ms, a.max_wait)
     doctor: dict = {}
     doc_thread: threading.Thread | None = None
     # A boot that will be restarted mid-queue runs no doctor: it would outlive the stop and run against an
@@ -1081,7 +1127,7 @@ def measure_boot(inst: Install, a: argparse.Namespace, env: dict[str, str], labe
                                                    "wait_event": x[4], "backend_start": x[5], "backend_type": x[6]}
                                                   for x in survivors]})
         rec.update({"reached_ready": True, "restarted_mid_queue_s": round(last.t, 1), "total_wal_bytes": last.lsn - base,
-                    "pci_builds": build_timeline(samples),
+                    "pci_builds": build_timeline(samples), "move_wal_bytes": move_wal_bytes(samples, last),
                     "phases": {"migrate": _phase(base, first_mark(marks), marks["bind"]),
                                "ready": _phase(marks["bind"].lsn, marks["bind"], marks["ready"]),
                                "until_restart": _phase(marks["ready"].lsn, marks["ready"], last)}})

@@ -233,7 +233,7 @@ ssh "$H-test" "cd ~/src/nexus && for L in A B C; do git worktree add -q --detach
 # Leg A: the normal upgrade, then a plain reboot
 ssh "$H-test" 'cd ~/src/nexus-wt/engine-cut-'"$TAG"'-A && uv sync -q && NX_BUILD_LEASE_WAIT=28800 scripts/build-gate-jar.sh --lab-run lab-m && mkdir -p output/gate && \
   lab-run -c lab-m -- uv run python scripts/upgrade_boot_writes.py --prev-client '"$PREV"' --new-jar-commit '"$TAG"' \
-  --ceiling 67108864 --ceiling-boot 67108864 --ceiling-reboot 67108864 --json output/gate/A.json'
+  --ceiling-boot 67108864 --ceiling-reboot 67108864 --json output/gate/A.json'
 # Leg B: from before per-collection indexes, queued aspect rows, graceful restart mid-queue
 ssh "$H-test" 'cd ~/src/nexus-wt/engine-cut-'"$TAG"'-B && uv sync -q && NX_BUILD_LEASE_WAIT=28800 scripts/build-gate-jar.sh --lab-run lab-m && mkdir -p output/gate && \
   lab-run -c lab-m -- uv run python scripts/upgrade_boot_writes.py --prev-client 7.76.0 --new-jar-commit '"$TAG"' --no-pci-wait \
@@ -265,8 +265,7 @@ stamp (a plain `mvnw package`).
 
 - **Leg A** is the normal upgrade, from the release users are on now, then a
   plain same-version reboot. `--ceiling-boot` bounds the upgrade boot's migrate
-  and ready, `--ceiling` total WAL through idle (measured 0.80 MB from 8.0.0),
-  and `--ceiling-reboot` the reboot's migrate
+  and ready, and `--ceiling-reboot` the reboot's migrate
   and ready (measured 0.45-0.59 MB). Every index is valid before the reboot, so
   nothing legitimate writes in it, and an engine that rewrites data on every
   boot fails here even if its first boot passes.
@@ -284,10 +283,22 @@ stamp (a plain `mvnw package`).
 - **Leg C** is Leg B with a forced kill, under the same upgrade-boot bound and the
   restart rule.
 
+Data moves (Sam, T2 `nexus/sam-ruling-upgrade-gate-move-pacing-2026-11-23`). The
+harness sets `NX_DATA_MOVE_SLEEP_MS` for every boot of the new engine (`--data-move-sleep-ms`,
+default 0, recorded as `data_move_sleep_ms`), so the registered moves, the RDR-229 stamps
+included, run to completion inside `--max-wait` instead of at production pacing (about 4.8 h
+for the fixture's chunks stamp). Before it waits for idle it adds up the pauses of the open
+moves and exits 2 when they cannot fit `--max-wait`. Every leg's byte bound covers migrate and
+ready (`--ceiling-boot`) and the reboot (`--ceiling-reboot`) and nothing after ready: the WAL
+the moves write after ready (about 2.1 GB for the chunks stamp) is reported as
+`move_wal_bytes`, never gated. Do not add `--ceiling` back to a leg: it gates the total less
+that figure, so the settle phase's other writes and the autovacuum the moves leave still count.
+
 Every leg must exit 0. Exit 1 is a red (a bound tripped, a boot failed, or the
 restart rule failed): do not tag. Exit 2 is a harness failure with no measurement: fix the
 run and repeat it, never tag on it. Paste each fetched `output/gate/*.json`'s
-`verdict`, `boot_wal_bytes`, `reboot_wal_bytes` (Leg A), `total_wal_bytes`,
+`verdict`, `boot_wal_bytes`, `reboot_wal_bytes` (Leg A), `total_wal_bytes`, `move_wal_bytes`,
+`data_move_sleep_ms`,
 `ceilings_tripped`, `new_jar_sha256`, `new_jar_commit`, `new_jar_identity` and the
 `resume` block on the cut bead, and check that `new_jar_identity` shows the jar's
 engine tree equals the tag commit's. Not covered by this step: background work

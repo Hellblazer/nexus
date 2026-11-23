@@ -365,7 +365,9 @@ def _main_with_stubbed_boots(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, ar
 
     def fake_boot_new(inst, a, env, rep) -> None:  # noqa: ANN001
         seen.update(env=dict(env), sleep=a.data_move_sleep_ms)
-        rep.boots = [{"label": "upgrade", "reached_ready": True}]
+        rep.boots = [{"label": "upgrade", "reached_ready": True, **({"restarted_mid_queue_s": 1.0} if a.restart_mid_queue else {})}]
+        if a.restart_mid_queue:
+            rep.resume = {"resume_ok": True}
 
     monkeypatch.setattr(_mod, "build_old_state", lambda *_a, **_k: None)
     monkeypatch.setattr(_mod, "boot_new", fake_boot_new)
@@ -373,7 +375,8 @@ def _main_with_stubbed_boots(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, ar
     setattr_in(monkeypatch, _mod, "subprocess.run", lambda *_a, **_k: None)
     monkeypatch.setattr(_mod.Install, "pgdata", property(lambda self: tmp_path / "pgdata"))
     out = tmp_path / "report.json"
-    rc = _mod.main([*argv, "--new-jar", str(jar), "--work", str(tmp_path / "work"), "--json", str(out), "--no-second-boot"])
+    rc = _mod.main([*argv, "--new-jar", str(jar), "--work", str(tmp_path / "work"), "--json", str(out),
+                     *([] if "--restart-mid-queue" in argv else ["--no-second-boot"])])
     return rc, seen, json.loads(out.read_text(encoding="utf-8"))
 
 
@@ -465,3 +468,77 @@ def test_the_total_ceiling_ignores_post_ready_move_wal_but_the_report_has_it(mon
     assert rep.move_wal_bytes == move and rep.total_wal_bytes == total   # reported beside the total
     assert _mod.ceiling_verdict(rep.boot_wal_bytes, rep.total_wal_bytes, _MIB64, _MIB64, rep.reboot_wal_bytes, _MIB64,
                                 rep.move_wal_bytes) == ("under-ceiling", [])
+
+
+# ── the sizing check: pauses alone must fit --max-wait (ask rdr229-upgrade-gate-pacing) ────
+
+# The registered pacing of the RDR-229 stamps (vectors-070): chunks 100 rows / 20 s, the rest 1000 rows / 4 s.
+_FIXTURE_MOVES = [
+    {"label": "rdr229-stamp-catalog_documents", "table": "nexus.catalog_documents", "rows": 90, "chunk_size": 1000,
+     "registered_sleep_ms": 4000, "registered_at": "t1"},
+    {"label": "rdr229-stamp-catalog_document_chunks", "table": "nexus.catalog_document_chunks", "rows": 86_000,
+     "chunk_size": 1000, "registered_sleep_ms": 4000, "registered_at": "t2"},
+    {"label": "rdr229-stamp-chunks", "table": "nexus.chunks", "rows": 86_000, "chunk_size": 100,
+     "registered_sleep_ms": 20_000, "registered_at": "t3"},
+]
+
+
+def test_production_pacing_on_the_fixture_fails_the_sizing_check_fast() -> None:
+    with pytest.raises(_mod.HarnessError) as e:
+        _mod.check_move_pacing(_FIXTURE_MOVES, None, 2400.0)   # what the harness did before: the registered sleep_ms
+    msg = str(e.value)
+    assert "rdr229-stamp-chunks 86000 rows / 100 per chunk x 20000 ms = 17200 s" in msg
+    assert "--max-wait 2400" in msg and "--data-move-sleep-ms" in msg
+
+
+def test_a_zero_pause_passes_the_sizing_check_and_the_estimate_is_reported() -> None:
+    est = _mod.check_move_pacing(_FIXTURE_MOVES, 0, 2400.0)
+    assert est["pause_s_total"] == 0 and est["sleep_override_ms"] == 0
+    assert [m["chunks"] for m in est["moves"]] == [1, 86, 860]
+
+
+def test_the_pause_adds_across_moves_and_is_judged_at_the_bound() -> None:
+    # 1 + 86 + 860 = 947 chunks; at 2500 ms that is 2367.5 s, under 2400; at 2600 ms 2462.2 s, over
+    assert _mod.check_move_pacing(_FIXTURE_MOVES, 2500, 2400.0)["pause_s_total"] == 2367.5
+    with pytest.raises(_mod.HarnessError, match="2462 s"):
+        _mod.check_move_pacing(_FIXTURE_MOVES, 2600, 2400.0)
+    assert _mod.check_move_pacing([], None, 1.0)["pause_s_total"] == 0
+
+
+def test_open_moves_reads_the_registry_and_counts_each_driving_table() -> None:
+    queries: list[str] = []
+
+    class _Inst:
+        def sql(self, q: str) -> list[list[str]]:
+            queries.append(q)
+            if "nexus.data_moves" in q:
+                return [["rdr229-stamp-chunks", "nexus", "chunks", "100", "20000", "2026-11-23 01:00:00+00"]]
+            return [["86000"]]
+
+    moves = _mod.open_moves(_Inst())
+    assert moves == [{"label": "rdr229-stamp-chunks", "table": "nexus.chunks", "rows": 86_000, "chunk_size": 100,
+                      "registered_sleep_ms": 20_000, "registered_at": "2026-11-23 01:00:00+00"}]
+    assert 'select count(*) from "nexus"."chunks"' in queries
+    assert "completed_at is null" in queries[0] and "s.supersedes = d.label" in queries[0]
+
+
+def test_every_leg_reports_the_pause_and_the_move_wal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # marginalia's field names: data_move_sleep_ms (an int) and move_wal_bytes, both in the report JSON of every leg,
+    # a leg that saw no move included (0, never absent)
+    for argv in ([], ["--restart-mid-queue", "3", "--restart-mode", "kill"], ["--no-pci-wait", "--collections", "7"]):
+        _rc, _seen, report = _main_with_stubbed_boots(monkeypatch, tmp_path, argv)
+        assert report["data_move_sleep_ms"] == 0 and isinstance(report["data_move_sleep_ms"], int), argv
+        assert report["move_wal_bytes"] == 0, argv
+
+
+def test_a_restarted_leg_reports_the_move_wal_up_to_the_restart() -> None:
+    samples = [_sm(0, 10), _sm(1, 20, True), _sm(2, 70, True)]
+    assert _mod.move_wal_bytes(samples, samples[-1]) == 50   # the figure the mid-queue branch records
+
+
+def test_leg_a_no_longer_gates_the_total_in_the_skill() -> None:
+    skill = (_REPO / ".claude" / "skills" / "engine-release" / "SKILL.md").read_text(encoding="utf-8")
+    legs = [ln for ln in skill.splitlines() if "scripts/upgrade_boot_writes.py" in ln or "--json output/gate/" in ln]
+    assert any("output/gate/A.json" in ln for ln in legs)
+    assert not any("--ceiling " in ln for ln in legs), legs      # --ceiling-boot / --ceiling-reboot only
+    assert "move_wal_bytes" in skill and "data_move_sleep_ms" in skill
