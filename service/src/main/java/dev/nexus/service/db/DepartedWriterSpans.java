@@ -102,6 +102,14 @@ final class DepartedWriterSpans {
 
     private static final Logger log = LoggerFactory.getLogger(DepartedWriterSpans.class);
 
+    /** Spans from gate 3 whose collection id could not be resolved (RDR-229 P3.5c): logged at WARN and counted, never kept silently. */
+    private static final java.util.concurrent.atomic.AtomicLong UNRESOLVED = new java.util.concurrent.atomic.AtomicLong();
+
+    /** The count of unresolved spans so far (for tests and the status surface). */
+    static long unresolvedSpans() {
+        return UNRESOLVED.get();
+    }
+
     /** Chashes per statement, the bind budget {@code PgVectorRepository.SOURCE_URI_JOIN_BATCH} also uses. */
     static final int BATCH = 300;
 
@@ -281,6 +289,7 @@ final class DepartedWriterSpans {
         final boolean byId = gate3.holds();
         return guarded(ctx, tenant, "clear", () -> {
             int cleared = 0;
+            int unresolved = 0;
             // RDR-229 P3.5c: from gate 3 a collection is its id. A row that carries none (its producer has not switched) is
             // resolved from its label; a row with no id at all is no collection and is not cleared.
             Map<String, Long> resolved = !byId ? Map.of() : CollectionIdLookup.idsOf(ctx, tenant,
@@ -289,7 +298,10 @@ final class DepartedWriterSpans {
             for (Gone g : departed) {
                 Gone keyed = !byId || g.collectionId() != null ? g : g.withId(resolved.get(g.collection()));
                 Object key = byId ? keyed.collectionId() : keyed.collection();
-                if (key == null) continue;
+                if (key == null) {
+                    unresolved++;   // never kept silently: logged and counted below
+                    continue;
+                }
                 byCollection.computeIfAbsent(key, k -> new LinkedHashMap<>())
                     .computeIfAbsent(keyed.hex(), k -> new ArrayList<>()).add(keyed);
             }
@@ -307,6 +319,10 @@ final class DepartedWriterSpans {
                     tuples.addAll(group);
                 }
                 if (!chashes.isEmpty()) cleared += clearBatch(ctx, tenant, e.getKey(), chashes, tuples, byId);
+            }
+            if (unresolved > 0) {
+                UNRESOLVED.addAndGet(unresolved);
+                log.warn("event=departed_writer_spans_unresolved tenant={} spans={} cause=clear reason=no_collection_id", tenant, unresolved);
             }
             if (cleared > 0) {
                 log.info("event=departed_writer_spans_cleared tenant={} chunks={}", tenant, cleared);
@@ -400,7 +416,11 @@ final class DepartedWriterSpans {
             Object collection = null;
             List<byte[]> chashes = new ArrayList<>();
             for (Record2<Object, byte[]> c : candidates) {
-                if (c.value1() == null) continue;   // a NULL id is no collection
+                if (c.value1() == null) {   // a NULL id is no collection: logged and counted, never kept silently
+                    UNRESOLVED.incrementAndGet();
+                    log.warn("event=departed_writer_spans_unresolved tenant={} cause=trash_purge reason=no_collection_id", tenant);
+                    continue;
+                }
                 if (!c.value1().equals(collection) || chashes.size() >= BATCH) {
                     if (!chashes.isEmpty()) cleared += trashBatch(ctx, tenant, threshold, collection, chashes, byId);
                     chashes = new ArrayList<>();

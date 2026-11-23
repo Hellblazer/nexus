@@ -149,8 +149,8 @@ class CatalogSchemeRouteMeasurementTest extends Rdr241RouteTestBase {
             double route = routeMedianMs(q, expect);
             var where = CatalogDocReads.schemeWhere(TENANT, c.scheme);
             String tag = stage + " scheme " + c.scheme + " offset " + c.offset;
-            double window = statementMedianMs(tag + " page with count(*) OVER ()", ctx -> CatalogDocReads.pageQuery(ctx, where, 1000, c.offset));
-            double rowsOnly = statementMedianMs(tag + " page without the window", ctx -> CatalogDocReads.pageRowsQuery(ctx, where, 1000, c.offset));
+            double window = statementMedianMs(tag + " page with count(*) OVER ()", ctx -> CatalogDocReads.pageQuery(ctx, where, 1000, c.offset, dev.nexus.service.datamove.Gate3.never()));
+            double rowsOnly = statementMedianMs(tag + " page without the window", ctx -> CatalogDocReads.pageRowsQuery(ctx, where, 1000, c.offset, dev.nexus.service.datamove.Gate3.never()));
             double count = statementMedianMs(tag + " count statement", ctx -> CatalogDocReads.countQuery(ctx, where));
             emit(String.format(Locale.ROOT, "RDR241SCHEME %s | route median %.1f ms | page+window %.1f ms | page only %.1f ms | count %.1f ms | matches %d",
                 tag, route, window, rowsOnly, count, expect));

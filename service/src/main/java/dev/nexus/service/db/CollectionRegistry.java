@@ -4,6 +4,7 @@ package dev.nexus.service.db;
 
 import org.jooq.DSLContext;
 import org.jooq.Record7;
+import org.jooq.impl.DSL;
 
 import java.util.Map;
 import java.util.Optional;
@@ -284,6 +285,8 @@ public final class CollectionRegistry {
                 .on(EMBEDDING_MODELS.EMBEDDING_MODEL.eq(CATALOG_COLLECTIONS.EMBEDDING_MODEL))
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
                 .and(CATALOG_COLLECTIONS.NAME.eq(collection)))
+            .orderBy(DSL.when(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("").and(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.isNull()), 1).otherwise(0).desc(),
+                CATALOG_COLLECTIONS.COLLECTION_ID.desc()).limit(1)
             .fetchOne();
         if (r == null) {
             throw new UnregisteredCollectionException(tenant, collection);
@@ -399,6 +402,8 @@ public final class CollectionRegistry {
         }
         return Optional.ofNullable(ctx.select(CATALOG_COLLECTIONS.LIFECYCLE_STATE).from(CATALOG_COLLECTIONS)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(collection)))
+            .orderBy(DSL.when(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("").and(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.isNull()), 1).otherwise(0).desc(),
+                CATALOG_COLLECTIONS.COLLECTION_ID.desc()).limit(1)
             .fetchOne(CATALOG_COLLECTIONS.LIFECYCLE_STATE));
     }
 
