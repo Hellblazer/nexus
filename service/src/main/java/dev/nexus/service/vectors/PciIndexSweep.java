@@ -319,18 +319,19 @@ public final class PciIndexSweep implements PciIndexSet {
                 Instant earlier = continuous ? previous.since().get(key) : null;
                 since.put(key, earlier == null ? now : earlier);
             }
-            SortedSet<String> entries = snapshot.validEntries();
+            SortedSet<String> entries = new TreeSet<>(snapshot.validEntries());
+            entries.addAll(snapshot.validIdEntries());   // the router's set stays name-keyed; the log of changes covers the id family too
             state.set(new State(snapshot, status, new AtomicBoolean(), Map.copyOf(since), entries));
             logSetChange(previous.entries(), entries);
             if (status.unparsed() > 0 && status.valid() == 0) {
                 // Indexes named pci_ exist and none parsed: a deparse change after a PostgreSQL upgrade looks
                 // exactly like this, and routes every collection as if it had no index.
-                log.warn("event=pci_sweep valid={} invalid={} unparsed={} reindex_leftover={} "
+                log.warn("event=pci_sweep valid={} valid_id={} invalid={} unparsed={} reindex_leftover={} "
                     + "warning=unparsed_indexes_and_no_valid_one",
-                    status.valid(), status.invalid(), status.unparsed(), status.reindexLeftover());
+                    status.valid(), snapshot.validIdCount(), status.invalid(), status.unparsed(), status.reindexLeftover());
             } else {
-                log.info("event=pci_sweep valid={} invalid={} unparsed={} reindex_leftover={}",
-                    status.valid(), status.invalid(), status.unparsed(), status.reindexLeftover());
+                log.info("event=pci_sweep valid={} valid_id={} invalid={} unparsed={} reindex_leftover={}",
+                    status.valid(), snapshot.validIdCount(), status.invalid(), status.unparsed(), status.reindexLeftover());
             }
             if (previous.expiryLogged().get()) {
                 log.info("event=pci_sweep_set_recovered valid={} invalid={} unparsed={} reindex_leftover={}",

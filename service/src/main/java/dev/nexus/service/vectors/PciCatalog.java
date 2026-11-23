@@ -579,7 +579,7 @@ public final class PciCatalog {
                 leafLeftoverIndexes += leaf.leafLeftovers().size();
                 for (Index index : leaf.indexes()) {
                     if (index.idParsed()) {
-                        // Never in the router's maps or counts: no reader selects by id before P3.5.
+                        // Not in the name-keyed router maps or in validCount (the name count): from the latch the serving path selects by id, and validIdCount counts these.
                         (index.valid() ? validIdKeys : invalidIdKeys)
                             .add(idKey(leaf.model(), leaf.tenant(), index.collectionId()));
                     } else if (index.leftover()) {
@@ -684,6 +684,19 @@ public final class PciCatalog {
                 for (Index index : leaf.indexes()) {
                     if (index.parsed() && index.valid()) {
                         entries.add(leaf.name() + ":" + index.collection() + ":" + index.name());
+                    }
+                }
+            }
+            return entries;
+        }
+
+        /** One entry per valid id-predicate index, {@code leaf:id=<id>:index}, sorted: after the latch these are the serving indexes, so the sweep logs their changes too. */
+        java.util.SortedSet<String> validIdEntries() {
+            java.util.SortedSet<String> entries = new java.util.TreeSet<>();
+            for (Leaf leaf : leaves) {
+                for (Index index : leaf.indexes()) {
+                    if (index.idParsed() && index.valid()) {
+                        entries.add(leaf.name() + ":id=" + index.collectionId() + ":" + index.name());
                     }
                 }
             }
