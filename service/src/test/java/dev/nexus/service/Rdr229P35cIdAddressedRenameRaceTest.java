@@ -13,6 +13,7 @@ import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.nexus.service.CollectionRouteFixture.Resp;
+import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.CollectionRegistry;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
