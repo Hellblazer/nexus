@@ -6109,7 +6109,7 @@ public final class CatalogRepository {
                 break;
             }
         }
-        if (!anyRows) return;
+        if (!anyRows) { ExpectedCollectionIds.nothingToWrite(collection); return; }   // no row is filed under the name: nothing to protect
         try {
             CollectionRegistry.lookupWritable(tenantScope, tenant, collection);
         } catch (CollectionSupersededException | CollectionRetiredIdException | UnknownCollectionIdException e) {
@@ -13629,7 +13629,7 @@ public final class CatalogRepository {
      */
     public int importChunksBatch(String tenant, String docId, String collection, List<Map<String, Object>> rows) {
         requireNonBlank(collection, "collection");
-        if (rows == null || rows.isEmpty()) return 0;
+        if (rows == null || rows.isEmpty()) { ExpectedCollectionIds.nothingToWrite(collection); return 0; }
         return manifestWriteTxn(tenant, "catalog.importChunksBatch " + collection, ctx -> {
             // Conflict key: (tenant_id, doc_id, position). doc_id is constant for
             // this call (the {doc_id, rows} import envelope is per-document).
