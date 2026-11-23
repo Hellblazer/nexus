@@ -123,6 +123,11 @@ class Catalog044OwnerFromDocumentsRepairTest {
                 }
 
                 applyRemainingChangelog(adminDs);
+                if (Rdr229CompleteStamps.formAApplied()) { // -Dnexus.test.formA.applied=true: the vectors-078 form A bodies over the repaired rows
+                    try (Connection su = pg.createConnection("")) {
+                        Rdr229CompleteStamps.completeAndApplyFormA(su);
+                    }
+                }
 
                 try (Connection su = pg.createConnection("")) {
                     assertThat(ownerOf(su, TENANT, SLUG_CODE))
