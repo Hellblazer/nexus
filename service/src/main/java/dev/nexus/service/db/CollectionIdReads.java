@@ -104,9 +104,13 @@ final class CollectionIdReads {
         return gate3.holds() ? idA.eq(idB) : nameA.eq(nameB);
     }
 
-    /** A registry row is live: {@code superseded_by = ''} before gate 3; {@code superseded_by_id IS NULL} from gate 3. */
+    /**
+     * A registry row is live: {@code superseded_by = ''} before gate 3; from gate 3 both columns, {@code superseded_by = '' AND
+     * superseded_by_id IS NULL}, as {@link CollectionIds#live} tests them (a retired tombstone with no successor has the text of its dead
+     * successor and its own id, so each column alone misses one kind of tombstone).
+     */
     static Condition live(Gate3 gate3, Field<String> supersededBy, Field<Long> supersededById) {
-        return gate3.holds() ? supersededById.isNull() : supersededBy.eq("");
+        return gate3.holds() ? supersededBy.eq("").and(supersededById.isNull()) : supersededBy.eq("");
     }
 
     /** A registry row is a tombstone: the negation of {@link #live}. */
