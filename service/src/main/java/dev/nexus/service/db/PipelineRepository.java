@@ -792,11 +792,13 @@ public final class PipelineRepository {
      *  Returns the number of pipeline rows removed. */
     public int deleteForCollection(String tenant, String collection) {
         requireNonBlank(collection, "collection");
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.deleteFrom(PDF_PIPELINE)
+        return tenantScope.withTenant(tenant, ctx -> {
+            RequestedCollectionRead.require(ctx, tenant, collection);   // P3.5a: a request by id reads that id first
+            return ctx.deleteFrom(PDF_PIPELINE)
                .where(PDF_PIPELINE.TENANT_ID.eq(tenant)
                        .and(PDF_PIPELINE.COLLECTION.eq(collection)))
-               .execute());
+               .execute();
+        });
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────
