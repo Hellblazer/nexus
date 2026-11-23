@@ -10564,6 +10564,7 @@ public final class CatalogRepository {
         // step 6), which fires vectors-021-3's chunk-locking trigger; whole transaction retried on 40P01.
         // `counts` is built inside the lambda, so each attempt starts from an empty map.
         return manifestWriteTxn(tenant, "catalog.deleteCollection " + name, ctx -> {
+            CollectionRegistry.exemptFromWriterCensus(ctx, "the collection delete: children first, registry row last (linda Q2)");
             // RDR-229 P3.5a, row 16: a delete by id reads and locks the row of that id first (the registry row before any child row,
             // the canonical lock order), in this transaction, so a row that is gone, retired, or no longer bears `name` since the
             // verdict read is refused (404 / 409) before anything is purged. From gate 3 the purge below is of THAT row's id; before it the
