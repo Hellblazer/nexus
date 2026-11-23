@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import sys
 import tomllib
 from pathlib import Path
 
@@ -106,6 +107,7 @@ def test_the_gate_script_runs_the_storage_touch_fan_in_for_the_workflows_suite_a
     directory, suite and shard count the step names (the other half of the guarantee the old step carried)."""
     spec = importlib.util.spec_from_file_location("ci_gate_fan_in", REPO / "scripts" / "ci_gate_fan_in.py")
     module = importlib.util.module_from_spec(spec)
+    sys.modules["ci_gate_fan_in"] = module  # the script's dataclass looks its module up here
     spec.loader.exec_module(module)
     doc = yaml.safe_load(CI_YML.read_text(encoding="utf-8"))
     run = str(next(s for s in _steps(doc, "pytest-gate") if _FAN_IN in str(s.get("run", "")))["run"])
