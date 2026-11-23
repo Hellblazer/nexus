@@ -336,9 +336,11 @@ public final class AspectQueueDrain {
         // collection_id when the table kept that column (an install that kept it), else the row's own name
         Field<Long> qCollectionId = DSL.field(DSL.name("q", "collection_id"), Long.class);
         boolean queueHasId = k.byId() && queueHasCollectionId(ctx);
+        // the queue row's own collection id when the table kept the column (selected so the row can say it names no collection by id)
+        Field<Long> qCid = queueHasId ? qCollectionId : DSL.inline((Long) null).as("q_cid");
         Field<String> queueLabel = queueHasId ? DSL.coalesce(k.label(tenant, qCollection, qCollectionId), qCollection).as("queue_label") : qCollection;
         for (Record r : ctx.select(qId, queueLabel, qSourcePath, qDocId, qHash, qStatus, qNext,
-                    k.byId() ? homeOf : d.PHYSICAL_COLLECTION)
+                    k.byId() ? homeOf : d.PHYSICAL_COLLECTION, qCid)
                 .from(q)
                 .leftJoin(d).on(d.TENANT_ID.eq(qTenant).and(d.TUMBLER.eq(qDocId)))
                 .where(qTenant.eq(tenant).and(qId.gt(afterId)))
@@ -358,7 +360,7 @@ public final class AspectQueueDrain {
             String home = r.get(k.byId() ? homeOf : d.PHYSICAL_COLLECTION);
             String queueName = r.get(queueLabel);
             String collection = home == null || home.isEmpty() ? queueName : home;
-            if (k.byId() && (home == null || home.isEmpty()) && !(queueHasId && r.get(qCollectionId) != null)) {
+            if (k.byId() && (home == null || home.isEmpty()) && r.get(qCid) == null) {
                 nameOnly.put(r.get(qId), queueName);
             }
             out.add(new Row(r.get(qId), collection, r.get(qSourcePath), nz(r.get(qDocId)),

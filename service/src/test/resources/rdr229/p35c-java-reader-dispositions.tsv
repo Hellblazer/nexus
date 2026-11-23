@@ -137,6 +137,7 @@ java	db/QuarantineOrigin.java catalog_collections where	name	label-kept	resolves
 java	db/QuarantineOrigin.java catalog_collections where	superseded_by	id	
 java	db/QuarantineOrigin.java chunks expr	collection	id	
 java	db/QuarantineOrigin.java chunks where	collection	id	
+java	db/QuarantineOrigin.java chunks order_by	collection	both	the sibling listing orders by the chunk's collection id and the registry label from the latch, and by the name before it (the pre-latch arm)
 java	db/ReembedJobRepository.java reembed_jobs expr	source_collection	id	
 java	db/ReembedJobRepository.java reembed_jobs expr	target_collection	id	
 java	db/ReembedJobRepository.java reembed_jobs result	source_collection	id	Job's source and target: the live registry label of the row's id, else the stored name (history with no registry FK, linda 2026-11-23); the stored name is the fallback only for a gone collection
