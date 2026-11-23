@@ -244,4 +244,49 @@ class WriteRegistryMemoTest {
             ExpectedCollectionIds.clear();
         }
     }
+
+    /** The id of {@code label}'s row. */
+    private long idOf(String label) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES).select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(label)).fetchOne(CATALOG_COLLECTIONS.COLLECTION_ID);
+        }
+    }
+
+    /** Retires {@code label}'s row as a supersede does; P3.1's CHECK ties {@code superseded_by} to {@code superseded_by_id}. */
+    private void retire(String label, String successor) throws Exception {
+        long successorId = idOf(successor);
+        try (Connection su = pg.createConnection("")) {
+            int retired = DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_COLLECTIONS)
+                .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, successor).set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, successorId)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(label)).execute();
+            assertThat(retired).isEqualTo(1);
+        }
+    }
+
+    @Test
+    void aRetiredRowReadForCleanup_isNeverAnsweredAsLiveByAnIdWrite() throws Exception {
+        String retired = seeded("cleanup-retired");
+        String successor = seeded("cleanup-succ");
+        retire(retired, successor);
+        long id = idOf(retired);
+
+        assertThatThrownBy(() -> scope.withTenant(TENANT, ctx -> {
+            CollectionRegistry.lockForCleanup(ctx, TENANT, java.util.List.of(id), java.util.List.of());   // reads the retired row, memoises it
+            return CollectionRegistry.requireIdForWrite(ctx, TENANT, id);   // must still be refused: the memo is not a live answer
+        })).as("a retired row the cleanup read is not handed back as live").isInstanceOf(CollectionRetiredIdException.class);
+    }
+
+    @Test
+    void aLiveRowReadForCleanup_isAnsweredFromTheMemoByAnIdWrite_withoutASecondRead() throws Exception {
+        String live = seeded("cleanup-live");
+        long id = idOf(live);
+
+        long answered = scope.withTenant(TENANT, ctx -> {
+            CollectionRegistry.lockForCleanup(ctx, TENANT, java.util.List.of(id), java.util.List.of());
+            return CollectionRegistry.requireIdForWrite(ctx, TENANT, id).collectionId();
+        });
+
+        assertThat(answered).isEqualTo(id);
+    }
 }
