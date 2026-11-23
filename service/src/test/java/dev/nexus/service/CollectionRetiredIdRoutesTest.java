@@ -535,12 +535,13 @@ class CollectionRetiredIdRoutesTest {
 
     /**
      * The manifest-only {@code write_many} (no {@code chunks} key) has no metadata refresh transaction: its first write transaction is
-     * the per-document one, which reads the registry row after the document's advisory locks. Its chunk was never stored, so the
-     * document is the per-document failure it would be without any rename; what the test pins is that the rename in the gap is not a
-     * refusal of the request and that nothing lands under the new holder of the old label.
+     * the per-document one, which takes the gate of the label it is given, reads the registry row, sees the row renamed and runs again with
+     * the new label's gate first. The chunk is STORED in the collection (seeded before the rename), so the document's manifest row has a
+     * chunk to reference and the write must land: the manifest row is filed under the row's CURRENT label with X's id, nothing under the new
+     * holder of the old label, and no document fails.
      */
     @Test
-    void writeManyWithDocsOnly_byAnIdWhoseRowWasRenamedAndItsLabelTaken_isNotRefused_andWritesNothingUnderTheNewHolder() {
+    void writeManyWithDocsOnly_byAnIdWhoseRowWasRenamedAndItsLabelTaken_landsTheManifestRowUnderTheNewLabel() {
         String b = label("retired-rn-wmd-b-" + (n++));
         String c = label("retired-rn-wmd-c-" + (n++));
         String host = label("retired-rn-wmd-host-" + (n++));
@@ -548,6 +549,7 @@ class CollectionRetiredIdRoutesTest {
         long x = fxLocal.idOf(b);
         String doc = "rn-gap-doc-" + b;
         String hex = Chash.ofText("rn-gap-wmd-" + b).toHex();
+        seedChunkIn(fxLocal, b, hex);
         fxLocal.asSuperuser(ctx -> {
             CollectionIdSeeds.ownerDocument(ctx, fxLocal.tenant, doc, host);
             return null;
@@ -556,9 +558,13 @@ class CollectionRetiredIdRoutesTest {
             "{\"collection_id\":" + x + ",\"docs\":[{\"doc_id\":" + json(doc) + ",\"rows\":[{\"position\":0,\"chash\":\"" + hex
                 + "\",\"chunk_index\":0}]}]}"));
         assertThat(r.status()).as("not refused for the rename: %s", r.body()).isEqualTo(200);
+        assertThat(r.json().path("failed_doc_ids").size()).as("no document failed: %s", r.body()).isZero();
+        var chunks = dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+        java.util.List<String> labels = fxLocal.asSuperuser(ctx -> ctx.select(chunks.COLLECTION).from(chunks)
+            .where(chunks.DOC_ID.eq(doc)).and(chunks.COLLECTION_ID.eq(x)).fetch(chunks.COLLECTION));
+        assertThat(labels).as("the manifest row landed under the renamed row's current label, with its id").containsExactly(c);
         Long newId = fxLocal.idOf(b);
-        int underTheNewHolder = fxLocal.asSuperuser(ctx -> ctx.fetchCount(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS,
-            dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID.eq(newId)));
+        int underTheNewHolder = fxLocal.asSuperuser(ctx -> ctx.fetchCount(chunks, chunks.COLLECTION_ID.eq(newId)));
         assertThat(underTheNewHolder).as("no manifest row under the new holder").isZero();
     }
 

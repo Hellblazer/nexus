@@ -7917,7 +7917,11 @@ FROM scope s
         }
         try {
             return tenantScope.withTenant(tenant, ctx -> {
-                // P3.5a: the ledger transaction reads the origin's row too (no function ran, so no gate is held and the order is free)
+                // P3.5a: the ledger transaction reads the origin's row too (no function ran, so no gate is held and the order is free).
+                // Its row read waits for a retiring verb's lock, so it carries the restore's lock and statement bounds like every other
+                // transaction of this route (a bound that trips is the typed busy, asRestoreBusy)
+                PgSession.setStatementAndLockBounds(ctx, PgSession.DEFAULT_GC_RESTORE_BOUNDED_STATEMENT_TIMEOUT_MS,
+                                                    PgSession.DEFAULT_GC_RESTORE_BOUNDED_LOCK_TIMEOUT_MS);
                 GcCollectionReads.enter(ctx, tenant, originCollection);
                 runAfterSweepSqlHook();
                 keyed.marker().mark(ctx, outcome);
@@ -7947,6 +7951,11 @@ FROM scope s
                 List<String> pending = new ArrayList<>(byChash.keySet());
                 // P3.5a: once per transaction, before any function: the origin's gate in Java (when a sibling will be asked), then its row
                 // by id; every sibling call below runs with the row's current label. With no sibling no function runs, no gate is held.
+                // The gate and the origin's row read below can wait (for a sweep, for a verb), and they come before any sibling turn sets its
+                // bounds: bound them like the rest of the route, by what is left of the call's budget (the function's own gate wait was
+                // under these bounds before the gate moved here)
+                PgSession.setStatementAndLockBounds(ctx, (int) Math.min(Math.max(1, keyed.remainingMs()), Integer.MAX_VALUE),
+                                                    PgSession.DEFAULT_GC_RESTORE_BOUNDED_LOCK_TIMEOUT_MS);
                 final String originNow = GcCollectionReads.enter(ctx, tenant,
                     siblings.isEmpty() ? GcCollectionReads.Gate.NONE : GcCollectionReads.Gate.ORIGIN, gate, originCollection, null).origin();
                 int index = 0;
