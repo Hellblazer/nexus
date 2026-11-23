@@ -41,8 +41,9 @@ in this script's output. Nothing is dropped. What the scan cannot see: a name co
 handed to a helper (the helper's own use of the parameter is a bare expression with no table), and SQL a changeset holds (P3.5b's).
 
 Usage: rdr229_p35c_java_reader_census.py <tree-root> [--write] [--check]
-  default: print totals and the UNRESOLVED lines; --write rewrites service/src/test/resources/rdr229/p35c-java-reader-census.tsv;
-  --check exits 1 when the committed file differs from a fresh run.
+  default: print totals and the UNRESOLVED lines; --write rewrites service/src/test/resources/rdr229/p35c-java-reader-census.tsv and
+  the sidecar p35c-java-reader-census-excluded.tsv (the variable-key jsonb reads, each with its reason; see EXCLUSIONS below);
+  --check exits 1 when either committed file differs from a fresh run.
 """
 from __future__ import annotations
 
@@ -54,6 +55,7 @@ import sys
 ROOT = pathlib.Path(sys.argv[1]).resolve() if len(sys.argv) > 1 and not sys.argv[1].startswith("--") else pathlib.Path(".").resolve()
 JAVA = ROOT / "service/src/main/java"
 OUT = ROOT / "service/src/test/resources/rdr229/p35c-java-reader-census.tsv"
+OUT_EXCLUDED = ROOT / "service/src/test/resources/rdr229/p35c-java-reader-census-excluded.tsv"
 CHECKS = ROOT / "service/src/main/resources/db/rdr229/p31-checks.tsv"
 
 NAME_CONST = {"COLLECTION", "PHYSICAL_COLLECTION", "SOURCE_COLLECTION", "TARGET_COLLECTION", "SUPERSEDED_BY"}
@@ -235,7 +237,7 @@ LABEL_KEYS = ("origin_collection",)
 ID_KEYS = ("origin_collection_id",)       # the id twin of origin_collection: noted in the output, not a label read
 JSONB_READ_FNS = {"jsonb_extract_path_text", "jsonb_extract_path", "jsonb_exists", "jsonb_object_field_text", "jsonb_object_field"}
 STRING_CONSTS = {}                        # static final String NAME = "literal"; over every scanned file (the key often is one)
-variable_key_reads = []                   # (file, line): a jsonb read whose key is neither a literal nor a known constant
+variable_key_reads = []                   # (file, line, method, accessor): a jsonb read whose key is neither a literal nor a known constant
 id_key_reads = []                         # (file, line): a read of an ID_KEYS key
 unfollowed_bindings = []                  # (file, line, var): a Field bound to a label read that a method returns or another file may use
 for _p in sorted(JAVA.rglob("*.java")):
@@ -282,6 +284,72 @@ def block_pairs(m):
     return out
 
 
+NOT_A_METHOD = {"if", "for", "while", "switch", "catch", "try", "else", "synchronized", "do"}
+
+
+def enclosing_method(m, blocks, pos):
+    """The name of the innermost method (or constructor) body holding pos, or '<class>' when none does (a field initialiser)."""
+    for o, c in sorted((b for b in blocks if b[0] < pos < b[1]), key=lambda b: b[1] - b[0]):
+        head = m[max(m.rfind(";", 0, o), m.rfind("{", 0, o), m.rfind("}", 0, o)) + 1:o]
+        mm = re.search(r"(\w+)\s*\([^;{}]*\)\s*(?:throws\s+[\w\s,.<>]+)?\s*$", head)
+        if mm and mm.group(1) not in NOT_A_METHOD and "->" not in head[mm.end(1):]:
+            return mm.group(1)
+    return "<class>"
+
+
+# A jsonb read whose key is neither a literal nor a known constant is not a row (no key is named at the accessor), but it is never
+# silently dropped: it is a row of the sidecar p35c-java-reader-census-excluded.tsv with this reason, keyed by (file under
+# service/src/main/java/dev/nexus/service/, method). A site with no entry here is written with status UNREVIEWED and the census test
+# fails on it, so a new variable-key read has to be read and given a reason. Every entry below was read from its source and from the
+# callers of the helper it sits in (the keys they pass are named in the reason).
+# The label keys, in writing: chunks.metadata 'origin_collection' (the census rows, LABEL_KEYS above) and tuples.body 'collection' (the
+# aspects task queue's body; governed by ruling R4 below, a label that stays: task bodies have no id, P3.7's one-row rename rewrites
+# the in-flight bodies).
+EXCLUSIONS = {
+    ("db/AspectTaskRefs.java", "bodyAttribute"): (
+        "n-a (R4)", "helper over nexus.tuples.body of the aspects task queue: its callers pass \"collection\" (AspectTaskRefs.java:117 countNaming, :127 "
+        "countNamingWhereDoc, :198) and \"doc_id\" (:151, an id, not a label). tuples.body 'collection' is a LABEL key; linda R4: aspect task bodies "
+        "stay on the label, P3.7's one-row rename rewrites in-flight task bodies (wren's acceptance test pins it), so countNaming and countNamingWhereDoc are n/a"),
+    ("db/CatalogDocReads.java", "metaText"): (
+        "excluded", "catalog_documents.metadata, not chunks.metadata: the key is a metadata filter key the client names in a catalog search (callers "
+        "CatalogDocReads.java:171 and :184 pass e.key() and m.key()); the engine resolves no collection through it"),
+    ("db/CatalogEpoch.java", "member"): (
+        "excluded", "not a metadata read: the column name of a pg_control_system() or pg_control_checkpoint() composite (callers CatalogEpoch.java:128 and :130)"),
+    ("db/CatalogTtlCheckAdmin.java", "typeOf"): (
+        "excluded", "fixed keys: the callers pass \"ttl_days\" and \"put_at\" (CatalogTtlCheckAdmin.java:162, :163, :173), the document ttl keys; no label"),
+    ("db/DepartedWriterSpans.java", "writers"): (
+        "excluded", "fixed keys: SPAN_KEYS (DepartedWriterSpans.java:542: line_start, line_end, chunk_start_char, chunk_end_char), the manifest span keys; no label"),
+    ("db/DepartedWriterSpans.java", "update"): (
+        "excluded", "fixed keys: SPAN_KEYS (DepartedWriterSpans.java:542: line_start, line_end, chunk_start_char, chunk_end_char), the manifest span keys; no label"),
+    ("db/ManifestFillableCount.java", "metaText"): (
+        "excluded", "helper over chunks.metadata whose callers pass fixed manifest keys: line_start, line_end, chunk_start_char, chunk_end_char, page_number, "
+        "section_title, section_type (ManifestFillableCount.java:142-171, :213-230) and the manifest label keys (ManifestFill.java:396 labelText); no collection label key"),
+    ("db/ManifestFillableCount.java", "metaType"): (
+        "excluded", "helper over chunks.metadata whose callers pass fixed manifest keys: line_start, line_end, chunk_start_char, chunk_end_char, page_number, "
+        "section_title, section_type (ManifestFillableCount.java:142-171, :213-230) and the manifest label keys (ManifestFill.java:396 labelText); no collection label key"),
+    ("db/PdfStubMetadataReads.java", "carriesNonChunkRowKey"): (
+        "excluded", "key presence over NON_CHUNK_ROW_KEYS (PdfStubMetadataReads.java:136), the union of ChunkMetadataKeys DOCUMENT, POSITION and LEGACY "
+        "(none is origin_collection or any label); a presence test, no value compared"),
+    ("db/TupleRepository.java", "readCondition"): (
+        "excluded", "nexus.tuples.keys, not chunks.metadata: the key is a tuple pattern key the caller names (TupleRepository.java:1327); no collection is resolved"),
+    ("db/TupleRepository.java", "matchCondition"): (
+        "excluded", "nexus.tuples.keys, not chunks.metadata: the key is a required tuple key the caller names (TupleRepository.java:2282); no collection is resolved"),
+    ("vectors/ChunkKeySweep.java", "hasKey"): (
+        "excluded", "key presence of the quarantine implication pair (plan.quarantineImplies(), callers ChunkKeySweep.java:468-469: quarantined_by then quarantined_at); "
+        "an actor and a timestamp, no label, a presence test"),
+    ("vectors/ChunkKeySweep.java", "jsonIntegerText"): (
+        "excluded", "fixed keys: the callers pass the manifest span keys chunk_end_char, line_start, line_end, chunk_start_char (ChunkKeySweep.java:578-582); integers, no label"),
+    ("vectors/ChunkKeySweep.java", "hasKeyAsField"): (
+        "excluded", "fixed keys: the callers pass put_at, ttl_days (ChunkKeySweep.java:549, :562) and source_format, tags, category through missingKey (:607-609), the catalog "
+        "document keys; presence tests, no label"),
+    ("vectors/PgVectorRepository.java", "metadataCondition"): (
+        "excluded", "generic client metadata filter: the client names a key of its own metadata in a where clause (the caller, PgVectorRepository.java:4783, passes "
+        "each entry of the request's where map); the engine resolves no collection through it"),
+    ("vectors/StoreGetProjection.java", "spanKeys"): (
+        "excluded", "fixed keys: SPAN_KEYS (StoreGetProjection.java:38: chunk_text_hash, line_start, line_end), projected into the span_keys column; no label"),
+}
+
+
 def scan_metadata_keys(p, f, code, m, calls, binds, bound):
     """The jsonb key reads of a file: accessor calls, the Fields they are bound to, and their uses (see the module docstring)."""
     blocks = block_pairs(m)
@@ -289,15 +357,15 @@ def scan_metadata_keys(p, f, code, m, calls, binds, bound):
     for c in calls:
         spans = arg_spans(m, c)
         if c.name in ("jsonbGetAttributeAsText", "jsonbGetAttribute") and len(spans) == 2:
-            reads_found.append((c, key_of(code[spans[1][0]:spans[1][1]]), code[spans[0][0]:spans[0][1]]))
+            reads_found.append((c, key_of(code[spans[1][0]:spans[1][1]]), code[spans[0][0]:spans[0][1]], c.name))
         elif c.name == "function" and len(spans) >= 4:
             fn = re.fullmatch(r"\s*\"([a-z_]+)\"\s*", code[spans[0][0]:spans[0][1]])
             if fn and fn.group(1) in JSONB_READ_FNS:
-                reads_found.append((c, key_of(code[spans[3][0]:spans[3][1]]), code[spans[2][0]:spans[2][1]]))
-    for c, key, jarg in reads_found:
+                reads_found.append((c, key_of(code[spans[3][0]:spans[3][1]]), code[spans[2][0]:spans[2][1]], fn.group(1)))
+    for c, key, jarg, accessor in reads_found:
         line = line_of(code, c.open)
         if key is None:
-            variable_key_reads.append((f, line))
+            variable_key_reads.append((f, line, enclosing_method(m, blocks, c.open), accessor))
             continue
         if key in ID_KEYS:
             id_key_reads.append((f, line))
@@ -635,9 +703,22 @@ text += "# Generated by scripts/rdr229_p35c_java_reader_census.py (a drift check
 text += "# op is the clause the column sits in (where, join_on, select, group_by, order_by, on_conflict, ...); via says how it was found\n"
 text += "# (jooq constant, alias, helper ch/ct, literal, sql string). table ? is UNRESOLVED (named in the script's output). Writes are P3.1's.\n"
 text += "# The two upserts the RDR names are the on_conflict rows of PgVectorRepository (chunks) and TaxonomyCentroidRepository (taxonomy_centroids).\n"
+text += "# metadata label keys: " + ", ".join(LABEL_KEYS) + "\n"   # the jsonb keys scanned for (LABEL_KEYS); Rdr229P35cIdReadersPinTest reads this line
 text += "\t".join(HEAD) + "\n"
 for k in body:
     text += "\t".join(k[:5] + ("+".join(sorted(rows[k])), notes.get(k, "-"))) + "\n"
+
+EX_HEAD = ("file", "line", "method", "accessor", "status", "reason")
+ex_sites = sorted({(f, int(line), meth, acc) for f, line, meth, acc in variable_key_reads}, key=lambda t: (t[0], t[1], t[2], t[3]))
+ex_text = "# RDR-229 P3.5c (nexus-p2m1x.25): every jsonb read in service/src/main/java whose key is neither a literal nor a static final String constant.\n"
+ex_text += "# Generated by scripts/rdr229_p35c_java_reader_census.py (a drift check: --check). Not census rows (no key is named at the accessor), never dropped:\n"
+ex_text += "# each site is read and given a status and a reason (EXCLUSIONS in the script, keyed by file and method); a site with none is UNREVIEWED and fails the census test.\n"
+ex_text += "# The label keys, in writing: chunks.metadata 'origin_collection' (census rows named metadata.origin_collection) and tuples.body 'collection'\n"
+ex_text += "# (the aspects task queue; linda R4: stays on the label, P3.7's one-row rename rewrites the in-flight bodies; reached here through AspectTaskRefs.bodyAttribute).\n"
+ex_text += "\t".join(EX_HEAD) + "\n"
+for f_, line_, meth_, acc_ in ex_sites:
+    status, reason = EXCLUSIONS.get((f_.removeprefix("service/src/main/java/dev/nexus/service/"), meth_), ("UNREVIEWED", "-"))
+    ex_text += "\t".join((f_, str(line_), meth_, acc_, status, reason)) + "\n"
 
 if __name__ == "__main__":
     by_table = collections.Counter(k[2] for k in body)
@@ -652,7 +733,10 @@ if __name__ == "__main__":
     print("record accessors skipped (x.collection() with no ChunkTable/CentroidTable binding)", sum(skipped_accessors.values()),
           dict(skipped_accessors.most_common(8)))
     print("metadata keys", {k: sum(1 for r in body if r[3] == "metadata." + k) for k in LABEL_KEYS}, "id-key reads (not rows)", len(set(id_key_reads)),
-          "variable-key reads (not rows)", len(set(variable_key_reads)), sorted({f.split("/")[-1] for f, _ in variable_key_reads}))
+          "variable-key reads (not rows; the sidecar lists them)", len(ex_sites), "in", len({t[0] for t in ex_sites}), "files")
+    for f_, line_, meth_, acc_ in ex_sites:
+        if (f_.removeprefix("service/src/main/java/dev/nexus/service/"), meth_) not in EXCLUSIONS:
+            print("UNREVIEWED variable-key read", f_, line_, meth_, acc_)
     for f, line, var in sorted(set(unfollowed_bindings)):
         print("NOT FOLLOWED", f, line, var)
     for f, line, col, op, via in sorted(set(unresolved)):
@@ -661,5 +745,6 @@ if __name__ == "__main__":
     if "--write" in sys.argv:
         OUT.parent.mkdir(parents=True, exist_ok=True)
         OUT.write_text(text)
+        OUT_EXCLUDED.write_text(ex_text)
     if "--check" in sys.argv:
-        sys.exit(0 if OUT.exists() and OUT.read_text() == text else 1)
+        sys.exit(0 if OUT.exists() and OUT.read_text() == text and OUT_EXCLUDED.exists() and OUT_EXCLUDED.read_text() == ex_text else 1)

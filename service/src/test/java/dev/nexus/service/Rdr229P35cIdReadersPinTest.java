@@ -40,6 +40,29 @@ class Rdr229P35cIdReadersPinTest {
     private static final Path MAIN = Path.of("src", "main", "java");
     private static final Set<String> READS_THE_ID = Set.of("id", "both");
     private static final String JAVA = "service/src/main/java/dev/nexus/service/";
+    private static final String META = "metadata.";
+    private static final String LABEL_KEYS_HEADER = "# metadata label keys:";
+
+    /** The jsonb label keys the census scans for: its header line, written by the script from its LABEL_KEYS (one definition, regenerated). */
+    private static Set<String> labelKeysOf(String resource) throws IOException {
+        try (InputStream in = Rdr229P35cIdReadersPinTest.class.getClassLoader().getResourceAsStream(resource)) {
+            assertThat(in).as("test resource " + resource).isNotNull();
+            var line = new String(in.readAllBytes(), StandardCharsets.UTF_8).lines().filter(l -> l.startsWith(LABEL_KEYS_HEADER)).findFirst();
+            assertThat(line).as("the census header names its metadata label keys").isPresent();
+            Set<String> keys = new java.util.TreeSet<>();
+            for (String k : line.get().substring(LABEL_KEYS_HEADER.length()).split(",")) if (!k.isBlank()) keys.add(k.strip());
+            return keys;
+        }
+    }
+
+    private static final Set<String> CENSUS_LABEL_KEYS;
+    static {
+        try {
+            CENSUS_LABEL_KEYS = labelKeysOf("rdr229/p35c-java-reader-census.tsv");
+        } catch (IOException e) {
+            throw new ExceptionInInitializerError(e);
+        }
+    }
 
     private static List<String> resource(String name) throws IOException {
         try (InputStream in = Rdr229P35cIdReadersPinTest.class.getClassLoader().getResourceAsStream(name)) {
@@ -76,15 +99,21 @@ class Rdr229P35cIdReadersPinTest {
 
     /** The readers that still route by name after the latch, in what the tables say; empty when every reader selects by id. */
     static List<String> routedByName(List<String> census, List<String> javaDispositions, List<String> sqlDispositions, String mainSource) {
+        return routedByName(census, javaDispositions, sqlDispositions, mainSource, CENSUS_LABEL_KEYS);
+    }
+
+    static List<String> routedByName(List<String> census, List<String> javaDispositions, List<String> sqlDispositions, String mainSource,
+                                     Set<String> labelKeys) {
         List<String> out = new ArrayList<>();
         var disposition = dispositionsByGroup(javaDispositions);
         java.util.Set<String> seen = new java.util.TreeSet<>();
         for (String row : censusRows(census)) {
             String[] f = row.split("\t", -1);
-            // A metadata-key row (name_column metadata.<key>, nexus-p2m1x.25) is a read of a jsonb tag, not of a name column a per-collection
-            // name index serves, so the retire this pin guards does not depend on it. tests/test_rdr229_p37_pending_violations.py holds the
-            // VIOLATING ones to P3.7; the reaper's are P4.1's, like the by-label reaper SQL above.
-            if (f[3].startsWith("metadata.")) continue;
+            // A metadata-key row (name_column metadata.<key>, nexus-p2m1x.25) of a key on the census's label-key list is a read of a jsonb
+            // tag, not of a name column a per-collection name index serves, so the retire this pin guards does not depend on it.
+            // tests/test_rdr229_p37_pending_violations.py holds the VIOLATING ones to P3.7; the reaper's are P4.1's, like the by-label
+            // reaper SQL above. Only that: a row of a column reader, or of a metadata key not on the list, gets no skip.
+            if (f[3].startsWith(META) && labelKeys.contains(f[3].substring(META.length()))) continue;
             String group = f[0].replace(JAVA, "") + " " + f[2] + " " + f[4];
             String d = disposition.get(group + "\t" + f[3]);
             if (!seen.add(group + "\t" + f[3])) continue;
@@ -166,6 +195,27 @@ class Rdr229P35cIdReadersPinTest {
         List<String> plantedSql = new ArrayList<>(sql);
         plantedSql.add("function\tnexus.planted_search_384\tcollection\tname-kept\tplanted");
         assertThat(routedByName(census, java, plantedSql, src)).as("a name-kept function with no twin call").hasSize(1);
+
+        // The metadata skip is narrow (linda 2026-11-24): the census's label-key list is read from the census header, and only a metadata row
+        // of a key on it is skipped. A column reader, or a metadata row of another key, with a disposition that is no id read is reported.
+        assertThat(CENSUS_LABEL_KEYS).as("the label keys the census scans for").containsExactly("origin_collection");
+        List<String> metaCensus = new ArrayList<>(census);
+        metaCensus.add(JAVA + "db/PlantedReader.java\t1\tchunks\tmetadata.origin_collection\twhere\tmetadata_key\t-");
+        List<String> metaJava = new ArrayList<>(java);
+        metaJava.add("java\tdb/PlantedReader.java chunks where\tmetadata.origin_collection\tn-a\tplanted");
+        assertThat(routedByName(metaCensus, metaJava, sql, src)).as("a label-key metadata row is skipped").isEmpty();
+
+        List<String> otherKey = new ArrayList<>(census);
+        otherKey.add(JAVA + "db/PlantedReader.java\t1\tchunks\tmetadata.some_other_key\twhere\tmetadata_key\t-");
+        List<String> otherKeyJava = new ArrayList<>(java);
+        otherKeyJava.add("java\tdb/PlantedReader.java chunks where\tmetadata.some_other_key\tn-a\tplanted");
+        assertThat(routedByName(otherKey, otherKeyJava, sql, src)).as("a metadata row of a key not on the list gets no skip").hasSize(1);
+
+        List<String> columnCensus = new ArrayList<>(census);
+        columnCensus.add(JAVA + "db/PlantedReader.java\t1\tchunks\tcollection\twhere\tjooq\t-");
+        List<String> columnJava = new ArrayList<>(java);
+        columnJava.add("java\tdb/PlantedReader.java chunks where\tcollection\tn-a\tplanted");
+        assertThat(routedByName(columnCensus, columnJava, sql, src)).as("a column reader cannot use the metadata skip").hasSize(1);
 
         // With the real tables and an engine source that calls no twin, every name-kept function is reported.
         assertThat(routedByName(census, java, sql, "")).as("no twin called: every one of the 38 name-kept functions is reported").hasSize(38);
