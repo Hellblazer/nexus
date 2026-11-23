@@ -136,8 +136,12 @@ def _needs_operator_row(label: str, info: dict[str, Any], entry: dict[str, Any])
         parts.append("a retry is in progress now")
     else:
         parts.append(f"next retry {nxt if isinstance(nxt, str) else 'unknown'}")
+    # With no step, this engine has not seen the move fail since it started: the flag is the move's definition (it reaches
+    # PciBuilders.terminateOrThrow when its on_complete runs), not an observed attempt, so the row says "may".
+    seen = step is not None
     if builds:
-        parts.append("each attempt ends in-flight index builds")
+        parts.append("each attempt ends in-flight index builds" if seen
+                     else "an attempt may end in-flight index builds (this engine has not seen the move fail yet)")
     reset = _RETRY_NOW.format(label=label)
     return HealthResult(
         label=f"Data move {label}", ok=False, detail="; ".join(parts) + _counts(entry),
@@ -145,15 +149,18 @@ def _needs_operator_row(label: str, info: dict[str, Any], entry: dict[str, Any])
             "The engine keeps retrying this move by itself, and nothing committed is lost, but the retries are not "
             "getting anywhere. "
             + (
-                "Each attempt re-runs the warm-up and ends the in-flight index builds (PCI, leaf, id-unique), so waiting "
-                "costs those builds. " if builds else ""
+                ("Each attempt re-runs the warm-up and ends the in-flight index builds (PCI, leaf, id-unique), so "
+                 "waiting costs those builds. " if seen else
+                 "An attempt that reaches the move's on_complete ends the in-flight index builds (PCI, leaf, "
+                 "id-unique); this engine has not seen the move fail since it started, so whether its attempts get "
+                 "that far is not known yet. ") if builds else ""
             )
             + "The engine log has the page: event=data_move_needs_operator (label, step, SQLSTATE and the bound that "
             "step missed), and event=data_move_blocked has the full reason of each retry. Fix what it names (a lock "
             "holder, a bound too short for the table); the next retry time above says whether to wait or act",
             (
-                "Resetting the retry count starts another attempt at once, and that attempt ends the in-flight index "
-                "builds again, so fix the cause first (raise the bound, or let the builds finish); then: " + reset
+                "Resetting the retry count starts another attempt at once, and that attempt can end the in-flight "
+                "index builds again, so fix the cause first (raise the bound, or let the builds finish); then: " + reset
                 if builds else reset
             ),
         ],
