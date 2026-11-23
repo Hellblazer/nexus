@@ -32,6 +32,24 @@ public final class DataMoveOrphans {
     public static final String PREFIX = DataMoveWorker.APPLICATION_NAME_PREFIX;
 
     /**
+     * Cancels the statement a backend is running ({@code pg_cancel_backend}), from a connection of its own: the engine is stopping and a
+     * validation with no statement bound would otherwise run on. Never throws.
+     */
+    static void cancelBackend(AdminConnection admin, int pid) {
+        Properties props = new Properties();
+        props.setProperty("user", admin.user());
+        props.setProperty("password", admin.password());
+        props.setProperty("ApplicationName", PREFIX + "cancel");
+        props.setProperty("connectTimeout", "3");
+        props.setProperty("socketTimeout", "5");
+        try (Connection c = DriverManager.getConnection(admin.url(), props)) {
+            DSL.using(c, SQLDialect.POSTGRES).select(DSL.function("pg_cancel_backend", SQLDataType.BOOLEAN, DSL.val(pid))).fetch();
+        } catch (SQLException | DataAccessException e) {
+            log.warn("event=data_move_completion_cancel_failed pid={} cause=\"{}\"", pid, FailureHandler.oneLine(e.toString()));
+        }
+    }
+
+    /**
      * @return how many backends were ended; -1 when the database could not be reached (logged, never fatal: the boot goes on)
      */
     public static int terminateLeftover(AdminConnection admin) {

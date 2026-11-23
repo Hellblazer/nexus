@@ -338,18 +338,16 @@ final class VerifyingFinisher implements MoveFinisher {
             DSL.field(DSL.name("completed_at"), SQLDataType.TIMESTAMPWITHTIMEZONE).isNull());
     }
 
-    /** The completion statement in flight, so {@link #cancelInFlight} can reach it from the thread that stops the engine. */
-    private volatile java.sql.Statement completionStatement;
+    /** The backend of the completion in flight and the admin values to reach it with, so {@link #cancelInFlight} can end it from the thread that stops the engine. */
+    private record InFlight(dev.nexus.service.db.AdminConnection admin, int pid) { }
+
+    private volatile InFlight inFlight;
 
     @Override
     public void cancelInFlight() {
-        java.sql.Statement st = completionStatement;
-        if (st != null) {
-            try {
-                st.cancel();
-            } catch (SQLException | RuntimeException e) {
-                log.warn("event=data_move_completion_cancel_failed cause=\"{}\"", FailureHandler.oneLine(e.toString()));
-            }
+        InFlight running = inFlight;
+        if (running != null) {
+            DataMoveOrphans.cancelBackend(running.admin(), running.pid());
         }
     }
 
@@ -379,7 +377,10 @@ final class VerifyingFinisher implements MoveFinisher {
                 if (reporter != null && pid != null) {
                     reporter.callStarted(move, COMPLETION_RUN, pid);
                 }
-                tx.connection(c -> MoveSql.runOnComplete(c, move.onComplete(), st -> completionStatement = st));
+                if (pid != null) {
+                    inFlight = new InFlight(context.adminConnection(), pid);
+                }
+                tx.connection(c -> MoveSql.runOnComplete(c, move.onComplete()));
             });
         } catch (DataAccessException e) {
             SQLException raised = e.getCause(SQLException.class);
@@ -391,7 +392,7 @@ final class VerifyingFinisher implements MoveFinisher {
                     + FailureHandler.oneLine(raised != null ? "sqlstate=" + raised.getSQLState() + " " + raised.getMessage()
                         : e.getMessage())));
         } finally {
-            completionStatement = null;
+            inFlight = null;
             if (reporter != null) {
                 reporter.callEnded(move);
             }
