@@ -765,7 +765,7 @@ public final class NexusService {
         // RDR-229 P3.5a: CollectionSelectorFilter resolves collection_id to the label on the collection-taking routes.
         var authFilter = List.of(new AuthFilter(tokenCache, tokenStore, catalogRepo),
                 new dev.nexus.service.http.IdempotencyKeyGuard(),
-                new dev.nexus.service.http.CollectionSelectorFilter(new dev.nexus.service.db.CollectionRegistry(gate3), tenantScope));
+                new dev.nexus.service.http.CollectionSelectorFilter(dev.nexus.service.db.CollectionRegistry.shared(gate3), tenantScope));
 
         var whoamiCtx = server.createContext("/v1/_whoami", new WhoamiHandler(tenantScope));
         whoamiCtx.getFilters().addAll(authFilter);
