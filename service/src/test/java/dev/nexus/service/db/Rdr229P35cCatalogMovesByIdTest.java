@@ -269,6 +269,37 @@ class Rdr229P35cCatalogMovesByIdTest {
         assertThat(uri).as("nothing was written").isEqualTo("file:///old/a.pdf");
     }
 
+    /**
+     * Before the latch, labels are exact, so an unregistered physical_collection has no registry row: there is no lock to take, and no verb can
+     * race the move. The move goes ahead, and the WARN names the tenant, the document and the label (an unregistered collection is a data
+     * problem). The post-latch case above is refused. (linda 2026-11-23)
+     */
+    @Test
+    void beforeTheLatchADocumentWhoseCollectionHasNoRegistryRowStillMoves_andTheWarnNamesIt() throws Exception {
+        String t = tenant();
+        latched.set(false);
+        register(t, COLL_A);
+        curatorOwner(t, "1.1", "pdfs");
+        String s = registered(t, "1.1", "s", "file:///old/a.pdf", "/old/a.pdf", COLL_A);
+        su(ctx -> ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.TENANT_ID.eq(t)).and(CATALOG_COLLECTIONS.NAME.eq(COLL_A)).execute());
+        var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(CatalogMoves.class);
+        var appender = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            moves.moveDocument(t, s, "file:///new/a.pdf", "/new/a.pdf", false);
+        } finally {
+            logger.detachAppender(appender);
+        }
+
+        var uri = su(ctx -> ctx.select(CATALOG_DOCUMENTS.SOURCE_URI).from(CATALOG_DOCUMENTS)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(t)).and(CATALOG_DOCUMENTS.TUMBLER.eq(s)).fetchOne(CATALOG_DOCUMENTS.SOURCE_URI));
+        assertThat(uri).as("the move went ahead without a lock").isEqualTo("file:///new/a.pdf");
+        assertThat(appender.list).as("and the WARN names the tenant, the document and the label").anyMatch(e ->
+            e.getLevel() == ch.qos.logback.classic.Level.WARN && e.getFormattedMessage().contains("tenant=" + t)
+                && e.getFormattedMessage().contains("doc_id=" + s) && e.getFormattedMessage().contains("collection=" + COLL_A));
+    }
+
     // ---- the owner fold ------------------------------------------------------------------------------------------------------------
 
     /**
