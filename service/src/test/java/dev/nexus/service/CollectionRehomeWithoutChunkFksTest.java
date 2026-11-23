@@ -16,6 +16,7 @@ import static dev.nexus.service.CollectionRouteFixture.json;
 import static dev.nexus.service.CollectionRouteFixture.label;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNK_ORPHANED_AT;
 import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -40,7 +41,7 @@ class CollectionRehomeWithoutChunkFksTest {
         fx.asSuperuser(ctx -> {
             ctx.alterTable(CATALOG_DOCUMENT_CHUNKS).dropConstraintIfExists("fk_catalog_chunks_chunk").execute();
             ctx.alterTable(TOPIC_ASSIGNMENTS).dropConstraintIfExists("topic_assignments_chunk_fk").execute();
-            ctx.alterTable(org.jooq.impl.DSL.table(org.jooq.impl.DSL.name("nexus", "chunk_orphaned_at"))).dropConstraintIfExists("chunk_orphaned_at_chunk_fk").execute();
+            ctx.alterTable(CHUNK_ORPHANED_AT).dropConstraintIfExists("chunk_orphaned_at_chunk_fk").execute();
             return null;
         });
     }
@@ -70,9 +71,12 @@ class CollectionRehomeWithoutChunkFksTest {
         Resp assigned = fx.post("/v1/taxonomy/assignments/assign", "{\"doc_id\":\"" + hex + "\",\"topic_id\":" + topic
             + ",\"assigned_by\":\"manual\",\"source_collection\":" + json(source) + "}");
         assertThat(assigned.status()).as("setup: " + assigned.body()).isEqualTo(200);
-        fx.asSuperuser(ctx -> ctx.execute("insert into nexus.chunk_orphaned_at (tenant_id, collection, collection_id, chash, orphaned_at) "
-            + "values (?, ?, ?, decode(?, 'hex'), now()) on conflict (tenant_id, collection, chash) do update set orphaned_at = excluded.orphaned_at",
-            fx.tenant, source, sid, hex));
+        java.time.OffsetDateTime orphanedAt = java.time.OffsetDateTime.now();
+        fx.asSuperuser(ctx -> ctx.insertInto(CHUNK_ORPHANED_AT, CHUNK_ORPHANED_AT.TENANT_ID, CHUNK_ORPHANED_AT.COLLECTION, CHUNK_ORPHANED_AT.COLLECTION_ID,
+                CHUNK_ORPHANED_AT.CHASH, CHUNK_ORPHANED_AT.ORPHANED_AT)
+            .values(fx.tenant, source, sid, Chash.fromHex(hex).toBytes(), orphanedAt)
+            .onConflict(CHUNK_ORPHANED_AT.TENANT_ID, CHUNK_ORPHANED_AT.COLLECTION, CHUNK_ORPHANED_AT.CHASH)
+            .doUpdate().set(CHUNK_ORPHANED_AT.ORPHANED_AT, orphanedAt).execute());
 
         Resp r = fx.post("/v1/catalog/collections/rehome", "{\"source\":" + json(source) + ",\"target\":" + json(target) + "}");
 
@@ -90,12 +94,12 @@ class CollectionRehomeWithoutChunkFksTest {
             .from(TOPIC_ASSIGNMENTS).where(TOPIC_ASSIGNMENTS.DOC_ID.eq(chash)).fetchOne());
         assertThat(assignmentRow.value1()).as("and so was the assignment").isEqualTo(target);
         assertThat(assignmentRow.value2()).isEqualTo(tid);
-        org.jooq.Result<org.jooq.Record> orphanMarks = fx.asSuperuser(ctx -> ctx.fetch("select collection, collection_id from nexus.chunk_orphaned_at where tenant_id = ? and chash = decode(?, 'hex')",
-            fx.tenant, hex));
+        org.jooq.Result<org.jooq.Record2<String, Long>> orphanMarks = fx.asSuperuser(ctx -> ctx.select(CHUNK_ORPHANED_AT.COLLECTION, CHUNK_ORPHANED_AT.COLLECTION_ID)
+            .from(CHUNK_ORPHANED_AT).where(CHUNK_ORPHANED_AT.TENANT_ID.eq(fx.tenant)).and(CHUNK_ORPHANED_AT.CHASH.eq(chash)).fetch());
         int orphanMarkCount = orphanMarks.size();
         assertThat(orphanMarkCount).as("the orphan mark moved with its chunk, once").isEqualTo(1);
-        assertThat(orphanMarks.get(0).get("collection", String.class)).as("under the target's label").isEqualTo(target);
-        assertThat(((Number) orphanMarks.get(0).get("collection_id")).longValue()).as("and id").isEqualTo(tid);
+        assertThat(orphanMarks.get(0).value1()).as("under the target's label").isEqualTo(target);
+        assertThat(orphanMarks.get(0).value2()).as("and id").isEqualTo(tid);
         int left = fx.asSuperuser(ctx -> ctx.fetchCount(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID.eq(sid)));
         assertThat(left).as("nothing of the source is left in the manifest").isEqualTo(0);
     }

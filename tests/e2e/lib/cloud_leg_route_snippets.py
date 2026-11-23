@@ -154,6 +154,34 @@ else:
     raise SystemExit("gc quarantine-restore accepted an origin nothing registers")
 """
 
+GC_RESTORE_REREFERENCED = r"""
+from nexus.db import make_t3
+from nexus.db.http_vector_client import VectorServiceError
+# RDR-229 P3.5a: as GC_QUARANTINE_ORPHANS, for restore-rereferenced: an origin nothing registers, refused when the engine
+# reads its registry row, before any chunk is looked at.
+try:
+    make_t3().gc_restore_rereferenced("quarantine-@label@-gc-probe", "@label@-gc-probe")
+except VectorServiceError as exc:
+    assert exc.code in (400, 404, 409, 422) and exc.reason, f"gc restore-rereferenced answered {exc.code} with no typed reason: {exc}"
+    print("restore-rereferenced refused", exc.code, exc.reason)
+else:
+    raise SystemExit("gc restore-rereferenced accepted an origin nothing registers")
+"""
+
+GC_EXPIRE_QUARANTINE = r"""
+from nexus.db import make_t3
+from nexus.db.http_vector_client import VectorServiceError
+# RDR-229 P3.5a: as GC_QUARANTINE_ORPHANS, for expire-quarantine (which deletes quarantine rows): an origin nothing registers,
+# refused when the engine reads its registry row, before any quarantine row is looked at.
+try:
+    make_t3().gc_expire_quarantine("quarantine-@label@-gc-probe", "@label@-gc-probe", "2026-01-01T00:00:00Z", 1.0, 100, False)
+except VectorServiceError as exc:
+    assert exc.code in (400, 404, 409, 422) and exc.reason, f"gc expire-quarantine answered {exc.code} with no typed reason: {exc}"
+    print("expire-quarantine refused", exc.code, exc.reason)
+else:
+    raise SystemExit("gc expire-quarantine accepted an origin nothing registers")
+"""
+
 TELEMETRY_RENAME = r"""
 import httpx
 from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
@@ -299,4 +327,6 @@ else:
 GC_PROBES = {
     "POST /v1/vectors/gc/quarantine-orphans": ("route-gc-quarantine-orphans", GC_QUARANTINE_ORPHANS, "quarantine-orphans refused"),
     "POST /v1/vectors/gc/quarantine-restore": ("route-gc-quarantine-restore", GC_QUARANTINE_RESTORE, "quarantine-restore refused"),
+    "POST /v1/vectors/gc/restore-rereferenced": ("route-gc-restore-rereferenced", GC_RESTORE_REREFERENCED, "restore-rereferenced refused"),
+    "POST /v1/vectors/gc/expire-quarantine": ("route-gc-expire-quarantine", GC_EXPIRE_QUARANTINE, "expire-quarantine refused"),
 }

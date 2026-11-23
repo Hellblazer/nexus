@@ -23,6 +23,10 @@ import java.util.stream.Stream;
 import static dev.nexus.service.CollectionRouteFixture.json;
 import static dev.nexus.service.CollectionRouteFixture.label;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_PROFILE;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -111,18 +115,31 @@ class HeavyRoutesRenameGapTest {
             });
         }
 
+        org.jooq.Condition chunkAt(String collection, String hex) {
+            return CHUNKS.TENANT_ID.eq(f.tenant).and(CHUNKS.COLLECTION.eq(collection)).and(CHUNKS.CHASH.eq(Chash.fromHex(hex).toBytes()));
+        }
+
         int chunksIn(String collection, String hex) {
-            return f.asSuperuser(c -> c.fetchOne("select count(*) from nexus.chunks where tenant_id = ? and collection = ? and chash = decode(?, 'hex')",
-                f.tenant, collection, hex).get(0, Integer.class));
+            Integer n = f.asSuperuser(c -> c.fetchCount(CHUNKS, chunkAt(collection, hex)));
+            return n;
         }
 
         Long chunkId(String collection, String hex) {
-            return f.asSuperuser(c -> c.fetchOptional("select collection_id from nexus.chunks where tenant_id = ? and collection = ? and chash = decode(?, 'hex')",
-                f.tenant, collection, hex).map(r -> r.get(0, Long.class)).orElse(null));
+            return f.asSuperuser(c -> c.select(CHUNKS.COLLECTION_ID).from(CHUNKS).where(chunkAt(collection, hex)).fetchOptional(CHUNKS.COLLECTION_ID).orElse(null));
         }
 
-        List<Map<String, Object>> rows(String sql, Object... args) {
-            return f.asSuperuser(c -> c.fetch(sql, args).intoMaps());
+        /** The named columns of the rows of {@code table} whose columns equal the key/value pairs, read as the superuser; each value binds as its own class. */
+        @SuppressWarnings({"unchecked", "rawtypes"})
+        List<Map<String, Object>> rows(String table, List<String> columns, Object... keyValues) {
+            return f.asSuperuser(c -> {
+                org.jooq.Condition where = org.jooq.impl.DSL.trueCondition();
+                for (int i = 0; i < keyValues.length; i += 2) {
+                    org.jooq.Field field = org.jooq.impl.DSL.field(org.jooq.impl.DSL.name((String) keyValues[i]), keyValues[i + 1].getClass());
+                    where = where.and(field.eq(keyValues[i + 1]));
+                }
+                return c.select(columns.stream().map(n -> org.jooq.impl.DSL.field(org.jooq.impl.DSL.name(n))).toList())
+                    .from(org.jooq.impl.DSL.table(org.jooq.impl.DSL.name("nexus", table))).where(where).fetch().intoMaps();
+            });
         }
     }
 
@@ -141,7 +158,7 @@ class HeavyRoutesRenameGapTest {
             return new Plan("{\"doc_id\":" + json(doc) + ",\"collection_id\":" + t.x + ",\"rows\":[" + rowBody(hex) + "]}", 200,
                 gap -> t.chunk(gap.currentLabelOf().get(t.x), hex, Map.of()), Set.of(), true, o -> {
                     assertThat(o.resp().body()).as("the answer").contains(answer);
-                    var rows = t.rows("select collection, collection_id from nexus.catalog_document_chunks where tenant_id = ? and doc_id = ?", o.f().tenant, doc);
+                    var rows = t.rows("catalog_document_chunks", List.of("collection", "collection_id"), "tenant_id", o.f().tenant, "doc_id", doc);
                     assertThat(rows).as("the manifest row landed, once").hasSize(1);
                     assertThat(rows.get(0).get("collection")).as("under the renamed row's current label").isEqualTo(o.current());
                     assertThat(((Number) rows.get(0).get("collection_id")).longValue()).as("with its id").isEqualTo(o.id());
@@ -160,7 +177,7 @@ class HeavyRoutesRenameGapTest {
             return new Plan("{\"collection_id\":" + t.x + ",\"docs\":[{\"doc_id\":" + json(doc) + ",\"rows\":[" + rowBody(hex) + "]}]}", 200,
                 gap -> t.chunk(gap.currentLabelOf().get(t.x), hex, Map.of()), Set.of(), true, o -> {
                     assertThat(o.resp().json().path("failed_doc_ids").size()).as("no document failed: " + o.resp().body()).isZero();
-                    var rows = t.rows("select collection, collection_id from nexus.catalog_document_chunks where tenant_id = ? and doc_id = ?", o.f().tenant, doc);
+                    var rows = t.rows("catalog_document_chunks", List.of("collection", "collection_id"), "tenant_id", o.f().tenant, "doc_id", doc);
                     assertThat(rows).as("the manifest row landed, once").hasSize(1);
                     assertThat(rows.get(0).get("collection")).isEqualTo(o.current());
                     assertThat(((Number) rows.get(0).get("collection_id")).longValue()).isEqualTo(o.id());
@@ -219,9 +236,9 @@ class HeavyRoutesRenameGapTest {
                 }, Set.of(), true, o -> {
                     assertThat(t.chunksIn(sib, mine)).as("the renamed collection's expired chunk is gone: " + o.resp().body()).isZero();
                     assertThat(t.chunksIn(sib, decoy)).as("the chunk tagged for the new holder of the old label was not expired").isEqualTo(1);
-                    var audit = t.rows("select details::text as d from nexus.gc_audit where tenant_id = ? and operation = 'gc_expire_quarantine'", o.f().tenant);
+                    var audit = t.rows("gc_audit", List.of("details"), "tenant_id", o.f().tenant, "operation", "gc_expire_quarantine");
                     assertThat(audit).as("one expiry audited").isNotEmpty();
-                    assertThat(audit.get(audit.size() - 1).get("d").toString()).as("naming the origin by its CURRENT label")
+                    assertThat(audit.get(audit.size() - 1).get("details").toString()).as("naming the origin by its CURRENT label")
                         .contains(o.current()).doesNotContain("\"" + t.b + "\"");
                 });
         }),
@@ -244,8 +261,7 @@ class HeavyRoutesRenameGapTest {
         }),
         new Case("/v1/vectors/reembed/jobs", true, (t, route) -> {
             return new Plan("{\"source_collection_id\":" + t.x + "}", 201, null, Set.of(), true, o -> {
-                var jobs = t.rows("select source_collection, source_collection_id from nexus.reembed_jobs where tenant_id = ? and source_collection_id = ?",
-                    o.f().tenant, o.id());
+                var jobs = t.rows("reembed_jobs", List.of("source_collection", "source_collection_id"), "tenant_id", o.f().tenant, "source_collection_id", o.id());
                 assertThat(jobs).as("the job was filed: " + o.resp().body()).hasSize(1);
                 assertThat(jobs.get(0).get("source_collection")).as("under the renamed row's current label").isEqualTo(o.current());
             });
@@ -257,8 +273,8 @@ class HeavyRoutesRenameGapTest {
             // the topic was filed before the rename, so it bears the old label by construction
             return new Plan("{\"doc_id\":\"" + hex + "\",\"topic_id\":" + topic + ",\"assigned_by\":\"manual\",\"source_collection_id\":" + t.x + "}", 200,
                 null, Set.of("topics"), true, o -> {
-                    var rows = t.rows("select source_collection, source_collection_id from nexus.topic_assignments where tenant_id = ? and doc_id = decode(?, 'hex')",
-                        o.f().tenant, hex);
+                    var rows = t.rows("topic_assignments", List.of("source_collection", "source_collection_id"), "tenant_id", o.f().tenant,
+                        "doc_id", Chash.fromHex(hex).toBytes());
                     assertThat(rows).as("the assignment landed: " + o.resp().body()).hasSize(1);
                     assertThat(rows.get(0).get("source_collection")).as("under the current label").isEqualTo(o.current());
                     assertThat(((Number) rows.get(0).get("source_collection_id")).longValue()).isEqualTo(o.id());
@@ -269,7 +285,7 @@ class HeavyRoutesRenameGapTest {
             assertThat(parent).as("setup: the parent topic").isPositive();
             String spec = "{\"label\":\"hv-child\",\"doc_count\":0,\"created_at\":\"2026-10-22T00:00:00Z\",\"terms_json\":\"[]\",\"doc_ids\":[]}";
             return new Plan("{\"topic_id\":" + parent + ",\"collection_id\":" + t.x + ",\"child_specs\":[" + spec + "]}", 200, null, Set.of("topics"), true, o -> {
-                var kids = t.rows("select collection, collection_id from nexus.topics where tenant_id = ? and parent_id = ?", o.f().tenant, parent);
+                var kids = t.rows("topics", List.of("collection", "collection_id"), "tenant_id", o.f().tenant, "parent_id", parent);
                 assertThat(kids).as("the child landed: " + o.resp().body()).hasSize(1);
                 assertThat(kids.get(0).get("collection")).as("under the current label").isEqualTo(o.current());
                 assertThat(((Number) kids.get(0).get("collection_id")).longValue()).isEqualTo(o.id());
@@ -280,7 +296,7 @@ class HeavyRoutesRenameGapTest {
             t.ownerDoc(doc, t.host());
             return new Plan("{\"collection_id\":" + t.x + ",\"doc_id\":" + json(doc) + ",\"highlights_md\":\"## key\\nfinding\",\"ingested_at\":\"2026-10-22T00:00:00.000000Z\"}",
                 200, null, Set.of(), true, o -> {
-                    var rows = t.rows("select collection, collection_id from nexus.document_highlights where tenant_id = ? and doc_id = ?", o.f().tenant, doc);
+                    var rows = t.rows("document_highlights", List.of("collection", "collection_id"), "tenant_id", o.f().tenant, "doc_id", doc);
                     assertThat(rows).as("the highlight landed: " + o.resp().body()).hasSize(1);
                     assertThat(rows.get(0).get("collection")).as("under the current label").isEqualTo(o.current());
                     assertThat(((Number) rows.get(0).get("collection_id")).longValue()).isEqualTo(o.id());
@@ -293,8 +309,8 @@ class HeavyRoutesRenameGapTest {
             String chash = Chash.ofText("hv-remap-" + t.stem).toHex();
             return new Plan("{\"source_collection_id\":" + t.x + ",\"entries\":[{\"old_id\":\"hv-old\",\"new_chash\":\"" + chash
                 + "\",\"target_collection_id\":" + targetId + ",\"provenance\":\"hv\"}]}", 200, null, Set.of(), true, o -> {
-                    var rows = t.rows("select source_collection, source_collection_id, target_collection, target_collection_id from nexus.chash_remap "
-                        + "where tenant_id = ? and old_id = 'hv-old'", o.f().tenant);
+                    var rows = t.rows("chash_remap", List.of("source_collection", "source_collection_id", "target_collection", "target_collection_id"),
+                        "tenant_id", o.f().tenant, "old_id", "hv-old");
                     assertThat(rows).as("the fact landed: " + o.resp().body()).hasSize(1);
                     assertThat(rows.get(0).get("source_collection")).as("the source under its current label").isEqualTo(o.current());
                     assertThat(((Number) rows.get(0).get("source_collection_id")).longValue()).isEqualTo(o.id());
@@ -304,7 +320,7 @@ class HeavyRoutesRenameGapTest {
         new Case("/v1/pipeline/create", false, (t, route) -> {
             String hash = "hv-" + t.stem;
             return new Plan("{\"collection_id\":" + t.x + ",\"content_hash\":" + json(hash) + ",\"pdf_path\":\"/hv.pdf\"}", 200, null, Set.of(), true, o -> {
-                var rows = t.rows("select collection from nexus.pdf_pipeline where tenant_id = ? and content_hash = ?", o.f().tenant, hash);
+                var rows = t.rows("pdf_pipeline", List.of("collection"), "tenant_id", o.f().tenant, "content_hash", hash);
                 assertThat(rows).as("the pipeline landed: " + o.resp().body()).hasSize(1);
                 assertThat(rows.get(0).get("collection")).as("under the current label").isEqualTo(o.current());
             });
@@ -325,9 +341,9 @@ class HeavyRoutesRenameGapTest {
         fxLocal = prepared(new CollectionRouteFixture(true));
         // the re-embed start: the tenant's profile names a model other than the source's, and the engine is told it serves it
         fxLocal.asSuperuser(ctx -> {
-            ctx.execute("delete from nexus.embedding_profile where tenant_id = ? and content_type = 'docs'", fxLocal.tenant);
-            ctx.execute("insert into nexus.embedding_profile (tenant_id, content_type, embedding_model, dimension) values (?, 'docs', ?, 768)",
-                fxLocal.tenant, BGE);
+            ctx.deleteFrom(EMBEDDING_PROFILE).where(EMBEDDING_PROFILE.TENANT_ID.eq(fxLocal.tenant)).and(EMBEDDING_PROFILE.CONTENT_TYPE.eq("docs")).execute();
+            ctx.insertInto(EMBEDDING_PROFILE, EMBEDDING_PROFILE.TENANT_ID, EMBEDDING_PROFILE.CONTENT_TYPE, EMBEDDING_PROFILE.EMBEDDING_MODEL,
+                EMBEDDING_PROFILE.DIMENSION).values(fxLocal.tenant, "docs", BGE, 768).execute();
             return null;
         });
         fxLocal.service.setReembedServedModelsForTests(() -> List.of(BGE, "minilm-l6-v2-384"));
@@ -344,8 +360,8 @@ class HeavyRoutesRenameGapTest {
                 }
             }
             ctx.alterTable(CATALOG_COLLECTIONS).dropConstraint(CATALOG_COLLECTIONS.getPrimaryKey().getName()).cascade().execute();
-            ctx.execute("alter table nexus.catalog_document_chunks drop constraint if exists fk_catalog_chunks_chunk");
-            ctx.execute("alter table nexus.topic_assignments drop constraint if exists topic_assignments_chunk_fk");
+            ctx.alterTable(CATALOG_DOCUMENT_CHUNKS).dropConstraintIfExists("fk_catalog_chunks_chunk").execute();
+            ctx.alterTable(TOPIC_ASSIGNMENTS).dropConstraintIfExists("topic_assignments_chunk_fk").execute();
             return null;
         });
         return f;

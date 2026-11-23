@@ -237,7 +237,7 @@ final class TaxonomyAnalytics {
      * Topics carrying projection assignments that have no {@code topic_links}
      * row, restricted to those a link is structurally POSSIBLE for.
      *
-     * <p>The predicate mirrors {@link #refreshProjectionLinks} exactly, and that
+     * <p>The predicate mirrors {@link TaxonomyRepository#refreshProjectionLinks} exactly, and that
      * is the whole point: a drift audit whose notion of "linkable" differs from
      * the materializer's reports fiction. {@code refreshProjectionLinks} pairs a
      * projection TARGET with a NON-projection SOURCE, so a topic is only drifted
