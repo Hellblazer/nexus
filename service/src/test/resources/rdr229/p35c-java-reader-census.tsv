@@ -488,8 +488,8 @@ service/src/main/java/dev/nexus/service/vectors/ChunkKeySweep.java	993	chunks	co
 service/src/main/java/dev/nexus/service/vectors/ChunkKeySweep.java	1018	chunks	collection	where	jooq	-
 service/src/main/java/dev/nexus/service/vectors/ChunkOwnerLabel.java	104	catalog_document_chunks	collection	order_by	alias	-
 service/src/main/java/dev/nexus/service/vectors/ChunkOwnerLabel.java	104	chunks	collection	order_by	jooq	-
-service/src/main/java/dev/nexus/service/vectors/ChunkSensitivity.java	72	catalog_document_chunks	collection	where	alias	-
-service/src/main/java/dev/nexus/service/vectors/ChunkSensitivity.java	139	catalog_document_chunks	collection	where	alias	-
+service/src/main/java/dev/nexus/service/vectors/ChunkSensitivity.java	65	catalog_document_chunks	collection	where	alias	-
+service/src/main/java/dev/nexus/service/vectors/ChunkSensitivity.java	129	catalog_document_chunks	collection	where	alias	-
 service/src/main/java/dev/nexus/service/vectors/CollectionSelector.java	96	catalog_collections	name	select	jooq	-
 service/src/main/java/dev/nexus/service/vectors/CollectionSelector.java	99	catalog_collections	name	where	jooq	-
 service/src/main/java/dev/nexus/service/vectors/CollectionSelector.java	140	catalog_collections	name	where	jooq	-
