@@ -38,9 +38,6 @@ class CollectionDeleteByIdTest {
 
     /** Point 3: the typed 404 for an id no row has (the same body every by-id route answers, CollectionRoutesByIdTest). */
     private static final String UNKNOWN_REASON = "unknown_collection_id";
-    /** Point 4: the typed refusal of a retired row; the body names the live successor in {@link #SUCCESSOR}. */
-    private static final String SUPERSEDED_REASON = "collection_superseded";
-    private static final String SUCCESSOR = "successor_collection_id";
 
     CollectionRouteFixture fx;
     int n;
@@ -151,43 +148,53 @@ class CollectionDeleteByIdTest {
     // ---- point 4 -------------------------------------------------------------------------------------------------------
 
     /**
-     * Contract point 4: "a superseded label, or a superseded row's id, -> typed refusal naming the live successor's
-     * collection_id; the tombstone stays." Today's name path deletes a tombstone by its label; this changes that outcome
-     * (the wire ledger gets its own entry for it). Both ways a tombstone arises: a supersede (the tombstone keeps its data)
-     * and a name-path rename (the tombstone is empty). The label and the id of the tombstone get the same refusal.
+     * Contract point 4 as linda changed it on 2026-11-23 (option (b)): a superseded label, or a superseded row's id, is deleted
+     * with the 200 it always got, and the refusal naming the successor moves to the paired client release (P3.12). The
+     * tombstone goes; the live successor is untouched. (From gate 3 the purge is scoped by the tombstone's own id:
+     * {@link CollectionDeleteScopeByIdTest}.) Both ways a tombstone arises: a supersede (the tombstone keeps its data) and a
+     * name-path rename (the tombstone is empty).
      */
     @Test
-    void point4_aSupersededLabelOrIdIsRefusedNamingTheLiveSuccessorsId_theTombstoneStays() {
-        // a supersede
+    void point4_aSupersededLabelOrIdIsDeleted_theSuccessorStays() {
+        // a supersede, deleted by its label
         String oldOne = registered("p4-old");
         String successor = registered("p4-succ");
-        long oldId = fx.idOf(oldOne);
         long successorId = fx.idOf(successor);
         Resp sup = fx.post("/v1/catalog/collections/supersede",
             "{\"name\":" + json(oldOne) + ",\"superseded_by\":" + json(successor) + "}");
         assertThat(sup.status()).as("setup: " + sup.body()).isEqualTo(200);
-        assertRefusedNamingSuccessor(fx.post(DELETE, "{\"name\":" + json(oldOne) + "}"), successorId);
-        assertRefusedNamingSuccessor(fx.post(DELETE, "{\"collection_id\":" + oldId + "}"), successorId);
-        assertThat(fx.supersededBy(oldOne)).as("the tombstone stays").isEqualTo(successor);
-        assertThat(fx.idOf(oldOne)).isEqualTo(oldId);
+        Resp byLabel = fx.post(DELETE, "{\"name\":" + json(oldOne) + "}");
+        assertThat(byLabel.status()).as("the 200 stays: %s", byLabel.body()).isEqualTo(200);
+        assertThat(fx.exists(oldOne)).as("the tombstone goes").isFalse();
         assertThat(fx.supersededBy(successor)).as("and the live successor is untouched").isEqualTo("");
+        assertThat(fx.idOf(successor)).isEqualTo(successorId);
+
+        // a supersede, deleted by the tombstone's id
+        String oldTwo = registered("p4-old-id");
+        long oldTwoId = fx.idOf(oldTwo);
+        assertThat(fx.post("/v1/catalog/collections/supersede",
+            "{\"name\":" + json(oldTwo) + ",\"superseded_by\":" + json(successor) + "}").status()).isEqualTo(200);
+        Resp byId = fx.post(DELETE, "{\"collection_id\":" + oldTwoId + "}");
+        assertThat(byId.status()).as(byId.body()).isEqualTo(200);
+        assertThat(byId.json().path("collection_id").asLong(-1)).isEqualTo(oldTwoId);
+        assertThat(fx.exists(oldTwo)).isFalse();
+        assertThat(fx.exists(successor)).isTrue();
 
         // a name-path rename: the old label is an empty tombstone of the new one
         String from = registered("p4-ren-from");
-        long fromId = fx.idOf(from);
         String to = label("del-p4-ren-to-" + (n++));
         Resp ren = fx.post("/v1/catalog/collections/rename", "{\"old_name\":" + json(from) + ",\"new_name\":" + json(to) + "}");
         assertThat(ren.status()).as("setup: " + ren.body()).isEqualTo(200);
-        long toId = fx.idOf(to);
-        assertRefusedNamingSuccessor(fx.post(DELETE, "{\"name\":" + json(from) + "}"), toId);
-        assertRefusedNamingSuccessor(fx.post(DELETE, "{\"collection_id\":" + fromId + "}"), toId);
-        assertThat(fx.supersededBy(from)).as("the rename's tombstone stays").isEqualTo(to);
+        Resp byTombstone = fx.post(DELETE, "{\"name\":" + json(from) + "}");
+        assertThat(byTombstone.status()).as(byTombstone.body()).isEqualTo(200);
+        assertThat(fx.exists(from)).as("the rename's empty tombstone goes").isFalse();
+        assertThat(fx.exists(to)).as("the renamed collection stays").isTrue();
     }
 
     /**
      * Contract point 4, last clause: "the --all empty-tombstone sweep unchanged." Deleting the live successor still removes
      * the empty retired rows that name it (nexus-s80u9; {@code CatalogDeleteRetiredPredecessorTest}), by id as by label: the
-     * refusal is for deleting the tombstone itself.
+     * delete of the tombstone itself is a plain delete (point 4 above).
      */
     @Test
     void point4_theEmptyTombstoneSweepIsUnchanged_deletingTheSuccessorByIdStillRemovesIt() {
@@ -202,14 +209,6 @@ class CollectionDeleteByIdTest {
         assertThat(r.status()).as(r.body()).isEqualTo(200);
         assertThat(fx.exists(to)).isFalse();
         assertThat(fx.exists(from)).as("the empty tombstone that named it goes with it").isFalse();
-    }
-
-    private void assertRefusedNamingSuccessor(Resp r, long successorId) {
-        assertThat(r.status()).as(r.body()).isEqualTo(409);
-        assertThat(r.reason()).as("typed: %s", r.body()).isEqualTo(SUPERSEDED_REASON);
-        assertThat(r.json().path(SUCCESSOR).asLong(-1)).as("names the live successor's collection_id: %s", r.body())
-            .isEqualTo(successorId);
-        assertThat(r.json().path("error").asText()).contains(String.valueOf(successorId));
     }
 
     // ---- point 6 -------------------------------------------------------------------------------------------------------
