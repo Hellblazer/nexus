@@ -320,6 +320,57 @@ class Rdr229P35cSharedLabelAndHistoryTest extends AtomicWriteTestBase {
         assertThat(drawn).as("no TooManyRows, and not the tombstone's id: the new row gets its own").isNotEqualTo(tombstone);
     }
 
+    /**
+     * folio review F4: repointTombstones takes the tombstone rows FOR UPDATE in collection_id order before it updates them, the order of a
+     * retiring verb's lockRows. The UPDATE alone meets the rows in physical order, and a tuple that was rewritten sits behind the others:
+     * here x1 (the lower id) is rewritten so it sits behind x2. A session holds x2; the re-point must wait on it HOLDING x1 (taken first, in id
+     * order), which a third session sees as a refused FOR UPDATE NOWAIT on x1. Without the ordered lock the re-point holds nothing while it waits.
+     */
+    @Test
+    void repointTombstonesLocksTheTombstoneRowsInIdOrderBeforeUpdatingThem() throws Exception {
+        String from = label("rolfrom"), to = label("rolto");
+        long fromId = registerRow(from, "", null, "rolowner-f");
+        long toId = registerRow(to, "", null, "rolowner-t");
+        long x1 = registerRow(label("rolx"), from, fromId, "rolowner-x1");
+        long x2 = registerRow(label("rolx"), from, fromId, "rolowner-x2");
+        assertThat(x1).as("setup: x1 is the lower id").isLessThan(x2);
+        su(d -> d.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.OWNER_ID)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(x1)).execute());   // x1's tuple now sits behind x2's
+
+        java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newSingleThreadExecutor();
+        try (Connection holder = pg.createConnection(""); Connection probe = pg.createConnection("")) {
+            holder.setAutoCommit(false);
+            DSL.using(holder, SQLDialect.POSTGRES).select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(x2)).forUpdate().fetch();
+            java.util.concurrent.Future<Integer> repoint = pool.submit(() ->
+                tenantScope.withTenant(TENANT, ctx -> CollectionTombstones.repointTombstones(ctx, TENANT, fromId, toId)));
+            // the re-point is waiting for x2: a lock request is not granted
+            long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(30);
+            while (true) {
+                boolean waiting = DSL.using(probe, SQLDialect.POSTGRES).fetchCount(DSL.table(DSL.name("pg_catalog", "pg_locks")),
+                    DSL.field(DSL.name("granted"), Boolean.class).isFalse().and(DSL.field(DSL.name("locktype"), String.class).in("tuple", "transactionid"))) > 0;
+                if (waiting) break;
+                assertThat(repoint.isDone() || System.nanoTime() > deadline).as("the re-point never showed waiting").isFalse();
+                Thread.sleep(10);
+            }
+            probe.setAutoCommit(false);
+            boolean refused = false;
+            try {
+                DSL.using(probe, SQLDialect.POSTGRES).select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(x1)).forUpdate().noWait().fetch();
+            } catch (org.jooq.exception.DataAccessException e) {
+                refused = true;   // 55P03: the waiting re-point already holds x1
+            } finally {
+                probe.rollback();
+            }
+            assertThat(refused).as("while it waits for the higher id, the re-point holds the lower one (the rows are locked in id order)").isTrue();
+            holder.rollback();
+            assertThat(repoint.get(30, java.util.concurrent.TimeUnit.SECONDS)).as("released, it re-points both").isEqualTo(2);
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
     @Test
     void repointTombstonesMovesExactlyTheTombstonesPointingAtFromIdOntoToIdWithItsLabel() throws Exception {
         String from = label("rpfrom"), to = label("rpto"), other = label("rpother");

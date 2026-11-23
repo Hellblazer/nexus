@@ -6402,7 +6402,7 @@ public final class CatalogRepository {
 
     private String writeManifestRows(DSLContext ctx, String tenant, String docId,
                                           String collection, String gate, List<Map<String, Object>> rows) {
-        return writeManifestRows(ctx, tenant, docId, collection, gate, rows, null, null, null, null, null, null);
+        return writeManifestRows(ctx, tenant, docId, collection, gate, rows, null, null, null, null, null, null, null);
     }
 
     /**
@@ -6470,7 +6470,8 @@ public final class CatalogRepository {
                                           Set<String> writtenThisRequest,
                                           List<String>[] writtenChashesOut,
                                           RacedEmbeds racedOut,
-                                          List<DepartedWriterSpans.Gone> priorRows) {
+                                          List<DepartedWriterSpans.Gone> priorRows,
+                                          Gate3 spans) {
         requireNonBlank(collection, "collection");
         // Case-1 duty only (RDR-191): does docId exist at all? A ghost
         // document (exists, no physical_collection) is no longer a special
@@ -6514,7 +6515,8 @@ public final class CatalogRepository {
         // nexus-z0o2p.29: a replace writes the difference (ManifestReplace) so a re-index that keeps a chunk's
         // row stops dropping and re-listing it; the delete-and-insert below remains for a bad row (it fails there
         // as it always did) and for a rewrite of more than ManifestReplace.MAX_CHANGED_ROWS rows.
-        final Gate3 spansGate = DepartedWriterSpans.pinned(gate3);   // read once for the pass: the rows are read and cleared by one reading of the latch
+        // the pass's one reading of the latch: the caller's when it read the prior rows itself (writeManifestMany's before-read), else taken here
+        final Gate3 spansGate = spans != null ? spans : DepartedWriterSpans.pinned(gate3);
         List<DepartedWriterSpans.Gone> diffed = ManifestReplace.replace(ctx, tenant, docId, collection, rows, spansGate);
         if (diffed != null) {
             if (!rows.isEmpty()) stampIndexedAt(ctx, tenant, docId);
@@ -7221,6 +7223,8 @@ public final class CatalogRepository {
                         // entry is left out of dropped_chashes and the RDR-192 reaper covers
                         // the un-swept chunks), never the write.
                         long tBeforeReadStart = System.nanoTime();
+                        // one reading of the latch for this attempt: the before-read below and the span clear of writeManifestRows see the same answer
+                        final Gate3 attemptSpansGate = DepartedWriterSpans.pinned(gate3);
                         // nexus-pvkbv: the same read also yields the rows' collection and own span, which
                         // writeManifestRows hands to the departed-chunk span clear.
                         List<DepartedWriterSpans.Gone> beforeRows =
@@ -7228,7 +7232,7 @@ public final class CatalogRepository {
                                   tenant, docId, () -> {
                                       java.util.function.BiConsumer<String, DSLContext> hook = beforeReadHookForTests;
                                       if (hook != null) hook.accept(docId, ctx);
-                                      return currentManifestRows(ctx, tenant, docId);
+                                      return currentManifestRows(ctx, tenant, docId, attemptSpansGate);
                                   }, null);
                         Set<String> beforeRead = beforeRows == null ? null : chashesOf(beforeRows);
                         long tBeforeReadEnd = System.nanoTime();
@@ -7244,7 +7248,7 @@ public final class CatalogRepository {
                             writeManifestRows(ctx, tenant, docId, docCollection[0], docCollection[0], rows,
                                     resolvedChunks, chunksWrittenHolder,
                                     requestWrittenChashes, newlyWrittenChashesHolder, docRaced,
-                                    beforeRows == null ? PRIOR_ROWS_UNREAD : beforeRows);
+                                    beforeRows == null ? PRIOR_ROWS_UNREAD : beforeRows, attemptSpansGate);
                             if (move != null) {
                                 completeMove(ctx, tenant, docId, docCollection[0], move.sourceCollection(), moveSatelliteHolder);
                                 // The job's record of this move, in the same transaction. Lock order for a job's
@@ -7709,10 +7713,10 @@ public final class CatalogRepository {
      * manifest read in the file (getManifest/getManifestMany) rather than
      * relying on a downstream throw to make an unguarded read harmless.
      */
-    private List<DepartedWriterSpans.Gone> currentManifestRows(DSLContext ctx, String tenant, String docId) {
+    private List<DepartedWriterSpans.Gone> currentManifestRows(DSLContext ctx, String tenant, String docId, Gate3 spansGate) {
         // RDR-223 P1.2: ORDER BY position so the dropped list a write_many response reports is
         // in the previous manifest's order, deterministically (the sweep itself never cared).
-        return DepartedWriterSpans.Gone.allOf(ctx.select(DepartedWriterSpans.Gone.columns(gate3))
+        return DepartedWriterSpans.Gone.allOf(ctx.select(DepartedWriterSpans.Gone.columns(spansGate))
                   .from(CATALOG_DOCUMENT_CHUNKS)
                   .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
                          .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId))
