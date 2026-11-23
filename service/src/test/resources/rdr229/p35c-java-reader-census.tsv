@@ -404,8 +404,8 @@ service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	334	chunks	coll
 service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	339	catalog_collections	name	select	alias	-
 service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	366	chunks	collection	where	jooq	-
 service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	408	catalog_collections	name	where	jooq	-
-service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	428	chunks	collection	where	jooq	-
-service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	453	chunks	collection	where	jooq	-
+service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	429	chunks	collection	where	jooq	-
+service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	454	chunks	collection	where	jooq	-
 service/src/main/java/dev/nexus/service/db/ReembedJobHold.java	36	reembed_jobs	source_collection	expr	jooq	-
 service/src/main/java/dev/nexus/service/db/ReembedJobHold.java	37	reembed_jobs	target_collection	expr	jooq	-
 service/src/main/java/dev/nexus/service/db/ReembedJobHold.java	45	catalog_collections	superseded_by	where	alias	-
