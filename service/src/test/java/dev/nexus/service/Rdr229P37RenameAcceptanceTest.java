@@ -16,6 +16,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 
@@ -307,14 +308,24 @@ class Rdr229P37RenameAcceptanceTest {
             org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("tenant_id"), String.class).eq(w.tenant())));
         assertThat(orphansBefore).as("non-vacuity: an orphan row for the chunk").isEqualTo(1L);
 
+        // position 0 keeps the chunk the seed put there: replacing it would drop that chunk's only manifest reference and stamp an orphan row of its own
+        String kept = env.su(ctx -> java.util.HexFormat.of().formatHex(ctx.select(org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("chash"), byte[].class))
+            .from(org.jooq.impl.DSL.table(org.jooq.impl.DSL.name("nexus", "catalog_document_chunks")))
+            .where(org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("tenant_id"), String.class).eq(w.tenant())
+                .and(org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("doc_id"), String.class).eq("rn-doc-1"))
+                .and(org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("position"), Integer.class).eq(0)))
+            .fetchSingle().value1()));
         var r = env.callJson("POST", "/v1/catalog/manifest/write", w.token(),
-            "{\"doc_id\":\"rn-doc-1\",\"collection\":\"" + w.b() + "\",\"rows\":[{\"position\":0,\"chash\":\"" + Rdr229RenameSeeds.hexChash("rn-doc-1")
+            "{\"doc_id\":\"rn-doc-1\",\"collection\":\"" + w.b() + "\",\"rows\":[{\"position\":0,\"chash\":\"" + kept
                 + "\"},{\"position\":1,\"chash\":\"" + chash + "\"}]}");
 
         assertThat(r.statusCode()).as("no 23503: the manifest row of an existing chunk commits: " + r.body()).isEqualTo(200);
-        long orphansAfter = env.su(ctx -> (long) ctx.fetchCount(org.jooq.impl.DSL.table(org.jooq.impl.DSL.name("nexus", "chunk_orphaned_at")),
-            org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("tenant_id"), String.class).eq(w.tenant())));
-        assertThat(orphansAfter).as("the orphan row of the now-referenced chunk is cleared").isZero();
+        List<String> orphansAfter = env.su(ctx -> ctx.select(org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("chash"), byte[].class))
+            .from(org.jooq.impl.DSL.table(org.jooq.impl.DSL.name("nexus", "chunk_orphaned_at")))
+            .where(org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("tenant_id"), String.class).eq(w.tenant()))
+            .fetch(0, byte[].class).stream().map(java.util.HexFormat.of()::formatHex).toList());
+        assertThat(orphansAfter).as("the orphan row of the now-referenced chunk " + chash + " is cleared, and the write orphaned nothing (kept " + kept + ")")
+            .isEmpty();
     }
 
     /** (c) addendum 9: a delete by the old label A leaves B's chunks, topic_assignments and manifest rows untouched, and deletes nothing. */
