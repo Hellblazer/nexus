@@ -4,6 +4,7 @@ package dev.nexus.service.db;
 
 import org.jooq.DSLContext;
 import org.jooq.Field;
+import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
 
 import java.time.OffsetDateTime;
@@ -24,15 +25,44 @@ public final class CollectionTombstones {
     private CollectionTombstones() {}
 
     /**
+     * The registry row lock bound, in milliseconds as the GUC text (linda's Q3): a verb that cannot lock its rows in this time answers
+     * {@link RenameBusyException} (503 {@code rename_busy}) and changes nothing. PostgreSQL lets new {@code FOR KEY SHARE} lockers
+     * join a row while a {@code FOR UPDATE} waits for the old ones, so steady overlapping writers can starve the verb: the bound turns
+     * that into an answer. Writers get no timeout.
+     */
+    private static volatile String rowLockTimeoutMs = "10000";
+
+    /** Test hook: a shorter bound, so a starvation test answers in a second; pass {@code null} to restore the default. */
+    public static void setRowLockTimeoutMsForTests(String ms) {
+        rowLockTimeoutMs = ms == null ? "10000" : ms;
+    }
+
+    /**
      * Step 3 of the canonical lock order ({@link RenameGuard#runRename}): the registry rows of {@code names} that exist,
-     * {@code SELECT ... FOR UPDATE} in {@code collection_id} order, taken by every verb that retires or revives a row before any chunk,
-     * manifest or child-row work. The order itself, and why it cannot close a cycle, is written once in {@code runRename}'s javadoc.
+     * {@code SELECT ... FOR UPDATE} in {@code collection_id} order, taken by a verb that retires or revives a row (the catalog rename
+     * and the supersede; the delete is not one, linda's Q2) before any chunk, manifest or child-row work. The order itself, and why it
+     * cannot close a cycle, is written once in {@code runRename}'s javadoc. The wait is bounded ({@link #rowLockTimeoutMs}, set local to
+     * this statement and restored after it): on a timeout nothing has been written, the transaction rolls back, and
+     * {@link RenameBusyException} says so. A wait over {@link RegistryLockWait#SLOW_MS} is logged with its time.
      */
     static void lockRows(DSLContext ctx, String tenant, String... names) {
-        ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
-            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.in(names))
-            .orderBy(CATALOG_COLLECTIONS.COLLECTION_ID)
-            .forUpdate().fetch();
+        String previous = ctx.select(DSL.function("current_setting", String.class, DSL.val("lock_timeout"))).fetchOne(0, String.class);
+        ctx.select(DSL.function("set_config", String.class, DSL.val("lock_timeout"), DSL.val(rowLockTimeoutMs), DSL.val(true))).fetch();
+        long started = System.nanoTime();
+        try {
+            ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.in(names))
+                .orderBy(CATALOG_COLLECTIONS.COLLECTION_ID)
+                .forUpdate().fetch();
+        } catch (DataAccessException e) {
+            if ("55P03".equals(e.sqlState())) {
+                RegistryLockWait.logIfSlow("verb", tenant, String.join(",", names), (System.nanoTime() - started) / 1_000_000, "timed_out");
+                throw new RenameBusyException(rowLockTimeoutMs + " ms");
+            }
+            throw e;
+        }
+        RegistryLockWait.logIfSlow("verb", tenant, String.join(",", names), (System.nanoTime() - started) / 1_000_000, "locked");
+        ctx.select(DSL.function("set_config", String.class, DSL.val("lock_timeout"), DSL.val(previous), DSL.val(true))).fetch();
     }
 
     /**
@@ -47,9 +77,10 @@ public final class CollectionTombstones {
      * @return the number of rows updated (0 means no {@code (tenant, name)} row, or a different target already set)
      */
     static int supersede(DSLContext ctx, String tenant, String name, String supersededBy, Field<OffsetDateTime> stampedAt) {
-        // The canonical lock order (RenameGuard#runRename), steps 1 and 3: this verb takes no sweep gate.
+        // The canonical lock order (RenameGuard#runRename), steps 1 and 3: this verb takes no sweep gate. The successor's row too, so a
+        // delete of the successor between the target check and the UPDATE cannot leave the CHECK a successor that is gone (23514).
         RenameLatchLock.shared(ctx);
-        lockRows(ctx, tenant, name);
+        lockRows(ctx, tenant, name, supersededBy);
         CollectionIds.require(ctx, tenant, supersededBy);
         return casSupersede(ctx, tenant, name, supersededBy, CollectionIds.idOf(tenant, supersededBy), stampedAt);
     }

@@ -52,7 +52,9 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
  *     existing order;</li>
  * <li>the registry rows, in {@code collection_id} order: {@code FOR UPDATE} for a verb ({@code CollectionTombstones#lockRows}, called
  *     in {@code CollectionRename#retireAndRegister} right after the tuple locks and before the first row write),
- *     {@code FOR KEY SHARE} for a writer (the foreign key takes it on insert, and the by-id read takes it explicitly);</li>
+ *     {@code FOR KEY SHARE} for a writer: the registry check every write transaction runs first takes it (by id through the request
+ *     carrier, by label through the memoised in-transaction read; the label read lands with slice A at assembly), and the foreign key
+ *     takes it again on the first child insert;</li>
  * <li>only then the chunk, manifest and child-row work.</li>
  * </ol>
  * The writers that take advisory locks follow it: a manifest or chunk writer takes its sweep gate shared and then, on insert, its key
@@ -60,7 +62,9 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
  * lock); none takes a tuple lock and then a gate.
  * {@code FOR UPDATE} conflicts with {@code FOR KEY SHARE}, so a verb waits for the writers in flight on its rows and its re-home
  * includes their rows, and a writer that arrives after it waits, then reads the retired row (409 {@code collection_superseded}) instead of
- * filing rows into it. Both sides take the gate before the row, so a sweep queued for the exclusive gate waits on both shared holders and
+ * filing rows into it: the bar is "live at commit" for EVERY writer, each of which takes the registry key share first, in its own
+ * transaction, before any child write. The verb's wait is bounded ({@link RenameBusyException}, 503 {@code rename_busy}); a writer's is
+ * not, and a wait over a second is logged either way ({@link RegistryLockWait}). Both sides take the gate before the row, so a sweep queued for the exclusive gate waits on both shared holders and
  * neither waits on it once it holds its gate: no cycle. The supersede takes no sweep gate, so it takes steps 1 and 3 only.
  *
  * <p>The latch row decides, except that no row with the readiness complete is {@code latch_row_missing}. The in-process gate 3 signal

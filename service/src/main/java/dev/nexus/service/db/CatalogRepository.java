@@ -10666,7 +10666,7 @@ public final class CatalogRepository {
      * DIFFERENT target; new registered) live in {@code CatalogHandler
      * .handleCollectionSupersede}, alongside the identical handler-side guards its
      * sibling verb {@code handleCollectionRename} already carries (nexus-hz785 404,
-     * nexus-gaou3 409). This method stays a pure UPDATE.
+     * nexus-gaou3 409). Inside, it takes the rename lock shared and both rows FOR UPDATE ({@link CollectionTombstones#supersede}).
      */
     public int supersedeCollection(String tenant, String name, String supersededBy, String supersededAt) {
         // superseded_at is timestamptz NULL after catalog-002-1-temporal-typing;
@@ -10676,7 +10676,7 @@ public final class CatalogRepository {
             : DSL.val(tsOrNull(supersededAt));
         // RDR-229 P3.1 (R7): the statement, its CAS conjunct and the successor-id resolution live in
         // CollectionTombstones.supersede; an unregistered target is refused there with UnregisteredCollectionException.
-        int updated = tenantScope.withTenant(tenant, ctx -> {
+        int updated = DeadlockRetry.run("catalog.supersedeCollection " + name, () -> tenantScope.withTenant(tenant, ctx -> {
             int n = CollectionTombstones.supersede(ctx, tenant, name, supersededBy, stampedAt);
             // catalog-051-2 (RDR-229): the retired row no longer holds its tuple, so a slug-owned successor whose documents
             // name that owner (a re-home moves them while the source stays live) can take it now. The same no-op write
@@ -10685,7 +10685,7 @@ public final class CatalogRepository {
                 rederiveOwner(ctx, tenant, supersededBy);
             }
             return n;
-        });
+        }));
         // nexus-mp8ys: post-commit, like every evict (see CollectionRegistry.evict). The cached row
         // names no successor; left in place it would let an implicit chunk write to the retired
         // name pass the registry check, which is the stranding this refusal exists to stop. The
@@ -11417,7 +11417,7 @@ public final class CatalogRepository {
      * (physical_collection = source): a stale URI naming {@code source} on a document in another collection is not the
      * move's to touch (critique of a11876053). A tombstoned mover is not checked: it cannot collide under catalog-016.
      */
-    private static void requireCollectionUrisFree(DSLContext ctx, String tenant, String source, String target,
+    static void requireCollectionUrisFree(DSLContext ctx, String tenant, String source, String target,
                                                   String operation) {
         var hit = moveUriCollisions(ctx, tenant, source, target,
             m -> m.PHYSICAL_COLLECTION.eq(source).and(NoteUri.namesCollection(m.SOURCE_URI, source)))

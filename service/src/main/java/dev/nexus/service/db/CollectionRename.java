@@ -27,6 +27,11 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
  * <li>With the index absent, the advisory locks of X's tuple and Y's tuple, in the sorted order the batch paths take theirs
  *     ({@link CollectionTupleLock#lock}), before either row is touched: a registration takes a tuple's lock and then
  *     its row, so a rename that held X's row and then waited for a tuple's lock could meet it head on.</li>
+ * <li>Both registry rows, X's and Y's when it exists, {@code SELECT ... FOR UPDATE} in {@code collection_id} order
+ *     ({@link CollectionTombstones#lockRows}, bounded by its timeout: {@link RenameBusyException}), before the first row write. The
+ *     wait can be long (a writer in flight on X), so what the steps above read is read again after it: X's and Y's tuples, Y's
+ *     liveness and the URIs X's documents would take; a change is the named 409 ({@link CatalogRepository.CollectionMergeRefused} or
+ *     {@code SourceUriCollision}), never a 23505.</li>
  * <li>Y's id: the id of Y's own tombstone when Y is being revived (a rename back keeps the row and its id), else a fresh draw
  *     from the column's sequence ({@link CollectionMint#drawId}: taken-id check, one forward heal).</li>
  * <li>X is retired through {@link CollectionTombstones#supersede(DSLContext, String, String, String, long)}, the one writer
@@ -70,6 +75,7 @@ final class CollectionRename {
                 new CollectionTupleLock.Tuple(tenant, source.value1(), source.value2(), source.value3(), source.value4())));
         }
         CollectionTombstones.lockRows(ctx, tenant, oldName, newName);   // canonical lock order (RenameGuard#runRename): after the tuple locks above, before any row write
+        recheckAfterLock(ctx, tenant, oldName, newName, newContentType, newOwnerId, own, source);
         long successorId = successorId(ctx, tenant, newName);
         int retired = CollectionTombstones.supersede(ctx, tenant, oldName, newName, successorId);
         if (retired == 0 && own != null) {
@@ -90,6 +96,28 @@ final class CollectionRename {
         counts.put("catalog_collections_inserted", written);
         // RDR-229 P3.1 (R7): Y is the successor that tombstones naming it were waiting for; a revived Y already is, so no row moves
         CollectionTombstones.repointTombstonesNaming(ctx, tenant, java.util.List.of(newName));
+    }
+
+    /**
+     * What the wait for the rows may have made stale, read again with the rows locked: X's tuple and attributes, Y's liveness, and the
+     * URIs. Each change is the named refusal, in this transaction, before anything is written.
+     */
+    private static void recheckAfterLock(DSLContext ctx, String tenant, String oldName, String newName,
+                                         Field<String> newContentType, Field<String> newOwnerId,
+                                         Record4<String, String, String, String> own,
+                                         Record5<String, String, String, String, String> source) {
+        String operation = "renaming " + oldName + " to " + newName;
+        if (!java.util.Objects.equals(own, ownTuple(ctx, tenant, oldName))
+                || !java.util.Objects.equals(source, successorAttributes(ctx, tenant, oldName, newContentType, newOwnerId))) {
+            throw new CatalogRepository.CollectionMergeRefused(operation + ": " + oldName + " changed while this rename waited for its "
+                + "registry row; nothing was renamed, so try again");
+        }
+        if (ctx.fetchExists(ctx.selectOne().from(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+                .and(CATALOG_COLLECTIONS.NAME.eq(newName)).and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")))) {
+            throw new CatalogRepository.CollectionMergeRefused(operation + ": target collection already exists: " + newName
+                + " (registered while this rename waited); nothing was renamed");
+        }
+        CatalogRepository.requireCollectionUrisFree(ctx, tenant, oldName, newName, operation);
     }
 
     /** Y's id: the id of Y's own tombstone when Y is being revived (it keeps it), else a fresh draw from the sequence. */

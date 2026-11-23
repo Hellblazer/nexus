@@ -393,6 +393,9 @@ public final class HttpUtil {
      *       {@code collection_id_mismatch} ({@link #COLLECTION_ID_MISMATCH_REASON}) for a registry row of another id, all from
      *       {@code CollectionSelectorFilter}; the delete answers 409
      *       {@code collection_label_ambiguous} ({@link #COLLECTION_LABEL_AMBIGUOUS_REASON}, listing {@code collection_ids}).</li>
+     *   <li>{@code rename_busy} (503, with {@code Retry-After} and {@code retry_after_seconds}): a catalog rename or a collection
+     *       supersede could not lock its registry row within 10 s because writers still held it ({@link #RENAME_BUSY_REASON},
+     *       RDR-229 P3.5a). Nothing was changed; retry.</li>
      *   <li>{@code rename_path_mismatch} (409): a catalog rename reached the one-row regime with no one-row rename to run
      *       ({@link #RENAME_PATH_MISMATCH_REASON}, RDR-229 P3.5a). Nothing was renamed.</li>
      *   <li>{@code rename_not_in_registry} (409): a per-store rename in the one-row regime, where it is a no-op because the
@@ -629,6 +632,16 @@ public final class HttpUtil {
                 + ",\"reason\":\"" + RENAME_REFUSED_REASON + "\""
                 + ",\"missing\":" + jsonString(renameRefused.wireValue())
                 + "}");
+            return true;
+        }
+        // RDR-229 P3.5a (linda Q3): a rename or supersede could not lock its registry row within its bound; nothing changed. Retryable.
+        if (renameBusy(e) != null) {
+            log.warn("event={}_rename_busy {}", event, context);
+            exchange.getResponseHeaders().set("Retry-After", Long.toString(dev.nexus.service.db.RenameBusyException.RETRY_AFTER_SECONDS));
+            send(exchange, 503,
+                "{\"error\":" + jsonString(renameBusy(e).getMessage())
+                + ",\"reason\":\"" + RENAME_BUSY_REASON + "\""
+                + ",\"retry_after_seconds\":" + dev.nexus.service.db.RenameBusyException.RETRY_AFTER_SECONDS + "}");
             return true;
         }
         // RDR-229 P3.5a (linda Q-A): a per-store rename in the one-row regime whose label pair does not match the registry.
@@ -932,6 +945,19 @@ public final class HttpUtil {
 
     /** {@code reason} on the 409 for a rename that reached the one-row regime with no one-row rename to run. Wire contract. */
     static final String RENAME_PATH_MISMATCH_REASON = "rename_path_mismatch";
+
+    /** {@code reason} on the 503 for a rename or supersede that could not lock its registry row within its bound. Wire contract. */
+    static final String RENAME_BUSY_REASON = "rename_busy";
+
+    /** The {@link dev.nexus.service.db.RenameBusyException} in {@code t}'s cause chain, or null. */
+    static dev.nexus.service.db.RenameBusyException renameBusy(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof dev.nexus.service.db.RenameBusyException r) {
+                return r;
+            }
+        }
+        return null;
+    }
 
     /** {@code reason} on the 409 for a per-store rename whose label pair does not match the registry in the one-row regime. Wire contract. */
     static final String RENAME_NOT_IN_REGISTRY_REASON = "rename_not_in_registry";

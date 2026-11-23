@@ -62,6 +62,16 @@ public final class DeadlockRetry {
      */
     private static final AtomicLong RETRY_ATTEMPTS = new AtomicLong();
 
+    private static volatile String lastRetriedContext;
+
+    /**
+     * The context label of the most recent retry, or null: a test that must show ITS transaction did not deadlock compares this with its
+     * own context, which a retry of some other transaction in the JVM cannot spoil the way it spoils {@link #retryAttemptCount()}.
+     */
+    public static String lastRetriedContext() {
+        return lastRetriedContext;
+    }
+
     /** @return total retry attempts issued by {@link #run} so far, process-wide. */
     public static long retryAttemptCount() {
         return RETRY_ATTEMPTS.get();
@@ -95,6 +105,7 @@ public final class DeadlockRetry {
             } catch (RuntimeException ex) {
                 if (isDeadlock(ex) && ++attempt < MAX_ATTEMPTS) {
                     RETRY_ATTEMPTS.incrementAndGet();
+                    lastRetriedContext = context;
                     log.warn("event=deadlock_retry context={} attempt={} maxAttempts={}",
                             context, attempt, MAX_ATTEMPTS);
                     backoff(attempt);
