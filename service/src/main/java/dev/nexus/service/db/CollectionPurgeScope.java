@@ -27,7 +27,7 @@ import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
  * deleted collection's. A label with no registry row has no id to scope by, so it removes nothing from any content table (the
  * same empty answer an unknown label gets), whatever the name columns say.
  *
- * <p>Built once per delete attempt, from {@link RenameGuard#scopesDeletesById()} read at that moment, so the switch needs no
+ * <p>Built once per delete attempt, from the repository's {@code Gate3} read at that moment, so the switch needs no
  * restart.
  */
 final class CollectionPurgeScope {
