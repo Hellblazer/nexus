@@ -125,6 +125,31 @@ public final class CollectionRegistry {
      * never re-caches. Taken on misses and evicts only, never on a cache hit.
      */
     private static final Object FILL_LOCK = new Object();
+
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(CollectionRegistry.class);
+
+    /**
+     * A write's registry row read is {@code FOR KEY SHARE} with no timeout of its own: an ingest writer waits as long as a retiring verb holds the row
+     * (an operator's gc route is bounded instead, {@link GcCollectionReads}: it can be retried, while an ingest writer should not fail behind a
+     * rare rename). The wait stays unbounded but is not silent: a read that took this long or longer is logged once it returns,
+     * {@code event=registry_wait_slow}, with the collection, its id, the wait in ms and the route.
+     */
+    private static volatile long slowWaitMs = 1_000;
+
+    /** Test-only: the wait, in ms, from which a registry read is logged; restore 1000. Never set by production code. */
+    static void setSlowWaitMsForTests(long ms) {
+        slowWaitMs = ms;
+    }
+
+    private static void noteWait(long startNanos, String tenant, java.util.function.Supplier<Object> collection,
+                                 java.util.function.Supplier<Object> collectionId) {
+        long ms = (System.nanoTime() - startNanos) / 1_000_000L;
+        if (ms >= slowWaitMs) {
+            log.warn("event=registry_wait_slow tenant={} collection={} collection_id={} wait_ms={} route={}", tenant,
+                String.valueOf(collection.get()).replaceAll("\\p{Cntrl}", "?"), collectionId.get(), ms,
+                ExpectedCollectionIds.route().replaceAll("\\p{Cntrl}", "?"));
+        }
+    }
     private static final long[] EVICTIONS = new long[1];
 
     /** Test seam (nexus-hkh1y): runs between a miss's read and its cache fill. */
@@ -347,6 +372,7 @@ public final class CollectionRegistry {
             match = match.or(CATALOG_COLLECTIONS.NAME.in(unnamed));
         }
         Field<Integer> modelDimension = EMBEDDING_MODELS.DIMENSION.as("model_dimension");
+        long waitStarted = System.nanoTime();
         List<CollectionRow> rows = ctx.select(
                 CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.COLLECTION_ID,
                 CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
@@ -360,6 +386,7 @@ public final class CollectionRegistry {
             .orderBy(CATALOG_COLLECTIONS.COLLECTION_ID)
             .forKeyShare().of(CATALOG_COLLECTIONS)
             .fetch(r -> rowOf(r, modelDimension, tenant));
+        noteWait(waitStarted, tenant, () -> rows.stream().map(CollectionRow::label).toList(), () -> rows.stream().map(CollectionRow::collectionId).toList());
         for (String label : todo) {
             OptionalLong named = ExpectedCollectionIds.of(label);
             CollectionRow chosen = null;
@@ -442,6 +469,7 @@ public final class CollectionRegistry {
             match = match.or(CATALOG_COLLECTIONS.NAME.in(labelTodo));
         }
         Field<Integer> modelDimension = EMBEDDING_MODELS.DIMENSION.as("model_dimension");
+        long waitStarted = System.nanoTime();
         List<CollectionRow> rows = ctx.select(
                 CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.COLLECTION_ID,
                 CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
@@ -455,6 +483,7 @@ public final class CollectionRegistry {
             .orderBy(CATALOG_COLLECTIONS.COLLECTION_ID)
             .forKeyShare().of(CATALOG_COLLECTIONS)
             .fetch(r -> rowOf(r, modelDimension, tenant));
+        noteWait(waitStarted, tenant, () -> rows.stream().map(CollectionRow::label).toList(), () -> rows.stream().map(CollectionRow::collectionId).toList());
         for (long id : idTodo) {
             CollectionRow row = rows.stream().filter(r -> r.collectionId() == id).findFirst()
                 .orElseThrow(() -> new UnknownCollectionIdException(tenant, id));
@@ -756,7 +785,12 @@ public final class CollectionRegistry {
             .orderBy(order)
             .limit(1);
         // FOR KEY SHARE names the registry row alone: PostgreSQL refuses a row lock on the nullable side of the outer join
+        long waitStarted = System.nanoTime();
         Record r = keyShare ? read.forKeyShare().of(CATALOG_COLLECTIONS).fetchOne() : read.fetchOne();
+        if (keyShare) {
+            noteWait(waitStarted, tenant, () -> r == null ? "" : r.get(CATALOG_COLLECTIONS.NAME),
+                () -> r == null ? "" : r.get(CATALOG_COLLECTIONS.COLLECTION_ID));
+        }
         if (r == null) {
             return null;
         }

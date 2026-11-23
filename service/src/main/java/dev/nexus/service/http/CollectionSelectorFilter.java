@@ -223,6 +223,7 @@ public final class CollectionSelectorFilter extends Filter {
             return;
         }
         try {
+            ExpectedCollectionIds.noteRoute(exchange.getRequestURI().getPath());   // the log line of a slow registry wait names it
             ExpectedCollectionIds.set(resolver.expected, beforeTransactionRead, afterTransactionRead);
             Runnable hook = afterResolve;
             if (hook != null) {

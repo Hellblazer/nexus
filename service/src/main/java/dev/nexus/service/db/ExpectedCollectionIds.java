@@ -149,6 +149,20 @@ public final class ExpectedCollectionIds {
 
     public static void clear() {
         CURRENT.remove();
+        ROUTE.remove();
+    }
+
+    private static final ThreadLocal<String> ROUTE = new ThreadLocal<>();
+
+    /** Names the route this thread is serving, for the log line of a slow registry wait; cleared by {@link #clear()}. */
+    public static void noteRoute(String path) {
+        ROUTE.set(path);
+    }
+
+    /** The route this thread is serving, or {@code ""} (an internal caller, a background writer). */
+    static String route() {
+        String r = ROUTE.get();
+        return r == null ? "" : r;
     }
 
     /** The labels this request named by id that no in-transaction read has consumed, sorted; empty when none is left. */

@@ -63,6 +63,12 @@ public final class GcCollectionReads {
         }
     }
 
+    /**
+     * The statement bound of a gc route's registry read, 25 s (the bound a restore already carries). It is a gc route's, not a writer's: an
+     * operator's gc can be retried, so a verb that holds the row past 25 s ends the wait as a typed 503 {@code rename_busy}; an ingest writer
+     * has no such bound (it waits for the verb, and the wait is logged as {@code registry_wait_slow} past one second), because a writer should
+     * not fail behind a rare rename.
+     */
     private static volatile int registryReadBoundMs = 25_000;
 
     /** Test-only: the statement bound of a registry read on a route that sets none, in ms; clear with 25000. Never set by production code. */
