@@ -3,17 +3,11 @@
 package dev.nexus.service.datamove;
 
 import dev.nexus.service.db.AdminConnection;
-import org.jooq.SQLDialect;
-import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.sql.Connection;
-import java.sql.DriverManager;
-import java.sql.SQLException;
 import java.time.OffsetDateTime;
-import java.util.Properties;
 
 /**
  * Watches one move while its validation runs with no statement bound, and cancels the statement when the move is paused or superseded
@@ -100,21 +94,15 @@ final class CompletionWatch implements AutoCloseable {
                     DataMoveOrphans.cancelBackend(admin, pid, applicationName, backendStart);
                     return;
                 }
-            } catch (SQLException | DataAccessException e) {
+            } catch (RuntimeException e) {   // a refused session (the server is unreachable) or a failed read: look again at the next interval
                 log.debug("event=data_move_completion_watch_failed label={} cause=\"{}\"", label, FailureHandler.oneLine(e.toString()));
             }
         }
     }
 
-    private boolean heldOrGone() throws SQLException {
-        Properties props = new Properties();
-        props.setProperty("user", admin.user());
-        props.setProperty("password", admin.password());
-        props.setProperty("ApplicationName", DataMoveOrphans.PREFIX + "watch");
-        props.setProperty("connectTimeout", "3");
-        props.setProperty("socketTimeout", "5");
-        try (Connection c = DriverManager.getConnection(admin.url(), props)) {
-            var ctx = DSL.using(c, SQLDialect.POSTGRES);
+    private boolean heldOrGone() {
+        try (var session = DataMoveOrphans.openSession(admin, "watch")) {
+            var ctx = session.ctx();
             var row = DataMoveRegistry.reload(ctx, label);
             boolean held = row.isEmpty() || row.get().paused()
                 || ctx.fetchExists(DSL.table(DSL.name("nexus", "data_moves")), DSL.field(DSL.name("supersedes"), String.class).eq(label));

@@ -3,17 +3,12 @@
 package dev.nexus.service.datamove;
 
 import dev.nexus.service.db.AdminConnection;
-import org.jooq.SQLDialect;
-import org.jooq.exception.DataAccessException;
+import dev.nexus.service.db.AdminDdlSession;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.sql.Connection;
-import java.sql.DriverManager;
-import java.sql.SQLException;
-import java.util.Properties;
 
 /**
  * Ends the backends a stopped engine left behind, BEFORE the schema migration (only this database's and this role's: a backend of another database on the cluster, or of another role, is never signalled) (nexus-p2m1x.21; linda, 2026-11-23). A validation with no
@@ -37,23 +32,26 @@ public final class DataMoveOrphans {
      * pid the server has reused for another session is left alone. Never throws.
      */
     static void cancelBackend(AdminConnection admin, int pid, String applicationName, java.time.OffsetDateTime backendStart) {
-        Properties props = new Properties();
-        props.setProperty("user", admin.user());
-        props.setProperty("password", admin.password());
-        props.setProperty("ApplicationName", PREFIX + "cancel");
-        props.setProperty("connectTimeout", "3");
-        props.setProperty("socketTimeout", "5");
-        try (Connection c = DriverManager.getConnection(admin.url(), props)) {
+        try (AdminDdlSession session = openSession(admin, "cancel")) {
             var pidField = DSL.field(DSL.name("pid"), Integer.class);
-            DSL.using(c, SQLDialect.POSTGRES).select(DSL.function("pg_cancel_backend", SQLDataType.BOOLEAN, pidField))
+            session.ctx().select(DSL.function("pg_cancel_backend", SQLDataType.BOOLEAN, pidField))
                 .from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
                 .where(ours()).and(pidField.eq(pid))
                 .and(DSL.field(DSL.name("application_name"), String.class).eq(applicationName))
                 .and(DSL.field(DSL.name("backend_start"), java.time.OffsetDateTime.class).eq(backendStart))
                 .fetch();
-        } catch (SQLException | DataAccessException e) {
+        } catch (RuntimeException e) {   // a refused session (the server is unreachable) or a failed statement
             log.warn("event=data_move_completion_cancel_failed pid={} cause=\"{}\"", pid, FailureHandler.oneLine(e.toString()));
         }
+    }
+
+    /**
+     * A short session on the admin values, from the one sanctioned opener ({@link AdminDdlSession#open}, whose URL is the admin's), named
+     * {@code nexus-data-move-<purpose>}. It takes no run lock and alters nothing. Throws {@link AdminDdlSession.Refused} when it cannot connect.
+     */
+    static AdminDdlSession openSession(AdminConnection admin, String purpose) {
+        return AdminDdlSession.open(admin, new AdminDdlSession.Settings(PREFIX + purpose, 0L, "data move " + purpose, "nexus", "data_moves", "none"),
+            false);
     }
 
     /** A backend of this database, run by the role this connection is: the ownership check before any signal (never a process that is not ours). */
@@ -66,14 +64,8 @@ public final class DataMoveOrphans {
      * @return how many backends were ended; -1 when the database could not be reached (logged, never fatal: the boot goes on)
      */
     public static int terminateLeftover(AdminConnection admin) {
-        Properties props = new Properties();
-        props.setProperty("user", admin.user());
-        props.setProperty("password", admin.password());
-        props.setProperty("ApplicationName", PREFIX + "boot-reaper");
-        props.setProperty("connectTimeout", "3");
-        props.setProperty("socketTimeout", "10");
-        try (Connection c = DriverManager.getConnection(admin.url(), props)) {
-            var ctx = DSL.using(c, SQLDialect.POSTGRES);
+        try (AdminDdlSession session = openSession(admin, "boot-reaper")) {
+            var ctx = session.ctx();
             var pid = DSL.field(DSL.name("pid"), Integer.class);
             var name = DSL.field(DSL.name("application_name"), String.class);
             var rows = ctx.select(pid, name, DSL.function("pg_terminate_backend", SQLDataType.BOOLEAN, pid))
@@ -86,7 +78,7 @@ public final class DataMoveOrphans {
                 log.warn("event=data_move_leftover_ended pid={} application_name=\"{}\"", r.value1(), r.value2());
             }
             return rows.size();
-        } catch (SQLException | DataAccessException e) {
+        } catch (RuntimeException e) {
             log.warn("event=data_move_leftover_not_ended cause=\"{}\"", FailureHandler.oneLine(e.toString()));
             return -1;
         }
