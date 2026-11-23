@@ -28,7 +28,7 @@ import java.util.List;
  */
 final class RestoreOriginMarker {
 
-    private static final Field<JSONB> ID_KEY = DSL.function("jsonb_extract_path", SQLDataType.JSONB, CHUNKS.METADATA, DSL.val(QuarantineOrigin.ORIGIN_ID_KEY));
+    private static final Field<JSONB> ID_KEY = DSL.jsonbGetAttribute(CHUNKS.METADATA, QuarantineOrigin.ORIGIN_ID_KEY);
     private static final Field<String> ID_KEY_TYPE = DSL.function("jsonb_typeof", SQLDataType.VARCHAR, ID_KEY);
     private static final Field<String> LABEL_TAG = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "origin_collection");
 
