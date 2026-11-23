@@ -9140,7 +9140,6 @@ FROM scope s
             try {
                 ctx.connection(conn -> {
                     conn.rollback(taken[0]);
-                    CollectionRegistry.forgetWriteMemo(ctx);
                     conn.releaseSavepoint(taken[0]);
                 });
             } catch (RuntimeException rollbackFailure) {
@@ -9209,7 +9208,6 @@ FROM scope s
                      tenant, collection, cap, String.valueOf(e.getMessage()).replace('\n', ' '));
             try {
                 ctx.connection(conn -> conn.rollback(taken));
-                CollectionRegistry.forgetWriteMemo(ctx);
             } catch (RuntimeException rollbackFailure) {
                 // The transaction is unusable and this failure escapes; the count's failure rides along as suppressed.
                 rollbackFailure.addSuppressed(e);

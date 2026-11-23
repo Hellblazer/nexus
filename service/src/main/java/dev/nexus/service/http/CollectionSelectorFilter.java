@@ -305,7 +305,9 @@ public final class CollectionSelectorFilter extends Filter {
         if (left.isEmpty()) {
             return;
         }
-        log.error("event=collection_id_not_consumed path={} labels={} status={}", LogText.escapeControl(path), left.size(), status);
+        // WARN, not ERROR: a by-id write_many whose every document fails requireDocumentExists (no such document) answers 200 without a
+        // transaction that reached its registry read, which is no defect; the test sink and the census assert the strict reading
+        log.warn("event=collection_id_not_consumed path={} labels={} status={}", LogText.escapeControl(path), left.size(), status);
         if (sink != null) {
             sink.accept(path + " " + left);
         }
