@@ -69,7 +69,6 @@ public final class TaxonomyRepository {
         this(tenantScope, Gate3.never(), RenameGuard.open());
     }
 
-    /** The rename guard alone: gate 3 never holds (P3.5a's callers and tests). */
     public TaxonomyRepository(TenantScope tenantScope, RenameGuard renameGuard) {
         this(tenantScope, Gate3.never(), renameGuard);
     }

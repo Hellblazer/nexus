@@ -45,7 +45,7 @@ class Rdr229P35cCatalogReadersIntegrationTest extends AtomicWriteTestBase {
 
     @BeforeAll
     void gatedRepository() throws Exception {
-        gated = new CatalogRepository(tenantScope, latched::get);
+        gated = new CatalogRepository(tenantScope, latched::get, dev.nexus.service.db.RenameGuard.open());
         gatedSvc = new CombinedWriteService(tenantScope, gated, new EmbedderRouter(embedder, "document"));
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);

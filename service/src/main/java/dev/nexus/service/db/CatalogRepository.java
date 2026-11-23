@@ -341,7 +341,7 @@ public final class CatalogRepository {
     private static final Field<Integer> EX_CHK_CEN   = DSL.field("EXCLUDED.char_end",     Integer.class);
 
     private final TenantScope tenantScope;
-    /** RDR-229 P3.5c (nexus-p2m1x.25): gate 3, read per statement; readers switch to the id and the upserts to the id key on it. */
+    /** The one latched gate-3 signal Main builds (RDR-229 P3.5a, P3.5c), read per statement: a delete scopes its purge by the row's id once it holds; the readers switch to the id and the upserts to the id key on it. */
     private final Gate3 gate3;
 
     /**
@@ -371,8 +371,6 @@ public final class CatalogRepository {
     private final AtomicBoolean vacuumInProgress = new AtomicBoolean(false);
 
     private final RenameGuard renameGuard;
-    /** The one latched gate-3 signal Main builds: a delete scopes its purge by the row's id once it holds; P3.5c's readers key on the id. */
-    private final dev.nexus.service.datamove.Gate3 gate3;
 
     /** For tests: no gate 3 and no rename refusal. Production uses the three-argument form (the one shape, RDR-229 P3.5a and P3.5c). */
     public CatalogRepository(TenantScope tenantScope) {
@@ -393,8 +391,8 @@ public final class CatalogRepository {
     /** The scope this repository runs in, for the sibling repositories split out of it (CatalogLinksRepository). */
     TenantScope tenantScope() { return tenantScope; }
 
-    /** The gate-3 signal, for the sibling readers split out of this class. */
-    Gate3 gate3() { return gate3; }
+    /** The gate-3 signal this repository was built with: the siblings split out of it and the catalog routes' readers take this one instance. */
+    public Gate3 gate3() { return gate3; }
 
     /**
      * Test-only (nexus-tyxnh): observe whether a purge-trash VACUUM sweep is
@@ -10578,7 +10576,7 @@ public final class CatalogRepository {
                 .and(CollectionIdReads.live(gate3, CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.SUPERSEDED_BY_ID))
                 .fetchOne();
             counts.put("catalog_collections", scope.matchesNothing() ? 0 : rowId != null
-                ? CollectionTombstones.deleteRegistryRowById(ctx, tenant, name, rowId, retiredRemoved)
+                ? CollectionTombstones.deleteRegistryRowById(ctx, tenant, name, rowId, retiredRemoved, gate3)
                 : CollectionTombstones.deleteRegistryRows(ctx, tenant, registryRows, gate3) - retiredRemoved.size());
             if (freed != null) {
                 rederiveOwnersHeldBack(ctx, tenant, freed.value1(), freed.value2(), freed.value3(), freed.value4());
@@ -14594,66 +14592,9 @@ public final class CatalogRepository {
         };
     }
 
-    /** Convert a jOOQ Record.intoMap() to a strongly-typed doc map. */
+    /** Convert a jOOQ Record.intoMap() to a strongly-typed doc map ({@link CatalogDocRow#of}). */
     static Map<String, Object> docRowFromRecord(Map<String, Object> raw) {
-        Map<String, Object> m = new LinkedHashMap<>();
-        // Column names in intoMap() are the unqualified column names
-        m.put("tumbler",             raw.getOrDefault("tumbler", null));
-        m.put("title",               raw.getOrDefault("title", null));
-        m.put("author",              raw.getOrDefault("author", null));
-        m.put("year",                raw.getOrDefault("year", null));
-        // hygiene-001 (nexus-tk070.p6a follow-on): these five columns are NOT NULL
-        // now — nne()/0 here is belt-and-suspenders documentation of that guarantee
-        // (every write site already stamps ""/0; see registerDocumentWithOutcome,
-        // doImportDocument, buildUpdateDocumentQuery's null-skip), not a live gap.
-        m.put("content_type",        nne((String) raw.getOrDefault("content_type", null)));
-        m.put("file_path",           nne((String) raw.getOrDefault("file_path", null)));
-        m.put("corpus",              nne((String) raw.getOrDefault("corpus", null)));
-        m.put("physical_collection", nne((String) raw.getOrDefault("physical_collection", null)));
-        m.put("chunk_count",         raw.getOrDefault("chunk_count", null) != null
-                                          ? raw.get("chunk_count") : 0);
-        m.put("head_hash",           raw.getOrDefault("head_hash", null));
-        // nexus-cefa1.2: indexed_at is timestamptz now (catalog-031-1-documents-temporal)
-        // — .intoMap() hands back an OffsetDateTime, not a String; format for the wire.
-        // Stays nullable, matching the pre-migration nullable-TEXT-no-default contract.
-        m.put("indexed_at",          utcIso((java.time.OffsetDateTime) raw.get("indexed_at")));
-        Object rawMeta = raw.get("metadata");
-        if (rawMeta != null) {
-            try {
-                m.put("metadata", MAPPER.readValue(rawMeta.toString(), MAP_TYPE));
-            } catch (Exception e) {
-                m.put("metadata", null);
-            }
-        } else {
-            m.put("metadata", null);
-        }
-        m.put("source_mtime", raw.getOrDefault("source_mtime", 0.0));
-        m.put("alias_of",     nne((String) raw.getOrDefault("alias_of", null)));
-        m.put("source_uri",   nne((String) raw.getOrDefault("source_uri", null)));
-        m.put("bib_year",                raw.getOrDefault("bib_year", 0));
-        m.put("bib_authors",             nne((String) raw.getOrDefault("bib_authors", null)));
-        m.put("bib_venue",               nne((String) raw.getOrDefault("bib_venue", null)));
-        m.put("bib_citation_count",      raw.getOrDefault("bib_citation_count", 0));
-        m.put("bib_semantic_scholar_id", nne((String) raw.getOrDefault("bib_semantic_scholar_id", null)));
-        m.put("bib_openalex_id",         nne((String) raw.getOrDefault("bib_openalex_id", null)));
-        m.put("bib_doi",                 nne((String) raw.getOrDefault("bib_doi", null)));
-        // nexus-cefa1.2: bib_enriched_at is timestamptz now — was NOT NULL DEFAULT ''
-        // before catalog-031-1-documents-temporal, so preserve the always-non-null ""
-        // wire contract via nne() around the formatted read.
-        m.put("bib_enriched_at",         nne(utcIso((java.time.OffsetDateTime) raw.get("bib_enriched_at"))));
-        // nexus-5xn3k.2 (RUNFENCE): index_state stays NULL-able (NULL = unknown,
-        // catalog-020's deliberate no-backfill default) — do NOT nne() it, unlike
-        // the other three (NOT NULL DEFAULT '' columns, same nne() treatment as
-        // alias_of/source_uri above).
-        m.put("index_state",        raw.getOrDefault("index_state", null));
-        m.put("index_content_hash", nne((String) raw.getOrDefault("index_content_hash", null)));
-        m.put("index_run_id",       nne((String) raw.getOrDefault("index_run_id", null)));
-        // nexus-cefa1.2: index_started_at is timestamptz now — same NOT-NULL-DEFAULT-''
-        // wire-contract preservation as bib_enriched_at above.
-        m.put("index_started_at",   nne(utcIso((java.time.OffsetDateTime) raw.get("index_started_at"))));
-        // nexus-rfvyy.6.5 (RDR-243): always a JSON boolean, never null (the column is NOT NULL DEFAULT false).
-        m.put("sensitive",          Boolean.TRUE.equals(raw.get("sensitive")));
-        return m;
+        return CatalogDocRow.of(raw);
     }
 
     /**
@@ -14893,7 +14834,7 @@ public final class CatalogRepository {
     private static boolean nb(Boolean v, boolean def) { return v != null ? v : def; }
 
     /** Non-null empty: returns "" if null. */
-    private static String nne(String v) { return v != null ? v : ""; }
+    static String nne(String v) { return v != null ? v : ""; }
 
     /** RDR-231: a caller's document source_uri in its stored spelling (a legacy note URI becomes nx-note://). */
     private static String sourceUriOf(Map<String, Object> d) { return NoteUri.canonical(nne(s(d, "source_uri"))); }
@@ -15002,7 +14943,7 @@ public final class CatalogRepository {
      * since Postgres timestamptz stores full microsecond precision ({@code
      * TIMESTAMPWITHTIMEZONE(6)}).
      */
-    private static String utcIso(java.time.OffsetDateTime ts) {
+    static String utcIso(java.time.OffsetDateTime ts) {
         return ts == null ? null : INDEXED_AT_FMT.format(ts.withOffsetSameInstant(java.time.ZoneOffset.UTC));
     }
 
