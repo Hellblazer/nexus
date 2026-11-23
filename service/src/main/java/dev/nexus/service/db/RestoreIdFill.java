@@ -102,6 +102,8 @@ final class RestoreIdFill {
 
     /** The registry stage's columns that keep the file's own {@code collection_id} and {@code superseded_by_id}. */
     static final String SRC_ID = "src_collection_id";
+    /** A session temp table of one restore: the file's registry labels to the ids the restore drew (see {@link #refillOriginTag}). */
+    private static final String ORIGIN_NAME_MAP = "nx_restore_origin_name_map";
     static final String SRC_SUCCESSOR = "src_superseded_by_id";
 
     private static final String REGISTRY = "catalog_collections";
@@ -398,8 +400,9 @@ final class RestoreIdFill {
      * A quarantined chunk's metadata tags its origin by name ({@code origin_collection}) and by id
      * ({@link QuarantineOrigin#ORIGIN_ID_KEY}). The id is the backup's installation's; a restore mints new ids, so a tag that
      * has the key gets the id the map holds for it, or the key set to JSON null when the map holds none (the name beside it is not
-     * consulted: from P3.7 it may be a stale label, or another collection's). Every other key of the metadata is kept. A row
-     * without the key is not written.
+     * consulted: from P3.7 it may be a stale label, or another collection's). A row with the label tag and no id key gets the id this
+     * restore drew for the file's registry row of that label, or JSON null (the file's own registry, never the live one). Every other key of the
+     * metadata is kept; a row with neither is not written.
      */
     private static void refillOriginTag(DSLContext ctx, Stage rows, CollectionIdMap map) {
         if (!stageHasColumn(ctx, rows, "metadata")) return;
@@ -409,15 +412,28 @@ final class RestoreIdFill {
         Field<Long> sourceId = DSL.when(originIdText.likeRegex("^[0-9]{1,18}$"), originIdText.cast(SQLDataType.BIGINT))
             .otherwise(DSL.castNull(SQLDataType.BIGINT));
         Field<Long> restored = map.target(sourceId);
-        Field<JSONB> refilled = DSL.function("jsonb_set", SQLDataType.JSONB, metadata,
-            DSL.val(new String[] {QuarantineOrigin.ORIGIN_ID_KEY}), DSL.function("to_jsonb", SQLDataType.JSONB, restored));
+        String[] path = {QuarantineOrigin.ORIGIN_ID_KEY};
+        Field<JSONB> refilled = DSL.function("jsonb_set", SQLDataType.JSONB, metadata, DSL.val(path),
+            DSL.function("to_jsonb", SQLDataType.JSONB, restored));
         // an unmapped id is marked, never removed: the key present with JSON null is how a dangling tag reads (the backfill's mark), and an
         // absent key would keep gate 3 shut (CompletionCheck's quarantine clause)
-        Field<JSONB> stripped = DSL.function("jsonb_set", SQLDataType.JSONB, metadata,
-            DSL.val(new String[] {QuarantineOrigin.ORIGIN_ID_KEY}), DSL.val(JSONB.jsonb("null")));
+        Field<JSONB> marked = DSL.function("jsonb_set", SQLDataType.JSONB, metadata, DSL.val(path), DSL.val(JSONB.jsonb("null")));
+        Condition keyed = DSL.condition(DSL.function("jsonb_exists", SQLDataType.BOOLEAN, metadata, DSL.val(QuarantineOrigin.ORIGIN_ID_KEY)));
+        // a tag-only chunk (the label tag, no id key, an older backup): the id the RESTORE drew for the file's registry row of that label, or
+        // JSON null when the file has no single such row. Never the live registry: after the latch that label may belong to another collection.
+        Field<String> originName = DSL.function("jsonb_extract_path_text", SQLDataType.VARCHAR, metadata, DSL.val("origin_collection"));
+        Condition tagOnly = keyed.not().and(originName.isNotNull()).and(originName.ne(""));
+        Field<Long> byName = map.isEmpty() ? DSL.castNull(SQLDataType.BIGINT)
+            : DSL.field(DSL.select(DSL.field(DSL.name("om", "dst"), SQLDataType.BIGINT))
+                .from(DSL.table(DSL.name(ORIGIN_NAME_MAP)).as("om"))
+                .where(DSL.field(DSL.name("om", "nm"), SQLDataType.VARCHAR).eq(originName)));
+        Field<JSONB> filledByName = DSL.function("jsonb_set", SQLDataType.JSONB, metadata, DSL.val(path),
+            DSL.function("to_jsonb", SQLDataType.JSONB, byName));
         ctx.update(TenantImportStaging.stageTable(rows).as("s"))
-            .set(DSL.field(DSL.name("metadata"), SQLDataType.JSONB), DSL.when(restored.isNotNull(), refilled).otherwise(stripped))
-            .where(DSL.function("jsonb_exists", SQLDataType.BOOLEAN, metadata, DSL.val(QuarantineOrigin.ORIGIN_ID_KEY)).isTrue())
+            .set(DSL.field(DSL.name("metadata"), SQLDataType.JSONB),
+                DSL.when(keyed, DSL.when(restored.isNotNull(), refilled).otherwise(marked))
+                    .otherwise(DSL.when(byName.isNotNull(), filledByName).otherwise(marked)))
+            .where(keyed.or(tagOnly))
             .execute();
     }
 
@@ -510,6 +526,17 @@ final class RestoreIdFill {
             .select(ctx.select(source, DSL.min(drawn)).from(s).where(source.isNotNull()).groupBy(source).having(DSL.count().eq(1)))
             .execute();
         boolean carriesIds = ctx.fetchExists(ctx.selectOne().from(s).where(source.isNotNull()));
+        // the file's own labels to the ids this restore drew, for a tag-only quarantine chunk (refillOriginTag): a label the file's registry
+        // bears on exactly one row. Never the live registry: after the latch a label may belong to a different collection.
+        ctx.createTemporaryTable(DSL.name(ORIGIN_NAME_MAP))
+            .column("nm", SQLDataType.VARCHAR.nullable(false))
+            .column("dst", SQLDataType.BIGINT.nullable(false))
+            .constraints(DSL.primaryKey("nm"))
+            .onCommitDrop().execute();
+        Field<String> fileName = DSL.field(DSL.name("s", "name"), SQLDataType.VARCHAR);
+        ctx.insertInto(DSL.table(DSL.name(ORIGIN_NAME_MAP)), DSL.field(DSL.name("nm"), SQLDataType.VARCHAR), DSL.field(DSL.name("dst"), SQLDataType.BIGINT))
+            .select(ctx.select(fileName, DSL.min(drawn)).from(s).where(fileName.isNotNull().and(fileName.ne(""))).groupBy(fileName).having(DSL.count().eq(1)))
+            .execute();
         return new CollectionIdMap(CollectionIdMap.TABLE, carriesIds);
     }
 
