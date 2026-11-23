@@ -366,7 +366,7 @@ public final class CatalogRepository {
     private final AtomicBoolean vacuumInProgress = new AtomicBoolean(false);
 
     private final RenameGuard renameGuard;
-    /** RDR-229 P3.5c reads the id once this holds (the one Main builds); P3.5a hands it on with the rename guard. */
+    /** The one latched gate-3 signal Main builds: a delete scopes its purge by the row's id once it holds ({@link CollectionPurgeScope}), and P3.5c's readers key on the id. */
     private final dev.nexus.service.datamove.Gate3 gate3;
 
     /** Tests and callers with no gate 3 and no rename refusal: the name path, a rename never refused. Production uses the three-argument form. */
@@ -10391,7 +10391,7 @@ public final class CatalogRepository {
         return manifestWriteTxn(tenant, "catalog.deleteCollection " + name, ctx -> {
             deferManifestChunkFk(ctx);
             // RDR-229 P3.5a: before gate 3 the name columns scope the purge; from it the row's id does, and a label with no row purges nothing
-            CollectionPurgeScope scope = CollectionPurgeScope.resolve(ctx, renameGuard.scopesDeletesById(), tenant, name, onlyId);
+            CollectionPurgeScope scope = CollectionPurgeScope.resolve(ctx, gate3.holds(), tenant, name, onlyId);
 
             // RDR-235 (nexus-5r2sc.2.6): the collection's unconsumed aspects tasks (available, claimed and dead)
             // go with it, in this transaction. FIRST statement of the purge: the tuple row locks come before the
