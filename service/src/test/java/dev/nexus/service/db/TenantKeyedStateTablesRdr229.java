@@ -146,6 +146,7 @@ final class TenantKeyedStateTablesRdr229 {
             + "which the same write reads by label");
         notKeyed.put("AspectDocCollectionLocks.Held.ids", REGISTRY_READ_PER_TRANSACTION + "the stored collection ids an aspect or "
             + "highlight write holds");
+        notKeyed.put("TaxonomyRegistryReads.afterFirstReadHookForTests", "a test-only hook, null in production");
         notKeyed.put("AspectDocCollectionLocks.Held.labels", REGISTRY_READ_PER_TRANSACTION + "the labels of unstamped rows the same "
             + "write holds");
     }
