@@ -60,7 +60,9 @@ public final class QuarantineOrigin {
 
     /**
      * The metadata key beside {@code origin_collection} that holds the origin's registry {@code collection_id}
-     * (RDR-229 P3.1). A JSONB key, not a column; the move writes the name tag, and a retag writes both.
+     * (RDR-229 P3.1). A JSONB key, not a column; the SQL move (nexus.gc_quarantine_orphans, vectors-069/077) writes both tags, and a retag
+     * writes both. A dangling tag is marked by the key present with JSON null (the backfill), never absent: gate 3 does not hold while a
+     * quarantine chunk lacks the key ({@code CompletionCheck}).
      */
     public static final String ORIGIN_ID_KEY = "origin_collection_id";
 
@@ -79,13 +81,21 @@ public final class QuarantineOrigin {
     private static final Field<String> ORIGIN_TAG = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "origin_collection");
     /**
      * A chunk row whose {@code metadata} names {@code origin} as its origin: from gate 3 by the origin's registry id
-     * ({@code origin_collection_id}; a row written before the id key carries none and is read by its label tag), before it by the label
-     * tag. One definition for {@code rowsOf} and the restore's sibling lookup (RDR-229 P3.5c).
+     * ({@code origin_collection_id}) alone, before it by the label tag. A row with no origin id after the latch (the key absent, or present
+     * and JSON null, which a dangling tag is backfilled to) is no sibling of the label's current holder: the arm
+     * {@code origin_collection_id IS NULL AND origin_collection = label} is refused (linda 2026-11-23), because a label names whichever row
+     * holds it now. Gate 3 does not hold while a quarantine chunk lacks the key ({@code CompletionCheck}), so after the latch every row has
+     * it. {@link #taggedWithoutId} finds the refused rows, to count and WARN. One definition for {@code rowsOf} and the restore's sibling lookup.
      */
     public static Condition taggedWith(boolean byId, String tenant, String origin) {
         return byId
-            ? ORIGIN_ID.eq(CollectionIds.idOf(tenant, origin).cast(String.class)).or(ORIGIN_ID.isNull().and(ORIGIN_TAG.eq(origin)))
+            ? ORIGIN_ID.eq(CollectionIds.idOf(tenant, origin).cast(String.class))
             : ORIGIN_TAG.eq(origin);
+    }
+
+    /** A row the label tag names as origin and that carries no origin id: what {@link #taggedWith} refuses from gate 3. */
+    public static Condition taggedWithoutId(String origin) {
+        return ORIGIN_ID.isNull().and(ORIGIN_TAG.eq(origin));
     }
 
     /** The origin's registry id as the tag carries it (text); null on a row written before the id key. */
@@ -192,9 +202,9 @@ public final class QuarantineOrigin {
      *                   shares the origin's attributes once its row is written), or {@code null}
      */
     private static Condition rowsOf(String tenant, String origin, String exceptName, Gate3 gate3) {
-        // RELIANCE (RDR-229 P3.5c): the origin is found by the {@code origin_collection} TAG, a label, and rowsOf never reads
-        // {@code origin_collection_id}. The tag stays current only because the rename calls retagRowsOf (P3.7's one-row rename, wren's
-        // CollectionOneRowRename, must keep calling it); a rename that skipped it would strand the tagged rows under the old label.
+        // RDR-229 P3.5c: before gate 3 the origin is found by the {@code origin_collection} TAG, a label, which stays current because the
+        // rename calls retagRowsOf (P3.7's one-row rename, wren's CollectionOneRowRename, must keep calling it); from gate 3 it is found by the
+        // tag's id ({@code origin_collection_id}, see taggedWith), which a rename does not change, and a row with no id is no sibling.
         // one reading of gate 3 for the whole condition (RDR-229 P3.5c, linda 2026-11-23)
         final boolean byId = CollectionKey.of(gate3).byId();
         // the origin's id: the live-first resolver (a label may name a live row and tombstones); null before gate 3, where nothing reads it

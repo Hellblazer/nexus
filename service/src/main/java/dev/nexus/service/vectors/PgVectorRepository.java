@@ -7729,11 +7729,34 @@ FROM scope s
                               // the origin by its id from the latch, the label tag before it (QuarantineOrigin's one definition)
                               .and(dev.nexus.service.db.QuarantineOrigin.taggedWith(byId, tenant, originCollection)))))))
                .fetch(CATALOG_COLLECTIONS.NAME);
+        if (byId) {
+            warnOfQuarantineRowsWithNoOriginId(ctx, tenant, originCollection);
+        }
         var ordered = new ArrayList<String>(found.size());
         if (found.contains(reaperName)) ordered.add(reaperName);
         found.stream().filter(n -> !n.equals(reaperName)).sorted().forEach(ordered::add);
         return List.copyOf(ordered);
     }
+
+    /**
+     * From gate 3 a quarantine row that carries the label tag and no origin id is no sibling of the label's current holder (it is skipped by
+     * {@code QuarantineOrigin.taggedWith}): count it and say so, so a pending backfill is seen (linda 2026-11-23). Existence only, bounded
+     * by the same quarantine collections the sibling read walks.
+     */
+    private static void warnOfQuarantineRowsWithNoOriginId(DSLContext ctx, String tenant, String originCollection) {
+        boolean any = ctx.fetchExists(DSL.selectOne().from(CHUNKS)
+            .where(CHUNKS.TENANT_ID.eq(tenant))
+            .and(CHUNKS.COLLECTION_ID.in(DSL.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("quarantine"))))
+            .and(dev.nexus.service.db.QuarantineOrigin.taggedWithoutId(originCollection)));
+        if (any) {
+            QUARANTINE_NO_ORIGIN_ID_SKIPPED.incrementAndGet();
+            log.warn("quarantine chunks tagged origin_collection={} carry no origin_collection_id: skipped as siblings of the label's current holder (pre-id quarantine; backfill pending)", originCollection);
+        }
+    }
+
+    /** How many sibling reads skipped quarantine rows that carry a label tag and no origin id (RDR-229 P3.5c); process-wide, no tenant state. */
+    public static final java.util.concurrent.atomic.AtomicLong QUARANTINE_NO_ORIGIN_ID_SKIPPED = new java.util.concurrent.atomic.AtomicLong();
 
     private static String[] canonicalChashes(List<String> chashes) {
         if (chashes == null || chashes.isEmpty()) {

@@ -541,6 +541,16 @@ public final class CompletionCheck {
             }
         }
         Optional<Boolean> latch = readLatch(ctx, tables, GATE3);
+ith no origin_collection_id key keeps gate 3 shut: after the latch a row with no
+        // origin id is no sibling of its label's holder, so the key must be there (present, JSON null for a dangling tag) before readers rely on it
+        if (gate3Holds && latch.isEmpty()) {
+            long lacking = quarantineChunksLackingOriginId(ctx, tables);
+            if (lacking > 0) {
+                gate3Holds = false;
+                why = (lacking > QUARANTINE_PROBE_CAP ? QUARANTINE_PROBE_CAP + "+" : Long.toString(lacking))
+                    + " quarantine chunks lack origin_collection_id (pre-id quarantine; backfill pending)";
+            }
+        }
         if (gate3Holds && latch.isEmpty() && tables.contains("rdr229_gate_latch")) {
             boolean written = true;
             try {
@@ -555,6 +565,41 @@ public final class CompletionCheck {
         return new Result(gate1, gate2, gate3Holds, List.copyOf(states.values()), List.copyOf(checks), supersededByPresent,
             waiting, List.copyOf(violators), List.copyOf(uncovered), why, danglingTombstones(ctx, tables, null), pciNotApplicable,
             latch.isPresent(), idInvalid, latch.orElse(false));
+    }
+
+    /** The most quarantine chunks without the origin key the probe counts: it stops there (it needs existence, and a count to report). */
+    static final long QUARANTINE_PROBE_CAP = 10_000;
+
+    /**
+     * How many quarantine chunks (rows of {@code chunks} whose collection_id names a registry row whose lifecycle_state is quarantine, as
+     * QuarantineOrigin.isQuarantine judges it) carry no {@code origin_collection_id} key, at most {@link #QUARANTINE_PROBE_CAP} + 1. KEY
+     * PRESENCE, not a non-null value: a dangling tag is backfilled to the key present with JSON null, which passes. Read-only; scoped to the
+     * quarantine collections through the registry join and the chunks' (tenant_id, collection_id) key, never a scan of every chunk.
+     */
+    static long quarantineChunksLackingOriginId(DSLContext ctx, Set<String> tables) {
+        if (!tables.contains("chunks") || !tables.contains("catalog_collections")
+            || !columnExists(ctx, "catalog_collections", "lifecycle_state") || !columnExists(ctx, "chunks", "collection_id")) {
+            return 0;
+        }
+        Table<?> cc = DSL.table(DSL.name("nexus", "catalog_collections")).as("qcc");
+        Table<?> ch = DSL.table(DSL.name("nexus", "chunks")).as("qch");
+        Field<String> chTenant = DSL.field(DSL.name("qch", "tenant_id"), String.class);
+        Field<Long> chColl = DSL.field(DSL.name("qch", "collection_id"), Long.class);
+        Field<org.jooq.JSONB> metadata = DSL.field(DSL.name("qch", "metadata"), org.jooq.JSONB.class);
+        Condition hasKey = DSL.condition(DSL.function("jsonb_exists", Boolean.class,
+            DSL.coalesce(metadata, DSL.val(org.jooq.JSONB.jsonb("{}"))), DSL.val("origin_collection_id")));
+        var probe = ctx.selectOne().from(cc).join(ch)
+            .on(chTenant.eq(DSL.field(DSL.name("qcc", "tenant_id"), String.class))
+                .and(chColl.eq(DSL.field(DSL.name("qcc", "collection_id"), Long.class))))
+            .where(DSL.field(DSL.name("qcc", "lifecycle_state"), String.class).eq("quarantine"))
+            .and(DSL.not(hasKey))
+            .limit(QUARANTINE_PROBE_CAP + 1);
+        try {
+            return ctx.fetchCount(probe);
+        } catch (DataAccessException e) {   // unknown is not "none": a probe that cannot read keeps the gate shut
+            log.warn("event=rdr229_quarantine_origin_probe_failed cause=\"{}\"", e.toString());
+            return QUARANTINE_PROBE_CAP + 1;
+        }
     }
 
     /**
