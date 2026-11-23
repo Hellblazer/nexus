@@ -11127,17 +11127,17 @@ public final class CatalogRepository {
         String[] tuple = new String[5]; RenameOutcome[] oneRow = new RenameOutcome[1];   // oneRow: set when P3.7's body ran
         String[] epoch = new String[1];   // baton's CatalogEpoch, read inside the transaction's tenant scope
         Map<String, Integer> counts;
+        boolean returned = false;
         try {
             counts = CollectionMint.refusingRace(tenantScope, tenant,
                 () -> renameCollectionTxn(tenant, oldName, newName, requestedSourceId, expectedTargetSupersededBy, newContentType,
                     newOwnerId, newNameEmbeddingModel, tuple, epoch, oneRow), CollectionMint.recheckOf(tenant, tuple, gate3));
-        } catch (RuntimeException | Error e) {
-            // Row 15 addendum: a COMMIT that reached the client as an exception may still have been applied (PostgreSQL applied it,
-            // the client saw an error), so both labels leave the cache here as they do after a return; evicting is always safe.
-            // (The one-row regime's own evict, RenameGuard#committedOneRow, runs only on a return.)
-            CollectionRegistry.evict(tenant, oldName);
-            CollectionRegistry.evict(tenant, newName);
-            throw e;
+            returned = true;
+        } finally {
+            // Row 15 addendum: a COMMIT that reached the client as an exception may still have been applied (PostgreSQL applied it, the client saw an
+            // error), so both labels leave the cache on a throw of either path as they do after a one-row return; evicting is always safe. The name
+            // path's own post-return evictions follow below; the one-row path's are this one (RenameGuard#evictOneRowLabels), run once the body ran.
+            if (!returned || oneRow[0] != null) renameGuard.evictOneRowLabels(tenant, oldName, newName);
         }
         if (oneRow[0] != null) return renameGuard.committedOneRow(tenant, oldName, newName, oneRow[0]);   // the path taken, not a count key
         long renamedId = 0;
