@@ -506,8 +506,17 @@ class Rdr229P35cVectorsReaperIdReadTest extends AtomicWriteTestBase {
         }
 
         // The manifest row's name now differs from the chunk's, its id does not.
-        su(ctx -> ctx.update(CATALOG_DOCUMENT_CHUNKS).set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, "another-name")
-            .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)).execute());
+        // (vectors-079 stamps a manifest row's name from its chunk until P4.1, so the diverged name, the state after P4.1, is written with triggers off,
+        // on this session only)
+        su(ctx -> {
+            ctx.set(DSL.name("session_replication_role"), DSL.inline("replica"));
+            try {
+                ctx.update(CATALOG_DOCUMENT_CHUNKS).set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, "another-name")
+                    .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)).execute();
+            } finally {
+                ctx.set(DSL.name("session_replication_role"), DSL.inline("origin"));
+            }
+        });
 
         assertThat(sweep(Gate3.never()).preconditions(tenant, plan()).get("keyless_ttl_rows"))
             .as("by name the owner is not found").isEqualTo(1L);
