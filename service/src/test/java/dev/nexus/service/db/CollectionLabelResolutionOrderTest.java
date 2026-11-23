@@ -71,7 +71,7 @@ class CollectionLabelResolutionOrderTest {
                     ctx.alterTable(CATALOG_COLLECTIONS).dropConstraint(key.getName()).cascade().execute();
                 }
             }
-            insert(ctx, SUCCESSOR, "label-order-succ", "live", "");
+            successorId = insert(ctx, SUCCESSOR, "label-order-succ", "live", false);
             return null;
         });
     }
@@ -91,11 +91,15 @@ class CollectionLabelResolutionOrderTest {
         }
     }
 
-    private long insert(DSLContext ctx, String name, String owner, String lifecycle, String supersededBy) {
+    /** The registry id of {@link #SUCCESSOR}, set by {@link #start}: every tombstone names it by label and by id (the P3.1 CHECK). */
+    private long successorId;
+
+    private long insert(DSLContext ctx, String name, String owner, String lifecycle, boolean tombstone) {
         return ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
                 CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL,
-                CATALOG_COLLECTIONS.LIFECYCLE_STATE, CATALOG_COLLECTIONS.SUPERSEDED_BY)
-            .values(TENANT, name, "docs", owner, "minilm-l6-v2-384", lifecycle, supersededBy)
+                CATALOG_COLLECTIONS.LIFECYCLE_STATE, CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.SUPERSEDED_BY_ID)
+            .values(TENANT, name, "docs", owner, "minilm-l6-v2-384", lifecycle, tombstone ? SUCCESSOR : "",
+                tombstone ? successorId : null)
             .returning(CATALOG_COLLECTIONS.COLLECTION_ID).fetchOne(CATALOG_COLLECTIONS.COLLECTION_ID);
     }
 
@@ -114,9 +118,9 @@ class CollectionLabelResolutionOrderTest {
     @Test
     void aLabelHeldByALiveRowAndTwoTombstonesResolvesToTheLiveRow_thenToTheNewestTombstone() {
         long[] ids = asSuperuser(ctx -> {
-            long older = insert(ctx, LABEL, "label-order-a", "dormant", SUCCESSOR);
-            long live = insert(ctx, LABEL, "label-order-b", "live", "");
-            long newer = insert(ctx, LABEL, "label-order-c", "dormant", SUCCESSOR);
+            long older = insert(ctx, LABEL, "label-order-a", "dormant", true);
+            long live = insert(ctx, LABEL, "label-order-b", "live", false);
+            long newer = insert(ctx, LABEL, "label-order-c", "dormant", true);
             return new long[] {older, live, newer};
         });
         long older = ids[0];
@@ -151,8 +155,8 @@ class CollectionLabelResolutionOrderTest {
     void aQuarantinedRowThatIsNotSupersededIsLiveForTheOrder() {
         String label = "docs__label-order-q__minilm-l6-v2-384__v1";
         long[] ids = asSuperuser(ctx -> {
-            long tomb = insert(ctx, label, "label-order-qa", "live", SUCCESSOR);
-            long quarantined = insert(ctx, label, "label-order-qb", "quarantine", "");
+            long tomb = insert(ctx, label, "label-order-qa", "live", true);
+            long quarantined = insert(ctx, label, "label-order-qb", "quarantine", false);
             return new long[] {tomb, quarantined};
         });
         CollectionRegistry.shared().evictTenant(TENANT);
