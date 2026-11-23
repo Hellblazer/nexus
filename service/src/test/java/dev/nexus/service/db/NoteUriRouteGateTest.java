@@ -130,7 +130,6 @@ class NoteUriRouteGateTest {
         listed(ASP, "getHighlightBySourceUri", "highlights/get_by_source_uri: matches on the canonical form"),
         listed(ASP, "filterBySourceUris", "aspects/operator-query filter: the source_uris list is canonicalized once"),
         listed(ASP, "groupByField", "aspects/operator-query groupby: the source_uris list is canonicalized once"),
-        listed(ASP, "confidenceAggregate", "aspects/operator-query aggregate: the source_uris list is canonicalized once"),
         // ── MERGE ─────────────────────────────────────────────────────────
         exempt(CAT, "mergeDocuments", Cls.MERGE,
             "moves a stored URI from the duplicate row to the canonical row (the dup is blanked first so "
@@ -172,7 +171,6 @@ class NoteUriRouteGateTest {
         exempt(CAT, "mostRecentTombstoned", Cls.PASS_THROUGH, "RDR-243 sensitivity inheritance (nexus-rfvyy.6.24): reads the latest tombstoned row holding the URI; receives the already-canonical URI from register (deriveSourceUri), takes none from the caller"),
         exempt(CAT, "mostRecentTombstonedMany", Cls.PASS_THROUGH, "RDR-243 sensitivity inheritance (nexus-rfvyy.6.24): the batch form of mostRecentTombstoned; its URIs are the already-canonical ones register_many derived"),
         exempt(CAT, "documentFields", Cls.PASS_THROUGH, "column list of a document read; returns the stored value"),
-        exempt(CAT, "docRowFromRecord", Cls.PASS_THROUGH, "renders a stored row; RDR-231 forbids response rewriting"),
         // ── PASS_THROUGH: CatalogLinksRepository ──────────────────────────
         exempt(LNK, "documentsByOwnerContentTypes", Cls.PASS_THROUGH,
             "list?source_uri_prefix= with an owner or content_type (RDR-193 Step 3, nexus-u5m5g.4): the prefix is a file: URI prefix matched "

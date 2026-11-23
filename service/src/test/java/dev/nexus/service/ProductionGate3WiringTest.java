@@ -47,13 +47,13 @@ class ProductionGate3WiringTest {
     private static final Set<String> MENTIONS_NEVER = Set.of(
         "NexusService.java", "db/AspectQueueDrain.java", "db/AspectRepository.java", "db/CatalogRepository.java",
         "db/ChashConstraintValidator.java", "db/ChashRepository.java", "db/CombinedWriteService.java",
-        "db/IndexRunCensusReads.java", "db/LegacyChunkSurvey.java", "db/PdfStubMetadataReads.java", "db/PipelineRepository.java",
+        "db/IndexRunCensusReads.java", "db/LegacyChunkSurvey.java", "db/ManifestForeignCollectionReads.java", "db/PdfStubMetadataReads.java", "db/PipelineRepository.java",
         "db/QuarantineOrigin.java", "db/ReembedJobRepository.java", "db/ReembedSourceReader.java", "db/RemapRepository.java",
         "db/TaxonomyRepository.java", "db/TelemetryRepository.java", "db/UriSegmentCensusReads.java",
         "http/ChashConformanceHandler.java", "vectors/ChunkConstraintAdmin.java", "vectors/ChunkKeySweep.java",
         "vectors/ChunkOwnerLabel.java", "vectors/ManifestLabelStage.java",
         "vectors/PciIdBuilds.java", "vectors/PciQueryRingReader.java",
-        "vectors/PciGate3Coverage.java", "vectors/PciReconciler.java", "vectors/PgVectorRepository.java", "vectors/ReaperRepository.java",
+        "vectors/PciReconciler.java", "vectors/PgVectorRepository.java", "vectors/ReaperRepository.java",
         "vectors/TaxonomyCentroidRepository.java", "vectors/TopicRouteArm.java");
 
     /** Comments removed, string and text-block literals kept whole: a {@code "/*"} inside a literal must not swallow the code after it. */
