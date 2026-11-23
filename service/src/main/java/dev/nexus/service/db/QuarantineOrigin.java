@@ -224,13 +224,24 @@ public final class QuarantineOrigin {
      *                   shares the origin's attributes once its row is written), or {@code null}
      */
     private static Condition rowsOf(String tenant, String origin, String exceptName, Gate3 gate3) {
+        return rowsOf(tenant, origin, exceptName, gate3, null);
+    }
+
+    /**
+     * {@link #rowsOf(String, String, String, Gate3)} with the origin's registry row named by id: a one-row rename has already moved that row to the new label
+     * when it retags, so the attribute-derived sibling clause finds the origin by {@code originIdKnown}, not by the old label no row carries any more (folio's r3
+     * review F4). Null finds it by label, as before.
+     */
+    private static Condition rowsOf(String tenant, String origin, String exceptName, Gate3 gate3, Long originIdKnown) {
         // RDR-229 P3.5c: before gate 3 the origin is found by the {@code origin_collection} TAG, a label, which stays current because the
         // rename calls retagRowsOf (P3.7's one-row rename, wren's CollectionOneRowRename, must keep calling it); from gate 3 it is found by the
         // tag's id ({@code origin_collection_id}, see taggedWith), which a rename does not change, and a row with no id is no sibling.
         // one reading of gate 3 for the whole condition (RDR-229 P3.5c, linda 2026-11-23)
         final boolean byId = CollectionKey.of(gate3).byId();
         // the origin's id: the live-first resolver (a label may name a live row and tombstones); null before gate 3, where nothing reads it
-        final Field<Long> originId = byId ? CollectionIds.idOf(tenant, origin) : null;
+        // a one-row rename passes the id it renamed (its registry row no longer carries the label, P3.7), which wins over the resolver
+        final Field<Long> originId = !byId ? null
+            : originIdKnown != null ? DSL.val(originIdKnown) : CollectionIds.idOf(tenant, origin);
         var sib = CATALOG_COLLECTIONS.as("quarantine_sibling");
         var org = CATALOG_COLLECTIONS.as("quarantine_origin");
         var twin = CATALOG_COLLECTIONS.as("quarantine_twin");
@@ -249,7 +260,7 @@ public final class QuarantineOrigin {
             .and(twin.MODEL_VERSION.eq(org.MODEL_VERSION))
             .and(twin.CONTENT_TYPE.eq(org.CONTENT_TYPE));
         Condition siblingRows = sib.TENANT_ID.eq(tenant)
-                   .and(byId ? org.COLLECTION_ID.eq(originId) : org.NAME.eq(origin))
+                   .and(originIdKnown != null ? org.COLLECTION_ID.eq(originIdKnown) : byId ? org.COLLECTION_ID.eq(originId) : org.NAME.eq(origin))
                    .and(sib.LIFECYCLE_STATE.eq("quarantine"))
                    .and(sib.OWNER_ID.eq(org.OWNER_ID))
                    .and(sib.EMBEDDING_MODEL.eq(org.EMBEDDING_MODEL))
@@ -264,7 +275,8 @@ public final class QuarantineOrigin {
             .and(CollectionIdReads.is(gate3, tenant, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, PREFIX + origin).or(inRowDerivedSibling));
         // From gate 3 the tag names the origin by its id ({@code origin_collection_id}, which retagRowsOf writes), the label tag being the
         // pre-latch arm and the arm of a row written before the id key existed (it carries no id key); a tag that names no id reads by label.
-        Condition tagged = taggedWith(byId, tenant, origin);
+        // a one-row rename names the origin by the id it renamed: the old label no longer resolves to that row, so the tag is read by that id
+        Condition tagged = byId && originIdKnown != null ? ORIGIN_ID.eq(DSL.val(String.valueOf(originIdKnown))) : taggedWith(byId, tenant, origin);
         return CHUNKS.TENANT_ID.eq(tenant).and(inQuarantine).and(tagged.or(untaggedHere));
     }
 
@@ -378,8 +390,17 @@ public final class QuarantineOrigin {
 
     /** {@link #retagRowsOf(DSLContext, String, String, String)} reading the id from gate 3 (RDR-229 P3.5c). */
     static int retagRowsOf(DSLContext ctx, String tenant, String from, String to, Gate3 gate3) {
+        return retagRowsOf(ctx, tenant, from, to, gate3, null);
+    }
+
+    /**
+     * {@link #retagRowsOf(DSLContext, String, String, String, Gate3)} for a one-row rename (RDR-229 P3.7): {@code originIdKnown} is the renamed collection's id,
+     * whose registry row already carries {@code to}, so the attribute-derived siblings are found through it, not through a label no row carries any more
+     * (folio's r3 review F4). Null reads the origin as the other callers do.
+     */
+    static int retagRowsOf(DSLContext ctx, String tenant, String from, String to, Gate3 gate3, Long originIdKnown) {
         final boolean byId = CollectionKey.of(gate3).byId();
-        Condition rows = rowsOf(tenant, from, to, gate3);
+        Condition rows = rowsOf(tenant, from, to, gate3, originIdKnown);
         // RDR-229 P3.1 stage 2b (nexus-p2m1x.17): the tag names the origin by id as well as by name, so a reader can
         // follow a rename by id. A metadata key, not a column. The id is the registry's now, in this transaction (the
         // rename registers its target before the retag runs); a target with no registry row is tagged by name alone.

@@ -195,8 +195,9 @@ public final class CollectionOneRowRename implements OneRowRename {
             .where(DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant).and(DOCUMENT_HIGHLIGHTS.COLLECTION_ID.eq(id)))
             .and(NoteUri.namesCollection(DOCUMENT_HIGHLIGHTS.SOURCE_URI, oldName)).execute());
         // the latched gate (this body runs only past the latch): quarantine rows found by the collection's id and siblings by the registry's label, as every
-        // other gate-3 reader (linda's census pass 2; the 4-argument form passes Gate3.never())
-        QuarantineOrigin.retagRowsOf(ctx, tenant, oldName, newName, LATCHED);
+        // other gate-3 reader (linda's census pass 2; the 4-argument form passes Gate3.never()); the origin is named by id, because its registry row already
+        // carries the new label, so an attribute-derived sibling is found through it (folio's r3 review F4)
+        QuarantineOrigin.retagRowsOf(ctx, tenant, oldName, newName, LATCHED, id);
         return new Outcome(id, counts);
     }
 
