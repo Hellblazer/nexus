@@ -130,6 +130,7 @@ _RECOVERY_FUTILE_WINDOW_S: float = 60.0
 # bounded wait as the nine mixin adopters (call sites unchanged — only
 # the alias target moved to the gated resolver).
 from nexus.db.client_identity import client_identity_headers
+from nexus.db.t2.shared_ssl import get_shared_ssl_context
 from nexus.identity.token_header import identity_headers, retry_headers_after_401, superseded_from_response
 from nexus.db.service_endpoint import (
     resolve_service_endpoint_with_evidence_gate as _resolve_endpoint,
@@ -313,7 +314,9 @@ class HttpScratchStore:
         return self._session_id
 
     def close(self) -> None:
-        """Close the keep-alive connection pool (idempotent)."""
+        """Close the keep-alive connection pool (idempotent). The store stays closed: :meth:`_send` reopens only
+        a client the store lost, never one its owner shut."""
+        self._closed_by_owner = True
         self._client.close()
         _log.debug("http_scratch_store.closed")
 
@@ -484,11 +487,7 @@ class HttpScratchStore:
         if token is None:
             return False
         self._headers["Authorization"] = f"Bearer {token}"
-        try:
-            self._client.close()
-        except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
-            pass
-        self._client = self._build_client()
+        self._replace_client()
         _log.warning("http_scratch_store.data_token_remint_on_401")
         return True
 
@@ -541,11 +540,7 @@ class HttpScratchStore:
         # precedence over whatever the lease republished, exactly as at
         # construction.
         self._apply_data_token_override()
-        try:
-            self._client.close()
-        except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
-            pass
-        self._client = self._build_client()
+        self._replace_client()
         return True
 
     def _refresh_session_token_from_lease(self, sent_token: str) -> bool:
@@ -620,11 +615,7 @@ class HttpScratchStore:
         if self._export_adopted_token:
             os.environ[_SESSION_ENV] = fresh
             os.environ.setdefault(_SESSION_ID_ENV, session_id)
-        try:
-            self._client.close()
-        except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
-            pass
-        self._client = self._build_client()
+        self._replace_client()
 
     def _recover_borrowed_session(self, sent_token: str) -> bool:
         """nexus-k9sec: the token this store borrowed is dead (HTTP 401 after
@@ -690,7 +681,7 @@ class HttpScratchStore:
         if not self._recover_borrowed_session(getattr(self, "_session_token", "")):
             return resp, heal_suffix
         try:
-            resp = self._client.post(
+            resp = self._send(
                 path, json=payload,
                 headers=self._authorized_headers(payload, write=write),
             )
@@ -716,10 +707,54 @@ class HttpScratchStore:
         # RDR-167 Step 2 (nexus-dngtz.1.3): the headers above are baked, so the correlation id is stamped
         # per request instead (set to the bound id, removed when none is bound); every build, the rebind
         # after a lease change included, goes through this method and so carries the hook.
+        # verify= is the process-wide SSL context the T2 stores share: the CA bundle inside the install
+        # generation is read once per process, so a rebuild after that generation was removed cannot fail
+        # (2026-11-21: a rebuild re-read the vanished bundle, raised a pathless ENOENT, and every later
+        # scratch call failed "client has been closed"). A failing first read names the bundle's path.
         return httpx.Client(
             base_url=self._base_url, headers=self._headers, timeout=30.0,
+            verify=get_shared_ssl_context(),
             event_hooks={"request": [stamp_request]},
         )
+
+    def _replace_client(self) -> None:
+        """Swap in a freshly built client: build FIRST, close the old one after. Closing first stranded the
+        store on a closed client whenever the build raised (2026-11-21), and the store is a process-wide
+        singleton in the MCP server, so every later call failed until a restart. A failed build now raises
+        with the old client still open."""
+        fresh = self._build_client()
+        old, self._client = self._client, fresh
+        try:
+            old.close()
+        except Exception:  # noqa: BLE001 — closing the replaced pool is best effort; the new one is in place
+            pass
+
+    def _live_client(self) -> httpx.Client:
+        """The client to send on: rebuilt once when it was closed under the store (anything but the owner's
+        :meth:`close`), so a lost client costs one rebuild instead of the rest of the process."""
+        client = self._client
+        if getattr(client, "is_closed", False) is not True or getattr(self, "_closed_by_owner", False):
+            return client
+        lock = getattr(self, "_refresh_lock", None)
+        if lock is None:
+            self._replace_client()
+        else:
+            with lock:
+                if self._client is client:  # another thread may have rebuilt it while we waited
+                    self._replace_client()
+        _log.warning("http_scratch_store.client_reopened", session_id=getattr(self, "_session_id", ""))
+        return self._client
+
+    def _send(self, path: str, *, json: dict[str, Any], headers: dict[str, str]) -> httpx.Response:
+        """POST on the live client. A client closed between the check and the send (a concurrent heal swapped
+        it) gets one retry on the replacement; httpx raises a plain RuntimeError for a closed client."""
+        client = self._live_client()
+        try:
+            return client.post(path, json=json, headers=headers)
+        except RuntimeError:
+            if getattr(client, "is_closed", False) is not True or getattr(self, "_closed_by_owner", False):
+                raise
+            return self._live_client().post(path, json=json, headers=headers)
 
     def close_session(self) -> int:
         """Delete all scratch entries for this session. Returns count deleted.
@@ -1012,7 +1047,7 @@ class HttpScratchStore:
         # default -- see _current_authorization_header's docstring.
         request_headers = self._authorized_headers(payload, write=mutates)
         try:
-            resp = self._client.post(path, json=payload, headers=request_headers)
+            resp = self._send(path, json=payload, headers=request_headers)
         except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError):
             # nexus-om64x: stale endpoint after a supervisor restart (connect-refused
             # OR TCP RST on a pooled in-flight connection) — re-resolve from the lease
@@ -1020,7 +1055,7 @@ class HttpScratchStore:
             if not self._rebind_from_lease():
                 raise RuntimeError(f"HttpScratchStore: connect failed on {path}")
             try:
-                resp = self._client.post(path, json=payload, headers=self._authorized_headers(payload, write=mutates))
+                resp = self._send(path, json=payload, headers=self._authorized_headers(payload, write=mutates))
             except httpx.HTTPError as exc:
                 raise RuntimeError(f"HttpScratchStore: connect failed on retry {path}: {exc}") from exc
         except httpx.HTTPError as exc:
@@ -1042,7 +1077,7 @@ class HttpScratchStore:
             # token or the bearer the ladder below would otherwise heal and blame.
             if (fresh := retry_headers_after_401(request_headers, path)) is not None:
                 try:
-                    resp = self._client.post(path, json=payload, headers=fresh)
+                    resp = self._send(path, json=payload, headers=fresh)
                 except httpx.HTTPError as exc:
                     raise RuntimeError(
                         f"HttpScratchStore: network error on identity-token retry {path}: {exc}"
@@ -1073,7 +1108,7 @@ class HttpScratchStore:
                     # (RDR-005 self-minted data token) is only visible via
                     # _current_authorization_header(), same as the initial
                     # request above.
-                    resp = self._client.post(
+                    resp = self._send(
                         path, json=payload,
                         headers=self._authorized_headers(payload, write=mutates),
                     )
@@ -1146,14 +1181,14 @@ class HttpScratchStore:
         # critic S4 (nexus-ssqk9): see _post's matching comment.
         request_headers = self._authorized_headers(payload, write=False)
         try:
-            resp = self._client.post(path, json=payload, headers=request_headers)
+            resp = self._send(path, json=payload, headers=request_headers)
         except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError):
             # nexus-om64x: stale endpoint after a supervisor restart (connect-refused
             # OR TCP RST on a pooled in-flight connection) — re-resolve + retry once.
             if not self._rebind_from_lease():
                 raise RuntimeError(f"HttpScratchStore: connect failed on {path}")
             try:
-                resp = self._client.post(path, json=payload, headers=self._authorized_headers(payload, write=False))
+                resp = self._send(path, json=payload, headers=self._authorized_headers(payload, write=False))
             except httpx.HTTPError as exc:
                 raise RuntimeError(f"HttpScratchStore: connect failed on retry {path}: {exc}") from exc
         except httpx.HTTPError as exc:
@@ -1180,7 +1215,7 @@ class HttpScratchStore:
                 try:
                     # nexus-fe96p: see _post's matching comment -- resolve
                     # the Authorization header FRESH on the retry too.
-                    resp = self._client.post(
+                    resp = self._send(
                         path, json=payload,
                         headers=self._authorized_headers(payload, write=False),
                     )

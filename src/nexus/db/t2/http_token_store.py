@@ -40,6 +40,7 @@ DEFAULT_TENANT: str = "default"
 # bounded wait as the nine mixin adopters (call sites unchanged — only
 # the alias target moved to the gated resolver).
 from nexus.db.client_identity import client_identity_headers
+from nexus.db.t2.shared_ssl import get_shared_ssl_context
 from nexus.db.service_endpoint import (
     resolve_service_endpoint_with_evidence_gate as _resolve_endpoint,
 )
@@ -193,10 +194,24 @@ class HttpTokenStore:
         # RDR-167 Step 2 (nexus-dngtz.1.3): the headers above are baked, so the correlation id is stamped
         # per request instead (set to the bound id, removed when none is bound); every build, the rebind
         # after a lease change included, goes through this method and so carries the hook.
+        # verify= is the process-wide SSL context (see HttpScratchStore._build_client): the MCP lifespan opens
+        # one of these per session-token refresh, and a per-client context re-read the CA bundle from an install
+        # generation that may have been removed since the process started.
         return httpx.Client(
             base_url=self._base_url, headers=headers, timeout=30.0,
+            verify=get_shared_ssl_context(),
             event_hooks={"request": [stamp_request]},
         )
+
+    def _replace_client(self) -> None:
+        """Build the new client FIRST and close the old one after, so a failed build leaves the store on an
+        open client rather than a closed one (the HttpScratchStore incident, 2026-11-21)."""
+        fresh = self._build_client()
+        old, self._client = self._client, fresh
+        try:
+            old.close()
+        except Exception:  # noqa: BLE001 — closing the replaced pool is best effort; the new one is in place
+            pass
 
     def _rebind_from_lease(self) -> bool:
         """nexus-om64x: on connection-refused, re-resolve the endpoint from the
@@ -226,11 +241,7 @@ class HttpTokenStore:
             self._auth_token = new_token
             self._using_data_token = False
         self._apply_data_token_preference()
-        try:
-            self._client.close()
-        except Exception:  # noqa: BLE001 — best-effort close of stale client during reset
-            pass
-        self._client = self._build_client()
+        self._replace_client()
         return True
 
     def close(self) -> None:
@@ -289,11 +300,7 @@ class HttpTokenStore:
             manager.invalidate(self._base_url, self._tenant)
             self._using_data_token = False
             self._apply_data_token_preference()
-            try:
-                self._client.close()
-            except Exception:  # noqa: BLE001 — best-effort close of the stale client before rebuild
-                pass
-            self._client = self._build_client()
+            self._replace_client()
             resp = self._client.post(path, json=body)
         if resp.status_code in (401, 403):
             raise TokenAdminAuthError(
