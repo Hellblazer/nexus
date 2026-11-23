@@ -21,7 +21,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * collection a re-embed job in a lock state holds, matched by the job end's registry id, or, for an end whose id no longer
  * names a live registry row, by the label the job recorded. After a one-row rename (simulated as the superuser does it, as
  * {@code CollectionRehomeByIdTest} does) the job still names the old label and the row's id, so the guard must hold the
- * collection under its NEW label.
+ * collection under its NEW label. The rename leg is not reachable in P3.5a (see {@link #assertRenameRefusedNothingChanged}): the
+ * test asserts the documented refusal there, and keeps both re-home legs.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ReembedGuardByIdTest {
@@ -69,6 +70,24 @@ class ReembedGuardByIdTest {
         return fx.post("/v1/catalog/collections/rename", "{\"old_name\":" + json(from) + ",\"new_name\":" + json(to) + "}");
     }
 
+    /**
+     * A rename of {@code from} answers the typed 409 {@code rename_refused} ({@code missing} {@code name_key_drop_move}: the
+     * fixture's Gate3Signal latches gate 3 and its readiness defaults to the drop move missing), and nothing changes. With gate 3
+     * latched, a name-path rename is refused (slice C, {@code RenameGuard.runRename}); after a one-row rename the only rename
+     * that can run is P3.7's one-row body, which P3.5a's {@code OneRowRename.failClosed()} refuses. So P3.5a cannot reach the
+     * re-embed guard (or the sweep gate) through a rename of a renamed collection. That a rename under the new label waits
+     * behind a job (or a sweep) is covered by P3.7's acceptance test, {@code Rdr229P37RenameAcceptanceTest}.
+     */
+    private void assertRenameRefusedNothingChanged(String from, String to) {
+        long id = fx.idOf(from);
+        Resp r = rename(from, to);
+        assertThat(r.status()).as(r.body()).isEqualTo(409);
+        assertThat(r.reason()).as("typed: %s", r.body()).isEqualTo("rename_refused");
+        assertThat(r.json().path("missing").asText()).as("names the missing condition: %s", r.body()).isEqualTo("name_key_drop_move");
+        assertThat(fx.idOf(from)).as("nothing renamed: the row keeps its id").isEqualTo(id);
+        assertThat(fx.exists(to)).as("nothing renamed: the new label has no row").isFalse();
+    }
+
     private void assertHeld(Resp r, Job job) {
         assertThat(r.status()).as(r.body()).isEqualTo(409);
         assertThat(r.json().path("job_id").asText()).as("it names the job: %s", r.body()).isEqualTo(job.jobId().toString());
@@ -84,7 +103,7 @@ class ReembedGuardByIdTest {
 
         assertHeld(rehome(src2, other), job);
         assertHeld(rehome(other, src2), job);
-        assertHeld(rename(src2, label("rjg-fresh-" + (n++))), job);
+        assertRenameRefusedNothingChanged(src2, label("rjg-fresh-" + (n++)));
     }
 
     @Test
@@ -96,7 +115,7 @@ class ReembedGuardByIdTest {
         String tgt2 = oneRowRename(tgt, "tt2");
 
         assertHeld(rehome(other, tgt2), job);
-        assertHeld(rename(tgt2, label("rjg-fresh-" + (n++))), job);
+        assertRenameRefusedNothingChanged(tgt2, label("rjg-fresh-" + (n++)));
     }
 
     @Test

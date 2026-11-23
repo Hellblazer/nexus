@@ -43,6 +43,7 @@ class CollectionRehomeByIdTest {
     @BeforeAll
     void startAll() throws Exception {
         fx = new CollectionRouteFixture();
+        fx.buildIdTwins();   // a real install has the id twins before gate 3 latches (P3.4's pass)
         fx.gate3.set(true);
         fx.asSuperuser(ctx -> {
             for (var key : CATALOG_COLLECTIONS.getKeys()) {

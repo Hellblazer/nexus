@@ -84,6 +84,24 @@ class SweepGateAfterRenameTest {
         return fx.post("/v1/catalog/collections/rename", "{\"old_name\":" + json(from) + ",\"new_name\":" + json(to) + "}");
     }
 
+    /**
+     * A rename of {@code from} answers the typed 409 {@code rename_refused} ({@code missing} {@code name_key_drop_move}: the
+     * fixture's Gate3Signal latches gate 3 and its readiness defaults to the drop move missing), and nothing changes. With gate 3
+     * latched, a name-path rename is refused (slice C, {@code RenameGuard.runRename}); after a one-row rename the only rename
+     * that can run is P3.7's one-row body, which P3.5a's {@code OneRowRename.failClosed()} refuses. So P3.5a cannot reach the
+     * sweep gate (or the re-embed guard) through a rename of a renamed collection. That a rename under the new label waits
+     * behind a sweep (or a job) is covered by P3.7's acceptance test, {@code Rdr229P37RenameAcceptanceTest}.
+     */
+    private void assertRenameRefusedNothingChanged(String from, String to) {
+        long id = fx.idOf(from);
+        Resp r = rename(from, to);
+        assertThat(r.status()).as(r.body()).isEqualTo(409);
+        assertThat(r.reason()).as("typed: %s", r.body()).isEqualTo("rename_refused");
+        assertThat(r.json().path("missing").asText()).as("names the missing condition: %s", r.body()).isEqualTo("name_key_drop_move");
+        assertThat(fx.idOf(from)).as("nothing renamed: the row keeps its id").isEqualTo(id);
+        assertThat(fx.exists(to)).as("nothing renamed: the new label has no row").isFalse();
+    }
+
     private void assertBlocksWhileHeld(Connection holder, java.util.concurrent.Callable<Resp> request, String what) throws Exception {
         Future<Resp> future = executor.submit(request);
         assertThatThrownBy(() -> future.get(1500, TimeUnit.MILLISECONDS))
@@ -113,13 +131,24 @@ class SweepGateAfterRenameTest {
         assertBlocksWhileHeld(holdGate(a2), () -> rehome(s, a2), "a re-home onto the new label");
     }
 
+    /**
+     * The rename leg of the sweep-gate audit is not reachable in P3.5a: the rename is refused before it takes the gate, so there is
+     * nothing for the gate to block. With a sweep holding the gate under the new label, the rename still answers at once with the
+     * refusal and changes nothing; the rename that waits on the gate is P3.7's, covered by {@code Rdr229P37RenameAcceptanceTest}.
+     */
     @Test
-    void afterAOneRowRename_aSweepHoldingTheGateUnderTheNewLabelBlocksARenameOfIt() throws Exception {
+    void afterAOneRowRename_aRenameOfItIsRefusedBeforeTheGate_soASweepHoldingTheGateDoesNotBlockIt() throws Exception {
         String a = registered("rn-a");
         String a2 = oneRowRename(a, "rn-a2");
         String fresh = label("swg-rn-fresh-" + (n++));
 
-        assertBlocksWhileHeld(holdGate(a2), () -> rename(a2, fresh), "a rename of the new label");
+        Connection holder = holdGate(a2);
+        try {
+            executor.submit(() -> assertRenameRefusedNothingChanged(a2, fresh)).get(20, TimeUnit.SECONDS);
+        } finally {
+            holder.rollback();
+            holder.close();
+        }
     }
 
     @Test
