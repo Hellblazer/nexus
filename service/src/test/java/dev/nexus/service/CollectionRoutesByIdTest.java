@@ -512,4 +512,133 @@ class CollectionRoutesByIdTest {
         assertThat(operations).containsExactlyInAnyOrder("sb3-by-id", "sb3-by-label");
         assertThat(fx.get("/v1/catalog/gc_audit/list?collection=" + enc(label)).json().path("entries")).hasSize(2);
     }
+
+    // ---- F1: every writer that reads by id writes under the LOCKED row's current label (linda's Q1) -----------------------------
+
+    /** The (name column, id column) pairs of the schema ({@code collection}/{@code collection_id}, {@code source_collection}/...), found once. */
+    private List<String[]> nameIdPairs;
+
+    private List<String[]> nameIdPairs(CollectionRouteFixture f) {
+        if (nameIdPairs == null) {
+            nameIdPairs = f.asSuperuser(ctx -> {
+                List<String[]> pairs = new ArrayList<>();
+                ctx.meta().filterSchemas(sc -> sc.getName().equals("nexus")).getTables().forEach(t -> {
+                    for (var field : t.fields()) {
+                        if (field.getType() == String.class && t.field(field.getName() + "_id") != null
+                            && t.field(field.getName() + "_id").getType() == Long.class
+                            && (field.getName().equals("collection") || field.getName().endsWith("_collection") || field.getName().equals("name"))) {
+                            pairs.add(new String[] {t.getName(), field.getName(), field.getName() + "_id"});
+                        }
+                    }
+                });
+                return pairs;
+            });
+        }
+        return nameIdPairs;
+    }
+
+    /** Rows anywhere in the schema carrying one of {@code ids} beside a label that is not that row's current label, and rows of {@code foreign} ids. */
+    private int[] renameGapFindings(CollectionRouteFixture f, java.util.Map<Long, String> currentLabelOf, java.util.Set<Long> newHolders,
+                                    List<String> violations) {
+        int[] counts = new int[1];   // rows that carry a renamed id (the write landed somewhere)
+        f.asSuperuser(ctx -> {
+            for (String[] pair : nameIdPairs(f)) {
+                var table = org.jooq.impl.DSL.table(org.jooq.impl.DSL.name("nexus", pair[0]));
+                var name = org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("nexus", pair[0], pair[1]), String.class);
+                var id = org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("nexus", pair[0], pair[2]), Long.class);
+                if (pair[0].equals("catalog_collections")) {
+                    continue;   // the registry itself: the rename in place is the setup
+                }
+                int holders = ctx.fetchCount(table, id.in(newHolders));
+                if (holders > 0) {
+                    violations.add(pair[0] + "." + pair[2] + ": " + holders + " row(s) carry the id of the NEW holder of the old label");
+                }
+                for (var e : currentLabelOf.entrySet()) {
+                    int carried = ctx.fetchCount(table, id.eq(e.getKey()));
+                    counts[0] += carried;
+                    int stale = ctx.fetchCount(table, id.eq(e.getKey()).and(name.isDistinctFrom(e.getValue())));
+                    if (stale > 0) {
+                        violations.add(pair[0] + "." + pair[1] + ": " + stale + " row(s) carry id " + e.getKey() + " beside a label that is not "
+                            + e.getValue() + ", its current one");
+                    }
+                }
+            }
+            return null;
+        });
+        return counts;
+    }
+
+    private final java.util.Map<String, Integer> renameGapLanded = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.atomic.AtomicInteger renameGapRan = new java.util.concurrent.atomic.AtomicInteger();
+
+    /**
+     * The table-driven rename-gap test (RDR-229 P3.5a, review F1): for every route of the census, a request by ID whose collections are
+     * renamed in place just before the write transaction's registry read (and each old label taken by a new row) must file nothing under
+     * the new holder of the old label, and every row it files under a renamed id carries that row's CURRENT label. The invariant is read
+     * across every name/id column pair of the schema, not per route, so a writer that stamps the boundary label is found wherever it writes.
+     * A route that cannot answer 2xx on this fixture (it needs a document, a chunk or a job) proves the first half only; the floor at the end
+     * names the routes that must land.
+     */
+    @TestFactory
+    Stream<DynamicNode> everyRouteByIdFollowsARenameAndStampsTheCurrentLabel() {
+        List<DynamicNode> nodes = new ArrayList<>();
+        int idx = 0;
+        for (Route route : CollectionRouteCensus.ROUTES) {
+            int n = idx++;
+            String path = route.path();
+            if (route.tier() == Tier.RENAME || path.endsWith("/collections/delete") || path.endsWith("/collections/supersede")
+                || path.endsWith("/collections/rehome")) {
+                continue;   // a rename, delete or retire changes the registry itself; the re-home has its own test (CollectionRehomeLiveAtCommitTest)
+            }
+            nodes.add(DynamicTest.dynamicTest(route.label(), () -> {
+                Prepared p = new Prepared(route, "rg" + n);
+                CollectionRouteFixture f = p.f;
+                f.gate3.set(false);
+                java.util.Map<Long, String> currentLabelOf = new java.util.LinkedHashMap<>();
+                java.util.Set<Long> newHolders = new java.util.LinkedHashSet<>();
+                java.util.concurrent.atomic.AtomicBoolean ran = new java.util.concurrent.atomic.AtomicBoolean();
+                f.service.collectionSelectorFilter().testHooks(null, () -> {
+                    if (ran.compareAndSet(false, true)) {
+                        java.util.concurrent.CompletableFuture.runAsync(() -> {
+                            for (int k = 0; k < p.idSide.size(); k++) {
+                                String old = p.idSide.get(k);
+                                long id = p.idSideIds.get(k);
+                                String fresh = (old.startsWith("quarantine-") ? "quarantine-" : "") + CollectionRouteFixture.label("rg" + n + "-r" + k);
+                                f.asSuperuser(ctx -> ctx.update(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+                                    .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME, fresh)
+                                    .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(f.tenant))
+                                    .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.COLLECTION_ID.eq(id)).execute());
+                                currentLabelOf.put(id, fresh);
+                                f.register(old);   // a new row takes the old label
+                                newHolders.add(f.idOf(old));
+                            }
+                        }).join();
+                    }
+                }, null, null);
+                Resp r;
+                try {
+                    r = call(route, Mode.ID, p);
+                } finally {
+                    f.service.collectionSelectorFilter().testHooks(null, null, null, unconsumed::add);
+                }
+                if (!ran.get()) {
+                    System.err.println("rename_gap " + path + " skipped: the route reached no registry read by id (" + r.status() + ")");
+                    return;
+                }
+                renameGapRan.incrementAndGet();
+                List<String> violations = new ArrayList<>();
+                int landed = renameGapFindings(f, currentLabelOf, newHolders, violations)[0];
+                renameGapLanded.merge(path, landed, Integer::sum);
+                System.err.printf("rename_gap %s status=%d landed_rows=%d%n", path, r.status(), landed);
+                assertThat(violations).as("%s by id after a rename in the gap (answered %d: %s)", route.label(), r.status(), r.body()).isEmpty();
+            }));
+        }
+        nodes.add(DynamicTest.dynamicTest("non-vacuity: routes ran the rename and the named writers landed rows", () -> {
+            assertThat(renameGapRan.get()).as("routes that ran the rename-in-the-gap").isGreaterThanOrEqualTo(10);
+            for (String must : List.of("/v1/taxonomy/topics/insert", "/v1/taxonomy/centroids/upsert")) {
+                assertThat(renameGapLanded.getOrDefault(must, 0)).as("rows %s filed under the renamed id", must).isPositive();
+            }
+        }));
+        return nodes.stream();
+    }
 }

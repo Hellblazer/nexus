@@ -15066,11 +15066,14 @@ public final class CatalogRepository {
             details.put("chashes_stored", GC_AUDIT_MAX_CHASHES);
         }
 
+        // RDR-229 P3.5a (F1): a history row, filed under the label the collection bears NOW when the request named it by id, so the
+        // row never carries the id of one collection beside the label another now has; the id is then the current holder's of that label
+        final String auditLabel = collection == null ? "" : CollectionIds.historyLabel(ctx, tenant, collection);
         return ctx.insertInto(GC_AUDIT)
                    .set(GC_AUDIT.TENANT_ID,   tenant)
                    .set(GC_AUDIT.OPERATION,   operation)
-                   .set(GC_AUDIT.COLLECTION,  collection == null ? "" : collection)
-                   .set(GC_AUDIT.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
+                   .set(GC_AUDIT.COLLECTION,  auditLabel)
+                   .set(GC_AUDIT.COLLECTION_ID, CollectionIds.idOf(tenant, auditLabel))
                    .set(GC_AUDIT.ACTOR,       actor == null ? "" : actor)
                    .set(GC_AUDIT.DRY_RUN,     dryRun)
                    .set(GC_AUDIT.CHASH_COUNT, fullCount)

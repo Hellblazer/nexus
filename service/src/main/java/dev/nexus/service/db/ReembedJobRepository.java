@@ -305,16 +305,19 @@ public final class ReembedJobRepository {
                 // RDR-229 P3.5a: both ends' registry rows FOR KEY SHARE at once, in id order (the order a verb locks in), after the advisory
                 // guard and before the job row is written; the two reads below answer from the memo
                 CollectionRegistry.requireAllForWrite(ctx, tenant, java.util.List.of(source, target));
-                requireNotHeldFromTheOtherSide(ctx, tenant, source, target);
+                // the id is the identity: the job is filed under the locked rows' CURRENT labels (typed 422 when one end is unregistered)
+                final CollectionRow sourceRow = CollectionRegistry.requireForWrite(ctx, tenant, source);
+                final CollectionRow targetRow = CollectionRegistry.requireForWrite(ctx, tenant, target);
+                requireNotHeldFromTheOtherSide(ctx, tenant, sourceRow.label(), targetRow.label());
                 hook("after_start_reads", 0);
                 return Job.from(ctx.insertInto(REEMBED_JOBS)
                 .set(REEMBED_JOBS.TENANT_ID, tenant)
                 .set(REEMBED_JOBS.JOB_ID, jobId)
-                .set(REEMBED_JOBS.SOURCE_COLLECTION, source)
-                .set(REEMBED_JOBS.TARGET_COLLECTION, target)
-                // RDR-229 P3.1: both ends' registry ids, read in this transaction (typed 422 when one is unregistered)
-                .set(REEMBED_JOBS.SOURCE_COLLECTION_ID, CollectionIds.require(ctx, tenant, source))
-                .set(REEMBED_JOBS.TARGET_COLLECTION_ID, CollectionIds.require(ctx, tenant, target))
+                .set(REEMBED_JOBS.SOURCE_COLLECTION, sourceRow.label())
+                .set(REEMBED_JOBS.TARGET_COLLECTION, targetRow.label())
+                // RDR-229 P3.1: both ends' registry ids, from the locked rows
+                .set(REEMBED_JOBS.SOURCE_COLLECTION_ID, sourceRow.collectionId())
+                .set(REEMBED_JOBS.TARGET_COLLECTION_ID, targetRow.collectionId())
                 .set(REEMBED_JOBS.STATE, PLANNED)
                 .set(REEMBED_JOBS.TOKEN_CAP, tokenCap)
                 .set(REEMBED_JOBS.KEEP_SOURCE, keepSource)

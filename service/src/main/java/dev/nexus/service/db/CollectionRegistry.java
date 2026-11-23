@@ -482,7 +482,7 @@ public final class CollectionRegistry {
      * @throws UnknownCollectionIdException if the tenant has no row with that id (never an
      *         {@link UnregisteredCollectionException}, which a label with no row raises)
      */
-    public CollectionRow resolveId(DSLContext ctx, String tenant, long collectionId) {
+    CollectionRow resolveId(DSLContext ctx, String tenant, long collectionId) {
         Optional<CollectionRow> hit = cachedById(tenant, collectionId);
         if (hit.isPresent()) {
             return hit.get();
@@ -491,7 +491,11 @@ public final class CollectionRegistry {
             () -> new UnknownCollectionIdException(tenant, collectionId));
     }
 
-    /** {@link #resolveId}, for a caller outside an open transaction: a cache hit opens none, a miss opens one short read. */
+    /**
+     * {@link #resolveId}, for a caller outside an open transaction: a cache hit opens none, a miss opens one short read. A READ with no lock: the
+     * route boundary's id-to-label resolution ({@code CollectionSelectorFilter}) is its one caller outside this package, pinned by
+     * {@code LookupIdCallersTest}; a write that names an id reads it {@code FOR KEY SHARE} in its own transaction instead.
+     */
     public CollectionRow lookupId(TenantScope scope, String tenant, long collectionId) {
         Optional<CollectionRow> hit = cachedById(tenant, collectionId);
         if (hit.isPresent()) {
@@ -506,7 +510,7 @@ public final class CollectionRegistry {
     }
 
     /** The cached row of {@code collectionId}, if any; never touches the database. */
-    public Optional<CollectionRow> cachedById(String tenant, long collectionId) {
+    Optional<CollectionRow> cachedById(String tenant, long collectionId) {
         return Optional.ofNullable(knownById.get(idKey(tenant, collectionId)));
     }
 
