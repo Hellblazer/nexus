@@ -300,7 +300,7 @@ class Rdr229P37RenameAcceptanceTest {
                     org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("orphaned_at"), java.time.OffsetDateTime.class),
                     org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("embedding_model"), String.class))
                 .values(w.tenant(), w.a(), java.util.HexFormat.of().parseHex(chash), w.id(), java.time.OffsetDateTime.now(),
-                    PgContainerHelper.collectionModel(ctx, w.tenant(), w.a())).execute();
+                    PgContainerHelper.collectionModel(ctx, w.tenant(), w.b())).execute();
             return null;
         });
         long orphansBefore = env.su(ctx -> (long) ctx.fetchCount(org.jooq.impl.DSL.table(org.jooq.impl.DSL.name("nexus", "chunk_orphaned_at")),
