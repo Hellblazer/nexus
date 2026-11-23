@@ -30,6 +30,7 @@ from nexus.rdr229_completion_health import (
     DANGLING_LABEL,
     DANGLING_QUERY,
     ID_INDEX_LABEL,
+    LATCH_POSTURE_LABEL,
     NOT_KNOWN,
     SELF_ID_LABEL,
     SELF_ID_QUERY,
@@ -42,7 +43,7 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures" / "rdr229_completion_sta
 #: Every key the engine's field carries; the module reads each of them, and a key the engine adds that is not here fails the shape test.
 FIELD_KEYS = {
     "gate1", "gate2", "gate3", "gates_holding", "gates_total", "summary", "gate3_why", "gate3_latched", "id_index_invalid",
-    "labels_total", "labels_incomplete", "checks_missing", "validate_waits",
+    "gate3_latch_pci_off", "labels_total", "labels_incomplete", "checks_missing", "validate_waits",
 }
 
 #: A number in front of what it counts: the shape of every tenant count the old status text carried.
@@ -133,6 +134,17 @@ def test_an_invalid_id_index_is_its_own_row_a_warning_once_gate3_has_latched_and
     early = _by_label(_check({"rdr229_completion": {**base, "id_index_invalid": True, "gate3_latched": False}}))[ID_INDEX_LABEL]
     assert early.ok and not early.warn
     assert "not latched" in early.detail
+
+
+def test_a_latch_written_while_pci_was_off_is_an_information_row_that_says_the_id_indexes_are_built_first():
+    base = _fixture("all_stamps_done_gate3_waiting")["rdr229_completion"]
+    assert LATCH_POSTURE_LABEL not in _by_label(_check({"rdr229_completion": {**base, "gate3_latch_pci_off": False}})), "non-vacuity"
+
+    rows = _check({"rdr229_completion": {**base, "gate3_latched": True, "gate3_latch_pci_off": True}})
+    row = _by_label(rows)[LATCH_POSTURE_LABEL]
+    assert row.ok and not row.warn
+    assert "NX_SEARCH_PCI was off" in row.detail and "builds the id indexes first" in row.detail
+    _never_red(rows)
 
 
 def test_blocked_stamps_are_one_summary_row_and_no_warning():

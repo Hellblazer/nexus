@@ -632,6 +632,14 @@ public final class PciReconciler {
     }
 
     /**
+     * RDR-229 P3.4 (linda, 2026-11-23): the gate 3 latch row says it latched while {@code NX_SEARCH_PCI} was off ({@code pci_off}), so no id index was
+     * required then. With PCI on now, the id builds go ahead as if gate 2 held; the readers are on the id either way.
+     */
+    public void buildIdIndexesFirstWhen(java.util.function.BooleanSupplier pciOffLatch) {
+        idBuilds.pciOffLatch(pciOffLatch);
+    }
+
+    /**
      * Whether this engine's readers select by id ({@link IdReaders#PRESENT}, which P3.5c flips; the default). The name family retires only
      * when this is true as well as the latched gate 3: the retire drops the indexes the name path serves from.
      */

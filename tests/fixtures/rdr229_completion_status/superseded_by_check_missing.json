@@ -10,6 +10,7 @@
     "gate3_why" : "gate 2 does not hold",
     "gate3_latched" : false,
     "id_index_invalid" : false,
+    "gate3_latch_pci_off" : false,
     "labels_total" : 16,
     "labels_incomplete" : [ {
       "label" : "rdr229-stamp-catalog_collections",

@@ -10,6 +10,7 @@
     "gate3_why" : "the PCI coverage (P3.4) is not installed or could not be read (no catalog, or no registry rows visible), so nothing says the id indexes exist",
     "gate3_latched" : false,
     "id_index_invalid" : false,
+    "gate3_latch_pci_off" : false,
     "labels_total" : 16,
     "labels_incomplete" : [ ],
     "checks_missing" : [ ],

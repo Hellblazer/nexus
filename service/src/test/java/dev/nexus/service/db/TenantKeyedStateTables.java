@@ -754,8 +754,13 @@ final class TenantKeyedStateTables {
         // nexus-p2m1x.22 (RDR-229 P3.4): the id-predicate half's memory. The planned keys are replaced whole by each pass that saw
         // every leaf (and dropped to unknown by one that did not); the gate and the per-pass plan values are not kept.
         notKeyed.put("PciIdBuilds.readers", "whether this engine's id readers are present (IdReaders.PRESENT, which P3.5c flips) as a supplier, bound once at boot; a callback, no data");
+        notKeyed.put("PciIdBuilds.pciOffLatch", "whether the gate 3 latch row says it latched while PCI was off, as a supplier bound once at boot; a callback, no data");
+        notKeyed.put("CompletionBootWork.DbReader.coverage", COMPLETION_ENGINE_WIDE + "the last PCI coverage read, reused for at most ten minutes once gate 3 has latched "
+            + "(it holds id keys: model, tenant and collection id), in memory only and replaced by the next read");
+        notKeyed.put("CompletionBootWork.DbReader.coverageAt", "when that coverage was read (a time); no tenant state");
         notKeyed.put("PciIdBuilds.gate3", "the completion check's gate 3 as a supplier, bound once at boot; a callback, no data");
-        notKeyed.put("PciGate3Coverage.vacuity", "the empty-case scan's last answer (a boolean and a time), kept ten minutes; names no tenant or collection");
+        notKeyed.put("PciGate3Coverage.unindexed", PCI_OFF + "; the last near-latch scan's keys (model, tenant, collection id) of collections at the build threshold with no index, replaced whole by each scan and dropped after ten minutes");
+        notKeyed.put("PciGate3Coverage.Found.keys", PCI_OFF);
         notKeyed.put("PciIdBuilds.gate2", "the completion check's gate 2 as a supplier, bound once at boot; a callback, no data");
         notKeyed.put("PciReconcilePlanner.Plan.actions", RESULT);
         notKeyed.put("PciCatalog.Snapshot.validIds", PCI_OFF);
@@ -883,6 +888,15 @@ final class TenantKeyedStateTables {
             + "name, key columns, predicate), built from ArbiterTwins and constants; the same for every tenant and never changed");
         notKeyed.put("IdUniqueIndexPass.beforeStatement", ID_UNIQUE_INDEX_PASS_ENGINE_WIDE + "a test seam: a consumer that sees "
             + "each DDL statement's text before the pass sends it; null in production");
+        notKeyed.put("IdUniqueIndexPass.mismatched", ID_UNIQUE_INDEX_PASS_ENGINE_WIDE + "the pass's own indexes found standing with another "
+            + "definition, by index name, with the status text; constants of SPECS, no tenant or collection value");
+        notKeyed.put("IdUniqueIndexPass.waitLogged", ID_UNIQUE_INDEX_PASS_ENGINE_WIDE + "the twin index names whose changeset wait has been logged "
+            + "once; constants of SPECS");
+        notKeyed.put("IdUniqueIndexPass.backoffs", ID_UNIQUE_INDEX_PASS_ENGINE_WIDE + "the indexes whose build timed out, by index name, with a "
+            + "failure count and the next attempt's time; constants of SPECS");
+        notKeyed.put("IdUniqueIndexPass.buildTimeout", ID_UNIQUE_INDEX_PASS_ENGINE_WIDE + "the build statement's bound, a test seam; a duration");
+        notKeyed.put("IdUniqueIndexPass.recheck", ID_UNIQUE_INDEX_PASS_ENGINE_WIDE + "how long a finished pass waits before it looks again, a test "
+            + "seam; a duration");
     }
 
     private static final String COMPLETION_ENGINE_WIDE = "the RDR-229 boot-time completion check is engine-wide, never a "

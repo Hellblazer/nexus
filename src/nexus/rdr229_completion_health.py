@@ -21,6 +21,9 @@ on an engine that predates the check); absent is "not known", never ok. This mod
   readers go by the latch, so a live gate 3 that turns false later (an id index rebuilding) does not move them. An INVALID id-predicate
   PCI index is reported on its own: a warning once gate 3 has latched (readers depend on that index), information before. The engine
   drops an INVALID index and builds it again on its next reconciler pass; nothing to run.
+* ``gate3_latch_pci_off`` (P3.4): the latch row says gate 3 latched while ``NX_SEARCH_PCI`` was off, so no per-collection id index was required
+  then. An information row: with PCI on now the engine builds the id indexes first, as if gate 2 held, and until they are VALID a search has
+  no per-collection index (the readers are on the id either way).
 * ``dangling_tombstones``: R7's pre-flight, COUNTS by content type of this tenant's registry tombstones whose ``superseded_by``
   names no row of their tenant, and of the tombstones the stamp resolved to their own id (retired, no successor). Each row
   carries the read-only query that lists them by name, to run as ``nexus_admin``.
@@ -55,6 +58,7 @@ SUMMARY_LABEL = "RDR-229 completion"
 DANGLING_LABEL = "RDR-229 dangling tombstones"
 SELF_ID_LABEL = "RDR-229 self-id tombstones"
 ID_INDEX_LABEL = "RDR-229 id-predicate index"
+LATCH_POSTURE_LABEL = "RDR-229 gate 3 latch posture"
 NOT_KNOWN = (
     "not known: the engine has not reported its RDR-229 completion state yet (it has not read it, or it predates the check)"
 )
@@ -130,6 +134,20 @@ def _id_index_row(field: dict[str, Any]) -> HealthResult | None:
             fix_suggestions=["Nothing to run. If it stays INVALID across reconciler passes, read the engine log for event=pci_build_failed."],
         )
     return HealthResult(label=ID_INDEX_LABEL, ok=True, detail=f"{detail} Gate 3 has not latched yet; readers still select by name.")
+
+
+def _latch_posture_row(field: dict[str, Any]) -> HealthResult | None:
+    """The latch's pci_off posture, or ``None`` when gate 3 did not latch while PCI was off."""
+    if field.get("gate3_latch_pci_off") is not True:
+        return None
+    return HealthResult(
+        label=LATCH_POSTURE_LABEL, ok=True,
+        detail=(
+            "gate 3 latched while NX_SEARCH_PCI was off, so no per-collection id index was required then. With PCI on the engine builds "
+            "the id indexes first (as if gate 2 held); until they are VALID a search has no per-collection index, because the readers are "
+            "on the id either way."
+        ),
+    )
 
 
 def _check_row(constraint: str, what: str, counts: dict[str, Any] | None = None) -> HealthResult:
@@ -290,6 +308,9 @@ def check_rdr229_completion(
     id_row = _id_index_row(field)
     if id_row is not None:
         rows.append(id_row)
+    posture_row = _latch_posture_row(field)
+    if posture_row is not None:
+        rows.append(posture_row)
     for c in _dicts(field.get("checks_missing")):
         constraint = c.get("constraint")
         if isinstance(constraint, str) and constraint:

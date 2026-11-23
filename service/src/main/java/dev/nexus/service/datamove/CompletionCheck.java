@@ -277,11 +277,22 @@ public final class CompletionCheck {
      *                                readers and the name-index retirement go by this, not by the live {@code gate3}
      * @param idIndexInvalid          some id-predicate PCI index is INVALID (building, killed or mid-rebuild); reported on its own, whether or not
      *                                gate 3 has latched
+     * @param gate3LatchPciOff        the latch row says gate 3 latched while per-collection indexing was off ({@code pci_off}): no id index was required
+     *                                then, so with PCI on the engine builds them first
      */
     public record Result(boolean gate1, boolean gate2, boolean gate3, List<LabelState> labels, List<CheckState> checks,
                          boolean supersededByCheckPresent, long supersededByWaiting, List<Violators> violators,
                          List<String> gate3Uncovered, String gate3Why, Dangling dangling, boolean gate3PciNotApplicable,
-                         boolean gate3Latched, boolean idIndexInvalid) {
+                         boolean gate3Latched, boolean idIndexInvalid, boolean gate3LatchPciOff) {
+
+        /** As above with the latch row not saying PCI was off. */
+        public Result(boolean gate1, boolean gate2, boolean gate3, List<LabelState> labels, List<CheckState> checks,
+                      boolean supersededByCheckPresent, long supersededByWaiting, List<Violators> violators,
+                      List<String> gate3Uncovered, String gate3Why, Dangling dangling, boolean gate3PciNotApplicable,
+                      boolean gate3Latched, boolean idIndexInvalid) {
+            this(gate1, gate2, gate3, labels, checks, supersededByCheckPresent, supersededByWaiting, violators, gate3Uncovered,
+                gate3Why, dangling, gate3PciNotApplicable, gate3Latched, idIndexInvalid, false);
+        }
 
         /** As above with neither a latch nor an INVALID id index. */
         public Result(boolean gate1, boolean gate2, boolean gate3, List<LabelState> labels, List<CheckState> checks,
@@ -339,10 +350,10 @@ public final class CompletionCheck {
     }
 
     /**
-     * As above with {@code gate3Extras}: further conditions gate 3 needs beside P3.4's id-predicate indexes (linda 2026-11-22: the
-     * runtime-built id UNIQUE indexes, {@code IdUniqueIndexPass.allValid}, which {@code Main} wires in). Each is read only once gate 2
-     * holds and the PCI coverage is complete, on the check's read-only session; one that is false, or throws, keeps gate 3 closed.
-     * Gate 3 implies gate 2 structurally: nothing past the gate-2 test below is read while gate 2 is false.
+     * As above with {@code gate3Extras}: further conditions gate 3 needs beside P3.4's id-predicate indexes (the runtime-built id UNIQUE
+     * indexes, {@code IdUniqueIndexPass.allValid}, which {@code Main} wires in). Each is read only once gate 2 holds and the PCI coverage is
+     * complete, on the check's read-only session; one that is false, or throws, keeps gate 3 closed. Gate 3 implies gate 2 structurally: nothing
+     * past the gate-2 test below is read while gate 2 is false. Writes no latch.
      */
     static Result evaluate(DSLContext ctx, ReadSet readSet, Gate3Source gate3, ViolatorCounter counter,
                            List<java.util.function.Predicate<DSLContext>> gate3Extras) {
@@ -352,14 +363,16 @@ public final class CompletionCheck {
     /**
      * Writes the gate 3 latch row when gate 3 holds ({@code INSERT ... ON CONFLICT DO NOTHING} into {@code nexus.rdr229_gate_latch}). The check's
      * own session is read only at the server, so the engine's reader supplies a writer that uses a session of its own; a caller with a writable
-     * {@code ctx} may pass {@link #LATCH_ON_CTX}. A writer that throws leaves the latch unwritten and the check unchanged: the next read tries again.
+     * {@code ctx} may pass {@link #latchOnCtx}. {@code pciOff} is the posture to record: true when the PCI clause did not apply
+     * ({@code NX_SEARCH_PCI=0}), so no id index was required when the gate latched. A writer that throws leaves the latch unwritten and the check
+     * unchanged: the next read tries again.
      */
     @FunctionalInterface
     public interface LatchWriter {
-        void latch(DSLContext readCtx, String gate);
+        void latch(DSLContext readCtx, String gate, boolean pciOff);
 
         /** Writes nothing: a caller that only reads (most tests). */
-        LatchWriter NONE = (ctx, gate) -> { };
+        LatchWriter NONE = (ctx, gate, pciOff) -> { };
     }
 
     /**
@@ -385,28 +398,41 @@ public final class CompletionCheck {
 
     /** A writer that inserts on the {@code ctx} it is given (a connection that is not read only). */
     public static LatchWriter latchOnCtx(String engineVersion) {
-        return (ctx, gate) -> insertLatch(ctx, gate, engineVersion);
+        return (ctx, gate, pciOff) -> insertLatch(ctx, gate, engineVersion, pciOff);
     }
 
-    /** {@code INSERT INTO nexus.rdr229_gate_latch ... ON CONFLICT DO NOTHING}, typed. The first writer's row stands. */
-    public static void insertLatch(DSLContext ctx, String gate, String engineVersion) {
+    private static final Field<Boolean> LATCH_PCI_OFF = DSL.field(DSL.name("pci_off"), Boolean.class);
+
+    /**
+     * {@code INSERT INTO nexus.rdr229_gate_latch ... ON CONFLICT DO NOTHING}, typed. The first writer's row stands, {@code pci_off} included:
+     * it records the posture the gate latched in (no per-collection index was required because {@code NX_SEARCH_PCI=0}).
+     */
+    public static void insertLatch(DSLContext ctx, String gate, String engineVersion, boolean pciOff) {
         ctx.insertInto(LATCH, LATCH_GATE, DSL.field(DSL.name("latched_at"), OffsetDateTime.class),
-                DSL.field(DSL.name("engine_version"), String.class))
-            .values(gate, OffsetDateTime.now(java.time.ZoneOffset.UTC), engineVersion)
+                DSL.field(DSL.name("engine_version"), String.class), LATCH_PCI_OFF)
+            .values(gate, OffsetDateTime.now(java.time.ZoneOffset.UTC), engineVersion, pciOff)
             .onConflictDoNothing().execute();
     }
 
-    /** Whether {@code nexus.rdr229_gate_latch} holds a row for {@code gate}. */
-    static boolean latched(DSLContext ctx, Set<String> tables, String gate) {
+    /**
+     * The latch row of {@code gate}: empty when there is none (or the table does not exist yet), else its {@code pci_off}. A failed read throws:
+     * unknown is never "not latched".
+     */
+    public static Optional<Boolean> readLatch(DSLContext ctx, String gate) {
+        return readLatch(ctx, tablesPresent(ctx), gate);
+    }
+
+    static Optional<Boolean> readLatch(DSLContext ctx, Set<String> tables, String gate) {
         if (!tables.contains("rdr229_gate_latch")) {
-            return false;
+            return Optional.empty();
         }
-        return ctx.fetchExists(ctx.selectOne().from(LATCH).where(LATCH_GATE.eq(gate)));
+        return Optional.ofNullable(ctx.select(LATCH_PCI_OFF).from(LATCH).where(LATCH_GATE.eq(gate)).fetchOne(LATCH_PCI_OFF));
     }
 
     /**
      * As above, and {@code latchWriter}: called once when gate 3 holds and the latch row does not exist yet (gate 3 holds, after the gate 2 test,
-     * the PCI clause and every further condition). The result's {@code gate3Latched} is the row's existence after that call.
+     * the PCI clause and every further condition). The result's {@code gate3Latched} is the row's existence after that call, and
+     * {@code gate3LatchPciOff} its recorded posture.
      */
     static Result evaluate(DSLContext ctx, ReadSet readSet, Gate3Source gate3, ViolatorCounter counter,
                            List<java.util.function.Predicate<DSLContext>> gate3Extras, LatchWriter latchWriter) {
@@ -462,7 +488,7 @@ public final class CompletionCheck {
                 pciNotApplicable = true;
                 gate3Holds = extrasHold(ctx, gate3Extras);
                 if (!gate3Holds) {
-                    why = "a further gate 3 condition does not hold (the runtime-built id unique indexes)";
+                    why = furtherConditionWhy(ctx);
                 }
             } else if (coverage.get().planned().isEmpty() && !coverage.get().nothingToIndex()
                 && liveCollections(ctx, tables, null) > 0) {
@@ -477,25 +503,39 @@ public final class CompletionCheck {
                     why = "collections that hold a VALID name-predicate index or an id-predicate index have no VALID id-predicate index (missing or INVALID)";
                 } else if (!extrasHold(ctx, gate3Extras)) {
                     gate3Holds = false;
-                    why = "a further gate 3 condition does not hold (the runtime-built id unique indexes)";
+                    why = furtherConditionWhy(ctx);
                 }
             }
         }
-        boolean latched = latched(ctx, tables, GATE3);
-        if (gate3Holds && !latched && tables.contains("rdr229_gate_latch")) {
+        Optional<Boolean> latch = readLatch(ctx, tables, GATE3);
+        if (gate3Holds && latch.isEmpty() && tables.contains("rdr229_gate_latch")) {
             boolean written = true;
             try {
-                latchWriter.latch(ctx, GATE3);
+                latchWriter.latch(ctx, GATE3, pciNotApplicable);
             } catch (RuntimeException e) {   // not latched yet: the next read tries again
                 written = false;
                 log.warn("event=rdr229_gate3_latch_not_written cause=\"{}\"", e.toString());
             }
             // A failed writer leaves this read unlatched, whatever the row says; the row it did write (if any) is read next time.
-            latched = written && latched(ctx, tables, GATE3);
+            latch = written ? readLatch(ctx, tables, GATE3) : Optional.empty();
         }
         return new Result(gate1, gate2, gate3Holds, List.copyOf(states.values()), List.copyOf(checks), supersededByPresent,
             waiting, List.copyOf(violators), List.copyOf(uncovered), why, danglingTombstones(ctx, tables, null), pciNotApplicable,
-            latched, idInvalid);
+            latch.isPresent(), idInvalid, latch.orElse(false));
+    }
+
+    /**
+     * Why the further gate 3 conditions (the runtime-built id unique indexes) do not hold: names the changesets their twins still wait for
+     * ({@link IdUniqueIndexPass#waitingChangesets}; ids only, no tenant or collection), when there are any. A failed read adds nothing.
+     */
+    private static String furtherConditionWhy(DSLContext ctx) {
+        String base = "a further gate 3 condition does not hold (the runtime-built id unique indexes)";
+        try {
+            List<String> waiting = IdUniqueIndexPass.waitingChangesets(ctx);
+            return waiting.isEmpty() ? base : base + "; an id twin waits for changeset" + (waiting.size() > 1 ? "s " : " ") + String.join(", ", waiting);
+        } catch (RuntimeException e) {
+            return base;
+        }
     }
 
     private static boolean extrasHold(DSLContext ctx, List<java.util.function.Predicate<DSLContext>> extras) {

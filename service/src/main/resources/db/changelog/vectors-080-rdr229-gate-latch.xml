@@ -9,6 +9,9 @@
       gate           the primary key: the gate's name ('gate3').
       latched_at     when the check first saw the gate hold.
       engine_version the engine release that wrote it.
+      pci_off        true when the gate latched while per-collection indexing was off (NX_SEARCH_PCI=0): no per-collection index was required
+                     then, so an engine that later runs with PCI on builds the id indexes first, as if gate 2 held, because readers are on the
+                     id either way. false (the default) when the id indexes were required.
 
     Global table, no tenant column and no row-level security (the posture of data_moves, service_tokens and install_pings): it describes
     the install and holds no tenant data, so it is not in the tenant export registry (that covers the RLS tables) and a tenant export or
@@ -30,7 +33,8 @@
 CREATE TABLE nexus.rdr229_gate_latch (
     gate            TEXT        PRIMARY KEY,
     latched_at      TIMESTAMPTZ NOT NULL,
-    engine_version  TEXT        NOT NULL
+    engine_version  TEXT        NOT NULL,
+    pci_off         BOOLEAN     NOT NULL DEFAULT false
 );
         </sql>
         <rollback>

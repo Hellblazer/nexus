@@ -920,6 +920,31 @@ public final class PciCatalog {
     }
 
     /**
+     * {@link #attributedCollectionId} for an index of the leaf ({@code model}, {@code tenant}): the id its predicate reads, provided the index's name
+     * is {@link #indexNameById} of that (model, tenant, id). An operator's {@code pci_<hash>} index that happens to read an id predicate is not the
+     * builder's, so it stays unparsed and is never planned for a drop. {@code indexName} may be a REINDEX CONCURRENTLY leftover's, whose base name
+     * (before {@code _ccnew}/{@code _ccold} and the counter) is checked instead.
+     */
+    static Optional<Long> idOfBuilderIndex(String model, String tenant, String indexName, String accessMethod, String deparsedPredicate,
+                                           String standardConformingStrings, boolean leftover, boolean valid) {
+        if (model == null || tenant == null) {
+            return Optional.empty();
+        }
+        Optional<Long> id = leftover
+            ? leftoverCollectionId(indexName, accessMethod, deparsedPredicate, true, standardConformingStrings, valid)
+            : attributedCollectionId(indexName, accessMethod, deparsedPredicate, true, standardConformingStrings);
+        if (id.isEmpty()) {
+            return Optional.empty();
+        }
+        String base = leftover ? indexName.substring(0, PREFIX.length() + HASH_HEX_DIGITS) : indexName;
+        try {
+            return base.equals(indexNameById(model, tenant, id.get())) ? id : Optional.empty();
+        } catch (IllegalArgumentException e) {   // a NUL in the model or tenant
+            return Optional.empty();
+        }
+    }
+
+    /**
      * {@link #leftoverCollection} for the id predicate (RDR-229 P3.4, N2): the collection id a REINDEX CONCURRENTLY leftover of an id index was
      * made from, or empty. The same conditions: INVALID, a builder name plus {@code _ccnew}/{@code _ccold} and a counter, hnsw, a parsing
      * predicate, both leaf bounds parsed and {@code standard_conforming_strings} on.
@@ -1116,14 +1141,12 @@ public final class PciCatalog {
             String collection = attributedCollection(indexName, method, predicate,
                 model != null && tenant != null, stringsSetting).orElse(null);
             Long collectionId = collection != null ? null
-                : attributedCollectionId(indexName, method, predicate, model != null && tenant != null, stringsSetting)
-                    .orElse(null);
+                : idOfBuilderIndex(model, tenant, indexName, method, predicate, stringsSetting, false, isValid).orElse(null);
             String leftoverOf = collection != null || collectionId != null ? null
                 : leftoverCollection(indexName, method, predicate, model != null && tenant != null, stringsSetting,
                     isValid).orElse(null);
             Long leftoverOfId = collection != null || collectionId != null || leftoverOf != null ? null
-                : leftoverCollectionId(indexName, method, predicate, model != null && tenant != null, stringsSetting,
-                    isValid).orElse(null);
+                : idOfBuilderIndex(model, tenant, indexName, method, predicate, stringsSetting, true, isValid).orElse(null);
             indexes.add(new Index(indexName, isValid, collection, leftoverOf, comment, null, collectionId, leftoverOfId));
         }
 
