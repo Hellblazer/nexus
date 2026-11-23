@@ -162,6 +162,8 @@ public final class NexusService {
 
     private final HttpServer server;
     private final TenantScope tenantScope;
+    /** RDR-229 P3.5c: gate 3 latched on this install; the repositories read the id once it holds (read per call). */
+    private final dev.nexus.service.datamove.Gate3 gate3;
     /**
      * RDR-205 Phase 1 Step 5 (bead nexus-em75s.5): the tuple sweep's tenant
      * enumeration reads {@code nexus.tuple_tenants} directly via a plain
@@ -621,7 +623,17 @@ public final class NexusService {
                         java.util.function.Supplier<dev.nexus.service.vectors.EmbedActivitySnapshot> localEmbedActivitySupplier,
                         TemplateRegistry tupleTemplateRegistry) throws IOException {
         this(port, token, dataSource, docEmbedderRouter, pgVectorRepository, reranker, localEmbedActivitySupplier,
-                tupleTemplateRegistry, null);
+                tupleTemplateRegistry, (ScheduledExecutorService) null);
+    }
+
+    /** As above, with gate 3's latch for the repositories (RDR-229 P3.5c): the production constructor, {@code Main} passes it. */
+    public NexusService(int port, String token, DataSource dataSource, EmbedderRouter docEmbedderRouter,
+                        PgVectorRepository pgVectorRepository, dev.nexus.service.vectors.Reranker reranker,
+                        java.util.function.Supplier<dev.nexus.service.vectors.EmbedActivitySnapshot> localEmbedActivitySupplier,
+                        TemplateRegistry tupleTemplateRegistry, dev.nexus.service.datamove.Gate3 gate3) throws IOException {
+        this(port, token, dataSource, docEmbedderRouter, pgVectorRepository, reranker, localEmbedActivitySupplier,
+                tupleTemplateRegistry, null, System::getenv, () -> dev.nexus.service.db.PgSession.startupPciSettings().enabled(),
+                null, null, gate3);
     }
 
     /**
@@ -658,7 +670,19 @@ public final class NexusService {
                         java.util.function.Function<String, String> env,
                         java.util.function.BooleanSupplier pciEnabled) throws IOException {
         this(port, token, dataSource, docEmbedderRouter, pgVectorRepository, reranker, localEmbedActivitySupplier,
-                tupleTemplateRegistry, sweepSchedulerOverride, env, pciEnabled, null, null);
+                tupleTemplateRegistry, sweepSchedulerOverride, env, pciEnabled, null, null, dev.nexus.service.datamove.Gate3.never());
+    }
+
+    /** The re-embed seams' constructor, gate 3 never latched (the tests that pass the seams; RDR-229 P3.5c keeps their signature). */
+    NexusService(int port, String token, DataSource dataSource, EmbedderRouter docEmbedderRouter,
+                 PgVectorRepository pgVectorRepository, dev.nexus.service.vectors.Reranker reranker,
+                 java.util.function.Supplier<dev.nexus.service.vectors.EmbedActivitySnapshot> localEmbedActivitySupplier,
+                 TemplateRegistry tupleTemplateRegistry, ScheduledExecutorService sweepSchedulerOverride,
+                 java.util.function.Function<String, String> env, java.util.function.BooleanSupplier pciEnabled,
+                 ScheduledExecutorService reembedExecutorOverride,
+                 dev.nexus.service.reembed.ReembedRunner.Settings reembedSettings) throws IOException {
+        this(port, token, dataSource, docEmbedderRouter, pgVectorRepository, reranker, localEmbedActivitySupplier, tupleTemplateRegistry,
+                sweepSchedulerOverride, env, pciEnabled, reembedExecutorOverride, reembedSettings, dev.nexus.service.datamove.Gate3.never());
     }
 
     /**
@@ -676,12 +700,14 @@ public final class NexusService {
                         java.util.function.Function<String, String> env,
                         java.util.function.BooleanSupplier pciEnabled,
                         ScheduledExecutorService reembedExecutorOverride,
-                        dev.nexus.service.reembed.ReembedRunner.Settings reembedSettings) throws IOException {
+                        dev.nexus.service.reembed.ReembedRunner.Settings reembedSettings,
+                        dev.nexus.service.datamove.Gate3 gate3) throws IOException {
         // Before anything binds or touches the database: a refused configuration must not half-start.
         verifyTenantResetRouteBind(env);
         final boolean tenantResetRoute = tenantResetRouteEnabled(env);
         this.tenantScope = new TenantScope(dataSource);
         this.dataSource = dataSource;
+        this.gate3 = java.util.Objects.requireNonNull(gate3, "gate3");
 
         // Token lifecycle (RDR-152 bead nexus-gmiaf.32.2): resolve bearer→tenant
         // server-side against the service_tokens registry (RLS-off, read pre-context
@@ -701,13 +727,13 @@ public final class NexusService {
         var telemetryRepo = new TelemetryRepository(tenantScope);
         this.scratchRepo  = new ScratchRepository(tenantScope);
         var taxonomyRepo  = new TaxonomyRepository(tenantScope); var taxonomyCoverage = new dev.nexus.service.db.TaxonomyCoverage(tenantScope); // RDR-134 Step 2
-        var taxonomyCentroidRepo = new dev.nexus.service.vectors.TaxonomyCentroidRepository(tenantScope);
+        var taxonomyCentroidRepo = new dev.nexus.service.vectors.TaxonomyCentroidRepository(tenantScope, gate3);
         var aspectRepo    = new AspectRepository(tenantScope);
         var chashRepo     = new ChashRepository(tenantScope);
         var remapRepo     = new RemapRepository(tenantScope);
         var ladderRepo    = new LadderRepository(tenantScope);
         var pipelineRepo  = new PipelineRepository(tenantScope);
-        this.catalogRepo  = new CatalogRepository(tenantScope);
+        this.catalogRepo  = new CatalogRepository(tenantScope, gate3);
         this.identityRepo = new dev.nexus.service.db.IdentityRepository(tenantScope, java.time.Clock.systemUTC());
         var identityFence = new dev.nexus.service.http.IdentityFence(new dev.nexus.service.db.IdentityFenceReads(tenantScope)); // RDR-253
 
@@ -1686,67 +1712,6 @@ public final class NexusService {
 
     // ── tuple sweep (RDR-205 Phase 1 Step 5, bead nexus-em75s.5) ────────────────
 
-    /** Testable, pure resolution — {@value #TUPLE_SWEEP_BATCH_SIZE_ENV}. */
-    static int resolveTupleSweepBatchSize() {
-        return resolveTupleSweepBatchSize(System.getenv(TUPLE_SWEEP_BATCH_SIZE_ENV));
-    }
-
-    static int resolveTupleSweepBatchSize(String envValue) {
-        return parsePositiveInt(envValue, DEFAULT_TUPLE_SWEEP_BATCH_SIZE, TUPLE_SWEEP_BATCH_SIZE_ENV);
-    }
-
-    /** Testable, pure resolution — {@value #TUPLE_SWEEP_MAX_BATCHES_PER_TENANT_ENV}. */
-    static int resolveTupleSweepMaxBatchesPerTenant() {
-        return resolveTupleSweepMaxBatchesPerTenant(System.getenv(TUPLE_SWEEP_MAX_BATCHES_PER_TENANT_ENV));
-    }
-
-    static int resolveTupleSweepMaxBatchesPerTenant(String envValue) {
-        return parsePositiveInt(envValue, DEFAULT_TUPLE_SWEEP_MAX_BATCHES_PER_TENANT,
-                TUPLE_SWEEP_MAX_BATCHES_PER_TENANT_ENV);
-    }
-
-    /** Testable, pure resolution — {@value #TUPLE_SWEEP_WALL_CLOCK_BUDGET_SECONDS_ENV}. */
-    static long resolveTupleSweepWallClockBudgetSeconds() {
-        return resolveTupleSweepWallClockBudgetSeconds(System.getenv(TUPLE_SWEEP_WALL_CLOCK_BUDGET_SECONDS_ENV));
-    }
-
-    static long resolveTupleSweepWallClockBudgetSeconds(String envValue) {
-        return parsePositiveLong(envValue, DEFAULT_TUPLE_SWEEP_WALL_CLOCK_BUDGET_SECONDS,
-                TUPLE_SWEEP_WALL_CLOCK_BUDGET_SECONDS_ENV);
-    }
-
-    private static int parsePositiveInt(String envValue, int defaultValue, String envName) {
-        if (envValue == null || envValue.isBlank()) {
-            return defaultValue;
-        }
-        int v;
-        try {
-            v = Integer.parseInt(envValue.trim());
-        } catch (NumberFormatException e) {
-            throw new IllegalArgumentException(envName + " must be a positive integer (got '" + envValue + "')");
-        }
-        if (v <= 0) {
-            throw new IllegalArgumentException(envName + " must be positive (got " + v + ")");
-        }
-        return v;
-    }
-
-    private static long parsePositiveLong(String envValue, long defaultValue, String envName) {
-        if (envValue == null || envValue.isBlank()) {
-            return defaultValue;
-        }
-        long v;
-        try {
-            v = Long.parseLong(envValue.trim());
-        } catch (NumberFormatException e) {
-            throw new IllegalArgumentException(envName + " must be a positive integer (got '" + envValue + "')");
-        }
-        if (v <= 0) {
-            throw new IllegalArgumentException(envName + " must be positive (got " + v + ")");
-        }
-        return v;
-    }
-
     /** One {@code nexus.tuple_tenants} row's sweep-order key. */
     record TupleTenantCursor(String tenantId, OffsetDateTime lastSweptAt) { }
 
@@ -1878,8 +1843,8 @@ public final class NexusService {
      */
     TupleSweepRunResult runScheduledTupleSweep(OffsetDateTime now) {
         return runScheduledTupleSweep(now, SweepBounds.STATEMENT_TIMEOUT,
-                resolveTupleSweepBatchSize(), resolveTupleSweepMaxBatchesPerTenant(),
-                Duration.ofSeconds(resolveTupleSweepWallClockBudgetSeconds()));
+                TupleSweepEnv.resolveTupleSweepBatchSize(), TupleSweepEnv.resolveTupleSweepMaxBatchesPerTenant(),
+                Duration.ofSeconds(TupleSweepEnv.resolveTupleSweepWallClockBudgetSeconds()));
     }
 
     /**

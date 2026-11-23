@@ -601,6 +601,16 @@ public final class Main {
             return;
         }
 
+        // RDR-229 P3.5c (nexus-p2m1x.25): the one gate 3 signal the Java readers switch to the id on, read on every call. It answers
+        // the boot latch (read below, before the listener binds) until the completion check starts, then the check's latch, which
+        // never goes back to false; so a latched install never routes by a stale name, even on the first requests of a restart.
+        var bootLatchRef = new java.util.concurrent.atomic.AtomicReference<dev.nexus.service.datamove.Gate3Latch>();
+        var completionRef = new java.util.concurrent.atomic.AtomicReference<dev.nexus.service.datamove.CompletionBootWork>();
+        dev.nexus.service.datamove.Gate3 gate3 = () -> {
+            var c = completionRef.get();
+            var b = bootLatchRef.get();
+            return c != null ? c.gate3Latched() : b != null && b.latched();
+        };
         // nexus-43ulx.12 (RDR-227): the router's valid-index set, built from the NX_SEARCH_PCI* settings the boot
         // validation block after the pool (above the schema migration) has already parsed, and handed to the
         // repository as its only index set (the empty default belongs to tests, never to production).
@@ -610,7 +620,7 @@ public final class Main {
         pgVectorRepo.startupFanoutArmPermits();
 
         var service = new NexusService(port, token, ds, docEmbedRouter, pgVectorRepo, reranker,
-                localEmbedActivitySupplier, tupleTemplateRegistry);
+                localEmbedActivitySupplier, tupleTemplateRegistry, gate3);
         // RDR-210 Step 4 (nexus-un7vj): /version and /v1/status report the profile, the reranker and any
         // degraded-boot description beside the embedding mode. Bound before the listener starts.
         service.embedPosture(dev.nexus.service.http.EmbedPosture.of(plan, reranker));
@@ -631,6 +641,7 @@ public final class Main {
             return;
         }
         log.info("event=rdr229_gate3_latch_read latched={} pci_off={}", gate3Latch.latched(), gate3Latch.pciOff());
+        bootLatchRef.set(gate3Latch);
         service.start();
         // The read half runs in every engine, whatever NX_SEARCH_PCI says: one read now, then one per
         // NX_SEARCH_PCI_SWEEP_SECONDS. Started after the service so the pool is serving; stopped in the
@@ -700,6 +711,7 @@ public final class Main {
         // It READS (the session is read-only at the server) and reports where the three gates stand in /v1/status
         // boot_work; no boot-time data migration, the stamp is a visible data move. Never takes the engine down.
         var completionCheck = startCompletionBootWork(bootWork, adminConnection, pciReconciler.gate3Source(), gate3Latch);
+        completionRef.set(completionCheck);
         // The check reads again when a worker's move completes and when a reconciler pass ends; its 60 s poll backs those up.
         if (completionCheck != null) {
             if (dataMoveWorker != null) {
