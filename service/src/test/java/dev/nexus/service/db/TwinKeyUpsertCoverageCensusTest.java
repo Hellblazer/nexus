@@ -37,7 +37,7 @@ import java.util.stream.Stream;
  *       {@code CONSTRAINT_NAME}, consulting {@code pg_index} and {@code pg_partition_root});</li>
  *   <li>a {@code DO NOTHING} is target-less ({@code ON CONFLICT DO NOTHING} / {@code onConflictDoNothing()}), which
  *       arbitrates every unique index;</li>
- *   <li>anything else is listed in {@link #KNOWN_PENDING} with a reason.</li>
+ *   <li>anything else is listed in {@link #PERMANENT} (for good) or {@link #KNOWN_PENDING} (another lane's fix in flight) with a reason.</li>
  * </ul>
  *
  * <p><b>What is scanned.</b> (1) {@code service/src/main/java}: jOOQ {@code .onConflict(..).doUpdate()/.doNothing()} chains,
@@ -77,11 +77,23 @@ public class TwinKeyUpsertCoverageCensusTest {
      * Violations the owner has acknowledged: {@code "<file or function>::<table>::<KIND>::<n>"} (n counts same file, table and
      * kind from 1, in source order) to the reason. Empty: every violation the census finds is reported to the ruling's owner.
      */
+    /** Sites outside the rule for good, each with its reason. */
+    static final Map<String, String> PERMANENT = new TreeMap<>();
+
+    /** Sites another lane is fixing; it must be EMPTY at colophon's final pass (linda, 2026-11-22), see
+     * {@link #knownPendingIsEmptyOnceTheIdReadersArePresent}. */
     static final Map<String, String> KNOWN_PENDING = new TreeMap<>();
 
     static {
+        PERMANENT.put("dev/nexus/service/db/TaxonomyRepository.java::topics::JAVA_DO_UPDATE::1",
+            "arbiter is topics' id primary key (ON CONFLICT (TOPICS.ID)), a third key: a racing insert carries a different id, so a retry would meet the same label collision again; the name key and its id twin cover the same rows, so the twin adds no failure the name key did not already raise (bob, 2026-11-22)");  // line 2111
+        PERMANENT.put("dev/nexus/service/db/TaxonomyRepository.java::topics::JAVA_DO_UPDATE::2",
+            "arbiter is topics' id primary key (ON CONFLICT (TOPICS.ID)), a third key: a racing insert carries a different id, so a retry would meet the same label collision again; the name key and its id twin cover the same rows, so the twin adds no failure the name key did not already raise (bob, 2026-11-22)");  // line 2354
+    }
+
+    static {
         // RDR-229 #7 coverage (bob, 2026-11-22). Sites in elsinore's P3.5b/c mapping are fixed on her branch and leave this list
-        // when it stacks (a stale entry fails); topics' two id-PK upserts stay, with their reason.
+        // when it stacks (a stale entry fails), and the list is empty once IdReaders.PRESENT (P3.5c) is true.
         KNOWN_PENDING.put("dev/nexus/service/db/AspectRepository.java::document_aspects::JAVA_DO_UPDATE::1",
             "elsinore, RDR-229 P3.5b/c (nexus-p2m1x.24/.25): fixed on her branch (vectors-077/078; Java through TwinKeyUpsert); remove when it stacks");  // line 345
         KNOWN_PENDING.put("dev/nexus/service/db/AspectRepository.java::document_aspects::JAVA_DO_UPDATE::2",
@@ -92,12 +104,8 @@ public class TwinKeyUpsertCoverageCensusTest {
             "elsinore, RDR-229 P3.5b/c (nexus-p2m1x.24/.25): fixed on her branch (vectors-077/078; Java through TwinKeyUpsert); remove when it stacks");  // line 152
         KNOWN_PENDING.put("dev/nexus/service/db/TaxonomyRepository.java::taxonomy_meta::JAVA_DO_UPDATE::1",
             "elsinore, RDR-229 P3.5b/c (nexus-p2m1x.24/.25): fixed on her branch (vectors-077/078; Java through TwinKeyUpsert); remove when it stacks");  // line 1696
-        KNOWN_PENDING.put("dev/nexus/service/db/TaxonomyRepository.java::topics::JAVA_DO_UPDATE::1",
-            "arbiter is topics' id primary key (ON CONFLICT (TOPICS.ID)), a third key: a racing insert carries a different id, so a retry would meet the same label collision again; the name key and its id twin cover the same rows, so the twin adds no failure the name key did not already raise (bob, 2026-11-22)");  // line 2111
         KNOWN_PENDING.put("dev/nexus/service/db/TaxonomyRepository.java::taxonomy_meta::JAVA_DO_UPDATE::2",
             "elsinore, RDR-229 P3.5b/c (nexus-p2m1x.24/.25): fixed on her branch (vectors-077/078; Java through TwinKeyUpsert); remove when it stacks");  // line 2234
-        KNOWN_PENDING.put("dev/nexus/service/db/TaxonomyRepository.java::topics::JAVA_DO_UPDATE::2",
-            "arbiter is topics' id primary key (ON CONFLICT (TOPICS.ID)), a third key: a racing insert carries a different id, so a retry would meet the same label collision again; the name key and its id twin cover the same rows, so the twin adds no failure the name key did not already raise (bob, 2026-11-22)");  // line 2354
         KNOWN_PENDING.put("dev/nexus/service/db/TaxonomyRepository.java::taxonomy_meta::JAVA_DO_UPDATE::3",
             "elsinore, RDR-229 P3.5b/c (nexus-p2m1x.24/.25): fixed on her branch (vectors-077/078; Java through TwinKeyUpsert); remove when it stacks");  // line 2490
         KNOWN_PENDING.put("dev/nexus/service/db/TaxonomyRepository.java::topics::JAVA_DO_NOTHING::1",
@@ -126,6 +134,19 @@ public class TwinKeyUpsertCoverageCensusTest {
             "elsinore, RDR-229 P3.5b/c (nexus-p2m1x.24/.25): fixed on her branch (vectors-077/078; Java through TwinKeyUpsert); remove when it stacks");  // line 4590
         KNOWN_PENDING.put("nexus.stamp_chunks_on_manifest_update [db/changelog/vectors-069-collection-id-dual-write-functions.xml]::chunk_orphaned_at::SQL_DO_UPDATE::1",
             "elsinore, RDR-229 P3.5b/c (nexus-p2m1x.24/.25): fixed on her branch (vectors-077/078; Java through TwinKeyUpsert); remove when it stacks");  // line 4690
+    }
+
+    /**
+     * KNOWN_PENDING lists sites elsinore's P3.5b/c is fixing; an entry her stack misses would stay pending forever. So once P3.5c has
+     * flipped {@link dev.nexus.service.vectors.IdReaders#PRESENT} (her readers select by id: P3.5b and P3.5c are on the tree), the list
+     * must be empty. Skipped before that.
+     */
+    @Test
+    void knownPendingIsEmptyOnceTheIdReadersArePresent() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(dev.nexus.service.vectors.IdReaders.PRESENT,
+            "P3.5b/c not on this tree yet (IdReaders.PRESENT is false): KNOWN_PENDING may still name their sites");
+        assertThat(KNOWN_PENDING).as("P3.5b/c are on the tree, so every pending twin-key site must be fixed: wrap it, make it target-less, "
+            + "or move it to PERMANENT with a reason").isEmpty();
     }
 
     // ── the census over the live tree ────────────────────────────────────────────────────────────
@@ -176,13 +197,16 @@ public class TwinKeyUpsertCoverageCensusTest {
         Map<String, String> byKey = pendingKeys(sites, paired);
         List<String> unacknowledged = new ArrayList<>();
         for (String v : violations) {
-            if (!KNOWN_PENDING.containsKey(pendingKeyOf(v, byKey))) {
+            String k = pendingKeyOf(v, byKey);
+            if (!KNOWN_PENDING.containsKey(k) && !PERMANENT.containsKey(k)) {
                 unacknowledged.add(v);
             }
         }
         Set<String> stale = new TreeSet<>(KNOWN_PENDING.keySet());
+        stale.addAll(PERMANENT.keySet());
         stale.removeAll(byKey.values());
-        assertThat(stale).as("KNOWN_PENDING entries that match no violation").isEmpty();
+        assertThat(stale).as("KNOWN_PENDING or PERMANENT entries that match no violation").isEmpty();
+        assertThat(KNOWN_PENDING.keySet()).as("an entry is pending or permanent, never both").doesNotContainAnyElementsOf(PERMANENT.keySet());
         assertThat(unacknowledged)
             .as("twin-key upserts outside the rule (a targeted DO UPDATE must run inside TwinKeyUpsert.run or carry the plpgsql "
                 + "column-matched retry; a DO NOTHING must be target-less). " + summary)
