@@ -13,6 +13,8 @@ import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.sql.Connection;
 import java.sql.SQLException;
@@ -103,6 +105,14 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
             assertThat(ofLeaf.get(0).parentId()).as("%s: adopted by the parent key (conparentid set)", leaf).isNotZero();
         }
         assertThat(fks.stream().filter(f -> f.parentId() == 0)).as("no chunks leaf key is left standing alone (conparentid 0)").isEmpty();
+        long middle = ctx().fetchOne("SELECT count(*) FROM pg_catalog.pg_partition_tree('nexus.chunks'::pg_catalog.regclass) pt "
+            + "WHERE NOT pt.isleaf AND pt.level > 0").get(0, Long.class);
+        long middleWithKey = ctx().fetchOne("SELECT count(*) FROM pg_catalog.pg_partition_tree('nexus.chunks'::pg_catalog.regclass) pt "
+            + "WHERE NOT pt.isleaf AND pt.level > 0 AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint k WHERE k.conrelid = pt.relid "
+            + "AND k.contype = 'f' AND k.conparentid <> 0 AND pg_catalog.pg_get_constraintdef(k.oid) LIKE 'FOREIGN KEY (tenant_id, collection_id, "
+            + "embedding_model) REFERENCES nexus.catalog_collections%')").get(0, Long.class);
+        assertThat(middle).as("non-vacuity: chunks has model partitions between the parent and its leaves").isPositive();
+        assertThat(middleWithKey).as("every model partition got the key from the parent ADD, attached to it").isEqualTo(middle);
     }
 
     // ── 1 ───────────────────────────────────────────────────────────────────────────────────────────────────
@@ -202,8 +212,8 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
 
     /**
      * A leaf created after the validations: the parent step does NOT add the composite (it would scan the new leaf and build a second key
-     * there). It adds the new leaf's key NOT VALID, queues the leaf's validation move and leaves the move open (no scan); the next call, with
-     * the work queued, raises 55P03 and writes nothing; once the leaf validates, the step adds the composite.
+     * there). It adds the new leaf's key NOT VALID, queues the leaf's validation move and re-opens itself (no scan); the next call, with the
+     * work queued, does the same and adds nothing; once the leaf validates, the step adds the composite.
      */
     @Test
     void aLeafAddedAfterTheValidationsMakesTheParentStepDeferWithNoScanThenComplete() throws Exception {
@@ -246,10 +256,9 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
         assertThat(after.getOrDefault(lateLeaf, new long[] {0, 0})[0] - before.getOrDefault(lateLeaf, new long[] {0, 0})[0])
             .as("not the late leaf either").isZero();
 
-        // 2: the work is queued and nothing changes: the step raises 55P03 (blocked, retried with a backoff) and writes nothing
-        assertThatThrownBy(() -> runOnCompleteOnOwnSession(onCompleteOf(Rdr229ChunksFk.ADOPT_LABEL)))
-            .as("a leaf still waits for its move").satisfies(t -> assertThat(sqlState(t)).isEqualTo("55P03"));
-        assertThat(compositeOnId()).isEmpty();
+        // 2: the work is queued and nothing changes: the step returns, writes nothing that matters (it re-opens itself) and adds no composite
+        runOnCompleteOnOwnSession(onCompleteOf(Rdr229ChunksFk.ADOPT_LABEL));
+        assertThat(compositeOnId()).as("still deferred while the new leaf's move has not run").isEmpty();
 
         // 3: the leaf validates and the step completes
         resume(Rdr229ChunksFk.ADOPT_LABEL);
@@ -261,7 +270,7 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
     // ── 4 ───────────────────────────────────────────────────────────────────────────────────────────────────
 
     /**
-     * A writer keeps inserting while a leaf VALIDATE is held: the VALIDATEs of every leaf run in a transaction that stays open (SHARE UPDATE
+     * A writer keeps inserting while a leaf VALIDATE is held: the production on_complete of every leaf move runs in a transaction that stays open (SHARE UPDATE
      * EXCLUSIVE on each leaf and ROW SHARE on the registry, held to the commit), and chunk inserts run meanwhile, each under a 2 s lock wait, and
      * none waits. The writes go through {@link DeadlockRetry}: the test's own attempt counter and the retry counter both stay at the number of
      * writes and zero, so a deadlock the belt absorbed would show.
@@ -279,8 +288,12 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
         try (Connection holder = pg.createConnection(""); Connection writer = pg.createConnection("")) {
             holder.setAutoCommit(false);
             try (Statement st = holder.createStatement()) {
-                for (LeafFk f : leafFks()) {
-                    st.execute("ALTER TABLE nexus." + quote(f.leaf()) + " VALIDATE CONSTRAINT " + quote(f.name()));
+                // the PRODUCTION leaf on_complete of every leaf, under the bounds the finisher gives a validation (no statement bound, 5 s lock wait),
+                // in a transaction that stays open
+                st.execute("SET LOCAL statement_timeout = 0");
+                st.execute("SET LOCAL lock_timeout = '5s'");
+                for (var m : leafMoves()) {
+                    MoveSql.runOnComplete(holder, (String) m.get("on_complete"));
                 }
                 long held = ctx().fetchOne("SELECT count(*) FROM pg_catalog.pg_locks l WHERE l.pid = " + pid(holder)
                     + " AND l.locktype = 'relation' AND l.mode = 'ShareUpdateExclusiveLock' AND l.granted").get(0, Long.class);
@@ -368,6 +381,283 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
                 throw new IllegalStateException(e);
             }
         });
+    }
+
+    // ── 5: predicate drift ──────────────────────────────────────────────────────────────────────────────────
+
+    /**
+     * A validated leaf key that differs from the composite in one thing PostgreSQL compares (the delete action, deferrability, the column
+     * order) is NOT adopted: PostgreSQL would build a second key on that leaf and scan it under SHARE ROW EXCLUSIVE. The step must see the
+     * difference, add no composite, and queue the leaf's own matching key.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"NO_ACTION", "DEFERRABLE", "COLUMN_ORDER"})
+    void aValidatedLeafKeyThatDiffersIsNotAdopted_theStepQueuesTheLeafAndAddsNoComposite(String difference) throws Exception {
+        seed("drift-" + difference.toLowerCase(java.util.Locale.ROOT).replace('_', '-'));
+        registerSwaps();
+        runSwaps(new VerifyingFinisher());
+        pause(Rdr229ChunksFk.ADOPT_LABEL);
+        productionWorker(new VerifyingFinisher()).runCycle();
+        assertThat(leafFks()).as("precondition: every leaf key validated").allSatisfy(f -> assertThat(f.validated()).isTrue());
+        String leaf = chunkLeaves().get(0);
+        String mismatch = "p33c_mismatch_" + difference.toLowerCase(java.util.Locale.ROOT);
+        ctx().execute("ALTER TABLE nexus." + quote(leaf) + " DROP CONSTRAINT " + quote(leaf + Rdr229ChunksFk.LEAF_CONSTRAINT_SUFFIX));
+        String columns = difference.equals("COLUMN_ORDER") ? "(collection_id, tenant_id, embedding_model)" : "(tenant_id, collection_id, embedding_model)";
+        String actions = switch (difference) {
+            case "NO_ACTION" -> "ON DELETE NO ACTION";
+            case "DEFERRABLE" -> "ON DELETE RESTRICT DEFERRABLE";
+            default -> "ON DELETE RESTRICT";
+        };
+        try {
+            ctx().execute("ALTER TABLE nexus." + quote(leaf) + " ADD CONSTRAINT " + quote(mismatch) + " FOREIGN KEY " + columns
+                + " REFERENCES nexus.catalog_collections " + columns + " " + actions);
+            resume(Rdr229ChunksFk.ADOPT_LABEL);
+
+            runOnCompleteOnOwnSession(onCompleteOf(Rdr229ChunksFk.ADOPT_LABEL));
+
+            assertThat(compositeOnId()).as("%s: the composite is not added over a key PostgreSQL would not adopt", difference).isEmpty();
+            var own = ctx().resultQuery("SELECT convalidated FROM pg_catalog.pg_constraint WHERE conrelid = ('nexus.' || quote_ident(?))::pg_catalog.regclass "
+                + "AND conname = ?", leaf, leaf + Rdr229ChunksFk.LEAF_CONSTRAINT_SUFFIX).fetch(0, Boolean.class);
+            assertThat(own).as("%s: the leaf's own key was queued, NOT VALID", difference).containsExactly(false);
+            assertThat(completedAt(Rdr229ChunksFk.LEAF_LABEL_PREFIX + leaf)).as("and its validation move is open").isNull();
+
+            runUntilComposite(new VerifyingFinisher());
+            assertThat(compositeOnId()).as("%s: the composite arrives once the leaf's own key validated", difference).hasSize(1);
+            long parent = ctx().fetchOne("SELECT conparentid::bigint FROM pg_catalog.pg_constraint WHERE conrelid = ('nexus.' || quote_ident(?))::pg_catalog.regclass "
+                + "AND conname = ?", leaf, leaf + Rdr229ChunksFk.LEAF_CONSTRAINT_SUFFIX).get(0, Long.class);
+            assertThat(parent).as("%s: the matching key was adopted", difference).isNotZero();
+        } finally {
+            ctx().execute("ALTER TABLE nexus." + quote(leaf) + " DROP CONSTRAINT IF EXISTS " + quote(mismatch));
+        }
+    }
+
+    // ── 6: the adoption move's states ───────────────────────────────────────────────────────────────────────
+
+    /** While leaves wait, the adoption move re-opens itself: no completion event, no listener call, no retry counted, and the composite is not there. */
+    @Test
+    void theAdoptionMoveThatReopensItselfIsNotACompletionAndCountsNoRetry() {
+        seed("reopen");
+        registerSwaps();
+        runSwaps(new VerifyingFinisher());
+        pause(Rdr229ChunksFk.LEAF_LABEL_PREFIX + "%");
+        var completions = new AtomicInteger();
+        var w = productionWorker(new VerifyingFinisher());
+        w.onMoveCompleted(completions::incrementAndGet);
+
+        for (int i = 0; i < 3; i++) {
+            w.runCycle();
+        }
+
+        assertThat(completions.get()).as("nothing completed: the adoption move re-opened itself each time").isZero();
+        var adopt = adoptMoves().get(0);
+        assertThat(adopt.get("completed_at")).as("still open").isNull();
+        assertThat(adopt.get("failed_at")).isNull();
+        assertThat((Integer) adopt.get("transient_retries")).as("a wait for a leaf is no failure: no retry counted").isZero();
+        assertThat(compositeOnId()).isEmpty();
+    }
+
+    /** A leaf move that is failed is named by the adoption move, which fails loud (permanent) instead of waiting on it for ever. */
+    @Test
+    void aFailedLeafMoveFailsTheAdoptionMoveAndNamesIt() {
+        seed("failedleaf");
+        registerSwaps();
+        runSwaps(new VerifyingFinisher());
+        String failed = (String) leafMoves().get(0).get("label");
+        ctx().execute("UPDATE nexus.data_moves SET failed_at = now(), failure = 'planted' WHERE label = ?", failed);
+        pause(Rdr229ChunksFk.LEAF_LABEL_PREFIX + "%");
+
+        productionWorker(new VerifyingFinisher()).runCycle();
+
+        var adopt = adoptMoves().get(0);
+        assertThat(adopt.get("failed_at")).as("the adoption move failed, loud").isNotNull();
+        assertThat((String) adopt.get("failure")).as("naming the leaf move").contains(failed).contains("failed");
+        assertThat(compositeOnId()).isEmpty();
+    }
+
+    /** A leaf move that is paused is named by a 55P03 (transient), so an operator reading the blocked state sees which leaf holds it. */
+    @Test
+    void aPausedLeafMoveBlocksTheAdoptionMoveAndNamesTheLeaf() {
+        seed("pausedleaf");
+        registerSwaps();
+        runSwaps(new VerifyingFinisher());
+        pause(Rdr229ChunksFk.LEAF_LABEL_PREFIX + "%");
+
+        productionWorker(new VerifyingFinisher()).runCycle();
+
+        var adopt = adoptMoves().get(0);
+        assertThat(adopt.get("failed_at")).as("blocked, not failed").isNull();
+        assertThat((String) adopt.get("last_transient")).as("the blocked state names the paused leaf").contains("paused").contains("55P03");
+    }
+
+    /** A validation move whose leaf is gone fails loud, with 42P01 naming it, and does not complete as a no-op. */
+    @Test
+    void aLeafValidationMoveWhoseLeafIsGoneFailsLoud() throws Exception {
+        seed("goneleaf");
+        registerSwaps();
+        runSwaps(new VerifyingFinisher());
+        String leaf = chunkLeaves().get(0);
+        String text = onCompleteOf(Rdr229ChunksFk.LEAF_LABEL_PREFIX + leaf);
+        assertThat(text).as("the text names the leaf by schema and name, quoted").contains("quote_ident('nexus')").contains("quote_ident('" + leaf + "')");
+        String gone = text.replace("quote_ident('" + leaf + "')", "quote_ident('p33c_no_such_leaf')");
+
+        assertThatThrownBy(() -> runOnCompleteOnOwnSession(gone)).as("a leaf that is not there is not 'validated'")
+            .satisfies(t -> assertThat(sqlState(t)).isEqualTo("42P01"));
+    }
+
+    // ── 7: the lock a validation waits on, and what the status shows ────────────────────────────────────────
+
+    private record Held(Connection connection, String leaf, String label) { }
+
+    /** Pauses every move but one leaf validation, and holds ACCESS EXCLUSIVE on that leaf from a session of the test's own. */
+    private Held holdOneLeaf() throws Exception {
+        seed("held");
+        registerSwaps();
+        runSwaps(new VerifyingFinisher());
+        String leaf = chunkLeaves().get(0);
+        String label = Rdr229ChunksFk.LEAF_LABEL_PREFIX + leaf;
+        pause("rdr229-%");
+        resume(label);
+        Connection c = pg.createConnection("");
+        c.setAutoCommit(false);
+        try (Statement st = c.createStatement()) {
+            st.execute("LOCK TABLE nexus." + quote(leaf) + " IN ACCESS EXCLUSIVE MODE");
+        }
+        return new Held(c, leaf, label);
+    }
+
+    private static int completionPid(DataMoveWorker w, String label, long timeoutMs) {
+        long end = System.nanoTime() + timeoutMs * 1_000_000L;
+        while (System.nanoTime() < end) {
+            var call = w.states().call(label);
+            if (call.isPresent() && VerifyingFinisher.COMPLETION_RUN.equals(call.get().runLabel())) {
+                return call.get().pid();
+            }
+            sleepMs(50);
+        }
+        return -1;
+    }
+
+    /**
+     * The production leaf on_complete that cannot get the leaf's lock waits the 5 s lock wait of a validation, not 700 ms, then fails 55P03
+     * (transient: blocked, retried). While it waits its backend is known to the status (pid and start) and is a {@code nexus-data-move-}
+     * session. The leaf key stays NOT VALID.
+     */
+    @Test
+    void aLeafValidationBehindAHeldAccessExclusiveWaitsAboutFiveSecondsThenBlocksOn55P03() throws Exception {
+        Held held = holdOneLeaf();
+        try (Connection holder = held.connection()) {
+            var w = productionWorker(new VerifyingFinisher());
+            long started = System.nanoTime();
+            var cycle = CompletableFuture.runAsync(w::runCycle);
+            int pid = completionPid(w, held.label(), 3_000);
+            assertThat(pid).as("the completion's backend is recorded for the status while it waits").isPositive();
+            String application = ctx().fetchOne("SELECT application_name FROM pg_catalog.pg_stat_activity WHERE pid = ?", pid).get(0, String.class);
+            assertThat(application).as("the session carries the data-move name, so a boot can reap it").startsWith("nexus-data-move-");
+            cycle.get(30, TimeUnit.SECONDS);
+            long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+            holder.rollback();
+
+            assertThat(elapsedMs).as("it waited the validation's 5 s lock wait, not the 700 ms of a step that blocks writers").isGreaterThanOrEqualTo(4_500L);
+            var row = moves(LABEL_F.eq(held.label())).get(0);
+            assertThat(row.get("completed_at")).as("not completed").isNull();
+            assertThat(row.get("failed_at")).as("blocked, never failed").isNull();
+            assertThat((String) row.get("last_transient")).as("the lock timeout is the recorded transient").contains("55P03");
+            assertThat(leafFks().stream().filter(f -> f.leaf().equals(held.leaf())).toList()).singleElement()
+                .satisfies(f -> assertThat(f.validated()).isFalse());
+            assertThat(w.states().call(held.label())).as("and the in-flight record is gone").isEmpty();
+        }
+    }
+
+    /** Stopping the worker cancels the completion statement in flight: the cycle ends at once, the move is not failed and no transient is counted. */
+    @Test
+    void stoppingTheWorkerCancelsAValidationWaitingOnALock() throws Exception {
+        Held held = holdOneLeaf();
+        try (Connection holder = held.connection()) {
+            var w = productionWorker(new VerifyingFinisher());
+            var cycle = CompletableFuture.runAsync(w::runCycle);
+            assertThat(completionPid(w, held.label(), 3_000)).as("the validation is waiting").isPositive();
+            long stopAt = System.nanoTime();
+
+            w.stop();
+            cycle.get(3, TimeUnit.SECONDS);
+
+            assertThat(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - stopAt)).as("the wait was cut short, not run out").isLessThan(3_000L);
+            holder.rollback();
+            var row = moves(LABEL_F.eq(held.label())).get(0);
+            assertThat(row.get("failed_at")).as("a stop is not a failure").isNull();
+            assertThat(row.get("last_transient")).as("nor a transient").isNull();
+            assertThat(row.get("completed_at")).isNull();
+        }
+    }
+
+    /** A boot ends the {@code nexus-data-move-} backends a stopped engine left, before the migration. */
+    @Test
+    void theBootReapsLeftoverDataMoveBackends() throws Exception {
+        java.util.Properties props = new java.util.Properties();
+        props.setProperty("user", adminConnection.user());
+        props.setProperty("password", adminConnection.password());
+        props.setProperty("ApplicationName", "nexus-data-move-leftover-test");
+        try (Connection orphan = java.sql.DriverManager.getConnection(adminConnection.url(), props)) {
+            assertThat(orphan.isValid(2)).as("precondition: the leftover backend is alive").isTrue();
+
+            int ended = DataMoveOrphans.terminateLeftover(adminConnection);
+
+            assertThat(ended).as("it ended at least the leftover").isGreaterThanOrEqualTo(1);
+            assertThat(orphan.isValid(2)).as("and it is gone").isFalse();
+        }
+    }
+
+    // ── 8: the role that validates ──────────────────────────────────────────────────────────────────────────
+
+    /**
+     * The role the data-move worker runs as owns the registry and every chunks leaf, including a leaf created after the migration through the
+     * service path ({@code create_tenant_partitions} is SECURITY DEFINER, so the leaf belongs to its owner): PostgreSQL validates a key
+     * set-based only when the validating role owns both tables (row security then does not apply to the check), and falls back to one probe
+     * per row otherwise. And one production leaf VALIDATE, run as that role, probes the registry by index not once (it is set-based).
+     */
+    @Test
+    void theWorkerRoleOwnsTheRegistryAndEveryLeafAndAProductionLeafValidateIsSetBased() throws Exception {
+        seed("owner");
+        registerSwaps();
+        // a leaf created after the migration, as the service role does it (when that role exists in this fixture; the owner otherwise)
+        String lateTenant = "p33c-owner-leaf-" + System.nanoTime();
+        tenantsUsed.add(lateTenant);
+        try (Connection c = pg.createConnection("")) {
+            boolean svc = DSL.using(c, SQLDialect.POSTGRES).fetchExists(DSL.table(DSL.name("pg_catalog", "pg_roles")),
+                DSL.field(DSL.name("rolname"), String.class).eq("nexus_svc"));
+            if (svc) {
+                try (Statement st = c.createStatement()) {
+                    st.execute("SET ROLE nexus_svc");
+                }
+            }
+            DSL.using(c, SQLDialect.POSTGRES).execute("SELECT nexus.create_tenant_partitions('nexus.chunks'::pg_catalog.regclass, ?, true)", lateTenant);
+        }
+        String worker = adminConnection.user();
+        var owners = ctx().resultQuery("SELECT c.relname || ' (' || pg_catalog.pg_get_userbyid(c.relowner) || ')' FROM pg_catalog.pg_class c "
+                + "WHERE (c.oid = 'nexus.catalog_collections'::pg_catalog.regclass OR c.oid IN (SELECT pt.relid FROM "
+                + "pg_catalog.pg_partition_tree('nexus.chunks'::pg_catalog.regclass) pt WHERE pt.isleaf)) AND pg_catalog.pg_get_userbyid(c.relowner) <> ?",
+            worker).fetch(0, String.class);
+        assertThat(owners).as("tables not owned by %s, the role the data-move worker runs as", worker).isEmpty();
+        assertThat(chunkLeaves()).as("non-vacuity: chunks has leaves").hasSizeGreaterThanOrEqualTo(2);
+
+        runSwaps(new VerifyingFinisher());
+        String leaf = chunkLeaves().get(0);
+        long rows = ctx().fetchOne("SELECT count(*) FROM nexus." + quote(leaf)).get(0, Long.class);
+        assertThat(rows).as("non-vacuity: the leaf has rows, so a per-row fallback would probe the registry").isPositive();
+        String text = onCompleteOf(Rdr229ChunksFk.LEAF_LABEL_PREFIX + leaf);
+        java.util.Properties props = new java.util.Properties();
+        props.setProperty("user", adminConnection.user());
+        props.setProperty("password", adminConnection.password());
+        try (Connection c = java.sql.DriverManager.getConnection(adminConnection.url(), props)) {
+            c.setAutoCommit(false);
+            MoveSql.runOnComplete(c, text);
+            var stat = DSL.using(c, SQLDialect.POSTGRES).fetchOne("SELECT coalesce(idx_scan, 0) FROM pg_catalog.pg_stat_xact_user_tables "
+                + "WHERE schemaname = 'nexus' AND relname = 'catalog_collections'");
+            long probes = stat == null ? 0L : stat.get(0, Long.class);
+            c.rollback();
+            assertThat(probes).as("the VALIDATE as %s probed the registry by index %d times for %d rows: 0 is the set-based check", worker, probes, rows)
+                .isZero();
+        }
     }
 
     private static String quote(String ident) {
