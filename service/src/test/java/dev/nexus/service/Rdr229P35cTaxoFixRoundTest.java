@@ -340,6 +340,40 @@ class Rdr229P35cTaxoFixRoundTest extends AtomicWriteTestBase {
             .as("the dangling target id is gone history; its stored name reaches it").isInstanceOf(ReembedJobRepository.JobLockHeld.class);
     }
 
+    /** Retires {@code name} to a tombstone naming {@code successor}: the row stays, but it is no longer a live collection. */
+    private void retire(String name, String successor) throws Exception {
+        long successorId = idOf(successor);
+        su(ctx -> ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, successor)
+            .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, successorId)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(name)).execute());
+    }
+
+    /** A tombstone is not a LIVE registry row: its ledger entries are history, found by the old label with the gone flag, and a job reports its stored name. */
+    @Test
+    void aTombstoneIsGoneHistory() throws Exception {
+        var remap = new RemapRepository(tenantScope, LATCHED);
+        var jobs = new ReembedJobRepository(tenantScope, LATCHED);
+        String old = register("tb"), tgt = register("tt"), succ = register("ts");
+        remap.recordBatch(TENANT, List.of(fact(old, "t1", tgt)));
+        remap.recordBatch(TENANT, List.of(fact(tgt, "t2", old)));        // old as the TARGET of another leg
+        var job = jobs.start(TENANT, old, tgt, null, true, false);
+        retire(old, succ);
+
+        var asSource = remap.entriesForCollection(TENANT, old);
+        assertThat(asSource).as("found by its old label: the name arm reaches the tombstone's history").hasSize(1);
+        assertThat(remap.count(TENANT, old)).isEqualTo(1);
+        assertThat(remap.sourceCollections(TENANT)).contains(old);
+        var asTarget = remap.entriesForCollection(TENANT, tgt);
+        assertThat(asTarget).hasSize(1);
+        assertThat(asTarget.get(0).get("target_collection")).as("a tombstoned target keeps its stored name").isEqualTo(old);
+        assertThat(asTarget.get(0).get("target_gone")).isEqualTo("true");
+
+        var seen = jobs.get(TENANT, job.jobId()).orElseThrow();
+        assertThat(seen.sourceCollection()).isEqualTo(old);
+        assertThat(seen.sourceGone()).as("a tombstoned source is gone").isTrue();
+        assertThat(seen.targetGone()).isFalse();
+    }
+
     // ---- readers the first class could not falsify ---------------------------------------------------------------
 
     @Test
