@@ -27,10 +27,12 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
+import dev.nexus.service.db.RenameOutcome;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -353,19 +355,62 @@ class RenameGuardLatchRecheckTest {
     }
 
     /**
-     * runRename decides from the latch row: none is the name path, the row with readiness complete is the one-row body, the row with
-     * readiness missing is the refusal. The open guard is always the name path.
+     * runRename decides from the latch row: none (the readiness still waiting) is the name path, the row with readiness complete is the
+     * one-row body, the row with readiness missing is the refusal, and no row with readiness complete is the inconsistency refusal
+     * (linda's Q-B). The open guard is always the name path.
      */
     @Test
     void runRenameDecidesFromTheLatchRowOnly() {
+        var preLatch = new RenameGuard(() -> Missing.NAME_KEY_DROP_MOVE, OneRowRename.failClosed());
         var ready = new RenameGuard(() -> Missing.NONE, OneRowRename.failClosed());
-        var notReady = new RenameGuard(() -> Missing.NAME_KEY_DROP_MOVE, OneRowRename.failClosed());
-        assertThat(runRenameDecision(ready)).as("no row: the name path").isEqualTo(RenameGuard.RenamePath.NAME_PATH);
+        assertThat(runRenameDecision(preLatch)).as("no row, the drop move missing: the name path").isEqualTo(RenameGuard.RenamePath.NAME_PATH);
+        assertThatThrownBy(() -> runRenameDecision(ready)).as("no row, readiness complete: never the name path")
+            .satisfies(t -> assertThat(refusalIn(t).missing()).isEqualTo(Missing.LATCH_ROW_MISSING));
 
         writeLatch();
         assertThat(runRenameDecision(ready)).as("the row and readiness complete").isEqualTo(RenameGuard.RenamePath.ONE_ROW);
         assertThat(runRenameDecision(RenameGuard.open())).as("the open guard never leaves the name path").isEqualTo(RenameGuard.RenamePath.NAME_PATH);
-        assertRefused("runRename", () -> runRenameDecision(notReady));
+        assertRefused("runRename", () -> runRenameDecision(preLatch));
+    }
+
+    /** The lock is transaction-scoped: a transaction argument that runs the work on an autocommit connection fails closed. */
+    @Test
+    void aTransactionArgumentThatIsNotOneTransactionFailsClosed() throws Exception {
+        var guard = new RenameGuard(() -> Missing.NAME_KEY_DROP_MOVE, OneRowRename.failClosed());
+        try (Connection c = pg.createConnection("")) {
+            c.setAutoCommit(true);
+            DSLContext autocommit = DSL.using(c, SQLDialect.POSTGRES);
+            assertThatThrownBy(() -> guard.runRename(work -> work.apply(autocommit), x -> "name", x -> "one"))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("one transaction");
+        }
+    }
+
+    /**
+     * The seam keeps the whole outcome (the must-fix of round 2): a stub one-row rename runs through renameCollectionOutcome, the answer
+     * carries its collection id, epoch and ids_stable, and both labels are evicted from the registry cache by the path taken, not by a
+     * name-path count key (the stub's counts have none).
+     */
+    @Test
+    void theOneRowOutcomeIsTheAnswer_andBothLabelsLeaveTheRegistryCache() {
+        OneRowRename stub = (ctx, tenant, from, to) ->
+            new RenameOutcome(Map.of("stub_rows", 1), 777L, "stub-epoch", true);
+        var guard = new RenameGuard(() -> Missing.NONE, stub);
+        var scope = new TenantScope(svcDs);
+        var repo = new CatalogRepository(scope, Gate3.never(), guard);
+        String from = register("stub");
+        String to = fresh("stub");
+        dev.nexus.service.db.CollectionRegistry.lookup(scope, TENANT, from);   // warms the old label
+        assertThat(dev.nexus.service.db.CollectionRegistry.isKnown(TENANT, from)).as("guard: the old label is KNOWN").isTrue();
+        writeLatch();
+
+        RenameOutcome out = repo.renameCollectionOutcome(TENANT, from, to, null, null, null, null);
+
+        assertThat(out.collectionId()).as("the stub's id, not 0").isEqualTo(777L);
+        assertThat(out.catalogEpoch()).isEqualTo("stub-epoch");
+        assertThat(out.idsStable()).as("the stub's answer, not the guard's constant").isTrue();
+        assertThat(out.counts()).containsEntry("stub_rows", 1);
+        assertThat(dev.nexus.service.db.CollectionRegistry.isKnown(TENANT, from)).as("the old label left the cache").isFalse();
+        assertThat(supersededBy(from)).as("the stub wrote nothing").isEqualTo("");
     }
 
     /**
@@ -443,6 +488,7 @@ class RenameGuardLatchRecheckTest {
      * The latch write's lock wait is bounded: with a rename's shared lock held it throws at the bound (here 500 ms), writes no row,
      * and a second call after the release succeeds.
      */
+    @Timeout(60)
     @Test
     void theLatchWriteGivesUpAtItsLockTimeout_writesNoRow_andSucceedsOnceTheRenameIsDone() throws Exception {
         try (Connection holder = pg.createConnection("")) {
@@ -460,6 +506,25 @@ class RenameGuardLatchRecheckTest {
             return null;
         });
         assertThat(latchRow()).as("after the release the write goes through").isTrue();
+    }
+
+    /**
+     * The production write is the four-argument one, on its default bound: the bound is positive and at most 10 s (a stuck rename costs
+     * the others that much, never more), the write succeeds with no rename in flight, and a second call leaves the first writer's row.
+     */
+    @Timeout(60)
+    @Test
+    void theProductionLatchWriteUsesItsDefaultBound_andTheFirstWritersRowStands() {
+        long bound = Long.parseLong(CompletionCheck.LATCH_LOCK_TIMEOUT_MS);
+        assertThat(bound).as("the default lock bound in ms").isPositive().isLessThanOrEqualTo(10_000L);
+
+        su(ctx -> {
+            CompletionCheck.insertLatch(ctx, CompletionCheck.GATE3, "first", false);
+            CompletionCheck.insertLatch(ctx, CompletionCheck.GATE3, "second", true);
+            return null;
+        });
+        assertThat(su(ctx -> ctx.select(DSL.field(DSL.name("engine_version"), String.class)).from(LATCH).fetch(0, String.class)))
+            .as("ON CONFLICT DO NOTHING: one row, the first writer's").containsExactly("first");
     }
 
     /** The open guard takes no lock and reads no row: what a repository built without a guard gets. */

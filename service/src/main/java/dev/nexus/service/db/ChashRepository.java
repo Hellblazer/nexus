@@ -351,7 +351,7 @@ public final class ChashRepository {
             }
             return total;
         }, ctx -> {
-            RenameNoOpActivity.record("chash", oldCollection, newCollection);   // the registry rename moved the label: nothing to rewrite
+            RenameGuard.requireRegistryRenamed(ctx, tenant, oldCollection, newCollection);   // the registry rename moved the label: nothing to rewrite
             noop[0] = true;
             return 0;
         }));
@@ -362,7 +362,9 @@ public final class ChashRepository {
         // on the rare eviction race otherwise (RDR-204 nexus-ft04v.14).
         // nexus-hkh1y: the lookup itself caches (on a miss, through the guarded fill); a direct
         // markKnown of its result would re-cache a read a concurrent evict had invalidated.
-        if (!noop[0]) {
+        if (noop[0]) {
+            RenameNoOpActivity.record("chash", oldCollection, newCollection);   // counted once committed
+        } else {
             CollectionRegistry.lookup(tenantScope, tenant, newCollection);
         }
         return updated;

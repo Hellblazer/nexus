@@ -96,7 +96,7 @@ final class CollectionRouteFixture implements AutoCloseable {
             newBoot(latchedAtBoot);
         }
     }
-    final AtomicReference<RenameReadiness.Missing> renameWindow = new AtomicReference<>(RenameReadiness.Missing.NONE);
+    final AtomicReference<RenameReadiness.Missing> renameWindow = new AtomicReference<>(RenameReadiness.Missing.NAME_KEY_DROP_MOVE);
 
     final PostgreSQLContainer<?> pg;
     final HikariDataSource svcDs;

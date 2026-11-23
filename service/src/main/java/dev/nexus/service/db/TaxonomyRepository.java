@@ -1675,7 +1675,9 @@ public final class TaxonomyRepository {
      */
     public Map<String, Integer> renameCollection(String tenant, String oldCol, String newCol) {
         CollectionLabel.validateUserLabel(newCol);
-        return renameGuard.runRename(tenantScope, tenant, ctx -> {
+        boolean[] noop = new boolean[1];   // set by the committed attempt when the one-row regime made this a no-op
+        Map<String, Integer> answer = renameGuard.runRename(tenantScope, tenant, ctx -> {
+            noop[0] = false;
             // RDR-210 Phase 6 Step 2 (bead nexus-f98bg): refused while a re-embed job holds either name.
             CatalogRepository.refuseUnderReembedJob(ctx, tenant, "rename", oldCol, newCol);
             // RDR-164 P1a: the new collection name must be registered before the denorm
@@ -1707,9 +1709,12 @@ public final class TaxonomyRepository {
                 .execute();
             return Map.of("topics", topics, "assignments", assignments, "meta", meta);
         }, ctx -> {
-            RenameNoOpActivity.record("taxonomy", oldCol, newCol);   // the registry rename moved the label: nothing to rewrite
+            RenameGuard.requireRegistryRenamed(ctx, tenant, oldCol, newCol);   // the registry rename moved the label: nothing to rewrite
+            noop[0] = true;
             return Map.of("topics", 0, "assignments", 0, "meta", 0);
         });
+        if (noop[0]) RenameNoOpActivity.record("taxonomy", oldCol, newCol);   // counted once committed
+        return answer;
     }
 
     // ── Taxonomy meta ──────────────────────────────────────────────────────────
