@@ -366,14 +366,21 @@ public final class CatalogRepository {
     private final AtomicBoolean vacuumInProgress = new AtomicBoolean(false);
 
     private final RenameGuard renameGuard;
+    /** RDR-229 P3.5c reads the id once this holds (the one Main builds); P3.5a hands it on with the rename guard. */
+    private final dev.nexus.service.datamove.Gate3 gate3;
 
+    /** Tests and callers with no gate 3 and no rename refusal: the name path, a rename never refused. Production uses the three-argument form. */
     public CatalogRepository(TenantScope tenantScope) {
-        this(tenantScope, RenameGuard.open());
+        this(tenantScope, dev.nexus.service.datamove.Gate3.never(), RenameGuard.open());
     }
 
-    /** RDR-229 P3.5a: {@code renameGuard} is the rename refusal every rename of this repository consults first. */
-    public CatalogRepository(TenantScope tenantScope, RenameGuard renameGuard) {
-        this.renameGuard = renameGuard;
+    /**
+     * The one production shape (RDR-229 P3.5a and P3.5c): {@code gate3} is the one latched signal Main builds, and
+     * {@code renameGuard} is the rename refusal every rename of this repository consults first.
+     */
+    public CatalogRepository(TenantScope tenantScope, dev.nexus.service.datamove.Gate3 gate3, RenameGuard renameGuard) {
+        this.gate3 = java.util.Objects.requireNonNull(gate3, "gate3");
+        this.renameGuard = java.util.Objects.requireNonNull(renameGuard, "renameGuard");
         this.tenantScope = tenantScope;
         this.vacuumExecutor = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "purge-trash-vacuum");
