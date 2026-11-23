@@ -297,8 +297,10 @@ class Rdr229P37RenameAcceptanceTest {
             ctx.insertInto(org.jooq.impl.DSL.table(org.jooq.impl.DSL.name("nexus", "chunk_orphaned_at")),
                     org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("tenant_id"), String.class), org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("collection"), String.class),
                     org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("chash"), byte[].class), org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("collection_id"), Long.class),
-                    org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("orphaned_at"), java.time.OffsetDateTime.class))
-                .values(w.tenant(), w.a(), java.util.HexFormat.of().parseHex(chash), w.id(), java.time.OffsetDateTime.now()).execute();
+                    org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("orphaned_at"), java.time.OffsetDateTime.class),
+                    org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("embedding_model"), String.class))
+                .values(w.tenant(), w.a(), java.util.HexFormat.of().parseHex(chash), w.id(), java.time.OffsetDateTime.now(),
+                    PgContainerHelper.collectionModel(ctx, w.tenant(), w.a())).execute();
             return null;
         });
         long orphansBefore = env.su(ctx -> (long) ctx.fetchCount(org.jooq.impl.DSL.table(org.jooq.impl.DSL.name("nexus", "chunk_orphaned_at")),
@@ -407,10 +409,10 @@ class Rdr229P37RenameAcceptanceTest {
             return null;
         });
 
-        JsonNode end = env.restore(dstToken, env.export(token));
+        var open = env.open(dstToken, env.export(token));
 
-        assertThat(end.get("status").asText()).as("a restore into a tenant with data does not commit: " + end).isNotEqualTo("committed");
-        assertThat(end.toString()).as("it names why: " + end).containsIgnoringCase("not empty");
+        assertThat(open.statusCode()).as("a restore into a tenant with data is refused at open: " + open.body()).isEqualTo(409);
+        assertThat(open.body()).as("it names why").contains("tenant_not_empty").containsIgnoringCase("empty tenant only");
     }
 
     private static Map<String, Map<String, Long>> without(Map<String, Map<String, Long>> by) {

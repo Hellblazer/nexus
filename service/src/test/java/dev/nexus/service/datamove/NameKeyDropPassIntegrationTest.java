@@ -113,13 +113,13 @@ class NameKeyDropPassIntegrationTest {
         try (Connection holder = pg.createConnection("")) {
             holder.setAutoCommit(true);
             var ctx = DSL.using(holder, SQLDialect.POSTGRES);
-            ctx.fetch("SELECT pg_advisory_lock(?)", SchemaMigrator.MIGRATION_ADVISORY_LOCK_KEY);   // the walk is running
+            ctx.select(DSL.function("pg_advisory_lock", org.jooq.impl.SQLDataType.OTHER, DSL.val(SchemaMigrator.MIGRATION_ADVISORY_LOCK_KEY))).fetch();   // the walk is running
             var pass = new NameKeyDropPass(admin, () -> snapshot(true, true), VERSION);
 
             assertThat(pass.runOnce()).as("the pass yields to the migration").isEqualTo(NameKeyDropPass.Outcome.MIGRATING);
             assertThat(rows()).as("nothing registered during migrate").isZero();
 
-            ctx.fetch("SELECT pg_advisory_unlock(?)", SchemaMigrator.MIGRATION_ADVISORY_LOCK_KEY);
+            ctx.select(DSL.function("pg_advisory_unlock", org.jooq.impl.SQLDataType.BOOLEAN, DSL.val(SchemaMigrator.MIGRATION_ADVISORY_LOCK_KEY))).fetch();
             assertThat(pass.runOnce()).as("the next tick, the walk over").isEqualTo(NameKeyDropPass.Outcome.REGISTERED);
             assertThat(rows()).isEqualTo(1);
         }
