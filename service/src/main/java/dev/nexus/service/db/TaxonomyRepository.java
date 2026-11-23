@@ -145,7 +145,7 @@ public final class TaxonomyRepository {
      * match by the current label alone misses the collection's own rows.
      */
     private static org.jooq.Condition ownTopics(CollectionRow row, String currentLabel) {
-        return row == null ? TOPICS.COLLECTION.eq(currentLabel)
+        return row == null ? TOPICS.COLLECTION_ID.isNull().and(TOPICS.COLLECTION.eq(currentLabel))   // no row holds the label: only rows the id stamp has not reached
             : CollectionOwnedRows.of(java.util.Optional.of(row), TOPICS.COLLECTION_ID, TOPICS.COLLECTION, currentLabel);
     }
 

@@ -21,7 +21,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * RDR-229 P3.5a (nexus-p2m1x.23): the re-home does not depend on the chunk foreign keys' ON UPDATE cascade. The mover files the source's chunks
- * under the target and, with {@code fk_catalog_chunks_chunk} and {@code topic_assignments_chunk_fk} present, the cascade carried the manifest rows and the
+ * under the target and, with {@code fk_catalog_chunks_chunk} and {@code topic_assignments_chunk_fk} (and {@code chunk_orphaned_at_chunk_fk}) present, the cascade carried the manifest rows and the
  * topic assignments along; the name key and those foreign keys go at P3.7, and a row they did not carry kept the source's label, so the re-home reported
  * the manifest as never done. This class drops both foreign keys on its own database and runs a re-home with a stored chunk, a manifest row and an
  * assignment: each lands under the TARGET's label with the target's id, and nothing is left at the source.
@@ -40,6 +40,7 @@ class CollectionRehomeWithoutChunkFksTest {
         fx.asSuperuser(ctx -> {
             ctx.alterTable(CATALOG_DOCUMENT_CHUNKS).dropConstraintIfExists("fk_catalog_chunks_chunk").execute();
             ctx.alterTable(TOPIC_ASSIGNMENTS).dropConstraintIfExists("topic_assignments_chunk_fk").execute();
+            ctx.alterTable(org.jooq.impl.DSL.table(org.jooq.impl.DSL.name("nexus", "chunk_orphaned_at"))).dropConstraintIfExists("chunk_orphaned_at_chunk_fk").execute();
             return null;
         });
     }
@@ -69,6 +70,9 @@ class CollectionRehomeWithoutChunkFksTest {
         Resp assigned = fx.post("/v1/taxonomy/assignments/assign", "{\"doc_id\":\"" + hex + "\",\"topic_id\":" + topic
             + ",\"assigned_by\":\"manual\",\"source_collection\":" + json(source) + "}");
         assertThat(assigned.status()).as("setup: " + assigned.body()).isEqualTo(200);
+        fx.asSuperuser(ctx -> ctx.execute("insert into nexus.chunk_orphaned_at (tenant_id, collection, collection_id, chash, orphaned_at) "
+            + "values (?, ?, ?, decode(?, 'hex'), now()) on conflict (tenant_id, collection, chash) do update set orphaned_at = excluded.orphaned_at",
+            fx.tenant, source, sid, hex));
 
         Resp r = fx.post("/v1/catalog/collections/rehome", "{\"source\":" + json(source) + ",\"target\":" + json(target) + "}");
 
@@ -83,6 +87,11 @@ class CollectionRehomeWithoutChunkFksTest {
         assertThat(fx.asSuperuser(ctx -> ctx.select(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID)
                 .from(TOPIC_ASSIGNMENTS).where(TOPIC_ASSIGNMENTS.DOC_ID.eq(chash)).fetchOne()))
             .as("and so was the assignment").extracting(rec -> rec.value1(), rec -> rec.value2()).containsExactly(target, tid);
+        var orphanMarks = fx.asSuperuser(ctx -> ctx.fetch("select collection, collection_id from nexus.chunk_orphaned_at where tenant_id = ? and chash = decode(?, 'hex')",
+            fx.tenant, hex));
+        assertThat(orphanMarks).as("the orphan mark moved with its chunk, once").hasSize(1);
+        assertThat(orphanMarks.get(0).get("collection")).as("under the target's label").isEqualTo(target);
+        assertThat(((Number) orphanMarks.get(0).get("collection_id")).longValue()).as("and id").isEqualTo(tid);
         int left = fx.asSuperuser(ctx -> ctx.fetchCount(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID.eq(sid)));
         assertThat(left).as("nothing of the source is left in the manifest").isEqualTo(0);
     }

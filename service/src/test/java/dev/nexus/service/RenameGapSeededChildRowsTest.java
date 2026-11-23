@@ -160,6 +160,25 @@ class RenameGapSeededChildRowsTest {
         assertThat(r.json().path("manual_assignments").get(0).path("doc_id").asText()).isEqualTo(doc);
     }
 
+    /** The read twin of the purge test below: a READ by a label no row holds reaches none of the renamed collection's topics or manual assignments. */
+    @Test
+    void readRebuildOldState_byTheOldLabelOfARenamedCollection_readsNoneOfItsRows() {
+        String b = registered("oldstate-old");
+        long topic = seedTopic(b, "seed-topic");
+        String doc = dev.nexus.service.db.Chash.ofText("rgs-manual-old-" + b).toHex();
+        Resp assigned = fx.post("/v1/taxonomy/assignments/assign",
+            "{\"doc_id\":\"" + doc + "\",\"topic_id\":" + topic + ",\"assigned_by\":\"manual\"}");
+        assertThat(assigned.status()).as("setup: " + assigned.body()).isEqualTo(200);
+        oneRowRename(b);   // b is held by no row now
+        assertThat(fx.exists(b)).as("setup: no row holds the old label").isFalse();
+
+        Resp r = fx.get("/v1/taxonomy/rebuild/old_state?collection=" + b);
+
+        assertThat(r.status()).as(r.body()).isEqualTo(200);
+        assertThat(r.json().path("old_topic_map")).as("the renamed collection's topic is not read by its old label").isEmpty();
+        assertThat(r.json().path("manual_assignments")).as("nor its manual assignment").isEmpty();
+    }
+
     @Test
     void lastDiscoverCount_byAnIdWhoseRowWasRenamed_stillReadsTheCollectionsOwnMetaRow() {
         String b = registered("lastcount");
