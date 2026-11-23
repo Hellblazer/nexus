@@ -8,6 +8,7 @@ import org.jooq.impl.DSL;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNK_ORPHANED_AT;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
@@ -115,5 +116,29 @@ final class CatalogIdStamps {
         ctx.update(CHUNK_ORPHANED_AT).set(CHUNK_ORPHANED_AT.COLLECTION_ID, id)
             .where(CHUNK_ORPHANED_AT.TENANT_ID.eq(tenant)).and(CHUNK_ORPHANED_AT.COLLECTION.eq(collection))
             .and(CHUNK_ORPHANED_AT.COLLECTION_ID.isDistinctFrom(id)).execute();
+    }
+
+    /**
+     * {@link #repairCascadedIds} for a re-home from gate 3, keyed by id: the topic assignments and {@code chunk_orphaned_at}
+     * rows of the source's id whose chunk now carries {@code targetId} (the chunk update moved it, and the foreign key carried
+     * the row with it), given {@code targetId}. The name arm of the form above is wrong after a one-row rename (the rows can
+     * hold a stored name no label has), and the id alone is too wide: the rows of a chunk the re-home left behind (a collision)
+     * also hold the source's id and must keep it, so the chunk's own id is the test.
+     */
+    static void repairCascadedIdsFrom(DSLContext ctx, String tenant, Long sourceId, Long targetId) {
+        var c = CHUNKS.as("rcc");
+        ctx.update(TOPIC_ASSIGNMENTS).set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, targetId)
+            .where(TOPIC_ASSIGNMENTS.TENANT_ID.eq(tenant)).and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID.eq(sourceId))
+            .and(DSL.exists(DSL.selectOne().from(c).where(c.TENANT_ID.eq(tenant))
+                .and(c.COLLECTION.eq(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)).and(c.CHASH.eq(TOPIC_ASSIGNMENTS.DOC_ID))
+                .and(c.COLLECTION_ID.eq(targetId))))
+            .execute();
+        var o = CHUNKS.as("rco");
+        ctx.update(CHUNK_ORPHANED_AT).set(CHUNK_ORPHANED_AT.COLLECTION_ID, targetId)
+            .where(CHUNK_ORPHANED_AT.TENANT_ID.eq(tenant)).and(CHUNK_ORPHANED_AT.COLLECTION_ID.eq(sourceId))
+            .and(DSL.exists(DSL.selectOne().from(o).where(o.TENANT_ID.eq(tenant))
+                .and(o.COLLECTION.eq(CHUNK_ORPHANED_AT.COLLECTION)).and(o.CHASH.eq(CHUNK_ORPHANED_AT.CHASH))
+                .and(o.COLLECTION_ID.eq(targetId))))
+            .execute();
     }
 }

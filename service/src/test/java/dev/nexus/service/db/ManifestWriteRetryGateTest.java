@@ -147,6 +147,9 @@ class ManifestWriteRetryGateTest {
         Map.entry("ManifestFillablePredicates", "nexus-f3yqd: jOOQ conditions over the manifest, its documents and chunk rows (the"
             + " guards the two rung counts share, with a NOT EXISTS over the other holders of a chash); it builds"
             + " conditions and writes nothing"),
+        Map.entry("CollectionPurgeScope", "RDR-229 P3.5a (nexus-p2m1x.23): builds the jOOQ conditions that scope a collection delete's"
+            + " DELETEs by name or by id (the manifest's two columns among them); it builds conditions and writes nothing, the"
+            + " statements are deleteCollectionTxn's, which is retried"),
         Map.entry("ChunkKeySweep", "nexus-6pfgb.43: SELECT subqueries over the manifest joined to its live document (the"
             + " precondition counts of the retire-keys dry run: legacy-label rows, NULL-span rows, rows whose TTL no owner"
             + " records) and an UPDATE of nexus.chunks metadata; it writes no manifest row"),
