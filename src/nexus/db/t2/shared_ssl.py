@@ -123,8 +123,8 @@ def _named(exc: OSError) -> OSError:
         return exc
     return OSError(
         exc.errno,
-        f"{exc.strerror or exc}: the TLS CA bundle could not be read (if it lived in an nx install "
-        "that was removed while this process ran, restart the session to use the current install)",
+        f"{exc.strerror or exc}: the TLS CA bundle could not be read (if it lived in an install generation "
+        "that was removed while this process ran, restart the session to use the current one)",
         path,
     )
 

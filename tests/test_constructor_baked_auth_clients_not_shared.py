@@ -82,8 +82,13 @@ def test_the_two_stores_do_not_share_a_client_factory():
             f"onto the other store's requests. See RDR-198 and convert to "
             f"per-call auth BEFORE sharing, never after."
         )
+        # The process-wide SSL CONTEXT is shared on purpose (2026-11-21: a per-client context re-read the CA
+        # bundle from a removed install generation). It carries no credential; the client and its baked
+        # headers stay per store, which the httpx.Client( check above and the headers check below pin.
+        unshared = src.replace("get_shared_ssl_context()", "")
+        assert "headers=" in src, f"{cls_name}._build_client no longer bakes its own headers into its client"
         for shared_marker in ("shared_transport", "get_shared", "_SHARED", "singleton"):
-            assert shared_marker not in src, (
+            assert shared_marker not in unshared, (
                 f"{cls_name}._build_client references {shared_marker!r}, which "
                 f"suggests it was pointed at a shared client. That is the exact "
                 f"cross-domain credential bleed RDR-198 declined to risk. "

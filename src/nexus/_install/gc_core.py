@@ -304,7 +304,7 @@ def _ancestry(depth: int = 4) -> list[dict]:
             break
         try:
             r = subprocess.run(  # noqa: S603 — fixed argv
-                ("ps", "-o", "ppid=,command=", "-p", str(pid)),
+                ("ps", "-ww", "-o", "ppid=,command=", "-p", str(pid)),  # -ww: no COLUMNS truncation on Linux
                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2,
             )
         except Exception as exc:  # noqa: BLE001 — diagnostics only
