@@ -183,6 +183,14 @@ class Rdr229P35bSqlReadersIntegrationTest {
                 .containsExactlyInAnyOrderElementsOf(HALF_CHASHES);
             assertThat(viewCount(ctx, "chunk_count", HALF)).as("collection_vector_stats counts all four live").isEqualTo(4L);
             assertThat(viewCount(ctx, "stored_count", HALF)).as("and stores four").isEqualTo(4L);
+            // RDR-229 P3.5b (linda 2026-11-23): the view's label is the registry's where the row carries an id and the row's own
+            // name where it does not, and it groups by that label, so two stamped chunks and an unstamped one are still one row
+            org.jooq.Condition ofHalf = DSL.field(DSL.name("tenant_id"), String.class).eq(TENANT)
+                .and(DSL.field(DSL.name("collection"), String.class).eq(HALF));
+            assertThat(ctx.fetchCount(VECTOR_STATS, ofHalf)).as("a half-stamped collection is one row of the stats view").isEqualTo(1);
+            assertThat(ctx.select(DSL.field(DSL.name("collection_id"), Long.class)).from(VECTOR_STATS).where(ofHalf)
+                    .fetchOne(0, Long.class))
+                .as("and its trailing collection_id is the registry's").isEqualTo(registryId(ctx, HALF));
         }
     }
 
@@ -220,6 +228,10 @@ class Rdr229P35bSqlReadersIntegrationTest {
                 .as("collection_vector_stats must not count a chunk live through a '' name match on a NULL id")
                 .isZero();
             assertThat(viewCount(ctx, "stored_count", BLANK)).as("the chunk is still stored: inventory is not liveness").isEqualTo(1L);
+            assertThat(ctx.select(DSL.field(DSL.name("collection_id"), Long.class)).from(VECTOR_STATS)
+                    .where(DSL.field(DSL.name("tenant_id"), String.class).eq(TENANT))
+                    .and(DSL.field(DSL.name("collection"), String.class).eq(BLANK)).fetchOne(0, Long.class))
+                .as("a row with no id keeps its own name and shows no id").isNull();
         }
     }
 
