@@ -851,6 +851,53 @@ class CompletionCheckIntegrationTest {
     }
 
     /**
+     * RDR-229 P3.7 (linda 2026-11-23, before the per-leaf FK is stacked): the name-key drop ({@link NameKeyDropMove}) drops
+     * {@code chunks_collection_fk}, so it must not be registered until the id key that replaces it, {@link Rdr229SwapMove#COMPOSITE_CONSTRAINT},
+     * exists and is VALIDATED. The drop registers only on the gate 3 latch, and gate 3 reads gate 2, whose chunks swap label stands on that
+     * key. With the key NOT VALID, and then missing, nothing is latched and nothing is registered; with it validated the same steps latch and
+     * register once (non-vacuity). PostgreSQL 17 cannot add a NOT VALID foreign key to the partitioned chunks table, so the NOT VALID state is
+     * set in the catalog ({@code pg_constraint.convalidated}, which the check reads): the state the per-leaf build passes through on a server that can.
+     */
+    @Test
+    void theNameKeyDropIsNotRegisteredWhileTheChunksIdKeyIsNotValidOrMissing_andIsOnceItIsValidated() throws Exception {
+        var moves = DSL.table(DSL.name("nexus", "data_moves"));
+        var label = DSL.field(DSL.name("label"), String.class);
+        CompletionCheck.ReadSet rs = new CompletionCheck.ReadSet(List.of(), CompletionCheck.ReadSet.p33c().gate2Labels());
+        clearLatch();
+        ctx.deleteFrom(moves).where(label.eq(NameKeyDropMove.LABEL)).execute();
+        try {
+            swap();
+            ctx.execute("UPDATE pg_catalog.pg_constraint SET convalidated = false WHERE conrelid = 'nexus.chunks'::pg_catalog.regclass AND conname = ?",
+                Rdr229SwapMove.COMPOSITE_CONSTRAINT);
+            var notValid = CompletionCheck.evaluate(ctx, rs, everyIndexValid(), CompletionCheck.DIRECT, List.of(), CompletionCheck.latchOnCtx("engine-p37"));
+            assertThat(state(notValid, CHUNKS_SWAP).why()).contains(Rdr229SwapMove.COMPOSITE_CONSTRAINT).contains("NOT VALID");
+            assertThat(notValid.gate3Latched()).as("the chunks id key is NOT VALID: no latch").isFalse();
+            assertThat(NameKeyDropMove.registerIfAbsent(notValid, ctx, "engine-p37")).isFalse();
+            assertThat(ctx.fetchCount(moves, label.eq(NameKeyDropMove.LABEL))).as("no name-key drop while the id key is NOT VALID").isZero();
+
+            ctx.alterTable(DSL.table(DSL.name("nexus", "chunks"))).dropConstraint(DSL.name(Rdr229SwapMove.COMPOSITE_CONSTRAINT)).execute();
+            var missing = CompletionCheck.evaluate(ctx, rs, everyIndexValid(), CompletionCheck.DIRECT, List.of(), CompletionCheck.latchOnCtx("engine-p37"));
+            assertThat(state(missing, CHUNKS_SWAP).why()).contains(Rdr229SwapMove.COMPOSITE_CONSTRAINT).contains("missing");
+            assertThat(missing.gate3Latched()).as("the chunks id key is missing: no latch").isFalse();
+            assertThat(NameKeyDropMove.registerIfAbsent(missing, ctx, "engine-p37")).isFalse();
+            assertThat(ctx.fetchCount(moves, label.eq(NameKeyDropMove.LABEL))).as("no name-key drop while the id key is missing").isZero();
+
+            // the key again, as the swap adds it (validated: no NOT VALID on the partitioned table)
+            ctx.execute("ALTER TABLE nexus.chunks ADD CONSTRAINT " + Rdr229SwapMove.COMPOSITE_CONSTRAINT + " FOREIGN KEY (tenant_id, collection_id, embedding_model)"
+                + " REFERENCES nexus.catalog_collections (tenant_id, collection_id, embedding_model) ON DELETE RESTRICT");
+            var held = CompletionCheck.evaluate(ctx, rs, everyIndexValid(), CompletionCheck.DIRECT, List.of(), CompletionCheck.latchOnCtx("engine-p37"));
+            assertThat(held.gate2()).as("non-vacuity: with the key validated gate 2 holds").isTrue();
+            assertThat(held.gate3Latched()).as("and gate 3 latches").isTrue();
+            assertThat(NameKeyDropMove.registerIfAbsent(held, ctx, "engine-p37")).isTrue();
+            assertThat(ctx.fetchCount(moves, label.eq(NameKeyDropMove.LABEL))).isEqualTo(1);
+        } finally {
+            ctx.deleteFrom(moves).where(label.eq(NameKeyDropMove.LABEL)).execute();
+            clearLatch();
+            unswap();
+        }
+    }
+
+    /**
      * The boot read bounds each attempt ({@code lock_timeout} and {@code statement_timeout}): a lock held on the latch table fails the attempt at its
      * bound and the read retries, until the deadline ends it with the boot's named failure. Without the bounds the read would wait on the lock for the
      * socket's 35 minutes, past the five-minute deadline. Released, the same call answers.
