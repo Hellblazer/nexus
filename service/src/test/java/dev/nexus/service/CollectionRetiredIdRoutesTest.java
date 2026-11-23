@@ -453,6 +453,92 @@ class CollectionRetiredIdRoutesTest {
         assertThat(chunksOf(a, hex)).as("the new holder's chunk is still there").isEqualTo(1);
     }
 
+    // ---- the RENAME variant of the gap: the id's row is renamed and its old label taken by a new row (linda, census pass 2) -----------
+
+    /**
+     * The request names B by id X. Just before the write transaction's registry read (the hook, on another thread) a one-row rename
+     * gives X's row the label C (the registry row keeps its id, which is what P3.7's rename does and what the scoped-delete test simulates
+     * in place), and a NEW row takes the label B. The registry cache holds B as X's row (warmed before the request, so a known cache hit
+     * exists and a handler that went back to the label would write under the new B). The write reads the row of X by id, finds another
+     * label than B, and is refused: 500 {@code collection_id_mismatch} naming X. Nothing lands under X or under the new B's id.
+     */
+    private Resp withTheRowRenamedAndTheLabelTaken(CollectionRouteFixture f, String b, long x, String c, Supplier<Resp> request) {
+        // warm the process-wide cache for the label: a by-label lookup fills B -> X's row, and the rename below does not evict it
+        dev.nexus.service.db.CollectionRegistry.lookup(new dev.nexus.service.db.TenantScope(f.svcDs), f.tenant, b);
+        assertThat(dev.nexus.service.db.CollectionRegistry.cached(f.tenant, b)).as("setup: the cache is warm for " + b).isPresent();
+        AtomicInteger ran = new AtomicInteger();
+        f.service.collectionSelectorFilter().testHooks(null, () -> elsewhere(() -> {
+            f.asSuperuser(ctx -> ctx.update(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+                .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME, c)
+                .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(f.tenant))
+                .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.COLLECTION_ID.eq(x)).execute());
+            f.register(b);
+            ran.incrementAndGet();
+        }), null, null);
+        try {
+            Resp r = request.get();
+            assertThat(ran.get()).as("setup: the hook renamed the row and registered a new one under " + b).isEqualTo(1);
+            Long newId = f.idOf(b);
+            assertThat(newId).as("setup: the old label now names another row").isNotNull().isNotEqualTo(x);
+            assertThat(f.idOf(c)).as("setup: the renamed row bears " + c).isEqualTo(x);
+            return r;
+        } finally {
+            f.service.collectionSelectorFilter().testHooks(null, null, null, null);
+        }
+    }
+
+    private void assertIdOfAnotherLabel(Resp r, long x) {
+        assertThat(r.status()).as(r.body()).isEqualTo(500);
+        assertThat(r.reason()).as("typed: %s", r.body()).isEqualTo("collection_id_mismatch");
+        assertThat(r.json().path("collection_id").asLong(-1)).as("names the id: %s", r.body()).isEqualTo(x);
+    }
+
+    /** Rows of the chunks table under either id or either label: nothing may have landed under the renamed row or the new holder. */
+    private int chunkRowsUnder(CollectionRouteFixture f, long x, Long newId, String b, String c) {
+        return f.asSuperuser(ctx -> ctx.fetchCount(CHUNKS, CHUNKS.COLLECTION_ID.in(x, newId).or(CHUNKS.COLLECTION.in(b, c))));
+    }
+
+    @Test
+    void upsertChunks_byAnIdWhoseRowWasRenamedAndItsLabelTaken_isRefused_withTheCacheWarm_andLandsNothing() {
+        String b = registered("rn-gap-b");
+        String c = label("retired-rn-gap-c-" + (n++));
+        long x = fx.idOf(b);
+        String hex = Chash.ofText("rn-gap-upsert-" + b).toHex();
+        Resp r = withTheRowRenamedAndTheLabelTaken(fx, b, x, c, () -> fx.post("/v1/vectors/upsert-chunks",
+            "{\"collection_id\":" + x + ",\"ids\":[\"" + hex + "\"],\"documents\":[\"rename gap text\"]}"));
+        assertIdOfAnotherLabel(r, x);
+        assertThat(chunkRowsUnder(fx, x, fx.idOf(b), b, c)).as("nothing under X, under the new holder, or under either label").isZero();
+    }
+
+    @Test
+    void writeMany_byAnIdWhoseRowWasRenamedAndItsLabelTaken_isRefused_andLandsNothing() {
+        String b = label("retired-rn-wm-b-" + (n++));
+        String c = label("retired-rn-wm-c-" + (n++));
+        fxLocal.register(b);
+        long x = fxLocal.idOf(b);
+        String hex = Chash.ofText("rn-gap-write-many-" + b).toHex();
+        Resp r = withTheRowRenamedAndTheLabelTaken(fxLocal, b, x, c, () -> fxLocal.post("/v1/catalog/manifest/write_many",
+            "{\"collection_id\":" + x + ",\"chunks\":[{\"chash\":\"" + hex + "\",\"text\":\"rename gap text\",\"metadata\":{}}],\"docs\":[]}"));
+        assertIdOfAnotherLabel(r, x);
+        assertThat(chunkRowsUnder(fxLocal, x, fxLocal.idOf(b), b, c)).as("nothing under X, under the new holder, or under either label").isZero();
+    }
+
+    @Test
+    void aspectUpsert_byAnIdWhoseRowWasRenamedAndItsLabelTaken_isRefused_andLandsNothing() {
+        String b = registered("rn-gap-aspect-b");
+        String c = label("retired-rn-gap-aspect-c-" + (n++));
+        long x = fx.idOf(b);
+        Resp r = withTheRowRenamedAndTheLabelTaken(fx, b, x, c, () -> fx.post("/v1/aspects/upsert", "{\"collection_id\":" + x
+            + ",\"source_path\":\"rn-gap.md\",\"doc_id\":\"rn-gap-doc\",\"confidence\":0.9,"
+            + "\"extracted_at\":\"2026-01-01T00:00:00Z\",\"model_version\":\"v1\",\"extractor_name\":\"ex\"}"));
+        assertIdOfAnotherLabel(r, x);
+        Long newId = fx.idOf(b);
+        int aspects = fx.asSuperuser(ctx -> ctx.fetchCount(dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS,
+            dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS.COLLECTION_ID.in(x, newId)
+                .or(dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS.COLLECTION.in(b, c))));
+        assertThat(aspects).as("no aspect row under X, under the new holder, or under either label").isZero();
+    }
+
     // ---- W1 (review F1, C1, C2, F5): the writes that used to go on by label before any registry read -----------------------------
 
     /** What the hook does in the gap, as a retirement: supersedes {@code a} by {@code b}, on another thread. */
