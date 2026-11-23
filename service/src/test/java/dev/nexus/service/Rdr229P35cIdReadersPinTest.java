@@ -81,6 +81,10 @@ class Rdr229P35cIdReadersPinTest {
         java.util.Set<String> seen = new java.util.TreeSet<>();
         for (String row : censusRows(census)) {
             String[] f = row.split("\t", -1);
+            // A metadata-key row (name_column metadata.<key>, nexus-p2m1x.25) is a read of a jsonb tag, not of a name column a per-collection
+            // name index serves, so the retire this pin guards does not depend on it. tests/test_rdr229_p37_pending_violations.py holds the
+            // VIOLATING ones to P3.7; the reaper's are P4.1's, like the by-label reaper SQL above.
+            if (f[3].startsWith("metadata.")) continue;
             String group = f[0].replace(JAVA, "") + " " + f[2] + " " + f[4];
             String d = disposition.get(group + "\t" + f[3]);
             if (!seen.add(group + "\t" + f[3])) continue;

@@ -370,6 +370,9 @@ service/src/main/java/dev/nexus/service/db/PipelineRepository.java	151	pdf_pipel
 service/src/main/java/dev/nexus/service/db/PipelineRepository.java	230	pdf_pipeline	collection	where	jooq	-
 service/src/main/java/dev/nexus/service/db/PipelineRepository.java	833	pdf_pipeline	collection	where	jooq	-
 service/src/main/java/dev/nexus/service/db/PipelineRepository.java	834	pdf_pipeline	collection	where	jooq	-
+service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	81	chunks	metadata.origin_collection	accessor_def	metadata_key	-
+service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	93	chunks	metadata.origin_collection	expr	bound	-
+service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	98	chunks	metadata.origin_collection	expr	bound	-
 service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	241	catalog_collections	name	select	jooq	-
 service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	241	chunks	collection	expr	jooq	-
 service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	243	catalog_collections	name	expr	alias	-
@@ -378,6 +381,7 @@ service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	246	catalog_col
 service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	252	catalog_collections	name	expr	alias	-
 service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	262	catalog_collections	name	select	alias	-
 service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	262	chunks	collection	expr	jooq	-
+service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	263	chunks	metadata.origin_collection	expr	bound	-
 service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	264	chunks	collection	expr	jooq	-
 service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	283	catalog_collections	name	where	jooq	-
 service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	284	catalog_collections	superseded_by	where	jooq	-
@@ -387,6 +391,7 @@ service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	327	catalog_col
 service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	354	chunks	collection	where	jooq	-
 service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	387	catalog_collections	name	where	jooq	-
 service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	407	chunks	collection	where	jooq	-
+service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	408	chunks	metadata.origin_collection	where	bound	-
 service/src/main/java/dev/nexus/service/db/QuarantineOrigin.java	432	chunks	collection	where	jooq	-
 service/src/main/java/dev/nexus/service/db/ReembedJobHold.java	36	reembed_jobs	source_collection	expr	jooq	-
 service/src/main/java/dev/nexus/service/db/ReembedJobHold.java	37	reembed_jobs	target_collection	expr	jooq	-
@@ -438,6 +443,12 @@ service/src/main/java/dev/nexus/service/db/RemapRepository.java	343	catalog_coll
 service/src/main/java/dev/nexus/service/db/RenameGuard.java	223	catalog_collections	name	select	jooq	-
 service/src/main/java/dev/nexus/service/db/RenameGuard.java	226	catalog_collections	name	where	jooq	-
 service/src/main/java/dev/nexus/service/db/RenameGuard.java	228	catalog_collections	name	result	jooq	-
+service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	390	?	metadata.origin_collection	accessor_def	metadata_key	the jsonb column is not bound to a table in this file
+service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	391	?	metadata.origin_collection	where	bound	the jsonb column is not bound to a table in this file
+service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	395	?	metadata.origin_collection	where	bound	the jsonb column is not bound to a table in this file
+service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	424	?	metadata.origin_collection	accessor_def	metadata_key	the jsonb column is not bound to a table in this file
+service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	425	?	metadata.origin_collection	where	bound	the jsonb column is not bound to a table in this file
+service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	429	?	metadata.origin_collection	where	bound	the jsonb column is not bound to a table in this file
 service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	470	catalog_collections	name	select	alias	-
 service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	491	?	superseded_by	expr	literal	0 candidate tables in the statement
 service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	561	catalog_collections	superseded_by	where	alias	-
@@ -585,6 +596,9 @@ service/src/main/java/dev/nexus/service/vectors/PgVectorRepository.java	6759	chu
 service/src/main/java/dev/nexus/service/vectors/PgVectorRepository.java	6762	chunks	collection	where	helper	-
 service/src/main/java/dev/nexus/service/vectors/PgVectorRepository.java	7391	gc_audit	collection	select	jooq	-
 service/src/main/java/dev/nexus/service/vectors/PgVectorRepository.java	7421	catalog_collections	name	where	jooq	-
+service/src/main/java/dev/nexus/service/vectors/PgVectorRepository.java	7551	chunks	metadata.origin_collection	accessor_def	metadata_key	-
+service/src/main/java/dev/nexus/service/vectors/PgVectorRepository.java	7552	chunks	metadata.origin_collection	expr	bound	-
+service/src/main/java/dev/nexus/service/vectors/PgVectorRepository.java	7552	chunks	metadata.origin_collection	where	bound	-
 service/src/main/java/dev/nexus/service/vectors/PgVectorRepository.java	7565	chunks	collection	where	jooq	-
 service/src/main/java/dev/nexus/service/vectors/PgVectorRepository.java	7721	catalog_collections	name	select	jooq	-
 service/src/main/java/dev/nexus/service/vectors/PgVectorRepository.java	7724	catalog_collections	name	where	jooq	-
@@ -606,10 +620,19 @@ service/src/main/java/dev/nexus/service/vectors/ReaperRepository.java	96	chunks	
 service/src/main/java/dev/nexus/service/vectors/ReaperRepository.java	97	chunks	collection	result	jooq	-
 service/src/main/java/dev/nexus/service/vectors/ReaperRepository.java	127	catalog_collections	name	select	jooq	-
 service/src/main/java/dev/nexus/service/vectors/ReaperRepository.java	159	chunks	collection	where	jooq	-
+service/src/main/java/dev/nexus/service/vectors/ReaperRepository.java	196	chunks	metadata.origin_collection	accessor_def	metadata_key	-
+service/src/main/java/dev/nexus/service/vectors/ReaperRepository.java	202	chunks	metadata.origin_collection	select	bound	-
 service/src/main/java/dev/nexus/service/vectors/ReaperRepository.java	204	chunks	collection	where	jooq	-
+service/src/main/java/dev/nexus/service/vectors/ReaperRepository.java	206	chunks	metadata.origin_collection	where	bound	-
+service/src/main/java/dev/nexus/service/vectors/ReaperRepository.java	207	chunks	metadata.origin_collection	result	bound	-
+service/src/main/java/dev/nexus/service/vectors/ReaperRepository.java	241	chunks	metadata.origin_collection	accessor_def	metadata_key	-
 service/src/main/java/dev/nexus/service/vectors/ReaperRepository.java	251	catalog_collections	name	expr	jooq	-
+service/src/main/java/dev/nexus/service/vectors/ReaperRepository.java	254	chunks	metadata.origin_collection	select	bound	-
 service/src/main/java/dev/nexus/service/vectors/ReaperRepository.java	256	chunks	collection	where	jooq	-
+service/src/main/java/dev/nexus/service/vectors/ReaperRepository.java	257	chunks	metadata.origin_collection	where	bound	-
 service/src/main/java/dev/nexus/service/vectors/ReaperRepository.java	261	catalog_collections	name	where	jooq	-
+service/src/main/java/dev/nexus/service/vectors/ReaperRepository.java	261	chunks	metadata.origin_collection	where	bound	-
+service/src/main/java/dev/nexus/service/vectors/ReaperRepository.java	264	chunks	metadata.origin_collection	result	bound	-
 service/src/main/java/dev/nexus/service/vectors/TaxonomyCentroidRepository.java	176	taxonomy_centroids	collection	where	helper	-
 service/src/main/java/dev/nexus/service/vectors/TaxonomyCentroidRepository.java	198	taxonomy_centroids	collection	on_conflict	helper	-
 service/src/main/java/dev/nexus/service/vectors/TaxonomyCentroidRepository.java	205	taxonomy_centroids	collection	set_value	helper	-

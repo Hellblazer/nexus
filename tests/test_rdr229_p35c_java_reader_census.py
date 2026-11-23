@@ -25,6 +25,7 @@ _JAVA = "service/src/main/java/dev/nexus/service/"
 _NAME_COLUMNS = {"collection", "physical_collection", "source_collection", "target_collection", "superseded_by", "name"}
 _OPS = {"where", "join_on", "join_using", "select", "group_by", "order_by", "having", "on_conflict", "returning", "set_value",
         "result", "values", "expr", "accessor_def", "partition_by", "distinct_on", "from"}
+_LABEL_KEYS = ("origin_collection",)   # the jsonb keys that carry a collection label (the script's LABEL_KEYS, with its writer proof)
 _HEADER = ["file", "line", "table", "name_column", "op", "via", "note"]
 # Floors a working scan clears by a wide margin (the run that wrote the file found 617 rows in 49 of 388 files, 22 tables).
 _MIN_ROWS, _MIN_FILES, _MIN_TABLES = 400, 30, 15
@@ -81,13 +82,13 @@ def test_every_unresolved_occurrence_is_a_row_and_a_printed_line():
 def test_a_write_is_not_a_read_and_every_row_is_well_formed():
     for r in _rows():
         assert len(r) == len(_HEADER), r
-        assert r[3] in _NAME_COLUMNS, r
+        assert r[3] in _NAME_COLUMNS or r[3] in {"metadata." + k for k in _LABEL_KEYS}, r
         assert r[4] in _OPS, r
         assert r[1].isdigit(), r
         assert (_REPO / r[0]).is_file(), r
 
 
-_VOCABULARY = {"id", "both", "label-kept", "parse-removed"}
+_VOCABULARY = {"id", "both", "label-kept", "parse-removed", "n-a"}
 
 
 def _row_object(r: list[str]) -> str:
@@ -122,8 +123,14 @@ def _rule_breaches(dispositions) -> list[str]:
             out.append(f"{where}: kind is always 'java'")
         elif disposition not in _VOCABULARY:
             out.append(f"{where}: {disposition!r} is not one of {sorted(_VOCABULARY)}")
-        elif disposition == "label-kept" and col != "name":
+        elif disposition == "label-kept" and col != "name" and not col.startswith("metadata."):
             out.append(f"{where}: label-kept is only for a read of the registry label, catalog_collections.name (linda 2026-11-22)")
+        elif disposition == "label-kept" and col.startswith("metadata.") and not (reason.startswith("VIOLATING") or "nexus-p2m1x.35" in reason):
+            out.append(f"{where}: label-kept on a metadata key needs the R1 reaper reason (nexus-p2m1x.35) or a VIOLATING reason (linda 2026-11-24)")
+        elif disposition == "n-a" and not col.startswith("metadata."):
+            out.append(f"{where}: n-a is only for a metadata-key row (name_column metadata.<key>), never a column reader (linda 2026-11-24)")
+        elif disposition == "n-a" and not reason:
+            out.append(f"{where}: n-a needs a reason")
         elif disposition == "label-kept" and not reason:
             out.append(f"{where}: label-kept needs a one-line reason")
         elif disposition == "both" and not reason:
@@ -145,9 +152,88 @@ def test_the_rules_refuse_what_they_name():
         ("java", "db/X.java chunks join_on", "collection"): ("both", ""),                # both with no reason
         ("java", "db/X.java chunks group_by", "collection"): ("parse-removed", ""),      # no parse in a Java census
         ("sql", "db/X.java chunks order_by", "collection"): ("id", ""),                  # kind is java
+        ("java", "db/X.java chunks having", "collection"): ("n-a", "a reason"),          # n-a on a column reader
+        ("java", "db/X.java chunks values", "metadata.origin_collection"): ("n-a", ""),  # n-a with no reason
+        ("java", "db/X.java chunks returning", "metadata.origin_collection"): ("label-kept", "no ruling cited"),  # label-kept on a key, no R1 or VIOLATING reason
     }
     assert len(_rule_breaches(bad)) == len(bad)
     good = {("java", "db/X.java catalog_collections where", "name"): ("label-kept", "the user's label, not a key"),
             ("java", "db/X.java chunks where", "collection"): ("id", ""),
-            ("java", "db/X.java topics where", "collection"): ("both", "the stamp may not have reached topics")}
+            ("java", "db/X.java topics where", "collection"): ("both", "the stamp may not have reached topics"),
+            ("java", "db/X.java chunks expr", "metadata.origin_collection"): ("n-a", "import maps a file's labels to fresh ids, no live read"),
+            ("java", "db/X.java chunks select", "metadata.origin_collection"): ("label-kept", "R1 reaper ruling (nexus-p2m1x.35): holds until P4.1"),
+            ("java", "db/X.java chunks result", "metadata.origin_collection"): ("label-kept", "VIOLATING: a label match; P3.7 (taggedWith by id) switches it to id")}
     assert _rule_breaches(good) == []
+
+
+# ---- the metadata-key reads (nexus-p2m1x.25): the scanner on a planted tree ------------------------------------------------
+
+_PLANTED = '''package dev.nexus.service;
+import org.jooq.*;
+import org.jooq.impl.DSL;
+import static dev.nexus.service.jooq.nexus.Tables.*;
+class Planted {
+    static final String TAG_KEY = "origin_collection";
+    static final String ID_KEY = "origin_collection_id";
+    private static final Field<String> TAG = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, TAG_KEY);
+    Condition viaConstant(String o) { return TAG.eq(o); }
+    Condition viaLocal(DSLContext ctx, String o) {
+        Field<String> local = DSL.jsonbGetAttribute(CHUNKS.METADATA, "origin_collection").cast(String.class);
+        return local.eq(o);
+    }
+    void direct(DSLContext ctx, String o) {
+        ctx.selectOne().from(CHUNKS).where(DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "origin_collection").eq(o)).fetch();
+        ctx.selectOne().from(CHUNKS).where(DSL.function("jsonb_extract_path_text", String.class, CHUNKS.METADATA, DSL.val("origin_collection")).eq(o)).fetch();
+        ctx.fetch("SELECT 1 FROM nexus.chunks c WHERE c.metadata ->> 'origin_collection' = ?", o);
+        ctx.fetch("SELECT 1 FROM nexus.chunks c WHERE jsonb_exists(c.metadata, 'origin_collection')");
+    }
+    void notLabels(DSLContext ctx, String key) {
+        DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "title");                       // another key
+        DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, ID_KEY);                        // the id twin: counted, never a row
+        DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, key);                           // a variable key: counted, never a row
+        DSL.val(new String[] {"origin_collection"});                                 // a jsonb_set path, a write
+        ctx.fetch("SELECT 1 FROM nexus.chunks c WHERE c.metadata ->> 'origin_collection_id' IS NULL");
+    }
+}
+'''
+
+
+def _planted_run(tmp_path):
+    java = tmp_path / "service/src/main/java/dev/nexus/service"
+    java.mkdir(parents=True)
+    (java / "Planted.java").write_text(_PLANTED)
+    checks = tmp_path / "service/src/main/resources/db/rdr229"
+    checks.mkdir(parents=True)
+    (checks / "p31-checks.tsv").write_text((_REPO / "service/src/main/resources/db/rdr229/p31-checks.tsv").read_text())
+    proc = subprocess.run([sys.executable, str(_SCRIPT), str(tmp_path), "--write"], capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stderr[-1500:]
+    out = tmp_path / "service/src/test/resources/rdr229/p35c-java-reader-census.tsv"
+    rows = [ln.split("\t") for ln in out.read_text().splitlines() if ln and not ln.startswith("#")][1:]
+    return proc.stdout, [r for r in rows if r[3].startswith("metadata.")]
+
+
+def test_the_scanner_finds_each_form_of_a_metadata_key_read(tmp_path):
+    stdout, rows = _planted_run(tmp_path)
+    got = {(int(r[1]), r[4], r[5]) for r in rows}
+    lines = {n: ln for n, ln in enumerate(_PLANTED.splitlines(), 1)}
+    at = lambda needle: [n for n, ln in lines.items() if needle in ln]
+    assert all(r[3] == "metadata.origin_collection" and r[2] == "chunks" for r in rows), rows
+    # a Field bound to the read (a class constant resolved through TAG_KEY, and a local): the declaration and every use
+    (decl,) = at("private static final Field<String> TAG")
+    (use,) = at("return TAG.eq")
+    (loc,) = at("Field<String> local")
+    (loc_use,) = at("return local.eq")
+    assert (decl, "accessor_def", "metadata_key") in got and (use, "expr", "bound") in got
+    assert (loc, "accessor_def", "metadata_key") in got and (loc_use, "expr", "bound") in got   # a cast of the read still binds
+    # a direct accessor, the extract_path function, and the two SQL-string forms
+    (acc,) = at(".where(DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, \"origin_collection\")")
+    (fn,) = at('DSL.function("jsonb_extract_path_text"')
+    (arrow,) = at("c.metadata ->> 'origin_collection' = ?")
+    (exists,) = at("jsonb_exists(c.metadata, 'origin_collection')")
+    assert (acc, "where", "metadata_key") in got and (fn, "where", "metadata_key") in got
+    assert (arrow, "where", "sql_metadata_key") in got and (exists, "where", "sql_metadata_key") in got
+    # not a row: another key, the id twin, a variable key, a jsonb_set path, the id key inside a SQL string
+    flagged = {r[1] for r in rows}
+    for needle in ('"title"', "ID_KEY)", "key);", "new String[]", "origin_collection_id' IS NULL"):
+        assert not (set(map(str, at(needle))) & flagged), needle
+    assert "id-key reads (not rows) 2" in stdout and "variable-key reads (not rows) 1" in stdout, stdout
