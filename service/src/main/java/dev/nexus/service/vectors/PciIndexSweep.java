@@ -115,9 +115,9 @@ public final class PciIndexSweep implements PciIndexSet {
      * state expired marks only that state, and a failed read carries the flag forward so the expiry logs once.
      */
     private record State(PciIndexSet set, Status status, AtomicBoolean expiryLogged,
-                         Map<PciCatalog.Key, Instant> since, SortedSet<String> entries) {
+                         Map<PciCatalog.Key, Instant> since, SortedSet<String> entries, Map<String, Instant> idSince) {
         State(PciIndexSet set, Status status) {
-            this(set, status, new AtomicBoolean(), Map.of(), new TreeSet<>());
+            this(set, status, new AtomicBoolean(), Map.of(), new TreeSet<>(), Map.of());
         }
     }
 
@@ -245,6 +245,24 @@ public final class PciIndexSweep implements PciIndexSet {
     }
 
     /**
+     * As {@link #validIndex}, for the id-predicate index of {@code collectionId}: its name and since when it has been listed without a break (a
+     * set that expired and recovered counts as a new run), so the plan check's first trigger fires for a new or recovered id index too.
+     */
+    @Override
+    public Optional<ValidIndex> validIdIndex(String model, String tenant, long collectionId) {
+        State s = state.get();
+        if (expired(s)) {
+            noteExpired(s);
+            return Optional.empty();
+        }
+        if (!s.set().hasValidIdIndex(model, tenant, collectionId)) {
+            return Optional.empty();
+        }
+        Instant since = s.idSince().get(PciCatalog.idKey(model, tenant, collectionId));
+        return Optional.of(new ValidIndex(PciCatalog.indexNameById(model, tenant, collectionId), since == null ? Instant.EPOCH : since));
+    }
+
+    /**
      * From memory: the anchor the last successful read saw on the valid index for this key, or empty (no such index,
      * no parseable anchor, or the set has expired). The status object reads {@code anchor.origin()} from it.
      */
@@ -344,9 +362,15 @@ public final class PciIndexSweep implements PciIndexSet {
                 Instant earlier = continuous ? previous.since().get(key) : null;
                 since.put(key, earlier == null ? now : earlier);
             }
+            // The same rule for the id-predicate indexes, by (model, tenant, id): the plan check's "a new or recovered index is checked at once".
+            Map<String, Instant> idSince = new HashMap<>();
+            for (String key : snapshot.validIdKeys()) {
+                Instant earlier = continuous ? previous.idSince().get(key) : null;
+                idSince.put(key, earlier == null ? now : earlier);
+            }
             SortedSet<String> entries = new TreeSet<>(snapshot.validEntries());
             entries.addAll(snapshot.validIdEntries());   // the router's set stays name-keyed; the log of changes covers the id family too
-            state.set(new State(snapshot, status, new AtomicBoolean(), Map.copyOf(since), entries));
+            state.set(new State(snapshot, status, new AtomicBoolean(), Map.copyOf(since), entries, Map.copyOf(idSince)));
             logSetChange(previous.entries(), entries);
             if (status.unparsed() > 0 && status.valid() == 0 && status.validId() == 0) {
                 // Indexes named pci_ exist and none parsed, of either family: a deparse change after a PostgreSQL upgrade looks
@@ -410,7 +434,7 @@ public final class PciIndexSweep implements PciIndexSet {
     private boolean failed(String reason, RuntimeException cause) {
         State previous = state.get();
         state.set(new State(previous.set(), previous.status().failedAt(clock.instant()), previous.expiryLogged(),
-            previous.since(), previous.entries()));
+            previous.since(), previous.entries(), previous.idSince()));
         String detail = cause == null ? "the read saw no partition leaves of nexus.chunks"
             : String.valueOf(cause.getMessage() != null ? cause.getMessage() : cause.toString());
         if (isStopping()) {

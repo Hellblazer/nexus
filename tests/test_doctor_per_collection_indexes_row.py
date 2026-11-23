@@ -537,3 +537,15 @@ def test_an_invalid_id_index_during_a_build_is_not_a_warning() -> None:
 def test_an_older_engine_without_the_id_keys_reads_zero_and_shows_nothing_extra() -> None:
     r = _row(_status(valid=3))
     assert "by id" not in r.detail and "3 valid, 0 invalid" in r.detail
+
+
+def test_a_standby_engine_with_a_fresh_read_passes_an_invalid_id_count_with_the_peer_note() -> None:
+    # Same rule as the name family: the invalid id index may be the peer's build in flight, so a standby with a fresh read passes it.
+    r = _row(_status(state="standby", valid=0, valid_id=2, invalid_id=1, building=None, failing=None))
+    assert r.warn is False and r.ok is True
+    assert "1 by id" in r.detail and "peer's build in flight" in r.detail
+
+
+def test_a_standby_engine_still_warns_on_an_invalid_id_index_when_its_read_is_expired() -> None:
+    r = _row(_status(state="standby", valid=0, valid_id=2, invalid_id=1, building=None, failing=None, expired=True))
+    assert r.warn is True

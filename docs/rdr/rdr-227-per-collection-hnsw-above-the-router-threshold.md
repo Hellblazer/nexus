@@ -976,7 +976,7 @@ A standby engine, and an engine whose admin credentials were refused, read:
 The counts are global, not per tenant, like the existing `reaper` object on the
 same unauthenticated route. The object is additive and goes in the wire ledger;
 a client against an engine that predates it finds no key and reports
-not-applicable. Each sweep also logs `event=pci_sweep valid= valid_id= invalid= invalid_id= unparsed= reindex_leftover=`,
+not-applicable. Each sweep also logs `event=pci_sweep valid= invalid= unparsed= reindex_leftover=`,
 and `event=pci_sweep_set_changed added_count= removed_count= added= removed=` when
 the router's set changed between two reads (`leaf:collection:index` entries, cut at
 20 with the exact counts; the first read after a boot lists what the boot found, and

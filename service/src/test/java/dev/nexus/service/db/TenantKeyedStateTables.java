@@ -688,6 +688,7 @@ final class TenantKeyedStateTables {
             "PciIndexSweep.State.expiryLogged",
             "PciIndexSweep.State.set",
             "PciIndexSweep.State.since",
+            "PciIndexSweep.State.idSince",
             "PciIndexSweep.state",
             "PciPlanCheck.armsSeen",
             "PciReconciler.Planned.actions",
