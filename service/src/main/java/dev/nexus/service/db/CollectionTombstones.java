@@ -49,6 +49,7 @@ public final class CollectionTombstones {
      * {@link RenameBusyException} says so. A wait over {@link RegistryLockWait#SLOW_MS} is logged with its time.
      */
     static void lockRows(DSLContext ctx, String tenant, String... names) {
+        WriteRegistryMemo.exempt(ctx, "a verb that locks the registry rows FOR UPDATE");
         String previous = ctx.select(DSL.function("current_setting", String.class, DSL.val("lock_timeout"))).fetchOne(0, String.class);
         ctx.select(DSL.function("set_config", String.class, DSL.val("lock_timeout"), DSL.val(rowLockTimeoutMs), DSL.val(true))).fetch();
         long started = System.nanoTime();

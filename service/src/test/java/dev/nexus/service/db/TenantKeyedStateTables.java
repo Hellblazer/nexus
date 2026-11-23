@@ -366,6 +366,7 @@ final class TenantKeyedStateTables {
         notKeyed.put("ExpectedCollectionIds.Carrier.consumed", "the labels the request on this thread has read by id in its own transaction; dies with the request's carrier (RDR-229 P3.5a)");
         notKeyed.put("ExpectedCollectionIds.Carrier.readByTransaction", "census only (a test turns it on): the labels each transaction of the request read, by the transaction's jOOQ configuration; dies with the request's carrier (RDR-229 P3.5a)");
         notKeyed.put("ExpectedCollectionIds.Carrier.historyTransactions", "census only: the transactions of the request that declared a history write; dies with the request's carrier (RDR-229 P3.5a)");
+        notKeyed.put("StrictWriterCensus.FOUND", "census only (off unless -Dnexus.writer.census is set): the guarded-table writes that ran in a transaction with no registry read, as 'table @ frame' strings; a test reads it and nothing is keyed by tenant (RDR-229 P3.5a)");
         notKeyed.put("ExpectedCollectionIds.Carrier.findings", "census only: the write transactions of the request that read none of its named ids; dies with the request's carrier (RDR-229 P3.5a)");
         notKeyed.put("CollectionRegistry.writeReadHookForTests", TEST_HOOK);
         notKeyed.put("DeadlockRetry.retryListenerForTests", TEST_HOOK);
