@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -56,6 +57,33 @@ class PciGate3CoverageScanIntegrationTest extends PciIdIndexSupport {
             DSLContext ctx = via.apply(DSL.using(admin, SQLDialect.POSTGRES));
             return CompletionCheck.evaluate(ctx, new CompletionCheck.ReadSet(List.of(), List.of()), source, List.of());
         }
+    }
+
+    /**
+     * RDR-229 P3.5c (census V1): from the latch the near-latch scan probes a collection's rows by its id, so a collection renamed in place (its
+     * chunk rows keep the old label) still qualifies under its new label; before it, the name probe finds none under the new label.
+     */
+    @Test
+    void theNearLatchScanProbesByIdFromTheLatch_aRenamedCollectionStillQualifies() throws Exception {
+        String tenant = newTenant("covid");
+        String oldLabel = name("covid-old"), newLabel = name("covid-new");
+        collection(tenant, oldLabel, 300);                       // qualifies (>= B), no id index yet
+        PciReconciler r = reconciler(settings(2));
+        r.reconcileOnce();
+        int renamed = asSuperuser(su -> su.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.NAME, newLabel)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(oldLabel)).execute());
+        assertThat(renamed).as("the registry row is renamed in place").isEqualTo(1);
+        int carrying = asSuperuser(su -> su.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(newLabel))));
+        assertThat(carrying).as("precondition: no chunk row carries the new label").isZero();
+
+        var byId = read(new PciGate3Coverage(catalog::read, settings(2), Clock.systemUTC(), () -> true));
+        var byName = read(new PciGate3Coverage(catalog::read, settings(2), Clock.systemUTC()));
+
+        assertThat(byId).as("the scan answered").isPresent();
+        assertThat(byId.get().planned()).as("by id the renamed collection qualifies and needs an id index").isNotEmpty();
+        assertThat(byName.map(c -> c.planned().size()).orElse(0))
+            .as("by name the new label counts no row, so nothing is required of it (the name path before the latch)")
+            .isLessThan(byId.get().planned().size());
     }
 
     // -- S-a: the per-leaf cap ---------------------------------------------------------------------------------------------

@@ -50,10 +50,6 @@ final class PciLeafCounting {
      * ({@code chunks_gate_probe_owner_read}, vectors-029), so without it a same-named collection of another tenant would
      * be added to the count and a leaf would build an index its own rows do not warrant. The name path ({@link Gate3#never()}).
      */
-    static int count(DSLContext tx, int dim, String collection, String model, String tenant, int cap) {
-        return count(tx, dim, collection, model, tenant, cap, Gate3.never());
-    }
-
     /**
      * {@link #count(DSLContext, int, String, String, String, int)} that reads the collection's rows by {@code collection_id} once
      * {@code gate3} holds (RDR-229 P3.5c, nexus-p2m1x.25): the label resolves to the registry's id in the same statement, so a collection
@@ -64,7 +60,7 @@ final class PciLeafCounting {
      */
     static int count(DSLContext tx, int dim, String collection, String model, String tenant, int cap, Gate3 gate3) {
         if (!gate3.holds()) {
-            Integer n = PgVectorRepository.probeSelectedRowsQuery(tx, dim, new String[] {collection}, model, tenant, cap)
+            Integer n = PgVectorRepository.probeSelectedRowsQuery(tx, dim, CollectionSelector.byName(java.util.List.of(collection)), model, tenant, cap)
                 .fetchOne(0, Integer.class);
             return n == null ? 0 : n;
         }
