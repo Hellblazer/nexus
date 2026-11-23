@@ -463,8 +463,8 @@ final class CollectionRouteCensus {
      * test requires every named row to call the helper.
      */
     static final List<Helper> HELPERS = List.of(
-        new Helper(CATALOG, "requireCollection", List.of("handleIndexRunBegin", "handleIndexRunBeginMany", "handleManifestWrite",
-            "handleManifestAppend", "handleImportChunk")),
+        new Helper(CATALOG, "requireCollection", List.of("handleManifestWrite", "handleManifestAppend",
+            "handleManifestAppendMany", "handleManifestWriteMany", "handleImportChunk")),
         new Helper(PIPELINE, "refFromBody", List.of("handleProgress", "handleExtractionMeta", "handleComplete", "handleFail",
             "handlePages", "handleChunks", "handleMarkUploaded", "handleResetUploaded", "handleClearWal", "handleDelete")),
         new Helper(PIPELINE, "optionalRefFromQuery", List.of("handleCounts")));
