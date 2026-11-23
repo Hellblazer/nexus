@@ -297,6 +297,7 @@ public final class DataMoveWorker implements AutoCloseable {
                 .from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
                 .where(DSL.condition(DSL.function("starts_with", SQLDataType.BOOLEAN, name,
                     DSL.val(APPLICATION_NAME_PREFIX))))
+                .and(DataMoveOrphans.ours())
                 .and(DSL.not(DSL.condition(DSL.function("starts_with", SQLDataType.BOOLEAN, name,
                     DSL.val(applicationName)))))
                 .and(pid.ne(DSL.function("pg_backend_pid", SQLDataType.INTEGER)))
