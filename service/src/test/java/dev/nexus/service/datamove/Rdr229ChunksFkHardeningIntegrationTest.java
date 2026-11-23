@@ -5,10 +5,12 @@ package dev.nexus.service.datamove;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.vectors.PciBuilderSession;
 import dev.nexus.service.vectors.Rdr229ChunksFk;
 import org.jooq.Field;
 import org.jooq.SQLDialect;
+import org.jooq.Table;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -81,8 +83,8 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
         String suffix = Long.toString(System.nanoTime());
         String otherDb = "p33c_other_db_" + suffix;
         String otherRole = "p33c_other_role_" + suffix;
-        runSql(P33cSql.stmt("create.database", otherDb));
-        runSql(P33cSql.stmt("create.role", otherRole, "p33c_pw"));
+        PgContainerHelper.createDatabase(su, otherDb);
+        PgContainerHelper.createLoginRole(su, otherRole, "p33c_pw", false);
         String otherUrl = adminConnection.url().replaceFirst("(jdbc:postgresql://[^/]+/)[^?]+", "$1" + otherDb);
         try (Connection ours = openAsWorker("nexus-data-move-ours-" + suffix);
              Connection otherDatabase = open(otherUrl, adminConnection.user(), adminConnection.password(), "nexus-data-move-otherdb-" + suffix);
@@ -96,8 +98,8 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
             assertThat(alive(otherDatabase)).as("the same name in another database of the cluster: left alone").isTrue();
             assertThat(alive(otherUser)).as("the same name, same database, another role: left alone").isTrue();
         } finally {
-            runSql(P33cSql.stmt("drop.database.force", otherDb));
-            runSql(P33cSql.stmt("drop.role", otherRole));
+            PgContainerHelper.dropDatabaseIfExists(su, otherDb);
+            PgContainerHelper.dropRoleRevokingGrants(su, otherRole);
         }
     }
 
@@ -108,13 +110,7 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
         try (Connection victim = openAsWorker(application)) {
             int victimPid = pid(victim);
             OffsetDateTime start = backendStart(victim);
-            var sleeper = CompletableFuture.runAsync(() -> {
-                try {
-                    MoveSql.runOnComplete(victim, P33cSql.stmt("sleep", "30"));
-                } catch (SQLException e) {
-                    throw new IllegalStateException(sqlState(e), e);
-                }
-            });
+            var sleeper = CompletableFuture.runAsync(() -> sleep(victim, 30));
             sleepMs(700);
 
             DataMoveOrphans.cancelBackend(adminConnection, victimPid, application, start.minusSeconds(60));
@@ -230,7 +226,7 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
         Connection writer = pg.createConnection("");
         parked.add(writer);
         writer.setAutoCommit(false);
-        MoveSql.runOnComplete(writer, P33cSql.stmt("lock.table", "nexus." + quote(fks.get(fks.size() - 1).leaf()), "ROW EXCLUSIVE"));
+        lock(writer, fks.get(fks.size() - 1).leaf(), PgContainerHelper.LockMode.ROW_EXCLUSIVE);
         try (Connection builder = openAsWorker(PciBuilderSession.APPLICATION_NAME_PREFIX + "p33c-test")) {
             var w = productionWorker(new VerifyingFinisher());
 
@@ -258,12 +254,12 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
         Connection writer = pg.createConnection("");
         parked.add(writer);
         writer.setAutoCommit(false);
-        MoveSql.runOnComplete(writer, P33cSql.stmt("lock.table", "nexus." + quote(chunkLeaves().get(0)), "ROW EXCLUSIVE"));
+        lock(writer, chunkLeaves().get(0), PgContainerHelper.LockMode.ROW_EXCLUSIVE);
 
         try (Connection c = pg.createConnection("")) {
             c.setAutoCommit(false);
-            MoveSql.runOnComplete(c, P33cSql.stmt("set.local", "statement_timeout", "1400"));
-            MoveSql.runOnComplete(c, P33cSql.stmt("set.local", "lock_timeout", "'700ms'"));
+            setLocal(c, "statement_timeout", 1400);
+            setLocal(c, "lock_timeout", "700ms");
             long start = System.nanoTime();
             assertThatThrownBy(() -> MoveSql.runOnComplete(c, onCompleteOf(Rdr229ChunksFk.ADOPT_LABEL)))
                 .as("the lock on chunks is refused").satisfies(t -> assertThat(sqlState(t)).isEqualTo("55P03"));
@@ -288,7 +284,7 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
         runSwaps(new VerifyingFinisher());
         validateEveryLeafByHand();
         String text = onCompleteOf(Rdr229ChunksFk.ADOPT_LABEL);
-        String addStatement = P33cSql.stmt("add.parent", Rdr229ChunksFk.PARENT_CONSTRAINT);
+        String addStatement = Rdr229ChunksFk.ADD_PARENT;
         assertThat(text).as("the parent ADD is in the registered text").contains(addStatement);
         ctx().update(table("nexus", "data_moves"))
             .set(DSL.field(DSL.name("statement_timeout_ms"), Integer.class), 1_000)
@@ -325,7 +321,7 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
         Connection adoption = pg.createConnection("");
         parked.add(adoption);
         adoption.setAutoCommit(false);
-        MoveSql.runOnComplete(adoption, P33cSql.stmt("lock.table", "nexus.chunks", "SHARE ROW EXCLUSIVE"));   // what the adoption holds, from its lock to its commit
+        lock(adoption, "chunks", PgContainerHelper.LockMode.SHARE_ROW_EXCLUSIVE);   // what the adoption holds, from its lock to its commit
         String lateTenant = "p33c-serialize-leaf-" + System.nanoTime();
         tenantsUsed.add(lateTenant);
         var creating = CompletableFuture.runAsync(() -> {
@@ -353,7 +349,7 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
         Connection b = openAsWorker(PciBuilderSession.APPLICATION_NAME_PREFIX + "p33c-real-" + System.nanoTime());
         parked.add(b);
         b.setAutoCommit(false);
-        MoveSql.runOnComplete(b, P33cSql.stmt("lock.table", "nexus." + quote(leaf), "SHARE UPDATE EXCLUSIVE"));
+        lock(b, leaf, PgContainerHelper.LockMode.SHARE_UPDATE_EXCLUSIVE);
         return b;
     }
 
@@ -449,7 +445,7 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
         try (Connection plain = openAsWorker("p33c-plain-session")) {
             parked.add(plain);
             plain.setAutoCommit(false);
-            MoveSql.runOnComplete(plain, P33cSql.stmt("lock.table", "nexus." + quote(chunkLeaves().get(0)), "SHARE UPDATE EXCLUSIVE"));
+            lock(plain, chunkLeaves().get(0), PgContainerHelper.LockMode.SHARE_UPDATE_EXCLUSIVE);
 
             productionWorker(new VerifyingFinisher()).runCycle();
 
@@ -549,7 +545,9 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
             if (once.compareAndSet(false, true)) {
                 try {
                     ctx().alterTable(table("nexus", leaf)).dropConstraint(DSL.name(key)).execute();
-                    runSql(P33cSql.stmt("add.fk.not.valid", "nexus." + quote(leaf), quote(key), Rdr229ChunksFk.FK_DEFINITION));
+                    try (Connection c = pg.createConnection("")) {
+                        addLeafKeyNotValid(c, leaf, key);
+                    }
                 } catch (SQLException e) {
                     throw new IllegalStateException(e);
                 }
@@ -576,8 +574,8 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
         try (Connection c = pg.createConnection("")) {
             c.setAutoCommit(false);
             try {
-                MoveSql.runOnComplete(c, P33cSql.stmt("set.local", "statement_timeout", "1400"));
-                MoveSql.runOnComplete(c, P33cSql.stmt("set.local", "lock_timeout", "'700ms'"));
+                setLocal(c, "statement_timeout", 1400);
+                setLocal(c, "lock_timeout", "700ms");
                 MoveSql.runOnComplete(c, text);
                 c.commit();
             } catch (SQLException | RuntimeException e) {
@@ -592,7 +590,7 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
         Connection holder = pg.createConnection("");
         parked.add(holder);
         holder.setAutoCommit(false);
-        MoveSql.runOnComplete(holder, P33cSql.stmt("lock.table", "nexus.catalog_collections", "ROW EXCLUSIVE"));
+        lock(holder, "catalog_collections", PgContainerHelper.LockMode.ROW_EXCLUSIVE);
         return CompletableFuture.runAsync(() -> {
             sleepMs(ms);
             try {
@@ -642,7 +640,7 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
         Connection writer = pg.createConnection("");
         parked.add(writer);
         writer.setAutoCommit(false);
-        MoveSql.runOnComplete(writer, P33cSql.stmt("lock.table", "nexus." + quote(leaf), "ROW EXCLUSIVE"));
+        lock(writer, leaf, PgContainerHelper.LockMode.ROW_EXCLUSIVE);
 
         long start = System.nanoTime();
         assertThatThrownBy(() -> runAdoptionUnderProductionBounds(onCompleteOf(Rdr229ChunksFk.ADOPT_LABEL)))
@@ -667,7 +665,7 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
             sleepMs(2_500);
 
             assertThat(watch.fired()).as("a closed watch did not fire although its move is paused").isFalse();
-            MoveSql.runOnComplete(victim, P33cSql.stmt("sleep", "0.3"));   // would raise 57014 had it been cancelled
+            sleep(victim, 0.3);   // would raise 57014 had it been cancelled
         }
     }
 
@@ -681,8 +679,8 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
     private long registryScans(String user, String password, String table, String constraint) throws Exception {
         try (Connection c = open(adminConnection.url(), user, password, "p33c-probe")) {
             c.setAutoCommit(false);
-            MoveSql.runOnComplete(c, P33cSql.stmt("add.fk.not.valid", "nexus." + table, constraint, Rdr229ChunksFk.FK_DEFINITION));
-            MoveSql.runOnComplete(c, P33cSql.stmt("validate.constraint", "nexus." + table, constraint));
+            addLeafKeyNotValid(c, table, constraint);
+            PgContainerHelper.validateConstraint(c, table("nexus", table), constraint);
             Field<Long> idx = DSL.field(DSL.name("idx_scan"), Long.class);
             Field<Long> seq = DSL.field(DSL.name("seq_scan"), Long.class);
             var scanned = DSL.using(c, SQLDialect.POSTGRES).select(seq, idx).from(DSL.table(DSL.name("pg_catalog", "pg_stat_xact_user_tables")))
@@ -715,18 +713,21 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
         String role = "p33c_nonowner_" + suffix;
         String ownerTable = "p33c_scratch_owner_" + suffix;
         String otherTable = "p33c_scratch_other_" + suffix;
-        runSql(P33cSql.stmt("create.role", role, "p33c_pw"));
-        runSql(P33cSql.stmt("grant.schema.usage", role));
-        runSql(P33cSql.stmt("grant.select.references", role));
+        PgContainerHelper.createLoginRole(su, role, "p33c_pw", false);
+        PgContainerHelper.grantSchemaUsage(su, "nexus", role);
+        PgContainerHelper.grantSchemaUsage(su, "nexus_test", role);   // the fixtures' functions the probe calls
+        Table<?> registry = table("nexus", "catalog_collections");
+        ctx().grant(DSL.privilege("select"), DSL.privilege("references")).on(registry).to(DSL.role(DSL.name(role))).execute();
         try {
             for (String t : List.of(ownerTable, otherTable)) {
                 // every registry row twenty times over: the per-row fallback probes once per row, the set-based check once in all
-                runSql(P33cSql.stmt("create.scratch", t));
+                ctx().createTable(table("nexus", t)).as(DSL.select(DSL.field(DSL.name("r", "tenant_id")), DSL.field(DSL.name("r", "collection_id")),
+                        DSL.field(DSL.name("r", "embedding_model"))).from(registry.as("r")).crossJoin(DSL.generateSeries(1, 20).as("g"))).execute();
             }
             long rows = ctx().fetchCount(table("nexus", ownerTable));
             assertThat(rows).as("non-vacuity: at least twenty rows, whose probes a per-row check would make").isGreaterThanOrEqualTo(20L);
-            runSql(P33cSql.stmt("alter.owner", otherTable, role));
-            runSql(P33cSql.stmt("alter.owner", ownerTable, adminConnection.user()));
+            PgContainerHelper.alterTableOwner(su, table("nexus", otherTable), role);
+            PgContainerHelper.alterTableOwner(su, table("nexus", ownerTable), adminConnection.user());
 
             long ownerScans = registryScans(adminConnection.user(), adminConnection.password(), ownerTable, "p33c_owner_fk");
             long nonOwnerScans = registryScans(role, "p33c_pw", otherTable, "p33c_other_fk");
@@ -736,11 +737,12 @@ class Rdr229ChunksFkHardeningIntegrationTest extends Rdr229SwapMovesFixtures {
             assertThat(nonOwnerScans).as("a role that does not own the registry: one probe per referencing row (the per-row fallback), %d rows", rows)
                 .isGreaterThanOrEqualTo(rows);
         } finally {
-            runSql(P33cSql.stmt("drop.table", ownerTable));
-            runSql(P33cSql.stmt("drop.table", otherTable));
-            runSql(P33cSql.stmt("revoke.registry", role));
-            runSql(P33cSql.stmt("revoke.schema", role));
-            runSql(P33cSql.stmt("drop.role", role));
+            ctx().dropTableIfExists(table("nexus", ownerTable)).execute();
+            ctx().dropTableIfExists(table("nexus", otherTable)).execute();
+            ctx().revoke(DSL.privilege("select"), DSL.privilege("references")).on(registry).from(DSL.role(DSL.name(role))).execute();
+            PgContainerHelper.revokeSchemaUsage(su, "nexus", role);
+            PgContainerHelper.revokeSchemaUsage(su, "nexus_test", role);
+            PgContainerHelper.dropRoleRevokingGrants(su, role);
         }
     }
 }
