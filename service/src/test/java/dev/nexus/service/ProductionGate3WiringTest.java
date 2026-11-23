@@ -53,7 +53,7 @@ class ProductionGate3WiringTest {
         "http/ChashConformanceHandler.java", "vectors/ChunkConstraintAdmin.java", "vectors/ChunkKeySweep.java",
         "vectors/ChunkOwnerLabel.java", "vectors/ChunkSensitivity.java", "vectors/ManifestLabelStage.java",
         "vectors/PciIdBuilds.java", "vectors/PciLeafCounting.java", "vectors/PciQueryRingReader.java",
-        "vectors/PciReconciler.java", "vectors/PgVectorRepository.java", "vectors/ReaperRepository.java",
+        "vectors/PciGate3Coverage.java", "vectors/PciReconciler.java", "vectors/PgVectorRepository.java", "vectors/ReaperRepository.java",
         "vectors/TaxonomyCentroidRepository.java", "vectors/TopicRouteArm.java");
 
     /** Comments removed, string and text-block literals kept whole: a {@code "/*"} inside a literal must not swallow the code after it. */

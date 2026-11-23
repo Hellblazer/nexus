@@ -37,6 +37,15 @@ import static org.assertj.core.api.Assertions.assertThat;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class PciGate3CoverageScanIntegrationTest extends PciIdIndexSupport {
 
+    /** The registry's name keys are dropped once, for the near-latch scan's renamed-in-place case (the one-row rename P3.7 runs). */
+    @org.junit.jupiter.api.BeforeAll
+    void dropTheRegistryNameKeys() throws Exception {
+        asSuperuser(su -> {
+            assertThat(dev.nexus.service.VecPciRegistryNames.dropRegistryNameKeys(su)).as("non-vacuity: the registry's name keys are dropped").isNotEmpty();
+            return null;
+        });
+    }
+
     private PciGate3Coverage coverage(PciSettings s, Clock clock) {
         return new PciGate3Coverage(catalog::read, s, clock);
     }
