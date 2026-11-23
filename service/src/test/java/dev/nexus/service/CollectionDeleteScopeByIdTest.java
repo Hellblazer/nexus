@@ -45,6 +45,7 @@ class CollectionDeleteScopeByIdTest {
     @BeforeAll
     void startAll() throws Exception {
         fx = new CollectionRouteFixture();
+        fx.buildIdTwins();   // a real install has the id twins before gate 3 latches (P3.4's pass)
         fx.gate3.set(true);
         // the name-key drop move, as far as this class needs it. Every inbound foreign key on a registry key that
         // holds `name` goes first: the primary key's cascade does not reach the ones on the other name-keyed unique

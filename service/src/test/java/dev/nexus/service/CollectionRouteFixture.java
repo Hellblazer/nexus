@@ -214,6 +214,18 @@ final class CollectionRouteFixture implements AutoCloseable {
         send("GET", "/v1/catalog/collections/list", null);
     }
 
+    /**
+     * Builds the id twins (the id-keyed unique indexes) the way a real install has them before gate 3 can latch: P3.4's
+     * {@link dev.nexus.service.datamove.IdUniqueIndexPass}, run once as its own census tests do. A test that latches gate 3
+     * calls this first; from the latch the named upserts arbitrate on those twins (P3.5c, elsinore), and a latched store
+     * without them is one a real install cannot reach (42P10 on the first latched upsert).
+     */
+    void buildIdTwins() {
+        new dev.nexus.service.datamove.IdUniqueIndexPass(
+            new dev.nexus.service.db.AdminConnection(pg.getJdbcUrl(), pg.getUsername(), pg.getPassword()),
+            new dev.nexus.service.BootWorkRegistry(java.time.Clock.systemUTC()), () -> true).runOnce();
+    }
+
     @Override
     public void close() {
         dev.nexus.service.db.CollectionRegistry.shared().evictTenant(tenant);
