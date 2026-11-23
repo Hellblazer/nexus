@@ -104,14 +104,14 @@ public final class CollectionSelector {
                    out.putIfAbsent(r.value1(), r.value2());
                }
            });
-        // a label the request named by id is that id, when the row of that id still carries the label; else it resolves to nothing, never
+        // a label the request named by id is that id, whatever label the row bears now; if no row has the id it resolves to nothing, never
         // to the row that holds the label now (I7). A plain read: the by-id read FOR KEY SHARE is the write's own, taken before this.
         for (String n : nonEmpty) {
             var requested = dev.nexus.service.db.ExpectedCollectionIds.requested(n);
             if (requested.isPresent()) {
                 Long held = ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
                     .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(requested.getAsLong()))
-                    .and(CATALOG_COLLECTIONS.NAME.eq(n)).fetchOne(CATALOG_COLLECTIONS.COLLECTION_ID);
+                    .fetchOne(CATALOG_COLLECTIONS.COLLECTION_ID);
                 if (held == null) {
                     out.remove(n);
                 } else {
@@ -181,7 +181,7 @@ public final class CollectionSelector {
         if (nonEmpty.isEmpty()) {
             return DSL.falseCondition();
         }
-        // a label the request named by id is that id (with the label), never the row that holds the label now (I7)
+        // a label the request named by id is that id, never the row that holds the label now (I7)
         List<String> named = nonEmpty.stream().filter(n -> dev.nexus.service.db.ExpectedCollectionIds.requested(n).isPresent()).toList();
         List<String> free = nonEmpty.stream().filter(n -> !named.contains(n)).toList();
         Condition out = DSL.falseCondition();
