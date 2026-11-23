@@ -2,6 +2,10 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import dev.nexus.service.datamove.Gate3;
+import org.jooq.Condition;
+import org.jooq.DSLContext;
+import org.jooq.Field;
 import org.jooq.impl.DSL;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -60,10 +64,39 @@ public final class RemapRepository {
             String targetCollection,
             String provenance) {}
 
+    private static final Field<?>[] NAME_KEY = {CHASH_REMAP.TENANT_ID, CHASH_REMAP.SOURCE_COLLECTION, CHASH_REMAP.OLD_ID};
+    private static final Field<?>[] ID_KEY = {CHASH_REMAP.TENANT_ID, CHASH_REMAP.SOURCE_COLLECTION_ID, CHASH_REMAP.OLD_ID};
+
     private final TenantScope tenantScope;
+    private final Gate3 gate3;
 
     public RemapRepository(TenantScope tenantScope) {
+        this(tenantScope, Gate3.never());
+    }
+
+    /** RDR-229 P3.5c: from gate 3 on the install the readers name a collection by its id column ({@link CollectionKey}). */
+    public RemapRepository(TenantScope tenantScope, Gate3 gate3) {
         this.tenantScope = tenantScope;
+        this.gate3 = java.util.Objects.requireNonNull(gate3, "gate3");
+    }
+
+    private CollectionKey ck() {
+        return CollectionKey.of(gate3);
+    }
+
+    private Condition sourceIs(String tenant, String c) {
+        return ck().eq(tenant, CHASH_REMAP.SOURCE_COLLECTION, CHASH_REMAP.SOURCE_COLLECTION_ID, c);
+    }
+
+    private Condition targetIs(String tenant, String c) {
+        return ck().eq(tenant, CHASH_REMAP.TARGET_COLLECTION, CHASH_REMAP.TARGET_COLLECTION_ID, c);
+    }
+
+    /** The batch upsert under {@link TwinKeyUpsert}: the id key arbitrates from gate 3, the name key before. */
+    private <T> T upsert(DSLContext ctx, java.util.function.Function<Field<?>[], T> statement) {
+        boolean byId = ck().byId();
+        return TwinKeyUpsert.run(ctx, "chash_remap", byId ? TwinKeyUpsert.Arbiter.ID_KEY : TwinKeyUpsert.Arbiter.NAME_KEY,
+            c -> statement.apply(byId ? ID_KEY : NAME_KEY));
     }
 
     /**
@@ -149,7 +182,8 @@ public final class RemapRepository {
                         newChashBytes(e.newChash()), e.targetCollection(), now, e.provenance(),
                         ids.get(e.sourceCollection()), ids.get(e.targetCollection()));
             }
-            step.onConflict(CHASH_REMAP.TENANT_ID, CHASH_REMAP.SOURCE_COLLECTION, CHASH_REMAP.OLD_ID)
+            final var rows = step;
+            upsert(ctx, key -> rows.onConflict(key)
                 .doUpdate()
                 .set(CHASH_REMAP.NEW_CHASH, DSL.field("EXCLUDED.new_chash", byte[].class))
                 .set(CHASH_REMAP.TARGET_COLLECTION, DSL.field("EXCLUDED.target_collection", String.class))
@@ -158,7 +192,7 @@ public final class RemapRepository {
                 // the conflict branch re-stamps both ids: a row not stamped yet has names and no ids
                 .set(CHASH_REMAP.SOURCE_COLLECTION_ID, DSL.field("EXCLUDED.source_collection_id", Long.class))
                 .set(CHASH_REMAP.TARGET_COLLECTION_ID, DSL.field("EXCLUDED.target_collection_id", Long.class))
-                .execute();
+                .execute());
             return null;
         });
         log.info("event=remap_record_batch tenant={} entries={} deduped={}",
@@ -190,8 +224,8 @@ public final class RemapRepository {
         int deleted = tenantScope.withTenant(tenant, ctx ->
             ctx.deleteFrom(CHASH_REMAP)
                .where(CHASH_REMAP.TENANT_ID.eq(tenant)
-                       .and(CHASH_REMAP.SOURCE_COLLECTION.eq(sourceCollection))
-                       .and(CHASH_REMAP.TARGET_COLLECTION.eq(targetCollection)))
+                       .and(sourceIs(tenant, sourceCollection))
+                       .and(targetIs(tenant, targetCollection)))
                .execute());
         log.info("event=remap_clear_leg tenant={} source={} target={} deleted={}",
                 tenant, sourceCollection, targetCollection, deleted);
@@ -206,10 +240,11 @@ public final class RemapRepository {
     public List<Map<String, String>> entriesForCollection(String tenant, String sourceCollection) {
         requireNonBlank(sourceCollection, "source_collection");
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(CHASH_REMAP.OLD_ID, CHASH_REMAP.NEW_CHASH, CHASH_REMAP.TARGET_COLLECTION)
+            ctx.select(CHASH_REMAP.OLD_ID, CHASH_REMAP.NEW_CHASH,
+                       ck().label(tenant, CHASH_REMAP.TARGET_COLLECTION, CHASH_REMAP.TARGET_COLLECTION_ID))
                .from(CHASH_REMAP)
                .where(CHASH_REMAP.TENANT_ID.eq(tenant)
-                       .and(CHASH_REMAP.SOURCE_COLLECTION.eq(sourceCollection)))
+                       .and(sourceIs(tenant, sourceCollection)))
                .orderBy(CHASH_REMAP.OLD_ID)
                .fetch(r -> Map.of(
                        "old_id", r.value1(),
@@ -236,7 +271,7 @@ public final class RemapRepository {
             ctx.select(CHASH_REMAP.OLD_ID, CHASH_REMAP.NEW_CHASH)
                .from(CHASH_REMAP)
                .where(CHASH_REMAP.TENANT_ID.eq(tenant))
-               .orderBy(CHASH_REMAP.SOURCE_COLLECTION, CHASH_REMAP.OLD_ID)
+               .orderBy(ck().key(CHASH_REMAP.SOURCE_COLLECTION, CHASH_REMAP.SOURCE_COLLECTION_ID), CHASH_REMAP.OLD_ID)
                .limit(limit)
                .offset(offset)
                .fetch(r -> List.of(r.value1(), newChashHex(r.value2()))));
@@ -254,7 +289,7 @@ public final class RemapRepository {
         return tenantScope.withTenant(tenant, ctx -> {
             var where = CHASH_REMAP.TENANT_ID.eq(tenant);
             if (sourceCollection != null && !sourceCollection.isBlank()) {
-                where = where.and(CHASH_REMAP.SOURCE_COLLECTION.eq(sourceCollection));
+                where = where.and(sourceIs(tenant, sourceCollection));
             }
             return (long) ctx.fetchCount(CHASH_REMAP, where);
         });
@@ -262,12 +297,14 @@ public final class RemapRepository {
 
     /** Distinct source collections — the prior-collections (source-gone) probe input. */
     public List<String> sourceCollections(String tenant) {
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.selectDistinct(CHASH_REMAP.SOURCE_COLLECTION)
-               .from(CHASH_REMAP)
-               .where(CHASH_REMAP.TENANT_ID.eq(tenant))
-               .orderBy(CHASH_REMAP.SOURCE_COLLECTION)
-               .fetch(CHASH_REMAP.SOURCE_COLLECTION));
+        return tenantScope.withTenant(tenant, ctx -> {
+            var raw = ck().label(tenant, CHASH_REMAP.SOURCE_COLLECTION, CHASH_REMAP.SOURCE_COLLECTION_ID);
+            var lbl = raw.as("source_collection");
+            return ctx.selectDistinct(lbl).from(CHASH_REMAP)
+               .where(CHASH_REMAP.TENANT_ID.eq(tenant).and(raw.isNotNull()))
+               .orderBy(lbl)
+               .fetch(lbl);
+        });
     }
 
     private static void requireNonBlank(String value, String field) {

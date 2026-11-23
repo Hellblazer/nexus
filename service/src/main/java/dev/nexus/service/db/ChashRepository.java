@@ -1,5 +1,6 @@
 package dev.nexus.service.db;
 
+import dev.nexus.service.datamove.Gate3;
 import dev.nexus.service.vectors.DimTables;
 import org.jooq.DSLContext;
 
@@ -90,16 +91,33 @@ public final class ChashRepository {
         " WHERE tenant_id = current_setting('nexus.tenant', true) AND chash = ?";
 
     private final TenantScope tenantScope;
+    private final Gate3 gate3;
     /** RDR-229 P3.5a: the rename refusal this repository's rename consults first ({@link RenameGuard#open()} never refuses). */
     private final RenameGuard renameGuard;
 
     public ChashRepository(TenantScope tenantScope) {
-        this(tenantScope, RenameGuard.open());
+        this(tenantScope, Gate3.never(), RenameGuard.open());
     }
 
+    /** The rename guard alone: gate 3 never holds (P3.5a's callers and tests). */
     public ChashRepository(TenantScope tenantScope, RenameGuard renameGuard) {
+        this(tenantScope, Gate3.never(), renameGuard);
+    }
+
+    /** RDR-229 P3.5c: from gate 3 on the install the readers name a collection by its id column ({@link CollectionKey}). */
+    public ChashRepository(TenantScope tenantScope, Gate3 gate3) {
+        this(tenantScope, gate3, RenameGuard.open());
+    }
+
+    /** The production constructor: the one gate-3 signal and the one rename guard ({@code NexusService} passes both). */
+    public ChashRepository(TenantScope tenantScope, Gate3 gate3, RenameGuard renameGuard) {
         this.tenantScope = tenantScope;
-        this.renameGuard = renameGuard;
+        this.gate3 = java.util.Objects.requireNonNull(gate3, "gate3");
+        this.renameGuard = java.util.Objects.requireNonNull(renameGuard, "renameGuard");
+    }
+
+    private CollectionKey ck() {
+        return CollectionKey.of(gate3);
     }
 
     /**
@@ -146,7 +164,16 @@ public final class ChashRepository {
     public List<Map<String, String>> lookup(String tenant, Chash chash) {
         byte[] bytes = chash.toBytes();
         return tenantScope.withTenant(tenant, ctx -> {
-            var rows = ctx.resultQuery(PROBE_SQL, bytes).fetch();
+            // RDR-229 P3.5c: from gate 3 the collection is the registry's label of the chunk's id (typed, joined on the id);
+            // before it, the published probe over the name column.
+            var rows = ck().byId()
+                ? ctx.select(CATALOG_COLLECTIONS.NAME.as("collection"), CHUNKS.CREATED_AT)
+                     .from(CHUNKS).join(CATALOG_COLLECTIONS)
+                     .on(CATALOG_COLLECTIONS.TENANT_ID.eq(CHUNKS.TENANT_ID)
+                         .and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(CHUNKS.COLLECTION_ID)))
+                     .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.CHASH.eq(bytes)))
+                     .fetch()
+                : ctx.resultQuery(PROBE_SQL, bytes).fetch();
             List<Map<String, String>> result = new ArrayList<>(rows.size());
             for (var r : rows) {
                 OffsetDateTime ts = r.get("created_at", OffsetDateTime.class);
@@ -178,11 +205,14 @@ public final class ChashRepository {
      */
     public Set<String> distinctCollections(String tenant) {
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(384);
-        return tenantScope.withTenant(tenant, ctx ->
-            new HashSet<>(ctx.selectDistinct(ch.collection())
+        return tenantScope.withTenant(tenant, ctx -> {
+            var raw = ck().label(tenant, ch.collection(), CHUNKS.COLLECTION_ID);
+            var lbl = raw.as("collection");
+            return new HashSet<>(ctx.selectDistinct(lbl)
                              .from(ch.table())
-                             .where(ch.tenantId().eq(tenant))
-                             .fetch(ch.collection())));
+                             .where(ch.tenantId().eq(tenant).and(raw.isNotNull()))
+                             .fetch(lbl));
+        });
     }
 
     // ── rename_collection ──────────────────────────────────────────────────────
@@ -413,7 +443,7 @@ public final class ChashRepository {
             Integer n = ctx.selectCount()
                            .from(ch.table())
                            .where(ch.tenantId().eq(tenant)
-                               .and(ch.collection().eq(collection)))
+                               .and(ck().eq(tenant, ch.collection(), CHUNKS.COLLECTION_ID, collection)))
                            .fetchOne(0, Integer.class);
             return n != null ? n : 0;
         });
@@ -453,7 +483,7 @@ public final class ChashRepository {
             for (String hex : ctx.selectDistinct(ch.chash())
                                  .from(ch.table())
                                  .where(ch.tenantId().eq(tenant)
-                                     .and(ch.collection().eq(collection)))
+                                     .and(ck().eq(tenant, ch.collection(), CHUNKS.COLLECTION_ID, collection)))
                                  .fetch(ch.chash())) {
                 if (hex != null && !hex.isEmpty()) {
                     result.add(hex);

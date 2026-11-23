@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import dev.nexus.service.datamove.Gate3;
 import dev.nexus.service.jooq.nexus.tables.records.ReembedJobsRecord;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
@@ -272,8 +273,20 @@ public final class ReembedJobRepository {
         this.lockRetryHookForTests = hook;
     }
 
+    private final Gate3 gate3;
+
     public ReembedJobRepository(TenantScope scope) {
+        this(scope, Gate3.never());
+    }
+
+    /** RDR-229 P3.5c: from gate 3 on the install the readers name a collection by its id column ({@link CollectionKey}). */
+    public ReembedJobRepository(TenantScope scope, Gate3 gate3) {
         this.scope = scope;
+        this.gate3 = java.util.Objects.requireNonNull(gate3, "gate3");
+    }
+
+    private CollectionKey ck() {
+        return CollectionKey.of(gate3);
     }
 
     /**
@@ -329,10 +342,10 @@ public final class ReembedJobRepository {
      * that job. A target that is the SOURCE of a job still in a lock state is being drained by it; filling it from
      * another job would race the drain. Either is {@link JobLockHeld} naming that job.
      */
-    private static void requireNotHeldFromTheOtherSide(DSLContext ctx, String tenant, String source, String target) {
+    private void requireNotHeldFromTheOtherSide(DSLContext ctx, String tenant, String source, String target) {
         var intoSource = ctx.select(REEMBED_JOBS.JOB_ID, REEMBED_JOBS.STATE).from(REEMBED_JOBS)
             .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
-            .and(REEMBED_JOBS.TARGET_COLLECTION.eq(source))
+            .and(ck().eq(tenant, REEMBED_JOBS.TARGET_COLLECTION, REEMBED_JOBS.TARGET_COLLECTION_ID, source))
             .and(REEMBED_JOBS.STATE.in(LOCK_STATES))
             .orderBy(REEMBED_JOBS.STARTED_AT, REEMBED_JOBS.JOB_ID)
             .limit(1)
@@ -342,7 +355,7 @@ public final class ReembedJobRepository {
         }
         var outOfTarget = ctx.select(REEMBED_JOBS.JOB_ID, REEMBED_JOBS.STATE).from(REEMBED_JOBS)
             .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
-            .and(REEMBED_JOBS.SOURCE_COLLECTION.eq(target))
+            .and(ck().eq(tenant, REEMBED_JOBS.SOURCE_COLLECTION, REEMBED_JOBS.SOURCE_COLLECTION_ID, target))
             .and(REEMBED_JOBS.STATE.in(LOCK_STATES))
             .orderBy(REEMBED_JOBS.STARTED_AT, REEMBED_JOBS.JOB_ID)
             .limit(1)
@@ -424,8 +437,8 @@ public final class ReembedJobRepository {
                 var update = ctx.update(REEMBED_JOBS)
                     .set(REEMBED_JOBS.STATE, to)
                     .set(REEMBED_JOBS.UPDATED_AT, clock())
-                    .set(REEMBED_JOBS.SOURCE_COLLECTION_ID, SOURCE_OWN_ID)
-                    .set(REEMBED_JOBS.TARGET_COLLECTION_ID, TARGET_OWN_ID);
+                    .set(REEMBED_JOBS.SOURCE_COLLECTION_ID, sourceOwnId())
+                    .set(REEMBED_JOBS.TARGET_COLLECTION_ID, targetOwnId());
                 if (change.failureReason() != null) {
                     update = update.set(REEMBED_JOBS.FAILURE_REASON, change.failureReason());
                 } else if (!keepsReason) {
@@ -477,7 +490,9 @@ public final class ReembedJobRepository {
         }
         return retryingOnLock(tenant, jobId, () -> sourceOf(tenant, jobId), () ->
             scope.withTenant(tenant, ctx -> {
-                var row = ctx.select(REEMBED_JOBS.SOURCE_COLLECTION, REEMBED_JOBS.TARGET_COLLECTION)
+                var k = ck();
+                var row = ctx.select(k.label(tenant, REEMBED_JOBS.SOURCE_COLLECTION, REEMBED_JOBS.SOURCE_COLLECTION_ID),
+                                     k.label(tenant, REEMBED_JOBS.TARGET_COLLECTION, REEMBED_JOBS.TARGET_COLLECTION_ID))
                     .from(REEMBED_JOBS)
                     .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
                     .and(REEMBED_JOBS.JOB_ID.eq(jobId))
@@ -500,8 +515,8 @@ public final class ReembedJobRepository {
                     .setNull(REEMBED_JOBS.LAST_ERROR)
                     .setNull(REEMBED_JOBS.FINISHED_AT)
                     .set(REEMBED_JOBS.UPDATED_AT, clock())
-                    .set(REEMBED_JOBS.SOURCE_COLLECTION_ID, SOURCE_OWN_ID)
-                    .set(REEMBED_JOBS.TARGET_COLLECTION_ID, TARGET_OWN_ID)
+                    .set(REEMBED_JOBS.SOURCE_COLLECTION_ID, sourceOwnId())
+                    .set(REEMBED_JOBS.TARGET_COLLECTION_ID, targetOwnId())
                     .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
                     .and(REEMBED_JOBS.JOB_ID.eq(jobId))
                     .and(REEMBED_JOBS.STATE.eq(DONE))
@@ -528,8 +543,8 @@ public final class ReembedJobRepository {
             .set(REEMBED_JOBS.DOC_CURSOR, "")
             .setNull(REEMBED_JOBS.FAILURE_REASON)
             .set(REEMBED_JOBS.UPDATED_AT, clock())
-            .set(REEMBED_JOBS.SOURCE_COLLECTION_ID, SOURCE_OWN_ID)
-            .set(REEMBED_JOBS.TARGET_COLLECTION_ID, TARGET_OWN_ID)
+            .set(REEMBED_JOBS.SOURCE_COLLECTION_ID, sourceOwnId())
+            .set(REEMBED_JOBS.TARGET_COLLECTION_ID, targetOwnId())
             .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
             .and(REEMBED_JOBS.JOB_ID.eq(jobId))
             .and(REEMBED_JOBS.STATE.eq(CUTOVER))
@@ -635,8 +650,8 @@ public final class ReembedJobRepository {
                 .set(REEMBED_JOBS.CHUNKS_REUSED, REEMBED_JOBS.CHUNKS_REUSED.plus(batch.chunksReused()))
                 .set(REEMBED_JOBS.TOKENS_BILLED, REEMBED_JOBS.TOKENS_BILLED.plus(batch.tokensBilled()))
                 .set(REEMBED_JOBS.UPDATED_AT, clock())
-                .set(REEMBED_JOBS.SOURCE_COLLECTION_ID, SOURCE_OWN_ID)
-                .set(REEMBED_JOBS.TARGET_COLLECTION_ID, TARGET_OWN_ID);
+                .set(REEMBED_JOBS.SOURCE_COLLECTION_ID, sourceOwnId())
+                .set(REEMBED_JOBS.TARGET_COLLECTION_ID, targetOwnId());
             if (batch.cursor() != null) {
                 update = update.set(REEMBED_JOBS.DOC_CURSOR,
                     DSL.greatest(REEMBED_JOBS.DOC_CURSOR, DSL.val(batch.cursor())));
@@ -670,8 +685,8 @@ public final class ReembedJobRepository {
             .set(REEMBED_JOBS.PASS_NUMBER, (short) (fromPass + 1))
             .set(REEMBED_JOBS.DOC_CURSOR, "")
             .set(REEMBED_JOBS.UPDATED_AT, clock())
-            .set(REEMBED_JOBS.SOURCE_COLLECTION_ID, SOURCE_OWN_ID)
-            .set(REEMBED_JOBS.TARGET_COLLECTION_ID, TARGET_OWN_ID)
+            .set(REEMBED_JOBS.SOURCE_COLLECTION_ID, sourceOwnId())
+            .set(REEMBED_JOBS.TARGET_COLLECTION_ID, targetOwnId())
             .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
             .and(REEMBED_JOBS.JOB_ID.eq(jobId))
             .and(REEMBED_JOBS.STATE.eq(RUNNING))
@@ -720,8 +735,8 @@ public final class ReembedJobRepository {
             var update = ctx.update(REEMBED_JOBS)
                 .set(REEMBED_JOBS.CUTOVER_STEP, step)
                 .set(REEMBED_JOBS.UPDATED_AT, clock())
-                .set(REEMBED_JOBS.SOURCE_COLLECTION_ID, SOURCE_OWN_ID)
-                .set(REEMBED_JOBS.TARGET_COLLECTION_ID, TARGET_OWN_ID);
+                .set(REEMBED_JOBS.SOURCE_COLLECTION_ID, sourceOwnId())
+                .set(REEMBED_JOBS.TARGET_COLLECTION_ID, targetOwnId());
             if (note != null) {
                 update = update.set(REEMBED_JOBS.LAST_ERROR, note.isEmpty() ? null : note);
             }
@@ -754,8 +769,8 @@ public final class ReembedJobRepository {
             int set = ctx.update(REEMBED_JOBS)
                 .set(REEMBED_JOBS.LAST_ERROR, message)
                 .set(REEMBED_JOBS.UPDATED_AT, clock())
-                .set(REEMBED_JOBS.SOURCE_COLLECTION_ID, SOURCE_OWN_ID)
-                .set(REEMBED_JOBS.TARGET_COLLECTION_ID, TARGET_OWN_ID)
+                .set(REEMBED_JOBS.SOURCE_COLLECTION_ID, sourceOwnId())
+                .set(REEMBED_JOBS.TARGET_COLLECTION_ID, targetOwnId())
                 .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
                 .and(REEMBED_JOBS.JOB_ID.eq(jobId))
                 .and(REEMBED_JOBS.STATE.eq(state))
@@ -789,8 +804,8 @@ public final class ReembedJobRepository {
         return scope.withTenant(tenant, ctx -> {
             var latest = ctx.select(REEMBED_JOBS.JOB_ID, REEMBED_JOBS.DISPOSITION).from(REEMBED_JOBS)
                 .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
-                .and(REEMBED_JOBS.SOURCE_COLLECTION.eq(earlierSource))
-                .and(REEMBED_JOBS.TARGET_COLLECTION.eq(earlierTarget))
+                .and(ck().eq(tenant, REEMBED_JOBS.SOURCE_COLLECTION, REEMBED_JOBS.SOURCE_COLLECTION_ID, earlierSource))
+                .and(ck().eq(tenant, REEMBED_JOBS.TARGET_COLLECTION, REEMBED_JOBS.TARGET_COLLECTION_ID, earlierTarget))
                 .and(REEMBED_JOBS.STATE.in(DONE, ABORTED))
                 .orderBy(REEMBED_JOBS.FINISHED_AT.desc().nullsLast(), REEMBED_JOBS.STARTED_AT.desc())
                 .limit(1)
@@ -802,8 +817,8 @@ public final class ReembedJobRepository {
             return ctx.update(REEMBED_JOBS)
                 .set(REEMBED_JOBS.DISPOSITION, "revived")
                 .set(REEMBED_JOBS.UPDATED_AT, clock())
-                .set(REEMBED_JOBS.SOURCE_COLLECTION_ID, SOURCE_OWN_ID)
-                .set(REEMBED_JOBS.TARGET_COLLECTION_ID, TARGET_OWN_ID)
+                .set(REEMBED_JOBS.SOURCE_COLLECTION_ID, sourceOwnId())
+                .set(REEMBED_JOBS.TARGET_COLLECTION_ID, targetOwnId())
                 .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
                 .and(REEMBED_JOBS.JOB_ID.eq(latest.get().get(REEMBED_JOBS.JOB_ID)))
                 .returning()
@@ -867,8 +882,8 @@ public final class ReembedJobRepository {
             .set(REEMBED_JOBS.DOCUMENTS_SKIPPED, REEMBED_JOBS.DOCUMENTS_SKIPPED.plus(skippedDelta))
             .set(REEMBED_JOBS.DOC_CURSOR, DSL.greatest(REEMBED_JOBS.DOC_CURSOR, DSL.val(docId)))
             .set(REEMBED_JOBS.UPDATED_AT, clock())
-            .set(REEMBED_JOBS.SOURCE_COLLECTION_ID, SOURCE_OWN_ID)
-            .set(REEMBED_JOBS.TARGET_COLLECTION_ID, TARGET_OWN_ID)
+            .set(REEMBED_JOBS.SOURCE_COLLECTION_ID, SOURCE_OWN_NAME_ID)
+            .set(REEMBED_JOBS.TARGET_COLLECTION_ID, TARGET_OWN_NAME_ID)
             .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
             .and(REEMBED_JOBS.JOB_ID.eq(jobId))
             .execute();
@@ -880,10 +895,20 @@ public final class ReembedJobRepository {
      *  CHECKs look at each updated row, and a row not stamped yet has names and no ids). An id already stored is kept
      *  (no UPDATE here changes a name), because a cutover deletes the source's registry row and a live subselect would
      *  then null the id beside a non-empty name. */
-    private static final Field<Long> SOURCE_OWN_ID = DSL.coalesce(REEMBED_JOBS.SOURCE_COLLECTION_ID,
+    // coalesce reads the stored id first, so it is the row's own id once stamped: the static recordMoveInTxn keeps it (no Gate3 reaches it)
+    private static final Field<Long> SOURCE_OWN_NAME_ID = DSL.coalesce(REEMBED_JOBS.SOURCE_COLLECTION_ID,
         CollectionIds.idOf(REEMBED_JOBS.TENANT_ID, REEMBED_JOBS.SOURCE_COLLECTION));
-    private static final Field<Long> TARGET_OWN_ID = DSL.coalesce(REEMBED_JOBS.TARGET_COLLECTION_ID,
+    private static final Field<Long> TARGET_OWN_NAME_ID = DSL.coalesce(REEMBED_JOBS.TARGET_COLLECTION_ID,
         CollectionIds.idOf(REEMBED_JOBS.TENANT_ID, REEMBED_JOBS.TARGET_COLLECTION));
+
+    /** From gate 3 the row's own id outright (P3.5c: its name may be stale after a one-row rename); before it, the id else the name's. */
+    private Field<Long> sourceOwnId() {
+        return ck().byId() ? REEMBED_JOBS.SOURCE_COLLECTION_ID : SOURCE_OWN_NAME_ID;
+    }
+
+    private Field<Long> targetOwnId() {
+        return ck().byId() ? REEMBED_JOBS.TARGET_COLLECTION_ID : TARGET_OWN_NAME_ID;
+    }
 
     private static Field<OffsetDateTime> clock() {
         return DSL.function("clock_timestamp", SQLDataType.TIMESTAMPWITHTIMEZONE);
@@ -891,10 +916,13 @@ public final class ReembedJobRepository {
 
     /** The job's source, or null when the job row is absent. */
     private String sourceOf(String tenant, UUID jobId) {
-        return scope.withTenant(tenant, ctx -> ctx.select(REEMBED_JOBS.SOURCE_COLLECTION).from(REEMBED_JOBS)
-            .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
-            .and(REEMBED_JOBS.JOB_ID.eq(jobId))
-            .fetchOne(REEMBED_JOBS.SOURCE_COLLECTION));
+        return scope.withTenant(tenant, ctx -> {
+            var lbl = ck().label(tenant, REEMBED_JOBS.SOURCE_COLLECTION, REEMBED_JOBS.SOURCE_COLLECTION_ID);
+            return ctx.select(lbl).from(REEMBED_JOBS)
+                .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
+                .and(REEMBED_JOBS.JOB_ID.eq(jobId))
+                .fetchOne(lbl);
+        });
     }
 
     /**
@@ -942,7 +970,9 @@ public final class ReembedJobRepository {
                 .from(REEMBED_JOBS)
                 .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
                 // by its name, or by its registry id: after a one-row rename the holder still carries the old label (RDR-229 P3.4)
-                .and(REEMBED_JOBS.SOURCE_COLLECTION.eq(source).or(REEMBED_JOBS.SOURCE_COLLECTION_ID.eq(CollectionIds.idOf(tenant, source))))
+                .and(ck().byId()
+                    ? ck().eq(tenant, REEMBED_JOBS.SOURCE_COLLECTION, REEMBED_JOBS.SOURCE_COLLECTION_ID, source)
+                    : REEMBED_JOBS.SOURCE_COLLECTION.eq(source).or(REEMBED_JOBS.SOURCE_COLLECTION_ID.eq(CollectionIds.idOf(tenant, source))))
                 .and(REEMBED_JOBS.STATE.in(LOCK_STATES))
                 .and(REEMBED_JOBS.JOB_ID.ne(self))
                 .fetchOptional())
