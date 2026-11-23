@@ -302,6 +302,9 @@ public final class ReembedJobRepository {
         return retryingOnLock(tenant, jobId, () -> source, () ->
             scope.withTenant(tenant, ctx -> {
                 takeStartGuard(ctx, tenant, source);
+                // RDR-229 P3.5a: both ends' registry rows FOR KEY SHARE at once, in id order (the order a verb locks in), after the advisory
+                // guard and before the job row is written; the two reads below answer from the memo
+                CollectionRegistry.requireAllForWrite(ctx, tenant, java.util.List.of(source, target));
                 requireNotHeldFromTheOtherSide(ctx, tenant, source, target);
                 hook("after_start_reads", 0);
                 return Job.from(ctx.insertInto(REEMBED_JOBS)
@@ -359,6 +362,7 @@ public final class ReembedJobRepository {
      * answers as a retryable 409; the transaction ends with the throw, so nothing was written.
      */
     static void takeStartGuard(DSLContext ctx, String tenant, String source) {
+        WriteRegistryMemo.assertNoneHeld(ctx, "the re-embed start guard");
         String before = ctx.select(DSL.function("current_setting", String.class, DSL.val("lock_timeout")))
             .fetchOne(0, String.class);
         PgSession.setLocal(ctx, "lock_timeout", Integer.toString(GUARD_LOCK_TIMEOUT_MS));

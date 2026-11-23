@@ -449,6 +449,11 @@ public final class CollectionRegistry {
         }
     }
 
+    /** Tags this transaction exempt from the writer census ({@code StrictWriterCensus}): a verb, a background writer that waits for no lock. */
+    public static void exemptFromWriterCensus(DSLContext ctx, String why) {
+        WriteRegistryMemo.exempt(ctx, why);
+    }
+
     /**
      * Drops the transaction's memo of registry rows it read {@code FOR KEY SHARE}: a rollback to a savepoint releases any lock taken
      * inside it while the memo says it is held, so a savepoint that contains a registry read must call this after the rollback. No

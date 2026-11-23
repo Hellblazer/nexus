@@ -544,7 +544,7 @@ final class CollectionRouteCensus {
     record Resolving(int sites, String serves) { }
 
     static final java.util.Map<String, Resolving> RESOLVING = java.util.Map.ofEntries(
-        java.util.Map.entry("db/AspectRepository.java", new Resolving(12, "the /v1/aspects rows and the aspect ETL; the aspect upsert's write stamps the registry row's current label (requireWritable)")),
+        java.util.Map.entry("db/AspectRepository.java", new Resolving(13, "the /v1/aspects rows and the aspect ETL; the aspect upsert's write stamps the registry row's current label (requireWritable); the batch imports read their collections in id order (lockCollectionsInIdOrder)")),
         java.util.Map.entry("db/CatalogIdStamps.java", new Resolving(1, "the catalog writers' memoized label lookup")),
         java.util.Map.entry("db/CatalogMoves.java", new Resolving(1, "/v1/catalog/documents/move, the owners move")),
         java.util.Map.entry("db/CatalogRepository.java", new Resolving(29, "the document routes (DocumentCollectionRef), the collection routes (set_aspects_enabled reads its row in its write) and the catalog writers, and registryFirst, the manifest writers' registry check after their advisory locks; the re-home reads both ends FOR KEY SHARE (requireAllForWrite, then each locked row) and scopes by those rows")),
@@ -554,12 +554,12 @@ final class CollectionRouteCensus {
         java.util.Map.entry("db/CollectionTombstones.java", new Resolving(2, "the collection delete and supersede routes")),
         java.util.Map.entry("db/CombinedWriteService.java", new Resolving(6, "the manifest write, append and write_many routes; the metadata refresh transaction's registry check (requireWritable) is the sixth")),
         java.util.Map.entry("db/DepartedWriterSpans.java", new Resolving(1, "the manifest write routes' departed-writer fill")),
-        java.util.Map.entry("db/DocumentCollectionRef.java", new Resolving(5, "the document routes: the one resolver of physical_collection_id; a document request's id is read FOR KEY SHARE in the write's transaction (requireIdForWrite); a request by label takes the key share first too (requireForWriteIfPresent)")),
+        java.util.Map.entry("db/DocumentCollectionRef.java", new Resolving(6, "the document routes: the one resolver of physical_collection_id; a document request's id is read FOR KEY SHARE in the write's transaction (requireIdForWrite); a request by label takes the key share first too (requireForWriteIfPresent); a batch reads its labels in one statement in id order")),
         java.util.Map.entry("db/GcCollectionReads.java", new Resolving(3, "the four /v1/vectors/gc writes: the origin and a by-id sibling, read in the write's transaction; the origin again when the restore function refused it")),
         java.util.Map.entry("db/ManifestReplace.java", new Resolving(3, "the manifest write routes; an empty manifest reads the registry row too (requireForWriteIfPresent)")),
         java.util.Map.entry("db/PipelineRepository.java", new Resolving(2, "the /v1/pipeline create and delete_collection rows")),
         java.util.Map.entry("db/QuarantineOrigin.java", new Resolving(4, "the /v1/vectors/gc quarantine routes")),
-        java.util.Map.entry("db/ReembedJobRepository.java", new Resolving(5, "the /v1/vectors/reembed rows")),
+        java.util.Map.entry("db/ReembedJobRepository.java", new Resolving(6, "the /v1/vectors/reembed rows; the job start reads both ends in id order")),
         java.util.Map.entry("db/RemapRepository.java", new Resolving(4, "the /v1/remap rows; record_batch and clear_leg read every collection of the call FOR KEY SHARE at once, in id order (requireAllForWrite)")),
         java.util.Map.entry("db/RequestedCollectionRead.java", new Resolving(1, "the by-id read of the aspect delete, salient-sentences write, pipeline delete and remap leg clear")),
         java.util.Map.entry("db/RestoreIdFill.java", new Resolving(1, "the gc quarantine restore route")),

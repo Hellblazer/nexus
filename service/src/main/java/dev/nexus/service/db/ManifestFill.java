@@ -315,9 +315,13 @@ public final class ManifestFill {
         // name order; shared holders never wait on each other. A row re-homed after that read is written under the gate
         // of its old collection: the UPDATE adds no key and writes no collection, so it cannot interleave with the
         // sweep's retirement of either.
+        // RDR-229 P3.5a, exempt from the registry lock: this UPDATE names no collection in a write and reads no registry row; its gates are
+        // taken first (acquireSweepGateShared fails when this transaction already holds a registry row, in the census), and a re-home or rename
+        // that lands between the pick and the write changes the collection of a row this statement leaves as it is.
         for (String collection : collections) {
             CatalogRepository.acquireSweepGateShared(ctx, tenant, collection);
         }
+        WriteRegistryMemo.exempt(ctx, "manifest fill: names no collection in its write, reads no registry row");
         // After the gates, so a gate wait keeps the statement timeout; 0 turns the limit off in skip mode, which waits on no row.
         PgSession.setLocal(ctx, "lock_timeout", Long.toString(skipLocked ? 0L : lockTimeoutMs()));
         return updateStatement(ctx, tenant, kind, after, last, skipLocked).execute();

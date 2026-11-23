@@ -865,7 +865,7 @@ public final class CombinedWriteService {
                 // the request's metadata into the new row, and the later per-document transactions would answer 404 after it committed.
                 final String coll = CollectionRegistry.requireWritable(ctx, tenant, collection).label();   // the row's CURRENT label
                 if (!coll.equals(collection)) {
-                    CatalogRepository.acquireSweepGateShared(ctx, tenant, coll);   // a rename landed after the gate above
+                    CatalogRepository.acquireSweepGateSharedAfterRename(ctx, tenant, coll);   // a rename landed after the gate above
                 }
                 Map<String, String> existingText =
                     selectExistingText(ctx, ch, tenant, coll, dedupChashes);

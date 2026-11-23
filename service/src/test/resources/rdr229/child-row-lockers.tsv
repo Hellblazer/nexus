@@ -15,7 +15,7 @@ CatalogRepository.java	registerDocumentManyWithOutcome	CATALOG_OWNERS	forUpdate	
 CatalogRepository.java	registerDocumentWithOutcome	CATALOG_OWNERS	forUpdate	after-registry	a registry read (requireWritable, registryFirst or normalize) precedes the lock in the same method
 CatalogRepository.java	rewriteStaleNotes	CATALOG_COLLECTIONS	forShare	registry	the registry row itself: the verb FOR UPDATE, the writer FOR KEY SHARE, the stale-note repair FOR SHARE (registry first)
 CatalogRepository.java	sweepOneOwner	CATALOG_OWNERS	forUpdate	no-registry-lock	ghost sweep of one owner: owner row, no collection named
-ChunkKeySweep.java	oneBatch	CHUNKS	forUpdate	no-registry-lock	background chunk-key sweep: chunk rows FOR UPDATE; it stamps the id by an unlocked read, which never waits for a registry row lock, so it cannot be a link of a cycle
+ChunkKeySweep.java	oneBatch	CHUNKS	forUpdate	no-registry-lock	background chunk-key sweep: chunk rows FOR UPDATE SKIP LOCKED, which never waits for a row lock, so it cannot be a link of a cycle
 CollectionRegistry.java	fillOrNull	CATALOG_COLLECTIONS	forKeyShare	registry	the registry row itself: the verb FOR UPDATE, the writer FOR KEY SHARE, the stale-note repair FOR SHARE (registry first)
 CollectionRegistry.java	lockAllForWrite	CATALOG_COLLECTIONS	forKeyShare	registry	the registry row itself: the verb FOR UPDATE, the writer FOR KEY SHARE, the stale-note repair FOR SHARE (registry first)
 CollectionTombstones.java	lockRows	CATALOG_COLLECTIONS	forUpdate	registry	the registry row itself: the verb FOR UPDATE, the writer FOR KEY SHARE, the stale-note repair FOR SHARE (registry first)

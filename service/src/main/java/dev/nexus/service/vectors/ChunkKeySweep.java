@@ -904,6 +904,7 @@ public final class ChunkKeySweep {
      */
     private Batch oneBatch(DSLContext ctx, String tenant, ChunkKeyPlan plan, Set<String> collections, int size,
                            Cursor after) {
+        dev.nexus.service.db.CollectionRegistry.exemptFromWriterCensus(ctx, "chunk-key sweep: SKIP LOCKED, waits for no lock, names no collection write");
         long s0 = System.nanoTime();
         Condition keyset = after == null ? DSL.trueCondition()
             : DSL.row(CHUNKS.COLLECTION, CHUNKS.CHASH).gt(DSL.row(after.collection(), cursorChash(after)));
@@ -918,6 +919,8 @@ public final class ChunkKeySweep {
             .and(keyset)
             .orderBy(CHUNKS.COLLECTION, CHUNKS.CHASH)
             .limit(size)
+            // RDR-229 P3.5a, exempt from the registry lock: SKIP LOCKED never waits for a row lock, so this sweep is no link of a lock cycle
+            // (a row a writer or verb holds is left to the next pass); it reads no registry row under a lock and stamps the id by a plain read
             .forUpdate().skipLocked()
             .fetch();
         long selectMs = (System.nanoTime() - s0) / 1_000_000;

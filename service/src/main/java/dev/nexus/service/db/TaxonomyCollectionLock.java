@@ -48,6 +48,7 @@ final class TaxonomyCollectionLock {
             lock(ctx, tenant + "/" + collection);
             return null;
         }
+        WriteRegistryMemo.assertNoneHeld(ctx, "the taxonomy lock of " + collection);   // the second lock below is the stated exception
         OptionalLong named = ExpectedCollectionIds.of(collection);
         Long keyed = named.isPresent() ? Long.valueOf(named.getAsLong()) : unlockedId(ctx, tenant, collection);
         lock(ctx, keyed == null ? tenant + "/" + collection : key(tenant, keyed));
