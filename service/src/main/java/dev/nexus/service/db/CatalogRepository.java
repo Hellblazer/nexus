@@ -4519,8 +4519,8 @@ public final class CatalogRepository {
      */
     private static Rewritten rewriteStaleNotes(DSLContext ctx, String tenant, List<StaleNote> chosen) {
         if (chosen.isEmpty()) return new Rewritten(0, List.of());
-        lockDocumentRowsSorted(ctx, tenant, true, chosen.stream().map(StaleNote::tumbler).toArray(String[]::new));
-        noteUriRepairStage("locked");
+        // RDR-229 P3.5a lock order (RenameGuard#runRename): the collections' registry rows first (FOR SHARE, below), then the document
+        // rows; this locked the documents FOR UPDATE first, the reverse of every writer and verb
         // RDR-229: a collection retyped since the census is no longer proven a note collection. Read the rows that still
         // are AND hold a share lock on them until this transaction ends, so a concurrent upsertCollection that would retype
         // one waits for the repair to commit instead of landing between this read and the UPDATE. Sorted by name, as
@@ -4533,6 +4533,8 @@ public final class CatalogRepository {
             .orderBy(CATALOG_COLLECTIONS.NAME)
             .forShare()
             .fetch(CATALOG_COLLECTIONS.NAME));
+        lockDocumentRowsSorted(ctx, tenant, true, chosen.stream().map(StaleNote::tumbler).toArray(String[]::new));
+        noteUriRepairStage("locked");
         // Re-read under the lock: a row that moved or died since the census is left to the next pass.
         record Fresh(String uri, String collection) {}
         Map<String, Fresh> fresh = new HashMap<>();

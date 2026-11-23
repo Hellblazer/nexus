@@ -95,7 +95,17 @@ final class DocumentCollectionRef {
 
     private static Map<String, Object> normalize(DSLContext ctx, String tenant, Map<String, Object> request,
                                                  Map<Long, CollectionRow> memo) {
-        if (!request.containsKey(ID) || request.get(ID) instanceof Resolved) {
+        if (request.get(ID) instanceof Resolved) {
+            return request;
+        }
+        if (!request.containsKey(ID)) {
+            // a request by label: the collection's row FOR KEY SHARE first, before the owner claim and the document row (RDR-229
+            // P3.5a, registry first). A label no row has is not refused here (the typed 422 is idOf's, as before), and a request
+            // naming no collection locks nothing.
+            String label = CatalogRepository.s(request, LABEL);
+            if (label != null && !label.isEmpty()) {   // a second ask in the transaction is a memo hit
+                CollectionRegistry.requireForWriteIfPresent(ctx, tenant, label);
+            }
             return request;
         }
         check(request);
