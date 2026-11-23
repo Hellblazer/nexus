@@ -101,19 +101,26 @@ class ChildRowLockerCensusTest {
     @Test
     void everyRowLockingStatementIsClassifiedAndItsOrderProven() throws Exception {
         Map<String, String[]> table = new LinkedHashMap<>();
+        Map<String, Integer> countOf = new LinkedHashMap<>();
         for (String line : Files.readAllLines(TABLE)) {
             if (line.isBlank() || line.startsWith("#")) {
                 continue;
             }
             String[] c = line.split("\t", -1);
-            assertThat(c).as("file, method, table, lock, verdict, reason: %s", line).hasSize(6);
-            table.put(c[0] + "\t" + c[1] + "\t" + c[2] + "\t" + c[3], new String[] {c[4], c[5]});
+            assertThat(c).as("file, method, table, lock, count, verdict, reason: %s", line).hasSize(7);
+            table.put(c[0] + "\t" + c[1] + "\t" + c[2] + "\t" + c[3], new String[] {c[5], c[6]});
+            countOf.put(c[0] + "\t" + c[1] + "\t" + c[2] + "\t" + c[3], Integer.parseInt(c[4]));
         }
         List<Site> sites = scan();
         TreeSet<String> found = new TreeSet<>();
+        Map<String, Integer> foundCount = new LinkedHashMap<>();
         for (Site s : sites) {
             found.add(s.key());
+            foundCount.merge(s.key(), 1, Integer::sum);
         }
+        // one count per STATEMENT: a second lock on the same table in the same method is a second site, and the table says how many
+        assertThat(foundCount).as("the number of row-locking statements of each (file, method, table, lock): a second one in a method needs its own look")
+            .containsExactlyInAnyOrderEntriesOf(countOf);
         System.err.printf("child_row_locker_census sites=%d distinct=%d classified=%d%n", sites.size(), found.size(), table.size());
         assertThat(sites.size()).as("non-vacuity: the row-locking statements found in the main sources").isGreaterThanOrEqualTo(30);
         assertThat(found).as("a row-locking statement missing from child-row-lockers.tsv, or listed there and gone: classify it")
