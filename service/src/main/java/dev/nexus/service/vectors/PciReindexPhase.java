@@ -49,6 +49,8 @@ final class PciReindexPhase {
     private final Clock clock;
     private final Anchorer anchorer;
     private final RedMarker redMarker;
+    /** Whether the canary measures id indexes now: the reconciler's latch (gate 3 latched, id readers present). Before it an id REINDEX is not re-measured. */
+    private volatile java.util.function.BooleanSupplier idCanary = () -> false;
 
     /** @param canary the canary's schedule, or null (a reconciler built without one measures nothing) */
     PciReindexPhase(PciReindexState state, PciCanarySchedule canary, Clock clock, Anchorer anchorer) {
@@ -62,6 +64,10 @@ final class PciReindexPhase {
         this.clock = Objects.requireNonNull(clock, "clock");
         this.anchorer = Objects.requireNonNull(anchorer, "anchorer");
         this.redMarker = Objects.requireNonNull(redMarker, "redMarker");
+    }
+
+    void idCanaryWhen(java.util.function.BooleanSupplier latched) {
+        this.idCanary = Objects.requireNonNull(latched, "latched");
     }
 
     /**
@@ -142,10 +148,9 @@ final class PciReindexPhase {
                 if (r.vacuumAfter() && pass.live()) {
                     vacuumLeaf(pass, leaf);
                 }
-                if (id == null) {
-                    // The canary measures a collection through the serving statement, which selects by name until P3.5 serves by id: no
-                    // canary for an id index yet (nothing to re-measure, nothing to hold red against it).
-                    remeasure(pass, leaf, name, r, wasRed);
+                // The canary measures the family the serving statement selects by: a name index before the latch, an id index once it holds.
+                if (id == null || idCanary.getAsBoolean()) {
+                    remeasure(pass, leaf, name, r, wasRed, id);
                 }
                 return true;
             }
@@ -196,7 +201,7 @@ final class PciReindexPhase {
      * REINDEX whatever the canary reads (a REINDEX of a graph under a day old rebuilds essentially the same graph), is
      * independent of both.
      */
-    private void remeasure(PciBuilderSession.Pass pass, Leaf leaf, String name, Reindex r, boolean wasRed) {
+    private void remeasure(PciBuilderSession.Pass pass, Leaf leaf, String name, Reindex r, boolean wasRed, Long id) {
         if (canary == null) {
             return;
         }
@@ -204,7 +209,7 @@ final class PciReindexPhase {
             PciCanary.Result before = canary.latest(name);
             List<float[]> sample = before != null && before.state() == PciCanary.State.RED ? before.redSample() : null;
             var target = new PciCanary.Target(PciReconciler.leafId(leaf), leaf.tenant(), leaf.model(), r.collection(),
-                name);
+                name, id);
             PciCanary.Result after = canary.remeasure(target, sample);
             if (wasRed && after.state() == PciCanary.State.RED) {
                 state.stillRed(name);

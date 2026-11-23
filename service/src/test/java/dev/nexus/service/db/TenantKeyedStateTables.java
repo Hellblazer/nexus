@@ -818,7 +818,10 @@ final class TenantKeyedStateTables {
             "PciReconciler.Tally.idLabels",
             "PciReconciler.Planned.idLabels",
             // the latch the id canary's statements read: a supplier over the reconciler's own gate 3 latch, no tenant state
-            "PciReconciler.CanaryLatch.source")) {
+            "PciCanaryLatch.source",
+            "PciReconciler.canaryLatch",
+            "PciQueryRing.gate3",
+            "PciReindexPhase.idCanary")) {
             notKeyed.put(f, PCI_OFF);
         }
         // nexus-4lnn1.1.5 (RDR-230 Technical Design 7): the maintenance snapshot (counts on /v1/status, entries on

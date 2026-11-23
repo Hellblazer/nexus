@@ -371,6 +371,7 @@ public final class PciReconciler {
         this.ledger = new PciAnchorLedger(Objects.requireNonNull(clock, "clock"), reindex::reference,
             name -> reindex.owedAnchors().containsKey(name));
         this.phase = new PciReindexPhase(reindex, canary, clock, this::writeAnchor, ledger::markRedUnfixed);
+        this.phase.idCanaryWhen(idBuilds::gate3Holds);
         this.ringExpiry = Objects.requireNonNull(ringExpiry, "ringExpiry");
         this.random = Objects.requireNonNull(random, "random");
         this.catalog = Objects.requireNonNull(catalog, "catalog");
@@ -413,9 +414,9 @@ public final class PciReconciler {
                                        PciSettings settings, ToIntFunction<Collection<String>> ringExpiry,
                                        PgVectorRepository repository,
                                        dev.nexus.service.db.TenantScope scope) {
-        var ring = new PciQueryRingReader(Objects.requireNonNull(scope, "scope"));
-        // The canary's id statements follow the latch this reconciler's retire reads (gate 3 latched, the id readers present), bound below.
-        var latch = new CanaryLatch();
+        // The canary's id statements and its ring reader follow the latch this reconciler's retire reads (gate 3 latched, the id readers present), bound below.
+        var latch = new PciCanaryLatch();
+        var ring = new PciQueryRingReader(Objects.requireNonNull(scope, "scope"), latch);
         var runner = new PciCanary(ring::load, Objects.requireNonNull(repository, "repository").canaryStatements(latch));
         var reconciler = new PciReconciler(new PciCatalog(ds)::read,
             new PciBuilderSession(admin.url(), admin.user(), admin.password(), bootNonce, settings), sweep, settings,
@@ -423,21 +424,13 @@ public final class PciReconciler {
             Duration.ofSeconds(Objects.requireNonNull(settings, "settings").sweepSeconds()),
             RandomGenerator.getDefault(), ringExpiry, new PciCanarySchedule(runner));
         latch.follow(reconciler.idBuilds::gate3Holds);
+        reconciler.canaryLatch = latch;
         return reconciler;
     }
 
-    /** The latch an id canary statement reads: the reconciler's own {@code idBuilds.gate3Holds()}, bound once the reconciler exists. Never true before. */
-    static final class CanaryLatch implements dev.nexus.service.datamove.Gate3 {
-        private volatile java.util.function.BooleanSupplier source = () -> false;
-
-        void follow(java.util.function.BooleanSupplier latched) {
-            this.source = Objects.requireNonNull(latched, "latched");
-        }
-
-        @Override
-        public boolean holds() {
-            return source.getAsBoolean();
-        }
+    /** The latch the canary, its ring reader and the query ring's admission follow: false until this reconciler binds it ({@link #create} with a canary). */
+    public dev.nexus.service.datamove.Gate3 canaryLatch() {
+        return canaryLatch;
     }
 
     /** The canary's latest result for every index it has run on, by index name (empty without a canary). */
@@ -626,6 +619,7 @@ public final class PciReconciler {
     private volatile Runnable passEnded = () -> { };
 
     private final PciIdBuilds idBuilds = new PciIdBuilds();
+    private volatile dev.nexus.service.datamove.Gate3 canaryLatch = dev.nexus.service.datamove.Gate3.never();
 
     /** RDR-229 P3.4: gate 2 of the completion check, read at the start of each pass; until it holds no id build is planned. */
     public void idBuildGate(java.util.function.BooleanSupplier gate2) {
@@ -775,9 +769,10 @@ public final class PciReconciler {
     }
 
     /**
-     * The recall canary (nexus-4lnn1.1.4), after the pass's drops and builds: every valid parsed index the snapshot
-     * lists that the pass did not drop, and every index it built. It runs on the lock holder only, never fails the pass,
-     * and acts on nothing: a result is recorded and logged (RDR-230 Phase 1 has no REINDEX).
+     * The recall canary (nexus-4lnn1.1.4), after the pass's drops and builds: the family the serving statement selects by. Before gate 3 has latched
+     * that is every valid name index the snapshot lists that the pass did not drop, and every name index it built; once it has (and the id readers are
+     * present), the valid id indexes and every id index it built. It runs on the lock holder only and never fails the pass; a result is recorded and
+     * logged, and a red one can start a REINDEX (RDR-230).
      */
     private void runCanaries(PciCatalog.Snapshot snapshot, Tally tally) {
         if (canary == null) {
