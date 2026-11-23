@@ -305,11 +305,11 @@ class Rdr229P35cVectorsReaperIdReadTest extends AtomicWriteTestBase {
         assertThat(unlatched.resolveQuarantineSiblings(tenant, origin)).as("before gate 3 the label tag finds both")
             .contains(qLabelOnly, qWithId);
 
-        var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(dev.nexus.service.vectors.PgVectorRepository.class);
+        var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(dev.nexus.service.db.QuarantineOrigin.class);
         var appender = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
         appender.start();
         logger.addAppender(appender);
-        long before = dev.nexus.service.vectors.PgVectorRepository.QUARANTINE_NO_ORIGIN_ID_SKIPPED.get();
+        long before = dev.nexus.service.db.QuarantineOrigin.NO_ORIGIN_ID_SKIPPED.get();
         List<String> siblings;
         try {
             siblings = latchedRepo.resolveQuarantineSiblings(tenant, origin);
@@ -319,7 +319,7 @@ class Rdr229P35cVectorsReaperIdReadTest extends AtomicWriteTestBase {
 
         assertThat(siblings).as("from gate 3 the id-tagged quarantine collection is a sibling and the label-only one is not")
             .contains(qWithId).doesNotContain(qLabelOnly);
-        assertThat(dev.nexus.service.vectors.PgVectorRepository.QUARANTINE_NO_ORIGIN_ID_SKIPPED.get()).as("the skip is counted").isGreaterThan(before);
+        assertThat(dev.nexus.service.db.QuarantineOrigin.NO_ORIGIN_ID_SKIPPED.get()).as("the skip is counted").isGreaterThan(before);
         assertThat(appender.list).as("and a WARN says so").anyMatch(e -> e.getLevel() == ch.qos.logback.classic.Level.WARN
             && e.getFormattedMessage().contains("carry no origin_collection_id"));
     }
