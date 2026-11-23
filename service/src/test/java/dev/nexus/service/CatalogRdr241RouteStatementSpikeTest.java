@@ -349,6 +349,11 @@ class CatalogRdr241RouteStatementSpikeTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
+            Long[] fxIds = new Long[5];   // P3.1: each document names a registered collection, by id
+            for (int c = 0; c < 5; c++) {
+                PgContainerHelper.insertCollection(seed, TENANT, "knowledge__fx-" + c + "__v1");
+                fxIds[c] = dev.nexus.service.db.CollectionIds.require(seed, TENANT, "knowledge__fx-" + c + "__v1");
+            }
             OffsetDateTime deletedAt = OffsetDateTime.parse("2026-10-01T12:00:00+00:00");
             int total = Fx.LIVE + Fx.DELETED;
             for (int lo = 0; lo < total; lo += 1000) {
@@ -356,12 +361,13 @@ class CatalogRdr241RouteStatementSpikeTest {
                     CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.AUTHOR, CATALOG_DOCUMENTS.CONTENT_TYPE,
                     CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.SOURCE_URI,
                     CATALOG_DOCUMENTS.METADATA, CATALOG_DOCUMENTS.ALIAS_OF, CATALOG_DOCUMENTS.SENSITIVE,
-                    CATALOG_DOCUMENTS.DELETED_AT);
+                    CATALOG_DOCUMENTS.DELETED_AT, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID);
                 var step = ins;
                 for (int i = lo; i < Math.min(total, lo + 1000); i++) {
                     step = step.values(TENANT, Fx.tumbler(i), "Doc " + i, Fx.author(i), Fx.contentType(i),
                         "/fx/" + i + ".md", "knowledge__fx-" + (i % 5) + "__v1", "file:///fx/" + i + ".md",
-                        JSONB.valueOf(Fx.metadataJson(i)), Fx.aliasOf(i), Fx.sensitive(i), Fx.live(i) ? null : deletedAt);
+                        JSONB.valueOf(Fx.metadataJson(i)), Fx.aliasOf(i), Fx.sensitive(i), Fx.live(i) ? null : deletedAt,
+                        fxIds[i % 5]);
                 }
                 step.execute();
             }

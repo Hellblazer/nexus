@@ -195,6 +195,7 @@ class ShortPageCountMeasurementTest {
             su.setAutoCommit(true);
             DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
             PgContainerHelper.insertCollection(seed, TENANT, COLLECTION);
+            Long cid = dev.nexus.service.db.CollectionIds.require(seed, TENANT, COLLECTION);   // P3.1: every seeded row carries the collection id
             Map<String, String> off = Map.of("autovacuum_enabled", "false");
             PgContainerHelper.setTableStorageParams(su, CATALOG_DOCUMENT_CHUNKS, off);
             PgContainerHelper.setTableStorageParams(su, CATALOG_DOCUMENTS, off);
@@ -203,11 +204,13 @@ class ShortPageCountMeasurementTest {
             var docSeries = DSL.generateSeries(0, docs - 1).as("d", "n");
             Field<Integer> n = docSeries.field("n", Integer.class);
             seed.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
-                    CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.SOURCE_URI)
+                    CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.SOURCE_URI,
+                    CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
                 .select(seed.select(DSL.inline(TENANT), DSL.concat(DSL.inline("h7-d"), DSL.cast(n, SQLDataType.VARCHAR)),
                         DSL.concat(DSL.inline("h7-d"), DSL.cast(n, SQLDataType.VARCHAR), DSL.inline(".md")),
                         DSL.inline(COLLECTION),
-                        DSL.concat(DSL.inline("file:///h7-d"), DSL.cast(n, SQLDataType.VARCHAR), DSL.inline(".md")))
+                        DSL.concat(DSL.inline("file:///h7-d"), DSL.cast(n, SQLDataType.VARCHAR), DSL.inline(".md")),
+                        DSL.val(cid, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID))
                     .from(docSeries))
                 .execute();
             for (String twin : List.of("h7-twin-a", "h7-twin-b")) {
@@ -216,6 +219,7 @@ class ShortPageCountMeasurementTest {
                     .set(CATALOG_DOCUMENTS.TUMBLER, twin)
                     .set(CATALOG_DOCUMENTS.TITLE, twin + ".md")
                     .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLLECTION)
+                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, cid)
                     .set(CATALOG_DOCUMENTS.SOURCE_URI, "file:///" + twin + ".md")
                     .execute();
             }
@@ -238,10 +242,10 @@ class ShortPageCountMeasurementTest {
                     gateWord(chash.ge(DSL.val(HexFormat.of().parseHex(gammaFrom), SQLDataType.BLOB)), GAMMA),
                     gateWord(i.mod(DELTA_EVERY).eq(0), DELTA));
                 seed.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.EMBEDDING_MODEL, CHUNKS.CHASH,
-                        CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384)
+                        CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.COLLECTION_ID)
                     .select(seed.select(DSL.val(TENANT, CHUNKS.TENANT_ID), DSL.val(COLLECTION, CHUNKS.COLLECTION),
                             DSL.val(MODEL, CHUNKS.EMBEDDING_MODEL), chash, text,
-                            DSL.cast(vector, CHUNKS.EMBEDDING_384.getDataType()))
+                            DSL.cast(vector, CHUNKS.EMBEDDING_384.getDataType()), DSL.val(cid, CHUNKS.COLLECTION_ID))
                         .from(series))
                     .execute();
                 if (!leafTuned) {
@@ -260,10 +264,12 @@ class ShortPageCountMeasurementTest {
                 seed.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
                         CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
                         CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
-                        CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE, CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN)
+                        CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE, CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN,
+                        CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID)
                     .select(seed.select(DSL.val(TENANT, CATALOG_DOCUMENT_CHUNKS.TENANT_ID), docId, position, chash,
                             DSL.val(COLLECTION, CATALOG_DOCUMENT_CHUNKS.COLLECTION),
-                            DSL.val(MODEL, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL), labelOf(i), DSL.inline(true))
+                            DSL.val(MODEL, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL), labelOf(i), DSL.inline(true),
+                            DSL.val(cid, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID))
                         .from(series).crossJoin(owners)
                         .where(k.lt(ownersOf(i)))
                         .orderBy(i, k))

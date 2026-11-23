@@ -40,6 +40,7 @@ class IndexRunCensusChunkReadMeasurementTest extends IndexRunCensusTestBase {
             su.setAutoCommit(true);
             var ctx = DSL.using(su, SQLDialect.POSTGRES);
             String model = PgContainerHelper.collectionModel(ctx, TENANT, C1);
+            Long cid = dev.nexus.service.db.CollectionIds.require(ctx, TENANT, C1);   // P3.1: chunks carry their collection id
             var series = DSL.generateSeries(1, rows).as("g", "n");
             org.jooq.Field<Integer> n = series.field(0, Integer.class);
             org.jooq.Field<byte[]> chash = DSL.function(DSL.name("decode"), org.jooq.impl.SQLDataType.VARBINARY,
@@ -47,9 +48,10 @@ class IndexRunCensusChunkReadMeasurementTest extends IndexRunCensusTestBase {
             org.jooq.Field<org.jooq.JSONB> meta = DSL.jsonbObject(DSL.jsonEntry("content_hash",
                 DSL.concat(DSL.inline("legacy"), n.cast(org.jooq.impl.SQLDataType.VARCHAR))));
             ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT,
-                    CHUNKS.EMBEDDING_768, CHUNKS.METADATA)
+                    CHUNKS.EMBEDDING_768, CHUNKS.METADATA, CHUNKS.COLLECTION_ID)
                 .select(ctx.select(DSL.inline(TENANT), DSL.inline(C1), chash, DSL.inline(model), DSL.inline("t"),
-                    DSL.val(VectorSeeds.vec(768, 0.1f), CHUNKS.EMBEDDING_768), meta).from(series))
+                    DSL.val(VectorSeeds.vec(768, 0.1f), CHUNKS.EMBEDDING_768), meta,
+                    DSL.val(cid, CHUNKS.COLLECTION_ID)).from(series))
                 .execute();
             PgContainerHelper.analyzeTable(su, CHUNKS);
         }

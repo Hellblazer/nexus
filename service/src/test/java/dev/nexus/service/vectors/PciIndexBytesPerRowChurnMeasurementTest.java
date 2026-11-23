@@ -321,14 +321,15 @@ class PciIndexBytesPerRowChurnMeasurementTest {
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
                 DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+                Long cid = dev.nexus.service.db.CollectionIds.require(ctx, tenant, collection);   // P3.1: chunks carry their collection id
                 for (int done = 0; done < count; done += BATCH) {
                     int n = Math.min(BATCH, count - done);
                     var step = ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH,
-                        CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_1024, CHUNKS.METADATA);
+                        CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_1024, CHUNKS.METADATA, CHUNKS.COLLECTION_ID);
                     for (int i = 0; i < n; i++) {
                         int id = next++;
                         step = step.values(tenant, collection, chash(id), MODEL, "row " + id, unitVector(seed, id),
-                            JSONB.jsonb("{}"));
+                            JSONB.jsonb("{}"), cid);
                         live.add(id);
                     }
                     step.execute();
