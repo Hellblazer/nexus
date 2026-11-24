@@ -158,6 +158,15 @@ def test_a_repo_name_with_underscores_is_hyphenated_in_the_subject_only(tmp_path
     assert status == 1 and calls == [] and "my-repo-rdr-research already has a collection" in err
 
 
+def test_the_migration_block_run_alone_refuses_before_any_rename(tmp_path: Path) -> None:
+    """Every tool call is a fresh shell. Run without the reuse check that defines ``SUBJECT`` and ``subject_collections``, the
+    guard would see empty output and the rename would name an empty subject; the block must stop first."""
+    block = f"CUR={CURRENT}\n" + _section_block("#### One-time migration", "nexus")
+    status, calls, _out, err = _bash(block, LIST_WITH_ID, tmp_path)
+    assert status == 1 and calls == []
+    assert "run the reuse check above first" in err
+
+
 @pytest.mark.parametrize(
     ("listing", "expected"),
     [
