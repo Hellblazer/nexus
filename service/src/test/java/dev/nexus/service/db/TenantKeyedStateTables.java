@@ -794,6 +794,8 @@ final class TenantKeyedStateTables {
         notKeyed.put("PciIdBuilds.pciOffLatch", "whether the gate 3 latch row says it latched while PCI was off, as a supplier bound once at boot; a callback, no data");
         // RDR-229 P3.5a: W2's route classification and gc seam, W1's client-label carrier.
         notKeyed.put("CollectionSelectors.EXEMPT", "the route table's exempt routes and the reason for each, a constant built once; no tenant");
+        notKeyed.put("CollectionSelectors.RETIRED_LABEL_READABLE", "the read routes that may still read a retired collection by label, with the "
+            + "reason for each (RDR-229 R7): a static route classification built once; no per-tenant state");
         notKeyed.put("GcCollectionReads.beforeMoveForTests", "a test seam run before a gc move, null in production; a callback, no data");
         notKeyed.put("ExpectedCollectionIds.Carrier.clientLabels", "the labels one request itself sent beside its ids, held for that "
             + "request's thread only and cleared at its end; no tenant state");
