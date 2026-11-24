@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.MEMORY;
+import static dev.nexus.service.jooq.nexus.Tables.REEMBED_JOBS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -130,6 +131,65 @@ class StrictWriterCensusTest {
         assertThat(StrictWriterCensus.bindsACollection(dsl.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.CHUNK_COUNT, 1)
             .where(CATALOG_DOCUMENTS.TENANT_ID.eq("t")).and(CATALOG_DOCUMENTS.TUMBLER.eq("1.2")).getSQL()))
             .as("the tenant and a tumbler name no collection").isFalse();
+    }
+
+    /**
+     * G3 (the row 14 census fix): a collection column bound to the empty string names no collection. {@code CollectionIds.idOf(Field, Field)}
+     * renders its empty-name guard as {@code <name column> = ?} with {@code ''} bound, and the ledger writes' keep-the-stored-id coalesce
+     * carries it, so such a statement was judged against the held rows and recorded as another collection's.
+     */
+    @Test
+    void aCollectionColumnBoundToTheEmptyString_namesNoCollection_andIsNotJudgedAgainstTheHeldRows() {
+        StrictWriterCensus.setModeForTests("strict");
+        DSLContext compared = txn();
+        WriteRegistryMemo.put(compared, "t", "held", row(9, "held"));
+        compared.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.CHUNK_COUNT, 3)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq("t")).and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq("")).execute();
+        // the keep-the-stored-id coalesce of a re-embed job row's own-id stamp, as the repository writes it
+        DSLContext ledger = txn();
+        WriteRegistryMemo.put(ledger, "t", "held", row(9, "held"));
+        ledger.update(REEMBED_JOBS)
+            .set(REEMBED_JOBS.SOURCE_COLLECTION_ID, DSL.coalesce(REEMBED_JOBS.SOURCE_COLLECTION_ID,
+                CollectionIds.idOf(REEMBED_JOBS.TENANT_ID, REEMBED_JOBS.SOURCE_COLLECTION)))
+            .where(REEMBED_JOBS.TENANT_ID.eq("t")).and(REEMBED_JOBS.JOB_ID.eq(java.util.UUID.randomUUID())).execute();
+        assertThat(StrictWriterCensus.examined()).as("non-vacuity: the census looked at both writes").isEqualTo(2);
+        assertThat(StrictWriterCensus.violations()).as("an empty-string bind names no collection: nothing to judge").isEmpty();
+    }
+
+    /** The empty string is dropped only where it is the whole bind of the column: a real label or id beside it is still judged. */
+    @Test
+    void aCollectionColumnBoundToTheEmptyStringBesideARealCollection_isStillJudged() {
+        StrictWriterCensus.setModeForTests("strict");
+        DSLContext list = txn();
+        WriteRegistryMemo.put(list, "t", "held", row(9, "held"));
+        list.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.CHUNK_COUNT, 3)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq("t")).and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.in("", "elsewhere")).execute();
+        DSLContext both = txn();
+        WriteRegistryMemo.put(both, "t", "held", row(9, "held"));
+        both.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.CHUNK_COUNT, 3)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq("t")).and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(""))
+            .and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID.eq(99L)).execute();
+        DSLContext held = txn();
+        WriteRegistryMemo.put(held, "t", "held", row(9, "held"));
+        held.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.CHUNK_COUNT, 3)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq("t")).and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.in("", "held")).execute();
+        assertThat(StrictWriterCensus.violations()).as("the list with another collection and the id of another are found; the held one is not")
+            .hasSize(2).allSatisfy(v -> assertThat(v).contains("holds another collection"));
+    }
+
+    /** The rule on what jOOQ renders and binds. */
+    @Test
+    void bindsACollection_ofARenderedStatementWithItsBinds_skipsAColumnBoundToTheEmptyString() {
+        DSLContext dsl = DSL.using(SQLDialect.POSTGRES);
+        var empty = dsl.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.CHUNK_COUNT, 1)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq("t")).and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(""));
+        assertThat(StrictWriterCensus.bindsACollection(empty.getSQL())).as("the text alone cannot tell: it binds a collection column").isTrue();
+        assertThat(StrictWriterCensus.bindsACollection(empty.getSQL(), empty.getBindValues())).as("with its binds: ''").isFalse();
+        var named = dsl.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.CHUNK_COUNT, 1)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq("t")).and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq("x"));
+        assertThat(StrictWriterCensus.bindsACollection(named.getSQL(), named.getBindValues())).as("a label").isTrue();
+        var set = dsl.update(CHUNKS).set(CHUNKS.COLLECTION, "x").where(CHUNKS.TENANT_ID.eq("t"));
+        assertThat(StrictWriterCensus.bindsACollection(set.getSQL(), set.getBindValues())).as("an assigned label").isTrue();
     }
 
     @Test
