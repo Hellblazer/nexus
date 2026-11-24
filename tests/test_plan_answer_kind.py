@@ -80,7 +80,7 @@ _BEFORE: dict[str, tuple[str, str, str, str, str, str]] = {
     "analyze-default.yml": ('{"scope":"global","strategy":"default","verb":"analyze"}', "92d76c1c6890", "default", "analyze", "global", "a62aa486d019"),
     "citation-traversal.yml": ('{"scope":"global","strategy":"citation-traversal","verb":"research"}', "c9e0e3702824", "citation-traversal", "research", "global", "a04f9e1f1caf"),
     "corpus-coverage-check.yml": ('{"scope":"global","strategy":"corpus-coverage-check","verb":"research"}', "074cf6f1330f", "corpus-coverage-check", "research", "global", "84ea44981806"),
-    "debug-default.yml": ('{"scope":"global","strategy":"default","verb":"debug"}', "dbd0623d59ea", "default", "debug", "global", "86c8c533da69"),
+    "debug-default.yml": ('{"scope":"global","strategy":"default","verb":"debug"}', "dbd0623d59ea", "default", "debug", "global", "d0c61b8878de"),  # steps moved on purpose: the query step's literal `author: nexus` is gone (8.5.6 docs audit)
     "document-default.yml": ('{"scope":"global","strategy":"default","verb":"document"}', "afbb8e70a34e", "default", "document", "global", "3f302c09fa3c"),
     "document-discovery.yml": ('{"scope":"global","strategy":"document-discovery","verb":"research"}', "546d2e15c18a", "document-discovery", "research", "global", "84ea44981806"),
     "find-by-author.yml": ('{"scope":"global","strategy":"find-by-author","verb":"research"}', "5be70bc2a349", "find-by-author", "research", "global", "2d5217c1ce02"),
