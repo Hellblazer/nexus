@@ -282,7 +282,9 @@ public final class CatalogMoves {
             CollectionRegistry.requireIdsAndLabelsForWrite(ctx, tenant, collectionIdsOf(ctx, tenant, docs, matched), List.of());
             return;
         }
-        List<String> labels = docs.stream().map(r -> r.value2()).filter(l -> l != null && !l.isEmpty()).distinct().toList();
+        // Before the latch, by label, the same set the by-id branch locks: the documents' own labels and those of the rows the move writes besides
+        // (the documents' aspect and highlight rows, and the documents that name a matched one as alias_of), all in the one call (RDR-229 P3.5a row 14)
+        List<String> labels = labelsOf(ctx, tenant, docs, matched);
         if (labels.isEmpty()) {
             return;
         }
@@ -304,6 +306,22 @@ public final class CatalogMoves {
                     tenant, d.value1(), d.value2());
             }
         }
+    }
+
+    /** {@link #collectionIdsOf} by label, for the move before the latch: the distinct non-empty labels, in the order they are first met. */
+    private static List<String> labelsOf(DSLContext ctx, String tenant,
+            org.jooq.Result<? extends org.jooq.Record3<String, String, Long>> docs, List<String> matched) {
+        java.util.Set<String> labels = new java.util.LinkedHashSet<>();
+        docs.forEach(r -> labels.add(r.value2()));
+        for (List<String> chunk : chunks(matched)) {
+            labels.addAll(ctx.selectDistinct(DOCUMENT_ASPECTS.COLLECTION).from(DOCUMENT_ASPECTS)
+                .where(DOCUMENT_ASPECTS.TENANT_ID.eq(tenant).and(DOCUMENT_ASPECTS.DOC_ID.in(chunk))).fetch(DOCUMENT_ASPECTS.COLLECTION));
+            labels.addAll(ctx.selectDistinct(DOCUMENT_HIGHLIGHTS.COLLECTION).from(DOCUMENT_HIGHLIGHTS)
+                .where(DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant).and(DOCUMENT_HIGHLIGHTS.DOC_ID.in(chunk))).fetch(DOCUMENT_HIGHLIGHTS.COLLECTION));
+            labels.addAll(ctx.selectDistinct(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION).from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.ALIAS_OF.in(chunk))).fetch(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION));
+        }
+        return labels.stream().filter(l -> l != null && !l.isEmpty()).toList();
     }
 
     /**
