@@ -245,7 +245,8 @@ public final class RemapRepository {
             // row whose collection is gone, so the dangling rows of a deleted collection clear too
             return ctx.deleteFrom(CHASH_REMAP)
                .where(CHASH_REMAP.TENANT_ID.eq(tenant)
-                       // a leg with no registry row was read without a lock: only its dangling rows, never a collection registered since
+                       // from gate 3, a leg with no registry row (read without a lock) matches only its dangling rows, never a collection registered since;
+                       // before gate 3 it is the plain name match, which still reaches a collection registered meanwhile (DanglingLedger)
                        .and(sourceRow.isPresent() ? sourceIs(tenant, source)
                            : DanglingLedger.of(gate3, tenant, CHASH_REMAP.SOURCE_COLLECTION, CHASH_REMAP.SOURCE_COLLECTION_ID, source))
                        .and(targetRow.isPresent() ? targetIs(tenant, target)

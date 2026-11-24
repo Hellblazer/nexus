@@ -827,7 +827,8 @@ public final class PipelineRepository {
             return ctx.deleteFrom(PDF_PIPELINE)
                .where(PDF_PIPELINE.TENANT_ID.eq(tenant)
                        // a ledger outlives its registry row (the client deletes the row first, then asks for this cleanup by name): with
-                       // no row the rows are found by the name they recorded, and only those whose id no live registry row holds
+                       // no row the rows are found by the name they recorded, from gate 3 only those whose id no live registry row holds
+                       // (before gate 3 the plain name match, which still reaches a collection registered meanwhile: DanglingLedger)
                        .and(row.isPresent()
                            ? CollectionOwnedRows.of(row, PDF_PIPELINE.COLLECTION_ID, PDF_PIPELINE.COLLECTION, collection)
                            : DanglingLedger.of(gate3, tenant, PDF_PIPELINE.COLLECTION, PDF_PIPELINE.COLLECTION_ID, collection)))
