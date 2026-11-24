@@ -353,6 +353,129 @@ def test_a_failed_move_fails_the_leg() -> None:
     assert not _mod.status_says_idle(200, {"boot_work": [_FAILED]})
 
 
+# Sam 2026-11-24 (T2 nexus/sam-ruling-856-overlap-2026-11-24): the RDR-229 P3.7 restart notice (boot_work id exactly
+# "rdr229-restart", posted once the stamps are done, kept until a restart) counts as parked for idle, is reported in the
+# boot's record, never gates the upgrade boot, and leg A's plain reboot must clear it.
+
+_NOTICE = {"id": "rdr229-restart", "what": "restart the engine once: it applies the P3.5b changesets that a collection "
+           "rename waits for (2 of 5 not applied yet)", "started_at": 1.0, "done": 0, "total": 0, "unit": None,
+           "safe_to_stop": True, "on_stop": "nothing is lost: the restart is the step that applies them", "step": None}
+
+
+def test_the_restart_notice_alone_counts_as_idle_and_is_not_a_parked_move() -> None:
+    status = {"boot_work": [_NOTICE]}
+    assert _mod.boot_work_settled(status) and _mod.status_says_idle(200, status)
+    assert _mod.restart_notices(status) == [_NOTICE]
+    assert _mod.parked_moves(status) == [] and not _mod.moves_working(status) and _mod.moves_progress(status) == ()
+    assert _mod.status_says_idle(200, {"boot_work": [_NOTICE, _BLOCKED, _PAUSED]})
+
+
+def test_the_restart_notice_with_a_running_move_or_a_failed_one_does_not_count_as_idle() -> None:
+    assert not _mod.status_says_idle(200, {"boot_work": [_NOTICE, _WORKING]})
+    assert not _mod.status_says_idle(200, {"boot_work": [_NOTICE, _BLOCKED_OTHER]})
+    assert not _mod.status_says_idle(200, {"boot_work": [_NOTICE, {"kind": "pci_build"}]})
+    assert not _mod.status_says_idle(200, {"boot_work": [_NOTICE, _FAILED]})
+    assert _mod.failed_moves({"boot_work": [_NOTICE, _FAILED]}) == [_FAILED]
+
+
+@pytest.mark.parametrize("ident", ["rdr229-completion", "rdr229-restart-2", "xrdr229-restart", "data-move:rdr229-restart",
+                                   "RDR229-RESTART", "rdr229", ""])
+def test_only_the_exact_restart_id_is_the_notice(ident: str) -> None:
+    entry = {"id": ident, "what": "restart the engine once"}
+    assert not _mod.is_restart_notice(entry) and not _mod.status_says_idle(200, {"boot_work": [entry]})
+    assert _mod.restart_notices({"boot_work": [entry]}) == []
+
+
+def test_wait_idle_reaches_idle_on_the_notice_alone_and_hands_it_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clock(monkeypatch, 1.0)
+    tick = {"t": 0.0}
+
+    def fake_sample(_i: object, _t0: float) -> object:
+        tick["t"] += 10.0
+        return _mod.Sample(tick["t"], 100, None, None, 0, 0, ())
+
+    monkeypatch.setattr(_mod, "sample", fake_sample)
+    monkeypatch.setattr(_mod, "http_status", lambda _p, _path: (200, {"boot_work": [_NOTICE, _BLOCKED]}))
+    parked: list = []
+    idle = _mod.wait_idle(object(), lambda: 1, 0.0, [], _mod.IdleRule(15.0, 1 << 20), 1e9, "new engine (upgrade)",
+                          parked=parked)
+    assert idle.t >= 20.0 and parked == [_BLOCKED, _NOTICE]
+
+
+def test_the_upgrade_boot_records_the_notice_beside_the_parked_moves_and_the_sizing_ignores_it(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    status = {"boot_work": [_NOTICE]}
+    base, _l, _q = _drive_measure_boot(monkeypatch, tmp_path, status=status)
+    rec, _l, _q = _drive_measure_boot(monkeypatch, tmp_path, status=status, idle_parked=[_BLOCKED, _NOTICE])
+    assert rec["restart_requested"] is True and rec["restart_notice_entry"]["id"] == "rdr229-restart"
+    assert [m["id"] for m in rec["parked_moves"]] == [_BLOCKED["id"]]   # the notice is not listed as a move
+    assert rec["move_pacing"]["moves"] == base["move_pacing"]["moves"] and rec["move_pacing"]["moves"]   # not an open move
+    clean, _l, _q = _drive_measure_boot(monkeypatch, tmp_path)
+    assert clean["restart_requested"] is False and "restart_notice_entry" not in clean
+
+
+def _boot_new_with(monkeypatch: pytest.MonkeyPatch, first: dict, second: dict) -> object:
+    boots = iter([first, second])
+    monkeypatch.setattr(_mod, "measure_boot", lambda *_a, **_k: next(boots))
+
+    class _Inst:
+        def checkpoint_lsn(self) -> str:
+            return "0/0"
+
+    class _A:
+        second_boot = True
+        restart_mode = "graceful"
+        _before: dict = {}
+
+    rep = _mod.Report(prev_client="x", new_jar="j", rows_per_collection=1, checkpoint_lsn="0/0")
+    _mod.boot_new(_Inst(), _A(), {}, rep)
+    return rep
+
+
+_PHASES = {"migrate": {"wal_bytes": 1}, "ready": {"wal_bytes": 1}}
+
+
+def _upgrade_boot(requested: bool) -> dict:
+    return {"label": "upgrade", "reached_ready": True, "phases": _PHASES, "restart_requested": requested}
+
+
+def test_a_notice_still_listed_after_the_reboot_fails_the_leg(monkeypatch: pytest.MonkeyPatch) -> None:
+    reboot = {"label": "reboot", "reached_ready": True, "phases": _PHASES, "restart_requested": True,
+              "restart_notice_entry": {"id": "rdr229-restart", "what": "restart the engine once"}}
+    with pytest.raises(_mod.HarnessError, match=r"rdr229-restart still in boot_work.*upgrade boot posted it"):
+        _boot_new_with(monkeypatch, _upgrade_boot(True), reboot)
+    assert reboot["restart_notice"] == "still-listed"
+
+
+def test_a_notice_the_upgrade_boot_never_posted_is_recorded_and_passes(monkeypatch: pytest.MonkeyPatch) -> None:
+    reboot = {"label": "reboot", "reached_ready": True, "phases": _PHASES, "restart_requested": False}
+    rep = _boot_new_with(monkeypatch, _upgrade_boot(False), reboot)
+    assert rep.boots[1]["restart_notice"] == "not-posted"
+
+
+def test_a_notice_the_reboot_cleared_is_recorded_cleared(monkeypatch: pytest.MonkeyPatch) -> None:
+    reboot = {"label": "reboot", "reached_ready": True, "phases": _PHASES, "restart_requested": False}
+    rep = _boot_new_with(monkeypatch, _upgrade_boot(True), reboot)
+    assert rep.boots[1]["restart_notice"] == "cleared"
+
+
+def test_a_notice_listed_by_the_upgrade_boots_resume_or_retry_is_not_asserted(monkeypatch: pytest.MonkeyPatch) -> None:
+    # --restart-mid-queue legs (resume) and a retry after a failed boot keep their rules: only a plain reboot clears it
+    resume_first = {"label": "upgrade", "reached_ready": True, "phases": _PHASES, "restarted_mid_queue_s": 5.0,
+                    "pci_builds": [], "restart_lsn": "0/1"}
+    resume = {"label": "resume", "reached_ready": True, "phases": _PHASES, "restart_requested": True, "pci_builds": [],
+              "_adopted_lines": []}
+    rep = _boot_new_with(monkeypatch, resume_first, resume)
+    assert "restart_notice" not in rep.boots[1]
+    retry = {"label": "retry", "reached_ready": True, "phases": _PHASES, "restart_requested": True}
+    rep = _boot_new_with(monkeypatch, {"label": "upgrade", "reached_ready": False, "failure": "x"}, retry)
+    assert "restart_notice" not in rep.boots[1]
+
+
+def test_the_module_docstring_names_the_notice_and_the_ruling() -> None:
+    assert "rdr229-restart" in _mod.__doc__ and "sam-ruling-856-overlap-2026-11-24" in _mod.__doc__
+
+
 # ── data-move pacing in the upgrade legs (Sam's choice 1 on ask rdr229-upgrade-gate-pacing) ────
 
 import json  # noqa: E402
@@ -552,7 +675,8 @@ class _FakeProc:
 
 def _drive_measure_boot(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, label: str = "upgrade", *,
                         restart: bool = False, sleep_ms: int = 0, max_wait: float = 600.0, status: dict | None = None,
-                        registry: list | None = _REGISTRY, rows: list | None = (("86000",),)) -> tuple[dict, list, list]:
+                        registry: list | None = _REGISTRY, rows: list | None = (("86000",),),
+                        idle_parked: list | None = None) -> tuple[dict, list, list]:
     """``measure_boot`` for one boot label with Popen, psql, HTTP and the idle wait faked. Returns the record, the env
     of every launched process, and the SQL it ran."""
     launched: list[dict] = []
@@ -575,7 +699,7 @@ def _drive_measure_boot(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, label: 
         if restart:
             raise _mod.MidQueueRestart
         if parked is not None:
-            parked[:] = []
+            parked[:] = list(idle_parked or [])
         return idle
 
     class _Inst:

@@ -24,7 +24,10 @@ are reported beside it, measured from the first sample after PG accepts connecti
 ``migrate`` is PG up to the engine's HTTP bind, ``ready`` is up to ``/health`` 200, ``settle`` is up to
 idle. Idle means all of: ``/v1/status`` ``boot_work`` empty (absent on engines that predate it is
 taken as empty) or holding only parked data moves (``blocked:`` for a missing prerequisite, or ``paused:``;
-reported as ``parked_moves``, never gated; a ``failed:`` move fails the leg; Sam 2026-11-21), no rows in ``pg_stat_progress_create_index`` or ``pg_stat_progress_vacuum``, and WAL
+reported as ``parked_moves``, never gated; a ``failed:`` move fails the leg; Sam 2026-11-21) or the RDR-229 restart
+notice (the entry with id exactly ``rdr229-restart``, posted once the stamps are done, asking for one restart and
+staying until it; reported as ``restart_requested`` and ``restart_notice_entry``, never gated by the upgrade boot,
+never part of the move sizing; Sam 2026-11-24, T2 ``nexus/sam-ruling-856-overlap-2026-11-24``), no rows in ``pg_stat_progress_create_index`` or ``pg_stat_progress_vacuum``, and WAL
 growth under ``--idle-wal-bytes`` over the last ``--idle-window`` seconds; and, unless
 ``--no-reconcile-wait``, a completed PCI reconcile pass in this boot's engine log plus the PCI end state (a
 valid ``pci_`` index for each large seeded collection, none INVALID). The byte bounds gate migrate + ready of
@@ -35,6 +38,10 @@ WAL-logged (an index build's own heap and index pages beyond WAL, temp files) sh
 
 Every boot is followed by a second one on the same data dir: a same-version ``reboot`` after a good
 upgrade, a ``retry`` after a failed one (does the failure repeat), a ``resume`` after a mid-queue restart.
+The plain ``reboot`` is the restart the notice asks for: once it reaches idle its ``boot_work`` must not list
+``rdr229-restart``, or the leg fails with a HarnessError naming it; the reboot's record carries ``restart_notice``
+(``cleared``, or ``not-posted`` when the upgrade boot never posted it, which passes). Restart legs
+(``--restart-mid-queue``) keep their rules; for them the notice only counts as parked in the idle waits.
 Each boot also runs ``nx doctor`` from ``/health`` 200 and records how long it took (``--doctor-capture``
 adds a py-spy profile, a DEBUG log and ``pg_stat_activity`` samples).
 
@@ -539,6 +546,23 @@ def parked_moves(status: dict | None) -> list[dict]:
     return [e for e in ((status or {}).get("boot_work") or []) if _is_parked(e)]
 
 
+#: The ``boot_work`` id of the RDR-229 P3.7 restart notice (``CompletionBootWork.RESTART_ENTRY_ID``): posted once every
+#: stamp move is done and a P3.5b changeset has not applied, it asks the operator for one restart and stays until that
+#: restart. It is not a data move (no ``data-move:`` prefix, no ``reason_class``, ``what`` is the instruction), so the
+#: move rules above never see it and it needs its own parked rule. Matched on the exact id, never a substring.
+RESTART_NOTICE_ID = "rdr229-restart"
+
+
+def is_restart_notice(entry: dict) -> bool:
+    """True for the RDR-229 restart notice and nothing else: the exact id."""
+    return isinstance(entry, dict) and entry.get("id") == RESTART_NOTICE_ID
+
+
+def restart_notices(status: dict | None) -> list[dict]:
+    """The restart-notice entries of ``/v1/status`` boot_work (at most one in practice)."""
+    return [e for e in ((status or {}).get("boot_work") or []) if is_restart_notice(e)]
+
+
 def failed_moves(status: dict | None) -> list[dict]:
     """The ``failed:`` data-move entries: a failed move fails the leg."""
     return [e for e in ((status or {}).get("boot_work") or []) if _move_state(e) == "failed"]
@@ -605,10 +629,12 @@ def pre_move_wal_bytes(samples: list["Sample"], ready: "Sample", idle: "Sample")
 
 
 def boot_work_settled(status: dict | None) -> bool:
-    """Every boot_work entry is a parked move (or there is none): nothing in it is still working."""
+    """Every boot_work entry is a parked move or the RDR-229 restart notice (or there is none): nothing in it is
+    still working. The notice asks for a restart and holds nothing back (Sam 2026-11-24, T2
+    nexus/sam-ruling-856-overlap-2026-11-24); leg A's reboot is what must clear it."""
     if boot_work_empty(status):
         return True
-    return all(_is_parked(e) for e in status["boot_work"])
+    return all(_is_parked(e) or is_restart_notice(e) for e in status["boot_work"])
 
 
 def status_says_idle(code: int, status: dict | None) -> bool:
@@ -693,7 +719,8 @@ def wait_idle(inst: Install, port_fn, t0: float, samples: list[Sample], rule: Id
               what: str, extra=None, on_sample=None, parked: list[dict] | None = None) -> Sample:
     """Sample every second until idle (module docstring) and ``extra()``, when given, is true; raise
     HarnessError at the deadline, or at once when a data move reports ``failed:``. At idle, ``parked`` (when
-    given) is filled with the parked moves the last status showed (:func:`parked_moves`)."""
+    given) is filled with the parked moves the last status showed (:func:`parked_moves`) followed by the restart notice,
+    when listed (:func:`restart_notices`); the caller tells them apart with :func:`is_restart_notice`."""
     last_note = 0.0
     while True:
         now = time.monotonic()
@@ -716,7 +743,7 @@ def wait_idle(inst: Install, port_fn, t0: float, samples: list[Sample], rule: Id
                     and (extra is None or extra()):
                 if s.lsn - older[-1].lsn < rule.wal_bytes:
                     if parked is not None:
-                        parked[:] = parked_moves(status)
+                        parked[:] = parked_moves(status) + restart_notices(status)
                     return s
             if now - last_note > 60:
                 last_note = now
@@ -1272,7 +1299,13 @@ def measure_boot(inst: Install, a: argparse.Namespace, env: dict[str, str], labe
         rec["total_io_extend_bytes"] = int(idle.io_extend_bytes or 0) - int(first.io_extend_bytes or 0)
     rec["elapsed_s"] = round(idle.t, 1)
     rec["parked_moves"] = [{"id": e.get("id"), "what": e.get("what"), "reason_class": e.get("reason_class")}
-                           for e in parked]
+                           for e in parked if not is_restart_notice(e)]
+    # The restart notice is reported beside the parked moves, never among them: it is not a move and never enters the
+    # sizing (open_moves / size_open_moves read parked_moves() of the status, which leaves it out).
+    notice = next((e for e in parked if is_restart_notice(e)), None)
+    rec["restart_requested"] = notice is not None
+    if notice is not None:
+        rec["restart_notice_entry"] = {"id": notice.get("id"), "what": notice.get("what")}
     after = hnsw_indexes(inst)
     rec["hnsw"] = len(after)
     rec["pci"] = sum(1 for n, _, ok in after if n.startswith(PCI_PREFIX) and ok)
@@ -1282,6 +1315,22 @@ def measure_boot(inst: Install, a: argparse.Namespace, env: dict[str, str], labe
     proc.wait(timeout=60)
     start_out.close()
     return rec
+
+
+def reboot_restart_check(first: dict, reboot: dict) -> None:
+    """Leg A's reboot is the restart the RDR-229 notice asks for: once it reaches idle its boot_work must no longer
+    list ``rdr229-restart``. Records ``restart_notice`` on the reboot (``cleared``: the upgrade boot posted it and the
+    reboot did not; ``not-posted``: the upgrade boot never posted it, so there was nothing to clear) and raises
+    HarnessError, naming the notice, when the reboot still lists it (Sam 2026-11-24,
+    T2 nexus/sam-ruling-856-overlap-2026-11-24)."""
+    if reboot.get("restart_requested"):
+        reboot["restart_notice"] = "still-listed"
+        what = (reboot.get("restart_notice_entry") or {}).get("what", "")
+        raise HarnessError(
+            f"the plain reboot reached idle with {RESTART_NOTICE_ID} still in boot_work ({what!r}): the restart the "
+            f"upgrade boot asked for did not clear it (the upgrade boot "
+            f"{'posted' if first.get('restart_requested') else 'did not post'} it)")
+    reboot["restart_notice"] = "cleared" if first.get("restart_requested") else "not-posted"
 
 
 def boot_new(inst: Install, a: argparse.Namespace, env: dict[str, str], rep: Report) -> None:
@@ -1332,6 +1381,8 @@ def boot_new(inst: Install, a: argparse.Namespace, env: dict[str, str], rep: Rep
         second.pop("_adopted_lines", None)
     rep.hnsw_after = last.get("hnsw", 0)
     rep.pci_after = last.get("pci", 0)
+    if len(rep.boots) > 1 and rep.boots[1].get("label") == "reboot" and rep.boots[1].get("reached_ready"):
+        reboot_restart_check(first, rep.boots[1])
 
 
 def jar_identity(jar: Path | None) -> str | None:
