@@ -755,14 +755,14 @@ public final class CompletionCheck {
     }
 
     /**
-     * Why the further gate 3 conditions (the runtime-built id unique indexes) do not hold: names the changesets their twins still wait for
+     * Why the further gate 3 conditions (the runtime-built id unique indexes) do not hold: names the changesets gate 3 still waits for
      * ({@link IdUniqueIndexPass#waitingChangesets}; ids only, no tenant or collection), when there are any. A failed read adds nothing.
      */
     private static String furtherConditionWhy(DSLContext ctx) {
         String base = "a further gate 3 condition does not hold (the runtime-built id unique indexes)";
         try {
             List<String> waiting = IdUniqueIndexPass.waitingChangesets(ctx);
-            String out = waiting.isEmpty() ? base : base + "; an id twin waits for changeset" + (waiting.size() > 1 ? "s " : " ") + String.join(", ", waiting);
+            String out = waiting.isEmpty() ? base : base + "; gate 3 waits for changeset" + (waiting.size() > 1 ? "s " : " ") + String.join(", ", waiting);
             List<String> held = IdUniqueIndexPass.heldReasons();   // table and index names only, never a tenant or a key value
             return held.isEmpty() ? out : out + "; " + String.join("; ", held);
         } catch (RuntimeException e) {

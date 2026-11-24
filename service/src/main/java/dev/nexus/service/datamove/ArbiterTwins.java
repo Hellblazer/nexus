@@ -45,6 +45,15 @@ public record ArbiterTwins(String table, String nameColumns, String idColumns, S
     public static final java.util.Map<String, List<String>> WAITS_FOR_CHANGESETS = java.util.Map.of(
         "idx_canary_query_ring_id_digest_uq", List.of("vectors-078-8"));
 
+    /**
+     * Changesets gate 3 waits for that no twin index stands behind (linda 2026-11-23): vectors-084's by-id overloads of
+     * {@code taxonomy_ann_query_<dim>}, which {@code TaxonomyCentroidRepository#annQuery} calls once gate 3 holds, with no fallback to the text
+     * overload. Gate 3 can latch at the first boot after the stamps complete, the boot at which vectors-084 applies, so it must not hold while
+     * one of the three is unrecorded in databasechangelog. {@link IdUniqueIndexPass#allValid} requires them recorded and
+     * {@link IdUniqueIndexPass#waitingChangesets} names the ones that are not.
+     */
+    public static final List<String> GATE3_WAITS_FOR_CHANGESETS = List.of("vectors-084-1", "vectors-084-2", "vectors-084-3");
+
     public static final List<ArbiterTwins> ALL = List.of(
         // the P3.3b/c parent UNIQUE on the id key, attached once both swaps complete (gate 2)
         new ArbiterTwins("chunks", "tenant_id, collection, chash, embedding_model", "tenant_id, collection_id, chash, embedding_model", null, null),

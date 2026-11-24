@@ -252,8 +252,9 @@ public final class IdUniqueIndexPass implements AutoCloseable {
     }
 
     /**
-     * The changesets the pass's twins still wait for ({@link ArbiterTwins#WAITS_FOR_CHANGESETS}), for gate3_why and boot_work: the ids not yet
-     * recorded in databasechangelog of every twin that is not yet VALID. Empty when nothing waits.
+     * The changesets gate 3 still waits for, for gate3_why and boot_work: the ids not yet recorded in databasechangelog of every twin that is
+     * not yet VALID ({@link ArbiterTwins#WAITS_FOR_CHANGESETS}), then the unrecorded ones of {@link ArbiterTwins#GATE3_WAITS_FOR_CHANGESETS}.
+     * Empty when nothing waits.
      */
     public static List<String> waitingChangesets(DSLContext ctx) {
         var dcl = DSL.table(DSL.name("public", "databasechangelog"));
@@ -267,10 +268,26 @@ public final class IdUniqueIndexPass implements AutoCloseable {
             var recorded = ctx.selectDistinct(id).from(dcl).where(id.in(ids)).fetch(id);
             ids.stream().filter(i -> !recorded.contains(i) && !out.contains(i)).forEach(out::add);
         }
+        for (String changeset : unrecordedGate3Changesets(ctx)) {
+            if (!out.contains(changeset)) {
+                out.add(changeset);
+            }
+        }
         return out;
     }
 
-    /** True when every applicable index exists and is VALID with its definition: what gate 3 requires. A failed read is false. */
+    /** The ids of {@link ArbiterTwins#GATE3_WAITS_FOR_CHANGESETS} not recorded in databasechangelog, in the list's order. */
+    static List<String> unrecordedGate3Changesets(DSLContext ctx) {
+        var dcl = DSL.table(DSL.name("public", "databasechangelog"));
+        var id = DSL.field(DSL.name("id"), String.class);
+        var recorded = ctx.selectDistinct(id).from(dcl).where(id.in(ArbiterTwins.GATE3_WAITS_FOR_CHANGESETS)).fetch(id);
+        return ArbiterTwins.GATE3_WAITS_FOR_CHANGESETS.stream().filter(c -> !recorded.contains(c)).toList();
+    }
+
+    /**
+     * True when every applicable index exists and is VALID with its definition and every changeset of
+     * {@link ArbiterTwins#GATE3_WAITS_FOR_CHANGESETS} is recorded: what gate 3 requires. A failed read is false.
+     */
     public static boolean allValid(DSLContext ctx) {
         try {
             for (Spec s : SPECS) {
@@ -278,7 +295,7 @@ public final class IdUniqueIndexPass implements AutoCloseable {
                     return false;
                 }
             }
-            return true;
+            return unrecordedGate3Changesets(ctx).isEmpty();
         } catch (DataAccessException e) {
             log.warn("event=id_unique_index_valid_unread cause=\"{}\"", oneLine(e));
             return false;

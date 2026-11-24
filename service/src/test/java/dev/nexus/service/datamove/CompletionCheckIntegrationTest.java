@@ -628,16 +628,16 @@ class CompletionCheckIntegrationTest {
         }
     }
 
-    /** linda 2026-11-23: gate3_why names the changeset a twin of the runtime-built id unique indexes still waits for. */
+    /** linda 2026-11-23: gate3_why names the changesets gate 3 still waits for: a twin of the runtime-built id unique indexes' and vectors-084's. */
     @Test
     void gate3WhyNamesTheChangesetTheIdTwinsWaitFor() {
-        // The fresh walk (formAApplied() false, so this never skips there) leaves vectors-078-8 unrecorded and a twin waits for it.
+        // The fresh walk (formAApplied() false, so this never skips there) leaves vectors-078-8 and vectors-084-1/2/3 unrecorded: a twin and gate 3 wait.
         org.junit.jupiter.api.Assumptions.assumeFalse(dev.nexus.service.Rdr229CompleteStamps.formAApplied(),
-            "on the form-A clone vectors-078-8 is recorded (Rdr229CompleteStamps.java:88-91), so no twin waits "
-                + "(ArbiterTwins.java:45-46, IdUniqueIndexPass.java:258-270); the precondition needs a fresh walk");
+            "on the form-A clone vectors-078-8 and vectors-084-1/2/3 are recorded (Rdr229CompleteStamps.java:88-91), so nothing waits "
+                + "(ArbiterTwins.java:45-55, IdUniqueIndexPass.java:258-285); the precondition needs a fresh walk");
         IdIndexCatalogReads.forgetWaitedChangesets(ctx);
         List<String> waiting = IdUniqueIndexPass.waitingChangesets(ctx);
-        assertThat(waiting).as("non-vacuity: a twin waits for a changeset that is not recorded").isNotEmpty();
+        assertThat(waiting).as("non-vacuity: gate 3 waits for a changeset that is not recorded").isNotEmpty();
 
         var refused = CompletionCheck.evaluate(ctx, new CompletionCheck.ReadSet(List.of(), List.of()), everyIndexValid(), CompletionCheck.DIRECT,
             List.of(c -> false));
@@ -645,6 +645,7 @@ class CompletionCheckIntegrationTest {
         assertThat(refused.gate3()).isFalse();
         assertThat(refused.gate3Why()).contains("a further gate 3 condition does not hold");
         waiting.forEach(id -> assertThat(refused.gate3Why()).contains(id));
+        assertThat(waiting).as("gate 3 waits for vectors-084's three as well as the twin's").contains("vectors-078-8", "vectors-084-1", "vectors-084-2", "vectors-084-3");
         assertThat(refused.gate3Why()).as("ids only: no tenant or collection on the unauthenticated status").doesNotContain("canary_query_ring");
     }
 
