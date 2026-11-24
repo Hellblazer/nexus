@@ -134,8 +134,14 @@ def test_allowlist_entry_still_exists() -> None:
         )
 
 
-#: The one module allowed to touch ``fcntl`` at ALL, at any scope.
-_FCNTL_ALLOWED: frozenset[str] = frozenset({"_locking.py"})
+#: The modules allowed to touch ``fcntl`` at ALL, at any scope: the shim, and the
+#: generation lease's two halves. ``_nx_lease.py`` runs inside every interpreter a
+#: generation starts (copied into its site-packages, nexus not importable by contract)
+#: and ``lease_core.py`` is the bootstrap-safe core gc and the builders share with it
+#: (``tests/test_install_lease_core_is_bootstrap_safe.py`` pins that neither imports
+#: nexus), so neither can reach ``nexus._locking``. Both guard ``fcntl`` behind a
+#: win32 check at module scope and take the Windows arm through a held handle.
+_FCNTL_ALLOWED: frozenset[str] = frozenset({"_locking.py", "_nx_lease.py", "lease_core.py"})
 
 
 def _fcntl_references(source: str) -> list[int]:
