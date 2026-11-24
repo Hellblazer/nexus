@@ -56,7 +56,7 @@ public final class PciBuilders {
      *
      * @param log the caller's logger, for the failure line
      */
-    static int count(DSLContext ctx, Logger log) {
+    public static int count(DSLContext ctx, Logger log) {
         try {
             Integer count = ctx.selectCount()
                 .from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))

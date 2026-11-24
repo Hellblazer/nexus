@@ -49,6 +49,22 @@ final class ChunkFamily {
         return onComplete != null && NAMES.matcher(normalise(onComplete)).find();
     }
 
+    /**
+     * True when a completion attempt of {@code move} waits for in-flight index builds instead of ending them: the name-key drop move
+     * ({@link NameKeyDropMove#LABEL}). Its {@code on_complete} names {@code nexus.chunks}, so {@link #touches} classes it as chunk-family,
+     * but its completion defers while any build runs (Sam 2026-11-23, T2 {@code nexus/sam-ruling-rdr229-drop-move-waits-for-id-builds-2026-11-24}:
+     * "Fix: wait, don't end"). The builds after gate 3 are id-index builds the reconciler keeps making, and ending one on every attempt
+     * throws an HNSW build away.
+     */
+    static boolean waitsForIndexBuilds(DataMove move) {
+        return NameKeyDropMove.LABEL.equals(move.label());
+    }
+
+    /** True when a completion attempt of {@code move} ends the in-flight index builds: chunk-family, and not a move that waits for them. */
+    static boolean endsIndexBuilds(DataMove move) {
+        return touches(move) && !waitsForIndexBuilds(move);
+    }
+
     static String normalise(String text) {
         return text.replace("\"", "").toLowerCase(Locale.ROOT).replaceAll("\\s*\\.\\s*", ".");
     }
