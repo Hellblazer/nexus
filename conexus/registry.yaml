@@ -399,7 +399,7 @@ standalone_skills:
     tools: [ToolSearch, mcp__plugin_sn_serena__jet_brains_find_symbol, mcp__plugin_sn_serena__find_symbol, mcp__plugin_sn_serena__jet_brains_find_referencing_symbols, mcp__plugin_sn_serena__find_referencing_symbols, mcp__plugin_sn_serena__jet_brains_get_symbols_overview, mcp__plugin_sn_serena__get_symbols_overview, mcp__plugin_sn_serena__jet_brains_type_hierarchy, mcp__plugin_sn_serena__jet_brains_rename, mcp__plugin_sn_serena__rename_symbol, mcp__plugin_sn_serena__replace_symbol_body, mcp__plugin_sn_serena__insert_before_symbol, mcp__plugin_sn_serena__insert_after_symbol]
 
   cli-controller:
-    description: "Expert guidance for controlling interactive CLI applications using tmux-cli"
+    description: "Expert guidance for controlling interactive CLI applications through tmux"
     triggers:
       - "interactive debugging (pdb, gdb, jshell)"
       - "spawning Claude Code instances"
@@ -408,7 +408,7 @@ standalone_skills:
     tools: [Bash, Read, Write]
 
   mailbox:
-    description: "RDR-205 Phase 5 — the mailbox/<address> tuple-space convention: send by tuple_out with a sender-minted nonce, drain by tuple_in before any hand-back"
+    description: "RDR-205 Phase 5 — the mailbox/<address> tuple-space convention: send with mailbox_send (raw tuple_out with a sender-minted nonce for a caller-controlled resend), drain by tuple_in before any hand-back"
     triggers:
       - "sending a message to another agent's or instance's address"
       - "draining a mailbox before composing a hand-back"
@@ -499,7 +499,7 @@ standalone_skills:
     tools: [Bash, Read]
 
   composition-probe:
-    description: "Runtime composition smoke test for coordinator beads — dispatches a general-purpose subagent to generate a 30-50 line end-to-end test against the coordinator's entry point, runs it via project-native test runner (py/java/ts auto-detected), reports PASS or FAIL with dependency attribution. Fires on beads tagged metadata.coordinator=true (set by the nx_enrich_beads ≥2 deps heuristic). Read-only tool budget per RDR-066 Phase 1a CA-1 finding."
+    description: "Runtime composition smoke test for coordinator beads — dispatches a general-purpose subagent to generate a 30-50 line end-to-end test against the coordinator's entry point, runs it via project-native test runner (py/java/ts auto-detected), reports PASS or FAIL with dependency attribution. Fires on beads tagged metadata.coordinator=true (set by hand with bd update --set-metadata coordinator=true when a bead composes outputs from two or more prior beads). Tool budget: read code, write the one /tmp probe file, run the one pinned runner (RDR-066 Phase 1a CA-1)."
     triggers:
       - "run composition probe on bead X"
       - "verify coordinator bead composition"
@@ -509,7 +509,7 @@ standalone_skills:
     dispatches_to: [general-purpose]
 
   plan-first:
-    description: "Gate skill at the top of every retrieval task — tries plan_match first, executes via plan_run if a match clears the threshold, falls through to nx_answer otherwise"
+    description: "Gate skill at the top of every retrieval task — routes reduce-from-many-documents retrieval through nx_answer, which matches a saved plan, runs it, and inline-plans on a miss (there are no separate plan_match/plan_run tools)"
     triggers:
       - "before any retrieval task"
       - "before dispatching search/query"
@@ -517,7 +517,7 @@ standalone_skills:
     tools: [Read]
 
   design-to-code-trace:
-    description: "Verb skill for design / architecture / planning tasks — dispatches plan_match with dimensions={verb:research}, executes via plan_run with caller bindings. Renamed off the bare 'research' name (nexus-cnzei.4) which collided with the /conexus:research command's own skill registration."
+    description: "Verb skill for design / architecture / planning tasks — calls nx_answer with dimensions={verb:research} and the caller's bindings. Renamed off the bare 'research' name (nexus-cnzei.4) which collided with the /conexus:research command's own skill registration."
     triggers:
       - "how does X work"
       - "design context for Y"
@@ -525,7 +525,7 @@ standalone_skills:
     tools: [Read]
 
   decision-drift-review:
-    description: "Verb skill for critique / audit against decision history for a change set — dispatches plan_match with dimensions={verb:review}. Renamed off the bare 'review' name (nexus-cnzei.4) which invited confusion with code review."
+    description: "Verb skill for critique / audit against decision history for a change set — calls nx_answer with dimensions={verb:review}. Renamed off the bare 'review' name (nexus-cnzei.4) which invited confusion with code review."
     triggers:
       - "review this change set"
       - "did the refactor drift from the RDR"
@@ -533,7 +533,7 @@ standalone_skills:
     tools: [Read]
 
   analyze:
-    description: "Verb skill for analysis / synthesis / cross-corpus tasks — dispatches plan_match with dimensions={verb:analyze}"
+    description: "Verb skill for analysis / synthesis / cross-corpus tasks — calls nx_answer with dimensions={verb:analyze}"
     triggers:
       - "compare approaches across corpora"
       - "survey options"
@@ -541,7 +541,7 @@ standalone_skills:
     tools: [Read]
 
   why-was-this-written:
-    description: "Verb skill for the design intent behind a failing code path — dispatches plan_match with dimensions={verb:debug}; intentionally flat (no traverse — Serena handles symbol navigation). Renamed off the bare 'debug' name (nexus-cnzei.4) which collided with the /conexus:debug command's own skill registration."
+    description: "Verb skill for the design intent behind a failing code path — calls nx_answer with dimensions={verb:debug}; intentionally flat (no traverse — Serena handles symbol navigation). Renamed off the bare 'debug' name (nexus-cnzei.4) which collided with the /conexus:debug command's own skill registration."
     triggers:
       - "why is this handler failing"
       - "trace the stack of the panic"
@@ -549,7 +549,7 @@ standalone_skills:
     tools: [Read]
 
   document:
-    description: "Verb skill for documentation authoring or audit — dispatches plan_match with dimensions={verb:document}"
+    description: "Verb skill for documentation authoring or audit — calls nx_answer with dimensions={verb:document}"
     triggers:
       - "audit doc coverage"
       - "find doc-coverage gaps"
