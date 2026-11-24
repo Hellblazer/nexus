@@ -30,7 +30,7 @@ All three:
 ### Current consumers
 
 - **Batch chain**:
-  1. `taxonomy_assign_batch_hook` (RDR-070) — accepts `embeddings=None` from the MCP path and fetches them from T3 inline.
+  1. `taxonomy_assign_batch_hook` (RDR-070) — reads only the batch's chunk chashes; the engine computes and persists the assignment server-side (`POST /v1/taxonomy/assignments/assign_from_chashes`), so `embeddings`, `contents` and `metadatas` are accepted for the shared call shape and not read.
   2. `manifest_write_batch_hook` (RDR-108 D2) — populates the catalog `document_chunks` manifest.
   (`chash_dual_write_batch_hook` was retired by RDR-187 — the chunks tables are the chash store now, so there is nothing left to dual-write. `install_default_hooks` in `hook_registry.py` no longer registers it.)
 - **Document-grain chain**: `aspect_extraction_enqueue_hook` (RDR-089). Defined in `aspect_worker.py`, registered via `install_default_hooks` in `hook_registry.py`. Enqueues one task per document to the engine's `aspects` tuple queue; a daemon worker thread claims it and invokes `extract_aspects`. Async dispatch was necessary because the spike measured 26.5s median per document — blocking-inline would have been a non-starter on the ingest path.
@@ -72,3 +72,5 @@ A separate runtime fire-once test (`test_index_pdf_fires_document_hook_exactly_o
 - **Register, don't import.** Add new hook consumers via `HookRegistry.register_*` (or extend `install_default_hooks` for load-bearing defaults), not by direct call. CI's drift guard will reject the bypass.
 - **The chash-before-taxonomy ordering invariant is gone.** RDR-187 retired `chash_dual_write_batch_hook`; the remaining batch consumers (`taxonomy_assign_batch_hook`, `manifest_write_batch_hook`) have no registration-order dependency on each other.
 - **SDK internals we reach into are few, private, and listed.** `server._lowlevel_server` (instructions, `add_notification_handler` for the channel gate, `lifespan`), `Server.middleware` (the tool-call log and the stale-host check are `tools/call` entries; the SDK calls it provisional for 2.x minors), `Tool.from_function` (the `_fail` patch), and the raw stdio write stream (`channel.py`). The pin is `mcp>=2.3,<3`; raise the cap only with a deliberate migration gated by the MVV handshake probe. Two mcp 1.x patches are retired because 2.x fixed them (the answered-after-cancel reply, sync bodies on the loop); `tests/test_mcp_sdk_patches.py` and `tests/test_mcp_sync_tool_offload.py` pin both on the wire, so a regression fails there. mcp 2.x also hides a non-`ToolError` crash's text from the client; `_tool_failure` keeps the text of every `Exception` (as 1.x sent it, `Error executing tool <name>: <text>`) by re-raising it as a `ToolError`, and logs it with its traceback first because the SDK logs a `ToolError` without one. The stale-host note and the tools that raise on purpose (`nx_tidy`, `nx_enrich_beads`, `nx_plan_audit`) depend on that text.
+
+#

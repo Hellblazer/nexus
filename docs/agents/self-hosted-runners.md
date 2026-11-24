@@ -26,21 +26,21 @@ macOS-specific runs, and the overflow when chas is busy. The T2 how-tos
 **The lab pool** (Sam, 2026-10-10, nexus-480wm; T2 `homelab/labrun-pool-howto`)
 is a set of single-use runners that a scheduler on chas starts per job, with
 labels `lab-s`, `lab-m`, `lab-6c18g`, `lab-6c18g-release`, `lab-16c16g`, `lab-l`, `lab-xl` (Linux) and `lab-mac-s`, `lab-mac-m`
-(macOS on hellmini). Two CI jobs use it: the Service CI Java job on `lab-16c16g` (16 cores, 16 GB) and the
+(macOS on hellmini). Three CI jobs use it: the Service CI Java job on `lab-16c16g` (16 cores, 16 GB), the
 pytest shard matrix on `lab-6c18g` (6 cores, 18 GB; six fit on chas at once;
 a pull request into `main` takes `lab-6c18g-release`, the same class placed
 ahead of the develop shards, labrun-9no),
 with 4 xdist workers inside each shard (not `-n auto`: each worker also runs
-an engine JVM and a Postgres).
+an engine JVM and a Postgres), and the macOS PG-bundle job (`ca3-pgvector-bundle-macos`) on `lab-mac-s` (2 cores, 4 GB).
 The mac-arm64 release legs use the macOS classes (below, § Engine-service
 release). Every other job stays where it was. Three things
 differ from a GitHub-hosted runner:
 
-- **A pull request from a fork never runs there.** Both jobs choose the runner
+- **A pull request from a fork never runs there.** Each job chooses the runner
   with a `runs-on` expression that gives `ubuntu-latest` when the pull request's
   head repository is not this one. A new pool job must carry the same
   expression. The repo variable `NX_CI_POOL=off` sends every run back to
-  `ubuntu-latest`; set it when chas is down, because both jobs feed required
+  `ubuntu-latest`; set it when chas is down, because these jobs feed required
   checks and a job with no runner waits.
 - **`$HOME` and the tool cache outlive the job and are shared** with jobs
   running at the same time (the work directory is per job and deleted). So a
