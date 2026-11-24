@@ -288,11 +288,8 @@ public final class CatalogMoves {
         if (labels.isEmpty()) {
             return;
         }
-        try {
-            CollectionRegistry.requireAllForWrite(ctx, tenant, labels);
-        } catch (UnregisteredCollectionException unregistered) {
-            // see below: a label with no registry row is no lock to take
-        }
+        // a label with no registry row is no lock to take (see below): the lock skips it, it never raises for one
+        CollectionRegistry.requireAllForWrite(ctx, tenant, labels);
         // Before the latch, labels are exact, so an unregistered physical_collection has no registry row: there is no lock to take, and no
         // verb can race the move (every verb needs the row). After the latch, an unresolved label is a stale label for a row that exists,
         // so skipping its lock would misdirect the move: refuse (the by-id branch above has no such skip) (linda 2026-11-23). The rekey that
@@ -350,15 +347,31 @@ public final class CatalogMoves {
      * Once the document rows are held: every collection the move writes in must be one whose registry row this transaction already holds (taken
      * by {@link #lockCollectionsOfDocuments} before any document row). A document re-homed, or an aspect, highlight or alias row filed under a
      * collection that arrived between that read and the document locks, names one it does not hold; the move is refused (run it again), never
-     * carried on under a lock it does not have, and nothing was written (linda 2026-11-23, CM-FIX). Before gate 3 the labels are exact and
-     * the pre-latch skip stays as it is.
+     * carried on under a lock it does not have, and nothing was written (linda 2026-11-23, CM-FIX). Before gate 3 the same check runs by label,
+     * for the labels that have a live registry row.
      */
     private static void requireCollectionsHeld(DSLContext ctx, String tenant, CollectionKey ck, org.jooq.Condition docCond) {
-        if (!ck.byId()) {
-            return;
-        }
         var docs = ctx.select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
             .from(CATALOG_DOCUMENTS).where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(docCond)).fetch();
+        if (!ck.byId()) {
+            // Before the latch the same recheck by label (RDR-229 P3.5a row 14): a label the rows of these documents are filed under now that has a
+            // LIVE registry row and whose row this transaction does not hold arrived between lockCollectionsOfDocuments' unlocked read and the
+            // document locks; the move is refused (run it again), as by id. A label with no live row (unregistered, or only a tombstone) has no
+            // row to hold, as before.
+            List<String> labels = labelsOf(ctx, tenant, docs, docs.stream().map(r -> r.value1()).toList());
+            if (labels.isEmpty()) {
+                return;
+            }
+            java.util.Set<String> live = new java.util.HashSet<>(ctx.select(CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.in(labels))
+                .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")).fetch(CATALOG_COLLECTIONS.NAME));
+            for (String label : labels) {
+                if (live.contains(label) && !CollectionRegistry.holdsRow(ctx, tenant, label)) {
+                    throw refuse("a collection the move writes in (" + label + ") changed while the move was starting and its registry row is not held; run it again");
+                }
+            }
+            return;
+        }
         java.util.SortedSet<Long> ids = collectionIdsOf(ctx, tenant, docs, docs.stream().map(r -> r.value1()).toList());
         if (ids.isEmpty()) {
             return;
