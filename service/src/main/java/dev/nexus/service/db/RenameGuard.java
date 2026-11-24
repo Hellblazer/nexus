@@ -76,7 +76,8 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
  * sample the readiness is read from, and a sample that read the latch row answers NONE only while the signal is set (a lost latch row
  * answers NONE with the signal unset and is refused {@code latch_row_missing} above, before any body), so a rename that takes the one-row path always sees
  * the signal set, and the one-row body's helpers (which follow the service's {@code Gate3}) take the same id forms the readers take.
- * Across engines there is no window: {@code EngineSingletonLock} (nexus-5tykh) allows one engine per database.
+ * The readiness and the helpers read the one signal of the engine that runs the rename, and each engine's own sample sets its own signal before it
+ * publishes, so this holds with more than one engine on a database: it does not rely on there being only one.
  *
  * <p>One public constructor, {@code (readiness, oneRowRename)}: P3.7 supplies its catalog rename ({@link OneRowRename}) where
  * {@code NexusService} builds the guard.
