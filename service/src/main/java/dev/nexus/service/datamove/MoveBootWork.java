@@ -323,7 +323,7 @@ public final class MoveBootWork implements AutoCloseable {
             // the last failure this process saw says the step, the bound and whether it ended builds; with none (an engine that
             // has just started) the move's definition says whether an attempt would
             boolean seen = state.map(s -> s.step() != null).orElse(false);
-            boolean builds = seen ? state.get().terminatesIndexBuilds() : m.onComplete() != null && ChunkFamily.touches(m);
+            boolean builds = seen ? state.get().terminatesIndexBuilds() : m.onComplete() != null && ChunkFamily.endsIndexBuilds(m);
             out.add(new BootWorkRegistry.NeedsOperator(m.label(), m.transientRetries(), last,
                 last.plus(MoveRetryPolicy.backoff(m.transientRetries())), MoveReasons.sqlstateOf(m.lastTransient()),
                 m.statementTimeoutMs(), builds, seen ? state.get().step() : null,
