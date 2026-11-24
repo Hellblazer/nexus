@@ -26,7 +26,7 @@ A `Needs re-examination (T2 <repo>_rdr markers):` section follows the census (RD
 
 The skill body should:
 
-1. **Seed T1 link context** to RDR-067 tumbler (1.1.771) so audit findings auto-link
+1. **Seed T1 link context** to RDR-067's tumbler so audit findings auto-link (look it up with a catalog search: tumblers are per install; skip the seed when the catalog has none)
 2. **Run the main-session transcript pre-step** — NOT delegatable (see skill body §Main-Session PRE-STEP). Honor the `--no-transcripts` flag if passed.
 3. **Load the canonical prompt** from the shipped `${CLAUDE_PLUGIN_ROOT}/resources/rdr_process/AUDIT-PROMPT.md` (T2 `nexus_rdr/067-canonical-prompt-v1` overrides it when present) and substitute `{project}` + `{transcript_excerpts}`
 4. **Dispatch `deep-research-synthesizer`** via Agent tool with `model: "sonnet"` and the substituted prompt as the task body

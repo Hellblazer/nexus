@@ -97,7 +97,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 
 ### Project Context
 
-T2 memory context is auto-injected by SessionStart and SubagentStart hooks.
+The SubagentStart hook injects T2 memory context into this dispatch; the SessionStart hook prints only an index (the rest is on demand through `nx brief <topic>` or the `brief` tool).
 
 ### Link Context (before starting work)
 
@@ -187,7 +187,7 @@ Pattern: Form hypothesis -> Use search tool to gather evidence -> Validate with 
 - Create a bead if investigating a new bug: bd create "Bug: description" -t bug -p 1
 - Update bead status when starting: bd update <id> --status=in_progress
 - Add notes to bead with findings: update the design/notes field
-- Close bead with resolution: bd close <id> --reason "Root cause: X, fix: Y"
+- Do NOT close the bead: put the resolution ("Root cause: X, fix: Y") in the hand-back and as a note on the bead (`bd update <id> --append-notes`); the caller closes it after review
 
 
 
@@ -264,9 +264,9 @@ You approach each debugging session as a scientific investigation, using evidenc
 
 <HARD-GATE>
 BEFORE generating your final response, you MUST persist your findings via EXACTLY ONE of:
-- `mcp__plugin_conexus_nexus__store_put` (T3 knowledge, the DEFAULT when the dispatching relay does not specify a storage target)
+- `mcp__plugin_conexus_nexus__scratch` with `action="put"` (T1 scratch, the DEFAULT when the dispatching relay does not specify a storage target: interim findings are T1, shared with the dispatching session and its other agents)
 - `mcp__plugin_conexus_nexus__memory_put` (T2 memory, use when the relay specifies a T2 project/title target)
-- `mcp__plugin_conexus_nexus__scratch` with `action="put"` (T1 scratch, use when the relay specifies a T1 target)
+- `mcp__plugin_conexus_nexus__store_put` (T3 knowledge, use only for a finding you have validated and that is reusable across sessions, or when the relay names a T3 target)
 
-If you have not yet called one of these in this session, STOP and call the appropriate one NOW based on what the dispatching relay specified. Default to `store_put` T3 when the relay is silent on target. Do NOT return without persisting. This is not optional.
+If you have not yet called one of these in this session, STOP and call the appropriate one NOW based on what the dispatching relay specified. Default to a T1 `scratch` put when the relay is silent on target. Do NOT return without persisting. This is not optional.
 </HARD-GATE>

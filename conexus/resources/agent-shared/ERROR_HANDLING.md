@@ -33,14 +33,14 @@ This file documents common error handling patterns for agents.
 
 **Session scope confusion** (accessing scratch from wrong session):
 - Error: scratch get returns "not found" even though you just wrote it
-- Cause: T1 is session-scoped; subagents each have their own T1 scope
-- Fix: Use T2 memory (memory_put/memory_get tools) for cross-agent relay within the same project
-- Note: T1 scratch IDs are only valid within the session that created them
+- Cause: a dispatched agent shares its parent session's T1, so the likely causes are a `/clear`, `/resume` or restart (each starts a new scope), a separate process with its own session, or an id that was never written in this session
+- Fix: Use T2 memory (memory_put/memory_get tools) for anything that must cross a session or a process boundary
+- Note: a T1 id is valid only in the scope that wrote it
 
 **Scratch entry not found after session restart**:
 - Error: scratch `action="get"` returns error after session restart
-- Cause: T1 is ephemeral — wiped at SessionEnd unless flagged
-- Fix: Use scratch_manage `action="flag"` BEFORE session ends to auto-promote to T2
+- Cause: T1 is ephemeral — a new session scope starts empty, and an idle session's rows are swept after 24 hours; only flagged entries are copied to T2
+- Fix: Use scratch_manage `action="flag"` BEFORE the session ends to copy the entry to T2 (or `scope="identity"` to keep it across `/clear` and restart)
 - Prevention: Flag valuable scratch entries immediately after creation
 
 **Scratch promote fails (missing project)**:
@@ -110,9 +110,8 @@ integer-or-None shape `memory_put`/`plan_save` use.
 
 **Collection name validation**:
 - Collection names use `__` as separator (NOT `::`).
-- Conformant shape (RDR-103): `<content_type>__<owner>__<embedding_model>__v<n>`, e.g. `knowledge__myproject-1-1__voyage-context-3__v1`, `code__nexus-1-1__voyage-code-3__v1`.
-- Operators may type the short form `knowledge__myproject` to MCP / `nx` commands; `t3_collection_name` auto-promotes it to the conformant 4-segment shape before any T3 write.
-- Pre-existing legacy 2-segment collections remain readable; only NEW non-conformant creations are blocked at `T3Database.get_or_create_collection`.
+- Type the bare subject (`myproject`) to MCP / `nx` commands and let the catalog name the collection; never type a model token, a version or the `__` segments. `docs`, `code` and `rdr` collections (minted by `nx index repo`) render as `<content_type>__<owner>__<embedding_model>__v<n>`, e.g. `code__nexus-1-1__voyage-code-3__v1`; a NEW `knowledge` subject is labelled `c<id>` by the engine.
+- Collections that already exist keep their names and stay readable by their full name.
 - Invalid: `knowledge::myproject` (the RDR-103 name grammar uses `__`; colons are refused).
 
 **Duplicate document ID**:

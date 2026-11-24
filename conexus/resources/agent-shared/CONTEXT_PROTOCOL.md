@@ -18,7 +18,7 @@ These agents **MUST proactively search** for context before starting:
 
 **Search Sources in Order**:
 1. **Bead**: `bd show <id>` for task context, design field, dependencies
-2. **Project Infrastructure**: T2 memory and beads context is auto-injected by SessionStart and SubagentStart hooks
+2. **Project Infrastructure**: the SubagentStart hook injects T2 memory context into a dispatched agent; SessionStart prints only an index (read the rest on demand with `nx brief <topic>` or the `brief` tool)
 3. **T3 store**: mcp__plugin_conexus_nexus__search( `query="[topic]", corpus="knowledge", limit=5`
 4. **Catalog link graph**: `mcp__plugin_conexus_nexus__query( question="[topic]", follow_links="implements" )` — the `query` tool automatically boosts results from documents with precise `implements` links
 5. **T2 memory**: mcp__plugin_conexus_nexus__memory_get( `project="{project}", title="ACTIVE_INDEX.md"`
@@ -53,7 +53,7 @@ If relay received, verify it contains:
 
 ## T1 — Session Scratch (Ephemeral)
 
-T1 is session-scoped: all entries are wiped at SessionEnd unless flagged.
+T1 is session-scoped: `/clear`, `/resume` and a restart start a new scope, an idle session's rows are swept after 24 hours, and flagged entries are copied to T2 when the session ends or moves to a new id. A dispatched agent shares its parent session's T1.
 
 **When to use T1:**
 - Ephemeral working notes and hypotheses during a single session
@@ -156,8 +156,10 @@ the lock-holders did.
   **namespace the backup path** (`/tmp/$$-layout.sh.orig`, not
   `/tmp/layout.sh.orig`). Measured on the same RG-E run: an agent that DID hold
   the lock still restored a SIBLING's backup from the shared unnamespaced path,
-  leaving its own mutation in place after a "successful" restore. Prefer
-  `git checkout -- <path>` for a tracked file — there is nothing to namespace.
+  leaving its own mutation in place after a "successful" restore. For a
+  tracked file, write the committed text back with `git show HEAD:<path> > <path>`
+  (read-only git; the shared-tree git guard denies checkout and restore to
+  subagents) — there is nothing to namespace.
 - **Verify the restore against the repo, not against your own copy.** Diffing
   against the backup you just restored from is a tautology. `git status --short`
   is the check; that is how the above was caught.
@@ -189,7 +191,7 @@ Conexus MCP tools use the full prefix `mcp__plugin_conexus_nexus__` (e.g. `mcp__
 
 | Tier | Name | Scope | MCP Tools | Use Cases | TTL |
 |------|------|-------|-----------|-----------|-----|
-| T1 | scratch | Session (ephemeral) | `scratch`, `scratch_manage` | Working notes, hypotheses, debug traces | Wiped on SessionEnd (flag to survive) |
+| T1 | scratch | Session (ephemeral) | `scratch`, `scratch_manage` | Working notes, hypotheses, debug traces | Swept after 24 h idle (flag to survive) |
 | T2 | memory | Per-project, persistent | `memory_put`, `memory_get`, `memory_delete`, `memory_search`, `memory_consolidate` | Session state, project context, agent relay, active work. Consolidation: find overlaps, merge duplicates, flag stale entries | Permanent when `ttl` is omitted (nexus-473mx); pass `ttl=N` days to expire. Heat-weighted: highly-accessed entries survive longer |
 | T3 | store / search | Permanent, cross-session | `search`, `query`, `store_put`, `store_get`, `store_list` | Research findings, architectural decisions, validated patterns. Results include `chunk_text_hash` metadata | `permanent` or explicit TTL |
 | Catalog | document registry | Permanent, cross-session | `search`, `show`, `links`, `link`, `resolve` | Author/corpus/provenance queries; typed links between documents; content-addressed span references | Permanent |
@@ -218,7 +220,7 @@ Use the right search form for the task:
 | Search document subtree | mcp__plugin_conexus_nexus__query( `question="topic", subtree="1.1"` |
 | Search within a topic cluster | mcp__plugin_conexus_nexus__search( `query="question", topic="PDF Extraction"` |
 | Cross-corpus research | Use query tool with `corpus="all"` or multiple query calls |
-| List documents in a collection | mcp__plugin_conexus_nexus__store_list( `collection="knowledge__art-1-1__voyage-context-3__v1", docs=true` (RDR-103 4-segment shape) |
+| List documents in a collection | mcp__plugin_conexus_nexus__store_list( `collection="<name as nx collection list prints it>", docs=true` |
 
 **When NOT to use search:**
 - When the relay already contains the information needed
@@ -228,8 +230,8 @@ Use the right search form for the task:
 ## PRODUCE
 
 Agents produce artifacts based on their specialization:
-- **Code Changes**: Committed with bead reference in message
-- **Test Results**: Logged; failures create bug beads
+- **Code Changes**: Left in the working tree for the caller, who runs the review gate, then commits with the bead reference (an implementer never commits)
+- **Test Results**: Reported in the hand-back; the caller files or updates any bug bead
 - **Analysis/Research**: Store in T3 store with appropriate title pattern
 - **Session State**: Store in T2 memory for multi-session work
 - **Interim Working Notes**: Use T1 scratch for session-scoped state; promote to T2 when validated:
@@ -348,8 +350,8 @@ If expected context not received:
 All agents should:
 - Check `bd ready` for available work before starting
 - Update bead status when starting: `bd update <id> --claim`
-- Close beads when complete: `bd close <id>`
-- Create new beads for discovered work: `bd create`
+- Do NOT close the bead you worked: the caller closes it after both reviewers return clean
+- Discovered work: add it as a note on the bead you hold (`bd update <id> --append-notes`), or hand it back; the caller files beads
 
 ## nx Store Patterns
 
@@ -378,7 +380,7 @@ store_put uses `tags` parameter for categorization (comma-separated strings). Al
 
 ## nx Memory Organization
 
-Three project namespaces are in use:
+Two project namespaces are in use:
 - `{repo}` — agent working notes and relay state (e.g., `project="nexus"`)
 - `{repo}_rdr` — RDR records and gate results (e.g., `project="nexus_rdr"`)
 

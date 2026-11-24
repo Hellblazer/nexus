@@ -216,7 +216,7 @@ Every Critical and Significant also carries a `Class:` line, `BLOCKS-PLANNING` o
 - First, try catalog (structured metadata): `mcp__plugin_conexus_nexus-catalog__search(query="relevant terms from problem statement", content_type="rdr")`
   - If results found, use `mcp__plugin_conexus_nexus-catalog__links(tumbler="<result>", direction="both")` to discover related RDRs in the graph
 - If catalog empty or not initialized, fall back to T3 semantic search:
-  - Use store_list tool to enumerate collections, filter by the `rdr__` prefix (RDR-103 conformant names start `rdr__<owner>__voyage-context-3__v1`)
+  - Use `collection_list` to enumerate collections and keep the `rdr__` ones (an rdr collection renders as `rdr__<owner>__<embedding_model>__v1`), or pass `corpus="rdr"` to `search` to fan out across all of them
   - mcp__plugin_conexus_nexus__search(query="relevant query terms from RDR problem statement", corpus="{each_collection}", limit=5
 If no collections found: "No prior RDRs indexed. Cross-project prior-art search will improve as RDRs are indexed and closed."
 

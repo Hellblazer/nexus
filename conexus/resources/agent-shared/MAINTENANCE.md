@@ -49,7 +49,7 @@
 See developer.md or code-review-expert.md for example patterns:
 - Use natural language queries in the search MCP tool
 - Pass `corpus="code"` for code search
-- Use `n` in 10-30 range
+- Use `limit` in 10-30 range
 
 Example section:
 ```markdown
