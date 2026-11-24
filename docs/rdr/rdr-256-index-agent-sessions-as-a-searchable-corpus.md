@@ -118,7 +118,7 @@ and RDR-229.
 | RDR-240 Procedures as Lua scripts | Origin of the transcript reader | Its `transcripts.sessions` verb owns the file listing and line framing (`src/nexus/lua_runtime/transcripts_read.py`). This RDR reuses those, not the verb: the verb is a read-only count surface and never returns tool results (rdr-240:361-365). It has no active-path walk (256-research-2). |
 | RDR-243 Document sensitivity | Hard constraint | Its LLM-surface table (`src/nexus/tables/llm-surfaces.toml`) gets this RDR's surfaces as rows, and a session the scanner flags is stamped `sensitive`. The flag is not the corpus-wide protection, because it withholds a document from the session model by default (Q1), and agents are this corpus's readers (256-research-8). |
 | RDR-103 / RDR-204 collection names and attributes | Considered | A fifth content type would join both RDRs' enumerations of content types; it is the rejected Alternative 3 (256-research-12). |
-| RDR-229 The collection name becomes a label | Adjacent, in flight | Its Phase 3 is moving collections to minted labels found by attributes. The explicit-only attribute is read from the row, never from the name, so it needs no ordering against P3.6 or P3.8; it shares code with P3 at three sites and needs P3.9 to survive a recovery-bundle import (256-research-18). |
+| RDR-229 The collection name becomes a label | Adjacent, landed | Its Phase 3 moved collections to minted labels found by attributes (P3.6's label rule, P3.8's minter, P3.9's recovery bundle carrying each registry row). The explicit-only attribute is read from the row, never from the name, so it needs no ordering against them; it shares code with P3 at three sites, and a version 3 recovery bundle carries the registry row it rides in (256-research-18, written while P3.8 and P3.9 were in flight; re-checked against develop 2026-11-24). |
 | RDR-171 dchash spans | Considered, not used | Its span does not survive an append or a deleted source (Gap 2). Expansion here uses the manifest's line columns instead. |
 | RDR-223 / RDR-181 document write and embed skip | Reused | A document write replaces its manifest in one write, and the engine skips re-embedding a chunk whose text it already holds (256-research-7). That is the incremental mechanism. |
 | RDR-246 Data moves are background jobs | Constraint | The backfill of existing transcripts is an explicit command, never engine-boot work. |
@@ -162,8 +162,8 @@ it ships redacts image captions, not sessions (256-research-6).
   owner's hierarchical id (such as `1.1.42`). The **knowledge curator** is
   the catalog owner that knowledge notes are filed under. A **label** is
   what RDR-229 turns a collection's name into, and a **minted** label is
-  the `c<id>` form the engine gives a new collection once RDR-229's P3.8
-  lands. **Liquibase** is the tool the engine uses to change its
+  the `c<id>` form the engine gives a new collection (RDR-229's P3.8,
+  landed). **Liquibase** is the tool the engine uses to change its
   PostgreSQL schema. The **orphan reaper** is the engine job that deletes
   chunks no manifest names. A **canary** test plants a unique string in the
   input and asserts it never appears in any output.
@@ -195,7 +195,7 @@ candidate scanners.
 | Claude Code transcript format | Yes (real files) | Records carry `uuid`, `parentUuid`; `compact_boundary` records carry `logicalParentUuid`, which often names a record absent from the file (256-research-4). No published schema; the format can change without notice. |
 | diderot `sessiondecode` | Yes | Active-path rule, record splitting and id scheme (FORMATS.md:31-62). Fixtures are synthetic (FORMATS.md:33-35). |
 | Engine document write | Yes | One write per document, manifest replaced, re-embed skipped for held text (doc_indexer.py:2384-2389, :2844-2850). |
-| Client collection row cache | Yes | A fixed key list per collection from `list_collections` (mcp_infra.py:985-996). |
+| Client collection row cache | Yes | A fixed key list per collection from `list_collections` (mcp_infra.py:991-1000). |
 | detect-secrets 1.5.0 | Yes (sdist and a run) | Apache-2.0; `scan_line` in-process; network verification only when its verification filter is configured, which in-process Settings do not do by default; custom plugins load from a file path (256-research-15, -17). |
 
 ### Key Discoveries
@@ -242,8 +242,9 @@ candidate scanners.
 - **✅ Verified** (source search): a fifth content type would touch about
   thirty client and engine sites, four of which silently treat an unknown
   type as `code`. *Source: 256-research-12.*
-- **⚠️ Documented** (source search): RDR-229 P3.6 and P3.8 are rewriting the
-  name grammar and the render paths a fifth type would need. *Source:
+- **⚠️ Documented** (source search): RDR-229 P3.6 and P3.8 rewrote the
+  name grammar and the render paths a fifth type would need (both landed after
+  this finding; the cost of a fifth type is re-measured with the work). *Source:
   256-research-13.*
 - **✅ Verified** (source search): scanner candidates' licences, release
   dates and plugin coverage. *Source: 256-research-14.*
@@ -257,8 +258,8 @@ candidate scanners.
   same five sessions. *Source: 256-research-17.*
 - **⚠️ Documented** (source search): an explicit-only attribute read from the
   collection row needs no ordering against RDR-229 P3.6 or P3.8; it shares
-  three code sites with P3, and before P3.9 a recovery-bundle import drops
-  it. *Source: 256-research-18.*
+  three code sites with P3. A recovery-bundle import dropped it before P3.9;
+  P3.9 has landed and a version 3 bundle carries the registry row. *Source: 256-research-18.*
 
 ### Critical Assumptions
 
@@ -439,20 +440,24 @@ collections (`docs/collections.md` Rule 1).
   mints) can never drop it. Nothing clears it except a CLI route that takes
   a reason, like RDR-243's lowering route.
 - *Re-asserted.* Every `nx index sessions` run asserts the attribute on the
-  collections it writes. This covers the one path that can lose it before
-  RDR-229 P3.9 lands: a client recovery-bundle import, which registers the
-  collection without its registry row (256-research-18). `nx doctor` reports
+  collections it writes. This covers the one path that could lose it before
+  RDR-229 P3.9: a client recovery-bundle import, which registered the
+  collection without its registry row (256-research-18). P3.9 has landed: a
+  version 3 bundle carries each collection's registry row and import
+  registers from it, so Step 4 checks that the row the bundle carries holds
+  the attribute, and the re-assertion stays as the cover for a version 2
+  bundle. `nx doctor` reports
   a `knowledge` collection owned by `agent-sessions` without the attribute.
-- *Read, through one seam.* The client row cache (`mcp_infra.py:985-996`)
+- *Read, through one seam.* The client row cache (`mcp_infra.py:991-1000`)
   gains the key. One predicate decides it: `is_default_scope_row(row)`,
-  new beside `is_live_collection_row` (`db/http_vector_client.py:3384`),
+  new beside `is_live_collection_row` (`db/http_vector_client.py:3406`),
   true for a row that is live by that predicate and does not carry
   `explicit_only`. Every reader that builds a scope the caller did not name
   filters through it, and no reader tests the key itself. The readers:
   bare-corpus fan-out in `resolve_corpus` stage 2 (`corpus.py:2662`), which
   also serves the default corpora and the `corpus="all"` expansion
   (`mcp/core.py:4305-4316`); the MCP fan-out listing
-  (`mcp_infra.get_live_collection_names`, `mcp_infra.py:1249`), which also
+  (`mcp_infra.get_live_collection_names`, `mcp_infra.py:1253`), which also
   feeds the collection-name hint of the `nx_answer` planner prompt
   (`mcp/core.py:13225`, where `_get_collection_names` is that function's
   alias, `mcp/core.py:88`); the `nx store list` and `nx store get`
@@ -484,11 +489,14 @@ collections (`docs/collections.md` Rule 1).
   read from the row, never from the name, so P3.6's label rule and P3.8's
   minted labels leave it unchanged (256-research-18). Three code sites are
   shared with P3 work: the row-cache key list, `register_collection`
-  (`catalog/http_catalog_client.py:3685`), which P3.8 rewrites to return
-  the row, and the tenant export (`TenantExport.java:355`). Whichever change
-  lands second carries the attribute; Step 4 checks each against develop
-  when it starts. P3.9 should carry the attribute in the recovery bundle's
-  registry row; until it does, the re-assertion above covers imports.
+  (`catalog/http_catalog_client.py:3717`), which P3.8 rewrote to return
+  the row, and the tenant export's `catalog_collections` registry entry
+  (`TenantExport.java:382`). P3.6, P3.8 and P3.9 have landed, so the
+  attribute is the later change: Step 4 adds it at each site and checks
+  each against develop when it starts. P3.9's recovery bundle carries the
+  registry row (format 3), so the attribute travels with the row once it is
+  there; until then, and for a version 2 bundle, the re-assertion above
+  covers imports.
 
 **Catalog and manifest.**
 
@@ -559,19 +567,23 @@ the extractor without it: the batch enqueue in the indexer
 it gives no config (`aspect_extractor.py:1583-1585`) (256-research-22). So
 the gate goes there: `select_config` returns `None` for a collection whose
 row carries `explicit_only`, and also, failing closed, for any collection
-whose candidate subject (`corpus.candidate_knowledge_subject`,
-`corpus.py:890-905`) is `agent-sessions`, whatever the row says or
+whose candidate subject (`candidate_knowledge_subject`,
+`catalog/rows/legacy_names.py:201`) is `agent-sessions`, whatever the row says or
 whether it can be read. The subject check covers a row that is missing,
 unreadable, or stale in the 60-second row cache before a re-assertion is
 seen. It reads the name, which the attribute itself never does (Ordering
 against RDR-229, below): it is an extra bar for one subject, not the
-attribute's meaning. It works while names carry the subject. After RDR-229
-P3.8 a minted label carries none, but it also derives no content type, so
-a collection with no readable row already gets no config
-(`corpus.py:872, 883`); a stale cached row is then the remaining gap, and
-by then P3.9 carries the attribute in the registry row from registration
-on, so the row has it from its first read (inferred, not read; Step 4
-checks P3.8 and P3.9 on develop). A gated call is logged as `aspect_gate_explicit_only`. `nx enrich
+attribute's meaning. It works only while the name carries the subject. P3.8
+has landed, and a collection the engine registers by attributes for a new
+subject carries a minted `c<id>` label, so for such a collection the
+subject check reads no subject and the row's `explicit_only` is the only
+gate. A collection with no readable row still gets no config, because a
+prefix-free label derives no content type (`corpus.candidate_content_type`,
+`corpus.py:794`, which `routing_content_type`, `corpus.py:805`, falls back
+to); a stale cached row is the remaining gap, and the attribute rides in the
+registry row from registration on, so the row has it from its first read
+(inferred, not read; Step 4 tests the gate on a minted-label collection, not
+only a named one). A gated call is logged as `aspect_gate_explicit_only`. `nx enrich
 aspects` on such a collection refuses with its own message naming the
 attribute, rather than the generic "no extractor config" text
 (`commands/enrich.py:1754-1761`). A future `explicit_only` collection
@@ -738,7 +750,7 @@ ceiling (4,280 of 4,442 lines in `scripts/file-size-exceptions.txt`).
 | Active-path decoder | none (256-research-2) | New. |
 | Chunk write, embed skip, manifest | `src/nexus/doc_indexer.py` write path (`_write_chunks_with_owner_rows`, private; its caller fires the hooks and owns the fence and stamp) | Reuse: promote or wrap the writer; add the session origin to the fence-key lint and the producer to the vw594 allowlist. |
 | Aspect-extraction gate | `aspect_extractor.select_config`, which every aspect path passes | Extend: no config for an `explicit_only` collection, failing closed for the subject. |
-| Default-scope filter | `is_live_collection_row` (`db/http_vector_client.py:3384`) | Extend: `is_default_scope_row` beside it; a positive lint over every listing call. |
+| Default-scope filter | `is_live_collection_row` (`db/http_vector_client.py:3406`) | Extend: `is_default_scope_row` beside it; a positive lint over every listing call. |
 | LLM-surface registry | `llm-surfaces.toml`, `CENSUS_ROW_COUNT` | Extend: census rows 26 and 27. |
 | Line-range positions | `catalog_document_chunks.line_start/line_end` | Reuse; no schema change. |
 | Collection registration and row cache | `register_collection`, `mcp_infra` row cache | Extend with `explicit_only`. |
@@ -829,9 +841,10 @@ repository; kept out of default searches as a property of the type.
   content types, four of which silently treat an unknown type as `code`, so
   a missed site would embed or score sessions as code with no error
   (256-research-12).
-- It collides with RDR-229 Phase 3: P3.6 and P3.8 are rewriting the name
+- It collided with RDR-229 Phase 3: P3.6 and P3.8 were rewriting the name
   grammar and every render-for-new-collection path the type would need, so
-  the type would have to wait for P3.8 (256-research-13).
+  the type would have had to wait for P3.8 (256-research-13; P3.6 and P3.8
+  have since landed, which does not change the census above).
 
 **Decision**: chosen by Sam first, then rejected by him on 2026-11-21 in
 favour of the knowledge subject, on that census and that collision (T2
@@ -1167,7 +1180,7 @@ as on the CLI: a private key, single-line or multi-line, comes back as
 
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
-| `agent-sessions` collections (one per embedding model) | In scope (`nx sessions list`, `nx collection list`) | In scope (`list` shows per-session counts, versions, last run; `nx collection list` shows the attribute) | In scope (`nx sessions forget`, which also excludes the session from later runs, `--undo` to reverse; a collection by the usual collection delete; engine backups keep removed chunks until they age out) | In scope (`expand` statuses; `list --check` re-verifies a sample; doctor checks the attribute) | Tenant backup (RDR-248) carries rows and chunks; a client bundle carries the attribute from RDR-229 P3.9, re-asserted until then; verbatim records wait for the archive RDR |
+| `agent-sessions` collections (one per embedding model) | In scope (`nx sessions list`, `nx collection list`) | In scope (`list` shows per-session counts, versions, last run; `nx collection list` shows the attribute) | In scope (`nx sessions forget`, which also excludes the session from later runs, `--undo` to reverse; a collection by the usual collection delete; engine backups keep removed chunks until they age out) | In scope (`expand` statuses; `list --check` re-verifies a sample; doctor checks the attribute) | Tenant backup (RDR-248) carries rows and chunks; a client bundle carries the attribute through the registry row from RDR-229 P3.9 (landed), re-asserted for a version 2 bundle; verbatim records wait for the archive RDR |
 | `explicit_only` column | In scope (`nx collection list`) | N/A | In scope (`nx collection explicit-only clear <collection> --reason`) | In scope (doctor) | With the collection row |
 | `sessions.ack`, `sessions.exclude` config | In scope (`nx config get`) | In scope (the ack block names its endpoints and time) | In scope (unset `sessions.ack`, after which indexing refuses; `nx sessions forget --undo` removes one exclusion) | In scope (every run compares endpoints) | N/A |
 
@@ -1232,7 +1245,7 @@ both already locked; 256-research-14). No other.
 - **Scenario**: a sensitive session in local mode creates the bge sibling.
   **Verify**: the sibling has the attribute without the writer setting it.
 - **Scenario**: the subject's collection registered without the attribute,
-  as a pre-P3.9 bundle import does. **Verify**: doctor names it; the next
+  as a version 2 bundle import does. **Verify**: doctor names it; the next
   indexing run sets it.
 - **Scenario**: tenant backup and restore. **Verify**: the attribute
   survives.
@@ -1437,3 +1450,4 @@ No question for Sam remains open in this RDR.
   Gap 4 reworded.
 - 2026-11-21: Gate round 1 — BLOCKED (2 Critical, 6 Significant, 2 ship-blocker(s)); blob `7577b9115929`; critique `nexus_rdr/256-gate-critique-2026-11-21-r1`.
 - 2026-11-22: Gate round 2 — PASSED (0 Critical, 3 Significant, 0 ship-blocker(s)); blob `2cd057fe6cfd`; critique `nexus_rdr/256-gate-critique-2026-11-22-r2`.
+- 2026-11-24: wording to develop at the 8.5.6 docs audit (nexus-856): RDR-229 P3.6, P3.8 and P3.9 have landed, so the lines that waited on them (the glossary, the ordering paragraph, the recovery-bundle cover, the fail-closed subject check on a minted label) say what is now so, and the cited lines that moved (`is_live_collection_row`, `register_collection`, the tenant export entry, the row-cache key list, `candidate_knowledge_subject`) are re-cited. Nothing of the corpus is built yet (no `nx index sessions`, no `explicit_only`, no detect-secrets dependency, 25 census rows). No design change; status unchanged.

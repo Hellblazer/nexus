@@ -244,7 +244,7 @@ ranges:
   FORCE-RLS, list-partitioned (text, text, bytea) table as the engine's role,
   partition-wise and over the parent, with resume after a killed coordinator:
   every row processed exactly once (T2 nexus_rdr/246-research-2) — **Method**: Spike
-- [ ] A plain run on one `nexus.chunks` leaf, CALLed under a per-tenant session as `nexus_admin` on FORCE RLS with the per-leaf grants, processes every row of the leaf exactly once and resumes after a killed coordinator — **Status**: Unverified; the partitioned spike above ran over the parent. — **Method**: Spike, in the DataMoveWorker tests (Step 4)
+- [x] A plain run on one `nexus.chunks` leaf, CALLed under a per-tenant session as `nexus_admin` on FORCE RLS with the per-leaf grants, processes every row of the leaf exactly once and resumes after a killed coordinator — **Status**: Verified in the DataMoveWorker tests (`DataMoveWorkerIntegrationTest`): one run per leaf of a list-partitioned (model, tenant) table, none partition-wise, every row moved once under its own tenant's session, a four-column-key chunks-shaped table, and a kill mid-move resumed at the next chunk (`killedMidMove_nextBootResumesAtTheNextChunk_andEndsAsAnUninterruptedRun`). The registered moves over `nexus.chunks` (vectors-070, vectors-082) have run on installs. — **Method**: Spike, in the DataMoveWorker tests (Step 4)
 - [x] dml_utils needs Sam's ddl_utils installed first, and its install role needs
   ddl_utils_caller: the bytea change adds the first changeset that calls
   ddl_utils' constraint helpers, behind a HALT precondition — **Status**:
@@ -283,9 +283,13 @@ ranges:
   closes the JDBC connection, so the walks must not close the first
   `Liquibase` object before the last walk on that connection finishes —
   **Method**: Spike with real Liquibase in Phase 1 Step 3b
-- [ ] The cloud host's PostgreSQL loads pg_background and has spare
+- [x] The cloud host's PostgreSQL loads pg_background and has spare
   max_worker_processes — **Status**: Checked 2026-11-10, NOT available
-  today (bob's read-only check on Sam's go, SSM command 60942485, T2
+  then; installed live on 2026-11-19 (Sam's go, T2
+  conexus/operator-go-db-host-ami-bake-pg-background-2026-11-19) and the
+  db-host AMI re-baked with the module (ami-0bf126ab98a279170, pg_background
+  2.0.4; T2 nexus/finding-db-host-ami-lacks-pg-background-2026-11-21, which
+  corrects its first version). The 2026-11-10 read follows (bob's read-only check on Sam's go, SSM command 60942485, T2
   conexus/pg-background-availability-prod-2026-11-10). The host runs
   PostgreSQL 17.11 (PGDG build for Ubuntu 24.04, aarch64). Neither the nexus
   nor the conexus database has a pg_available_extensions row for it, and
@@ -297,7 +301,8 @@ ranges:
   database. That is a conexus host change on Sam's go. Raising
   max_worker_processes needs a PostgreSQL restart. Sam ruled 2026-11-15 that
   the install waits until the first job that uses it lands, or until PGDG ships
-  2.0.4 (recorded on nexus-f3yqd.2). — **Method**: Live
+  2.0.4 (recorded on nexus-f3yqd.2); the first registered moves shipped in
+  engine-service-v0.1.200, and the install was done 2026-11-19. — **Method**: Live
   read-only check
 - [x] `CREATE EXTENSION pg_background` needs a superuser, because the
   extension is not marked trusted. Locally, the engine's bundle cluster is
@@ -1215,14 +1220,14 @@ launcher that upstream does not test.
 
 ### Prerequisites
 
-- [ ] All Critical Assumptions verified
+- [x] All Critical Assumptions verified (the last two, the per-leaf run and the cloud install, 2026-11-24)
 - [x] bytea keys merged in Hellblazer/dml_utils (PR #1, a6cd544, 2026-11-10). Sam ruled 2026-11-16 to pin merged commits rather than wait for releases; he may tag releases later. ddl_utils is pinned at 5f088e2
 - [x] the committing procedure entry point merged in Hellblazer/dml_utils (Step 1's second PR, Hellblazer/dml_utils#2, merge commit 28b0b3aa9, 2026-11-16); nexus pinned 28b0b3aa9 until the four-column change (next item), since a6cd544 has bytea keys but no procedure. Its bloat test (RunMigrationChunksBloatTest) is green in the PR's Maven Build run 43900555823 on a tree identical to 28b0b3aa9's
 - [x] a four-column primary key supported in Hellblazer/dml_utils (Step 1's third change, Hellblazer/dml_utils#3, merge commit 9196f4b1c, 2026-11-17) before any move over nexus.chunks, the Minimum Viable Validation's move included; nexus re-pinned to 9196f4b1c (nexus-f3yqd.2.21, develop 98307288f..596d18f2a). The re-pin adds changesets 011 and 012 and changes ten runOnChange changesets (005 and nine library functions), which re-apply idempotently; no other applied changeset changed
 - [x] pg_background in the bundle on all four platforms, in a released bundle that the engine substrate pins (engine-service-v0.1.194's bundles carry pg_background 2.0)
-- [ ] ddl_utils installed ahead of dml_utils in the engine's schema setup (Step 4)
-- [ ] the superuser bootstrap creates pg_background, the three library roles and their grants: `nexus.db.pg_provision` locally (Step 4) and the db-host configuration in the cloud (Activation Step 1)
-- [ ] A Java test image with pg_background for the engine suite's data-move tests (Step 3c)
+- [x] ddl_utils installed ahead of dml_utils in the engine's schema setup (Step 4)
+- [x] the superuser bootstrap creates pg_background, the three library roles and their grants: `nexus.db.pg_provision` locally (Step 4) and the db-host configuration in the cloud (Activation Step 1, done 2026-11-19)
+- [x] A Java test image with pg_background for the engine suite's data-move tests (Step 3c)
 
 ### Minimum Viable Validation
 
@@ -1370,7 +1375,9 @@ because the host has no general egress. Then `CREATE EXTENSION pg_background`
 runs as superuser in the nexus database, with the three library roles and
 their grants (Technical Design, Install sequence, step 1). The package
 version must match the bundle's pinned version. Sam ruled 2026-11-15 that it waits until
-the first job that uses it lands in an engine, or until PGDG ships 2.0.4. An
+the first job that uses it lands in an engine, or until PGDG ships 2.0.4; it
+was installed on the live host 2026-11-19 and the db-host image re-baked (see
+the Critical Assumption on the cloud host). An
 engine without it serves and reports its moves blocked (Technical Design), so
 this step lands before the first registered move is expected to run in the
 cloud.
@@ -1583,3 +1590,4 @@ the first registered move.
 - 2026-11-17: verification refusals to the code of nexus-f3yqd.2.19's parity follow-up (grant 3): the gate and `MoveSql` both refuse a blank text, a `/*/` and a `$` directly next to a non-ASCII character, and a standalone `$1` has no word character, `$` or non-ASCII character beside it.
 - 2026-11-21: wording to landed, reviewed code (grant 3), nexus-p2m1x.21, feature/rdr246-split-move-bounds: Sam's split-bounds ruling (T2 `nexus/sam-ruling-split-move-bounds-2026-11-21`, amending decision C `nexus/sam-ruling-rdr229-ask-c-2026-11-20`). The first verification pass runs READ ONLY under the new `verify_statement_timeout_ms` (default 60000, ACCESS SHARE only, the warm-up); the completion transaction keeps `statement_timeout_ms` and `lock_timeout`, and re-checks table-wide and per tenant (tenants re-read from `nexus.service_tokens` and the leaves) under that one budget before `on_complete`; a re-check row is `VERIFICATION_NONEMPTY`, and a re-check lock wait, timeout or deadlock is a transient `RECHECK` failure.
 - 2026-11-20: wording to reviewed code (grant 3), RDR-229 P2.10 (nexus-p2m1x.15, reviews T2 nexus/review-p2m1x15-2026-11-20-r2 and nexus/critique-p2m1x15-2026-11-20-r2): the owner-read policy also covers a tenant-scoped support table a move's template or verification joins (`catalog_collections_owner_read`, which RDR-229 D2's `vectors-065` adds and P2.10 reuses), and the boot check covers it through `DrivingTableIsolationCheck.SUPPORT_TABLES`.
+- 2026-11-24: wording to the tree at the 8.5.6 docs audit (nexus-856): the per-leaf Critical Assumption and the cloud pg_background Critical Assumption are marked verified (the leaf tests in `DataMoveWorkerIntegrationTest`; the 2026-11-19 live install and AMI re-bake), the Prerequisites that waited on Phase 1 Step 4, Step 3c and Activation Step 1 are ticked, and Activation Step 1 says it was done. No design change; status unchanged.
