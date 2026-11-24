@@ -7528,7 +7528,7 @@ public final class CatalogRepository {
         var holder = CATALOG_DOCUMENTS.as("holder");
         Field<String> rewritten = NoteUri.moveTo(moving.SOURCE_URI, source, target);
         return ctx.select(moving.TUMBLER, holder.SOURCE_URI, holder.TUMBLER,
-                CollectionIdReads.labelOf(gate3, holder.TENANT_ID, holder.PHYSICAL_COLLECTION, holder.PHYSICAL_COLLECTION_ID))
+                holder.PHYSICAL_COLLECTION)
             .from(moving).join(holder).on(holder.TENANT_ID.eq(tenant).and(holder.SOURCE_URI.eq(rewritten)))
             .where(moving.TENANT_ID.eq(tenant))
             .and(movingRows.apply(moving))
@@ -10961,7 +10961,7 @@ public final class CatalogRepository {
         String[] epoch = new String[1];   // baton's CatalogEpoch, read inside the transaction's tenant scope
         Map<String, Integer> counts = CollectionMint.refusingRace(tenantScope, tenant,
             () -> renameCollectionTxn(tenant, oldName, newName, expectedTargetSupersededBy, newContentType, newOwnerId,
-                newNameEmbeddingModel, tuple, epoch, oneRow), CollectionMint.recheckOf(tenant, tuple));
+                newNameEmbeddingModel, tuple, epoch, oneRow), CollectionMint.recheckOf(tenant, tuple, gate3));
         if (oneRow[0] != null) return renameGuard.committedOneRow(tenant, oldName, newName, oneRow[0]);   // the path taken, not a count key
         long renamedId = 0;
         // Post-commit (nexus-h8rf6 wave review): the rename RETIRES the old registry row —
@@ -11990,9 +11990,8 @@ public final class CatalogRepository {
             // The manifest rows the chunk cascade carried to the target (ManifestInsertGateTest: pinned writer).
             ctx.update(CATALOG_DOCUMENT_CHUNKS).set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, targetId)
                 .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)).and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(target))
-                .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID.isDistinctFrom(targetId))
-                .and(sourceId == null ? DSL.noCondition() : CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID.eq(sourceId)).execute();
-            CatalogIdStamps.repairCascadedIds(ctx, tenant, target, targetId, sourceId);
+                .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID.isDistinctFrom(targetId)).execute();
+            CatalogIdStamps.repairCascadedIds(ctx, tenant, target, targetId, null);
             return new RehomeResult(
                 moved.getOrDefault("chunks", 0),
                 moved.getOrDefault("catalog_documents", 0),
