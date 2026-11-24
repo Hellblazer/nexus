@@ -138,6 +138,29 @@ class Rdr229P35cPreGateRenameGapTest {
         }
     }
 
+    /**
+     * (2) {@code PgVectorRepository.delete}: a store-delete by id removes X's chunk (under its current label) and leaves the new holder Y's chunk
+     * of the same chash. Before the fix the DELETE named the request's label: it removed Y's chunk and answered for X with nothing deleted.
+     */
+    @Test
+    void storeDeleteById_beforeGate3_inTheRenameGap_deletesTheRenamedCollectionsChunk_notTheNewHoldersOfTheOldLabel() {
+        String b = registered("del");
+        long x = fx.idOf(b);
+        String hex = Chash.ofText("pre-gate-delete-" + b).toHex();
+        try (CollectionRouteFixture.RenameGap gap = fx.renameInPlaceBeforeTheWritesRead(List.of(x), List.of(b), "pg-del-" + (n++), g -> {
+            seedChunk(g.currentLabelOf().get(x), hex, "x-own");
+            seedChunk(b, hex, "y-own");
+        })) {
+            Resp r = fx.post("/v1/vectors/store-delete", "{\"collection_id\":" + x + ",\"ids\":[" + json(hex) + "]}");
+
+            assertThat(gap.ran()).as("setup: the rename ran before the write's by-id read (%s)", r.body()).isTrue();
+            assertThat(r.status()).as(r.body()).isEqualTo(200);
+            long y = gap.newHolders().iterator().next();
+            assertThat(chunkExists(x, hex)).as("the renamed collection's chunk is deleted").isFalse();
+            assertThat(chunkExists(y, hex)).as("the new holder's chunk is still there").isTrue();
+        }
+    }
+
     private void recordLeg(String source, String target, String marker) {
         Resp r = fx.post("/v1/remap/record_batch", "{\"source_collection\":" + json(source) + ",\"entries\":[{\"old_id\":\"old-" + marker + "\","
             + "\"new_chash\":\"" + Chash.ofText("pre-gate-remap-" + marker + source + target).toHex() + "\",\"target_collection\":"
