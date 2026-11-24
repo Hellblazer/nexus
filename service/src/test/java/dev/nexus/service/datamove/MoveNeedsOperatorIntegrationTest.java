@@ -660,8 +660,17 @@ class MoveNeedsOperatorIntegrationTest extends DataMoveIntegrationBase {
         throw new AssertionError("no boot_work entry for " + label + " in " + status.get("boot_work"));
     }
 
+    /** The drop move's label is fixed, so an earlier test's finished run would be resumed; archive it, as the other label-reusing tests do. */
+    private void withNoEarlierRunOf(String label) {
+        for (String run : activeRuns(label)) {
+            DataMoveRuns.archive(ctx(), run);
+        }
+        assertThat(activeRuns(label)).as("no run of %s is left from an earlier test", label).isEmpty();
+    }
+
     @Test
     void theDropMoveWhileItWaitsForABuild_countsNothingPagesNoOne_andReadsAsAWait_thenOverdue_thenCompletes() throws Exception {
+        withNoEarlierRunOf(NameKeyDropMove.LABEL);
         registerMove(NameKeyDropMove.LABEL, CHUNK_FAMILY_ON_COMPLETE);
         var finisher = new VerifyingFinisher();
         finisher.buildWait.clock = clock;
@@ -705,6 +714,7 @@ class MoveNeedsOperatorIntegrationTest extends DataMoveIntegrationBase {
 
     @Test
     void aLockTimeoutOnTheDropWithNoBuildRunning_isCountedAsOnAnyMove_notWaitedOut() throws Exception {
+        withNoEarlierRunOf(NameKeyDropMove.LABEL);
         registerMove(NameKeyDropMove.LABEL, CHUNK_FAMILY_ON_COMPLETE);
         var w = workerOn(new VerifyingFinisher());
         var props = new Properties();
