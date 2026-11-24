@@ -48,6 +48,8 @@ flowchart TD
   SVC --> PGT2[("Postgres<br/>T2 domain stores")]
 
   SVC --> CAT[("Postgres<br/>catalog (documents · links · manifests)")]
+  CAT --- COLREG[("collection registry<br/>collection_id = identity · name = label<br/>(RDR-229)")]
+  PG -. "chunks reference<br/>the registry row" .-> COLREG
 ```
 
 (The [reference architecture diagram](architecture-diagram.svg) covers the *retrieval / planning* layer: query decomposition, the operator DAG, taxonomy and the knowledge graph. That layer is substrate-agnostic; the diagram above is its storage-plane complement.)
