@@ -4292,8 +4292,7 @@ def _check_static_service_token() -> list[HealthResult]:
     fingerprint = hashlib.sha256(token.encode()).hexdigest()[:8]
     armed = bool((get_credential("mint_token") or "").strip())
     try:
-        resp = httpx.get(f"{url}/v1/_whoami",
-                         headers={"Authorization": f"Bearer {token}"}, timeout=10.0, verify=get_shared_ssl_context())
+        resp = httpx.get(f"{url}/v1/_whoami", headers={"Authorization": f"Bearer {token}"}, timeout=10.0, verify=get_shared_ssl_context())
     except httpx.HTTPError as exc:
         return [HealthResult(label=label, ok=False, warn=True,
                              detail=f"could not verify against {host}: {type(exc).__name__}")]
