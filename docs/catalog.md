@@ -104,7 +104,7 @@ nx catalog link "Paper A" "Paper B" --type cites
 nx catalog link 1.1.5 1.2.3 --type implements
 ```
 
-Both arguments accept titles or tumblers. Link types: `cites`, `implements`, `implements-heuristic`, `supersedes`, `quotes`, `relates`, `comments`, `formalizes`, plus `same-as` (written by the content-hash dedup pass), `contains` and `describes`, which the graph traversal includes by default; the type is free text, so any other string is accepted.
+Both arguments accept titles or tumblers. Link types: `cites`, `implements`, `supersedes`, `quotes`, `relates`, `comments`, `formalizes`, plus `same-as` (written by the content-hash dedup pass), `contains` and `describes`, which the graph traversal includes by default; the type is free text, so any other string is accepted. `implements-heuristic` is a legacy type: the indexer pass that wrote it has been off since engine v0.1.57 and nothing writes it now, though you may still create or query it by hand.
 
 Duplicate links are merged — the second creator is recorded in `co_discovered_by`. Linking to a deleted or non-existent document (a **dangling endpoint**) is refused by the engine (>= v0.1.61, nexus-9ssih) with a clear error naming both endpoints — older engines that don't emit the `dangling_endpoint` code accept the link silently. Bypassing the refusal (`allow_dangling=True`) is Python-API-only (`HttpCatalogClient.link()`); the `nx catalog link` CLI command has no flag for it.
 
@@ -215,10 +215,10 @@ A **purpose** is a human-named alias for a list of catalog link types. Plan temp
 
 | Name | Resolves to | When to use |
 |------|-------------|-------------|
-| `find-implementations` | `implements`, `implements-heuristic` | Walk from a design/RDR to the code modules that implement it |
+| `find-implementations` | `implements`, `implements-heuristic` | Walk from a design/RDR to the code modules that implement it (`implements-heuristic` is legacy edges only; nothing writes new ones) |
 | `decision-evolution` | `supersedes`, `cites` | Walk back through the decision history (RDRs that supersede or cite each other) |
 | `reference-chain` | `cites`, `quotes` | Walk citation chains across docs and papers |
-| `documentation-for` | `implements`, `implements-heuristic`, `cites` | Inverse of `find-implementations`: code back to docs that describe it |
+| `documentation-for` | `implements`, `implements-heuristic` (legacy edges only), `cites` | Inverse of `find-implementations`: code back to docs that describe it |
 | `soft-relations` | `relates`, `comments` | Loose semantic associations; lower-confidence than `find-implementations` |
 | `all-implementations` | `implements` | Strict-only — excludes `implements-heuristic`. For audits that need verified mappings |
 | `factual-evidence` | `cites`, `implements`, `relates` | Walk from a paper, RDR or chunk to the documents that cite it, implement it or relate to it; the graph context the `hybrid-factual-lookup` plan builds for factual questions |
@@ -527,7 +527,7 @@ Repairs `document_chunks` manifest gaps left by a persistently-failed manifest-w
 ### Bulk operations
 
 ```bash
-nx catalog link-bulk-delete --type implements-heuristic --created-by indexer --dry-run
+nx catalog link-bulk-delete --type implements-heuristic --created-by indexer --dry-run   # clears the legacy heuristic edges
 ```
 
 Preview and bulk-delete links by type and/or creator. Always use `--dry-run` first.
