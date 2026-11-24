@@ -14,16 +14,16 @@ T2 `nexus/directive-test-suite-architecture`. This skill is the routing card.
 
 | Need | Command | Notes |
 |------|---------|-------|
-| Agent hand run | `lab-run -c lab-m -- python3 scripts/watched_pytest.py --stall 180 --status <f> -- uv run pytest <paths, -k or -m>` | Targeted, on chas. No tree gets two green full runs; once pushed, develop CI is the verdict; a hand full suite is announced with its change class, tree sha and "no green full run exists" (AGENTS.md rule 13). Engine: `scripts/mvnw-leased.sh --lab-run`. |
-| Full Python suite | `uv run pytest -n auto` | Auto-capped to the box's shared-memory budget and, in a lab-run grant, to the grant's memory (AGENTS.md). The pre-push run a `src/nexus/` or `service/` change requires, once per tree (rule 13). |
+| Agent hand run | `lab-remote -c lab-m -- python3 scripts/watched_pytest.py --stall 180 --status <f> -- uv run pytest <paths, -k or -m>` (a background command; on chas itself `lab-run -c lab-m -- ...`) | Targeted, from your session's worktree. No tree gets two green full runs; once pushed, develop CI is the verdict; a hand full suite is announced with its change class, tree sha and "no green full run exists" (AGENTS.md rule 13). Engine: `scripts/mvnw-leased.sh --lab-run`. |
+| Full Python suite | `lab-remote -c lab-l -- python3 scripts/watched_pytest.py --stall 180 --status <f> -- uv run pytest -n auto` (a background command; on chas itself `lab-run -c lab-l -- ...`) | A hand full suite is announced with its change class, tree sha and "no green full run of this tree exists"; "pre-push" alone is not a reason, and a green full run of a tree is never repeated (AGENTS.md rule 13). Before a push, run what the diff reaches (`pre-push-review`). `-n auto` is auto-capped to the box's shared-memory budget and, in a lab-run grant, to the grant's memory. On the Mac laptop a bare `uv run pytest -n auto` with the engine substrate on exits 75; `NX_LOCAL_HEAVY=1` is for a run that needs the laptop's `claude`, `bd` or credentials. |
 | Debugging interleaving/isolation | `uv run pytest` (serial) | Only when parallelism masks the signal |
 | Repo-structure invariants | `uv run pytest -m lint` | O(repo) meta-tests; PR-gated by CI `test-lint`; run when touching `conexus/`, RDR frontmatter, storage-boundary/hook invariants |
-| Real-substrate depth | `uv run pytest -m integration` | Nightly local-service gate territory |
+| Real-substrate depth | `uv run pytest -m integration` | PR and develop CI run the integration files the change affects (`test-integration-affected`, ci.yml), and on a PR into main every one; the nightly local-service gate runs the whole family |
 | System truths, in-process | `scenario` journeys (in default loop) | `tests/test_scenario_journeys.py` |
 
 After ANY pull/rebase touching `service/`: `scripts/build-gate-jar.sh` first;
 session start refuses (exit 75) on a missing or stale jar.
-One full suite per box at a time (AGENTS.md rule 5).
+One full suite per box at a time (AGENTS.md rule 5), run from your session's own worktree, never the primary (rules 1 and 3).
 
 What a diff needs before a push is the `pre-push-review` skill's subject; the
 fixed commands for it come from preflight (`nx run preflight`).
