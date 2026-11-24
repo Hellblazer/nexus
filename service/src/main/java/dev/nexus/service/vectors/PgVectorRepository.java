@@ -6766,8 +6766,7 @@ FROM scope s
                                     : CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(ch.collection()))
                           .and(ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH).eq(ch.chash()))));
             return ctx.deleteFrom(ch.table())
-               // by the row's CURRENT label (coll), not the request's: before gate 3 a row renamed in place since the route boundary
-               // resolved its id has no chunk named by the request's label (368cf7da04)
+               // by the row's CURRENT label (coll), not the request's: before gate 3 the name column decides (368cf7da04)
                .where(CollectionSelector.collectionIs(gate3, tenant, ch.collection(), ch.collectionId(), coll)
                    .and(ch.chash().in(ids)).andNot(stillReferenced))
                .execute();
@@ -8325,8 +8324,7 @@ FROM scope s
             int affected = 0;
             List<String> missing = new ArrayList<>();
             for (int i = 0; i < ids.size(); i++) {
-                // the row's CURRENT label, not the request's: a row renamed in place since the route boundary resolved its id bears another
-                // label, and before gate 3 the statement names the collection by that label (368cf7da04 handed it the request's)
+                // the row's CURRENT label, not the request's: before gate 3 the statement names the collection by it (368cf7da04)
                 int rows = updateMetadataOneRow(ctx, ch, tenant, coll, ids.get(i), metadatas.get(i), deleteKeys,
                                                 gate3);
                 affected += rows;
@@ -8843,9 +8841,7 @@ FROM scope s
                 // to slice docsToEmbed / align an embedding — so this reordering is
                 // behavior-preserving; see CatalogRepository-sibling PgVectorMetadata
                 // BatchParityTest for the exact-row-state parity this must hold instead.
-                // by the row's CURRENT label (coll), as the existence read above: before gate 3 the UPDATE names the collection by that label,
-                // and the request's label, after a one-row rename, reaches nothing of this row (every chash rerouted to a re-embed) or the
-                // new holder's rows (368cf7da04 handed it the request's)
+                // by the row's CURRENT label (coll), as the existence read above: the request's reaches other rows after a rename (368cf7da04)
                 needEmbedIdx.addAll(
                     batchUpdateMetadata(ctx, ch, tenant, coll, dedupIds, dedupMetas, unchangedIdx,
                             deleteKeys == null ? List.of() : deleteKeys, gate3));
