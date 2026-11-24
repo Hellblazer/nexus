@@ -45,9 +45,10 @@ was not measured, it says so.
   anything is in this case at first; PDF support then installs on first use once
   the DLLs are in place. Where the line appears: interactive `nx self install` and
   `nx upgrade` print it; the Claude Code plugin setup repeats it in its done
-  message (like `web/install.ps1` and `web/install.sh`, which build with
-  `--extras pdf` unless `--slim` is given, and a `--slim` run prints "PDF support
-  was left out" and the command to add it); `nx upgrade --auto`
+  message. `web/install.ps1` and `web/install.sh` build with `--extras pdf`
+  unless `--slim` is given. A `--slim` run prints "PDF support was left out" and
+  the command to add it; that message is about the flag and is not the
+  missing-DLL line. `nx upgrade --auto`
   and the session-start lockstep upgrade write it to their logs only
   (`lockstep.log` for the second). The first PDF index
   stops with the link too. `nx doctor` shows "PDF support" red on an install that
