@@ -40,22 +40,37 @@ def _group_command(*words: str) -> click.Command | None:
     return cmd
 
 
+def _index_problems(line: str) -> tuple[list[str], int]:
+    """The problems one source line's ``nx index`` mentions have, and how many remedies it examined."""
+    bad: list[str] = []
+    seen = 0
+    for m in _INDEX.finditer(line):
+        raw = m.group(0).split()[2:]
+        if raw and raw[0].startswith("<"):
+            # `nx index <path>`: the bare group takes no argument, the verb is `nx index repo <path>`.
+            bad.append(f"nx index {raw[0]} is a placeholder where a subcommand belongs")
+            continue
+        words = [w for w in raw if not w.startswith("-")]
+        if not words or not re.fullmatch(r"[a-z|]+", words[0]):
+            continue  # prose such as the log header "nx index ..."; a bare-group flag is judged below
+        seen += 1
+        for sub in words[0].split("|"):
+            cmd = _group_command("index", sub)
+            if cmd is None or isinstance(cmd, click.Group):
+                bad.append(f"nx index {sub} is not a command")
+    for m in re.finditer(r"\bnx index (--\w[\w-]*)", line):
+        bad.append(f"`nx index {m.group(1)}` names a flag of the bare group")
+    return bad, seen
+
+
 def _scan() -> tuple[list[str], list[str], int]:
     bad: list[str] = []
     seen_index = seen_purge = 0
     for rel in FILES:
         for lineno, line in enumerate((SRC / rel).read_text(encoding="utf-8").splitlines(), 1):
-            for m in _INDEX.finditer(line):
-                words = [w for w in m.group(0).split()[2:] if not w.startswith(("-", "<"))]
-                if not words or not re.fullmatch(r"[a-z|]+", words[0]):
-                    continue  # prose such as the log header "nx index ..."; a bare-group flag is judged below
-                seen_index += 1
-                for sub in words[0].split("|"):
-                    cmd = _group_command("index", sub)
-                    if cmd is None or isinstance(cmd, click.Group):
-                        bad.append(f"{rel}:{lineno}: nx index {sub} is not a command")
-            for m in re.finditer(r"\bnx index (--\w[\w-]*)", line):
-                bad.append(f"{rel}:{lineno}: `nx index {m.group(1)}` names a flag of the bare group")
+            found, seen = _index_problems(line)
+            seen_index += seen
+            bad.extend(f"{rel}:{lineno}: {msg}" for msg in found)
             for m in _PURGE.finditer(line):
                 seen_purge += 1
                 purge = _group_command("catalog", "purge-trash")
@@ -79,6 +94,21 @@ def test_the_scan_fires_on_the_forms_it_was_written_for() -> None:
     real = {opt for p in purge.params for opt in (*p.opts, *p.secondary_opts)}
     assert "--execute" not in real and {"--no-dry-run", "--confirm"} <= real
     assert _INDEX.search("run nx index <path> --force now") and _PURGE.search("nx catalog purge-trash --execute")
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["run nx index <path> now", "nx index <path>", "`nx index <path>`.", "nx index <path> --force"],
+)
+def test_a_bare_index_placeholder_form_is_flagged(line: str) -> None:
+    """nx index <path> (no flag, no subcommand) used to pass: the words list stayed empty and the flag regex needs --."""
+    bad, _seen = _index_problems(line)
+    assert bad, f"{line!r} was not flagged"
+
+
+@pytest.mark.parametrize("line", ["nx index repo <path>", "nx index ... header", "nx index repo|pdf"])
+def test_the_real_and_prose_forms_stay_clean(line: str) -> None:
+    assert _index_problems(line)[0] == []
 
 
 @pytest.mark.parametrize("old", ["nx index <path> --force", "nx index --force"])
