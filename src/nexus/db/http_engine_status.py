@@ -73,7 +73,8 @@ def fetch_engine_status(*, timeout: float = 5.0, mint_deadline_s: float | None =
         # 403 to a bare GET and 200 with the resolved token (nexus-grzai; the
         # unauthenticated probe reported a false UNKNOWN on every cloud box).
         headers = {"Authorization": f"Bearer {token}"} if token else {}
-        resp = httpx.get(f"{base_url.rstrip('/')}/v1/status", headers=headers, timeout=timeout)
+        from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — deferred: read once per process, not per call (2026-11-21)
+        resp = httpx.get(f"{base_url.rstrip('/')}/v1/status", headers=headers, timeout=timeout, verify=get_shared_ssl_context())
         resp.raise_for_status()
         body = resp.json()
     except Exception as exc:  # noqa: BLE001 — fail-closed: a transport blip or a pre-nexus-s71lr engine (404) is "unprobeable"
@@ -90,7 +91,8 @@ def fetch_engine_status_at(base_url: str, token: str | None, *, timeout: float =
     endpoint resolution, or ``None`` on any failure. Never raises (nexus-f3yqd.3)."""
     try:
         headers = {"Authorization": f"Bearer {token}"} if token else {}
-        resp = httpx.get(f"{base_url.rstrip('/')}/v1/status", headers=headers, timeout=timeout)
+        from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — deferred: read once per process, not per call (2026-11-21)
+        resp = httpx.get(f"{base_url.rstrip('/')}/v1/status", headers=headers, timeout=timeout, verify=get_shared_ssl_context())
         resp.raise_for_status()
         body = resp.json()
     except Exception as exc:  # noqa: BLE001 — advisory: an unreadable status is nothing to report

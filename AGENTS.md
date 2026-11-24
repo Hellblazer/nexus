@@ -16,6 +16,7 @@ scripts/reinstall-tool.sh                # install nx CLI locally (preserves ext
 uv run pytest -n auto                    # full unit suite (no API keys needed; auto-capped); hand full suites: rule 13
 uv run pytest                            # serial fallback (debugging only)
 uv run pytest -m lint                    # O(repo) meta-tests (out of hot loop, PR-gated in CI)
+uv run pytest -n auto $(uv run python scripts/select_affected_tests.py --base origin/develop)   # before a push: the tests your diff can affect
 uv run pytest -m integration             # E2E (requires .env from .env.example)
 uv sync && scripts/reinstall-tool.sh && nx --version    # after edits
 ```

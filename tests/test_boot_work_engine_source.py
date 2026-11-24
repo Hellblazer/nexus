@@ -177,7 +177,7 @@ def test_the_status_request_goes_to_the_lease_engine_with_its_token(monkeypatch)
 
     seen: list[tuple] = []
 
-    def get(url, *, headers, timeout):
+    def get(url, *, headers, timeout, **kwargs):  # **kwargs: verify= (the process-wide SSL context, 2026-11-21)
         seen.append((url, headers, timeout))
         return httpx.Response(200, json={"boot_work": [PCI]}, request=httpx.Request("GET", url))
 

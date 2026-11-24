@@ -720,7 +720,13 @@ class ApiBackend:
         async def consume() -> None:
             timeout = httpx.Timeout(connect=10.0, read=None, write=60.0, pool=None)
             failure: str | None = None
-            async with httpx.AsyncClient(timeout=timeout, trust_env=self._trust_env, follow_redirects=False) as client:
+            from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — deferred: the db package import is heavy for this module
+
+            # The process-wide SSL context: this runs inside the MCP server, whose install generation can be
+            # removed while it lives; a per-client context re-reads the CA bundle from it.
+            async with httpx.AsyncClient(
+                timeout=timeout, trust_env=self._trust_env, follow_redirects=False, verify=get_shared_ssl_context(),
+            ) as client:
                 try:
                     async with client.stream("POST", url, headers=headers, json=body) as resp:
                         if 300 <= resp.status_code < 400:

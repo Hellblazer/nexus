@@ -7,6 +7,7 @@ The last class runs the selector against this checkout, so the composition with
 """
 from __future__ import annotations
 
+import json
 import pathlib
 import subprocess
 import sys
@@ -187,6 +188,77 @@ class TestFileReferences:
         _write(tree, "tests/test_tool2.py", "import tool2\n")
         assert "tests/test_tool2.py" in _sel(tree, ["scripts/tool2.py"]).files
 
+    def test_a_comment_or_docstring_naming_a_file_is_not_a_reference(self, tree: pathlib.Path) -> None:
+        _write(tree, "tests/test_comment.py",
+               '"""See docs/notes.md for why."""\n# docs/notes.md explains this\nimport json\n')
+        assert "tests/test_comment.py" not in _sel(tree, ["docs/notes.md"]).files
+
+    def test_a_test_file_naming_a_file_in_a_message_selects_itself(self, tree: pathlib.Path) -> None:
+        # over-selecting the referencing test is cheap; only its importers are the cost
+        _write(tree, "tests/test_msg.py", "MSG = 'update the table in docs/notes.md before retrying'\n")
+        assert "tests/test_msg.py" in _sel(tree, ["docs/notes.md"]).files
+
+    def test_a_helper_mentioning_a_file_in_a_message_does_not_reach_its_importers(self, tree: pathlib.Path) -> None:
+        # tests/_signal_fence.py names tests/AGENTS.md in an error message and reads nothing
+        _write(tree, "tests/_msg.py", "MSG = 'name the target as the session (docs/notes.md) and retry'\n")
+        _write(tree, "tests/test_uses_msg.py", "from tests._msg import MSG\n")
+        got = _sel(tree, ["docs/notes.md"])
+        assert "tests/test_uses_msg.py" not in got.files
+        assert got.files == {}
+
+    def test_a_helper_mentioning_a_file_does_not_select_everything_through_a_conftest(self, tree: pathlib.Path) -> None:
+        _write(tree, "tests/_plug.py", "MSG = 'see the notes (docs/notes.md) for the rule'\n")
+        got = _sel(tree, ["docs/notes.md"])
+        assert got.everything is None
+
+    def test_a_helper_that_reads_a_file_by_a_pathlib_chain_reaches_its_importers(self, tree: pathlib.Path) -> None:
+        _write(tree, "tests/_reader.py", "import pathlib\nROOT = pathlib.Path('.')\nTEXT = (ROOT / 'docs' / 'notes.md').read_text()\n")
+        _write(tree, "tests/test_uses_reader.py", "from tests._reader import TEXT\n")
+        assert "tests/test_uses_reader.py" in _sel(tree, ["docs/notes.md"]).files
+
+    def test_a_helper_that_opens_a_file_by_a_path_literal_reaches_its_importers(self, tree: pathlib.Path) -> None:
+        _write(tree, "tests/_opener.py", "TEXT = open('docs/notes.md').read()\n")
+        _write(tree, "tests/test_uses_opener.py", "from tests._opener import TEXT\n")
+        assert "tests/test_uses_opener.py" in _sel(tree, ["docs/notes.md"]).files
+
+    @pytest.mark.parametrize("pattern", ["*.py", "*.md"])
+    def test_a_bare_extension_glob_names_no_particular_file(self, tree: pathlib.Path, pattern: str) -> None:
+        _write(tree, "tests/test_globby.py", f"import pathlib\nL = list(pathlib.Path('.').glob('{pattern}'))\n")
+        got = _sel(tree, ["scripts/tool.py", "docs/notes.md", "src/nexus/d.py"])
+        assert "tests/test_globby.py" not in got.files
+
+    @pytest.mark.parametrize("call", ["rglob('*.py')", "glob('**/*.py')"])
+    def test_a_tree_walk_for_an_extension_is_a_lint_over_every_such_file(self, tree: pathlib.Path, call: str) -> None:
+        _write(tree, "tests/test_walker.py", f"import pathlib\nL = list(pathlib.Path('src').{call})\n")
+        assert "tests/test_walker.py" in _sel(tree, ["src/nexus/d.py"]).files
+        assert "tests/test_walker.py" not in _sel(tree, ["docs/notes.md"]).files
+
+    def test_a_regex_in_a_string_is_not_a_glob(self, tree: pathlib.Path) -> None:
+        _write(tree, "tests/test_rx.py", "import re\nR = re.compile('[a-z_][a-z0-9_]*')\n")
+        assert "tests/test_rx.py" not in _sel(tree, ["scripts/tool.py", "src/nexus/d.py", "docs/notes.md"]).files
+
+    def test_a_route_in_a_helper_is_a_read_even_when_a_message_repeats_it(self, tree: pathlib.Path) -> None:
+        _write(tree, "service/src/main/java/dev/nexus/service/Who.java", 'class Who { static final String R = "/v1/whoami"; }\n')
+        _write(tree, "tests/_probe.py", "URL = base + '/v1/whoami'\nERR = 'engine does not answer GET /v1/whoami'\n")
+        _write(tree, "tests/test_uses_probe.py", "from tests._probe import URL\n")
+        got = _sel(tree, ["service/src/main/java/dev/nexus/service/Who.java"])
+        assert "tests/test_uses_probe.py" in got.files
+
+    def test_a_path_to_one_file_does_not_name_its_whole_directory(self, tree: pathlib.Path) -> None:
+        # ROOT / "scripts" / "one.py" reads one.py; a change to another script is not a reason to run it
+        _write(tree, "tests/test_one.py", "import pathlib\nP = pathlib.Path('.') / 'scripts' / 'one.py'\n")
+        got = _sel(tree, ["scripts/two.py"])
+        assert "tests/test_one.py" not in got.files
+        assert "tests/test_one.py" in _sel(tree, ["scripts/one.py"]).files
+
+    def test_a_bare_directory_literal_still_names_the_directory(self, tree: pathlib.Path) -> None:
+        _write(tree, "tests/test_scan.py", "import pathlib\nL = sorted(pathlib.Path('.').joinpath('scripts').rglob('x'))\nN = 'scripts'\n")
+        assert "tests/test_scan.py" in _sel(tree, ["scripts/two.py"]).files
+
+    def test_a_glob_with_a_directory_part_still_selects(self, tree: pathlib.Path) -> None:
+        _write(tree, "tests/test_dirglob.py", "import pathlib\nL = list(pathlib.Path('.').glob('docs/rdr/*.md'))\n")
+        assert "tests/test_dirglob.py" in _sel(tree, ["docs/rdr/rdr-258.md"]).files
+
 
 class TestSelectsEverything:
     @pytest.mark.parametrize("changed", ["tests/conftest.py", "pyproject.toml", "uv.lock"])
@@ -207,11 +279,118 @@ class TestSelectsEverything:
 
     def test_the_cli_prints_the_tests_dir_and_says_why(self, tree: pathlib.Path) -> None:
         out = subprocess.run(
-            [sys.executable, str(SCRIPT), "--repo", str(tree), "--no-meta", "--no-docs", "tests/conftest.py"],
+            [sys.executable, str(SCRIPT), "--repo", str(tree), "--no-meta", "--no-docs", "--full-closure", "tests/conftest.py"],
             capture_output=True, text=True, check=True,
         )
         assert out.stdout.split() == ["tests"]
         assert "everything" in out.stderr.lower()
+
+
+class TestCap:
+    """A closure over the cap prints the direct tier: the changed tests, the tests that import a changed
+    module themselves, and the file, docs and route hits; the rest is develop CI's."""
+
+    def test_under_the_cap_nothing_changes(self, tree: pathlib.Path) -> None:
+        got = _sel(tree, ["src/nexus/b.py"], cap_pct=100)
+        assert got.capped is None
+        assert "tests/test_direct.py" in got.files
+
+    def test_over_the_cap_prints_the_direct_tier(self, tree: pathlib.Path) -> None:
+        # b.py -> a.py -> tests/test_direct.py: the test is two hops away
+        got = _sel(tree, ["src/nexus/b.py"], cap_pct=5)
+        assert got.capped and "develop CI" in got.capped and "%" in got.capped
+        assert "tests/test_direct.py" not in got.files
+
+    def test_the_direct_tier_keeps_the_direct_importers(self, tree: pathlib.Path) -> None:
+        got = _sel(tree, ["src/nexus/a.py"], cap_pct=5)
+        assert got.capped
+        assert "tests/test_direct.py" in got.files
+
+    def test_the_direct_tier_keeps_a_changed_test_and_a_file_reader(self, tree: pathlib.Path) -> None:
+        _write(tree, "tests/test_reads.py", "import pathlib\nP = pathlib.Path('conf/x.toml')\n")
+        got = _sel(tree, ["src/nexus/b.py", "tests/test_none.py", "conf/x.toml"], cap_pct=5)
+        assert got.capped
+        assert {"tests/test_none.py", "tests/test_reads.py"} <= set(got.files)
+
+    def test_the_direct_tier_drops_a_test_that_names_the_file_only_by_a_glob(self, tree: pathlib.Path) -> None:
+        # a lint that globs a directory is every file's reader: the full selection keeps it, the direct tier does not
+        _write(tree, "tests/test_globs.py", "import pathlib\nL = list(pathlib.Path('.').glob('conf/*.toml'))\n")
+        _write(tree, "tests/test_names.py", "import pathlib\nP = pathlib.Path('conf/x.toml')\n")
+        changed = ["src/nexus/b.py", "conf/x.toml"]
+        assert "tests/test_globs.py" in _sel(tree, changed, cap_pct=100).files
+        got = _sel(tree, changed, cap_pct=5)
+        assert got.capped
+        assert "tests/test_globs.py" not in got.files
+        assert "tests/test_names.py" in got.files
+
+    def test_the_direct_tier_leaves_the_engine_booting_set_to_develop_ci(self, tree: pathlib.Path) -> None:
+        # a service/ main change selects every engine-booting test in the full closure (hundreds of files);
+        # the direct tier keeps the wire-route readers and drops that set
+        _write(tree, "service/src/main/java/dev/nexus/service/http/WidgetHandler.java",
+               'class WidgetHandler { static final String R = "/v1/widgets/{id}"; }\n')
+        _write(tree, "tests/test_boots_engine.py", "import pytest\npytestmark = pytest.mark.t2_tenant\n")
+        _write(tree, "tests/test_widget_wire.py", "def test_x():\n    assert '/v1/widgets/abc'\n")
+        _write(tree, "src/nexus/widget_client.py", "URL = '/v1/widgets'\n")
+        _write(tree, "tests/test_widget_client.py", "import nexus.widget_client\n")
+        changed = ["service/src/main/java/dev/nexus/service/http/WidgetHandler.java"]
+        assert "tests/test_boots_engine.py" in _sel(tree, changed, service_substrate=True, cap_pct=100).files
+        assert "tests/test_widget_client.py" in _sel(tree, changed, cap_pct=100).files
+        got = _sel(tree, changed, service_substrate=True, cap_pct=5)
+        assert got.capped
+        assert "tests/test_boots_engine.py" not in got.files
+        assert "tests/test_widget_wire.py" in got.files
+        # a module that names the route is not a changed module: its importers wait for develop CI
+        assert "tests/test_widget_client.py" not in got.files
+
+    def test_a_nested_conftest_reached_by_the_change_selects_nothing_in_the_direct_tier(self, tree: pathlib.Path) -> None:
+        # tests/sub/conftest.py imports nexus.d: the old rule runs every test below tests/sub/
+        assert "tests/sub/test_in_sub.py" in _sel(tree, ["src/nexus/d.py"]).files
+        got = _sel(tree, ["src/nexus/d.py"], cap_pct=5)
+        assert got.capped
+        assert "tests/sub/test_in_sub.py" not in got.files
+
+    @pytest.mark.parametrize("changed", ["tests/conftest.py", "pyproject.toml", "tests/_plug.py"])
+    def test_run_everything_is_capped_too(self, tree: pathlib.Path, changed: str) -> None:
+        got = _sel(tree, [changed], cap_pct=25)
+        assert got.everything is None
+        assert got.capped
+
+    def test_no_cap_leaves_run_everything(self, tree: pathlib.Path) -> None:
+        assert _sel(tree, ["tests/conftest.py"], cap_pct=None).everything
+
+
+class TestCapAtTheCommandLine:
+    def _run(self, tree: pathlib.Path, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), "--repo", str(tree), "--no-meta", "--no-docs", "--no-cache", *args],
+            capture_output=True, text=True, check=True,
+        )
+
+    def test_the_cap_is_on_by_default_and_says_so(self, tree: pathlib.Path) -> None:
+        out = self._run(tree, "tests/conftest.py")
+        assert out.stdout.split() != ["tests"]
+        assert "direct tier" in out.stderr and "develop CI runs the full suite" in out.stderr
+
+    def test_full_closure_restores_the_old_output(self, tree: pathlib.Path) -> None:
+        out = self._run(tree, "--full-closure", "tests/conftest.py")
+        assert out.stdout.split() == ["tests"]
+        assert "direct tier" not in out.stderr
+
+    def test_full_closure_prints_a_closure_over_the_cap(self, tree: pathlib.Path) -> None:
+        capped = self._run(tree, "--cap-pct", "5", "src/nexus/b.py")
+        full = self._run(tree, "--cap-pct", "5", "--full-closure", "src/nexus/b.py")
+        assert "tests/test_direct.py" not in capped.stdout.split()
+        assert "tests/test_direct.py" in full.stdout.split()
+
+    def test_explain_marks_a_capped_selection(self, tree: pathlib.Path) -> None:
+        assert "CAPPED:" in self._run(tree, "--explain", "tests/conftest.py").stdout
+
+    def test_the_estimate_names_the_workers_and_the_command_uses_n_auto(self, tree: pathlib.Path) -> None:
+        durations = {"tests/test_direct.py::test_x": 8.0}
+        (tree / ".test_durations.json").write_text(json.dumps(durations))
+        out = self._run(tree, "--workers", "4", "src/nexus/a.py")
+        assert "at 4 workers" in out.stderr
+        assert "pytest -n auto" in out.stderr
 
 
 class TestServiceChange:
@@ -234,6 +413,17 @@ class TestServiceChange:
         assert "tests/test_boots_engine.py" not in _sel(tree, changed).files
         got = _sel(tree, changed, service_substrate=True)
         assert "tests/test_boots_engine.py" in got.files
+
+    def test_the_cli_selects_the_engine_tests_by_default(self, tree: pathlib.Path) -> None:
+        """The flag defaults on at the command line: the replay's one diff-caused miss was missed only without it."""
+        _write(tree, "service/src/main/java/dev/nexus/service/Util.java", "class Util {}\n")
+        _write(tree, "tests/test_boots_engine.py", "import pytest\npytestmark = pytest.mark.t2_tenant\n")
+        base = [sys.executable, str(SCRIPT), "--repo", str(tree), "--no-meta", "--no-docs", "--no-cache"]
+        path = "service/src/main/java/dev/nexus/service/Util.java"
+        on = subprocess.run([*base, path], capture_output=True, text=True, check=True).stdout
+        off = subprocess.run([*base, "--no-service-substrate", path], capture_output=True, text=True, check=True).stdout
+        assert "tests/test_boots_engine.py" in on.split()
+        assert "tests/test_boots_engine.py" not in off.split()
 
     def test_a_service_change_with_no_route_says_so(self, tree: pathlib.Path) -> None:
         _write(tree, "service/src/main/java/dev/nexus/service/Util.java", "class Util {}\n")
@@ -264,7 +454,7 @@ class TestExplainAndRange:
 
     def test_files_from_stdin(self, tree: pathlib.Path) -> None:
         out = subprocess.run(
-            [sys.executable, str(SCRIPT), "--repo", str(tree), "--no-meta", "--no-docs", "--files-from", "-"],
+            [sys.executable, str(SCRIPT), "--repo", str(tree), "--no-meta", "--no-docs", "--full-closure", "--files-from", "-"],
             input="src/nexus/d.py\n", capture_output=True, text=True, check=True,
         )
         assert "tests/test_lazy.py" in out.stdout.split()
@@ -279,7 +469,7 @@ class TestExplainAndRange:
         _write(tree, "src/nexus/d.py", "D = 3\n")
         git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "change")
         out = subprocess.run(
-            [sys.executable, str(SCRIPT), "--repo", str(tree), "--no-meta", "--no-docs", "--range", "HEAD~1..HEAD"],
+            [sys.executable, str(SCRIPT), "--repo", str(tree), "--no-meta", "--no-docs", "--full-closure", "--range", "HEAD~1..HEAD"],
             capture_output=True, text=True, check=True,
         )
         assert "tests/test_lazy.py" in out.stdout.split()

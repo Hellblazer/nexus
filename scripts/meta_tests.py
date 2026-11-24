@@ -83,8 +83,9 @@ ENV = {"NX_TEST_T2_SUBSTRATE": "none"}
 GUARD_ENV = {"NX_CENSUS_ONLY_JOB": "1", "NX_SCENARIO_SKIP_BUDGET": "999"}
 #: What a green run of this script does not cover, printed at the end of every run.
 NOT_COVERED = (
-    "not covered here: the whole -m lint bucket and the full-corpus census job (push-train rule 1 still asks for"
-    " them), census-style tests that carry neither mark, and the Java source walkers (printed above when selected)"
+    "not covered here: the rest of the -m lint bucket and the full-corpus census job (develop CI runs them; push-train"
+    " rule 1 no longer asks for them by hand, Sam 2026-11-23), census-style tests that carry neither mark, and the"
+    " Java source walkers (printed above when selected)"
 )
 
 

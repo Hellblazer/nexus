@@ -1,0 +1,3 @@
+### Fixed
+
+- **Generation cleanup no longer deletes the install a live session runs from when it cannot trust its process table.** The holder census answered an empty table when `ps` failed, timed out or was not on PATH (or the Windows table could not be read), and the reap read that as "nothing holds any generation" and removed every complete generation outside the keep window and the `current`/`previous` pointers, including ones live MCP servers were running from. A census now counts only when the table lists the cleanup's own process (a `ps` that shows a subset, as a sandbox can, fails it too); otherwise complete generations are kept with a `kept <gen>: process census unavailable` line, and only receipt-less build wreckage is still removed.

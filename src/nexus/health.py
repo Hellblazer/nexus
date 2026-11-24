@@ -21,6 +21,7 @@ import structlog
 from nexus._log_safe_url import log_endpoint
 from nexus.bounded_subprocess import run_bounded
 from nexus.config import default_db_path
+from nexus.db.t2.shared_ssl import get_shared_ssl_context
 from nexus.redact import redact_credentials  # noqa: F401 — re-exported; callers import it from here
 from nexus.tuple_templates import resolve_tuple_template
 from nexus.util.nx_argv import which_off_cwd
@@ -3295,7 +3296,7 @@ def _check_mineru_server() -> list[HealthResult]:
     # the election short-circuits on a live pid.
     if provisioned:
         try:
-            resp = _httpx.get(f"{url}/health", timeout=2.0)
+            resp = _httpx.get(f"{url}/health", timeout=2.0, verify=get_shared_ssl_context())
         except (_httpx.ConnectError, _httpx.TimeoutException):
             pass  # not up — fall through to the on-demand assessment
         else:
@@ -3473,7 +3474,7 @@ def probe_t2_schema_fingerprint(
             resolved_base_url, _token = resolve_service_endpoint()
 
         get = http_get if http_get is not None else (
-            lambda u, t: httpx.get(u, timeout=t)
+            lambda u, t: httpx.get(u, timeout=t, verify=get_shared_ssl_context())
         )
         resp = get(f"{resolved_base_url.rstrip('/')}/version", timeout)
         resp.raise_for_status()
@@ -4292,7 +4293,7 @@ def _check_static_service_token() -> list[HealthResult]:
     armed = bool((get_credential("mint_token") or "").strip())
     try:
         resp = httpx.get(f"{url}/v1/_whoami",
-                         headers={"Authorization": f"Bearer {token}"}, timeout=10.0)
+                         headers={"Authorization": f"Bearer {token}"}, timeout=10.0, verify=get_shared_ssl_context())
     except httpx.HTTPError as exc:
         return [HealthResult(label=label, ok=False, warn=True,
                              detail=f"could not verify against {host}: {type(exc).__name__}")]
@@ -4630,7 +4631,7 @@ def _check_storage_service_health(
         if http_get is not None:
             resp = http_get(url, timeout=5.0)
         else:
-            resp = _httpx.get(url, timeout=5.0)
+            resp = _httpx.get(url, timeout=5.0, verify=get_shared_ssl_context())
     except (_httpx.ConnectError, _httpx.TimeoutException, OSError) as exc:
         # Fatal: we have a confirmed endpoint and it is not responding.
         # Unlike the undiscoverable case above, here we know the address and

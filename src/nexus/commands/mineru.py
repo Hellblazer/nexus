@@ -135,7 +135,8 @@ def start(port: int) -> None:
             )
             raise click.exceptions.Exit(1)
         try:
-            resp = httpx.get(url, timeout=2)
+            from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — deferred: read once per process, not per call (2026-11-21)
+            resp = httpx.get(url, timeout=2, verify=get_shared_ssl_context())
             if resp.status_code == 200:
                 healthy = True
                 break
@@ -332,7 +333,8 @@ def status() -> None:
     # Check /health
     url = f"http://127.0.0.1:{port}/health"
     try:
-        resp = httpx.get(url, timeout=5)
+        from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — deferred: read once per process, not per call (2026-11-21)
+        resp = httpx.get(url, timeout=5, verify=get_shared_ssl_context())
         if resp.status_code == 200:
             data = resp.json()
             # The server's /health serves ``processing_tasks`` / ``queued_tasks``

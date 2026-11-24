@@ -116,7 +116,9 @@ exit 0
 def _stub_ps(bin_dir: Path, lines: list[str]) -> None:
     bin_dir.mkdir(parents=True, exist_ok=True)
     ps = bin_dir / "ps"
-    ps.write_text("#!/bin/sh\ncat <<'PSEOF'\n" + "\n".join(lines) + "\nPSEOF\n")
+    # The table lists the process that ran ps ($PPID, gc_core), as a real ps does:
+    # gc counts a census as working only when its own pid is in it.
+    ps.write_text("#!/bin/sh\necho \"$PPID python3 gc_core.py\"\ncat <<'PSEOF'\n" + "\n".join(lines) + "\nPSEOF\n")
     ps.chmod(ps.stat().st_mode | stat.S_IXUSR)
 
 

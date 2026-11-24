@@ -3145,10 +3145,10 @@ Says whether this session may push now (RDR-252, the push script's hold-your-pus
 ### nx ci record-push
 
 ```
-nx ci record-push [--base <repo>-<branch> | --remote origin --branch <branch>] --from-sha <sha> --to-sha <sha> [--count N] [--red-fix <reason>]
+nx ci record-push [--base <repo>-<branch> | --remote origin --branch <branch>] --from-sha <sha> --to-sha <sha> [--count N] [--red-fix <reason>] [--skip <check>=<reason> ...] [--proof-info <leg>=<tree12>,<started>,<seconds>,<host> ...]
 ```
 
-Writes the push record of a push that landed (RDR-252): one tuple on `board/ci/<base>--push`, key `topic=<base>--push`, nonce `push-<to-sha>`, dims `from=<your identity id, or unknown>`, `kind=push`, `sha=<to-sha>`, body `{"base": <from-sha>, "n": <count>, "red_fix": <reason>}` (`n` and `red_fix` only when given; the reason is cleaned to one line, control characters and newlines becoming spaces, and cut so the whole UTF-8 body fits the template's 1024 bytes, at most 500 characters). The owner stamper links `base` to the tip to order the branch's tips and maps the record's sender-session stamp to the pusher; it never reads `from`. A failed stamped write is retried once as a minimal record (base, tip, from; the same nonce) written without the T1 session header, so the chain keeps its link. Only that header is dropped: a process that holds an RDR-253 identity token still has the record stamped by it (the status line says `still stamped by the identity token`), and one that holds none writes it unstamped (`no identity token stamps it ... no pusher`). One status line on standard output: `PUSH_RECORD_OK ... stamped`, `PUSH_RECORD_UNSTAMPED` (written with no session token or identity token to stamp it, or resent without the token or tokens the engine rejected, a 401 resend of the session header or of the identity token, with none left: the chain keeps its link but the push names no pusher), `PUSH_RECORD_FALLBACK` or `PUSH_RECORD_FAILED`. The exit code is 0 whatever it says, because the push has landed and the record never fails it; only a base that cannot be derived (see `nx ci check-hold`) is refused, with exit 2.
+Writes the push record of a push that landed (RDR-252): one tuple on `board/ci/<base>--push`, key `topic=<base>--push`, nonce `push-<to-sha>`, dims `from=<your identity id, or unknown>`, `kind=push`, `sha=<to-sha>`, body `{"base": <from-sha>, "n": <count>, "proofs": {<leg>: {"tree", "at", "s", "host"}}, "skips": {<check>: <reason>}, "red_fix": <reason>}` (`n`, `proofs`, `skips` and `red_fix` only when given; `--proof-info LEG=TREE12,STARTED,SECONDS,HOST` is repeatable and names the heavy-leg proof (`--proof` of the push script) the push relied on: tree prefix, start (UTC ISO), seconds, host (cut to 40 characters); a malformed value exits 2; `--skip CHECK=REASON` is repeatable and names a push-time check of `scripts/git-push-develop.sh` the push overrode, nexus-igea9: a lower-case check name and a non-blank reason, else exit 2; the skips are fitted first, each reason cut and a name never, within about 400 bytes; the reason is cleaned to one line, control characters and newlines becoming spaces, and cut so the whole UTF-8 body fits the template's 1024 bytes, at most 500 characters). The owner stamper links `base` to the tip to order the branch's tips and maps the record's sender-session stamp to the pusher; it never reads `from`. A failed stamped write is retried once as a minimal record (base, tip, from; the same nonce) written without the T1 session header, so the chain keeps its link. Only that header is dropped: a process that holds an RDR-253 identity token still has the record stamped by it (the status line says `still stamped by the identity token`), and one that holds none writes it unstamped (`no identity token stamps it ... no pusher`). One status line on standard output: `PUSH_RECORD_OK ... stamped`, `PUSH_RECORD_UNSTAMPED` (written with no session token or identity token to stamp it, or resent without the token or tokens the engine rejected, a 401 resend of the session header or of the identity token, with none left: the chain keeps its link but the push names no pusher), `PUSH_RECORD_FALLBACK` or `PUSH_RECORD_FAILED`. The exit code is 0 whatever it says, because the push has landed and the record never fails it; only a base that cannot be derived (see `nx ci check-hold`) is refused, with exit 2.
 
 ## nx collection
 
@@ -5359,6 +5359,21 @@ the moment its holders are gone. Every held tree the reap keeps is printed
 where the reap used to say nothing about them. `nx doctor`'s Holders row names
 each held generation's size on disk and the remedy: end those sessions, then
 `nx self gc`.
+
+When the process census cannot be trusted (`ps` fails, times out or is not on
+PATH, or its table does not list the cleanup's own process), no complete
+generation is reaped: each is kept with `kept <gen>: process census
+unavailable`. Every run except `--dry-run`, from this verb, the SessionStart
+hook, `nx self install` or the bootstrap, appends JSON lines to
+`~/.config/nexus/logs/install-gc.log` (under `NEXUS_CONFIG_DIR` when set) as
+it goes: `gc_reap_begin` before each delete, `gc_reaped`, `gc_reap_kept` or
+`gc_reap_failed` after it (a begin with no end is a killed run), and a
+`gc_run` summary. They carry the reason, the holder count and a holder map,
+the census (state, why, `ps` duration, rows), `caller` (`self-gc-hook`,
+`self-gc`, `self-install`, `bootstrap`) and the nx that ran the reap; the
+begin and summary lines add the parent process chain, with token, key,
+secret, password and auth values redacted. The file is owner-only (0600) and
+rotates to `install-gc.log.1` past 1 MB.
 
 | Flag | Description |
 |------|-------------|

@@ -15,7 +15,8 @@ did land is not doubled) is tried so the chain keeps its link. Only the T1 sessi
 still rides the write, so a process that holds one gets the record stamped by it, and one that does not writes it unstamped;
 the status line says which was written, and which of the two it is. A push that
 overrode the develop-red hold carries the reason in the body as ``red_fix``, on either record, so the board shows every
-escape. The whole body stays under the template's cap (:data:`BODY_MAX_BYTES`, ``max_body_bytes`` in ``board-ci.yaml``), so
+escape, and so does each push-time check it overrode (``skips``, a name to reason map: ``--skip CHECK=REASON``, nexus-igea9).
+The whole body stays under the template's cap (:data:`BODY_MAX_BYTES`, ``max_body_bytes`` in ``board-ci.yaml``), so
 the reason is cut by serialized UTF-8 bytes, never by characters, and control characters and newlines in it become spaces.
 Nothing here raises: the caller's push has already landed.
 """
@@ -23,6 +24,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from typing import Any
 
 #: The ``board/ci/<topic>`` template's ``max_body_bytes`` (service/src/main/resources/tuples/templates/board-ci.yaml): the
@@ -30,6 +32,12 @@ from typing import Any
 BODY_MAX_BYTES = 1024
 #: The most characters of a ``red_fix`` reason the body carries before the byte cut.
 RED_FIX_MAX = 500
+#: The most characters of one ``skips`` reason, and the bytes all the skips may take together before the ``red_fix`` reason
+#: is fitted: the skips are cut first (never a check name), so a push that overrode many checks still leaves room for both.
+SKIP_MAX = 200
+SKIPS_BUDGET_BYTES = 400
+#: The most characters of a proof's ``host`` the body carries.
+HOST_MAX = 40
 
 _CONTROL_RUNS = re.compile(r"[\s\x00-\x1f\x7f-\x9f  ]+")
 
@@ -52,12 +60,38 @@ def _fits(text: str) -> bool:
     return len(text.encode("utf-8")) <= BODY_MAX_BYTES
 
 
-def body(from_sha: str, count: int | None, red_fix: str | None) -> str:
-    """The record body as JSON: ``base`` (the tip the push replaced), ``n`` when given, ``red_fix`` when given and not empty
-    after cleaning. The reason is cut to the longest prefix with which the whole body fits :data:`BODY_MAX_BYTES`."""
+def _skips_for(fields: dict[str, Any], skips: Mapping[str, str] | None) -> dict[str, Any]:
+    """*fields* with the ``skips`` map added: each reason cleaned to one line and cut to the longest cap in a falling ladder
+    with which the skips alone stay under :data:`SKIPS_BUDGET_BYTES`; a check name is kept at any cap."""
+    cleaned = {name: clean_reason(reason) for name, reason in (skips or {}).items()}
+    if not cleaned:
+        return fields
+    for cap in (SKIP_MAX, 100, 50, 25, 10, 0):
+        shown = {name: text[:cap].rstrip() for name, text in cleaned.items()}
+        if len(_dumps(shown).encode("utf-8")) <= SKIPS_BUDGET_BYTES or cap == 0:
+            return {**fields, "skips": shown}
+    return fields  # unreachable: the ladder ends at 0
+
+
+def _proofs_for(fields: dict[str, Any], proofs: Mapping[str, Mapping[str, Any]] | None) -> dict[str, Any]:
+    """*fields* with the ``proofs`` map added: per heavy leg, the tree sha prefix, the start (UTC ISO), the duration in seconds
+    and the host of the run the push relied on. The host is cleaned and cut; the rest is fixed-width."""
+    if not proofs:
+        return fields
+    shown = {leg: {"tree": str(info.get("tree", ""))[:12], "at": str(info.get("at", ""))[:20], "s": int(info.get("s", 0)),
+                   "host": clean_reason(str(info.get("host", "")))[:HOST_MAX]} for leg, info in proofs.items()}
+    return {**fields, "proofs": shown}
+
+
+def body(from_sha: str, count: int | None, red_fix: str | None, skips: Mapping[str, str] | None = None,
+         proofs: Mapping[str, Mapping[str, Any]] | None = None) -> str:
+    """The record body as JSON: ``base`` (the tip the push replaced), ``n`` when given, ``skips`` (the push-time checks the
+    push overrode, name to reason) and ``proofs`` (the heavy-leg runs it relied on) when any, ``red_fix`` when given and not empty after cleaning. The skips are fitted first
+    (:func:`_skips_for`), then the reason is cut to the longest prefix with which the whole body fits :data:`BODY_MAX_BYTES`."""
     fields: dict[str, Any] = {"base": from_sha}
     if count is not None:
         fields["n"] = count
+    fields = _skips_for(_proofs_for(fields, proofs), skips)
     reason = clean_reason(red_fix)[:RED_FIX_MAX]
     if not reason:
         return _dumps(fields)
@@ -98,7 +132,8 @@ def _stamp_state(store: Any) -> tuple[bool, bool, int, int]:
             int(_hint(store, "identity_dropped_resends", 0)))
 
 
-def write(store: Any, base: str, from_sha: str, to_sha: str, count: int | None, label: str, red_fix: str | None) -> str:
+def write(store: Any, base: str, from_sha: str, to_sha: str, count: int | None, label: str, red_fix: str | None,
+          skips: Mapping[str, str] | None = None, proofs: Mapping[str, Mapping[str, Any]] | None = None) -> str:
     """Write the push record; the one status line: ``PUSH_RECORD_OK`` (stamped), ``PUSH_RECORD_UNSTAMPED`` (written, with no
     session stamp), ``PUSH_RECORD_FALLBACK`` (the stamped write failed, the minimal unstamped record stands) or
     ``PUSH_RECORD_FAILED`` (neither landed). Never raises."""
@@ -109,7 +144,7 @@ def write(store: Any, base: str, from_sha: str, to_sha: str, count: int | None, 
     nonce = f"push-{to_sha}"
     session, identity, retries, id_drops = _stamp_state(store)
     try:
-        store.out(subspace, {"topic": topic}, dims, body(from_sha, count, red_fix), nonce=nonce)
+        store.out(subspace, {"topic": topic}, dims, body(from_sha, count, red_fix, skips, proofs), nonce=nonce)
     except Exception as first:  # noqa: BLE001 -- the push landed; a record fault is reported, never raised
         why = _why(first)
     else:
@@ -131,7 +166,7 @@ def write(store: Any, base: str, from_sha: str, to_sha: str, count: int | None, 
     _, _, _, drops_before = _stamp_state(store)
     try:
         with without_session_header():
-            store.out(subspace, {"topic": topic}, dims, body(from_sha, None, red_fix), nonce=nonce)
+            store.out(subspace, {"topic": topic}, dims, body(from_sha, None, red_fix, skips, proofs), nonce=nonce)
     except Exception as second:  # noqa: BLE001
         return f"PUSH_RECORD_FAILED {why}; the minimal unstamped retry failed too ({_why(second)}) (the push stands, no record was written)"
     _, _, _, drops_after = _stamp_state(store)

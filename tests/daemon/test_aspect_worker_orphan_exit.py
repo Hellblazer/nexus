@@ -618,18 +618,61 @@ def test_the_stop_verb_reaches_the_worker_through_a_symlinked_spelling_of_its_di
 # ── fix round 1: the verb does not report success for a holder it left alone ─
 
 
+#: A program that writes ``ready`` once it runs, then sleeps.
+_READY_THEN_SLEEP: str = "import sys, time; sys.stdout.write('ready\\n'); sys.stdout.flush(); time.sleep(120)"
+
+
+def _spawn_ready(argv: list[str], *, timeout_s: float = 60.0) -> subprocess.Popen[bytes]:
+    """Start *argv* and return once the program writes its ``ready`` line.
+
+    ``Popen`` returns when the child's execve has replaced its memory, before
+    the kernel has written the new argv, so ``/proc/<pid>/cmdline`` can still
+    read empty; under load that window is wide enough for ``holder_identity``
+    to answer "unreadable" (fail closed) where the test expects "foreign"
+    (nexus-igea9). A line the program writes can only come after its exec.
+    """
+    proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)  # noqa: S603
+    assert proc.stdout is not None
+    got: list[bytes] = []
+    reader = threading.Thread(target=lambda: got.append(proc.stdout.readline()), daemon=True)  # type: ignore[union-attr]
+    reader.start()
+    reader.join(timeout_s)
+    if [line.strip() for line in got] != [b"ready"]:  # Windows text-mode stdout writes b"ready\r\n"
+        proc.kill()
+        proc.wait(timeout=10)
+        pytest.fail(f"the bystander did not report ready within {timeout_s}s (read {got!r})")
+    proc.stdout.close()
+    return proc
+
+
 @pytest.fixture
 def bystander() -> Iterator[subprocess.Popen[bytes]]:
-    """A live process that is not an aspect worker; stopped by pid here."""
-    proc = subprocess.Popen(  # noqa: S603 - this interpreter, a fixed sleep
-        [sys.executable, "-c", "import time; time.sleep(120)"],
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+    """A live process that is not an aspect worker, handed over only once it runs; stopped by pid here."""
+    proc = _spawn_ready([sys.executable, "-c", _READY_THEN_SLEEP])
     try:
         yield proc
     finally:
         if proc.poll() is None:
             proc.kill()
+        proc.wait(timeout=10)
+
+
+@_posix_only
+def test_the_bystander_is_handed_over_only_once_its_own_program_runs() -> None:
+    """A child that is not yet running its final program (here: one that execs
+    it after a delay, standing in for a child still inside execve) must not be
+    handed over; a bare ``Popen`` would return while the first program runs."""
+    # The marker is joined at run time, so stage one's own command line never holds it.
+    stage_one = (
+        "import os, sys, time; time.sleep(0.5); "
+        f"os.execv(sys.executable, [sys.executable, '-c', {_READY_THEN_SLEEP!r}, 'nexus-igea9-' + 'final'])"
+    )
+    proc = _spawn_ready([sys.executable, "-c", stage_one])
+    try:
+        assert "nexus-igea9-final" in sr.process_command(proc.pid)
+        assert sr.holder_identity(proc.pid, is_ours=lambda c: "aspect-worker" in c) == "foreign"
+    finally:
+        proc.kill()
         proc.wait(timeout=10)
 
 

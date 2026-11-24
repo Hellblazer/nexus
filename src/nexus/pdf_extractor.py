@@ -143,7 +143,8 @@ def _mineru_server_slots(url: str | None = None) -> int:
 def _live_server_slots(url: str) -> int | None:
     """The positive integer the server at *url* reports as ``max_concurrent_requests``, else None."""
     try:
-        resp = httpx.get(f"{url.rstrip('/')}/health", timeout=_MINERU_HEALTH_SLOTS_TIMEOUT_S)
+        from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — deferred: read once per process, not per call (2026-11-21)
+        resp = httpx.get(f"{url.rstrip('/')}/health", timeout=_MINERU_HEALTH_SLOTS_TIMEOUT_S, verify=get_shared_ssl_context())
         if resp.status_code != 200:
             return None
         payload = resp.json()
@@ -2543,7 +2544,8 @@ class PDFExtractor:
         """
         url = f"{base_url}/health"
         try:
-            resp = httpx.get(url, timeout=2)
+            from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — deferred: read once per process, not per call (2026-11-21)
+            resp = httpx.get(url, timeout=2, verify=get_shared_ssl_context())
             if resp.status_code == 200:
                 return True, ""
             _log.debug("mineru_health_probe_non_200", url=url,
@@ -2831,6 +2833,7 @@ class PDFExtractor:
             )
         url = f"{resolved_url}/file_parse"
         with pdf_path.open("rb") as f:
+            from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — deferred: read once per process, not per call (2026-11-21)
             resp = httpx.post(
                 url,
                 files=[("files", (pdf_path.name, f, "application/pdf"))],
@@ -2847,6 +2850,7 @@ class PDFExtractor:
                     "lang_list": "en",
                 },
                 timeout=get_mineru_page_timeout_s() * self._mineru_attempt_pages(start, end),
+                verify=get_shared_ssl_context(),
             )
         resp.raise_for_status()
         data = resp.json()
@@ -3036,7 +3040,8 @@ class PDFExtractor:
                 _log.warning("mineru_restart_failed", reason="process exited")
                 return False
             try:
-                resp = httpx.get(url, timeout=2)
+                from nexus.db.t2.shared_ssl import get_shared_ssl_context  # noqa: PLC0415 — deferred: read once per process, not per call (2026-11-21)
+                resp = httpx.get(url, timeout=2, verify=get_shared_ssl_context())
                 if resp.status_code == 200:
                     break
             except (httpx.ConnectError, httpx.TimeoutException):
