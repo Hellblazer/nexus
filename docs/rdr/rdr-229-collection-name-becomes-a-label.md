@@ -1605,12 +1605,21 @@ while the engine serves:
        (`IdUniqueIndexPass.java:243-251`; T2 `229-research-269`,
        `229-research-319`). Until the latch row exists, gate 3 also does not
        latch while any quarantine chunk lacks the `origin_collection_id` key
-       (present, or JSON null for a dangling tag, passes); its reason says
-       how many, capped at 10,000 (`CompletionCheck.java:544-552`, `:571`).
-       Row 13 of the Phase 3 blocking list, the quarantine origin-id backfill
-       (branch `feature/nexus-p2m1x.22-quarantine-origin-backfill`, changeset
-       `vectors-082` there; not yet on the stack), marks those pre-id rows
-       and so retires the wait (linda 2026-11-24; T2 `229-research-327`). Then
+       (present, or JSON null for a dangling tag, passes). Its reason names no
+       count, since it goes out on the unauthenticated `/v1/status` and the
+       probe counts every tenant's chunks; the count, capped at 10,000, goes
+       to the engine log only (`CompletionCheck.java:690-701`; marlowe, commit 31e3bbe2f0).
+       Row 13 of the Phase 3 blocking list, the quarantine origin-id backfill,
+       marks those pre-id rows: `vectors-082-1` registers the data move
+       `rdr229-quarantine-origin-id`, which writes each quarantine chunk's
+       `origin_collection_id`, the id its label resolves to or JSON null where
+       no row carries the label (and fills a NULL `collection_id` by the
+       stamp's rule, commit d6b15419b2), and that label joins gate 2, so gate 3 cannot
+       latch until it completes; the clause above stays as the live check
+       (`vectors-082-quarantine-origin-id-backfill.xml:50`;
+       `QuarantineOriginBackfill.java:15`; `CompletionCheck.java:163-172`;
+       commit 5518000146; linda 2026-11-24; T2 `229-research-327`,
+       `229-research-332`). Then
        the readers move to the id: `CollectionRegistry` is keyed by id
        (P3.5a; T2 `229-research-308`), and the jOOQ readers switch with the
        latched gate 3 (P3.5c). Once gate 3 has latched, the engine's
@@ -4117,3 +4126,4 @@ large, and moved under a ratchet.
 - 2026-11-24: P3.7 folded from the stacked code (grant 3, nexus-p2m1x.27; T2 `229-research-329`): `NameKeyDropPass` registers the name-key drop move on the latch, the check registers nothing; the refusal's values and order, `rename_missing` and the readiness's own read of the P3.5b list; `ids_stable` true on the one-row answer; the one-row body's other duties; `vectors-079`'s child-name triggers; `label_reserved` and the mint's skip; `vectors-083` and the restore refusal `restore_origin_unregistered` (commit 2d054c3be8); the eight reads P3.5c held, now switched; the census counts with P3.7; the wire changes paired with 8.5.6. Held for a ruling: the `rdr229-restart` boot_work notice against the P4.0 restart-request text.
 - 2026-11-24: the restart request follows P3.7's reviewed code (Sam, "Amend the RDR", T2 `nexus/sam-ruling-rdr229-restart-request-follows-p37-code-2026-11-24`, superseding the P4.0 part of option 1 on ask `rdr229-p41-p40-p35-rulings`): P3.7 asks for the restart as `rename_missing` `restart` and as the `rdr229-restart` boot_work notice, the one exception to the boot_work rule; P4.0 owns no separate request, and its Test and the Test Plan scenario say so. P4.1's drop move is registered by an engine pass, as `NameKeyDropPass` registers P3.7's, because the completion check runs read-only (linda).
 - 2026-11-24: row 16b folded from the stacked code (grant 3, nexus-p2m1x.22; T2 `229-research-331`): a supersede that names its successor by id locks it by id beside the source, with 404 and 409 answers, and a source named by id retired in the gap is decided under the lock: 200 with nothing written for the requested successor, 409 for any other.
+- 2026-11-24: row 13 and marlowe's gate3_why fix folded from the stacked code (grant 3, nexus-p2m1x.22; T2 `229-research-332`): `vectors-082-1` registers the quarantine origin-id backfill move, whose label joins gate 2, the gate 3 clause staying as the live check; gate 3's reason names no count, the capped count going to the engine log only.
