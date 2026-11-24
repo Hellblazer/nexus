@@ -757,7 +757,11 @@ def catalog_link(
 def catalog_links(
     tumbler: Annotated[str, Field(description="Document tumbler or exact title to start from.")],
     direction: Annotated[str, Field(description="Traversal direction: \"out\", \"in\", or \"both\".")] = "both",
-    link_type: Annotated[str, Field(description="Restrict to this link type; \"\" follows every type.")] = "",
+    link_type: Annotated[str, Field(description=(
+        "Restrict to this link type. \"\" follows the engine's default set (cites, implements, relates, contains, "
+        "supersedes, describes, quotes, comments, formalizes, same-as), not implements-heuristic or a custom type: "
+        "name one of those here, one type per call."
+    ))] = "",
     depth: Annotated[int, Field(description="BFS depth; 1 (default) returns direct neighbors only.")] = 1,
 ) -> dict:
     """Walk the catalog link graph from one entry, live documents only.
