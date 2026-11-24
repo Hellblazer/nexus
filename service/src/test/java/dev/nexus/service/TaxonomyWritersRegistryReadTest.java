@@ -473,8 +473,11 @@ class TaxonomyWritersRegistryReadTest {
         assertThat(sourceId(incomingWins, target)).as("the incoming row won: it keeps its source id").isEqualTo(x);
         assertThat(sourceId(existingWins, target)).as("the existing row won: it keeps its source id").isEqualTo(x);
         assertThat(sourceId(moved, target)).as("a row with no conflict moved, keeping its source id").isEqualTo(x);
+        // vectors-079 (P3.7): a topic_assignments row's source_collection is its chunk's stored name until P4.1 drops the name columns, and a one-row
+        // rename rewrites no chunk, so every merged row is stored under the old label b whatever label the merge handed it (as
+        // Rdr229P35cIdAddressedRenameRaceTest.assertStoredUnderTheChunksName asserts); the id is what says which collection it is (above)
         assertThat(List.of(sourceName(incomingWins, target), sourceName(existingWins, target), sourceName(moved, target)))
-            .as("and every merged row is filed under its source collection's CURRENT label, not the old one").containsOnly(c);
+            .as("and every merged row's name is its chunk's stored label %s, not %s (vectors-079)", b, c).containsOnly(b);
         assertThat(topicRow(source)).as("the source topic is gone").isNull();
     }
 
