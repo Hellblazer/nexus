@@ -335,7 +335,10 @@ public final class DataMoveWorker implements AutoCloseable {
         for (DataMove move : open) {
             labels.add(move.label());
         }
-        states.retainOnly(labels, superseded);
+        // a move that left the open list outside finish() (superseded, or no longer open): what the finisher keeps per move goes
+        for (String gone : states.retainOnly(labels, superseded)) {
+            finisher.forget(gone);
+        }
         failures.retainOnly(labels);
         int worked = 0;
         for (DataMove move : open) {
@@ -511,6 +514,8 @@ public final class DataMoveWorker implements AutoCloseable {
             d = FailureHandler.Disposition.blocked(detail + " (the failure handler failed: "
                 + FailureHandler.oneLine(e.toString()) + ")");
         }
+        // a failure of any kind ends a run of deferrals that began in an earlier pass: a wait that follows it reports its own age
+        finisher.forget(move.label());
         String sqlstate = d.sqlstate() != null ? d.sqlstate() : failure.raised() == null ? null : failure.raised().getSQLState();
         if (d.kind() == FailureHandler.Kind.FAILED) {
             MoveEvents.failed(move.label(), stage.name(), failure.tenant(), sqlstate, d.reason());

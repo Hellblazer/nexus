@@ -7,10 +7,12 @@ import dev.nexus.service.log.SecretMask;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -164,14 +166,20 @@ public final class MoveStates implements MoveReporter {
     /**
      * Drops the state of every move that is not open, except a failed one, which stays until a move supersedes it
      * ({@code supersededLabels}).
+     *
+     * @return the labels whose state was dropped, so the worker can tell the finisher it no longer holds them
      */
-    void retainOnly(Collection<String> openLabels, Collection<String> supersededLabels) {
+    Set<String> retainOnly(Collection<String> openLabels, Collection<String> supersededLabels) {
+        Set<String> dropped = new HashSet<>();
         byLabel.entrySet().removeIf(e -> {
-            if (supersededLabels.contains(e.getKey())) {
-                return true;
+            boolean drop = supersededLabels.contains(e.getKey())
+                || e.getValue().kind() != Kind.FAILED && !openLabels.contains(e.getKey());
+            if (drop) {
+                dropped.add(e.getKey());
             }
-            return e.getValue().kind() != Kind.FAILED && !openLabels.contains(e.getKey());
+            return drop;
         });
         calls.keySet().removeIf(label -> !byLabel.containsKey(label));
+        return dropped;
     }
 }
