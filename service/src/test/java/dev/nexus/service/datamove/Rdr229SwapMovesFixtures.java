@@ -8,6 +8,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import dev.nexus.service.BootWorkRegistry;
 import dev.nexus.service.IdKeyIndexProbe;
 import dev.nexus.service.PgCatalogProbes;
+import dev.nexus.service.PgContainerFkHelper;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.VectorSeeds;
 import dev.nexus.service.db.CatalogRepository;
@@ -111,8 +112,8 @@ abstract class Rdr229SwapMovesFixtures extends DataMoveIntegrationBase {
 
     /** The per-leaf key as the swap adds it, NOT VALID: the same columns, the same actions. */
     static void addLeafKeyNotValid(Connection c, String leaf, String constraint) {
-        PgContainerHelper.addFkNotValidColumns(c, table("nexus", leaf), constraint, LEAF_KEY_COLUMNS, table("nexus", "catalog_collections"),
-            LEAF_KEY_COLUMNS, PgContainerHelper.DeleteAction.RESTRICT, false);
+        PgContainerFkHelper.addFkNotValidColumns(c, table("nexus", leaf), constraint, LEAF_KEY_COLUMNS, table("nexus", "catalog_collections"),
+            LEAF_KEY_COLUMNS, PgContainerFkHelper.DeleteAction.RESTRICT, false);
     }
 
     /** {@code table} locked in {@code mode} in {@code c}'s open transaction: the lock outlives the call and ends with the transaction. */

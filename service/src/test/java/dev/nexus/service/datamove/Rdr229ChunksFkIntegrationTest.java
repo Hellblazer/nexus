@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import dev.nexus.service.IdKeyIndexProbe;
+import dev.nexus.service.PgContainerFkHelper;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.DeadlockRetry;
 import dev.nexus.service.vectors.Rdr229ChunksFk;
@@ -375,10 +376,10 @@ class Rdr229ChunksFkIntegrationTest extends Rdr229SwapMovesFixtures {
         String mismatch = "p33c_mismatch_" + difference.toLowerCase(java.util.Locale.ROOT);
         ctx().alterTable(table("nexus", leaf)).dropConstraint(DSL.name(leaf + Rdr229ChunksFk.LEAF_CONSTRAINT_SUFFIX)).execute();
         List<String> columns = difference.equals("COLUMN_ORDER") ? List.of("collection_id", "tenant_id", "embedding_model") : LEAF_KEY_COLUMNS;
-        var action = difference.equals("NO_ACTION") ? PgContainerHelper.DeleteAction.NO_ACTION : PgContainerHelper.DeleteAction.RESTRICT;
+        var action = difference.equals("NO_ACTION") ? PgContainerFkHelper.DeleteAction.NO_ACTION : PgContainerFkHelper.DeleteAction.RESTRICT;
         try {
             try (Connection c = pg.createConnection("")) {
-                PgContainerHelper.addFkNotValidColumns(c, table("nexus", leaf), mismatch, columns, table("nexus", "catalog_collections"), columns, action,
+                PgContainerFkHelper.addFkNotValidColumns(c, table("nexus", leaf), mismatch, columns, table("nexus", "catalog_collections"), columns, action,
                     difference.equals("DEFERRABLE"));
                 PgContainerHelper.validateConstraint(c, table("nexus", leaf), mismatch);   // validated, as the leaf's own key was
             }

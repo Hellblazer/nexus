@@ -44,7 +44,6 @@ import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
@@ -3036,18 +3035,6 @@ public final class PgContainerHelper {
                 .and(DSL.field(DSL.name("datname"), String.class).eq(DSL.function("current_database", String.class))));
     }
 
-    /** The other backends of this database as a table (pid, state, wait event, the start of the query), for a failure message. */
-    public static String backendActivity(DSLContext ctx) {
-        PgLockWait.clearSnapshot(ctx);
-        return ctx.select(DSL.field(DSL.name("pid"), Integer.class), DSL.field(DSL.name("state"), String.class),
-                DSL.field(DSL.name("wait_event_type"), String.class), DSL.field(DSL.name("wait_event"), String.class),
-                DSL.left(DSL.field(DSL.name("query"), String.class), 90).as("query"))
-            .from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
-            .where(DSL.field(DSL.name("pid"), Integer.class).ne(DSL.function("pg_backend_pid", Integer.class))
-                .and(DSL.field(DSL.name("datname"), String.class).eq(DSL.function("current_database", String.class))))
-            .fetch().format();
-    }
-
     /**
      * The eight PostgreSQL table lock modes, for {@link #lockTable}; each constant's name with underscores as
      * spaces is the mode's keyword form, which {@code nexus_test.lock_table} checks again server-side.
@@ -3178,30 +3165,6 @@ public final class PgContainerHelper {
         DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
         Routines.addFkNotValidComposite3(ctx.configuration(), ctx.render(table), constraintName, column2, column3,
             ctx.render(refTable), refColumn2, refColumn3, extraClause);
-    }
-
-    /** The delete actions of a foreign key, for {@link #addFkNotValidColumns}; the constant's name with underscores as spaces is the keyword form. */
-    public enum DeleteAction { NO_ACTION, RESTRICT, CASCADE, SET_NULL, SET_DEFAULT }
-
-    /**
-     * {@code ALTER TABLE table ADD CONSTRAINT name FOREIGN KEY (columns) REFERENCES refTable (refColumns) ON DELETE action [DEFERRABLE] NOT VALID}
-     * (nexus-p2m1x.21) through {@code nexus_test.add_fk_not_valid_columns}: jOOQ renders NOT ENFORCED, which PostgreSQL 17 refuses, and the
-     * other wrappers fix the column count or add {@code embedding_model} themselves. Every column and the constraint name goes through
-     * {@link #requireTestIdentifier} and the lists must be the same length, in key order; the action is the enum. NOT VALID: the caller
-     * runs {@link #validateConstraint} for a validated key. The ALTER runs in the connection's open transaction as that connection's role.
-     */
-    public static void addFkNotValidColumns(Connection conn, Table<?> table, String constraintName, List<String> columns,
-                                            Table<?> refTable, List<String> refColumns, DeleteAction onDelete, boolean deferrable) {
-        if (columns.isEmpty() || columns.size() != refColumns.size()) {
-            throw new IllegalArgumentException("a key needs as many referenced columns as columns: " + columns + " -> " + refColumns);
-        }
-        requireTestIdentifier(constraintName);
-        Stream.concat(columns.stream(), refColumns.stream()).forEach(PgContainerHelper::requireTestIdentifier);
-        DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
-        ctx.select(DSL.function(DSL.name("nexus_test", "add_fk_not_valid_columns"), SQLDataType.BOOLEAN, DSL.val(ctx.render(table)),
-                DSL.val(constraintName), DSL.val(String.join(",", columns)), DSL.val(ctx.render(refTable)), DSL.val(String.join(",", refColumns)),
-                DSL.val(onDelete.name().replace('_', ' ')), DSL.val(deferrable)))
-            .fetch();
     }
 
     /**
