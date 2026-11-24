@@ -31,13 +31,15 @@ since RDR-155 P4a, in both local and cloud mode.
 - **running** — the supervisor publishes a `storage_service` lease; T2 + T3 serve.
 - **upgrading** — a transient state during `nx upgrade`, while the stateless
   preconditions (package, engine, process) converge and the ladder walks
-  whatever data rungs are pending. The ladder is currently EMPTY
-  (`upgrade_ladder/registry.py`): the T2-schema and Chroma→service
-  substrate-move rungs died with the Chroma/client-SQLite migration
-  machinery at RDR-155 P4b, and the RDR-180 chash-rekey rung that survived
-  them was itself retired (nexus-lgdel.l1) once it had converged on every
-  live install. The ladder stands ready for whatever future data transition
-  needs a rung, not a fixed pipeline.
+  whatever data rungs are pending. The ladder holds five rungs today
+  (`RUNG_ORDER` in `upgrade_ladder/registry.py`: `rdr192-manifest-backfill`,
+  `note-tags-array`, `manifest-section-labels`, `manifest-span-fill` and
+  `retire-keys-sweep`; each is described in the
+  [migration runbook](../migration-runbook.md)). The T2-schema and
+  Chroma→service substrate-move rungs died with the Chroma/client-SQLite
+  migration machinery at RDR-155 P4b, and the RDR-180 chash-rekey rung was
+  retired (nexus-lgdel.l1) once it had converged on every live install. The
+  ladder is not a fixed pipeline: a data transition that needs a rung adds one.
 
 The running-state machinery (lease publish/heartbeat/relinquish, single-writer
 discovery, version-skew) is the shared service-registry primitive
@@ -95,7 +97,9 @@ at the endpoint with an operator-provisioned token; no install, no provision.
   service stack when a legacy footprint needs one to migrate into), then walks
   the ladder: every pending rung, in order, each detecting → converging →
   verifying before completion is recorded. Idempotent and resumable; runs
-  `--auto` (T2 only, no engine install) on session start via the plugin hook.
+  `--auto` on session start via the plugin hook: an unattended run that holds a
+  per-config-dir lock and, against a managed service, reads no whole catalog
+  (see [migration-runbook.md](../migration-runbook.md#nx-upgrade---auto-one-at-a-time-and-what-it-does-on-a-managed-service)).
   See [cli-reference.md](../cli-reference.md#nx-upgrade).
 - **`nx doctor`** — reports pending rungs read-only, plus era debt (pre-RDR-108
   chunk ids) from the release that ships the detector rather than on migration
@@ -116,8 +120,9 @@ present in this release.** On the current release, a pre-PG install is
 redirected to the pinned last migration-capable release instead, where it runs
 `nx upgrade` to perform the move described above (against a local engine, never
 a managed endpoint), then upgrades forward. See
-[migration-runbook.md](../migration-runbook.md) for the operator's manual
-order of operations.
+[migration-runbook.md](../migration-runbook.md) for the rungs, what an upgrade
+does after a release such as 8.5.6, and the redirect for installs that predate
+Postgres (it is no longer the operator's manual for a Chroma migration).
 
 When to upgrade: whenever you update the code — `nx upgrade` converges whatever
 that install actually needs, whether that is one schema migration or a five-year
