@@ -186,6 +186,15 @@ def _read_hook(path: Path) -> str:
         return fh.read()
 
 
+def _read_hook_safe(path: Path) -> str | None:
+    """:func:`_read_hook`, or None when the file is not UTF-8 text (a compiled hook): such a file is never read as a shell
+    script and never rewritten, so a stanza cannot corrupt it and one cannot abort a sweep."""
+    try:
+        return _read_hook(path)
+    except ValueError:
+        return None
+
+
 def _write_hook(path: Path, text: str) -> None:
     """Write *text* with LF line ends on every platform: a stanza written with CRLF breaks a shell hook."""
     with open(path, "w", encoding="utf-8", newline="\n") as fh:
@@ -227,7 +236,7 @@ def _refuse_malformed(hooks_dir: Path) -> None:
     bad = [
         hooks_dir / n for n in MANAGED_HOOK_NAMES
         if (hooks_dir / n).is_file()
-        and _has_unterminated_sentinel(_read_hook((hooks_dir / n)))
+        and _has_unterminated_sentinel(_read_hook_safe(hooks_dir / n) or "")
     ]
     if bad:
         raise click.ClickException("\n".join(_malformed_message(p) for p in bad))
@@ -239,8 +248,8 @@ def _hook_status(hooks_dir: Path, hook_name: str) -> str:
     hook_file = hooks_dir / hook_name
     if not hook_file.exists():
         return "not installed"
-    content = _read_hook(hook_file)
-    if SENTINEL_BEGIN not in content:
+    content = _read_hook_safe(hook_file)
+    if content is None or SENTINEL_BEGIN not in content:
         return "unmanaged"
     if _has_unterminated_sentinel(content):
         return "malformed"
@@ -316,7 +325,9 @@ def _install_hook(hooks_dir: Path, hook_name: str) -> str:
         hook_file.chmod(0o755)
         return "created"
 
-    content = _read_hook(hook_file)
+    content = _read_hook_safe(hook_file)
+    if content is None:
+        return "skipped (the existing hook is not a text file)"
     if _has_unterminated_sentinel(content):
         # "already installed" would be a false success: the stanza is not
         # in a runnable state and nothing here can fix it.
@@ -344,8 +355,8 @@ def _uninstall_hook(hooks_dir: Path, hook_name: str) -> str:
     hook_file = hooks_dir / hook_name
     if not hook_file.exists():
         return "not installed"
-    content = _read_hook(hook_file)
-    if SENTINEL_BEGIN not in content:
+    content = _read_hook_safe(hook_file)
+    if content is None or SENTINEL_BEGIN not in content:
         return "not installed"
     if _has_unterminated_sentinel(content):
         # _remove_stanza matches nothing here, so "stanza removed" would
@@ -483,8 +494,8 @@ def hooks_update(path: Path) -> None:
         if not hook_file.exists():
             click.echo(f"  · {name}  (not installed; skipped)")
             continue
-        content = _read_hook(hook_file)
-        if SENTINEL_BEGIN not in content:
+        content = _read_hook_safe(hook_file)
+        if content is None or SENTINEL_BEGIN not in content:
             click.echo(f"  · {name}  (unmanaged; skipped)")
             continue
         # Rewrite: remove old stanza, install fresh one. The
@@ -522,7 +533,10 @@ def _refresh_managed_hooks(hooks_dir: Path, *, install_pre_push: bool = False) -
             else:
                 results.append((name, "not installed"))
             continue
-        content = _read_hook(hook_file)
+        content = _read_hook_safe(hook_file)
+        if content is None:
+            results.append((name, "skipped:not a text file"))
+            continue
         if SENTINEL_BEGIN not in content:
             if wanted:
                 action = _install_hook(hooks_dir, name)
@@ -648,7 +662,7 @@ def refresh_all_managed_hooks(*, echo: bool = False) -> dict[str, Any]:
                     click.echo(f"  ! {repo}  (hooks dir not writable; skipped)")
                 continue
             pre_push = hooks_dir / PRE_PUSH_HOOK
-            if pre_push.is_file() and SENTINEL_BEGIN in _read_hook(pre_push):
+            if pre_push.is_file() and SENTINEL_BEGIN in (_read_hook_safe(pre_push) or ""):
                 verdict = Verdict(False)   # already there: the refresh rewrites it, whoever serves the repo
             else:
                 verdict = decide(repo, hooks_dir, served_once)
@@ -678,7 +692,7 @@ def refresh_all_managed_hooks(*, echo: bool = False) -> dict[str, Any]:
             click.echo(f"  ✓ {repo}  (installed {', '.join(installed)})")
         for n, a in results:
             if a.startswith("skipped"):
-                notes.append(f"pre-push hook left alone in {hooks_dir / n}: {a.split(':', 1)[1]}")
+                notes.append(f"{n} hook left alone in {hooks_dir / n}: {a.split(':', 1)[1]}")
             elif a.startswith("installed") and (tracked := _tracked_note(repo, hooks_dir / n)):
                 notes.append(tracked)
         if refreshed:

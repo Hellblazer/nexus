@@ -20,7 +20,7 @@ __all__ = ["Verdict", "decide", "inside_repo", "read_served", "repo_bases", "ser
 
 def read_served(identity: str | None = None, client: Any = None) -> tuple[frozenset[str] | None, str]:
     """``(bases, why)``: the union of ``serves`` over every live group *identity* belongs to, or ``(None, <why not>)`` when it
-    cannot be read.
+    cannot be read; the reason is empty for a process with no identity (it belongs to no group, so there is nothing to tell).
 
     *identity* defaults to the one this process holds (:func:`nexus.ci_ack.counted_identity`); an empty one belongs to no
     group, so there is nothing to read. *client* defaults to ``GroupsClient.from_config()``, closed here; a client passed in is
@@ -32,7 +32,7 @@ def read_served(identity: str | None = None, client: Any = None) -> tuple[frozen
 
             identity = ci_ack.counted_identity()
         if not identity:
-            return None, "this process holds no identity, so it belongs to no group (`nx identity show` says what it holds)"
+            return None, ""   # no identity belongs to no group: nothing to read, and nothing worth telling the user
         if client is None:
             from nexus.groups import GroupsClient  # noqa: PLC0415 -- deferred: the HTTP client is not needed to import this
 
@@ -104,7 +104,7 @@ def decide(repo: Path, hooks_dir: Path, read: Callable[[], tuple[frozenset[str] 
         return Verdict(False)
     served, why = read()
     if served is None:
-        return Verdict(False, f"pre-push hook not installed in any repo: {why}")
+        return Verdict(False, f"pre-push hook not installed in any repo: {why}" if why else "")
     if not served & bases:
         return Verdict(False)
     if not inside_repo(hooks_dir, repo):

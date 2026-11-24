@@ -57,7 +57,7 @@ FILE_KEY: str = "(file)"
 # One concrete board subspace: board/<topic> or board/ci/<topic>. A topic carries no slash and
 # no wildcard; no other prefix (mailbox triggers are cut from version 1).
 # A topic is any run of characters but "/", "*" and whitespace: the repo's own topics are looser
-# than a slug (ci_wait builds board/ci/{repo}-{branch}--done unsanitized). "board/ci" alone is no
+# than a slug (ci_wait builds board/ci/{repo}-{branch}--done through ci_base.join, the CI adapter's own normalisation). "board/ci" alone is no
 # topic: ci/ needs a topic after it.
 _SUBSPACE_RE = re.compile(r"board/(?:ci/[^/*\s]+|(?!ci$)[^/*\s]+)")
 _FIELD = r"[A-Za-z_][A-Za-z0-9_]*"

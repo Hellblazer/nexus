@@ -42,18 +42,24 @@ Decisions of record (nexus-igea9, Sam's design of RDR-252 item 4 and the dispatc
 """
 from __future__ import annotations
 
+import hashlib
 import re
 
 from nexus._git_hooks_meta import PRE_PUSH_HOOK, SENTINEL_BEGIN, SENTINEL_END
 from nexus.ci_wait import BOARD_BRANCHES
 
-__all__ = ["CREATED_NOTE", "PRE_PUSH_HOOK", "STANZA", "VIA_SCRIPT_ENV", "create_content", "insert_stanza", "is_shell_hook", "remove_stanza"]
+__all__ = ["CREATED_NOTE", "LEGACY_CREATED_DIGESTS", "PRE_PUSH_HOOK", "STANZA", "VIA_SCRIPT_ENV", "create_content", "insert_stanza", "is_shell_hook", "remove_stanza"]
 
 #: The environment variable ``scripts/git-push-develop.sh`` sets on its own ``git push``.
 VIA_SCRIPT_ENV = "NX_PUSH_VIA_SCRIPT"
 
 #: The line that marks a file nexus created, so removing the stanza can tell it from a hook that was there before.
 CREATED_NOTE = "# created for the managed pre-push stanza; removed with it"
+
+#: SHA-256 of the stanza text the first round wrote (before the created-note line existed). A file that is exactly a shebang and
+#: one of these, with nothing else in it, was created by nexus and is removed whole, as :func:`create_content`'s files are.
+#: The current stanza is deliberately not here: installing it into a shebang-only hook someone else made must restore that hook.
+LEGACY_CREATED_DIGESTS: frozenset[str] = frozenset({"b111504cb7883040833aa8d8a68f5e9c92e473fc6ea39b3dfcfdafa5859a7db4"})
 
 _SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ksh"})
 
@@ -83,11 +89,14 @@ _nx_pp_job() {
   (
     trap '' HUP
     export GIT_TERMINAL_PROMPT=0
+    _j_poll="${NX_PRE_PUSH_POLL_S:-5}"
+    case "$_j_poll" in *[!0-9.]*|*.*.*) _j_poll=5 ;; esac
+    case "$_j_poll" in *[1-9]*) ;; *) _j_poll=5 ;; esac
     _j_end=$(( $(date +%s) + ${NX_PRE_PUSH_WAIT_S:-600} ))
     echo "=== pre-push record $2 $3 $(date +%Y-%m-%dT%H:%M:%S%z) ==="
     while kill -0 "$7" 2> /dev/null; do
       if [ "$(date +%s)" -ge "$_j_end" ]; then echo "gave up: the push never finished"; exit 0; fi
-      sleep "${NX_PRE_PUSH_POLL_S:-5}"
+      sleep "$_j_poll"
     done
     _j_grace=$(( $(date +%s) + ${NX_PRE_PUSH_GRACE_S:-30} ))
     while :; do
@@ -100,7 +109,7 @@ _nx_pp_job() {
       rm -f "$_j_out"
       if [ "$_j_seen" = "$3" ]; then break; fi
       if [ "$(date +%s)" -ge "$_j_grace" ]; then echo "gave up: $1 does not show $2 at $3 (the push did not land, or the remote is unreachable)"; exit 0; fi
-      sleep "${NX_PRE_PUSH_POLL_S:-5}"
+      sleep "$_j_poll"
     done
     _j_fix="$5"; _j_n="$6"; _j_old="$4"
     case "$_j_old" in *[!0]*) ;; *) _j_old="" ;; esac
@@ -119,9 +128,10 @@ _nx_pre_push() {
   _nx_top="$(git rev-parse --show-toplevel 2> /dev/null || :)"
   if [ -n "$_nx_top" ]; then _nx_top="$(cd "$_nx_top" 2> /dev/null || exit 1; pwd -P)" || _nx_top=""; fi
   _nx_bin=""
-  _nx_oifs="$IFS"
-  IFS=:
-  for _nx_d in $PATH; do
+  _nx_rest="$PATH:"
+  while [ -n "$_nx_rest" ]; do
+    _nx_d="${_nx_rest%%:*}"
+    _nx_rest="${_nx_rest#*:}"
     if [ -z "$_nx_d" ] || [ ! -x "$_nx_d/nx" ]; then continue; fi
     _nx_r="$(cd "$_nx_d" 2> /dev/null || exit 1; pwd -P)" || continue
     case "$_nx_r" in */.venv/*) continue ;; esac
@@ -129,7 +139,6 @@ _nx_pre_push() {
     _nx_bin="$_nx_d/nx"
     break
   done
-  IFS="$_nx_oifs"
   if [ -z "$_nx_bin" ]; then return 0; fi
   _nx_remote="$1"
   _nx_in="$(mktemp "${TMPDIR:-/tmp}/nx-pre-push.XXXXXX" 2> /dev/null)" || return 0
@@ -187,6 +196,12 @@ _AFTER_SHEBANG = re.compile(rf"\A(?P<first>#![^\n]*)\n(?P<note>{re.escape(CREATE
 _BARE = re.compile(rf"\A{_BLOCK}(?:\n(?P<rest>.*)\Z|\Z)", re.DOTALL)
 
 
+def _block_digest(content: str) -> str:
+    start = content.find(SENTINEL_BEGIN)
+    end = content.find(SENTINEL_END, start) + len(SENTINEL_END)
+    return hashlib.sha256(content[start:end].encode()).hexdigest()
+
+
 def is_shell_hook(content: str) -> bool:
     """Whether a stanza of shell can be put in *content*: no shebang line (git runs it with the shell), or one naming a POSIX
     shell directly or through ``env``."""
@@ -224,6 +239,8 @@ def remove_stanza(content: str) -> str | None:
     if m is not None:
         rest = m.group("rest")
         if m.group("note") is not None and not rest:
+            return None
+        if m.group("note") is None and not rest and m.group("first") == "#!/bin/sh" and _block_digest(content) in LEGACY_CREATED_DIGESTS:
             return None
         return f"{m.group('first')}\n{rest}" if rest is not None else m.group("first")
     m = _BARE.match(content)

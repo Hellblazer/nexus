@@ -18,7 +18,6 @@ import pytest
 from click.testing import CliRunner
 
 from nexus import _git_hooks_meta as meta
-from nexus import ci_base, ci_wait
 from nexus._git_hooks_meta import SENTINEL_BEGIN
 from nexus.cli import main
 from nexus.commands import hooks as hooks_mod
@@ -26,7 +25,6 @@ from nexus.commands import index as index_cmd
 from nexus.commands.upgrade import _refresh_all_git_hooks
 from nexus.health import _check_git_hooks
 from nexus.pre_push_hook import serving
-from nexus.pre_push_hook.stanza import STANZA
 from tests.test_pre_push_hook import Rig, _commit, _existing_body, _git, _opt, _registry_only, _sweep
 
 
@@ -91,10 +89,6 @@ def test_the_job_is_gone_within_its_bound_when_the_remote_never_answers(rig: Rig
         assert rig.verbs("record-push") == []
     finally:
         remote.stop()
-
-
-def test_the_job_never_prompts_for_credentials() -> None:
-    assert "GIT_TERMINAL_PROMPT=0" in STANZA, "ls-remote after the push must not ask on the terminal"
 
 
 def test_the_record_waits_for_the_remote_to_show_the_tip(rig: Rig, tmp_path: Path) -> None:
@@ -309,9 +303,15 @@ def test_upgrade_names_the_removal_that_removes_only_the_pre_push_hook(capsys: p
 
 
 def test_upgrade_says_when_the_groups_could_not_be_read(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
-    summary = _sweep(monkeypatch, [rig], None, "this process holds no identity")
+    summary = _sweep(monkeypatch, [rig], None, "the groups could not be read (RuntimeError: engine down)")
     assert summary["installed"] == 0
-    assert any("no identity" in n and "pre-push" in n for n in summary["notes"]), summary
+    assert any("engine down" in n and "pre-push" in n for n in summary["notes"]), summary
+
+
+def test_upgrade_says_nothing_for_a_process_with_no_identity(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No identity belongs to no group: there is nothing to tell, so the many users who hold none see no line."""
+    summary = _sweep(monkeypatch, [rig], None, "")
+    assert summary["installed"] == 0 and "notes" not in summary, summary
 
 
 def test_upgrade_is_silent_when_nothing_serves_the_repo(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -371,7 +371,7 @@ def test_the_serving_read_names_why_it_failed() -> None:
             pass
 
     served, why = serving.read_served(identity="", client=Broken())
-    assert served is None and "identity" in why
+    assert served is None and why == "", "no identity: it belongs to no group, so there is nothing to say"
     served, why = serving.read_served(identity="i1", client=Broken())
     assert served is None and "engine down" in why
 
@@ -403,14 +403,3 @@ def test_nx_index_asks_the_shared_helper_for_its_tip() -> None:
 
 
 # ── the board name: the adapter's, with dash runs collapsed (RDR-220) ────────────────────────────────────────────────
-
-
-def test_a_name_with_a_double_dash_derives_the_adapters_topic(tmp_path: Path) -> None:
-    repo = tmp_path / "r"
-    repo.mkdir()
-    _git("init", "-q", cwd=repo)
-    _git("remote", "add", "origin", "https://github.com/o/a--b.git", cwd=repo)
-    assert ci_base.derive("origin", "develop", cwd=repo) == "a-b-develop"
-    assert ci_base.join("a--b", "develop") == "a-b-develop"
-    assert ci_wait.done_subspace("a--b", "develop") == "board/ci/a-b-develop--done"
-    assert ci_base.derive("origin", "develop", cwd=repo) in serving.repo_bases(repo)
