@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from nexus._install import lease_core
-from tests._lease_support import NT, holder, make_generation, venv_python
+from tests._lease_support import NT, holder, make_generation, venv_python, wait_until_free
 from tests._module_seam import setattr_in
 
 HOOK = Path(lease_core.__file__).with_name("_nx_lease.py")
@@ -48,7 +48,7 @@ def test_a_running_interpreter_holds_the_lease_and_its_exit_frees_it(gen: Path) 
     assert lease_core.probe(gen) == "free"
     with holder(venv_python(gen)):
         assert lease_core.probe(gen) == "held"
-    assert lease_core.probe(gen) == "free"
+    assert wait_until_free(gen) == "free"
 
 
 def test_the_lease_survives_a_garbage_collection(gen: Path) -> None:
