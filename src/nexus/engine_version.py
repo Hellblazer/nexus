@@ -757,7 +757,7 @@ from __future__ import annotations
 #: native Liquibase reflection metadata), RDR-167 Phase 1's correlation id,
 #: request_failed line and log-sink escaping, and RDR-134's topic coverage.
 #: Paired: the cloud deploy follows the client tag.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 200)
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 202)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed
