@@ -276,6 +276,9 @@ class GrantsNexusSvcUpgradeIntegrationTest {
         // quarantine_reattach_plan is a LANGUAGE sql function, whose body Postgres checks when it is created: left in, the old walk fails at
         // vectors-083-4 with 'column cc.collection_id does not exist' (the plpgsql bodies of -1 to -3 and -5 to -7 are not checked until they run). It
         // is as unborn as vectors-077, whose definers it replaces; the new boot applies it after them.
+        // THE RULE for a future changeset (linda 2026-11-24): any changeset whose bodies name collection_id (the column vectors-068 adds)
+        // joins this list, because the old walk runs without it; a real upgrade is unaffected (master order applies 068 first). A miss
+        // fails the old walk at that changeset, and the non-vacuity assertion below names every entry, so the list cannot shrink unnoticed.
         for (String unborn : List.of("db/changelog/datamoves-002-verify-statement-timeout.xml",
                 "db/changelog/vectors-068-collection-id-expand.xml",
                 "db/changelog/vectors-069-collection-id-dual-write-functions.xml",
