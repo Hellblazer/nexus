@@ -12,6 +12,10 @@ Two defects, both in the skill's shell block:
 The step now renames the legacy collection onto the subject's own four-segment name BEFORE any ``store_put``. These tests
 run the skill's own block, extracted from the file, with a fake ``nx`` that serves a listing and records the rename, and
 check that the bare subject then resolves to the renamed collection.
+
+The engine mints a ``c<id>`` label for a new knowledge subject, so a subject's collection is found by its CONTENT_TYPE and
+OWNER columns, never by splitting its name: both the reuse check and the migration guard are run against listings that
+carry a ``c<id>`` row.
 """
 from __future__ import annotations
 
@@ -22,8 +26,10 @@ from pathlib import Path
 import pytest
 
 from nexus import corpus
+from nexus.catalog.collection_name import CollectionAttributes
 
 SKILL = Path(__file__).resolve().parent.parent / "conexus" / "skills" / "rdr-close" / "SKILL.md"
+MIGRATION = SKILL.with_name("migration.md")
 
 LEGACY = "knowledge__rdr_postmortem__nexus"
 TARGET = "knowledge__nexus-rdr-research__bge-base-en-v15-768__v1"
@@ -42,20 +48,31 @@ knowledge__other-notes__bge__v1          3       3  8   knowledge     1-2    bge
 
 SUBJECT_TAKEN = LIST_WITH_ID + "knowledge__nexus-rdr-research__bge-base-en-v15-768__v1  2  2  9  knowledge  1-1  bge-base-en-v15-768  768  live\n"
 SUBJECT_RETIRED = LIST_WITH_ID + "knowledge__nexus-rdr-research__old__v1  0  4  6  knowledge  1-1  bge-base-en-v15-768  768  superseded->x\n"
+C_ID_SUBJECT = LIST_WITH_ID + "c12  2  2  11  knowledge  nexus-rdr-research  bge-base-en-v15-768  768  live\n"
+C_ID_SUBJECT_RETIRED = LIST_WITH_ID + "c12  0  4  11  knowledge  nexus-rdr-research  bge-base-en-v15-768  768  superseded->c13\n"
+C_ID_OTHER_SUBJECT = LIST_WITH_ID + "c13  2  2  12  knowledge  other-notes  bge-base-en-v15-768  768  live\n"
 NO_LEGACY = "NAME  CHUNKS  STORED  ID  CONTENT_TYPE  OWNER  MODEL  DIM  STATE\nknowledge__other-notes__bge__v1  3  3  8  knowledge  1-2  m  768  live\n"
 LEGACY_NO_MODEL = f"NAME  CHUNKS  STORED  ID  CONTENT_TYPE  OWNER  MODEL  DIM  STATE\n{LEGACY}  9  9  7  knowledge  1-1  -  -  live\n"
 
 
-def _migration_block(repo: str) -> str:
-    text = SKILL.read_text(encoding="utf-8")
-    section = text[text.index("#### One-time migration"):]
+def _section_block(heading: str, repo: str, source: Path = SKILL) -> str:
+    text = source.read_text(encoding="utf-8")
+    section = text[text.index(heading):]
     block = re.search(r"```bash\n(.*?)```", section, re.S)
-    assert block, "the migration section must carry its bash block"
+    assert block, f"the section {heading!r} must carry its bash block"
     return block.group(1).replace("{repo}", repo).replace("<repo>", repo)
 
 
-def _run(listing: str, tmp_path: Path, repo: str = "nexus") -> tuple[int, list[str]]:
-    """The skill's block against a fake ``nx``; the exit status and the rename calls it made."""
+def _migration_block(repo: str) -> str:
+    return _section_block("#### One-time migration", repo, MIGRATION)
+
+
+def _reuse_block(repo: str) -> str:
+    return _section_block("Check for an existing subject", repo)
+
+
+def _bash(block: str, listing: str, tmp_path: Path) -> tuple[int, list[str], str, str]:
+    """*block* against a fake ``nx``; the exit status, the non-list calls it made, stdout and stderr."""
     calls = tmp_path / "calls"
     calls.touch()
     fake = (
@@ -64,49 +81,111 @@ def _run(listing: str, tmp_path: Path, repo: str = "nexus") -> tuple[int, list[s
         f"  else printf '%s\\n' \"$*\" >> {calls}; fi\n"
         "}\n"
     )
-    done = subprocess.run(["bash", "-c", fake + _migration_block(repo)], capture_output=True, text=True)
-    return done.returncode, calls.read_text().splitlines()
+    done = subprocess.run(["bash", "-c", fake + block], capture_output=True, text=True)
+    return done.returncode, calls.read_text().splitlines(), done.stdout, done.stderr
+
+
+def _run(listing: str, tmp_path: Path, repo: str = "nexus") -> tuple[int, list[str], str]:
+    """The migration block; the exit status, the rename calls it made and what it said on stderr."""
+    status, calls, _out, err = _bash(_migration_block(repo), listing, tmp_path)
+    return status, calls, err
 
 
 @pytest.mark.parametrize("listing", [LIST_WITHOUT_ID, LIST_WITH_ID], ids=["without-id-column", "with-id-column"])
 def test_the_legacy_collection_is_renamed_onto_the_subjects_own_name_whatever_the_columns(listing: str, tmp_path: Path) -> None:
-    status, calls = _run(listing, tmp_path)
+    status, calls, _err = _run(listing, tmp_path)
     assert status == 0
     assert calls == [f"catalog rename-collection {LEGACY} {TARGET} --yes"]
 
 
-@pytest.mark.parametrize("listing", [SUBJECT_TAKEN, NO_LEGACY, LEGACY_NO_MODEL], ids=["subject-taken", "no-legacy", "no-model"])
-def test_the_migration_stops_before_renaming_when_it_cannot_work(listing: str, tmp_path: Path) -> None:
-    """Non-vacuity for the test above: the block must be able to refuse. A rename onto an existing subject, or with no
-    model, is the call the engine would refuse or mislabel."""
-    status, calls = _run(listing, tmp_path)
+@pytest.mark.parametrize(
+    ("listing", "said"),
+    [
+        (SUBJECT_TAKEN, "already has a collection"),
+        (C_ID_SUBJECT, "already has a collection"),
+        (NO_LEGACY, "nothing to migrate"),
+        (LEGACY_NO_MODEL, "no registered model"),
+    ],
+    ids=["subject-taken", "subject-taken-as-c-id", "legacy-not-listed", "no-model"],
+)
+def test_the_migration_stops_before_renaming_when_it_cannot_work(listing: str, said: str, tmp_path: Path) -> None:
+    """Non-vacuity for the test above: the block must be able to refuse, and say why on stderr. A rename onto an existing
+    subject (a minted ``c<id>`` one included), or with no model, is the call the engine would refuse or mislabel."""
+    status, calls, err = _run(listing, tmp_path)
     assert status == 1 and calls == []
+    assert said in err
 
 
-def test_a_retired_collection_of_the_subject_does_not_block_the_rename(tmp_path: Path) -> None:
-    status, calls = _run(SUBJECT_RETIRED, tmp_path)
+@pytest.mark.parametrize("listing", [SUBJECT_RETIRED, C_ID_SUBJECT_RETIRED, C_ID_OTHER_SUBJECT], ids=["retired", "c-id-retired", "c-id-of-another-subject"])
+def test_a_retired_or_unrelated_collection_does_not_block_the_rename(listing: str, tmp_path: Path) -> None:
+    status, calls, _err = _run(listing, tmp_path)
     assert status == 0 and calls == [f"catalog rename-collection {LEGACY} {TARGET} --yes"]
 
 
-def test_the_skill_does_not_mint_the_subject_before_the_rename() -> None:
+@pytest.mark.parametrize(
+    ("listing", "expected"),
+    [
+        (LIST_WITH_ID, ""),
+        (SUBJECT_TAKEN, "knowledge__nexus-rdr-research__bge-base-en-v15-768__v1"),
+        (C_ID_SUBJECT, "c12"),
+        (C_ID_SUBJECT_RETIRED, ""),
+        (C_ID_OTHER_SUBJECT, ""),
+    ],
+    ids=["none", "four-segment", "c-id", "c-id-retired", "c-id-of-another-subject"],
+)
+def test_the_reuse_check_finds_the_subjects_collection_whatever_its_label(listing: str, expected: str, tmp_path: Path) -> None:
+    status, calls, out, _err = _bash(_reuse_block("nexus"), listing, tmp_path)
+    assert status == 0 and calls == []
+    assert out.split() == ([expected] if expected else [])
+
+
+def test_the_rename_names_the_subjects_four_segment_target_and_the_skill_says_to_run_it_before_any_write() -> None:
+    """The fake ``nx`` above proves the block makes no other call; this pins what the call names, and that the text a reader
+    follows puts the migration ahead of the first ``store_put`` (a first write to a new subject mints a ``c<id>`` label, and
+    the rename refuses a target that exists)."""
     block = _migration_block("nexus")
-    assert "store_put" not in block and "migrate-fallback" not in block
+    assert 'nx catalog rename-collection "$OLD" "knowledge__nexus-rdr-research__${MODEL}__v1" --yes' in block
+    text = SKILL.read_text(encoding="utf-8")
+    step6 = text[text.index("### Step 6: T3 Archive"):]
+    ahead = step6.index("BEFORE the first `store_put`")
+    assert ahead < step6.index("mcp__plugin_conexus_nexus__store_put(") and "(migration.md)" in step6
+    assert "migrate-fallback" not in block
+
+
+def test_the_skill_says_how_to_read_the_current_knowledge_model() -> None:
+    section = MIGRATION.read_text(encoding="utf-8")
+    assert "nx config get local.embed_model" in section and "voyage-context-3" in section
 
 
 def test_the_bare_subject_resolves_to_the_renamed_collection_and_mints_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     """What the skill promises: after the rename, ``store_put(collection="nexus-rdr-research")`` reaches the renamed
     collection. The contrast case (no such collection) mints a ``c<id>`` label, which is the split the skill warns of;
-    the mint is stubbed so the test never reaches an engine."""
+    the mint is stubbed so the test never reaches an engine. The fake T3 answers ``find_collection`` as the catalog does,
+    with a row whose owner is the subject, and records the model the lookup was keyed on (the one the skill's MODEL must
+    equal)."""
     monkeypatch.setattr(corpus, "_promoted_model_token_for_read", lambda content_type: "bge-base-en-v15-768")
     monkeypatch.setattr(corpus, "mint_knowledge_subject_label", lambda *a, **k: "c7")
 
     class T3:
         def __init__(self, existing: set[str]) -> None:
             self.existing = existing
+            self.looked_up: list[tuple[str, str, str]] = []
 
         def collection_exists(self, name: str) -> bool:
             return name in self.existing
 
+        def find_collection(self, content_type: str, owner_id: str, model: str) -> CollectionAttributes | None:
+            self.looked_up.append((content_type, owner_id, model))
+            if TARGET not in self.existing or owner_id != "nexus-rdr-research" or model != "bge-base-en-v15-768":
+                return None
+            return CollectionAttributes(
+                collection_id=7, label=TARGET, content_type="knowledge", owner_id="nexus-rdr-research",
+                embedding_model="bge-base-en-v15-768", model_version=1, dimension=768, lifecycle_state="live",
+            )
+
     renamed = T3({TARGET})
     assert corpus.t3_collection_name("nexus-rdr-research", t3=renamed, for_write=True) == TARGET
-    assert corpus.t3_collection_name("nexus-rdr-research", t3=T3(set()), for_write=True) == "c7"
+    assert renamed.looked_up == [("knowledge", "nexus-rdr-research", "bge-base-en-v15-768")]
+    empty = T3(set())
+    assert corpus.t3_collection_name("nexus-rdr-research", t3=empty, for_write=True) == "c7"
+    assert empty.looked_up == [("knowledge", "nexus-rdr-research", "bge-base-en-v15-768")]
