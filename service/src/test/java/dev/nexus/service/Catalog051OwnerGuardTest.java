@@ -94,8 +94,13 @@ class Catalog051OwnerGuardTest {
             List<String> beforeNotices = registerCollectionOn(su, SLUG_LATE, "docs", "late-ef56ab78", DOCS_MODEL, "v1");
             assertThat(ownerOf(ctx, SLUG_LATE)).as("a registration over existing documents keeps the slug")
                 .isEqualTo("late-ef56ab78");
-            assertThat(beforeNotices).as("the BEFORE-trigger notice names both collections and the owner not taken")
-                .anySatisfy(n -> assertThat(n).contains("catalog-051").contains(SLUG_LATE).contains(HOLDER).contains("1-33"));
+            if (beforeInsertBranchLive()) {
+                assertThat(beforeNotices).as("the BEFORE-trigger notice names both collections and the owner not taken")
+                    .anySatisfy(n -> assertThat(n).contains("catalog-051").contains(SLUG_LATE).contains(HOLDER).contains("1-33"));
+            } else {
+                assertThat(beforeNotices).as(FORM_A_BEFORE_INSERT)
+                    .noneMatch(n -> n.contains("catalog-051") || n.contains("catalog-044"));
+            }
             assertThat(liveTupleCount(ctx, "docs", "1-33", DOCS_MODEL, "v1")).isEqualTo(1);
 
             // controls: a free tuple is still rewritten
@@ -132,8 +137,13 @@ class Catalog051OwnerGuardTest {
             insertLegacyDocument(su, ctx, "1.33.2", SLUG_LATE);
             List<String> beforeNotices = registerCollectionOn(su, SLUG_LATE, "docs", "late-ef56ab78", DOCS_MODEL, "v1");
             assertThat(ownerOf(ctx, SLUG_LATE)).isEqualTo("late-ef56ab78");
-            assertThat(beforeNotices).anySatisfy(n -> assertThat(n).contains("catalog-051").contains(SLUG_LATE)
-                .contains(HOLDER).contains("1-33"));
+            if (beforeInsertBranchLive()) {
+                assertThat(beforeNotices).anySatisfy(n -> assertThat(n).contains("catalog-051").contains(SLUG_LATE)
+                    .contains(HOLDER).contains("1-33"));
+            } else {
+                assertThat(beforeNotices).as(FORM_A_BEFORE_INSERT)
+                    .noneMatch(n -> n.contains("catalog-051") || n.contains("catalog-044"));
+            }
 
             insertDocument(su, "1.34.1", SLUG_FREE_CODE);
             assertThat(ownerOf(ctx, SLUG_FREE_CODE)).as("a free tuple is still rewritten under the index").isEqualTo("1-34");
@@ -227,6 +237,19 @@ class Catalog051OwnerGuardTest {
         });
     }
 
+    /**
+     * RDR-229 P3.5b: with the vectors-078 form A bodies applied ({@code -Dnexus.test.formA.applied=true}) the owner derivation reads
+     * documents by {@code physical_collection_id}. A document that exists before its collection registers is the legacy shape (a name,
+     * no id) a completed stamp has none of, and a registry INSERT mints an id no document can carry yet, so the BEFORE INSERT branch
+     * finds no documents and derives nothing: dead by design (vectors-078-1). The AFTER trigger path is unchanged.
+     */
+    private static boolean beforeInsertBranchLive() {
+        return !Rdr229CompleteStamps.formAApplied();
+    }
+
+    private static final String FORM_A_BEFORE_INSERT =
+        "documents are read by id, so a registration over legacy documents finds none and derives no owner";
+
     /** Makes the (non-)holder collection for one owner segment such as {@code 1-600}. */
     @FunctionalInterface
     private interface HolderMaker {
@@ -253,8 +276,9 @@ class Catalog051OwnerGuardTest {
         String before = "docs__b" + n + "-cd34ef56__voyage-context-3__v1";
         insertLegacyDocument(su, ctx, "1." + n + "1.1", before);
         collection(ctx, before, "docs", "b" + n + "-cd34ef56", DOCS_MODEL, "v1", lifecycle, supersededBy);
-        soft.assertThat(ownerOf(ctx, before)).as("%s: rewritten=%s (BEFORE trigger)", what, rewritten)
-            .isEqualTo(rewritten ? beforeOwner : "b" + n + "-cd34ef56");
+        soft.assertThat(ownerOf(ctx, before)).as("%s: rewritten=%s (BEFORE trigger)%s", what, rewritten,
+                beforeInsertBranchLive() ? "" : " (form A: " + FORM_A_BEFORE_INSERT + ")")
+            .isEqualTo(rewritten && beforeInsertBranchLive() ? beforeOwner : "b" + n + "-cd34ef56");
     }
 
     static boolean isWaitingOnALock(Connection su, int pid) {

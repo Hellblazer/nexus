@@ -2,17 +2,26 @@
 <!--
     Bead nexus-p2m1x.24 (RDR-229 P3.5b, item 6 "Readers during the stamp", SQL readers): every live SQL reader whose body names no
     chunk-family table reads the id only, behind a CONTINUE precondition, so it is skipped unrecorded and retried at each boot until
-    every stamp move has completed, and applies at the first boot after (RDR-246 lines 937-940). A view's output label comes from
+    the stamp is complete as THE GATE below defines it, and applies at the first boot after (RDR-246 lines 937-940). A view's output label comes from
     nexus.catalog_collections.name joined on the id, so no form A object depends on a name column and P4.1's RESTRICT drop meets
     none of them. The catalog-044 owner trigger fires on physical_collection_id.
 
-    THE GATE (on every changeset, verbatim): no rdr229-stamp-% move is incomplete with no successor, except a failed move whose
-    driving table is gone (the CompletionCheck rule: a move counts as complete when it or the move that supersedes it, a
-    nexus.rdr229_restamp -rerun-N row, has completed_at); and at least one stamp move exists.
+    THE GATE (on every changeset, verbatim; one sqlCheck that returns 0 only then): the completion check's own rule for a stamp label
+    (CompletionCheck), read from pg_catalog and nexus.data_moves alone. Every CHECK of db/rdr229/p31-checks.tsv (twenty, among them
+    catalog_collections_superseded_by_id_check) must be present on its table and validated (pg_constraint.convalidated), and the stamp
+    move of its table (rdr229-stamp-<table>) must be complete: it has completed_at, or the move that supersedes it (a
+    nexus.rdr229_restamp -rerun-N row, followed down the chain) is complete, or it failed and its driving table is gone. A stamp label
+    with no move row is incomplete. The one exception is aspect_extraction_queue, which is not applicable (its CHECK and move are not
+    required) while its table or its collection_id column is absent and it has no move row or a failed one; a queue move that completed
+    on an install whose table was dropped since counts complete. The twelve ids are the CONTINUE changesets named below. This is not
+    "every move has completed_at": a stamp whose on_complete found an orphan row leaves its CHECK NOT VALID, and these changesets wait.
 
-    P3.7's one-row rename waits until every changeset of this file is recorded in databasechangelog: they are listed in
-    db/rdr229/p35b-continue-changesets.txt, and tests/test_rdr229_p35b_continue_list.py keeps the list equal to this file. When every stamp
-    move is complete and one of them is not yet recorded, the completion check asks for a restart. Each is in the
+    The gate does not read P3.3a's id-twin or P3.3c's swap and child labels, which the completion check's later gates add: those
+    concern the id foreign keys and indexes, not what these readers read.
+
+    P3.7's one-row rename must wait until every changeset of this file is recorded in databasechangelog: they are listed in
+    db/rdr229/p35b-continue-changesets.txt, and tests/test_rdr229_p35b_continue_list.py keeps the list equal to this file. Neither P3.7's
+    check nor a restart request on the completion check reads the list yet (P3.7 is not in this tree). Each is in the
     _CONTINUE_ALLOWLIST of tests/test_changelog_continue_precondition_chunks_lint.py with its lock argument.
 
     Built on each object's LAST DEFINER; the rollback restores it verbatim; P3.1's id writes are kept word for word (reads only
@@ -27,9 +36,34 @@
 
     <changeSet id="vectors-078-1" author="nexus-p2m1x.24">
         <preConditions onFail="CONTINUE" onError="CONTINUE">
-            <sqlCheck expectedResult="0">SELECT (SELECT count(*) FROM nexus.data_moves m WHERE m.label LIKE 'rdr229-stamp-%' AND m.completed_at IS NULL AND NOT EXISTS (SELECT 1 FROM nexus.data_moves s WHERE s.supersedes = m.label) AND NOT (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL)) + (CASE WHEN EXISTS (SELECT 1 FROM nexus.data_moves WHERE label LIKE 'rdr229-stamp-%') THEN 0 ELSE 1 END)</sqlCheck>
+            <sqlCheck expectedResult="0">WITH RECURSIVE done(label) AS (
+                SELECT m.label FROM nexus.data_moves m
+                 WHERE m.label LIKE 'rdr229-stamp-%'
+                   AND (m.completed_at IS NOT NULL
+                        OR (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL))
+                UNION
+                SELECT s.supersedes FROM nexus.data_moves s JOIN done d ON d.label = s.label WHERE s.supersedes IS NOT NULL
+            )
+            SELECT count(*)
+              FROM (VALUES ('catalog_collections_superseded_by_id_check'), ('chunks_collection_id_check'), ('chunks_collection_id_not_null'), ('taxonomy_centroids_collection_id_check'), ('taxonomy_centroids_collection_id_not_null'), ('catalog_document_chunks_collection_id_check'), ('chunk_orphaned_at_collection_id_check'), ('topic_assignments_source_collection_id_check'), ('document_aspects_collection_id_check'), ('topics_collection_id_check'), ('taxonomy_meta_collection_id_check'), ('document_highlights_collection_id_check'), ('canary_query_ring_collection_id_check'), ('aspect_extraction_queue_collection_id_check'), ('catalog_documents_physical_collection_id_check'), ('chash_remap_source_collection_id_check'), ('chash_remap_target_collection_id_check'), ('pdf_pipeline_collection_id_check'), ('reembed_jobs_source_collection_id_check'), ('reembed_jobs_target_collection_id_check')) AS e(conname)
+              LEFT JOIN (pg_catalog.pg_constraint c
+                         JOIN pg_catalog.pg_class r ON r.oid = c.conrelid AND NOT r.relispartition
+                         JOIN pg_catalog.pg_namespace n ON n.oid = r.relnamespace AND n.nspname = 'nexus')
+                ON c.conname = e.conname AND c.contype = 'c'
+             WHERE (c.oid IS NULL OR NOT c.convalidated
+                    OR NOT EXISTS (SELECT 1 FROM done d WHERE d.label = 'rdr229-stamp-' || r.relname))
+               AND NOT (e.conname = 'aspect_extraction_queue_collection_id_check'
+                        AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
+                                          JOIN pg_catalog.pg_class qc ON qc.oid = a.attrelid AND qc.relkind IN ('r', 'p')
+                                          JOIN pg_catalog.pg_namespace qn ON qn.oid = qc.relnamespace AND qn.nspname = 'nexus'
+                                         WHERE qc.relname = 'aspect_extraction_queue' AND a.attname = 'collection_id' AND NOT a.attisdropped)
+                        AND CASE WHEN EXISTS (SELECT 1 FROM done d WHERE d.label = 'rdr229-stamp-aspect_extraction_queue')
+                                 THEN to_regclass('nexus.aspect_extraction_queue') IS NULL
+                                 ELSE NOT EXISTS (SELECT 1 FROM nexus.data_moves q WHERE q.label = 'rdr229-stamp-aspect_extraction_queue' AND q.failed_at IS NULL)
+                            END)
+        </sqlCheck>
         </preConditions>
-        <comment>RDR-229 P3.5b form A (nexus-p2m1x.24): CONTINUE-gated on every rdr229-stamp-* move having completed_at set (a move superseded by a -rerun-N row defers to it; a failed move whose driving table is gone counts complete; no stamp row at all keeps waiting), so it is skipped unrecorded and retried at every boot until then. nexus.catalog_collection_doc_owner(p_tenant, p_collection) reads the collection's documents by physical_collection_id: the label argument is resolved to its registry row(s) by a join on catalog_collections (name is the label and stays), so no document name column is read. Replaces the definition in catalog-044-collection-owner-from-documents.xml, changeset catalog-044-1 (line 123), the last definer; the signature, attributes and grants are kept. DATA EFFECT: none, a function definition only.</comment>
+        <comment>RDR-229 P3.5b form A (nexus-p2m1x.24): CONTINUE-gated on every stamp label being complete as CompletionCheck counts it (the gate is described in the file header), so it is skipped unrecorded and retried at every boot until then. nexus.catalog_collection_doc_owner(p_tenant, p_collection) reads the collection's documents by physical_collection_id: the label argument is resolved to its registry row(s) by a join on catalog_collections (name is the label and stays), so no document name column is read. Replaces the definition in catalog-044-collection-owner-from-documents.xml, changeset catalog-044-1 (line 123), the last definer; the signature, attributes and grants are kept. DATA EFFECT: none, a function definition only.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE OR REPLACE FUNCTION nexus.catalog_collection_doc_owner(p_tenant text, p_collection text)
     RETURNS text
@@ -37,6 +71,12 @@ CREATE OR REPLACE FUNCTION nexus.catalog_collection_doc_owner(p_tenant text, p_c
     STABLE
     SECURITY INVOKER
 AS $fn$
+    -- RDR-229 P3.5b: documents are read by physical_collection_id, through the registry row(s) that carry p_collection as their label.
+    -- The registry INSERT branch is dead by design for a fresh label: the BEFORE INSERT trigger (catalog_collections_owner_from_docs)
+    -- passes NEW.name before the new row exists, so no registry row holds the label, and a document can carry only the id of a row that
+    -- already exists. The one way in is a label a tombstone (a superseded row of that name) still holds, whose documents the new row
+    -- would read as the by-name read did; catalog_collections_pk (tenant_id, name) keeps a tombstone and a live row from sharing a name
+    -- until P4.1 replaces it, so that cannot happen today (Rdr229P35bSqlReadersIntegrationTest pins both).
     SELECT o.seg
       FROM (
           SELECT split_part(d.tumbler, '.', 1) || '-' || split_part(d.tumbler, '.', 2) AS seg,
@@ -84,9 +124,34 @@ $fn$;
 
     <changeSet id="vectors-078-2" author="nexus-p2m1x.24">
         <preConditions onFail="CONTINUE" onError="CONTINUE">
-            <sqlCheck expectedResult="0">SELECT (SELECT count(*) FROM nexus.data_moves m WHERE m.label LIKE 'rdr229-stamp-%' AND m.completed_at IS NULL AND NOT EXISTS (SELECT 1 FROM nexus.data_moves s WHERE s.supersedes = m.label) AND NOT (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL)) + (CASE WHEN EXISTS (SELECT 1 FROM nexus.data_moves WHERE label LIKE 'rdr229-stamp-%') THEN 0 ELSE 1 END)</sqlCheck>
+            <sqlCheck expectedResult="0">WITH RECURSIVE done(label) AS (
+                SELECT m.label FROM nexus.data_moves m
+                 WHERE m.label LIKE 'rdr229-stamp-%'
+                   AND (m.completed_at IS NOT NULL
+                        OR (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL))
+                UNION
+                SELECT s.supersedes FROM nexus.data_moves s JOIN done d ON d.label = s.label WHERE s.supersedes IS NOT NULL
+            )
+            SELECT count(*)
+              FROM (VALUES ('catalog_collections_superseded_by_id_check'), ('chunks_collection_id_check'), ('chunks_collection_id_not_null'), ('taxonomy_centroids_collection_id_check'), ('taxonomy_centroids_collection_id_not_null'), ('catalog_document_chunks_collection_id_check'), ('chunk_orphaned_at_collection_id_check'), ('topic_assignments_source_collection_id_check'), ('document_aspects_collection_id_check'), ('topics_collection_id_check'), ('taxonomy_meta_collection_id_check'), ('document_highlights_collection_id_check'), ('canary_query_ring_collection_id_check'), ('aspect_extraction_queue_collection_id_check'), ('catalog_documents_physical_collection_id_check'), ('chash_remap_source_collection_id_check'), ('chash_remap_target_collection_id_check'), ('pdf_pipeline_collection_id_check'), ('reembed_jobs_source_collection_id_check'), ('reembed_jobs_target_collection_id_check')) AS e(conname)
+              LEFT JOIN (pg_catalog.pg_constraint c
+                         JOIN pg_catalog.pg_class r ON r.oid = c.conrelid AND NOT r.relispartition
+                         JOIN pg_catalog.pg_namespace n ON n.oid = r.relnamespace AND n.nspname = 'nexus')
+                ON c.conname = e.conname AND c.contype = 'c'
+             WHERE (c.oid IS NULL OR NOT c.convalidated
+                    OR NOT EXISTS (SELECT 1 FROM done d WHERE d.label = 'rdr229-stamp-' || r.relname))
+               AND NOT (e.conname = 'aspect_extraction_queue_collection_id_check'
+                        AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
+                                          JOIN pg_catalog.pg_class qc ON qc.oid = a.attrelid AND qc.relkind IN ('r', 'p')
+                                          JOIN pg_catalog.pg_namespace qn ON qn.oid = qc.relnamespace AND qn.nspname = 'nexus'
+                                         WHERE qc.relname = 'aspect_extraction_queue' AND a.attname = 'collection_id' AND NOT a.attisdropped)
+                        AND CASE WHEN EXISTS (SELECT 1 FROM done d WHERE d.label = 'rdr229-stamp-aspect_extraction_queue')
+                                 THEN to_regclass('nexus.aspect_extraction_queue') IS NULL
+                                 ELSE NOT EXISTS (SELECT 1 FROM nexus.data_moves q WHERE q.label = 'rdr229-stamp-aspect_extraction_queue' AND q.failed_at IS NULL)
+                            END)
+        </sqlCheck>
         </preConditions>
-        <comment>RDR-229 P3.5b form A (nexus-p2m1x.24): CONTINUE-gated on every rdr229-stamp-* move having completed_at set (a move superseded by a -rerun-N row defers to it; a failed move whose driving table is gone counts complete; no stamp row at all keeps waiting), so it is skipped unrecorded and retried at every boot until then. nexus.catalog_collections_owner_from_docs (the BEFORE INSERT OR UPDATE OF owner_id, content_type trigger function on catalog_collections) reads superseded by NEW.superseded_by_id IS NULL and excludes the row itself from the holder lookup by collection_id; the holder's name is read only as the registry label for the NOTICE and the ORDER BY. Replaces the definition in catalog-051-curator-owner-not-replaceable.xml, changeset catalog-051-2 (line 158), the last definer; the signature, attributes and grants are kept. DATA EFFECT: none, a function definition only.</comment>
+        <comment>RDR-229 P3.5b form A (nexus-p2m1x.24): CONTINUE-gated on every stamp label being complete as CompletionCheck counts it (the gate is described in the file header), so it is skipped unrecorded and retried at every boot until then. nexus.catalog_collections_owner_from_docs (the BEFORE INSERT OR UPDATE OF owner_id, content_type trigger function on catalog_collections) reads superseded by NEW.superseded_by_id IS NULL and excludes the row itself from the holder lookup by collection_id; the holder's name is read only as the registry label for the NOTICE and the ORDER BY. Replaces the definition in catalog-051-curator-owner-not-replaceable.xml, changeset catalog-051-2 (line 158), the last definer; the signature, attributes and grants are kept. DATA EFFECT: none, a function definition only.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE OR REPLACE FUNCTION nexus.catalog_collections_owner_from_docs()
     RETURNS TRIGGER
@@ -189,9 +254,34 @@ $fn$;
 
     <changeSet id="vectors-078-3" author="nexus-p2m1x.24">
         <preConditions onFail="CONTINUE" onError="CONTINUE">
-            <sqlCheck expectedResult="0">SELECT (SELECT count(*) FROM nexus.data_moves m WHERE m.label LIKE 'rdr229-stamp-%' AND m.completed_at IS NULL AND NOT EXISTS (SELECT 1 FROM nexus.data_moves s WHERE s.supersedes = m.label) AND NOT (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL)) + (CASE WHEN EXISTS (SELECT 1 FROM nexus.data_moves WHERE label LIKE 'rdr229-stamp-%') THEN 0 ELSE 1 END)</sqlCheck>
+            <sqlCheck expectedResult="0">WITH RECURSIVE done(label) AS (
+                SELECT m.label FROM nexus.data_moves m
+                 WHERE m.label LIKE 'rdr229-stamp-%'
+                   AND (m.completed_at IS NOT NULL
+                        OR (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL))
+                UNION
+                SELECT s.supersedes FROM nexus.data_moves s JOIN done d ON d.label = s.label WHERE s.supersedes IS NOT NULL
+            )
+            SELECT count(*)
+              FROM (VALUES ('catalog_collections_superseded_by_id_check'), ('chunks_collection_id_check'), ('chunks_collection_id_not_null'), ('taxonomy_centroids_collection_id_check'), ('taxonomy_centroids_collection_id_not_null'), ('catalog_document_chunks_collection_id_check'), ('chunk_orphaned_at_collection_id_check'), ('topic_assignments_source_collection_id_check'), ('document_aspects_collection_id_check'), ('topics_collection_id_check'), ('taxonomy_meta_collection_id_check'), ('document_highlights_collection_id_check'), ('canary_query_ring_collection_id_check'), ('aspect_extraction_queue_collection_id_check'), ('catalog_documents_physical_collection_id_check'), ('chash_remap_source_collection_id_check'), ('chash_remap_target_collection_id_check'), ('pdf_pipeline_collection_id_check'), ('reembed_jobs_source_collection_id_check'), ('reembed_jobs_target_collection_id_check')) AS e(conname)
+              LEFT JOIN (pg_catalog.pg_constraint c
+                         JOIN pg_catalog.pg_class r ON r.oid = c.conrelid AND NOT r.relispartition
+                         JOIN pg_catalog.pg_namespace n ON n.oid = r.relnamespace AND n.nspname = 'nexus')
+                ON c.conname = e.conname AND c.contype = 'c'
+             WHERE (c.oid IS NULL OR NOT c.convalidated
+                    OR NOT EXISTS (SELECT 1 FROM done d WHERE d.label = 'rdr229-stamp-' || r.relname))
+               AND NOT (e.conname = 'aspect_extraction_queue_collection_id_check'
+                        AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
+                                          JOIN pg_catalog.pg_class qc ON qc.oid = a.attrelid AND qc.relkind IN ('r', 'p')
+                                          JOIN pg_catalog.pg_namespace qn ON qn.oid = qc.relnamespace AND qn.nspname = 'nexus'
+                                         WHERE qc.relname = 'aspect_extraction_queue' AND a.attname = 'collection_id' AND NOT a.attisdropped)
+                        AND CASE WHEN EXISTS (SELECT 1 FROM done d WHERE d.label = 'rdr229-stamp-aspect_extraction_queue')
+                                 THEN to_regclass('nexus.aspect_extraction_queue') IS NULL
+                                 ELSE NOT EXISTS (SELECT 1 FROM nexus.data_moves q WHERE q.label = 'rdr229-stamp-aspect_extraction_queue' AND q.failed_at IS NULL)
+                            END)
+        </sqlCheck>
         </preConditions>
-        <comment>RDR-229 P3.5b form A (nexus-p2m1x.24): CONTINUE-gated on every rdr229-stamp-* move having completed_at set (a move superseded by a -rerun-N row defers to it; a failed move whose driving table is gone counts complete; no stamp row at all keeps waiting), so it is skipped unrecorded and retried at every boot until then. nexus.catalog_documents_owner_to_collection (the AFTER trigger function on catalog_documents) finds the document's collection by NEW.physical_collection_id (registry row of that id, whatever name the document carries), treats an unset id as no collection, reads superseded by superseded_by_id, and excludes the row itself from the holder lookup by collection_id; every name it prints or hands to catalog_collection_doc_owner is the registry's label of that id. The registry UPDATE keeps setting superseded_by_id exactly as vectors-069-23 does (P3.1's id write is a write and stays). Replaces the definition in vectors-069-collection-id-dual-write-functions.xml, changeset vectors-069-23 (line 7570), the last definer; the signature, attributes and grants are kept. DATA EFFECT: none, a function definition only.</comment>
+        <comment>RDR-229 P3.5b form A (nexus-p2m1x.24): CONTINUE-gated on every stamp label being complete as CompletionCheck counts it (the gate is described in the file header), so it is skipped unrecorded and retried at every boot until then. nexus.catalog_documents_owner_to_collection (the AFTER trigger function on catalog_documents) finds the document's collection by NEW.physical_collection_id (registry row of that id, whatever name the document carries), treats an unset id as no collection, reads superseded by superseded_by_id, and excludes the row itself from the holder lookup by collection_id; every name it prints or hands to catalog_collection_doc_owner is the registry's label of that id. The registry UPDATE keeps setting superseded_by_id exactly as vectors-069-23 does (P3.1's id write is a write and stays). Replaces the definition in vectors-069-collection-id-dual-write-functions.xml, changeset vectors-069-23 (line 7570), the last definer; the signature, attributes and grants are kept. DATA EFFECT: none, a function definition only.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE OR REPLACE FUNCTION nexus.catalog_documents_owner_to_collection()
     RETURNS TRIGGER
@@ -368,9 +458,34 @@ $fn$;
 
     <changeSet id="vectors-078-4" author="nexus-p2m1x.24" failOnError="false">
         <preConditions onFail="CONTINUE" onError="CONTINUE">
-            <sqlCheck expectedResult="0">SELECT (SELECT count(*) FROM nexus.data_moves m WHERE m.label LIKE 'rdr229-stamp-%' AND m.completed_at IS NULL AND NOT EXISTS (SELECT 1 FROM nexus.data_moves s WHERE s.supersedes = m.label) AND NOT (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL)) + (CASE WHEN EXISTS (SELECT 1 FROM nexus.data_moves WHERE label LIKE 'rdr229-stamp-%') THEN 0 ELSE 1 END)</sqlCheck>
+            <sqlCheck expectedResult="0">WITH RECURSIVE done(label) AS (
+                SELECT m.label FROM nexus.data_moves m
+                 WHERE m.label LIKE 'rdr229-stamp-%'
+                   AND (m.completed_at IS NOT NULL
+                        OR (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL))
+                UNION
+                SELECT s.supersedes FROM nexus.data_moves s JOIN done d ON d.label = s.label WHERE s.supersedes IS NOT NULL
+            )
+            SELECT count(*)
+              FROM (VALUES ('catalog_collections_superseded_by_id_check'), ('chunks_collection_id_check'), ('chunks_collection_id_not_null'), ('taxonomy_centroids_collection_id_check'), ('taxonomy_centroids_collection_id_not_null'), ('catalog_document_chunks_collection_id_check'), ('chunk_orphaned_at_collection_id_check'), ('topic_assignments_source_collection_id_check'), ('document_aspects_collection_id_check'), ('topics_collection_id_check'), ('taxonomy_meta_collection_id_check'), ('document_highlights_collection_id_check'), ('canary_query_ring_collection_id_check'), ('aspect_extraction_queue_collection_id_check'), ('catalog_documents_physical_collection_id_check'), ('chash_remap_source_collection_id_check'), ('chash_remap_target_collection_id_check'), ('pdf_pipeline_collection_id_check'), ('reembed_jobs_source_collection_id_check'), ('reembed_jobs_target_collection_id_check')) AS e(conname)
+              LEFT JOIN (pg_catalog.pg_constraint c
+                         JOIN pg_catalog.pg_class r ON r.oid = c.conrelid AND NOT r.relispartition
+                         JOIN pg_catalog.pg_namespace n ON n.oid = r.relnamespace AND n.nspname = 'nexus')
+                ON c.conname = e.conname AND c.contype = 'c'
+             WHERE (c.oid IS NULL OR NOT c.convalidated
+                    OR NOT EXISTS (SELECT 1 FROM done d WHERE d.label = 'rdr229-stamp-' || r.relname))
+               AND NOT (e.conname = 'aspect_extraction_queue_collection_id_check'
+                        AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
+                                          JOIN pg_catalog.pg_class qc ON qc.oid = a.attrelid AND qc.relkind IN ('r', 'p')
+                                          JOIN pg_catalog.pg_namespace qn ON qn.oid = qc.relnamespace AND qn.nspname = 'nexus'
+                                         WHERE qc.relname = 'aspect_extraction_queue' AND a.attname = 'collection_id' AND NOT a.attisdropped)
+                        AND CASE WHEN EXISTS (SELECT 1 FROM done d WHERE d.label = 'rdr229-stamp-aspect_extraction_queue')
+                                 THEN to_regclass('nexus.aspect_extraction_queue') IS NULL
+                                 ELSE NOT EXISTS (SELECT 1 FROM nexus.data_moves q WHERE q.label = 'rdr229-stamp-aspect_extraction_queue' AND q.failed_at IS NULL)
+                            END)
+        </sqlCheck>
         </preConditions>
-        <comment>RDR-229 P3.5b form A (nexus-p2m1x.24): CONTINUE-gated on every rdr229-stamp-* move having completed_at set (a move superseded by a -rerun-N row defers to it; a failed move whose driving table is gone counts complete; no stamp row at all keeps waiting), so it is skipped unrecorded and retried at every boot until then. The catalog-044 trigger catalog_documents_owner_to_collection on nexus.catalog_documents fires AFTER INSERT OR UPDATE OF physical_collection_id, deleted_at instead of physical_collection, so a write of the id (the writer the name column no longer drives) derives the owner. DROP TRIGGER takes ACCESS EXCLUSIVE on catalog_documents, so it runs under SET LOCAL lock_timeout = '5s' as catalog-044-2 did, and failOnError="false" makes a lock it cannot get skip the changeset unrecorded for the next boot instead of halting the boot. Replaces the trigger of catalog-044-collection-owner-from-documents.xml, changeset catalog-044-2 (line 234), the last definer. DATA EFFECT: none, a trigger definition only; no row changes.</comment>
+        <comment>RDR-229 P3.5b form A (nexus-p2m1x.24): CONTINUE-gated on every stamp label being complete as CompletionCheck counts it (the gate is described in the file header), so it is skipped unrecorded and retried at every boot until then. The catalog-044 trigger catalog_documents_owner_to_collection on nexus.catalog_documents fires AFTER INSERT OR UPDATE OF physical_collection_id, deleted_at instead of physical_collection, so a write of the id (the writer the name column no longer drives) derives the owner. DROP TRIGGER takes ACCESS EXCLUSIVE on catalog_documents, so it runs under SET LOCAL lock_timeout = '5s' as catalog-044-2 did, and failOnError="false" makes a lock it cannot get skip the changeset unrecorded for the next boot instead of halting the boot. Replaces the trigger of catalog-044-collection-owner-from-documents.xml, changeset catalog-044-2 (line 234), the last definer. DATA EFFECT: none, a trigger definition only; no row changes.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 SET LOCAL lock_timeout = '5s';
 DROP TRIGGER IF EXISTS catalog_documents_owner_to_collection ON nexus.catalog_documents;
@@ -392,9 +507,34 @@ CREATE TRIGGER catalog_documents_owner_to_collection
 
     <changeSet id="vectors-078-7" author="nexus-p2m1x.24">
         <preConditions onFail="CONTINUE" onError="CONTINUE">
-            <sqlCheck expectedResult="0">SELECT (SELECT count(*) FROM nexus.data_moves m WHERE m.label LIKE 'rdr229-stamp-%' AND m.completed_at IS NULL AND NOT EXISTS (SELECT 1 FROM nexus.data_moves s WHERE s.supersedes = m.label) AND NOT (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL)) + (CASE WHEN EXISTS (SELECT 1 FROM nexus.data_moves WHERE label LIKE 'rdr229-stamp-%') THEN 0 ELSE 1 END)</sqlCheck>
+            <sqlCheck expectedResult="0">WITH RECURSIVE done(label) AS (
+                SELECT m.label FROM nexus.data_moves m
+                 WHERE m.label LIKE 'rdr229-stamp-%'
+                   AND (m.completed_at IS NOT NULL
+                        OR (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL))
+                UNION
+                SELECT s.supersedes FROM nexus.data_moves s JOIN done d ON d.label = s.label WHERE s.supersedes IS NOT NULL
+            )
+            SELECT count(*)
+              FROM (VALUES ('catalog_collections_superseded_by_id_check'), ('chunks_collection_id_check'), ('chunks_collection_id_not_null'), ('taxonomy_centroids_collection_id_check'), ('taxonomy_centroids_collection_id_not_null'), ('catalog_document_chunks_collection_id_check'), ('chunk_orphaned_at_collection_id_check'), ('topic_assignments_source_collection_id_check'), ('document_aspects_collection_id_check'), ('topics_collection_id_check'), ('taxonomy_meta_collection_id_check'), ('document_highlights_collection_id_check'), ('canary_query_ring_collection_id_check'), ('aspect_extraction_queue_collection_id_check'), ('catalog_documents_physical_collection_id_check'), ('chash_remap_source_collection_id_check'), ('chash_remap_target_collection_id_check'), ('pdf_pipeline_collection_id_check'), ('reembed_jobs_source_collection_id_check'), ('reembed_jobs_target_collection_id_check')) AS e(conname)
+              LEFT JOIN (pg_catalog.pg_constraint c
+                         JOIN pg_catalog.pg_class r ON r.oid = c.conrelid AND NOT r.relispartition
+                         JOIN pg_catalog.pg_namespace n ON n.oid = r.relnamespace AND n.nspname = 'nexus')
+                ON c.conname = e.conname AND c.contype = 'c'
+             WHERE (c.oid IS NULL OR NOT c.convalidated
+                    OR NOT EXISTS (SELECT 1 FROM done d WHERE d.label = 'rdr229-stamp-' || r.relname))
+               AND NOT (e.conname = 'aspect_extraction_queue_collection_id_check'
+                        AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
+                                          JOIN pg_catalog.pg_class qc ON qc.oid = a.attrelid AND qc.relkind IN ('r', 'p')
+                                          JOIN pg_catalog.pg_namespace qn ON qn.oid = qc.relnamespace AND qn.nspname = 'nexus'
+                                         WHERE qc.relname = 'aspect_extraction_queue' AND a.attname = 'collection_id' AND NOT a.attisdropped)
+                        AND CASE WHEN EXISTS (SELECT 1 FROM done d WHERE d.label = 'rdr229-stamp-aspect_extraction_queue')
+                                 THEN to_regclass('nexus.aspect_extraction_queue') IS NULL
+                                 ELSE NOT EXISTS (SELECT 1 FROM nexus.data_moves q WHERE q.label = 'rdr229-stamp-aspect_extraction_queue' AND q.failed_at IS NULL)
+                            END)
+        </sqlCheck>
         </preConditions>
-        <comment>RDR-229 P3.5b form A (nexus-p2m1x.24): CONTINUE-gated on every rdr229-stamp-* move having completed_at set (a move superseded by a -rerun-N row defers to it; a failed move whose driving table is gone counts complete; no stamp row at all keeps waiting), so it is skipped unrecorded and retried at every boot until then. nexus.catalog_collection_tuple_duplicates_unscoped counts the live tuples over superseded_by_id IS NULL instead of superseded_by = ''. Replaces the definition in collections-001-tuple-unique-index.xml, changeset collections-001-1 (line 91), the last definer; the signature, attributes and the REVOKE ALL FROM PUBLIC are kept. DATA EFFECT: none, a function definition only.</comment>
+        <comment>RDR-229 P3.5b form A (nexus-p2m1x.24): CONTINUE-gated on every stamp label being complete as CompletionCheck counts it (the gate is described in the file header), so it is skipped unrecorded and retried at every boot until then. nexus.catalog_collection_tuple_duplicates_unscoped counts the live tuples over superseded_by_id IS NULL instead of superseded_by = ''. Replaces the definition in collections-001-tuple-unique-index.xml, changeset collections-001-1 (line 91), the last definer; the signature, attributes and the REVOKE ALL FROM PUBLIC are kept. DATA EFFECT: none, a function definition only.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE OR REPLACE FUNCTION nexus.catalog_collection_tuple_duplicates_unscoped() RETURNS bigint
 LANGUAGE sql STABLE SECURITY INVOKER
@@ -428,9 +568,34 @@ $fn$;
 
     <changeSet id="vectors-078-8" author="nexus-p2m1x.24">
         <preConditions onFail="CONTINUE" onError="CONTINUE">
-            <sqlCheck expectedResult="0">SELECT (SELECT count(*) FROM nexus.data_moves m WHERE m.label LIKE 'rdr229-stamp-%' AND m.completed_at IS NULL AND NOT EXISTS (SELECT 1 FROM nexus.data_moves s WHERE s.supersedes = m.label) AND NOT (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL)) + (CASE WHEN EXISTS (SELECT 1 FROM nexus.data_moves WHERE label LIKE 'rdr229-stamp-%') THEN 0 ELSE 1 END)</sqlCheck>
+            <sqlCheck expectedResult="0">WITH RECURSIVE done(label) AS (
+                SELECT m.label FROM nexus.data_moves m
+                 WHERE m.label LIKE 'rdr229-stamp-%'
+                   AND (m.completed_at IS NOT NULL
+                        OR (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL))
+                UNION
+                SELECT s.supersedes FROM nexus.data_moves s JOIN done d ON d.label = s.label WHERE s.supersedes IS NOT NULL
+            )
+            SELECT count(*)
+              FROM (VALUES ('catalog_collections_superseded_by_id_check'), ('chunks_collection_id_check'), ('chunks_collection_id_not_null'), ('taxonomy_centroids_collection_id_check'), ('taxonomy_centroids_collection_id_not_null'), ('catalog_document_chunks_collection_id_check'), ('chunk_orphaned_at_collection_id_check'), ('topic_assignments_source_collection_id_check'), ('document_aspects_collection_id_check'), ('topics_collection_id_check'), ('taxonomy_meta_collection_id_check'), ('document_highlights_collection_id_check'), ('canary_query_ring_collection_id_check'), ('aspect_extraction_queue_collection_id_check'), ('catalog_documents_physical_collection_id_check'), ('chash_remap_source_collection_id_check'), ('chash_remap_target_collection_id_check'), ('pdf_pipeline_collection_id_check'), ('reembed_jobs_source_collection_id_check'), ('reembed_jobs_target_collection_id_check')) AS e(conname)
+              LEFT JOIN (pg_catalog.pg_constraint c
+                         JOIN pg_catalog.pg_class r ON r.oid = c.conrelid AND NOT r.relispartition
+                         JOIN pg_catalog.pg_namespace n ON n.oid = r.relnamespace AND n.nspname = 'nexus')
+                ON c.conname = e.conname AND c.contype = 'c'
+             WHERE (c.oid IS NULL OR NOT c.convalidated
+                    OR NOT EXISTS (SELECT 1 FROM done d WHERE d.label = 'rdr229-stamp-' || r.relname))
+               AND NOT (e.conname = 'aspect_extraction_queue_collection_id_check'
+                        AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
+                                          JOIN pg_catalog.pg_class qc ON qc.oid = a.attrelid AND qc.relkind IN ('r', 'p')
+                                          JOIN pg_catalog.pg_namespace qn ON qn.oid = qc.relnamespace AND qn.nspname = 'nexus'
+                                         WHERE qc.relname = 'aspect_extraction_queue' AND a.attname = 'collection_id' AND NOT a.attisdropped)
+                        AND CASE WHEN EXISTS (SELECT 1 FROM done d WHERE d.label = 'rdr229-stamp-aspect_extraction_queue')
+                                 THEN to_regclass('nexus.aspect_extraction_queue') IS NULL
+                                 ELSE NOT EXISTS (SELECT 1 FROM nexus.data_moves q WHERE q.label = 'rdr229-stamp-aspect_extraction_queue' AND q.failed_at IS NULL)
+                            END)
+        </sqlCheck>
         </preConditions>
-        <comment>RDR-229 P3.5b form A (nexus-p2m1x.24): CONTINUE-gated on every rdr229-stamp-* move having completed_at set (a move superseded by a -rerun-N row defers to it; a failed move whose driving table is gone counts complete; no stamp row at all keeps waiting), so it is skipped unrecorded and retried at every boot until then. nexus.canary_query_ring_upsert reads and trims a collection's ring by collection_id: the label argument is resolved once to (collection_id, name) from the registry; an entry already in the ring (same collection id and digest) has added_at refreshed, otherwise it is inserted with the registry's label in the still-NOT NULL name column, and a concurrent insert of the same entry (the name primary key stays until P4.1) is caught as unique_violation and refreshed, as ON CONFLICT on the name key did. The trim DELETE selects the ring by id. The 23503 refusal of an unregistered name, the per-entry foreign_key_violation skip and the return value are unchanged. Replaces the definition in vectors-069-collection-id-dual-write-functions.xml, changeset vectors-069-24 (line 7738), the last definer; the signature, attributes, search_path pin and grants are kept. DATA EFFECT: none, a function definition only.</comment>
+        <comment>RDR-229 P3.5b form A (nexus-p2m1x.24): CONTINUE-gated on every stamp label being complete as CompletionCheck counts it (the gate is described in the file header), so it is skipped unrecorded and retried at every boot until then. nexus.canary_query_ring_upsert reads and trims a collection's ring by collection_id: the label argument is resolved once to (collection_id, name) from the registry; an entry already in the ring (same collection id and digest) has added_at refreshed, otherwise it is inserted with the registry's label in the still-NOT NULL name column, and a unique_violation on the name primary key (it stays until P4.1) sends the entry round once more, so a row a concurrent call committed between the UPDATE and the INSERT is found by the id and refreshed, as ON CONFLICT on the name key did. If the second try meets the name key again, that key's row carries another or no collection id: the entry is skipped with a WARNING and not counted, and the row is not restamped, because finding it means reading the name column (vectors-069-24's ON CONFLICT ... DO UPDATE did restamp it, but P3.5b's form A readers no longer read the name, and after P3.7's rename a name key's row may belong to the collection the label was renamed away from). DATA EFFECT: none, a function definition only.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE OR REPLACE FUNCTION nexus.canary_query_ring_upsert(
     p_tenant      text,
@@ -452,6 +617,8 @@ DECLARE
     v_name    text;
     v_cids    bigint[]  := ARRAY[]::bigint[];
     v_ring    bigint;
+    v_state   integer;
+    v_try     integer;
     i         integer;
 BEGIN
     IF coalesce(cardinality(p_collections), 0) <> v_n
@@ -482,44 +649,54 @@ BEGIN
                 p_collections[i], p_tenant
                 USING ERRCODE = 'foreign_key_violation';
         END IF;
-        BEGIN
-            -- refresh added_at when the digest is already in this collection's ring (by id), else insert
-            UPDATE nexus.canary_query_ring r
-               SET added_at = clock_timestamp(), collection_id = v_cid
-             WHERE r.tenant_id = p_tenant
-               AND r.collection_id = v_cid
-               AND r.vector_digest = p_digests[i];
-            IF NOT FOUND THEN
-                IF v_dims = 384 THEN
-                    INSERT INTO nexus.canary_query_ring
-                        (tenant_id, collection, collection_id, embedding_model, embedding_384, vector_digest, added_at)
-                    VALUES (p_tenant, v_name, v_cid, p_models[i], v_vec, p_digests[i], clock_timestamp());
-                ELSIF v_dims = 768 THEN
-                    INSERT INTO nexus.canary_query_ring
-                        (tenant_id, collection, collection_id, embedding_model, embedding_768, vector_digest, added_at)
-                    VALUES (p_tenant, v_name, v_cid, p_models[i], v_vec, p_digests[i], clock_timestamp());
-                ELSE
-                    INSERT INTO nexus.canary_query_ring
-                        (tenant_id, collection, collection_id, embedding_model, embedding_1024, vector_digest, added_at)
-                    VALUES (p_tenant, v_name, v_cid, p_models[i], v_vec, p_digests[i], clock_timestamp());
-                END IF;
-            END IF;
-            v_written := v_written + 1;
-            v_cids    := v_cids || v_cid;
-        EXCEPTION
-            WHEN foreign_key_violation THEN
-                -- S6: the collection (or its model) is gone since the entry was enqueued. Skip this entry only.
-                NULL;
-            WHEN unique_violation THEN
-                -- a concurrent call inserted the same entry between the UPDATE and the INSERT: refresh it, as ON CONFLICT did.
+        -- v_state: 0 pending, 1 written, 2 skipped. Two tries: a unique_violation sends the entry round again, so a row a concurrent call
+        -- committed between the UPDATE and the INSERT is found by the id on the second try and refreshed.
+        v_state := 0;
+        FOR v_try IN 1 .. 2 LOOP
+            BEGIN
+                -- refresh added_at when the digest is already in this collection's ring (by id), else insert
                 UPDATE nexus.canary_query_ring r
                    SET added_at = clock_timestamp(), collection_id = v_cid
                  WHERE r.tenant_id = p_tenant
                    AND r.collection_id = v_cid
                    AND r.vector_digest = p_digests[i];
-                v_written := v_written + 1;
-                v_cids    := v_cids || v_cid;
-        END;
+                IF NOT FOUND THEN
+                    IF v_dims = 384 THEN
+                        INSERT INTO nexus.canary_query_ring
+                            (tenant_id, collection, collection_id, embedding_model, embedding_384, vector_digest, added_at)
+                        VALUES (p_tenant, v_name, v_cid, p_models[i], v_vec, p_digests[i], clock_timestamp());
+                    ELSIF v_dims = 768 THEN
+                        INSERT INTO nexus.canary_query_ring
+                            (tenant_id, collection, collection_id, embedding_model, embedding_768, vector_digest, added_at)
+                        VALUES (p_tenant, v_name, v_cid, p_models[i], v_vec, p_digests[i], clock_timestamp());
+                    ELSE
+                        INSERT INTO nexus.canary_query_ring
+                            (tenant_id, collection, collection_id, embedding_model, embedding_1024, vector_digest, added_at)
+                        VALUES (p_tenant, v_name, v_cid, p_models[i], v_vec, p_digests[i], clock_timestamp());
+                    END IF;
+                END IF;
+                v_state := 1;
+            EXCEPTION
+                WHEN foreign_key_violation THEN
+                    -- S6: the collection (or its model) is gone since the entry was enqueued. Skip this entry only.
+                    v_state := 2;
+                WHEN unique_violation THEN
+                    -- The name primary key (it stays until P4.1) already holds this digest and no row of this collection id does: a
+                    -- concurrent call just committed it (the next try finds it by the id), or the row of that name key carries another
+                    -- or no collection id. That row is not restamped here: finding it means reading the name column, which a form A
+                    -- reader no longer does, and once P3.7 renames a collection the name key's row may belong to the collection that
+                    -- label was renamed away from. It is not counted either.
+                    NULL;
+            END;
+            EXIT WHEN v_state != 0;
+        END LOOP;
+        IF v_state = 1 THEN
+            v_written := v_written + 1;
+            v_cids    := v_cids || v_cid;
+        ELSIF v_state = 0 THEN
+            RAISE WARNING 'canary_query_ring_upsert: a ring entry for collection id % was not written: its name key already holds the digest under another or no collection id',
+                v_cid;
+        END IF;
     END LOOP;
 
     -- Trim each ring this call wrote to, in a fixed order (two concurrent calls take the same row locks in the
@@ -644,9 +821,34 @@ $fn$;
 
     <changeSet id="vectors-078-9" author="nexus-p2m1x.24">
         <preConditions onFail="CONTINUE" onError="CONTINUE">
-            <sqlCheck expectedResult="0">SELECT (SELECT count(*) FROM nexus.data_moves m WHERE m.label LIKE 'rdr229-stamp-%' AND m.completed_at IS NULL AND NOT EXISTS (SELECT 1 FROM nexus.data_moves s WHERE s.supersedes = m.label) AND NOT (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL)) + (CASE WHEN EXISTS (SELECT 1 FROM nexus.data_moves WHERE label LIKE 'rdr229-stamp-%') THEN 0 ELSE 1 END)</sqlCheck>
+            <sqlCheck expectedResult="0">WITH RECURSIVE done(label) AS (
+                SELECT m.label FROM nexus.data_moves m
+                 WHERE m.label LIKE 'rdr229-stamp-%'
+                   AND (m.completed_at IS NOT NULL
+                        OR (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL))
+                UNION
+                SELECT s.supersedes FROM nexus.data_moves s JOIN done d ON d.label = s.label WHERE s.supersedes IS NOT NULL
+            )
+            SELECT count(*)
+              FROM (VALUES ('catalog_collections_superseded_by_id_check'), ('chunks_collection_id_check'), ('chunks_collection_id_not_null'), ('taxonomy_centroids_collection_id_check'), ('taxonomy_centroids_collection_id_not_null'), ('catalog_document_chunks_collection_id_check'), ('chunk_orphaned_at_collection_id_check'), ('topic_assignments_source_collection_id_check'), ('document_aspects_collection_id_check'), ('topics_collection_id_check'), ('taxonomy_meta_collection_id_check'), ('document_highlights_collection_id_check'), ('canary_query_ring_collection_id_check'), ('aspect_extraction_queue_collection_id_check'), ('catalog_documents_physical_collection_id_check'), ('chash_remap_source_collection_id_check'), ('chash_remap_target_collection_id_check'), ('pdf_pipeline_collection_id_check'), ('reembed_jobs_source_collection_id_check'), ('reembed_jobs_target_collection_id_check')) AS e(conname)
+              LEFT JOIN (pg_catalog.pg_constraint c
+                         JOIN pg_catalog.pg_class r ON r.oid = c.conrelid AND NOT r.relispartition
+                         JOIN pg_catalog.pg_namespace n ON n.oid = r.relnamespace AND n.nspname = 'nexus')
+                ON c.conname = e.conname AND c.contype = 'c'
+             WHERE (c.oid IS NULL OR NOT c.convalidated
+                    OR NOT EXISTS (SELECT 1 FROM done d WHERE d.label = 'rdr229-stamp-' || r.relname))
+               AND NOT (e.conname = 'aspect_extraction_queue_collection_id_check'
+                        AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
+                                          JOIN pg_catalog.pg_class qc ON qc.oid = a.attrelid AND qc.relkind IN ('r', 'p')
+                                          JOIN pg_catalog.pg_namespace qn ON qn.oid = qc.relnamespace AND qn.nspname = 'nexus'
+                                         WHERE qc.relname = 'aspect_extraction_queue' AND a.attname = 'collection_id' AND NOT a.attisdropped)
+                        AND CASE WHEN EXISTS (SELECT 1 FROM done d WHERE d.label = 'rdr229-stamp-aspect_extraction_queue')
+                                 THEN to_regclass('nexus.aspect_extraction_queue') IS NULL
+                                 ELSE NOT EXISTS (SELECT 1 FROM nexus.data_moves q WHERE q.label = 'rdr229-stamp-aspect_extraction_queue' AND q.failed_at IS NULL)
+                            END)
+        </sqlCheck>
         </preConditions>
-        <comment>RDR-229 P3.5b form A (nexus-p2m1x.24): CONTINUE-gated on every rdr229-stamp-* move having completed_at set (a move superseded by a -rerun-N row defers to it; a failed move whose driving table is gone counts complete; no stamp row at all keeps waiting), so it is skipped unrecorded and retried at every boot until then. nexus.taxonomy_ann_query_384 matches the centroids by collection_id: the p_collection label is resolved once to its registry id (cross pass: every other collection's centroids, same-collection pass: this one's; an unregistered label keeps the cross pass open to all, as the name compare did), and the superseded-target exclusion joins the registry on collection_id and tests superseded_by_id. Stays LANGUAGE sql with no SET clause so the planner still inlines it (search-path-002). Replaces the definition in vectors-038-cross-pass-skips-superseded.xml, the last definer (line 297); the signature, attributes and grants are kept. DATA EFFECT: none, a function definition only.</comment>
+        <comment>RDR-229 P3.5b form A (nexus-p2m1x.24): CONTINUE-gated on every stamp label being complete as CompletionCheck counts it (the gate is described in the file header), so it is skipped unrecorded and retried at every boot until then. nexus.taxonomy_ann_query_384 matches the centroids by collection_id: the p_collection label is resolved once to its registry id (cross pass: every other collection's centroids, same-collection pass: this one's; an unregistered label keeps the cross pass open to all, as the name compare did), and the superseded-target exclusion joins the registry on collection_id and tests superseded_by_id. Stays LANGUAGE sql with no SET clause so the planner still inlines it (search-path-002). Replaces the definition in vectors-038-cross-pass-skips-superseded.xml, the last definer (line 297); the signature, attributes and grants are kept. DATA EFFECT: none, a function definition only.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE OR REPLACE FUNCTION nexus.taxonomy_ann_query_384(
     p_embedding         nexus.vector(384),
@@ -725,9 +927,34 @@ $$;
 
     <changeSet id="vectors-078-10" author="nexus-p2m1x.24">
         <preConditions onFail="CONTINUE" onError="CONTINUE">
-            <sqlCheck expectedResult="0">SELECT (SELECT count(*) FROM nexus.data_moves m WHERE m.label LIKE 'rdr229-stamp-%' AND m.completed_at IS NULL AND NOT EXISTS (SELECT 1 FROM nexus.data_moves s WHERE s.supersedes = m.label) AND NOT (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL)) + (CASE WHEN EXISTS (SELECT 1 FROM nexus.data_moves WHERE label LIKE 'rdr229-stamp-%') THEN 0 ELSE 1 END)</sqlCheck>
+            <sqlCheck expectedResult="0">WITH RECURSIVE done(label) AS (
+                SELECT m.label FROM nexus.data_moves m
+                 WHERE m.label LIKE 'rdr229-stamp-%'
+                   AND (m.completed_at IS NOT NULL
+                        OR (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL))
+                UNION
+                SELECT s.supersedes FROM nexus.data_moves s JOIN done d ON d.label = s.label WHERE s.supersedes IS NOT NULL
+            )
+            SELECT count(*)
+              FROM (VALUES ('catalog_collections_superseded_by_id_check'), ('chunks_collection_id_check'), ('chunks_collection_id_not_null'), ('taxonomy_centroids_collection_id_check'), ('taxonomy_centroids_collection_id_not_null'), ('catalog_document_chunks_collection_id_check'), ('chunk_orphaned_at_collection_id_check'), ('topic_assignments_source_collection_id_check'), ('document_aspects_collection_id_check'), ('topics_collection_id_check'), ('taxonomy_meta_collection_id_check'), ('document_highlights_collection_id_check'), ('canary_query_ring_collection_id_check'), ('aspect_extraction_queue_collection_id_check'), ('catalog_documents_physical_collection_id_check'), ('chash_remap_source_collection_id_check'), ('chash_remap_target_collection_id_check'), ('pdf_pipeline_collection_id_check'), ('reembed_jobs_source_collection_id_check'), ('reembed_jobs_target_collection_id_check')) AS e(conname)
+              LEFT JOIN (pg_catalog.pg_constraint c
+                         JOIN pg_catalog.pg_class r ON r.oid = c.conrelid AND NOT r.relispartition
+                         JOIN pg_catalog.pg_namespace n ON n.oid = r.relnamespace AND n.nspname = 'nexus')
+                ON c.conname = e.conname AND c.contype = 'c'
+             WHERE (c.oid IS NULL OR NOT c.convalidated
+                    OR NOT EXISTS (SELECT 1 FROM done d WHERE d.label = 'rdr229-stamp-' || r.relname))
+               AND NOT (e.conname = 'aspect_extraction_queue_collection_id_check'
+                        AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
+                                          JOIN pg_catalog.pg_class qc ON qc.oid = a.attrelid AND qc.relkind IN ('r', 'p')
+                                          JOIN pg_catalog.pg_namespace qn ON qn.oid = qc.relnamespace AND qn.nspname = 'nexus'
+                                         WHERE qc.relname = 'aspect_extraction_queue' AND a.attname = 'collection_id' AND NOT a.attisdropped)
+                        AND CASE WHEN EXISTS (SELECT 1 FROM done d WHERE d.label = 'rdr229-stamp-aspect_extraction_queue')
+                                 THEN to_regclass('nexus.aspect_extraction_queue') IS NULL
+                                 ELSE NOT EXISTS (SELECT 1 FROM nexus.data_moves q WHERE q.label = 'rdr229-stamp-aspect_extraction_queue' AND q.failed_at IS NULL)
+                            END)
+        </sqlCheck>
         </preConditions>
-        <comment>RDR-229 P3.5b form A (nexus-p2m1x.24): CONTINUE-gated on every rdr229-stamp-* move having completed_at set (a move superseded by a -rerun-N row defers to it; a failed move whose driving table is gone counts complete; no stamp row at all keeps waiting), so it is skipped unrecorded and retried at every boot until then. nexus.taxonomy_ann_query_768 matches the centroids by collection_id: the p_collection label is resolved once to its registry id (cross pass: every other collection's centroids, same-collection pass: this one's; an unregistered label keeps the cross pass open to all, as the name compare did), and the superseded-target exclusion joins the registry on collection_id and tests superseded_by_id. Stays LANGUAGE sql with no SET clause so the planner still inlines it (search-path-002). Replaces the definition in vectors-038-cross-pass-skips-superseded.xml, the last definer (line 525); the signature, attributes and grants are kept. DATA EFFECT: none, a function definition only.</comment>
+        <comment>RDR-229 P3.5b form A (nexus-p2m1x.24): CONTINUE-gated on every stamp label being complete as CompletionCheck counts it (the gate is described in the file header), so it is skipped unrecorded and retried at every boot until then. nexus.taxonomy_ann_query_768 matches the centroids by collection_id: the p_collection label is resolved once to its registry id (cross pass: every other collection's centroids, same-collection pass: this one's; an unregistered label keeps the cross pass open to all, as the name compare did), and the superseded-target exclusion joins the registry on collection_id and tests superseded_by_id. Stays LANGUAGE sql with no SET clause so the planner still inlines it (search-path-002). Replaces the definition in vectors-038-cross-pass-skips-superseded.xml, the last definer (line 525); the signature, attributes and grants are kept. DATA EFFECT: none, a function definition only.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE OR REPLACE FUNCTION nexus.taxonomy_ann_query_768(
     p_embedding         nexus.vector(768),
@@ -806,9 +1033,34 @@ $$;
 
     <changeSet id="vectors-078-11" author="nexus-p2m1x.24">
         <preConditions onFail="CONTINUE" onError="CONTINUE">
-            <sqlCheck expectedResult="0">SELECT (SELECT count(*) FROM nexus.data_moves m WHERE m.label LIKE 'rdr229-stamp-%' AND m.completed_at IS NULL AND NOT EXISTS (SELECT 1 FROM nexus.data_moves s WHERE s.supersedes = m.label) AND NOT (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL)) + (CASE WHEN EXISTS (SELECT 1 FROM nexus.data_moves WHERE label LIKE 'rdr229-stamp-%') THEN 0 ELSE 1 END)</sqlCheck>
+            <sqlCheck expectedResult="0">WITH RECURSIVE done(label) AS (
+                SELECT m.label FROM nexus.data_moves m
+                 WHERE m.label LIKE 'rdr229-stamp-%'
+                   AND (m.completed_at IS NOT NULL
+                        OR (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL))
+                UNION
+                SELECT s.supersedes FROM nexus.data_moves s JOIN done d ON d.label = s.label WHERE s.supersedes IS NOT NULL
+            )
+            SELECT count(*)
+              FROM (VALUES ('catalog_collections_superseded_by_id_check'), ('chunks_collection_id_check'), ('chunks_collection_id_not_null'), ('taxonomy_centroids_collection_id_check'), ('taxonomy_centroids_collection_id_not_null'), ('catalog_document_chunks_collection_id_check'), ('chunk_orphaned_at_collection_id_check'), ('topic_assignments_source_collection_id_check'), ('document_aspects_collection_id_check'), ('topics_collection_id_check'), ('taxonomy_meta_collection_id_check'), ('document_highlights_collection_id_check'), ('canary_query_ring_collection_id_check'), ('aspect_extraction_queue_collection_id_check'), ('catalog_documents_physical_collection_id_check'), ('chash_remap_source_collection_id_check'), ('chash_remap_target_collection_id_check'), ('pdf_pipeline_collection_id_check'), ('reembed_jobs_source_collection_id_check'), ('reembed_jobs_target_collection_id_check')) AS e(conname)
+              LEFT JOIN (pg_catalog.pg_constraint c
+                         JOIN pg_catalog.pg_class r ON r.oid = c.conrelid AND NOT r.relispartition
+                         JOIN pg_catalog.pg_namespace n ON n.oid = r.relnamespace AND n.nspname = 'nexus')
+                ON c.conname = e.conname AND c.contype = 'c'
+             WHERE (c.oid IS NULL OR NOT c.convalidated
+                    OR NOT EXISTS (SELECT 1 FROM done d WHERE d.label = 'rdr229-stamp-' || r.relname))
+               AND NOT (e.conname = 'aspect_extraction_queue_collection_id_check'
+                        AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
+                                          JOIN pg_catalog.pg_class qc ON qc.oid = a.attrelid AND qc.relkind IN ('r', 'p')
+                                          JOIN pg_catalog.pg_namespace qn ON qn.oid = qc.relnamespace AND qn.nspname = 'nexus'
+                                         WHERE qc.relname = 'aspect_extraction_queue' AND a.attname = 'collection_id' AND NOT a.attisdropped)
+                        AND CASE WHEN EXISTS (SELECT 1 FROM done d WHERE d.label = 'rdr229-stamp-aspect_extraction_queue')
+                                 THEN to_regclass('nexus.aspect_extraction_queue') IS NULL
+                                 ELSE NOT EXISTS (SELECT 1 FROM nexus.data_moves q WHERE q.label = 'rdr229-stamp-aspect_extraction_queue' AND q.failed_at IS NULL)
+                            END)
+        </sqlCheck>
         </preConditions>
-        <comment>RDR-229 P3.5b form A (nexus-p2m1x.24): CONTINUE-gated on every rdr229-stamp-* move having completed_at set (a move superseded by a -rerun-N row defers to it; a failed move whose driving table is gone counts complete; no stamp row at all keeps waiting), so it is skipped unrecorded and retried at every boot until then. nexus.taxonomy_ann_query_1024 matches the centroids by collection_id: the p_collection label is resolved once to its registry id (cross pass: every other collection's centroids, same-collection pass: this one's; an unregistered label keeps the cross pass open to all, as the name compare did), and the superseded-target exclusion joins the registry on collection_id and tests superseded_by_id. Stays LANGUAGE sql with no SET clause so the planner still inlines it (search-path-002). Replaces the definition in vectors-038-cross-pass-skips-superseded.xml, the last definer (line 753); the signature, attributes and grants are kept. DATA EFFECT: none, a function definition only.</comment>
+        <comment>RDR-229 P3.5b form A (nexus-p2m1x.24): CONTINUE-gated on every stamp label being complete as CompletionCheck counts it (the gate is described in the file header), so it is skipped unrecorded and retried at every boot until then. nexus.taxonomy_ann_query_1024 matches the centroids by collection_id: the p_collection label is resolved once to its registry id (cross pass: every other collection's centroids, same-collection pass: this one's; an unregistered label keeps the cross pass open to all, as the name compare did), and the superseded-target exclusion joins the registry on collection_id and tests superseded_by_id. Stays LANGUAGE sql with no SET clause so the planner still inlines it (search-path-002). Replaces the definition in vectors-038-cross-pass-skips-superseded.xml, the last definer (line 753); the signature, attributes and grants are kept. DATA EFFECT: none, a function definition only.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE OR REPLACE FUNCTION nexus.taxonomy_ann_query_1024(
     p_embedding         nexus.vector(1024),
@@ -887,9 +1139,34 @@ $$;
 
     <changeSet id="vectors-078-13" author="nexus-p2m1x.24">
         <preConditions onFail="CONTINUE" onError="CONTINUE">
-            <sqlCheck expectedResult="0">SELECT (SELECT count(*) FROM nexus.data_moves m WHERE m.label LIKE 'rdr229-stamp-%' AND m.completed_at IS NULL AND NOT EXISTS (SELECT 1 FROM nexus.data_moves s WHERE s.supersedes = m.label) AND NOT (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL)) + (CASE WHEN EXISTS (SELECT 1 FROM nexus.data_moves WHERE label LIKE 'rdr229-stamp-%') THEN 0 ELSE 1 END)</sqlCheck>
+            <sqlCheck expectedResult="0">WITH RECURSIVE done(label) AS (
+                SELECT m.label FROM nexus.data_moves m
+                 WHERE m.label LIKE 'rdr229-stamp-%'
+                   AND (m.completed_at IS NOT NULL
+                        OR (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL))
+                UNION
+                SELECT s.supersedes FROM nexus.data_moves s JOIN done d ON d.label = s.label WHERE s.supersedes IS NOT NULL
+            )
+            SELECT count(*)
+              FROM (VALUES ('catalog_collections_superseded_by_id_check'), ('chunks_collection_id_check'), ('chunks_collection_id_not_null'), ('taxonomy_centroids_collection_id_check'), ('taxonomy_centroids_collection_id_not_null'), ('catalog_document_chunks_collection_id_check'), ('chunk_orphaned_at_collection_id_check'), ('topic_assignments_source_collection_id_check'), ('document_aspects_collection_id_check'), ('topics_collection_id_check'), ('taxonomy_meta_collection_id_check'), ('document_highlights_collection_id_check'), ('canary_query_ring_collection_id_check'), ('aspect_extraction_queue_collection_id_check'), ('catalog_documents_physical_collection_id_check'), ('chash_remap_source_collection_id_check'), ('chash_remap_target_collection_id_check'), ('pdf_pipeline_collection_id_check'), ('reembed_jobs_source_collection_id_check'), ('reembed_jobs_target_collection_id_check')) AS e(conname)
+              LEFT JOIN (pg_catalog.pg_constraint c
+                         JOIN pg_catalog.pg_class r ON r.oid = c.conrelid AND NOT r.relispartition
+                         JOIN pg_catalog.pg_namespace n ON n.oid = r.relnamespace AND n.nspname = 'nexus')
+                ON c.conname = e.conname AND c.contype = 'c'
+             WHERE (c.oid IS NULL OR NOT c.convalidated
+                    OR NOT EXISTS (SELECT 1 FROM done d WHERE d.label = 'rdr229-stamp-' || r.relname))
+               AND NOT (e.conname = 'aspect_extraction_queue_collection_id_check'
+                        AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
+                                          JOIN pg_catalog.pg_class qc ON qc.oid = a.attrelid AND qc.relkind IN ('r', 'p')
+                                          JOIN pg_catalog.pg_namespace qn ON qn.oid = qc.relnamespace AND qn.nspname = 'nexus'
+                                         WHERE qc.relname = 'aspect_extraction_queue' AND a.attname = 'collection_id' AND NOT a.attisdropped)
+                        AND CASE WHEN EXISTS (SELECT 1 FROM done d WHERE d.label = 'rdr229-stamp-aspect_extraction_queue')
+                                 THEN to_regclass('nexus.aspect_extraction_queue') IS NULL
+                                 ELSE NOT EXISTS (SELECT 1 FROM nexus.data_moves q WHERE q.label = 'rdr229-stamp-aspect_extraction_queue' AND q.failed_at IS NULL)
+                            END)
+        </sqlCheck>
         </preConditions>
-        <comment>RDR-229 P3.5b form A (nexus-p2m1x.24): CONTINUE-gated on every rdr229-stamp-* move having completed_at set (a move superseded by a -rerun-N row defers to it; a failed move whose driving table is gone counts complete; no stamp row at all keeps waiting), so it is skipped unrecorded and retried at every boot until then. nexus.collection_doc_counts groups the live documents by physical_collection_id and reports the registry's label of that id as physical_collection (a join on catalog_collections, whose name is the label and is not dropped), so the view reads no document name column and survives P4.1's DROP COLUMN ... CASCADE. Same columns, names, types and order (tenant_id text, physical_collection text, doc_count bigint); one row per label as before. A document with no collection id (the old '' name) is no collection and is not counted. Replaces the view of catalog-019-tombstone-aware-read-views.xml, changeset catalog-019-2 (line 110), the last definer; its option and its grant are kept. DATA EFFECT: none, a view definition only.</comment>
+        <comment>RDR-229 P3.5b form A (nexus-p2m1x.24): CONTINUE-gated on every stamp label being complete as CompletionCheck counts it (the gate is described in the file header), so it is skipped unrecorded and retried at every boot until then. nexus.collection_doc_counts groups the live documents by physical_collection_id and reports the registry's label of that id as physical_collection (a join on catalog_collections, whose name is the label and is not dropped), so the view reads no document name column and survives P4.1's DROP COLUMN ... CASCADE. Same columns, names, types and order (tenant_id text, physical_collection text, doc_count bigint); one row per label as before. A document with no collection id (the old '' name) is no collection and is not counted. Replaces the view of catalog-019-tombstone-aware-read-views.xml, changeset catalog-019-2 (line 110), the last definer; its option and its grant are kept. DATA EFFECT: none, a view definition only.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE OR REPLACE VIEW nexus.collection_doc_counts
     WITH (security_invoker = true)
@@ -924,9 +1201,34 @@ SELECT d.tenant_id,
 
     <changeSet id="vectors-078-14" author="nexus-p2m1x.24">
         <preConditions onFail="CONTINUE" onError="CONTINUE">
-            <sqlCheck expectedResult="0">SELECT (SELECT count(*) FROM nexus.data_moves m WHERE m.label LIKE 'rdr229-stamp-%' AND m.completed_at IS NULL AND NOT EXISTS (SELECT 1 FROM nexus.data_moves s WHERE s.supersedes = m.label) AND NOT (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL)) + (CASE WHEN EXISTS (SELECT 1 FROM nexus.data_moves WHERE label LIKE 'rdr229-stamp-%') THEN 0 ELSE 1 END)</sqlCheck>
+            <sqlCheck expectedResult="0">WITH RECURSIVE done(label) AS (
+                SELECT m.label FROM nexus.data_moves m
+                 WHERE m.label LIKE 'rdr229-stamp-%'
+                   AND (m.completed_at IS NOT NULL
+                        OR (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL))
+                UNION
+                SELECT s.supersedes FROM nexus.data_moves s JOIN done d ON d.label = s.label WHERE s.supersedes IS NOT NULL
+            )
+            SELECT count(*)
+              FROM (VALUES ('catalog_collections_superseded_by_id_check'), ('chunks_collection_id_check'), ('chunks_collection_id_not_null'), ('taxonomy_centroids_collection_id_check'), ('taxonomy_centroids_collection_id_not_null'), ('catalog_document_chunks_collection_id_check'), ('chunk_orphaned_at_collection_id_check'), ('topic_assignments_source_collection_id_check'), ('document_aspects_collection_id_check'), ('topics_collection_id_check'), ('taxonomy_meta_collection_id_check'), ('document_highlights_collection_id_check'), ('canary_query_ring_collection_id_check'), ('aspect_extraction_queue_collection_id_check'), ('catalog_documents_physical_collection_id_check'), ('chash_remap_source_collection_id_check'), ('chash_remap_target_collection_id_check'), ('pdf_pipeline_collection_id_check'), ('reembed_jobs_source_collection_id_check'), ('reembed_jobs_target_collection_id_check')) AS e(conname)
+              LEFT JOIN (pg_catalog.pg_constraint c
+                         JOIN pg_catalog.pg_class r ON r.oid = c.conrelid AND NOT r.relispartition
+                         JOIN pg_catalog.pg_namespace n ON n.oid = r.relnamespace AND n.nspname = 'nexus')
+                ON c.conname = e.conname AND c.contype = 'c'
+             WHERE (c.oid IS NULL OR NOT c.convalidated
+                    OR NOT EXISTS (SELECT 1 FROM done d WHERE d.label = 'rdr229-stamp-' || r.relname))
+               AND NOT (e.conname = 'aspect_extraction_queue_collection_id_check'
+                        AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
+                                          JOIN pg_catalog.pg_class qc ON qc.oid = a.attrelid AND qc.relkind IN ('r', 'p')
+                                          JOIN pg_catalog.pg_namespace qn ON qn.oid = qc.relnamespace AND qn.nspname = 'nexus'
+                                         WHERE qc.relname = 'aspect_extraction_queue' AND a.attname = 'collection_id' AND NOT a.attisdropped)
+                        AND CASE WHEN EXISTS (SELECT 1 FROM done d WHERE d.label = 'rdr229-stamp-aspect_extraction_queue')
+                                 THEN to_regclass('nexus.aspect_extraction_queue') IS NULL
+                                 ELSE NOT EXISTS (SELECT 1 FROM nexus.data_moves q WHERE q.label = 'rdr229-stamp-aspect_extraction_queue' AND q.failed_at IS NULL)
+                            END)
+        </sqlCheck>
         </preConditions>
-        <comment>RDR-229 P3.5b form A (nexus-p2m1x.24): CONTINUE-gated on every rdr229-stamp-* move having completed_at set (a move superseded by a -rerun-N row defers to it; a failed move whose driving table is gone counts complete; no stamp row at all keeps waiting), so it is skipped unrecorded and retried at every boot until then. nexus.collection_health_meta groups the live documents by physical_collection_id and reports the registry's label of that id as collection (a join on catalog_collections), so the view reads no document name column and survives P4.1's DROP COLUMN ... CASCADE. Same columns, names, types and order (tenant_id, collection, last_indexed, orphan_count, stale_source_ratio); one row per label as before. A document with no collection id (the old '' name) is no collection and has no row. Replaces the view of catalog-031-type-hygiene.xml, changeset catalog-031-1-documents-temporal (line 120), the last definer; its option and its grant are kept. DATA EFFECT: none, a view definition only.</comment>
+        <comment>RDR-229 P3.5b form A (nexus-p2m1x.24): CONTINUE-gated on every stamp label being complete as CompletionCheck counts it (the gate is described in the file header), so it is skipped unrecorded and retried at every boot until then. nexus.collection_health_meta groups the live documents by physical_collection_id and reports the registry's label of that id as collection (a join on catalog_collections), so the view reads no document name column and survives P4.1's DROP COLUMN ... CASCADE. Same columns, names, types and order (tenant_id, collection, last_indexed, orphan_count, stale_source_ratio); one row per label as before. A document with no collection id (the old '' name) is no collection and has no row. Replaces the view of catalog-031-type-hygiene.xml, changeset catalog-031-1-documents-temporal (line 120), the last definer; its option and its grant are kept. DATA EFFECT: none, a view definition only.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE OR REPLACE VIEW nexus.collection_health_meta
     WITH (security_invoker = true)
@@ -978,9 +1280,34 @@ SELECT d.tenant_id,
 
     <changeSet id="vectors-078-15" author="nexus-p2m1x.24">
         <preConditions onFail="CONTINUE" onError="CONTINUE">
-            <sqlCheck expectedResult="0">SELECT (SELECT count(*) FROM nexus.data_moves m WHERE m.label LIKE 'rdr229-stamp-%' AND m.completed_at IS NULL AND NOT EXISTS (SELECT 1 FROM nexus.data_moves s WHERE s.supersedes = m.label) AND NOT (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL)) + (CASE WHEN EXISTS (SELECT 1 FROM nexus.data_moves WHERE label LIKE 'rdr229-stamp-%') THEN 0 ELSE 1 END)</sqlCheck>
+            <sqlCheck expectedResult="0">WITH RECURSIVE done(label) AS (
+                SELECT m.label FROM nexus.data_moves m
+                 WHERE m.label LIKE 'rdr229-stamp-%'
+                   AND (m.completed_at IS NOT NULL
+                        OR (m.failed_at IS NOT NULL AND to_regclass(quote_ident(m.driving_schema) || '.' || quote_ident(m.driving_table)) IS NULL))
+                UNION
+                SELECT s.supersedes FROM nexus.data_moves s JOIN done d ON d.label = s.label WHERE s.supersedes IS NOT NULL
+            )
+            SELECT count(*)
+              FROM (VALUES ('catalog_collections_superseded_by_id_check'), ('chunks_collection_id_check'), ('chunks_collection_id_not_null'), ('taxonomy_centroids_collection_id_check'), ('taxonomy_centroids_collection_id_not_null'), ('catalog_document_chunks_collection_id_check'), ('chunk_orphaned_at_collection_id_check'), ('topic_assignments_source_collection_id_check'), ('document_aspects_collection_id_check'), ('topics_collection_id_check'), ('taxonomy_meta_collection_id_check'), ('document_highlights_collection_id_check'), ('canary_query_ring_collection_id_check'), ('aspect_extraction_queue_collection_id_check'), ('catalog_documents_physical_collection_id_check'), ('chash_remap_source_collection_id_check'), ('chash_remap_target_collection_id_check'), ('pdf_pipeline_collection_id_check'), ('reembed_jobs_source_collection_id_check'), ('reembed_jobs_target_collection_id_check')) AS e(conname)
+              LEFT JOIN (pg_catalog.pg_constraint c
+                         JOIN pg_catalog.pg_class r ON r.oid = c.conrelid AND NOT r.relispartition
+                         JOIN pg_catalog.pg_namespace n ON n.oid = r.relnamespace AND n.nspname = 'nexus')
+                ON c.conname = e.conname AND c.contype = 'c'
+             WHERE (c.oid IS NULL OR NOT c.convalidated
+                    OR NOT EXISTS (SELECT 1 FROM done d WHERE d.label = 'rdr229-stamp-' || r.relname))
+               AND NOT (e.conname = 'aspect_extraction_queue_collection_id_check'
+                        AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
+                                          JOIN pg_catalog.pg_class qc ON qc.oid = a.attrelid AND qc.relkind IN ('r', 'p')
+                                          JOIN pg_catalog.pg_namespace qn ON qn.oid = qc.relnamespace AND qn.nspname = 'nexus'
+                                         WHERE qc.relname = 'aspect_extraction_queue' AND a.attname = 'collection_id' AND NOT a.attisdropped)
+                        AND CASE WHEN EXISTS (SELECT 1 FROM done d WHERE d.label = 'rdr229-stamp-aspect_extraction_queue')
+                                 THEN to_regclass('nexus.aspect_extraction_queue') IS NULL
+                                 ELSE NOT EXISTS (SELECT 1 FROM nexus.data_moves q WHERE q.label = 'rdr229-stamp-aspect_extraction_queue' AND q.failed_at IS NULL)
+                            END)
+        </sqlCheck>
         </preConditions>
-        <comment>RDR-229 P3.5b form A (nexus-p2m1x.24): CONTINUE-gated on every rdr229-stamp-* move having completed_at set (a move superseded by a -rerun-N row defers to it; a failed move whose driving table is gone counts complete; no stamp row at all keeps waiting), so it is skipped unrecorded and retried at every boot until then. nexus.topics_with_counts reports the registry's label of the topic's collection_id as collection (a left join on catalog_collections, '' where the topic has no collection, as its name column read), so the view reads no topics name column and survives P4.1's DROP COLUMN ... CASCADE. Same columns, names, types and order. Replaces the view of catalog-009-read-shape-views.xml, changeset catalog-009-5 (line 138), the last definer; its option and its grant are kept. DATA EFFECT: none, a view definition only.</comment>
+        <comment>RDR-229 P3.5b form A (nexus-p2m1x.24): CONTINUE-gated on every stamp label being complete as CompletionCheck counts it (the gate is described in the file header), so it is skipped unrecorded and retried at every boot until then. nexus.topics_with_counts reports the registry's label of the topic's collection_id as collection (a left join on catalog_collections, '' where the topic has no collection, as its name column read), so the view reads no topics name column and survives P4.1's DROP COLUMN ... CASCADE. Same columns, names, types and order. Replaces the view of catalog-009-read-shape-views.xml, changeset catalog-009-5 (line 138), the last definer; its option and its grant are kept. DATA EFFECT: none, a view definition only.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE OR REPLACE VIEW nexus.topics_with_counts
     WITH (security_invoker = true)
