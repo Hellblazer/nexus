@@ -1247,8 +1247,11 @@ while the engine serves:
   PostgreSQL checks a `NOT VALID` constraint on every inserted and every
   updated row. So an insert without the id fails at once, and so does an
   update of a row the stamp has not reached unless it sets the id. The
-  writers are 109 engine Java write sites (jOOQ and raw SQL) and 26 live
-  SQL functions across the tables that gain the column. Insert and update
+  writers are 109 engine Java write sites (jOOQ and raw SQL) and 25 live
+  SQL functions across the tables that gain the column (the distinct
+  functions of the `sql_function` rows of
+  `service/src/test/resources/rdr229/p31-writer-census.tsv`; the earlier
+  hand census of T2 `229-research-41` counted 26; T2 `229-research-324`). Insert and update
   paths both count, among them the chunk movers (`gc_quarantine_orphans`,
   `gc_restore_rereferenced`, `quarantine_restore_chunks`,
   `reaper_quarantine_chunks`), rename and re-home, `catalog_reconcile_commit`
@@ -2324,7 +2327,7 @@ every script and note URI that names one.
   once (inferred, not read: PostgreSQL checks every new row version), so a
   missed writer is a write failure after P3.1's cut, not a null found at the
   switch. **Mitigation**: P3.1 works from the writer census (109 Java write
-  sites, 26 SQL functions; T2 `229-research-41`) and tests each path, and a
+  sites, 25 SQL functions; `p31-writer-census.tsv`, T2 `229-research-41`, `229-research-324`) and tests each path, and a
   census test counts null ids per table before each switch. That census
   test runs on fixtures. The guard on a user's install is that its readers
   switch only once its own stamp moves have `completed_at` set (item 6,
@@ -2755,7 +2758,7 @@ its acceptance is that test green plus the census pin it lowers.
   P4.1 drops the name key (item 6). The 20 CHECKs carry stable names from
   one list, `p31-checks.tsv`, which the operator down-step and re-add SQL
   are generated from (`docs/runbooks/rdr-229-p31-rollback.md`; Risks). Every
-  writer (item 6's census: 109 Java write sites, 26 SQL functions) sets the
+  writer (item 6's census: 109 Java write sites, 25 SQL functions) sets the
   id on insert and update from this cut. The 24 SQL functions that write a
   guarded table are redefined by changeset (`vectors-069`) to set it from the
   registry in their own statement. The client registers a collection before
@@ -3206,15 +3209,18 @@ its acceptance is that test green plus the census pin it lowers.
   The `vectors-079` trigger
   that sets a child row's name from its chunk goes with the name columns,
   and the two `chunk_orphaned_at` stamp triggers switch to the id twin
-  (comments 17:55 and 18:13; T2 `229-research-110`). Before any name
-  column drops, one step redefines the SQL functions that survive P4.1
+  (comments 17:55 and 18:13; T2 `229-research-110`). P4.1's first
+  changeset, CONTINUE-gated, redefines the SQL functions that survive P4.1
   and still read or write a name column, so they read and write by the id:
   the rows of `service/src/test/resources/rdr229/p35b-reader-dispositions.tsv`
   whose disposition is `writer-kept` or `unchanged-fallback`, and the
   `sql_function` rows of `service/src/test/resources/rdr229/p31-writer-census.tsv`
   (P3.1's SQL writers, `canary_query_ring_upsert` among them). The list is
   read from those two files, not written out by name, so it cannot drift
-  from them (linda 2026-11-24; T2 `229-research-323`). Then the name columns
+  from them. P4.1's drop move does not register until that changeset is
+  recorded as applied, so no name column drops, in the move's `on_complete`
+  or in a changeset, before the survivors are redefined (linda 2026-11-24;
+  T2 `229-research-323`, `229-research-324`). Then the name columns
   on referencing tables are dropped (the name primary keys of the chunks and
   centroids went in the swap above). Then,
   in the registry changeset, `superseded_by` (replaced by
@@ -3268,8 +3274,8 @@ its acceptance is that test green plus the census pin it lowers.
   table it is refused outright, by the CONTINUE-precondition lint, and the
   step belongs in a move's `on_complete`" (RDR-246 lines 986-992). That
   `on_complete` also removes the name arm of P3.5b's both-shapes readers.
-  The boot-time completion check registers that move once gate 3 holds,
-  so the move never exists before the moves it depends on have
+  The boot-time completion check registers that move once gate 3 holds
+  and P4.1's first changeset is recorded as applied (above), so the move never exists before the moves it depends on have
   completed, and its verification only checks its own table (T2
   `229-research-52`). On every other table the dropping changeset carries
   CONTINUE preconditions on that table's own stamp move's `completed_at`,
@@ -3889,3 +3895,4 @@ large, and moved under a ratchet.
 - 2026-11-23: P3.5a's gc routes and re-home folded from the stacked code (grant 3, nexus-p2m1x.23): the gc routes' order (the sweep gate in Java where the route takes one, the registry rows FOR KEY SHARE with no lock timeout, the SQL function with the current labels), the 25 s registry-read bound on a route that sets none, `rename_busy`'s three sources, `quarantine_restore_busy` and, on the keyed quarantine and bounded expire forms, `sweep_gate_busy`, the client's same-key resend, `registry_wait_slow`, and the re-home as a writer that sets the moved rows' id and label itself (T2 `229-research-321`).
 - 2026-11-24: linda's three design rulings written (Sam, option 1 on ask `rdr229-p41-p40-p35-rulings`; gaps from fix check `229-fix-check-dd7a970c71`; T2 `229-research-322`): P4.1 drops the 38 `name-kept` functions in the step that drops the name columns, with a `pg_proc` body test that also fails on zero functions examined; P4.0 owns the restart request, in `rdr229_completion` and not `boot_work`, matching item 6; P3.5's Test says gate 3 on a half-stamped store latches only after the boot that applies `vectors-078-8` (bead nexus-p2m1x.48).
 - 2026-11-24: linda's follow-up rulings D1 to D3 on P4.1 written (Sam, "proceed" on ask `rdr229-p41-d1-d3`; gaps from fix check `229-fix-check-92fbbaa966`; T2 `229-research-323`): the 38 `name-kept` drops and `hybrid_search_<dim>` go in the registry changeset, dependents redefined to their `_by_id` twins first and the originals dropped with RESTRICT; a step before the column drops redefines the `writer-kept` and `unchanged-fallback` functions and P3.1's SQL writers by the id, listed from the two tsv files; the `pg_proc` test matches columns on the drop list, leaves out the history name columns, counts `superseded_by` only after its changeset, requires every surviving function examined, and runs after P4.1's last changeset.
+- 2026-11-24: P4.1's redefinition step pinned (linda, under the same ask): it is P4.1's first changeset, CONTINUE-gated, and P4.1's drop move registers only once that changeset is recorded, so no name column drops before the survivors are redefined; the P3.1 SQL writer count corrected from 26 to 25 at its three sites, from `p31-writer-census.tsv` (T2 `229-research-324`).
