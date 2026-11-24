@@ -51,7 +51,7 @@ Host-load discipline: each container is capped (`--cpus=2 --memory=3g
 | base apt + uv | `UV_VERSION` build ARG | uv bump (rare) |
 | PG bundle | `PINNED_SERVICE_TAG` build ARG (+ optional `PG_BUNDLE_SHA256` assert; actual sha recorded at `/opt/nexus-pg/bundle.sha256`) | engine floor bump (`REQUIRED_ENGINE_VERSION`) |
 | bge-768 ONNX (engine boot requires it) | `BGE_ASSET_TAG` + `BGE_MODEL_SHA256` + `BGE_TOKENIZER_SHA256` ARGs (pins mirror `src/nexus/db/service_bge_model.py`) | model re-export (effectively never) |
-| MiniLM ONNX | `MINILM_SHA256` ARG (verified against the chroma-S3 tarball; same constant as `src/nexus/db/minilm_direct.py`) | effectively never |
+| MiniLM ONNX | `MINILM_SHA256` ARG (verified against the MiniLM archive's SHA-256; same constant as `src/nexus/db/minilm_direct.py`, whose cache directory still carries the old `chroma` path name; chromadb itself is gone, RDR-155 P4b) | effectively never |
 | CPython | `PY_VERSION` ARG | rare |
 | dependency layer | content hash of `pyproject.toml` + `uv.lock` (implicit via COPY) | lock refresh |
 | source + project | content of `src/ tests/ scripts/ docs/ ...` | every edit (cheap — wheels already cached) |
@@ -69,7 +69,7 @@ the runtime path works in-container (it is the same product seam), but every
 fresh container would re-download ~100 MB and re-extract; baking moves that
 to one keyed image layer. `NEXUS_PG_BIN` is discovery leg 1, so the baked
 bundle short-circuits the network leg entirely. Same argument for the MiniLM
-tarball (chroma re-downloads on archive-hash miss).
+archive (the MiniLM loader re-downloads on an archive-hash miss).
 
 ## In-container contract notes
 
@@ -124,8 +124,8 @@ cache keys are the REHEARSAL inputs rather than the working tree:
 | seeded corpus (optional) | content hash of a fixture tarball |
 
 A rehearsal container then runs the migration under test:
-`pip install <candidate wheel>` (mounted from `dist/`) + `nx guided-upgrade`
-against the baked prev-state, turning the 20-30 min
+`pip install <candidate wheel>` (mounted from `dist/`) + `nx upgrade`
+against the baked prev-state (`nx guided-upgrade` is deleted; this leg is a design sketch), turning the 20-30 min
 `tests/e2e/migration-rehearsal/run.sh` cold-start into minutes, and
 `--from-version` legs become concurrent `docker run`s of different rehearsal
 images (`nexus-rehearsal:<prev>-<prev-engine>`). Rotation policy stays what
