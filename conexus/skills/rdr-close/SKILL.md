@@ -193,13 +193,13 @@ The main RDR is already in its `rdr__` collection from `nx index repo`, drafts i
 
 Per the collection rules (https://github.com/Hellblazer/nexus/blob/main/docs/collections.md), Rule 1, a knowledge collection is a subject area, never an owner id. The post-mortem's target is the bare subject `{repo}-rdr-research` (per Rule 3, never the four-segment form — `store_put` renders and, on first write, mints it), with `category="rdr_postmortem"` stamped on the chunk metadata so it is queryable as a distinct slice without needing its own collection.
 
-**Correction (2026-09-23, nexus-vupim).** This step used to resolve the target via `nx catalog collection-name --content-type knowledge`, which renders the OWNER-ID-shaped name for the repo's own tumbler (e.g. `knowledge__1-7__...`) — exactly the non-subject shape Rule 1 forbids, and a name a curator-owned document (post-mortems are catalog-owned by the knowledge curator, not the repo) has no business landing in. Three post-mortems archived that way before the fix landed in `knowledge__1-1__...` on the nexus repo itself; see nexus-vupim for the re-home record.
+**Correction (nexus-vupim).** This step once resolved the target with `nx catalog collection-name --content-type knowledge`, which renders the OWNER-ID-shaped name for the repo's own tumbler (`knowledge__1-7__...`), the shape Rule 1 forbids; post-mortems belong to the knowledge curator, not the repo.
 
-Check for an existing subject before writing (Rule 2, reuse before create):
+Check for an existing subject before writing (Rule 2, reuse before create). A new subject's collection is labelled `c<id>` by the engine, so it is found by its CONTENT_TYPE and OWNER columns (OWNER is the subject), not by its name; a live collection named `knowledge__<subject>__...` counts too, and a retired one does not:
 ```bash
-nx collection list | grep "{repo}-rdr-research"
+nx collection list | awk -v s="{repo}-rdr-research" '$1=="NAME"{for(i=1;i<=NF;i++){if($i=="CONTENT_TYPE")t=i;if($i=="OWNER")o=i};next} /superseded->/{next} {split($1,p,"__")} (t&&o&&$t=="knowledge"&&$o==s)||(p[1]=="knowledge"&&p[2]==s){print $1}'
 ```
-If it exists, reuse it — pass its bare subject name to `store_put` below regardless; the catalog resolves the rest.
+It prints the collection's name, or nothing when the subject has none. If it prints one, reuse it — pass its bare subject name to `store_put` below regardless; the catalog resolves the rest. If it prints nothing and the legacy `knowledge__rdr_postmortem__<repo>` collection exists, run the one-time migration below BEFORE the first `store_put`.
 
 Seed link-context so the post-mortem auto-links to the RDR:
 ```
@@ -224,24 +224,7 @@ mcp__plugin_conexus_nexus__search(query="...", corpus="knowledge__{repo}-rdr-res
 
 #### One-time migration (the legacy `knowledge__rdr_postmortem__<repo>` collection)
 
-Rename that collection onto the subject BEFORE the first `store_put` to `{repo}-rdr-research`: `nx catalog rename-collection` refuses a target that exists, and a first `store_put` on a new subject mints a `c<id>` label, leaving no conformant name to rename onto. The target is the subject's four-segment name with the legacy collection's own model (a rename never re-embeds):
-
-```bash
-OLD="knowledge__rdr_postmortem__<repo>"
-# the subject must have no collection yet
-nx collection list | awk -v s="{repo}-rdr-research" '{split($1,p,"__")} p[1]=="knowledge" && p[2]==s && $0 !~ /superseded->/ {f=1} END{exit f}' \
-  || { echo "{repo}-rdr-research already has a collection: skip" >&2; exit 1; }
-# the legacy collection's model, by the MODEL header
-MODEL=$(nx collection list | awk -v o="$OLD" '$1=="NAME"{for(i=1;i<=NF;i++) if($i=="MODEL") c=i; next} $1==o && c {print $c; exit}')
-[ -n "$MODEL" ] && [ "$MODEL" != "-" ] || { echo "no registered model for $OLD: skip" >&2; exit 1; }
-nx catalog rename-collection "$OLD" "knowledge__{repo}-rdr-research__${MODEL}__v1" --yes
-```
-
-`nx collection list` has no `--json` form, so the filters read NAME (first word) and the MODEL header, never a column position. Afterwards the bare subject resolves to this collection for `store_put` and `search(corpus="knowledge__{repo}-rdr-research")`, but only when `MODEL` is the model this install writes knowledge in today; otherwise a later `store_put` mints a second collection.
-
-**Skip** (legacy post-mortems stay findable by their old collection and tags: `search(corpus="knowledge__rdr_postmortem__<repo>")`) when the subject already has a collection, when `MODEL` is not your current knowledge model, or when the post-mortems sit in an owner-id-shaped `knowledge__<owner-id>__...` collection that holds other knowledge too. Not `nx catalog migrate-fallback`: it re-points documents onto owner-id-shaped targets and does not move chunks.
-
-Renamed chunks lack `category="rdr_postmortem"`; they stay findable by their `tags="rdr,post-mortem,..."`. To add the category, re-run `store_put` with it against the subject, overwriting by title.
+Rename it onto the subject BEFORE the first `store_put` to `{repo}-rdr-research`; the steps, the guard and the skip cases are in [migration.md](migration.md), loaded when the legacy collection exists.
 
 ## Flow: Reverted or Abandoned
 
