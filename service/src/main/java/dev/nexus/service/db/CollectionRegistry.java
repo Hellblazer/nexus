@@ -744,6 +744,33 @@ public final class CollectionRegistry {
         return scope.withTenant(tenant, ctx -> resolveId(ctx, tenant, collectionId));
     }
 
+    /**
+     * The row each of {@code labels} resolves to, in ONE read (RDR-229 R7's retired-label guard): the live row of a label first, else its
+     * newest tombstone ({@link #labelResolutionOrder}, as {@link #resolveLabel} picks one), tenant-filtered by the caller's transaction and
+     * by this statement. A label no row has is absent from the map. A plain read: no lock, nothing cached.
+     */
+    public Map<String, CollectionRow> readLabels(DSLContext ctx, String tenant, java.util.Collection<String> labels) {
+        if (labels.isEmpty()) {
+            return Map.of();
+        }
+        Field<Integer> modelDimension = EMBEDDING_MODELS.DIMENSION.as("model_dimension");
+        Map<String, CollectionRow> out = new java.util.LinkedHashMap<>();
+        ctx.select(
+                CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.COLLECTION_ID,
+                CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.DIMENSION,
+                CATALOG_COLLECTIONS.LIFECYCLE_STATE, modelDimension,
+                CATALOG_COLLECTIONS.SUPERSEDED_BY)
+            .from(CATALOG_COLLECTIONS)
+            .leftJoin(EMBEDDING_MODELS)
+                .on(EMBEDDING_MODELS.EMBEDDING_MODEL.eq(CATALOG_COLLECTIONS.EMBEDDING_MODEL))
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.in(labels)))
+            .orderBy(labelResolutionOrder())
+            .fetch(r -> rowOf(r, modelDimension, tenant))
+            .forEach(row -> out.putIfAbsent(row.label(), row));   // the first row of a label in resolution order is its row
+        return out;
+    }
+
     /** The cached row of {@code label}, if any; never touches the database. */
     public Optional<CollectionRow> cachedByLabel(String tenant, String label) {
         return Optional.ofNullable(known.get(key(tenant, label)));
