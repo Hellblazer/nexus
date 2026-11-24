@@ -32,6 +32,9 @@ OWN = ("db/changelog/vectors-077-rdr229-p35b-readers-both.xml", "db/changelog/ve
 # Changelogs after P3.5b that redefine objects P3.5b redefined (vectors-083, RDR-229 P3.7, nexus-p2m1x.27): not "before P3.5b", so they are not a last
 # definer here. Their own rollbacks restore the vectors-077 text, which this test does not judge.
 LATER = ("db/changelog/vectors-083-restore-by-origin-id.xml",)
+# vectors-084 ADDS overloads (nexus.taxonomy_ann_query_<dim> with a trailing p_collection_id bigint) and redefines nothing: it is not a
+# definer of the object the 078 rollbacks restore, and its own rollback drops exactly the overload it added.
+OVERLOADS = ("db/changelog/vectors-084-rdr229-ann-query-by-id.xml",)
 _OBJ = re.compile(r"CREATE\s+(?:OR\s+REPLACE\s+)?(FUNCTION|VIEW|TRIGGER)\s+(?:IF\s+NOT\s+EXISTS\s+)?((?:nexus\.)?\w+)", re.I)
 _DOLLAR = re.compile(r"\$[A-Za-z_]*\$")
 
@@ -81,7 +84,7 @@ def check(res: Path = _RES, overrides: dict[str, str] | None = None) -> tuple[in
     master = re.sub(r"<!--.*?-->", "", read("db/changelog/db.changelog-master.xml") or "", flags=re.S)
     last: dict[str, str] = {}
     for inc in re.findall(r'<include\s+file="([^"]+)"', master):
-        if inc in OWN or inc in LATER:
+        if inc in OWN or inc in LATER or inc in OVERLOADS:
             continue
         text = read(inc)
         if text is not None:
@@ -153,3 +156,34 @@ def test_a_no_op_changeset_and_a_twin_that_drops_the_wrong_function_are_caught()
     _, problems, _ = check(overrides={OWN[0]: noop, OWN[1]: "<databaseChangeLog/>"})
     assert any(p.startswith("x-1:") and "no-op" in p for p in problems), problems
     assert any(p.startswith("x-2:") and "drops h_by_id" in p for p in problems), problems
+
+
+def check_overloads(res: Path = _RES) -> tuple[int, list[str]]:
+    """(overloads checked, problems): each changeset of an overload file creates functions and its rollback drops those, by the
+    signature that carries the added trailing bigint, and creates nothing."""
+    checked, problems = 0, []
+    for inc in OVERLOADS:
+        text = re.sub(r"<!--.*?-->", "", (res / inc).read_text(), flags=re.S)
+        for cs in re.finditer(r'(?s)<changeSet id="([^"]+)".*?</changeSet>', text):
+            cid, body = cs.group(1), cs.group(0)
+            parts = body.split("<rollback>")
+            if len(parts) != 2:
+                problems.append(f"{cid}: {len(parts) - 1} <rollback> blocks")
+                continue
+            made = [m.group(1).lower() for m in re.finditer(r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+nexus\.(\w+)", parts[0], re.I)]
+            rb = html.unescape(parts[1].split("</rollback>")[0])
+            dropped = [m.group(1).lower() for m in re.finditer(
+                r"DROP\s+FUNCTION\s+IF\s+EXISTS\s+nexus\.(\w+)\s*\([^)]*,\s*bigint\s*\)", rb, re.I)]
+            if not made or made != dropped:
+                problems.append(f"{cid}: creates {made}, its rollback drops {dropped}")
+            elif re.search(r"\bCREATE\b", rb, re.I):
+                problems.append(f"{cid}: its rollback creates something; it must only drop the overload")
+            else:
+                checked += len(made)
+    return checked, problems
+
+
+def test_every_overload_rollback_drops_only_the_overload():
+    checked, problems = check_overloads()
+    assert checked == 3, f"non-vacuity: {checked} overloads checked, vectors-084 adds three"
+    assert not problems, "\n".join(problems)

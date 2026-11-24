@@ -139,9 +139,17 @@ class CrossPreviewDriftTest {
     }
 
     private String prosrc(String functionName) throws Exception {
+        return prosrc(functionName, -1);
+    }
+
+    /** The source of the overload with {@code arguments} arguments ({@code -1}: the one overload there is). */
+    private String prosrc(String functionName, int arguments) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            var found = PgCatalogProbes.routineConfigAndSource(DSL.using(su, SQLDialect.POSTGRES), "nexus", functionName);
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            var found = arguments < 0
+                ? PgCatalogProbes.routineConfigAndSource(ctx, "nexus", functionName)
+                : PgCatalogProbes.routineConfigAndSource(ctx, "nexus", functionName, arguments);
             assertThat(found).as(functionName + " must exist").isNotNull();
             return found.prosrc();
         }
@@ -181,11 +189,13 @@ class CrossPreviewDriftTest {
     @Test
     void allNineCrossPassFunctions_excludeSupersededCollections() throws Exception {
         int checked = 0;
+        int byId = 0;
         java.util.Map<Integer, String> annP35bChangeset = java.util.Map.of(384, "vectors-078-9", 768, "vectors-078-10", 1024, "vectors-078-11");
         for (int dim : new int[] {384, 768, 1024}) {
             for (String fn : new String[] {"assign_from_chashes_", "cross_preview_", "taxonomy_ann_query_"}) {
-                String src = normalizeWhitespace(prosrc(fn + dim));
                 boolean ann = fn.startsWith("taxonomy_ann_query");
+                // vectors-084 adds a seven-argument overload of the ann function beside the six-argument text one
+                String src = normalizeWhitespace(ann ? prosrc(fn + dim, 6) : prosrc(fn + dim));
                 if (ann && recorded(annP35bChangeset.get(dim))) {
                     assertThat(src)
                         .as("%s%d (vectors-078, id form) must leave out the centroids of a collection whose registry row"
@@ -214,7 +224,22 @@ class CrossPreviewDriftTest {
                 }
                 checked++;
             }
+            // vectors-084: the by-id overload, once recorded, filters on the id parameter and excludes superseded targets as the text one does
+            String byIdChangeset = "vectors-084-" + (dim == 384 ? 1 : dim == 768 ? 2 : 3);
+            if (recorded(byIdChangeset)) {
+                assertThat(normalizeWhitespace(prosrc("taxonomy_ann_query_" + dim, 7)))
+                    .as("taxonomy_ann_query_%d by id (%s): the collection predicate is the parameter, not a registry subselect", dim, byIdChangeset)
+                    .contains("THEN collection_id IS DISTINCT FROM p_collection_id")
+                    .contains("ELSE collection_id = p_collection_id")
+                    .contains("AND NOT EXISTS ( SELECT 1 FROM nexus.catalog_collections cc")
+                    .contains("AND cc.collection_id = nexus.taxonomy_centroids.collection_id")
+                    .contains("AND cc.superseded_by_id IS NOT NULL)")
+                    .doesNotContain("rc.name").doesNotContain("<> ALL (ARRAY(");
+                byId++;
+            }
         }
+        assertThat(byId).as("non-vacuity: vectors-084's three overloads are checked exactly when vectors-078's form A bodies are recorded")
+            .isEqualTo(recorded("vectors-078-9") ? 3 : 0);
         assertThat(checked).as("non-vacuity: three dims by three functions").isEqualTo(9);
     }
 

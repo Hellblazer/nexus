@@ -43,6 +43,13 @@ public final class P35bContinueChangesets {
         }
     }
 
+    /** The changelog file (as the walk names it, {@code db/changelog/...}) of a listed id: vectors-084's three, else vectors-078's. */
+    public static String file(String id) {
+        return id.startsWith("vectors-084-")
+            ? "db/changelog/vectors-084-rdr229-ann-query-by-id.xml"
+            : "db/changelog/vectors-078-rdr229-p35b-readers-continue.xml";
+    }
+
     /** Every changeset a fresh walk skips with onFail="CONTINUE": {@value #COLLECTIONS_WAIT} and the P3.5b list. */
     static Set<String> freshWalkSkips() {
         Set<String> skips = new LinkedHashSet<>();

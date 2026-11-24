@@ -184,7 +184,7 @@ class ChunkOrphanedAtIndexChangesetIntegrationTest {
             .anyMatch(l -> l.contains("collections-001-tuple-unique-index.xml::collections-001-2"));
         for (String id : P35bContinueChangesets.ids()) {
             assertThat(kept).as("the P3.5b CONTINUE reader " + id + " is a named member of the retrying set")
-                .anyMatch(l -> l.contains("vectors-078-rdr229-p35b-readers-continue.xml::" + id + " reason="));
+                .anyMatch(l -> l.contains(P35bContinueChangesets.file(id).substring("db/changelog/".length()) + "::" + id + " reason="));
         }
     }
 
