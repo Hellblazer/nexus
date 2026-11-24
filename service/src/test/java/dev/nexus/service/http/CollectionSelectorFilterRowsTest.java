@@ -82,6 +82,10 @@ class CollectionSelectorFilterRowsTest {
             @Override public Optional<CollectionSuccessor.Successor> successorOf(String tenant, long retiredId) {
                 return Optional.ofNullable(successors.get(retiredId));
             }
+
+            @Override public Optional<CollectionRow> byLabel(String tenant, String label) {
+                return byId.values().stream().filter(r -> r.label().equals(label)).findFirst();   // a stub label is held by one row
+            }
         };
         filter = new CollectionSelectorFilter(rows);
         filter.testHooks(null, null, null, reports::add);
@@ -205,6 +209,35 @@ class CollectionSelectorFilterRowsTest {
         assertThat(j.path("superseded_by").asText()).as("the key the client's superseded_write_error_from_body reads")
             .isEqualTo("successor-nine");
         assertThat(j.path("successor_collection_id").asLong()).isEqualTo(9);
+    }
+
+    // ---- R7: a read by LABEL of a retired row with no live successor ------------------------------------------------------------
+
+    @Test
+    void r7_aLabelOfARetiredRowWithNoSuccessorIsRefusedOnAReadRoute_andAWriteRouteAndOtherLabelsAreNot() throws Exception {
+        int before = handlerCalls;
+        Resp body = post("/v1/vectors/store-get", "{\"collection\":\"retired-eight\"}");
+        Resp query = get("/v1/taxonomy/topics?collection=" + enc("retired-eight"));
+        Resp list = post("/v1/vectors/search", "{\"collections\":[\"live-five\",\"retired-eight\"],\"query\":\"q\"}");
+        for (Resp r : new Resp[] {body, query, list}) {
+            assertThat(r.status()).as(r.body()).isEqualTo(409);
+            assertThat(r.json().path("reason").asText()).isEqualTo("collection_superseded");
+            assertThat(r.json().path("collection").asText()).isEqualTo("retired-eight");
+            assertThat(r.json().path("collection_id").asLong()).isEqualTo(8);
+            assertThat(r.json().has("superseded_by")).as(r.body()).isFalse();
+            assertThat(r.json().has("successor_collection_id")).isFalse();
+        }
+        assertThat(handlerCalls).as("the handler never ran").isEqualTo(before);
+
+        // not refused: a live label, a retired label WITH a live successor, a label no row has, a write route, a readable route
+        for (Resp r : new Resp[] {
+                post("/v1/vectors/store-get", "{\"collection\":\"live-five\"}"),
+                post("/v1/vectors/store-get", "{\"collection\":\"retired-seven\"}"),
+                post("/v1/vectors/store-get", "{\"collection\":\"nobody\"}"),
+                post("/v1/vectors/store-delete", "{\"collection\":\"retired-eight\"}"),
+                get("/v1/catalog/collections/get?name=retired-eight")}) {
+            assertThat(r.status()).as(r.body()).isEqualTo(200);
+        }
     }
 
     @Test
