@@ -155,12 +155,9 @@ public final class CollectionSelectorFilter extends Filter {
 
         /**
          * The row a LABEL resolves to (the live row, else the newest tombstone, as every label read resolves it), or empty when no row has
-         * it. Used for the read routes that refuse a retired collection ({@link RetiredLabelReadGuard}); a stub that never answers a row
-         * disables that refusal.
+         * it. The read routes that refuse a retired collection ask it ({@link RetiredLabelReadGuard}); every implementation answers it.
          */
-        default Optional<CollectionRow> byLabel(String tenant, String label) {
-            return Optional.empty();
-        }
+        Optional<CollectionRow> byLabel(String tenant, String label);
     }
 
     private final Rows rows;
