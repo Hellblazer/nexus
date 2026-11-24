@@ -330,3 +330,36 @@ GC_PROBES = {
     "POST /v1/vectors/gc/restore-rereferenced": ("route-gc-restore-rereferenced", GC_RESTORE_REREFERENCED, "restore-rereferenced refused"),
     "POST /v1/vectors/gc/expire-quarantine": ("route-gc-expire-quarantine", GC_EXPIRE_QUARANTINE, "expire-quarantine refused"),
 }
+
+#: RDR-229 rows 15 and 16 (nexus-p2m1x.22): the retiring verbs, asked by collection_id, read and lock that id in their own
+#: transaction. A retiring verb cannot be probed on a real collection, so each is asked about an id no tenant's row has: the
+#: route boundary answers 404 unknown_collection_id naming it, and nothing is read by label, retired or deleted. An engine
+#: without the id selector refuses the body for its missing label, with no such reason, and fails the probe.
+_RETIRING_BY_ID = r"""
+import httpx
+from nexus.commands.catalog import _get_catalog
+probe_id = 9_000_000_000_000_000_000   # below bigint's top, far above any id the registry's sequence hands out
+try:
+    _get_catalog()._post("@path@", {"collection_id": probe_id, @extra@}, idempotent=False)
+except httpx.HTTPStatusError as exc:
+    body = exc.response.text
+    assert exc.response.status_code == 404 and "unknown_collection_id" in body and str(probe_id) in body, (
+        f"@verb@ by an unregistered collection_id answered {exc.response.status_code}: {body[:200]}")
+    print("@verb@ by id refused 404 unknown_collection_id")
+else:
+    raise SystemExit("@verb@ accepted a collection_id no row has")
+"""
+
+
+def _retiring_probe(verb: str, path: str, extra: str) -> tuple[str, str, str]:
+    code = _RETIRING_BY_ID.replace("@path@", path).replace("@extra@", extra).replace("@verb@", verb)
+    return (f"route-collections-{verb}-by-id", code, f"{verb} by id refused 404 unknown_collection_id")
+
+
+RETIRING_BY_ID_PROBES: dict[str, tuple[str, str, str]] = {
+    "POST /v1/catalog/collections/supersede": _retiring_probe("supersede", "/collections/supersede",
+                                                              '"superseded_by": "@label@-supersede-probe"'),
+    "POST /v1/catalog/collections/rename": _retiring_probe("rename", "/collections/rename",
+                                                           '"new_name": "@label@-rename-probe"'),
+    "POST /v1/catalog/collections/delete": _retiring_probe("delete", "/collections/delete", ""),
+}
