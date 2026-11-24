@@ -209,6 +209,15 @@ class TaxonomyWritersRegistryReadTest {
      * waiting lock, runs {@code whileWaiting} (what must not have happened yet), lets the verb go, and returns the answer.
      */
     private Resp whileAVerbHolds(String heldCollection, String path, String body, Runnable whileWaiting) throws Exception {
+        return whileAVerbHolds(heldCollection, path, body, null, whileWaiting);
+    }
+
+    /**
+     * As above, and when {@code waitingStatement} is given (a SQL {@code ILIKE} pattern), the lock wait must be a backend whose statement matches
+     * it, not any lock wait: a write whose child rows wait in a foreign-key check on the held row would otherwise satisfy the test with no
+     * registry read of its own ({@link PgActivityProbe#waitsOnALock}).
+     */
+    private Resp whileAVerbHolds(String heldCollection, String path, String body, String waitingStatement, Runnable whileWaiting) throws Exception {
         Future<Resp> writer;
         try (Connection verb = fx.pg.createConnection("")) {
             verb.setAutoCommit(false);
@@ -216,6 +225,10 @@ class TaxonomyWritersRegistryReadTest {
             writer = pool.submit(() -> fx.post(path, body));
             try {
                 awaitWaiting(writer, path + " waits for the registry row the verb holds");
+                if (waitingStatement != null) {
+                    assertThat(PgActivityProbe.waitsOnALock(fx.pg, waitingStatement))
+                        .as("%s waits in a statement matching %s (done: %s)", path, waitingStatement, writer.isDone()).isTrue();
+                }
                 assertThat(writer.isDone()).as("the write has not finished while the verb holds the row").isFalse();
                 whileWaiting.run();
             } finally {
@@ -500,7 +513,9 @@ class TaxonomyWritersRegistryReadTest {
         String d = doc("mg-race");
         projection(source, d, 0.7, other);
 
+        // the wait must be the registry read (FOR KEY SHARE), not the foreign-key check on the moved row's source id, which also waits on the held row
         Resp r = whileAVerbHolds(other, "/v1/taxonomy/topics/merge", "{\"source_id\":" + source + ",\"target_id\":" + target + "}",
+            "%key share%catalog_collections%",
             () -> assertThat(assignmentCount(d, source)).as("the merge has moved nothing while it waits").isEqualTo(1));
 
         assertThat(r.status()).as(r.body()).isEqualTo(200);
