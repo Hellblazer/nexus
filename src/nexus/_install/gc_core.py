@@ -1,16 +1,20 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""Reap old generations. THE ONLY CODE IN THIS ARC THAT DELETES ANYTHING.
+"""Reap old generations. THE ONLY SWEEP IN THIS ARC: it decides what to delete.
 
 nexus-utpuw.6 (P2b). Everything else in ``_install/`` builds beside, points at,
-or reports on. Read the refusals before the logic.
+or reports on, with one exception that is not a sweep: a builder that fails
+removes the tree IT just built (``install_generation.sh``'s trap,
+``generation_core.build_generation``'s ``finally``, ``self_cmd``'s unflipped
+generation), which no process can be running from. Read the refusals before the
+logic.
 
 Stdlib-only and importing nothing from nexus, for the reason
 ``layout_core`` and ``census_core`` are: ``gc.sh`` dispatches here and is
 sourced by the installer, which runs with nothing installed. Pinned by
 ``tests/test_install_gc_core_is_bootstrap_safe.py``.
 
-FOUR NEVER-DELETE RULES
+FIVE NEVER-DELETE RULES
 
     (a) the generation ``current`` points at
     (b) the PREVIOUS current, which is rollback for free, recorded by .3
@@ -19,6 +23,13 @@ FOUR NEVER-DELETE RULES
         the installer is exec'd from its own generation. keep-last-N usually
         covers this; the plan is explicit that "usually" is not a rule, so it
         is passed in and checked.
+    (e) any generation whose LEASE a live interpreter holds (``lease_core``).
+        This covers what the census cannot see: a process started through
+        ``tools/current/...``, one that rewrote its title, one whose argv was
+        cut. Asked of the kernel, not of ``ps``; ORed with (c), never replacing it.
+        A generation with no lease file (built before leases) is judged by (c)
+        alone, as it always was. The lock is re-taken just before the delete and
+        held through it.
 
 They are ABSOLUTE, not tiebreaks: a held generation far outside keep-last-N is
 still retained.
@@ -71,6 +82,7 @@ GC_USAGE_EXIT = 64
 
 _LAYOUT: object | None = None
 _CENSUS: object | None = None
+_LEASE: object | None = None
 
 
 def _sibling(name: str):
@@ -130,6 +142,13 @@ def _census():
     if _CENSUS is None:
         _CENSUS = _sibling("census_core")
     return _CENSUS
+
+
+def _lease():
+    global _LEASE
+    if _LEASE is None:
+        _LEASE = _sibling("lease_core")
+    return _LEASE
 
 
 class GCError(Exception):
@@ -393,6 +412,7 @@ def plan(
     claim_minutes: int = DEFAULT_BUILD_CLAIM_MINUTES,
     platform: str | None = None,
     census_ok: bool | None = None,
+    lease_states: dict[str, str] | None = None,
 ) -> list[tuple[str, Path, str]]:
     """Decide what happens to every ``gen-*`` entry, deleting nothing.
 
@@ -401,6 +421,10 @@ def plan(
     window or protected by a pointer, which the shell half reports nothing
     about; ``keep`` is the two cases it prints a line for.
 
+    *lease_states*, when given, is filled with ``{str(entry): lease state}`` for
+    every entry rule (e) probed (only those that would otherwise be reaped), so
+    the caller can record what the lease said without a fourth tuple field.
+
     SEPARATED FROM THE DELETION ON PURPOSE. Every rule that decides a tree's
     fate is here, where a test can ask what the sweep WOULD do over any tree
     shape without a single ``rm`` running. ``--dry-run`` becomes "run the plan
@@ -408,7 +432,7 @@ def plan(
     against the first, which is the shape a dry run has to have to be worth
     trusting.
     """
-    layout, census = _layout(), _census()
+    layout, census, lease = _layout(), _census(), _lease()
     prefix, receipt = layout.GENERATION_PREFIX, layout.RECEIPT_NAME
     marker = layout.BUILDING_MARKER_NAME
 
@@ -488,6 +512,26 @@ def plan(
                         "held by " + " ".join(str(p) for p in holders)))
             continue
 
+        # (e) THE LEASE. Asked only now, of an entry that would otherwise be
+        # reaped: the probe takes the exclusive lock for a moment, and a
+        # starting interpreter that meets it retries (~20 ms), so it never runs
+        # on current, previous, the keep window or the running installer. The
+        # ledger pointer is no tree and carries none.
+        if not layout.is_link(entry, platform=platform):
+            state = lease.probe(entry, platform=platform)
+            if lease_states is not None:
+                lease_states[str(entry)] = state
+            kind = lease.state_kind(state)
+            if kind == lease.STATE_HELD:
+                out.append(("keep", entry, "leased: a live interpreter started from it holds its lease"))
+                continue
+            if kind == lease.STATE_ERROR:
+                out.append(("keep", entry,
+                            f"lease check failed ({state}); kept for this run, the census cannot vouch for it alone"))
+                continue
+            # free: reap, because (c) found no holder either. absent / unsupported:
+            # no lease to ask, so (c) is the whole answer, as it was before leases.
+
         out.append(("reap", entry, ""))
     return out
 
@@ -528,7 +572,35 @@ def _collecting_handler(failures: list[tuple[str, BaseException]]):
     return handler
 
 
-def _reap_windows_tree(path: Path) -> tuple[bool, str]:
+def _remove_all_but_lease(root: Path, lease_name: str, on_error) -> None:
+    """Delete everything under *root* except ``root/<lease_name>``, bottom-up,
+    reporting each failure to *on_error* (the ``_collecting_handler`` shape) and
+    carrying on. ``shutil.rmtree`` cannot skip one file: its final ``rmdir`` of
+    *root* would fail and read as "in use". A link (symlink or junction) is
+    removed as a link and never followed."""
+    for dirpath, dirnames, filenames in os.walk(
+        root, topdown=False, onerror=lambda exc: on_error(os.scandir, exc.filename, exc),
+    ):
+        for name in filenames:
+            if name == lease_name and Path(dirpath) == root:
+                continue
+            target = os.path.join(dirpath, name)
+            try:
+                os.unlink(target)
+            except OSError as exc:
+                on_error(os.unlink, target, exc)
+        for name in dirnames:
+            target = os.path.join(dirpath, name)
+            try:
+                if os.path.islink(target):
+                    os.unlink(target)
+                else:
+                    os.rmdir(target)
+            except OSError as exc:
+                on_error(os.rmdir, target, exc)
+
+
+def _reap_windows_tree(path: Path, hold=None) -> tuple[bool, str]:
     """Delete one generation directory on Windows. ``(gone, detail)``.
 
     Receipt first: with the completion marker gone the tree is not a
@@ -536,8 +608,37 @@ def _reap_windows_tree(path: Path) -> tuple[bool, str]:
     never be mistaken for a usable one. Then the tree, collecting failures. Any
     failure leaves the directory "kept (in use)" for the next run to retry; the
     caller says ``reaped`` only when the directory is actually gone.
+
+    With *hold* (the exclusive ``DELETE_ON_CLOSE`` handle on ``.nx-lease``, from
+    ``lease_core.acquire``) the lease file is the last thing standing: everything
+    else goes in a walk that skips it, then the handle is closed (the kernel
+    removes the lease file), then the directory. No interpreter can start from a
+    gutted tree in between, because starting one means opening the lease file at
+    share mode 0 against us. The handle is released on every path out.
     """
     layout = _layout()
+    if hold is not None:
+        failures: list[tuple[str, BaseException]] = []
+        handler = _collecting_handler(failures)
+        try:
+            try:
+                os.unlink(path / layout.RECEIPT_NAME)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                return False, f"could not remove the receipt ({exc})"
+            _remove_all_but_lease(path, _lease().LEASE_NAME, handler)
+        finally:
+            hold.release()
+        if not failures:
+            try:
+                os.rmdir(path)
+            except OSError as exc:
+                failures.append((str(path), exc))
+        if not path.exists():
+            return True, ""
+        first = failures[0] if failures else (str(path), "still present")
+        return False, f"could not remove {len(failures) or 1} item(s), first {first[0]}: {first[1]}"
     try:
         (path / layout.RECEIPT_NAME).unlink(missing_ok=True)
     except OSError as exc:
@@ -572,8 +673,12 @@ def _looks_like_venv(target: Path, nt: bool) -> bool:
     ).is_file()
 
 
-def _reap(entry: Path, emit_err, platform: str | None = None) -> list[str]:
+def _reap(entry: Path, emit_err, platform: str | None = None, hold=None) -> list[str]:
     """Delete one planned entry. Returns the lines to print on stdout.
+
+    *hold* is the exclusive lease hold (``lease_core.acquire``) the caller took
+    just before this call; the delete runs under it and it is released here
+    (Windows, where the release removes the lease file) or by the caller (POSIX).
 
     THE SCOPING GUARD LIVES HERE. Following a ``gen-*`` symlink is the ONLY way
     this sweep can delete anything outside the tools root, so it is fenced
@@ -600,7 +705,7 @@ def _reap(entry: Path, emit_err, platform: str | None = None) -> list[str]:
         # live in this same directory and following one would empty the
         # generation it names rather than removing a link.
         if nt:
-            gone, detail = _reap_windows_tree(entry)
+            gone, detail = _reap_windows_tree(entry, hold)
             return [f"reaped {entry}"] if gone else [f"kept {entry}: in use ({detail})"]
         shutil.rmtree(entry, ignore_errors=True)
         return [f"reaped {entry}"]
@@ -669,11 +774,18 @@ def gc_generations(
     claim_minutes: int = DEFAULT_BUILD_CLAIM_MINUTES,
     emit_err=None,
     platform: str | None = None,
+    before_reap=None,
 ) -> list[str]:
     """Run the sweep. Returns the stdout lines; refusals go to *emit_err*.
 
     Raises :class:`GCError` for a bad ``keep``, BEFORE anything is planned and
     long before anything is deleted.
+
+    *before_reap*, a test seam, is called with each entry about to be reaped,
+    after its ``gc_reap_begin`` line and before the exclusive lease is re-taken:
+    the gap between ``plan`` and the delete, where a process can start from a
+    generation the plan judged idle (an rmtree of 1.7 GB takes long enough for
+    that to matter).
     """
     if emit_err is None:
         def emit_err(message: str) -> None:
@@ -734,15 +846,31 @@ def gc_generations(
     lines: list[str] = []
     kept: list[dict] = []
     reaped = 0
-    for action, entry, detail in plan(
+    lease = _lease()
+    lease_states: dict[str, str] = {}
+    steps = plan(
         resolved, keep=keep, self_generation=self_generation, snapshot=view,
         grace_minutes=grace_minutes, claim_minutes=claim_minutes, platform=platform, census_ok=ok,
-    ):
+        lease_states=lease_states,
+    )
+    # What the lease said, counted once per run: a lease that is silently broken
+    # everywhere reads as "free" on every generation, which is invisible without it.
+    lease_counts = {kind: 0 for kind in lease.STATES}
+    for state in lease_states.values():
+        lease_counts[lease.state_kind(state)] += 1
+    lease_unsupported = lease_counts[lease.STATE_UNSUPPORTED] > 0
+    if lease_unsupported and record is not None:
+        record({**common, "event": "lease_unsupported", "count": lease_counts[lease.STATE_UNSUPPORTED]})
+    nt = _layout()._is_nt(platform)
+    for action, entry, detail in steps:
         if action == "skip":
             continue
         if action == "keep":
             lines.append(f"kept {entry}: {detail}")
-            kept.append({"generation": str(entry), "detail": detail})
+            row = {"generation": str(entry), "detail": detail}
+            if str(entry) in lease_states:
+                row["lease"] = lease_states[str(entry)]
+            kept.append(row)
             continue
         if dry_run:
             lines.append(f"would reap {entry}")
@@ -751,7 +879,7 @@ def gc_generations(
         complete = (entry / receipt).is_file() or _layout().is_link(entry, platform=platform)
         reason = (
             f"outside the keep window ({keep}), not current, previous or the running installer, "
-            "and no live holder in the process census"
+            "and no live holder in the process census or lease"
             if complete else "receipt-less build wreckage past its grace window"
         )
         stamp = entry.name[len(prefix):] if entry.name.startswith(prefix) else entry.name
@@ -759,14 +887,32 @@ def gc_generations(
             **common, "generation": str(entry), "stamp": stamp, "reason": reason,
             "holders": len(holders.get(str(entry), [])),
         }
+        if str(entry) in lease_states:
+            line["lease"] = lease_states[str(entry)]
         if record is not None:
             record({**line, "event": "gc_reap_begin", "ancestry": ancestry})  # on disk before the delete starts
+        hold = None
         try:
-            result = _reap(entry, emit_err, platform)
+            if before_reap is not None:
+                before_reap(entry)
+            result = None
+            if not _layout().is_link(entry, platform=platform):
+                # RE-TAKE the lock now, and keep it through the delete: the plan
+                # is a moment in the past, and a process that started since holds
+                # a lease the plan never saw. Held (or any error) keeps the tree.
+                state, hold = lease.acquire(entry, platform=platform, delete_on_close=nt)
+                if lease.state_kind(state) in (lease.STATE_HELD, lease.STATE_ERROR):
+                    result = [f"kept {entry}: lease {state} at the reap (a process started after the plan); not reaped"]
+                    line["lease"] = state
+            if result is None:
+                result = _reap(entry, emit_err, platform, hold)
         except BaseException as exc:
             if record is not None:
                 record({**line, "event": "gc_reap_failed", "error": f"{type(exc).__name__}: {exc}"})
             raise
+        finally:
+            if hold is not None:
+                hold.release()
         lines.extend(result)
         if any(out.startswith("reaped ") for out in result):
             reaped += 1
@@ -776,12 +922,16 @@ def gc_generations(
             # The reap kept it (Windows: in use; a refused ledger symlink says nothing). Close the
             # begin line, so a begin with no end means only a run killed mid-delete.
             detail = "; ".join(result) or "the reap refused and kept it (see stderr)"
-            kept.append({"generation": str(entry), "detail": detail})
+            row = {"generation": str(entry), "detail": detail}
+            if "lease" in line:
+                row["lease"] = line["lease"]
+            kept.append(row)
             if record is not None:
                 record({**line, "event": "gc_reap_kept", "detail": detail})
     if record is not None:
         record({
             **common, "event": "gc_run", "reaped": reaped, "kept": kept, "holders": holders, "ancestry": ancestry,
+            "lease": lease_counts, "lease_unsupported": lease_unsupported,
         })
     return lines
 
