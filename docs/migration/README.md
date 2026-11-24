@@ -5,7 +5,7 @@
 Every guide in this directory documents a **completed, historical** migration.
 None is a live, currently-followable operator procedure — for the current
 upgrade path see [`docs/migration-runbook.md`](../migration-runbook.md)
-(the operator's manual order of operations) and
+(the `nx upgrade` rungs and the per-release notes) and
 [`cli-reference.md` § nx upgrade](../cli-reference.md#nx-upgrade) (the
 one-command user path).
 

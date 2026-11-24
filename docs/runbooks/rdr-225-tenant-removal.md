@@ -1,7 +1,7 @@
 # Removing a tenant (RDR-225)
 
 Removes one tenant's vector storage and access from an engine on the RDR-225 layout (`vectors-030`): its leaves in
-`nexus.chunks` and `nexus.taxonomy_centroids`, the rows that reference its chunks, and its tokens. It does not
+`nexus.chunks` and `nexus.taxonomy_centroids`, the rows that reference its chunks, and its tokens (service, session and identity tokens). It does not
 touch the tenant's catalog documents, collections or topics; those are ordinary tenant-scoped rows and are out of
 this runbook's scope.
 
@@ -40,6 +40,7 @@ SELECT nexus.drop_tenant_partitions('<tenant>');
 BEGIN;
 DELETE FROM nexus.session_tokens WHERE tenant_id = '<tenant>';
 DELETE FROM nexus.service_tokens WHERE tenant_id = '<tenant>';
+DELETE FROM nexus.identity_tokens WHERE tenant_id = '<tenant>';
 COMMIT;
 ```
 
@@ -78,7 +79,8 @@ SELECT c.relname
 
 -- No tokens left (expect 0).
 SELECT (SELECT count(*) FROM nexus.service_tokens WHERE tenant_id = '<tenant>')
-     + (SELECT count(*) FROM nexus.session_tokens WHERE tenant_id = '<tenant>');
+     + (SELECT count(*) FROM nexus.session_tokens WHERE tenant_id = '<tenant>')
+     + (SELECT count(*) FROM nexus.identity_tokens WHERE tenant_id = '<tenant>');
 ```
 
 `nx doctor` compares token tenants against leaves; after this runbook the tenant appears in neither.
