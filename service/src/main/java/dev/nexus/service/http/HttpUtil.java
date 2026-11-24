@@ -397,8 +397,10 @@ public final class HttpUtil {
      *       {@code collection_label_ambiguous} ({@link #COLLECTION_LABEL_AMBIGUOUS_REASON}, listing {@code collection_ids}).</li>
      *   <li>{@code rename_busy} (503, with {@code Retry-After} and {@code retry_after_seconds}): a catalog rename or a collection
      *       supersede could not lock its registry row within 10 s because writers still held it ({@link #RENAME_BUSY_REASON},
-     *       RDR-229 P3.5a), or a write that follows a rename gave up after the collection was renamed repeatedly while it waited
-     *       ({@code RenameFollow}). Nothing was changed; retry.</li>
+     *       RDR-229 P3.5a), or a gc route's read of the registry row was held by such a verb past the route's statement bound
+     *       (25 s unless the route sets its own; {@code GcCollectionReads}; quarantine-restore answers
+     *       {@code quarantine_restore_busy} instead), or a write that follows a rename gave up after the
+     *       collection was renamed repeatedly while it waited ({@code RenameFollow}). Nothing was changed; retry.</li>
      *   <li>{@code rename_path_mismatch} (409): a catalog rename reached the one-row regime with no one-row rename to run
      *       ({@link #RENAME_PATH_MISMATCH_REASON}, RDR-229 P3.5a). Nothing was renamed.</li>
      *   <li>{@code rename_not_in_registry} (409): a per-store rename in the one-row regime, where it is a no-op because the

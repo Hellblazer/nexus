@@ -6,6 +6,7 @@
 #   both           reads the id where the row carries one and the name where it does not (a reader of a table the stamp may not have reached); P4.1 removes the name arm. Needs a reason.
 #   label-kept     keeps reading the registry label on purpose: only for name_column catalog_collections.name, with a one-line reason (linda 2026-11-22)
 #   parse-removed  refused here: the Java census has no parse column (a Java name parse is P3.5a's)
+#   n-a            only for a metadata-key row (name_column metadata.<key>), never a column reader: the site binds an accessor and reads nothing, or reads no live collection (a restore's file-label rewrite, a marker check, a write-avoidance test). Needs a reason (linda 2026-11-24)
 # A NULL id is no collection: an id or both reader never falls back to a '' name (linda 2026-11-20).
 # The two upserts (PgVectorRepository chunks, TaxonomyCentroidRepository taxonomy_centroids, op on_conflict) take the id key as their conflict target from gate 3: disposition id.
 kind	object	name_column	disposition	reason

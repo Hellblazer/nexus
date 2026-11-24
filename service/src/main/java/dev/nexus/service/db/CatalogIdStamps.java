@@ -129,7 +129,7 @@ final class CatalogIdStamps {
      */
     static void repairCascadedIdsFrom(DSLContext ctx, String tenant, Long sourceId, Long targetId, String targetLabel) {
         // The rows whose chunk MOVED (it is at the target and no longer at the source), given the target's label and id: the foreign keys that
-        // cascade the label (topic_assignments_chunk_fk) go at P3.7, and a row they did not carry keeps the source's label.
+        // cascade the label (topic_assignments_chunk_fk) stay until P4.1, and a row they did not carry keeps the source's label.
         var c = CHUNKS.as("rcc");
         var gone = CHUNKS.as("rcg");
         ctx.update(TOPIC_ASSIGNMENTS).set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, targetId).set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, targetLabel)

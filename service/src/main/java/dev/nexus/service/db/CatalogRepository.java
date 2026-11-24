@@ -6098,11 +6098,11 @@ public final class CatalogRepository {
     }
 
     /**
-     * The sweep gate EXCLUSIVE with no bound of its own, for a {@code /v1/vectors/gc} write that takes in Java the gate its SQL function
-     * takes first (RDR-229 P3.5a, {@link GcCollectionReads}): the lock order is the gate, then the registry row, then the function, so the
-     * gate has to be held before the row is read. The function's own take of the same key is a no-op (advisory locks are re-entrant in a
-     * transaction), and the route's lock and statement bounds, set before this call, govern the wait exactly as they governed the
-     * function's.
+     * The sweep gate EXCLUSIVE, with the 2 s lock bound ({@link #GC_GATE_LOCK_TIMEOUT_MS}) of the SQL function it stands in for, for a
+     * {@code /v1/vectors/gc} write that takes in Java the gate its SQL function takes first (RDR-229 P3.5a, {@link GcCollectionReads}):
+     * the lock order is the gate, then the registry row, then the function, so the gate has to be held before the row is read. This call
+     * sets that lock bound itself (local to the transaction), replacing the route's; the route's statement bound, set before this call,
+     * still applies. The function's own take of the same key is a no-op (advisory locks are re-entrant in a transaction).
      */
     public static void acquireSweepGateExclusiveHeldByGc(DSLContext ctx, String tenant, String collection) {
         WriteRegistryMemo.assertGateFirst(ctx, tenant, collection);
@@ -11926,12 +11926,15 @@ public final class CatalogRepository {
     }
 
     /**
-     * The two tables the FK cascade moves for us, named once so {@link
-     * #rehomeCollection} cannot drift from the constraints it relies on. Both are ON
-     * UPDATE CASCADE with {@code nexus.chunks} as parent: {@code
-     * fk_catalog_chunks_chunk} (catalog-029) and {@code topic_assignments_chunk_fk}
-     * (taxonomy-012). Writing either directly would duplicate work the database
-     * already did and can conflict with the cascade mid-statement.
+     * The two tables whose collection name the FK cascade carries when the chunks move, so the
+     * move loop skips them, named once so {@link #rehomeCollection} cannot drift from the
+     * constraints it relies on. Both are ON UPDATE CASCADE with {@code nexus.chunks} as
+     * parent: {@code fk_catalog_chunks_chunk} (catalog-029) and {@code topic_assignments_chunk_fk}
+     * (taxonomy-012). Moving either in the loop would duplicate work the database already did
+     * and can conflict with the cascade mid-statement. The cascade carries the name, not the id:
+     * {@link #rehomeCollection} writes the target's id on the carried rows after the loop (the
+     * manifest inline, with the label as well; the topic assignments and {@code chunk_orphaned_at}
+     * through {@code CollectionRehomeScope#repairCascaded}, which from gate 3 writes the label too).
      */
     private static final java.util.Set<String> CASCADE_CARRIED_TABLES =
         java.util.Set.of("catalog_document_chunks", "topic_assignments");
@@ -11952,9 +11955,10 @@ public final class CatalogRepository {
      * target, is gone).
      *
      * <p>THE MECHANISM IS THAT SAME FK. An UPDATE of {@code chunks.collection} carries
-     * the manifest and the topic assignments atomically, with no intermediate
-     * violating state, so this method never writes those two directly (see {@link
-     * #CASCADE_CARRIED_TABLES}). Everything else in {@link #COLLECTION_SCOPED_TABLES}
+     * the manifest's and the topic assignments' collection name atomically, with no
+     * intermediate violating state, so the move loop skips those two (see {@link
+     * #CASCADE_CARRIED_TABLES}) and this method gives the carried rows the target's id afterwards.
+     * Everything else in {@link #COLLECTION_SCOPED_TABLES}
      * gets its own UPDATE in the same transaction — including {@code
      * catalog_documents.physical_collection}, which carries no FK at all.
      *
@@ -12008,8 +12012,9 @@ public final class CatalogRepository {
             throw new RehomeRefused("source and target are the same collection: " + source);
         }
         // nexus-wbfpw.66: the chunks UPDATE below carries catalog_document_chunks.collection through the
-        // fk_catalog_chunks_chunk ON UPDATE CASCADE, so this transaction writes manifest rows (and fires
-        // vectors-021-3's chunk-locking trigger) without naming the table; whole transaction retried on
+        // fk_catalog_chunks_chunk ON UPDATE CASCADE, so the move loop writes manifest rows (and fires
+        // vectors-021-3's chunk-locking trigger) without naming the table, and the UPDATE after the loop that gives the carried
+        // rows the target's id does name it; whole transaction retried on
         // 40P01. `moved` and `leftBehind` are built inside the lambda, so each attempt starts empty.
         // RDR-229 P3.5a (RenameFollow, for two collections): the gates are keyed by label and the rows are read by id, so a rename of either
         // end that the read finds sends the transaction round again with the CURRENT labels' gates first, never a gate after the rows
@@ -12104,7 +12109,7 @@ public final class CatalogRepository {
             }
             // The manifest rows the chunk cascade carried to the target (ManifestInsertGateTest: pinned writer).
             // Written with the target's label as well as its id: the cascade of fk_catalog_chunks_chunk has done the label when that foreign key
-            // exists, and nothing has when it does not (P3.7 drops it), so the mover does not depend on it.
+            // exists, and nothing has when it does not (P4.1 drops it), so the mover does not depend on it.
             ctx.update(CATALOG_DOCUMENT_CHUNKS).set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, targetId)
                 .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, tgt)
                 .where(scope.cascadedManifest(tenant, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
