@@ -6,7 +6,7 @@ touch the tenant's catalog documents, collections or topics; those are ordinary 
 this runbook's scope.
 
 Exercised by `DropTenantPartitionsIntegrationTest` (`theRunbook_removesTheTenantsLeavesReferencingRowsAndTokens_andLeavesAnotherTenantUntouched`
-and `aDirectDropOfAReferencedChunksLeaf_isRefused_andChangesNothing`).
+and `aDirectDropOfAReferencedChunksLeaf_isRefused_andChangesNothing`). The test covers the leaf drop and the session and service token deletes; the `identity_tokens` delete and its Verify count were added later and no test runs them.
 
 ## Who runs it
 

@@ -94,8 +94,8 @@ collection list` shows the subject in the `OWNER` column, not in `NAME`
 there: a conformant `knowledge__distributed-systems__<model>__v1` or a
 legacy two-segment collection that holds data is found first, whatever its
 shape, and a recovery-bundle restore keeps the name it restores. Typing
-`knowledge__distributed-systems` takes the same path; only a `docs__X` or
-`code__X` name renders as `<type>__X__<model>__v1`. A label of the form `c`
+`knowledge__distributed-systems` takes the same path; only a `docs__X`,
+`code__X` or `rdr__X` name renders as `<type>__X__<model>__v1`. A label of the form `c`
 plus digits is the engine's to mint, so a registration, a rename target or
 a re-embed target of that shape is refused. Never type the four-segment
 form, a model token, or a version yourself. A name that encodes a model the
@@ -199,14 +199,15 @@ that skips them leaves rows that fail loud on a foreign key later
 (RDR-164). Never write to or delete a `quarantine-*` collection; the orphan
 GC owns those and restores from them.
 
-From RDR-229's gate 3 (`nx doctor`'s "RDR-229 completion" row says when) a rename
+From RDR-229's gate 3 latch (`nx doctor`'s "RDR-229 completion" row says when) a rename
 changes the collection's label only: it keeps its `collection_id`, and no chunk
 or child row is rewritten. The label it left is reserved, so a registration, a
 rename target or a re-embed target of that label is refused (409
 `label_reserved`, nothing written) until a later release relabels the rows still
-carrying it; renaming the collection back is allowed. While the engine still waits for
-something (the doctor row names it; one restart is the usual case), a rename is
-refused (409 `rename_refused`) and nothing changes. A delete, prune or reindex of a collection a
+carrying it; renaming the collection back is allowed. Before the latch a rename runs as before and is not refused. From the latch it is
+refused (409 `rename_refused`, nothing changes) until the name-key drop move has
+finished and the engine has restarted once; the doctor row "RDR-229 collection
+rename" names which. A delete, prune or reindex of a collection a
 re-embed job holds is refused (409 `collection_busy`). The
 [CLI reference](cli-reference.md#nx-collection) has each message and its way out.
 
