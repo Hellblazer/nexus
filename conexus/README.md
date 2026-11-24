@@ -16,7 +16,7 @@ New to Nexus? The [install guide](https://hellblazer.github.io/nexus/) covers se
 **Local development** (from the nexus repo checkout):
 
 ```bash
-claude --plugin-dir ./nx
+claude --plugin-dir ./conexus
 ```
 
 ## Prerequisites
@@ -53,7 +53,7 @@ story.
 - **40 skills** — infrastructure standalone, RDR-078 verb skills, MCP-tool pointer skills (RDR-080), agent-dispatcher skills, and RDR workflow skills
 - **5 standard pipelines** — feature, bug, research, onboarding, architecture (`plan-auditor` / `plan-enricher` / `knowledge-tidier` steps now direct MCP tool invocations per RDR-080)
 - **Session hooks** — print the T1 contract, due threads and an `nx brief` index at session start (T2 notes, ready beads, the Knowledge Map and tool notes load on demand), prime beads where the beads plugin is off, warn when T2 is unreachable, health-check dependencies
-- **Permission auto-approval** — safe commands and the nexus MCP tools skip the confirmation prompt, except `daemon_uninstall`, `setup` and `setup_status`
+- **Permission auto-approval** — the nexus and nexus-catalog MCP tools (and `sequentialthinking`) skip the confirmation prompt, except `daemon_uninstall`, `setup` and `setup_status`; the plugin never auto-approves a Bash command
 - **Two bundled MCP servers** — `nexus` (46 tools: search, query, store, memory, scratch, plans, traverse, scoped/graph-hop search, and orchestration tools including `nx_answer` for plan-centric retrieval, whose plans run the 10 LLM-backed operators) and `nexus-catalog` (10 catalog tools) — plus `sequential-thinking`, a standard-library Python server started through uv
 
 ### Pick your entry point
@@ -87,6 +87,11 @@ conexus/
 │   │   ├── README.md            # agent-shared directory guide (this section)
 │   │   └── RELAY_TEMPLATE.md    # Canonical relay message format
 │   └── rdr/                 # RDR templates and post-mortem scaffolding
+├── daemon/                  # Service autostart unit templates (launchd plist, systemd unit)
+├── evals/                   # Plugin eval suites
+├── launch/                  # nx_launch.py: finds the CLI program a hook entry names and runs it
+├── mcp/                     # sequential_thinking.py (the bundled stdlib server)
+├── plans/                   # Builtin plan templates (plans/builtin/*.yml) seeded into the plan library
 ├── commands/
 │   └── *.md                 # Slash commands (/conexus:research, /conexus:create-plan, /conexus:review-code, etc.)
 ├── hooks/
@@ -103,6 +108,7 @@ conexus/
 │       ├── version_lockstep_action.py # Detached, extras-preserving reinstall the lockstep
 │       │                              # hook dispatches
 │       ├── routing/                   # PreToolUse(Bash) guards + their shared _lib.py
+│       ├── nx_setup_notice.py         # SessionStart: report the first-of-eight setup state (RDR-228)
 │       ├── _interpreter.py            # Shared helper: re-exec under an interpreter that
 │       │                              # can serve the hook (3.12 floor, and the
 │       │                              # generation python that can import nexus)
@@ -110,6 +116,11 @@ conexus/
 │       ├── _tuple_size_limits.py      # Shared helper: stdlib tuple size caps
 │       ├── _tuple_sender.py           # Shared helper: stdlib sender label, unverified / unattested / agent mail (mirror of nexus.tuple_sender)
 │       ├── _hook_logging.py           # Shared helper: configure logging before nexus imports
+│       ├── _cli_lookup.py             # Shared helper: find the nx CLI's install directory
+│       ├── _exec_path.py              # Shared helper: PATH for a launched program
+│       ├── _identity_lookup.py        # Shared helper: this session's identity
+│       ├── _resume_pointer.py         # Shared helper: the /clear resume pointer in identity scratch
+│       ├── _session_facts.py          # Shared helper: session id and source from the hook payload
 │       └── nx_hook_shim.py            # Runs `nx-hook <verb>` so an older CLI cannot block a session
 ├── .mcp.json                # Bundled MCP servers (nexus storage + sequential-thinking)
 ├── registry.yaml            # Single source of truth: agents, pipelines, aliases
@@ -129,8 +140,11 @@ conexus/
     ├── git-worktrees/       # Standalone: isolated workspace setup via git worktrees
     ├── phase-review-gate/   # Standalone: cross-walk RDR §Approach against closing beads
     ├── receiving-review/    # Standalone: technical evaluation of code review feedback
+    ├── asks/                # Standalone: work the user's structured asks (RDR-245)
+    ├── upgrade/             # Standalone: preview and run `nx upgrade`
+    ├── tumbler-footnotes/   # Standalone: nx://catalog links to GFM footnotes
     │
-    │   # RDR-078 verb skills (dispatch plan_match + plan_run)
+    │   # RDR-078 verb skills (call nx_answer with a verb)
     ├── design-to-code-trace/ # verb: research / design / architecture (dimensions={verb:research};
     │                         # renamed off bare 'research', nexus-cnzei.4)
     ├── decision-drift-review/ # verb: review / critique / audit change-set (dimensions={verb:review};
@@ -139,16 +153,15 @@ conexus/
     ├── why-was-this-written/ # verb: debug / failing-path investigation (dimensions={verb:debug};
     │                         # renamed off bare 'debug', nexus-cnzei.4)
     ├── document/            # verb: document coverage / authoring
-    ├── plan-first/          # gate: plan_match before any retrieval
+    ├── plan-first/          # gate: reduce-from-many retrieval goes through nx_answer
     │
     │   # RDR-080 pointer skills (dispatch a specific MCP tool — no agent spawn)
-    ├── query/               # → mcp__plugin_conexus_nexus__nx_answer
     ├── knowledge-tidying/   # → mcp__plugin_conexus_nexus__nx_tidy
     ├── enrich-plan/         # → mcp__plugin_conexus_nexus__nx_enrich_beads
     ├── plan-validation/     # → mcp__plugin_conexus_nexus__nx_plan_audit
     │
-    │   # Agent-dispatcher skills
-    ├── code-review/         # → code-review-expert agent
+    │   # Agent-dispatcher skills (code-review-expert, debugger, developer and
+    │   # test-validator have no skill: their /conexus: commands dispatch the agent)
     ├── codebase-analysis/   # → codebase-deep-analyzer agent
     ├── deep-analysis/       # → deep-analyst agent
     ├── substantive-critique/# → substantive-critic agent
@@ -167,12 +180,12 @@ conexus/
     └── rdr-audit-checklist/ # RDR: audit project RDR lifecycle
 ```
 
-## Standalone Skills (24)
+## Standalone Skills (26)
 
 Skills that dispatch a tool or agent directly — no relay to a full sub-agent.
 This includes RDR-078 verb skills, RDR-080 MCP-tool pointers, and infrastructure skills.
 
-### Verb skills (RDR-078) — `plan_match` + `plan_run`
+### Verb skills (RDR-078) — `nx_answer` with `dimensions={verb: ...}`
 
 | Skill | Purpose |
 |-------|---------|
@@ -181,7 +194,7 @@ This includes RDR-078 verb skills, RDR-080 MCP-tool pointers, and infrastructure
 | analyze | Cross-corpus analysis and synthesis |
 | why-was-this-written | Design intent behind a failing code path (renamed off bare `debug`, nexus-cnzei.4) |
 | document | Documentation authoring or coverage audit |
-| plan-first | Retrieval gate — try `plan_match` before falling through to `nx_answer` |
+| plan-first | Retrieval gate — a reduce-from-many-documents question goes through `nx_answer`, which matches a saved plan first |
 
 ### MCP-tool pointer skills (RDR-080)
 
@@ -195,23 +208,25 @@ This includes RDR-078 verb skills, RDR-080 MCP-tool pointers, and infrastructure
 
 | Skill | Purpose |
 |-------|---------|
+| asks | Work the user's structured asks through `nx ask`: queue, echo-back, send with the user's own words, report (RDR-245) |
 | brainstorming-gate | Design gate — requires exploration and user approval before implementation |
 | catalog | Catalog operations + link graph patterns — resolve, link, context, seed |
 | cli-controller | Expert guidance for controlling interactive CLI applications via tmux |
 | composition-probe | Runtime composition smoke test for coordinator beads |
 | finishing-branch | Guide branch completion — verify tests, present merge/PR/keep/discard |
 | git-worktrees | Isolated workspace setup via git worktrees with safety verification |
-| mailbox | RDR-205 mailbox/<address> tuple-space convention — send by tuple_out, drain by tuple_in before hand-back |
+| mailbox | RDR-205 mailbox/<address> tuple-space convention — send with `mailbox_send`, drain by tuple_in before hand-back |
 | nexus | Nexus CLI reference for all tiers (T1/T2/T3) |
 | peer-messaging | Messaging other sessions and dispatched agents: channel choice, acknowledgement, trust boundary, sharing one machine |
 | orchestration | Agent routing reference — routing tables, pipeline templates, the review gate, skill routing, working rules |
 | phase-review-gate | Phase-boundary checklist — cross-walk RDR §Approach against closing beads to catch silent scope reduction |
 | receiving-review | Technical evaluation of code review feedback |
 | serena-code-nav | Navigate code by symbol — definitions, callers, type hierarchies |
+| tumbler-footnotes | Convert `nx://catalog/<tumbler>` links to GFM footnotes (or check/reverse them) with `nx catalog footnotes` |
 | upgrade | Shows what `nx upgrade` would converge, then runs it |
 | writing-nx-skills | Guide for authoring conexus plugin skills |
 
-## Agents (13)
+## Agents (10)
 
 See [`registry.yaml`](./registry.yaml) for full metadata (model, triggers, predecessors/successors).
 
@@ -220,15 +235,15 @@ See [`registry.yaml`](./registry.yaml) for full metadata (model, triggers, prede
 | Agent | Skill | Command | Model | Purpose |
 |-------|-------|---------|-------|---------|
 | architect-planner | architecture | `/conexus:architecture` | opus | Software architecture design, execution plans |
-| code-review-expert | code-review | `/conexus:review-code` | sonnet | Code quality, security, best practices |
+| code-review-expert | none | `/conexus:review-code` | sonnet | Code quality, security, best practices |
 | codebase-deep-analyzer | codebase-analysis | `/conexus:analyze-code` | haiku | Architecture, patterns, dependency mapping |
-| debugger | debugging | `/conexus:debug` | opus | Hypothesis-driven debugging |
+| debugger | none | `/conexus:debug` | opus | Hypothesis-driven debugging |
 | deep-analyst | deep-analysis | `/conexus:deep-analysis` | opus | Complex problem investigation, root cause |
 | deep-research-synthesizer | research-synthesis | `/conexus:research` | haiku | Multi-source research with synthesis |
-| developer | development | `/conexus:implement` | sonnet | TDD implementation, test-first methodology |
+| developer | none | `/conexus:implement` | sonnet | TDD implementation, test-first methodology |
 | strategic-planner | strategic-planning | `/conexus:create-plan` | opus | Implementation planning, task decomposition |
 | substantive-critic | substantive-critique | `/conexus:substantive-critique` | sonnet | Constructive critique of plans/designs/code |
-| test-validator | test-validation | `/conexus:test-validate` | haiku | Test coverage and quality validation |
+| test-validator | none | `/conexus:test-validate` | haiku | Test coverage and quality validation |
 
 ### Retired stub agents — call the MCP tool directly (RDR-080, deleted nexus-cnzei.4)
 
@@ -254,16 +269,17 @@ was removed — use `nx index pdf <file>` or the `/pdf-process` slash command.
 
 Defined in `registry.yaml`:
 
-- **feature**: strategic-planner → `nx_plan_audit` *(MCP)* → `nx_enrich_beads` *(MCP, conditional)* → architect-planner → developer → code-review-expert → test-validator
-- **bug**: debugger → developer → code-review-expert → test-validator
-- **research**: deep-research-synthesizer → `nx_tidy` *(MCP)*
+- **feature**: strategic-planner → architect-planner → developer → code-review-expert → substantive-critic → test-validator
+- **bug**: debugger → developer → code-review-expert → substantive-critic → test-validator
+- **research**: deep-research-synthesizer (call `nx_tidy` directly afterwards to consolidate what it stored)
 - **onboarding**: codebase-deep-analyzer → strategic-planner
 - **architecture**: codebase-deep-analyzer → deep-analyst → strategic-planner → architect-planner
 
-The `nx_plan_audit` / `nx_enrich_beads` / `nx_tidy` MCP-tool steps above replaced the
-`plan-auditor`, `plan-enricher`, and `knowledge-tidier` agents per RDR-080; those
-three stub agents were deleted at nexus-cnzei.4. Callers invoke the tool
-directly instead of dispatching a sub-agent.
+`code-review-expert` and `substantive-critic` both run on every implementation: they
+catch different, non-overlapping classes of issue. `nx_plan_audit`, `nx_enrich_beads`
+and `nx_tidy` replaced the `plan-auditor`, `plan-enricher`, and `knowledge-tidier`
+agents per RDR-080 (the stubs were deleted at nexus-cnzei.4); callers invoke the tool
+directly where a plan needs auditing or enriching.
 
 ## Hooks
 
@@ -303,8 +319,8 @@ uv starts; a warm hook returns when it is done and pays nothing for the larger l
 **Known blocking failure.** When uv can find no Python 3.12 or newer and cannot fetch one
 (offline, behind a proxy that blocks the download, air-gapped), `uv tool run` exits 2 with
 `No interpreter found`. Claude Code treats a hook's exit 2 as blocking on `PreToolUse`,
-`PermissionRequest` and `UserPromptSubmit`, so five of the fifteen uv-launched entries (both
-Bash gates, both `auto-approve` entries, the mailbox drain) refuse every Bash call, every
+`PermissionRequest` and `UserPromptSubmit`, so six of the twenty-two uv-launched entries (the
+three `PreToolUse` Bash and edit guards, both `auto-approve` entries, the mailbox drain) refuse every Bash call, every
 conexus tool call and every prompt until Python exists; the `SessionStart` and `SessionEnd`
 entries only print the error. The entries are in exec form (`args` is set, so there is no shell), and an
 exec-form entry cannot turn a launcher failure into a non-blocking code. The remedy is one
@@ -324,11 +340,11 @@ names each handler by its program and verb.
 |-------|--------|---------|
 | `SessionStart` | `hooks/scripts/nx_setup_notice.py` | First in the list. Reports the first of eight states (RDR-228): a setup run is live; the CLI is found and cannot start; the CLI resolves and a service is usable (nothing); a run was interrupted; the last run failed; no CLI (puts the one question with its table of choices: Local, Cloud, CLI only, Not now); a provisioned local service is down; no service is set up. The user's choice is honoured: after "not now" the no-CLI, down, no-service and stale failed or interrupted states are one quiet line naming `/conexus:setup` that asks nothing, and a recorded CLI-only choice makes the last two the same line. Says nothing in a cloud session (`CLAUDE_CODE_REMOTE`), where the servers are not. Starts no process, opens no socket, writes nothing |
 | `SessionStart` | `nx-hook upgrade-auto` | Auto-converge the CLI to the plugin's minimum required version. Spawns `nx upgrade --auto`; the shell form's `2>/dev/null` and its version-skew `|| echo` guidance live in the verb (`nexus.hooks.upgrade_auto`) |
-| `SessionStart` | `nx-hook self-gc` | Reap superseded install generations no live process is holding. Spawns `nx self gc`; the shell form's `>/dev/null 2>&1 \|\| true` is the verb's own silence (`nexus.hooks.self_gc`) |
+| `SessionStart` | `nx-hook self-gc` | Reap superseded install generations no live process is holding. Spawns `nx self gc` and prints nothing; gc's own record goes to `<config>/logs/install-gc.log` (1 MB, one previous file kept; it names this sweep as the caller and keeps parent commands redacted) (`nexus.hooks.self_gc`) |
 | `SessionStart` | `nx-hook preflight` | Silent health check of skill-routed tool reachability; emits a `## nx Preflight: FAILED` marker on gaps (nexus-hwbj) |
-| `SessionStart` | `nx-hook session-start` | Resolve/propagate session id; emit the routing guidance imperative (nexus-h33x8.4 — moved here from a pinned `cat` of a skill file so guidance edits ship at PyPI-release/reinstall cadence instead of plugin-release cadence; see `nexus.session_start_guidance`) |
+| `SessionStart` | `nx-hook session-start` | Resolve/propagate session id; bind the session to its identity and spawn a detached work-row reap that closes rows whose work ended unrecorded (`NX_WORK_REAP_DISABLED` turns it off); emit the routing guidance imperative (nexus-h33x8.4 — moved here from a pinned `cat` of a skill file so guidance edits ship at PyPI-release/reinstall cadence instead of plugin-release cadence; see `nexus.session_start_guidance`) |
 | `SessionStart` | `nx-hook session-context` | Print the T1 contract, the threads due, the identity-notes line and one index line naming `nx brief <topic>` (the T2 memory scan, ready beads, the capabilities block and the Knowledge Map moved behind `nx brief` and the `brief` MCP tool) |
-| `SessionStart` | `nx-hook rdr` | Reconcile RDR file frontmatter ↔ T2 metadata (self-healing on divergence) |
+| `SessionStart` | `nx-hook rdr` | Read-only RDR report: the document count, the T2 status breakdown and whether the tree is indexed. It reconciles nothing (the reconcile was deleted, nexus-e19sa) |
 | `SessionStart` (matcher `startup`) | `hooks/scripts/version_lockstep_hook.py` | Detect plugin↔CLI version skew (RDR-143); nudge and dispatch a detached, extras-preserving upgrade that takes effect next session |
 | `SessionStart` (matcher `startup`) | `hooks/scripts/nx_hook_shim.py mcp-connect-wait` | Wait, bounded (15s, inside a 50 s timeout that also covers uv's cold start) and fail-open, for this session's `nx-mcp` to publish its connect marker before turn 1 can outrun the connection; on timeout, says tool-tier hooks will be skipped (RDR-215, nexus-veh77) |
 | `SessionEnd` | `nx-session-end-launcher` | Flush session-end bookkeeping (memory, beads, scratch) via a detached grandchild |
@@ -435,8 +451,9 @@ The plugin ships `.mcp.json` which Claude Code picks up automatically on install
 | Session context | `brief` (the reference context SessionStart no longer injects, one topic at a time; the same text as `nx brief <topic>`) |
 
 **`nx_answer`** is the retrieval entry point for multi-step questions.
-It runs `plan_match` against the library, executes the best-matching plan
-via `plan_run`, and falls through to an inline planner on miss.  See
+It matches a saved plan from the library, runs it, and falls through to an
+inline planner on a miss (the matcher and runner are inside `nx_answer`, not
+separate tools).  See
 [`docs/querying-guide.md`](https://github.com/Hellblazer/nexus/blob/main/docs/querying-guide.md) for the pattern.
 
 ### Nexus MCP Servers (`nx-mcp`, `nx-mcp-catalog`)
@@ -493,13 +510,12 @@ When skills delegate to agents, they use a standardized relay format defined in 
 
 ### Permission Auto-Approval
 
-The permission hook auto-approves safe operations:
+The plugin's auto-approve hook (`PreToolUse` and `PermissionRequest`, matcher `mcp__plugin_conexus_.*`) approves an explicit allowlist of tool names
+([`auto_approve.py`](https://github.com/Hellblazer/nexus/blob/main/src/nexus/hooks/auto_approve.py), one name per line so each grant shows in a diff):
 
-- **nexus MCP tools**: all `mcp__plugin_conexus_nexus__*` core tools and `mcp__plugin_conexus_nexus-catalog__*` catalog tools
+- **nexus MCP tools**: every core tool except `daemon_uninstall`, `setup` and `setup_status`, which keep the application's own prompt
+- **nexus-catalog tools**: all ten
 - **sequential thinking**: `mcp__plugin_conexus_sequential-thinking__sequentialthinking`
-- **beads**: `bd list`, `bd show`, `bd search`, `bd prime`, `bd ready`, `bd status`
-- **git**: `git log`, `git diff`, `git status`, `git show`, `git branch -a`
-- **nexus CLI**: `nx search`, `nx store list/get`, `nx memory list/get/search`, `nx scratch list`, `nx doctor`
-- **maven**: `mvn help:*`, `mvn dependency:tree`, `mvn dependency:analyze`
+- **hook tools**: `hook_auto_approve` and `hook_subagent_start`, by name
 
-Dangerous commands (force-push, `bd delete`, deploys) are always denied.
+No plugin hook approves or denies a Bash command by allowlist. The Bash hooks are guards: the subagent git-write guard and the credential-print guard deny, and the destructive-action hook only advises.
