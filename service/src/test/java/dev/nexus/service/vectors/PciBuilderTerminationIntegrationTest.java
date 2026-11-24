@@ -105,6 +105,25 @@ class PciBuilderTerminationIntegrationTest {
 
     // -- helpers -----------------------------------------------------------------------------------------
 
+    /**
+     * Runs {@code work} on a thread of its own. Not {@code CompletableFuture.supplyAsync}: that runs on the common pool, which has
+     * cores minus one workers (3 on a 4-core grant), so three {@link Sleeper}s hold every worker for their 60 s and the migration walk
+     * queued behind them starts a minute late, after the build it should have ended has completed.
+     */
+    private static <T> CompletableFuture<T> onOwnThread(java.util.function.Supplier<T> work) {
+        var future = new CompletableFuture<T>();
+        Thread t = new Thread(() -> {
+            try {
+                future.complete(work.get());
+            } catch (Throwable e) {
+                future.completeExceptionally(e);
+            }
+        }, "pci-termination-test");
+        t.setDaemon(true);
+        t.start();
+        return future;
+    }
+
     /** A session that runs {@code pg_sleep(60)} on its own thread, so a backend is busy until it is ended. */
     final class Sleeper implements AutoCloseable {
         private final Connection conn;
@@ -120,7 +139,7 @@ class PciBuilderTerminationIntegrationTest {
             conn.setAutoCommit(true);
             DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
             pid = ctx.select(DSL.function("pg_backend_pid", SQLDataType.INTEGER)).fetchOne(0, Integer.class);
-            sqlState = CompletableFuture.supplyAsync(() -> {
+            sqlState = onOwnThread(() -> {
                 try {
                     ctx.select(DSL.function("pg_sleep", SQLDataType.OTHER, DSL.val(60))).fetch();
                     return "completed";
@@ -308,7 +327,7 @@ class PciBuilderTerminationIntegrationTest {
     CompletableFuture<DdlOutcome> startHeldBuild(PciBuilderSession.Pass pass, PciCatalog.Leaf leaf, String collection)
             throws Exception {
         String index = PciCatalog.indexName(M1024, T1, collection);
-        var build = CompletableFuture.supplyAsync(() -> pass.build(leaf, 1024, collection));
+        var build = onOwnThread(() -> pass.build(leaf, 1024, collection));
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
         while (System.nanoTime() < deadline && !indexExists(index)) {
             Thread.sleep(50);
@@ -338,7 +357,10 @@ class PciBuilderTerminationIntegrationTest {
      * The caller releases what holds the build in a {@code finally}, which lets a stuck walk end.
      */
     void migrateWithin(HikariDataSource ds, long seconds) {
-        var walk = CompletableFuture.runAsync(() -> SchemaMigrator.migrate(ds));
+        var walk = onOwnThread(() -> {
+            SchemaMigrator.migrate(ds);
+            return null;
+        });
         try {
             walk.get(seconds, TimeUnit.SECONDS);
         } catch (java.util.concurrent.TimeoutException e) {
@@ -590,7 +612,7 @@ class PciBuilderTerminationIntegrationTest {
             assertThat(built).isNotNull();
             CompletableFuture<DdlOutcome> reindex;
             try (SnapshotHolder snapshot = new SnapshotHolder()) {
-                reindex = CompletableFuture.supplyAsync(() -> pass.reindex(leaf, built));
+                reindex = onOwnThread(() -> pass.reindex(leaf, built));
                 awaitLeftover(index);
 
                 assertThat(reindex.isDone()).as("the REINDEX waits for the older snapshot").isFalse();
@@ -641,7 +663,7 @@ class PciBuilderTerminationIntegrationTest {
             assertThat(pass.build(leaf, 1024, coll)).isEqualTo(DdlOutcome.DONE);
             PciCatalog.Index built = indexNamed(index);
             try (SnapshotHolder snapshot = new SnapshotHolder()) {
-                var reindex = CompletableFuture.supplyAsync(() -> pass.reindex(leaf, built));
+                var reindex = onOwnThread(() -> pass.reindex(leaf, built));
                 awaitLeftover(index);
                 forgetAChangeset();
 
