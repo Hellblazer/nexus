@@ -1472,8 +1472,14 @@ def reindex_cmd(name: str, force: bool, ack_external_embedder: bool = False) -> 
             )
         else:
             ensure_collection_registered(name)
-    except LabelReservedError:
-        raise  # the engine refused the label whole (409 label_reserved): nothing re-registers it, so the re-index cannot proceed
+    except LabelReservedError as reserved:
+        # The delete above already ran, so this is not "nothing was written": say what is gone and what to run next.
+        raise click.ClickException(
+            f"reindex of '{name}' stopped after the delete: collection '{name}' was deleted, and it cannot be registered "
+            f"again because {reserved.explanation} Rename that collection back to {name!r} "
+            f"(`nx collection rename <its current name> {shlex.quote(name)}`), then re-index from the original sources "
+            f"(`nx index md <path>` or `nx index pdf <path>` for documents)."
+        ) from reserved
     except Exception as reg_exc:  # noqa: BLE001 — projection write is best-effort; the re-index below must proceed
         click.echo(
             f"WARNING: could not re-register catalog_collections row for "
@@ -2038,7 +2044,7 @@ def _reembed_job_error(exc: Exception) -> click.ClickException:
     """
     code = getattr(exc, "code", None)
     body = getattr(exc, "engine_body", None)
-    reserved = label_reserved_error_from_body(code, body)  # RDR-229 P3.7: the job's target label is reserved
+    reserved = label_reserved_error_from_body(code, body, user_chooses_label=False)  # RDR-229 P3.7: the job's target label is reserved
     if reserved is not None:
         return click.ClickException(str(reserved))
     text = str(body.get("error")) if isinstance(body, dict) and body.get("error") else str(exc)
