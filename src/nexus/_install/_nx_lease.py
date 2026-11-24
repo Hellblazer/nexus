@@ -45,14 +45,23 @@ _RETRIES = 10
 _PAUSE = 0.002
 
 
+def _open(path):
+    # On Windows a gc probe holds the file at share mode 0 for a moment, and an
+    # open that meets it is refused (PermissionError): retry as the POSIX lock does.
+    for attempt in range(_RETRIES + 1):
+        try:
+            return os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+        except PermissionError:
+            if sys.platform != "win32" or attempt == _RETRIES:
+                raise
+            time.sleep(_PAUSE)
+
+
 def _take():
     global _FD
     if _FD >= 0:
         return
-    fd = os.open(
-        os.path.join(os.path.realpath(sys.prefix), ".nx-lease"),
-        os.O_RDONLY | getattr(os, "O_BINARY", 0),
-    )
+    fd = _open(os.path.join(os.path.realpath(sys.prefix), ".nx-lease"))
     keep = False
     try:
         if os.read(fd, 32).split(b"\n", 1)[0].rstrip(b"\r") != _HEADER:
