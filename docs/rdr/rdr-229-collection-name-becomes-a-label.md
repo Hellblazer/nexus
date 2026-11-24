@@ -1013,9 +1013,12 @@ The key moves table by table in strangler order:
   engine writes both columns on every insert; a
   registered data move fills the old rows (below). The quarantine
   `origin_collection` metadata tag gains an `origin_collection_id` beside it:
-  the origin's registry id as a JSON number, and JSON null when the origin
-  has no registry row: the key is never absent once written
-  (`QuarantineOrigin.java:61-67`; T2 `229-research-327`). The three SQL functions that write the tag and the Java
+  the origin's registry id as a JSON number, left out when the origin has
+  no registry row (`jsonb_strip_nulls`, `vectors-069:223`; the Java retag,
+  `QuarantineOrigin.java:386-392`). A restore, and row 13's backfill (item
+  6), mark a dangling tag with the key present and JSON null
+  (`QuarantineOrigin.java:61-67`, `RestoreIdFill.java:398-430`; T2
+  `229-research-327`). The three SQL functions that write the tag and the Java
   retag (`QuarantineOrigin.ORIGIN_ID_KEY`) write it alike.
 - **Switch.** Each foreign key gets an id twin on `(tenant_id, collection_id)`
   (or `(tenant_id, collection_id, embedding_model)` for the RDR-225
@@ -1395,11 +1398,13 @@ while the engine serves:
   columns, and "If an attempt at inference is unsuccessful, an error is
   raised" (T2 `229-research-53`). Keeping the name primary key keeps an
   arbiter for both until P4.1. Both writers move their conflict target to
-  the id key with P3.5c, once gate 3 has latched on the install, read per
-  attempt (`PgVectorRepository.java:1348-1352`,
-  `TaxonomyCentroidRepository.java:189-197`); the id arm also writes the
-  writer's label into the name column, since `fk_catalog_chunks_chunk` ties
-  the manifest's name to the chunk's until P3.7 (`PgVectorRepository.java:1343-1347`).
+  the id key with P3.5c, once gate 3 has latched on the install, read once
+  per call (`PgVectorRepository.java:1348-1352`,
+  `TaxonomyCentroidRepository.java:183-197`); the id arm also writes the
+  writer's label into the name column: for chunks because
+  `fk_catalog_chunks_chunk` ties the manifest's name to the chunk's until
+  P3.7 (`PgVectorRepository.java:1343-1347`), for centroids until P3.7
+  revisits the name columns (`TaxonomyCentroidRepository.java:187-188`).
   `CatalogRepository.upsertManifestChunkVectors` switches the same way
   (`:6863-6864`; T2 `229-research-327`); both
   keys exist from P3.3b's pass to P4.1, so either target has an arbiter.
@@ -1589,21 +1594,22 @@ while the engine serves:
        the stamps (`vectors-078:573-601`, the changeset and its one `sqlCheck`), and the pass builds the
        twin only once `databasechangelog` records it
        (`IdUniqueIndexPass.java:243-251`; T2 `229-research-269`,
-       `229-research-319`). Gate 3 also stays shut while any quarantine chunk
-       lacks the `origin_collection_id` key (present, or JSON null for a
-       dangling tag, passes), and its reason names the count
-       (`CompletionCheck.java:544-552`). Row 13, the quarantine origin-id
-       backfill (`vectors-082`, commit c1476bac02, not yet on the stack),
-       marks those pre-id rows and so retires the wait (linda 2026-11-24;
-       T2 `229-research-327`). Then
+       `229-research-319`). Until the latch row exists, gate 3 also does not
+       latch while any quarantine chunk lacks the `origin_collection_id` key
+       (present, or JSON null for a dangling tag, passes); its reason says
+       how many, capped at 10,000 (`CompletionCheck.java:544-552`, `:571`).
+       Row 13 of the Phase 3 blocking list, the quarantine origin-id backfill
+       (branch `feature/nexus-p2m1x.22-quarantine-origin-backfill`, changeset
+       `vectors-082` there; not yet on the stack), marks those pre-id rows
+       and so retires the wait (linda 2026-11-24; T2 `229-research-327`). Then
        the readers move to the id: `CollectionRegistry` is keyed by id
        (P3.5a; T2 `229-research-308`), and the jOOQ readers switch with the
        latched gate 3 (P3.5c). The check registers P3.7's name-key drop move (Switch), the
        rename becomes one row (P3.7) once that move also has `completed_at`
        set, and the check registers P4.1's drop move once P4.1's release
        is installed.
-    Until gate 3, every Java reader of a name column takes the name key from
-    the one `Gate3` the engine builds (`Main.java:622-624`; the registry
+    Until gate 3, the Java readers that switch at the latch take the name key
+    from the one `Gate3` the engine builds (`Main.java:622-624`; the registry
     holds no gate, `CollectionRegistry.java:104`; T2 `229-research-327`),
     so the jOOQ readers read the name columns, except the ghost sweep's stats read,
     which is by the id before the latch too (P3.5b; T2 `229-research-318`), and
@@ -1985,8 +1991,8 @@ carries with a different collection's id is refused as
 `restore_ambiguous_collection_name` (T2 `229-research-190`). The quarantine tag's
 `origin_collection_id` is the source installation's id: an id the map holds
 is mapped, any other becomes JSON null, and a tag-only row gets the id this
-restore drew for that label in the file (`RestoreIdFill.java:398-430`; T2
-`229-research-327`). It is never resolved by the tag's
+restore drew for that label in the file, or JSON null when the file has no
+single such row (`RestoreIdFill.java:398-430`; T2 `229-research-327`). An id the tag carries is never resolved by the tag's
 `origin_collection` name, which may be stale (T2 `229-research-192`). The by-id map ships in the
 P3.5+P3.7 cut, not P4.1: from P3.7 a rename changes one registry row, the name
 columns go stale until P4.1 drops them, and a name cannot be trusted to join.
@@ -2562,8 +2568,9 @@ its acceptance is that test green plus the census pin it lowers.
   `model_version` falls back to the returned conformant name with a
   `collection_for_row_model_version_empty` warning (`:177-188`). The fallback is
   temporary, removed once P1.2's census counts zero empty rows; no bead owns
-  the removal, and D2's cloud run (below) is its trigger. The tie is
-  `created_at` ascending then name (`CatalogRepository.java:10560`), gated on
+  the removal, and D2's cloud run (below) is its trigger. P1.4 shipped the tie
+  as `created_at` ascending then name (P3.8 has since put the lowest
+  `collection_id` first, `CatalogRepository.java:10976`), gated on
   P1.2's census, which read `created_at_winner_differs` 0 on both tenants. P1.4
   lowered no census pin: the name parse it removed
   (`http_catalog_client.py:3875`) was never a counted site, and the fallback adds
@@ -2623,8 +2630,8 @@ its acceptance is that test green plus the census pin it lowers.
   prefix name down to its extensions' lowest threshold and prints the skipped
   count). No client floor bump: the flag and the echo are the gate. The
   route's field keeps its name, `source_collection_prefix`, and P3.5c adds
-  no id form of it (`TaxonomyHandler.java` is unchanged by P3.5c; T2
-  `229-research-327`). The cloud leg proves the body field
+  no id form of it (`git log 41b7af86b7..c90eb66df8` on `TaxonomyHandler.java`
+  is empty). The cloud leg proves the body field
   crosses the edge (`match: "bogus"` on a name that matches nothing must
   answer 400). Tests: a `..__v1`/`..__v10` pair and a `docs__art`/`docs__art-x`
   pair, each in prefix and in exact mode. [additive] wire entry.
@@ -3051,8 +3058,8 @@ its acceptance is that test green plus the census pin it lowers.
     `p35c-java-reader-dispositions.tsv`: 157 `id`, 101 `both`, 90
     `label-kept` and 6 `n-a`. The census also covers the quarantine tag's
     label key (`LABEL_KEYS = ("origin_collection",)`,
-    `scripts/rdr229_p35c_java_reader_census.py:236-237`; 23 Java and 19 SQL
-    rows). Eight reads still match that label after the latch and are held
+    `scripts/rdr229_p35c_java_reader_census.py:236`; 23 rows of this census,
+    and 19 of P3.5b's SQL census, `p35b-reader-census.tsv`). Eight reads still match that label after the latch and are held
     to P3.7, which switches them to the id (`vectors-083`): the restore's
     `quarantineRestoreSelected` (two rows), and `gc_expire_quarantine`,
     `gc_expire_quarantine_bounded` (linda 2026-11-24: by the id after the
@@ -3060,19 +3067,22 @@ its acceptance is that test green plus the census pin it lowers.
     `quarantine_restore_chunks` and `quarantine_reattach_plan`
     (`tests/test_rdr229_p37_pending_violations.py:35-44`, which fails once
     `vectors-083` exists and a row is left). The reaper's own expiry
-    functions stay on the label to P4.1 (R1, bead nexus-p2m1x.35). The ten
+    functions stay on the label to P4.1 (the reaper ruling R1 of bead
+    nexus-p2m1x.35). The ten
     `TwinKeyUpsert` sites take the id key as their conflict target, among
     them the chunk and centroid upserts (`PgVectorRepository.java:1352`,
     `CatalogRepository.java:6864`, `TaxonomyCentroidRepository.java:197`).
     An id-addressed statement names the requested id (I7), and a write
     stores the locked registry row's current label (I8;
-    `p35c-i8-stored-label-census.tsv`, 85 rows, none violating). The engine
+    `p35c-i8-stored-label-census.tsv`, 85 rows: 19 hold, 5 hold until P4.1
+    (the reaper's, R1), 61 do not apply, none violate). The engine
     empties its registry caches before it serves
     (`NexusService.java:1488-1494`) and evicts them after a commit the
     client sees fail (`CollectionRegistry.java:912`); supersede, rename and
     delete by id read and lock their source by id
     (`CollectionRefusals.java:37-78`). Also from the latch: the aspect queue
-    skips and counts a row whose `collection_id` names no registry row
+    skips and counts a row with no home document whose `collection_id`
+    names no registry row
     (`AspectQueueDrain.java:365-370`; linda 2026-11-23, ruling a), the
     foreign-collection listing compares by id
     (`ManifestForeignCollectionReads.java:74-82`), the document move locks
@@ -3987,4 +3997,4 @@ large, and moved under a ratchet.
 - 2026-11-24: P4.1's redefinition step pinned (linda, under the same ask): it is P4.1's first changeset, CONTINUE-gated, and P4.1's drop move registers only once that changeset is recorded, so no name column drops before the survivors are redefined; the P3.1 SQL writer count corrected from 26 to 25 at its three sites, from `p31-writer-census.tsv` (T2 `229-research-324`).
 - 2026-11-24: P4.1's redefinition step split after fix check `229-fix-check-901bcd7e97` (linda, replacing the earlier pin; T2 `229-research-325`): a CONTINUE changeset may not name a chunk-family table, so P4.1's first changeset is a plain one redefining the five survivors that name none, and the drop move's `on_complete` opens by redefining every other survivor, one CREATE OR REPLACE each with its final body, before the views, child keys, primary key swap and triggers; the `pg_proc` test reads a table-qualified drop list P4.1 creates, excludes the four history name columns by name, also fails on a call to a dropped function, and treats RESTRICT as a backstop.
 - 2026-11-24: P4.1's residual from fix check `229-fix-check-57ba196206` fixed in the text (Sam, option 1 on ask `rdr229-p41-first-changeset-gate`; linda's ruling; T2 `229-research-326`): P4.1 has no first changeset; every survivor, the five that name no chunk-family table included, is redefined once as the drop move's `on_complete` opens, after gate 3, which waits for `vectors-078-8` and so for the stamps and the two `vectors-078` changesets that redefine survivors; the view rows are redefined once, in the views step; the vacuous dependent-redefinition clause is dropped; the census line counts 33 move rows; item 6 names P4.1's CONTINUE changesets only.
-- 2026-11-24: P3.5c folded from the stacked code (grant 3, nexus-p2m1x.25; T2 `229-research-327`): the readers switch from the latched gate 3 through `CollectionKey`, `CollectionSelector` and `CollectionIdReads`; the reader census and its dispositions; the label metadata-key extension; the eight reads held to P3.7 (`vectors-083`), with linda's expiry ruling, and the reaper's held to P4.1; the ten `TwinKeyUpsert` arbiters, the id arm writing the label; I7 and I8; the registry caches emptied before serve; the verbs by id and their 409 `collection_id_mismatch`; gate 3's quarantine origin-id clause, retired by row 13's backfill; the origin id as JSON null, not absent, and in a restore; `IdReaders.PRESENT` true; `collectionForTuple`'s tie-break credited to P3.8. The R7 reader contract is held from this fold pending a ruling.
+- 2026-11-24: P3.5c folded from the stacked code (grant 3, nexus-p2m1x.25; T2 `229-research-327`): the readers switch from the latched gate 3 through `CollectionKey`, `CollectionSelector` and `CollectionIdReads`; the reader census and its dispositions; the label metadata-key extension; the eight reads held to P3.7 (`vectors-083`), with linda's expiry ruling, and the reaper's held to P4.1; the ten `TwinKeyUpsert` arbiters, the id arm writing the label; I7 and I8; the registry caches emptied before serve; the verbs by id and their 409 `collection_id_mismatch`; gate 3's quarantine origin-id clause, to be retired by row 13's backfill; the origin id as JSON null, not absent, and in a restore; `IdReaders.PRESENT` true; `collectionForTuple`'s tie-break credited to P3.8. The R7 reader contract is held from this fold pending a ruling.
