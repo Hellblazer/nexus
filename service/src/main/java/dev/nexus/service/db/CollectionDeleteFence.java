@@ -29,15 +29,17 @@ import static dev.nexus.service.jooq.nexus.Tables.REEMBED_JOBS;
  *
  * <p><b>The lock order of a delete by id</b> (B1 of the row 14 and row 16 merge). {@link #lockByIdFirst} takes, in this order: (1) the per-tenant
  * start guard, {@code pg_advisory_xact_lock_shared}, FIRST, before any registry row (a start holds it exclusive and then wants the origin's row
- * {@code FOR KEY SHARE}: a delete that held the row first and then waited for the guard would close a cycle with it, 40P01); (1b) the collection's
- * unconsumed aspect task rows, {@code FOR NO KEY UPDATE} ({@link AspectTaskRefs#lockOnly}: a claim-fenced aspect write takes its task row and then the registry row); (2) the origin's
+ * {@code FOR KEY SHARE}: a delete that held the row first and then waited for the guard would close a cycle with it, 40P01); (2) the origin's
  * row {@code FOR UPDATE} and its quarantine siblings' rows {@code FOR KEY SHARE}, in {@code collection_id} order and with no lock bound (linda:
  * the delete's lock is unbounded, a bound would be a new wire answer); (3) {@link CollectionRefusals#requireSourceById}, which only checks (404, 409
  * retired, 409 mismatch) and consumes the id the request named, a no-wait re-lock of the row (2) holds; (4) the {@code collection_busy} check.
  * One statement cannot lock some rows {@code FOR UPDATE} and others {@code FOR KEY SHARE}, so (2) is up to three statements that keep the id
  * order across both modes: the siblings below the origin's id, the origin, the siblings above it. The origin is never key-shared and then
- * upgraded: two concurrent deletes of one id would each hold a key share and wait on the other's upgrade (40P01). A delete by label keeps its
- * order: the fence key-shares the origin and the siblings in one statement ({@link #lockForDelete}).
+ * upgraded: two concurrent deletes of one id would each hold a key share and wait on the other's upgrade (40P01). The collection's aspect task rows
+ * are taken after all of it, by the purge's own {@code AspectTaskRefs.deleteNaming}: the registry row comes before the tuple rows, as in the
+ * claim-fenced aspect write ({@code AspectRepository.upsertAspect}: registry key share, then the claim row), the one-row rename and the re-home,
+ * so the delete cannot cycle with them. A delete by label keeps its order: the fence key-shares the origin and the siblings in one statement
+ * ({@link #lockForDelete}), after the purge's task-row delete (a pre-existing inversion against those verbs, absorbed by the deadlock retry).
  *
  * <p><b>The re-embed jobs.</b> A delete that arrives through the route ({@code refuseWhenBusy}) is refused with
  * {@link CatalogRepository.CollectionHeldByReembedJob} (the route answers 409 {@code collection_busy}) while a job in a lock state (planned,
@@ -104,12 +106,6 @@ final class CollectionDeleteFence {
         if (refuseWhenBusy) {
             takeGuardShared(ctx, tenant);   // (1)
         }
-        // The collection's unconsumed aspect tasks, before any registry row: the claim-fenced aspect write takes its task row and then the
-        // collection's registry row (key share), so a delete that held the registry row FOR UPDATE and then waited for a task row would close a
-        // cycle with it (40P01). They are found by the label the request resolved: if that label has another holder now, requireSourceById
-        // below refuses (404 or 409) and the transaction rolls back, so nothing is purged and the extra task locks were only a wait. The
-        // purge's own AspectTaskRefs.deleteNaming later re-takes these locks and deletes the rows.
-        AspectTaskRefs.lockOnly(ctx, tenant, name);
         // the seam of a request's by-id read, just before the transaction's first one (a no-op in production), as CollectionTombstones.lockRows has it
         ExpectedCollectionIds.beforeTransactionRead();
         lockInIdOrder(ctx, tenant, name, originId, !keepQuarantine && !QuarantineOrigin.isQuarantine(ctx, tenant, name), gate3);   // (2)
