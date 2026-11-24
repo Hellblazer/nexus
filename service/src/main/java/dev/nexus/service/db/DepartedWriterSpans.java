@@ -633,15 +633,12 @@ final class DepartedWriterSpans {
      * stored id has no row (the collection is gone) is left out of the statement.
      */
     private static List<CollectionRow> lockDeparted(DSLContext ctx, String tenant, Object collection, List<byte[]> chashes, boolean byId) {
-        if (byId) {
-            // from gate 3 the batch is keyed by the id the chunk rows store (a NULL id never reaches a batch): that id's row
-            return RegistryRowLocks.keyShareIfPresent(ctx, tenant, List.of((Long) collection), List.of());
-        }
-        String label = (String) collection;
+        // the chunk rows of the batch: by the id the batch is keyed by from gate 3 (byId), by the label before it
         List<Long> stored = ctx.selectDistinct(CHUNKS.COLLECTION_ID).from(CHUNKS)
-            .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(label)).and(CHUNKS.CHASH.in(chashes)))
+            .where(CHUNKS.TENANT_ID.eq(tenant).and(byId ? CHUNKS.COLLECTION_ID.eq((Long) collection) : CHUNKS.COLLECTION.eq((String) collection))
+                .and(CHUNKS.CHASH.in(chashes)))
             .fetch(CHUNKS.COLLECTION_ID);
-        return RegistryRowLocks.keyShareIfPresent(ctx, tenant, stored, stored.contains(null) ? List.of(label) : List.of());
+        return RegistryRowLocks.keyShareIfPresent(ctx, tenant, stored, !byId && stored.contains(null) ? List.of((String) collection) : List.of());
     }
 
     /**
