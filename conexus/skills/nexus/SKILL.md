@@ -119,7 +119,7 @@ Run a long `nx` command with its full output going to a log file (`nx ... > run.
 
 ## Collection Naming
 
-RDR-103 conformant shape: `<content_type>__<owner>__<embedding_model>__v<n>`. Examples: `code__nexus-1-1__voyage-code-3__v1`, `docs__nexus-1-1__voyage-context-3__v1`, `knowledge__art-1-1__voyage-context-3__v1`. The short legacy form (`knowledge__topic`) is accepted at the `--collection` boundary and auto-promoted by `t3_collection_name`. Pre-existing legacy 2-segment collections remain readable. Always `__` as the segment separator (the RDR-103 name grammar refuses colons).
+Type the bare subject (`distributed-systems`) and let the catalog name the collection; never a model token, version or `__` segment ([rules](https://github.com/Hellblazer/nexus/blob/main/docs/collections.md)). `nx index repo` mints `docs`, `code` and `rdr` collections, rendered `<content_type>__<owner>__<embedding_model>__v<n>`; a NEW `knowledge` subject is labelled `c<id>` by the engine. Existing collections keep their names; a full name is accepted wherever one is read.
 
 ## Title Conventions
 

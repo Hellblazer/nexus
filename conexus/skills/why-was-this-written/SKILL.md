@@ -15,10 +15,10 @@ decision history. A single-corpus RDR lookup is a `search` call — see
 does not dispatch a debugger. For hypothesis-driven fault isolation, dispatch
 the `debugger` agent.
 
-**Note — the debug scenario is intentionally flat** (no `traverse`
-step). Dev work starts from a concrete failing path; the primary
-link walk is the catalog's per-file lookup (not multi-hop graph
-traversal). Serena handles symbol-level navigation separately.
+**Note — the debug scenario is intentionally flat.** It runs one `query`
+on the symptom text over every corpus, hydrates the hits and summarizes
+them: no `traverse` step, no link walk. Serena handles symbol-level
+navigation separately.
 
 ## The call
 
@@ -26,7 +26,7 @@ traversal). Serena handles symbol-level navigation separately.
 mcp__plugin_conexus_nexus__nx_answer(
     question=<caller's phrasing>,
     dimensions={"verb": "debug"},
-    context=<failing_path + symptom — as JSON string if needed>,
+    context=<failing path + symptom — as JSON string if needed>,
 )
 ```
 
@@ -35,8 +35,7 @@ falls through to an inline `claude -p` planner.
 
 ## Required bindings
 
-- `failing_path` — the file (or directory) where the symptom manifests.
-- `symptom` — one-line description of what's failing.
+- `symptom` — one-line description of what is failing. The plan searches on it, and `nx_answer` fills it from the question when you do not bind it yourself. A failing file or directory is not a binding (path scoping was removed from the plan, nexus-7y4v0): put it in the question text so it reaches the search.
 
 ## Typical intent shapes
 
@@ -57,26 +56,26 @@ falls through to an inline `claude -p` planner.
 
 A single-corpus RDR lookup — e.g. "find the RDR that covers this
 module's error-handling approach" — is fine via
-`mcp__plugin_conexus_nexus__search(query=..., corpus="rdr__<owner>__voyage-context-3__v1")`
+`mcp__plugin_conexus_nexus__search(query=..., corpus="rdr__<owner>__<embedding_model>__v1")`
 (or the bare `rdr` prefix to fan out to all matching collections).
 Fast, cheap, and the chunks often contain the design rationale directly.
 
-Use this skill when: the question needs to *walk* the catalog's
-per-file links (code → RDR → related RDRs) or synthesize across
-multiple design notes rather than surface a single chunk.
+Use this skill when: the question needs a synthesis across several
+design notes and RDRs rather than a single chunk.
 
 ## Anti-patterns (do not do any of these)
 
-- **Calling `search` directly when the question needs a catalog walk
-  across per-file links.** `search` returns top-K by cosine; it won't
-  traverse the "this code implements that RDR" typed links. If you
-  need the walk, you need `nx_answer`.
+- **Calling `search` directly when the answer must be reduced from
+  several documents.** `search` returns top-K chunks by cosine and
+  stops there. If you need the hits read and summarized together, you
+  need `nx_answer`. (For a typed-link walk, `traverse` is its own tool.)
 - **Calling `plan_match` directly instead of `nx_answer`.** You lose
   the record step, the inline-planner fallback, and use_count telemetry.
 - **Expecting the debug plan to walk the full call graph.** It
   won't — that's Serena's job. The debug plan answers "what did we
   decide about this code?", not "what calls this function?".
-- **Running `debug` without a `failing_path`.** No reasonable
-  default; raises `PlanRunBindingError`.
+- **Running `debug` with no symptom in the question.** The plan has
+  nothing to search on but the question text, so a bare "debug this"
+  returns noise. Name the failure and the file.
 
 See `/conexus:plan-first` and the plan authoring guide (https://github.com/Hellblazer/nexus/blob/main/docs/plan-authoring-guide.md).

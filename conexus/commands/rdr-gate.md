@@ -11,13 +11,13 @@ description: Run finalization gate on an RDR — structural, assumption audit, a
 
 $ARGUMENTS
 
-**Targeted load**: parse the **numeric ID** (and any `--skip-research` flag)
-from `$ARGUMENTS` and run, via the Bash tool, `nx rdr preamble rdr-gate -- <ID>`
-with literal argv tokens. Never splice raw `$ARGUMENTS` into a shell-quoted
+**Targeted load**: parse the **numeric ID** (and the `--skip-gaps` flag, the one
+override the preamble honours) from `$ARGUMENTS` and run, via the Bash tool,
+`nx rdr preamble rdr-gate -- <ID> [--skip-gaps]` with literal argv tokens. Never splice raw `$ARGUMENTS` into a shell-quoted
 line — free text with apostrophes/quotes breaks the quoting (nexus-ybvyo).
 
 ## Action
 
-The data above is the command's own gathered data when the `!` preamble ran; if it is missing, run `nx rdr preamble rdr-gate -- <ID>` via the Bash tool rather than proceeding on nothing. Follow the `rdr-gate-checklist` skill body for the full procedure — path detection, the Layer 0 re-gate sweep, the fix check, Layers 1-3, gate aggregation, and the on-pass/on-fail write-back. This command's own job is the preamble injection above and the argument parsing below; the skill is the single source for the procedure itself.
+The data above is the command's own gathered data when the `!` preamble ran; if it is missing, run `nx rdr preamble rdr-gate -- <ID> [--skip-gaps]` via the Bash tool rather than proceeding on nothing. Follow the `rdr-gate-checklist` skill body for the full procedure — path detection, the Layer 0 re-gate sweep, the fix check, Layers 1-3, gate aggregation, and the on-pass/on-fail write-back. This command's own job is the preamble injection above and the argument parsing below; the skill is the single source for the procedure itself.
 
 If no ID given, show the available RDR table above and prompt for an ID.

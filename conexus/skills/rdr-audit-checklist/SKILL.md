@@ -92,16 +92,16 @@ Do NOT inline the canonical prompt text into this skill file — the shipped res
 ## Behavior — Audit Dispatch (default mode)
 
 1. **Derive project name** (see Current-Project Derivation)
-2. **Seed T1 link context** so the auto-linker ties findings to RDR-067:
+2. **Seed T1 link context** so the auto-linker ties findings to RDR-067. Tumblers are per install, so look the RDR up first: `mcp__plugin_conexus_nexus-catalog__search(query="RDR-067 cross-project RDR audit loop", content_type="rdr")`, and use the tumbler it returns for RDR-067. If the catalog does not hold RDR-067 on this install, skip the seed (the audit still runs; its findings just are not auto-linked).
    ```
    mcp__plugin_conexus_nexus__scratch(
      action="put",
-     content='{"targets": [{"tumbler": "1.1.771", "link_type": "cites"}], "source_agent": "deep-research-synthesizer"}',
+     content='{"targets": [{"tumbler": "<RDR-067 tumbler from the catalog search>", "link_type": "cites"}], "source_agent": "deep-research-synthesizer"}',
      tags="link-context"
    )
    ```
 3. **Main-session PRE-STEP** (transcript mining, see above — NOT delegatable)
-4. **Load canonical prompt** from T2 and substitute `{project}` + `{transcript_excerpts}`
+4. **Load canonical prompt** (the shipped `AUDIT-PROMPT.md`, or the T2 override when one exists; see above) and substitute `{project}` + `{transcript_excerpts}`
 5. **Dispatch the deep-research-synthesizer agent** via the Agent tool with `model: "sonnet"` and the substituted prompt as the task body (see Agent Invocation section)
 6. **Wait for the subagent result**
 7. **Parse the output** — extract the verdict category (VERIFIED / PARTIALLY VERIFIED / INCONCLUSIVE / FALSIFIED), incident count, confidence level, and drift-category distribution
@@ -119,7 +119,7 @@ Do NOT inline the canonical prompt text into this skill file — the shipped res
 
 ## Management Subcommands
 
-Three management subcommands let users and agents inspect scheduled audits from inside Claude Code without shelling out to OS primitives manually. Invoked as the first positional argument: `/conexus:rdr-audit list`, `/conexus:rdr-audit status <project>`, etc. If the first token is not one of the reserved subcommand words, the argument is treated as a project name and the skill routes to the default audit-dispatch flow instead.
+Three management subcommands let users and agents inspect scheduled audits from inside Claude Code without shelling out to OS primitives manually. They read triggers a user installed by hand (a launchd job named `com.nexus.rdr-audit.<project>.90d` or a cron line containing `rdr-audit`, as RDR-067 describes); nothing in the plugin or the CLI creates one, so on most machines `list` prints `No audits scheduled`. Invoked as the first positional argument: `/conexus:rdr-audit list`, `/conexus:rdr-audit status <project>`, etc. If the first token is not one of the reserved subcommand words, the argument is treated as a project name and the skill routes to the default audit-dispatch flow instead.
 
 ### Safety Split (core user-protection invariant)
 
@@ -226,7 +226,7 @@ Full audit output conforming to the canonical prompt's output-format contract:
 ## Success Criteria
 
 - [ ] Target project name derived (git remote → pwd basename → user prompt)
-- [ ] T1 link context seeded pointing to RDR-067 tumbler 1.1.771
+- [ ] T1 link context seeded with RDR-067's tumbler as the catalog returns it on this install (or skipped when the catalog has none)
 - [ ] Main-session transcript pre-step completed (or explicitly skipped via `--no-transcripts` / no transcript directory)
 - [ ] Canonical prompt loaded (shipped `AUDIT-PROMPT.md`, or the T2 `nexus_rdr/067-canonical-prompt-v1` override when present) and substituted
 - [ ] deep-research-synthesizer dispatched with the substituted prompt
