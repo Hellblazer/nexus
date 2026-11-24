@@ -369,7 +369,7 @@ any new hard failure is real signal — compensate with live validation of the
 release's changed paths (the v6.3.5/v6.3.6 pattern: exercise the advertised
 claims against the real deployment).
 
-If unit-suite Py3.13 surfaces a known nexus-9eaz-family flake (`test_migration_guard_*`, `test_concurrent_apply_pending_*`, `test_concurrent_bootstrap`, `test_concurrent_t2database_construction`, `test_stop_claiming_on_running_worker_causes_exit`): these are marked with `@_skip_on_gha_flake` on main, so they shouldn't fire here. If they DO fire locally, that's signal: investigate before proceeding.
+If a PR CI unit shard on Py3.13 (the release runs no hand unit suite) surfaces a known nexus-9eaz-family flake (`test_migration_guard_*`, `test_concurrent_apply_pending_*`, `test_concurrent_bootstrap`, `test_concurrent_t2database_construction`, `test_stop_claiming_on_running_worker_causes_exit`): these are marked with `@_skip_on_gha_flake` on main, so they shouldn't fire there. If they DO fire, that's signal: investigate before proceeding.
 
 ### 2. Audit docs against changes since last tag
 
@@ -409,7 +409,7 @@ uv-lock-version-matches-pyproject test.
 
 Optional but recommended: also bump `plugins[].source.sha` to the 40-char SHA of the release commit, for protection against tag force-push. Add post-commit (Step 8a, see below).
 
-**Engine-service pin (conditional 9th target — nexus-3rq00).** The Python/Java boundary rides one more hand-edited constant that sits OUTSIDE the seven-manifest parity gate: `PINNED_SERVICE_TAG` in `src/nexus/daemon/binary_install.py`, the `engine-service-vX.Y.Z` release this build auto-installs. It is DERIVED from `REQUIRED_ENGINE_VERSION`, so it is never hand-edited: moving the engine identity moves the pin by construction. Two invariants the `TestEnginePinParity` test enforces: (1) `PINNED_SERVICE_TAG`'s numeric version must be `>= REQUIRED_ENGINE_VERSION` (`src/nexus/engine_version.py`) — never ship a client that auto-installs an engine it then refuses as too old; (2) at the 6.0 release boundary the pin must be non-None (it is intentionally `None` pre-6.0). A release that bumps pyproject to 6.x without setting a real pin trips CI. **The pin's VALUE is asserted in exactly one test** — `tests/test_engine_version.py::TestRequiredEngineVersion::test_pinned_floor_is_current` — and since nexus-9gggv (2026-09-08) it is DERIVED, not typed: the floor must equal the first `engine-service-vX.Y.Z` the newest released `CHANGELOG.md` section names. So a `REQUIRED_ENGINE_VERSION` bump needs no test edit; it needs the release's CHANGELOG section to name its engine pairing as the FIRST `engine-service-v` mention in that section (a `was engine-service-vX` aside goes after the pairing, never before it; every released section to date satisfies this, 358 checked), and a bump without that line, or that line without the bump, is the red. Add the bump's reason to the test's comment trail for provenance. Before this derivation the tuple was hand-edited per release and missed on 7.23.0: the unit leg of the battery red'd on it after the paired engine gate was already green.
+**Engine-service pin (conditional 9th target — nexus-3rq00).** The Python/Java boundary rides one more constant that sits OUTSIDE the seven-manifest parity gate: `PINNED_SERVICE_TAG` in `src/nexus/daemon/binary_install.py`, the `engine-service-vX.Y.Z` release this build auto-installs. It is DERIVED from `REQUIRED_ENGINE_VERSION`, so it is never hand-edited (it was, before the derivation): moving the engine identity moves the pin by construction. Two invariants the `TestEnginePinParity` test enforces: (1) `PINNED_SERVICE_TAG`'s numeric version must be `>= REQUIRED_ENGINE_VERSION` (`src/nexus/engine_version.py`) — never ship a client that auto-installs an engine it then refuses as too old; (2) at the 6.0 release boundary the pin must be non-None (it is intentionally `None` pre-6.0). A release that bumps pyproject to 6.x without setting a real pin trips CI. **The pin's VALUE is asserted in exactly one test** — `tests/test_engine_version.py::TestRequiredEngineVersion::test_pinned_floor_is_current` — and since nexus-9gggv (2026-09-08) it is DERIVED, not typed: the floor must equal the first `engine-service-vX.Y.Z` the newest released `CHANGELOG.md` section names. So a `REQUIRED_ENGINE_VERSION` bump needs no test edit; it needs the release's CHANGELOG section to name its engine pairing as the FIRST `engine-service-v` mention in that section (a `was engine-service-vX` aside goes after the pairing, never before it; every released section to date satisfies this, 358 checked), and a bump without that line, or that line without the bump, is the red. Add the bump's reason to the test's comment trail for provenance. Before this derivation the tuple was hand-edited per release and missed on 7.23.0: the unit leg of the battery red'd on it after the paired engine gate was already green.
 
 Semver: MAJOR for breaking, MINOR for new features, PATCH for bug fixes.
 
@@ -509,7 +509,7 @@ no unit suite).
 
 Trigger: this release carries a schema or data migration — a new `upgrade_ladder` rung (`src/nexus/upgrade_ladder/registry.py`), or any client-side change to a shape data already has to conform to (T2 [22511] gap 9). Skip this step entirely when the release carries no such change.
 
-1. **Representative-scale rehearsal.** Run the populated-store upgrade rehearsal against a corpus seeded ABOVE a stated floor, not the harness's default toy seed (10-30 docs in `rehearse_package_upgrade.sh` / `rehearse_acquire.sh`, which is what Step 1's `--package-upgrade` leg uses, so it does not satisfy this item). Pre-tag, that is Step 6e's `tests/e2e/upgrade-rehearsal.sh` (seeded above its 50,000-row floor); post-publish, close the loop with Step 11c's published-bytes run:
+1. **Representative-scale rehearsal.** Run the populated-store upgrade rehearsal against a corpus seeded ABOVE a stated floor, not the harness's default toy seed (10-30 docs in `rehearse_package_upgrade.sh` / `rehearse_acquire.sh`, which is what Step 1's `--package-upgrade` leg uses, so it does not satisfy this item). Pre-tag, that is Step 6e's `tests/e2e/upgrade-rehearsal.sh` (seeded above its 50,000-row floor). Post-publish, Step 11c's published-bytes `--package-upgrade` run proves the PUBLISHED bytes upgrade, with the same toy seed, so it closes the loop on identity and not on scale:
    ```bash
    NEXUS_TARGET_RELEASE=X.Y.Z tests/e2e/migration-rehearsal/run.sh --package-upgrade
    ```
@@ -817,8 +817,10 @@ git fetch origin develop main
 # Read develop's tip CI before cutting on it; a red is diagnosed first, never
 # carried into the release PR (7.46.0: fix, rebase, force-push, second PR cycle).
 gh api repos/Hellblazer/nexus/commits/$(git rev-parse origin/develop)/check-runs --jq '.check_runs[] | [.name, .conclusion] | @tsv'
-# From the primary (or any worktree); skip this line if you already cut the
-# release worktree before Step 1 ("Where to run the battery"), and work in it:
+# Run the next two lines FROM THE PRIMARY: the relative path ../nexus-wt is the
+# primary's sibling directory and resolves nowhere else (from another worktree,
+# spell the primary's absolute path). Skip them if you already cut the release
+# worktree before Step 1 ("Where to run the battery"), and work in that one:
 git worktree add -b release/vX.Y.Z ../nexus-wt/<session>-release origin/develop
 cd ../nexus-wt/<session>-release   # everything below runs here
 
@@ -865,7 +867,7 @@ Wait for CI green, then merge:
 
 ```bash
 gh pr merge <N> --merge   # NOT --squash — preserves the chore(release) commit verbatim; NEVER --auto (see below)
-git checkout main && git pull
+git fetch origin main     # the merge commit is now origin/main; nothing checks out main
 ```
 
 Never `gh pr merge --auto` on a release PR: it fires when the required checks pass, including while a non-required check is red, and squashes only the tip at that moment, orphaning later pushes (three times, 2026-05 to 2026-06). Merge by hand, after CI is green.
@@ -909,7 +911,7 @@ gh pr create --base main --title "release: pin sha for vX.Y.Z" --body-file <body
 
 Wait for CI green and merge by hand with `gh pr merge <N> --merge` (never `--auto`), as in Step 7. Step 9 then tags the NEW merge commit on main, not the one in `RELEASE_SHA`.
 
-Tradeoff: an extra PR cycle and commit on main, but guards against the case where someone could force-push the `vX.Y.Z` tag. For solo / small-team projects the `ref` alone is usually fine; skip if so.
+Tradeoff: an extra PR cycle and commit on main, and for that whole CI cycle main's marketplace.json already names a `vX.Y.Z` that is not tagged yet, so a plugin install in that window fails. It guards against someone force-pushing the `vX.Y.Z` tag. For solo / small-team projects the `ref` alone is usually fine; skip this step unless the force-push risk outweighs that window.
 
 ### 8b. Publish the MinerU weights assets (F35, nexus-7t3w1; BEFORE the tag, under the release's go)
 
@@ -974,11 +976,12 @@ Authority for the protocol: `docs/agents/engine-service-release.md`
 (nexus-1emxn refinement paragraph) — this step carries the operational
 form; on any wording conflict, that file wins.
 
-After Step 7's PR merges, switch to main, fetch, and tag the merge commit:
+After Step 7's PR merges (or, when you ran Step 8a, the pin PR's merge commit), fetch and tag `origin/main`, with no checkout of main:
 
 ```bash
-git checkout main && git pull
-git tag -a vX.Y.Z -m "conexus X.Y.Z" $(git rev-parse HEAD)
+git fetch origin main
+git rev-parse origin/main                # read it: the merge commit you mean to tag
+git tag -a vX.Y.Z -m "conexus X.Y.Z" origin/main
 git push origin vX.Y.Z
 ```
 
@@ -1036,14 +1039,16 @@ The aggregate JSON above lags the simple index (7.48.0 and 7.49.0 both): a still
 Run it from a linked worktree on a branch cut off `origin/develop`, never from
 the primary (it keeps `develop` checked out and is not edited: AGENTS.md
 worktree rules 2 and 3, so `checkout develop` is refused in a worktree and
-forbidden in the primary). The release worktree works: after the tag, switch it
-to a new branch off develop with `git switch -c backmerge/vX.Y.Z origin/develop`,
-or cut a fresh one with `git worktree add -b backmerge/vX.Y.Z
-../nexus-wt/<session>-backmerge origin/develop`.
+forbidden in the primary). Cut a fresh worktree for it and leave the release
+worktree alone: Steps 11c and 12 run from a worktree at the client tag (in the
+release worktree, `git switch --detach vX.Y.Z`), and a back-merge branch there
+would be in their way.
 
 ```bash
+# From the primary (the relative path is the primary's sibling directory):
 git fetch origin develop main
-git switch -c backmerge/vX.Y.Z origin/develop    # in the release worktree
+git worktree add -b backmerge/vX.Y.Z ../nexus-wt/<session>-backmerge origin/develop
+cd ../nexus-wt/<session>-backmerge    # everything below runs here
 git merge origin/main --no-edit    # conflict-free right after a release (the release
                                    # branch just CONTAINED develop), but clean is
                                    # NOT correct: check CHANGELOG.md below first
@@ -1083,10 +1088,13 @@ Three things stand between the merge and `PUSH_OK`, none of them optional:
   this merge carries `pyproject.toml`, `uv.lock`, docs and plugin files, so it needs
   BOTH heavy proofs: the docs-readers selection and the write-seam gate, each a
   `scripts/watched_pytest.py --status` file made on this merge's own tree sha and passed
-  with `--proof <file>` (repeatable). Run step 1 first: a missing proof refuses
-  (`PUSH_REFUSED_DOCS_READERS` / `PUSH_REFUSED_WRITE_SEAM`, exit 14) and prints the
-  three-step chas recipe and the whole re-push line with `--proof` added. The other
-  way is `--skip-docs-readers '<reason>' --skip-write-seam '<reason>'`; each reason
+  with `--proof <file>` (repeatable). Step 1 stops at the scope audit (exit 7, the
+  list and the digest) before the check gate runs, so it shows no proof refusal. The
+  refusal comes on step 2: a missing proof refuses (`PUSH_REFUSED_DOCS_READERS` /
+  `PUSH_REFUSED_WRITE_SEAM`, exit 14) and prints the three-step chas recipe and the
+  whole re-push line with `--proof` added. To avoid the extra round, make both
+  proofs on the merge commit `M` before step 2 (the tree must be clean at `M`; a
+  later commit changes the tree and voids them). The other way is `--skip-docs-readers '<reason>' --skip-write-seam '<reason>'`; each reason
   goes on stdout and into the push record, so write the real one (what the same files
   already passed in, with the run) and never a placeholder.
 - **The develop-red hold.** While a red is open on `board/ci/nexus-develop--owner`, a
