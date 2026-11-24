@@ -1269,7 +1269,7 @@ while the engine serves:
   drift check (`--check`). It lists 186 Java write rows (143 on a literal
   table, 34 through a helper, 9 by name), 49 statements in 25 SQL functions
   (vectors-069 redefines 24 of them; `purge_trash` writes `''` and needs no
-  id) and 26 registered move templates.
+  id) and 33 move rows (`data_move`).
 - *Index builds follow the PCI reconciler's pattern.* RDR-246 keeps index
   builds out of a move: `on_complete` holds transactional DDL, "never CREATE
   INDEX CONCURRENTLY" (lines 546-550). The per-leaf unique indexes for the
@@ -1664,7 +1664,8 @@ while the engine serves:
     P4.0's floor) take effect once they hold, with no restart of their own (T2 `229-research-64`). A
     CONTINUE changeset still "applies at the first boot after the move
     completes" (RDR-246 lines 942-944): P3.5b's SQL readers on tables
-    outside the chunk family, and P4.1's changesets. Until P3.5b's apply,
+    outside the chunk family, and P4.1's CONTINUE changesets (the registry
+    and other-table drops). Until P3.5b's apply,
     those readers read the name columns, which a one-row rename no longer
     rewrites, so the one-row rename also waits for every P3.5b changeset
     to be recorded as applied: the twelve CONTINUE changesets of
@@ -3176,25 +3177,29 @@ its acceptance is that test green plus the census pin it lowers.
   P3.4's concurrent pass, or in P4.1 before its drops, depending on whether
   P3.5c's upsert switch needs them as conflict targets (same comment).
   Before any drop, every SQL function that survives P4.1 and still reads
-  or writes a name column is redefined to read and write by the id, in
-  two places (linda 2026-11-24; T2 `229-research-325`). P4.1's first
-  changeset, a plain one and not CONTINUE, redefines the five survivors
-  that name no chunk-family table: `canary_query_ring_upsert`,
-  `catalog_documents_owner_to_collection`, `document_restore`,
-  `document_trash` and `topics_recount_doc_count`. A CONTINUE changeset
-  could not hold the others: one whose body names `nexus.chunks`, a leaf,
-  `catalog_document_chunks`, `topic_assignments` or `chunk_orphaned_at` is
-  refused (above, "Readers during the stamp"). The plain changeset applies
-  in the boot's Liquibase walk (`Main.java:285`), before the completion
-  check that registers P4.1's drop move starts (`Main.java:720`), so the
-  move cannot register before it. The drop move's `on_complete` redefines
-  every other survivor as its first work, in the same transaction as the
-  drops that follow: the P3.1 SQL writers (the `sql_function` rows of
-  `service/src/test/resources/rdr229/p31-writer-census.tsv`, twenty of
-  which name a chunk-family table) and the rows of
+  or writes a name column is redefined to read and write by the id, once,
+  as the first work of P4.1's drop move's `on_complete`, in the same
+  transaction as the drops that follow (linda 2026-11-24; T2
+  `229-research-325`, `229-research-326`). P4.1 has no changeset of its
+  own for them. A CONTINUE changeset could not hold most of them: one
+  whose body names `nexus.chunks`, a leaf, `catalog_document_chunks`,
+  `topic_assignments` or `chunk_orphaned_at` is refused (above, "Readers
+  during the stamp"), and twenty of the P3.1 SQL writers name one. A plain
+  changeset could be overwritten: it applies at P4.1's first boot, and on
+  an install whose stamps are not yet complete `vectors-078`'s CONTINUE
+  changesets apply at a later boot and put name-reading bodies back. The
+  `on_complete` runs after both: the drop move registers only once gate 3
+  holds, and gate 3 waits for `vectors-078-8` (P3.5), whose precondition
+  the other eleven `vectors-078` changesets share word for word, so by
+  then every P3.5b changeset has applied and every stamp move has
+  completed, and no unstamped row is left for an id-only body to meet.
+  The survivors are the P3.1 SQL writers (the `sql_function` rows of
+  `service/src/test/resources/rdr229/p31-writer-census.tsv`) and the
+  function rows of
   `service/src/test/resources/rdr229/p35b-reader-dispositions.tsv` whose
-  disposition is `both`, `writer-kept` or `unchanged-fallback`, other than
-  the five above. Each
+  disposition is `both`, `writer-kept` or `unchanged-fallback`; the two
+  view rows among them, `live_chunks` and `collection_vector_stats`, are
+  redefined once, in the views step below. Each
   such function gets exactly one CREATE OR REPLACE, carrying its
   final body: the removal of a both-shapes reader's name arm and the
   switch of the two `chunk_orphaned_at` stamp triggers to the id are part
@@ -3249,9 +3254,8 @@ its acceptance is that test green plus the census pin it lowers.
   its `<object>_by_id` twin from `vectors-077` stays), and
   `hybrid_search_<dim>`, which has no `_by_id` twin (comment 20:10; T2
   `229-research-110`). Functions are schema, not data, so these drops go in
-  this changeset and not in a move's `on_complete`. Inside it, every object
-  that still calls one of them is first redefined to call its `_by_id`
-  twin, and then the originals are dropped with RESTRICT. RESTRICT is a
+  this changeset and not in a move's `on_complete`. They are dropped with
+  RESTRICT. RESTRICT is a
   backstop: it catches only the dependents PostgreSQL records (views,
   triggers), and the gate for the rest, plpgsql and EXECUTE-string callers,
   is the body scan of the test below (linda 2026-11-24; T2
@@ -3271,8 +3275,8 @@ its acceptance is that test green plus the census pin it lowers.
   `catalog_collections` but the id keys (inferred, not read: read from
   `pg_constraint`). It is skipped and retried at each boot until all
   hold. Test, run after P4.1's last changeset: P4.1 creates one drop
-  list, a list of table-qualified columns that both its changesets and
-  this test read. The test reads the body (`prosrc`) of every function in
+  list, a list of table-qualified columns that its changesets, its drop
+  move's `on_complete` and this test read. The test reads the body (`prosrc`) of every function in
   schema `nexus` from `pg_proc` and fails when a body references a column
   on that list, matched by table and column, or calls a function P4.1
   drops. The history name columns kept by design are excluded by name:
@@ -3296,8 +3300,7 @@ its acceptance is that test green plus the census pin it lowers.
   step belongs in a move's `on_complete`" (RDR-246 lines 986-992). That
   `on_complete` opens with the redefinition step above, which also removes
   the name arm of P3.5b's both-shapes readers.
-  The boot-time completion check registers that move once gate 3 holds,
-  after P4.1's first changeset has applied in the same boot's walk (above), so the move never exists before the moves it depends on have
+  The boot-time completion check registers that move once gate 3 holds, so the move never exists before the moves it depends on have
   completed, and its verification only checks its own table (T2
   `229-research-52`). On every other table the dropping changeset carries
   CONTINUE preconditions on that table's own stamp move's `completed_at`,
@@ -3919,3 +3922,4 @@ large, and moved under a ratchet.
 - 2026-11-24: linda's follow-up rulings D1 to D3 on P4.1 written (Sam, "proceed" on ask `rdr229-p41-d1-d3`; gaps from fix check `229-fix-check-92fbbaa966`; T2 `229-research-323`): the 38 `name-kept` drops and `hybrid_search_<dim>` go in the registry changeset, dependents redefined to their `_by_id` twins first and the originals dropped with RESTRICT; a step before the column drops redefines the `writer-kept` and `unchanged-fallback` functions and P3.1's SQL writers by the id, listed from the two tsv files; the `pg_proc` test matches columns on the drop list, leaves out the history name columns, counts `superseded_by` only after its changeset, requires every surviving function examined, and runs after P4.1's last changeset.
 - 2026-11-24: P4.1's redefinition step pinned (linda, under the same ask): it is P4.1's first changeset, CONTINUE-gated, and P4.1's drop move registers only once that changeset is recorded, so no name column drops before the survivors are redefined; the P3.1 SQL writer count corrected from 26 to 25 at its three sites, from `p31-writer-census.tsv` (T2 `229-research-324`).
 - 2026-11-24: P4.1's redefinition step split after fix check `229-fix-check-901bcd7e97` (linda, replacing the earlier pin; T2 `229-research-325`): a CONTINUE changeset may not name a chunk-family table, so P4.1's first changeset is a plain one redefining the five survivors that name none, and the drop move's `on_complete` opens by redefining every other survivor, one CREATE OR REPLACE each with its final body, before the views, child keys, primary key swap and triggers; the `pg_proc` test reads a table-qualified drop list P4.1 creates, excludes the four history name columns by name, also fails on a call to a dropped function, and treats RESTRICT as a backstop.
+- 2026-11-24: P4.1's residual from fix check `229-fix-check-57ba196206` fixed in the text (Sam, option 1 on ask `rdr229-p41-first-changeset-gate`; linda's ruling; T2 `229-research-326`): P4.1 has no first changeset; every survivor, the five that name no chunk-family table included, is redefined once as the drop move's `on_complete` opens, after gate 3 has required every `vectors-078` changeset applied and every stamp complete; the view rows are redefined once, in the views step; the vacuous dependent-redefinition clause is dropped; the census line counts 33 move rows; item 6 names P4.1's CONTINUE changesets only.
