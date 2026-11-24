@@ -472,13 +472,13 @@ def _template():
 
 def _shipped():
     """The shipped template as push-train's one base expands it: the aura a session serving nexus-develop loads."""
-    [one], _ = expand_template(_template(), ("nexus-develop",))
+    [one], _ = expand_template(_template(), ("nexus-develop",), group="push-train")
     return one
 
 
 def test_the_shipped_aura_is_a_template_gated_on_push_train_and_its_nexus_expansion_triggers_on_the_owner_post() -> None:
     template = _template()
-    assert template.is_template and template.subspace == "board/ci/{serves}--owner" and template.load_group == "push-train"
+    assert template.is_template and template.subspace == "board/ci/{serves}--owner" and template.load_group is None
     aura = _shipped()
     assert (aura.name, aura.load_group, aura.threads) == ("ci_develop_red@nexus-develop", "push-train", "develop CI red (nexus-develop)")
     assert aura.subspace == OWNER_SUBSPACE
@@ -535,7 +535,7 @@ def test_the_shipped_aura_is_not_warned_about_when_push_train_serves_nexus_devel
         asked.append(name)
         return GroupRecord(name=name, serves=("nexus-develop",))
 
-    [check] = check_auras(entries, cwd=None, templates=None, read_group=read)
+    [check] = check_auras(entries, cwd=None, templates=None, read_group=read, member_groups=lambda: ["push-train"])
     assert asked == ["push-train"]  # non-vacuity: the serving-group check ran against the shipped aura
     assert not check.findings and not check.warnings, (check.findings, check.warnings)
     assert {s.check for s in check.skipped} == {"dictionary"}

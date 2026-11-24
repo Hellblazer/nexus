@@ -109,13 +109,13 @@ def _template():
 
 def _shipped():
     """The shipped template as push-train's one base expands it: the aura a session serving nexus-develop loads."""
-    [one], _ = expand_template(_template(), ("nexus-develop",))
+    [one], _ = expand_template(_template(), ("nexus-develop",), group="push-train")
     return one
 
 
 def test_the_aura_triggers_on_the_nudge_kind_of_the_owner_post_and_is_gated_on_push_train() -> None:
     template, aura = _template(), _shipped()
-    assert template.is_template and template.subspace == "board/ci/{serves}--owner" and template.load_group == "push-train"
+    assert template.is_template and template.subspace == "board/ci/{serves}--owner" and template.load_group is None
     assert (aura.load_group, aura.subspace, aura.threads) == ("push-train", OWNER_SUBSPACE, "develop CI nudge (nexus-develop)")
     assert dict(aura.match) == {"kind": "nudge", "from": "engine"}
     assert dict(aura.clear_match or ()) == {"kind": "clear", "from": "engine"}
@@ -126,7 +126,7 @@ def test_the_aura_triggers_on_the_nudge_kind_of_the_owner_post_and_is_gated_on_p
 
 
 def test_the_aura_shows_in_a_block_of_its_own_so_it_never_overwrites_the_red_notice() -> None:
-    [red], _ = expand_template(load_aura("ci_develop_red", cwd=None), ("nexus-develop",))
+    [red], _ = expand_template(load_aura("ci_develop_red", cwd=None), ("nexus-develop",), group="push-train")
     assert _shipped().threads != red.threads and _template().threads != load_aura("ci_develop_red", cwd=None).threads
 
 

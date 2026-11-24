@@ -92,7 +92,7 @@ def _nexus_develop(name: str):
     """The shipped template *name* as the nexus push-train group (serving nexus-develop) loads it."""
     from nexus.auras import load_aura  # noqa: PLC0415 -- only these tests read the shipped root
 
-    [one], _ = expand_template(load_aura(name, cwd=None), ("nexus-develop",))
+    [one], _ = expand_template(load_aura(name, cwd=None), ("nexus-develop",), group="push-train")
     return one
 
 
@@ -420,6 +420,8 @@ def _mock_engine(monkeypatch: pytest.MonkeyPatch, memberships: list[str], calls:
                 {"identity": "i7", "group": g, "role": "member", "joined_at": "2026-11-19T09:00:00Z"} for g in memberships]})
         if req.url.path == "/v1/group/push-train":
             return httpx.Response(200, json=record)
+        if req.url.path.startswith("/v1/group/"):  # any other group: live, serving nothing
+            return httpx.Response(200, json={**record, "name": req.url.path.rsplit("/", 1)[-1], "serves": []})
         return httpx.Response(404, json={"error": "not_found", "message": req.url.path})
 
     def http() -> httpx.Client:
@@ -507,7 +509,7 @@ def test_a_group_gated_aura_loads_through_the_real_wiring_and_fires_with_me_fill
     before = len(_REAL_RUNS)
     subs, loader, sender, calls = asyncio.run(scenario(["some-other-group"], title2, sid2))
     assert subs.aura_topics() == [] and _ran(before) == 0 and sender.calls == []
-    assert loader.decisions["ci_develop_red"].reason == "not_a_member", "a template the gate refuses is recorded under its own name"
+    assert loader.decisions["ci_develop_red"].reason == "serves_nothing", "a template no group of the session serves is recorded under its own name"
     assert "GET /v1/group/push-train" not in calls, "a non-member reads no group"
     assert len(identity_lease._IDENTITY_LISTENERS) == len(listeners) + 2, "each start listens to the lease"  # noqa: SLF001
     loader.close()

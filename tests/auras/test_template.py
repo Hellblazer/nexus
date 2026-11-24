@@ -33,9 +33,6 @@ aura = "tmpl"
 summary = "a templated aura"
 procedure = "ci_red_notice"
 
-[load]
-group = "push-train"
-
 [trigger]
 subspace = "board/ci/{serves}--owner"
 match = { kind = "owner", from = "engine" }
@@ -43,6 +40,8 @@ match = { kind = "owner", from = "engine" }
 [args]
 sha = "dims.sha"
 branch = "self.branch"
+refresh = "body.refresh"
+reason = "body.reason"
 me = "self.identity"
 
 [clear]
@@ -100,10 +99,11 @@ def test_any_other_brace_use_is_refused(subspace: str) -> None:
     assert err.value.kind == "bad_subspace" and err.value.key == "trigger.subspace"
 
 
-def test_a_template_needs_the_group_whose_serves_it_expands() -> None:
+def test_a_template_takes_no_load_group_because_it_expands_over_every_group_the_session_is_in() -> None:
     with pytest.raises(AuraError) as err:
-        _parse(TEMPLATE.replace('[load]\ngroup = "push-train"\n', ""))
-    assert err.value.kind == "bad_subspace" and "[load] group" in err.value.detail
+        _parse(TEMPLATE.replace("[trigger]", '[load]\ngroup = "push-train"\n\n[trigger]', 1))
+    assert err.value.kind == "bad_group" and err.value.key == "load.group"
+    assert _parse().load_group is None
 
 
 def test_a_template_threads_value_must_name_the_base_so_expansions_cannot_collide() -> None:
@@ -151,11 +151,11 @@ def test_the_branch_is_the_part_after_the_last_hyphen(base: str, branch: str) ->
 
 def test_one_base_expands_to_one_aura_that_is_the_concrete_aura_it_replaces() -> None:
     template = _parse()
-    [one], rejected = expand_template(template, ("nexus-develop",))
+    [one], rejected = expand_template(template, ("nexus-develop",), group="push-train")
     assert rejected == []
     assert (one.name, one.subspace, one.base, one.expanded_from) == (
         "tmpl@nexus-develop", "board/ci/nexus-develop--owner", "nexus-develop", "tmpl")
-    assert not one.is_template and one.load_group == "push-train"
+    assert not one.is_template and one.load_group == "push-train", "each expansion carries the group that serves its base"
     assert one.threads == "develop CI red (nexus-develop)"
     args = dict(one.args)
     assert (args["branch"].kind, args["branch"].value) == ("literal", "develop"), "the host fills self.branch from the base"
@@ -186,6 +186,20 @@ def test_a_base_the_subspace_grammar_refuses_is_rejected_by_name_and_the_others_
     assert [b for b, _ in rejected] == ["has space-main", "a/b", "*"]
 
 
+@pytest.mark.parametrize("base", ["x-" + "y" * 33, "repo-", "repo-.x"])
+def test_a_base_whose_branch_the_procedure_would_refuse_is_rejected_at_expansion_not_at_the_first_red(base: str) -> None:
+    """The Lua's own rule for ``branch``: a letter or digit first, then letters, digits, dot, dash and underscore, at most 32."""
+    expansions, rejected = expand_template(_parse(), (base,))
+    assert expansions == [] and [b for b, _ in rejected] == [base]
+    assert "branch" in rejected[0][1]
+
+
+def test_a_branch_nothing_maps_is_not_checked_so_a_template_without_self_branch_takes_any_base() -> None:
+    plain = _parse(TEMPLATE.replace('branch = "self.branch"\n', "").replace('"{branch} CI red ({base})"', '"CI {base}"'))
+    expansions, rejected = expand_template(plain, ("repo-" + "y" * 40,))
+    assert rejected == [] and len(expansions) == 1
+
+
 def test_an_expansion_whose_threads_value_is_over_the_limit_is_rejected() -> None:
     long = "x" * 70 + "-main"
     expansions, rejected = expand_template(_parse(), (long,))
@@ -200,41 +214,52 @@ def _log_everything() -> None:
     structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.DEBUG))
 
 
-def _records(serves):
-    return {
-        "live": GroupRecord("push-train", serves=tuple(serves)),
-        "none": None,
-        "ended": GroupRecord("push-train", serves=tuple(serves), ended_at="2026-11-24T10:00:00Z"),
-        "unreadable": GroupUnreadable("down"),
+#: The groups the engine knows, as RDR-252:344 has them: a topic is served by at most one live group.
+def _groups(**over):
+    base = {
+        "push-train": GroupRecord("push-train", serves=("nexus-develop",)),
+        "recording-rig-train": GroupRecord("recording-rig-train", serves=("recording-rig-main",)),
+        "reviewers": GroupRecord("reviewers", serves=()),
+        "ended-train": GroupRecord("ended-train", serves=("old-main",), ended_at="2026-11-24T10:00:00Z"),
+        "down-train": GroupUnreadable("down"),
     }
+    base.update(over)
+    return base
 
 
 class _Loader:
-    def __init__(self, *, serves=("nexus-develop",), identity="i7", memberships=("push-train",), group="live", extra=()):
+    def __init__(self, *, memberships=("push-train",), identity="i7", groups=None, extra=(), memberships_error=None):
         self.subs = SubscriptionSet(session_id=_SID)
         self.attached: list = []
         self.states: list = []
         self.reads: list[str] = []
-        records = _records(serves)
+        self.membership_reads: list[str] = []
+        records = _groups() if groups is None else groups
 
         def read_group(name):
             self.reads.append(name)
-            found = records[group]
+            found = records.get(name)
             if isinstance(found, Exception):
                 raise found
             return found
 
+        def read_memberships(who):
+            self.membership_reads.append(who)
+            if memberships_error is not None:
+                raise memberships_error
+            return list(memberships)
+
         self.loader = AuraLoader(
             _SID, self.subs, discover=lambda: [_parse(), *extra], is_on=lambda _n: True,
             entry=lambda _sid: ("tamsin", 100), registered_owner=lambda: 100, make_runtime=lambda loaded: loaded,
-            attach=self.attached.append, identity=lambda: identity, memberships=lambda _who: list(memberships),
+            attach=self.attached.append, identity=lambda: identity, memberships=read_memberships,
             read_group=read_group, now=lambda: NOW, state_sink=lambda pid, state: self.states.append((pid, state)),
         )
         self.loader.on_resolve("tamsin")
 
     @property
     def loaded(self) -> list[str]:
-        return [a.name for batch in self.attached for a in batch]
+        return sorted(a.name for batch in self.attached for a in batch)
 
 
 def test_the_nexus_push_train_group_serving_one_base_loads_the_one_aura_it_had_before() -> None:
@@ -242,49 +267,79 @@ def test_the_nexus_push_train_group_serving_one_base_loads_the_one_aura_it_had_b
     assert h.loaded == ["tmpl@nexus-develop"]
     assert h.subs.aura_topics() == ["board/ci/nexus-develop--owner"]
     assert h.loader.decisions == {"tmpl@nexus-develop": AuraState(True, "loaded", "push-train")}
-    assert h.reads == ["push-train"], "one group read"
+    assert h.reads == ["push-train"] and h.membership_reads == ["i7"], "one membership read, one group read"
 
 
-def test_a_group_serving_n_bases_loads_one_aura_per_base_with_one_group_read() -> None:
+def test_a_session_only_in_a_repos_own_group_gets_that_repos_aura_and_nothing_for_nexus() -> None:
+    h = _Loader(memberships=("recording-rig-train",))
+    assert h.loaded == ["tmpl@recording-rig-main"]
+    assert h.subs.aura_topics() == ["board/ci/recording-rig-main--owner"]
+    assert h.loader.decisions == {"tmpl@recording-rig-main": AuraState(True, "loaded", "recording-rig-train")}
+    assert h.reads == ["recording-rig-train"], "the group the session is not in is never read"
+
+
+def test_a_session_in_two_groups_gets_each_groups_bases_with_that_groups_verdict() -> None:
+    h = _Loader(memberships=("push-train", "recording-rig-train"))
+    assert h.loaded == ["tmpl@nexus-develop", "tmpl@recording-rig-main"]
+    assert h.loader.decisions == {
+        "tmpl@nexus-develop": AuraState(True, "loaded", "push-train"),
+        "tmpl@recording-rig-main": AuraState(True, "loaded", "recording-rig-train"),
+    }
+    assert sorted(h.reads) == ["push-train", "recording-rig-train"] and h.membership_reads == ["i7"]
+    assert sorted(a.threads for batch in h.attached for a in batch) == [
+        "develop CI red (nexus-develop)", "main CI red (recording-rig-main)"]
+
+
+def test_a_group_serving_n_bases_loads_one_aura_per_base() -> None:
     bases = ("nexus-develop", "art-main", "recording-rig-main")
-    h = _Loader(serves=bases)
-    assert sorted(h.loaded) == sorted(f"tmpl@{b}" for b in bases)
+    h = _Loader(groups=_groups(**{"push-train": GroupRecord("push-train", serves=bases)}))
+    assert h.loaded == sorted(f"tmpl@{b}" for b in bases)
     assert sorted(h.subs.aura_topics()) == sorted(f"board/ci/{b}--owner" for b in bases)
-    assert {n: s.loaded for n, s in h.loader.decisions.items()} == {f"tmpl@{b}": True for b in bases}
-    assert h.reads == ["push-train"]
-    assert sorted(h.states[-1][1].auras) == sorted(h.loader.decisions)
+    assert {n: s.group for n, s in h.loader.decisions.items()} == {f"tmpl@{b}": "push-train" for b in bases}
+    assert sorted(h.states[-1][1].auras) == sorted(h.loader.decisions), "the state file names each base and its group"
 
 
-def test_a_group_that_serves_nothing_loads_nothing_and_says_so_under_the_template_name() -> None:
-    h = _Loader(serves=())
-    assert h.loaded == [] and h.subs.aura_topics() == []
-    assert h.loader.decisions == {"tmpl": AuraState(False, "serves_nothing", "push-train")}
-
-
-def test_a_base_the_grammar_refuses_is_recorded_not_loaded_and_the_rest_load() -> None:
-    h = _Loader(serves=("ok-main", "bad base-main"))
-    assert h.loaded == ["tmpl@ok-main"]
-    assert h.loader.decisions["tmpl@bad base-main"] == AuraState(False, "bad_base", "push-train")
+def test_a_base_two_groups_both_serve_is_expanded_once() -> None:
+    both = _groups(**{"recording-rig-train": GroupRecord("recording-rig-train", serves=("nexus-develop", "recording-rig-main"))})
+    h = _Loader(memberships=("push-train", "recording-rig-train"), groups=both)
+    assert h.loaded == ["tmpl@nexus-develop", "tmpl@recording-rig-main"]
 
 
 @pytest.mark.parametrize(
     ("kwargs", "reason"),
     [
-        ({"memberships": ("other",)}, "not_a_member"),
-        ({"group": "none"}, "no_group_record"),
-        ({"group": "ended"}, "group_disbanded"),
-        ({"group": "unreadable"}, "group_unreadable"),
+        ({"memberships": ()}, "not_a_member"),
+        ({"memberships": ("reviewers",)}, "serves_nothing"),
+        ({"memberships": ("ended-train",)}, "serves_nothing"),
+        ({"memberships": ("nobody-train",)}, "serves_nothing"),
+        ({"memberships": ("down-train",)}, "group_unreadable"),
+        ({"memberships": ("push-train",), "groups": _groups(**{"push-train": GroupRecord("push-train", serves=())})}, "serves_nothing"),
+        ({"identity": None}, "unbound"),
+        ({"memberships_error": GroupUnreadable("down")}, "memberships_unreadable"),
     ],
 )
-def test_a_template_the_gate_refuses_is_recorded_under_its_own_name(kwargs: dict, reason: str) -> None:
+def test_a_template_with_no_serving_group_loads_nothing_and_is_recorded_under_its_own_name(kwargs: dict, reason: str) -> None:
     h = _Loader(**kwargs)
-    assert h.loaded == [] and h.loader.decisions["tmpl"] == AuraState(False, reason, "push-train")
+    assert h.loaded == [] and h.subs.aura_topics() == []
+    assert h.loader.decisions == {"tmpl": AuraState(False, reason, None)}
+
+
+def test_an_unreadable_group_does_not_stop_the_groups_that_can_be_read() -> None:
+    h = _Loader(memberships=("down-train", "push-train"))
+    assert h.loaded == ["tmpl@nexus-develop"]
+
+
+def test_a_base_the_grammar_refuses_is_recorded_not_loaded_and_the_rest_load() -> None:
+    h = _Loader(groups=_groups(**{"push-train": GroupRecord("push-train", serves=("ok-main", "bad base-main"))}))
+    assert h.loaded == ["tmpl@ok-main"]
+    assert h.loader.decisions["tmpl@bad base-main"] == AuraState(False, "bad_base", "push-train")
 
 
 def test_a_server_that_loaded_unbound_expands_the_template_when_the_lease_binds() -> None:
     bound: list[str | None] = [None]
     subs = SubscriptionSet(session_id=_SID)
     runtimes: list = []
+    records = _groups()
 
     class _Rt:
         def __init__(self, loaded) -> None:
@@ -300,16 +355,15 @@ def test_a_server_that_loaded_unbound_expands_the_template_when_the_lease_binds(
     loader = AuraLoader(
         _SID, subs, discover=lambda: [_parse()], is_on=lambda _n: True, entry=lambda _sid: ("tamsin", 100),
         registered_owner=lambda: 100, make_runtime=make, attach=lambda _rt: None, identity=lambda: bound[0],
-        memberships=lambda _who: ["push-train"],
-        read_group=lambda n: GroupRecord(n, serves=("nexus-develop", "art-main")), now=lambda: NOW,
+        memberships=lambda _who: ["push-train", "recording-rig-train"], read_group=records.get, now=lambda: NOW,
     )
     loader.on_resolve("tamsin")
-    assert loader.decisions == {"tmpl": AuraState(False, "unbound", "push-train")}
+    assert loader.decisions == {"tmpl": AuraState(False, "unbound", None)}
     loader.note_identity("i7")
-    assert sorted(loader.decisions) == ["tmpl@art-main", "tmpl@nexus-develop"], "the stale unbound row for the template is gone"
+    assert sorted(loader.decisions) == ["tmpl@nexus-develop", "tmpl@recording-rig-main"], "the stale unbound row is gone"
     assert all(s.loaded for s in loader.decisions.values())
-    assert sorted(runtimes[0].names) == ["tmpl@art-main", "tmpl@nexus-develop"]
-    assert sorted(subs.aura_topics()) == ["board/ci/art-main--owner", "board/ci/nexus-develop--owner"]
+    assert sorted(runtimes[0].names) == ["tmpl@nexus-develop", "tmpl@recording-rig-main"]
+    assert sorted(subs.aura_topics()) == ["board/ci/nexus-develop--owner", "board/ci/recording-rig-main--owner"]
 
 
 def test_two_templates_cannot_both_write_one_base_threads_block() -> None:
@@ -317,6 +371,99 @@ def test_two_templates_cannot_both_write_one_base_threads_block() -> None:
     h = _Loader(extra=[twin])
     assert h.loaded == ["tmpl@nexus-develop"]
     assert h.loader.decisions["twin@nexus-develop"].reason == "refused_threads"
+
+
+# -- the pre-template blocks --------------------------------------------------------------------------------------
+
+
+class _RetiringRuntime:
+    """A runtime that records the blocks the loader asks it to retire."""
+
+    def __init__(self, loaded) -> None:
+        self.retired: list[tuple[str, str]] = []
+
+    def retire_blocks(self, pairs) -> None:
+        self.retired += list(pairs)
+
+
+def _shipped_loader(*, memberships=("push-train",)):
+    runtimes: list[_RetiringRuntime] = []
+    shipped = [auras.load_aura(n, cwd=None) for n in ("ci_develop_red", "ci_develop_nudge")]
+
+    def make(loaded):
+        runtimes.append(_RetiringRuntime(loaded))
+        return runtimes[-1]
+
+    loader = AuraLoader(
+        _SID, SubscriptionSet(session_id=_SID), discover=lambda: shipped, is_on=lambda _n: True,
+        entry=lambda _sid: ("tamsin", 100), registered_owner=lambda: 100, make_runtime=make, attach=lambda _rt: None,
+        identity=lambda: "i7", memberships=lambda _who: list(memberships), read_group=_groups().get, now=lambda: NOW,
+    )
+    loader.on_resolve("tamsin")
+    return loader, runtimes
+
+
+def test_the_first_expansion_retires_the_pre_template_blocks_of_the_two_shipped_auras() -> None:
+    _loader, [rt] = _shipped_loader()
+    assert sorted(rt.retired) == [("ci_develop_nudge", "develop CI nudge"), ("ci_develop_red", "develop CI red")]
+
+
+def test_a_session_whose_template_expanded_to_nothing_retires_nothing() -> None:
+    loader, runtimes = _shipped_loader(memberships=())
+    assert runtimes == [] and loader.decisions["ci_develop_red"].reason == "not_a_member"
+
+
+def test_the_threads_writer_removes_the_old_heading_and_leaves_the_new_one() -> None:
+    from nexus.auras.threads_block import ThreadsBlockWriter  # noqa: PLC0415
+
+    entry = {
+        "title": "s", "tags": "",
+        "content": f"session: {_SID}\n\n## Work\nref: x\n\n## aura: develop CI red\nstate: old\n\n"
+        "## aura: develop CI red (nexus-develop)\nstate: new\n",
+    }
+    store = [dict(entry)]
+    writer = ThreadsBlockWriter(
+        _SID, read_entries=lambda: list(store),
+        put=lambda title, content, tags: store.__setitem__(0, {"title": title, "content": content, "tags": tags}),
+    )
+    assert writer.remove_block("ci_develop_red", "develop CI red") is True
+    text = store[0]["content"]
+    assert "## aura: develop CI red\n" not in text and "state: old" not in text
+    assert "## aura: develop CI red (nexus-develop)\nstate: new" in text and "## Work" in text
+    assert writer.remove_block("ci_develop_red", "develop CI red") is False, "idempotent: a second removal finds nothing"
+
+
+def test_the_runtime_retires_blocks_through_its_writer_off_the_callers_thread() -> None:
+    from nexus.auras.runtime import AuraRuntime  # noqa: PLC0415
+
+    removed: list[tuple[str, str]] = []
+
+    class _Writer:
+        def set_block(self, *a) -> bool:
+            return True
+
+        def remove_block(self, aura: str, threads_value: str) -> bool:
+            removed.append((aura, threads_value))
+            return True
+
+    rt = AuraRuntime([], writer=_Writer(), run=lambda *a, **k: {}, identity="i7")
+    rt.retire_blocks([("ci_develop_red", "develop CI red")])
+    assert rt.wait_idle(10) and removed == [("ci_develop_red", "develop CI red")]
+
+
+def test_a_failing_retirement_is_logged_and_never_raised() -> None:
+    from nexus.auras.runtime import AuraRuntime  # noqa: PLC0415
+
+    class _Writer:
+        def set_block(self, *a) -> bool:
+            return True
+
+        def remove_block(self, aura: str, threads_value: str) -> bool:
+            raise RuntimeError("t2 down")
+
+    rt = AuraRuntime([], writer=_Writer(), run=lambda *a, **k: {}, identity="i7")
+    rt.retire_blocks([("a", "b")])
+    assert rt.wait_idle(10)
 
 
 # -- the notice names the branch ----------------------------------------------------------------------------------
@@ -369,7 +516,7 @@ def test_the_nudge_names_the_branch() -> None:
 def test_the_shipped_auras_are_templates_whose_expansion_fills_the_branch() -> None:
     for name in ("ci_develop_red", "ci_develop_nudge"):
         shipped = auras.load_aura(name, cwd=None)
-        assert shipped.is_template and shipped.subspace == "board/ci/{serves}--owner" and shipped.load_group == "push-train"
+        assert shipped.is_template and shipped.subspace == "board/ci/{serves}--owner" and shipped.load_group is None
         [one], _ = expand_template(shipped, ("nexus-develop",))
         assert one.subspace == "board/ci/nexus-develop--owner" and dict(one.args)["branch"].value == "develop", name
         [art], _ = expand_template(shipped, ("art-main",))
@@ -377,64 +524,119 @@ def test_the_shipped_auras_are_templates_whose_expansion_fills_the_branch() -> N
         assert art.threads.endswith("(art-main)")
 
 
+@pytest.mark.parametrize("branch", ["a b", "x\nneeds_sam: yes", "", "-x", "y" * 33])
+def test_the_nudge_refuses_a_branch_that_breaks_its_grammar_and_never_echoes_it(branch: str) -> None:
+    import lupa.lua54 as lua54  # noqa: PLC0415
+
+    from tests.auras.test_ci_red_nudge import SHA, _run  # noqa: PLC0415
+
+    with pytest.raises(lua54.LuaError, match="branch must be") as err:
+        _run(sha=SHA, next="i7", me="i7", branch=branch)
+    assert "needs_sam" not in str(err.value)
+
+
+def test_a_self_source_the_runtime_does_not_fill_is_a_failure_not_the_identity() -> None:
+    """``self.branch`` is a template's and expansion rewrites it to a literal; a copy that reached the runtime unexpanded
+    must not be handed the session's identity in its place."""
+    from nexus.auras.aura import ArgSource  # noqa: PLC0415
+    from nexus.auras.runtime import _arg, _Failure  # noqa: PLC0415
+
+    assert _arg(ArgSource("self", "identity"), None, "me", "i7") == "i7"
+    with pytest.raises(_Failure, match="self.branch"):
+        _arg(ArgSource("self", "branch"), None, "branch", "i7")
+
+
 # -- nx aura check ------------------------------------------------------------------------------------------------
 
 
-def _check(reader, *, templates=None, text: str = TEMPLATE):
-    [result] = check_auras([AuraEntry("tmpl", "shipped", _parse(text))], cwd=None, templates=templates, read_group=reader, now=NOW)
+def _check(read_group, member_groups, *, templates=None, text: str = TEMPLATE):
+    [result] = check_auras(
+        [AuraEntry("tmpl", "shipped", _parse(text))], cwd=None, templates=templates, read_group=read_group,
+        member_groups=member_groups, now=NOW,
+    )
     return result
 
 
-def test_a_template_whose_group_serves_bases_is_clean_of_serving_findings() -> None:
-    result = _check(lambda n: GroupRecord(n, serves=("nexus-develop", "art-main")))
-    assert not [f for f in result.findings if f.check == "serving_group"] and not result.warnings, (result.findings, result.warnings)
+def _serving(result):
+    return [x for x in (*result.findings, *result.warnings) if x.check == "serving_group"]
 
 
-def test_a_template_whose_group_serves_nothing_is_refused() -> None:
-    result = _check(lambda n: GroupRecord(n, serves=()))
-    assert [(f.check, f.key) for f in result.findings if f.check == "serving_group"] == [("serving_group", "load.group")]
-    assert "serves nothing" in result.findings[-1].detail
+def _reader(**over):
+    records = _groups(**over)
+
+    def read(name):
+        found = records.get(name)
+        if isinstance(found, Exception):
+            raise found
+        return found
+
+    return read
+
+
+def test_a_template_checked_in_a_session_that_belongs_to_serving_groups_is_clean() -> None:
+    result = _check(_reader(), lambda: ["push-train", "recording-rig-train"])
+    assert result.ok and not result.warnings and not _serving(result), (result.findings, result.warnings)
 
 
 @pytest.mark.parametrize(
-    ("record", "words"),
-    [(None, "no record"), (GroupRecord("push-train", serves=("a-b",), ended_at="2026-11-24T10:00:00Z"), "disbanded")],
+    ("groups", "words"),
+    [
+        ([], "belongs to no group"),
+        (["reviewers"], "serves nothing"),
+        (["ended-train"], "disbanded"),
+        (["nobody-train"], "no record"),
+    ],
 )
-def test_a_template_whose_group_has_no_live_record_is_refused(record, words: str) -> None:
-    result = _check(lambda _n: record)
+def test_group_state_that_leaves_a_template_with_no_base_is_a_warning_never_a_finding(groups: list[str], words: str) -> None:
+    """The concrete aura only warned here, and the shipped auras must not turn a release's ``nx aura check`` red because the
+    session is in no serving group (the first review's ship-blocker)."""
+    result = _check(_reader(), lambda: groups)
+    assert result.ok and not result.findings, result.findings
+    [warning] = _serving(result)
+    assert warning.key == "load.group" and words in warning.detail and "the template expands to no aura" in warning.detail
+
+
+def test_a_serving_group_among_the_sessions_groups_is_enough_for_no_warning() -> None:
+    result = _check(_reader(), lambda: ["push-train", "reviewers"])
+    assert result.ok and not result.warnings
+
+
+def test_a_base_whose_expansion_is_rejected_is_the_one_finding_and_names_it() -> None:
+    groups = {"push-train": GroupRecord("push-train", serves=("nexus-develop", "bad base-main", "art-main"))}
+    result = _check(groups.get, lambda: ["push-train"])
     serving = [f for f in result.findings if f.check == "serving_group"]
-    assert [f.key for f in serving] == ["load.group"] and words in serving[0].detail
+    assert len(serving) == 1 and "bad base-main" in serving[0].detail and "nexus-develop" not in serving[0].detail
+    assert not result.ok
 
 
 def test_a_group_that_cannot_be_read_skips_the_serving_group_check_by_name_and_never_passes_it() -> None:
-    def down(_n):
-        raise GroupUnreadable("engine is down")
+    def down():
+        raise GroupUnreadable("no identity here")
 
-    skipped = _check(down).skipped
-    assert "serving_group" in {s.check for s in skipped}
-    assert "engine is down" in next(s.reason for s in skipped if s.check == "serving_group")
-    assert "serving_group" in {s.check for s in _check(None).skipped}
-
-
-def test_a_template_is_validated_against_every_base_the_group_serves() -> None:
-    """A base whose expansion the grammar refuses is a finding naming that base, and only that base."""
-    result = _check(lambda n: GroupRecord(n, serves=("nexus-develop", "bad base-main", "art-main")))
-    serving = [f for f in result.findings if f.check == "serving_group"]
-    assert len(serving) == 1 and "bad base-main" in serving[0].detail and "nexus-develop" not in serving[0].detail
+    skipped = _check(_reader(), down).skipped
+    assert "no identity here" in next(s.reason for s in skipped if s.check == "serving_group")
+    assert "serving_group" in {s.check for s in _check(None, None).skipped}
+    assert "serving_group" in {s.check for s in _check(_reader(), lambda: ["down-train"]).skipped}
 
 
-def test_the_dictionary_check_runs_for_each_base_and_names_it() -> None:
+def test_the_dictionary_check_runs_for_each_base_of_each_group_and_names_it() -> None:
     template = {"name": "board/ci/<topic>", "dimensions": {"kind": {}, "sha": {}}, "doc": {"body": {"x": "..."}}}
-    result = _check(lambda n: GroupRecord(n, serves=("nexus-develop", "art-main")), templates=[template])
+    result = _check(_reader(), lambda: ["push-train", "recording-rig-train"], templates=[template])
     hits = [f for f in result.findings if f.key == "trigger.match.from"]
-    assert len(hits) == 2, result.findings
-    assert {f.detail.split("]")[0] for f in hits} == {"[nexus-develop", "[art-main"}
+    assert {f.detail.split("]")[0] for f in hits} == {"[nexus-develop", "[recording-rig-main"} and len(hits) == 2
 
 
-def test_the_dictionary_check_of_a_template_the_group_cannot_expand_uses_a_sample_base_and_still_runs() -> None:
+def test_the_dictionary_check_of_a_template_with_no_known_bases_uses_a_sample_base_and_still_runs() -> None:
     template = {"name": "board/ci/<topic>", "dimensions": {"kind": {}, "sha": {}}, "doc": {"body": {"x": "..."}}}
-    result = _check(None, templates=[template])
+    result = _check(None, None, templates=[template])
     assert [f.key for f in result.findings if f.check == "dictionary"].count("trigger.match.from") == 1
+
+
+def test_a_template_whose_sample_expansion_is_rejected_is_a_finding_naming_threads_not_an_index_error() -> None:
+    long = TEMPLATE.replace('"{branch} CI red ({base})"', '"{base} ' + "x" * 78 + '"')
+    template = {"name": "board/ci/<topic>", "dimensions": {"kind": {}, "sha": {}, "from": {}}, "doc": {"body": {"x": "..."}}}
+    result = _check(None, None, templates=[template], text=long)
+    assert [(f.check, f.key) for f in result.findings if f.key == "display.threads"] == [("threads", "display.threads")]
 
 
 def test_the_serving_group_warning_does_not_apply_to_the_template_itself() -> None:
@@ -444,19 +646,62 @@ def test_the_serving_group_warning_does_not_apply_to_the_template_itself() -> No
 # -- nx aura list -------------------------------------------------------------------------------------------------
 
 
-def test_nx_aura_list_reads_a_templates_expansions_out_of_the_state_file() -> None:
+def test_nx_aura_list_through_the_command_shows_each_base_and_its_group(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A state file holding ``tmpl@<base>`` rows, read by the real ``nx aura list`` (a mutant that dropped the template
+    lookup in the command left every earlier test green)."""
+    import json  # noqa: PLC0415
+
+    from click.testing import CliRunner  # noqa: PLC0415
+
+    from nexus.auras import loaded_state as ls  # noqa: PLC0415
+    from nexus.commands import aura_cmd  # noqa: PLC0415
+    from nexus.commands.aura_cmd import aura_group  # noqa: PLC0415
+    from nexus.lua_runtime import library  # noqa: PLC0415
+    from tests.identity.fakes import HOST, FakeProcesses  # noqa: PLC0415
+
+    root = tmp_path / "shipped"
+    root.mkdir()
+    (root / "tmpl.aura.toml").write_text(TEMPLATE, encoding="utf-8")
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    (cfg / "config.yml").write_text("auras:\n  tmpl: on\n", encoding="utf-8")
+    monkeypatch.setattr(library, "shipped_root", lambda: root)
+    monkeypatch.delenv(library.REPO_ROOT_ENV, raising=False)
+    monkeypatch.delenv("NX_AURAS_OFF", raising=False)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg))
+    monkeypatch.chdir(tmp_path)
+    procs = FakeProcesses(tmp_path / "sessions")
+    procs.start(4242, "2026-11-17T08:00:00Z", started_at=4242000)
+    adir = tmp_path / "auras"
+    state = ls.LoadedState(
+        server_pid=9000, host=HOST, pid=4242, started_at=4242000, proc_start="2026-11-17T08:00:00Z", session_id="sid",
+        identity="id-a", loaded_identity="id-a",
+        auras={
+            "tmpl@nexus-develop": ls.AuraState(True, "loaded", "push-train"),
+            "tmpl@recording-rig-main": ls.AuraState(True, "loaded", "recording-rig-train"),
+            "tmpl@bad base-main": ls.AuraState(False, "bad_base", "push-train"),
+        },
+    )
+    ls.write_state(ls.state_path(adir, 4242, 4242000), state)
+    monkeypatch.setattr(aura_cmd, "_loaded_inputs", lambda: (adir, procs, 4242, "id-a", None))
+    res = CliRunner().invoke(aura_group, ["list"])
+    assert res.exit_code == 0, res.output
+    row = next(ln for ln in res.output.splitlines() if ln.startswith("tmpl"))
+    assert "loaded for nexus-develop (push-train), recording-rig-main (recording-rig-train)" in row, row
+    assert "not loaded" not in row
+    as_json = json.loads(CliRunner().invoke(aura_group, ["list", "--json"]).output)
+    [entry] = [r for r in as_json if r["name"] == "tmpl"]
+    assert entry["loaded"]["loaded"] is True and entry["loaded"]["bases"] == [
+        {"base": "nexus-develop", "group": "push-train"}, {"base": "recording-rig-main", "group": "recording-rig-train"}]
+
+
+def test_nx_aura_list_says_why_when_no_base_of_a_template_loaded() -> None:
     from nexus.commands.aura_cmd import _loaded_text, _template_load  # noqa: PLC0415
 
-    state = {
-        "tmpl@art-main": AuraState(True, "loaded", "push-train"),
-        "tmpl@nexus-develop": AuraState(True, "loaded", "push-train"),
-        "tmpl@bad base-main": AuraState(False, "bad_base", "push-train"),
-        "tmplx@other-main": AuraState(True, "loaded", "push-train"),
-    }
+    state = {"tmpl@x-main": AuraState(False, "bad_base", "push-train")}
     seen, bases = _template_load(state, "tmpl")
-    assert seen is not None and seen.loaded and bases == ["art-main", "nexus-develop"], "the sibling tmplx is not tmpl's"
-    text = _loaded_text({"loaded": True, "reason": "loaded", "group": "push-train", "bases": bases})
-    assert text == "  loaded for art-main, nexus-develop (group push-train)"
-    refused, none = _template_load({"tmpl@x-main": AuraState(False, "bad_base", "push-train")}, "tmpl")
-    assert (refused, none) == (AuraState(False, "bad_base", "push-train"), [])
-    assert _template_load({}, "tmpl") == (None, [])
+    assert seen == AuraState(False, "bad_base", "push-train") and bases == []
+    assert _template_load({"tmpl": AuraState(False, "not_a_member", None)}, "other") == (None, [])
+    assert _loaded_text({"loaded": False, "reason": "serves_nothing", "group": None}) == "  not loaded: serves_nothing"

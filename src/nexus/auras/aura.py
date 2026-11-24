@@ -327,10 +327,10 @@ def parse_aura(data: bytes, *, name: str) -> Aura:
                 f"{load_group!r} is not a group name: a letter or digit, then letters, digits, '.', '_' or '-', at most 64",
             )
 
-    if template and load_group is None:
+    if template and load_group is not None:
         raise r.fail(
-            "bad_subspace", "trigger.subspace",
-            f"a {SERVES_PLACEHOLDER} template needs [load] group: the bases it expands to are that group's serves",
+            "bad_group", "load.group",
+            f"a {SERVES_PLACEHOLDER} template takes the serves of every group the session belongs to, so it names no group",
         )
     if not template:
         for arg, src in args:
@@ -360,8 +360,18 @@ def _check_template_threads(r: _Reader, threads: str) -> str:
     return threads.replace(BASE_PLACEHOLDER, "x").replace(BRANCH_PLACEHOLDER, "x")
 
 
-def expand_template(aura: Aura, serves: Iterable[str]) -> tuple[list[Aura], list[tuple[str, str]]]:
+#: What the procedure's own ``branch`` argument accepts (``ci_red_notice.lua``, ``ci_red_nudge.lua``): a letter or digit,
+#: then letters, digits, dot, dash and underscore, at most :data:`MAX_BRANCH_CHARS`. A base whose branch fails it is
+#: refused at expansion, so the procedure never strikes out on it at the first red.
+_BRANCH_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+MAX_BRANCH_CHARS: int = 32
+
+
+def expand_template(
+    aura: Aura, serves: Iterable[str], *, group: str | None = None,
+) -> tuple[list[Aura], list[tuple[str, str]]]:
     """The expansions of the template *aura* for the bases in *serves*, in order, and the bases left out with why.
+    *group* is the group that serves them; each expansion carries it as its ``load_group``.
 
     Each expansion is named ``<aura name>@<base>``, triggers on the subspace with its base in place of
     :data:`SERVES_PLACEHOLDER`, shows in the threads block the template's value gives with ``{base}`` and ``{branch}``
@@ -384,6 +394,11 @@ def expand_template(aura: Aura, serves: Iterable[str]) -> tuple[list[Aura], list
             rejected.append((base, f"{subspace!r} is not one concrete board/<topic> or board/ci/<topic>"))
             continue
         branch = branch_of(base)
+        if any(src == ArgSource("self", "branch") for _, src in aura.args) and (
+            _BRANCH_RE.fullmatch(branch) is None or len(branch) > MAX_BRANCH_CHARS
+        ):
+            rejected.append((base, f"its branch {branch!r} is not a branch of at most {MAX_BRANCH_CHARS} letters, digits, dot, dash and underscore"))
+            continue
         threads = aura.threads.replace(BASE_PLACEHOLDER, base).replace(BRANCH_PLACEHOLDER, branch)
         if not threads.isprintable() or not threads.isascii() or len(threads) > MAX_THREADS_CHARS:
             rejected.append((base, f"the threads value {threads!r} is over {MAX_THREADS_CHARS} characters or not printable ASCII"))
@@ -393,6 +408,6 @@ def expand_template(aura: Aura, serves: Iterable[str]) -> tuple[list[Aura], list
         )
         out.append(replace(
             aura, name=f"{aura.name}{EXPANSION_SEP}{base}", subspace=subspace, threads=threads, args=args,
-            base=base, expanded_from=aura.name,
+            base=base, expanded_from=aura.name, load_group=group,
         ))
     return out, rejected

@@ -2,9 +2,6 @@ aura = "ci_develop_nudge"
 summary = "Wakes next up when the owner of a red branch has not acknowledged it by half the deadline."
 procedure = "ci_red_nudge"
 
-[load]
-group = "push-train"
-
 [trigger]
 subspace = "board/ci/{serves}--owner"
 match = { kind = "nudge", from = "engine" }

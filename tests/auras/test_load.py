@@ -667,13 +667,13 @@ def test_the_late_gate_after_a_first_bind_also_reads_off_the_loop() -> None:
         nonlocal h
         h = _LateBind(auras=auras_mod_parse(_GATED, "gated"))
         reads: list[bool] = []
-        original = h.loader._memberships  # noqa: SLF001
+        original = h.loader._stage._memberships  # noqa: SLF001
 
         def watching(who):
             reads.append(_off_the_loop())
             return original(who)
 
-        h.loader._memberships = watching  # noqa: SLF001
+        h.loader._stage._memberships = watching  # noqa: SLF001
         h.loader.on_resolve("tamsin")
         await h.loader.note_identity_async("identity-a")
         return reads
@@ -690,7 +690,7 @@ def test_a_bind_the_lease_reports_while_a_load_that_saw_no_identity_runs_is_repl
 
     async def go():
         h = _LateBind(auras=auras_mod_parse(_GATED, "gated"))
-        original = h.loader._gate  # noqa: SLF001
+        original = h.loader._stage.gate  # noqa: SLF001
         loop = asyncio.get_running_loop()
 
         def gate_after_the_lease_binds(auras, identity):
@@ -699,7 +699,7 @@ def test_a_bind_the_lease_reports_while_a_load_that_saw_no_identity_runs_is_repl
                 asyncio.run_coroutine_threadsafe(h.loader.note_identity_async("identity-a"), loop).result(10)
             return original(auras, identity)
 
-        h.loader._gate = gate_after_the_lease_binds  # noqa: SLF001
+        h.loader._stage.gate = gate_after_the_lease_binds  # noqa: SLF001
         await h.loader.on_resolve_async("tamsin")
         return h
 
