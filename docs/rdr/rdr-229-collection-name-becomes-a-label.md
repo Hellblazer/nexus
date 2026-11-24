@@ -1333,7 +1333,7 @@ while the engine serves:
   and the plain `(tenant_id, <id column>)` supporting indexes. The code says
   these support P3.3a's id-twin foreign keys except
   `idx_catalog_chunks_collection_id`, the id twin of an index the R2 anti-join
-  reads (`IdUniqueIndexPass.java:50-52`, `:155`; `Main.java:944`; T2
+  reads (`IdUniqueIndexPass.java:50-52`, `:155`; `Main.java:968`; T2
   `229-research-266`, `229-research-289`). They are not in the boot walk.
   The P3.4 changelog adds only the latch table, `vectors-080-1` (T2
   `229-research-265`). `IdUniqueIndexPass.java:51-52` gives the reason: "an upgrade boot may write
@@ -1530,7 +1530,7 @@ while the engine serves:
     (`to_regclass` of its `driving_schema` and `driving_table` is NULL)
     counts as complete. That is how `aspect_extraction_queue` ends: once
     emptied, "the next boot's guard drops the emptied table"
-    (`Main.java:705`), and a move on a missing table fails with 42P01
+    (`Main.java:706-707`), and a move on a missing table fails with 42P01
     as "permanent" (`MovePreflight.java:67-71`,
     `DataMoveFailureClassifier.java:153-154`); nx doctor still shows its
     `failed:` row. Inferred, not read: the check decides it from those two
@@ -1778,10 +1778,12 @@ while the engine serves:
     failing transiently pages an operator (RDR-246's machinery): after 20
     transient failures in a row, or once 3 lock or statement timeouts in a
     row at `on_complete` have latched it, which for the swaps and the
-    name-key drop move is their 700 ms lock bound. It is logged once as
-    `data_move_needs_operator`, listed in `/v1/status`
-    `data_moves_need_operator_moves`, and shown red by nx doctor, and it
-    keeps retrying (`MoveRetryPolicy.java:31-38`, `:100-101`; commits
+    name-key drop move are their 700 ms lock bound and 1400 ms statement
+    bound. It is logged once per process as `data_move_needs_operator`,
+    listed in `/v1/status` `data_moves_need_operator_moves`, and shown red
+    by nx doctor, and it keeps retrying (`MoveRetryPolicy.java:15`, `:31-38`,
+    `:100-101`; `MoveEvents.java:83`; `StatusHandler.java:834-851`;
+    `data_moves_health.py:117-166`; commits
     6b7af9d83b, adbcceadf1, 67a0d4fc6a; T2 `229-research-333`).
 
 Whether any step needs a maintenance window is unverified (Critical
@@ -2970,17 +2972,19 @@ its acceptance is that test green plus the census pin it lowers.
   to the reader dispositions (T2 `229-research-270`, `229-research-327`).
   The recall canary follows the retire's value (`PciCanaryLatch`, bound to
   `PciIdBuilds.gate3Holds`, `PciReconciler.java:440-448`): before it, the
-  canary, the query ring's admission, the vacuum trigger and the REINDEX
-  re-measure use the name indexes; once it holds, the valid id indexes,
-  searched through the `_by_id` twin (`PciCanary.java:69-78`,
+  canary, the query ring's admission and the vacuum trigger use the name
+  indexes, and once it holds, the valid id indexes, the canary searching
+  them through the `_by_id` twin; the REINDEX re-measure covers a name
+  index always and adds the id indexes once it holds (`PciCanary.java:69-78`,
   `PciReconciler.java:798-857`, `PciQueryRing.java:159-168`,
   `PciReindexPhase.java:143-154`; commit b5b1d5e755 and follow-ups). With no
   singleton lock the name indexes do not retire, so the canary keeps
   measuring them while reads go by the id, and no canary covers the id
   indexes there (inferred from the wiring, not tested). The sweep line,
   `/v1/status` `per_collection_indexes` and nx doctor count the id family
-  apart: `valid` stays the name count, and `valid_id` and `invalid_id`
-  (additive, from engine-service 0.1.202) count the id indexes, which nx
+  apart: `valid` stays the name count, `valid_id` (additive, from
+  engine-service 0.1.202, `docs/cli-reference.md:4236`) counts the valid id
+  indexes, and `invalid_id` the distinct ids with an invalid id index, which nx
   doctor prints as "+ M by id" (`PciIndexSweep.java:374-384`,
   `PciCatalog.java:580-597`, `StatusHandler.java:856-862`,
   `pci_indexes_health.py:128-134`; T2 `229-research-333`). Until the retire ends, the
@@ -3362,7 +3366,7 @@ its acceptance is that test green plus the census pin it lowers.
   read and write with a typed error that names the floor. It does not
   exit at boot, as the engine's other refusals do (`ChunksIsolationCheck`
   "refuses to serve"), because the move worker and the reconciler start
-  only after `service.start()` (`Main.java:652`, `:678`, `:710-711`), so an
+  only after `service.start()` (`Main.java:652`, `:680`, `:712-715`), so an
   exiting engine would never run the moves its floor waits for (inferred,
   not read; T2 `229-research-59`). The check is re-read when the move
   worker records a `completed_at` and when a reconciler pass ends, so the
