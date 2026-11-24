@@ -389,6 +389,9 @@ def expand_template(
         if base in seen:
             continue
         seen.add(base)
+        if ":" in base:  # ``<aura>@group:<name>`` is the loader's key for a group it could not read (load_stage)
+            rejected.append((base, "a base holds no colon"))
+            continue
         subspace = aura.subspace.replace(SERVES_PLACEHOLDER, base)
         if _SUBSPACE_RE.fullmatch(subspace) is None:
             rejected.append((base, f"{subspace!r} is not one concrete board/<topic> or board/ci/<topic>"))

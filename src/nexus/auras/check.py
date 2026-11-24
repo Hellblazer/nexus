@@ -240,7 +240,7 @@ def check_serving_group(
 
 
 #: The base a template is expanded for when its group cannot be read, so the dictionary check still has a subspace.
-_SAMPLE_BASE = "sample-main"
+_SAMPLE_BASE = "x-y"
 
 
 def check_template_serving(

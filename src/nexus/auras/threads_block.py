@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import re
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import structlog
@@ -105,7 +105,7 @@ class ThreadsBlockWriter:
         # no identity line (Phase 1), or no identity of our own (a Desktop session): our session line decides
         return session.session_id == self.session_id
 
-    def _entry(self, aura: str) -> Mapping[str, Any] | None:
+    def _entry(self, aura: str, *, quiet: bool = False) -> Mapping[str, Any] | None:
         rows = list(self._read())
         own = self._current_identity()  # once per write: with no identity yet it reads the token directory
         mine = [row for row in rows if self._mine(row, own)]
@@ -115,7 +115,8 @@ class ThreadsBlockWriter:
             # the identity-lined entry is the seat's; a legacy entry still carrying the session line is not a second one
             mine = [r for r in mine if parse_session("", str(r.get("content", ""))).identity == self.identity]
         if not mine:
-            _log.warning("aura_threads_no_entry", aura=aura, session_id=self.session_id)
+            if not quiet:
+                _log.warning("aura_threads_no_entry", aura=aura, session_id=self.session_id)
             return None
         if len(mine) > 1:
             _log.warning(
@@ -145,6 +146,25 @@ class ThreadsBlockWriter:
             if row is None:
                 return False
             lines, found = _without_block(str(row.get("content", "")).splitlines(), heading)
+            if not found:
+                return False
+            self._put(str(row.get("title", "")), "\n".join(lines) + "\n", str(row.get("tags", "") or ""))
+            return True
+
+
+    def remove_blocks(self, pairs: Sequence[tuple[str, str]]) -> bool:
+        """Remove each ``(aura, threads value)`` block in one read-modify-write. True when the entry was written (some block
+        was there). A session with no entry is not an event: the loader asks for a block that may never have existed."""
+        headings = [_heading(threads_value) for _aura, threads_value in pairs]
+        with _LOCK:
+            row = self._entry(pairs[0][0] if pairs else "", quiet=True)
+            if row is None:
+                return False
+            lines = str(row.get("content", "")).splitlines()
+            found = False
+            for heading in headings:
+                lines, one = _without_block(lines, heading)
+                found = found or one
             if not found:
                 return False
             self._put(str(row.get("title", "")), "\n".join(lines) + "\n", str(row.get("tags", "") or ""))

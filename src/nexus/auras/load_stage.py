@@ -45,6 +45,9 @@ class Gate:
 
     verdicts: dict[str, AuraState] = dataclasses.field(default_factory=dict)
     served: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    #: The groups of the identity whose record could not be read, in name order. A template that still loads from another
+    #: group records each one (``<aura>@group:<name>``), so the loss is visible and a reconnect is known to be needed.
+    unreadable: tuple[str, ...] = ()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -110,6 +113,7 @@ class LoadStage:
             assert group is not None
             out[aura.name] = AuraState(False, "not_a_member", group) if group not in member_of else record(group)[0]
         served: list[tuple[str, tuple[str, ...]]] = []
+        unreadable: list[str] = []
         if templates:
             reasons: list[str] = []
             for group in sorted(member_of):
@@ -118,6 +122,8 @@ class LoadStage:
                     served.append((group, serves))
                 else:
                     reasons.append(state.reason if not state.loaded else "serves_nothing")
+                    if state.reason == "group_unreadable":
+                        unreadable.append(group)
             if served:
                 verdict = AuraState(True, "loaded", None)
             elif not member_of:
@@ -126,7 +132,7 @@ class LoadStage:
                 verdict = AuraState(False, "group_unreadable" if "group_unreadable" in reasons else "serves_nothing", None)
             for aura in templates:
                 out[aura.name] = verdict
-        return Gate(out, tuple(served))
+        return Gate(out, tuple(served), tuple(unreadable))
 
     def _group_verdict(self, group: str) -> tuple[AuraState, tuple[str, ...]]:
         """The verdict on *group* and its ``serves`` list (empty unless the verdict is loaded)."""
@@ -158,6 +164,7 @@ class LoadStage:
                 out.append(aura)
                 continue
             made: list[Aura] = []
+            refused = 0
             seen: set[str] = set()
             for group, serves in gate.served:
                 fresh = [b for b in serves if b not in seen]
@@ -166,10 +173,12 @@ class LoadStage:
                 for base, why in rejected:
                     extra[f"{aura.name}@{base}"] = AuraState(False, "bad_base", group)
                     _log.warning("aura_base_refused", aura=aura.name, group=group, base=base, reason=why)
+                refused += len(rejected)
                 made += expansions
+            for group in gate.unreadable:
+                extra[f"{aura.name}@group:{group}"] = AuraState(False, "group_unreadable", group)
             if not made:
-                if not extra:
-                    _log.warning("aura_serves_nothing", aura=aura.name)
+                _log.warning("aura_serves_nothing", aura=aura.name, refused=refused)
                 verdicts[aura.name] = AuraState(False, "serves_nothing", None)
                 out.append(aura)
                 continue

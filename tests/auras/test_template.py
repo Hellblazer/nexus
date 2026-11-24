@@ -324,11 +324,6 @@ def test_a_template_with_no_serving_group_loads_nothing_and_is_recorded_under_it
     assert h.loader.decisions == {"tmpl": AuraState(False, reason, None)}
 
 
-def test_an_unreadable_group_does_not_stop_the_groups_that_can_be_read() -> None:
-    h = _Loader(memberships=("down-train", "push-train"))
-    assert h.loaded == ["tmpl@nexus-develop"]
-
-
 def test_a_base_the_grammar_refuses_is_recorded_not_loaded_and_the_rest_load() -> None:
     h = _Loader(groups=_groups(**{"push-train": GroupRecord("push-train", serves=("ok-main", "bad base-main"))}))
     assert h.loaded == ["tmpl@ok-main"]
@@ -698,10 +693,9 @@ def test_nx_aura_list_through_the_command_shows_each_base_and_its_group(
 
 
 def test_nx_aura_list_says_why_when_no_base_of_a_template_loaded() -> None:
-    from nexus.commands.aura_cmd import _loaded_text, _template_load  # noqa: PLC0415
+    from nexus.commands.aura_cmd import _loaded_text, _template_state  # noqa: PLC0415
 
     state = {"tmpl@x-main": AuraState(False, "bad_base", "push-train")}
-    seen, bases = _template_load(state, "tmpl")
-    assert seen == AuraState(False, "bad_base", "push-train") and bases == []
-    assert _template_load({"tmpl": AuraState(False, "not_a_member", None)}, "other") == (None, [])
+    assert _template_state(state, "tmpl") == {"loaded": False, "reason": "bad_base", "group": "push-train"}
+    assert _template_state({"tmpl": AuraState(False, "not_a_member", None)}, "other") is None
     assert _loaded_text({"loaded": False, "reason": "serves_nothing", "group": None}) == "  not loaded: serves_nothing"

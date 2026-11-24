@@ -266,27 +266,31 @@ def _loaded_text(load: dict[str, Any] | None) -> str:
     group = f" (group {load['group']})" if load["group"] else ""
     if load["loaded"]:
         if load.get("bases"):  # a {serves} template: each base with the group that serves it
-            return "  loaded for " + ", ".join(f"{b['base']} ({b['group']})" if b["group"] else b["base"] for b in load["bases"])
+            text = "  loaded for " + ", ".join(f"{b['base']} ({b['group']})" if b["group"] else b["base"] for b in load["bases"])
+            return text + "".join(f"; not read: group {g} (reconnect)" for g in load.get("unread", ()))
         return f"  loaded{group}"
     hint = _RECONNECT_HINT if load["reason"] in _RETRY_ON_RECONNECT else ""
     return f"  not loaded: {load['reason']}{group}{hint}"
 
 
-def _template_load(
-    loaded: dict[str, loaded_state.AuraState], name: str,
-) -> tuple[loaded_state.AuraState | None, list[tuple[str, str | None]]]:
-    """What the state file says of a ``{serves}`` template (RDR-252 "Aura per base"): the server records its expansions as
-    ``<name>@<base>``, so the template is loaded when any expansion is, for those bases and the group that serves each;
-    otherwise the reason of the first refused one. ``(None, [])`` when the file says nothing of it."""
+def _template_state(loaded: dict[str, loaded_state.AuraState], name: str) -> dict[str, Any] | None:
+    """What the state file says of a ``{serves}`` template (RDR-252 "Aura per base"), as the ``loaded`` object of a row.
+
+    The server records an expansion as ``<name>@<base>`` and a group it could not read as ``<name>@group:<group>`` (a base
+    holds no colon). The template is loaded when any expansion is, for those bases, each with the group that serves it
+    (``bases``), and ``unread`` names the groups that were not read, which a reconnect retries; otherwise the row carries
+    the reason of the first refused expansion. ``None`` when the file says nothing of the template."""
     prefix = f"{name}@"
-    expansions = {k[len(prefix):]: v for k, v in sorted(loaded.items()) if k.startswith(prefix)}
-    up = [(b, v.group) for b, v in expansions.items() if v.loaded]
+    rows = {k[len(prefix):]: v for k, v in sorted(loaded.items()) if k.startswith(prefix)}
+    unread = [k[len("group:"):] for k in rows if k.startswith("group:")]
+    expansions = {k: v for k, v in rows.items() if not k.startswith("group:")}
+    up = [{"base": b, "group": v.group} for b, v in expansions.items() if v.loaded]
     if up:
-        return loaded_state.AuraState(True, "loaded", None), up
-    if expansions:
-        first = next(iter(expansions.values()))
-        return loaded_state.AuraState(False, first.reason, first.group), []
-    return None, []
+        return {"loaded": True, "reason": "loaded", "group": None, "bases": up, "unread": unread}
+    first = next(iter(expansions.values()), None) or next(iter(rows.values()), None)
+    if first is None:
+        return None
+    return {"loaded": False, "reason": first.reason, "group": first.group}
 
 
 def _unclaimed_files_text(listed: tuple[loaded_state.LoadedState, ...]) -> list[str]:
@@ -347,18 +351,15 @@ def list_cmd(json_out: bool) -> None:
         d = states[e.name]
         r = e.result
         seen = loaded.get(e.name) if d.on else None
-        bases: list[tuple[str, str | None]] = []
+        template_load: dict[str, Any] | None = None
         if d.on and isinstance(r, Aura) and r.is_template and seen is None:
-            seen, bases = _template_load(loaded, e.name)
+            template_load = _template_state(loaded, e.name)
         if d.on and view.claimed and view.state is None and isinstance(r, Aura) and (r.load_group or r.is_template):
             unwritten[e.name] = (
                 f"  not loaded: no state file from this session's MCP server{f' (group {r.load_group})' if r.load_group else ''}; "
                 "it has not started or has no identity: reconnect it (/mcp) once the session is bound"
             )
-        load = None if seen is None else {
-            "loaded": seen.loaded, "reason": seen.reason, "group": seen.group,
-            **({"bases": [{"base": b, "group": g} for b, g in bases]} if bases else {}),
-        }
+        load = template_load if seen is None else {"loaded": seen.loaded, "reason": seen.reason, "group": seen.group}
         if isinstance(r, Aura):
             rows.append({
                 "name": e.name, "root": e.root, "summary": r.summary,

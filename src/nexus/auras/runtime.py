@@ -224,10 +224,17 @@ class AuraRuntime:
 
     def _retire(self, pairs: list[tuple[str, str]]) -> None:
         try:
+            batch = getattr(self._writer, "remove_blocks", None)
+            if batch is not None:  # one read-modify-write for every heading
+                try:
+                    batch(pairs)
+                except Exception as exc:  # noqa: BLE001 -- an old block left in place is cosmetic
+                    _log.warning("aura_legacy_blocks_not_removed", blocks=[a for a, _ in pairs], error=str(exc))
+                return
             for aura, threads_value in pairs:
                 try:
                     self._writer.remove_block(aura, threads_value)
-                except Exception as exc:  # noqa: BLE001 -- an old block left in place is cosmetic
+                except Exception as exc:  # noqa: BLE001 -- one failure spares the rest
                     _log.warning("aura_legacy_block_not_removed", aura=aura, error=str(exc))
         finally:
             with self._cond:
