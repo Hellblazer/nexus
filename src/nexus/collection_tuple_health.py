@@ -18,6 +18,8 @@ A second warning covers an index that waits for a reason nothing else names. ``G
 listing, and ``boot_work`` has no open or failed entry for the re-own move, the engine's guard is waiting for something
 unnamed, for example its duplicate counter erroring under ``onError="CONTINUE"``. The row points at the engine's boot log.
 An absent key is an engine that predates the field: no row. The status body carries one boolean and no tenant text.
+A pending ``rdr229-restart`` notice, or another RDR-229 move still open, also explains the wait (a fresh install's first
+boot, nexus-p2m1x.48): the one restart that notice names builds the index too, so there is one instruction, not two.
 
 Kept out of :mod:`nexus.health` (a file near its size cap). The candidate set is ``CatalogRepository.collectionForTuple``'s:
 a row with no supersession and a lifecycle other than ``quarantine``; a dormant or disputed row still holds its tuple.
@@ -39,6 +41,12 @@ INDEX_WAIT_LABEL = "Collection tuple index"
 REOWN_MOVE_LABEL = "rdr229-reown-repo-stems-from-curator"
 #: The ``boot_work`` entry id of the re-own move (``data-move:<label>``): open, blocked, stalled or failed while it is listed.
 REOWN_MOVE_ID = "data-move:" + REOWN_MOVE_LABEL
+#: The ``boot_work`` entry id of the RDR-229 restart notice (``CompletionBootWork.RESTART_ENTRY_ID``): every stamp move is
+#: complete and one engine restart applies the P3.5b changesets. That restart walks the changelog, so it builds this index too.
+RESTART_ENTRY_ID = "rdr229-restart"
+#: The id prefix of RDR-229's other data moves (stamp, fkvalidate, quarantine, residue): while one is listed the install is
+#: still settling, and the restart notice is not due until every stamp move is complete.
+RDR229_MOVE_PREFIX = "data-move:rdr229-"
 #: Tuples named in the row; the rest are counted.
 _NAMED = 5
 _UNSET: Any = object()
@@ -84,8 +92,14 @@ def _index_waits_unexplained(rows: list[dict[str, Any]], dups: list[DuplicateTup
 
     Needs all three of: ``collection_tuple_index_present`` is the boolean ``False`` (an absent or non-boolean value is an
     older engine or an unread answer, never false); *rows* was read and holds no duplicate (an unread registry cannot rule
-    one out, and the caller passes only a list here); and ``boot_work`` is a list with no entry for the re-own move (a
-    move that is working, blocked, stalled, paused or failed is the data-move rows' to report, and the index waits for it).
+    one out, and the caller passes only a list here); and ``boot_work`` is a list with no entry that explains the wait.
+
+    Three entries explain it, each the engine saying what it is doing (nexus-p2m1x.48). The re-own move itself (working,
+    blocked, stalled, paused, queued or failed: the data-move rows report it). The ``rdr229-restart`` notice: one restart
+    applies RDR-229's CONTINUE changesets, and the same boot walks ``collections-001-2``. Another RDR-229 move still open: on
+    a fresh install the re-own move completes within seconds of the first boot, after the walk skipped the changeset, so the
+    index waits for the first restart after the moves finish, and the restart notice is published only once every stamp move
+    is complete. The row stays for the case it was written for: none of the three is listed.
     """
     if not isinstance(engine_status, dict) or dups:
         return False
@@ -94,7 +108,11 @@ def _index_waits_unexplained(rows: list[dict[str, Any]], dups: list[DuplicateTup
     work = engine_status.get("boot_work")
     if not isinstance(work, list):
         return False
-    return not any(isinstance(e, dict) and e.get("id") == REOWN_MOVE_ID for e in work)
+    return not any(isinstance(e, dict) and _explains_the_wait(str(e.get("id") or "")) for e in work)
+
+
+def _explains_the_wait(entry_id: str) -> bool:
+    return entry_id in (REOWN_MOVE_ID, RESTART_ENTRY_ID) or entry_id.startswith(RDR229_MOVE_PREFIX)
 
 
 def check_collection_tuples(rows: object = _UNSET, engine_status: object = None) -> list[HealthResult]:
