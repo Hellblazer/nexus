@@ -531,6 +531,19 @@ class OffProfile:
     blocked: dict[str, str] = field(default_factory=dict)
 
 
+def keep_live_documents_advice(source: str) -> str:
+    """What to do about a restored source whose live documents the engine will not move (its kept job's target is retired
+    or missing): keep them by indexing their files into the current collection, then delete the superseded source.
+
+    Never ``nx collection reindex``: that deletes the collection and its registry row first and re-registers it under
+    its own model, which a profile that has moved on refuses, so the live documents would be gone with nothing rebuilt."""
+    return (
+        "the engine will not move its live documents into a retired or missing target; to keep them, re-index their files "
+        "into the current collection (`nx index repo <path>` for code and repositories, `nx index md <path>` for markdown, "
+        f"`nx index pdf <path>` for PDFs), then `nx collection delete {source}` clears the superseded source"
+    )
+
+
 def blocked_report(verdict: OffProfile, name_list: Callable[[list[str]], str]) -> tuple[list[str], list[str]]:
     """The doctor's ``(detail parts, fix suggestions)`` for the restored sources ``--all`` skips, ``([], [])`` for none.
 
@@ -542,8 +555,7 @@ def blocked_report(verdict: OffProfile, name_list: Callable[[list[str]], str]) -
     return (
         [f"{len(named)} superseded source(s) hold a live document again but the kept job cannot be re-entered, so "
          f"re-embed --all skips them: {name_list(named)}"],
-        ["rebuild the source(s) from their files under the current profile: nx collection reindex <name> "
-         "(nx index repo for a code collection)"],
+        [keep_live_documents_advice("<source>")],
     )
 
 

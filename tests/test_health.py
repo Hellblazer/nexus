@@ -1237,7 +1237,14 @@ def test_embedding_profile_off_profile_row_keeps_a_restored_source_whose_kept_jo
     assert f"{_SRC} (its target {_TGT} is retired)" in r.detail
     assert "cannot be re-entered" in r.detail
     assert not any("nx collection re-embed --all" in s for s in r.fix_suggestions)
-    assert any("nx collection reindex" in s for s in r.fix_suggestions)
+    # Never reindex: it deletes the collection and its registry row, then cannot re-register it under the old profile.
+    fix = " ".join(r.fix_suggestions)
+    assert "reindex" not in fix and "rebuild" not in fix and "under the current profile" not in fix, fix
+    assert "nx index repo" in fix and "nx collection delete <source>" in fix
+    from tests._cli_tree import missing_commands, named_commands  # noqa: PLC0415 — test-local import
+
+    assert named_commands(fix), "the remedy names commands, so the check below is not vacuous"
+    assert missing_commands(fix) == [], fix
 
 
 @pytest.mark.usefixtures("cloud_mode")

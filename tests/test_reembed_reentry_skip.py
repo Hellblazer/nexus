@@ -12,6 +12,7 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.db.http_vector_client import VectorServiceError
+from tests._cli_tree import missing_commands, named_commands
 from tests.test_reembed_verb import (  # noqa: F401 — local_mode is an autouse fixture the module's tests rely on
     JOB, KEPT_SRC, KEPT_TGT, _engine, _invoke, _kept_tombstoned_world, local_mode,
 )
@@ -41,17 +42,33 @@ class TestReentrySkip:
         assert len(lines) == 1 and lines[0].startswith(f"{KEPT_SRC}: not re-entered: {why}; "), result.output
         assert "re-entry of job" not in result.output, "it is not offered as a re-entry either"
 
-    def test_the_skip_line_names_a_remedy_that_exists_for_each_kind_of_re_entry(self, runner):
-        """A cutover re-entry holds no document (the job would only delete the source); a running one holds a live
-        document the job would have moved. The remedies are commands that exist."""
-        for live, total, kind, remedy in [
-            (0, 0, "cutover", f"`nx collection delete {KEPT_SRC}`"),
-            (1, 2, "running", f"`nx collection reindex {KEPT_SRC}`"),
-        ]:
-            jobs, cat = _kept_tombstoned_world(live=live, total=total, target_row="superseded")
-            result = _invoke(runner, _engine(jobs=jobs), cat, ["--all"])
-            (line,) = [ln for ln in result.output.splitlines() if "not re-entered" in ln]
-            assert remedy in line, (kind, line)
+    def test_a_cutover_skip_line_names_the_delete_that_finishes_the_job(self, runner):
+        """No document is left in the source, so the job would only have deleted it; ``nx collection delete`` does that."""
+        jobs, cat = _kept_tombstoned_world(live=0, total=0, target_row="superseded")
+        result = _invoke(runner, _engine(jobs=jobs), cat, ["--all"])
+        (line,) = [ln for ln in result.output.splitlines() if "not re-entered" in ln]
+        assert [w[:2] for w in named_commands(line)] == [["collection", "delete"]], line
+        assert missing_commands(line) == []
+
+    def test_a_running_skip_line_keeps_the_live_document_and_never_names_reindex(self, runner):
+        """A live document is in the source and the engine will not move it into a retired target. ``nx collection
+        reindex`` would delete the collection and its registry row, then fail to re-register it under the profile it
+        no longer matches: the document would be gone with nothing rebuilt. The line points at indexing the files into
+        the current collection, then deleting the superseded source; every command it names exists."""
+        jobs, cat = _kept_tombstoned_world(live=1, total=2, target_row="superseded")
+        result = _invoke(runner, _engine(jobs=jobs), cat, ["--all"])
+        (line,) = [ln for ln in result.output.splitlines() if "not re-entered" in ln]
+        named = [" ".join(w[:2]) for w in named_commands(line)]
+        assert "collection reindex" not in named and "reindex" not in line, line
+        assert "rebuild" not in line and "under the current profile" not in line, line
+        assert named == ["index repo", "index md", "index pdf", "collection delete"], line
+        assert f"`nx collection delete {KEPT_SRC}`" in line
+        assert missing_commands(line) == [], line
+
+    def test_the_command_check_catches_a_command_that_does_not_exist(self):
+        """Without this the two tests above could pass over a remedy naming nothing real."""
+        assert missing_commands("run `nx collection rebuild X` or `nx index nope`") == ["collection rebuild X", "index nope"]
+        assert missing_commands("run `nx collection reindex X --force` then `nx index md <path>`") == []
 
     def test_a_dry_run_names_the_skip_not_a_reentry(self, runner):
         jobs, cat = _kept_tombstoned_world(target_row="superseded")
