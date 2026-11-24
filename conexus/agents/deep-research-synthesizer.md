@@ -132,7 +132,7 @@ You have access to and will actively leverage:
   - mcp__plugin_conexus_nexus__query(question="topic", where="bib_year>=2023" -- filter by year, citations, tags
   - mcp__plugin_conexus_nexus__search(query="query", corpus="knowledge", limit=5 -- chunk-level semantic search
   - mcp__plugin_conexus_nexus__store_list(collection="<name as nx collection list prints it>", docs=true -- enumerate all documents (a `docs`, `code` or `rdr` collection is `<content_type>__<owner>__<embedding_model>__v<n>`; a new `knowledge` subject is labelled `c<id>`)
-  - mcp__plugin_conexus_nexus__store_put(content="content", collection="<subject>", title="title", tags="tags" -- store findings (the bare prefix is auto-promoted to a conformant 4-segment name)
+  - mcp__plugin_conexus_nexus__store_put(content="content", collection="<subject>", title="title", tags="tags" -- store findings (type the bare subject as `collection`; a new knowledge subject gets an engine-minted `c<id>` label)
 - **T3 code index**: Semantic code search across indexed repositories
   - mcp__plugin_conexus_nexus__search(query="query", corpus="code", limit=20 -- hybrid semantic + git frecency
   - mcp__plugin_conexus_nexus__search(query="query", corpus="code__<owner>__voyage-code-3__v1", limit=20 -- repo-specific

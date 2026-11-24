@@ -110,9 +110,9 @@ When a memory file's "How to apply" is a procedure, ordered steps, over about 8 
 bd update <id> --append-notes "$(cat /tmp/bead-<id>.md)"
 ```
 
-`$(cat ...)` inside double quotes keeps the file's backticks and `$variables` literal. For a design field use `--design-file`. **Never use `--body-file` or `--description` to add to a bead**: both REPLACE the description.
+`$(cat ...)` inside double quotes keeps the file's backticks and `$variables` literal. Inline multi-line `--notes` or `--design` has the same problem: use a file (`--design-file`, or `--append-notes "$(cat <file>)"`). **Never use `--body-file` or `--description` to add to a bead**: both REPLACE the description.
 
-Short single-phrase values (e.g. `--design "revised scope"`) are safe. The bug only affects multi-line content with markdown formatting.
+Short single-phrase values (e.g. `--design "revised scope"`) are safe.
 
 ## Quality Checklist
 
