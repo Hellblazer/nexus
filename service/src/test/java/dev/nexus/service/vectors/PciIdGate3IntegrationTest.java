@@ -430,8 +430,9 @@ class PciIdGate3IntegrationTest extends PciIdIndexSupport {
                 setQuarantineMetadata(tenant, id, carrying.equals("null") ? "{}" : carrying);
                 var shut = reporter.refresh();
                 assertThat(shut.gate3()).as("a pre-id quarantine chunk: gate 3 does not hold").isFalse();
-                assertThat(shut.gate3Why()).as("and says why, with the count")
-                    .contains("quarantine chunks lack origin_collection_id").contains("300").contains("backfill pending");
+                // row 21: gate3_why goes out on the unauthenticated /v1/status, and the count is every tenant's: the reason, no number
+                assertThat(shut.gate3Why()).as("and says why, without a count")
+                    .contains("quarantine chunks lack origin_collection_id").contains("backfill pending").doesNotContainPattern("\\d");
             }
             for (String key : new String[] {"{\"origin_collection_id\": 7}", "{\"origin_collection_id\": null}"}) {
                 asSuperuser(su -> su.deleteFrom(LATCH).execute());
