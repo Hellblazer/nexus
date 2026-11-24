@@ -88,11 +88,91 @@ def test_tagged_classes_derives_fqcn_from_code_not_comments(tmp_path):
     assert _mod.tagged_classes(str(tmp_path / "src" / "test" / "java")) == ["a.b.Real"]
 
 
+def _tree(tmp_path, files: dict[str, str]) -> str:
+    root = tmp_path / "src" / "test" / "java" / "a"
+    root.mkdir(parents=True)
+    for name, src in files.items():
+        (root / f"{name}.java").write_text(src)
+    return str(tmp_path / "src" / "test" / "java")
+
+
+@pytest.mark.parametrize(
+    "decl",
+    [
+        "abstract class Base {}",
+        "abstract class Base<T> {}",
+        "public abstract class Base {}",
+        "abstract public class Base {}",
+        "public abstract sealed class Base permits X {}",
+        "@TestInstance(TestInstance.Lifecycle.PER_CLASS)\nabstract class Base {}",
+        "abstract\nclass Base {}",
+    ],
+)
+def test_abstract_tagged_class_is_skipped(tmp_path, decl):
+    """PciIdIndexSupport: an abstract @Tag class never runs and has no report; its
+    concrete subclasses carry their own tag and are the ones expected."""
+    root = _tree(
+        tmp_path,
+        {
+            "Base": f'package a;\n@Tag("integration")\n{decl}\n',
+            "Sub": 'package a;\n@Tag("integration")\nclass Sub extends Base {}\n',
+        },
+    )
+    assert _mod.tagged_classes(root) == ["a.Sub"]
+
+
+def test_concrete_tagged_class_is_still_required(tmp_path):
+    root = _tree(tmp_path, {"Real": 'package a;\n@Tag("integration")\npublic final class Real {}\n'})
+    assert _mod.tagged_classes(root) == ["a.Real"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "// abstract class Real {}\nclass Real {}",
+        "/* abstract class Real {} */\nclass Real {}",
+        "/** an abstract class Real is documented here */\nclass Real {}",
+        'class Real { String s = "abstract class Real {}"; }',
+        'class Real { String s = """\n  abstract class Real {}\n  """; }',
+    ],
+    ids=["line-comment", "block-comment", "javadoc", "string", "text-block"],
+)
+def test_abstract_only_in_comment_or_string_is_still_required(tmp_path, body):
+    root = _tree(tmp_path, {"Real": f'package a;\n@Tag("integration")\n{body}\n'})
+    assert _mod.tagged_classes(root) == ["a.Real"]
+
+
+def test_nested_abstract_class_does_not_exempt_a_concrete_file(tmp_path):
+    root = _tree(
+        tmp_path,
+        {
+            "Real": 'package a;\n@Tag("integration")\nclass Real {\n  abstract static class Helper {}\n'
+            "  abstract static class Real2 {}\n}\n"
+        },
+    )
+    assert _mod.tagged_classes(root) == ["a.Real"]
+
+
+def test_abstract_method_in_concrete_class_does_not_exempt_it(tmp_path):
+    root = _tree(
+        tmp_path,
+        {"Real": 'package a;\n@Tag("integration")\nclass Real {\n  abstract void classy();\n}\n'},
+    )
+    assert _mod.tagged_classes(root) == ["a.Real"]
+
+
+def test_tagged_interface_is_still_required(tmp_path):
+    root = _tree(tmp_path, {"Iface": 'package a;\n@Tag("integration")\ninterface Iface {}\n'})
+    assert _mod.tagged_classes(root) == ["a.Iface"]
+
+
 def test_the_real_tree_expects_what_it_should():
     """The checked-in tree: javadoc-only RdrO8dil7 is out, every allowlist entry is
     a real tagged class, and the set is not vacuously small."""
     classes = _mod.tagged_classes(str(_REPO / "service" / "src" / "test" / "java"))
     assert "dev.nexus.service.RdrO8dil7GlobalManifestAntiJoinTest" not in classes
+    assert "dev.nexus.service.vectors.PciIdIndexSupport" not in classes
+    assert "dev.nexus.service.vectors.PciIdIndexIntegrationTest" in classes
     assert len(classes) >= 10
     assert set(_mod.ALLOWED_SKIPS) <= set(classes)
     assert all(reason.strip() for reason in _mod.ALLOWED_SKIPS.values())

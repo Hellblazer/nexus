@@ -88,6 +88,23 @@ _TAG_RE = re.compile(
     r'@\s*(?:[\w.]*\.)?Tag\s*\(\s*(?:value\s*=\s*)?"<S(\d+)>"\s*\)'
 )
 
+# The file's own top-level class declared ``abstract`` (any modifier order, optional
+# generics/extends after the name). Matched against stripped code, by the file's
+# class name, so a comment, a string, a nested abstract class (other name) or an
+# abstract method never exempts a concrete class.
+_ABSTRACT_MODS = r"(?:(?:public|protected|private|static|final|sealed|non-sealed|strictfp)\s+)*"
+
+
+def is_abstract_class(code: str, name: str) -> bool:
+    """True when *code* declares ``abstract ... class <name>``. An abstract class is
+    never run by JUnit and never writes a report of its own: its tests report under
+    each concrete subclass, which carries its own tag and is still expected."""
+    return bool(
+        re.search(
+            rf"(?<![\w.])abstract\s+{_ABSTRACT_MODS}class\s+{re.escape(name)}\b", code
+        )
+    )
+
 
 def strip_java(src: str) -> tuple[str, list[str]]:
     """Return (code, literals): *src* with comments blanked and every string
@@ -135,7 +152,8 @@ def is_integration_tagged(src: str) -> bool:
 
 
 def tagged_classes(test_root: str) -> list[str]:
-    """Fully-qualified class names carrying a real @Tag("integration") annotation."""
+    """Fully-qualified class names carrying a real @Tag("integration") annotation,
+    except abstract classes (never executed, so never reported)."""
     found = []
     for dirpath, _dirs, files in os.walk(test_root):
         for name in files:
@@ -149,6 +167,8 @@ def tagged_classes(test_root: str) -> list[str]:
             if not is_integration_tagged(src):
                 continue
             code, _lits = strip_java(src)
+            if is_abstract_class(code, name[:-5]):
+                continue
             m = re.search(r"^\s*package\s+([\w.]+)\s*;", code, re.M)
             if not m:
                 continue
