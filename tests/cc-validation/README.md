@@ -311,7 +311,7 @@ the entire MCP stack broken. Two rules came out of the rework:
 
 Reworked for validity 2026-05-31: 05, 06, 07, 09, 10, 11, 14a, 14b, 16, 18, 19A,
 23. Verified valid as-is: 01, 17 (explicit-token),
-02/03/04/12/13/14c/15/20–22/24–26 (forensic/positive). (nexus-qsmc5 found 01-04, 11, 15, 17,
+02/03/04/12/13/14c/15/20–22/24–25 (forensic/positive; there is no scenario 26 or 27). (nexus-qsmc5 found 01-04, 11, 15, 17,
 21, 24 and 25 were NOT valid: a token or marker written whole in the prompt or command
 body, or a verdict read off the pane; and 05-07 ran under the bypass flag. Reworked.) (09/10's branch-1 token
 grep used to match the user's own turn-1 prompt in scrollback — fixed by
@@ -698,9 +698,9 @@ container/                      # Dockerfile + run.sh: how Claude Code runs (cha
 fixtures/stub_server.py         # MCPServer stub (needs an interpreter with `mcp`)
 ../e2e/lib.sh                   # _tmux, claude_start, claude_prompt, claude_wait, capture
 ../e2e/lib/claude_credentials.py # shared credential helper (run/status); no file, ever (RDR-219)
-lib/                            # stdlib-only readers the verdicts call: version_answers.py (the 06/07
+lib/                            # stdlib-only readers the verdicts call: version_answers.py (the 06/07/33/34
                                 # table), agent_facts.py (17), debug_log.py (01, 15)
-../../docs/tables/cc-version-answers.toml  # the version -> observed answer table for 06/07
+../../docs/tables/cc-version-answers.toml  # the version -> observed answer table for 06, 07, 33 and 34
 ```
 
 Companion gist (older notes): `4a7d73baa4409e02af7af222023b8b9d`.

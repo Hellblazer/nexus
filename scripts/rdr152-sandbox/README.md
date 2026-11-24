@@ -1,5 +1,7 @@
 # RDR-152 Acceptance Sandbox Harness
 
+> Historical (RDR-152 is closed): steps that run "the five `nx storage migrate` ETLs" from a prod SQLite file cannot run any more. The `nx storage` group was deleted at RDR-155 P4b, and nothing in nexus reads a pre-PG `.db` file now (root AGENTS.md hot rules). Read the rest as the record of how the sandbox was built.
+
 Fully isolated Postgres + Java service stack for de-risking
 Phase-4 destructive deletion.  Prod is never written.
 
