@@ -1408,8 +1408,9 @@ while the engine serves:
   `TaxonomyCentroidRepository.java:183-197`); the id arm also writes the
   writer's label into the name column: for chunks because
   `fk_catalog_chunks_chunk` ties the manifest's name to the chunk's until
-  P4.1 (`PgVectorRepository.java:1343-1347`; from P3.7, `vectors-079`'s
-  trigger sets a child row's name from its chunk's), for centroids until P3.7
+  P4.1, and from P3.7 `vectors-079`'s trigger sets a child row's name
+  from its chunk's (`vectors-079-child-row-name-from-chunk.xml:5-12`; the
+  code comment at `PgVectorRepository.java:1343-1347` still says P3.7), for centroids until P3.7
   revisits the name columns (`TaxonomyCentroidRepository.java:187-188`).
   `CatalogRepository.upsertManifestChunkVectors` switches the same way
   (`:6863-6864`; T2 `229-research-327`); both
@@ -1631,10 +1632,12 @@ while the engine serves:
     id while the rename is still the name path, which gives the collection
     a new id that its index on the old id does not select (T2
     `229-research-53`, `229-research-63`). The engine therefore refuses a
-    rename in that window: gate 3 holds and not both of those. The typed
+    rename in that window: gate 3 holds and not both of those (or the
+    readiness cannot be read, below). The typed
     error is 409 `rename_refused`, whose `missing` names the first condition
     not met, in this order: `readiness_unreadable` when the readiness could
-    not be read; `name_key_drop_move` while the move has no `completed_at`;
+    not be read, until a sample has once read `none` (after that an
+    unreadable sample keeps `none`, `CompletionBootWork.java:270-280`); `name_key_drop_move` while the move has no `completed_at`;
     `p35b_list_missing` when the engine's P3.5b list is empty or absent;
     `restart` while a listed changeset has not applied; and
     `p35c_readers_absent` unless the id readers are present, which cannot
@@ -1651,10 +1654,10 @@ while the engine serves:
     an inconsistency such as a partial restore (`RenameReadiness.java:53-57`,
     `RenameGuard.java:160-168`; T2 `229-research-313`).
     The latch row decides the path, not the in-process signal
-    (`RenameGuard.java:74-80`; T2 `229-research-302`), and the readiness
-    answers `none` only once this engine's gate 3 signal is set, which the
-    sample sets before it is published, so a latched sample with the signal
-    unset answers `readiness_unreadable` (`CompletionBootWork.java:246-260`,
+    (`RenameGuard.java:74-80`; T2 `229-research-302`). A sample that read
+    the latch row and would answer `none` answers `readiness_unreadable`
+    instead while this engine's gate 3 signal is unset; the sample sets the
+    signal before it is published (`CompletionBootWork.java:246-260`,
     `:448-455`; T2 `229-research-329`). The
     window is that move's run, a short pass over the registry and its
     `on_complete`, and, where a P3.5b changeset has not applied, the time
@@ -1898,8 +1901,7 @@ stale note that the stale-note repair rewrites to `nx-note://<collection>/`
 aspect tasks, which name their collection in the task body: "a collection
 rename ... has to rewrite or delete the tasks itself, in the same
 transaction" (`AspectTaskRefs.java:23-26`; from P3.7 the one-row body calls it at
-`CollectionOneRowRename.java:181`, and the name path at
-`CatalogRepository.java:11663`; T2 `229-research-37`, `229-research-314`). The one-row rename needs every
+`CollectionOneRowRename.java:181`, and the name path at `CatalogRepository.java:11710`; T2 `229-research-37`, `229-research-314`). The one-row rename needs every
 reader off the referencing tables' name columns (P3.5) and every
 per-collection index off the name (P3.4). From P3.7 those columns are dead:
 unread, and no longer rewritten by a rename, so they hold the label each row
@@ -3000,8 +3002,8 @@ its acceptance is that test green plus the census pin it lowers.
     6; `http_catalog_client.py:518-524`): until then a rename gives the collection a
     new id, and from gate 3 until P3.7's one-row rename can run (that move
     complete and every P3.5b changeset applied) the engine refuses a
-    rename, with a typed error that names the missing condition, the move
-    or the restart. The refusal ships in P3.7's engine cut, which is
+    rename, with a typed error that names the missing condition (item 6
+    lists the values). The refusal ships in P3.7's engine cut, which is
     P3.5's (P3.7). `ids_stable` is true on a one-row answer
     (`CollectionOneRowRename.java:64`) and false on a name-path answer,
     which still gives a new id (`RenameGuard.java:249-251`; T2
@@ -3088,7 +3090,8 @@ its acceptance is that test green plus the census pin it lowers.
     `both`, 90 `label-kept` and 6 `n-a` (with P3.7 on top, 664 rows in 364
     groups: 159, 105, 92 and 8; T2 `229-research-329`). The census also covers the quarantine tag's
     label key (`LABEL_KEYS = ("origin_collection",)`,
-    `scripts/rdr229_p35c_java_reader_census.py:236`; 23 rows of this census,
+    `scripts/rdr229_p35c_java_reader_census.py:236`; 23 rows of this census at
+    P3.5c's tip and 24 with P3.7,
     and 19 of P3.5b's SQL census, `p35b-reader-census.tsv`). Eight reads still matched that label after the latch and were held
     to P3.7, which switched them to the id (`vectors-083`, and
     `RestoreOriginMarker.windowOrigin` for the Java one; `PENDING_P37` is
@@ -3102,7 +3105,7 @@ its acceptance is that test green plus the census pin it lowers.
     reaper's own expiry functions stay on the label to P4.1 (the reaper
     ruling R1 of bead nexus-p2m1x.35); `vectors-083-7` adds to
     `reaper_expire_client_quarantine` only an arm that, when the origin
-    label names no live collection, narrows the expiry to rows whose origin
+    label names no live knowledge collection, narrows the expiry to rows whose origin
     id is JSON null. The ten
     `TwinKeyUpsert` sites take the id key as their conflict target, among
     them the chunk and centroid upserts (`PgVectorRepository.java:1352`,
@@ -3157,15 +3160,17 @@ its acceptance is that test green plus the census pin it lowers.
   source named by `collection_id` that is unknown, retired or relabelled;
   refuses a reserved target label; deletes a retired row at the target
   label by id; repoints the tombstones that name either label; and retags
-  the quarantine origin tags with the renamed id; it writes none of the
-  fourteen `COLLECTION_SCOPED_TABLES` (`:182-184`), and its answer has
+  the quarantine origin tags with the renamed id; it rewrites the name
+  column of none of the fourteen `COLLECTION_SCOPED_TABLES` (`:182-184`;
+  its note-URI rewrite, below, touches three of them), and its answer has
   `ids_stable` true (`:64`). `vectors-079` adds a trigger on
   `catalog_document_chunks`, `chunk_orphaned_at` and `topic_assignments`
   that sets a child row's name from its chunk's, so the chunk-name child
   keys, kept until P4.1, hold after a one-row rename
   (`vectors-079-child-row-name-from-chunk.xml:65`). From the latch a label is
-  reserved while a row of a name-keyed table carries it under another
-  collection's id, and the upsert (a new or revived registration), a
+  reserved while a row of a name-keyed table carries it under a
+  `collection_id` whose registry row is now labelled otherwise (a
+  whole-tenant restore is exempt; `LabelReserved.java:43-45`, `:114-115`), and the upsert (a new or revived registration), a
   supersede's successor, a rename target and the single-form
   per-collection import answer 409 `label_reserved`; the batch import
   refuses the row with rule `label_reserved`, and the mint skips a
@@ -3180,7 +3185,7 @@ its acceptance is that test green plus the census pin it lowers.
   JSON-null marker is not restored by label, and the restore refuses with
   409 `restore_origin_unregistered`, naming the label and the row count,
   while the chunks stay quarantined; before the latch the label restore is
-  unchanged (linda's ruling; `RestoreOriginMarker.java:50-70`, `:94-103`,
+  unchanged (linda's ruling, T2 `229-research-330`; `RestoreOriginMarker.java:50-70`, `:94-103`,
   `HttpUtil.java:699-711`; commit 2d054c3be8; T2 `229-research-329`).
   P3.7 also ships the name-key drop move: the
   engine's `NameKeyDropPass` registers it once gate 3 has latched, its `on_complete` drops
@@ -3864,10 +3869,12 @@ the two residue shapes item 12 leaves unrepaired (P1.2 counts them).
   P3.5 and P3.7 one cut together with the rename refusal and the name-key
   drop move's registration (P3.7), whose 409 `label_reserved`, 409
   `restore_origin_unregistered` and `rdr229-restart` notice are not additive
-  and pair with client 8.5.6 (`docs/wire-contract-pending.md:103-107`);
+  and pair with client 8.5.6: for each, an old client against the new engine
+  is not safe (`docs/wire-contract-pending.md:103-107`; T2 `229-research-330`);
   the client floor bumps in the release that first depends on each, engine
   deployed first. Routes accept both a label and an id from P3.5, so an
-  older client keeps working until the floor bump. An install that skips
+  older client keeps working until the floor bump, except for those three
+  P3.7 changes. An install that skips
   releases is guarded by its own moves, not by the cut order: its readers
   switch once the completion check sees its gates pass there
   (item 6, "Readers during the stamp"). A client trusts a collection's
