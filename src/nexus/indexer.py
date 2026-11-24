@@ -486,6 +486,7 @@ def _register_run_collections(
     test that skipped registration). An unreachable registry, a profile mismatch and a retired name all stop the run;
     a retired name is refused before the upsert, which would un-retire it (nexus-wwuzp).
     """
+    from nexus.collection_errors import LabelReservedError  # noqa: PLC0415 — deferred: keep this module's import surface as it was
     from nexus.corpus import (  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
         collection_registration_kwargs,
         ensure_collection_registered,
@@ -515,7 +516,11 @@ def _register_run_collections(
         )
         kwargs = collection_registration_kwargs(name)
         kwargs["embedding_model"] = model
-        ensure_collection_registered(name, kwargs=kwargs)
+        try:
+            ensure_collection_registered(name, kwargs=kwargs)
+        except LabelReservedError as reserved:
+            # the run names this collection from the repo's registry: the label is not the person's to change
+            raise reserved.with_fixed_label() from reserved
 
 
 def _repo_target_model(db: object, collection_name: str, *, legacy_model: str | None) -> tuple[str, bool]:
