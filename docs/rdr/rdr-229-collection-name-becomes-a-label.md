@@ -1523,7 +1523,7 @@ while the engine serves:
     validation labels, row 13's quarantine origin-id backfill label (in
     gate 2, below), and P3.7's name-key drop label, which the check
     reads for the rename readiness only and which gates no gate
-    (`CompletionCheck.java:127`, `:819-821`; T2 `229-research-329`). A label with no row
+    (`CompletionCheck.java:128`, `:835`; T2 `229-research-329`). A label with no row
     counts as incomplete, because the swap, child and drop rows are
     registered at run time. A move whose row
     has `failed_at` set and whose driving table no longer exists
@@ -1654,7 +1654,7 @@ while the engine serves:
     `restart` while a listed changeset has not applied; and
     `p35c_readers_absent` unless the id readers are present, which cannot
     happen in this build, since `IdReaders.PRESENT` is true
-    (`CompletionCheck.java:412-425`, `RenameReadiness.java:28-58`,
+    (`CompletionCheck.java:424-437`, `RenameReadiness.java:28-58`,
     `RenameRefusedException.java:55-65`, `HttpUtil.java:649-657`; T2
     `229-research-301`, `229-research-303`, `229-research-329`). The same
     values, with `none`, go out as `rdr229_completion.rename_missing`, and
@@ -1719,7 +1719,7 @@ while the engine serves:
     and the worker acts on it (`case COMPLETED -> ...`,
     `DataMoveWorker.java:562`). So the engine re-reads the check when the
     worker records a `completed_at`, and when a reconciler pass ends
-    (`Main.java:721`; T2 `229-research-274`), and a 60 s safety
+    (`Main.java:723`; T2 `229-research-274`), and a 60 s safety
     poll reads again when no event came in that time, in case one was
     missed. The count of rows that keep a CHECK `NOT VALID` is a bounded
     scan, so it is cached for 10 minutes per table. The gates the
@@ -1739,17 +1739,17 @@ while the engine serves:
     (`vectors-077:3-5`). From P3.7 the engine reads the list
     (`P35bChangesets.java:31-37`) and `databasechangelog` in each completion
     sample under a 2 s statement bound, and counts an id applied when its
-    `exectype` is EXECUTED, RERAN or MARK_RAN (`CompletionCheck.java:777`,
-    `:819-833`; T2 `229-research-320`, `229-research-329`). P3.7's engine
+    `exectype` is EXECUTED, RERAN or MARK_RAN (`CompletionCheck.java:805`,
+    `:835-847`; T2 `229-research-320`, `229-research-329`). P3.7's engine
     asks for that restart in two places, on different conditions. When gate
     1 holds and a listed P3.5b changeset is not yet applied, `boot_work`
     carries the entry `rdr229-restart`, naming how many of the listed
-    changesets have not applied (`CompletionCheck.java:432-434`;
+    changesets have not applied (`CompletionCheck.java:444-446`;
     `CompletionBootWork.java:82`, `:471-483`). `rdr229_completion.rename_missing`,
     which nx doctor shows, reads `none` until gate 3 has latched
     (`CompletionBootWork.java:199-203`), and then `restart` only once the
     drop move has `completed_at` and a listed changeset is still unapplied
-    (`CompletionCheck.java:412-425`). On a half-stamped store the restart is
+    (`CompletionCheck.java:424-437`). On a half-stamped store the restart is
     asked for by the notice alone: gate 3 latches only at the boot that
     applies `vectors-078` (P3.5). The notice is the one exception among the
     check's reports to the rule above (`id-unique-index-held`, above, is
@@ -1774,7 +1774,15 @@ while the engine serves:
     rename keeps its fourteen-table rewrite, and Phase 4's drops never apply
     (P4.1). P4.0's floor never holds there either, so a P4.0 engine would
     serve that install migration-only; it stays on a release before P4.0
-    until its moves run (P4.0; T2 `229-research-59`).
+    until its moves run (P4.0; T2 `229-research-59`). A move that keeps
+    failing transiently pages an operator (RDR-246's machinery): after 20
+    transient failures in a row, or once 3 lock or statement timeouts in a
+    row at `on_complete` have latched it, which for the swaps and the
+    name-key drop move is their 700 ms lock bound. It is logged once as
+    `data_move_needs_operator`, listed in `/v1/status`
+    `data_moves_need_operator_moves`, and shown red by nx doctor, and it
+    keeps retrying (`MoveRetryPolicy.java:31-38`, `:100-101`; commits
+    6b7af9d83b, adbcceadf1, 67a0d4fc6a; T2 `229-research-333`).
 
 Whether any step needs a maintenance window is unverified (Critical
 Assumption 5). Inferred, not read: the swap's DDL holds ACCESS EXCLUSIVE on
@@ -2949,7 +2957,7 @@ its acceptance is that test green plus the census pin it lowers.
   its rows has a null id (stamp-before-build, Scope boundary with RDR-247),
   and no build starts until gate 2 of the completion check (both swaps,
   every validation move and the quarantine origin-id backfill complete), so a chunk-family `on_complete` cannot
-  end it (item 6; `Main.java:712-716`; T2 `229-research-276`). The step also
+  end it (item 6; `Main.java:731-735`; T2 `229-research-276`). The step also
   builds the eight id-keyed arbiters and their supporting indexes at run
   time, in `IdUniqueIndexPass`, after the engine serves (item 6; T2
   `229-research-266`). `PciCatalog` reads the id back from the predicate, and
@@ -2957,9 +2965,25 @@ its acceptance is that test green plus the census pin it lowers.
   that P3.4 is complete on the install.
   The name indexes retire (`REPLACED_BY_ID`) only once gate 3 has latched,
   `IdReaders.PRESENT` is true, and the engine holds its singleton lock
-  (`Main.java:265`, `:736`; `PciReconciler.java:650`, `:666`). P3.5c sets it
+  (`Main.java:265`, `:738`; `PciReconciler.java:663`, `:679`). P3.5c sets it
   `true` (`IdReaders.java:23`), and `Rdr229P35cIdReadersPinTest` holds it
-  to the reader dispositions (T2 `229-research-270`, `229-research-327`). Until the retire ends, the
+  to the reader dispositions (T2 `229-research-270`, `229-research-327`).
+  The recall canary follows the retire's value (`PciCanaryLatch`, bound to
+  `PciIdBuilds.gate3Holds`, `PciReconciler.java:440-448`): before it, the
+  canary, the query ring's admission, the vacuum trigger and the REINDEX
+  re-measure use the name indexes; once it holds, the valid id indexes,
+  searched through the `_by_id` twin (`PciCanary.java:69-78`,
+  `PciReconciler.java:798-857`, `PciQueryRing.java:159-168`,
+  `PciReindexPhase.java:143-154`; commit b5b1d5e755 and follow-ups). With no
+  singleton lock the name indexes do not retire, so the canary keeps
+  measuring them while reads go by the id, and no canary covers the id
+  indexes there (inferred from the wiring, not tested). The sweep line,
+  `/v1/status` `per_collection_indexes` and nx doctor count the id family
+  apart: `valid` stays the name count, and `valid_id` and `invalid_id`
+  (additive, from engine-service 0.1.202) count the id indexes, which nx
+  doctor prints as "+ M by id" (`PciIndexSweep.java:374-384`,
+  `PciCatalog.java:580-597`, `StatusHandler.java:856-862`,
+  `pci_indexes_health.py:128-134`; T2 `229-research-333`). Until the retire ends, the
   id indexes get a budget of their own, the same `NX_SEARCH_PCI_MAX_PER_LEAF`,
   so a leaf at the cap holds the cap's worth of name indexes and the cap's
   worth of id indexes, one build at a time. That is a stated exception to the
@@ -2976,7 +3000,7 @@ its acceptance is that test green plus the census pin it lowers.
   (`lock_timeout` and `statement_timeout`). A failed attempt is retried with
   backoff, 500 ms doubling to 30 s, and after 5 minutes in all without an
   answer the engine exits with status 1 rather than serve on a guess
-  (`Gate3Latch.java:28-32, 69-70, 78-94`, `Main.java:612-625`; T2
+  (`Gate3Latch.java:28-32, 69-70, 78-94`, `Main.java:608-617`; T2
   `229-research-257`, `229-research-280`). The latch stays held for P3.5's
   readers and for P3.7's one-row rename and its refusal (P3.7). P3.5's readers,
   that rename and the name-index retire go by the latched value, never by the
@@ -2989,7 +3013,7 @@ its acceptance is that test green plus the census pin it lowers.
   `229-research-292`). An install that latched while `NX_SEARCH_PCI=0` has
   `pci_off` set; when PCI is turned on, the reconciler builds the id indexes
   first, as if gate 2 held, and P3.5's readers select by the id either way
-  (`PciIdBuilds.java:32-34`, `Main.java:721`; T2 `229-research-272`,
+  (`PciIdBuilds.java:32-34`, `Main.java:741`; T2 `229-research-272`,
   `229-research-290`).
   Test: a collection with a row whose `collection_id` is null gets no index on
   the id; readers and the rename stay on the name path, before the latch, while any collection
@@ -3011,7 +3035,7 @@ its acceptance is that test green plus the census pin it lowers.
   `vectors-078-8`: the id twin `idx_canary_query_ring_id_digest_uq` waits
   for that changeset (`ArbiterTwins.java:45-46`, `IdUniqueIndexPass.java:448-454`),
   gate 3 waits for the twin (`IdUniqueIndexPass.allValid`, wired as a gate 3
-  condition at `Main.java:890`; `CompletionCheck.java:518-540`), and the
+  condition at `Main.java:897`; `CompletionCheck.java:660-686`), and the
   changeset's one CONTINUE `sqlCheck`, on every stamp move complete with its
   CHECKs present and validated (item 6), lets Liquibase apply it only at a
   boot (`vectors-078:573-601`, the changeset and its one `sqlCheck`). Inferred from code, not tested (T2
@@ -4129,3 +4153,4 @@ large, and moved under a ratchet.
 - 2026-11-24: the restart request follows P3.7's reviewed code (Sam, "Amend the RDR", T2 `nexus/sam-ruling-rdr229-restart-request-follows-p37-code-2026-11-24`, superseding the P4.0 part of option 1 on ask `rdr229-p41-p40-p35-rulings`): P3.7 asks for the restart as `rename_missing` `restart` and as the `rdr229-restart` boot_work notice, the one exception to the boot_work rule; P4.0 owns no separate request, and its Test and the Test Plan scenario say so. P4.1's drop move is registered by an engine pass, as `NameKeyDropPass` registers P3.7's, because the completion check runs read-only (linda).
 - 2026-11-24: row 16b folded from the stacked code (grant 3, nexus-p2m1x.22; T2 `229-research-331`): a supersede that names its successor by id locks it by id beside the source, with 404 and 409 answers, and a source named by id retired in the gap is decided under the lock: 200 with nothing written for the requested successor, 409 for any other.
 - 2026-11-24: row 13 and marlowe's gate3_why fix folded from the stacked code (grant 3, nexus-p2m1x.22; T2 `229-research-332`): `vectors-082-1` registers the quarantine origin-id backfill move, whose label joins gate 2, the gate 3 clause staying as the live check; gate 3's reason names no count, the capped count going to the engine log only.
+- 2026-11-24: the recall canary and the PCI id-index counts folded from the stacked code (grant 3, nexus-p2m1x.22; T2 `229-research-333`): the canary, ring admission, vacuum trigger and REINDEX re-measure follow the retire's value onto the id indexes; the gap with no singleton lock; `valid_id` and `invalid_id` in the sweep, `/v1/status` and nx doctor; one sentence on RDR-246's needs-operator page for RDR-229's moves; Main, PciReconciler and CompletionCheck cites moved by the later commits. Held for linda: the name-key drop move's `on_complete` ending in-flight builds after the latch.
