@@ -16,9 +16,14 @@ final class Vectors079Text {
 
     /** Replays the changeset with {@code from} replaced by {@code to}, runs {@code work}, and replays the shipped changeset back. */
     static void withMutant(Rdr229RenameEngine engine, String from, String to, Runnable work) {
+        withSubstitutions(engine, new java.util.LinkedHashMap<>(java.util.Map.of(from, to)), work);
+    }
+
+    /** {@link #withMutant} with several substitutions, applied in map order (an instrumentation and a mutant together). */
+    static void withSubstitutions(Rdr229RenameEngine engine, java.util.LinkedHashMap<String, String> substitutions, Runnable work) {
         engine.su(ctx -> ctx.connectionResult(c -> {
             try {
-                PgContainerHelper.replayChangesetSubstituting(c, CHANGESET, CHANGESET_ID, from, to);
+                PgContainerHelper.replayChangesetSubstituting(c, CHANGESET, CHANGESET_ID, substitutions);
             } catch (Exception e) {
                 throw new IllegalStateException(e);
             }

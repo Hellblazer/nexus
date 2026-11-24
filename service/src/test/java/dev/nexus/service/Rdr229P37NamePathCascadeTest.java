@@ -24,7 +24,7 @@ import java.util.List;
  * manifest, orphaned-at and topic-assignment row by name while it still carries the old id. That cascade is not a writer: step 2 of the
  * trigger (a by-id scan of the tenant's leaf, no id key on chunks in this tree) would run once per cascaded row, N x N. The trigger skips
  * it for a child whose collection id belongs to a tombstone. The rename must complete, leave every child on its chunk's name, and cost
- * about what it costs with the triggers disabled.
+ * the work it costs with the triggers disabled: counted (step-2 lookups through a test-only counting seam), never timed.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class Rdr229P37NamePathCascadeTest {
@@ -130,80 +130,120 @@ class Rdr229P37NamePathCascadeTest {
         }));
     }
 
-    private long renameMillis(String tenant, String token, String oldName, String newName) throws Exception {
+    private static final org.jooq.Table<?> PROBE = DSL.table(DSL.name("nexus", "p37_step2_probe"));
+    private static final String CHANGELOG_PROBE_CREATE = "db/changelog-test/db.changelog-test-step2-probe-create.xml";
+    private static final String CHANGELOG_PROBE_DROP = "db/changelog-test/db.changelog-test-step2-probe-drop.xml";
+
+    /** Each of the trigger bodies' step 2 (the by-id lookup of the chunk) advances the probe first: the instrumentation, the only change to the text. */
+    private static final String STEP2 = "SELECT c.collection INTO v_stored";
+    private static final String STEP2_COUNTED = "PERFORM pg_catalog.nextval('nexus.p37_step2_probe');\n    " + STEP2;
+    private static final String GUARD = "r.superseded_by <> ''";
+    private static final String GUARD_OFF = "r.superseded_by = 'never'";
+
+    private void probe(String changelog, String bookkeeping) {
+        engine.su(ctx -> ctx.connectionResult(c -> {
+            try {
+                PgContainerHelper.runSuperuserTestChangelog(c, changelog, bookkeeping, java.util.Map.of());
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+            return null;
+        }));
+    }
+
+    /** How many times the instrumented bodies reached step 2 so far (the sequence's value, 0 before its first use). */
+    private long step2Lookups() {
+        var lastValue = DSL.field(DSL.name("last_value"), Long.class);
+        var isCalled = DSL.field(DSL.name("is_called"), Boolean.class);
+        return engine.su(ctx -> {
+            var row = ctx.select(lastValue, isCalled).from(PROBE).fetchOne();
+            return Boolean.TRUE.equals(row.value2()) ? row.value1() : 0L;
+        });
+    }
+
+    /** What one rename did: how long it took (printed, never asserted) and how many step-2 lookups the instrumented trigger bodies made during it. */
+    private record Cascade(long millis, long step2Lookups) { }
+
+    private Cascade cascade(String tenant, String token, String oldName, String newName) throws Exception {
         long[] before = childCounts(tenant, oldName);
         assertThat(before).as("non-vacuity: children to cascade").containsExactly(N / 2L, N / 2L, N / 2L);
+        long lookupsBefore = step2Lookups();
         long started = System.nanoTime();
         var r = engine.rename(token, oldName, newName);
         long ms = (System.nanoTime() - started) / 1_000_000;
+        long lookups = step2Lookups() - lookupsBefore;
         assertThat(r.status()).as("the name path before gate 3: " + r).isEqualTo(200);
         assertThat(childCounts(tenant, oldName)).as("no child is left under the old name").containsExactly(0L, 0L, 0L);
         assertThat(childCounts(tenant, newName)).as("every child follows its chunk to the new name").containsExactly(before);
         assertThat(Rdr229ChildNameWorld.childrenNotOnTheirChunksName(engine, tenant)).as("the children are consistent with the chunks").isZero();
-        return ms;
+        return new Cascade(ms, lookups);
     }
 
+    /**
+     * The guard is load-bearing, and it is shown by COUNTING the work it skips, never by timing it. A cascaded child still carries the old collection
+     * id, which belongs to the tombstone the rename just left; step 2 of the trigger bodies (a by-id scan of the tenant's leaf, no id key on chunks in this
+     * tree) would run once per cascaded row. The test replays vectors-079 with the one change that step 2 first advances a sequence the test created on
+     * this container (a counting seam in the test only; the shipped text is replayed back afterwards): the guarded cascade reaches step 2 for none of the
+     * 3 x N/2 children, the same cascade with the guard mutated off for every one of them, and the control, the three triggers disabled, for none.
+     * (The sequence is only advanced by step 2 and nothing else on this engine writes a child under a name other than its chunk's during the test.)
+     */
     @Test
-    void aNamePathRenameCascadesEveryChildWithTheTriggersInstalled_atAboutTheCostOfNoTriggers() throws Exception {
+    void aNamePathRenameCascadesEveryChildWithTheTriggersInstalled_withoutTheByIdLookupPerRow() throws Exception {
         String tenant = "p37-casc";
         String token = engine.newTenant(tenant);
-        String disabledOld = coll("p37cascb", 1);
-        String enabledOld = coll("p37casca", 1);
-        seed(tenant, disabledOld);
-        seed(tenant, enabledOld);
-
-        // control: the same rename with the three triggers disabled
-        triggers(false);
-        long withoutMs;
+        long children = 3L * (N / 2);
+        probe(CHANGELOG_PROBE_CREATE, "databasechangelog_test_step2_probe");
         try {
-            withoutMs = renameMillis(tenant, token, disabledOld, coll("p37cascb", 2));
-        } finally {
-            triggers(true);
-        }
-        long withMs = renameMillis(tenant, token, enabledOld, coll("p37casca", 2));
+            String disabledOld = coll("p37cascb", 1);
+            String enabledOld = coll("p37casca", 1);
+            String unguardedOld = coll("p37cascc", 1);
+            seed(tenant, disabledOld);
+            seed(tenant, enabledOld);
+            seed(tenant, unguardedOld);
 
-        // the same rename with the three functions replaced by mutants WITHOUT the tombstone guard (what this commit's predecessor shipped):
-        // the cascade runs step 2 for every row. The guard is what keeps the cascade at the cost above.
-        String unguardedOld = coll("p37cascc", 1);
-        seed(tenant, unguardedOld);
-        long[] unguardedMs = new long[1];
-        Vectors079Text.withMutant(engine, "r.superseded_by <> ''", "r.superseded_by = 'never'", () -> {
+            // control: the same rename with the three triggers disabled does no lookup at all (and the children still follow: the foreign keys' cascade)
+            triggers(false);
+            Cascade disabled;
             try {
-                unguardedMs[0] = renameMillis(tenant, token, unguardedOld, coll("p37cascc", 2));
-            } catch (Exception e) {
-                throw new IllegalStateException(e);
+                disabled = cascade(tenant, token, disabledOld, coll("p37cascb", 2));
+            } finally {
+                triggers(true);
             }
-        });
 
-        System.out.println("TIMING name-path rename of " + (N + 1) + " chunks, " + N / 2 + " manifest, " + N / 2 + " orphaned, " + N / 2
-            + " assignment rows: triggers disabled " + withoutMs + " ms, installed " + withMs + " ms, installed without the tombstone guard "
-            + unguardedMs[0] + " ms");
-        // wall-clock on a shared host is noisy: the guard is load-bearing if the unguarded cascade is slower in ANY of up to three paired rounds
-        boolean loadBearing = unguardedMs[0] > withMs;
-        long lastWith = withMs;
-        long lastUnguarded = unguardedMs[0];
-        for (int i = 1; i <= 2 && !loadBearing; i++) {
-            final int round = i;
-            String guardedOld = coll("p37cascg" + round, 1);
-            String unguardedAgain = coll("p37cascu" + round, 1);
-            seed(tenant, guardedOld);
-            seed(tenant, unguardedAgain);
-            lastWith = renameMillis(tenant, token, guardedOld, coll("p37cascg" + round, 2));
-            long[] again = new long[1];
-            Vectors079Text.withMutant(engine, "r.superseded_by <> ''", "r.superseded_by = 'never'", () -> {
+            // the guarded cascade, the shipped guard with the counting step 2
+            var counted = new java.util.LinkedHashMap<String, String>();
+            counted.put(STEP2, STEP2_COUNTED);
+            Cascade[] guarded = new Cascade[1];
+            Vectors079Text.withSubstitutions(engine, counted, () -> {
                 try {
-                    again[0] = renameMillis(tenant, token, unguardedAgain, coll("p37cascu" + round, 2));
+                    guarded[0] = cascade(tenant, token, enabledOld, coll("p37casca", 2));
                 } catch (Exception e) {
                     throw new IllegalStateException(e);
                 }
             });
-            lastUnguarded = again[0];
-            System.out.println("TIMING round " + round + ": installed " + lastWith + " ms, installed without the tombstone guard " + lastUnguarded + " ms");
-            loadBearing = lastUnguarded > lastWith;
+
+            // the same rename with the tombstone guard mutated off (what the predecessor of this commit shipped): step 2 runs for every cascaded row
+            var countedWithoutGuard = new java.util.LinkedHashMap<String, String>();
+            countedWithoutGuard.put(STEP2, STEP2_COUNTED);
+            countedWithoutGuard.put(GUARD, GUARD_OFF);
+            Cascade[] unguarded = new Cascade[1];
+            Vectors079Text.withSubstitutions(engine, countedWithoutGuard, () -> {
+                try {
+                    unguarded[0] = cascade(tenant, token, unguardedOld, coll("p37cascc", 2));
+                } catch (Exception e) {
+                    throw new IllegalStateException(e);
+                }
+            });
+
+            System.out.println("COUNTS name-path rename of " + (N + 1) + " chunks, " + children + " cascaded child rows: step-2 lookups: triggers disabled "
+                + disabled.step2Lookups() + ", guarded " + guarded[0].step2Lookups() + ", without the tombstone guard " + unguarded[0].step2Lookups()
+                + "; TIMING (not asserted) " + disabled.millis() + " / " + guarded[0].millis() + " / " + unguarded[0].millis() + " ms");
+            assertThat(disabled.step2Lookups()).as("control: with the triggers disabled nothing looks anything up").isZero();
+            assertThat(guarded[0].step2Lookups()).as("the guard skips step 2 for every cascaded child: no by-id lookup per row, as with the triggers off").isZero();
+            assertThat(unguarded[0].step2Lookups()).as("load-bearing: without the guard every one of the " + children + " cascaded children does the by-id lookup")
+                .isGreaterThanOrEqualTo(children);
+        } finally {
+            probe(CHANGELOG_PROBE_DROP, "databasechangelog_test_step2_probe_drop");
         }
-        assertThat(loadBearing).as("load-bearing: without the guard the same cascade is slower in at least one of three paired rounds (guarded " + withMs
-            + " vs " + unguardedMs[0] + " ms, then " + lastWith + " vs " + lastUnguarded + " ms)").isTrue();
-        assertThat(withMs).as("the cascade costs about what it costs without the triggers (disabled " + withoutMs + " ms): no by-id scan per row")
-            .isLessThanOrEqualTo(withoutMs * 3 + 3000);
     }
 }

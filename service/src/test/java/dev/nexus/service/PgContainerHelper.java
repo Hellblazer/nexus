@@ -2627,6 +2627,25 @@ public final class PgContainerHelper {
         });
     }
 
+    /**
+     * {@link #replayChangesetSubstituting(Connection, String, String, String, String)} for several substitutions, applied in map order; each
+     * {@code from} must occur in the text as it stands when that substitution is applied.
+     */
+    public static List<String> replayChangesetSubstituting(Connection conn, String changelog, String changesetId,
+            java.util.LinkedHashMap<String, String> substitutions) throws Exception {
+        return replayPart(conn, changelog, changesetId, ChangesetPart.FORWARD, text -> {
+            String edited = text;
+            for (var sub : substitutions.entrySet()) {
+                if (sub.getKey().isEmpty() || !edited.contains(sub.getKey())) {
+                    throw new IllegalStateException("changeset " + changesetId + " in " + changelog
+                        + " no longer contains the substituted text: " + sub.getKey());
+                }
+                edited = edited.replace(sub.getKey(), sub.getValue());
+            }
+            return edited;
+        });
+    }
+
     /** The forward text {@link #replayChangeset} would run, for a test that pins which statement it replays. */
     public static String changesetForwardText(String changelog, String changesetId) throws Exception {
         return changesetText(changelog, changesetId, ChangesetPart.FORWARD);

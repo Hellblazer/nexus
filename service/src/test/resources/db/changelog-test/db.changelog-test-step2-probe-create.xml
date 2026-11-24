@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-229 P3.7 (nexus-p2m1x.27): the counting seam of the name-path cascade test: a sequence the instrumented vectors-079 trigger bodies advance each time they reach step 2 (the by-id lookup of the chunk), so the test counts lookups instead of timing them. Usable by the service role through PUBLIC.
+    Used by Rdr229P37NamePathCascadeTest only. runAlways, bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="step2-probe-create" author="nexus-p2m1x.27" runAlways="true">
+        <sql>CREATE SEQUENCE IF NOT EXISTS nexus.p37_step2_probe</sql>
+        <sql>GRANT USAGE, SELECT, UPDATE ON SEQUENCE nexus.p37_step2_probe TO PUBLIC</sql>
+    </changeSet>
+</databaseChangeLog>
