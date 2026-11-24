@@ -581,6 +581,7 @@ final class CollectionRouteCensus {
         java.util.Map.entry("vectors/ChunkKeySweep.java", new Resolving(1, "the chunk-key sweep (excluded: ChunkKeysAdminHandler#handleSweep)")),
         java.util.Map.entry("vectors/EmbedderRouter.java", new Resolving(1, "the embed route and the vector writes' model dispatch")),
         java.util.Map.entry("vectors/PgVectorRepository.java", new Resolving(19, "the /v1/vectors rows; resolveNeedEmbedIdx's metadata transaction reads the registry row (requireWritable) after the sweep gate")),
+        java.util.Map.entry("vectors/RestoreOriginMarker.java", new Resolving(1, "the /v1/vectors/gc restore routes' marker check (RDR-229 P3.7): the named quarantine siblings' chunks by CollectionSelector.collectionIn, a read that refuses (409 restore_origin_unregistered) and moves nothing")),
         java.util.Map.entry("vectors/TaxonomyCentroidRepository.java", new Resolving(2, "the /v1/taxonomy centroid rows; the centroid upsert stamps the row's own id and current label")));
 
     /**
