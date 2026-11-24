@@ -31,6 +31,13 @@ VENDORED = [
     for rest in ("db.changelog-master.xml", "changes/changes.xml", "changes/sql_changes/001-create-schema.sql", "LICENSE")
 ]
 
+# nexus-p2m1x: the db/rdr229 lists the engine reads at run time through getClassLoader().getResourceAsStream, a call native-image
+# does not register on its own. resource-config.json lacked db/rdr229/ and the v0.1.200 to v0.1.202 binaries did not embed
+# p33a-fk-twins.tsv, so FkTwins threw "is not on the classpath" and RDR-229's completion work never started.
+RDR229 = [
+    _res(f"db/rdr229/{name}") for name in ("p31-checks.tsv", "p33a-fk-twins.tsv", "p35b-continue-changesets.txt")
+]
+
 CLEAN = [
     _res("ai/onnxruntime/native/linux-x64/libonnxruntime.so"),
     _res("ai/onnxruntime/native/linux-x64/libonnxruntime4j_jni.so"),
@@ -38,6 +45,7 @@ CLEAN = [
     _res("native/lib/tokenizers.properties"),
     _res("db/changelog/aspects-001-baseline.xml"),
     *VENDORED,
+    *RDR229,
     # JNA ships every platform itself and is explicitly out of scope.
     _res("com/sun/jna/darwin-aarch64/libjnidispatch.jnilib"),
     _res("com/sun/jna/win32-x86-64/jnidispatch.dll", "a.jar", "b.jar"),
@@ -140,7 +148,7 @@ def test_losing_any_one_required_library_fails_on_every_platform(platform_name: 
     platform carries (libonnxruntime4j_jni, libtokenizers, a Windows MinGW
     runtime DLL) must fail even though every forbidden-resource check is green."""
     platform = chk.PLATFORMS[platform_name]
-    full = [_res(path) for path in platform.required] + VENDORED
+    full = [_res(path) for path in platform.required] + VENDORED + RDR229
     assert chk.check_report(full, platform) == [], "the required list itself must be a clean report"
     for missing in platform.required:
         report = [r for r in full if r["name"] != missing]
@@ -209,7 +217,7 @@ def test_foreign_suffix_fails_per_platform(platform_name: str, name: str):
 )
 def test_own_suffix_elsewhere_passes(platform_name: str, name: str):
     platform = chk.PLATFORMS[platform_name]
-    clean = [_res(path) for path in platform.required] + VENDORED
+    clean = [_res(path) for path in platform.required] + VENDORED + RDR229
     assert chk.check_report(clean + [_res(name)], platform) == []
 
 
@@ -310,7 +318,7 @@ def test_cli_passes_on_clean_inputs(tmp_path, capsys):
 
 @pytest.mark.parametrize("platform_name", sorted(chk.PLATFORMS))
 def test_cli_passes_each_platforms_own_required_set(tmp_path, platform_name: str):
-    report = [_res(path) for path in chk.PLATFORMS[platform_name].required] + VENDORED
+    report = [_res(path) for path in chk.PLATFORMS[platform_name].required] + VENDORED + RDR229
     assert _cli(tmp_path, report, GOOD_LOG, platform_name) == 0
 
 
@@ -353,7 +361,7 @@ def test_losing_any_vendored_resource_kind_fails_on_every_platform(platform_name
     """The engine applies db/vendor/<library> at boot; a native binary without a library's master, changes file,
     .sql files or LICENSE cannot, whatever the native-library checks say."""
     platform = chk.PLATFORMS[platform_name]
-    full = [_res(path) for path in platform.required] + VENDORED
+    full = [_res(path) for path in platform.required] + VENDORED + RDR229
     assert chk.check_report(full, platform) == [], "the full set must be a clean report"
     for lost in VENDORED:
         name = lost["name"]
@@ -384,3 +392,39 @@ def test_the_resource_config_names_the_vendored_patterns():
     vendor_patterns = sorted(pat for pat in patterns if pat.startswith("db/vendor/"))
     uncovered = [n for n in on_disk if not any(re.fullmatch(pat, n) for pat in vendor_patterns)]
     assert uncovered == [], f"vendored runtime files no resource-config pattern includes: {uncovered[:5]}"
+
+
+# ── the db/rdr229 lists the engine reads at run time (nexus-p2m1x) ──────────
+
+
+@pytest.mark.parametrize("name", [r["name"] for r in RDR229])
+def test_a_report_without_one_rdr229_runtime_resource_fails(name: str):
+    """The defect: resource-config.json had no db/rdr229/ pattern, so the shipped binaries lacked p33a-fk-twins.tsv
+    (and p35b-continue-changesets.txt) and the completion work never started. Each of the three must be named."""
+    report = [r for r in CLEAN if r["name"] != name]
+    assert len(report) == len(CLEAN) - 1, "the fixture must hold the resource it removes"
+    problems = chk.check_report(report, LINUX)
+    assert len(problems) == 1 and "RDR-229 runtime resource not embedded" in problems[0] and name in problems[0]
+
+
+def test_a_report_with_no_rdr229_resource_names_all_three():
+    report = [r for r in CLEAN if not r["name"].startswith("db/rdr229/")]
+    problems = chk.check_report(report, LINUX)
+    assert sorted(p.rsplit(": ", 1)[1] for p in problems if "RDR-229 runtime resource" in p) == sorted(
+        r["name"] for r in RDR229
+    )
+
+
+def test_a_report_with_the_rdr229_resources_passes():
+    assert chk.check_report(CLEAN, LINUX) == []
+
+
+def test_the_v0_1_202_shape_reports_exactly_the_two_missing_lists():
+    """RECONSTRUCTION, not a captured report: no embedded-resources.json artifact survives for engine-service-v0.1.202
+    (the release run uploads the binaries only). Its shape is read from the binary itself: p31-checks.tsv was embedded
+    (RestoreIdFill reads it through Class.getResourceAsStream, which native-image registers by itself) and
+    p33a-fk-twins.tsv and p35b-continue-changesets.txt were not (ClassLoader.getResourceAsStream, never registered)."""
+    report = [r for r in CLEAN if r["name"] not in ("db/rdr229/p33a-fk-twins.tsv", "db/rdr229/p35b-continue-changesets.txt")]
+    problems = chk.check_report(report, LINUX)
+    assert len(problems) == 2, problems
+    assert any("p33a-fk-twins.tsv" in p for p in problems) and any("p35b-continue-changesets.txt" in p for p in problems)
