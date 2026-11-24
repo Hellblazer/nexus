@@ -308,7 +308,7 @@ mcp__plugin_conexus_nexus__nx_answer(
     scope="global",
     context="recently changed: src/nexus/plans/, RDR-078",
     max_steps=6,
-    budget_usd=0.50,       # reserved for future enforcement
+    budget_usd=0.50,       # soft cost guide: warns when the plan's predicted cost exceeds it, stops after the segment that crosses it (the total can overshoot); must be positive
     min_confidence=0.50,   # RDR-092 Phase 2 Option A, optional precision-first floor
 )
 ```
@@ -347,6 +347,8 @@ reference earlier output via `$stepK.<field>`.
 | `operator_generate` | schema-conforming dict (`{output: str}`) |
 | `operator_filter` | `{items: [...], rationale: [{id, reason}]}` — items is a subset of the input, one rationale row per input |
 | `operator_check` | `{schema_version: 1, ok: bool, evidence: [{item_id, quote, role, state, span, tumbler, chash, collection}], rejected: [str], uncovered: [str], requires_review: bool}` — role ∈ `supports` / `contradicts` / `neutral`; the model emits only `item_id`, `quote`, `role`; the host binds the rest after dispatch (RDR-088 amendment 2026-11-01, Witness Schema v1). `state` ∈ `bound` / `unattributed` / `unresolved` / `ambiguous`; only `bound` is a valid witness; a bundled terminal check over an earlier step's output returns every item `unresolved` |
+| `operator_groupby` | groups, each with a `key_value` and its full item dicts (items that cannot be assigned land in `key_value="unassigned"`) — partitions by a natural-language key; a SQL fast path over `document_aspects` columns runs first (`source` `auto`), the LLM path otherwise |
+| `operator_aggregate` | one summary per group from a prior `operator_groupby` step (the canonical `filter -> groupby -> aggregate` pipeline); `source` `auto` recognizes a small SQL reducer vocabulary (count, count distinct, avg/min/max confidence) and falls back to the LLM |
 | `operator_verify` | `{schema_version: 1, verified: bool, reason: str, evidence: [item as for check], rejected: [str], requires_review: bool, citations: [str]}` — `citations` is deprecated: the quotes of `bound` and `unattributed` items, removed at `schema_version: 2` |
 
 `traverse` is the load-bearing addition from RDR-078 — it makes typed

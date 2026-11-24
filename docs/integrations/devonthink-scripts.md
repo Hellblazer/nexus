@@ -104,12 +104,13 @@ ends with `nx dt`'s summary line:
 
 ```
 [Tue Apr 29 12:34:56 PDT 2026] Index Selection: 3 record(s)
-indexed: 3 / 3, skipped: 0, stamped: 3 / 3
+Indexed 3 record(s) (0 skipped).
 ```
 
-`stamped: N / M` reports the catalog `source_uri = x-devonthink-item://<UUID>`
-stamping success rate. A miss means the catalog entry was created but
-the DT identity wasn't attached; rerun `nx catalog update --source-uri`
+The parenthesis grows a count for each thing that did not go cleanly, for
+example `, 1 DT-URI stamp-failed`. A stamp failure means the catalog entry was
+created (stamped with `source_uri = x-devonthink-item://<UUID>`) but the DT
+identity wasn't attached; rerun `nx catalog update --source-uri`
 on that path to recover.
 
 ## Troubleshooting
@@ -126,12 +127,12 @@ Most often: you installed the script but didn't restart DEVONthink.
 Quit DT (cmd-Q, not just close the window), reopen it, then re-drag
 the script onto the toolbar via `View > Customize Toolbar…`.
 
-**`Voyage credential missing` in the log.**
+**A Voyage key that works in your terminal is not found in the log.**
 Same root cause as the smart-rule case: AppleScript's `do shell
-script` runs with a bare environment, so a `VOYAGE_API_KEY` set in
-`.zshrc` is invisible. Put the key in
-`~/.config/nexus/credentials.json` instead; `nx` reads that
-regardless of shell env.
+script` runs with a bare environment, so a Voyage key exported in
+`.zshrc` is invisible. Save it with `nx config set voyage_api_key <key>`
+instead; `nx` reads it from `~/.config/nexus/config.yml` regardless of
+shell env.
 
 **Script says "Group is empty" but I can see records in the group.**
 "Current group" is read from the front window only. If you triggered
