@@ -145,6 +145,9 @@ class SqlStringLiteralGateTest {
         Map.entry("dev/nexus/service/ExtensionBootstrapSiteConformanceTest.java", 6),
         // an expected message substring
         Map.entry("dev/nexus/service/GrantsPgMonitorTest.java", 1),
+        // the vectors-079 step-2 text the cascade test finds and replaces to count the guard's skipped lookups (the instrumented body is
+        // replayed as a changeset through PgContainerHelper); a fragment of a trigger body, never sent to a database on its own (RDR-229 P3.7)
+        Map.entry("dev/nexus/service/Rdr229P37NamePathCascadeTest.java", 1),
         // expected changeset text read back by PgContainerHelper.changesetForwardText
         Map.entry("dev/nexus/service/PgContainerHelperChangesetTextTest.java", 4),
         // an expected remedy in the migrator's refusal message
@@ -172,7 +175,7 @@ class SqlStringLiteralGateTest {
         // an expected substring of the gc function body
         Map.entry("dev/nexus/service/vectors/PgVectorRepositoryGcQuarantineTest.java", 1));
 
-    private static final int TEXT_TOTAL = 105;
+    private static final int TEXT_TOTAL = 106;
 
     /** JDBC calls that take SQL text, per file, exact. Each entry says what the SQL is. */
     private static final Map<String, Integer> JDBC_ENTRY = Map.ofEntries(
