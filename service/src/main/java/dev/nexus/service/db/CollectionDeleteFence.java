@@ -160,8 +160,10 @@ final class CollectionDeleteFence {
      * The origin's row {@code FOR UPDATE} and the rows of the quarantine collections that hold rows of it {@code FOR KEY SHARE}, in
      * {@code collection_id} order across both modes: the siblings whose id is below the origin's, the origin, the siblings above it. The
      * siblings are found by name and locked by the id they bear now (so a sibling a verb renames while the delete waits is still the row
-     * locked); the set is read again after the lock and a sibling that is new is key-shared on the next pass, up to {@link #PASSES} (a sibling
-     * that keeps appearing past that is left to the delete's own row delete, which waits on it as before). No lock bound is set.
+     * locked); the set is read again after the origin is locked, always, and a sibling that is new is key-shared on the next pass, up to
+     * {@link #PASSES} (a sibling that keeps appearing past that is left to the delete's own row delete, which waits on it as before). A sibling
+     * found on a later pass is locked after the origin, out of id order, so it can cycle with a verb that holds it and wants the origin: a 40P01
+     * the deadlock retry absorbs. No lock bound is set.
      */
     private static void lockInIdOrder(DSLContext ctx, String tenant, String origin, long originId, boolean withSiblings, Gate3 gate3) {
         Set<Long> handled = new HashSet<>();
@@ -190,9 +192,9 @@ final class CollectionDeleteFence {
                 RegistryRowLocks.keyShareIfPresent(ctx, tenant, todo, List.of());
             }
             first = false;
-            if (todo.isEmpty()) {
-                return;
-            }
+            // the set is read once more after the origin is locked, whatever the first read found: a sibling that appeared while the delete waited
+            // for the origin's row is key-shared by the next pass. That one is taken after the origin's FOR UPDATE and so out of id order (below the
+            // origin's id too): a verb holding it FOR UPDATE and wanting the origin would cycle with the delete, a 40P01 the deadlock retry absorbs
         }
     }
 
@@ -228,9 +230,7 @@ final class CollectionDeleteFence {
             locked.addAll(RegistryRowLocks.keyShareIfPresent(ctx, tenant, ids, first && originId == null ? List.of(origin) : List.of()));
             handled.addAll(todo);
             first = false;
-            if (todo.isEmpty()) {
-                return locked;
-            }
+            // read once more after the first lock, whatever the first read found (as lockInIdOrder): a late sibling is key-shared by the next pass
         }
         return locked;
     }
