@@ -1225,18 +1225,25 @@ def t3_collection_name(
 
     Inputs land in one of three shapes:
 
-    - ``foo`` (no underscores) becomes
-      ``knowledge__foo__voyage-context-3__v1``.
-    - ``knowledge__foo`` (legacy 2-segment) is auto-promoted to
-      ``knowledge__foo__voyage-context-3__v1``.
-    - ``knowledge__foo__voyage-context-3__v1`` (already 4-segment
-      conformant) passes through untouched.
+    - A bare subject (``foo``, no underscores) or a legacy ``knowledge__foo``
+      is a knowledge subject. With a ``subject_finder`` (or a *t3* with
+      ``find_collection``) the subject's catalog row is read first and its
+      label is the answer, whatever shape that label has. A write that
+      passes a ``subject_finder`` and finds no row returns the subject for
+      the engine to register by attributes (content type and owner): the
+      engine mints the label, a ``c<id>`` for a new subject. Without a
+      finder it renders ``knowledge__foo__<model>__v1``.
+    - ``docs__foo`` / ``code__foo`` (and ``rdr__foo``) render
+      ``<ct>__foo__<model>__v1``; only these content types still render a
+      four-segment name from the subject.
+    - A conformant four-segment name (``<ct>__<owner>__<model>__v<n>``)
+      passes through untouched.
 
-    Auto-promotion satisfies ``T3Database``'s strict-naming guard
+    The rendered form satisfies ``T3Database``'s strict-naming guard
     (RDR-103 Phase 5) while preserving the operator habit of typing
     short ``--collection`` arguments.
 
-    RDR-229 P2.8: an empty conformant knowledge subject is found by its catalog row
+    RDR-229 P2.8, P3.8: an empty conformant knowledge subject is found by its catalog row
     (:func:`nexus.knowledge_subject.knowledge_subject_label`), a label of any shape included.
 
     nexus-hmxi: when *t3* is supplied, the resolver checks for an
