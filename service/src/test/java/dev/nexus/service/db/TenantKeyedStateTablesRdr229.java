@@ -82,6 +82,7 @@ final class TenantKeyedStateTablesRdr229 {
         notKeyed.put("CompletionBootWork.eventExecutor", "the executor an event's read runs on (the reporter's own "
             + "single thread, or a test's direct executor); holds no data");
         notKeyed.put("CompletionBootWork.readOwed", bookkeeping + " (a flag: an event asked for a read)");
+        notKeyed.put("CompletionBootWork.signalWaitLogged", bookkeeping + " (a flag: the rename_waits_gate3_signal warning was logged once; RDR-229 P3.7)");
         notKeyed.put("CompletionBootWork.lastSampleAt", bookkeeping + " (when the last read began)");
         notKeyed.put("CompletionBootWork.safetyPoll", "the interval of the slow poll behind the two events; "
             + "configuration, not keyed by tenant");
