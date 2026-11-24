@@ -13,7 +13,8 @@ from __future__ import annotations
 import io
 import json
 import urllib.error
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import click
 import httpx
@@ -21,12 +22,20 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.catalog.http_catalog_client import HttpCatalogClient
+from nexus.catalog.catalog_spans import resolve_span_text_for_entry
 from nexus.cli import main
-from nexus.collection_errors import RetiredNoSuccessorError, SupersededCollectionWriteError
+from nexus.collection_errors import (
+    RetiredNoSuccessorError,
+    SupersededCollectionWriteError,
+    retired_no_successor_error_from_body,
+)
+from nexus.commands.catalog import _span_text_or_marker
 from nexus.commands.collection import _reembed_job_error
 from nexus.db import http_vector_client as hv
 from nexus.db.http_vector_client import VectorServiceError
+from nexus.search_engine import SearchDiagnostics, search_cross_corpus
 from tests._cli_tree import missing_commands, named_commands
+from tests.conftest import catalog_row_for_collection_name
 
 NAME = "docs__papers__bge-base-en-v15-768__v1"
 RETIRED = {"error": "collection_superseded", "reason": "collection_superseded", "collection": NAME, "collection_id": 41,
@@ -39,6 +48,7 @@ def _assert_the_one_message(text: str, name: str = NAME) -> None:
     assert f"collection '{name}' was retired and has no successor" in out, out
     assert "nothing to read or write under that label" in out, out
     assert "`nx collection list`" in out and "index their files into a live collection" in out, out
+    assert "`nx index repo <path>`" not in out and "`nx index repo` is refused while" in out, "repo indexing is not the way out here"
     assert "Nothing was changed" in out and "Traceback" not in text and "HTTPStatusError" not in text, out
     assert "retry" not in out.lower()
     assert named_commands(out) and missing_commands(out) == [], out
@@ -96,8 +106,10 @@ def test_every_other_409_is_left_to_its_own_handling(body) -> None:
         with pytest.raises(Exception) as raised:
             hv._post("/v1/vectors/search", {"collection": NAME})
     assert not isinstance(raised.value, RetiredNoSuccessorError), body
-    if "reason" in body and body["reason"] == "collection_label_ambiguous":
-        assert isinstance(raised.value, VectorServiceError) and raised.value.code == 409
+    if body.get("superseded_by") and body.get("reason") == "collection_superseded":
+        assert isinstance(raised.value, SupersededCollectionWriteError), body  # the with-successor path
+    else:
+        assert type(raised.value) is VectorServiceError and raised.value.code == 409, (body, raised.value)  # the generic handler
 
 
 def test_a_409_that_is_not_409_is_not_taken_for_it() -> None:
@@ -182,3 +194,118 @@ def test_a_reembed_refusal_of_a_retired_collection_is_the_one_message(suffix) ->
 def test_other_reembed_refusals_keep_their_own_text(code, body) -> None:
     err = _reembed_job_error(VectorServiceError("HTTP", code=code, engine_body=body))
     assert "nothing to read or write under that label" not in err.message
+
+
+# ── (a) a retired name in a multi-collection search is one failed collection, not a failed search ──
+
+
+class _BatchingT3:
+    """A T3 stand-in whose combined search is refused whole when it names a retired collection (the engine's 409)."""
+
+    _voyage_client = "fake-voyage"
+
+    def __init__(self, rows: dict[str, list[dict]], retired: set[str]) -> None:
+        self._rows, self._retired = rows, retired
+        self.calls: list[list[str]] = []
+
+    def search(self, query, collection_names, n_results=10, where=None, *, sensitivity="include"):
+        self.calls.append(list(collection_names))
+        for name in collection_names:
+            if name in self._retired:
+                raise RetiredNoSuccessorError(name, 41)
+        return [{**r, "collection": name} for name in collection_names for r in self._rows.get(name, [])]
+
+    def _resolve_collection_rows(self, names):
+            return {n: {"content_type": catalog_row_for_collection_name(n)["content_type"]} for n in names}
+
+
+def test_a_search_over_a_live_and_a_retired_collection_returns_the_live_hits_and_names_the_retired_one_failed() -> None:
+    live, dead = "code__nexus", "knowledge__gone__bge-base-en-v15-768__v1"
+    t3 = _BatchingT3({live: [{"id": "a", "content": "hit", "distance": 0.3}]}, retired={dead})
+    diags: list[SearchDiagnostics] = []
+    results = search_cross_corpus("q", [live, dead], 10, t3, diagnostics_out=diags, sensitivity="include")
+
+    assert {r.id for r in results} == {"a"}, "the live collection's hits still return"
+    assert list(diags[0].failed_collections) == [dead]
+    message = diags[0].failed_collections[dead]
+    assert "was retired and has no successor" in message
+    assert "dim" not in message.lower(), "the failure text must not read as a dimension mismatch"
+
+
+def test_a_search_over_only_a_retired_collection_fails_loud_naming_it() -> None:
+    dead = "knowledge__gone__bge-base-en-v15-768__v1"
+    with pytest.raises(Exception) as raised:
+        search_cross_corpus("q", [dead], 10, _BatchingT3({}, retired={dead}), sensitivity="include")
+    assert dead in str(raised.value) and "failed" in str(raised.value).lower()
+
+
+# ── (b) a span in a retired collection is its own unresolvable reason, never "span not found" ──
+
+
+def test_a_span_in_a_retired_collection_raises_it_and_nx_catalog_show_prints_its_own_marker() -> None:
+    entry = SimpleNamespace(physical_collection=NAME, file_path="", meta={"doc_id": "d1"}, tumbler="1.2.3")
+
+    class _Retired:
+        def get_or_create_collection(self, name):
+            raise RetiredNoSuccessorError(name, 41)
+
+        get_collection = get_or_create_collection
+
+    with patch("nexus.db.make_t3", lambda: _Retired()), pytest.raises(RetiredNoSuccessorError):
+        resolve_span_text_for_entry(entry, "3:10-40", catalog=None)
+
+
+def test_catalog_show_preview_prints_the_retired_marker_the_degraded_one_and_the_text(capsys) -> None:
+    cat = MagicMock()
+    cat.resolve_span_text.side_effect = RetiredNoSuccessorError(NAME, 41)
+    assert _span_text_or_marker(cat, "1.1.2", "3:10-40") is None
+    out = capsys.readouterr().out
+    assert f"[span unavailable — collection {NAME!r} was retired and has no successor]" in out
+    assert "vector service degraded" not in out
+
+    cat.resolve_span_text.side_effect = VectorServiceError("boom")
+    assert _span_text_or_marker(cat, "1.1.2", "3:10-40") is None
+    assert "vector service degraded" in capsys.readouterr().out
+
+    cat.resolve_span_text.side_effect = None
+    cat.resolve_span_text.return_value = "the passage"
+    assert _span_text_or_marker(cat, "1.1.2", "3:10-40") == "the passage"
+    assert capsys.readouterr().out == ""
+
+
+# ── (c) the manifest span fill: tests/upgrade/test_manifest_span_fill_rung.py (retired_no_successor case) ──
+
+
+# ── (d) the converter, directly ──
+
+
+@pytest.mark.parametrize("status,body,expect", [
+    (409, RETIRED, True),
+    (409, {**RETIRED, "collection_id": None}, True),
+    (409, {**RETIRED, "superseded_by": None, "successor_collection_id": None}, True),
+    (409, {**RETIRED, "superseded_by": ""}, True),
+    (409, {**RETIRED, "superseded_by": "docs__x"}, False),          # a successor named: the with-successor path's
+    (409, {**RETIRED, "successor_collection_id": 5}, False),
+    (409, {**RETIRED, "reason": "label_reserved"}, False),
+    (409, {k: v for k, v in RETIRED.items() if k != "reason"}, False),
+    (409, {**RETIRED, "collection": ""}, False),
+    (409, {**RETIRED, "collection": None}, False),
+    (409, {k: v for k, v in RETIRED.items() if k != "collection"}, False),
+    (404, RETIRED, False),
+    (500, RETIRED, False),
+    (None, RETIRED, False),
+    (409, "collection_superseded", False),
+    (409, None, False),
+    (409, [RETIRED], False),
+])
+def test_the_converter_keys_on_status_reason_name_and_the_absence_of_a_successor(status, body, expect) -> None:
+    got = retired_no_successor_error_from_body(status, body)
+    assert (got is not None) is expect, (status, body)
+    if expect:
+        assert got.name == RETIRED["collection"]
+
+
+def test_a_non_int_or_bool_collection_id_is_dropped_not_trusted() -> None:
+    assert retired_no_successor_error_from_body(409, {**RETIRED, "collection_id": True}).collection_id is None
+    assert retired_no_successor_error_from_body(409, {**RETIRED, "collection_id": "41"}).collection_id is None
+    assert retired_no_successor_error_from_body(409, RETIRED).collection_id == 41

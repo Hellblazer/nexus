@@ -803,7 +803,21 @@ def _conflict(status: int = 409) -> httpx.HTTPStatusError:
     return httpx.HTTPStatusError("conflict", request=request, response=httpx.Response(status, request=request))
 
 
-@pytest.mark.parametrize("refusal", [_superseded, _conflict], ids=["typed_superseded", "bare_409"])
+def _retired_no_successor():
+    """RDR-229 R7: the by-id body with no successor, converted by the helper ``_raise_for_status`` calls."""
+    from nexus.collection_errors import retired_no_successor_error_from_body  # noqa: PLC0415
+
+    err = retired_no_successor_error_from_body(409, {
+        "error": "collection_superseded", "reason": "collection_superseded",
+        "collection": "code__art__bge-base-en-v15-768__v2", "collection_id": 41,
+    })
+    assert err is not None
+    return err
+
+
+@pytest.mark.parametrize(
+    "refusal", [_superseded, _conflict, _retired_no_successor], ids=["typed_superseded", "bare_409", "retired_no_successor"],
+)
 def test_a_409_for_a_superseded_collection_defers_that_collection_and_the_run_goes_on(world: World, refusal) -> None:
     OTHER = "code__art__bge-base-en-v15-768__v2"
     a = world.doc("1.1.1", collection=OTHER)

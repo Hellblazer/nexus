@@ -36,11 +36,8 @@ from nexus.context_annotations import (  # noqa: F401 — owner_titles is re-exp
     owner_titles,
 )
 from nexus.catalog.rows.legacy_names import embedding_model_for_collection_name
-from nexus.corpus import (
-    LOCAL_EMBEDDING_MODELS,
-    candidate_content_type,
-    resolve_row_preferred,
-)
+from nexus.collection_errors import RetiredNoSuccessorError
+from nexus.corpus import LOCAL_EMBEDDING_MODELS, candidate_content_type, resolve_row_preferred
 from nexus.db.http_vector_client import (
     HttpVectorClient,
     PerCollectionEnvelopeError,
@@ -1854,7 +1851,7 @@ def search_cross_corpus(
                                            where=effective_where, sensitivity=sensitivity, **chash_kw)
         except SensitivityExcludeUnavailable:
             raise  # RDR-243 review r1 F5: a refusal is not a lexical-leg failure, and `retry without --lexical` would be wrong advice
-        except VectorServiceError as lex_exc:
+        except (VectorServiceError, RetiredNoSuccessorError) as lex_exc:
             raise LexicalLegUnavailableError(
                 f"the lexical leg failed for {cols}: {lex_exc}. Refusing "
                 "rather than returning vector-only rows, which would look "
@@ -1945,7 +1942,8 @@ def search_cross_corpus(
             # collection, so it is not one collection's failure to isolate, and a per-collection fallback
             # would re-probe and could return a partial result that looks complete.
             raise
-        except VectorServiceError as exc:
+        except (VectorServiceError, RetiredNoSuccessorError) as exc:
+            # RDR-229 R7: a batched request naming one retired, successor-less label is refused whole (409); the per-collection fallback below serves the rest.
             # nexus-pebfx.8 / nexus-9tsdf (nexus-d9xt2 follow-on): one
             # unservable collection in the batch (embedding-space mismatch,
             # or a stale orphaned dimension-mismatched collection) fails
@@ -1960,7 +1958,7 @@ def search_cross_corpus(
                 # timeout) is retried normally on the next call instead
                 # of being permanently downgraded to singleton-only
                 # batching.
-                if _is_permanent_poisoning_error(exc):
+                if isinstance(exc, VectorServiceError) and _is_permanent_poisoning_error(exc):
                     _record_poisoned_collection(cols[0], exc)
                 return [{"col": cols[0], "error": str(exc)}]
             # nexus-d9xt2 review/critique fold-in: resubmit the per-
@@ -2228,8 +2226,8 @@ def search_cross_corpus(
             return None
         except SensitivityExcludeUnavailable:
             raise  # RDR-243 review r1 F5: a refused read is not this group's failure
-        except VectorServiceError as exc:
-            if allow_split and len(group) > 1 and _is_mixed_model_error(exc):
+        except (VectorServiceError, RetiredNoSuccessorError) as exc:
+            if allow_split and len(group) > 1 and isinstance(exc, VectorServiceError) and _is_mixed_model_error(exc):
                 _log.warning(
                     "search_per_collection_mixed_model_group",
                     collections=len(group),

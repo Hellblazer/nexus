@@ -28,6 +28,7 @@ from nexus.commands.catalog_cmds.sensitive_listing import sensitive_page
 if TYPE_CHECKING:
     from nexus.catalog.catalog_protocol import CatalogReader
     from nexus.sensitive_output import DocumentRows
+from nexus.collection_errors import RetiredNoSuccessorError
 from nexus.db.http_vector_client import VectorServiceError
 
 _log = structlog.get_logger(__name__)
@@ -576,6 +577,21 @@ def _link_dict(lnk) -> dict:
     return lnk if isinstance(lnk, dict) else lnk.to_dict()
 
 
+def _span_text_or_marker(cat: Any, tumbler: str, span: str) -> str | None:
+    """A link span's text for ``nx catalog show``'s preview, or None after printing why there is none.
+
+    nexus-ib6uy: a degraded vector service renders an explicit marker, never a silent missing preview. RDR-229 R7: so
+    does a span in a collection that was retired and has no successor, with its own wording (it is neither a missing
+    span nor a degraded service)."""
+    try:
+        return cat.resolve_span_text(tumbler, span)
+    except VectorServiceError:
+        click.echo("    [span unavailable — vector service degraded]")
+    except RetiredNoSuccessorError as retired:
+        click.echo(f"    [span unavailable — collection {retired.name!r} was retired and has no successor]")
+    return None
+
+
 def _hidden_link_endpoints(cat: "CatalogReader", presented: "DocumentRows", tumblers: set[str], posture: str) -> frozenset[str]:
     """The documents an edge of the shown card must not describe: the shown document when it is withheld, and under a
     withhold every other endpoint whose catalog row is sensitive (its span text and its edge ``meta`` are content).
@@ -647,13 +663,7 @@ def _show_document(cat: "CatalogReader", entry, as_json: bool) -> None:
         """The first 120 characters of the span's text, unless the document it sits in is withheld."""
         if other in hidden:
             return
-        # nexus-ib6uy: a degraded vector service renders an
-        # explicit marker, never a silent missing preview.
-        try:
-            text = cat.resolve_span_text(other, span)
-        except VectorServiceError:
-            click.echo("    [span unavailable — vector service degraded]")
-            text = None
+        text = _span_text_or_marker(cat, other, span)
         if text:
             preview = text[:120].replace("\n", " ")
             click.echo(f"    \"{preview}{'...' if len(text) > 120 else ''}\"")
