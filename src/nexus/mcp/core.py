@@ -8915,12 +8915,13 @@ def plan_search(
     """
     try:
         with _t2_ctx() as db:
-            # Over-fetch by 1 to detect if there are more.
+            # The engine's plan search takes a limit and no offset, so ask for everything up to the end of
+            # this page plus one row (to detect more) and slice the front off below.
             # any_lexeme=True (nexus-vi8fp decision C): this is a HUMAN
             # browsing surface — a person judges the list — so it gets the
             # any-lexeme recall fallback plan_match deliberately does not.
             results = db.search_plans(
-                query, limit=limit + 1, project=project, any_lexeme=True,
+                query, limit=offset + limit + 1, project=project, any_lexeme=True,
             )
         if offset:
             results = results[offset:]
@@ -8966,11 +8967,11 @@ def plan_delete(
         with _t2_ctx() as db:
             row = db.plans.get_plan(plan_id)
             if row is None:
-                return f"Not found: plan id {plan_id}"
+                return _fail(f"Not found: plan id {plan_id}")
             removed = db.plans.delete_plan(plan_id)
         if not removed:
             # get_plan→delete_plan race: another caller deleted it first.
-            return f"Not found: plan id {plan_id} (already deleted)"
+            return _fail(f"Not found: plan id {plan_id} (already deleted)")
         label = row.get("name") or row.get("query") or "(unnamed)"
         return f"Deleted plan id={plan_id}: {label[:80]}"
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
@@ -9432,6 +9433,10 @@ def tuple_ack(
 ) -> str:
     """Consume a claimed tuple (`ack`), optionally writing a reply in the same transaction (RDR-206).
 
+    A row that `tuple_out` with mode=replace rewrote while it was claimed
+    is not consumed by this ack: it goes back to available carrying the
+    new body.
+
     Pass `reply` to write a reply as the request is consumed; both commit
     together or not at all. The reply's target must resolve to a
     keys+nonce template (e.g. a mailbox address); a keys-only target (e.g.
@@ -9536,9 +9541,9 @@ def tuple_release(
     claim_id: Annotated[str, Field(description="The claim id returned by `tuple_in`.")],
     claimant: Annotated[str, Field(description="Must match the identity that made the claim.")],
 ) -> str:
-    """Consume a claimed tuple (`release`, RDR-211): release ends a live
-    claim WITHOUT counting an attempt -- a hand-back that is not a
-    failure. Use `tuple_nack` instead when the work genuinely failed and
+    """Hand a claimed tuple back (`release`, RDR-211): the row returns to
+    available with its attempt count unchanged and is NOT consumed -- a
+    hand-back that is not a failure. Use `tuple_nack` instead when the work genuinely failed and
     should count toward the template's `max_attempts`; `nack` counts one.
 
     Returns a confirmation naming the claim. Refused on a lapsed claim
@@ -9597,7 +9602,7 @@ def tuple_registry(
 # context on every unqualified call. The footer entry names the next
 # cursor so a caller that genuinely needs everything can still walk it.
 def tuple_list(
-    prefix: Annotated[str, Field(description="Optional subspace-name prefix filter (e.g. \"agents.mailbox.\").")] = "",
+    prefix: Annotated[str, Field(description="Optional subspace-name prefix filter (e.g. \"mailbox/\"; subspaces are slash-separated).")] = "",
     limit: Annotated[int, Field(description="Max subspaces to return per page.")] = 100,
     after: Annotated[str, Field(description="Subspace-name cursor from a prior truncated page's footer.")] = "",
 ) -> list[dict]:
@@ -10592,7 +10597,11 @@ def traverse(
         description="One or more tumbler strings (e.g. [\"1.1\", \"1.2\"]), or a single string.",
     )],
     link_types: Annotated[list[str] | None, Field(
-        description="Explicit catalog link types to follow (\"implements\", \"cites\", ...). Mutually exclusive with purpose.",
+        description=(
+            "Explicit catalog link types to follow (\"implements\", \"cites\", ...). Mutually exclusive with purpose. "
+            "With neither this nor purpose, the engine follows its default set (cites, implements, relates, contains, "
+            "supersedes, describes, quotes, comments, formalizes, same-as); name implements-heuristic or a custom type here."
+        ),
     )] = None,
     purpose: Annotated[str, Field(
         description="Named alias for a link-type set (e.g. \"find-implementations\"). Mutually exclusive with link_types.",
@@ -16853,10 +16862,12 @@ def daemon_uninstall(
     )] = False,
     remove_data: Annotated[bool, Field(
         description=(
-            "When true (and confirm=true), ALSO deletes the nexus CONFIG "
-            "directory (~/.config/nexus/, or NEXUS_CONFIG_DIR) — notes, "
-            "plans, and the catalog — and the model cache (~/.cache/nexus/). "
-            "Irreversible."
+            "When true (and confirm=true), ALSO deletes everything under the "
+            "nexus CONFIG directory (~/.config/nexus/, or NEXUS_CONFIG_DIR), "
+            "including the bundled Postgres cluster: every T3 chunk (all "
+            "indexed code, docs, rdr and knowledge collections), T1, tuples "
+            "and identities, plus notes, plans and the catalog. It also "
+            "deletes the model cache (~/.cache/nexus/). Irreversible."
         ),
     )] = False,
 ) -> str:

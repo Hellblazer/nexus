@@ -244,7 +244,8 @@ HOOK_TOOLS: tuple[HookToolSpec, ...] = (
         },
         summary=(
             "auto-approves an explicit allowlist of conexus MCP tools "
-            "(plus any hook_ tool) on PreToolUse and PermissionRequest"
+            "(the hook_ tools are in it by name, not by prefix) on PreToolUse "
+            "and PermissionRequest"
         ),
     ),
     HookToolSpec(
