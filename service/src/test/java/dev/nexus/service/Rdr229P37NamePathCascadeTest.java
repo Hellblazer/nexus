@@ -134,9 +134,29 @@ class Rdr229P37NamePathCascadeTest {
     private static final String CHANGELOG_PROBE_CREATE = "db/changelog-test/db.changelog-test-step2-probe-create.xml";
     private static final String CHANGELOG_PROBE_DROP = "db/changelog-test/db.changelog-test-step2-probe-drop.xml";
 
-    /** Each of the trigger bodies' step 2 (the by-id lookup of the chunk) advances the probe first: the instrumentation, the only change to the text. */
-    private static final String STEP2 = "SELECT c.collection INTO v_stored";
-    private static final String STEP2_COUNTED = "PERFORM pg_catalog.nextval('nexus.p37_step2_probe');\n    " + STEP2;
+    /** The text of vectors-079-1's step 2 that ends in this, the by-id lookup of the chunk, in each of the three trigger bodies. */
+    private static final String STEP2_TARGET = "INTO v_stored";
+    private static final int TRIGGER_BODIES = 3;
+
+    /**
+     * The statement of each trigger body's step 2 (the by-id lookup of the chunk), read from the changeset's own text, so it is the shipped statement
+     * and not a copy of it that this test holds as a SQL string: the line that ends in {@link #STEP2_TARGET}, trimmed, which occurs once per body.
+     * It is a text anchor the test substitutes into the replayed changeset, never executed alone.
+     */
+    private static String step2() throws Exception {
+        String text = PgContainerHelper.changesetForwardText(Vectors079Text.CHANGESET, Vectors079Text.CHANGESET_ID);
+        var anchors = text.lines().map(String::strip).filter(l -> l.endsWith(STEP2_TARGET)).distinct().toList();
+        assertThat(anchors).as("vectors-079-1's step 2 is one statement, spelled the same in every trigger body").hasSize(1);
+        assertThat(text.split(java.util.regex.Pattern.quote(anchors.get(0)), -1).length - 1)
+            .as("non-vacuity: step 2 occurs once in each trigger body").isEqualTo(TRIGGER_BODIES);
+        return anchors.get(0);
+    }
+
+    /** Each of the trigger bodies' step 2 advances the probe first: the instrumentation, the only change to the text. */
+    private static String step2Counted(String step2) {
+        return "PERFORM pg_catalog.nextval('nexus.p37_step2_probe');\n    " + step2;
+    }
+
     private static final String GUARD = "r.superseded_by <> ''";
     private static final String GUARD_OFF = "r.superseded_by = 'never'";
 
@@ -212,7 +232,7 @@ class Rdr229P37NamePathCascadeTest {
 
             // the guarded cascade, the shipped guard with the counting step 2
             var counted = new java.util.LinkedHashMap<String, String>();
-            counted.put(STEP2, STEP2_COUNTED);
+            counted.put(step2(), step2Counted(step2()));
             Cascade[] guarded = new Cascade[1];
             Vectors079Text.withSubstitutions(engine, counted, () -> {
                 try {
@@ -224,7 +244,7 @@ class Rdr229P37NamePathCascadeTest {
 
             // the same rename with the tombstone guard mutated off (what the predecessor of this commit shipped): step 2 runs for every cascaded row
             var countedWithoutGuard = new java.util.LinkedHashMap<String, String>();
-            countedWithoutGuard.put(STEP2, STEP2_COUNTED);
+            countedWithoutGuard.put(step2(), step2Counted(step2()));
             countedWithoutGuard.put(GUARD, GUARD_OFF);
             Cascade[] unguarded = new Cascade[1];
             Vectors079Text.withSubstitutions(engine, countedWithoutGuard, () -> {
