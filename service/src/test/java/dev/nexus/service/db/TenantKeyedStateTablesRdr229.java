@@ -188,6 +188,16 @@ final class TenantKeyedStateTablesRdr229 {
             + "write holds");
     }
 
+    /** RDR-229 P3.7 row 23 (nexus-p2m1x.27): the name-key drop move's wait for in-flight index builds. */
+    static void fillBuildWait(Map<String, String> notKeyed) {
+        notKeyed.put("BuildWait.since", "the start of a data move's unbroken run of deferrals, by move label (an Instant): nexus.data_moves is "
+            + "a global registry with no tenant column, so the label names an install-wide move and no tenant; kept in memory only, dropped "
+            + "when the move completes, fails, pauses or is forgotten (VerifyingFinisher.forget), and a restart starts it again");
+        notKeyed.put("PciBuilders.Building.pids", "the process ids of the index-builder backends one read of pg_stat_progress_create_index "
+            + "found: a per-call snapshot of the engine's own sessions, carried in a record that lives for one deferral, no tenant, "
+            + "collection or row");
+    }
+
     private static final String DATA_MOVE_REPORT_SESSION_COMPLETION = "the completion check's own read-only admin "
         + "connection (default_transaction_read_only on), kept between samples and replaced after a failure; it reads the "
         + "global registry and the catalog and carries no tenant setting";
