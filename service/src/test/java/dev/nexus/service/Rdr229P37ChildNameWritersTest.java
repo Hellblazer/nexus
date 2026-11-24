@@ -156,6 +156,8 @@ class Rdr229P37ChildNameWritersTest {
 
     @Test
     void quarantineRestoreChunks_reattachesAManifestRowToTheRestoredChunkOfTheRenamedCollection() throws Exception {
+        // The quarantined chunk is tagged as a quarantine move writes it: the label the origin had then (the old one) and its registry id, the key
+        // vectors-083's restore matches by from the latch (a tag with the label alone is not the origin's once gate 3 holds).
         var w = Rdr229ChildNameWorld.renamed(engine, "qr", Rdr229ChildNameWorld.MODEL_768, 768);
         String sibling = "quarantine-" + w.newName;
         String doc = "cn.qr.restore";
@@ -165,8 +167,8 @@ class Rdr229P37ChildNameWritersTest {
             long siblingId = Rdr229RenameChecks.registryId(ctx, w.tenant, sibling);
             held[0] = Rdr229ChildNameWorld.chunk(ctx, w.tenant, sibling, siblingId, w.model, w.dim, "held");
             ctx.update(dev.nexus.service.jooq.nexus.Tables.CHUNKS)
-                .set(dev.nexus.service.jooq.nexus.Tables.CHUNKS.METADATA, org.jooq.JSONB.valueOf("{\"origin_collection\": \"" + w.newName
-                    + "\", \"quarantined_at\": \"2026-01-01T00:00:00Z\", \"catalog_doc_id\": \"" + doc + "\", \"chunk_index\": 0}"))
+                .set(dev.nexus.service.jooq.nexus.Tables.CHUNKS.METADATA, org.jooq.JSONB.valueOf("{\"origin_collection\": \"" + w.oldName
+                    + "\", \"origin_collection_id\": " + w.id + ", \"quarantined_at\": \"2026-01-01T00:00:00Z\", \"catalog_doc_id\": \"" + doc + "\", \"chunk_index\": 0}"))
                 .where(dev.nexus.service.jooq.nexus.Tables.CHUNKS.TENANT_ID.eq(w.tenant))
                 .and(dev.nexus.service.jooq.nexus.Tables.CHUNKS.COLLECTION.eq(sibling)).execute();
             ctx.insertInto(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.TENANT_ID, w.tenant).set(CATALOG_DOCUMENTS.TUMBLER, doc)
