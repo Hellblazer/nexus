@@ -1949,16 +1949,12 @@ public final class PgVectorRepository {
         return canaryStatements(permitWait, Gate3.never());
     }
 
-    /**
-     * As above for a reconciler whose canary also measures id-predicate indexes: {@code latched} is the latch the reconciler's retire reads (gate 3
-     * LATCHED and the id readers present). An id target is sent through the id twin of the serving search only while it holds.
-     */
+    /** As above for a canary that also measures id indexes: {@code latched} is the reconciler's (see {@link PciCanary.Target#selector}). */
     PciCanary.Statements canaryStatements(Gate3 latched) {
         return canaryStatements(PciCanaryPolicy.PERMIT_WAIT, latched);
     }
 
-    /** As above with the permit wait and the latch given. */
-    PciCanary.Statements canaryStatements(java.time.Duration permitWait, Gate3 latched) {
+    PciCanary.Statements canaryStatements(java.time.Duration permitWait, Gate3 latched) {   // as above, the permit wait and the latch given
         return new PciCanary.Statements() {
             @Override
             public PciCanary.Leg hnsw(PciCanary.Target target, float[] query, int k, boolean explain) {
@@ -1984,18 +1980,7 @@ public final class PgVectorRepository {
         if (!entry.embeddingModel().equals(target.model()) || entry.dimension() != query.length) {
             throw new IllegalStateException("the collection is no longer the one the index was built for");
         }
-        // The canary measures the index it was targeted at. A name target stays on the name function. An id target (the reconciler makes one only once
-        // gate 3 has latched) goes through a selector built on the reconciler's latch, so the registry resolves its label to the id exactly as the
-        // serving path does (live rows only) and plainSearchFn takes the _by_id twin; it must resolve to the id the index was built for.
-        CollectionSelector sel;
-        if (target.collectionId() == null) {
-            sel = CollectionSelector.byName(List.of(target.collection()));
-        } else {
-            sel = CollectionSelector.of(latched, tenantScope, target.tenant(), target.collection());
-            if (!sel.byId() || !target.collectionId().equals(sel.idOf(target.collection()))) {
-                throw new IllegalStateException("the collection is no longer the one the id index was built for, or the latch no longer holds");
-            }
-        }
+        CollectionSelector sel = target.selector(latched, tenantScope);   // the canary measures the index it was targeted at (PciCanary.Target)
         org.jooq.Table<?> fn = plainSearchFn(entry.dimension(), Vector.of(query), sel, planWhere(null), k,
             entry.embeddingModel(), target.tenant());
         return runPlainSearchStatement(target.tenant(), entry.embeddingModel(), fn, entry.dimension(), sel, k,
