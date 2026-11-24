@@ -15,6 +15,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import static dev.nexus.service.CollectionRouteFixture.json;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_PROFILE;
+import static dev.nexus.service.jooq.nexus.Tables.REEMBED_JOBS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -106,6 +107,25 @@ class ReembedRetiredNoSuccessorTest {
         assertThat(r.json().path("collection_id").asLong(-1)).isEqualTo(retiredId);
         assertThat(r.json().has("superseded_by")).as("no successor fields: %s", r.body()).isFalse();
         assertThat(r.json().has("successor_collection_id")).isFalse();
+    }
+
+    /**
+     * The cloud leg's jobs probe names a source nothing registers (tests/e2e/lib/cloud_leg_route_snippets.py, REEMBED_PROBES). On a local engine the
+     * handler answers 404 with exactly this body, from reads alone: no job row is written for it (ReembedHandler#resolve, after keptTombstonedJobOf).
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {PLAN, JOBS})
+    void anUnregisteredSource_isRefused404WithAnExactBody_andNoJobRowIsWritten(String route) {
+        String name = name(owner(), BGE, 1);
+        long jobsBefore = fx.asSuperuser(ctx -> (long) ctx.fetchCount(REEMBED_JOBS, REEMBED_JOBS.TENANT_ID.eq(fx.tenant)));
+
+        Resp r = start(route, "{\"source_collection\":" + json(name) + "}");
+
+        assertThat(r.status()).as(r.body()).isEqualTo(404);
+        assertThat(r.json()).hasSize(1);
+        assertThat(r.json().path("error").asText()).isEqualTo("source collection " + name + " is not registered");
+        long jobsAfter = fx.asSuperuser(ctx -> (long) ctx.fetchCount(REEMBED_JOBS, REEMBED_JOBS.TENANT_ID.eq(fx.tenant)));
+        assertThat(jobsAfter).as("no job row was written").isEqualTo(jobsBefore);
     }
 
     // ---- the source ---------------------------------------------------------------------------------------------------------------
