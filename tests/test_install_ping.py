@@ -8,6 +8,7 @@ import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from click.testing import CliRunner
@@ -279,3 +280,210 @@ def test_an_undecidable_check_counts_as_not_a_checkout(monkeypatch: pytest.Monke
 
     monkeypatch.setattr(se, "is_dev_checkout_process", boom)
     assert ip.running_from_dev_checkout() is False
+
+
+# ── automation skips and the NX_TELEMETRY opt-in ───────────────────────────
+#
+# A CI run, a lab-run grant, a pytest process and a container are not installs;
+# counting them taints the install numbers. The signals are read through
+# `_automation_env()` and `_CONTAINER_ROOT` so these tests choose the
+# environment and the filesystem instead of inheriting the host's (which, under
+# pytest, always has PYTEST_CURRENT_TEST set and may well be a container).
+
+
+@pytest.fixture
+def auto(cfg: Path, monkeypatch: pytest.MonkeyPatch):
+    """`cfg` plus a clean, writable stand-in for the automation environment."""
+    root = cfg / "rootfs"
+    root.mkdir()
+    env: dict[str, str] = {}
+    monkeypatch.setattr(ip, "_automation_env", lambda: env)
+    monkeypatch.setattr(ip, "_CONTAINER_ROOT", root)
+    monkeypatch.delenv("NX_TELEMETRY", raising=False)
+    return SimpleNamespace(env=env, root=root)
+
+
+def test_clean_environment_is_not_automation(auto: SimpleNamespace) -> None:
+    assert ip.automation_reason(auto.env, auto.root) is None
+    assert ip.telemetry_enabled() is True
+    assert ip.telemetry_status() == {"enabled": True, "source": "default"}
+
+
+def test_ci_vendor_list_covers_the_named_vendors() -> None:
+    """Non-vacuity: the parametrized tests below walk ip.CI_ENV_VARS, so an
+    emptied tuple would pass them all."""
+    required = {
+        "CI", "GITHUB_ACTIONS", "GITLAB_CI", "BUILDKITE", "CIRCLECI", "TRAVIS",
+        "JENKINS_URL", "JENKINS_HOME", "TEAMCITY_VERSION", "TF_BUILD",
+        "BITBUCKET_BUILD_NUMBER", "DRONE", "CODEBUILD_BUILD_ID", "APPVEYOR",
+    }
+    assert required <= set(ip.CI_ENV_VARS)
+
+
+@pytest.mark.parametrize("name", sorted(ip.CI_ENV_VARS) if hasattr(ip, "CI_ENV_VARS") else ["CI"])
+def test_each_ci_variable_skips_and_is_named(auto: SimpleNamespace, name: str) -> None:
+    auto.env[name] = "true"
+    assert ip.telemetry_enabled() is False
+    assert ip.telemetry_status() == {"enabled": False, "source": f"automation: CI ({name})"}
+    assert ip.ping_in_background() is None
+
+
+@pytest.mark.parametrize("value", ["false", "False", "0", "", "  ", "no", "off"])
+def test_falsy_ci_value_is_not_set(auto: SimpleNamespace, value: str) -> None:
+    auto.env["CI"] = value
+    auto.env["GITHUB_ACTIONS"] = value
+    assert ip.automation_reason(auto.env, auto.root) is None
+    assert ip.telemetry_enabled() is True
+
+
+def test_a_url_or_id_value_counts_as_set(auto: SimpleNamespace) -> None:
+    auto.env["JENKINS_URL"] = "https://ci.example.invalid/"
+    assert ip.telemetry_status()["source"] == "automation: CI (JENKINS_URL)"
+
+
+def test_nomad_lab_run_skips(auto: SimpleNamespace) -> None:
+    auto.env["NOMAD_ALLOC_ID"] = "0a1b2c3d"
+    assert ip.telemetry_enabled() is False
+    assert ip.telemetry_status() == {"enabled": False, "source": "automation: lab-run (NOMAD_ALLOC_ID)"}
+
+
+def test_pytest_skips(auto: SimpleNamespace) -> None:
+    auto.env["PYTEST_CURRENT_TEST"] = "tests/test_x.py::test_y (call)"
+    assert ip.telemetry_enabled() is False
+    assert ip.telemetry_status() == {"enabled": False, "source": "automation: pytest (PYTEST_CURRENT_TEST)"}
+
+
+def test_kubernetes_env_skips(auto: SimpleNamespace) -> None:
+    auto.env["KUBERNETES_SERVICE_HOST"] = "10.0.0.1"
+    assert ip.telemetry_enabled() is False
+    assert ip.telemetry_status() == {
+        "enabled": False, "source": "automation: container (KUBERNETES_SERVICE_HOST)",
+    }
+
+
+def test_dockerenv_file_skips(auto: SimpleNamespace) -> None:
+    (auto.root / ".dockerenv").write_text("")
+    assert ip.telemetry_enabled() is False
+    assert ip.telemetry_status() == {"enabled": False, "source": "automation: container (/.dockerenv)"}
+
+
+def test_podman_containerenv_file_skips(auto: SimpleNamespace) -> None:
+    (auto.root / "run").mkdir()
+    (auto.root / "run" / ".containerenv").write_text("")
+    assert ip.telemetry_enabled() is False
+    assert ip.telemetry_status() == {"enabled": False, "source": "automation: container (/run/.containerenv)"}
+
+
+def _write_cgroup(root: Path, text: str) -> None:
+    (root / "proc" / "1").mkdir(parents=True)
+    (root / "proc" / "1" / "cgroup").write_text(text)
+
+
+@pytest.mark.parametrize("marker", ["docker", "containerd", "kubepods", "lxc"])
+def test_proc_cgroup_marker_skips(auto: SimpleNamespace, marker: str) -> None:
+    _write_cgroup(auto.root, f"12:cpu:/{marker}/abcdef\n0::/{marker}/abcdef\n")
+    assert ip.telemetry_enabled() is False
+    assert ip.telemetry_status() == {
+        "enabled": False, "source": f"automation: container (/proc/1/cgroup: {marker})",
+    }
+
+
+def test_plain_host_cgroup_is_not_a_container(auto: SimpleNamespace) -> None:
+    _write_cgroup(auto.root, "0::/user.slice/user-501.slice/session-2.scope\n")
+    assert ip.automation_reason(auto.env, auto.root) is None
+    assert ip.telemetry_enabled() is True
+
+
+def test_missing_proc_is_not_a_container(auto: SimpleNamespace) -> None:
+    assert not (auto.root / "proc").exists()
+    assert ip.automation_reason(auto.env, auto.root) is None
+    assert ip.automation_reason(auto.env, auto.root / "no-such-root") is None
+
+
+def test_unreadable_proc_never_raises(auto: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    # a directory where the file should be: read_text raises IsADirectoryError
+    (auto.root / "proc" / "1" / "cgroup").mkdir(parents=True)
+    assert ip.automation_reason(auto.env, auto.root) is None
+
+    # and a permission failure, the other way /proc is unreadable in a sandbox
+    from pathlib import Path as _Path
+
+    real = _Path.read_text
+
+    def deny(self: Path, *a: object, **k: object) -> str:
+        if self.name == "cgroup":
+            raise PermissionError("denied")
+        return real(self, *a, **k)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(_Path, "read_text", deny)
+    assert ip.automation_reason(auto.env, auto.root) is None
+    assert ip.telemetry_enabled() is True
+
+
+def test_real_process_is_seen_as_automation_under_pytest() -> None:
+    """Non-vacuity for the section: the unpatched detector, reading this very
+    process, must report automation (PYTEST_CURRENT_TEST is always set here).
+    If it does not, every `auto` test above could pass against a detector
+    that never fires on the host."""
+    reason = ip.automation_reason()
+    assert reason is not None and reason.startswith("automation: ")
+
+
+# ── NX_TELEMETRY=1: the explicit opt-in ────────────────────────────────────
+
+@pytest.mark.parametrize("signal", [
+    {"CI": "true"}, {"NOMAD_ALLOC_ID": "x"}, {"PYTEST_CURRENT_TEST": "t"}, {"KUBERNETES_SERVICE_HOST": "h"},
+])
+def test_opt_in_overrides_automation(auto: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, signal: dict[str, str]) -> None:
+    auto.env.update(signal)
+    assert ip.telemetry_enabled() is False
+    monkeypatch.setenv("NX_TELEMETRY", "1")
+    assert ip.telemetry_enabled() is True
+    assert ip.telemetry_status() == {"enabled": True, "source": "env NX_TELEMETRY=1"}
+
+
+def test_opt_in_overrides_a_container_file(auto: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    (auto.root / ".dockerenv").write_text("")
+    monkeypatch.setenv("NX_TELEMETRY", "1")
+    assert ip.telemetry_enabled() is True
+
+
+@pytest.mark.parametrize("value", ["0", "false", ""])
+def test_falsy_opt_in_does_not_override(auto: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    auto.env["CI"] = "true"
+    monkeypatch.setenv("NX_TELEMETRY", value)
+    assert ip.telemetry_enabled() is False
+
+
+def test_no_telemetry_env_beats_the_opt_in(auto: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NX_TELEMETRY", "1")
+    monkeypatch.setenv("NX_NO_TELEMETRY", "1")
+    assert ip.telemetry_enabled() is False
+    assert ip.telemetry_status() == {"enabled": False, "source": "env NX_NO_TELEMETRY=1"}
+
+
+def test_config_opt_out_beats_the_opt_in(auto: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    (auto.root.parent / "config.yml").write_text("telemetry:\n  enabled: false\n")
+    monkeypatch.setenv("NX_TELEMETRY", "1")
+    assert ip.telemetry_enabled() is False
+    assert ip.telemetry_status() == {"enabled": False, "source": "config telemetry.enabled"}
+
+
+def test_dev_checkout_beats_the_opt_in(auto: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A dev checkout is not an install whatever the env says; only the
+    automation signals are overridable."""
+    monkeypatch.setattr(ip, "running_from_dev_checkout", lambda: True)
+    monkeypatch.setenv("NX_TELEMETRY", "1")
+    assert ip.telemetry_enabled() is False
+    assert ip.telemetry_status() == {"enabled": False, "source": "dev checkout"}
+
+
+def test_opted_in_automation_sends_over_the_wire(
+    auto: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, receiver: type[_Recorder]
+) -> None:
+    auto.env["CI"] = "true"
+    assert ip.ping_if_due() is False
+    assert receiver.bodies == []
+    monkeypatch.setenv("NX_TELEMETRY", "1")
+    assert ip.ping_if_due() is True
+    assert len(receiver.bodies) == 1
