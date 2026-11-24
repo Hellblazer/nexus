@@ -2998,7 +2998,7 @@ public final class TaxonomyRepository {
                 if (topicId == null) {
                     topicId = ctx.select(TOPICS.ID).from(TOPICS)
                         .where(TOPICS.TENANT_ID.eq(tenant),
-                               topicsOf(tenant, collection),
+                               ownTopics(lockedRow, coll),
                                TOPICS.LABEL.eq(label),
                                TOPICS.PARENT_ID.isNull())
                         .fetchOne(TOPICS.ID);
@@ -3139,7 +3139,7 @@ public final class TaxonomyRepository {
                 if (topicId == null) {
                     topicId = ctx.select(TOPICS.ID).from(TOPICS)
                         .where(TOPICS.TENANT_ID.eq(tenant),
-                               topicsOf(tenant, collection),
+                               ownTopics(lockedRow, coll),
                                TOPICS.LABEL.eq(label),
                                TOPICS.PARENT_ID.isNull())
                         .fetchOne(TOPICS.ID);
