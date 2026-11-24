@@ -780,16 +780,18 @@ class AspectTaskRefsRenameTest {
     }
 
     /**
-     * A delete by id against a claim-fenced aspect write of the same collection (RDR-229 P3.5a row 14, B1): the writer holds its task row
-     * and then wants the collection's registry row FOR KEY SHARE. The delete takes the collection's task rows BEFORE the registry row, so it
-     * waits on the task row holding nothing, the writer's key share is granted, and both finish. A delete that held the registry row FOR UPDATE
-     * first and then waited for the task row would close a cycle with the writer (40P01, which the deadlock retry would turn into a clean
-     * answer): the retry listener is what shows none happened.
+     * A delete by id against a claim-fenced aspect write of the same collection, the writer in the order {@code AspectRepository.upsertAspect}
+     * really takes (RDR-229 P3.5a row 14, B1; the canonical order, registry row before tuple rows): the collection's registry row
+     * {@code FOR KEY SHARE} first, then the claim's task row {@code FOR NO KEY UPDATE}. The delete takes the origin's row {@code FOR UPDATE}
+     * and waits for the writer's key share holding nothing, so the writer reaches its task row and both finish. A delete that held the task rows
+     * before it asked for the registry row (the aspect task lock this class once pinned, {@code AspectTaskRefs.lockOnly}) would hold what the
+     * writer wants while it waits for what the writer holds: 40P01, which the deadlock retry turns into a clean answer, so the retry listener
+     * is what shows none happened.
      */
     @Test
-    void aDeleteById_againstAClaimFencedAspectWrite_takesTheTaskRowsBeforeTheRegistryRow_andNeitherDeadlocks() throws Exception {
-        String tenant = freshTenant("delete-lock-order");
-        String a = coll("dlo");
+    void aDeleteById_againstAClaimFencedAspectWriteInItsRealOrder_registryRowThenTheClaimRow_neitherDeadlocks() throws Exception {
+        String tenant = freshTenant("delete-real-order");
+        String a = coll("rlo");
         register(tenant, a);
         long id = su(ctx -> CollectionIds.require(ctx, tenant, a));
         outTask(tenant, a, "1.9.1");
@@ -797,44 +799,88 @@ class AspectTaskRefsRenameTest {
 
         List<String> retries = new java.util.concurrent.CopyOnWriteArrayList<>();
         DeadlockRetry.setRetryListenerForTests(retries::add);
-        CountDownLatch locked = new CountDownLatch(1);
+        CountDownLatch keyShared = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         ExecutorService pool = Executors.newFixedThreadPool(2);
         try {
-            CompletableFuture<Void> writer = CompletableFuture.runAsync(() -> scope.withTenant(tenant, ctx -> {
-                ctx.select(TUPLES.ID).from(TUPLES)
-                    .where(TUPLES.TENANT_ID.eq(tenant)).and(TUPLES.CLAIM_ID.eq(claimed.claimId())).forUpdate().fetch();
-                locked.countDown();
+            CompletableFuture<Object> writer = CompletableFuture.supplyAsync(() -> DeadlockRetry.run("aspect.upsert fenced", () -> scope.withTenant(tenant, ctx -> {
+                ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(id)).forKeyShare().fetch();
+                keyShared.countDown();
                 try {
                     assertThat(release.await(30, TimeUnit.SECONDS)).isTrue();
                 } catch (InterruptedException e) {
                     throw new IllegalStateException(e);
                 }
-                // the fenced write's registry read, after its task row
-                ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
-                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(id)).forKeyShare().fetch();
-                return null;
-            }), pool);
-            assertThat(locked.await(30, TimeUnit.SECONDS)).as("the writer holds the task row").isTrue();
+                ctx.select(TUPLES.ID).from(TUPLES)
+                    .where(TUPLES.TENANT_ID.eq(tenant)).and(TUPLES.CLAIM_ID.eq(claimed.claimId())).forNoKeyUpdate().fetch();
+                return (Object) "ok";
+            })), pool);
+            assertThat(keyShared.await(30, TimeUnit.SECONDS)).as("the writer holds the registry row").isTrue();
 
             CompletableFuture<Map<String, Integer>> delete =
                 CompletableFuture.supplyAsync(() -> catalog.deleteCollectionById(tenant, a, id, false), pool);
-            assertThat(PgActivityProbe.waitsOnALock(pg, "%no key update%"))
-                .as("the delete is waiting on the task row").isTrue();
-            assertThat(delete.isDone()).as("the delete is blocked behind the writer").isFalse();
+            assertThat(PgActivityProbe.waitsOnALock(pg, "%for update%"))
+                .as("the delete is parked on the registry row FOR UPDATE").isTrue();
             release.countDown();
 
-            writer.get(30, TimeUnit.SECONDS);
-            Map<String, Integer> counts = delete.get(30, TimeUnit.SECONDS);
-
+            writer.get(60, TimeUnit.SECONDS);
+            Map<String, Integer> counts = delete.get(60, TimeUnit.SECONDS);
             assertThat(counts).as("the delete answered").isNotNull();
             int tasks = su(ctx -> ctx.fetchCount(TUPLES, TUPLES.TENANT_ID.eq(tenant).and(TUPLES.SUBSPACE.eq("aspects"))));
             assertThat(tasks).as("the collection's task went with it").isZero();
-            boolean registered = su(ctx -> ctx.fetchExists(CATALOG_COLLECTIONS,
-                CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(id))));
-            assertThat(registered).as("the collection is gone").isFalse();
-            assertThat(retries).as("no 40P01: the deadlock retry never ran for this delete")
-                .noneMatch(c -> c.contains("catalog.deleteCollection"));
+            assertThat(retries).as("no 40P01 for the writer or the delete").isEmpty();
+        } finally {
+            DeadlockRetry.setRetryListenerForTests(null);
+            pool.shutdownNow();
+        }
+    }
+
+    /**
+     * A delete by id against a one-row rename in its order (registry row {@code FOR UPDATE}, then the tuple rows the rename rewrites, as
+     * {@code CollectionOneRowRename} and {@code renameAspectCollection} do): the rename holds the origin's row and wants the task rows; the
+     * delete waits for the origin's row holding nothing, the rename takes the task rows and commits, and the delete goes on. A delete that
+     * held the task rows first would cycle with it (40P01, absorbed by the deadlock retry: the listener shows none).
+     */
+    @Test
+    void aDeleteById_againstAOneRowRenamesOrder_registryRowThenTheTaskRows_neitherDeadlocks() throws Exception {
+        String tenant = freshTenant("delete-vs-rename");
+        String a = coll("dvr");
+        register(tenant, a);
+        long id = su(ctx -> CollectionIds.require(ctx, tenant, a));
+        outTask(tenant, a, "1.9.2");
+
+        List<String> retries = new java.util.concurrent.CopyOnWriteArrayList<>();
+        DeadlockRetry.setRetryListenerForTests(retries::add);
+        CountDownLatch holding = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            CompletableFuture<Object> rename = CompletableFuture.supplyAsync(() -> DeadlockRetry.run("one-row rename", () -> scope.withTenant(tenant, ctx -> {
+                ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(id)).forUpdate().fetch();
+                holding.countDown();
+                try {
+                    assertThat(release.await(30, TimeUnit.SECONDS)).isTrue();
+                } catch (InterruptedException e) {
+                    throw new IllegalStateException(e);
+                }
+                ctx.select(TUPLES.ID).from(TUPLES)
+                    .where(TUPLES.TENANT_ID.eq(tenant)).and(TUPLES.SUBSPACE.eq("aspects")).forNoKeyUpdate().fetch();
+                return (Object) "ok";
+            })), pool);
+            assertThat(holding.await(30, TimeUnit.SECONDS)).as("the rename holds the registry row").isTrue();
+
+            CompletableFuture<Map<String, Integer>> delete =
+                CompletableFuture.supplyAsync(() -> catalog.deleteCollectionById(tenant, a, id, false), pool);
+            assertThat(PgActivityProbe.waitsOnALock(pg, "%for update%"))
+                .as("the delete is parked on the registry row FOR UPDATE").isTrue();
+            release.countDown();
+
+            rename.get(60, TimeUnit.SECONDS);
+            Map<String, Integer> counts = delete.get(60, TimeUnit.SECONDS);
+            assertThat(counts).as("the delete answered").isNotNull();
+            assertThat(retries).as("no 40P01 for the rename or the delete").isEmpty();
         } finally {
             DeadlockRetry.setRetryListenerForTests(null);
             pool.shutdownNow();

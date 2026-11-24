@@ -188,16 +188,6 @@ public final class AspectTaskRefs {
         return deleted;
     }
 
-    /**
-     * Lock every unconsumed task naming {@code collection} {@code FOR NO KEY UPDATE} in id order, and change nothing: the first half of
-     * {@link #deleteNaming}, for a caller that must hold the task rows before it takes a registry row (the canonical order: a claim-fenced
-     * aspect write takes its task row, then the collection's registry row). {@link #deleteNaming} later re-takes the locks the transaction
-     * already holds and deletes the rows.
-     */
-    public static void lockOnly(DSLContext ctx, String tenant, String collection) {
-        lockNaming(ctx, tenant, collection, DSL.trueCondition());
-    }
-
     /** The matching tasks' ids, locked FOR NO KEY UPDATE in id order. */
     private static List<byte[]> lockNaming(DSLContext ctx, String tenant, String collection, Condition extra) {
         int skipped = ctx.fetchCount(TUPLES, unconsumed(tenant).and(bodyIsNotJsonb()));
