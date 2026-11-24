@@ -289,6 +289,44 @@ class CollectionRouteClassificationTest {
         assertThat(notCollectionRoutes).as("non-vacuity: dispatched routes with no collection field").hasSizeGreaterThanOrEqualTo(150);
     }
 
+    /**
+     * RDR-229 R7: every route of the table that is neither a write nor exempt is a read, and a read says whether a request by label may still
+     * read a retired collection ({@link CollectionSelectors#RETIRED_LABEL_READABLE}, with its reason) or is refused when the collection is
+     * retired with no live successor ({@link CollectionSelectors#RETIRED_LABEL_REFUSED}). A new read route is in neither until its author chooses.
+     */
+    @Test
+    void everyReadRouteSaysWhetherALabelMayStillReadARetiredCollection() {
+        Set<String> reads = new TreeSet<>(CollectionSelectors.ROUTES.keySet());
+        reads.removeAll(CollectionSelectors.WRITES);
+        reads.removeAll(CollectionSelectors.EXEMPT.keySet());
+        Set<String> refused = CollectionSelectors.RETIRED_LABEL_REFUSED;
+        Set<String> readable = CollectionSelectors.RETIRED_LABEL_READABLE.keySet();
+
+        List<String> neither = new ArrayList<>();
+        List<String> both = new ArrayList<>();
+        for (String path : reads) {
+            boolean r = refused.contains(path);
+            boolean o = readable.contains(path);
+            if (!r && !o) {
+                neither.add(path);
+            } else if (r && o) {
+                both.add(path);
+            }
+        }
+        assertThat(neither).as("read routes in neither RETIRED_LABEL_REFUSED nor RETIRED_LABEL_READABLE").isEmpty();
+        assertThat(both).as("read routes in both").isEmpty();
+        Set<String> stale = new TreeSet<>(refused);
+        stale.addAll(readable);
+        stale.removeAll(reads);
+        assertThat(stale).as("classified routes that are not read routes of the table").isEmpty();
+        CollectionSelectors.RETIRED_LABEL_READABLE.forEach((path, reason) -> assertThat(reason).as("the reason of %s", path).isNotBlank());
+        // non-vacuity: the refusal covers the reader classes R7 names, and the reads counted are the table's
+        assertThat(refused).contains("/v1/vectors/search", "/v1/vectors/query", "/v1/vectors/search-metadata-scoped", "/v1/vectors/get",
+            "/v1/vectors/store-get", "/v1/vectors/store-list", "/v1/taxonomy/topics", "/v1/aspects/get", "/v1/aspects/list_by_collection");
+        assertThat(reads).as("non-vacuity: read routes of the table").hasSizeGreaterThanOrEqualTo(40);
+        System.out.printf("retired-label classification: reads=%d refused=%d readable=%d%n", reads.size(), refused.size(), readable.size());
+    }
+
     @Test
     void theScanSeesAnUnclassifiedRoute() {
         String handler = """
