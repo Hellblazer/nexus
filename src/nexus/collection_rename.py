@@ -18,6 +18,7 @@ from typing import Any
 
 import click
 
+from nexus.collection_errors import LabelReservedError
 from nexus.db.collection_state import CollectionState, probe_collection_state
 
 
@@ -214,6 +215,8 @@ def rename_collection_data_plane(
             renamed = client.rename_collection_cascade(
                 old, new, check_model_token=False,
             )
+    except LabelReservedError:
+        raise  # the engine refused the new label whole (409 label_reserved); its message is the answer, and a retry cannot help
     except Exception as exc:
         detail = _engine_model_mismatch_detail(exc) or _engine_refusal_detail(exc) or str(exc)
         raise click.ClickException(

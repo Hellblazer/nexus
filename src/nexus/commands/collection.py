@@ -10,6 +10,7 @@ from typing import Any
 import click
 import structlog
 
+from nexus.collection_errors import LabelReservedError, label_reserved_error_from_body
 from nexus.commands._help_links import COLLECTIONS_RULES_EPILOG
 from nexus.commands.store import _t3
 from nexus.config import DEFAULT_EXTRACTOR
@@ -1471,6 +1472,8 @@ def reindex_cmd(name: str, force: bool, ack_external_embedder: bool = False) -> 
             )
         else:
             ensure_collection_registered(name)
+    except LabelReservedError:
+        raise  # the engine refused the label whole (409 label_reserved): nothing re-registers it, so the re-index cannot proceed
     except Exception as reg_exc:  # noqa: BLE001 — projection write is best-effort; the re-index below must proceed
         click.echo(
             f"WARNING: could not re-register catalog_collections row for "
@@ -2035,6 +2038,9 @@ def _reembed_job_error(exc: Exception) -> click.ClickException:
     """
     code = getattr(exc, "code", None)
     body = getattr(exc, "engine_body", None)
+    reserved = label_reserved_error_from_body(code, body)  # RDR-229 P3.7: the job's target label is reserved
+    if reserved is not None:
+        return click.ClickException(str(reserved))
     text = str(body.get("error")) if isinstance(body, dict) and body.get("error") else str(exc)
     if code == 404 and not _ENGINE_404_MESSAGES.match(text):
         return click.ClickException(

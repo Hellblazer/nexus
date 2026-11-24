@@ -60,6 +60,12 @@ COLLECTION_SUPERSEDED_REASON: str = "collection_superseded"
 #: them, and re-register the origin or let the quarantine expire for the marked ones.
 RESTORE_ORIGIN_UNREGISTERED_REASON: str = "restore_origin_unregistered"
 
+#: A register, revive, mint, supersede successor, rename target or per-collection import named a label that is RESERVED: a
+#: collection renamed away from it by the one-row rename still has rows in the name-keyed tables that carry it, until P4.1 drops
+#: the name columns (HTTP 409, RDR-229 P3.7; the engine's ``HttpUtil.LABEL_RESERVED_REASON``). Also carries ``error`` and ``label``.
+#: Nothing was written. Never retryable: pick another label, or rename the collection that was renamed away back to it.
+LABEL_RESERVED_REASON: str = "label_reserved"
+
 #: A write naming an embedding model registered nowhere (HTTP 422, RDR-225).
 UNREGISTERED_EMBEDDING_MODEL_REASON: str = "unregistered_embedding_model"
 
