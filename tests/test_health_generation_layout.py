@@ -39,7 +39,7 @@ from pathlib import Path
 
 import pytest
 
-from nexus import health, install_layout
+from nexus import health, health_generation_holders, install_census, install_layout
 
 
 def _receipt(version: str = "7.18.0", base_interpreter: str = "/usr/bin") -> str:
@@ -606,7 +606,7 @@ def test_holders_row_reports_a_lower_bound_when_the_walk_is_capped(layout, monke
         install_census, "generation_holder_pids",
         lambda gen, snapshot=None: [4242] if Path(gen).name == old.name else [],
     )
-    monkeypatch.setattr(health, "_TREE_BYTES_MAX_FILES", 1)
+    monkeypatch.setattr(health_generation_holders, "_TREE_BYTES_MAX_FILES", 1)
 
     row = _result(health._check_generation_layout(), "Holders")
 
@@ -687,3 +687,73 @@ def test_upgrade_advice_keeps_the_uv_form_on_an_unmigrated_box(layout) -> None:
     assert advice == "uv tool upgrade conexus", (
         f"an un-migrated box was told to run the generation installer: {advice!r}"
     )
+
+
+# --------------------------------------------------------------------------
+# the generation lease on the Holders row (read from the last gc_run record)
+# --------------------------------------------------------------------------
+
+def _write_gc_run(config_dir, **fields) -> None:
+    logs = config_dir / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    record = {"event": "gc_run", "ts": "2026-11-24T01:00:00Z", **fields}
+    (logs / "install-gc.log").write_text(
+        json.dumps({"event": "gc_reaped"}) + "\n" + json.dumps(record) + "\n" + json.dumps({"event": "gc_reap_begin"}) + "\n"
+    )
+
+
+def test_the_holders_row_reports_lease_held_generations_a_census_cannot_see(layout, tmp_path, monkeypatch) -> None:
+    tools, bin_dir = layout
+    old = _generation(tools, "20260101T000000Z")
+    new = _generation(tools, "20260826T010000Z")
+    (tools / "current").symlink_to(new)
+    (bin_dir / "nx").write_text("#!/bin/sh\n")
+    monkeypatch.setattr(install_census, "generation_holder_pids", lambda gen, snapshot=None: [])
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg"))
+    _write_gc_run(tmp_path / "cfg", lease={"held": 1, "free": 0, "absent": 0, "unsupported": 0, "error": 0},
+                  kept=[{"generation": str(old), "detail": "leased", "lease": "held"}])
+
+    row = _result(health._check_generation_layout(), "Holders")
+
+    assert old.name in row.detail and "lease" in row.detail, row.detail
+    assert row.ok and not row.warn, "a held lease is a fact, not a fault"
+
+
+def test_the_holders_row_warns_on_a_lease_error_and_on_a_filesystem_without_locks(layout, tmp_path, monkeypatch) -> None:
+    tools, bin_dir = layout
+    old = _generation(tools, "20260101T000000Z")
+    new = _generation(tools, "20260826T010000Z")
+    (tools / "current").symlink_to(new)
+    (bin_dir / "nx").write_text("#!/bin/sh\n")
+    monkeypatch.setattr(install_census, "generation_holder_pids", lambda gen, snapshot=None: [])
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg"))
+    _write_gc_run(tmp_path / "cfg", lease={"held": 0, "free": 0, "absent": 0, "unsupported": 2, "error": 1},
+                  lease_unsupported=True,
+                  kept=[{"generation": str(old), "detail": "lease check failed", "lease": "error:EIO"}])
+
+    row = _result(health._check_generation_layout(), "Holders")
+
+    assert row.warn and not row.ok, row
+    assert "error:EIO" in row.detail and "no locks" in row.detail and old.name in row.detail, row.detail
+    assert row.fix_suggestions
+
+
+def test_the_holders_row_says_nothing_of_leases_when_there_is_no_record(layout, tmp_path, monkeypatch) -> None:
+    tools, bin_dir = layout
+    _generation(tools, "20260101T000000Z")
+    new = _generation(tools, "20260826T010000Z")
+    (tools / "current").symlink_to(new)
+    (bin_dir / "nx").write_text("#!/bin/sh\n")
+    monkeypatch.setattr(install_census, "generation_holder_pids", lambda gen, snapshot=None: [])
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg-empty"))
+
+    row = _result(health._check_generation_layout(), "Holders")
+
+    assert row.ok and "ease" not in row.detail.replace("released", ""), row.detail
+
+
+def test_the_last_gc_run_reader_survives_a_cut_or_missing_log(tmp_path) -> None:
+    assert health_generation_holders.last_gc_run(tmp_path / "none.log") is None
+    log = tmp_path / "install-gc.log"
+    log.write_text('{"event": "gc_run", "ts": "a", "lease": {}}\n{"event": "gc_run", "ts"')
+    assert health_generation_holders.last_gc_run(log)["ts"] == "a"

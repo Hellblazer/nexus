@@ -22,6 +22,11 @@ from nexus._log_safe_url import log_endpoint
 from nexus.bounded_subprocess import run_bounded
 from nexus.config import default_db_path
 from nexus.db.t2.shared_ssl import get_shared_ssl_context
+from nexus.health_generation_holders import (  # noqa: F401 — moved out at the size ceiling; re-exported
+    _format_held_size,
+    _tree_bytes,
+    check_generation_holders as _check_generation_holders,
+)
 from nexus.redact import redact_credentials  # noqa: F401 — re-exported; callers import it from here
 from nexus.tuple_templates import resolve_tuple_template
 from nexus.util.nx_argv import which_off_cwd
@@ -715,106 +720,6 @@ def _check_orphan_uv_install() -> list[HealthResult]:
             "the reinstall-tool.sh script in a nexus checkout's scripts directory    # same, from a checkout",
         ],
     )]
-
-
-def _check_generation_holders(
-    current, generations, *, tools: Path | None = None,
-) -> list[HealthResult]:
-    """Who is still running from an older generation. INFORMATIONAL.
-
-    Holders are a fact, not a fault: they keep running from their own tree and
-    converge at their next spawn. A row that failed on them would contradict
-    the acceptance criterion this whole arc exists to satisfy, which is that a
-    live session stops being an obstacle to installing.
-    """
-    from nexus import install_census  # noqa: PLC0415 — deferred import
-
-    snapshot = install_census.ps_snapshot()
-    held = []
-    for gen in generations:
-        if gen == current:
-            continue
-        try:
-            pids = install_census.generation_holder_pids(gen, snapshot=snapshot)
-        except Exception:  # noqa: BLE001 — a census failure is not a layout fault
-            continue
-        if pids:
-            held.append(
-                f"{gen.name}: {len(pids)} ({', '.join(str(p) for p in pids[:4])}), "
-                f"{_format_held_size(gen)} on disk"
-            )
-    # The legacy uv tree is an "older generation" too -- the oldest one there
-    # is -- and it is receipt-less, so it is never in *generations*. Ask the
-    # census for it by structure (nexus-k52g0: 9 processes on the 7.19.0 uv
-    # tree rendered as "nothing is still bound to an older generation").
-    for legacy in install_census.legacy_tree_candidates(tools=tools):
-        try:
-            pids = install_census.generation_holder_pids(legacy, snapshot=snapshot)
-        except Exception:  # noqa: BLE001 — a census failure is not a layout fault
-            continue
-        if pids:
-            held.append(
-                f"legacy uv tree {legacy}: {len(pids)} "
-                f"({', '.join(str(p) for p in pids[:4])})"
-            )
-    if not held:
-        return [HealthResult(
-            label="Holders", ok=True,
-            detail="nothing is still bound to an older generation",
-        )]
-    return [HealthResult(
-        label="Holders", ok=True,
-        detail=(
-            "still bound to an older generation, converging at their next "
-            f"spawn — {'; '.join(held)}. A held tree is never reaped while "
-            "those processes live (nexus-xn84f): end those sessions, then "
-            "`nx self gc` (or the next `nx self install`) reclaims it."
-        ),
-    )]
-
-
-#: Files the Holders row will stat per held generation before it stops and
-#: reports a lower bound. A generation is ~50k files; the cap keeps a box
-#: with many stranded trees (the case nexus-xn84f fixes) from turning doctor
-#: into a disk walk.
-_TREE_BYTES_MAX_FILES: int = 200_000
-
-
-def _tree_bytes(root: Path) -> tuple[int, bool]:
-    """``(bytes under root, complete)``, following no symlinks; ``(0, True)``
-    when unreadable. ``complete`` is False when the file cap stopped the walk,
-    so the caller renders a lower bound."""
-    total = 0
-    seen = 0
-    try:
-        for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = [d for d in dirnames if not os.path.islink(os.path.join(dirpath, d))]
-            for name in filenames:
-                seen += 1
-                if seen > _TREE_BYTES_MAX_FILES:
-                    return total, False
-                fp = os.path.join(dirpath, name)
-                try:
-                    if not os.path.islink(fp):
-                        total += os.stat(fp).st_size
-                except OSError:
-                    continue
-    except OSError:
-        return 0, True
-    return total, True
-
-
-def _format_held_size(gen: Path) -> str:
-    size, complete = _tree_bytes(gen)
-    return _format_bytes(size) if complete else f"at least {_format_bytes(size)}"
-
-
-def _format_bytes(n: int) -> str:
-    if n >= 1 << 30:
-        return f"{n / (1 << 30):.1f} GB"
-    if n >= 1 << 20:
-        return f"{n / (1 << 20):.0f} MB"
-    return f"{n} B"
 
 
 def _check_process_footprint() -> list[HealthResult]:
