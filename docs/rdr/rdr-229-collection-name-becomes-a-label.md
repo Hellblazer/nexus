@@ -3133,7 +3133,14 @@ its acceptance is that test green plus the census pin it lowers.
     (`NexusService.java:1488-1494`) and evicts them after a commit the
     client sees fail (`CollectionRegistry.java:912`); supersede, rename and
     delete by id read and lock their source by id
-    (`CollectionRefusals.java:37-78`). Also from the latch: the aspect queue
+    (`CollectionRefusals.java:37-78`). A supersede that names its
+    successor by id locks and reads it by id in the same ordered statement
+    as the source, answering 404 `unknown_collection_id` when it is gone and
+    409 when it is retired or bears another label; under that lock a source
+    already retired to the requested successor answers 200 and writes
+    nothing, and one retired to any other successor is 409
+    `collection_superseded`, never re-pointed (`CollectionTombstones.java:179-210`,
+    `:244-245`; row 16b, T2 `229-research-331`). Also from the latch: the aspect queue
     skips and counts a row with no home document whose `collection_id`
     names no registry row
     (`AspectQueueDrain.java:365-370`; linda 2026-11-23, ruling a), the
@@ -4104,3 +4111,4 @@ large, and moved under a ratchet.
 - 2026-11-24: the R7 reader contract split (Sam, "Split", relayed by linda; T2 `229-research-328`): P3.5c keeps the guard messages, `TargetSelection`'s no-successor refusal, the label-addressed read refusing with today's 409 `collection_superseded` body and one test per reader class, none yet on the stack; the `RETIRED_NO_SUCCESSOR` marker and its typed client error move to the next cut.
 - 2026-11-24: P3.7 folded from the stacked code (grant 3, nexus-p2m1x.27; T2 `229-research-329`): `NameKeyDropPass` registers the name-key drop move on the latch, the check registers nothing; the refusal's values and order, `rename_missing` and the readiness's own read of the P3.5b list; `ids_stable` true on the one-row answer; the one-row body's other duties; `vectors-079`'s child-name triggers; `label_reserved` and the mint's skip; `vectors-083` and the restore refusal `restore_origin_unregistered` (commit 2d054c3be8); the eight reads P3.5c held, now switched; the census counts with P3.7; the wire changes paired with 8.5.6. Held for a ruling: the `rdr229-restart` boot_work notice against the P4.0 restart-request text.
 - 2026-11-24: the restart request follows P3.7's reviewed code (Sam, "Amend the RDR", T2 `nexus/sam-ruling-rdr229-restart-request-follows-p37-code-2026-11-24`, superseding the P4.0 part of option 1 on ask `rdr229-p41-p40-p35-rulings`): P3.7 asks for the restart as `rename_missing` `restart` and as the `rdr229-restart` boot_work notice, the one exception to the boot_work rule; P4.0 owns no separate request, and its Test and the Test Plan scenario say so. P4.1's drop move is registered by an engine pass, as `NameKeyDropPass` registers P3.7's, because the completion check runs read-only (linda).
+- 2026-11-24: row 16b folded from the stacked code (grant 3, nexus-p2m1x.22; T2 `229-research-331`): a supersede that names its successor by id locks it by id beside the source, with 404 and 409 answers, and an idempotent supersede decides its 200 under the lock and writes nothing.
