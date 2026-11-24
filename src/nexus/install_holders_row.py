@@ -14,7 +14,7 @@ import json
 import os
 from pathlib import Path
 
-from nexus.config import nexus_config_dir
+from nexus import config as _config
 
 #: How much of the end of install-gc.log is read for the last ``gc_run`` line. A run
 #: line with a long ``kept`` list and an ancestry chain is a few KB; this is generous.
@@ -136,7 +136,7 @@ def _format_bytes(n: int) -> str:
 def last_gc_run(log: Path | None = None) -> dict | None:
     """The newest ``gc_run`` record in ``install-gc.log`` (or its rotated ``.1``), or
     None when there is none or the log cannot be read. Never raises."""
-    base = log if log is not None else nexus_config_dir() / "logs" / "install-gc.log"
+    base = log if log is not None else _config.nexus_config_dir() / "logs" / "install-gc.log"
     for path in (base, base.with_name(base.name + ".1")):
         try:
             with open(path, "rb") as fh:

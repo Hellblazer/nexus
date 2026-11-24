@@ -41,12 +41,12 @@ class FakeHold:
 def _tree(tmp_path: Path) -> Path:
     gen = tmp_path / "gen-A"
     (gen / "Lib" / "site-packages" / "pkg").mkdir(parents=True)
-    (gen / "Lib" / "site-packages" / "pkg" / "m.py").write_text("x")
+    (gen / "Lib" / "site-packages" / "pkg" / "m.py").write_text("x", encoding="utf-8")
     (gen / "Scripts").mkdir()
     (gen / "Scripts" / "python.exe").write_bytes(b"MZ")
-    (gen / "pyvenv.cfg").write_text("home = C:\\py\n")
-    (gen / "nexus-install.json").write_text("{}\n")
-    (gen / ".nx-lease").write_text("nx-lease 1\n")
+    (gen / "pyvenv.cfg").write_text("home = C:\\py\n", encoding="utf-8")
+    (gen / "nexus-install.json").write_text("{}\n", encoding="utf-8")
+    (gen / ".nx-lease").write_text("nx-lease 1\n", encoding="utf-8")
     return gen
 
 
@@ -127,7 +127,7 @@ class TestInjected:
         gen = _tree(tmp_path)
         sentinel = tmp_path / "sentinel"
         sentinel.mkdir()
-        (sentinel / "precious.txt").write_text("keep")
+        (sentinel / "precious.txt").write_text("keep", encoding="utf-8")
         (gen / "Lib" / "junction").symlink_to(sentinel, target_is_directory=True)
         # os.path.islink would catch a symlink; make the injected platform see it the way
         # Windows sees a junction instead, so only layout.is_link recognises it.
@@ -135,7 +135,7 @@ class TestInjected:
         setattr_in(monkeypatch, gc_core, "os.path.islink", lambda p: False if Path(p).name == "junction" else real_islink(p), raising=False)
         setattr_in(monkeypatch, "nexus._install.layout_core", "os.path.isjunction", lambda p: Path(p).name == "junction", raising=False)
         gone, detail = gc_core._reap_windows_tree(gen, FakeHold(gen / ".nx-lease"), platform=WIN)
-        assert (sentinel / "precious.txt").read_text() == "keep", "the reap followed a link out of the tree"
+        assert (sentinel / "precious.txt").read_text(encoding="utf-8") == "keep", "the reap followed a link out of the tree"
         assert gone, detail
 
     def test_the_hold_open_asks_for_delete_sharing_not_delete_on_close(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -158,7 +158,7 @@ class TestInjected:
 
     def test_a_missing_or_nondirectory_parent_is_absent(self, tmp_path: Path) -> None:
         assert lease_core.probe(tmp_path / "no-such-gen", platform=WIN) == "absent"
-        (tmp_path / "file").write_text("x")
+        (tmp_path / "file").write_text("x", encoding="utf-8")
         assert lease_core.probe(tmp_path / "file", platform=WIN) == "absent"
 
     def test_win_open_outcomes_read_as_lease_states(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -198,7 +198,7 @@ class TestRealWindows:
         """The premise the Windows hook rests on: Python's open() gives no delete
         share, so a process holding the lease open cannot have it removed."""
         path = tmp_path / ".nx-lease"
-        path.write_text("nx-lease 1\n")
+        path.write_text("nx-lease 1\n", encoding="utf-8")
         fd = os.open(str(path), os.O_RDONLY | os.O_BINARY)
         try:
             with pytest.raises(PermissionError):
@@ -245,13 +245,13 @@ class TestRealWindows:
         tools, (a, b, c, d) = make_tools(tmp_path)
         sentinel = tmp_path / "sentinel"
         (sentinel / "sub").mkdir(parents=True)
-        (sentinel / "sub" / "precious.txt").write_text("keep")
-        (sentinel / "top.txt").write_text("keep")
+        (sentinel / "sub" / "precious.txt").write_text("keep", encoding="utf-8")
+        (sentinel / "top.txt").write_text("keep", encoding="utf-8")
         _winapi.CreateJunction(str(sentinel), str(a / "Lib" / "site-packages" / "linked"))
         assert (a / "Lib" / "site-packages" / "linked" / "top.txt").is_file(), "the junction does not resolve"
         lines = gc_core.gc_generations(tools, keep=1, snapshot=blind_snapshot(), grace_minutes=0)
         assert not a.exists(), lines
-        assert (sentinel / "top.txt").read_text() == "keep" and (sentinel / "sub" / "precious.txt").read_text() == "keep", (
+        assert (sentinel / "top.txt").read_text(encoding="utf-8") == "keep" and (sentinel / "sub" / "precious.txt").read_text(encoding="utf-8") == "keep", (
             "the reap followed a junction out of the generation and deleted what it names"
         )
 
@@ -261,7 +261,7 @@ class TestRealWindows:
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "config"))
         tools, (a, *_rest) = make_tools(tmp_path)
         victim = a / "Lib" / "site-packages" / "held.py"
-        victim.write_text("x")
+        victim.write_text("x", encoding="utf-8")
         fd = os.open(str(victim), os.O_RDONLY | os.O_BINARY)
         try:
             lines = gc_core.gc_generations(tools, keep=1, snapshot=blind_snapshot(), grace_minutes=0)

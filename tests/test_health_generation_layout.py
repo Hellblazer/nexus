@@ -39,7 +39,7 @@ from pathlib import Path
 
 import pytest
 
-from nexus import health, health_generation_holders, install_census, install_layout
+from nexus import health, install_holders_row, install_census, install_layout
 
 
 def _receipt(version: str = "7.18.0", base_interpreter: str = "/usr/bin") -> str:
@@ -606,7 +606,7 @@ def test_holders_row_reports_a_lower_bound_when_the_walk_is_capped(layout, monke
         install_census, "generation_holder_pids",
         lambda gen, snapshot=None: [4242] if Path(gen).name == old.name else [],
     )
-    monkeypatch.setattr(health_generation_holders, "_TREE_BYTES_MAX_FILES", 1)
+    monkeypatch.setattr(install_holders_row, "_TREE_BYTES_MAX_FILES", 1)
 
     row = _result(health._check_generation_layout(), "Holders")
 
@@ -753,7 +753,7 @@ def test_the_holders_row_says_nothing_of_leases_when_there_is_no_record(layout, 
 
 
 def test_the_last_gc_run_reader_survives_a_cut_or_missing_log(tmp_path) -> None:
-    assert health_generation_holders.last_gc_run(tmp_path / "none.log") is None
+    assert install_holders_row.last_gc_run(tmp_path / "none.log") is None
     log = tmp_path / "install-gc.log"
     log.write_text('{"event": "gc_run", "ts": "a", "lease": {}}\n{"event": "gc_run", "ts"')
-    assert health_generation_holders.last_gc_run(log)["ts"] == "a"
+    assert install_holders_row.last_gc_run(log)["ts"] == "a"

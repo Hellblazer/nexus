@@ -22,7 +22,7 @@ from nexus._log_safe_url import log_endpoint
 from nexus.bounded_subprocess import run_bounded
 from nexus.config import default_db_path
 from nexus.db.t2.shared_ssl import get_shared_ssl_context
-from nexus.health_generation_holders import (  # noqa: F401 — moved out at the size ceiling; re-exported
+from nexus.install_holders_row import (  # noqa: F401 — moved out at the size ceiling; re-exported
     _format_held_size,
     _tree_bytes,
     check_generation_holders as _check_generation_holders,
