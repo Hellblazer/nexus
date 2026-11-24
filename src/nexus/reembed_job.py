@@ -531,16 +531,17 @@ class OffProfile:
     blocked: dict[str, str] = field(default_factory=dict)
 
 
-def keep_live_documents_advice(source: str) -> str:
+def keep_live_documents_advice(quoted_source: str) -> str:
     """What to do about a restored source whose live documents the engine will not move (its kept job's target is retired
     or missing): keep them by indexing their files into the current collection, then delete the superseded source.
+    *quoted_source* is the label as one shell word; the caller quotes it.
 
     Never ``nx collection reindex``: that deletes the collection and its registry row first and re-registers it under
     its own model, which a profile that has moved on refuses, so the live documents would be gone with nothing rebuilt."""
     return (
         "the engine will not move its live documents into a retired or missing target; to keep them, re-index their files "
         "into the current collection (`nx index repo <path>` for code and repositories, `nx index md <path>` for markdown, "
-        f"`nx index pdf <path>` for PDFs), then `nx collection delete {source}` clears the superseded source"
+        f"`nx index pdf <path>` for PDFs), then `nx collection delete {quoted_source}` clears the superseded source"
     )
 
 

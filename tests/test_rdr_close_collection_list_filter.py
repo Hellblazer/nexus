@@ -127,7 +127,7 @@ def test_a_retired_or_unrelated_collection_does_not_block_the_rename(listing: st
     assert status == 0 and calls == [f"catalog rename-collection {LEGACY} {TARGET} --yes"]
 
 
-def test_the_migration_stops_when_the_legacy_model_is_not_the_one_this_install_writes(tmp_path: Path) -> None:
+def test_the_migration_stops_when_the_legacy_model_is_not_the_one_this_install_writes(tmp_path: Path, cloud_mode: None) -> None:
     status, calls, err = _run(LIST_WITH_ID, tmp_path, cur="voyage-context-3")
     assert status == 1 and calls == []
     assert f"MODEL is {CURRENT}, this install writes voyage-context-3: skip" in err
@@ -198,7 +198,7 @@ def test_the_rename_names_the_subjects_four_segment_target_and_the_skill_says_to
     assert "migrate-fallback" not in block
 
 
-def test_the_skill_says_how_to_read_the_current_knowledge_model() -> None:
+def test_the_skill_says_how_to_read_the_current_knowledge_model(cloud_mode: None) -> None:
     text = SKILL.read_text(encoding="utf-8")
     section = text[text.index("#### One-time migration"):]
     assert "nx config get local.embed_model" in section and "voyage-context-3" in section

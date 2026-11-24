@@ -204,7 +204,7 @@ def test_reindex_whose_reregistration_is_refused_says_the_collection_was_already
 # ── nx catalog migrate-fallback: the documents moved before the supersede was refused ──
 
 
-def test_migrate_fallback_says_the_documents_moved_when_the_supersede_is_refused_as_reserved(monkeypatch) -> None:
+def test_migrate_fallback_says_the_documents_moved_when_the_supersede_is_refused_as_reserved(monkeypatch, cloud_mode) -> None:
     monkeypatch.setattr("nexus.corpus._profile_model_for_content_type", lambda content_type: None)
     entry = MagicMock()
     entry.tumbler = "1.1.1"

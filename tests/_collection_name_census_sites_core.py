@@ -200,7 +200,7 @@ SITES: tuple[S, ...] = (
       (')', 'kwargs = collection_registration_kwargs(name)'),
       'primitive_call', 'mint', MINT_REG),
     S('src/nexus/indexer.py',
-      ('kwargs["embedding_model"] = model', 'ensure_collection_registered(name, kwargs=kwargs)'),
+      ('try:', 'ensure_collection_registered(name, kwargs=kwargs)'),
       'primitive_call', 'mint', MINT_REG),
     S('src/nexus/indexer_utils.py',
       ('return False', 'if not fnmatch.fnmatch(parts[i], seg):'),
