@@ -2480,7 +2480,7 @@ def _reembed_all(
     (stale, held by a job, or a re-entry) is an error.
     """
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-    from nexus.reembed_job import candidates, profile_models  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.reembed_job import candidates, keep_live_documents_advice, profile_models  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     _require_local_engine(db)
     reader = make_catalog_reader()
@@ -2527,8 +2527,7 @@ def _reembed_all(
             remedy = (
                 f"it holds no document now; `nx collection delete {shlex.quote(src)}` finishes what the job would have done"
                 if r.kind == "cutover" else
-                f"a document is live in it again; `nx collection reindex {shlex.quote(src)}` rebuilds the collection "
-                f"from its source files under the current profile (`nx index repo` for a code collection)"
+                f"a document is live in it again, and {keep_live_documents_advice(shlex.quote(src))}"
             )
             click.echo(f"{src}: not re-entered: {why}; {remedy}")
     _reembed_jobs(
