@@ -1520,7 +1520,8 @@ while the engine serves:
     each move. Each release adds
     its own labels to the set: the stamp labels (P3.1), P3.3a's seven
     validation labels, P3.3c's two swap labels and three child
-    validation labels, and P3.7's name-key drop label, which the check
+    validation labels, row 13's quarantine origin-id backfill label (in
+    gate 2, below), and P3.7's name-key drop label, which the check
     reads for the rename readiness only and which gates no gate
     (`CompletionCheck.java:127`, `:819-821`; T2 `229-research-329`). A label with no row
     counts as incomplete, because the swap, child and drop rows are
@@ -1568,8 +1569,8 @@ while the engine serves:
     implies gate 2; T2 `229-research-260`):
     1. Every stamp move and every P3.3a move complete: P3.3b's pass
        starts.
-    2. Also both swap moves and the three child validation moves complete:
-       P3.4's builds start.
+    2. Also both swap moves, the three child validation moves and the
+       quarantine origin-id backfill complete: P3.4's builds start.
     3. Also P3.4 complete on the install. The PCI clause is read from the
        database, never from the reconciler's in-process plan, so a standby
        computes the same answer (T2 `229-research-261`). Each live,
@@ -1611,10 +1612,11 @@ while the engine serves:
        to the engine log only (`CompletionCheck.java:690-701`; marlowe, commit 31e3bbe2f0).
        Row 13 of the Phase 3 blocking list, the quarantine origin-id backfill,
        marks those pre-id rows: `vectors-082-1` registers the data move
-       `rdr229-quarantine-origin-id`, which writes each quarantine chunk's
-       `origin_collection_id`, the id its label resolves to or JSON null where
-       no row carries the label (and fills a NULL `collection_id` by the
-       stamp's rule, commit d6b15419b2), and that label joins gate 2, so gate 3 cannot
+       `rdr229-quarantine-origin-id`, which writes `origin_collection_id` on
+       each quarantine chunk that lacks it, the id its label resolves to or
+       JSON null where no row carries the label (and fills a NULL
+       `collection_id` by the stamp's rule, commit 6789a6a9c9, pinned by
+       d6b15419b2), and the move's label joins gate 2, so gate 3 cannot
        latch until it completes; the clause above stays as the live check
        (`vectors-082-quarantine-origin-id-backfill.xml:50`;
        `QuarantineOriginBackfill.java:15`; `CompletionCheck.java:163-172`;
@@ -2945,8 +2947,8 @@ its acceptance is that test green plus the census pin it lowers.
   the start (a failed build is left INVALID, `PciCatalog.java:356-357`; T2
   `229-research-273`). Each collection's index is built only once none of
   its rows has a null id (stamp-before-build, Scope boundary with RDR-247),
-  and no build starts until gate 2 of the completion check (both swaps and
-  every validation move complete), so a chunk-family `on_complete` cannot
+  and no build starts until gate 2 of the completion check (both swaps,
+  every validation move and the quarantine origin-id backfill complete), so a chunk-family `on_complete` cannot
   end it (item 6; `Main.java:712-716`; T2 `229-research-276`). The step also
   builds the eight id-keyed arbiters and their supporting indexes at run
   time, in `IdUniqueIndexPass`, after the engine serves (item 6; T2
