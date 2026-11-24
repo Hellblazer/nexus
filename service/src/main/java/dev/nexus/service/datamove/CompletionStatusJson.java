@@ -23,12 +23,13 @@ import dev.nexus.service.http.HttpUtil;
  *  "labels_total":n,"labels_incomplete":[{"label","table","why"}],
  *  "checks_missing":[{"table","constraint","what"}],
  *  "validate_waits":[{"table","constraints":[names],"what":operator text}],
- *  "rename_missing":"none"|"name_key_drop_move"|"p35b_list_missing"|"restart"|"readiness_unreadable"}
+ *  "rename_missing":"none"|"name_key_drop_move"|"p35b_list_missing"|"restart"|"readiness_unreadable"|"p35c_readers_absent"}
  * </pre>
  * {@code rename_missing} (RDR-229 P3.7, [additive]) is what a collection rename waits for ({@code readiness_unreadable} when it could not be read, after the latch), spelled as the 409 {@code rename_refused}'s
  * {@code missing}: {@code none} before gate 3 (the rename is the name path) and once the one-row rename can run, {@code name_key_drop_move}
  * from gate 3 until that move has {@code completed_at}, then {@code p35b_list_missing} while this build ships no P3.5b changeset list (a restart
- * does not fix it) or {@code restart} until every changeset of the list has applied. Once gate 3 is latched the value no longer follows
+ * does not fix it) or {@code restart} until every changeset of the list has applied, then {@code p35c_readers_absent} while this engine's id readers
+ * (P3.5c) are not present. Once gate 3 is latched the value no longer follows
  * the live gate 3: a dip of gate 3 leaves it as it is. It is the readiness the rename path itself reads ({@link CompletionBootWork#renameReadiness()}),
  * monotone: once a sample has read the readiness as {@code none}, an unreadable sample later still reports {@code none}, because renames keep running.
  * {@code labels_total} and {@code gates_holding} count the engine's own moves and gates, not any tenant's data. {@code labels_incomplete}
