@@ -39,6 +39,10 @@ NAMING_ALLOWED = {
     # the chunk routes' own scan lists the one class that borrows its comparison; the file name is spelled in two parts
     # because that scan reads this file too
     "tests/test_retire_" + "keys_no_trigger.py",
+    # the P3.5c Java reader census (RDR-229) lists the admin class among the reads it classifies, and its exclusion
+    # sidecar names it with the reason; neither calls a route
+    "scripts/rdr229_p35c_java_reader_census.py",
+    "service/src/test/resources/rdr229/p35c-java-reader-census-excluded.tsv",
 }
 NAMES = ("catalog-ttl-check", "CatalogTtlCheck", "catalogTtlCheck", "catalog_ttl_check", "catalog_documents_ttl_put_at")
 #: Not scanned: version control, environments and build output, and prose that only describes the routes.
