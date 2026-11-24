@@ -642,9 +642,10 @@ P3.5 and P3.7 ship in one engine cut, because P3.5a's rename refusal
 ends only when the name-key drop move that P3.7 ships and registers has
 completed and every P3.5b changeset has applied, which needs a restart,
 and the engine can read that readiness (`RenameReadiness.java:28-58`;
-T2 `229-research-329`; the changesets are the twelve that
-`p35b-continue-changesets.txt` lists, each to be in `databasechangelog`,
-`p35b-continue-changesets.txt:1-15`; T2 `229-research-301`,
+T2 `229-research-329`; the changesets are the fifteen that
+`p35b-continue-changesets.txt` lists, twelve of `vectors-078` and three of
+`vectors-084`, each to be in `databasechangelog`,
+`p35b-continue-changesets.txt:1-18`; T2 `229-research-334`; T2 `229-research-301`,
 `229-research-320`; P3.7);
 P3.6 ships on its own. From P3.7 the referencing tables' name columns are dead until P4.1 drops
 them (item 7), so an engine downgraded past P3.7 reads stale names; the
@@ -1604,7 +1605,14 @@ while the engine serves:
        the stamps (`vectors-078:573-601`, the changeset and its one `sqlCheck`), and the pass builds the
        twin only once `databasechangelog` records it
        (`IdUniqueIndexPass.java:243-251`; T2 `229-research-269`,
-       `229-research-319`). Until the latch row exists, gate 3 also does not
+       `229-research-319`). Gate 3 also waits until `vectors-084-1` to `-3`
+       are recorded: they add the `taxonomy_ann_query_<dim>` overloads that
+       take the collection id, which the centroid search calls once gate 3
+       holds, so that the planner keeps the HNSW index at 768 and 1024
+       dimensions. They have no twin index, so `IdUniqueIndexPass.allValid`
+       reads `databasechangelog` for them, and `gate3_why` names the ones not
+       yet recorded (`ArbiterTwins.java:55`; `IdUniqueIndexPass.java:279-284`;
+       commits 96d14ac197, dfd69fc456, c0e8dd68a6; T2 `229-research-334`). Until the latch row exists, gate 3 also does not
        latch while any quarantine chunk lacks the `origin_collection_id` key
        (present, or JSON null for a dangling tag, passes). Its reason names no
        count, since it goes out on the unauthenticated `/v1/status` and the
@@ -1639,7 +1647,7 @@ while the engine serves:
     rewriting the fourteen `COLLECTION_SCOPED_TABLES`. From gate 3 until
     the one-row rename can run, that is until P3.7's name-key drop move
     has `completed_at` set and every P3.5b changeset has applied (below;
-    `p35b-continue-changesets.txt:4-15`, T2 `229-research-320`),
+    `p35b-continue-changesets.txt:4-18`, T2 `229-research-320`),
     readers are on the
     id while the rename is still the name path, which gives the collection
     a new id that its index on the old id does not select (T2
@@ -1732,9 +1740,10 @@ while the engine serves:
     and other-table drops). Until P3.5b's apply,
     those readers read the name columns, which a one-row rename no longer
     rewrites, so the one-row rename also waits for every P3.5b changeset
-    to be recorded as applied: the twelve CONTINUE changesets of
-    `vectors-078`, listed in `db/rdr229/p35b-continue-changesets.txt`, each
-    with a row in `databasechangelog` (`p35b-continue-changesets.txt:1-15`);
+    to be recorded as applied: the fifteen CONTINUE changesets listed in
+    `db/rdr229/p35b-continue-changesets.txt`, twelve of `vectors-078` and
+    three of `vectors-084`, each with a row in `databasechangelog`
+    (`p35b-continue-changesets.txt:1-18`; T2 `229-research-334`);
     `vectors-077`'s changesets are plain and apply at once
     (`vectors-077:3-5`). From P3.7 the engine reads the list
     (`P35bChangesets.java:31-37`) and `databasechangelog` in each completion
@@ -3190,8 +3199,11 @@ its acceptance is that test green plus the census pin it lowers.
     (`AspectQueueDrain.java:365-370`; linda 2026-11-23, ruling a), the
     foreign-collection listing compares by id
     (`ManifestForeignCollectionReads.java:74-82`), the document move locks
-    every collection id it writes in before any document row
-    (`CatalogMoves.java:271-283`), the telemetry rename retags by id
+    every collection id it writes in before any document row, answering
+    409 `collection_superseded` for a retired one and 404
+    `unknown_collection_id` for an id no registry row holds, a dry run
+    included and nothing written (`CatalogMoves.java:271-283`;
+    `docs/wire-contract-pending.md:110`; T2 `229-research-334`), the telemetry rename retags by id
     (`TelemetryRepository.java:715-748`), the reaper lists collections by id
     (`ReaperRepository.java:83-99`), the legacy survey takes the gate
     (`LegacyChunkSurvey.java:172`), and departed spans key by id
@@ -3260,7 +3272,7 @@ its acceptance is that test green plus the census pin it lowers.
   one-row rename waits for its `completed_at` as well, and for every
   P3.5b changeset to have applied, each id of
   `db/rdr229/p35b-continue-changesets.txt` in `databasechangelog` (item 6, Switch;
-  `p35b-continue-changesets.txt:4-15`; T2
+  `p35b-continue-changesets.txt:4-18`; T2
   `229-research-58`, `229-research-61`, `229-research-64`,
   `229-research-320`). From gate 3
   until the one-row rename can run, that is while the move has no
@@ -3406,7 +3418,8 @@ its acceptance is that test green plus the census pin it lowers.
   changesets apply at a later boot and put name-reading bodies back. The
   `on_complete` runs after both: the drop move registers only once gate 3
   holds, and gate 3 waits for `vectors-078-8` (P3.5), whose precondition
-  the other eleven `vectors-078` changesets share word for word, so by
+  the other fourteen listed P3.5b changesets, of `vectors-078` and
+  `vectors-084`, share word for word, so by
   then `vectors-078-3` and `-8`, the two that redefine survivors, have
   applied, every stamp move has completed, and no row of a table that
   carries a CHECK is left unstamped for an id-only body to meet (inferred
@@ -4158,3 +4171,4 @@ large, and moved under a ratchet.
 - 2026-11-24: row 16b folded from the stacked code (grant 3, nexus-p2m1x.22; T2 `229-research-331`): a supersede that names its successor by id locks it by id beside the source, with 404 and 409 answers, and a source named by id retired in the gap is decided under the lock: 200 with nothing written for the requested successor, 409 for any other.
 - 2026-11-24: row 13 and marlowe's gate3_why fix folded from the stacked code (grant 3, nexus-p2m1x.22; T2 `229-research-332`): `vectors-082-1` registers the quarantine origin-id backfill move, whose label joins gate 2, the gate 3 clause staying as the live check; gate 3's reason names no count, the capped count going to the engine log only.
 - 2026-11-24: the recall canary and the PCI id-index counts folded from the stacked code (grant 3, nexus-p2m1x.22; T2 `229-research-333`): the canary, ring admission, vacuum trigger and REINDEX re-measure follow the retire's value onto the id indexes; the gap with no singleton lock; `valid_id` and `invalid_id` in the sweep, `/v1/status` and nx doctor; one sentence on RDR-246's needs-operator page for RDR-229's moves; Main, PciReconciler and CompletionCheck cites moved by the later commits. Held for linda: the name-key drop move's `on_complete` ending in-flight builds after the latch.
+- 2026-11-24: `vectors-084` and the move routes' refusal folded from the stacked code (grant 3, nexus-p2m1x.24 and .25; T2 `229-research-334`): the P3.5b list holds fifteen changesets, twelve of `vectors-078` and three of `vectors-084`, all on the one precondition; gate 3 also waits for `vectors-084-1` to `-3`, the by-id `taxonomy_ann_query_<dim>` overloads; the document and owner moves answer 409 and 404 by id from the latch.
