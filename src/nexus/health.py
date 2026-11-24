@@ -11076,8 +11076,8 @@ def _check_manifest_null_collection() -> list[HealthResult]:
             "stamped one."
         )
         fix_suggestions.append(
-            "nx index <path> --force       (re-index; the new write "
-            "requires a real collection, replacing the NULL-collection row)"
+            "nx index repo <repo-root> --force   (or `nx index md|pdf|rdr <file> --force`; "
+            "the new write requires a real collection, replacing the NULL-collection row)"
         )
     if ghost:
         detail += (
@@ -11691,7 +11691,7 @@ def _check_gc_audit_non_empty_after_purge() -> list[HealthResult]:
 #: and the design memo does not name a number at all; this was picked ad
 #: hoc from the bead-text amendment's "e.g. N hours" placeholder. Low
 #: blast radius if wrong: this is a WARN-level doctor advisory, never a
-#: gate, and its remedy (``nx index <path> --force``) is the same
+#: gate, and its remedy (``nx index repo <repo-root> --force``) is the same
 #: idempotent, safe-to-over-run operation the fence design relies on
 #: elsewhere — a false positive on a genuinely slow extraction costs one
 #: unnecessary WARNING, not a wrong action taken automatically. Revisit
@@ -11888,7 +11888,7 @@ def _fence_facts_from_documents(documents: list[Any]) -> _FenceFacts:
     candidates: list[tuple[str, datetime]] = []
     candidates_truncated = 0
     # GH #1512 (nexus-kt7f4): the owner prefix of each named candidate, so the
-    # remedy can be split by owner kind below -- `nx index <path> --force`
+    # remedy can be split by owner kind below -- `nx index repo <repo-root> --force`
     # applies to a repo file and to nothing else.
     candidate_prefix: dict[str, str] = {}
     candidate_file: dict[str, str] = {}
@@ -12138,7 +12138,7 @@ def _stale_fence_rows(cat: Any, label: str, f: _FenceFacts) -> list[HealthResult
         #
         # nexus-apig6: scoped to the post-anchor population and NAMED. The old
         # shape reported the whole ``reported_null`` count and prescribed an
-        # unqualified `nx index <path> --force`, which on a corpus indexed
+        # unqualified `nx index repo <repo-root> --force`, which on a corpus indexed
         # before v7.3.0 reads as "re-embed all 462 of your documents" —
         # contradicting vw594's own no-backfill decision.
         post_anchor_count = f.post_anchor_count
@@ -12177,7 +12177,7 @@ def _stale_fence_rows(cat: Any, label: str, f: _FenceFacts) -> list[HealthResult
         non_repo_note = (
             f" {non_repo_count} of the named document(s) belong to a non-repo "
             "owner (the knowledge store's curator owner): they have no file "
-            "path, so `nx index --force` cannot apply to them; a store put or "
+            "path, so a file re-index cannot apply to them; a store put or "
             "a bulk import wrote them before that path was fenced, and "
             "`nx catalog reconcile-fences` stamps the ones whose manifest is "
             "whole (GH #1512)."
@@ -12220,7 +12220,7 @@ def _stale_fence_rows(cat: Any, label: str, f: _FenceFacts) -> list[HealthResult
                 + f"{legacy_note}{undated_note}{non_repo_note}"
                 + (
                     f" {len(missing_files)} of the named repo document(s) name a file that is no longer in its "
-                    f"repo (e.g. {missing_files[0][2]}): `nx index --force` cannot re-index a file that is gone, "
+                    f"repo (e.g. {missing_files[0][2]}): `nx index repo --force` cannot re-index a file that is gone, "
                     "and `nx catalog prune-stale` removes these entries (GH #1610)."
                     if missing_files else ""
                 )
@@ -12236,15 +12236,15 @@ def _stale_fence_rows(cat: Any, label: str, f: _FenceFacts) -> list[HealthResult
                 for prefix in sorted({p for p, _ident, _fp in missing_files})
             ] + ([] if len(post_anchor) - non_repo_count - len(missing_files) <= 0 else (
                 [
-                    "nx index <path> --force   (re-index ONLY the named "
-                    "document(s) above — this clears the symptom, not the "
+                    "nx index repo <repo-root> --force   (re-index the repo holding "
+                    "the named document(s) above; this clears the symptom, not the "
                     "unfenced producer)",
                 ] if proven_anchor is not None else [
                     "nx --version   (a client below 7.3.0 explains this with "
                     "no regression at all)",
-                    "nx index <path> --force   (on a 7.3.0+ client, re-index "
-                    "ONLY the named document(s) above — this clears the "
-                    "symptom, not the unfenced producer)",
+                    "nx index repo <repo-root> --force   (on a 7.3.0+ client, "
+                    "re-index the repo holding the named document(s) above; "
+                    "this clears the symptom, not the unfenced producer)",
                 ]
             )),
         ))
@@ -12282,8 +12282,8 @@ def _stale_fence_rows(cat: Any, label: str, f: _FenceFacts) -> list[HealthResult
                 "Re-indexing ONE document tells them apart."
             ),
             fix_suggestions=[
-                "nx index <path> --force   (re-index any ONE document to "
-                "establish this install's fence baseline, then re-run doctor)",
+                "nx index md <file> --force   (or `nx index pdf|rdr <file>`; re-index any ONE "
+                "document to establish this install's fence baseline, then re-run doctor)",
             ],
         ))
 
@@ -12295,8 +12295,8 @@ def _stale_fence_rows(cat: Any, label: str, f: _FenceFacts) -> list[HealthResult
             names += f"; +{f.stale_total - len(f.stale_shown)} more"
         note_hint = ""
         suggestions = [
-            "nx index <path>   (a normal re-index clears the fence; "
-            "--force is not required)",
+            "nx index repo <repo-root>   (or `nx index md|pdf|rdr <file>`; a normal "
+            "re-index clears the fence, --force is not required)",
         ]
         if f.stale_notes:
             note_hint = (
@@ -12915,7 +12915,7 @@ def _next_seq_drift_rows(
             "the next registration, so these self-heal when next written to."
         ),
         fix_suggestions=[
-            "nx index <path>   (any registration into the owner floors it)",
+            "nx index repo <repo-root>   (any registration into the owner floors it)",
         ],
     )]
 

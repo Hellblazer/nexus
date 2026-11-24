@@ -87,6 +87,12 @@ TENANT_CREATION_BUSY_REASON: str = "tenant_creation_busy"
 #: and ``job_id``. Nothing was removed. Retry once the job is done, or after ``nx collection re-embed --abort JOB``.
 COLLECTION_BUSY_REASON: str = "collection_busy"
 
+#: A collection rename (``POST /v1/catalog/collections/rename`` and the per-store rename routes) while the engine cannot yet
+#: run the one-row rename (HTTP 409, RDR-229 P3.5a). Also carries ``error`` and ``missing``: ``restart`` when the engine must
+#: restart to apply a changeset (renames open after the next restart), else ``name_key_drop_move``, ``p35b_list_missing``,
+#: ``readiness_unreadable``, ``p35c_readers_absent`` or ``latch_row_missing``. Nothing was renamed.
+RENAME_REFUSED_REASON: str = "rename_refused"
+
 
 def error_reason(body: Any) -> str | None:
     """The ``reason`` of a decoded error body, or None when it has none.
