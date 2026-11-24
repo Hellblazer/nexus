@@ -19,6 +19,7 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import java.sql.Connection;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -30,6 +31,7 @@ import java.util.function.Function;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
@@ -295,5 +297,118 @@ class CollectionDeleteFenceTest {
         assertThatThrownBy(() -> jobs.start(T, origin, other, null, false, false))
             .as("after the delete committed the start's own registry read finds no collection").isInstanceOf(UnregisteredCollectionException.class);
         assertThat(jobs.listAll(T).stream().filter(j -> j.sourceCollection().equals(origin)).count()).as("no job was filed").isZero();
+    }
+
+    // ── (c) the lock order of a delete by id (B1 of the row 14 and row 16 merge) ───
+
+    /** A hand session holding the per-tenant re-embed start guard EXCLUSIVE, as a start does before it reads any registry row. */
+    private Connection startHoldingTheGuard() throws Exception {
+        Connection start = pg.createConnection("");
+        start.setAutoCommit(false);
+        DSL.using(start, SQLDialect.POSTGRES).select(DSL.function("pg_advisory_xact_lock", Object.class,
+            DSL.function("hashtext", Integer.class, DSL.val(CatalogRepository.reembedGuardKey(T))))).fetch();
+        return start;
+    }
+
+    /** Polls until {@code n} active backends wait on a lock inside a statement matching {@code queryPattern}; false when they never do. */
+    private boolean waiters(int n, String queryPattern) throws Exception {
+        var activity = DSL.table(DSL.name("pg_catalog", "pg_stat_activity"));
+        var waitType = DSL.field(DSL.name("wait_event_type"), String.class);
+        var state = DSL.field(DSL.name("state"), String.class);
+        var query = DSL.field(DSL.name("query"), String.class);
+        for (int i = 0; i < 150; i++) {
+            int waiting = su(ctx -> ctx.fetchCount(DSL.selectOne().from(activity)
+                .where(waitType.eq("Lock")).and(state.eq("active")).and(query.likeIgnoreCase(queryPattern))));
+            if (waiting >= n) {
+                return true;
+            }
+            Thread.sleep(100);
+        }
+        return false;
+    }
+
+    /**
+     * The cycle B1 closes: a start holds the guard exclusive and then wants the origin's row {@code FOR KEY SHARE}; a delete by id that held
+     * the row {@code FOR UPDATE} first and only then waited for the guard (shared) would wait on the start while the start waits on it,
+     * 40P01. The delete takes the guard BEFORE any registry row, so it is parked on the guard holding nothing, the start's key share is
+     * granted at once (bounded here: a delete that held the row would make it time out), and the delete finishes when the start commits.
+     */
+    @Timeout(120)
+    @Test
+    void aDeleteById_againstAReEmbedStartHoldingTheGuardExclusive_waitsOnTheGuardHoldingNoRegistryRow_andFinishesWithNoDeadlock() throws Exception {
+        String origin = registeredLabel("byidguard");
+        long originId = idOf(origin);
+        java.util.List<String> retries = new java.util.concurrent.CopyOnWriteArrayList<>();
+        DeadlockRetry.setRetryListenerForTests(retries::add);
+        try {
+            Future<Map<String, Integer>> delete;
+            try (Connection start = startHoldingTheGuard()) {
+                delete = pool.submit(() -> catalog.deleteCollectionById(T, origin, originId, false));
+                assertThat(PgActivityProbe.waitsOnALock(pg, "%pg_advisory_xact_lock_shared%"))
+                    .as("the delete is parked on the start guard, which it takes first").isTrue();
+                DSLContext hand = DSL.using(start, SQLDialect.POSTGRES);
+                hand.select(DSL.function("set_config", String.class, DSL.val("lock_timeout"), DSL.val("1s"), DSL.val(true))).fetch();
+                assertThatCode(() -> hand.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(T)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(originId)).forKeyShare().fetch())
+                    .as("the start's read of the origin's row is not blocked: the parked delete holds no registry row").doesNotThrowAnyException();
+                assertThat(delete.isDone()).as("the delete still waits for the guard").isFalse();
+                start.commit();
+            }
+
+            Map<String, Integer> counts = delete.get(60, TimeUnit.SECONDS);
+
+            assertThat(counts).as("the delete went through once the guard was free").isNotNull();
+            assertThat(registered(origin)).isFalse();
+            assertThat(retries).as("no 40P01: the deadlock retry never ran for this delete").noneMatch(c -> c.contains(origin));
+        } finally {
+            DeadlockRetry.setRetryListenerForTests(null);
+        }
+    }
+
+    /**
+     * Two deletes of one id at once: each takes the guard shared (they do not conflict), then the origin's row {@code FOR UPDATE}, so they
+     * serialise on it. The one that runs second finds the row gone and answers 404; neither is a deadlock victim. The origin's row is never
+     * key-shared first and upgraded afterwards: two such deletes would each hold a key share and wait on the other's upgrade. Both are held on
+     * the guard by a hand session and released together, so they meet at the row; the deadlock retry belt would turn a 40P01 into a clean answer,
+     * so the retry listener is what shows none happened.
+     */
+    @Timeout(300)
+    @Test
+    void twoConcurrentDeletesByIdOfOneId_serialiseOnTheOriginsRow_oneWinsTheOtherAnswers404_andNeitherDeadlocks() throws Exception {
+        java.util.List<String> retries = new java.util.concurrent.CopyOnWriteArrayList<>();
+        DeadlockRetry.setRetryListenerForTests(retries::add);
+        try {
+            for (int round = 0; round < 8; round++) {
+                String[] c = originWithSibling();   // a sibling too: the siblings' key shares are in the same ordered lock
+                String origin = c[0];
+                long originId = idOf(origin);
+                Future<Map<String, Integer>> first;
+                Future<Map<String, Integer>> second;
+                try (Connection start = startHoldingTheGuard()) {
+                    first = pool.submit(() -> catalog.deleteCollectionById(T, origin, originId, false));
+                    second = pool.submit(() -> catalog.deleteCollectionById(T, origin, originId, false));
+                    assertThat(waiters(2, "%pg_advisory_xact_lock_shared%")).as("both deletes are parked on the guard").isTrue();
+                    start.commit();   // both are released at once and meet at the origin's row
+                }
+                int removed = 0;
+                int refused = 0;
+                for (Future<Map<String, Integer>> f : List.of(first, second)) {
+                    try {
+                        f.get(60, TimeUnit.SECONDS);
+                        removed++;
+                    } catch (ExecutionException e) {
+                        assertThat(e.getCause()).as("the second delete finds the row gone: 404, never a deadlock").isInstanceOf(UnknownCollectionIdException.class);
+                        refused++;
+                    }
+                }
+                assertThat(removed).as("exactly one delete removed the collection (round %d)", round).isEqualTo(1);
+                assertThat(refused).isEqualTo(1);
+                assertThat(registered(origin)).isFalse();
+            }
+            assertThat(retries).as("no delete was a deadlock victim: the deadlock retry belt never ran for a delete")
+                .noneMatch(c -> c.startsWith("catalog.deleteCollection "));
+        } finally {
+            DeadlockRetry.setRetryListenerForTests(null);
+        }
     }
 }
