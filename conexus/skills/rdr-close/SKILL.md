@@ -228,6 +228,7 @@ Rename that collection onto the subject BEFORE the first `store_put` to `{repo}-
 
 ```bash
 CUR="${CUR:?set CUR to the model this install writes knowledge in (read it as described below)}"
+[ -n "${SUBJECT:-}" ] && type subject_collections >/dev/null 2>&1 || { echo "run the reuse check above first" >&2; exit 1; }
 OLD="knowledge__rdr_postmortem__<repo>"
 # the subject must have no live collection yet, whatever its label: `subject_collections` from the reuse check above
 [ -z "$(subject_collections)" ] \
