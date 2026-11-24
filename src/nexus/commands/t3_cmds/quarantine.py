@@ -60,7 +60,7 @@ from typing import Any, NoReturn
 
 import click
 
-from nexus.db.engine_reasons import QUARANTINE_RESTORE_BUSY_REASON
+from nexus.db.engine_reasons import QUARANTINE_RESTORE_BUSY_REASON, RESTORE_ORIGIN_UNREGISTERED_REASON
 
 #: The ``reason`` on an ``attach`` verdict row of a bytes-only restore (or its dry run) that drops the forward owner
 #: link: the owner and position named on the row are not kept (nexus-l003p).
@@ -550,6 +550,18 @@ def _error_for(exc: Exception, pages_done: int) -> tuple[str, int]:
         return (f"quarantine restore: the engine was busy ({exc}). That call rolled back: nothing moved, was attached "
                 f"or audited (no earlier quarantine sibling had committed). Wait a few seconds and run the same "
                 f"command again.{after}"), EXIT_BUSY
+    if exc.code == 409 and exc.reason == RESTORE_ORIGIN_UNREGISTERED_REASON:
+        # RDR-229 P3.7 (engine 0.1.202): the origin had no registry row when the chunks were quarantined; the engine
+        # refuses the whole call rather than re-create the origin from its label. Nothing moved.
+        engine = exc.engine_body if isinstance(exc.engine_body, dict) else {}
+        label = engine.get("label") if isinstance(engine.get("label"), str) and engine.get("label") else "the origin"
+        rows = engine.get("rows")
+        stay = (f"{rows} chunk{'s' if rows != 1 else ''} stay{'s' if rows == 1 else ''} quarantined"
+                if isinstance(rows, int) and not isinstance(rows, bool) else "the chunks stay quarantined")
+        return (f"quarantine restore: origin collection {label} has no registry row, so the engine will not re-create "
+                f"it from its label, and {stay}. Nothing was restored by this call. Restore the chunks that do have a "
+                f"registered origin by naming only them, or register {label} and run the same command again.{after}"
+                ), EXIT_ENGINE_ERROR
     # The engine names its request fields; the operator types flags.
     said = str(exc).replace("quarantined_since / quarantined_before", "--quarantined-since / --quarantined-before")
     return f"quarantine restore refused by the engine: {said}{after}", EXIT_ENGINE_ERROR

@@ -52,6 +52,19 @@ COLLECTION_MODEL_MISMATCH_REASON: str = "collection_model_mismatch"
 #: explicit registration revives a name.
 COLLECTION_SUPERSEDED_REASON: str = "collection_superseded"
 
+#: ``POST /v1/vectors/gc/restore-rereferenced`` (bounded or not) or ``POST /v1/vectors/gc/quarantine-restore``, from the collection-id
+#: latch (gate 3), named quarantined chunks tagged with the origin's label whose ``origin_collection_id`` is the JSON null marker: an
+#: origin that had no registry row, or no longer has one, when they were quarantined (HTTP 409, RDR-229 P3.7). Also carries ``label``
+#: (the origin) and ``rows`` (how many chunks carry the marker). The whole call is refused before anything moves, id-matched chunks
+#: of the same call included, and the chunks stay quarantined. Never retryable as sent: restore the other chunks by naming only
+#: them, and re-register the origin or let the quarantine expire for the marked ones.
+RESTORE_ORIGIN_UNREGISTERED_REASON: str = "restore_origin_unregistered"
+
+#: ``POST /v1/catalog/collections/delete`` named a collection a re-embed job in a non-terminal state (planned, running, paused,
+#: cutover or failed) holds as its source or its target (HTTP 409, RDR-229 P3.5a row 14). Also carries ``error``, ``collection``
+#: and ``job_id``. Nothing was removed. Retry once the job is done, or after ``nx collection re-embed --abort JOB``.
+COLLECTION_BUSY_REASON: str = "collection_busy"
+
 #: A write naming an embedding model registered nowhere (HTTP 422, RDR-225).
 UNREGISTERED_EMBEDDING_MODEL_REASON: str = "unregistered_embedding_model"
 
