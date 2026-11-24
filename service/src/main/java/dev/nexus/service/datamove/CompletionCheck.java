@@ -547,8 +547,11 @@ public final class CompletionCheck {
             long lacking = quarantineChunksLackingOriginId(ctx, tables);
             if (lacking > 0) {
                 gate3Holds = false;
-                why = (lacking > QUARANTINE_PROBE_CAP ? QUARANTINE_PROBE_CAP + "+" : Long.toString(lacking))
-                    + " quarantine chunks lack origin_collection_id (pre-id quarantine; backfill pending)";
+                // no count in the text: it goes out on the unauthenticated /v1/status, and the probe counts every tenant's chunks
+                // (row 21); the count goes to the engine log only
+                log.info("event=rdr229_gate3_quarantine_origin_pending chunks={}",
+                    lacking > QUARANTINE_PROBE_CAP ? QUARANTINE_PROBE_CAP + "+" : Long.toString(lacking));
+                why = "quarantine chunks lack origin_collection_id (pre-id quarantine; backfill pending)";
             }
         }
         if (gate3Holds && latch.isEmpty() && tables.contains("rdr229_gate_latch")) {
