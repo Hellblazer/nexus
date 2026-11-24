@@ -59,6 +59,23 @@ final class PciCanary implements PciCanarySchedule.Runner {
         Target(String leaf, String tenant, String model, String collection, String index) {
             this(leaf, tenant, model, collection, index, null);
         }
+
+        /**
+         * The selector the canary's statement reads this target through. A name target stays on the name function. An id target (the reconciler
+         * makes one only once gate 3 has latched) goes through a selector built on the reconciler's {@code latched}, so the registry resolves its
+         * label to the id exactly as the serving path does (live rows only) and the search takes the _by_id twin; it must resolve to the id the
+         * index was built for, else the statement is refused.
+         */
+        CollectionSelector selector(dev.nexus.service.datamove.Gate3 latched, dev.nexus.service.db.TenantScope scope) {
+            if (collectionId == null) {
+                return CollectionSelector.byName(List.of(collection));
+            }
+            CollectionSelector sel = CollectionSelector.of(latched, scope, tenant, collection);
+            if (!sel.byId() || !collectionId.equals(sel.idOf(collection))) {
+                throw new IllegalStateException("the collection is no longer the one the id index was built for, or the latch no longer holds");
+            }
+            return sel;
+        }
     }
 
     /** One row of a page: the chunk's id (its chash, hex) and its distance from the query. */
