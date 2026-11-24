@@ -2828,7 +2828,7 @@ its acceptance is that test green plus the census pin it lowers.
   completion check, which reports in its own `rdr229_completion` field,
   with the read set and gates later releases extend (item 6, "Readers
   during the stamp"); and R7's pre-flight counts, with the reader contract
-  split between P3.5c and the next cut (P3.5c). Test: an upgrade
+  split between P3.5c and the next cut. Test: an upgrade
   boot registers the move and rewrites no row of a large table; a killed run
   resumes from its last committed batch; an insert and an update without the
   id are refused; a name-path rename gives every rewritten row, and the
