@@ -4,6 +4,7 @@ package dev.nexus.service;
 
 import static dev.nexus.service.CollectionRouteFixture.json;
 import static dev.nexus.service.CollectionRouteFixture.label;
+import static dev.nexus.service.jooq.nexus.Tables.CHASH_REMAP;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -25,6 +26,8 @@ import java.util.Map;
  * <ul>
  *   <li>{@code updateMetadataWithMissing} locked X's row and computed C, then handed the request's B to {@code updateMetadataOneRow}
  *       (regression of 368cf7da04): it changed Y's chunk, not X's;</li>
+ *   <li>{@code RemapRepository.clearLeg} matched both legs by the request's label through {@code CollectionKey.eqHistory}, whose
+ *       pre-gate-3 arm is {@code name = request label} (regression of ced0ada045): it cleared Y's leg, not X's.</li>
  * </ul>
  * The rename runs on another thread ({@link CollectionRouteFixture#renameInPlaceBeforeTheWritesRead}); the rows a write looks for under
  * the row's current label are filed once the rename is done (its {@code afterRename} callback), as that method's javadoc says.
@@ -95,6 +98,43 @@ class Rdr229P35cPreGateRenameGapTest {
             String yMeta = metadataOf(y, hex);
             assertThat(xMeta).as("the renamed collection's chunk is the one changed").contains("gap_key").contains("x-own");
             assertThat(yMeta).as("the new holder's chunk is untouched").doesNotContain("gap_key").contains("y-own");
+        }
+    }
+
+    private void recordLeg(String source, String target, String marker) {
+        Resp r = fx.post("/v1/remap/record_batch", "{\"source_collection\":" + json(source) + ",\"entries\":[{\"old_id\":\"old-" + marker + "\","
+            + "\"new_chash\":\"" + Chash.ofText("pre-gate-remap-" + marker + source + target).toHex() + "\",\"target_collection\":"
+            + json(target) + ",\"provenance\":\"pg\"}]}");
+        assertThat(r.status()).as("setup: " + r.body()).isEqualTo(200);
+    }
+
+    private int legRows(String source, String target) {
+        Integer rows = fx.asSuperuser(ctx -> ctx.fetchCount(CHASH_REMAP,
+            CHASH_REMAP.TENANT_ID.eq(fx.tenant).and(CHASH_REMAP.SOURCE_COLLECTION.eq(source)).and(CHASH_REMAP.TARGET_COLLECTION.eq(target))));
+        return rows;
+    }
+
+    /**
+     * (ii) {@code RemapRepository.clearLeg}: the source leg named by X's id clears X's rows (filed under its current label C) and leaves the
+     * new holder Y's rows, filed under B, in place.
+     */
+    @Test
+    void clearLegById_beforeGate3_inTheRenameGap_clearsTheRenamedCollectionsLeg_notTheNewHoldersOfTheOldLabel() {
+        String b = registered("leg-s");
+        String t = registered("leg-t");
+        long x = fx.idOf(b);
+        try (CollectionRouteFixture.RenameGap gap = fx.renameInPlaceBeforeTheWritesRead(List.of(x), List.of(b), "pg-leg-" + (n++), g -> {
+            recordLeg(g.currentLabelOf().get(x), t, "x-own");   // X's leg, under the label it bears now
+            recordLeg(b, t, "y-own");                           // the new holder's leg onto the same target, under B
+        })) {
+            Resp r = fx.post("/v1/remap/clear_leg", "{\"source_collection_id\":" + x + ",\"target_collection\":" + json(t) + "}");
+
+            assertThat(gap.ran()).as("setup: the rename ran before the write's by-id read (%s)", r.body()).isTrue();
+            assertThat(r.status()).as(r.body()).isEqualTo(200);
+            String c = gap.currentLabelOf().get(x);
+            assertThat(r.json().path("deleted").asInt(-1)).as("the renamed collection's leg row was cleared").isEqualTo(1);
+            assertThat(legRows(c, t)).as("X's leg, under its current label, is gone").isZero();
+            assertThat(legRows(b, t)).as("the new holder's leg is untouched").isEqualTo(1);
         }
     }
 }
