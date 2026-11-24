@@ -116,6 +116,12 @@ _FLOCK_ALLOWED_MODULES = frozenset({
     # db/migrations.py entry removed — RDR-158 P4 Stage 4 (nexus-i711w):
     # the migration serialization flock died with the file. DOWNWARD-only.
     "commands/daemon.py",                # daemon CLI single-instance lock
+    # The generation lease (T2 nexus/design-install-generation-lease-2026-11-24): a SHARED flock
+    # an interpreter holds on <generation>/.nx-lease for its life (the hook), and gc's exclusive
+    # try-lock on it. Not daemon-scope election: no lifecycle, lease renewal or heartbeat; the
+    # kernel drops it when the process dies. Both modules are stdlib-only and cannot use _locking.
+    "_install/_nx_lease.py",
+    "_install/lease_core.py",
     # verify-fill watermark file lock (nexus-te885.10, review c0e4493e f4):
     # serializes read-modify-write of migration/verify_fill_watermarks.json
     # across concurrent verify-fill runs. NOT daemon-scope election — no
