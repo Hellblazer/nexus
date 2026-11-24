@@ -18,6 +18,7 @@ import lupa.lua54 as lua54
 import pytest
 
 from nexus.auras import enumerate_auras, load_aura, parse_aura
+from nexus.auras.aura import expand_template
 from nexus.auras.check import check_auras, check_serving_group
 from nexus.auras.enable import resolve
 from nexus.auras.load_gate import GroupRecord
@@ -123,6 +124,7 @@ def test_the_header_declares_the_owner_row_fields_and_me_and_grants_nothing() ->
     h = hd.parse(SOURCE, name="ci_red_notice")
     assert [(a.name, a.type, a.optional) for a in h.args] == [
         ("sha", "string", False),
+        ("branch", "string", True),
         ("owner", "string", True),
         ("owner_alias", "string", True),
         ("next", "string", True),
@@ -464,13 +466,21 @@ def test_a_row_missing_a_required_field_still_strikes_through_the_real_header() 
 # -- the aura ---------------------------------------------------------------------
 
 
-def _shipped():
+def _template():
     return load_aura("ci_develop_red", cwd=None)
 
 
-def test_the_shipped_aura_is_gated_on_push_train_and_triggers_on_the_owner_post() -> None:
+def _shipped():
+    """The shipped template as push-train's one base expands it: the aura a session serving nexus-develop loads."""
+    [one], _ = expand_template(_template(), ("nexus-develop",))
+    return one
+
+
+def test_the_shipped_aura_is_a_template_gated_on_push_train_and_its_nexus_expansion_triggers_on_the_owner_post() -> None:
+    template = _template()
+    assert template.is_template and template.subspace == "board/ci/{serves}--owner" and template.load_group == "push-train"
     aura = _shipped()
-    assert aura.load_group == "push-train"
+    assert (aura.name, aura.load_group, aura.threads) == ("ci_develop_red@nexus-develop", "push-train", "develop CI red (nexus-develop)")
     assert aura.subspace == OWNER_SUBSPACE
     assert dict(aura.match) == {"kind": "owner", "from": "engine"}
     assert dict(aura.clear_match or ()) == {"kind": "clear", "from": "engine"}
@@ -482,6 +492,7 @@ def test_the_shipped_aura_maps_the_owner_row_and_the_session_identity() -> None:
     aura = _shipped()
     assert {name: (spec.kind, spec.value) for name, spec in aura.args} == {
         "sha": ("dims", "sha"),
+        "branch": ("literal", "develop"),
         "owner": ("body", "owner"),
         "owner_alias": ("body", "owner_alias"),
         "next": ("body", "next"),
@@ -500,7 +511,7 @@ def test_the_shipped_aura_maps_the_owner_row_and_the_session_identity() -> None:
 
 def test_the_shipped_aura_file_is_the_parse_of_its_own_text() -> None:
     shipped = (ROOT / "ci_develop_red.aura.toml").read_text(encoding="utf-8")
-    assert load_aura("ci_develop_red", cwd=None) == parse_aura(shipped.encode(), name="ci_develop_red")
+    assert _template() == parse_aura(shipped.encode(), name="ci_develop_red")
 
 
 def test_the_shipped_aura_passes_every_check_that_needs_no_engine(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -670,7 +681,7 @@ def test_a_from_engine_row_ignored_for_its_stamp_is_logged_once_per_row(debug_lo
         _offer({"kind": "owner", "sha": SHA, "from": "engine"}, sender_session=SESSION)
     refused = [e for e in logs if e["event"] == "aura_from_engine_ignored"]
     assert len(refused) == 1
-    assert refused[0]["log_level"] == "debug" and refused[0]["aura"] == "ci_develop_red" and refused[0]["tuple_id"] == "t1"
+    assert refused[0]["log_level"] == "debug" and refused[0]["aura"] == "ci_develop_red@nexus-develop" and refused[0]["tuple_id"] == "t1"
     assert SESSION not in str(refused[0]), "the line says the row was stamped, not by which session"
     with structlog.testing.capture_logs() as logs:
         _offer({"kind": "owner", "sha": SHA, "from": "engine"})  # the engine's own row
@@ -700,7 +711,7 @@ def test_a_runtime_logs_a_refused_from_engine_row_once_however_often_it_is_offer
 
 def test_a_clear_row_from_the_engine_removes_the_block() -> None:
     rec = _offer({"kind": "clear", "sha": SHA, "from": "engine"})
-    assert rec.removes == ["ci_develop_red"] and rec.runs == []
+    assert rec.removes == ["ci_develop_red@nexus-develop"] and rec.runs == []
 
 
 @pytest.mark.parametrize("writer", ["", "tamsin", "i9"])

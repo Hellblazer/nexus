@@ -12,12 +12,14 @@ Every aura ships off. Nexus never turns one on for you.
 
 ## What ships
 
-Two auras ship: `ci_develop_red`, and `ci_develop_nudge`, which wakes next up when the owner has not acknowledged (below). Both are off until you turn each on by name. `ci_develop_red` is for sessions in the `push-train` group (see [Loading an aura for a group](#loading-an-aura-for-a-group)) and it watches `board/ci/nexus-develop--owner`, where the engine's owner stamper posts who owns a red develop. The stamper names one owner for each red, and a next-up session behind it, by identity id and, from engine 0.1.198, also by the seat's live alias (`owner_alias`, `next_alias`), which the notice shows for someone else's red; a row with no alias shows the id. The aura writes a block to your threads entry, worded for what this session has to do:
+Two auras ship: `ci_develop_red`, and `ci_develop_nudge`, which wakes next up when the owner has not acknowledged (below). Both are off until you turn each on by name. `ci_develop_red` is for sessions in the `push-train` group (see [Loading an aura for a group](#loading-an-aura-for-a-group)) and it watches `board/ci/<base>--owner` for each base its group serves (`nexus-develop` for nexus; see [One aura for every base a group serves](#one-aura-for-every-base-a-group-serves)), where the engine's owner stamper posts who owns a red branch. The stamper names one owner for each red, and a next-up session behind it, by identity id and, from engine 0.1.198, also by the seat's live alias (`owner_alias`, `next_alias`), which the notice shows for someone else's red; a row with no alias shows the id. The aura writes a block to your threads entry, worded for what this session has to do:
 
 ```text
-## aura: develop CI red
+## aura: develop CI red (nexus-develop)
 state: Develop is red at 8b30c16, first red in your push. Diagnose it. Ack: nx ci ack 8b30c16.
 ```
+
+The texts below say `Develop` because the base is `nexus-develop`: the first word is the base's branch, capitalised (`Main is red at ...` for `art-main`).
 
 There are ten displays. `<owner>` is the owner's alias, else its identity id: from engine 0.1.198 the row carries the owner's live alias (`owner_alias`) beside the id, and the notice shows it; a row with no alias (an older engine, or an identity with none) shows the id. Who owns the red is always decided on the ids; the alias is a name to show.
 
@@ -38,7 +40,7 @@ The first three owner displays end with the acknowledgement: the owner writes a 
 
 A session wakes (the channel notice below) only on a post that starts something: a row with `refresh: false` that makes it the owner, or an escalated row that names it or names no one. Next up is shown the red and not woken, because the owner usually acknowledges within two minutes (RDR-252 post-close audit S2). A hand-off that seats a session as owner wakes it through the owner display. A stall escalation (`escalated` with `stalled: true`) carries `open_minutes` (whole minutes since the red began, the `N` in its text) and, when there was any sign of life on the red, `stalled_sign` (`ack` or `push`), `stalled_owner` (who gave it) and `stalled_since` (when, a UTC instant shown as `hh:mm UTC`); all three are absent when there was none. It wakes the leader only, and the text names only what the engine knows: a push is never called an acknowledgement.
 
-Until the `push-train` group is formed and serves `nexus-develop`, no session loads the aura, so a session with `auras.ci_develop_red=on` sees no develop reds at all. The old `--done`-based aura is gone; `nx aura check` warns about an aura on an `--owner` subspace that is loaded by a group not serving its topic.
+Until the `push-train` group is formed and serves a base, no session loads the aura, so a session with `auras.ci_develop_red=on` sees no reds at all. The old `--done`-based aura is gone; `nx aura check` warns about an aura on a concrete `--owner` subspace that is loaded by a group not serving its topic.
 
 ## Turning one on
 
@@ -69,7 +71,7 @@ Turning an aura on in the global config turns it on for every Claude session on 
 **The channel.** When the aura's file sets `display.channel = true`, the session also gets a channel notice on every fire. It is a fixed template and never carries the procedure's text:
 
 ```text
-aura ci_develop_red fired on board/ci/nexus-develop--owner tuple <id>; see the "aura: develop CI red" block in your threads entry
+aura ci_develop_red@nexus-develop fired on board/ci/nexus-develop--owner tuple <id>; see the "aura: develop CI red (nexus-develop)" block in your threads entry
 ```
 
 That notice wakes an idle session the way any channel message does.
@@ -100,6 +102,31 @@ A group-gated aura loads only in a session whose identity is a member of that gr
 A server that started with no identity loads no group-gated aura, and an aura with no `[load]` table loads as before. A Claude Desktop server has an identity only when it made the bind itself from the pending file, so otherwise it loads none. The one case that is not left until a reconnect: a server that loaded with no identity and whose identity lease later adopts its first one (any move from no identity to an identity: the bind from the pending file, or a token file a hook wrote) gates its group-gated auras once more at that moment (the reads are the same two, once), and loads the ones that pass; an identity the heartbeat reported before the load counts even when the token read at load missed it. A server that was bound when it loaded never gates again. Membership and group state are read once, at load: a group disbanded (or a seat that leaves it) while the session runs leaves the auras it already loaded in place until the MCP server reconnects, and a load that could not read the engine (`memberships_unreadable`, `group_unreadable`) stays that way until a reconnect, which `nx aura list` says on that aura's line. When an aura that is on is group-gated and this session's server wrote no state file, `nx aura list` says `not loaded: no state file` on its line. A read that fails (the engine is down, the group client is missing) loads none and gives the reason `memberships_unreadable` or `group_unreadable`.
 
 `nx aura list` says, for each aura that is on, whether this session's server loaded it, and why: `loaded`, or `not loaded: not_a_member`, `unbound`, `group_disbanded`, `no_group_record`, `memberships_unreadable`, `group_unreadable`, with the group named. The server keeps this in `~/.config/nexus/auras/loaded-<claude pid>.<startedAt>.json`, written at load and rewritten when its heartbeat sees the identity change, and removed when it exits. `nx aura list` reads the file of its nearest Claude process and deletes a file whose process is gone (no registry file with that pid and `startedAt`, or a pid whose start time differs, which covers `/restart`). With no Claude ancestor (a shell outside any Claude session) it prints every file on standard error, none claimed: one line per file with its Claude pid, identity and server pid, then one line per aura with its load decision. The table and `--json` on standard output say nothing about loading then. After a cross-seat `/resume` or a take-over the loaded set and `self.identity` stay the old identity's until the server reconnects, and `nx aura list` prints the mismatch and says so on standard error.
+
+## One aura for every base a group serves
+
+A repository's red is a different board topic, `board/ci/<repo>-<branch>--owner`, and the group that owns a repository's reds lists that topic's base (`<repo>-<branch>`) in its `serves`. An aura that triggers on one concrete subspace would need one file per repository. A trigger can instead carry the placeholder `{serves}` once, inside its topic:
+
+```toml
+[load]
+group = "push-train"                  # required with {serves}: the group whose serves list the placeholder expands
+
+[trigger]
+subspace = "board/ci/{serves}--owner"
+match = { kind = "owner", from = "engine" }
+
+[args]
+branch = "self.branch"                # the branch of the base this copy is for, filled when the template expands
+
+[display]
+threads = "{branch} CI red ({base})"  # {base} is required, {branch} optional, no other brace
+```
+
+At load, for a session in the `[load]` group, the loader reads the group's `serves` and expands the file into one aura per base. Each is named `<aura>@<base>` (`ci_develop_red@nexus-develop`), triggers on its own concrete subspace, and writes its own threads block, so two bases never share one. `nx aura list` shows the template as loaded for the bases that expanded. The branch is the part of the base after its last hyphen (`develop` for `nexus-develop`, `main` for `recording-rig-main`); a base is `<repo>-<branch>` with no delimiter between them, so a branch that itself holds a hyphen reads as its last word. A group that serves exactly one base expands to one aura, as if the file had named that subspace. Both shipped auras are templates, and their notice texts name the branch, not "Develop".
+
+The grammar takes `{serves}` exactly once in the topic of a `board/<topic>` or `board/ci/<topic>`, and refuses any other use of a brace in the subspace, a template with no `[load] group`, a threads value without `{base}` or with another brace, and `self.branch` in an aura that is not a template. `{serves}` is never read as a literal topic. A template whose group serves nothing loads nothing, and `nx aura list` says `not loaded: serves_nothing`; a base whose expansion the subspace or threads rules refuse is left out (`bad_base`). The group is read once at load, so a base added to `serves` later appears after the MCP server reconnects.
+
+`nx aura check` validates a template against every base its group serves: each expansion must be valid, and the dictionary check runs on each and names the base in its findings. It refuses a template whose group has no record, is disbanded or serves nothing. When the group cannot be read, the serving check is reported as skipped and the dictionary check reads one expansion for a sample base.
 
 ## The session's own identity as an argument
 
@@ -147,7 +174,7 @@ procedure = "ci_red_notice"
 subspace = "board/ci/nexus-develop--owner"       # one concrete board/<topic> or board/ci/<topic>; no wildcards
 match = { kind = "owner", from = "engine" }      # equality on dimensions; absent means every post
 
-[args]                                           # each procedure argument from dims.<f>, body.<f>, id, subspace, self.identity, or = "literal"
+[args]                                           # each procedure argument from dims.<f>, body.<f>, id, subspace, self.identity, or = "literal" (self.branch in a {serves} template)
 sha = "dims.sha"
 owner = "body.owner"
 owner_alias = "body.owner_alias"        # engine 0.1.198 on; absent from a row with no alias, which the procedure then shows by id

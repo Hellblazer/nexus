@@ -44,6 +44,14 @@ def repo_from_url(url: str) -> str | None:
     return slug[1].lower() if slug else None
 
 
+def branch_of(base: str) -> str:
+    """The branch a board *base* names: the part after its last hyphen (``develop`` for ``nexus-develop``, ``main`` for
+    ``recording-rig-main``), or the whole base when it has none. A base is ``<repo>-<branch>`` and the two parts are not
+    delimited, so a branch that itself holds a hyphen reads as its last word; the branches the CI adapter posts for are
+    ``develop``, ``main`` and ``master``."""
+    return base.rsplit("-", 1)[-1]
+
+
 def remote_url(remote: str = "origin", *, cwd: str | Path | None = None) -> str:
     """The URL of *remote* in the repository *cwd* (default: the current directory) is in, or "" when there is none, no git,
     or no repository."""

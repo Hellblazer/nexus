@@ -32,7 +32,7 @@ from typing import Any
 
 import structlog
 
-from nexus.auras.aura import Aura
+from nexus.auras.aura import Aura, expand_template
 from nexus.auras.load_gate import GroupReader, default_group_reader, group_is_live
 from nexus.auras.loaded_state import AuraState, LoadedState
 from nexus.db.t2.http_tuple_store import SchemaViolationError
@@ -50,6 +50,8 @@ class _Plan:
     pid: int = 0
     identity: str | None = None
     gate: dict[str, AuraState] = dataclasses.field(default_factory=dict)
+    #: Decisions for what the load left out without an aura to carry them: a base of a template that was refused.
+    extra: dict[str, AuraState] = dataclasses.field(default_factory=dict)
     fields: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
@@ -204,7 +206,9 @@ class AuraLoader:
         # An identity the lease reported before this load (a pending bind that beat the registry) counts when the token
         # read misses it: the lease wrote the token file before it told us, so a miss is a read that raced the write.
         identity = self._identity_or_none() or self._noted_identity
-        return _Plan("load", auras=auras, pid=pid, identity=identity, gate=self._gate(auras, identity))
+        gate, serves = self._gate(auras, identity)
+        auras, gate, extra = self._expand(auras, gate, serves)
+        return _Plan("load", auras=auras, pid=pid, identity=identity, gate=gate, extra=extra)
 
     def _commit(self, plan: _Plan) -> None:
         """Apply a plan on the loop: the decisions, the subscriptions, the runtime and the state."""
@@ -216,6 +220,7 @@ class AuraLoader:
             return
         self.loaded_identity = plan.identity
         self._discovered = plan.auras
+        self.decisions.update(plan.extra)
         accepted = self._admit(plan.auras, plan.gate)
         self._publish_state(plan.pid, plan.identity)
         if not accepted:
@@ -230,6 +235,8 @@ class AuraLoader:
         and subscription refusals. Returns the auras now loaded."""
         accepted: list[Aura] = []
         for aura in auras:
+            if aura.expanded_from is not None:
+                self.decisions.pop(aura.expanded_from, None)  # the template's own row (unbound, before a late bind) is replaced
             verdict = gate.get(aura.name)
             if verdict is not None and not verdict.loaded:
                 self.decisions[aura.name] = verdict
@@ -262,13 +269,17 @@ class AuraLoader:
             _log.warning("auras_identity_unreadable", session_id=self.session_id, error=str(exc))
             return None
 
-    def _gate(self, auras: Sequence[Aura], identity: str | None) -> dict[str, AuraState]:
-        """The verdict of each group-gated aura in *auras*, by name: one membership read, then one group read per
-        distinct group a not-yet-excluded aura names. An ungated aura has no entry and reads nothing."""
+    def _gate(
+        self, auras: Sequence[Aura], identity: str | None,
+    ) -> tuple[dict[str, AuraState], dict[str, tuple[str, ...]]]:
+        """The verdict of each group-gated aura in *auras*, by name, and the ``serves`` list of each group read (a template
+        expands from it): one membership read, then one group read per distinct group a not-yet-excluded aura names. An
+        ungated aura has no entry and reads nothing."""
         gated = [a for a in auras if a.load_group is not None]
         out: dict[str, AuraState] = {}
+        serves: dict[str, tuple[str, ...]] = {}
         if not gated:
-            return out
+            return out, serves
 
         def refuse(aura: Aura, reason: str) -> None:
             out[aura.name] = AuraState(False, reason, aura.load_group)
@@ -276,7 +287,7 @@ class AuraLoader:
         if identity is None:
             for aura in gated:
                 refuse(aura, "unbound")
-            return out
+            return out, serves
         member_of: set[str] | None = None
         if self._memberships is not None:
             try:
@@ -286,7 +297,7 @@ class AuraLoader:
         if member_of is None:
             for aura in gated:
                 refuse(aura, "memberships_unreadable")
-            return out
+            return out, serves
         records: dict[str, AuraState] = {}
         for aura in gated:
             group = aura.load_group
@@ -295,23 +306,57 @@ class AuraLoader:
                 refuse(aura, "not_a_member")
                 continue
             if group not in records:
-                records[group] = self._group_verdict(group)
+                records[group], serves[group] = self._group_verdict(group)
             out[aura.name] = records[group]
-        return out
+        return out, serves
 
-    def _group_verdict(self, group: str) -> AuraState:
+    def _group_verdict(self, group: str) -> tuple[AuraState, tuple[str, ...]]:
+        """The verdict on *group* and its ``serves`` list (empty unless the verdict is loaded)."""
         if self._read_group is None:
-            return AuraState(False, "group_unreadable", group)
+            return AuraState(False, "group_unreadable", group), ()
         try:
             record = self._read_group(group)
         except Exception as exc:  # noqa: BLE001 -- GroupUnreadable, an engine error or a bug
             _log.warning("auras_group_unreadable", session_id=self.session_id, group=group, error=str(exc))
-            return AuraState(False, "group_unreadable", group)
+            return AuraState(False, "group_unreadable", group), ()
         if record is None:
-            return AuraState(False, "no_group_record", group)
+            return AuraState(False, "no_group_record", group), ()
         if not group_is_live(record, self._now()):
-            return AuraState(False, "group_disbanded", group)
-        return AuraState(True, "loaded", group)
+            return AuraState(False, "group_disbanded", group), ()
+        return AuraState(True, "loaded", group), tuple(record.serves)
+
+    def _expand(
+        self, auras: Sequence[Aura], gate: dict[str, AuraState], serves: dict[str, tuple[str, ...]],
+    ) -> tuple[list[Aura], dict[str, AuraState], dict[str, AuraState]]:
+        """Replace each template the gate loads by its expansions, one per base in its group's ``serves`` (RDR-252 "Aura
+        per base"); each expansion has its template's verdict. A template the gate refuses stays as it is and is
+        recorded under its own name; one whose group serves nothing usable stays, with the reason ``serves_nothing``. A
+        base its expansion refuses is a decision of its own (``bad_base``), returned third because no aura carries it.
+        Touches no loader state: safe on a worker thread."""
+        out: list[Aura] = []
+        verdicts = dict(gate)
+        extra: dict[str, AuraState] = {}
+        for aura in auras:
+            verdict = gate.get(aura.name)
+            if not aura.is_template or verdict is None or not verdict.loaded:
+                out.append(aura)
+                continue
+            group = aura.load_group
+            expansions, rejected = expand_template(aura, serves.get(group or "", ()))
+            for base, why in rejected:
+                name = f"{aura.name}@{base}"
+                extra[name] = AuraState(False, "bad_base", group)
+                _log.warning("aura_base_refused", aura=aura.name, base=base, reason=why)
+            if not expansions:
+                if not rejected:
+                    _log.warning("aura_serves_nothing", aura=aura.name, group=group)
+                verdicts[aura.name] = AuraState(False, "serves_nothing", group)
+                out.append(aura)
+                continue
+            for expansion in expansions:
+                verdicts[expansion.name] = verdict
+                out.append(expansion)
+        return out, verdicts, extra
 
     def _publish_state(self, pid: int, identity: str | None) -> None:
         self._state_pid = pid
@@ -337,7 +382,8 @@ class AuraLoader:
         since nothing else would ever load them in this server's life."""
         pending = self._note(identity)
         if pending:
-            self._regate(pending, identity, self._gate(pending, identity))
+            gate, serves = self._gate(pending, identity)
+            self._regate(*self._expand(pending, gate, serves), identity)
         self._rewrite_identity(identity)
 
     async def note_identity_async(self, identity: str | None) -> None:
@@ -349,11 +395,12 @@ class AuraLoader:
         if pending:
             assert identity is not None
             try:
-                gate = await asyncio.to_thread(self._gate, pending, identity)
+                gate, serves = await asyncio.to_thread(self._gate, pending, identity)
+                expanded = self._expand(pending, gate, serves)
             except Exception as exc:  # noqa: BLE001 -- _gate does not raise; a bug here is not the waiter's to die of
                 _log.warning("auras_late_gate_failed", session_id=self.session_id, error=str(exc))
                 return
-            self._regate(pending, identity, gate)
+            self._regate(*expanded, identity)
         self._rewrite_identity(identity)
 
     def close(self) -> None:
@@ -384,8 +431,11 @@ class AuraLoader:
         self._state = dataclasses.replace(self._state, identity=identity)
         self._emit_state()
 
-    def _regate(self, pending: list[Aura], identity: str, gate: dict[str, AuraState]) -> None:
+    def _regate(
+        self, pending: list[Aura], gate: dict[str, AuraState], extra: dict[str, AuraState], identity: str,
+    ) -> None:
         self.loaded_identity = identity
+        self.decisions.update(extra)
         accepted: list[Aura] = []
         try:
             accepted = self._admit(pending, gate)

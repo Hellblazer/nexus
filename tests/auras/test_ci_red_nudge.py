@@ -13,6 +13,7 @@ import lupa.lua54 as lua54
 import pytest
 
 from nexus.auras import enumerate_auras, load_aura, parse_aura
+from nexus.auras.aura import expand_template
 from nexus.auras.check import check_auras
 from nexus.auras.threads_block import MAX_STATE_CHARS, sanitize_state
 from nexus.lua_runtime import header as hd
@@ -93,7 +94,8 @@ def test_a_value_that_is_not_in_its_grammar_is_refused_without_echoing_it(field:
 def test_the_header_declares_the_fields_a_nudge_row_carries_and_grants_nothing() -> None:
     h = hd.parse(SOURCE, name="ci_red_nudge")
     assert [(a.name, a.type, a.optional) for a in h.args] == [
-        ("sha", "string", False), ("next", "string", True), ("next_alias", "string", True), ("me", "string", False)]
+        ("sha", "string", False), ("branch", "string", True), ("next", "string", True), ("next_alias", "string", True),
+        ("me", "string", False)]
     assert h.grants == frozenset()
     assert sc.check(SOURCE, h.grants) == frozenset()
 
@@ -101,23 +103,31 @@ def test_the_header_declares_the_fields_a_nudge_row_carries_and_grants_nothing()
 # -- the aura ---------------------------------------------------------------------
 
 
-def _shipped():
+def _template():
     return load_aura("ci_develop_nudge", cwd=None)
 
 
+def _shipped():
+    """The shipped template as push-train's one base expands it: the aura a session serving nexus-develop loads."""
+    [one], _ = expand_template(_template(), ("nexus-develop",))
+    return one
+
+
 def test_the_aura_triggers_on_the_nudge_kind_of_the_owner_post_and_is_gated_on_push_train() -> None:
-    aura = _shipped()
-    assert aura.load_group == "push-train"
-    assert aura.subspace == OWNER_SUBSPACE
+    template, aura = _template(), _shipped()
+    assert template.is_template and template.subspace == "board/ci/{serves}--owner" and template.load_group == "push-train"
+    assert (aura.load_group, aura.subspace, aura.threads) == ("push-train", OWNER_SUBSPACE, "develop CI nudge (nexus-develop)")
     assert dict(aura.match) == {"kind": "nudge", "from": "engine"}
     assert dict(aura.clear_match or ()) == {"kind": "clear", "from": "engine"}
     assert aura.procedure == "ci_red_nudge" and aura.channel == "wake"
     assert {name: (spec.kind, spec.value) for name, spec in aura.args} == {
-        "sha": ("dims", "sha"), "next": ("body", "next"), "next_alias": ("body", "next_alias"), "me": ("self", "identity")}
+        "sha": ("dims", "sha"), "branch": ("literal", "develop"), "next": ("body", "next"),
+        "next_alias": ("body", "next_alias"), "me": ("self", "identity")}
 
 
 def test_the_aura_shows_in_a_block_of_its_own_so_it_never_overwrites_the_red_notice() -> None:
-    assert _shipped().threads != load_aura("ci_develop_red", cwd=None).threads
+    [red], _ = expand_template(load_aura("ci_develop_red", cwd=None), ("nexus-develop",))
+    assert _shipped().threads != red.threads and _template().threads != load_aura("ci_develop_red", cwd=None).threads
 
 
 def test_the_aura_passes_every_check_that_needs_no_engine(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -130,7 +140,7 @@ def test_the_aura_passes_every_check_that_needs_no_engine(monkeypatch: pytest.Mo
 
 def test_the_aura_file_is_the_parse_of_its_own_text() -> None:
     shipped = (ROOT / "ci_develop_nudge.aura.toml").read_text(encoding="utf-8")
-    assert _shipped() == parse_aura(shipped.encode(), name="ci_develop_nudge")
+    assert _template() == parse_aura(shipped.encode(), name="ci_develop_nudge")
 
 
 # -- through the runtime: only an engine-written nudge fires, and a nudge to someone else writes no block ---------
@@ -170,7 +180,7 @@ def _offer(dims: dict[str, str], body: str, result: dict, sender_session: str | 
 
 def test_an_engine_nudge_naming_me_runs_the_procedure_with_the_row_and_my_identity() -> None:
     rec = _offer({"kind": "nudge", "sha": SHA, "from": "engine"}, '{"next": "i7"}', {"show": True, "text": "x", "wake": True})
-    assert rec.runs == [{"sha": SHA, "next": ME, "me": ME}] and rec.sets == ["x"]
+    assert rec.runs == [{"sha": SHA, "branch": "develop", "next": ME, "me": ME}] and rec.sets == ["x"]
 
 
 def test_a_result_that_does_not_show_writes_no_block() -> None:
@@ -223,4 +233,4 @@ def test_a_nudge_a_client_posted_as_the_engine_fires_nothing_and_wakes_no_one(se
 
 def test_a_clear_row_removes_the_nudge_block() -> None:
     rec = _offer({"kind": "clear", "sha": SHA, "from": "engine"}, "{}", {"show": True, "text": "x", "wake": True})
-    assert rec.removes == ["ci_develop_nudge"] and rec.runs == []
+    assert rec.removes == ["ci_develop_nudge@nexus-develop"] and rec.runs == []

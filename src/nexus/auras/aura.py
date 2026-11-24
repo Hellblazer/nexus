@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import re
 import tomllib
-from dataclasses import dataclass, fields
+from collections.abc import Iterable
+from dataclasses import dataclass, fields, replace
 from typing import Literal
 
+from nexus.ci_base import branch_of
 from nexus.lua_runtime.header import ARG_NAME_RE, RESERVED
 from nexus.lua_runtime.library import READ_LIMIT, LibraryError, check_name
 from nexus.lua_runtime.limits import Limits
@@ -34,6 +36,19 @@ KINDS: tuple[str, ...] = (
     "bad_summary", "bad_field", "bad_group",
 )
 
+#: Separates a template's name from the base in an expansion's name (``ci_develop_red@nexus-develop``).
+EXPANSION_SEP: str = "@"
+
+#: The placeholder a template's trigger subspace carries once, inside its topic (RDR-252 "Aura per base"): the loader
+#: expands it into one aura per base in the ``serves`` list of the ``[load]`` group. It is recognised on purpose, never
+#: read as a literal topic.
+SERVES_PLACEHOLDER: str = "{serves}"
+#: The two placeholders of a template's ``display.threads``: the base (required, so no two expansions share a block) and
+#: the branch, the part of the base after its last hyphen (:func:`nexus.ci_base.branch_of`).
+BASE_PLACEHOLDER: str = "{base}"
+BRANCH_PLACEHOLDER: str = "{branch}"
+#: The ``self.<name>`` an argument may take from the base of a template's expansion.
+SELF_BRANCH: str = "self.branch"
 #: The longest ``display.threads`` value: it becomes the heading ``## aura: <value>`` in a threads entry.
 MAX_THREADS_CHARS: int = 80
 #: ``AuraError.key`` for a refusal of the file as a whole.
@@ -85,7 +100,8 @@ class AuraError(Exception):
 class ArgSource:
     """Where an argument's value comes from: ``dims.<field>`` or ``body.<field>`` (``value`` is the
     field), the tuple ``id`` or ``subspace`` (``value`` empty), a ``literal`` (``value`` is the text), or
-    ``self.identity`` (kind ``self``, ``value`` ``identity``): the host fills it at load, not the row."""
+    ``self.identity`` (kind ``self``, ``value`` ``identity``): the host fills it at load, not the row. A template's
+    ``self.branch`` (kind ``self``, ``value`` ``branch``) becomes a ``literal`` of the branch when the template expands."""
 
     kind: Literal["dims", "body", "id", "subspace", "literal", "self"]
     value: str = ""
@@ -110,6 +126,15 @@ class Aura:
     limits: Limits
     #: ``[load] group``: the aura loads only in a session whose identity is a member of that group (RDR-252).
     load_group: str | None = None
+    #: The base a template's expansion is for (``nexus-develop``); ``None`` for a file's own aura and for a template.
+    base: str | None = None
+    #: The template's name when this aura is one of its expansions (:func:`expand_template`).
+    expanded_from: str | None = None
+
+    @property
+    def is_template(self) -> bool:
+        """True for an aura whose trigger subspace carries :data:`SERVES_PLACEHOLDER`: it is expanded, never subscribed."""
+        return SERVES_PLACEHOLDER in self.subspace
 
 
 class _Reader:
@@ -160,6 +185,8 @@ class _Reader:
             return ArgSource("subspace")
         if text == SELF_IDENTITY:
             return ArgSource("self", "identity")
+        if text == SELF_BRANCH:
+            return ArgSource("self", "branch")
         if m := _DIMS_RE.fullmatch(text):
             return ArgSource("dims", m.group(1))
         if m := _BODY_RE.fullmatch(text):
@@ -168,7 +195,7 @@ class _Reader:
             return ArgSource("literal", m.group(1))
         raise self.fail(
             "bad_source", key,
-            f"{text!r} is not dims.<field>, body.<field>, id, subspace, {SELF_IDENTITY} or a literal written = \"value\"",
+            f"{text!r} is not dims.<field>, body.<field>, id, subspace, {SELF_IDENTITY}, {SELF_BRANCH} (a template's) or a literal written = \"value\"",
         )
 
     def limits(self, raw: dict[str, object]) -> Limits:
@@ -219,7 +246,18 @@ def parse_aura(data: bytes, *, name: str) -> Aura:
     if aura != name:
         raise r.fail("name_mismatch", "aura", f"is {aura!r}, and the file is named {name!r}")
     r.name_of(procedure, "procedure")
-    if _SUBSPACE_RE.fullmatch(subspace) is None:
+    template = "{" in subspace or "}" in subspace
+    if template:
+        rest = subspace.replace(SERVES_PLACEHOLDER, "", 1)
+        if subspace.count(SERVES_PLACEHOLDER) != 1 or "{" in rest or "}" in rest or _SUBSPACE_RE.fullmatch(
+            subspace.replace(SERVES_PLACEHOLDER, "x")
+        ) is None:
+            raise r.fail(
+                "bad_subspace", "trigger.subspace",
+                f"{subspace!r} uses a brace other than one {SERVES_PLACEHOLDER} inside the topic of a board/<topic> "
+                "or board/ci/<topic>",
+            )
+    elif _SUBSPACE_RE.fullmatch(subspace) is None:
         raise r.fail(
             "bad_subspace", "trigger.subspace",
             f"{subspace!r} is not one concrete board/<topic> or board/ci/<topic>",
@@ -250,9 +288,17 @@ def parse_aura(data: bytes, *, name: str) -> Aura:
         if dict(clear_match) == dict(match):
             raise r.fail("clear_equals_trigger", "clear.match", "equals trigger.match, so a post would both fire and clear")
 
+    shown = threads
+    if template:
+        shown = _check_template_threads(r, threads)
+    elif BASE_PLACEHOLDER in threads or BRANCH_PLACEHOLDER in threads:
+        raise r.fail(
+            "bad_threads", "display.threads",
+            f"{BASE_PLACEHOLDER} and {BRANCH_PLACEHOLDER} belong to a template ({SERVES_PLACEHOLDER} in the trigger subspace)",
+        )
     if (
-        not threads.strip() or not threads.isprintable() or not threads.isascii()
-        or threads != threads.strip() or len(threads) > MAX_THREADS_CHARS
+        not shown.strip() or not shown.isprintable() or not shown.isascii()
+        or shown != shown.strip() or len(shown) > MAX_THREADS_CHARS
     ):
         raise r.fail(
             "bad_threads", "display.threads",
@@ -281,9 +327,72 @@ def parse_aura(data: bytes, *, name: str) -> Aura:
                 f"{load_group!r} is not a group name: a letter or digit, then letters, digits, '.', '_' or '-', at most 64",
             )
 
+    if template and load_group is None:
+        raise r.fail(
+            "bad_subspace", "trigger.subspace",
+            f"a {SERVES_PLACEHOLDER} template needs [load] group: the bases it expands to are that group's serves",
+        )
+    if not template:
+        for arg, src in args:
+            if src == ArgSource("self", "branch"):
+                raise r.fail("bad_source", f"args.{arg}", f"{SELF_BRANCH} is the branch of a base, so only a {SERVES_PLACEHOLDER} template has one")
+
     limits = r.limits(r.table(top["limits"], "limits", _LIMIT_KEYS)) if "limits" in top else Limits()
     return Aura(
         name=aura, summary=summary, procedure=procedure, subspace=subspace, match=match, args=tuple(args),
         when_field=when_field, clear_match=clear_match, threads=threads, channel=channel, limits=limits,
         load_group=load_group,
     )
+
+
+def _check_template_threads(r: _Reader, threads: str) -> str:
+    """A template's ``display.threads`` as the file may write it: ``{base}`` once or more (so no two expansions share a
+    block) and ``{branch}``, no other brace. Returns the text with each placeholder replaced by a stand-in, for the
+    value rules the expansions must meet."""
+    rest = threads.replace(BASE_PLACEHOLDER, "").replace(BRANCH_PLACEHOLDER, "")
+    if "{" in rest or "}" in rest:
+        raise r.fail("bad_threads", "display.threads", f"a template's threads value takes only {BASE_PLACEHOLDER} and {BRANCH_PLACEHOLDER} in braces")
+    if BASE_PLACEHOLDER not in threads:
+        raise r.fail(
+            "bad_threads", "display.threads",
+            f"a template's threads value must contain {BASE_PLACEHOLDER}, so the expansions for two bases never write one block",
+        )
+    return threads.replace(BASE_PLACEHOLDER, "x").replace(BRANCH_PLACEHOLDER, "x")
+
+
+def expand_template(aura: Aura, serves: Iterable[str]) -> tuple[list[Aura], list[tuple[str, str]]]:
+    """The expansions of the template *aura* for the bases in *serves*, in order, and the bases left out with why.
+
+    Each expansion is named ``<aura name>@<base>``, triggers on the subspace with its base in place of
+    :data:`SERVES_PLACEHOLDER`, shows in the threads block the template's value gives with ``{base}`` and ``{branch}``
+    filled, and passes the base's branch (:func:`nexus.ci_base.branch_of`) as a literal wherever the template mapped
+    ``self.branch``. A base twice is expanded once. A base whose subspace is no board topic, or whose threads value breaks the
+    threads rules (80 printable ASCII characters), is left out and named in the second list. An aura that is not a
+    template expands to itself.
+    """
+    if not aura.is_template:
+        return [aura], []
+    out: list[Aura] = []
+    rejected: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for base in serves:
+        if base in seen:
+            continue
+        seen.add(base)
+        subspace = aura.subspace.replace(SERVES_PLACEHOLDER, base)
+        if _SUBSPACE_RE.fullmatch(subspace) is None:
+            rejected.append((base, f"{subspace!r} is not one concrete board/<topic> or board/ci/<topic>"))
+            continue
+        branch = branch_of(base)
+        threads = aura.threads.replace(BASE_PLACEHOLDER, base).replace(BRANCH_PLACEHOLDER, branch)
+        if not threads.isprintable() or not threads.isascii() or len(threads) > MAX_THREADS_CHARS:
+            rejected.append((base, f"the threads value {threads!r} is over {MAX_THREADS_CHARS} characters or not printable ASCII"))
+            continue
+        args = tuple(
+            (name, ArgSource("literal", branch) if src == ArgSource("self", "branch") else src) for name, src in aura.args
+        )
+        out.append(replace(
+            aura, name=f"{aura.name}{EXPANSION_SEP}{base}", subspace=subspace, threads=threads, args=args,
+            base=base, expanded_from=aura.name,
+        ))
+    return out, rejected

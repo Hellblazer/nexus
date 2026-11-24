@@ -118,6 +118,8 @@ _ABSENT = object()
 
 def _arg(spec: ArgSource, row: Any, name: str, identity: str | None = None) -> Any:
     if spec.kind == "self":
+        if spec.value != "identity":  # self.branch is a template's: expansion made it a literal, so none is left to fill here
+            raise _Failure("args", f"{name}: self.{spec.value} is not something a loaded aura fills")
         if identity is None:
             raise _Failure("args", f"{name}: this session has no identity to fill self.{spec.value} with")
         return identity

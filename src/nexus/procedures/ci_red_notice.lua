@@ -1,6 +1,6 @@
 -- procedure: ci_red_notice
 -- summary: The line an aura shows for an owner row of a red develop: who owns it and what this session does.
--- args: sha:string, owner:string?, owner_alias:string?, next:string?, next_alias:string?, refresh:boolean, reason:string, stalled:boolean?, stalled_owner:string?, stalled_since:string?, stalled_sign:string?, open_minutes:integer?, previous_owner:string?, me:string
+-- args: sha:string, branch:string?, owner:string?, owner_alias:string?, next:string?, next_alias:string?, refresh:boolean, reason:string, stalled:boolean?, stalled_owner:string?, stalled_since:string?, stalled_sign:string?, open_minutes:integer?, previous_owner:string?, me:string
 -- grants: none
 
 -- RDR-252 Step 4 (nexus-igea9.7), the procedure the shipped ci_develop_red aura wraps. It reads nothing and
@@ -30,6 +30,11 @@
 -- escalated and names me or names no one (the load gate has made me a member of the serving group). Next up is shown
 -- and never woken here (RDR-252 audit S2). A refresh row rewrites the block and does not wake again.
 --
+-- The branch the red is on, for the first words of every text ("Develop is red at ..."), is the aura's own: a template
+-- aura (RDR-252 "Aura per base", trigger board/ci/{serves}--owner) maps branch = "self.branch", and the expansion for a
+-- base fills it with the part of the base after its last hyphen ("develop" for nexus-develop). An aura that maps none
+-- reads as it did before the template: the branch is develop.
+--
 -- Values a tuple's writer controls (sha, owner, owner_alias, next, next_alias, reason, me) are checked against their grammar and never
 -- echoed in an error: the error text is logged.
 
@@ -48,6 +53,10 @@ local function segment(value, name, what)
 end
 
 local me = segment(args.me, "me")
+local branch = segment(args.branch, "branch", "a branch") or "develop"
+if #branch > 32 then
+  error("branch must be a branch of at most 32 letters, digits, dot, dash and underscore; got " .. #branch .. " characters", 0)
+end
 local owner = segment(args.owner, "owner")
 local next_up = segment(args.next, "next")
 segment(args.next_alias, "next_alias", "an alias")
@@ -78,7 +87,7 @@ local function clock(t)
   return h .. ":" .. m
 end
 
-local head = "Develop is red at " .. string.sub(sha, 1, 7)
+local head = string.upper(string.sub(branch, 1, 1)) .. string.sub(branch, 2) .. " is red at " .. string.sub(sha, 1, 7)
 -- The owner acknowledges with `nx ci ack <sha7>`, which posts the row with the caller's own identity id in `from`
 -- (nexus-igea9). The engine counts the row's sender-session stamp, not `from`, and `nx group ack-times` counts by the
 -- stamp too; `from` is a label people read. The hint is a fixed short form, so it always fits whole.

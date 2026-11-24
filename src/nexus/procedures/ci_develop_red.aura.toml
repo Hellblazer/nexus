@@ -1,16 +1,17 @@
 aura = "ci_develop_red"
-summary = "A red develop sha and who owns it, posted to this session's threads entry; wakes the owner; next up is shown it and woken by ci_develop_nudge."
+summary = "A red CI sha on a branch the group serves and who owns it, posted to this session's threads entry; wakes the owner; next up is shown it and woken by ci_develop_nudge."
 procedure = "ci_red_notice"
 
 [load]
 group = "push-train"
 
 [trigger]
-subspace = "board/ci/nexus-develop--owner"
+subspace = "board/ci/{serves}--owner"
 match = { kind = "owner", from = "engine" }
 
 [args]
 sha = "dims.sha"
+branch = "self.branch"
 owner = "body.owner"
 owner_alias = "body.owner_alias"
 next = "body.next"
@@ -33,4 +34,4 @@ match = { kind = "clear", from = "engine" }
 
 [display]
 channel = "wake"
-threads = "develop CI red"
+threads = "{branch} CI red ({base})"

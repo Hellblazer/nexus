@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from nexus.auras import parse_aura
+from nexus.auras.aura import expand_template
 from nexus.auras.runtime import AuraRuntime, channel_notice
 from nexus.auras.session import start_for_waiter
 from nexus.auras.threads_block import THREADS_PROJECT, ThreadsBlockWriter
@@ -85,6 +86,14 @@ def _counting_run(name, args=None, limits=None):
 
 def _no_store():
     raise AssertionError("this test writes no threads entry")
+
+
+def _nexus_develop(name: str):
+    """The shipped template *name* as the nexus push-train group (serving nexus-develop) loads it."""
+    from nexus.auras import load_aura  # noqa: PLC0415 -- only these tests read the shipped root
+
+    [one], _ = expand_template(load_aura(name, cwd=None), ("nexus-develop",))
+    return one
 
 
 def _sid() -> str:
@@ -445,7 +454,7 @@ def test_a_group_gated_aura_loads_through_the_real_wiring_and_fires_with_me_fill
     token = tmp_path / "identity.token"
     monkeypatch.setenv("NX_IDENTITY_TOKEN", str(token))
     monkeypatch.setattr("nexus.daemon.service_registry.pid_alive", lambda _p: True)
-    aura = load_aura("ci_develop_red", cwd=None)
+    aura = _nexus_develop("ci_develop_red")
     owner_subspace = aura.subspace
 
     async def scenario(memberships: list[str], title: str, sid: str):
@@ -491,14 +500,14 @@ def test_a_group_gated_aura_loads_through_the_real_wiring_and_fires_with_me_fill
     assert sorted(set(calls)) == ["GET /v1/group/push-train", "GET /v1/identity/i7/memberships"], "one read of each"
     assert loader.flush_state(), "the state file is written on a worker thread"
     written = read_state(state_dir(cfg) / f"loaded-{parent}.1700.json")
-    assert written is not None and written.identity == "i7" and written.auras["ci_develop_red"].loaded
+    assert written is not None and written.identity == "i7" and written.auras["ci_develop_red@nexus-develop"].loaded
 
     sid2, title2 = _sid(), f"s-{uuid.uuid4().hex[:8]}"
     _seed_entry(title2, sid2)
     before = len(_REAL_RUNS)
     subs, loader, sender, calls = asyncio.run(scenario(["some-other-group"], title2, sid2))
     assert subs.aura_topics() == [] and _ran(before) == 0 and sender.calls == []
-    assert loader.decisions["ci_develop_red"].reason == "not_a_member"
+    assert loader.decisions["ci_develop_red"].reason == "not_a_member", "a template the gate refuses is recorded under its own name"
     assert "GET /v1/group/push-train" not in calls, "a non-member reads no group"
     assert len(identity_lease._IDENTITY_LISTENERS) == len(listeners) + 2, "each start listens to the lease"  # noqa: SLF001
     loader.close()
@@ -537,7 +546,7 @@ def test_a_server_that_starts_with_no_token_loads_the_gated_aura_when_the_lease_
     token = tmp_path / "identity.token"                               # absent until the hook writes it
     monkeypatch.setenv("NX_IDENTITY_TOKEN", str(token))
     monkeypatch.setattr("nexus.daemon.service_registry.pid_alive", lambda _p: True)
-    owner_subspace = load_aura("ci_develop_red", cwd=None).subspace
+    owner_subspace = _nexus_develop("ci_develop_red").subspace
     sid, title = _sid(), f"s-{uuid.uuid4().hex[:8]}"
     _seed_entry(title, sid)
     (claude / "sessions" / f"{parent}.json").write_text(json.dumps(
@@ -578,12 +587,12 @@ def test_a_server_that_starts_with_no_token_loads_the_gated_aura_when_the_lease_
     unbound, subs, loader, sender = asyncio.run(scenario())
     assert unbound == ("unbound", [], [_TOPIC] if with_plain_aura else []), "no identity: nothing gated read or loaded"
     assert sorted(subs.aura_topics()) == sorted([owner_subspace, *([_TOPIC] if with_plain_aura else [])])
-    assert loader.loaded_identity == "i7" and loader.decisions["ci_develop_red"].loaded
+    assert loader.loaded_identity == "i7" and loader.decisions["ci_develop_red@nexus-develop"].loaded
     assert sorted(set(calls)) == ["GET /v1/group/push-train", "GET /v1/identity/i7/memberships"]
     assert _ran(before) == 1, "the owner row ran the procedure once"
     ack = f" Ack: nx ci ack {_RED_SHA[:7]}."
     assert f"state: Develop is red at 8b30c16, first red in your push. Diagnose it.{ack}\n" in _entry(title), "me was i7"
-    assert [text for text, _meta in sender.calls] == [channel_notice(load_aura("ci_develop_red", cwd=None), owner_subspace, "o1")]
+    assert [text for text, _meta in sender.calls] == [channel_notice(_nexus_develop("ci_develop_red"), owner_subspace, "o1")]
 
 
 def test_the_shipped_ci_develop_red_fires_and_clears_through_the_real_worker(repo: Path) -> None:
@@ -597,7 +606,7 @@ def test_the_shipped_ci_develop_red_fires_and_clears_through_the_real_worker(rep
     sid, title = _sid(), f"s-{uuid.uuid4().hex[:8]}"
     _seed_entry(title, sid)
     notices: list[str] = []
-    aura = load_aura("ci_develop_red", cwd=None)
+    aura = _nexus_develop("ci_develop_red")
     owner_subspace = aura.subspace
     assert owner_subspace == "board/ci/nexus-develop--owner"
     rt = AuraRuntime(
@@ -623,7 +632,7 @@ def test_the_shipped_ci_develop_red_fires_and_clears_through_the_real_worker(rep
     _settle(rt)
     assert _ran(before) == 1
     assert (
-        f"## aura: develop CI red\nstate: Develop is red at 8b30c16, first red in your push. Diagnose it.{ack}\n"
+        f"## aura: develop CI red (nexus-develop)\nstate: Develop is red at 8b30c16, first red in your push. Diagnose it.{ack}\n"
         in _entry(title)
     )
     assert notices == [channel_notice(aura, owner_subspace, "t1")]

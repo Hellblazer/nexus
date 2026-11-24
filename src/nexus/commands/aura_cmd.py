@@ -244,9 +244,27 @@ def _loaded_text(load: dict[str, Any] | None) -> str:
         return ""
     group = f" (group {load['group']})" if load["group"] else ""
     if load["loaded"]:
-        return f"  loaded{group}"
+        bases = f" for {', '.join(load['bases'])}" if load.get("bases") else ""
+        return f"  loaded{bases}{group}"
     hint = _RECONNECT_HINT if load["reason"] in _RETRY_ON_RECONNECT else ""
     return f"  not loaded: {load['reason']}{group}{hint}"
+
+
+def _template_load(
+    loaded: dict[str, loaded_state.AuraState], name: str,
+) -> tuple[loaded_state.AuraState | None, list[str]]:
+    """What the state file says of a ``{serves}`` template (RDR-252 "Aura per base"): the server records its expansions as
+    ``<name>@<base>``, so the template is loaded when any expansion is, for those bases; otherwise the reason of the first
+    refused one. ``(None, [])`` when the file says nothing of it."""
+    prefix = f"{name}@"
+    expansions = {k[len(prefix):]: v for k, v in sorted(loaded.items()) if k.startswith(prefix)}
+    up = [b for b, v in expansions.items() if v.loaded]
+    if up:
+        return loaded_state.AuraState(True, "loaded", expansions[up[0]].group), up
+    if expansions:
+        first = next(iter(expansions.values()))
+        return loaded_state.AuraState(False, first.reason, first.group), []
+    return None, []
 
 
 def _unclaimed_files_text(listed: tuple[loaded_state.LoadedState, ...]) -> list[str]:
@@ -307,12 +325,17 @@ def list_cmd(json_out: bool) -> None:
         d = states[e.name]
         r = e.result
         seen = loaded.get(e.name) if d.on else None
+        bases: list[str] = []
+        if d.on and isinstance(r, Aura) and r.is_template and seen is None:
+            seen, bases = _template_load(loaded, e.name)
         if d.on and view.claimed and view.state is None and isinstance(r, Aura) and r.load_group:
             unwritten[e.name] = (
                 f"  not loaded: no state file from this session's MCP server (group {r.load_group}); "
                 "it has not started or has no identity: reconnect it (/mcp) once the session is bound"
             )
-        load = None if seen is None else {"loaded": seen.loaded, "reason": seen.reason, "group": seen.group}
+        load = None if seen is None else {
+            "loaded": seen.loaded, "reason": seen.reason, "group": seen.group, **({"bases": bases} if bases else {}),
+        }
         if isinstance(r, Aura):
             rows.append({
                 "name": e.name, "root": e.root, "summary": r.summary,
