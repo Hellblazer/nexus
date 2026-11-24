@@ -1,0 +1,2225 @@
+{
+ "version": {
+  "app_version": "1.0-SNAPSHOT",
+  "release_version": "0.1.190",
+  "build_ref": "7deb77047+1794639995-2533580",
+  "nx_answer_steps_supported": true,
+  "nx_answer_run_complete_supported": true,
+  "nx_answer_run_summary_supported": true,
+  "nx_answer_runs_before_id_supported": true,
+  "catalog_graph_scope_filter_supported": true,
+  "catalog_graph_node_walk_supported": true,
+  "catalog_manifest_row_limit_supported": true,
+  "nx_answer_out_of_step_cost_supported": true,
+  "search_row_owner_span_supported": true,
+  "vector_search_chash_allow_supported": true,
+  "catalog_sensitivity_supported": true,
+  "vector_sensitivity_exclude_supported": true,
+  "rerank_sensitive_exclusion_supported": true,
+  "route_b_manifest_keys_supported": true,
+  "route_c_manifest_keys_supported": true,
+  "catalog_sensitive_list_supported": true,
+  "catalog_manifest_fillable_supported": true,
+  "catalog_stub_metadata_supported": true,
+  "chash_conformance_constraints_supported": true,
+  "catalog_manifest_foreign_collection_supported": true,
+  "catalog_manifest_fill_job_supported": true,
+  "catalog_index_run_census_supported": true,
+  "catalog_next_seq_drift_read_supported": true,
+  "chash_constraints_validate_job_supported": true,
+  "tenant_export_supported": true,
+  "tenant_export_format_version": 1,
+  "tenant_import_supported": true,
+  "process_uptime_seconds": 0,
+  "process_start_time": "2026-11-14T07:08:00.894Z",
+  "embedding_mode": "onnx-local",
+  "embedding_models": [
+   "bge-base-en-v15-768"
+  ],
+  "embedding_profile": "bge",
+  "reranker": "ms-marco-minilm-l6-v2",
+  "reranker_available": true,
+  "embedding_degraded": null,
+  "schema_latest_id": "grants-nexus-diag-5",
+  "schema_changeset_count": 573
+ },
+ "args": {
+  "collections": 8,
+  "scale": 0.2,
+  "runs": 1,
+  "warmup": 0,
+  "out": "bbtc2e-smoke.json"
+ },
+ "counts": {
+  "code__bbtc2c0__bge-base-en-v15-768__v1": 10,
+  "docs__bbtc2c1__bge-base-en-v15-768__v1": 20,
+  "knowledge__bbtc2c2__bge-base-en-v15-768__v1": 32,
+  "rdr__bbtc2c3__bge-base-en-v15-768__v1": 50,
+  "code__bbtc2c4__bge-base-en-v15-768__v1": 80,
+  "docs__bbtc2c5__bge-base-en-v15-768__v1": 130,
+  "knowledge__bbtc2c6__bge-base-en-v15-768__v1": 200,
+  "rdr__bbtc2c7__bge-base-en-v15-768__v1": 440
+ },
+ "info": {
+  "probe": [
+   {
+    "name": "text_gate_probe_768",
+    "secdef": true,
+    "owner": "nxtest"
+   }
+  ],
+  "leaf": "nexus.chunks_m0a90d9bc_t_1dea5f67b43f6985",
+  "settings": {
+   "effective_cache_size": "524288",
+   "gin_fuzzy_search_limit": "0",
+   "jit": "on",
+   "max_parallel_workers_per_gather": "2",
+   "random_page_cost": "4",
+   "server_version": "17.5",
+   "shared_buffers": "16384",
+   "work_mem": "4096"
+  },
+  "db_collate": "C",
+  "db_ctype": "C",
+  "indexes": "CREATE UNIQUE INDEX chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey ON nexus.chunks_m0a90d9bc_t_1dea5f67b43f6985 USING btree (tenant_id, collection, chash, embedding_model)\nCREATE INDEX chunks_m0a90d9bc_t_1dea5f67b43f6985_embedding_1024_idx ON nexus.chunks_m0a90d9bc_t_1dea5f67b43f6985 USING hnsw (embedding_1024 nexus.vector_cosine_ops) WITH (m='16', ef_construction='64')\nCREATE INDEX chunks_m0a90d9bc_t_1dea5f67b43f6985_embedding_384_idx ON nexus.chunks_m0a90d9bc_t_1dea5f67b43f6985 USING hnsw (embedding_384 nexus.vector_cosine_ops) WITH (m='16', ef_construction='64')\nCREATE INDEX chunks_m0a90d9bc_t_1dea5f67b43f6985_embedding_768_idx ON nexus.chunks_m0a90d9bc_t_1dea5f67b43f6985 USING hnsw (embedding_768 nexus.vector_cosine_ops) WITH (m='16', ef_construction='64')\nCREATE INDEX chunks_m0a90d9bc_t_1dea5f67b43f6985_tenant_id_chash_idx ON nexus.chunks_m0a90d9bc_t_1dea5f67b43f6985 USING btree (tenant_id, chash)\nCREATE INDEX chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_text_idx ON nexus.chunks_m0a90d9bc_t_1dea5f67b43f6985 USING gin (chunk_text nexus.gin_trgm_ops)\nCREATE INDEX chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_tsv_idx ON nexus.chunks_m0a90d9bc_t_1dea5f67b43f6985 USING gin (chunk_tsv)",
+  "leaf_size": "15 MB",
+  "explain_role": "nxtest",
+  "arm_permits": [
+   "2026-11-14 07:08:00,849 INFO  [main] d.n.s.vectors.PgVectorRepository - event=search_fanout_arm_permits effective=4 pool_size=8 default=4 ceiling=6 configured=4 source=default"
+  ]
+ },
+ "runs": [
+  {
+   "wall": 0.486143680755049,
+   "rows": 318,
+   "err": null,
+   "calls": [
+    {
+     "kind": "hybrid",
+     "n": 2,
+     "s": 0.058270813431590796,
+     "cols": [
+      "code__bbtc2c0__bge-base-en-v15-768__v1",
+      "docs__bbtc2c1__bge-base-en-v15-768__v1"
+     ],
+     "t0": 2732676.522459788
+    },
+    {
+     "kind": "hybrid",
+     "n": 2,
+     "s": 0.09325209306553006,
+     "cols": [
+      "knowledge__bbtc2c2__bge-base-en-v15-768__v1",
+      "rdr__bbtc2c3__bge-base-en-v15-768__v1"
+     ],
+     "t0": 2732676.487782041
+    },
+    {
+     "kind": "hybrid",
+     "n": 2,
+     "s": 0.06716511491686106,
+     "cols": [
+      "code__bbtc2c4__bge-base-en-v15-768__v1",
+      "docs__bbtc2c5__bge-base-en-v15-768__v1"
+     ],
+     "t0": 2732676.544020161
+    },
+    {
+     "kind": "hybrid",
+     "n": 2,
+     "s": 0.08785578422248363,
+     "cols": [
+      "knowledge__bbtc2c6__bge-base-en-v15-768__v1",
+      "rdr__bbtc2c7__bge-base-en-v15-768__v1"
+     ],
+     "t0": 2732676.579786236
+    }
+   ],
+   "events": [],
+   "q": "D",
+   "path": "hybrid",
+   "round": 0,
+   "warmup": false
+  },
+  {
+   "wall": 0.2294321800582111,
+   "rows": 318,
+   "err": null,
+   "calls": [
+    {
+     "kind": "hybrid",
+     "n": 2,
+     "s": 0.053632404655218124,
+     "cols": [
+      "code__bbtc2c0__bge-base-en-v15-768__v1",
+      "docs__bbtc2c1__bge-base-en-v15-768__v1"
+     ],
+     "t0": 2732677.093831146
+    },
+    {
+     "kind": "hybrid",
+     "n": 2,
+     "s": 0.044587729033082724,
+     "cols": [
+      "knowledge__bbtc2c2__bge-base-en-v15-768__v1",
+      "rdr__bbtc2c3__bge-base-en-v15-768__v1"
+     ],
+     "t0": 2732677.163815169
+    },
+    {
+     "kind": "hybrid",
+     "n": 2,
+     "s": 0.06931112101301551,
+     "cols": [
+      "code__bbtc2c4__bge-base-en-v15-768__v1",
+      "docs__bbtc2c5__bge-base-en-v15-768__v1"
+     ],
+     "t0": 2732677.151967454
+    },
+    {
+     "kind": "hybrid",
+     "n": 2,
+     "s": 0.08789394609630108,
+     "cols": [
+      "knowledge__bbtc2c6__bge-base-en-v15-768__v1",
+      "rdr__bbtc2c7__bge-base-en-v15-768__v1"
+     ],
+     "t0": 2732677.181651042
+    }
+   ],
+   "events": [],
+   "q": "D",
+   "path": "route",
+   "round": 0,
+   "warmup": false
+  },
+  {
+   "wall": 0.07885699393227696,
+   "rows": 120,
+   "err": null,
+   "calls": [],
+   "events": [],
+   "q": "D",
+   "path": "vector",
+   "round": 0,
+   "warmup": false
+  },
+  {
+   "wall": 0.23327529383823276,
+   "rows": 301,
+   "err": null,
+   "calls": [
+    {
+     "kind": "hybrid",
+     "n": 2,
+     "s": 0.08127325074747205,
+     "cols": [
+      "code__bbtc2c0__bge-base-en-v15-768__v1",
+      "docs__bbtc2c1__bge-base-en-v15-768__v1"
+     ],
+     "t0": 2732677.81769879
+    },
+    {
+     "kind": "hybrid",
+     "n": 2,
+     "s": 0.05128597002476454,
+     "cols": [
+      "knowledge__bbtc2c6__bge-base-en-v15-768__v1",
+      "rdr__bbtc2c7__bge-base-en-v15-768__v1"
+     ],
+     "t0": 2732677.876168839
+    },
+    {
+     "kind": "hybrid",
+     "n": 2,
+     "s": 0.032903734128922224,
+     "cols": [
+      "code__bbtc2c4__bge-base-en-v15-768__v1",
+      "docs__bbtc2c5__bge-base-en-v15-768__v1"
+     ],
+     "t0": 2732677.926821963
+    },
+    {
+     "kind": "hybrid",
+     "n": 2,
+     "s": 0.026540196035057306,
+     "cols": [
+      "knowledge__bbtc2c2__bge-base-en-v15-768__v1",
+      "rdr__bbtc2c3__bge-base-en-v15-768__v1"
+     ],
+     "t0": 2732677.955184243
+    }
+   ],
+   "events": [],
+   "q": "E",
+   "path": "hybrid",
+   "round": 0,
+   "warmup": false
+  },
+  {
+   "wall": 0.23019069386646152,
+   "rows": 301,
+   "err": null,
+   "calls": [
+    {
+     "kind": "hybrid",
+     "n": 2,
+     "s": 0.04880986921489239,
+     "cols": [
+      "code__bbtc2c0__bge-base-en-v15-768__v1",
+      "docs__bbtc2c1__bge-base-en-v15-768__v1"
+     ],
+     "t0": 2732678.273642819
+    },
+    {
+     "kind": "hybrid",
+     "n": 2,
+     "s": 0.04343507019802928,
+     "cols": [
+      "knowledge__bbtc2c2__bge-base-en-v15-768__v1",
+      "rdr__bbtc2c3__bge-base-en-v15-768__v1"
+     ],
+     "t0": 2732678.285414179
+    },
+    {
+     "kind": "hybrid",
+     "n": 2,
+     "s": 0.03682352276518941,
+     "cols": [
+      "code__bbtc2c4__bge-base-en-v15-768__v1",
+      "docs__bbtc2c5__bge-base-en-v15-768__v1"
+     ],
+     "t0": 2732678.306496398
+    },
+    {
+     "kind": "hybrid",
+     "n": 2,
+     "s": 0.028417283669114113,
+     "cols": [
+      "knowledge__bbtc2c6__bge-base-en-v15-768__v1",
+      "rdr__bbtc2c7__bge-base-en-v15-768__v1"
+     ],
+     "t0": 2732678.38425724
+    }
+   ],
+   "events": [],
+   "q": "E",
+   "path": "route",
+   "round": 0,
+   "warmup": false
+  },
+  {
+   "wall": 0.07973055494949222,
+   "rows": 120,
+   "err": null,
+   "calls": [],
+   "events": [],
+   "q": "E",
+   "path": "vector",
+   "round": 0,
+   "warmup": false
+  },
+  {
+   "wall": 0.19471851410344243,
+   "rows": 309,
+   "err": null,
+   "calls": [
+    {
+     "kind": "hybrid",
+     "n": 2,
+     "s": 0.06346072303131223,
+     "cols": [
+      "code__bbtc2c0__bge-base-en-v15-768__v1",
+      "docs__bbtc2c1__bge-base-en-v15-768__v1"
+     ],
+     "t0": 2732678.971176396
+    },
+    {
+     "kind": "hybrid",
+     "n": 2,
+     "s": 0.04629264213144779,
+     "cols": [
+      "knowledge__bbtc2c2__bge-base-en-v15-768__v1",
+      "rdr__bbtc2c3__bge-base-en-v15-768__v1"
+     ],
+     "t0": 2732678.989320392
+    },
+    {
+     "kind": "hybrid",
+     "n": 2,
+     "s": 0.02593253692612052,
+     "cols": [
+      "code__bbtc2c4__bge-base-en-v15-768__v1",
+      "docs__bbtc2c5__bge-base-en-v15-768__v1"
+     ],
+     "t0": 2732679.011987948
+    },
+    {
+     "kind": "hybrid",
+     "n": 2,
+     "s": 0.025719824712723494,
+     "cols": [
+      "knowledge__bbtc2c6__bge-base-en-v15-768__v1",
+      "rdr__bbtc2c7__bge-base-en-v15-768__v1"
+     ],
+     "t0": 2732679.061595836
+    }
+   ],
+   "events": [],
+   "q": "C",
+   "path": "hybrid",
+   "round": 0,
+   "warmup": false
+  },
+  {
+   "wall": 0.17241801088675857,
+   "rows": 309,
+   "err": null,
+   "calls": [
+    {
+     "kind": "hybrid",
+     "n": 2,
+     "s": 0.02670092973858118,
+     "cols": [
+      "code__bbtc2c0__bge-base-en-v15-768__v1",
+      "docs__bbtc2c1__bge-base-en-v15-768__v1"
+     ],
+     "t0": 2732679.348372137
+    },
+    {
+     "kind": "hybrid",
+     "n": 2,
+     "s": 0.03398350486531854,
+     "cols": [
+      "knowledge__bbtc2c2__bge-base-en-v15-768__v1",
+      "rdr__bbtc2c3__bge-base-en-v15-768__v1"
+     ],
+     "t0": 2732679.37414884
+    },
+    {
+     "kind": "hybrid",
+     "n": 2,
+     "s": 0.021334306336939335,
+     "cols": [
+      "code__bbtc2c4__bge-base-en-v15-768__v1",
+      "docs__bbtc2c5__bge-base-en-v15-768__v1"
+     ],
+     "t0": 2732679.391170744
+    },
+    {
+     "kind": "hybrid",
+     "n": 2,
+     "s": 0.02591780899092555,
+     "cols": [
+      "knowledge__bbtc2c6__bge-base-en-v15-768__v1",
+      "rdr__bbtc2c7__bge-base-en-v15-768__v1"
+     ],
+     "t0": 2732679.434022332
+    }
+   ],
+   "events": [],
+   "q": "C",
+   "path": "route",
+   "round": 0,
+   "warmup": false
+  },
+  {
+   "wall": 0.07003359589725733,
+   "rows": 120,
+   "err": null,
+   "calls": [],
+   "events": [],
+   "q": "C",
+   "path": "vector",
+   "round": 0,
+   "warmup": false
+  }
+ ],
+ "hybrid_batches": [
+  2,
+  2,
+  2,
+  2
+ ],
+ "explain": {
+  "D": {
+   "mode": "on",
+   "per_arm": [
+    {
+     "exec_ms": 1.675,
+     "plan_ms": 5.318,
+     "rows": 0,
+     "shared_hit": 57,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 10,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "col": "code__bbtc2c0__bge-base-en-v15-768__v1",
+     "rows_in": 10
+    },
+    {
+     "exec_ms": 3.814,
+     "plan_ms": 4.935,
+     "rows": 1,
+     "shared_hit": 110,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 19,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "col": "docs__bbtc2c1__bge-base-en-v15-768__v1",
+     "rows_in": 20
+    },
+    {
+     "exec_ms": 5.506,
+     "plan_ms": 4.898,
+     "rows": 0,
+     "shared_hit": 142,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 32,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "col": "knowledge__bbtc2c2__bge-base-en-v15-768__v1",
+     "rows_in": 32
+    },
+    {
+     "exec_ms": 9.303,
+     "plan_ms": 4.891,
+     "rows": 1,
+     "shared_hit": 230,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 82,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "col": "rdr__bbtc2c3__bge-base-en-v15-768__v1",
+     "rows_in": 50
+    },
+    {
+     "exec_ms": 12.2,
+     "plan_ms": 4.917,
+     "rows": 1,
+     "shared_hit": 323,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 155,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "col": "code__bbtc2c4__bge-base-en-v15-768__v1",
+     "rows_in": 80
+    },
+    {
+     "exec_ms": 22.738,
+     "plan_ms": 4.93,
+     "rows": 0,
+     "shared_hit": 523,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 130,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "col": "docs__bbtc2c5__bge-base-en-v15-768__v1",
+     "rows_in": 130
+    },
+    {
+     "exec_ms": 37.112,
+     "plan_ms": 4.911,
+     "rows": 1,
+     "shared_hit": 685,
+     "shared_read": 0,
+     "top_scan": "Bitmap Heap Scan",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Bitmap Heap Scan",
+      "Bitmap Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 362,
+     "removed_recheck": 0,
+     "heap_exact": 51,
+     "heap_lossy": 0,
+     "bitmap_rows": {
+      "chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey": 200
+     },
+     "jit": false,
+     "col": "knowledge__bbtc2c6__bge-base-en-v15-768__v1",
+     "rows_in": 200
+    },
+    {
+     "exec_ms": 15.718,
+     "plan_ms": 4.954,
+     "rows": 14,
+     "shared_hit": 987,
+     "shared_read": 0,
+     "top_scan": "Bitmap Heap Scan",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Bitmap Heap Scan",
+      "BitmapOr",
+      "Bitmap Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_tsv_idx)",
+      "Bitmap Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_text_idx)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 1670,
+     "removed_recheck": 40,
+     "heap_exact": 48,
+     "heap_lossy": 0,
+     "bitmap_rows": {
+      "chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_tsv_idx": 2,
+      "chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_text_idx": 58
+     },
+     "jit": false,
+     "col": "rdr__bbtc2c7__bge-base-en-v15-768__v1",
+     "rows_in": 440
+    }
+   ],
+   "per_batch": [
+    {
+     "exec_ms": 5.36,
+     "plan_ms": 5.428,
+     "rows": 1,
+     "shared_hit": 142,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 29,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "ncols": 2
+    },
+    {
+     "exec_ms": 16.231,
+     "plan_ms": 4.934,
+     "rows": 15,
+     "shared_hit": 997,
+     "shared_read": 0,
+     "top_scan": "Bitmap Heap Scan",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Bitmap Heap Scan",
+      "BitmapOr",
+      "Bitmap Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_tsv_idx)",
+      "Bitmap Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_text_idx)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 1833,
+     "removed_recheck": 40,
+     "heap_exact": 48,
+     "heap_lossy": 0,
+     "bitmap_rows": {
+      "chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_tsv_idx": 2,
+      "chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_text_idx": 58
+     },
+     "jit": false,
+     "ncols": 2
+    },
+    {
+     "exec_ms": 34.783,
+     "plan_ms": 5.24,
+     "rows": 1,
+     "shared_hit": 667,
+     "shared_read": 0,
+     "top_scan": "Bitmap Heap Scan",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Bitmap Heap Scan",
+      "Bitmap Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 285,
+     "removed_recheck": 0,
+     "heap_exact": 48,
+     "heap_lossy": 0,
+     "bitmap_rows": {
+      "chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey": 210
+     },
+     "jit": false,
+     "ncols": 2
+    },
+    {
+     "exec_ms": 14.578,
+     "plan_ms": 4.988,
+     "rows": 1,
+     "shared_hit": 347,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 114,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "ncols": 2
+    }
+   ],
+   "whole": {
+    "exec_ms": 16.192,
+    "plan_ms": 4.95,
+    "rows": 18,
+    "shared_hit": 1016,
+    "shared_read": 0,
+    "top_scan": "Bitmap Heap Scan",
+    "nodes": [
+     "Limit",
+     "Result",
+     "Bitmap Heap Scan",
+     "BitmapOr",
+     "Bitmap Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_tsv_idx)",
+     "Bitmap Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_text_idx)",
+     "Nested Loop",
+     "Index Scan(idx_catalog_chunks_collection)",
+     "Seq Scan"
+    ],
+    "removed_filter": 1944,
+    "removed_recheck": 40,
+    "heap_exact": 48,
+    "heap_lossy": 0,
+    "bitmap_rows": {
+     "chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_tsv_idx": 2,
+     "chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_text_idx": 58
+    },
+    "jit": false
+   },
+   "fn_arm": [
+    {
+     "g": 0,
+     "ms": 3.794,
+     "n": 0
+    },
+    {
+     "g": 1,
+     "ms": 5.841,
+     "n": 1
+    },
+    {
+     "g": 2,
+     "ms": 7.589,
+     "n": 0
+    },
+    {
+     "g": 3,
+     "ms": 11.176,
+     "n": 1
+    },
+    {
+     "g": 4,
+     "ms": 14.147,
+     "n": 1
+    },
+    {
+     "g": 5,
+     "ms": 24.645,
+     "n": 0
+    },
+    {
+     "g": 6,
+     "ms": 38.982,
+     "n": 1
+    },
+    {
+     "g": 7,
+     "ms": 16.357,
+     "n": 14
+    }
+   ],
+   "fn_batch": [
+    {
+     "g": 0,
+     "ms": 7.346,
+     "n": 1
+    },
+    {
+     "g": 1,
+     "ms": 16.569,
+     "n": 15
+    },
+    {
+     "g": 2,
+     "ms": 36.396,
+     "n": 1
+    },
+    {
+     "g": 3,
+     "ms": 16.49,
+     "n": 1
+    }
+   ],
+   "fn_whole": [
+    {
+     "g": 0,
+     "ms": 16.815,
+     "n": 18
+    }
+   ],
+   "variants": {
+    "fts": {
+     "whole": {
+      "exec_ms": 1.867,
+      "plan_ms": 3.314,
+      "rows": 2,
+      "shared_hit": 342,
+      "shared_read": 0,
+      "top_scan": "Bitmap Heap Scan",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Bitmap Heap Scan",
+       "Bitmap Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_tsv_idx)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 32,
+      "removed_recheck": 0,
+      "heap_exact": 2,
+      "heap_lossy": 0,
+      "bitmap_rows": {
+       "chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_tsv_idx": 2
+      },
+      "jit": false
+     },
+     "big": {
+      "exec_ms": 0.475,
+      "plan_ms": 3.141,
+      "rows": 0,
+      "shared_hit": 313,
+      "shared_read": 0,
+      "top_scan": "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 80,
+      "removed_recheck": 0,
+      "heap_exact": 0,
+      "heap_lossy": 0,
+      "bitmap_rows": {},
+      "jit": false
+     }
+    },
+    "ilike": {
+     "whole": {
+      "exec_ms": 1.15,
+      "plan_ms": 2.619,
+      "rows": 2,
+      "shared_hit": 288,
+      "shared_read": 0,
+      "top_scan": "Bitmap Heap Scan",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Bitmap Heap Scan",
+       "Bitmap Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_text_idx)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 32,
+      "removed_recheck": 4,
+      "heap_exact": 6,
+      "heap_lossy": 0,
+      "bitmap_rows": {
+       "chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_text_idx": 6
+      },
+      "jit": false
+     },
+     "big": {
+      "exec_ms": 0.696,
+      "plan_ms": 2.553,
+      "rows": 0,
+      "shared_hit": 112,
+      "shared_read": 0,
+      "top_scan": "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 80,
+      "removed_recheck": 0,
+      "heap_exact": 0,
+      "heap_lossy": 0,
+      "bitmap_rows": {},
+      "jit": false
+     }
+    },
+    "ilike_raw": {
+     "whole": {
+      "exec_ms": 1.015,
+      "plan_ms": 2.497,
+      "rows": 2,
+      "shared_hit": 288,
+      "shared_read": 0,
+      "top_scan": "Bitmap Heap Scan",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Bitmap Heap Scan",
+       "Bitmap Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_text_idx)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 32,
+      "removed_recheck": 4,
+      "heap_exact": 6,
+      "heap_lossy": 0,
+      "bitmap_rows": {
+       "chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_text_idx": 6
+      },
+      "jit": false
+     },
+     "big": {
+      "exec_ms": 0.738,
+      "plan_ms": 2.844,
+      "rows": 0,
+      "shared_hit": 112,
+      "shared_read": 0,
+      "top_scan": "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 80,
+      "removed_recheck": 0,
+      "heap_exact": 0,
+      "heap_lossy": 0,
+      "bitmap_rows": {},
+      "jit": false
+     }
+    }
+   },
+   "big": "code__bbtc2c4__bge-base-en-v15-768__v1"
+  },
+  "E": {
+   "mode": "substring",
+   "per_arm": [
+    {
+     "exec_ms": 0.223,
+     "plan_ms": 3.136,
+     "rows": 0,
+     "shared_hit": 57,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 10,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "col": "code__bbtc2c0__bge-base-en-v15-768__v1",
+     "rows_in": 10
+    },
+    {
+     "exec_ms": 0.329,
+     "plan_ms": 3.077,
+     "rows": 0,
+     "shared_hit": 107,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 20,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "col": "docs__bbtc2c1__bge-base-en-v15-768__v1",
+     "rows_in": 20
+    },
+    {
+     "exec_ms": 0.429,
+     "plan_ms": 3.049,
+     "rows": 0,
+     "shared_hit": 142,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 32,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "col": "knowledge__bbtc2c2__bge-base-en-v15-768__v1",
+     "rows_in": 32
+    },
+    {
+     "exec_ms": 0.643,
+     "plan_ms": 3.065,
+     "rows": 0,
+     "shared_hit": 227,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 50,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "col": "rdr__bbtc2c3__bge-base-en-v15-768__v1",
+     "rows_in": 50
+    },
+    {
+     "exec_ms": 0.971,
+     "plan_ms": 3.072,
+     "rows": 0,
+     "shared_hit": 319,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 80,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "col": "code__bbtc2c4__bge-base-en-v15-768__v1",
+     "rows_in": 80
+    },
+    {
+     "exec_ms": 1.424,
+     "plan_ms": 3.16,
+     "rows": 0,
+     "shared_hit": 523,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 130,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "col": "docs__bbtc2c5__bge-base-en-v15-768__v1",
+     "rows_in": 130
+    },
+    {
+     "exec_ms": 1.903,
+     "plan_ms": 3.138,
+     "rows": 1,
+     "shared_hit": 683,
+     "shared_read": 0,
+     "top_scan": "Bitmap Heap Scan",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Bitmap Heap Scan",
+      "Bitmap Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 298,
+     "removed_recheck": 0,
+     "heap_exact": 51,
+     "heap_lossy": 0,
+     "bitmap_rows": {
+      "chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey": 200
+     },
+     "jit": false,
+     "col": "knowledge__bbtc2c6__bge-base-en-v15-768__v1",
+     "rows_in": 200
+    },
+    {
+     "exec_ms": 3.368,
+     "plan_ms": 3.119,
+     "rows": 0,
+     "shared_hit": 679,
+     "shared_read": 0,
+     "top_scan": "Bitmap Heap Scan",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Bitmap Heap Scan",
+      "BitmapOr",
+      "Bitmap Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_tsv_idx)",
+      "Bitmap Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_text_idx)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 1,
+     "removed_recheck": 4,
+     "heap_exact": 5,
+     "heap_lossy": 0,
+     "bitmap_rows": {
+      "chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_tsv_idx": 1,
+      "chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_text_idx": 5
+     },
+     "jit": false,
+     "col": "rdr__bbtc2c7__bge-base-en-v15-768__v1",
+     "rows_in": 440
+    }
+   ],
+   "per_batch": [
+    {
+     "exec_ms": 0.461,
+     "plan_ms": 3.449,
+     "rows": 0,
+     "shared_hit": 139,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 30,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "ncols": 2
+    },
+    {
+     "exec_ms": 3.517,
+     "plan_ms": 3.078,
+     "rows": 1,
+     "shared_hit": 684,
+     "shared_read": 0,
+     "top_scan": "Bitmap Heap Scan",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Bitmap Heap Scan",
+      "BitmapOr",
+      "Bitmap Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_tsv_idx)",
+      "Bitmap Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_text_idx)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 99,
+     "removed_recheck": 4,
+     "heap_exact": 5,
+     "heap_lossy": 0,
+     "bitmap_rows": {
+      "chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_tsv_idx": 1,
+      "chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_text_idx": 5
+     },
+     "jit": false,
+     "ncols": 2
+    },
+    {
+     "exec_ms": 2.294,
+     "plan_ms": 3.398,
+     "rows": 0,
+     "shared_hit": 663,
+     "shared_read": 0,
+     "top_scan": "Bitmap Heap Scan",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Bitmap Heap Scan",
+      "Bitmap Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 210,
+     "removed_recheck": 0,
+     "heap_exact": 48,
+     "heap_lossy": 0,
+     "bitmap_rows": {
+      "chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey": 210
+     },
+     "jit": false,
+     "ncols": 2
+    },
+    {
+     "exec_ms": 0.991,
+     "plan_ms": 3.349,
+     "rows": 0,
+     "shared_hit": 344,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 82,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "ncols": 2
+    }
+   ],
+   "whole": {
+    "exec_ms": 3.48,
+    "plan_ms": 3.086,
+    "rows": 1,
+    "shared_hit": 684,
+    "shared_read": 0,
+    "top_scan": "Bitmap Heap Scan",
+    "nodes": [
+     "Limit",
+     "Result",
+     "Bitmap Heap Scan",
+     "BitmapOr",
+     "Bitmap Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_tsv_idx)",
+     "Bitmap Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_text_idx)",
+     "Nested Loop",
+     "Index Scan(idx_catalog_chunks_collection)",
+     "Seq Scan"
+    ],
+    "removed_filter": 99,
+    "removed_recheck": 4,
+    "heap_exact": 5,
+    "heap_lossy": 0,
+    "bitmap_rows": {
+     "chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_tsv_idx": 1,
+     "chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_text_idx": 5
+    },
+    "jit": false
+   },
+   "fn_arm": [
+    {
+     "g": 0,
+     "ms": 0.663,
+     "n": 0
+    },
+    {
+     "g": 1,
+     "ms": 0.696,
+     "n": 0
+    },
+    {
+     "g": 2,
+     "ms": 0.745,
+     "n": 0
+    },
+    {
+     "g": 3,
+     "ms": 0.952,
+     "n": 0
+    },
+    {
+     "g": 4,
+     "ms": 1.232,
+     "n": 0
+    },
+    {
+     "g": 5,
+     "ms": 1.563,
+     "n": 0
+    },
+    {
+     "g": 6,
+     "ms": 2.018,
+     "n": 1
+    },
+    {
+     "g": 7,
+     "ms": 2.189,
+     "n": 0
+    }
+   ],
+   "fn_batch": [
+    {
+     "g": 0,
+     "ms": 0.815,
+     "n": 0
+    },
+    {
+     "g": 1,
+     "ms": 2.242,
+     "n": 1
+    },
+    {
+     "g": 2,
+     "ms": 2.142,
+     "n": 0
+    },
+    {
+     "g": 3,
+     "ms": 1.092,
+     "n": 0
+    }
+   ],
+   "fn_whole": [
+    {
+     "g": 0,
+     "ms": 2.365,
+     "n": 1
+    }
+   ],
+   "variants": {
+    "fts": {
+     "whole": {
+      "exec_ms": 2.156,
+      "plan_ms": 3.143,
+      "rows": 1,
+      "shared_hit": 342,
+      "shared_read": 0,
+      "top_scan": "Bitmap Heap Scan",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Bitmap Heap Scan",
+       "Bitmap Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_tsv_idx)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 99,
+      "removed_recheck": 0,
+      "heap_exact": 1,
+      "heap_lossy": 0,
+      "bitmap_rows": {
+       "chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_tsv_idx": 1
+      },
+      "jit": false
+     },
+     "big": {
+      "exec_ms": 0.483,
+      "plan_ms": 3.14,
+      "rows": 0,
+      "shared_hit": 313,
+      "shared_read": 0,
+      "top_scan": "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 80,
+      "removed_recheck": 0,
+      "heap_exact": 0,
+      "heap_lossy": 0,
+      "bitmap_rows": {},
+      "jit": false
+     }
+    },
+    "ilike": {
+     "whole": {
+      "exec_ms": 1.508,
+      "plan_ms": 2.568,
+      "rows": 1,
+      "shared_hit": 308,
+      "shared_read": 0,
+      "top_scan": "Bitmap Heap Scan",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Bitmap Heap Scan",
+       "Bitmap Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_text_idx)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 99,
+      "removed_recheck": 4,
+      "heap_exact": 5,
+      "heap_lossy": 0,
+      "bitmap_rows": {
+       "chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_text_idx": 5
+      },
+      "jit": false
+     },
+     "big": {
+      "exec_ms": 0.709,
+      "plan_ms": 2.552,
+      "rows": 0,
+      "shared_hit": 112,
+      "shared_read": 0,
+      "top_scan": "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 80,
+      "removed_recheck": 0,
+      "heap_exact": 0,
+      "heap_lossy": 0,
+      "bitmap_rows": {},
+      "jit": false
+     }
+    },
+    "ilike_raw": {
+     "whole": {
+      "exec_ms": 1.232,
+      "plan_ms": 2.507,
+      "rows": 1,
+      "shared_hit": 297,
+      "shared_read": 0,
+      "top_scan": "Bitmap Heap Scan",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Bitmap Heap Scan",
+       "Bitmap Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_text_idx)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 99,
+      "removed_recheck": 10,
+      "heap_exact": 10,
+      "heap_lossy": 0,
+      "bitmap_rows": {
+       "chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_text_idx": 11
+      },
+      "jit": false
+     },
+     "big": {
+      "exec_ms": 0.73,
+      "plan_ms": 2.528,
+      "rows": 0,
+      "shared_hit": 112,
+      "shared_read": 0,
+      "top_scan": "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 80,
+      "removed_recheck": 0,
+      "heap_exact": 0,
+      "heap_lossy": 0,
+      "bitmap_rows": {},
+      "jit": false
+     }
+    },
+    "trgm": {
+     "whole": {
+      "exec_ms": 139.084,
+      "plan_ms": 4.58,
+      "rows": 1,
+      "shared_hit": 560,
+      "shared_read": 0,
+      "top_scan": "Bitmap Heap Scan",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Bitmap Heap Scan",
+       "Bitmap Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_text_idx)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 808,
+      "removed_recheck": 0,
+      "heap_exact": 214,
+      "heap_lossy": 0,
+      "bitmap_rows": {
+       "chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_text_idx": 710
+      },
+      "jit": false
+     },
+     "big": {
+      "exec_ms": 13.184,
+      "plan_ms": 4.863,
+      "rows": 0,
+      "shared_hit": 112,
+      "shared_read": 0,
+      "top_scan": "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 80,
+      "removed_recheck": 0,
+      "heap_exact": 0,
+      "heap_lossy": 0,
+      "bitmap_rows": {},
+      "jit": false
+     }
+    }
+   },
+   "big": "code__bbtc2c4__bge-base-en-v15-768__v1"
+  },
+  "C": {
+   "mode": "substring",
+   "per_arm": [
+    {
+     "exec_ms": 0.222,
+     "plan_ms": 3.257,
+     "rows": 0,
+     "shared_hit": 57,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 10,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "col": "code__bbtc2c0__bge-base-en-v15-768__v1",
+     "rows_in": 10
+    },
+    {
+     "exec_ms": 0.363,
+     "plan_ms": 3.045,
+     "rows": 1,
+     "shared_hit": 110,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 21,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "col": "docs__bbtc2c1__bge-base-en-v15-768__v1",
+     "rows_in": 20
+    },
+    {
+     "exec_ms": 0.412,
+     "plan_ms": 3.043,
+     "rows": 0,
+     "shared_hit": 142,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 32,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "col": "knowledge__bbtc2c2__bge-base-en-v15-768__v1",
+     "rows_in": 32
+    },
+    {
+     "exec_ms": 0.643,
+     "plan_ms": 3.03,
+     "rows": 1,
+     "shared_hit": 230,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 56,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "col": "rdr__bbtc2c3__bge-base-en-v15-768__v1",
+     "rows_in": 50
+    },
+    {
+     "exec_ms": 0.97,
+     "plan_ms": 3.041,
+     "rows": 0,
+     "shared_hit": 319,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 80,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "col": "code__bbtc2c4__bge-base-en-v15-768__v1",
+     "rows_in": 80
+    },
+    {
+     "exec_ms": 1.392,
+     "plan_ms": 3.032,
+     "rows": 0,
+     "shared_hit": 523,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 130,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "col": "docs__bbtc2c5__bge-base-en-v15-768__v1",
+     "rows_in": 130
+    },
+    {
+     "exec_ms": 1.927,
+     "plan_ms": 3.062,
+     "rows": 1,
+     "shared_hit": 685,
+     "shared_read": 0,
+     "top_scan": "Bitmap Heap Scan",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Bitmap Heap Scan",
+      "Bitmap Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 375,
+     "removed_recheck": 0,
+     "heap_exact": 51,
+     "heap_lossy": 0,
+     "bitmap_rows": {
+      "chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey": 200
+     },
+     "jit": false,
+     "col": "knowledge__bbtc2c6__bge-base-en-v15-768__v1",
+     "rows_in": 200
+    },
+    {
+     "exec_ms": 2.58,
+     "plan_ms": 3.064,
+     "rows": 6,
+     "shared_hit": 697,
+     "shared_read": 0,
+     "top_scan": "Bitmap Heap Scan",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Bitmap Heap Scan",
+      "BitmapOr",
+      "Bitmap Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_tsv_idx)",
+      "Bitmap Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_text_idx)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 1251,
+     "removed_recheck": 0,
+     "heap_exact": 9,
+     "heap_lossy": 0,
+     "bitmap_rows": {
+      "chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_tsv_idx": 8,
+      "chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_text_idx": 3
+     },
+     "jit": false,
+     "col": "rdr__bbtc2c7__bge-base-en-v15-768__v1",
+     "rows_in": 440
+    }
+   ],
+   "per_batch": [
+    {
+     "exec_ms": 0.489,
+     "plan_ms": 3.491,
+     "rows": 1,
+     "shared_hit": 142,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 31,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "ncols": 2
+    },
+    {
+     "exec_ms": 2.758,
+     "plan_ms": 3.305,
+     "rows": 7,
+     "shared_hit": 704,
+     "shared_read": 0,
+     "top_scan": "Bitmap Heap Scan",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Bitmap Heap Scan",
+      "BitmapOr",
+      "Bitmap Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_tsv_idx)",
+      "Bitmap Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_text_idx)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 1430,
+     "removed_recheck": 0,
+     "heap_exact": 9,
+     "heap_lossy": 0,
+     "bitmap_rows": {
+      "chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_tsv_idx": 8,
+      "chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_text_idx": 3
+     },
+     "jit": false,
+     "ncols": 2
+    },
+    {
+     "exec_ms": 2.282,
+     "plan_ms": 3.358,
+     "rows": 0,
+     "shared_hit": 663,
+     "shared_read": 0,
+     "top_scan": "Bitmap Heap Scan",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Bitmap Heap Scan",
+      "Bitmap Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 210,
+     "removed_recheck": 0,
+     "heap_exact": 48,
+     "heap_lossy": 0,
+     "bitmap_rows": {
+      "chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey": 210
+     },
+     "jit": false,
+     "ncols": 2
+    },
+    {
+     "exec_ms": 0.955,
+     "plan_ms": 3.078,
+     "rows": 1,
+     "shared_hit": 347,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 88,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "ncols": 2
+    }
+   ],
+   "whole": {
+    "exec_ms": 2.64,
+    "plan_ms": 3.065,
+    "rows": 9,
+    "shared_hit": 710,
+    "shared_read": 0,
+    "top_scan": "Bitmap Heap Scan",
+    "nodes": [
+     "Limit",
+     "Result",
+     "Bitmap Heap Scan",
+     "BitmapOr",
+     "Bitmap Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_tsv_idx)",
+     "Bitmap Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_text_idx)",
+     "Nested Loop",
+     "Index Scan(idx_catalog_chunks_collection)",
+     "Seq Scan"
+    ],
+    "removed_filter": 1431,
+    "removed_recheck": 0,
+    "heap_exact": 9,
+    "heap_lossy": 0,
+    "bitmap_rows": {
+     "chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_tsv_idx": 8,
+     "chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_text_idx": 3
+    },
+    "jit": false
+   },
+   "fn_arm": [
+    {
+     "g": 0,
+     "ms": 0.643,
+     "n": 0
+    },
+    {
+     "g": 1,
+     "ms": 0.704,
+     "n": 1
+    },
+    {
+     "g": 2,
+     "ms": 0.755,
+     "n": 0
+    },
+    {
+     "g": 3,
+     "ms": 0.929,
+     "n": 1
+    },
+    {
+     "g": 4,
+     "ms": 1.216,
+     "n": 0
+    },
+    {
+     "g": 5,
+     "ms": 1.555,
+     "n": 0
+    },
+    {
+     "g": 6,
+     "ms": 2.03,
+     "n": 1
+    },
+    {
+     "g": 7,
+     "ms": 1.593,
+     "n": 6
+    }
+   ],
+   "fn_batch": [
+    {
+     "g": 0,
+     "ms": 0.814,
+     "n": 1
+    },
+    {
+     "g": 1,
+     "ms": 1.602,
+     "n": 7
+    },
+    {
+     "g": 2,
+     "ms": 2.137,
+     "n": 0
+    },
+    {
+     "g": 3,
+     "ms": 1.086,
+     "n": 1
+    }
+   ],
+   "fn_whole": [
+    {
+     "g": 0,
+     "ms": 1.684,
+     "n": 9
+    }
+   ],
+   "variants": {
+    "fts": {
+     "whole": {
+      "exec_ms": 1.831,
+      "plan_ms": 3.179,
+      "rows": 8,
+      "shared_hit": 395,
+      "shared_read": 0,
+      "top_scan": "Bitmap Heap Scan",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Bitmap Heap Scan",
+       "Bitmap Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_tsv_idx)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 1392,
+      "removed_recheck": 0,
+      "heap_exact": 8,
+      "heap_lossy": 0,
+      "bitmap_rows": {
+       "chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_tsv_idx": 8
+      },
+      "jit": false
+     },
+     "big": {
+      "exec_ms": 0.474,
+      "plan_ms": 3.222,
+      "rows": 0,
+      "shared_hit": 313,
+      "shared_read": 0,
+      "top_scan": "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 80,
+      "removed_recheck": 0,
+      "heap_exact": 0,
+      "heap_lossy": 0,
+      "bitmap_rows": {},
+      "jit": false
+     }
+    },
+    "ilike": {
+     "whole": {
+      "exec_ms": 1.125,
+      "plan_ms": 2.635,
+      "rows": 3,
+      "shared_hit": 293,
+      "shared_read": 0,
+      "top_scan": "Bitmap Heap Scan",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Bitmap Heap Scan",
+       "Bitmap Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_text_idx)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 246,
+      "removed_recheck": 0,
+      "heap_exact": 3,
+      "heap_lossy": 0,
+      "bitmap_rows": {
+       "chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_text_idx": 3
+      },
+      "jit": false
+     },
+     "big": {
+      "exec_ms": 0.701,
+      "plan_ms": 2.55,
+      "rows": 0,
+      "shared_hit": 112,
+      "shared_read": 0,
+      "top_scan": "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 80,
+      "removed_recheck": 0,
+      "heap_exact": 0,
+      "heap_lossy": 0,
+      "bitmap_rows": {},
+      "jit": false
+     }
+    },
+    "ilike_raw": {
+     "whole": {
+      "exec_ms": 1.04,
+      "plan_ms": 2.527,
+      "rows": 3,
+      "shared_hit": 293,
+      "shared_read": 0,
+      "top_scan": "Bitmap Heap Scan",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Bitmap Heap Scan",
+       "Bitmap Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_text_idx)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 246,
+      "removed_recheck": 0,
+      "heap_exact": 3,
+      "heap_lossy": 0,
+      "bitmap_rows": {
+       "chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_text_idx": 3
+      },
+      "jit": false
+     },
+     "big": {
+      "exec_ms": 0.714,
+      "plan_ms": 2.69,
+      "rows": 0,
+      "shared_hit": 112,
+      "shared_read": 0,
+      "top_scan": "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 80,
+      "removed_recheck": 0,
+      "heap_exact": 0,
+      "heap_lossy": 0,
+      "bitmap_rows": {},
+      "jit": false
+     }
+    },
+    "trgm": {
+     "whole": {
+      "exec_ms": 46.925,
+      "plan_ms": 4.361,
+      "rows": 7,
+      "shared_hit": 490,
+      "shared_read": 0,
+      "top_scan": "Bitmap Heap Scan",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Bitmap Heap Scan",
+       "Bitmap Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_text_idx)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 755,
+      "removed_recheck": 0,
+      "heap_exact": 148,
+      "heap_lossy": 0,
+      "bitmap_rows": {
+       "chunks_m0a90d9bc_t_1dea5f67b43f6985_chunk_text_idx": 251
+      },
+      "jit": false
+     },
+     "big": {
+      "exec_ms": 12.001,
+      "plan_ms": 4.669,
+      "rows": 0,
+      "shared_hit": 112,
+      "shared_read": 0,
+      "top_scan": "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Index Scan(chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 80,
+      "removed_recheck": 0,
+      "heap_exact": 0,
+      "heap_lossy": 0,
+      "bitmap_rows": {},
+      "jit": false
+     }
+    }
+   },
+   "big": "code__bbtc2c4__bge-base-en-v15-768__v1"
+  }
+ },
+ "plan_text": {
+  "E_big_arm": "Limit  (cost=0.28..886.65 rows=1 width=33) (actual time=0.912..0.913 rows=0 loops=1)\n  Buffers: shared hit=319\n  ->  Result  (cost=0.28..886.65 rows=1 width=33) (actual time=0.912..0.912 rows=0 loops=1)\n        One-Time Filter: (NULLIF(current_setting('nexus.tenant'::text, true), ''::text) = 't2539193-1'::text)\n        Buffers: shared hit=319\n        ->  Index Scan using chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey on chunks_m0a90d9bc_t_1dea5f67b43f6985 c  (cost=0.28..886.65 rows=1 width=33) (actual time=0.910..0.910 rows=0 loops=1)\n              Index Cond: ((tenant_id = 't2539193-1'::text) AND (collection = ANY ('{code__bbtc2c4__bge-base-en-v15-768__v1}'::text[])) AND (embedding_model = 'bge-base-en-v15-768'::text))\n              Filter: (((chunk_tsv @@ '''resolv'' & ''activ'' & ''session'' & ''id'''::tsquery) OR (chunk_text ~~* '%resolve\\_active\\_session\\_id%'::text)) AND EXISTS(SubPlan 1))\n              Rows Removed by Filter: 80\n              Buffers: shared hit=319\n              SubPlan 1\n                ->  Nested Loop  (cost=0.15..9.31 rows=1 width=0) (never executed)\n                      Join Filter: (m.doc_id = d.tumbler)\n                      ->  Index Scan using idx_catalog_chunks_collection on catalog_document_chunks m  (cost=0.15..8.17 rows=1 width=64) (never executed)\n                            Index Cond: ((tenant_id = c.tenant_id) AND (collection = c.collection))\n                            Filter: (chash = c.chash)\n                      ->  Seq Scan on catalog_documents d  (cost=0.00..1.12 rows=1 width=64) (never executed)\n                            Filter: ((deleted_at IS NULL) AND (tenant_id = c.tenant_id))\nPlanning:\n  Buffers: shared hit=1304\nPlanning Time: 3.131 ms\nExecution Time: 0.953 ms",
+  "E_small_arm": "Limit  (cost=0.28..118.53 rows=1 width=33) (actual time=0.175..0.175 rows=0 loops=1)\n  Buffers: shared hit=57\n  ->  Result  (cost=0.28..118.53 rows=1 width=33) (actual time=0.174..0.175 rows=0 loops=1)\n        One-Time Filter: (NULLIF(current_setting('nexus.tenant'::text, true), ''::text) = 't2539193-1'::text)\n        Buffers: shared hit=57\n        ->  Index Scan using chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey on chunks_m0a90d9bc_t_1dea5f67b43f6985 c  (cost=0.28..118.53 rows=1 width=33) (actual time=0.173..0.173 rows=0 loops=1)\n              Index Cond: ((tenant_id = 't2539193-1'::text) AND (collection = ANY ('{code__bbtc2c0__bge-base-en-v15-768__v1}'::text[])) AND (embedding_model = 'bge-base-en-v15-768'::text))\n              Filter: (((chunk_tsv @@ '''resolv'' & ''activ'' & ''session'' & ''id'''::tsquery) OR (chunk_text ~~* '%resolve\\_active\\_session\\_id%'::text)) AND EXISTS(SubPlan 1))\n              Rows Removed by Filter: 10\n              Buffers: shared hit=57\n              SubPlan 1\n                ->  Nested Loop  (cost=0.15..9.31 rows=1 width=0) (never executed)\n                      Join Filter: (m.doc_id = d.tumbler)\n                      ->  Index Scan using idx_catalog_chunks_collection on catalog_document_chunks m  (cost=0.15..8.17 rows=1 width=64) (never executed)\n                            Index Cond: ((tenant_id = c.tenant_id) AND (collection = c.collection))\n                            Filter: (chash = c.chash)\n                      ->  Seq Scan on catalog_documents d  (cost=0.00..1.12 rows=1 width=64) (never executed)\n                            Filter: ((deleted_at IS NULL) AND (tenant_id = c.tenant_id))\nPlanning:\n  Buffers: shared hit=1304\nPlanning Time: 3.051 ms\nExecution Time: 0.211 ms",
+  "E_batch0": "Limit  (cost=0.28..345.05 rows=1 width=33) (actual time=0.419..0.419 rows=0 loops=1)\n  Buffers: shared hit=139\n  ->  Result  (cost=0.28..345.05 rows=1 width=33) (actual time=0.410..0.410 rows=0 loops=1)\n        One-Time Filter: (NULLIF(current_setting('nexus.tenant'::text, true), ''::text) = 't2539193-1'::text)\n        Buffers: shared hit=139\n        ->  Index Scan using chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey on chunks_m0a90d9bc_t_1dea5f67b43f6985 c  (cost=0.28..345.05 rows=1 width=33) (actual time=0.409..0.409 rows=0 loops=1)\n              Index Cond: ((tenant_id = 't2539193-1'::text) AND (collection = ANY ('{code__bbtc2c0__bge-base-en-v15-768__v1,docs__bbtc2c1__bge-base-en-v15-768__v1}'::text[])) AND (embedding_model = 'bge-base-en-v15-768'::text))\n              Filter: (((chunk_tsv @@ '''resolv'' & ''activ'' & ''session'' & ''id'''::tsquery) OR (chunk_text ~~* '%resolve\\_active\\_session\\_id%'::text)) AND EXISTS(SubPlan 1))\n              Rows Removed by Filter: 30\n              Buffers: shared hit=139\n              SubPlan 1\n                ->  Nested Loop  (cost=0.15..9.31 rows=1 width=0) (never executed)\n                      Join Filter: (m.doc_id = d.tumbler)\n                      ->  Index Scan using idx_catalog_chunks_collection on catalog_document_chunks m  (cost=0.15..8.17 rows=1 width=64) (never executed)\n                            Index Cond: ((tenant_id = c.tenant_id) AND (collection = c.collection))\n                            Filter: (chash = c.chash)\n                      ->  Seq Scan on catalog_documents d  (cost=0.00..1.12 rows=1 width=64) (never executed)\n                            Filter: ((deleted_at IS NULL) AND (tenant_id = c.tenant_id))\nPlanning:\n  Buffers: shared hit=1304\nPlanning Time: 3.061 ms\nExecution Time: 0.453 ms",
+  "D_big_arm": "Limit  (cost=0.28..886.65 rows=1 width=33) (actual time=6.634..12.284 rows=1 loops=1)\n  Buffers: shared hit=323\n  ->  Result  (cost=0.28..886.65 rows=1 width=33) (actual time=6.633..12.283 rows=1 loops=1)\n        One-Time Filter: (NULLIF(current_setting('nexus.tenant'::text, true), ''::text) = 't2539193-1'::text)\n        Buffers: shared hit=323\n        ->  Index Scan using chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey on chunks_m0a90d9bc_t_1dea5f67b43f6985 c  (cost=0.28..886.65 rows=1 width=33) (actual time=6.631..12.281 rows=1 loops=1)\n              Index Cond: ((tenant_id = 't2539193-1'::text) AND (collection = ANY ('{code__bbtc2c4__bge-base-en-v15-768__v1}'::text[])) AND (embedding_model = 'bge-base-en-v15-768'::text))\n              Filter: (((chunk_tsv @@ '''advisori'' & ''lock'''::tsquery) OR ('advisory lock'::text OPERATOR(nexus.<%) chunk_text)) AND EXISTS(SubPlan 1))\n              Rows Removed by Filter: 79\n              Buffers: shared hit=323\n              SubPlan 1\n                ->  Nested Loop  (cost=0.15..9.31 rows=1 width=0) (actual time=0.034..0.034 rows=1 loops=1)\n                      Join Filter: (m.doc_id = d.tumbler)\n                      Rows Removed by Join Filter: 6\n                      Buffers: shared hit=4\n                      ->  Index Scan using idx_catalog_chunks_collection on catalog_document_chunks m  (cost=0.15..8.17 rows=1 width=64) (actual time=0.022..0.022 rows=1 loops=1)\n                            Index Cond: ((tenant_id = c.tenant_id) AND (collection = c.collection))\n                            Filter: (chash = c.chash)\n                            Rows Removed by Filter: 76\n                            Buffers: shared hit=3\n                      ->  Seq Scan on catalog_documents d  (cost=0.00..1.12 rows=1 width=64) (actual time=0.008..0.009 rows=7 loops=1)\n                            Filter: ((deleted_at IS NULL) AND (tenant_id = c.tenant_id))\n                            Buffers: shared hit=1\nPlanning:\n  Buffers: shared hit=1304\nPlanning Time: 4.897 ms\nExecution Time: 12.316 ms",
+  "C_big_arm": "Limit  (cost=0.28..886.65 rows=1 width=33) (actual time=0.886..0.886 rows=0 loops=1)\n  Buffers: shared hit=319\n  ->  Result  (cost=0.28..886.65 rows=1 width=33) (actual time=0.885..0.886 rows=0 loops=1)\n        One-Time Filter: (NULLIF(current_setting('nexus.tenant'::text, true), ''::text) = 't2539193-1'::text)\n        Buffers: shared hit=319\n        ->  Index Scan using chunks_m0a90d9bc_t_1dea5f67b43f6985_pkey on chunks_m0a90d9bc_t_1dea5f67b43f6985 c  (cost=0.28..886.65 rows=1 width=33) (actual time=0.884..0.884 rows=0 loops=1)\n              Index Cond: ((tenant_id = 't2539193-1'::text) AND (collection = ANY ('{code__bbtc2c4__bge-base-en-v15-768__v1}'::text[])) AND (embedding_model = 'bge-base-en-v15-768'::text))\n              Filter: (((chunk_tsv @@ '''serial'''::tsquery) OR (chunk_text ~~* '%serialization%'::text)) AND EXISTS(SubPlan 1))\n              Rows Removed by Filter: 80\n              Buffers: shared hit=319\n              SubPlan 1\n                ->  Nested Loop  (cost=0.15..9.31 rows=1 width=0) (never executed)\n                      Join Filter: (m.doc_id = d.tumbler)\n                      ->  Index Scan using idx_catalog_chunks_collection on catalog_document_chunks m  (cost=0.15..8.17 rows=1 width=64) (never executed)\n                            Index Cond: ((tenant_id = c.tenant_id) AND (collection = c.collection))\n                            Filter: (chash = c.chash)\n                      ->  Seq Scan on catalog_documents d  (cost=0.00..1.12 rows=1 width=64) (never executed)\n                            Filter: ((deleted_at IS NULL) AND (tenant_id = c.tenant_id))\nPlanning:\n  Buffers: shared hit=1304\nPlanning Time: 3.057 ms\nExecution Time: 0.922 ms"
+ }
+}

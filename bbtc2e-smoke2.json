@@ -1,0 +1,2657 @@
+{
+ "version": {
+  "app_version": "1.0-SNAPSHOT",
+  "release_version": "0.1.190",
+  "build_ref": "7deb77047+1794639995-2533580",
+  "nx_answer_steps_supported": true,
+  "nx_answer_run_complete_supported": true,
+  "nx_answer_run_summary_supported": true,
+  "nx_answer_runs_before_id_supported": true,
+  "catalog_graph_scope_filter_supported": true,
+  "catalog_graph_node_walk_supported": true,
+  "catalog_manifest_row_limit_supported": true,
+  "nx_answer_out_of_step_cost_supported": true,
+  "search_row_owner_span_supported": true,
+  "vector_search_chash_allow_supported": true,
+  "catalog_sensitivity_supported": true,
+  "vector_sensitivity_exclude_supported": true,
+  "rerank_sensitive_exclusion_supported": true,
+  "route_b_manifest_keys_supported": true,
+  "route_c_manifest_keys_supported": true,
+  "catalog_sensitive_list_supported": true,
+  "catalog_manifest_fillable_supported": true,
+  "catalog_stub_metadata_supported": true,
+  "chash_conformance_constraints_supported": true,
+  "catalog_manifest_foreign_collection_supported": true,
+  "catalog_manifest_fill_job_supported": true,
+  "catalog_index_run_census_supported": true,
+  "catalog_next_seq_drift_read_supported": true,
+  "chash_constraints_validate_job_supported": true,
+  "tenant_export_supported": true,
+  "tenant_export_format_version": 1,
+  "tenant_import_supported": true,
+  "process_uptime_seconds": 0,
+  "process_start_time": "2026-11-14T07:10:05.262Z",
+  "embedding_mode": "onnx-local",
+  "embedding_models": [
+   "bge-base-en-v15-768"
+  ],
+  "embedding_profile": "bge",
+  "reranker": "ms-marco-minilm-l6-v2",
+  "reranker_available": true,
+  "embedding_degraded": null,
+  "schema_latest_id": "grants-nexus-diag-5",
+  "schema_changeset_count": 573
+ },
+ "args": {
+  "collections": 8,
+  "scale": 0.2,
+  "runs": 1,
+  "warmup": 0,
+  "out": "bbtc2e-smoke2.json"
+ },
+ "counts": {
+  "code__bbtc2c0__bge-base-en-v15-768__v1": 10,
+  "docs__bbtc2c1__bge-base-en-v15-768__v1": 20,
+  "knowledge__bbtc2c2__bge-base-en-v15-768__v1": 32,
+  "rdr__bbtc2c3__bge-base-en-v15-768__v1": 50,
+  "code__bbtc2c4__bge-base-en-v15-768__v1": 80,
+  "docs__bbtc2c5__bge-base-en-v15-768__v1": 130,
+  "knowledge__bbtc2c6__bge-base-en-v15-768__v1": 200,
+  "rdr__bbtc2c7__bge-base-en-v15-768__v1": 440
+ },
+ "info": {
+  "probe": [
+   {
+    "name": "text_gate_probe_768",
+    "secdef": true,
+    "owner": "nxtest"
+   }
+  ],
+  "leaf": "nexus.chunks_m0a90d9bc_t_ed0492d9e25db247",
+  "settings": {
+   "effective_cache_size": "524288",
+   "gin_fuzzy_search_limit": "0",
+   "jit": "on",
+   "max_parallel_workers_per_gather": "2",
+   "random_page_cost": "4",
+   "server_version": "17.5",
+   "shared_buffers": "16384",
+   "work_mem": "4096"
+  },
+  "db_collate": "C",
+  "db_ctype": "C",
+  "indexes": "CREATE UNIQUE INDEX chunks_m0a90d9bc_t_ed0492d9e25db247_pkey ON nexus.chunks_m0a90d9bc_t_ed0492d9e25db247 USING btree (tenant_id, collection, chash, embedding_model)\nCREATE INDEX chunks_m0a90d9bc_t_ed0492d9e25db247_embedding_1024_idx ON nexus.chunks_m0a90d9bc_t_ed0492d9e25db247 USING hnsw (embedding_1024 nexus.vector_cosine_ops) WITH (m='16', ef_construction='64')\nCREATE INDEX chunks_m0a90d9bc_t_ed0492d9e25db247_embedding_384_idx ON nexus.chunks_m0a90d9bc_t_ed0492d9e25db247 USING hnsw (embedding_384 nexus.vector_cosine_ops) WITH (m='16', ef_construction='64')\nCREATE INDEX chunks_m0a90d9bc_t_ed0492d9e25db247_embedding_768_idx ON nexus.chunks_m0a90d9bc_t_ed0492d9e25db247 USING hnsw (embedding_768 nexus.vector_cosine_ops) WITH (m='16', ef_construction='64')\nCREATE INDEX chunks_m0a90d9bc_t_ed0492d9e25db247_tenant_id_chash_idx ON nexus.chunks_m0a90d9bc_t_ed0492d9e25db247 USING btree (tenant_id, chash)\nCREATE INDEX chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_text_idx ON nexus.chunks_m0a90d9bc_t_ed0492d9e25db247 USING gin (chunk_text nexus.gin_trgm_ops)\nCREATE INDEX chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_tsv_idx ON nexus.chunks_m0a90d9bc_t_ed0492d9e25db247 USING gin (chunk_tsv)",
+  "leaf_size": "15 MB",
+  "explain_role": "nxtest",
+  "arm_permits": [
+   "2026-11-14 07:10:05,217 INFO  [main] d.n.s.vectors.PgVectorRepository - event=search_fanout_arm_permits effective=4 pool_size=8 default=4 ceiling=6 configured=4 source=default"
+  ]
+ },
+ "runs": [
+  {
+   "wall": 0.36891043884679675,
+   "rows": 313,
+   "err": null,
+   "calls": [
+    {
+     "kind": "route",
+     "n": 8,
+     "s": 0.20246573770418763,
+     "lex": false
+    },
+    {
+     "kind": "hybrid",
+     "n": 2,
+     "s": 0.042290505953133106,
+     "cols": [
+      "code__bbtc2c0__bge-base-en-v15-768__v1",
+      "docs__bbtc2c1__bge-base-en-v15-768__v1"
+     ],
+     "t0": 2732800.814837075
+    },
+    {
+     "kind": "hybrid",
+     "n": 2,
+     "s": 0.06282562157139182,
+     "cols": [
+      "knowledge__bbtc2c2__bge-base-en-v15-768__v1",
+      "rdr__bbtc2c3__bge-base-en-v15-768__v1"
+     ],
+     "t0": 2732800.815605758
+    },
+    {
+     "kind": "hybrid",
+     "n": 2,
+     "s": 0.09059480112046003,
+     "cols": [
+      "code__bbtc2c4__bge-base-en-v15-768__v1",
+      "docs__bbtc2c5__bge-base-en-v15-768__v1"
+     ],
+     "t0": 2732800.816259714
+    },
+    {
+     "kind": "hybrid",
+     "n": 2,
+     "s": 0.09189133206382394,
+     "cols": [
+      "knowledge__bbtc2c6__bge-base-en-v15-768__v1",
+      "rdr__bbtc2c7__bge-base-en-v15-768__v1"
+     ],
+     "t0": 2732800.817126071
+    }
+   ],
+   "events": [
+    {
+     "event": "search_per_collection_arm_phases",
+     "arms": "8",
+     "sum_arm_ms": "229",
+     "sum_permit_wait_ms": "0",
+     "sum_setup_ms": "31",
+     "sum_probe_ms": "35",
+     "sum_statement_ms": "121",
+     "sum_other_ms": "45",
+     "max_permit_wait_ms": "0",
+     "max_setup_ms": "7",
+     "max_probe_ms": "8",
+     "max_statement_ms": "30",
+     "exact_arms": "8",
+     "hnsw_arms": "0",
+     "ef1000_arms": "0",
+     "top_statements": "rdr__bbtc2c7__bge-base-en-v15-768__v1:exact:1000:30,knowledge__bbtc2c6__bge-base-en-v15-768__v1:exact:1000:18,knowledge__bbtc2c2__bge-base-en-v15-768__v1:exact:1000:13",
+     "sum_hnsw_statement_ms": "0",
+     "max_hnsw_statement_ms": "0"
+    },
+    {
+     "event": "search_per_collection",
+     "collections": "8",
+     "arms": "8",
+     "workers": "4",
+     "per_collection_k": "120",
+     "limit": "300",
+     "rows": "300",
+     "peak_retained_rows": "300",
+     "isolated_errors": "0",
+     "budget_exhausted": "0",
+     "statement_timeouts": "0",
+     "skipped": "0",
+     "fanout_ms": "155",
+     "slowest_arm_ms": "39",
+     "sum_arm_ms": "229",
+     "budget_ms": "20000",
+     "query_embed_ms": "18",
+     "enrich_ms": "51",
+     "include_embeddings": "false",
+     "embedding_fill_ms": "0"
+    },
+    {
+     "event": "search_per_collection_request",
+     "collections": "8",
+     "rows": "300",
+     "bytes": "598736",
+     "repo_ms": "160",
+     "serialize_ms": "9",
+     "handler_ms": "194"
+    }
+   ],
+   "q": "D",
+   "path": "hybrid",
+   "round": 0,
+   "warmup": false
+  },
+  {
+   "wall": 0.17850747192278504,
+   "rows": 313,
+   "err": null,
+   "calls": [
+    {
+     "kind": "route",
+     "n": 8,
+     "s": 0.17346926918253303,
+     "lex": true
+    }
+   ],
+   "events": [
+    {
+     "event": "search_per_collection_arm_phases",
+     "arms": "8",
+     "sum_arm_ms": "119",
+     "sum_permit_wait_ms": "0",
+     "sum_setup_ms": "8",
+     "sum_probe_ms": "13",
+     "sum_statement_ms": "76",
+     "sum_other_ms": "25",
+     "max_permit_wait_ms": "0",
+     "max_setup_ms": "1",
+     "max_probe_ms": "3",
+     "max_statement_ms": "34",
+     "exact_arms": "8",
+     "hnsw_arms": "0",
+     "ef1000_arms": "0",
+     "top_statements": "rdr__bbtc2c7__bge-base-en-v15-768__v1:exact:1000:34,knowledge__bbtc2c6__bge-base-en-v15-768__v1:exact:1000:14,docs__bbtc2c5__bge-base-en-v15-768__v1:exact:1000:6",
+     "sum_hnsw_statement_ms": "0",
+     "max_hnsw_statement_ms": "0"
+    },
+    {
+     "event": "search_per_collection",
+     "collections": "8",
+     "arms": "8",
+     "workers": "4",
+     "per_collection_k": "120",
+     "limit": "300",
+     "rows": "300",
+     "peak_retained_rows": "300",
+     "isolated_errors": "0",
+     "budget_exhausted": "0",
+     "statement_timeouts": "0",
+     "skipped": "0",
+     "fanout_ms": "138",
+     "slowest_arm_ms": "40",
+     "sum_arm_ms": "119",
+     "budget_ms": "20000",
+     "query_embed_ms": "12",
+     "enrich_ms": "24",
+     "include_embeddings": "false",
+     "embedding_fill_ms": "0"
+    },
+    {
+     "event": "search_per_collection_lexical",
+     "arms": "8",
+     "lexical_rows": "18",
+     "extra_rows": "13",
+     "errors": "0",
+     "slowest_arm_ms": "46",
+     "sum_arm_ms": "191"
+    },
+    {
+     "event": "search_per_collection_request",
+     "collections": "8",
+     "rows": "313",
+     "bytes": "627009",
+     "repo_ms": "140",
+     "serialize_ms": "4",
+     "handler_ms": "166"
+    }
+   ],
+   "q": "D",
+   "path": "route",
+   "round": 0,
+   "warmup": false
+  },
+  {
+   "wall": 0.10103169921785593,
+   "rows": 300,
+   "err": null,
+   "calls": [
+    {
+     "kind": "route",
+     "n": 8,
+     "s": 0.09701583767309785,
+     "lex": false
+    }
+   ],
+   "events": [
+    {
+     "event": "search_per_collection_arm_phases",
+     "arms": "8",
+     "sum_arm_ms": "74",
+     "sum_permit_wait_ms": "0",
+     "sum_setup_ms": "5",
+     "sum_probe_ms": "8",
+     "sum_statement_ms": "52",
+     "sum_other_ms": "10",
+     "max_permit_wait_ms": "0",
+     "max_setup_ms": "1",
+     "max_probe_ms": "1",
+     "max_statement_ms": "19",
+     "exact_arms": "8",
+     "hnsw_arms": "0",
+     "ef1000_arms": "0",
+     "top_statements": "rdr__bbtc2c7__bge-base-en-v15-768__v1:exact:1000:19,knowledge__bbtc2c6__bge-base-en-v15-768__v1:exact:1000:12,docs__bbtc2c5__bge-base-en-v15-768__v1:exact:1000:5",
+     "sum_hnsw_statement_ms": "0",
+     "max_hnsw_statement_ms": "0"
+    },
+    {
+     "event": "search_per_collection",
+     "collections": "8",
+     "arms": "8",
+     "workers": "4",
+     "per_collection_k": "120",
+     "limit": "300",
+     "rows": "300",
+     "peak_retained_rows": "300",
+     "isolated_errors": "0",
+     "budget_exhausted": "0",
+     "statement_timeouts": "0",
+     "skipped": "0",
+     "fanout_ms": "67",
+     "slowest_arm_ms": "22",
+     "sum_arm_ms": "74",
+     "budget_ms": "20000",
+     "query_embed_ms": "13",
+     "enrich_ms": "23",
+     "include_embeddings": "false",
+     "embedding_fill_ms": "0"
+    },
+    {
+     "event": "search_per_collection_request",
+     "collections": "8",
+     "rows": "300",
+     "bytes": "598736",
+     "repo_ms": "67",
+     "serialize_ms": "2",
+     "handler_ms": "90"
+    }
+   ],
+   "q": "D",
+   "path": "vector",
+   "round": 0,
+   "warmup": false
+  },
+  {
+   "wall": 0.20604785811156034,
+   "rows": 301,
+   "err": null,
+   "calls": [
+    {
+     "kind": "route",
+     "n": 8,
+     "s": 0.10696459328755736,
+     "lex": false
+    },
+    {
+     "kind": "hybrid",
+     "n": 2,
+     "s": 0.02738709608092904,
+     "cols": [
+      "knowledge__bbtc2c2__bge-base-en-v15-768__v1",
+      "rdr__bbtc2c3__bge-base-en-v15-768__v1"
+     ],
+     "t0": 2732801.963697945
+    },
+    {
+     "kind": "hybrid",
+     "n": 2,
+     "s": 0.04635774530470371,
+     "cols": [
+      "code__bbtc2c0__bge-base-en-v15-768__v1",
+      "docs__bbtc2c1__bge-base-en-v15-768__v1"
+     ],
+     "t0": 2732801.963475674
+    },
+    {
+     "kind": "hybrid",
+     "n": 2,
+     "s": 0.06255412893369794,
+     "cols": [
+      "code__bbtc2c4__bge-base-en-v15-768__v1",
+      "docs__bbtc2c5__bge-base-en-v15-768__v1"
+     ],
+     "t0": 2732801.964744693
+    },
+    {
+     "kind": "hybrid",
+     "n": 2,
+     "s": 0.09232130413874984,
+     "cols": [
+      "knowledge__bbtc2c6__bge-base-en-v15-768__v1",
+      "rdr__bbtc2c7__bge-base-en-v15-768__v1"
+     ],
+     "t0": 2732801.965317937
+    }
+   ],
+   "events": [
+    {
+     "event": "search_per_collection_arm_phases",
+     "arms": "8",
+     "sum_arm_ms": "69",
+     "sum_permit_wait_ms": "0",
+     "sum_setup_ms": "5",
+     "sum_probe_ms": "7",
+     "sum_statement_ms": "48",
+     "sum_other_ms": "10",
+     "max_permit_wait_ms": "0",
+     "max_setup_ms": "1",
+     "max_probe_ms": "1",
+     "max_statement_ms": "19",
+     "exact_arms": "8",
+     "hnsw_arms": "0",
+     "ef1000_arms": "0",
+     "top_statements": "rdr__bbtc2c7__bge-base-en-v15-768__v1:exact:1000:19,knowledge__bbtc2c6__bge-base-en-v15-768__v1:exact:1000:7,docs__bbtc2c5__bge-base-en-v15-768__v1:exact:1000:4",
+     "sum_hnsw_statement_ms": "0",
+     "max_hnsw_statement_ms": "0"
+    },
+    {
+     "event": "search_per_collection",
+     "collections": "8",
+     "arms": "8",
+     "workers": "4",
+     "per_collection_k": "120",
+     "limit": "300",
+     "rows": "300",
+     "peak_retained_rows": "300",
+     "isolated_errors": "0",
+     "budget_exhausted": "0",
+     "statement_timeouts": "0",
+     "skipped": "0",
+     "fanout_ms": "74",
+     "slowest_arm_ms": "22",
+     "sum_arm_ms": "69",
+     "budget_ms": "20000",
+     "query_embed_ms": "16",
+     "enrich_ms": "28",
+     "include_embeddings": "false",
+     "embedding_fill_ms": "0"
+    },
+    {
+     "event": "search_per_collection_request",
+     "collections": "8",
+     "rows": "300",
+     "bytes": "595042",
+     "repo_ms": "75",
+     "serialize_ms": "3",
+     "handler_ms": "100"
+    }
+   ],
+   "q": "E",
+   "path": "hybrid",
+   "round": 0,
+   "warmup": false
+  },
+  {
+   "wall": 0.14181671012192965,
+   "rows": 301,
+   "err": null,
+   "calls": [
+    {
+     "kind": "route",
+     "n": 8,
+     "s": 0.1372979092411697,
+     "lex": true
+    }
+   ],
+   "events": [
+    {
+     "event": "search_per_collection_arm_phases",
+     "arms": "8",
+     "sum_arm_ms": "127",
+     "sum_permit_wait_ms": "0",
+     "sum_setup_ms": "13",
+     "sum_probe_ms": "13",
+     "sum_statement_ms": "81",
+     "sum_other_ms": "22",
+     "max_permit_wait_ms": "0",
+     "max_setup_ms": "3",
+     "max_probe_ms": "4",
+     "max_statement_ms": "26",
+     "exact_arms": "8",
+     "hnsw_arms": "0",
+     "ef1000_arms": "0",
+     "top_statements": "rdr__bbtc2c7__bge-base-en-v15-768__v1:exact:1000:26,code__bbtc2c4__bge-base-en-v15-768__v1:exact:1000:16,knowledge__bbtc2c6__bge-base-en-v15-768__v1:exact:1000:16",
+     "sum_hnsw_statement_ms": "0",
+     "max_hnsw_statement_ms": "0"
+    },
+    {
+     "event": "search_per_collection",
+     "collections": "8",
+     "arms": "8",
+     "workers": "4",
+     "per_collection_k": "120",
+     "limit": "300",
+     "rows": "300",
+     "peak_retained_rows": "300",
+     "isolated_errors": "0",
+     "budget_exhausted": "0",
+     "statement_timeouts": "0",
+     "skipped": "0",
+     "fanout_ms": "96",
+     "slowest_arm_ms": "31",
+     "sum_arm_ms": "127",
+     "budget_ms": "20000",
+     "query_embed_ms": "19",
+     "enrich_ms": "22",
+     "include_embeddings": "false",
+     "embedding_fill_ms": "0"
+    },
+    {
+     "event": "search_per_collection_lexical",
+     "arms": "8",
+     "lexical_rows": "1",
+     "extra_rows": "1",
+     "errors": "0",
+     "slowest_arm_ms": "10",
+     "sum_arm_ms": "68"
+    },
+    {
+     "event": "search_per_collection_request",
+     "collections": "8",
+     "rows": "301",
+     "bytes": "597816",
+     "repo_ms": "97",
+     "serialize_ms": "4",
+     "handler_ms": "130"
+    }
+   ],
+   "q": "E",
+   "path": "route",
+   "round": 0,
+   "warmup": false
+  },
+  {
+   "wall": 0.10610584868118167,
+   "rows": 300,
+   "err": null,
+   "calls": [
+    {
+     "kind": "route",
+     "n": 8,
+     "s": 0.10133192501962185,
+     "lex": false
+    }
+   ],
+   "events": [
+    {
+     "event": "search_per_collection_arm_phases",
+     "arms": "8",
+     "sum_arm_ms": "69",
+     "sum_permit_wait_ms": "0",
+     "sum_setup_ms": "4",
+     "sum_probe_ms": "7",
+     "sum_statement_ms": "50",
+     "sum_other_ms": "9",
+     "max_permit_wait_ms": "0",
+     "max_setup_ms": "0",
+     "max_probe_ms": "1",
+     "max_statement_ms": "20",
+     "exact_arms": "8",
+     "hnsw_arms": "0",
+     "ef1000_arms": "0",
+     "top_statements": "rdr__bbtc2c7__bge-base-en-v15-768__v1:exact:1000:20,knowledge__bbtc2c6__bge-base-en-v15-768__v1:exact:1000:8,docs__bbtc2c5__bge-base-en-v15-768__v1:exact:1000:6",
+     "sum_hnsw_statement_ms": "0",
+     "max_hnsw_statement_ms": "0"
+    },
+    {
+     "event": "search_per_collection",
+     "collections": "8",
+     "arms": "8",
+     "workers": "4",
+     "per_collection_k": "120",
+     "limit": "300",
+     "rows": "300",
+     "peak_retained_rows": "300",
+     "isolated_errors": "0",
+     "budget_exhausted": "0",
+     "statement_timeouts": "0",
+     "skipped": "0",
+     "fanout_ms": "71",
+     "slowest_arm_ms": "23",
+     "sum_arm_ms": "69",
+     "budget_ms": "20000",
+     "query_embed_ms": "17",
+     "enrich_ms": "22",
+     "include_embeddings": "false",
+     "embedding_fill_ms": "0"
+    },
+    {
+     "event": "search_per_collection_request",
+     "collections": "8",
+     "rows": "300",
+     "bytes": "595042",
+     "repo_ms": "72",
+     "serialize_ms": "2",
+     "handler_ms": "94"
+    }
+   ],
+   "q": "E",
+   "path": "vector",
+   "round": 0,
+   "warmup": false
+  },
+  {
+   "wall": 0.17106607602909207,
+   "rows": 305,
+   "err": null,
+   "calls": [
+    {
+     "kind": "route",
+     "n": 8,
+     "s": 0.09539544489234686,
+     "lex": false
+    },
+    {
+     "kind": "hybrid",
+     "n": 2,
+     "s": 0.023514035623520613,
+     "cols": [
+      "knowledge__bbtc2c2__bge-base-en-v15-768__v1",
+      "rdr__bbtc2c3__bge-base-en-v15-768__v1"
+     ],
+     "t0": 2732803.006832362
+    },
+    {
+     "kind": "hybrid",
+     "n": 2,
+     "s": 0.04003719799220562,
+     "cols": [
+      "code__bbtc2c0__bge-base-en-v15-768__v1",
+      "docs__bbtc2c1__bge-base-en-v15-768__v1"
+     ],
+     "t0": 2732803.006707606
+    },
+    {
+     "kind": "hybrid",
+     "n": 2,
+     "s": 0.048748153261840343,
+     "cols": [
+      "code__bbtc2c4__bge-base-en-v15-768__v1",
+      "docs__bbtc2c5__bge-base-en-v15-768__v1"
+     ],
+     "t0": 2732803.008154391
+    },
+    {
+     "kind": "hybrid",
+     "n": 2,
+     "s": 0.06898145796731114,
+     "cols": [
+      "knowledge__bbtc2c6__bge-base-en-v15-768__v1",
+      "rdr__bbtc2c7__bge-base-en-v15-768__v1"
+     ],
+     "t0": 2732803.008409533
+    }
+   ],
+   "events": [
+    {
+     "event": "search_per_collection_arm_phases",
+     "arms": "8",
+     "sum_arm_ms": "80",
+     "sum_permit_wait_ms": "0",
+     "sum_setup_ms": "6",
+     "sum_probe_ms": "13",
+     "sum_statement_ms": "51",
+     "sum_other_ms": "11",
+     "max_permit_wait_ms": "0",
+     "max_setup_ms": "1",
+     "max_probe_ms": "3",
+     "max_statement_ms": "18",
+     "exact_arms": "8",
+     "hnsw_arms": "0",
+     "ef1000_arms": "0",
+     "top_statements": "rdr__bbtc2c7__bge-base-en-v15-768__v1:exact:1000:18,knowledge__bbtc2c6__bge-base-en-v15-768__v1:exact:1000:8,docs__bbtc2c5__bge-base-en-v15-768__v1:exact:1000:5",
+     "sum_hnsw_statement_ms": "0",
+     "max_hnsw_statement_ms": "0"
+    },
+    {
+     "event": "search_per_collection",
+     "collections": "8",
+     "arms": "8",
+     "workers": "4",
+     "per_collection_k": "120",
+     "limit": "300",
+     "rows": "300",
+     "peak_retained_rows": "300",
+     "isolated_errors": "0",
+     "budget_exhausted": "0",
+     "statement_timeouts": "0",
+     "skipped": "0",
+     "fanout_ms": "66",
+     "slowest_arm_ms": "22",
+     "sum_arm_ms": "80",
+     "budget_ms": "20000",
+     "query_embed_ms": "12",
+     "enrich_ms": "18",
+     "include_embeddings": "false",
+     "embedding_fill_ms": "0"
+    },
+    {
+     "event": "search_per_collection_request",
+     "collections": "8",
+     "rows": "300",
+     "bytes": "600086",
+     "repo_ms": "66",
+     "serialize_ms": "2",
+     "handler_ms": "89"
+    }
+   ],
+   "q": "C",
+   "path": "hybrid",
+   "round": 0,
+   "warmup": false
+  },
+  {
+   "wall": 0.10019031772390008,
+   "rows": 305,
+   "err": null,
+   "calls": [
+    {
+     "kind": "route",
+     "n": 8,
+     "s": 0.09673220198601484,
+     "lex": true
+    }
+   ],
+   "events": [
+    {
+     "event": "search_per_collection_arm_phases",
+     "arms": "8",
+     "sum_arm_ms": "64",
+     "sum_permit_wait_ms": "0",
+     "sum_setup_ms": "4",
+     "sum_probe_ms": "6",
+     "sum_statement_ms": "50",
+     "sum_other_ms": "5",
+     "max_permit_wait_ms": "0",
+     "max_setup_ms": "0",
+     "max_probe_ms": "1",
+     "max_statement_ms": "21",
+     "exact_arms": "8",
+     "hnsw_arms": "0",
+     "ef1000_arms": "0",
+     "top_statements": "rdr__bbtc2c7__bge-base-en-v15-768__v1:exact:1000:21,knowledge__bbtc2c6__bge-base-en-v15-768__v1:exact:1000:8,docs__bbtc2c5__bge-base-en-v15-768__v1:exact:1000:5",
+     "sum_hnsw_statement_ms": "0",
+     "max_hnsw_statement_ms": "0"
+    },
+    {
+     "event": "search_per_collection",
+     "collections": "8",
+     "arms": "8",
+     "workers": "4",
+     "per_collection_k": "120",
+     "limit": "300",
+     "rows": "300",
+     "peak_retained_rows": "300",
+     "isolated_errors": "0",
+     "budget_exhausted": "0",
+     "statement_timeouts": "0",
+     "skipped": "0",
+     "fanout_ms": "63",
+     "slowest_arm_ms": "24",
+     "sum_arm_ms": "64",
+     "budget_ms": "20000",
+     "query_embed_ms": "12",
+     "enrich_ms": "20",
+     "include_embeddings": "false",
+     "embedding_fill_ms": "0"
+    },
+    {
+     "event": "search_per_collection_lexical",
+     "arms": "8",
+     "lexical_rows": "9",
+     "extra_rows": "5",
+     "errors": "0",
+     "slowest_arm_ms": "7",
+     "sum_arm_ms": "42"
+    },
+    {
+     "event": "search_per_collection_request",
+     "collections": "8",
+     "rows": "305",
+     "bytes": "611542",
+     "repo_ms": "64",
+     "serialize_ms": "2",
+     "handler_ms": "90"
+    }
+   ],
+   "q": "C",
+   "path": "route",
+   "round": 0,
+   "warmup": false
+  },
+  {
+   "wall": 0.09932731604203582,
+   "rows": 300,
+   "err": null,
+   "calls": [
+    {
+     "kind": "route",
+     "n": 8,
+     "s": 0.0954106030985713,
+     "lex": false
+    }
+   ],
+   "events": [
+    {
+     "event": "search_per_collection_arm_phases",
+     "arms": "8",
+     "sum_arm_ms": "86",
+     "sum_permit_wait_ms": "0",
+     "sum_setup_ms": "6",
+     "sum_probe_ms": "9",
+     "sum_statement_ms": "66",
+     "sum_other_ms": "8",
+     "max_permit_wait_ms": "0",
+     "max_setup_ms": "1",
+     "max_probe_ms": "2",
+     "max_statement_ms": "20",
+     "exact_arms": "8",
+     "hnsw_arms": "0",
+     "ef1000_arms": "0",
+     "top_statements": "rdr__bbtc2c7__bge-base-en-v15-768__v1:exact:1000:20,knowledge__bbtc2c6__bge-base-en-v15-768__v1:exact:1000:15,docs__bbtc2c5__bge-base-en-v15-768__v1:exact:1000:9",
+     "sum_hnsw_statement_ms": "0",
+     "max_hnsw_statement_ms": "0"
+    },
+    {
+     "event": "search_per_collection",
+     "collections": "8",
+     "arms": "8",
+     "workers": "4",
+     "per_collection_k": "120",
+     "limit": "300",
+     "rows": "300",
+     "peak_retained_rows": "300",
+     "isolated_errors": "0",
+     "budget_exhausted": "0",
+     "statement_timeouts": "0",
+     "skipped": "0",
+     "fanout_ms": "67",
+     "slowest_arm_ms": "24",
+     "sum_arm_ms": "86",
+     "budget_ms": "20000",
+     "query_embed_ms": "12",
+     "enrich_ms": "20",
+     "include_embeddings": "false",
+     "embedding_fill_ms": "0"
+    },
+    {
+     "event": "search_per_collection_request",
+     "collections": "8",
+     "rows": "300",
+     "bytes": "600086",
+     "repo_ms": "67",
+     "serialize_ms": "2",
+     "handler_ms": "89"
+    }
+   ],
+   "q": "C",
+   "path": "vector",
+   "round": 0,
+   "warmup": false
+  }
+ ],
+ "hybrid_batches": [
+  2,
+  2,
+  2,
+  2
+ ],
+ "explain": {
+  "D": {
+   "mode": "on",
+   "per_arm": [
+    {
+     "exec_ms": 1.669,
+     "plan_ms": 5.348,
+     "rows": 0,
+     "shared_hit": 57,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 10,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "col": "code__bbtc2c0__bge-base-en-v15-768__v1",
+     "rows_in": 10
+    },
+    {
+     "exec_ms": 3.773,
+     "plan_ms": 4.909,
+     "rows": 1,
+     "shared_hit": 110,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 19,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "col": "docs__bbtc2c1__bge-base-en-v15-768__v1",
+     "rows_in": 20
+    },
+    {
+     "exec_ms": 5.726,
+     "plan_ms": 4.969,
+     "rows": 0,
+     "shared_hit": 142,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 32,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "col": "knowledge__bbtc2c2__bge-base-en-v15-768__v1",
+     "rows_in": 32
+    },
+    {
+     "exec_ms": 9.186,
+     "plan_ms": 4.965,
+     "rows": 1,
+     "shared_hit": 230,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 82,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "col": "rdr__bbtc2c3__bge-base-en-v15-768__v1",
+     "rows_in": 50
+    },
+    {
+     "exec_ms": 12.244,
+     "plan_ms": 4.925,
+     "rows": 1,
+     "shared_hit": 323,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 155,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "col": "code__bbtc2c4__bge-base-en-v15-768__v1",
+     "rows_in": 80
+    },
+    {
+     "exec_ms": 22.747,
+     "plan_ms": 4.903,
+     "rows": 0,
+     "shared_hit": 523,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 130,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "col": "docs__bbtc2c5__bge-base-en-v15-768__v1",
+     "rows_in": 130
+    },
+    {
+     "exec_ms": 37.215,
+     "plan_ms": 4.879,
+     "rows": 1,
+     "shared_hit": 685,
+     "shared_read": 0,
+     "top_scan": "Bitmap Heap Scan",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Bitmap Heap Scan",
+      "Bitmap Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 362,
+     "removed_recheck": 0,
+     "heap_exact": 51,
+     "heap_lossy": 0,
+     "bitmap_rows": {
+      "chunks_m0a90d9bc_t_ed0492d9e25db247_pkey": 200
+     },
+     "jit": false,
+     "col": "knowledge__bbtc2c6__bge-base-en-v15-768__v1",
+     "rows_in": 200
+    },
+    {
+     "exec_ms": 15.642,
+     "plan_ms": 4.915,
+     "rows": 14,
+     "shared_hit": 987,
+     "shared_read": 0,
+     "top_scan": "Bitmap Heap Scan",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Bitmap Heap Scan",
+      "BitmapOr",
+      "Bitmap Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_tsv_idx)",
+      "Bitmap Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_text_idx)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 1670,
+     "removed_recheck": 40,
+     "heap_exact": 48,
+     "heap_lossy": 0,
+     "bitmap_rows": {
+      "chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_tsv_idx": 2,
+      "chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_text_idx": 58
+     },
+     "jit": false,
+     "col": "rdr__bbtc2c7__bge-base-en-v15-768__v1",
+     "rows_in": 440
+    }
+   ],
+   "per_batch": [
+    {
+     "exec_ms": 14.622,
+     "plan_ms": 5.303,
+     "rows": 1,
+     "shared_hit": 347,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 114,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "ncols": 2
+    },
+    {
+     "exec_ms": 5.307,
+     "plan_ms": 5.235,
+     "rows": 1,
+     "shared_hit": 142,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 29,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "ncols": 2
+    },
+    {
+     "exec_ms": 34.758,
+     "plan_ms": 4.909,
+     "rows": 1,
+     "shared_hit": 667,
+     "shared_read": 0,
+     "top_scan": "Bitmap Heap Scan",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Bitmap Heap Scan",
+      "Bitmap Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 285,
+     "removed_recheck": 0,
+     "heap_exact": 48,
+     "heap_lossy": 0,
+     "bitmap_rows": {
+      "chunks_m0a90d9bc_t_ed0492d9e25db247_pkey": 210
+     },
+     "jit": false,
+     "ncols": 2
+    },
+    {
+     "exec_ms": 15.891,
+     "plan_ms": 4.953,
+     "rows": 15,
+     "shared_hit": 997,
+     "shared_read": 0,
+     "top_scan": "Bitmap Heap Scan",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Bitmap Heap Scan",
+      "BitmapOr",
+      "Bitmap Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_tsv_idx)",
+      "Bitmap Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_text_idx)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 1833,
+     "removed_recheck": 40,
+     "heap_exact": 48,
+     "heap_lossy": 0,
+     "bitmap_rows": {
+      "chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_tsv_idx": 2,
+      "chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_text_idx": 58
+     },
+     "jit": false,
+     "ncols": 2
+    }
+   ],
+   "whole": {
+    "exec_ms": 16.821,
+    "plan_ms": 5.345,
+    "rows": 18,
+    "shared_hit": 1016,
+    "shared_read": 0,
+    "top_scan": "Bitmap Heap Scan",
+    "nodes": [
+     "Limit",
+     "Result",
+     "Bitmap Heap Scan",
+     "BitmapOr",
+     "Bitmap Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_tsv_idx)",
+     "Bitmap Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_text_idx)",
+     "Nested Loop",
+     "Index Scan(idx_catalog_chunks_collection)",
+     "Seq Scan"
+    ],
+    "removed_filter": 1944,
+    "removed_recheck": 40,
+    "heap_exact": 48,
+    "heap_lossy": 0,
+    "bitmap_rows": {
+     "chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_tsv_idx": 2,
+     "chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_text_idx": 58
+    },
+    "jit": false
+   },
+   "fn_arm": [
+    {
+     "g": 0,
+     "ms": 3.804,
+     "n": 0
+    },
+    {
+     "g": 1,
+     "ms": 5.857,
+     "n": 1
+    },
+    {
+     "g": 2,
+     "ms": 7.609,
+     "n": 0
+    },
+    {
+     "g": 3,
+     "ms": 11.171,
+     "n": 1
+    },
+    {
+     "g": 4,
+     "ms": 14.172,
+     "n": 1
+    },
+    {
+     "g": 5,
+     "ms": 24.637,
+     "n": 0
+    },
+    {
+     "g": 6,
+     "ms": 38.956,
+     "n": 1
+    },
+    {
+     "g": 7,
+     "ms": 16.3,
+     "n": 14
+    }
+   ],
+   "fn_batch": [
+    {
+     "g": 0,
+     "ms": 16.472,
+     "n": 1
+    },
+    {
+     "g": 1,
+     "ms": 7.293,
+     "n": 1
+    },
+    {
+     "g": 2,
+     "ms": 36.372,
+     "n": 1
+    },
+    {
+     "g": 3,
+     "ms": 16.555,
+     "n": 15
+    }
+   ],
+   "fn_whole": [
+    {
+     "g": 0,
+     "ms": 16.831,
+     "n": 18
+    }
+   ],
+   "variants": {
+    "fts": {
+     "whole": {
+      "exec_ms": 1.8,
+      "plan_ms": 3.124,
+      "rows": 2,
+      "shared_hit": 342,
+      "shared_read": 0,
+      "top_scan": "Bitmap Heap Scan",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Bitmap Heap Scan",
+       "Bitmap Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_tsv_idx)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 32,
+      "removed_recheck": 0,
+      "heap_exact": 2,
+      "heap_lossy": 0,
+      "bitmap_rows": {
+       "chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_tsv_idx": 2
+      },
+      "jit": false
+     },
+     "big": {
+      "exec_ms": 0.45,
+      "plan_ms": 2.873,
+      "rows": 0,
+      "shared_hit": 313,
+      "shared_read": 0,
+      "top_scan": "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 80,
+      "removed_recheck": 0,
+      "heap_exact": 0,
+      "heap_lossy": 0,
+      "bitmap_rows": {},
+      "jit": false
+     }
+    },
+    "ilike": {
+     "whole": {
+      "exec_ms": 1.11,
+      "plan_ms": 2.541,
+      "rows": 2,
+      "shared_hit": 288,
+      "shared_read": 0,
+      "top_scan": "Bitmap Heap Scan",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Bitmap Heap Scan",
+       "Bitmap Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_text_idx)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 32,
+      "removed_recheck": 4,
+      "heap_exact": 6,
+      "heap_lossy": 0,
+      "bitmap_rows": {
+       "chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_text_idx": 6
+      },
+      "jit": false
+     },
+     "big": {
+      "exec_ms": 0.7,
+      "plan_ms": 2.65,
+      "rows": 0,
+      "shared_hit": 112,
+      "shared_read": 0,
+      "top_scan": "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 80,
+      "removed_recheck": 0,
+      "heap_exact": 0,
+      "heap_lossy": 0,
+      "bitmap_rows": {},
+      "jit": false
+     }
+    },
+    "ilike_raw": {
+     "whole": {
+      "exec_ms": 1.074,
+      "plan_ms": 2.542,
+      "rows": 2,
+      "shared_hit": 288,
+      "shared_read": 0,
+      "top_scan": "Bitmap Heap Scan",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Bitmap Heap Scan",
+       "Bitmap Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_text_idx)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 32,
+      "removed_recheck": 4,
+      "heap_exact": 6,
+      "heap_lossy": 0,
+      "bitmap_rows": {
+       "chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_text_idx": 6
+      },
+      "jit": false
+     },
+     "big": {
+      "exec_ms": 0.743,
+      "plan_ms": 2.829,
+      "rows": 0,
+      "shared_hit": 112,
+      "shared_read": 0,
+      "top_scan": "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 80,
+      "removed_recheck": 0,
+      "heap_exact": 0,
+      "heap_lossy": 0,
+      "bitmap_rows": {},
+      "jit": false
+     }
+    }
+   },
+   "big": "code__bbtc2c4__bge-base-en-v15-768__v1"
+  },
+  "E": {
+   "mode": "substring",
+   "per_arm": [
+    {
+     "exec_ms": 0.214,
+     "plan_ms": 3.155,
+     "rows": 0,
+     "shared_hit": 57,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 10,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "col": "code__bbtc2c0__bge-base-en-v15-768__v1",
+     "rows_in": 10
+    },
+    {
+     "exec_ms": 0.319,
+     "plan_ms": 3.071,
+     "rows": 0,
+     "shared_hit": 107,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 20,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "col": "docs__bbtc2c1__bge-base-en-v15-768__v1",
+     "rows_in": 20
+    },
+    {
+     "exec_ms": 0.412,
+     "plan_ms": 3.09,
+     "rows": 0,
+     "shared_hit": 142,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 32,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "col": "knowledge__bbtc2c2__bge-base-en-v15-768__v1",
+     "rows_in": 32
+    },
+    {
+     "exec_ms": 0.644,
+     "plan_ms": 3.048,
+     "rows": 0,
+     "shared_hit": 227,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 50,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "col": "rdr__bbtc2c3__bge-base-en-v15-768__v1",
+     "rows_in": 50
+    },
+    {
+     "exec_ms": 0.969,
+     "plan_ms": 3.079,
+     "rows": 0,
+     "shared_hit": 319,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 80,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "col": "code__bbtc2c4__bge-base-en-v15-768__v1",
+     "rows_in": 80
+    },
+    {
+     "exec_ms": 1.402,
+     "plan_ms": 3.165,
+     "rows": 0,
+     "shared_hit": 523,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 130,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "col": "docs__bbtc2c5__bge-base-en-v15-768__v1",
+     "rows_in": 130
+    },
+    {
+     "exec_ms": 1.917,
+     "plan_ms": 3.12,
+     "rows": 1,
+     "shared_hit": 683,
+     "shared_read": 0,
+     "top_scan": "Bitmap Heap Scan",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Bitmap Heap Scan",
+      "Bitmap Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 298,
+     "removed_recheck": 0,
+     "heap_exact": 51,
+     "heap_lossy": 0,
+     "bitmap_rows": {
+      "chunks_m0a90d9bc_t_ed0492d9e25db247_pkey": 200
+     },
+     "jit": false,
+     "col": "knowledge__bbtc2c6__bge-base-en-v15-768__v1",
+     "rows_in": 200
+    },
+    {
+     "exec_ms": 3.348,
+     "plan_ms": 3.066,
+     "rows": 0,
+     "shared_hit": 679,
+     "shared_read": 0,
+     "top_scan": "Bitmap Heap Scan",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Bitmap Heap Scan",
+      "BitmapOr",
+      "Bitmap Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_tsv_idx)",
+      "Bitmap Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_text_idx)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 1,
+     "removed_recheck": 4,
+     "heap_exact": 5,
+     "heap_lossy": 0,
+     "bitmap_rows": {
+      "chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_tsv_idx": 1,
+      "chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_text_idx": 5
+     },
+     "jit": false,
+     "col": "rdr__bbtc2c7__bge-base-en-v15-768__v1",
+     "rows_in": 440
+    }
+   ],
+   "per_batch": [
+    {
+     "exec_ms": 0.955,
+     "plan_ms": 3.411,
+     "rows": 0,
+     "shared_hit": 344,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 82,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "ncols": 2
+    },
+    {
+     "exec_ms": 0.431,
+     "plan_ms": 3.054,
+     "rows": 0,
+     "shared_hit": 139,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 30,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "ncols": 2
+    },
+    {
+     "exec_ms": 2.313,
+     "plan_ms": 3.033,
+     "rows": 0,
+     "shared_hit": 663,
+     "shared_read": 0,
+     "top_scan": "Bitmap Heap Scan",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Bitmap Heap Scan",
+      "Bitmap Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 210,
+     "removed_recheck": 0,
+     "heap_exact": 48,
+     "heap_lossy": 0,
+     "bitmap_rows": {
+      "chunks_m0a90d9bc_t_ed0492d9e25db247_pkey": 210
+     },
+     "jit": false,
+     "ncols": 2
+    },
+    {
+     "exec_ms": 3.46,
+     "plan_ms": 3.118,
+     "rows": 1,
+     "shared_hit": 684,
+     "shared_read": 0,
+     "top_scan": "Bitmap Heap Scan",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Bitmap Heap Scan",
+      "BitmapOr",
+      "Bitmap Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_tsv_idx)",
+      "Bitmap Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_text_idx)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 99,
+     "removed_recheck": 4,
+     "heap_exact": 5,
+     "heap_lossy": 0,
+     "bitmap_rows": {
+      "chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_tsv_idx": 1,
+      "chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_text_idx": 5
+     },
+     "jit": false,
+     "ncols": 2
+    }
+   ],
+   "whole": {
+    "exec_ms": 3.47,
+    "plan_ms": 3.436,
+    "rows": 1,
+    "shared_hit": 684,
+    "shared_read": 0,
+    "top_scan": "Bitmap Heap Scan",
+    "nodes": [
+     "Limit",
+     "Result",
+     "Bitmap Heap Scan",
+     "BitmapOr",
+     "Bitmap Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_tsv_idx)",
+     "Bitmap Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_text_idx)",
+     "Nested Loop",
+     "Index Scan(idx_catalog_chunks_collection)",
+     "Seq Scan"
+    ],
+    "removed_filter": 99,
+    "removed_recheck": 4,
+    "heap_exact": 5,
+    "heap_lossy": 0,
+    "bitmap_rows": {
+     "chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_tsv_idx": 1,
+     "chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_text_idx": 5
+    },
+    "jit": false
+   },
+   "fn_arm": [
+    {
+     "g": 0,
+     "ms": 0.648,
+     "n": 0
+    },
+    {
+     "g": 1,
+     "ms": 0.698,
+     "n": 0
+    },
+    {
+     "g": 2,
+     "ms": 0.744,
+     "n": 0
+    },
+    {
+     "g": 3,
+     "ms": 0.94,
+     "n": 0
+    },
+    {
+     "g": 4,
+     "ms": 1.227,
+     "n": 0
+    },
+    {
+     "g": 5,
+     "ms": 1.591,
+     "n": 0
+    },
+    {
+     "g": 6,
+     "ms": 2.043,
+     "n": 1
+    },
+    {
+     "g": 7,
+     "ms": 2.239,
+     "n": 0
+    }
+   ],
+   "fn_batch": [
+    {
+     "g": 0,
+     "ms": 1.17,
+     "n": 0
+    },
+    {
+     "g": 1,
+     "ms": 0.793,
+     "n": 0
+    },
+    {
+     "g": 2,
+     "ms": 2.197,
+     "n": 0
+    },
+    {
+     "g": 3,
+     "ms": 2.212,
+     "n": 1
+    }
+   ],
+   "fn_whole": [
+    {
+     "g": 0,
+     "ms": 2.377,
+     "n": 1
+    }
+   ],
+   "variants": {
+    "fts": {
+     "whole": {
+      "exec_ms": 2.168,
+      "plan_ms": 3.102,
+      "rows": 1,
+      "shared_hit": 342,
+      "shared_read": 0,
+      "top_scan": "Bitmap Heap Scan",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Bitmap Heap Scan",
+       "Bitmap Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_tsv_idx)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 99,
+      "removed_recheck": 0,
+      "heap_exact": 1,
+      "heap_lossy": 0,
+      "bitmap_rows": {
+       "chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_tsv_idx": 1
+      },
+      "jit": false
+     },
+     "big": {
+      "exec_ms": 0.442,
+      "plan_ms": 2.853,
+      "rows": 0,
+      "shared_hit": 313,
+      "shared_read": 0,
+      "top_scan": "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 80,
+      "removed_recheck": 0,
+      "heap_exact": 0,
+      "heap_lossy": 0,
+      "bitmap_rows": {},
+      "jit": false
+     }
+    },
+    "ilike": {
+     "whole": {
+      "exec_ms": 1.504,
+      "plan_ms": 2.548,
+      "rows": 1,
+      "shared_hit": 308,
+      "shared_read": 0,
+      "top_scan": "Bitmap Heap Scan",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Bitmap Heap Scan",
+       "Bitmap Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_text_idx)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 99,
+      "removed_recheck": 4,
+      "heap_exact": 5,
+      "heap_lossy": 0,
+      "bitmap_rows": {
+       "chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_text_idx": 5
+      },
+      "jit": false
+     },
+     "big": {
+      "exec_ms": 0.721,
+      "plan_ms": 2.533,
+      "rows": 0,
+      "shared_hit": 112,
+      "shared_read": 0,
+      "top_scan": "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 80,
+      "removed_recheck": 0,
+      "heap_exact": 0,
+      "heap_lossy": 0,
+      "bitmap_rows": {},
+      "jit": false
+     }
+    },
+    "ilike_raw": {
+     "whole": {
+      "exec_ms": 1.212,
+      "plan_ms": 2.53,
+      "rows": 1,
+      "shared_hit": 297,
+      "shared_read": 0,
+      "top_scan": "Bitmap Heap Scan",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Bitmap Heap Scan",
+       "Bitmap Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_text_idx)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 99,
+      "removed_recheck": 10,
+      "heap_exact": 10,
+      "heap_lossy": 0,
+      "bitmap_rows": {
+       "chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_text_idx": 11
+      },
+      "jit": false
+     },
+     "big": {
+      "exec_ms": 0.806,
+      "plan_ms": 2.878,
+      "rows": 0,
+      "shared_hit": 112,
+      "shared_read": 0,
+      "top_scan": "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 80,
+      "removed_recheck": 0,
+      "heap_exact": 0,
+      "heap_lossy": 0,
+      "bitmap_rows": {},
+      "jit": false
+     }
+    },
+    "trgm": {
+     "whole": {
+      "exec_ms": 138.782,
+      "plan_ms": 4.857,
+      "rows": 1,
+      "shared_hit": 560,
+      "shared_read": 0,
+      "top_scan": "Bitmap Heap Scan",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Bitmap Heap Scan",
+       "Bitmap Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_text_idx)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 808,
+      "removed_recheck": 0,
+      "heap_exact": 214,
+      "heap_lossy": 0,
+      "bitmap_rows": {
+       "chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_text_idx": 710
+      },
+      "jit": false
+     },
+     "big": {
+      "exec_ms": 12.875,
+      "plan_ms": 4.852,
+      "rows": 0,
+      "shared_hit": 112,
+      "shared_read": 0,
+      "top_scan": "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 80,
+      "removed_recheck": 0,
+      "heap_exact": 0,
+      "heap_lossy": 0,
+      "bitmap_rows": {},
+      "jit": false
+     }
+    }
+   },
+   "big": "code__bbtc2c4__bge-base-en-v15-768__v1"
+  },
+  "C": {
+   "mode": "substring",
+   "per_arm": [
+    {
+     "exec_ms": 0.217,
+     "plan_ms": 3.362,
+     "rows": 0,
+     "shared_hit": 57,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 10,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "col": "code__bbtc2c0__bge-base-en-v15-768__v1",
+     "rows_in": 10
+    },
+    {
+     "exec_ms": 0.349,
+     "plan_ms": 3.087,
+     "rows": 1,
+     "shared_hit": 110,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 21,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "col": "docs__bbtc2c1__bge-base-en-v15-768__v1",
+     "rows_in": 20
+    },
+    {
+     "exec_ms": 0.41,
+     "plan_ms": 3.021,
+     "rows": 0,
+     "shared_hit": 142,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 32,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "col": "knowledge__bbtc2c2__bge-base-en-v15-768__v1",
+     "rows_in": 32
+    },
+    {
+     "exec_ms": 0.643,
+     "plan_ms": 3.025,
+     "rows": 1,
+     "shared_hit": 230,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 56,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "col": "rdr__bbtc2c3__bge-base-en-v15-768__v1",
+     "rows_in": 50
+    },
+    {
+     "exec_ms": 0.969,
+     "plan_ms": 3.054,
+     "rows": 0,
+     "shared_hit": 319,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 80,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "col": "code__bbtc2c4__bge-base-en-v15-768__v1",
+     "rows_in": 80
+    },
+    {
+     "exec_ms": 1.387,
+     "plan_ms": 3.036,
+     "rows": 0,
+     "shared_hit": 523,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 130,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "col": "docs__bbtc2c5__bge-base-en-v15-768__v1",
+     "rows_in": 130
+    },
+    {
+     "exec_ms": 1.928,
+     "plan_ms": 3.122,
+     "rows": 1,
+     "shared_hit": 685,
+     "shared_read": 0,
+     "top_scan": "Bitmap Heap Scan",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Bitmap Heap Scan",
+      "Bitmap Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 375,
+     "removed_recheck": 0,
+     "heap_exact": 51,
+     "heap_lossy": 0,
+     "bitmap_rows": {
+      "chunks_m0a90d9bc_t_ed0492d9e25db247_pkey": 200
+     },
+     "jit": false,
+     "col": "knowledge__bbtc2c6__bge-base-en-v15-768__v1",
+     "rows_in": 200
+    },
+    {
+     "exec_ms": 2.572,
+     "plan_ms": 3.093,
+     "rows": 6,
+     "shared_hit": 697,
+     "shared_read": 0,
+     "top_scan": "Bitmap Heap Scan",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Bitmap Heap Scan",
+      "BitmapOr",
+      "Bitmap Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_tsv_idx)",
+      "Bitmap Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_text_idx)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 1251,
+     "removed_recheck": 0,
+     "heap_exact": 9,
+     "heap_lossy": 0,
+     "bitmap_rows": {
+      "chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_tsv_idx": 8,
+      "chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_text_idx": 3
+     },
+     "jit": false,
+     "col": "rdr__bbtc2c7__bge-base-en-v15-768__v1",
+     "rows_in": 440
+    }
+   ],
+   "per_batch": [
+    {
+     "exec_ms": 0.975,
+     "plan_ms": 3.393,
+     "rows": 1,
+     "shared_hit": 347,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 88,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "ncols": 2
+    },
+    {
+     "exec_ms": 0.459,
+     "plan_ms": 3.085,
+     "rows": 1,
+     "shared_hit": 142,
+     "shared_read": 0,
+     "top_scan": "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 31,
+     "removed_recheck": 0,
+     "heap_exact": 0,
+     "heap_lossy": 0,
+     "bitmap_rows": {},
+     "jit": false,
+     "ncols": 2
+    },
+    {
+     "exec_ms": 2.262,
+     "plan_ms": 3.029,
+     "rows": 0,
+     "shared_hit": 663,
+     "shared_read": 0,
+     "top_scan": "Bitmap Heap Scan",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Bitmap Heap Scan",
+      "Bitmap Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 210,
+     "removed_recheck": 0,
+     "heap_exact": 48,
+     "heap_lossy": 0,
+     "bitmap_rows": {
+      "chunks_m0a90d9bc_t_ed0492d9e25db247_pkey": 210
+     },
+     "jit": false,
+     "ncols": 2
+    },
+    {
+     "exec_ms": 2.624,
+     "plan_ms": 3.399,
+     "rows": 7,
+     "shared_hit": 704,
+     "shared_read": 0,
+     "top_scan": "Bitmap Heap Scan",
+     "nodes": [
+      "Limit",
+      "Result",
+      "Bitmap Heap Scan",
+      "BitmapOr",
+      "Bitmap Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_tsv_idx)",
+      "Bitmap Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_text_idx)",
+      "Nested Loop",
+      "Index Scan(idx_catalog_chunks_collection)",
+      "Seq Scan"
+     ],
+     "removed_filter": 1430,
+     "removed_recheck": 0,
+     "heap_exact": 9,
+     "heap_lossy": 0,
+     "bitmap_rows": {
+      "chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_tsv_idx": 8,
+      "chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_text_idx": 3
+     },
+     "jit": false,
+     "ncols": 2
+    }
+   ],
+   "whole": {
+    "exec_ms": 2.435,
+    "plan_ms": 3.238,
+    "rows": 9,
+    "shared_hit": 710,
+    "shared_read": 0,
+    "top_scan": "Bitmap Heap Scan",
+    "nodes": [
+     "Limit",
+     "Result",
+     "Bitmap Heap Scan",
+     "BitmapOr",
+     "Bitmap Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_tsv_idx)",
+     "Bitmap Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_text_idx)",
+     "Nested Loop",
+     "Index Scan(idx_catalog_chunks_collection)",
+     "Seq Scan"
+    ],
+    "removed_filter": 1431,
+    "removed_recheck": 0,
+    "heap_exact": 9,
+    "heap_lossy": 0,
+    "bitmap_rows": {
+     "chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_tsv_idx": 8,
+     "chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_text_idx": 3
+    },
+    "jit": false
+   },
+   "fn_arm": [
+    {
+     "g": 0,
+     "ms": 0.635,
+     "n": 0
+    },
+    {
+     "g": 1,
+     "ms": 0.717,
+     "n": 1
+    },
+    {
+     "g": 2,
+     "ms": 0.752,
+     "n": 0
+    },
+    {
+     "g": 3,
+     "ms": 0.929,
+     "n": 1
+    },
+    {
+     "g": 4,
+     "ms": 1.196,
+     "n": 0
+    },
+    {
+     "g": 5,
+     "ms": 1.54,
+     "n": 0
+    },
+    {
+     "g": 6,
+     "ms": 2.013,
+     "n": 1
+    },
+    {
+     "g": 7,
+     "ms": 1.565,
+     "n": 6
+    }
+   ],
+   "fn_batch": [
+    {
+     "g": 0,
+     "ms": 1.162,
+     "n": 1
+    },
+    {
+     "g": 1,
+     "ms": 0.783,
+     "n": 1
+    },
+    {
+     "g": 2,
+     "ms": 2.182,
+     "n": 0
+    },
+    {
+     "g": 3,
+     "ms": 1.612,
+     "n": 7
+    }
+   ],
+   "fn_whole": [
+    {
+     "g": 0,
+     "ms": 1.678,
+     "n": 9
+    }
+   ],
+   "variants": {
+    "fts": {
+     "whole": {
+      "exec_ms": 1.856,
+      "plan_ms": 3.106,
+      "rows": 8,
+      "shared_hit": 395,
+      "shared_read": 0,
+      "top_scan": "Bitmap Heap Scan",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Bitmap Heap Scan",
+       "Bitmap Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_tsv_idx)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 1392,
+      "removed_recheck": 0,
+      "heap_exact": 8,
+      "heap_lossy": 0,
+      "bitmap_rows": {
+       "chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_tsv_idx": 8
+      },
+      "jit": false
+     },
+     "big": {
+      "exec_ms": 0.484,
+      "plan_ms": 3.138,
+      "rows": 0,
+      "shared_hit": 313,
+      "shared_read": 0,
+      "top_scan": "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 80,
+      "removed_recheck": 0,
+      "heap_exact": 0,
+      "heap_lossy": 0,
+      "bitmap_rows": {},
+      "jit": false
+     }
+    },
+    "ilike": {
+     "whole": {
+      "exec_ms": 1.11,
+      "plan_ms": 2.589,
+      "rows": 3,
+      "shared_hit": 293,
+      "shared_read": 0,
+      "top_scan": "Bitmap Heap Scan",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Bitmap Heap Scan",
+       "Bitmap Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_text_idx)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 246,
+      "removed_recheck": 0,
+      "heap_exact": 3,
+      "heap_lossy": 0,
+      "bitmap_rows": {
+       "chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_text_idx": 3
+      },
+      "jit": false
+     },
+     "big": {
+      "exec_ms": 0.722,
+      "plan_ms": 2.54,
+      "rows": 0,
+      "shared_hit": 112,
+      "shared_read": 0,
+      "top_scan": "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 80,
+      "removed_recheck": 0,
+      "heap_exact": 0,
+      "heap_lossy": 0,
+      "bitmap_rows": {},
+      "jit": false
+     }
+    },
+    "ilike_raw": {
+     "whole": {
+      "exec_ms": 1.034,
+      "plan_ms": 2.502,
+      "rows": 3,
+      "shared_hit": 293,
+      "shared_read": 0,
+      "top_scan": "Bitmap Heap Scan",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Bitmap Heap Scan",
+       "Bitmap Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_text_idx)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 246,
+      "removed_recheck": 0,
+      "heap_exact": 3,
+      "heap_lossy": 0,
+      "bitmap_rows": {
+       "chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_text_idx": 3
+      },
+      "jit": false
+     },
+     "big": {
+      "exec_ms": 0.709,
+      "plan_ms": 2.542,
+      "rows": 0,
+      "shared_hit": 112,
+      "shared_read": 0,
+      "top_scan": "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 80,
+      "removed_recheck": 0,
+      "heap_exact": 0,
+      "heap_lossy": 0,
+      "bitmap_rows": {},
+      "jit": false
+     }
+    },
+    "trgm": {
+     "whole": {
+      "exec_ms": 46.93,
+      "plan_ms": 4.706,
+      "rows": 7,
+      "shared_hit": 490,
+      "shared_read": 0,
+      "top_scan": "Bitmap Heap Scan",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Bitmap Heap Scan",
+       "Bitmap Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_text_idx)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 755,
+      "removed_recheck": 0,
+      "heap_exact": 148,
+      "heap_lossy": 0,
+      "bitmap_rows": {
+       "chunks_m0a90d9bc_t_ed0492d9e25db247_chunk_text_idx": 251
+      },
+      "jit": false
+     },
+     "big": {
+      "exec_ms": 11.924,
+      "plan_ms": 4.579,
+      "rows": 0,
+      "shared_hit": 112,
+      "shared_read": 0,
+      "top_scan": "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+      "nodes": [
+       "Limit",
+       "Result",
+       "Index Scan(chunks_m0a90d9bc_t_ed0492d9e25db247_pkey)",
+       "Nested Loop",
+       "Index Scan(idx_catalog_chunks_collection)",
+       "Seq Scan"
+      ],
+      "removed_filter": 80,
+      "removed_recheck": 0,
+      "heap_exact": 0,
+      "heap_lossy": 0,
+      "bitmap_rows": {},
+      "jit": false
+     }
+    }
+   },
+   "big": "code__bbtc2c4__bge-base-en-v15-768__v1"
+  }
+ },
+ "plan_text": {
+  "E_big_arm": "Limit  (cost=0.28..886.65 rows=1 width=33) (actual time=0.928..0.929 rows=0 loops=1)\n  Buffers: shared hit=319\n  ->  Result  (cost=0.28..886.65 rows=1 width=33) (actual time=0.928..0.928 rows=0 loops=1)\n        One-Time Filter: (NULLIF(current_setting('nexus.tenant'::text, true), ''::text) = 't2545139-1'::text)\n        Buffers: shared hit=319\n        ->  Index Scan using chunks_m0a90d9bc_t_ed0492d9e25db247_pkey on chunks_m0a90d9bc_t_ed0492d9e25db247 c  (cost=0.28..886.65 rows=1 width=33) (actual time=0.926..0.926 rows=0 loops=1)\n              Index Cond: ((tenant_id = 't2545139-1'::text) AND (collection = ANY ('{code__bbtc2c4__bge-base-en-v15-768__v1}'::text[])) AND (embedding_model = 'bge-base-en-v15-768'::text))\n              Filter: (((chunk_tsv @@ '''resolv'' & ''activ'' & ''session'' & ''id'''::tsquery) OR (chunk_text ~~* '%resolve\\_active\\_session\\_id%'::text)) AND EXISTS(SubPlan 1))\n              Rows Removed by Filter: 80\n              Buffers: shared hit=319\n              SubPlan 1\n                ->  Nested Loop  (cost=0.15..9.31 rows=1 width=0) (never executed)\n                      Join Filter: (m.doc_id = d.tumbler)\n                      ->  Index Scan using idx_catalog_chunks_collection on catalog_document_chunks m  (cost=0.15..8.17 rows=1 width=64) (never executed)\n                            Index Cond: ((tenant_id = c.tenant_id) AND (collection = c.collection))\n                            Filter: (chash = c.chash)\n                      ->  Seq Scan on catalog_documents d  (cost=0.00..1.12 rows=1 width=64) (never executed)\n                            Filter: ((deleted_at IS NULL) AND (tenant_id = c.tenant_id))\nPlanning:\n  Buffers: shared hit=1304\nPlanning Time: 3.114 ms\nExecution Time: 0.965 ms",
+  "E_small_arm": "Limit  (cost=0.28..118.53 rows=1 width=33) (actual time=0.177..0.178 rows=0 loops=1)\n  Buffers: shared hit=57\n  ->  Result  (cost=0.28..118.53 rows=1 width=33) (actual time=0.177..0.177 rows=0 loops=1)\n        One-Time Filter: (NULLIF(current_setting('nexus.tenant'::text, true), ''::text) = 't2545139-1'::text)\n        Buffers: shared hit=57\n        ->  Index Scan using chunks_m0a90d9bc_t_ed0492d9e25db247_pkey on chunks_m0a90d9bc_t_ed0492d9e25db247 c  (cost=0.28..118.53 rows=1 width=33) (actual time=0.175..0.175 rows=0 loops=1)\n              Index Cond: ((tenant_id = 't2545139-1'::text) AND (collection = ANY ('{code__bbtc2c0__bge-base-en-v15-768__v1}'::text[])) AND (embedding_model = 'bge-base-en-v15-768'::text))\n              Filter: (((chunk_tsv @@ '''resolv'' & ''activ'' & ''session'' & ''id'''::tsquery) OR (chunk_text ~~* '%resolve\\_active\\_session\\_id%'::text)) AND EXISTS(SubPlan 1))\n              Rows Removed by Filter: 10\n              Buffers: shared hit=57\n              SubPlan 1\n                ->  Nested Loop  (cost=0.15..9.31 rows=1 width=0) (never executed)\n                      Join Filter: (m.doc_id = d.tumbler)\n                      ->  Index Scan using idx_catalog_chunks_collection on catalog_document_chunks m  (cost=0.15..8.17 rows=1 width=64) (never executed)\n                            Index Cond: ((tenant_id = c.tenant_id) AND (collection = c.collection))\n                            Filter: (chash = c.chash)\n                      ->  Seq Scan on catalog_documents d  (cost=0.00..1.12 rows=1 width=64) (never executed)\n                            Filter: ((deleted_at IS NULL) AND (tenant_id = c.tenant_id))\nPlanning:\n  Buffers: shared hit=1304\nPlanning Time: 3.029 ms\nExecution Time: 0.212 ms",
+  "E_batch0": "Limit  (cost=0.28..915.35 rows=1 width=33) (actual time=0.903..0.903 rows=0 loops=1)\n  Buffers: shared hit=344\n  ->  Result  (cost=0.28..915.35 rows=1 width=33) (actual time=0.902..0.903 rows=0 loops=1)\n        One-Time Filter: (NULLIF(current_setting('nexus.tenant'::text, true), ''::text) = 't2545139-1'::text)\n        Buffers: shared hit=344\n        ->  Index Scan using chunks_m0a90d9bc_t_ed0492d9e25db247_pkey on chunks_m0a90d9bc_t_ed0492d9e25db247 c  (cost=0.28..915.35 rows=1 width=33) (actual time=0.901..0.901 rows=0 loops=1)\n              Index Cond: ((tenant_id = 't2545139-1'::text) AND (collection = ANY ('{knowledge__bbtc2c2__bge-base-en-v15-768__v1,rdr__bbtc2c3__bge-base-en-v15-768__v1}'::text[])) AND (embedding_model = 'bge-base-en-v15-768'::text))\n              Filter: (((chunk_tsv @@ '''resolv'' & ''activ'' & ''session'' & ''id'''::tsquery) OR (chunk_text ~~* '%resolve\\_active\\_session\\_id%'::text)) AND EXISTS(SubPlan 1))\n              Rows Removed by Filter: 82\n              Buffers: shared hit=344\n              SubPlan 1\n                ->  Nested Loop  (cost=0.15..9.31 rows=1 width=0) (never executed)\n                      Join Filter: (m.doc_id = d.tumbler)\n                      ->  Index Scan using idx_catalog_chunks_collection on catalog_document_chunks m  (cost=0.15..8.17 rows=1 width=64) (never executed)\n                            Index Cond: ((tenant_id = c.tenant_id) AND (collection = c.collection))\n                            Filter: (chash = c.chash)\n                      ->  Seq Scan on catalog_documents d  (cost=0.00..1.12 rows=1 width=64) (never executed)\n                            Filter: ((deleted_at IS NULL) AND (tenant_id = c.tenant_id))\nPlanning:\n  Buffers: shared hit=1304\nPlanning Time: 3.028 ms\nExecution Time: 0.941 ms",
+  "D_big_arm": "Limit  (cost=0.28..886.65 rows=1 width=33) (actual time=6.616..12.233 rows=1 loops=1)\n  Buffers: shared hit=323\n  ->  Result  (cost=0.28..886.65 rows=1 width=33) (actual time=6.616..12.232 rows=1 loops=1)\n        One-Time Filter: (NULLIF(current_setting('nexus.tenant'::text, true), ''::text) = 't2545139-1'::text)\n        Buffers: shared hit=323\n        ->  Index Scan using chunks_m0a90d9bc_t_ed0492d9e25db247_pkey on chunks_m0a90d9bc_t_ed0492d9e25db247 c  (cost=0.28..886.65 rows=1 width=33) (actual time=6.614..12.230 rows=1 loops=1)\n              Index Cond: ((tenant_id = 't2545139-1'::text) AND (collection = ANY ('{code__bbtc2c4__bge-base-en-v15-768__v1}'::text[])) AND (embedding_model = 'bge-base-en-v15-768'::text))\n              Filter: (((chunk_tsv @@ '''advisori'' & ''lock'''::tsquery) OR ('advisory lock'::text OPERATOR(nexus.<%) chunk_text)) AND EXISTS(SubPlan 1))\n              Rows Removed by Filter: 79\n              Buffers: shared hit=323\n              SubPlan 1\n                ->  Nested Loop  (cost=0.15..9.31 rows=1 width=0) (actual time=0.036..0.036 rows=1 loops=1)\n                      Join Filter: (m.doc_id = d.tumbler)\n                      Rows Removed by Join Filter: 6\n                      Buffers: shared hit=4\n                      ->  Index Scan using idx_catalog_chunks_collection on catalog_document_chunks m  (cost=0.15..8.17 rows=1 width=64) (actual time=0.022..0.022 rows=1 loops=1)\n                            Index Cond: ((tenant_id = c.tenant_id) AND (collection = c.collection))\n                            Filter: (chash = c.chash)\n                            Rows Removed by Filter: 76\n                            Buffers: shared hit=3\n                      ->  Seq Scan on catalog_documents d  (cost=0.00..1.12 rows=1 width=64) (actual time=0.011..0.012 rows=7 loops=1)\n                            Filter: ((deleted_at IS NULL) AND (tenant_id = c.tenant_id))\n                            Buffers: shared hit=1\nPlanning:\n  Buffers: shared hit=1304\nPlanning Time: 5.178 ms\nExecution Time: 12.270 ms",
+  "C_big_arm": "Limit  (cost=0.28..886.65 rows=1 width=33) (actual time=0.878..0.878 rows=0 loops=1)\n  Buffers: shared hit=319\n  ->  Result  (cost=0.28..886.65 rows=1 width=33) (actual time=0.877..0.878 rows=0 loops=1)\n        One-Time Filter: (NULLIF(current_setting('nexus.tenant'::text, true), ''::text) = 't2545139-1'::text)\n        Buffers: shared hit=319\n        ->  Index Scan using chunks_m0a90d9bc_t_ed0492d9e25db247_pkey on chunks_m0a90d9bc_t_ed0492d9e25db247 c  (cost=0.28..886.65 rows=1 width=33) (actual time=0.876..0.876 rows=0 loops=1)\n              Index Cond: ((tenant_id = 't2545139-1'::text) AND (collection = ANY ('{code__bbtc2c4__bge-base-en-v15-768__v1}'::text[])) AND (embedding_model = 'bge-base-en-v15-768'::text))\n              Filter: (((chunk_tsv @@ '''serial'''::tsquery) OR (chunk_text ~~* '%serialization%'::text)) AND EXISTS(SubPlan 1))\n              Rows Removed by Filter: 80\n              Buffers: shared hit=319\n              SubPlan 1\n                ->  Nested Loop  (cost=0.15..9.31 rows=1 width=0) (never executed)\n                      Join Filter: (m.doc_id = d.tumbler)\n                      ->  Index Scan using idx_catalog_chunks_collection on catalog_document_chunks m  (cost=0.15..8.17 rows=1 width=64) (never executed)\n                            Index Cond: ((tenant_id = c.tenant_id) AND (collection = c.collection))\n                            Filter: (chash = c.chash)\n                      ->  Seq Scan on catalog_documents d  (cost=0.00..1.12 rows=1 width=64) (never executed)\n                            Filter: ((deleted_at IS NULL) AND (tenant_id = c.tenant_id))\nPlanning:\n  Buffers: shared hit=1304\nPlanning Time: 3.056 ms\nExecution Time: 0.918 ms"
+ }
+}
