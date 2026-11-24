@@ -359,7 +359,8 @@ ROUTE_MAP: dict[str, Step] = {
                                                            expect_route="/v1/taxonomy/assignments/prune_projection",
                                                            expect_stdout="match=bogus refused 400"),
     **{route: Step(name, "py", ["-c", code], expect_route=route.split(" ", 1)[1], expect_stdout=stdout)
-       for route, (name, code, stdout) in {**_routes.LABEL_RULE_RENAME_PROBES, **_routes.GC_PROBES, **_routes.RETIRING_BY_ID_PROBES}.items()},  # nexus-n3hhc, its class; RDR-229 P3.5a gc; rows 15-16 by id
+        for route, (name, code, stdout) in {**_routes.LABEL_RULE_RENAME_PROBES, **_routes.GC_PROBES, **_routes.RETIRING_BY_ID_PROBES,
+                                            **_routes.ROW14_PROBES}.items()},  # nexus-n3hhc, its class; RDR-229 P3.5a gc; rows 15-16 by id; row 14
 }
 
 _ROUTE_RE = re.compile(r"`(GET|POST|PUT|PATCH|DELETE) (/v1/[A-Za-z0-9_\-/.{}]+)")
