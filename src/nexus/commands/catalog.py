@@ -585,10 +585,10 @@ def _span_text_or_marker(cat: Any, tumbler: str, span: str) -> str | None:
     span nor a degraded service)."""
     try:
         return cat.resolve_span_text(tumbler, span)
+    except RetiredNoSuccessorError as retired:  # before VectorServiceError, which it subclasses
+        click.echo(f"    [span unavailable — collection {retired.name!r} was retired and has no successor]")
     except VectorServiceError:
         click.echo("    [span unavailable — vector service degraded]")
-    except RetiredNoSuccessorError as retired:
-        click.echo(f"    [span unavailable — collection {retired.name!r} was retired and has no successor]")
     return None
 
 

@@ -9,6 +9,8 @@ from __future__ import annotations
 import shlex
 from typing import Any
 
+from nexus.db.vector_errors import VectorServiceError
+
 
 class SupersededCollectionWriteError(RuntimeError):
     """A write named a collection the catalog has retired (``superseded_by``
@@ -122,19 +124,29 @@ def label_reserved_error_from_body(
     return LabelReservedError(label, user_chooses_label=user_chooses_label) if isinstance(label, str) and label else None
 
 
-class RetiredNoSuccessorError(RuntimeError):
+class RetiredNoSuccessorError(VectorServiceError):
     """The engine refused a request because it names a collection that was retired and has no live successor (409
     ``collection_superseded`` with no ``superseded_by``, RDR-229 R7, engine 0.1.202+).
 
     A retired collection whose successor was deleted names none. Its id was always refused; from this engine a request
     that names it by LABEL is refused too, where it used to be served from the tombstone with 200. There is nothing live
     under the label, so nothing can be read from or written to it; the way out is to use a live collection. Never
-    retried. Exposes ``name`` and ``collection_id`` (None when the engine named none)."""
+    retried.
 
-    def __init__(self, name: str, collection_id: int | None = None) -> None:
+    It IS a :class:`~nexus.db.vector_errors.VectorServiceError` with ``code`` 409, ``reason`` ``collection_superseded``
+    and the engine's body as ``engine_body``, exactly what the generic 409 raised before this type existed, so every
+    handler written for the engine's 409 (a degrade path, a "collection unreadable" skip) recovers as it did. Only the
+    message is specific. Catch it BEFORE ``VectorServiceError`` where it deserves its own treatment. Exposes ``name`` and
+    ``collection_id`` (None when the engine named none)."""
+
+    def __init__(self, name: str, collection_id: int | None = None, *, engine_body: dict | None = None) -> None:
+        from nexus.db.engine_reasons import COLLECTION_SUPERSEDED_REASON  # noqa: PLC0415 — deferred: engine_reasons is a leaf, kept lazy like the others here
+
         self.name = name
         self.collection_id = collection_id
-        super().__init__(retired_no_successor_message(name))
+        super().__init__(
+            retired_no_successor_message(name), code=409, reason=COLLECTION_SUPERSEDED_REASON, engine_body=engine_body,
+        )
 
 
 def retired_no_successor_message(name: str) -> str:
@@ -164,4 +176,6 @@ def retired_no_successor_error_from_body(status: int | None, body: Any) -> Retir
     if not (isinstance(name, str) and name):
         return None
     cid = body.get("collection_id")
-    return RetiredNoSuccessorError(name, cid if isinstance(cid, int) and not isinstance(cid, bool) else None)
+    return RetiredNoSuccessorError(
+        name, cid if isinstance(cid, int) and not isinstance(cid, bool) else None, engine_body=body,
+    )

@@ -23,6 +23,7 @@ from click.testing import CliRunner
 
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.catalog.catalog_spans import resolve_span_text_for_entry
+from nexus.catalog.rows.resolve import Unreadable, resolve_collection
 from nexus.cli import main
 from nexus.collection_errors import (
     RetiredNoSuccessorError,
@@ -32,8 +33,10 @@ from nexus.collection_errors import (
 from nexus.commands.catalog import _span_text_or_marker
 from nexus.commands.collection import _reembed_job_error
 from nexus.db import http_vector_client as hv
+from nexus.db.gateway_backoff import _GATEWAY_RETRY_CODES
 from nexus.db.http_vector_client import VectorServiceError
-from nexus.search_engine import SearchDiagnostics, search_cross_corpus
+from nexus.errors import SearchEmbeddingProfileMismatchError
+from nexus.search_engine import SearchDiagnostics, _is_permanent_poisoning_error, search_cross_corpus
 from tests._cli_tree import missing_commands, named_commands
 from tests.conftest import catalog_row_for_collection_name
 
@@ -80,6 +83,10 @@ def test_the_vector_client_turns_the_retired_no_successor_409_into_the_typed_err
     assert raised.value.name == NAME and raised.value.collection_id == 41
     assert request.call_count == 1, "never resent"
     _assert_the_one_message(str(raised.value))
+    # what the generic 409 VectorServiceError was before the type existed, so every handler written for it recovers
+    assert isinstance(raised.value, VectorServiceError)
+    assert raised.value.code == 409 and raised.value.reason == "collection_superseded"
+    assert raised.value.engine_body == RETIRED and raised.value.edge_refusal is False
 
 
 def test_a_collection_superseded_409_with_a_successor_is_still_the_write_error() -> None:
@@ -144,6 +151,10 @@ def test_the_shared_transport_turns_the_retired_no_successor_409_into_the_typed_
         cat.list_by_collection(NAME)
     _assert_the_one_message(str(raised.value))
     assert len(cat.sent) == 1, "one request, never resent"  # type: ignore[attr-defined]
+    # still the httpx status error this 409 was (a store that recovers from it by catching that keeps recovering), with
+    # its response, and a VectorServiceError for the handlers written for the vector client's 409
+    assert isinstance(raised.value, httpx.HTTPStatusError) and raised.value.response.status_code == 409
+    assert isinstance(raised.value, VectorServiceError) and raised.value.code == 409 and raised.value.engine_body == RETIRED
 
 
 def test_the_shared_transport_keeps_the_with_successor_and_other_409s() -> None:
@@ -309,3 +320,47 @@ def test_a_non_int_or_bool_collection_id_is_dropped_not_trusted() -> None:
     assert retired_no_successor_error_from_body(409, {**RETIRED, "collection_id": True}).collection_id is None
     assert retired_no_successor_error_from_body(409, {**RETIRED, "collection_id": "41"}).collection_id is None
     assert retired_no_successor_error_from_body(409, RETIRED).collection_id == 41
+
+
+# ── it is a 409 VectorServiceError: the handlers written for the engine's 409 recover as they did ──
+
+
+def test_a_real_handler_of_vector_service_error_recovers_from_the_retired_409() -> None:
+    """``resolve_collection`` turns a ``VectorServiceError`` from the row read into ``Unreadable`` (the name's own
+    derivation); the retired 409 reaches it as the same 409 ``VectorServiceError`` and recovers the same way."""
+    with patch("nexus.mcp_infra.get_collection_row", side_effect=RetiredNoSuccessorError(NAME, 41)):
+        got = resolve_collection(NAME)
+    assert isinstance(got, Unreadable) and got.reason == "listing"
+    assert isinstance(got.cause, RetiredNoSuccessorError)
+
+
+def test_a_vector_service_error_handler_that_branches_on_code_409_takes_the_same_branch() -> None:
+    generic = VectorServiceError("POST /v1/vectors/search → HTTP 409: collection_superseded", code=409,
+                                 reason="collection_superseded", engine_body=RETIRED)
+    retired = retired_no_successor_error_from_body(409, RETIRED)
+    for exc in (generic, retired):
+        assert (exc.code, exc.reason, exc.engine_body, exc.edge_refusal) == (409, "collection_superseded", RETIRED, False)
+
+
+def test_the_retried_classes_do_not_include_it() -> None:
+    """The gateway ladder retries 502/503/504 and a 409 only for ``request_in_flight``; neither matches this 409."""
+    exc = retired_no_successor_error_from_body(409, RETIRED)
+    assert exc.code not in _GATEWAY_RETRY_CODES
+    assert (exc.engine_body or {}).get("error") != "request_in_flight"
+
+
+# ── a retired collection's name can contain "dim"; it must not read as a dimension mismatch or poison a model ──
+
+
+def test_a_retired_collection_whose_name_contains_dim_is_a_failed_collection_not_a_dimension_mismatch() -> None:
+    dimname = "knowledge__dimensions__bge-base-en-v15-768__v1"
+    live = "code__nexus"
+    t3 = _BatchingT3({live: [{"id": "a", "content": "hit", "distance": 0.3}]}, retired={dimname})
+    diags: list[SearchDiagnostics] = []
+    results = search_cross_corpus("q", [live, dimname], 10, t3, diagnostics_out=diags, sensitivity="include")
+    assert {r.id for r in results} == {"a"} and list(diags[0].failed_collections) == [dimname]
+    assert _is_permanent_poisoning_error(RetiredNoSuccessorError(dimname)) is False, "no model is memoized as poisoned"
+    # all-retired with "dim" in the name: loud failure, but never the embedding-profile mismatch error
+    with pytest.raises(Exception) as raised:
+        search_cross_corpus("q", [dimname], 10, _BatchingT3({}, retired={dimname}), sensitivity="include")
+    assert not isinstance(raised.value, SearchEmbeddingProfileMismatchError)

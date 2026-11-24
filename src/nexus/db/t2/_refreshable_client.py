@@ -67,6 +67,7 @@ import structlog
 # against a future local-redefinition drift.
 from nexus._log_safe_url import log_endpoint
 from nexus.collection_errors import (
+    RetiredNoSuccessorError,
     label_reserved_error_from_body,
     retired_no_successor_error_from_body,
     superseded_write_error_from_body,
@@ -516,6 +517,16 @@ def _numeric_timeout(value: Any) -> float | None:
         return float(value)
     read = getattr(value, "read", None)
     return float(read) if isinstance(read, (int, float)) else None
+
+
+class _RetiredNoSuccessorHttpError(RetiredNoSuccessorError, httpx.HTTPStatusError):
+    """:class:`RetiredNoSuccessorError` as this transport raises it: also the ``httpx.HTTPStatusError`` this 409 was
+    before the type existed, with its ``request`` and ``response``, so a caller that recovers from a 409 by catching the
+    status error (or a ``VectorServiceError``) still does, and the CLI boundary sees the specific type."""
+
+    def __init__(self, typed: RetiredNoSuccessorError, failure: httpx.HTTPStatusError) -> None:
+        RetiredNoSuccessorError.__init__(self, typed.name, typed.collection_id, engine_body=typed.engine_body)
+        httpx.HTTPStatusError.__init__(self, str(typed), request=failure.request, response=failure.response)
 
 
 class RefreshableHttpStoreMixin:
@@ -1441,8 +1452,8 @@ class RefreshableHttpStoreMixin:
                 retired = retired_no_successor_error_from_body(409, resp.json())
             except Exception:  # noqa: BLE001 — an unreadable body is never this error; the generic 409 stands
                 retired = None
-            if retired is not None:  # RDR-229 R7: retired with no successor; typed so no retry ladder resends it
-                raise retired from failure
+            if retired is not None:  # RDR-229 R7: retired with no successor; a 409 either way, so no retry ladder resends it
+                raise _RetiredNoSuccessorHttpError(retired, failure) from failure
             try:
                 reserved = label_reserved_error_from_body(409, resp.json())
             except Exception:  # noqa: BLE001 — an unreadable body is never this error; the generic 409 stands

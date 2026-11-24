@@ -53,12 +53,7 @@ _log = structlog.get_logger(__name__)
 
 
 def _is_vector_service_error(exc: BaseException) -> bool:
-    """True iff *exc* is the service client's VectorServiceError, or the typed refusal of a retired collection with no
-    successor (``RetiredNoSuccessorError``, RDR-229 R7).
-
-    The retired case is raised, not collapsed to "span not found": the document's chunks are still in a collection the
-    engine will no longer read by label, which is not the same as a missing chunk. Its one in-tree caller, ``nx catalog
-    show``'s link preview, catches it and prints its own marker.
+    """True iff *exc* is the service client's VectorServiceError.
 
     nexus-ou4tb caller walk: this module's resolution paths deliberately
     degrade to ``None`` ("span not found") on per-collection failures —
@@ -72,9 +67,7 @@ def _is_vector_service_error(exc: BaseException) -> bool:
         from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — circular-dep avoidance: nexus.db imports catalog
     except ImportError:  # pragma: no cover — nexus.db always importable in practice
         return False
-    from nexus.collection_errors import RetiredNoSuccessorError  # noqa: PLC0415 — deferred: keep this module's import surface as it was
-
-    return isinstance(exc, (VectorServiceError, RetiredNoSuccessorError))
+    return isinstance(exc, VectorServiceError)
 
 
 _CHASH_FALLBACK_CONCURRENCY: int = 10
