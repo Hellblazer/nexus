@@ -576,3 +576,24 @@ def test_the_wait_is_keyed_on_the_class_not_the_words():
     # and the class on a move that is not blocked changes nothing
     failed = {"boot_work": [_classed("m", "failed: m: boom", "waiting_for_builds")]}
     assert [r.label for r in _red(check_data_moves(failed))] == ["Data move m"]
+
+
+def test_a_paged_move_that_is_also_waiting_for_a_build_is_the_red_needs_operator_row_not_the_waiting_note():
+    """nexus-p2m1x.27 row 23: a name-key drop move latched by three counted lock timeouts and then deferred behind an index
+    build is both: its boot_work entry is classed waiting_for_builds and /v1/status still pages it. The page wins, so the
+    doctor never says "no page is raised, so there is no retry count to reset" about a move that has one to reset."""
+    label = "rdr229-name-key-drop"
+    status = _needs_operator_status(
+        _paged(label, retries=3, sqlstate="55P03", bound=900, builds=True),
+        boot_work=[_classed(label, _WAIT_WHAT, "waiting_for_builds")],
+    )
+
+    rows = check_data_moves(status)
+
+    row = _by_label(rows)[f"Data move {label}"]
+    assert row.ok is False and row.warn is False, "red: the page, not the note"
+    assert f"needs an operator: {label}" in row.detail
+    assert "step on_complete missed its 900 ms bound (SQLSTATE 55P03)" in row.detail
+    assert not any("so there is no retry count to reset" in s for s in row.fix_suggestions)
+    assert any("transient_retries = 0" in s for s in row.fix_suggestions), "the reset the page offers"
+    assert [r.label for r in _red(rows)] == [f"Data move {label}"]
