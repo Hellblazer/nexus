@@ -50,7 +50,7 @@ public interface MoveFinisher {
         COMPLETED,
         /** The move failed for good: a non-empty verification, or an {@code on_complete} that failed for another reason. */
         FAILED,
-        /** Not now: a timeout or a lock; the move is retried after its wait. */
+        /** Not now: the move is retried after its wait, and nothing is counted. A finisher's own verdict, and the name-key drop's deferral while an index build runs ({@link BuildWait}). */
         BLOCKED,
         /** The runs are done and there is nothing more for this pass to do; the move is left alone for this process. */
         LEFT_OPEN,

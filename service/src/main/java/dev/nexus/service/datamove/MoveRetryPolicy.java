@@ -176,7 +176,7 @@ final class MoveRetryPolicy {
         }
         return switch (stage) {
             case ON_COMPLETE, RECHECK -> "55P03".equals(sqlstate)
-                ? VerifyingFinisher.lockTimeoutMs(move.statementTimeoutMs()) : move.statementTimeoutMs();
+                ? VerifyingFinisher.lockTimeoutMs(move) : move.statementTimeoutMs();
             case VERIFICATION -> "57014".equals(sqlstate) ? move.verifyStatementTimeoutMs() : FailureHandler.PageInfo.NO_BOUND;
             default -> FailureHandler.PageInfo.NO_BOUND;
         };

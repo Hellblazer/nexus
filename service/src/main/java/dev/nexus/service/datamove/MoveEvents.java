@@ -51,8 +51,10 @@ import org.slf4j.LoggerFactory;
  * characters is redacted too, and also masks any unrelated text that contains it. Not covered: a credential the engine does not
  * hold, a form of one not listed (a Base64 or hashed echo), and output that bypasses the logback appenders.
  *
- * <p>{@code stage=FINISH} (a finisher's own {@code FAILED} or {@code BLOCKED} verdict) is reachable only from a test
- * finisher: {@link VerifyingFinisher} reports every failure as {@code REPORT} instead.
+ * <p>{@code stage=FINISH} (a finisher's own {@code FAILED} or {@code BLOCKED} verdict) comes from a test finisher: {@link
+ * VerifyingFinisher} reports every failure as {@code REPORT} instead. Its one {@code BLOCKED} is the name-key drop's deferral
+ * while an index build runs ({@link BuildWait}), which has its own line ({@code data_move_completion_deferred}, and
+ * {@code data_move_completion_overdue} past six hours) and no {@code data_move_blocked}.
  */
 final class MoveEvents {
 

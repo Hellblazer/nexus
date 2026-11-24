@@ -45,9 +45,10 @@ import java.util.function.Consumer;
  * ends having run nothing. Only after it matched, on a move over the chunk family ({@link ChunkFamily}), are the
  * per-collection index builders ended (best effort, {@link PciBuilders}), so a pause set after the last read ends no build.
  * The exception is a move that waits instead ({@link ChunkFamily#waitsForIndexBuilds}, the name-key drop): a build in flight defers
- * its completion, see {@link #deferred}.
+ * its completion, see {@link BuildWait}.
  * {@code on_complete} runs under {@code SET LOCAL lock_timeout} below the move's {@code statement_timeout_ms} on every
- * move, so a lock it cannot get fails fast with 55P03 and no reader queues behind it.
+ * move, so a lock it cannot get fails fast with 55P03 and no reader queues behind it. A move that waits for builds gets a
+ * {@code lock_timeout} that is also below {@link #DEADLOCK_TIMEOUT_MS}, see {@link #lockTimeoutMs(DataMove)}.
  *
  * <p><b>A move with no statement bound</b> ({@link DataMove#unbounded}: a validation that blocks no writer, Sam 2026-11-23) does not run
  * {@code on_complete} in the transaction above. {@link #validateBeforeClaim} runs it first, in a transaction of its own under
@@ -87,9 +88,26 @@ final class VerifyingFinisher implements MoveFinisher {
 
     private static final Table<?> MOVES = DSL.table(DSL.name("nexus", "data_moves"));
 
+    /** PostgreSQL's default {@code deadlock_timeout}, in milliseconds: the server setting the drop's lock wait must stay under. */
+    static final int DEADLOCK_TIMEOUT_MS = 1_000;
+
+    /**
+     * The longest {@code lock_timeout} of a move that waits for index builds: under {@link #DEADLOCK_TIMEOUT_MS}. A lock wait that
+     * outlasts {@code deadlock_timeout} starts the deadlock check, and when a {@code CREATE INDEX CONCURRENTLY} waits on the
+     * drop's transaction while the drop waits on the build's table lock, the server may end the build as the victim. A wait that
+     * times out first leaves the drop the one that gives up (55P03), and nothing a build has done is thrown away.
+     */
+    static final int WAITING_LOCK_TIMEOUT_CEILING_MS = 900;
+
     /** The {@code lock_timeout} of {@code on_complete}: half the statement bound, at most 5 s, at least 1 ms. */
     static int lockTimeoutMs(int statementTimeoutMs) {
         return Math.max(1, Math.min(LOCK_TIMEOUT_CEILING_MS, statementTimeoutMs / 2));
+    }
+
+    /** {@link #lockTimeoutMs(int)} for {@code move}; a move that waits for builds is also held under {@link #WAITING_LOCK_TIMEOUT_CEILING_MS}. */
+    static int lockTimeoutMs(DataMove move) {
+        int ms = lockTimeoutMs(move.statementTimeoutMs());
+        return ChunkFamily.waitsForIndexBuilds(move) ? Math.min(ms, WAITING_LOCK_TIMEOUT_CEILING_MS) : ms;
     }
 
     /** Test seam: runs after the second read of the row and before the completion transaction, where a pause can slip in. */
@@ -101,8 +119,19 @@ final class VerifyingFinisher implements MoveFinisher {
     /** Test seam: runs with the completion transaction's context at the start of the re-check, before its first check of the session. */
     Consumer<DSLContext> recheckHook;
 
+    /** The wait of a move that does not end index builds (the name-key drop); its clock and detector are test seams. */
+    final BuildWait buildWait = new BuildWait();
+
     @Override
     public Result finish(Context context) {
+        Result result = finishOnce(context);
+        if (!BuildWait.isDeferral(result)) {
+            buildWait.clear(context.move().label());   // the unbroken run of deferrals ends here
+        }
+        return result;
+    }
+
+    private Result finishOnce(Context context) {
         if (context.stopped().getAsBoolean()) {
             return Result.leftOpen();
         }
@@ -270,7 +299,21 @@ final class VerifyingFinisher implements MoveFinisher {
         // a move with no statement bound (a validation that blocks no writer) gets statement_timeout 0, so no network timeout either,
         // and the lock wait the ceiling gives any move
         int statementMs = move.unbounded() ? 0 : move.statementTimeoutMs();
-        int lockMs = move.unbounded() ? DataMove.UNBOUNDED_LOCK_TIMEOUT_MS : lockTimeoutMs(statementMs);
+        int lockMs = move.unbounded() ? DataMove.UNBOUNDED_LOCK_TIMEOUT_MS : lockTimeoutMs(move);
+        boolean waits = onComplete != null && ChunkFamily.waitsForIndexBuilds(move);
+        if (waits) {
+            // before the transaction: a deferral then touches no row, and the drop never asks for the ACCESS EXCLUSIVE lock whose
+            // queue would stall every reader of chunks for lock_timeout on each poll while a build runs for hours
+            PciBuilders.Building builds = buildWait.read(admin);
+            if (builds.isUnreadable()) {
+                // not "a build is there": the drop ends nothing, so it needs no read to be safe, but it does not run blind either.
+                // An ordinary counted transient (a detector that stays unreadable is an operator matter)
+                return Result.report(failure(admin, move, FailureHandler.Stage.PREFLIGHT, null, null, BuildWait.unreadable(move.label())));
+            }
+            if (builds.count() > 0) {
+                return buildWait.defer(move.label(), builds, BuildWait.Path.BEFORE_LOCKS);
+            }
+        }
         boolean completed;
         // set once terminateOrThrow has run in this transaction: a failure after it reports that the builds are already ended
         boolean[] buildsEnded = {false};
@@ -293,13 +336,6 @@ final class VerifyingFinisher implements MoveFinisher {
                     .execute();
                 if (updated == 0) {
                     return false;
-                }
-                if (onComplete != null && ChunkFamily.waitsForIndexBuilds(move)) {
-                    // the completion waits for the builds: see waitForBuilds. The UPDATE above is rolled back by the throw
-                    int running = PciBuilders.count(tx, log);
-                    if (running != 0) {
-                        throw new BuildsInFlight(running);
-                    }
                 }
                 // the verification again, warm now, under the completion's own bound: a write since the first pass cannot slip
                 // past, and a non-empty or failed re-check rolls this transaction back with the UPDATE above
@@ -327,8 +363,6 @@ final class VerifyingFinisher implements MoveFinisher {
             });
         } catch (RecheckFailed e) {
             return Result.report(failure(admin, move, e.stage, null, e.raised, e.detail));
-        } catch (BuildsInFlight e) {
-            return deferred(move, e.running);
         } catch (DataAccessException e) {
             SQLException raised = e.getCause(SQLException.class);
             if (isAdoption(move) && raised != null && "55P03".equals(raised.getSQLState())
@@ -343,13 +377,14 @@ final class VerifyingFinisher implements MoveFinisher {
                 return Result.report(new FailureHandler.Failure(move, FailureHandler.Stage.ON_COMPLETE, null,
                     move.drivingSchema(), move.drivingTable(), null, 0, raised, adoptionTimeoutReason(admin, move), admin, buildsEnded[0]));
             }
-            if (ChunkFamily.waitsForIndexBuilds(move) && raised != null && LOCK_NOT_AVAILABLE.equals(raised.getSQLState())) {
-                // the lock wait of on_complete timed out (55P03): a build that began after the check in the transaction holds the
-                // lock it queued behind. Read afresh, outside the rolled-back transaction (inside it pg_stat_activity is one
-                // snapshot), and a build there makes this a deferral, not a failure; no build there leaves it the failure it was
-                int running = PciBuilders.count(admin, log);
-                if (running != 0) {
-                    return deferred(move, running);
+            if (waits && raised != null && LOCK_NOT_AVAILABLE.equals(raised.getSQLState())) {
+                // the lock wait of on_complete timed out (55P03): a build that began after the first read holds the lock it queued
+                // behind. Read afresh, outside the rolled-back transaction (inside it pg_stat_activity is one snapshot), and a build
+                // there makes this a deferral, not a failure. No build there, or a read that failed, leaves it the counted failure
+                // it was: an unreadable detector is not a build
+                PciBuilders.Building builds = buildWait.read(admin);
+                if (builds.count() > 0) {
+                    return buildWait.defer(move.label(), builds, BuildWait.Path.LOCK_WAIT);
                 }
             }
             return Result.report(new FailureHandler.Failure(move, FailureHandler.Stage.ON_COMPLETE, null,
@@ -531,47 +566,13 @@ final class VerifyingFinisher implements MoveFinisher {
     /** SQLSTATE 55P03, {@code lock_not_available}: the {@code lock_timeout} of {@code on_complete} ran out. */
     private static final String LOCK_NOT_AVAILABLE = "55P03";
 
-    /**
-     * A completion attempt of a move that waits for index builds ({@link ChunkFamily#waitsForIndexBuilds}) that found a build in flight:
-     * not a failure. Nothing is counted, written or paged, no build is ended, and the move stays open; it comes back as
-     * {@link MoveFinisher.Outcome#BLOCKED} (the worker keeps the reason for {@code /v1/status} in memory only and tries again after
-     * {@code blockedRetry}, the way it does for any not-now).
-     *
-     * <p><b>What it waits for.</b> Every backend {@link PciBuilders} finds (its one detector: {@code application_name} under
-     * {@code nexus-pci-builder-}): the per-collection PCI builds, the per-leaf unique-index pass and the id-unique pass, because after
-     * gate 3 the reconciler keeps making id indexes, and ending one on each attempt throws a build away (Sam 2026-11-23, T2
-     * {@code nexus/sam-ruling-rdr229-drop-move-waits-for-id-builds-2026-11-24}, "Fix: wait, don't end"). No build kind is ended for this
-     * move: the drop's locks are taken once none runs.
-     *
-     * <p><b>The race, and why it is closed without ending anything.</b> The read of the builds and the {@code on_complete} are not
-     * one atomic step, so a build can begin between them. Two cases. (1) It begins before {@code on_complete} takes its first lock: the
-     * ALTER queues behind the build's lock on the leaf, {@code lock_timeout} fires (55P03), the transaction rolls back, and the read
-     * after that failure (see {@link #complete}) sees the build and reports a deferral. (2) It begins after {@code on_complete} holds
-     * its ACCESS EXCLUSIVE locks: a {@code CREATE INDEX CONCURRENTLY} needs a lock on the leaf that conflicts, so it queues behind
-     * this transaction and runs after the commit. In neither case does anything end a build: {@code terminateOrThrow} is never reached
-     * for this move ({@link ChunkFamily#endsIndexBuilds}).
-     */
-    private static Result deferred(DataMove move, int running) {
-        String why = WAITING_FOR_BUILDS + (running < 0 ? ": the builders could not be read" : ": " + running + " running")
-            + "; the completion tries again later and ends none";
-        log.info("event=data_move_completion_deferred label={} builds={}", move.label(), running);
-        return Result.blocked(why);
-    }
-
-    /** The start of the reason a deferral carries. */
-    static final String WAITING_FOR_BUILDS = "waiting for in-flight index builds (PCI, leaf, id-unique)";
-
-    /** A completion attempt that found a build in flight: ends the transaction, the UPDATE with it. */
-    private static final class BuildsInFlight extends RuntimeException {
-        private static final long serialVersionUID = 1L;
-
-        final int running;
-
-        BuildsInFlight(int running) {
-            super("index builds in flight: " + running, null, false, false);
-            this.running = running;
-        }
-    }
+    // The wait of a move that does not end index builds (the name-key drop) is BuildWait's. The race it closes without ending anything:
+    // the read of the builds and on_complete are not one atomic step, so a build can begin between them. (1) It begins before
+    // on_complete takes its first lock: the ALTER queues behind the build's lock on the leaf, lock_timeout (below deadlock_timeout,
+    // lockTimeoutMs(DataMove)) fires (55P03), the transaction rolls back, and the read after that failure sees the build and reports
+    // a deferral on BuildWait.Path.LOCK_WAIT. (2) It begins after on_complete holds its ACCESS EXCLUSIVE locks: a CREATE INDEX
+    // CONCURRENTLY needs a lock on the leaf that conflicts, so it queues behind this transaction and runs after the commit. In
+    // neither case does anything end a build: terminateOrThrow is never reached for this move (ChunkFamily.endsIndexBuilds).
 
     /** A re-check that ends the completion transaction: carries what {@link #failure} needs. */
     private static final class RecheckFailed extends RuntimeException {
@@ -656,7 +657,7 @@ final class VerifyingFinisher implements MoveFinisher {
             if (move.unbounded()) {
                 PgSession.setStatementAndLockBounds(tx, 0, DataMove.UNBOUNDED_LOCK_TIMEOUT_MS);
             } else {
-                PgSession.setStatementAndLockBounds(tx, move.statementTimeoutMs(), lockTimeoutMs(move.statementTimeoutMs()));
+                PgSession.setStatementAndLockBounds(tx, move.statementTimeoutMs(), lockTimeoutMs(move));
             }
             if (!found.isEmpty()) {
                 List<String> parts = new ArrayList<>();

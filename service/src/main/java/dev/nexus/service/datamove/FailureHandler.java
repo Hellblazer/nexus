@@ -20,7 +20,7 @@ public interface FailureHandler {
 
     /** Where in a pass the failure arose. */
     enum Stage {
-        /** Step 1: the library install, a grant, the installed entry point, the admin view or a worker slot. */
+        /** Step 1: the library install, a grant, the installed entry point, the admin view or a worker slot; and the name-key drop's read of the index builders, when it fails. */
         PREFLIGHT,
         /** The tenant list or the catalog could not be read. */
         PROBE,

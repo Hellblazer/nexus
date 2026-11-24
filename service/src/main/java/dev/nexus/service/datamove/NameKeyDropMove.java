@@ -26,12 +26,16 @@ import java.util.List;
  * the {@code on_complete} names {@code nexus.chunks} and {@code topic_assignments}, {@link ChunkFamily} classes the move as
  * chunk-family, but it is the one chunk-family move that does NOT end the per-collection index builders as RDR-246's "Finishing a move"
  * asks: after gate 3 the reconciler keeps making id indexes, and ending one on every completion attempt throws an HNSW build away. Its
- * completion attempt waits instead: while any build {@code PciBuilders} detects is in flight, {@link VerifyingFinisher} defers the
- * completion (no failure count, no page, no termination) and tries again on a later cycle ({@link ChunkFamily#waitsForIndexBuilds};
+ * completion attempt waits instead: while a builder session is running a {@code CREATE INDEX} ({@code PciBuilders.building}), {@link VerifyingFinisher} defers the
+ * completion (no failure count, no page, no termination) and tries again on a later cycle ({@link BuildWait}, {@link ChunkFamily#waitsForIndexBuilds};
  * Sam 2026-11-23, T2 {@code nexus/sam-ruling-rdr229-drop-move-waits-for-id-builds-2026-11-24}, "Fix: wait, don't end"). The throttle is P3.2's (T2 {@code nexus_rdr/229-p32-fork-results-2026-11-20}, Sam's ask C ruling
  * 2026-11-20): {@code chunk_size} 10000, {@code sleep_ms} 8000, {@code statement_timeout_ms} 1400 (so a lock_timeout of 700 ms, under
  * deadlock_timeout of 1 s), measured at 21 ms holding ACCESS EXCLUSIVE on the registry, the chunks tree and six tables. Raise rule: if
- * the move times out twice (57014 or 55P03), raise it alone to 4000 and record why.
+ * the move times out twice (57014 or 55P03), raise {@code statement_timeout_ms} alone to 4000 and record why. The lock wait of its
+ * {@code on_complete} stays under {@code deadlock_timeout} whatever the statement bound is ({@link VerifyingFinisher#lockTimeoutMs(DataMove)}
+ * clamps it to {@value VerifyingFinisher#WAITING_LOCK_TIMEOUT_CEILING_MS} ms for a move that waits for builds): at 4000 the unclamped
+ * half would be 2000 ms, past the deadlock check, and a {@code CREATE INDEX CONCURRENTLY} waiting on the drop's transaction while the
+ * drop waits on the build's table lock could be chosen as the deadlock victim, which ends the build the wait exists to spare.
  */
 public final class NameKeyDropMove {
 

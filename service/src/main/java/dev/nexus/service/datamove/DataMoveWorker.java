@@ -592,7 +592,9 @@ public final class DataMoveWorker implements AutoCloseable {
                 states.failed(move, result.reason());
             }
             case BLOCKED -> {
-                MoveEvents.blocked(move.label(), "FINISH", null, move.transientRetries(), null, result.reason());
+                if (!BuildWait.isDeferral(result)) {   // a deferral logs its own one line (BuildWait.defer)
+                    MoveEvents.blocked(move.label(), "FINISH", null, move.transientRetries(), null, result.reason());
+                }
                 states.blocked(move, result.reason());
             }
             case LEFT_OPEN -> states.runsComplete(move);

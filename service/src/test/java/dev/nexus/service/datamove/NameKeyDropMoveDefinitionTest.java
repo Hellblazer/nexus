@@ -31,12 +31,48 @@ class NameKeyDropMoveDefinitionTest {
         DataMove m = move();
         assertThat(m.drivingTable()).as("the small registry table, so the move is short").isEqualTo("catalog_collections");
         assertThat(ChunkFamily.touches(m))
-            .as("on_complete names nexus.chunks and topic_assignments, so VerifyingFinisher ends the index builders first (RDR-246)")
+            .as("on_complete names nexus.chunks and topic_assignments, so a chunk-family move would end the index builders; this one waits for them instead (see the next test)")
             .isTrue();
         assertThat(ChunkFamily.touches(new DataMove(m.label(), m.template(), m.drivingSchema(), m.drivingTable(), m.chunkSize(),
             m.sleepMs(), m.statementTimeoutMs(), m.verification(), null, null, null, null, 0, null, null,
             m.verifyStatementTimeoutMs())))
             .as("non-vacuity: with no on_complete the driving table alone is not chunk-family").isFalse();
+    }
+
+    /** The same definition under another label: what any other chunk-family move looks like to the finisher. */
+    private static DataMove another() {
+        DataMove m = move();
+        return new DataMove("some-other-chunk-move", m.template(), m.drivingSchema(), m.drivingTable(), m.chunkSize(), m.sleepMs(),
+            m.statementTimeoutMs(), m.verification(), m.onComplete(), null, null, null, 0, null, null, m.verifyStatementTimeoutMs());
+    }
+
+    @Test
+    void theDropWaitsForIndexBuildsAndEndsNone_everyOtherChunkFamilyMoveEndsThem() {
+        DataMove drop = move();
+        assertThat(ChunkFamily.waitsForIndexBuilds(drop)).as("Sam 2026-11-23: wait, don't end").isTrue();
+        assertThat(ChunkFamily.endsIndexBuilds(drop)).as("a completion attempt of the drop ends no build").isFalse();
+        DataMove other = another();
+        assertThat(ChunkFamily.touches(other)).as("non-vacuity: the other move is chunk-family by the same on_complete").isTrue();
+        assertThat(ChunkFamily.waitsForIndexBuilds(other)).isFalse();
+        assertThat(ChunkFamily.endsIndexBuilds(other)).as("every other chunk-family move keeps ending the builders").isTrue();
+    }
+
+    @Test
+    void theDropsLockWaitStaysUnderDeadlockTimeout_whateverTheStatementBound_andAnotherMovesDoesNotChange() {
+        DataMove drop = move();
+        assertThat(VerifyingFinisher.lockTimeoutMs(drop)).as("1400 ms statement: half of it, 700 ms").isEqualTo(700);
+        assertThat(VerifyingFinisher.lockTimeoutMs(drop)).isLessThan(VerifyingFinisher.DEADLOCK_TIMEOUT_MS);
+        // the raise rule: raise statement_timeout_ms alone to 4000. Unclamped, half of it is 2000 ms, over deadlock_timeout (1 s),
+        // so the server could end a CREATE INDEX CONCURRENTLY as the deadlock victim
+        DataMove raised = new DataMove(drop.label(), drop.template(), drop.drivingSchema(), drop.drivingTable(), drop.chunkSize(),
+            drop.sleepMs(), 4000, drop.verification(), drop.onComplete(), null, null, null, 0, null, null, drop.verifyStatementTimeoutMs());
+        assertThat(VerifyingFinisher.lockTimeoutMs(raised.statementTimeoutMs())).as("non-vacuity: the unclamped half is over").isEqualTo(2000);
+        assertThat(VerifyingFinisher.lockTimeoutMs(raised)).as("clamped under deadlock_timeout").isLessThan(VerifyingFinisher.DEADLOCK_TIMEOUT_MS)
+            .isEqualTo(VerifyingFinisher.WAITING_LOCK_TIMEOUT_CEILING_MS);
+        DataMove otherRaised = new DataMove("some-other-chunk-move", drop.template(), drop.drivingSchema(), drop.drivingTable(),
+            drop.chunkSize(), drop.sleepMs(), 4000, drop.verification(), drop.onComplete(), null, null, null, 0, null, null,
+            drop.verifyStatementTimeoutMs());
+        assertThat(VerifyingFinisher.lockTimeoutMs(otherRaised)).as("another move's lock_timeout is unchanged").isEqualTo(2000);
     }
 
     @Test
