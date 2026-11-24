@@ -19,7 +19,6 @@ import dev.nexus.service.db.CollectionSuccessor;
 import dev.nexus.service.db.ExpectedCollectionIds;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.db.UnknownCollectionIdException;
-import dev.nexus.service.db.UnregisteredCollectionException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -154,16 +153,16 @@ public final class CollectionSelectorFilter extends Filter {
         Optional<CollectionSuccessor.Successor> successorOf(String tenant, long retiredId);
 
         /**
-         * The row a LABEL resolves to (the live row, else the newest tombstone, as every label read resolves it), or empty when no row has
-         * it. The read routes that refuse a retired collection ask it ({@link RetiredLabelReadGuard}); every implementation answers it.
+         * The row each of {@code labels} resolves to (the live row, else the newest tombstone, as every label read resolves it); a label no row
+         * has is absent. ONE registry read for all of the labels the registry's cache does not hold. The read routes that refuse a retired
+         * collection ask it ({@link RetiredLabelReadGuard}); every implementation answers it.
          */
-        Optional<CollectionRow> byLabel(String tenant, String label);
+        Map<String, CollectionRow> byLabels(String tenant, java.util.Collection<String> labels);
     }
 
-    private final Rows rows;
-
-    public CollectionSelectorFilter(CollectionRegistry registry, TenantScope scope) {
-        this(new Rows() {
+    /** The production {@link Rows}: the registry's own cache and one read for the labels it does not hold. */
+    static Rows registryRows(CollectionRegistry registry, TenantScope scope) {
+        return new Rows() {
             @Override public CollectionRow byId(String tenant, long id) {
                 return registry.lookupId(scope, tenant, id);
             }
@@ -172,18 +171,29 @@ public final class CollectionSelectorFilter extends Filter {
                 return CollectionSuccessor.of(scope, tenant, retiredId);
             }
 
-            @Override public Optional<CollectionRow> byLabel(String tenant, String label) {
-                Optional<CollectionRow> hit = registry.cachedByLabel(tenant, label);   // the cache never holds a tombstone
-                if (hit.isPresent()) {
-                    return hit;
+            @Override public Map<String, CollectionRow> byLabels(String tenant, java.util.Collection<String> labels) {
+                Map<String, CollectionRow> out = new LinkedHashMap<>();
+                List<String> cold = new ArrayList<>();
+                for (String label : labels) {
+                    Optional<CollectionRow> hit = registry.cachedByLabel(tenant, label);   // the cache never holds a tombstone
+                    if (hit.isPresent()) {
+                        out.put(label, hit.get());
+                    } else {
+                        cold.add(label);
+                    }
                 }
-                try {
-                    return Optional.of(scope.withTenant(tenant, ctx -> registry.resolveLabel(ctx, tenant, label)));
-                } catch (UnregisteredCollectionException none) {
-                    return Optional.empty();
+                if (!cold.isEmpty()) {
+                    out.putAll(scope.withTenant(tenant, ctx -> registry.readLabels(ctx, tenant, cold)));
                 }
+                return out;
             }
-        });
+        };
+    }
+
+    private final Rows rows;
+
+    public CollectionSelectorFilter(CollectionRegistry registry, TenantScope scope) {
+        this(registryRows(registry, scope));
     }
 
     CollectionSelectorFilter(Rows rows) {

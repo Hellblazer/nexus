@@ -83,8 +83,12 @@ class CollectionSelectorFilterRowsTest {
                 return Optional.ofNullable(successors.get(retiredId));
             }
 
-            @Override public Optional<CollectionRow> byLabel(String tenant, String label) {
-                return byId.values().stream().filter(r -> r.label().equals(label)).findFirst();   // a stub label is held by one row
+            @Override public Map<String, CollectionRow> byLabels(String tenant, java.util.Collection<String> labels) {
+                Map<String, CollectionRow> out = new HashMap<>();
+                for (String label : labels) {   // a stub label is held by one row
+                    byId.values().stream().filter(r -> r.label().equals(label)).findFirst().ifPresent(r -> out.put(label, r));
+                }
+                return out;
             }
         };
         filter = new CollectionSelectorFilter(rows);

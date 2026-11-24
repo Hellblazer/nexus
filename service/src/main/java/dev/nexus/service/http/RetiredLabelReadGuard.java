@@ -13,6 +13,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -50,13 +51,16 @@ final class RetiredLabelReadGuard {
      * resolved from ids in this request (live rows, already read), which are not read again.
      */
     static Optional<String> refusal(CollectionSelectorFilter.Rows rows, String tenant, Set<String> byId, List<String> labels) {
-        for (String label : new LinkedHashSet<>(labels)) {
-            if (byId.contains(label)) {
-                continue;
-            }
-            Optional<CollectionRow> row = rows.byLabel(tenant, label);
-            if (row.isPresent() && row.get().isSuperseded() && rows.successorOf(tenant, row.get().collectionId()).isEmpty()) {
-                return Optional.of(CollectionSupersededBody.of(row.get().collectionId(), row.get().label(), Optional.empty()));
+        Set<String> named = new LinkedHashSet<>(labels);
+        named.removeAll(byId);
+        if (named.isEmpty()) {
+            return Optional.empty();
+        }
+        Map<String, CollectionRow> resolved = rows.byLabels(tenant, named);   // one registry read for the labels the cache lacks
+        for (String label : named) {
+            CollectionRow row = resolved.get(label);
+            if (row != null && row.isSuperseded() && rows.successorOf(tenant, row.collectionId()).isEmpty()) {
+                return Optional.of(CollectionSupersededBody.of(row.collectionId(), row.label(), Optional.empty()));
             }
         }
         return Optional.empty();
