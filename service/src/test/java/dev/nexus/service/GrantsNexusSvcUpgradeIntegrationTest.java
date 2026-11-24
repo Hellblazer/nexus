@@ -271,6 +271,11 @@ class GrantsNexusSvcUpgradeIntegrationTest {
         // RDR-229 P3.5b (nexus-p2m1x.24): the reader redefinitions read the collection_id columns vectors-068 adds, so they are as
         // unborn as it is: left in, the old walk fails at vectors-077-1 (hybrid_search_1024) with 'column c.collection_id does not
         // exist'. A real database from before the registry walks vectors-068 before them; the new boot applies both files.
+        //
+        // RDR-229 P3.7 (nexus-p2m1x.27): vectors-083 redefines the restore, expiry and reattach functions that vectors-077 redefined, and
+        // quarantine_reattach_plan is a LANGUAGE sql function, whose body Postgres checks when it is created: left in, the old walk fails at
+        // vectors-083-4 with 'column cc.collection_id does not exist' (the plpgsql bodies of -1 to -3 and -5 to -7 are not checked until they run). It
+        // is as unborn as vectors-077, whose definers it replaces; the new boot applies it after them.
         for (String unborn : List.of("db/changelog/datamoves-002-verify-statement-timeout.xml",
                 "db/changelog/vectors-068-collection-id-expand.xml",
                 "db/changelog/vectors-069-collection-id-dual-write-functions.xml",
@@ -279,7 +284,8 @@ class GrantsNexusSvcUpgradeIntegrationTest {
                 "db/changelog/collections-002-collection-id-seq-heal-function.xml",
                 "db/changelog/collections-003-tuple-lock-stripes.xml",
                 "db/changelog/vectors-077-rdr229-p35b-readers-both.xml",
-                "db/changelog/vectors-078-rdr229-p35b-readers-continue.xml")) {
+                "db/changelog/vectors-078-rdr229-p35b-readers-continue.xml",
+                "db/changelog/vectors-083-restore-by-origin-id.xml")) {
             if (!stripped.contains(unborn)) {
                 stripped.add(unborn);
             }
@@ -292,6 +298,7 @@ class GrantsNexusSvcUpgradeIntegrationTest {
                 "db/changelog/collections-002-collection-id-seq-heal-function.xml",
                 "db/changelog/vectors-077-rdr229-p35b-readers-both.xml",
                 "db/changelog/vectors-078-rdr229-p35b-readers-continue.xml",
+                "db/changelog/vectors-083-restore-by-origin-id.xml",
                 "db/changelog/catalog-052-residue-moves-supersede.xml");
         for (String registering : stripped) {
             String include = "<include file=\"" + registering + "\"/>";
