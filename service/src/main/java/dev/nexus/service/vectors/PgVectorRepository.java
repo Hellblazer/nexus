@@ -6766,7 +6766,9 @@ FROM scope s
                                     : CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(ch.collection()))
                           .and(ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH).eq(ch.chash()))));
             return ctx.deleteFrom(ch.table())
-               .where(CollectionSelector.collectionIs(gate3, tenant, ch.collection(), ch.collectionId(), collection)
+               // by the row's CURRENT label (coll), not the request's: before gate 3 a row renamed in place since the route boundary
+               // resolved its id has no chunk named by the request's label (368cf7da04)
+               .where(CollectionSelector.collectionIs(gate3, tenant, ch.collection(), ch.collectionId(), coll)
                    .and(ch.chash().in(ids)).andNot(stillReferenced))
                .execute();
         });
