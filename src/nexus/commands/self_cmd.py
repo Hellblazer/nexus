@@ -865,7 +865,7 @@ def _reap_superseded(
     keep-3 prune, as a plain install would leave them.
 
     The reap is the install's own (:func:`_reap_generations`, ``keep=1``) with its
-    four never-delete rules, so ``current`` and a generation a live process runs
+    five never-delete rules, so ``current`` and a generation a live process runs
     from stay. Rule (d) is passed as :func:`perform_self_gc` passes it, when the
     running interpreter sits under the tools directory.
 
@@ -2254,7 +2254,7 @@ def _reap_generations(
     caller: str = "",
 ) -> list[str]:
     """Run gc.sh's reap once and return its report lines (``reaped``,
-    ``would reap``, ``kept ...: held by ...``). The four never-delete rules
+    ``would reap``, ``kept ...: held by ...``). The five never-delete rules
     live in gc.sh; this passes rule (d) when the caller runs from a
     generation and never raises: a reap that cannot run leaves the trees
     where they are, which is the safe direction. *remove_launchers* is Windows
@@ -2391,7 +2391,7 @@ def self_group() -> None:
 
 @self_group.command("install")
 @click.option("--keep", default=3, show_default=True,
-              help="Generations to retain. The four never-delete rules still apply.")
+              help="Generations to retain. The five never-delete rules still apply.")
 @click.option("--version", default=None,
               help="Install this version instead of whatever the source resolves to.")
 @click.option("--extras", "extras", multiple=True,
@@ -2484,7 +2484,7 @@ def _after_install_line() -> str:
 
 @self_group.command("gc")
 @click.option("--keep", default=3, show_default=True,
-              help="Generations to retain. The four never-delete rules still apply.")
+              help="Generations to retain. The five never-delete rules still apply.")
 @click.option("--dry-run", is_flag=True, help="Report what would go; delete nothing.")
 @click.option("--prune-uv-cache", "prune_cache", is_flag=True,
               help="Also run `uv cache prune` (the wheel archive every build feeds and nothing else empties).")

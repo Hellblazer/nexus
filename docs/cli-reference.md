@@ -5273,7 +5273,7 @@ half-built tree is never mistaken for a working one.
 
 | Flag | Description |
 |------|-------------|
-| `--keep N` | Generations to retain (default 3). The four never-delete rules still apply on top of it: the generation `current` points at, the previous one (free rollback), any generation with a live holder, and the generation hosting the running installer. |
+| `--keep N` | Generations to retain (default 3). The five never-delete rules still apply on top of it: the generation `current` points at, the previous one (free rollback), any generation with a live holder (a process the census sees, or a live interpreter holding the generation's lease), and the generation hosting the running installer. |
 | `--version X.Y.Z` | Install this version instead of whatever the source resolves to. **One-shot** — the pin is not sticky, and the next bare `nx self install` resolves the current release. Downgrades are safe by construction here: they build a new generation and flip, leaving the old tree for its holders. |
 | `--extras NAME` | Extra(s) to add, repeatable or comma-separated. Merged with the extras the receipt already carries, never replacing them (nexus-pffc4; see above). |
 | `--dry-run` | Print the build command and stop. |
@@ -5347,7 +5347,7 @@ nx self gc [--keep N] [--dry-run] [--prune-uv-cache]
 
 Reap old generations without installing one (7.39.0, nexus-xn84f). It is the
 same reap `nx self install` runs last, with the same keep window (default 3)
-and the same four never-delete rules, and it is what turns a held generation
+and the same five never-delete rules, and it is what turns a held generation
 back into free disk: a generation held by a long-lived `nx-mcp` at install
 time was never reclaimed until the next install, and on a box whose sessions
 live for days every generation since those sessions started was held at every
