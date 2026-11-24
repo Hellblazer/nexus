@@ -263,7 +263,8 @@ def test_step_3h_has_exactly_the_three_legs_each_with_its_own_bound() -> None:
         "A": {
             "--prev-client": "$PREV",
             "--new-jar-commit": "$TAG",
-            "--ceiling": _BOUND,
+            # no --ceiling (total through settle): every leg's byte bound is migrate + ready, and leg A's reboot
+            # (Sam, T2 nexus/sam-ruling-upgrade-gate-move-pacing-2026-11-23); the moves' WAL is move_wal_bytes
             "--ceiling-boot": _BOUND,
             "--ceiling-reboot": _BOUND,
             "--json": "output/gate/A.json",
