@@ -73,7 +73,8 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
  *
  * <p>The latch row decides, except that no row with the readiness complete is {@code latch_row_missing}. The in-process gate 3 signal
  * is not read here, but the readiness this guard reads is tied to it: {@code CompletionBootWork} sets the signal before it publishes the
- * sample the readiness is read from, and answers NONE only while the signal is set, so a rename that takes the one-row path always sees
+ * sample the readiness is read from, and a sample that read the latch row answers NONE only while the signal is set (a lost latch row
+ * answers NONE with the signal unset and is refused {@code latch_row_missing} above, before any body), so a rename that takes the one-row path always sees
  * the signal set, and the one-row body's helpers (which follow the service's {@code Gate3}) take the same id forms the readers take.
  * Across engines there is no window: {@code EngineSingletonLock} (nexus-5tykh) allows one engine per database.
  *

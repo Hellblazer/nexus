@@ -459,9 +459,9 @@ service/src/main/java/dev/nexus/service/db/RemapRepository.java	336	chash_remap	
 service/src/main/java/dev/nexus/service/db/RemapRepository.java	337	chash_remap	source_collection	result	jooq	-
 service/src/main/java/dev/nexus/service/db/RemapRepository.java	340	chash_remap	source_collection	select	jooq	-
 service/src/main/java/dev/nexus/service/db/RemapRepository.java	343	catalog_collections	name	expr	alias	-
-service/src/main/java/dev/nexus/service/db/RenameGuard.java	231	catalog_collections	name	select	jooq	-
-service/src/main/java/dev/nexus/service/db/RenameGuard.java	234	catalog_collections	name	where	jooq	-
-service/src/main/java/dev/nexus/service/db/RenameGuard.java	236	catalog_collections	name	result	jooq	-
+service/src/main/java/dev/nexus/service/db/RenameGuard.java	232	catalog_collections	name	select	jooq	-
+service/src/main/java/dev/nexus/service/db/RenameGuard.java	235	catalog_collections	name	where	jooq	-
+service/src/main/java/dev/nexus/service/db/RenameGuard.java	237	catalog_collections	name	result	jooq	-
 service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	390	?	metadata.origin_collection	accessor_def	metadata_key	the jsonb column is not bound to a table in this file
 service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	391	?	metadata.origin_collection	where	bound	the jsonb column is not bound to a table in this file
 service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	395	?	metadata.origin_collection	where	bound	the jsonb column is not bound to a table in this file

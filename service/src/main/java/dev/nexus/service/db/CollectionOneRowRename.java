@@ -43,9 +43,9 @@ public final class CollectionOneRowRename implements OneRowRename {
 
     /**
      * Gate 3 for the helpers this body calls, the service's own signal ({@code NexusService} passes the one it gives every repository). This body runs
-     * only on the one-row path, which {@link RenameGuard#runRename} takes only once the latch row exists and the readiness reads none; the readiness
-     * answers none only while this signal is set ({@code CompletionBootWork} sets it before it publishes the sample, and its readiness answers
-     * unreadable until it is set), so on this path the signal holds and the helpers take the id forms every reader takes. Across engines there is no
+     * only on the one-row path, which {@link RenameGuard#runRename} takes only once the latch row exists and the readiness reads none; a sample that
+     * read the latch row answers none only while this signal is set ({@code CompletionBootWork} sets it before it publishes the sample, and its
+     * readiness answers unreadable until it is set; a lost latch row is refused before this body), so on this path the signal holds and the helpers take the id forms every reader takes. Across engines there is no
      * window: {@code EngineSingletonLock} (nexus-5tykh) allows one engine per database.
      */
     private final dev.nexus.service.datamove.Gate3 gate3;
