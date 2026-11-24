@@ -104,6 +104,7 @@ on:
       - tests/test_os_trust_store.py
       - src/nexus/__init__.py
       - tests/test_install_generation_real_windows.py
+      - tests/test_install_lease_windows.py
       - tests/test_session_end_real_windows.py
       - tests/test_mcp_win_stdin_real_windows.py
       - tests/test_mcp_win_stdin.py
@@ -137,6 +138,10 @@ on:
       - src/nexus/_install/generation_core.py
       - src/nexus/_install/layout_core.py
       - src/nexus/_install/gc_core.py
+      # The generation lease: ctypes CreateFileW, the share-delete hold and the reap's link-safe walk
+      # live in lease_core.py and only a native run shows them (tests/test_install_lease_windows.py).
+      - src/nexus/_install/lease_core.py
+      - src/nexus/_install/_nx_lease.py
       - src/nexus/_install/census_core.py
       - src/nexus/db/pg_provision.py
       - src/nexus/db/pg_bundle.py
@@ -436,7 +441,7 @@ jobs:
       # the ceiling of 204 (0 failed, run 44675562916). The gate's plain-Python cases stay in the set and run on Windows.
       - name: Windows test set
         run: |
-          uv run --python 3.13 --frozen pytest --ignore=tests/daemon/test_service_stop_mineru.py --ignore=tests/daemon/test_stop_flagless_start_real_processes.py --ignore=tests/daemon/test_spawn_lock_hold.py --ignore=tests/daemon/test_storage_service_running.py --ignore=tests/hooks/test_session_facts_posix.py --ignore=tests/daemon/test_legacy_chash_guard_real_pg.py --ignore=tests/daemon/test_storage_stop_invisible.py --ignore=tests/daemon/test_stop_real_processes_posix.py --ignore=tests/hooks/test_compact_outcome_harness_posix.py tests/daemon/ tests/test_process_group_safety.py tests/test_session_sweep_orphan_trackers.py tests/test_win_console.py tests/test_winsec.py tests/test_winproc_core.py tests/test_install_generation_real_windows.py tests/test_session_end_real_windows.py tests/test_mcp_win_stdin.py tests/test_mcp_win_stdin_real_windows.py tests/test_os_trust_store.py tests/test_mcpb_bootstrap.py tests/test_mcpb_launcher_venv.py tests/test_pg_ctl_console_isolation_real_windows.py tests/test_off_cwd_resolver_real_windows.py tests/hooks/ tests/test_install_ps1.py tests/test_install_source.py tests/test_pdf_stack.py tests/test_installer_rebuild.py tests/test_mineru_cmd.py tests/test_mineru_spawn_windows_flags.py tests/test_context.py::TestSubagentHookInjection tests/test_context.py::TestSessionHookInjection -p no:cacheprovider -q -rs --junitxml=windows-tests-junit.xml
+          uv run --python 3.13 --frozen pytest --ignore=tests/daemon/test_service_stop_mineru.py --ignore=tests/daemon/test_stop_flagless_start_real_processes.py --ignore=tests/daemon/test_spawn_lock_hold.py --ignore=tests/daemon/test_storage_service_running.py --ignore=tests/hooks/test_session_facts_posix.py --ignore=tests/daemon/test_legacy_chash_guard_real_pg.py --ignore=tests/daemon/test_storage_stop_invisible.py --ignore=tests/daemon/test_stop_real_processes_posix.py --ignore=tests/hooks/test_compact_outcome_harness_posix.py tests/daemon/ tests/test_process_group_safety.py tests/test_session_sweep_orphan_trackers.py tests/test_win_console.py tests/test_winsec.py tests/test_winproc_core.py tests/test_install_generation_real_windows.py tests/test_install_lease_windows.py tests/test_session_end_real_windows.py tests/test_mcp_win_stdin.py tests/test_mcp_win_stdin_real_windows.py tests/test_os_trust_store.py tests/test_mcpb_bootstrap.py tests/test_mcpb_launcher_venv.py tests/test_pg_ctl_console_isolation_real_windows.py tests/test_off_cwd_resolver_real_windows.py tests/hooks/ tests/test_install_ps1.py tests/test_install_source.py tests/test_pdf_stack.py tests/test_installer_rebuild.py tests/test_mineru_cmd.py tests/test_mineru_spawn_windows_flags.py tests/test_context.py::TestSubagentHookInjection tests/test_context.py::TestSessionHookInjection -p no:cacheprovider -q -rs --junitxml=windows-tests-junit.xml
 
       # A run that skipped itself on Windows would pass having proved nothing. The
       # floor is sized from the measured run above: junit counts an xfail as a skip,
@@ -516,7 +521,7 @@ jobs:
       - name: Non-vacuity floor
         if: ${{ !cancelled() }}
         run: |
-          uv run --python 3.13 --frozen python scripts/check_junit_floor.py windows-tests-junit.xml --min-passed 3730 --max-skipped 204 --require-passed tests.test_winsec.TestRealWindows --require-passed tests.test_winproc_core.TestRealWindowsKernel --require-passed tests.test_os_trust_store.TestRealWindows --require-passed tests.test_install_generation_real_windows.TestRealWindows --require-passed tests.daemon.test_pid_alive_windows.TestRealWindowsKernel --require-passed tests.test_session_end_real_windows.TestRealWindows --require-passed tests.test_mcp_win_stdin_real_windows.TestRealWindows --require-passed test_hard_killing_the_supervisor_takes_its_job_engine_with_it --require-passed tests.test_mcpb_bootstrap.TestRealWindows --require-passed test_the_credential_guard_still_denies_through_the_launcher --require-passed test_auto_approve_allows_through_uv_and_the_shim --require-passed tests.test_pg_ctl_console_isolation_real_windows.TestRealWindows --require-passed tests.test_off_cwd_resolver_real_windows.TestRealWindows --require-passed tests.hooks.test_hook_launcher_cwd_real_windows.TestRealWindows --require-passed test_both_hooks_read_the_cache_as_utf8_under_a_non_utf8_locale --require-passed test_help_states_the_autostart_default_and_installs_nothing --require-passed test_the_server_outlives_the_desktop_extensions_job
+          uv run --python 3.13 --frozen python scripts/check_junit_floor.py windows-tests-junit.xml --min-passed 3730 --max-skipped 204 --require-passed tests.test_winsec.TestRealWindows --require-passed tests.test_winproc_core.TestRealWindowsKernel --require-passed tests.test_os_trust_store.TestRealWindows --require-passed tests.test_install_generation_real_windows.TestRealWindows --require-passed tests.test_install_lease_windows.TestRealWindows --require-passed tests.daemon.test_pid_alive_windows.TestRealWindowsKernel --require-passed tests.test_session_end_real_windows.TestRealWindows --require-passed tests.test_mcp_win_stdin_real_windows.TestRealWindows --require-passed test_hard_killing_the_supervisor_takes_its_job_engine_with_it --require-passed tests.test_mcpb_bootstrap.TestRealWindows --require-passed test_the_credential_guard_still_denies_through_the_launcher --require-passed test_auto_approve_allows_through_uv_and_the_shim --require-passed tests.test_pg_ctl_console_isolation_real_windows.TestRealWindows --require-passed tests.test_off_cwd_resolver_real_windows.TestRealWindows --require-passed tests.hooks.test_hook_launcher_cwd_real_windows.TestRealWindows --require-passed test_both_hooks_read_the_cache_as_utf8_under_a_non_utf8_locale --require-passed test_help_states_the_autostart_default_and_installs_nothing --require-passed test_the_server_outlives_the_desktop_extensions_job
 
   # RDR-229 P3.6 (nexus-21kr3): the label test against the real engine on native Windows. It cannot ride the
   # conformance job's pytest step: that step runs NX_TEST_T2_SUBSTRATE=none under the default addopts, which

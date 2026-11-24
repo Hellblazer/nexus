@@ -727,6 +727,7 @@ PHASE3_WINDOWS_MODULES = (
     "src/nexus/mcp/_win_stdin.py",
     "src/nexus/_install/generation_core.py", "src/nexus/_install/layout_core.py",
     "src/nexus/_install/gc_core.py", "src/nexus/_install/census_core.py",
+    "src/nexus/_install/lease_core.py", "src/nexus/_install/_nx_lease.py",
     "src/nexus/db/pg_provision.py", "src/nexus/db/pg_bundle.py", "src/nexus/commands/daemon.py",
     "src/nexus/daemon/storage_service_daemon.py", "src/nexus/daemon/service_registry.py",
     "src/nexus/daemon/aspect_worker_daemon.py",
@@ -735,7 +736,8 @@ PHASE3_WINDOWS_MODULES = (
 WINDOWS_TEST_SET = (
     "tests/daemon/", "tests/test_process_group_safety.py", "tests/test_session_sweep_orphan_trackers.py",
     "tests/test_win_console.py", "tests/test_winsec.py", "tests/test_winproc_core.py",
-    "tests/test_install_generation_real_windows.py", "tests/test_session_end_real_windows.py",
+    "tests/test_install_generation_real_windows.py", "tests/test_install_lease_windows.py",
+    "tests/test_session_end_real_windows.py",
     "tests/test_mcp_win_stdin.py", "tests/test_mcp_win_stdin_real_windows.py",
     "tests/test_os_trust_store.py",
     # Phase 4 (nexus-f9bgu.38 finding C): the desktop bootstrap and the uv hook launcher.
@@ -826,6 +828,7 @@ REAL_KERNEL_PATTERNS = (
     "tests.test_winproc_core.TestRealWindowsKernel",
     "tests.test_os_trust_store.TestRealWindows",
     "tests.test_install_generation_real_windows.TestRealWindows",
+    "tests.test_install_lease_windows.TestRealWindows",
     "tests.daemon.test_pid_alive_windows.TestRealWindowsKernel",
     "tests.test_session_end_real_windows.TestRealWindows",
     "tests.test_mcp_win_stdin_real_windows.TestRealWindows",

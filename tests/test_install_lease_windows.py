@@ -118,6 +118,7 @@ class TestInjected:
         assert gone is False and "receipt" in detail, detail
         assert hold.released and (gen / ".nx-lease").is_file()
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="needs the symlink privilege; the real-junction case is TestRealWindows")
     def test_a_link_inside_the_tree_is_removed_as_a_link_and_never_followed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
