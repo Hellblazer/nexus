@@ -252,7 +252,7 @@ For author/citation-specific questions ("what did Fagin write", "what cites X"):
 - Use `mcp__plugin_conexus_nexus-catalog__search(author="...", corpus="...")` for targeted metadata search
 - Use `mcp__plugin_conexus_nexus-catalog__links(tumbler="...", direction="in", link_type="cites")` for citation traversal
   - Returns `{"nodes": [...], "edges": [...]}` — nodes include physical_collection for T3 resolution
-  - Link types: `cites`, `implements-heuristic`, `supersedes`, `relates`
+  - Link types: `cites`, `implements`, `supersedes`, `relates` (`implements-heuristic` is legacy: nothing writes it since engine 0.1.57, and traversal excludes it by default)
 - Resolve to T3 collections via `mcp__plugin_conexus_nexus-catalog__resolve(owner="...")`, or `corpus="rdr"` (any of `code`, `docs`, `rdr`, `knowledge`, or an exact corpus label); an unknown `corpus` value fails the whole call
 
 Skip catalog only if tools are not available (not injected by SubagentStart hook).

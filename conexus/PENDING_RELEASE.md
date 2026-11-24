@@ -55,7 +55,7 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/agents/codebase-deep-analyzer.md`: text only: same T2 context line; the bead is closed by the caller, not the agent; the search example names the bare `code` corpus.
 - `conexus/agents/debugger.md`: text only: same T2 context line; the persistence default is T1 scratch (T3 only for validated findings); the caller closes the bead.
 - `conexus/agents/deep-analyst.md`: text only: same T2 context line; T1-first persistence default; the caller closes the bead.
-- `conexus/agents/deep-research-synthesizer.md`: text only: same T2 context line; a relay-specified T2 `ttl` omitted means permanent (there is no default 30); the collection example is a placeholder.
+- `conexus/agents/deep-research-synthesizer.md`: text only: same T2 context line; a relay-specified T2 `ttl` omitted means permanent (there is no default 30); the collection example is a placeholder; the link-type list marks `implements-heuristic` legacy.
 - `conexus/agents/developer.md`: text only: same T2 context line; no Agent tool and no commit stated in When to Delegate and PRODUCE; the review gate is the caller's policy, not a push guard; T2 default TTL is permanent.
 - `conexus/agents/substantive-critic.md`: text only: same T2 context line.
 - `conexus/agents/test-validator.md`: text only: same T2 context line.
@@ -72,6 +72,7 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/skills/mailbox/SKILL.md`: text only: `mailbox_send` resolves a name to a session or an identity mailbox; `address_kind` values are agent, session and identity.
 - `conexus/skills/nexus/reference.md`: text only: tool count and list, the parameters the tables lacked, the nx_answer budget fields, store_get ids, no `--chunk-size`, and the collection-naming rule.
 - `conexus/skills/orchestration/SKILL.md`: text only: the mid-turn message to an agent goes through `mailbox_send`.
+- `conexus/skills/rdr-show/SKILL.md`: text only: the example catalog links show `implements` and mark `implements-heuristic` as an older edge.
 - `conexus/skills/rdr-audit-checklist/SKILL.md`: text only: the RDR-067 tumbler is resolved through the catalog; the schedule subcommands read triggers the user installed by hand; the prompt loads from the shipped file first.
 - `conexus/skills/rdr-gate-checklist/SKILL.md`: text only: the prior-art step lists collections with `collection_list`, not `store_list`.
 - `conexus/skills/upgrade/SKILL.md`: text only: a section on the RDR-229 stamp moves and the one engine restart; the managed-cloud hop text points at the migration runbook for the carry list.
