@@ -68,6 +68,28 @@ public final class ReembedSourceReader {
         return CollectionKey.of(gate3);
     }
 
+    /**
+     * The CURRENT label of the live successor of the retired row {@code retiredId}, found by {@code superseded_by_id}
+     * ({@link CollectionSuccessor}), or empty when the row names none (RDR-229 R7: a tombstone whose successor was deleted
+     * carries its own dead label in {@code superseded_by}, which is no successor). A refusal that says what a retired row was
+     * superseded by asks this, never the stored text.
+     */
+    public java.util.Optional<String> liveSuccessorLabel(String tenant, long retiredId) {
+        return CollectionSuccessor.of(scope, tenant, retiredId).map(CollectionSuccessor.Successor::label);
+    }
+
+    /**
+     * {@link #liveSuccessorLabel(String, long)} for a retired row as {@code CatalogRepository#getCollection} returns it. A map with no
+     * {@code collection_id} is judged by the successor text it carries.
+     */
+    public java.util.Optional<String> liveSuccessorLabel(String tenant, Map<String, Object> row) {
+        if (row.get("collection_id") instanceof Number id) {
+            return liveSuccessorLabel(tenant, id.longValue());
+        }
+        String text = String.valueOf(row.get("superseded_by"));
+        return text.isEmpty() ? java.util.Optional.empty() : java.util.Optional.of(text);
+    }
+
 
     // The document shapes, defined once for the pass, the cutover's checks and the plan, so the plan cannot count a
     // different set than the cutover acts on. Each is a condition on CATALOG_DOCUMENTS (unaliased) rows.

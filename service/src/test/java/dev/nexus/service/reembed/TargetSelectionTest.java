@@ -33,6 +33,11 @@ class TargetSelectionTest {
     private static final String MODEL = "bge-base-en-v15-768";
     private static final String SOURCE = "docs__1-7__voyage-context-3__v1";
 
+    /** For a row built without an id: {@code decide} judges it by its successor text and never asks. */
+    private static final TargetSelection.Successors NO_LOOKUP = id -> {
+        throw new AssertionError("a row with no id is judged by its text, not by a lookup of " + id);
+    };
+
     private static CollectionRow row(String name, String version) {
         return new CollectionRow(name, CT, OWNER, MODEL, version, false, "", "live");
     }
@@ -233,31 +238,31 @@ class TargetSelectionTest {
 
     @Test
     void absentIsRegistered() {
-        assertThat(TargetSelection.decide(new Absent(), SOURCE, null)).isEqualTo(new Register());
+        assertThat(TargetSelection.decide(new Absent(), SOURCE, null, NO_LOOKUP)).isEqualTo(new Register());
     }
 
     @Test
     void aLiveTargetIsUsed() {
-        assertThat(TargetSelection.decide(new Live("t"), SOURCE, null)).isEqualTo(new UseLive("t"));
+        assertThat(TargetSelection.decide(new Live("t"), SOURCE, null, NO_LOOKUP)).isEqualTo(new UseLive("t"));
     }
 
     @Test
     void aLiveTargetThatAnotherLockStateJobHasAsItsSourceIsRefusedNamingTheJob() {
         var holder = new LockHolder(UUID.randomUUID(), "running");
-        Decision d = TargetSelection.decide(new Live("t"), SOURCE, holder);
+        Decision d = TargetSelection.decide(new Live("t"), SOURCE, holder, NO_LOOKUP);
         assertThat(d).isInstanceOf(Refuse.class);
         assertThat(((Refuse) d).reason()).contains(holder.jobId().toString()).contains("running").contains("t");
     }
 
     @Test
     void aSupersededTargetNamingTheSourceIsRevived() {
-        Decision d = TargetSelection.decide(new Superseded("t", SOURCE), SOURCE, null);
+        Decision d = TargetSelection.decide(new Superseded("t", SOURCE), SOURCE, null, NO_LOOKUP);
         assertThat(d).isEqualTo(new Revive("t"));
     }
 
     @Test
     void aSupersededTargetNamingAnotherSuccessorIsRefusedNamingBoth() {
-        Decision d = TargetSelection.decide(new Superseded("t", "docs__1-7__other__v1"), SOURCE, null);
+        Decision d = TargetSelection.decide(new Superseded("t", "docs__1-7__other__v1"), SOURCE, null, NO_LOOKUP);
         assertThat(d).isInstanceOf(Refuse.class);
         assertThat(((Refuse) d).reason()).contains("t").contains("docs__1-7__other__v1").contains(SOURCE);
     }
@@ -266,7 +271,7 @@ class TargetSelectionTest {
     void aSupersededTargetNamingAnotherSuccessorIsRefusedEvenWithNoLockHolder() {
         // The successor mismatch is the more basic refusal; a holder does not turn it into a revive or change it.
         var holder = new LockHolder(UUID.randomUUID(), "failed");
-        Decision d = TargetSelection.decide(new Superseded("t", "elsewhere"), SOURCE, holder);
+        Decision d = TargetSelection.decide(new Superseded("t", "elsewhere"), SOURCE, holder, NO_LOOKUP);
         assertThat(((Refuse) d).reason()).contains("elsewhere");
     }
 
@@ -274,9 +279,48 @@ class TargetSelectionTest {
     @CsvSource({"planned", "running", "paused", "cutover", "failed"})
     void aLockStateJobWithTheTargetAsItsSourceBlocksTheRevive(String holderState) {
         var holder = new LockHolder(UUID.randomUUID(), holderState);
-        Decision d = TargetSelection.decide(new Superseded("t", SOURCE), SOURCE, holder);
+        Decision d = TargetSelection.decide(new Superseded("t", SOURCE), SOURCE, holder, NO_LOOKUP);
         assertThat(d).isInstanceOf(Refuse.class);
         assertThat(((Refuse) d).reason()).contains(holder.jobId().toString()).contains(holderState).contains("t");
+    }
+
+    // ---- R7: a retired row with no live successor names none ----
+
+    @Test
+    void aSupersededTargetWithNoLiveSuccessorIsRefusedAsRetired_neverNamingItsOwnDeadLabelAsASuccessor() {
+        // the stored text of a tombstone whose successor was deleted is a label nothing bears
+        Decision d = TargetSelection.decide(new Superseded("t", "docs__dead__successor__v1", 7L), SOURCE, null,
+            id -> java.util.Optional.empty());
+        assertThat(d).isInstanceOf(Refuse.class);
+        assertThat(((Refuse) d).reason()).contains("collection t was retired and has no successor")
+            .doesNotContain("docs__dead__successor__v1").doesNotContain("superseded by");
+    }
+
+    @Test
+    void aRetiredTargetWithNoSuccessorIsRefusedEvenWhenItsTextNamesTheSource() {
+        // the text can name any label (a deleted successor's, then registered again as this job's source): only the id's walk counts
+        Decision d = TargetSelection.decide(new Superseded("t", SOURCE, 7L), SOURCE, null, id -> java.util.Optional.empty());
+        assertThat(d).isInstanceOf(Refuse.class);
+        assertThat(((Refuse) d).reason()).contains("collection t was retired and has no successor");
+    }
+
+    @Test
+    void aSupersededTargetWithALiveSuccessorNamesItByItsCurrentLabel_notByTheStoredText() {
+        Decision d = TargetSelection.decide(new Superseded("t", "stale-text", 7L), SOURCE, null,
+            id -> id == 7L ? java.util.Optional.of("docs__1-7__renamed__v1") : java.util.Optional.empty());
+        assertThat(((Refuse) d).reason()).contains("docs__1-7__renamed__v1").contains(SOURCE).doesNotContain("stale-text");
+    }
+
+    @Test
+    void aSupersededTargetWhoseLiveSuccessorIsTheSourceIsRevivedByTheIdsWalk() {
+        assertThat(TargetSelection.decide(new Superseded("t", "stale-text", 7L), SOURCE, null, id -> java.util.Optional.of(SOURCE)))
+            .isEqualTo(new Revive("t"));
+    }
+
+    @Test
+    void selectKeepsTheSupersededRowsId_soDecideCanFollowIt() {
+        var tombstone = new CollectionRow("t", CT, OWNER, MODEL, "v1", false, "dead", "live", "", 7L);
+        assertThat(select(tombstone)).isEqualTo(new Superseded("t", "dead", 7L));
     }
 
     // ---- ruling 2 as narrowed: an earlier done or aborted job is marked revived; a failed one holds the lock ----
@@ -298,14 +342,14 @@ class TargetSelectionTest {
     @Test
     void theEarlierDoneJobRevivesButAFailedOneHoldsTheLockAndRefuses() {
         // done: kept_by_flag or kept_tombstoned left the target superseded by this source and holds no lock.
-        assertThat(TargetSelection.decide(new Superseded("t", SOURCE), SOURCE, null)).isEqualTo(new Revive("t"));
+        assertThat(TargetSelection.decide(new Superseded("t", SOURCE), SOURCE, null, NO_LOOKUP)).isEqualTo(new Revive("t"));
         // aborted in cutover after the supersede: also no lock, same decision.
-        assertThat(TargetSelection.decide(new Superseded("t", SOURCE), SOURCE, null)).isEqualTo(new Revive("t"));
+        assertThat(TargetSelection.decide(new Superseded("t", SOURCE), SOURCE, null, NO_LOOKUP)).isEqualTo(new Revive("t"));
         // failed (parity_mismatch) after the supersede: the failed job keeps the source's lock, so the revive
         // is refused naming it until it is aborted; once aborted the lock is gone and the revive proceeds.
         var failed = new LockHolder(UUID.randomUUID(), "failed");
-        assertThat(TargetSelection.decide(new Superseded("t", SOURCE), SOURCE, failed)).isInstanceOf(Refuse.class);
-        assertThat(TargetSelection.decide(new Superseded("t", SOURCE), SOURCE, null)).isEqualTo(new Revive("t"));
+        assertThat(TargetSelection.decide(new Superseded("t", SOURCE), SOURCE, failed, NO_LOOKUP)).isInstanceOf(Refuse.class);
+        assertThat(TargetSelection.decide(new Superseded("t", SOURCE), SOURCE, null, NO_LOOKUP)).isEqualTo(new Revive("t"));
     }
 
     // ---- nexus-p2m1x.28: two sources on one tuple must not meet in one target ----
