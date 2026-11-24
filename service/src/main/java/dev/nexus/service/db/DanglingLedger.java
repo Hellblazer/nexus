@@ -13,10 +13,14 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
  * The rows of a ledger table (pdf_pipeline, chash_remap) that a label with NO registry row names by the name they recorded: before gate 3
  * that name; from gate 3 that name and an id no LIVE registry row holds (or none).
  *
- * <p>There is deliberately no {@code id = idOf(label)} arm, which {@link CollectionKey#eqLedger} and {@link CollectionKey#eqHistory}
- * have. A write that read the registry for the label and found no row took no lock, so the label can be registered by another request
- * between that tolerant read and the delete, and an id arm would then reach the NEW collection's rows without the key share a writer
- * takes (RDR-229 row 21, linda). A delete whose label HAS a row keeps the rule that reads the row it locked.
+ * <p><b>From gate 3</b> there is deliberately no {@code id = idOf(label)} arm, which {@link CollectionKey#eqLedger} and
+ * {@link CollectionKey#eqHistory} have. A write that read the registry for the label and found no row took no lock, so the label can be
+ * registered by another request between that tolerant read and the delete, and an id arm would then reach the NEW collection's rows
+ * without the key share a writer takes (RDR-229 row 21, linda). A delete whose label HAS a row keeps the rule that reads the row it locked.
+ *
+ * <p><b>Before gate 3</b> the no-row arm is the plain name match, {@code name = label}, and it still reaches a collection registered
+ * meanwhile: before the latch the rows are keyed by name, so a row filed under the label by the new collection is indistinguishable from a
+ * dangling one. The race closes at the latch, not here.
  */
 final class DanglingLedger {
 
