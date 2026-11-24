@@ -10566,12 +10566,16 @@ public final class CatalogRepository {
         // step 6), which fires vectors-021-3's chunk-locking trigger; whole transaction retried on 40P01.
         // `counts` is built inside the lambda, so each attempt starts from an empty map.
         return manifestWriteTxn(tenant, "catalog.deleteCollection " + name, ctx -> {
-            CollectionRegistry.exemptFromWriterCensus(ctx, "the collection delete: children first, registry row last (linda Q2)");
-            // RDR-229 P3.5a, row 16: a delete by id reads and locks the row of that id first (the registry row before any child row,
-            // the canonical lock order), in this transaction, so a row that is gone, retired, or no longer bears `name` since the
+            CollectionRegistry.exemptFromWriterCensus(ctx, "the collection delete takes the registry rows it needs itself: by label, the children first and the registry row last"
+                + " (linda Q2); by id, the re-embed start guard shared, then the origin row FOR UPDATE with its quarantine siblings' rows FOR KEY SHARE in collection_id order,"
+                + " then the children (CollectionDeleteFence.lockByIdFirst)");
+            // RDR-229 P3.5a, row 16 and row 14: a delete by id locks the registry rows first, in the canonical order (CollectionDeleteFence.lockByIdFirst:
+            // the re-embed start guard shared, the origin's row FOR UPDATE with its siblings' rows FOR KEY SHARE in one id order, the 404 / 409 checks of
+            // the row of that id, the collection_busy check), in this transaction, so a row that is gone, retired, or no longer bears `name` since the
             // verdict read is refused (404 / 409) before anything is purged. From gate 3 the purge below is of THAT row's id; before it the
             // purge is by name (CollectionPurgeScope), so the lock above is what keeps a label's new holder out of it.
-            Long lockedId = onlyId == null ? null : CollectionRefusals.requireSourceById(ctx, tenant, onlyId, name).collectionId();
+            Long lockedId = onlyId == null ? null
+                : CollectionDeleteFence.lockByIdFirst(ctx, tenant, name, onlyId, keepQuarantine, refuseWhenBusy).collectionId();
             deferManifestChunkFk(ctx);
             // RDR-229 P3.5a: before gate 3 the name columns scope the purge; from it the row's id does, and a label with no row purges nothing
             CollectionPurgeScope scope = CollectionPurgeScope.resolve(ctx, gate3.holds(), tenant, name, lockedId);
