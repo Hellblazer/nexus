@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-229 P3.7 (nexus-p2m1x.27): drops the counting sequence of db.changelog-test-step2-probe-create.xml.
+    Used by Rdr229P37NamePathCascadeTest only. runAlways, bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="step2-probe-drop" author="nexus-p2m1x.27" runAlways="true">
+        <sql>DROP SEQUENCE IF EXISTS nexus.p37_step2_probe</sql>
+    </changeSet>
+</databaseChangeLog>
