@@ -14,6 +14,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Properties;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.function.Function;
 
 /**
  * nexus-f3yqd.2.13: how the worker decides and what it keeps, on the pg_background image (the acceptance scenarios are
@@ -151,6 +152,85 @@ class DataMoveWorkerBehaviourIntegrationTest extends DataMoveIntegrationBase {
         worker(installed(), null, FailureHandler.BLOCK_ALWAYS, recording).runCycle();
 
         assertThat(forgotten).as("the worker skipped finish() for the paused move and told the finisher").contains("b-forget");
+    }
+
+    /** A finisher that answers with {@code answer} and records every label it is told to forget. */
+    private static MoveFinisher forgetting(List<String> forgotten,
+                                           Function<MoveFinisher.Context, MoveFinisher.Result> answer) {
+        return new MoveFinisher() {
+            @Override
+            public Result finish(Context context) {
+                return answer.apply(context);
+            }
+
+            @Override
+            public void forget(String label) {
+                forgotten.add(label);
+            }
+        };
+    }
+
+    @Test
+    void aMovePausedBetweenTheListAndTheReload_isForgottenByTheFinisher() throws Exception {
+        register("b-forget-reload", "plain_rows", 10, 0);
+        List<String> forgotten = new CopyOnWriteArrayList<>();
+        var w = worker(installed(), null, FailureHandler.BLOCK_ALWAYS,
+            forgetting(forgotten, c -> MoveFinisher.Result.leftOpen()));
+        // the open list was read with the move running; the pause lands before the worker reads the row again (workMove's reload)
+        w.beforeSessionOpenHook = () -> DataMoveTestFixtures.pause(ctx(), "b-forget-reload", true);
+
+        assertThat(w.runCycle()).isEqualTo(1);
+
+        assertThat(w.states().state("b-forget-reload").orElseThrow().kind()).isEqualTo(MoveStates.Kind.PAUSED);
+        assertThat(activeRuns("b-forget-reload")).as("no run started").isEmpty();
+        assertThat(forgotten).as("the pause seen at the pass's own reload").containsExactly("b-forget-reload");
+    }
+
+    @Test
+    void aMovePausedBetweenTwoRuns_isForgottenByTheFinisher() throws Exception {
+        register("b-forget-run", "tenant_rows", 10, 0);
+        List<String> forgotten = new CopyOnWriteArrayList<>();
+        var w = worker(installed(), null, FailureHandler.BLOCK_ALWAYS,
+            forgetting(forgotten, c -> MoveFinisher.Result.leftOpen()));
+        // the pause lands after the first tenant's CALL: the next run's reload (runOne) sees it
+        w.afterCallHook = () -> DataMoveTestFixtures.pause(ctx(), "b-forget-run", true);
+
+        w.runCycle();
+
+        assertThat(w.states().state("b-forget-run").orElseThrow().kind()).isEqualTo(MoveStates.Kind.PAUSED);
+        assertThat(activeRuns("b-forget-run")).as("the first run finished, no second began").hasSize(1);
+        assertThat(forgotten).as("the pause seen at a run's reload; finish() never ran").containsExactly("b-forget-run");
+    }
+
+    @Test
+    void aFinisherThatReportsThePause_isToldToForgetTheMove() throws Exception {
+        register("b-forget-out", "plain_rows", 10, 0);
+        List<String> forgotten = new CopyOnWriteArrayList<>();
+        var w = worker(installed(), null, FailureHandler.BLOCK_ALWAYS,
+            forgetting(forgotten, c -> MoveFinisher.Result.paused(c.move())));
+
+        assertThat(w.runCycle()).isEqualTo(1);
+
+        assertThat(w.states().state("b-forget-out").orElseThrow().kind()).isEqualTo(MoveStates.Kind.PAUSED);
+        assertThat(forgotten).as("the PAUSED outcome of finish()").containsExactly("b-forget-out");
+    }
+
+    @Test
+    void aMoveThatCompletesIsGoneOrIsReopened_isForgottenByTheFinisher() throws Exception {
+        register("b-forget-done", "tenant_plain", 50, 0);
+        register("b-forget-gone", "unforced_owned", 50, 0);
+        register("b-forget-open", "tenant_rows", 50, 0);
+        List<String> forgotten = new CopyOnWriteArrayList<>();
+        var w = worker(installed(), null, FailureHandler.BLOCK_ALWAYS, forgetting(forgotten, c -> switch (c.move().label()) {
+            case "b-forget-done" -> MoveFinisher.Result.completed();
+            case "b-forget-gone" -> MoveFinisher.Result.gone();
+            default -> MoveFinisher.Result.reopened();
+        }));
+
+        assertThat(w.runCycle()).isEqualTo(3);
+
+        assertThat(forgotten).as("forgetMove tells the finisher, whichever way the move left the open list")
+            .containsExactlyInAnyOrder("b-forget-done", "b-forget-gone", "b-forget-open");
     }
 
     @Test
