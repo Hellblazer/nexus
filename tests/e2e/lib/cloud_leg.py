@@ -175,7 +175,7 @@ def item_title_from_json(text: str) -> str:
 def check_target(*, service_url: str, token: str, mint_tenant: str, item_title: str,
                  ambient_environ: dict[str, str], ambient_config: Path | None) -> str:
     """Refuse unless the credential is the test tenant's, on the pinned public https edge. Raises Refusal.
-    *item_title* is the 1Password item's own title as the vault returned it. Returns the edge host."""
+    *item_title* is the 1Password item's own title as the vault returned it. Returns the edge host, as the allowlist (or the override) spells it."""
     if not service_url.startswith("https://"):
         raise Refusal("service_url is not the public https edge (https:// required)")
     rest = service_url[len("https://"):].split("/", 1)[0]
@@ -202,7 +202,7 @@ def check_target(*, service_url: str, token: str, mint_tenant: str, item_title: 
     if ambient.get("mint_tenant") and ambient["mint_tenant"] != REQUIRED_TENANT and ambient.get("mint_token") \
             and _sha(normalize_secret(ambient["mint_token"])) == th:
         raise Refusal("the test credential is bound to the operator's own tenant")
-    return host
+    return next(h for h in sorted(ALLOWED_EDGE_HOSTS | {override}) if h == host)  # the pinned entry, not the credential's own text
 
 
 # ── the step plan ───────────────────────────────────────────────────────────
