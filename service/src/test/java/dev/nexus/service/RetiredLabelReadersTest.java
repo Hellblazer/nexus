@@ -81,7 +81,9 @@ class RetiredLabelReadersTest {
             new Reader("vector store-list", true, "/v1/vectors/store-list", Shape.BODY_ONE, ""),
             new Reader("taxonomy topics", false, "/v1/taxonomy/topics", Shape.QUERY, ""),
             new Reader("aspect get", false, "/v1/aspects/get", Shape.QUERY, "&source_path=p35a.md", 404),
-            new Reader("aspect list_by_collection", false, "/v1/aspects/list_by_collection", Shape.QUERY, ""))
+            new Reader("aspect list_by_collection", false, "/v1/aspects/list_by_collection", Shape.QUERY, ""),
+            // returns chunk_text and metadata of a chunk of the collection (CatalogHandler#handleResolveSpan); a live label with no such chunk is its own 404
+            new Reader("catalog resolve_span", false, "/v1/catalog/resolve_span", Shape.QUERY, "&span_chash=" + "ab".repeat(32), 404))
             .map(r -> Arguments.of(r));
     }
 
