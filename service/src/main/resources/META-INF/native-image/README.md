@@ -85,3 +85,13 @@ descriptor's `name`.
   parameter's read and write method, and fails on any not registered here or in the traced
   file; `tests/test_native_liquibase_changelog_reflection.py` is the cheap XML-text cross-check
   of the setters, and fails on a changelog element it cannot map.
+
+## resource-config.json
+
+- **Every file under `src/main/resources` (outside this directory) needs a pattern here**, or a `-H:IncludeResources`
+  buildArg in `service/pom.xml`, or an entry in the not-read-at-run-time list of `ResourceConfigCensusTest`
+  (nexus-p2m1x). native-image folds only `Class.getResource` / `getResourceAsStream` calls whose argument is a constant;
+  a `ClassLoader.getResourceAsStream(CONSTANT)` call is not registered, and JVM tests load from the classpath, so they
+  never see the gap. `db/rdr229/p33a-fk-twins.tsv` was missing from engine-service v0.1.200 to v0.1.202 for that reason:
+  `FkTwins` threw "is not on the classpath" from a static holder and RDR-229's boot-time completion work never started.
+  `ResourceConfigCensusTest` walks the tree and fails on a file no pattern matches.
