@@ -227,9 +227,12 @@ mcp__plugin_conexus_nexus__search(query="...", corpus="knowledge__{repo}-rdr-res
 Operators that previously closed RDRs under either superseded shape — the old 3-segment `rdr_postmortem` name, or the owner-id-shaped name nexus-vupim found landing post-mortems in the repo's own tumbler collection — can roll the legacy collection into the conformant subject target with `nx catalog rename-collection`. Find the subject's own rendered name first (mint it with one `store_put` if it does not exist yet), then run once per affected repo:
 
 ```bash
-NEW=$(nx collection list | awk '$4=="{repo}-rdr-research"{print $1; exit}')
+NEW=$(nx collection list | awk -v s="{repo}-rdr-research" '{split($1,p,"__")} p[1]=="knowledge" && p[2]==s && $0 !~ /superseded->/ {print $1; exit}')
+[ -n "$NEW" ] || { echo "no collection for subject {repo}-rdr-research: store one post-mortem first" >&2; exit 1; }
 nx catalog rename-collection "knowledge__rdr_postmortem__<repo>" "$NEW" --yes
 ```
+
+`nx collection list` has no `--json` form, so the filter reads the NAME column only (the first word of each line, whose second `__` segment is the subject) and never counts columns; the list's other columns have changed before and will again.
 
 If the target collection already has documents (rare, only when `nx index repo` ran before the rename), use `nx catalog migrate-fallback` per-document instead so existing rows survive.
 
