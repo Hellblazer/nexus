@@ -1564,7 +1564,7 @@ def search_cross_corpus(
     rows fetched and the lean floor can leave it fewer. Server rerank and
     *lexical* imply it without being asked: the reranker reads the rows
     fetched per batch, all of them in cloud mode and the first
-    ``max(3 * n_results, 30)`` in local mode (:func:`_rerank_candidate_cap`);
+    ``max(3 * n_results, 60)`` in local mode (:func:`_rerank_candidate_cap`);
     :func:`_per_collection_floor` has the cloud measurement, taken before the
     cap existed. A *deep_candidates* caller is never capped.
 

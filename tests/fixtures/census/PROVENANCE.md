@@ -1,7 +1,9 @@
 # `session-75695009-prefix.redacted.jsonl`
 
-Frozen fixture backing `test_golden_session_75695009_exact_counts` (nexus-h33x8.1
-VERIFICATION 1 and 4).
+Frozen fixture that backed `test_golden_session_75695009_exact_counts` (nexus-h33x8.1
+VERIFICATION 1 and 4). That test and `tests/test_census.py` were deleted in
+`1573e468ac` (nexus-0r1uz), so nothing reads this file now; it is kept as the
+record of how the fixture was made.
 
 ## Why it is frozen
 
@@ -44,7 +46,7 @@ paths or URLs.
 
 **What this fixture therefore does NOT prove:** that the parser handles verbatim
 tool-call `input` payloads or free-text block bodies. Those paths are covered by
-the synthetic fixtures in `tests/test_census.py`.
+the synthetic fixtures `tests/test_census.py` held before it was deleted.
 
 ## Regenerating
 
