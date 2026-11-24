@@ -255,3 +255,32 @@ def test_a_lock_that_stays_busy_gives_up_and_leaks_no_descriptor(gen: Path, monk
     mod._take()
     assert mod._FD == -1
     assert len(os.listdir("/dev/fd")) == before, "the lease file's descriptor leaked"
+
+
+def test_a_windows_open_refused_by_a_probe_is_retried_and_a_posix_one_is_not(
+    gen: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On Windows gc's probe holds the file at share mode 0 for a moment and an
+    open that meets it fails with PermissionError; the hook retries as it does for
+    the POSIX lock. On POSIX an EACCES is a real refusal and is not retried."""
+    mod = _load_hook(gen, monkeypatch)
+    real_open = os.open
+    calls: list[str] = []
+
+    def refuses_twice(path, flags, *a, **k):
+        calls.append(path)
+        if len(calls) <= 2:
+            raise PermissionError(13, "sharing violation")
+        return real_open(path, flags, *a, **k)
+
+    setattr_in(monkeypatch, mod, "os.open", refuses_twice)
+    setattr_in(monkeypatch, mod, "sys.platform", "win32")
+    fd = mod._open(str(lease_core.lease_path(gen)))
+    os.close(fd)
+    assert len(calls) == 3, calls
+
+    calls.clear()
+    setattr_in(monkeypatch, mod, "sys.platform", "linux")
+    with pytest.raises(PermissionError):
+        mod._open(str(lease_core.lease_path(gen)))
+    assert len(calls) == 1, calls
