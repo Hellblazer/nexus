@@ -1129,7 +1129,9 @@ The key moves table by table in strangler order:
   collection's registry row FOR KEY SHARE inside the write's own
   transaction, by the named id when the request names one, and so does every
   other writer of a collection-scoped table for each collection it writes
-  under (P3.5a, below). The retiring verbs lock the row harder: supersede and
+  under (P3.5a, below), except the writers of the history tables, which are
+  stamped unlocked and exempt by ruling (`StrictWriterCensus.java:30-31`).
+  The retiring verbs lock the row harder: supersede and
   rename FOR UPDATE, by the id when the request names one, and a delete by id
   FOR UPDATE with its quarantine siblings' rows FOR KEY SHARE, where a delete
   by label key-shares them until its own row delete
@@ -1371,7 +1373,7 @@ while the engine serves:
   and the plain `(tenant_id, <id column>)` supporting indexes. The code says
   these support P3.3a's id-twin foreign keys except
   `idx_catalog_chunks_collection_id`, the id twin of an index the R2 anti-join
-  reads (`IdUniqueIndexPass.java:50-52`, `:155`; `Main.java:968`; T2
+  reads (`IdUniqueIndexPass.java:50-52`, `:155`; `Main.java:973`; T2
   `229-research-266`, `229-research-289`). They are not in the boot walk.
   The P3.4 changelog adds only the latch table, `vectors-080-1` (T2
   `229-research-265`). `IdUniqueIndexPass.java:51-52` gives the reason: "an upgrade boot may write
@@ -1438,8 +1440,10 @@ while the engine serves:
   `nexus/sam-ruling-validate-bounds-lock-wait-only-2026-11-23`, and linda's
   rulings on bead nexus-p2m1x.21; T2 `229-research-335`).* The chunks swap's
   `on_complete` is catalog-only. For each leaf of `nexus.chunks` with no
-  validated key that PostgreSQL would adopt, it adds `<leaf>_cid_fk` `NOT
-  VALID`, and it registers one validation move per leaf,
+  matching key that PostgreSQL would adopt, it adds `<leaf>_cid_fk` `NOT
+  VALID` (a leaf whose matching key is `NOT VALID` already gets its
+  validation move and no new key: `Rdr229ChunksFk.java:170`), and it
+  registers one validation move per leaf without a validated key,
   `rdr229-fkvalidate-chunks-leaf-<leaf>`, and then one adoption move,
   `rdr229-fkadopt-chunks`. `registered_at` orders them leaves first, so the
   worker, which takes the oldest first, validates the leaves before the
@@ -1455,8 +1459,8 @@ while the engine serves:
   every leaf key and the parent key. PostgreSQL adopts a leaf key only when
   the columns, their order, the referenced key, the delete and update
   actions, the match type and the deferrability all agree, and when they do
-  not it builds a second key on the parent, with a scan, and raises no error
-  (`Rdr229ChunksFk.java:34-36`, `:67-68`, `:83-109`). A re-run of the swap
+  not it builds a second key on that leaf, with a scan, and raises no error
+  (`Rdr229ChunksFk.java:28-29`, `:34-36`, `:67-68`, `:83-109`). A re-run of the swap
   after the composite exists adds nothing (`:218-222`).
   A leaf validation move's `on_complete` validates each foreign key of the
   leaf to the registry that is not validated yet, under SHARE UPDATE
@@ -1473,7 +1477,8 @@ while the engine serves:
   leaf has a validated key that matches the composite exactly, and a key
   already attached to the parent counts as a match (`:83-109`). While a leaf
   is not ready it takes no lock on chunks and ends no builder. It adds the
-  leaf's key, registers or re-opens the leaf's move and puts itself back
+  leaf's key when the leaf has no matching key, registers or re-opens the
+  leaf's move and puts itself back
   (`completed_at` NULL, `registered_at` now), which the finisher reads as no
   completion, with no event and no retry reset; when everything it needs is
   already queued it raises 55P03 and backs off like any move, 30 s doubling
@@ -1491,7 +1496,11 @@ while the engine serves:
   `:283-304`, `:312`). PostgreSQL adopts the leaf keys with no scan: 2 ms and
   no tuple read on a table with a 2M-row leaf, measured on PG 17.11 (T3
   `pg17-partitioned-fk-adoption-measured-2026-11-23`, cited at `:14-16`; not
-  re-run for this entry).
+  re-run for this entry). The needs-an-operator latch counts any 55P03 or
+  57014 at `on_complete` (`MoveRetryPolicy.java:85-92`;
+  `DataMoveFailureHandler.java:117`), so the adoption move's own waits count
+  toward it as well as its bound misses: the queued leaf move (`:277-281`),
+  the paused leaf (`:270-274`) and its 200 ms lock wait (`:283-289`, `:312`).
   When the lock on chunks times out, the finisher looks at who held it. If
   every session holding a lock that conflicts with SHARE ROW EXCLUSIVE on
   chunks or a leaf is a per-collection index builder of this engine (the
@@ -1635,7 +1644,7 @@ while the engine serves:
     for an open or failed move and finishes it when the move leaves both
     (`MoveBootWork.java:277-299`), so a missing entry does not tell a
     completed move from an unregistered or superseded one. P3.1 adds the
-    read: after `SchemaMigrator.migrate` (`Main.java:285`), on its own admin
+    read: after `SchemaMigrator.migrate` (`Main.java:290`), on its own admin
     session (`CompletionBootWork`), the engine reads the rows of its read
     set, the catalog and the CHECK constraints and keeps the latest answer
     for the process. The session is opened `default_transaction_read_only =
@@ -1655,7 +1664,7 @@ while the engine serves:
     (`to_regclass` of its `driving_schema` and `driving_table` is NULL)
     counts as complete. That is how `aspect_extraction_queue` ends: once
     emptied, "the next boot's guard drops the emptied table"
-    (`Main.java:706-707`), and a move on a missing table fails with 42P01
+    (`Main.java:711-712`), and a move on a missing table fails with 42P01
     as "permanent" (`MovePreflight.java:67-71`,
     `DataMoveFailureClassifier.java:153-154`); nx doctor still shows its
     `failed:` row. Inferred, not read: the check decides it from those two
@@ -1668,7 +1677,7 @@ while the engine serves:
     other label with no row stays incomplete. A stamp label is complete only
     while its table's CHECKs are present and validated. A P3.3c validation
     label is complete only while its child's id key is present and
-    validated (`CompletionCheck.java:61-64`; linda, nexus-p2m1x.21 comment
+    validated (`CompletionCheck.java:62-65`; linda, nexus-p2m1x.21 comment
     2026-11-22 10:44; T2 `229-research-104`). The chunks swap label is
     complete only while the composite is on the parent and validated, though
     the swap itself completes first: the per-leaf validation moves and the
@@ -1772,7 +1781,7 @@ while the engine serves:
        `NameKeyDropPass` does P3.7's, once P4.1's release
        is installed.
     Until gate 3, the Java readers that switch at the latch take the name key
-    from the one `Gate3` the engine builds (`Main.java:622-624`; the registry
+    from the one `Gate3` the engine builds (`Main.java:627-629`; the registry
     holds no gate, `CollectionRegistry.java:104`; T2 `229-research-327`),
     so the jOOQ readers read the name columns, except the ghost sweep's stats read,
     which is by the id before the latch too (P3.5b; T2 `229-research-318`), and
@@ -1856,11 +1865,14 @@ while the engine serves:
 
     The check is not read only at boot. The move worker knows in process
     when a move completes: the completion transaction sets `completed_at`
-    and returns `Result.completed()` (`VerifyingFinisher.java:244-287`),
-    and the worker acts on it (`case COMPLETED -> ...`,
-    `DataMoveWorker.java:562`). So the engine re-reads the check when the
+    and returns `Result.completed()` (`VerifyingFinisher.java:256-287`,
+    `:354`), except that a move whose on_complete put it back (the
+    adoption move, while a leaf is not ready) returns `Result.reopened()`,
+    a non-completion with no event (`:348-352`), and the worker acts on
+    either (`case COMPLETED -> ...`, `case REOPENED -> ...`,
+    `DataMoveWorker.java:586`, `:603`). So the engine re-reads the check when the
     worker records a `completed_at`, and when a reconciler pass ends
-    (`Main.java:723`; T2 `229-research-274`), and a 60 s safety
+    (`Main.java:728-735`; T2 `229-research-274`), and a 60 s safety
     poll reads again when no event came in that time, in case one was
     missed. The count of rows that keep a CHECK `NOT VALID` is a bounded
     scan, so it is cached for 10 minutes per table. The gates the
@@ -1923,7 +1935,12 @@ while the engine serves:
     move and the name-key drop move are their 700 ms lock bound and 1400 ms
     statement bound (the adoption's 57014, its parent ADD outgrowing that
     bound, is one of them: `VerifyingFinisher.java:329-335`,
-    `DataMoveFailureHandler.java:117`). It is logged once per process as `data_move_needs_operator`,
+    `DataMoveFailureHandler.java:117`). The latch counts any 55P03 or 57014
+    at `on_complete`, not only a miss of those two bounds
+    (`MoveRetryPolicy.java:85-92`), so the adoption move's own waits count
+    too: a leaf move still queued, a paused leaf, and its 200 ms lock wait
+    on chunks (`Rdr229ChunksFk.java:270-289`, `:312`). It is logged once per
+    process as `data_move_needs_operator`,
     listed in `/v1/status` `data_moves_need_operator_moves`, and shown red
     by nx doctor, and it keeps retrying (`MoveRetryPolicy.java:15`, `:31-38`,
     `:100-101`; `MoveEvents.java:83`; `StatusHandler.java:834-851`;
@@ -1934,8 +1951,11 @@ Whether any step needs a maintenance window is unverified (Critical
 Assumption 5). Inferred, not read: the swap's DDL holds ACCESS EXCLUSIVE on
 the table it alters. The composite foreign key no longer scans `nexus.chunks`
 under that lock: the swap adds each leaf's key `NOT VALID`, the leaves
-validate under SHARE UPDATE EXCLUSIVE with no statement bound, and the one
-step that blocks writers is the adoption move's parent ADD, which holds
+validate under SHARE UPDATE EXCLUSIVE with no statement bound. Each leaf's
+`ADD ... NOT VALID` takes SHARE ROW EXCLUSIVE on that leaf and the registry
+for an instant (`Rdr229ChunksFk.java:21`, `:173`), so it does hold writers, but
+only briefly. The one step of the composite that holds writers for more than
+an instant is the adoption move's parent ADD, which holds
 SHARE ROW EXCLUSIVE on chunks and every leaf and ACCESS EXCLUSIVE on the
 registry until it commits (item 6, P3.3c). `lock_timeout` bounds the wait for a
 lock, not how long it is held. P3.2 times the swap, the foreign-key
@@ -3093,7 +3113,8 @@ its acceptance is that test green plus the census pin it lowers.
     manifest's `DEFERRABLE INITIALLY DEFERRED`), registers the three moves
     that validate them (the chunks swap only; the centroids swap adds no child key, T2 `229-research-115`), and reaches the RDR-225
     composite on the id leaf by leaf: a `NOT VALID` key on each leaf of
-    `nexus.chunks`, a validation move for each, and an adoption move that
+    `nexus.chunks` that has no matching key, a validation move for each leaf
+    without a validated one, and an adoption move that
     adds the parent key once every leaf's key is validated (item 6). On the chunks swap, the
     `on_complete` also waits for the child index that the boot changeset
     `vectors-075-1` builds. It drops nothing; the name primary key and the
@@ -3103,6 +3124,22 @@ its acceptance is that test green plus the census pin it lowers.
     the swap, a chunk and a centroid upsert on the name target still succeed,
     and a name-path rename leaves every child row with the new id; EXPLAIN
     of a chunk DELETE after the swap uses `idx_chunk_orphaned_at_tenant_chash`.
+    Added coverage beyond the criteria above: `Rdr229ChunksFkIntegrationTest`
+    pins the per-leaf route end to end (the parent step adopts the validated
+    leaf keys with zero scan deltas, a leaf added late or a validated key that
+    differs makes the step defer, a failed or paused leaf move is named, a
+    gone leaf fails loud, and writers run through the validations with no
+    deadlock);
+    `Rdr229ChunksFkHardeningIntegrationTest` pins the edges (the reaper and
+    the cancel touch only this database's and this role's backends, a stop or
+    pause cancels a running validation, a crash between a validation and its
+    claim resumes, a pending leaf takes no lock on chunks, the adoption's 200
+    ms lock wait and its bound-miss record, and a swap re-run is a no-op);
+    `CompletionWatchCloseBoundIntegrationTest` pins what
+    `CompletionWatch.close()` waits for when the watch's read or cancel
+    session stalls at connect or at a statement; and
+    `DataMoveOrphansHungServerTest` pins that the boot reaper and the cancel
+    give up on a hung server within their bound and never throw.
 - P3.4 After P3.3: build every per-collection index on `collection_id`
   (predicate and name hash) beside its name index, through the PCI
   reconciler, which reports in `boot_work` and rebuilds a killed build from
@@ -3111,7 +3148,7 @@ its acceptance is that test green plus the census pin it lowers.
   its rows has a null id (stamp-before-build, Scope boundary with RDR-247),
   and no build starts until gate 2 of the completion check (both swaps,
   every validation move and the quarantine origin-id backfill complete), so a chunk-family `on_complete` cannot
-  end it (item 6; `Main.java:731-735`; T2 `229-research-276`). The step also
+  end it (item 6; `Main.java:736-741`; T2 `229-research-276`). The step also
   builds the eight id-keyed arbiters and their supporting indexes at run
   time, in `IdUniqueIndexPass`, after the engine serves (item 6; T2
   `229-research-266`). `PciCatalog` reads the id back from the predicate, and
@@ -3119,7 +3156,7 @@ its acceptance is that test green plus the census pin it lowers.
   that P3.4 is complete on the install.
   The name indexes retire (`REPLACED_BY_ID`) only once gate 3 has latched,
   `IdReaders.PRESENT` is true, and the engine holds its singleton lock
-  (`Main.java:265`, `:738`; `PciReconciler.java:663`, `:679`). P3.5c sets it
+  (`Main.java:265`, `:743`; `PciReconciler.java:663`, `:679`). P3.5c sets it
   `true` (`IdReaders.java:23`), and `Rdr229P35cIdReadersPinTest` holds it
   to the reader dispositions (T2 `229-research-270`, `229-research-327`).
   The recall canary follows the retire's value (`PciCanaryLatch`, bound to
@@ -3156,7 +3193,7 @@ its acceptance is that test green plus the census pin it lowers.
   (`lock_timeout` and `statement_timeout`). A failed attempt is retried with
   backoff, 500 ms doubling to 30 s, and after 5 minutes in all without an
   answer the engine exits with status 1 rather than serve on a guess
-  (`Gate3Latch.java:28-32, 69-70, 78-94`, `Main.java:608-617`; T2
+  (`Gate3Latch.java:28-32, 69-70, 78-94`, `Main.java:613-622`; T2
   `229-research-257`, `229-research-280`). The latch stays held for P3.5's
   readers and for P3.7's one-row rename and its refusal (P3.7). P3.5's readers,
   that rename and the name-index retire go by the latched value, never by the
@@ -3169,7 +3206,7 @@ its acceptance is that test green plus the census pin it lowers.
   `229-research-292`). An install that latched while `NX_SEARCH_PCI=0` has
   `pci_off` set; when PCI is turned on, the reconciler builds the id indexes
   first, as if gate 2 held, and P3.5's readers select by the id either way
-  (`PciIdBuilds.java:32-34`, `Main.java:741`; T2 `229-research-272`,
+  (`PciIdBuilds.java:32-34`, `Main.java:746`; T2 `229-research-272`,
   `229-research-290`).
   Test: a collection with a row whose `collection_id` is null gets no index on
   the id; readers and the rename stay on the name path, before the latch, while any collection
@@ -3191,7 +3228,7 @@ its acceptance is that test green plus the census pin it lowers.
   `vectors-078-8`: the id twin `idx_canary_query_ring_id_digest_uq` waits
   for that changeset (`ArbiterTwins.java:45-46`, `IdUniqueIndexPass.java:448-454`),
   gate 3 waits for the twin (`IdUniqueIndexPass.allValid`, wired as a gate 3
-  condition at `Main.java:897`; `CompletionCheck.java:660-686`), and the
+  condition at `Main.java:902`; `CompletionCheck.java:660-686`), and the
   changeset's one CONTINUE `sqlCheck`, on every stamp move complete with its
   CHECKs present and validated (item 6), lets Liquibase apply it only at a
   boot (`vectors-078:573-601`, the changeset and its one `sqlCheck`). Inferred from code, not tested (T2
@@ -3283,7 +3320,9 @@ its acceptance is that test green plus the census pin it lowers.
     (`CollectionRehomeScope.java:128-144`; `CatalogIdStamps.java:120-149`;
     T2 `229-research-321`).
     Row 14 (linda's ruling, Sam's (b); T2 `229-research-335`) puts every
-    other writer of a collection-scoped table under the one rule the verbs
+    other writer of a collection-scoped table, except the history tables'
+    writers (stamped unlocked, exempt by ruling; the 19 `history` sites
+    below; `StrictWriterCensus.java:30-31`), under the one rule the verbs
     and the gc routes above already meet: it reads the registry row of each
     collection it writes under FOR KEY SHARE, in its own write transaction,
     before its first write, in `collection_id` order after the sweep gate,
@@ -3316,16 +3355,20 @@ its acceptance is that test green plus the census pin it lowers.
     retired is locked and returned, one that is gone is skipped, and the
     write goes ahead. A supersede re-homes no child row, so a child row
     stamped to a retired or gone collection persists, and no released route
-    answers a new 409 or 404 for it; the collection a request names keeps its
-    refusal (`RegistryRowLocks.java:16-20`, `:35-67`;
+    answers a new 409 or 404 for a child row; the collection a request names
+    keeps its refusal (`RegistryRowLocks.java:16-20`, `:35-67`;
     `AspectDocCollectionLocks.java:24-26`; `TaxonomyRegistryReads.java:38-42`).
+    The one exception is the re-embed re-entry, which reads the ends of its
+    job tolerantly and then refuses with 409 when one is gone or the target is
+    retired (below; `ReembedJobEnds.java:42-52`).
     The rule is the code's, not a census result. `StrictWriterCensus` judges
     writes to 14 tables, is off unless `-Dnexus.writer.census` is set, passes
     a statement on any one matching bind, and does not judge a write keyed by
     a document, a topic or an alias id (`StrictWriterCensus.java:35-47`,
     `:138-145`). `p31-writer-census.tsv` marks how the scan proves the
     registry read of each of its 273 write sites: 48 `require`, 33 `verb`, 49
-    `sql`, 34 `move`, 19 `history` and 90 `unproven`, the sites whose caller
+    `sql`, 34 `move`, 19 `history` (stamped unlocked, exempt by ruling, so
+    not proved) and 90 `unproven`, the sites whose caller
     may read the row first, which `WriterCensusUnprovenPinTest` pins (the
     count is the `awk` in T2 `229-research-335`).
     Row 14 changes five answers. First, a collection delete, by label or
@@ -3338,7 +3381,8 @@ its acceptance is that test green plus the census pin it lowers.
     (`CollectionDeleteRoute.java:62-73`; `CollectionDeleteFence.java:44-52`,
     `:128-157`; `ReembedJobHold.java:41-47`; `ReembedJobRepository.java:55`;
     `HttpUtil.java:995-999`; `CatalogRepository.java:10464-10466`;
-    `ReembedRunner.java:647`). A re-embed start that re-enters a kept source
+    `ReembedRunner.java:647`). Second, a re-embed start that re-enters a kept
+    source
     reads both ends FOR KEY SHARE by the ids the job stored, after the start
     guard, and answers 409 `{error, job_id}`, writing nothing, when an end's
     row is gone or the target is retired (`ReembedJobEnds.java:11-56`;
@@ -3599,7 +3643,7 @@ its acceptance is that test green plus the census pin it lowers.
   read and write with a typed error that names the floor. It does not
   exit at boot, as the engine's other refusals do (`ChunksIsolationCheck`
   "refuses to serve"), because the move worker and the reconciler start
-  only after `service.start()` (`Main.java:652`, `:680`, `:712-715`), so an
+  only after `service.start()` (`Main.java:657`, `:685`, `:717-720`), so an
   exiting engine would never run the moves its floor waits for (inferred,
   not read; T2 `229-research-59`). The check is re-read when the move
   worker records a `completed_at` and when a reconciler pass ends, so the
@@ -3963,7 +4007,8 @@ The round 1 fix check found these, now resolved in the text:
 - "No maintenance window" asserted while Critical Assumption 5 was
   unverified: item 6 and Deployment model now leave it to P3.2.
 - A `NOT VALID` composite foreign key on the partitioned `nexus.chunks`,
-  which PostgreSQL refuses: item 6 validates it directly.
+  which PostgreSQL refuses: item 6 validates it directly (since replaced by
+  the per-leaf route, P3.3c; 2026-11-24 entry).
 
 Gate round 2 (2026-11-19) found these, now addressed in the text:
 
@@ -4402,4 +4447,4 @@ large, and moved under a ratchet.
 - 2026-11-24: row 13 and marlowe's gate3_why fix folded from the stacked code (grant 3, nexus-p2m1x.22; T2 `229-research-332`): `vectors-082-1` registers the quarantine origin-id backfill move, whose label joins gate 2, the gate 3 clause staying as the live check; gate 3's reason names no count, the capped count going to the engine log only.
 - 2026-11-24: the recall canary and the PCI id-index counts folded from the stacked code (grant 3, nexus-p2m1x.22; T2 `229-research-333`): the canary, ring admission, vacuum trigger and REINDEX re-measure follow the retire's value onto the id indexes; the gap with no singleton lock; `valid_id` and `invalid_id` in the sweep, `/v1/status` and nx doctor; one sentence on RDR-246's needs-operator page for RDR-229's moves; Main, PciReconciler and CompletionCheck cites moved by the later commits. Held for linda: the name-key drop move's `on_complete` ending in-flight builds after the latch.
 - 2026-11-24: `vectors-084` and the move routes' refusal folded from the stacked code (grant 3, nexus-p2m1x.24 and .25; T2 `229-research-334`): the P3.5b list holds fifteen changesets, twelve of `vectors-078` and three of `vectors-084`, all on the one precondition; gate 3 also waits for `vectors-084-1` to `-3`, the by-id `taxonomy_ann_query_<dim>` overloads; the document and owner moves answer 409 and 404 by id from the latch.
-- 2026-11-24: row 14 and the per-leaf foreign key folded from the stacked code (grant 3, nexus-p2m1x.21 and .23; T2 `229-research-335`): the composite `chunks_collection_id_fk` is reached leaf by leaf, the swap adding each leaf's key `NOT VALID` and registering a validation move per leaf and the adoption move `rdr229-fkadopt-chunks`, which adds the parent key over validated leaf keys under its own 200 ms lock wait and the tight 1400 ms bound, ends only the index builders that block it, and puts itself back while a leaf is not ready; the chunks swap label stays incomplete until the composite is validated, with a count in its reason; validations that block no writer carry no statement bound (`vectors-081-1`), run before their claim, and are cancelled by a stop, a pause or a supersede; the maintenance-window inference, the needs-operator sentence, P3.2's list and the P3.3c sentences follow. Row 14: every other writer reads its registry rows FOR KEY SHARE in the same order (tolerantly where the id is only a record), the retiring verbs' locks stated as the code has them (a delete by id FOR UPDATE with its siblings key-shared), 409 `collection_busy` on a collection delete and 409 on a re-embed re-entry (both paired with client 8.5.6), the chash rename's 503 `rename_busy`, the pre-latch document and owner moves by label, and `persist_split`'s 400; the census's reach counted (48 of 273 write sites proved, 90 unproven).
+- 2026-11-24: row 14 and the per-leaf foreign key folded from the stacked code (grant 3, nexus-p2m1x.21 and .23; T2 `229-research-335`): the composite `chunks_collection_id_fk` is reached leaf by leaf, the swap adding each leaf's key `NOT VALID` and registering a validation move per leaf and the adoption move `rdr229-fkadopt-chunks`, which adds the parent key over validated leaf keys under its own 200 ms lock wait and the tight 1400 ms bound, ends only the index builders that block it, and puts itself back while a leaf is not ready; the chunks swap label stays incomplete until the composite is validated, with a count in its reason; validations that block no writer carry no statement bound (`vectors-081-1`), run before their claim, and are cancelled by a stop, a pause or a supersede; the maintenance-window inference, the needs-operator sentence, P3.2's list and the P3.3c sentences follow. Row 14: every other writer, except the history tables' (stamped unlocked, exempt by ruling), reads its registry rows FOR KEY SHARE in the same order (tolerantly where the id is only a record), the retiring verbs' locks stated as the code has them (a delete by id FOR UPDATE with its siblings key-shared), 409 `collection_busy` on a collection delete and 409 on a re-embed re-entry (both paired with client 8.5.6), the chash rename's 503 `rename_busy`, the pre-latch document and owner moves by label, and `persist_split`'s 400; the census's reach counted (273 write sites: 48 require, 33 verb, 49 sql, 34 move, 19 history exempt by ruling, 90 unproven).
