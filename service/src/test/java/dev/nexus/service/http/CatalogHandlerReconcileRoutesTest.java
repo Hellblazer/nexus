@@ -8,6 +8,7 @@ import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpContext;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpPrincipal;
+import dev.nexus.service.PgBackendActivity;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.TenantScope;
@@ -1004,7 +1005,7 @@ class CatalogHandlerReconcileRoutesTest {
         while (true) {
             if (PgContainerHelper.backendsBlockedOnLocks(ctx) > 0) return;
             assertThat(System.nanoTime())
-                .as(() -> "the commit never blocked on the held row: " + PgContainerHelper.backendActivity(ctx))
+                .as(() -> "the commit never blocked on the held row: " + PgBackendActivity.backendActivity(ctx))
                 .isLessThan(deadline);
             Thread.sleep(50);
         }

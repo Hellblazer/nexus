@@ -862,7 +862,7 @@ $$;
     <changeSet id="test-objects-add-fk-not-valid-columns" author="nexus-p2m1x.21">
         <comment>nexus_test.add_fk_not_valid_columns(text, text, text, text, text, text, boolean): plpgsql wrapper for ALTER TABLE .. ADD
         CONSTRAINT .. FOREIGN KEY (cols) REFERENCES .. (ref cols) ON DELETE action [DEFERRABLE] NOT VALID (nexus-p2m1x.21), for
-        PgContainerHelper#addFkNotValidColumns: the per-leaf key of RDR-229 P3.3c has three columns, tenant_id first and embedding_model last,
+        PgContainerFkHelper#addFkNotValidColumns: the per-leaf key of RDR-229 P3.3c has three columns, tenant_id first and embedding_model last,
         which neither add_fk_not_valid (two) nor add_fk_not_valid_composite3 (adds embedding_model by itself) can spell; jOOQ renders NOT
         ENFORCED, which PostgreSQL 17 refuses. The column lists are comma-separated identifiers in key order, each %I-quoted; the tables are
         text cast to regclass inside the body, so PostgreSQL resolves them; the delete action is checked against the five PostgreSQL actions before it reaches format().
