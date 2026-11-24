@@ -1758,14 +1758,17 @@ public final class TaxonomyRepository {
             // doomed topics' assignments carry the source collections of the documents projected onto them (other collections' chunks), and
             // those collections' registry rows are read FOR KEY SHARE too, before any delete
             // the doomed topics are judged twice: from an unlocked guess for the lock order, then from the row as locked (the delete acts on that one)
-            final Long purgedId = TaxonomyRegistryReads.registryFirstAround(ctx, tenant, collection,
+            final var purgedRow = TaxonomyRegistryReads.registryFirstAround(ctx, tenant, collection,
                 () -> TaxonomyRegistryReads.sourcesOf(ctx, tenant, TOPIC_ASSIGNMENTS.TOPIC_ID.in(
                     select(TOPICS.ID).from(TOPICS).where(TaxonomyRegistryReads.topicsNamedBy(ctx, tenant, collection)))),
                 locked -> TaxonomyRegistryReads.sourcesOf(ctx, tenant, TOPIC_ASSIGNMENTS.TOPIC_ID.in(
-                    select(TOPICS.ID).from(TOPICS).where(ownTopics(locked.orElse(null), collection)))))
-                .map(CollectionRow::collectionId).orElse(null);
-            final org.jooq.Condition topicsOf = purgedId == null ? TOPICS.COLLECTION_ID.isNull().and(TOPICS.COLLECTION.eq(collection))
-                : TOPICS.COLLECTION_ID.eq(purgedId).or(TOPICS.COLLECTION_ID.isNull().and(TOPICS.COLLECTION.eq(collection)));
+                    select(TOPICS.ID).from(TOPICS).where(ownTopics(locked.orElse(null), collection)))));
+            final Long purgedId = purgedRow.map(CollectionRow::collectionId).orElse(null);
+            // the label of the unstamped arms (rows the id stamp has not reached) is the locked row's CURRENT label: the request's, after a one-row
+            // rename, is the new holder's, whose unstamped rows would match (a label no row holds stays the request's)
+            final String label = purgedRow.map(CollectionRow::label).orElse(collection);
+            final org.jooq.Condition topicsOf = purgedId == null ? TOPICS.COLLECTION_ID.isNull().and(TOPICS.COLLECTION.eq(label))
+                : TOPICS.COLLECTION_ID.eq(purgedId).or(TOPICS.COLLECTION_ID.isNull().and(TOPICS.COLLECTION.eq(label)));
             // the doomed topics are those of the row as locked (the condition above), not topicsOf(tenant, collection): before gate 3 that
             // helper names the collection by the REQUEST's label, which after a one-row rename is the new holder's topics (ced0ada045)
             var doomedIds = ctx.select(TOPICS.ID)
@@ -1784,11 +1787,11 @@ public final class TaxonomyRepository {
                     .execute();
             }
             if (PURGE_SCOPE_FULL.equals(scope)) {
-                final org.jooq.Condition unstamped = TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID.isNull().and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(collection));
+                final org.jooq.Condition unstamped = TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID.isNull().and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(label));
                 assignments += ctx.deleteFrom(TOPIC_ASSIGNMENTS).where(purgedId == null ? unstamped : TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID.eq(purgedId).or(unstamped)).execute();
             }
             int topics = ctx.deleteFrom(TOPICS).where(topicsOf).execute();
-            final org.jooq.Condition metaUnstamped = TAXONOMY_META.COLLECTION_ID.isNull().and(TAXONOMY_META.COLLECTION.eq(collection));
+            final org.jooq.Condition metaUnstamped = TAXONOMY_META.COLLECTION_ID.isNull().and(TAXONOMY_META.COLLECTION.eq(label));
             int meta = ctx.deleteFrom(TAXONOMY_META).where(purgedId == null ? metaUnstamped : TAXONOMY_META.COLLECTION_ID.eq(purgedId).or(metaUnstamped)).execute();
             return Map.of("topics", topics, "assignments", assignments, "links", links, "meta", meta);
         });
