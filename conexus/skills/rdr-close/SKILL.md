@@ -49,7 +49,7 @@ Dispatch `/conexus:substantive-critique <rdr-id>` via the Agent tool and parse t
 2. **Code-block path**: if the agent emitted the Verdict block inside a code fence, look for a line matching `outcome:\s*(\S+)` within a `## Verdict` section. Normalize the captured value case-insensitively: `FAILED`/`FAIL`/`BLOCKED`/`NOT-JUSTIFIED` → `not-justified`; `PARTIAL`/`PARTIALLY` → `partial`; `PASS`/`PASSED`/`APPROVED`/`JUSTIFIED` → `justified`.
 3. **Fallback path**: if neither canonical nor code-block form is present, count `### Issue:` headers under `## Critical Issues` and `## Significant Issues`. Derive outcome mechanically: Critical > 0 → `not-justified`; Critical == 0 AND Significant > 0 → `partial`; all clear → `justified`. Surface the fallback path to the user explicitly: "The critic did not emit a canonical Verdict block. Falling back to section counting: <counts>."
 
-All three paths map to the same 3-valued enum (`justified` / `partial` / `not-justified`) which is the gate signal branched on below.
+All three paths give the same enum (`justified` / `partial` / `not-justified`), branched on below.
 
 **Relay framing** (load-bearing, do not vary): the dispatch relay MUST be fixed-shape and minimal. Pass only `{rdr_id}` and the standard input artifacts (T2 RDR record, catalog entry, RDR markdown file). NEVER pass session-generated summaries of what was built, what diverged, or what the user intends. Rationalization bias is the exact failure mode RDR-069 addresses — see RDR-069 §Risks "Dispatch isolation risk".
 
@@ -79,9 +79,9 @@ Branch on `Verdict.outcome`:
 
 **B. `partial`** → surface all Critical and Significant findings to the user verbatim. Block closing as Implemented unless the user states an explicit override reason. If there is none, prompt the user: "The critic found significant issues. Address them and re-run, or give an override reason to close anyway with an audit trail." Do not proceed until the user either resolves findings (recursive loop) or gives the override.
 
-**C. `not-justified`** → surface ALL Critical findings verbatim. Block closing as Implemented unless the user states an explicit override reason. Per RDR-069 §Proposed Solution (line 282) and §Technical Design (line 307), `close_reason: reverted` and `close_reason: partial` are legitimate non-override paths on `not-justified` — a user who genuinely wants to acknowledge failure with `reverted` should be able to do so without an override. User's options: (1) address findings and re-run with reason Implemented (recursive refinement loop), (2) re-run with reason Reverted or Partial (honest failure-acknowledgment, no override needed), or (3) give a substantive override reason to close as Implemented despite the Critical findings. A one-word reason (e.g., "wontfix") is insufficient — prompt the user to expand it before accepting. Only `close_reason: implemented` requires the override.
+**C. `not-justified`** → surface ALL Critical findings verbatim. Block closing as Implemented unless the user states an explicit override reason. `close_reason: reverted` and `close_reason: partial` are legitimate non-override paths on `not-justified` — a user who genuinely wants to acknowledge failure with `reverted` should be able to do so without an override. User's options: (1) address findings and re-run with reason Implemented (recursive refinement loop), (2) re-run with reason Reverted or Partial (honest failure-acknowledgment, no override needed), or (3) give a substantive override reason to close as Implemented despite the Critical findings. A one-word reason (e.g., "wontfix") is insufficient — prompt the user to expand it before accepting. Only `close_reason: implemented` requires the override.
 
-**D. Verdict extraction failure** → this case should be rare now that the verdict extractor above tries canonical bullet form, code-block key-value form, AND section-counting fallback. Only reach this branch if all three extraction paths fail (e.g. critic response is completely empty or wholly unparseable). Surface explicitly to the user: "Critic response could not be parsed at all. Proceed without critique? (y/N)". Do not silently block; do not silently proceed.
+**D. Verdict extraction failure** → reached only when all three extraction paths fail (e.g. the critic response is empty or wholly unparseable). Surface explicitly to the user: "Critic response could not be parsed at all. Proceed without critique? (y/N)". Do not silently block; do not silently proceed.
 
 **E. Override audit entry** (runs whenever the user overrides the critic to close as Implemented):
 
@@ -95,9 +95,9 @@ mcp__plugin_conexus_nexus__memory_put(
 )
 ```
 
-The audit entries are the measurement surface for CA-4: if `{repo}_rdr/*-close-override-*` exceeds 20% of closes in any 30-day window, Phase 2 dispatch degrades to advisory mode (see RDR-069 Day 2 Operations).
+If `{repo}_rdr/*-close-override-*` exceeds 20% of closes in any 30-day window, dispatch degrades to advisory mode (RDR-069 Day 2 Operations).
 
-**Scenario 4 — timeout or transport failure**: if the Agent tool dispatch fails, times out (>5 minutes without response), or returns an unparseable response (not just a missing Verdict block, but genuinely malformed output), surface the failure to the user explicitly and ask: "Critic dispatch failed. Proceed without critique? (y/N)". Do not silently block and do not silently proceed — the user must choose.
+**Scenario 4 — timeout or transport failure**: if the Agent tool dispatch fails, times out (>5 minutes without response), or returns an unparseable response (not just a missing Verdict block, but genuinely malformed output), ask: "Critic dispatch failed. Proceed without critique? (y/N)". Never block or proceed silently; the user chooses.
 
 ### Step 2: Create Post-Mortem
 
@@ -148,17 +148,17 @@ If T2 record has no `epic_bead` field (user skipped planning at accept time):
    ```bash
    nx rdr set-status NNN closed
    ```
-   Code-enforced flip: rewrites the RDR file `status -> closed`, adds `closed_date`, and updates the README index-row status cell in one tested action. A record still `draft` (work shipped without the accept gate) closes only with `--reason "<why it shipped without acceptance>"`, the table's guarded `close-unaccepted` edge; without it the command refuses `reason-not-stated`. Hand-editing frontmatter is the source of the RDR-165/166 ledger drift (T2 advanced, file left stale) — always use the command. (`--date YYYY-MM-DD` overrides the default of today.)
+   Code-enforced flip: rewrites the RDR file `status -> closed`, adds `closed_date`, and updates the README index-row status cell in one tested action. A record still `draft` (work shipped without the accept gate) closes only with `--reason "<why it shipped without acceptance>"`, the table's guarded `close-unaccepted` edge; without it the command refuses `reason-not-stated`. Hand-edited frontmatter caused the RDR-165/166 ledger drift. (`--date YYYY-MM-DD` overrides the default of today.)
 3. (The README index row is updated by the command in step 2 — no separate regen step.)
 3a. Run `nx memory gate-rollup --rdr NNN --all` with `--dry-run` first and tell Sam its count; the real run (`--counted N`) gives the records a 30-day TTL and waits for his word (RDR-209 Phase 3). Nothing blocks the close without it.
-3b. **Tick or annotate every remaining `- [ ]` checkbox in the RDR body** — check it off if done, or replace with `- [deferred: nexus-XXXXX]` / `- [waived: <reason>]`. A closed RDR with unchecked boxes reads as hidden scope loss to every future audit (58 of 144 closed RDRs carried them as of 2026-07-13).
+3b. **Tick or annotate every remaining `- [ ]` checkbox in the RDR body** — check it off if done, or replace with `- [deferred: nexus-XXXXX]` / `- [waived: <reason>]`. A closed RDR with unchecked boxes reads as hidden scope loss to every future audit.
 4. **Scoped conditional reindex** — if the RDR body changed during close (e.g. divergence notes added, post-mortem link inserted, or any text outside the frontmatter block modified), run `nx index rdr` **scoped to the single RDR file**, NOT the whole corpus:
 
    ```bash
    nx index rdr docs/rdr/rdr-NNN-<slug>.md
    ```
 
-   A frontmatter-only edit (status/closed_date/close_reason flipping) does NOT need a reindex at all — the chunk text is unchanged, so embeddings would not shift. Check with:
+   A frontmatter-only edit (status/closed_date/close_reason) needs no reindex: the chunk text is unchanged. Check with:
 
    ```bash
    # If the diff is wholly inside the frontmatter block, skip the reindex.
@@ -167,7 +167,7 @@ If T2 record has no `epic_bead` field (user skipped planning at accept time):
    # Prints lines → body changed → run the single-file `nx index rdr <path>`.
    ```
 
-   **Do NOT run the directory form `nx index rdr` (no argument)** at close time — that walks the whole corpus and hash-dedups every file, which is wasteful for a one-file edit. The file form takes only the target RDR.
+   **Do NOT run the directory form `nx index rdr` (no argument)** at close time: it walks the whole corpus. The file form takes only the target RDR.
 
 ### Step 5: Catalog Links (if catalog initialized)
 
@@ -193,14 +193,13 @@ The main RDR is already in its `rdr__` collection from `nx index repo`, drafts i
 
 Per the collection rules (https://github.com/Hellblazer/nexus/blob/main/docs/collections.md), Rule 1, a knowledge collection is a subject area, never an owner id. The post-mortem's target is the bare subject `{repo}-rdr-research` (per Rule 3, never the four-segment form — `store_put` renders and, on first write, mints it), with `category="rdr_postmortem"` stamped on the chunk metadata so it is queryable as a distinct slice without needing its own collection.
 
-**Correction (nexus-vupim).** This step once resolved the target with `nx catalog collection-name --content-type knowledge`, which renders the OWNER-ID-shaped name for the repo's own tumbler (`knowledge__1-7__...`), the shape Rule 1 forbids; post-mortems belong to the knowledge curator, not the repo.
-
 Check for an existing subject before writing (Rule 2, reuse before create). A new subject's collection is labelled `c<id>` by the engine, so it is found by its CONTENT_TYPE and OWNER columns (OWNER is the subject), not by its name; a live collection named `knowledge__<subject>__...` counts too, and a retired one does not:
 ```bash
 SUBJECT="$(printf '%s' "{repo}" | tr _ -)-rdr-research"   # the engine turns _ into - in a subject
-nx collection list | awk -v s="$SUBJECT" '$1=="NAME"{for(i=1;i<=NF;i++){if($i=="CONTENT_TYPE")t=i;if($i=="OWNER")o=i};next} /superseded->/{next} {split($1,p,"__")} (t&&o&&$t=="knowledge"&&$o==s)||(p[1]=="knowledge"&&p[2]==s){print $1}'
+subject_collections() { nx collection list | awk -v s="$SUBJECT" '$1=="NAME"{for(i=1;i<=NF;i++){if($i=="CONTENT_TYPE")t=i;if($i=="OWNER")o=i};next} /superseded->/{next} {split($1,p,"__")} (t&&o&&$t=="knowledge"&&$o==s)||(p[1]=="knowledge"&&p[2]==s){print $1}'; }
+subject_collections
 ```
-It prints the collection's name, or nothing when the subject has none. If it prints one, reuse it — pass its bare subject name to `store_put` below regardless; the catalog resolves the rest. If it prints nothing and the legacy `knowledge__rdr_postmortem__<repo>` collection exists, run the one-time migration in [migration.md](migration.md) BEFORE the first `store_put`.
+It prints the collection's name, or nothing when the subject has none. If it prints one, reuse it — pass its bare subject name to `store_put` below regardless; the catalog resolves the rest. If it prints nothing and the legacy `knowledge__rdr_postmortem__<repo>` collection exists, run the one-time migration below BEFORE the first `store_put`.
 
 Seed link-context so the post-mortem auto-links to the RDR:
 ```
@@ -225,7 +224,31 @@ mcp__plugin_conexus_nexus__search(query="...", corpus="knowledge__{repo}-rdr-res
 
 #### One-time migration (the legacy `knowledge__rdr_postmortem__<repo>` collection)
 
-Rename it onto the subject BEFORE the first `store_put` to `{repo}-rdr-research`; the steps, the guard and the skip cases are in [migration.md](migration.md), loaded when the legacy collection exists.
+Rename that collection onto the subject BEFORE the first `store_put` to `{repo}-rdr-research`: `nx catalog rename-collection` refuses a target that exists, and a first `store_put` on a new subject mints a `c<id>` label, leaving no conformant name to rename onto. The target is the subject's four-segment name with the legacy collection's own model (a rename never re-embeds):
+
+```bash
+CUR="${CUR:?set CUR to the model this install writes knowledge in (read it as described below)}"
+OLD="knowledge__rdr_postmortem__<repo>"
+# the subject must have no live collection yet, whatever its label: `subject_collections` from the reuse check above
+[ -z "$(subject_collections)" ] \
+  || { echo "$SUBJECT already has a collection: skip" >&2; exit 1; }
+# the legacy collection's model, by the MODEL header; a retired (superseded) row is not the collection
+MODEL=$(nx collection list | awk -v o="$OLD" '$1=="NAME"{for(i=1;i<=NF;i++) if($i=="MODEL") c=i; next} /superseded->/{next} $1==o && c {print $c; exit}')
+[ -n "$MODEL" ] || { echo "$OLD is not listed: nothing to migrate" >&2; exit 1; }
+[ "$MODEL" != "-" ] || { echo "no registered model for $OLD: skip" >&2; exit 1; }
+[ "$MODEL" = "$CUR" ] || { echo "MODEL is $MODEL, this install writes $CUR: skip" >&2; exit 1; }
+nx catalog rename-collection "$OLD" "knowledge__${SUBJECT}__${MODEL}__v1" --yes
+```
+
+`nx collection list` has no `--json` form, so the filters read NAME (first word) and the CONTENT_TYPE, OWNER and MODEL headers, never a column position or a name split; the legacy name keeps `<repo>` as written. Afterwards the bare subject resolves to this collection for `store_put` and `search(corpus="knowledge__{repo}-rdr-research")`, but only when `MODEL` is the model this install writes knowledge in today, so the block stops unless `MODEL` equals `CUR`; otherwise a later `store_put` mints a second collection.
+
+Set `CUR` to what this install writes knowledge in today:
+- cloud mode: `voyage-context-3`;
+- local mode: read `nx config get local.embed_model`. A value starting `voyage` means `voyage-context-3`; any other value means `bge-base-en-v15-768`. When it is unset, a Voyage key saved in `config.yml` (shown by `nx config list`) means `voyage-context-3`, and no saved key means `bge-base-en-v15-768`. A key that is only in the environment does not choose the model.
+
+**Skip** (legacy post-mortems stay findable by their old collection and tags: `search(corpus="knowledge__rdr_postmortem__<repo>")`) when the subject already has a collection, when `MODEL` is not your current knowledge model, or when the post-mortems sit in an owner-id-shaped `knowledge__<owner-id>__...` collection that holds other knowledge too. Not `nx catalog migrate-fallback`: it re-points documents onto owner-id-shaped targets and does not move chunks.
+
+Renamed chunks lack `category="rdr_postmortem"`; they stay findable by their `tags="rdr,post-mortem,..."`. To add the category, re-run `store_put` with it against the subject, overwriting by title.
 
 ## Flow: Reverted or Abandoned
 
@@ -268,19 +291,7 @@ The close operation performs multiple state mutations. If any step fails:
 
 **Only one agent is dispatched by this skill:** `substantive-critic` (Step 1.75, implemented close only). All other operations use MCP tools directly (RDR-080).
 
-Post-mortem archival calls `mcp__plugin_conexus_nexus__store_put` directly (RDR-080, no agent spawn needed). The target collection is the bare subject `{repo}-rdr-research` (Step 6 — never the owner-id-shaped `nx catalog collection-name --content-type knowledge` resolution, see the nexus-vupim correction there), stamped `category="rdr_postmortem"` so the post-mortem is queryable as a slice of the knowledge collection:
-
-```
-mcp__plugin_conexus_nexus__store_put(
-    content=(read $RDR_DIR/post-mortem/NNN-kebab-title.md),
-    collection="{repo}-rdr-research",
-    title="RDR-NNN: {title} (post-mortem)",
-    tags="rdr,post-mortem,{comma-separated drift-categories}",
-    category="rdr_postmortem"
-)
-```
-
-Seed link-context before the store_put call (Step 6) to ensure auto-linker connects the post-mortem to the RDR.
+Post-mortem archival calls `mcp__plugin_conexus_nexus__store_put` directly (RDR-080, no agent spawn), as Step 6 shows: the bare subject `{repo}-rdr-research` (never the owner-id-shaped `nx catalog collection-name --content-type knowledge` resolution), `category="rdr_postmortem"`, with link-context seeded first.
 
 ## Success Criteria
 
