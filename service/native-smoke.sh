@@ -253,6 +253,33 @@ assert() { # name expected_code curl-args...
   if [ "$code" = "$exp" ]; then echo "  ok   $name -> $code"; else echo "  FAIL $name -> $code (want $exp): $(head -c160 "$SMOKE_TMP/ns.out")"; fail=1; fi
 }
 A=(-H "Authorization: Bearer smoketoken"); J=(-H "Content-Type: application/json")
+
+# nexus-p2m1x: RDR-229's boot-time completion work must START in the native image. JVM tests load db/rdr229/* from the
+# classpath, so a resource missing from resource-config.json never failed them; in the binary FkTwins threw "is not on the
+# classpath" from a static holder (ExceptionInInitializerError out of CompletionBootWork.atBoot, logged as
+# event=rdr229_completion_not_started) and the work never ran (v0.1.200 to v0.1.202). Its first sample is taken at start(), so
+# GET /v1/status carries "rdr229_completion":{"gate1":... once it runs; the field is absent until then. Bounded poll, no skip.
+echo "RDR-229 completion work (nexus-p2m1x):"
+cw_deadline=$(( $(date +%s) + 60 ))
+cw_seen=0
+while [ "$(date +%s)" -lt "$cw_deadline" ]; do
+  if curl -fsS "${A[@]}" "$U/v1/status" 2>/dev/null | grep -qF '"rdr229_completion":{"gate1":'; then cw_seen=1; break; fi
+  sleep 1
+done
+cw_bad=$(grep -c -E -- 'ExceptionInInitializerError|is not on the classpath|event=rdr229_completion_not_started|event=leaf_index_pass_not_started' "$SMOKE_TMP/svc.log" || true)
+if [ "$cw_bad" != "0" ]; then
+  echo "  FAIL svc.log has $cw_bad RDR-229 completion start failure line(s):"
+  grep -m 6 -E -- 'ExceptionInInitializerError|is not on the classpath|event=rdr229_completion_not_started|event=leaf_index_pass_not_started' "$SMOKE_TMP/svc.log" || true; fail=1
+else
+  echo "  ok   svc.log has no ExceptionInInitializerError, 'is not on the classpath' or rdr229_completion_not_started line"
+fi
+if [ "$cw_seen" = "1" ]; then
+  echo "  ok   /v1/status reports rdr229_completion (the completion check ran its first sample)"
+else
+  echo "  FAIL /v1/status has no rdr229_completion field after 60 s; the completion work did not start:"
+  curl -s "${A[@]}" "$U/v1/status" 2>/dev/null | head -c 600 || true; echo; fail=1
+fi
+
 echo "jOOQ runtime path:"
 assert "memory/put (INSERT)"   200 "${A[@]}" "${J[@]}" -X POST -d '{"project":"smoke","title":"a","content":"native ok","tags":"t","ttl":30}' "$U/v1/memory/put"
 assert "memory/get (SELECT)"   200 "${A[@]}" "$U/v1/memory/get?project=smoke&title=a"
