@@ -24,6 +24,12 @@ _Effective: 2026-11-07_
 > including a keyed network fingerprint the managed service derives from each
 > ping's source address. §3 is corrected.
 
+> **Change note (2026-11-24, conexus-momd):** the daily install ping now skips
+> itself in automated environments (test runs, continuous integration, lab
+> runs and containers), so it narrows what is collected; nothing new is sent.
+> Setting `NX_TELEMETRY=1` turns it back on inside a container. §2 describes
+> the skips.
+
 Conexus is a self-hosted MCP server and Claude Code / Claude Desktop extension that indexes content on your machine and provides semantic search and persistent memory across Claude conversations. This policy describes what data Conexus handles, where it goes, and what is never collected.
 
 ## 1. What Conexus stores
