@@ -3215,7 +3215,8 @@ its acceptance is that test green plus the census pin it lowers.
   until the one-row rename can run, that is while the move has no
   `completed_at` or a P3.5b changeset has not applied, the engine refuses
   a rename with a typed error that names the missing condition (item 6
-  lists the values), because
+  lists the values; P3.7 also asks for the restart that applies the P3.5b
+  changesets, with the `rdr229-restart` notice and `rename_missing`, item 6), because
   readers are on the id and the name-path rename would give the
   collection a new id (item 6; T2 `229-research-63`). P3.7 ships in one
   engine cut with P3.5: the rename refusal, the name-key drop move's
