@@ -104,6 +104,10 @@ class ManifestWriteRetryGateTest {
             + " (CREATE INDEX CONCURRENTLY idx_catalog_chunks_collection_id); reads the catalog, writes no row"),
         Map.entry("LegacyChunkSurvey", "nexus-f3yqd: reads manifest rows to find a chunk's owners and to classify a manifest row by its chunk;"
             + " writes nothing"),
+        Map.entry("CollectionRenameChecks", "RDR-229 P3.7: names catalog_document_chunks only in prose (the rename's sweep-gate comment);"
+            + " the refusals read the registry and the blocking tables, and write no row"),
+        Map.entry("RestoreOriginMarker", "RDR-229 P3.7: the restore refusal's marker check reads the manifest (an EXISTS over the origin's"
+            + " manifest rows); it executes reads only and writes no row"),
         Map.entry("SchemaMigrator", "names the table in the chash-length constraint map: DDL bookkeeping, no DML"),
         Map.entry("Rdr229SwapMove", "nexus-p2m1x.21: the text of the chunks swap's on_complete: ADD CONSTRAINT ... NOT VALID of the manifest's"
             + " id key (DDL) and the registering INSERTs of the move that validates it, whose template is the data-move worker's"
