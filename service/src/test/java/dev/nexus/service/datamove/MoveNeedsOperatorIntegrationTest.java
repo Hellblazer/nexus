@@ -13,6 +13,7 @@ import com.sun.net.httpserver.HttpServer;
 import dev.nexus.service.BootWorkRegistry;
 import dev.nexus.service.TestHttp;
 import dev.nexus.service.http.StatusHandler;
+import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
@@ -22,6 +23,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.net.http.HttpClient;
 import java.net.http.HttpResponse;
+import java.sql.Connection;
+import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.time.OffsetDateTime;
@@ -30,6 +33,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Properties;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
@@ -642,6 +646,80 @@ class MoveNeedsOperatorIntegrationTest extends DataMoveIntegrationBase {
         assertThat(realKeys).containsExactlyInAnyOrderElementsOf(fixtureKeys);
         for (String key : fixtureKeys) {
             assertThat(shape(r.get(key))).as("the type of " + key).isEqualTo(shape(f.get(key)));
+        }
+    }
+
+    // ── nexus-p2m1x.27 row 23: the name-key drop move waits for index builds; a wait is not a failure, a page or a mystery ──
+
+    private static JsonNode bootWorkEntry(JsonNode status, String label) {
+        for (JsonNode e : status.get("boot_work")) {
+            if (e.get("id").asText().equals(MoveBootWork.ID_PREFIX + label)) {
+                return e;
+            }
+        }
+        throw new AssertionError("no boot_work entry for " + label + " in " + status.get("boot_work"));
+    }
+
+    @Test
+    void theDropMoveWhileItWaitsForABuild_countsNothingPagesNoOne_andReadsAsAWait_thenOverdue_thenCompletes() throws Exception {
+        registerMove(NameKeyDropMove.LABEL, CHUNK_FAMILY_ON_COMPLETE);
+        var finisher = new VerifyingFinisher();
+        finisher.buildWait.clock = clock;
+        var w = workerOn(finisher);
+
+        try (InFlightIndexBuild build = InFlightIndexBuild.start(this, "row23-worker", "nexus-pci-builder-row23-w", "row23_worker_idx")) {
+            assertThat(w.runCycle()).isEqualTo(1);
+            cycle(w);
+            cycle(w);
+
+            assertThat(retries(NameKeyDropMove.LABEL)).as("repeated deferrals count no failure").isZero();
+            assertThat(ctx().select(DSL.field(DSL.name("last_transient"), String.class)).from(table("nexus", "data_moves"))
+                .where(LABEL.eq(NameKeyDropMove.LABEL)).fetchOne(0, String.class)).as("and write no failure text").isNull();
+            assertThat(stateOf(w, NameKeyDropMove.LABEL).kind()).isEqualTo(MoveStates.Kind.BLOCKED);
+            assertThat(stateOf(w, NameKeyDropMove.LABEL).reason()).startsWith(BuildWait.REASON_PREFIX);
+            JsonNode status = status(w);
+            assertThat(flag(status)).as("no page").isFalse();
+            assertThat(labels(status)).isEmpty();
+            assertThat(status.get("data_moves_need_operator_moves")).isEmpty();
+            JsonNode entry = bootWorkEntry(status, NameKeyDropMove.LABEL);
+            assertThat(entry.get("what").asText()).startsWith("blocked: " + NameKeyDropMove.LABEL
+                + ": waiting for in-flight index builds to finish (1 running)").doesNotContain("engine log").doesNotContain("overdue");
+            assertThat(entry.get("reason_class").asText()).isEqualTo("waiting_for_builds");
+
+            clock.advance(Duration.ofHours(7));   // the same wait, now past six hours
+            cycle(w);
+
+            status = status(w);
+            entry = bootWorkEntry(status, NameKeyDropMove.LABEL);
+            assertThat(entry.get("what").asText()).contains("(1 running)").contains("overdue, more than 6 h").contains("builder pids ")
+                .containsPattern("waiting for 7 h \\d+ m");
+            assertThat(entry.get("reason_class").asText()).isEqualTo("waiting_for_builds_overdue");
+            assertThat(retries(NameKeyDropMove.LABEL)).as("still no count").isZero();
+            assertThat(flag(status)).as("still no page").isFalse();
+        }
+
+        cycle(w);   // the build has finished: the drop completes, and the run of deferrals ends
+        assertThat(completedAt(NameKeyDropMove.LABEL)).isNotNull();
+        assertThat(finisher.buildWait.age(NameKeyDropMove.LABEL)).isNull();
+    }
+
+    @Test
+    void aLockTimeoutOnTheDropWithNoBuildRunning_isCountedAsOnAnyMove_notWaitedOut() throws Exception {
+        registerMove(NameKeyDropMove.LABEL, CHUNK_FAMILY_ON_COMPLETE);
+        var w = workerOn(new VerifyingFinisher());
+        var props = new Properties();
+        props.setProperty("user", ADMIN);
+        props.setProperty("password", ADMIN_PASSWORD);
+        props.setProperty("ApplicationName", "nexus-pci-builder-row23-holder");   // builder-named, and building nothing
+        try (Connection holder = DriverManager.getConnection(pg.getJdbcUrl(), props)) {
+            holder.setAutoCommit(false);
+            DSL.using(holder, SQLDialect.POSTGRES).select(DSL.one()).from(table("nexus", "chunks")).forShare().fetch();
+
+            assertThat(w.runCycle()).isEqualTo(1);
+
+            assertThat(retries(NameKeyDropMove.LABEL)).as("a 55P03 with no build in flight is a counted transient").isEqualTo(1);
+            assertThat(stateOf(w, NameKeyDropMove.LABEL).reason()).doesNotStartWith(BuildWait.REASON_PREFIX);
+            holder.rollback();
         }
     }
 

@@ -515,4 +515,33 @@ class MoveBootWorkTest {
         w.publish();
         assertThat(entry("m").what()).as("the elapsed time, and never the stalled text of a CALL").startsWith("working: m, validating for 5 m");
     }
+
+    // ── nexus-p2m1x.27 row 23: a restarted engine's page says what an attempt would do, by the move's own definition ──
+
+    private DataMove restartedWithRetries(String label, String onComplete) {
+        return new DataMove(label, "t", "s", "t", 10, 0, 1000, "v", onComplete, null, null, null, 20,
+            java.time.OffsetDateTime.ofInstant(clock.instant(), ZoneOffset.UTC), "an earlier transient",
+            DataMove.DEFAULT_VERIFY_STATEMENT_TIMEOUT_MS);
+    }
+
+    @Test
+    void aRestartedEngine_saysTheDropMoveEndsNoIndexBuilds_andAnotherChunkFamilyMoveDoes() {
+        String onComplete = NameKeyDropMove.onComplete();
+        var drop = restartedWithRetries(NameKeyDropMove.LABEL, onComplete);
+        var other = restartedWithRetries("some-other-chunk-move", onComplete);
+        assertThat(ChunkFamily.touches(drop)).as("non-vacuity: both are chunk-family by the same on_complete").isTrue();
+        assertThat(ChunkFamily.touches(other)).isTrue();
+        reader.open = List.of(drop, other);
+        var w = work(Duration.ofMinutes(15));
+
+        w.publish();
+
+        var paged = registry.dataMovesNeedOperator();
+        assertThat(paged).extracting(BootWorkRegistry.NeedsOperator::label).containsExactlyInAnyOrder(NameKeyDropMove.LABEL,
+            "some-other-chunk-move");
+        assertThat(paged).filteredOn(e -> e.label().equals(NameKeyDropMove.LABEL)).singleElement()
+            .extracting(BootWorkRegistry.NeedsOperator::terminatesIndexBuilds).as("the drop waits for builds").isEqualTo(false);
+        assertThat(paged).filteredOn(e -> e.label().equals("some-other-chunk-move")).singleElement()
+            .extracting(BootWorkRegistry.NeedsOperator::terminatesIndexBuilds).as("another move still ends them").isEqualTo(true);
+    }
 }
