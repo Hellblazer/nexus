@@ -73,4 +73,14 @@ A separate runtime fire-once test (`test_index_pdf_fires_document_hook_exactly_o
 - **The chash-before-taxonomy ordering invariant is gone.** RDR-187 retired `chash_dual_write_batch_hook`; the remaining batch consumers (`taxonomy_assign_batch_hook`, `manifest_write_batch_hook`) have no registration-order dependency on each other.
 - **SDK internals we reach into are few, private, and listed.** `server._lowlevel_server` (instructions, `add_notification_handler` for the channel gate, `lifespan`), `Server.middleware` (the tool-call log and the stale-host check are `tools/call` entries; the SDK calls it provisional for 2.x minors), `Tool.from_function` (the `_fail` patch), and the raw stdio write stream (`channel.py`). The pin is `mcp>=2.3,<3`; raise the cap only with a deliberate migration gated by the MVV handshake probe. Two mcp 1.x patches are retired because 2.x fixed them (the answered-after-cancel reply, sync bodies on the loop); `tests/test_mcp_sdk_patches.py` and `tests/test_mcp_sync_tool_offload.py` pin both on the wire, so a regression fails there. mcp 2.x also hides a non-`ToolError` crash's text from the client; `_tool_failure` keeps the text of every `Exception` (as 1.x sent it, `Error executing tool <name>: <text>`) by re-raising it as a `ToolError`, and logs it with its traceback first because the SDK logs a `ToolError` without one. The stale-host note and the tools that raise on purpose (`nx_tidy`, `nx_enrich_beads`, `nx_plan_audit`) depend on that text.
 
-#
+## Other modules
+
+| File | Purpose |
+|---|---|
+| `_first_run.py`, `_server_version.py`, `connect_marker.py`, `setup_tools.py` | Startup notices, the version both servers report, the connect-readiness marker, and the `setup` / `setup_status` tools. |
+| `identity_lease.py`, `identity_seam.py` | The MCP server's half of session identity (RDR-253): handover, renewal, fork row, pending bind; and the guarded seam between core and the lease. |
+| `_sensitivity_posture.py` | The nested `nx-mcp` server enters the sensitivity scope for every tool call (RDR-243). |
+| `_catalog_author.py`, `_shown_chunks.py`, `answer_chunks.py` | The author-alone read of `catalog_search`; short chunk ids on `search` hits and their resolution in `store_get_many`; the `nx_answer` envelope's chunk list. |
+| `operator_requests.py` | Prompt and schema builders for the `operator_*` functions the plan runner calls (not registered MCP tools). |
+| `plan_cache_registry.py`, `subscriptions.py` | The T1 plan-session cache registry; the per-session tuple-subscription set. |
+| `_slow_call_watchdog.py`, `_tool_call_log.py`, `_stale_host.py`, `_win_stdin.py`, `ci_notice.py` | Slow-call sampling, one log event per `tools/call`, MCP-host staleness warning, moving MCP stdio off fd 0 on Windows, the commit a CI board notice names. |
