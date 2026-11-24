@@ -6,6 +6,12 @@
 # one. Path scoping was never this plan's purpose (surfacing the design
 # context around a failure is), so it is gone rather than defaulted: the
 # symptom text is what a debug question actually carries.
+#
+# The query step also carried a literal `author: nexus`. `author` is a catalog
+# filter (a case-insensitive substring match on the document's author), so
+# every debug answer was narrowed to catalog documents whose author contains
+# "nexus". It is gone, and the builtin-plan tests refuse a literal author
+# on a retrieval step.
 name: default
 # Rationale (restored per critique — was description prose pre-mmfag):
 # intentionally FLAT — dev work starts from a concrete failure, and the primary
@@ -32,7 +38,6 @@ plan_json:
   - tool: query
     args:
       question: $symptom
-      author: nexus
       corpus: all
   - tool: store_get_many
     args:
