@@ -2140,16 +2140,12 @@ class CatalogRepositoryTest {
     /** nexus-6pbwx: over existing documents, a repo owner outranks a curator with more of them. */
     @Test @Order(60)
     void collectionOwner_registrationOverMixedDocumentsPrefersTheRepoOwner() throws Exception {
-        // The fresh walk (formAApplied() false) never skips here: the fixture below needs the CHECK lift that form A makes impossible.
-        org.junit.jupiter.api.Assumptions.assumeFalse(Rdr229CompleteStamps.formAApplied(),
-            "its fixture inserts name-only documents with the physical_collection_id CHECK lifted, which is impossible once form A applies; "
-                + "precedent Catalog051OwnerGuardTest.beforeInsertBranchLive() (dead by design, vectors-078-1)");
+        org.junit.jupiter.api.Assumptions.assumeFalse(Rdr229CompleteStamps.formAApplied(), "its fixture inserts name-only documents with the physical_collection_id CHECK lifted, which is impossible once form A applies; precedent Catalog051OwnerGuardTest.beforeInsertBranchLive() (dead by design, vectors-078-1)"); // fresh walk: formAApplied() is false, never skipped
         String tenant = "own6pbwx-mixed-tenant";
         putOwner(tenant, "1.22", "knowledge", "curator");
         putOwner(tenant, "1.23", "some-repo", "repo");
         String name = "docs__mixed-6pbwx__voyage-context-3__v1";
-        // RDR-229 P3.1: the documents exist BEFORE their collection registers, as on an upgraded install (a name, no registry row, no id: the NOT VALID
-        // CHECK refuses it on a new row, and putDoc registers first). Catalog051OwnerGuardTest's helper lifts the CHECK for each insert and puts it back NOT VALID.
+        // RDR-229 P3.1: the documents exist BEFORE their collection registers, as on an upgraded install (a name, no registry row, no id: the NOT VALID CHECK refuses it on a new row, and putDoc registers first). Catalog051OwnerGuardTest's helper lifts the CHECK for each insert and puts it back NOT VALID.
         try (Connection su = pg.createConnection("")) {
             var ctx = DSL.using(su, SQLDialect.POSTGRES);
             for (String t : List.of("1.22.1", "1.22.2", "1.22.3", "1.23.1")) Catalog051OwnerGuardTest.insertLegacyDocument(su, ctx, tenant, t, name);
