@@ -29,7 +29,6 @@ from nexus import corpus
 from nexus.catalog.collection_name import CollectionAttributes
 
 SKILL = Path(__file__).resolve().parent.parent / "conexus" / "skills" / "rdr-close" / "SKILL.md"
-MIGRATION = SKILL.with_name("migration.md")
 
 LEGACY = "knowledge__rdr_postmortem__nexus"
 TARGET = "knowledge__nexus-rdr-research__bge-base-en-v15-768__v1"
@@ -55,20 +54,21 @@ NO_LEGACY = "NAME  CHUNKS  STORED  ID  CONTENT_TYPE  OWNER  MODEL  DIM  STATE\nk
 LEGACY_NO_MODEL = f"NAME  CHUNKS  STORED  ID  CONTENT_TYPE  OWNER  MODEL  DIM  STATE\n{LEGACY}  9  9  7  knowledge  1-1  -  -  live\n"
 
 
-def _section_block(heading: str, repo: str, source: Path = SKILL) -> str:
-    text = source.read_text(encoding="utf-8")
+def _section_block(heading: str, repo: str) -> str:
+    text = SKILL.read_text(encoding="utf-8")
     section = text[text.index(heading):]
     block = re.search(r"```bash\n(.*?)```", section, re.S)
     assert block, f"the section {heading!r} must carry its bash block"
     return block.group(1).replace("{repo}", repo).replace("<repo>", repo)
 
 
-def _migration_block(repo: str) -> str:
-    return _section_block("#### One-time migration", repo, MIGRATION)
-
-
 def _reuse_block(repo: str) -> str:
     return _section_block("Check for an existing subject", repo)
+
+
+def _migration_block(repo: str) -> str:
+    """The migration block, run in the shell that ran the reuse check (it calls that block's ``subject_collections``)."""
+    return _reuse_block(repo) + "\n" + _section_block("#### One-time migration", repo)
 
 
 def _bash(block: str, listing: str, tmp_path: Path) -> tuple[int, list[str], str, str]:
@@ -158,18 +158,6 @@ def test_a_repo_name_with_underscores_is_hyphenated_in_the_subject_only(tmp_path
     assert status == 1 and calls == [] and "my-repo-rdr-research already has a collection" in err
 
 
-def _guard_awk(path: Path) -> str:
-    found = re.findall(r"awk -v s=\"\$SUBJECT\" '([^']*)'", path.read_text(encoding="utf-8"))
-    assert len(found) >= 1, f"{path.name} carries no subject-guard awk"
-    assert len(set(found)) == 1, f"{path.name} carries two different guard programs"
-    return found[0]
-
-
-def test_the_two_copies_of_the_subject_guard_are_the_same_program() -> None:
-    """SKILL.md's reuse check and migration.md's guard are one filter written twice; they must not drift."""
-    assert _guard_awk(SKILL) == _guard_awk(MIGRATION)
-
-
 @pytest.mark.parametrize(
     ("listing", "expected"),
     [
@@ -197,12 +185,13 @@ def test_the_rename_names_the_subjects_four_segment_target_and_the_skill_says_to
     text = SKILL.read_text(encoding="utf-8")
     step6 = text[text.index("### Step 6: T3 Archive"):]
     ahead = step6.index("BEFORE the first `store_put`")
-    assert ahead < step6.index("mcp__plugin_conexus_nexus__store_put(") and "(migration.md)" in step6
+    assert ahead < step6.index("mcp__plugin_conexus_nexus__store_put(") < step6.index("#### One-time migration")
     assert "migrate-fallback" not in block
 
 
 def test_the_skill_says_how_to_read_the_current_knowledge_model() -> None:
-    section = MIGRATION.read_text(encoding="utf-8")
+    text = SKILL.read_text(encoding="utf-8")
+    section = text[text.index("#### One-time migration"):]
     assert "nx config get local.embed_model" in section and "voyage-context-3" in section
     assert "newest live knowledge collection" not in section
 
