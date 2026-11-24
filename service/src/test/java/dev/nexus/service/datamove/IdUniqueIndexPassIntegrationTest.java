@@ -184,7 +184,8 @@ class IdUniqueIndexPassIntegrationTest extends DataMoveIntegrationBase {
         assertThat(PgCatalogProbes.indexExists(ctx(), "nexus", canary)).as("not built before vectors-078-8 is recorded").isFalse();
         assertThat(first.built()).as("every other applicable index is").isEqualTo(applicable() - 1);
         assertThat(IdUniqueIndexPass.allValid(ctx())).as("gate 3 waits with it").isFalse();
-        assertThat(IdUniqueIndexPass.waitingChangesets(ctx())).as("the wait is named, for gate3_why").containsExactly("vectors-078-8");
+        assertThat(IdUniqueIndexPass.waitingChangesets(ctx())).as("the wait is named, for gate3_why: the twin's, then vectors-084's")
+            .containsExactly("vectors-078-8", "vectors-084-1", "vectors-084-2", "vectors-084-3");
         assertThat(registry.snapshot()).as("a wait is not work: no boot_work entry of the pass, building or held, while it waits (it would be permanent here and "
                 + "defer nx upgrade's bundle swap); gate3_why names it instead")
             .noneMatch(e -> e.id().equals(IdUniqueIndexPass.BOOT_WORK_ID) || e.id().equals(IdUniqueIndexPass.HELD_BOOT_WORK_ID));
@@ -194,6 +195,42 @@ class IdUniqueIndexPassIntegrationTest extends DataMoveIntegrationBase {
         assertThat(second.built()).as("once recorded, the next pass builds the canary twin").isEqualTo(1);
         assertThat(IdUniqueIndexPass.allValid(ctx())).isTrue();
         assertThat(IdUniqueIndexPass.waitingChangesets(ctx())).as("nothing waits once built").isEmpty();
+    }
+
+    /**
+     * linda 2026-11-23: annQuery calls vectors-084's by-id overload from gate 3 with no fallback, so gate 3 does not hold on an install where
+     * vectors-084-1/2/3 are not all recorded, whatever its indexes say, and gate3_why names the ones that are not. Every index is built here
+     * and vectors-078-8 is recorded, so the three ids are the only thing gate 3 waits for; recording them one at a time shows each is required.
+     */
+    @Test
+    void gate3WaitsForVectors084_untilEachOfItsThreeChangesetsIsRecorded() {
+        IdIndexCatalogReads.forgetWaitedChangesets(ctx());
+        IdIndexCatalogReads.recordChangesets(ctx(), ArbiterTwins.WAITS_FOR_CHANGESETS.values().stream().flatMap(List::stream).distinct().toList());
+        var built = pass(new BootWorkRegistry(Clock.systemUTC()), true).runOnce();
+        assertThat(built.built()).as("non-vacuity: the pass built every applicable index").isEqualTo(applicable());
+        assertThat(IdUniqueIndexPass.SPECS.stream().filter(sp -> !IdUniqueIndexPass.valid(ctx(), sp)).toList())
+            .as("non-vacuity: every index is VALID, so the changesets are the only thing gate 3 waits for").isEmpty();
+        assertThat(ArbiterTwins.GATE3_WAITS_FOR_CHANGESETS).as("the list is vectors-084's three").containsExactly("vectors-084-1", "vectors-084-2", "vectors-084-3");
+
+        java.util.function.Supplier<CompletionCheck.Result> gate3 = () -> CompletionCheck.evaluate(ctx(), new CompletionCheck.ReadSet(List.of(), List.of()),
+            c -> java.util.Optional.of(new CompletionCheck.IdIndexCoverage(java.util.Set.of("a"), java.util.Set.of("a"), java.util.Set.of())),
+            CompletionCheck.DIRECT, List.of(IdUniqueIndexPass::allValid));
+        List<String> recorded = new java.util.ArrayList<>();
+        for (String id : ArbiterTwins.GATE3_WAITS_FOR_CHANGESETS) {
+            var r = gate3.get();
+            assertThat(r.gate2()).as("non-vacuity: gate 2 holds, so gate 3's further conditions are the ones read").isTrue();
+            assertThat(IdUniqueIndexPass.allValid(ctx())).as("gate 3's extra condition does not hold with %s unrecorded", id).isFalse();
+            assertThat(r.gate3()).as("gate 3 does not hold with %s unrecorded", id).isFalse();
+            assertThat(r.gate3Why()).as("gate3_why names %s", id).contains(id);
+            assertThat(IdUniqueIndexPass.waitingChangesets(ctx())).containsExactlyElementsOf(
+                ArbiterTwins.GATE3_WAITS_FOR_CHANGESETS.stream().filter(c -> !recorded.contains(c)).toList());
+            IdIndexCatalogReads.recordChangesets(ctx(), List.of(id));
+            recorded.add(id);
+        }
+        assertThat(IdUniqueIndexPass.allValid(ctx())).as("recorded: gate 3's extra condition holds").isTrue();
+        var held = gate3.get();
+        assertThat(held.gate3()).as("recorded: gate 3 holds").isTrue();
+        assertThat(IdUniqueIndexPass.waitingChangesets(ctx())).isEmpty();
     }
 
     /**

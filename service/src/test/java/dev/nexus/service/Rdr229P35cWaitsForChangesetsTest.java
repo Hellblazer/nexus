@@ -17,8 +17,9 @@ import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 /**
- * RDR-229 P3.5c (nexus-p2m1x.25; linda's P3.4 review item): every changeset id an id twin waits for
- * ({@link ArbiterTwins#WAITS_FOR_CHANGESETS}; today {@code vectors-078-8} for the canary twin) is a real changeset of the
+ * RDR-229 P3.5c (nexus-p2m1x.25; linda's P3.4 review item): every changeset id gate 3 waits for, an id twin's
+ * ({@link ArbiterTwins#WAITS_FOR_CHANGESETS}; today {@code vectors-078-8} for the canary twin) or vectors-084's
+ * ({@link ArbiterTwins#GATE3_WAITS_FOR_CHANGESETS}, the by-id ANN overloads annQuery calls from gate 3), is a real changeset of the
  * changelog, is included from the master changelog, and is in the P3.5b CONTINUE list {@value P35bContinueChangesets#LIST}.
  * A renumbered or renamed changeset would otherwise leave the twin, and with it gate 3, waiting for an id that never records.
  */
@@ -33,8 +34,10 @@ class Rdr229P35cWaitsForChangesetsTest {
 
     @Test
     void everyChangesetATwinWaitsForIsInTheChangelog_theMasterIncludesItsFile_andTheContinueList() throws IOException {
-        List<String> waited = ArbiterTwins.WAITS_FOR_CHANGESETS.values().stream().flatMap(List::stream).distinct().toList();
-        assertThat(waited).as("non-vacuity: a twin waits for a changeset").isNotEmpty().contains("vectors-078-8");
+        List<String> waited = Stream.concat(ArbiterTwins.WAITS_FOR_CHANGESETS.values().stream().flatMap(List::stream),
+            ArbiterTwins.GATE3_WAITS_FOR_CHANGESETS.stream()).distinct().toList();
+        assertThat(waited).as("non-vacuity: a twin and gate 3 wait for changesets").isNotEmpty()
+            .contains("vectors-078-8", "vectors-084-1", "vectors-084-2", "vectors-084-3");
         assertThat(ArbiterTwins.WAITS_FOR_CHANGESETS).as("the canary twin is the one that waits").containsKey("idx_canary_query_ring_id_digest_uq");
 
         String master = blankComments(Files.readString(CHANGELOGS.resolve("db.changelog-master.xml")));

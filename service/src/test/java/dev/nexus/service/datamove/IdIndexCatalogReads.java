@@ -91,11 +91,18 @@ final class IdIndexCatalogReads {
     private static final Field<String> DCL_ID = DSL.field(DSL.name("id"), String.class);
 
     /**
-     * Records each changeset {@code ArbiterTwins.WAITS_FOR_CHANGESETS} names as run (a stand-in row in databasechangelog), the state after
-     * P3.5b's form-A boot, so the pass builds every twin. Rows that already exist are left alone; {@link #forgetWaitedChangesets} removes them.
+     * Records each changeset gate 3 waits for ({@code ArbiterTwins.WAITS_FOR_CHANGESETS}'s twins' and {@code GATE3_WAITS_FOR_CHANGESETS}) as run
+     * (a stand-in row in databasechangelog), the state after P3.5b's form-A boot, so the pass builds every twin and gate 3's read can hold.
+     * Rows that already exist are left alone; {@link #forgetWaitedChangesets} removes them.
      */
     static void recordWaitedChangesets(DSLContext ctx) {
-        for (String id : ArbiterTwins.WAITS_FOR_CHANGESETS.values().stream().flatMap(List::stream).distinct().toList()) {
+        recordChangesets(ctx, java.util.stream.Stream.concat(ArbiterTwins.WAITS_FOR_CHANGESETS.values().stream().flatMap(List::stream),
+            ArbiterTwins.GATE3_WAITS_FOR_CHANGESETS.stream()).distinct().toList());
+    }
+
+    /** A stand-in row in databasechangelog for each of {@code ids} not already there (what {@link #forgetWaitedChangesets} removes). */
+    static void recordChangesets(DSLContext ctx, List<String> ids) {
+        for (String id : ids) {
             if (!ctx.fetchExists(DSL.selectOne().from(DCL).where(DCL_ID.eq(id)))) {
                 ctx.insertInto(DCL).columns(DCL_ID, DSL.field(DSL.name("author"), String.class), DSL.field(DSL.name("filename"), String.class),
                         DSL.field(DSL.name("dateexecuted"), java.time.LocalDateTime.class), DSL.field(DSL.name("orderexecuted"), Integer.class),
