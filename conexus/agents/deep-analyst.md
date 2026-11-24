@@ -193,18 +193,30 @@ Incorporate or explicitly refute prior findings in your analysis. When T3 is emp
 
 ## Persistence (before returning)
 
-You MUST persist your analysis findings BEFORE returning, **unless the dispatching relay specifies an alternative storage target** (e.g. a T2 `memory_put` destination or a T1 `scratch` target) in its Input Artifacts, Deliverable, or Operational Notes section. When the relay specifies a target, honor it and skip the T3 default.
+You MUST persist your analysis findings BEFORE returning, **unless the dispatching relay specifies an alternative storage target** (a T2 `memory_put` destination or a T3 `store_put` target) in its Input Artifacts, Deliverable, or Operational Notes section. When the relay specifies a target, honor it.
 
-**Why the default is T3**: the auto-linker creates catalog links at `store_put` time, and those links are lost if you skip the default dispatch path.
+**Why the default is T1**: interim findings go to T1 scratch, shared with the dispatching session and its other agents (the SubagentStart contract). Write to T3 only for a finding you have validated that is reusable across sessions: the auto-linker creates catalog links at `store_put` time.
 
-**Default T3 store call** (use only when the relay does not specify an alternative):
+**Default T1 call** (use when the relay does not specify an alternative):
+
+```
+mcp__plugin_conexus_nexus__scratch(
+    action="put",
+    content="# Analysis: {topic}\n\n{findings}",
+    tags="analysis,interim",
+    agent="deep-analyst"
+)
+```
+
+**T3 call** (a validated, reusable finding, or a relay-named T3 target):
 
 ```
 mcp__plugin_conexus_nexus__store_put(
     content="# Analysis: {topic}\n\n{findings}",
     collection="<subject>",
     title="analysis-deep-{topic}-{date}",
-    tags="analysis,deep-analyst,{domain}"
+    tags="analysis,deep-analyst,{domain}",
+    agent="deep-analyst"
 )
 ```
 

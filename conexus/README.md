@@ -320,8 +320,8 @@ uv starts; a warm hook returns when it is done and pays nothing for the larger l
 (offline, behind a proxy that blocks the download, air-gapped), `uv tool run` exits 2 with
 `No interpreter found`. Claude Code treats a hook's exit 2 as blocking on `PreToolUse`,
 `PermissionRequest` and `UserPromptSubmit`, so six of the twenty-two uv-launched entries (the
-three `PreToolUse` Bash and edit guards, both `auto-approve` entries, the mailbox drain) refuse every Bash call, every
-conexus tool call and every prompt until Python exists; the `SessionStart` and `SessionEnd`
+three `PreToolUse` guards, both `auto-approve` entries, the mailbox drain) refuse every Bash call, every
+edit and write, every conexus tool call and every prompt until Python exists; the `SessionStart` and `SessionEnd`
 entries only print the error. The entries are in exec form (`args` is set, so there is no shell), and an
 exec-form entry cannot turn a launcher failure into a non-blocking code. The remedy is one
 command on that machine: `uv python install 3.12` (online once, then it is cached). A

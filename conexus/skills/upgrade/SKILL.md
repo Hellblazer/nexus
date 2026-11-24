@@ -138,12 +138,7 @@ there, then upgrade back to current. Three preconditions for the hop at the pin:
   managed`, or a ChromaDB Cloud key with no mode record), which `NX_LOCAL=1`
   overrides. Read from the 6.18.1 source, not run at the pin. Never run
   the pin's `nx guided-upgrade --service-url ...` or aim it at a managed
-  endpoint: that path is unsupported and failed in every case measured
-  (nexus-6g218, local gate jars, not the managed endpoint): against a current
-  engine it stops before writing anything, and on the last build that still had
-  the `/v1/staging` routes a same-model store with no document aspects was
-  reported "Migration VERIFIED" while its 16- and 32-hex pointers were
-  discarded.
+  endpoint: unsupported, and it failed in every case measured (nexus-6g218).
   Do not set `service_url` first "to save a step".
 - **Stop any current-engine local service** a 7.x install left running
   (`nx daemon service stop`) so the pin provisions its own engine.
@@ -167,14 +162,14 @@ that data into the managed cloud, has the full list. Pick by user type:
 - Voyage collections from a Voyage-keyed hop 1: `nx store export --all` locally,
   then `nx store import FILE` in the cloud.
 - Source-less `store_put` notes: `nx catalog export recovery.jsonl` locally,
-  `nx catalog import` in the cloud (re-embeds; carries links and notes only).
+  `nx catalog import` in the cloud (re-embeds; carries links and notes only; a note's TTL clock restarts at the import).
 
 Order: hand-carry T2 memory and run the exports while the box is still local;
-then `unset NX_LOCAL` and switch with `nx config set service_url ...` (and the
+then `unset NX_LOCAL` (it wins over `service_url`) and switch with `nx config set service_url ...` (and the
 `service_token` you noted), clear the stranded banner (`nx stranded ack`, or move
 the pre-PG files it names aside), re-index from source, `nx store import`, and
 `nx catalog import` LAST (links resolve by `source_uri` against documents already
-there). Surface the choices to the user rather than making them.
+there). With no web access that order is the rule. Surface the choices to the user rather than making them.
 
 ## Managed service
 
