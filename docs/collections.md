@@ -65,7 +65,9 @@ Before writing to a new name, list what exists:
 nx collection list
 ```
 
-If a collection for the subject exists, write into it. Adding the eleventh
+A subject minted since 8.5.6 shows as a `c<id>` name with the subject in
+the `OWNER` column, so look there, not only at `NAME`. If a collection for
+the subject exists, write into it. Adding the eleventh
 paper on consensus to `distributed-systems` is right; creating
 `consensus-papers` beside it splits one subject's topics in two and makes
 both collections rank against each other for every query. When you are
@@ -81,14 +83,26 @@ nx index md notes/overview.md --collection vector-search
 nx index pdf --dir ~/papers/oracles --collection augur-oracle-papers
 ```
 
-`distributed-systems` becomes `knowledge__distributed-systems__<model>__v1`
-on your install, with the model your install actually embeds with. Never
-type the four-segment form, a model token, or a version yourself. A name
-that encodes a model the install does not use is exactly how local
-collections once ended up labelled with a model that never embedded them
-(GH #667, RDR-109). RDR-204 is retiring the encoded name as an authority
-altogether; a name you type by hand today is a name that has to be
-migrated tomorrow.
+A subject that has no collection yet is registered by its attributes
+(content type `knowledge`, owner `distributed-systems`, the model your
+install actually embeds with, version `v1`), and the engine mints the
+collection's id and its label, `c` followed by the id (`c4217`, say). The
+write goes to that label. The client renders no
+`knowledge__distributed-systems__<model>__v1` name for it, and `nx
+collection list` shows the subject in the `OWNER` column, not in `NAME`
+(RDR-229 P3.8). A subject that already has a collection keeps writing
+there: a conformant `knowledge__distributed-systems__<model>__v1` or a
+legacy two-segment collection that holds data is found first, whatever its
+shape, and a recovery-bundle restore keeps the name it restores. Typing
+`knowledge__distributed-systems` takes the same path; only a `docs__X` or
+`code__X` name renders as `<type>__X__<model>__v1`. A label of the form `c`
+plus digits is the engine's to mint, so a registration, a rename target or
+a re-embed target of that shape is refused. Never type the four-segment
+form, a model token, or a version yourself. A name that encodes a model the
+install does not use is exactly how local collections once ended up
+labelled with a model that never embedded them (GH #667, RDR-109). RDR-204
+is retiring the encoded name as an authority altogether; a name you type by
+hand today is a name that has to be migrated tomorrow.
 
 Subject names are lowercase, hyphen-separated, two or three words, ASCII.
 The owner segment of the four-segment name (and of the grandfathered
@@ -185,6 +199,17 @@ that skips them leaves rows that fail loud on a foreign key later
 (RDR-164). Never write to or delete a `quarantine-*` collection; the orphan
 GC owns those and restores from them.
 
+From RDR-229's gate 3 (`nx doctor`'s "RDR-229 completion" row says when) a rename
+changes the collection's label only: it keeps its `collection_id`, and no chunk
+or child row is rewritten. The label it left is reserved, so a registration, a
+rename target or a re-embed target of that label is refused (409
+`label_reserved`, nothing written) until a later release relabels the rows still
+carrying it; renaming the collection back is allowed. While the engine still waits for
+something (the doctor row names it; one restart is the usual case), a rename is
+refused (409 `rename_refused`) and nothing changes. A delete, prune or reindex of a collection a
+re-embed job holds is refused (409 `collection_busy`). The
+[CLI reference](cli-reference.md#nx-collection) has each message and its way out.
+
 A `quarantine-*` collection is a registered row like any other, under a name
 no parser accepts, so the two list routes (`/v1/catalog/collections/list`
 and `/v1/vectors/stats`) take a `lifecycle_state` filter (`live`,
@@ -217,11 +242,12 @@ and does not pretend to: a person-shaped subject (no signal to detect), and
 tags or categories used only once (tags live on chunk metadata, not on the
 catalog document, so that check would be a scan of every chunk; deferred on
 nexus-ger23). It never renames,
-merges, or deletes; those stay yours. For a suspected duplicate it names
-`nx collection merge-candidates`, which ranks pairs by shared-topic
-overlap, as the evidence to confirm with, and for one collection's depth
-`nx collection audit NAME` and `nx collection health` are the RDR-087
-views. Run `shape` before and after any curation pass; a clean run says how
+merges, or deletes; those stay yours. A suspected duplicate rests on name
+evidence alone: `nx collection merge-candidates`, which would rank pairs by
+shared-topic overlap, is unavailable (it exits 1; see the
+[CLI reference](cli-reference.md#nx-collection)), so judge the pair by
+reading both collections. For one collection's depth `nx collection audit
+NAME` and `nx collection health` are the RDR-087 views. Run `shape` before and after any curation pass; a clean run says how
 many collections it examined, so an empty result is never mistaken for a
 skipped one.
 

@@ -52,7 +52,7 @@ Classification is overridable via `.nexus.yml` (see [Per-Repo Configuration](#ne
 
 ## Dual-Collection Architecture
 
-Each indexed repository produces two T3 collections. Embedding happens server-side in the nexus-service (local mode: bge-768 by default, Voyage when keyed; managed-cloud: always Voyage AI):
+Each indexed repository produces a `code` and a `docs` T3 collection, and a third, `rdr`, when it has RDR files (below). Embedding happens server-side in the nexus-service (local mode: bge-768 by default, Voyage when keyed; managed-cloud: always Voyage AI):
 
 | Collection | Managed-cloud model | Local model, default | Local model, keyed | Contents |
 |---|---|---|---|---|
@@ -67,6 +67,8 @@ the conformance migration may still carry the legacy 2-segment shape
 (`<content_type>__<repo>-<hash8>`). Collection names are **stable across git
 worktrees** — `git rev-parse --git-common-dir` resolves to the shared `.git` directory,
 so a worktree and its parent produce identical collection names.
+
+**A second clone** of a repository in a folder with the same name (`~/work/nexus` and `~/scratch/nexus`) no longer takes the first clone's owner over (RDR-254 Gap 4). When another owner of that name records a root that is a different live git work tree on this machine (or one `nx` cannot read), `nx index repo` registers the repository under its own owner, named `<folder>-<repo hash>`, and leaves the first owner alone, so that clone's copies of the shared files are documents of their own. A root that is gone, the same clone reached through a symlink, or a root recorded by another machine, a container path or an unmounted volume keeps the one owner. An owner two clones already share keeps its documents; the clone whose hash it no longer carries gets its own owner and a new collection on its next run, which indexes and embeds the whole clone again.
 
 Additionally, markdown files under RDR paths (default: `docs/rdr/`) are indexed into a
 separate `rdr__*` collection via the batch markdown indexer.
