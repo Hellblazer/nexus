@@ -5,9 +5,9 @@
 # The two upserts the RDR names are the on_conflict rows of PgVectorRepository (chunks) and TaxonomyCentroidRepository (taxonomy_centroids).
 # metadata label keys: origin_collection
 file	line	table	name_column	op	via	note
-service/src/main/java/dev/nexus/service/datamove/CompletionCheck.java	1067	catalog_collections	superseded_by	expr	literal	-
-service/src/main/java/dev/nexus/service/datamove/CompletionCheck.java	1084	catalog_collections	superseded_by	expr	literal	-
-service/src/main/java/dev/nexus/service/datamove/CompletionCheck.java	1099	catalog_collections	superseded_by	expr	literal	-
+service/src/main/java/dev/nexus/service/datamove/CompletionCheck.java	1092	catalog_collections	superseded_by	expr	literal	-
+service/src/main/java/dev/nexus/service/datamove/CompletionCheck.java	1109	catalog_collections	superseded_by	expr	literal	-
+service/src/main/java/dev/nexus/service/datamove/CompletionCheck.java	1124	catalog_collections	superseded_by	expr	literal	-
 service/src/main/java/dev/nexus/service/db/AspectQueueDrain.java	323	?	collection	expr	literal	0 candidate tables in the statement
 service/src/main/java/dev/nexus/service/db/AspectQueueDrain.java	335	catalog_documents	physical_collection	expr	alias	-
 service/src/main/java/dev/nexus/service/db/AspectQueueDrain.java	346	catalog_documents	physical_collection	select	alias	-
@@ -631,9 +631,13 @@ service/src/main/java/dev/nexus/service/vectors/PgVectorRepository.java	8551	chu
 service/src/main/java/dev/nexus/service/vectors/PgVectorRepository.java	8928	catalog_document_chunks	collection	select	jooq	-
 service/src/main/java/dev/nexus/service/vectors/PgVectorRepository.java	9515	chunks	collection	where	helper	-
 service/src/main/java/dev/nexus/service/vectors/PgVectorRepository.java	9531	chunks	collection	expr	helper	-
-service/src/main/java/dev/nexus/service/vectors/Rdr229SwapMove.java	153	catalog_collections	name	where	sql	-
-service/src/main/java/dev/nexus/service/vectors/Rdr229SwapMove.java	155	catalog_collections	name	where	sql	-
-service/src/main/java/dev/nexus/service/vectors/Rdr229SwapMove.java	162	catalog_collections	name	where	sql	-
+service/src/main/java/dev/nexus/service/vectors/Rdr229ChunksFk.java	78	catalog_collections	name	where	sql	-
+service/src/main/java/dev/nexus/service/vectors/Rdr229ChunksFk.java	78	catalog_collections	superseded_by	where	sql	-
+service/src/main/java/dev/nexus/service/vectors/Rdr229ChunksFk.java	79	catalog_collections	superseded_by	where	sql	-
+service/src/main/java/dev/nexus/service/vectors/Rdr229ChunksFk.java	80	catalog_collections	superseded_by	where	sql	-
+service/src/main/java/dev/nexus/service/vectors/Rdr229SwapMove.java	147	catalog_collections	name	where	sql	-
+service/src/main/java/dev/nexus/service/vectors/Rdr229SwapMove.java	149	catalog_collections	name	where	sql	-
+service/src/main/java/dev/nexus/service/vectors/Rdr229SwapMove.java	156	catalog_collections	name	where	sql	-
 service/src/main/java/dev/nexus/service/vectors/ReaperRepository.java	92	chunks	collection	expr	jooq	-
 service/src/main/java/dev/nexus/service/vectors/ReaperRepository.java	94	chunks	collection	select	jooq	-
 service/src/main/java/dev/nexus/service/vectors/ReaperRepository.java	96	chunks	collection	order_by	jooq	-
