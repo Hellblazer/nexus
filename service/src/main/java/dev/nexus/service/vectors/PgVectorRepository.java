@@ -8316,7 +8316,9 @@ FROM scope s
             int affected = 0;
             List<String> missing = new ArrayList<>();
             for (int i = 0; i < ids.size(); i++) {
-                int rows = updateMetadataOneRow(ctx, ch, tenant, collection, ids.get(i), metadatas.get(i), deleteKeys,
+                // the row's CURRENT label, not the request's: a row renamed in place since the route boundary resolved its id bears another
+                // label, and before gate 3 the statement names the collection by that label (368cf7da04 handed it the request's)
+                int rows = updateMetadataOneRow(ctx, ch, tenant, coll, ids.get(i), metadatas.get(i), deleteKeys,
                                                 gate3);
                 affected += rows;
                 if (rows == 0) missing.add(ids.get(i));
