@@ -46,8 +46,6 @@ def test_the_quarantine_restore_busy_reason_equals_the_engines() -> None:
     assert match.group(1) == QUARANTINE_RESTORE_BUSY_REASON
 
 
-# TODO(RDR-229 P3, engine 0.1.202 on develop): pin COLLECTION_BUSY_REASON, RESTORE_ORIGIN_UNREGISTERED_REASON and
-# LABEL_RESERVED_REASON against HttpUtil.java in the list below; develop's HttpUtil does not declare them yet, so a pin now would fail.
 @pytest.mark.parametrize(
     "name",
     [
@@ -65,6 +63,8 @@ def test_the_quarantine_restore_busy_reason_equals_the_engines() -> None:
         "RENAME_BUSY_REASON",
         "COLLECTION_LABEL_AMBIGUOUS_REASON",
         "RESTORE_ORIGIN_UNREGISTERED_REASON",
+        "COLLECTION_BUSY_REASON",
+        "LABEL_RESERVED_REASON",
     ],
 )
 def test_the_rdr225_partition_reasons_equal_the_engines(name: str) -> None:
