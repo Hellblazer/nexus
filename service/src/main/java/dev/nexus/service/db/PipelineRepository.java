@@ -830,25 +830,9 @@ public final class PipelineRepository {
                        // no row the rows are found by the name they recorded, and only those whose id no live registry row holds
                        .and(row.isPresent()
                            ? CollectionOwnedRows.of(row, PDF_PIPELINE.COLLECTION_ID, PDF_PIPELINE.COLLECTION, collection)
-                           : danglingLedger(tenant, collection)))
+                           : DanglingLedger.of(gate3, tenant, PDF_PIPELINE.COLLECTION, PDF_PIPELINE.COLLECTION_ID, collection)))
                .execute();
         });
-    }
-
-    /**
-     * The rows of a label that has NO registry row, found by the name they recorded: before gate 3 that name; from gate 3 that name and an
-     * id no LIVE registry row holds (or none). There is deliberately no id disjunct ({@link CollectionKey#eqLedger} has one): the label can
-     * be registered by another request between this transaction's tolerant read (no row, so no key share) and the delete, and an
-     * {@code id = idOf(label)} arm would then reach the NEW collection's runs without the lock a writer takes.
-     */
-    private Condition danglingLedger(String tenant, String collection) {
-        Condition byName = PDF_PIPELINE.COLLECTION.eq(collection);
-        if (!gate3.holds()) {
-            return byName;
-        }
-        var reg = dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.as("pdlg");
-        return byName.and(PDF_PIPELINE.COLLECTION_ID.isNull().or(DSL.notExists(DSL.selectOne().from(reg)
-            .where(reg.TENANT_ID.eq(tenant)).and(reg.COLLECTION_ID.eq(PDF_PIPELINE.COLLECTION_ID)).and(CollectionIds.live(reg)))));
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────

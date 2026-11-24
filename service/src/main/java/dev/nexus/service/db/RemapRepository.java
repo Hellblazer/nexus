@@ -237,14 +237,19 @@ public final class RemapRepository {
             // each leg by the CURRENT label of the row the request names (a row renamed in place since the route boundary resolved its id
             // bears another label, and before gate 3 the history rule below is name = label: ced0ada045 matched the request's); a leg whose
             // collection is gone keeps the label the request carried, which the history rule matches against the dangling rows' stored name
-            String source = RequestedCollectionRead.require(ctx, tenant, sourceCollection).map(CollectionRow::label).orElse(sourceCollection);
-            String target = RequestedCollectionRead.require(ctx, tenant, targetCollection).map(CollectionRow::label).orElse(targetCollection);
+            var sourceRow = RequestedCollectionRead.require(ctx, tenant, sourceCollection);
+            var targetRow = RequestedCollectionRead.require(ctx, tenant, targetCollection);
+            String source = sourceRow.map(CollectionRow::label).orElse(sourceCollection);
+            String target = targetRow.map(CollectionRow::label).orElse(targetCollection);
             // the rows of each leg by the history rule (CollectionKey#eqHistory): the id of the row each leg names, and the stored name of a
             // row whose collection is gone, so the dangling rows of a deleted collection clear too
             return ctx.deleteFrom(CHASH_REMAP)
                .where(CHASH_REMAP.TENANT_ID.eq(tenant)
-                       .and(sourceIs(tenant, source))
-                       .and(targetIs(tenant, target)))
+                       // a leg with no registry row was read without a lock: only its dangling rows, never a collection registered since
+                       .and(sourceRow.isPresent() ? sourceIs(tenant, source)
+                           : DanglingLedger.of(gate3, tenant, CHASH_REMAP.SOURCE_COLLECTION, CHASH_REMAP.SOURCE_COLLECTION_ID, source))
+                       .and(targetRow.isPresent() ? targetIs(tenant, target)
+                           : DanglingLedger.of(gate3, tenant, CHASH_REMAP.TARGET_COLLECTION, CHASH_REMAP.TARGET_COLLECTION_ID, target)))
                .execute();
         });
         log.info("event=remap_clear_leg tenant={} source={} target={} deleted={}",
