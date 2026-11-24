@@ -633,8 +633,9 @@ class EngineOwnedPredicateIntegrationTest {
             .isGreaterThanOrEqualTo(8);
         assertThat(writes).as("non-vacuity: vectors-024-1 writes both keys, vectors-030-1 (RDR-225) redefines that"
                 + " one write site to carry the model, vectors-069 (RDR-229 P3.1) redefines it again to carry the"
-                + " collection id, and the scan saw all three")
-            .isEqualTo(6);
+                + " collection id, vectors-077-56 (RDR-229 P3.5b) redefines it for its reads and keeps the write word"
+                + " for word, and the scan saw all four")
+            .isEqualTo(8);
         assertThat(removals).as("non-vacuity: vectors-025 removes both keys, and the scan saw it").isGreaterThanOrEqualTo(2);
         assertThat(offenders).isEmpty();
     }
