@@ -4416,7 +4416,21 @@ def _prune_deleted_files(
             # propagate it loud instead of logging a warning and quietly
             # leaving GC broken (nexus-ft04v.28 C1 was exactly that shape).
             raise
-        except Exception:  # noqa: BLE001 — best-effort; failure logged, sweep continues
+        except Exception as exc:  # noqa: BLE001 — best-effort; failure logged, sweep continues
+            from nexus.db.engine_reasons import RESTORE_ORIGIN_UNREGISTERED_REASON  # noqa: PLC0415 — deferred import
+
+            if getattr(exc, "reason", None) == RESTORE_ORIGIN_UNREGISTERED_REASON:
+                # RDR-229 P3.7 (engine 0.1.202): quarantined chunks of this collection carry the null origin marker
+                # (the origin had no registry row), so the engine refused the restore before anything moved. A typed
+                # answer, not a fault: say so once for the collection, skip its prune this pass, go on to the next.
+                engine = getattr(exc, "engine_body", None)
+                _log.warning(
+                    "gc_restore_origin_unregistered", collection=collection_name,
+                    rows=engine.get("rows") if isinstance(engine, dict) else None,
+                    note="quarantined chunks name an origin with no registry row; the engine will not restore them "
+                         "or re-create the origin from its label. This collection was NOT pruned this pass.",
+                )
+                continue
             _log.warning("gc_serverside_prune_failed", collection=collection_name,
                          exc_info=True)
             continue
