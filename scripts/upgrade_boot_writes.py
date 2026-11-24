@@ -24,11 +24,14 @@ are reported beside it, measured from the first sample after PG accepts connecti
 ``migrate`` is PG up to the engine's HTTP bind, ``ready`` is up to ``/health`` 200, ``settle`` is up to
 idle. Idle means all of: ``/v1/status`` ``boot_work`` empty (absent on engines that predate it is
 taken as empty) or holding only parked data moves (``blocked:`` for a missing prerequisite, or ``paused:``;
-reported as ``parked_moves``, never gated; a ``failed:`` move fails the leg; Sam 2026-11-21), no rows in ``pg_stat_progress_create_index`` or ``pg_stat_progress_vacuum``, and WAL
+reported as ``parked_moves``, never gated; a ``failed:`` move fails the leg; Sam 2026-11-21), the standing
+condition ``id-unique-index-held`` or the restart notice ``rdr229-restart`` (visible and safe to stop, not work;
+neither is a data move, so neither counts as a working move for the pacing, sizing or stuck-vs-slow rules), no rows in ``pg_stat_progress_create_index`` or ``pg_stat_progress_vacuum``, and WAL
 growth under ``--idle-wal-bytes`` over the last ``--idle-window`` seconds; and, unless
 ``--no-reconcile-wait``, a completed PCI reconcile pass in this boot's engine log plus the PCI end state (a
-valid ``pci_`` index for each large seeded collection, none INVALID). The ceiling applies to the total;
-the phases name where a regression is (see Bounds below). The ceiling gates WAL only: data-file writes that are not
+valid ``pci_`` index for each large seeded collection, none INVALID). The byte bounds gate migrate + ready of
+the upgrade boot and of the plain reboot, nothing after ready (see Bounds below); the phases name where a
+regression is. The bounds gate WAL only: data-file writes that are not
 WAL-logged (an index build's own heap and index pages beyond WAL, temp files) show in the reported
 ``pg_stat_io`` figures, which are not gated.
 
@@ -51,17 +54,37 @@ built twice and every kept build adopted (``pci_anchor_adopted``); with PG down,
 rebuilt exactly once.
 
 Bounds: ``--ceiling-boot`` gates the upgrade boot's migrate + ready WAL (``boot_wal_bytes``; the release gate
-is 64 MiB, accepted by Sam 2026-11-10), ``--ceiling`` its total through settle (on a ``--restart-mid-queue``
-run, through the restart), and ``--ceiling-reboot`` a plain same-version reboot's migrate + ready
+is 64 MiB, accepted by Sam 2026-11-10) and ``--ceiling-reboot`` a plain same-version reboot's migrate + ready
 (``reboot_wal_bytes``; 64 MiB on the release gate's same-version leg). Both limits are Sam's, 2026-11-10, recorded
-on nexus-f3yqd.1. Every boot's ``boot_wal_bytes`` is reported in ``boots[]``. A ``resume`` boot is never gated:
-a PCI build kept across the restart writes its WAL while it migrates.
+on nexus-f3yqd.1. Nothing after ready is gated (Sam, T2 nexus/sam-ruling-upgrade-gate-move-pacing-2026-11-23):
+``--ceiling``, the old total through settle, is retired and refused. Every boot's ``boot_wal_bytes`` is reported in
+``boots[]``. A ``resume`` boot is never gated: a PCI build kept across the restart writes its WAL while it migrates.
+
+Data moves. The registered data moves (the RDR-229 stamps) run at the pause the harness sets, not at their
+registered ``sleep_ms``: every boot of the new engine gets ``NX_DATA_MOVE_SLEEP_MS`` from ``--data-move-sleep-ms``
+(default 0), recorded as ``data_move_sleep_ms``. A green leg proves the moves complete and the engine settles at that
+pause and says nothing about production pacing, which rests on the DataMoveWorker*IntegrationTest suites. Reported,
+never gated: ``pre_move_wal_bytes`` (ready to the first sample whose status shows a move working),
+``move_wal_bytes`` (the WAL from that sample until idle: the moves, plus whatever else wrote in that window,
+autovacuum included when it started before idle) and ``move_pacing`` (the sizing estimate, below). Once ready, the
+upgrade boot adds up each open move's ceil(rows / chunk_size) x pause and exits 2 when that exceeds the time left
+before ``--max-wait``: a lower bound on the pauses alone (no compute time, rows counted for the whole table, not
+per tenant leaf), so it can catch a leg that cannot finish and never prove one will. A move still working when
+``--max-wait`` runs out is red (exit 1, ``data-move-never-finished``) only when it is stuck: no active move's ``done``
+advanced over the last ``PROGRESS_WINDOW_S`` seconds of status reads. One that is still advancing is a leg that ran out
+of time (exit 2: raise ``--max-wait`` or lower ``--data-move-sleep-ms``).
+TODO(idle rule, Sam's call): the idle window (60 s) is no longer than ``autovacuum_naptime`` (60 s), so idle can come
+before the vacuum of the moves' dead tuples starts, and that vacuum can land in the reboot's migrate + ready. Whether
+idle wants a second quiet window of at least ``autovacuum_naptime``, or an ``n_dead_tup`` check on the moves'
+driving tables, is open; read ``boots[1].phases`` of the first real leg A before deciding. ``post_idle_tail`` is not
+reported for the same reason.
 
 Exit: 0 within every bound given (or none given) with the restart rule met; 1 above a bound
-(``boot-over-ceiling``, ``reboot-over-ceiling`` or ``over-ceiling``, with ``ceilings_tripped``), a boot that never reached ready
-(``boot-failed``) or a broken restart rule (``restart-red``); 2 when the run
-itself failed (a fixture that did not take, a boot that never reached idle within ``--max-wait``, a step
-that errored). Prints the figures as one JSON object on stdout, and to ``--json`` when given.
+(``boot-over-ceiling`` or ``reboot-over-ceiling``, with ``ceilings_tripped``), a boot that never reached ready
+(``boot-failed``), a data move stuck when ``--max-wait`` ran out (``data-move-never-finished``) or a broken
+restart rule (``restart-red``); 2 when the run itself failed (a fixture that did not take, a boot that never reached
+idle within ``--max-wait`` with no move working or only slow ones, a sizing check or registry read that could not run, a step that
+errored). Prints the figures as one JSON object on stdout, and to ``--json`` when given.
 
 Heavy: run it on a lab host (``lab-remote -c lab-m -- uv run python scripts/upgrade_boot_writes.py
 ...``), never on the laptop. It touches no cloud.
@@ -100,6 +123,11 @@ LOCAL_TENANT = "default"
 
 class HarnessError(RuntimeError):
     """The run could not produce a measurement (exit 2)."""
+
+
+class DataMoveNeverFinished(HarnessError):
+    """The deadline passed while a data move was still working: the engine had the work and did not finish it, which is
+    a red (exit 1), not a run that failed to measure."""
 
 
 def log(msg: str) -> None:
@@ -325,6 +353,9 @@ class Sample:
     building: int
     vacuuming: int
     pci_building: tuple[tuple[str, int], ...] = ()  # (index name, building backend pid)
+    moves_active: bool = False   # a data move was still working when /v1/status was read with this sample
+    status_read: bool = False    # that read succeeded (200); False leaves moves_active meaning "unknown", not "none"
+    moves_progress: tuple[tuple[str, int, int | None], ...] = ()   # (move id, done, total) of each working move
 
 
 def sample(inst: Install, t0: float) -> Sample | None:
@@ -535,6 +566,66 @@ def _is_restart_notice(entry: dict) -> bool:
     return isinstance(entry, dict) and str(entry.get("id") or "") == RESTART_NOTICE_ID
 
 
+def moves_working(status: dict | None) -> bool:
+    """A data move that is neither parked nor failed shows in boot_work: the engine is still running a move."""
+    return any(_move_state(e) not in (None, "failed") and not _is_parked(e)
+               for e in ((status or {}).get("boot_work") or []))
+
+
+#: A move that has not advanced its ``done`` over this many seconds of status reads, at the deadline, is stuck.
+PROGRESS_WINDOW_S = 150.0
+
+
+def moves_progress(status: dict | None) -> tuple[tuple[str, int, int | None], ...]:
+    """(id, done, total) of each data move that is neither parked nor failed in ``/v1/status`` boot_work."""
+    return tuple((str(e.get("id")), int(e.get("done") or 0), None if e.get("total") is None else int(e["total"]))
+                 for e in ((status or {}).get("boot_work") or [])
+                 if _move_state(e) not in (None, "failed") and not _is_parked(e))
+
+
+def deadline_error(samples: list["Sample"], what: str, window_s: float = PROGRESS_WINDOW_S) -> HarnessError:
+    """The error for a boot that did not reach idle by the deadline. The state is that of the most recent sample whose
+    status read SUCCEEDED (a failed read says nothing about the moves, and the message says so). With a move working:
+    ``DataMoveNeverFinished`` (red) when none of the working moves advanced ``done`` over the last ``window_s``
+    seconds, a plain ``HarnessError`` (exit 2) when one did (the leg only ran out of time)."""
+    read = [x for x in samples if x.status_read]
+    last = read[-1] if read else None
+    failed_read = (" (the last /v1/status read failed; the state is that of the read at "
+                   f"{last.t:.0f} s)" if last is not None and samples[-1] is not last else "")
+    if last is None or not last.moves_active:
+        return HarnessError(f"{what} never reached idle within the max wait{failed_read}")
+    window = [x for x in read if x.moves_active and x.t >= last.t - window_s]
+    first_done = {i: d for i, d, _t in window[0].moves_progress}
+    now = {i: (d, t) for i, d, t in last.moves_progress}
+    named = ", ".join(f"{i.removeprefix(MOVE_ID_PREFIX)} {d}/{'?' if t is None else t}" for i, (d, t) in now.items())
+    advanced = [i for i, (d, _t) in now.items() if d > first_done.get(i, d)]
+    if advanced:
+        return HarnessError(f"{what}: data moves still progressing at --max-wait; raise --max-wait or lower "
+                            f"--data-move-sleep-ms ({named}){failed_read}")
+    return DataMoveNeverFinished(f"{what}: a data move was stuck when the max wait ran out: none of {named} advanced "
+                                 f"in the last {min(window_s, last.t - window[0].t):.0f} s{failed_read}")
+
+
+def _first_active(samples: list["Sample"]) -> "Sample | None":
+    return next((x for x in samples if x.moves_active), None)
+
+
+def move_wal_bytes(samples: list["Sample"], idle: "Sample") -> int:
+    """WAL from the first sample whose status showed a data move working until ``idle``: the moves, plus whatever
+    else wrote in that window (a PCI build, a reconcile pass, an autovacuum that began before idle). Reported, never
+    gated. 0 when no sample saw a move working. The first seconds of a move can pass before any sample sees it; that
+    WAL is in ``pre_move_wal_bytes``."""
+    first = _first_active(samples)
+    return 0 if first is None else max(0, idle.lsn - first.lsn)
+
+
+def pre_move_wal_bytes(samples: list["Sample"], ready: "Sample", idle: "Sample") -> int:
+    """WAL from ``ready`` to the first sample that saw a data move working (to ``idle`` when none did). Reported,
+    never gated."""
+    first = _first_active(samples)
+    return max(0, (idle if first is None else first).lsn - ready.lsn)
+
+
 def boot_work_settled(status: dict | None) -> bool:
     """Every boot_work entry is a parked move, a standing condition or the restart notice (or there is none): nothing in it is still working."""
     if boot_work_empty(status):
@@ -629,7 +720,7 @@ def wait_idle(inst: Install, port_fn, t0: float, samples: list[Sample], rule: Id
     while True:
         now = time.monotonic()
         if now > deadline:
-            raise HarnessError(f"{what} never reached idle within the max wait")
+            raise deadline_error(samples, what)
         s = sample(inst, t0)
         if s is not None:
             samples.append(s)
@@ -637,6 +728,9 @@ def wait_idle(inst: Install, port_fn, t0: float, samples: list[Sample], rule: Id
                 on_sample(samples)
             port = port_fn()
             code, status = http_status(port, "/v1/status") if port else (0, None)
+            s.status_read = code == 200
+            s.moves_active = code == 200 and moves_working(status)
+            s.moves_progress = moves_progress(status) if s.moves_active else ()
             if code == 200 and (failed := failed_moves(status)):
                 raise HarnessError(f"{what}: data move failed: {failed}")
             older = [x for x in samples if x.t <= s.t - rule.window_s]
@@ -705,12 +799,17 @@ class Report:
     checkpoint_lsn: str = ""
     phases: dict[str, dict] = field(default_factory=dict)
     total_wal_bytes: int = 0
+    # WAL from the first sample whose status showed a data move working until idle (the moves, plus whatever else wrote
+    # in that window); pre_move_wal_bytes is ready to that sample. Both reported, never gated.
+    move_wal_bytes: int = 0
+    pre_move_wal_bytes: int = 0
+    pacing_note: str = ""
     total_io_write_bytes: int | None = None
     total_io_extend_bytes: int | None = None
     elapsed_s: float = 0.0
-    ceiling: int | None = None
     ceiling_boot: int | None = None
     ceiling_reboot: int | None = None
+    data_move_sleep_ms: int = 0
     new_jar_sha256: str | None = None
     new_jar_commit: str | None = None
     new_engine_version: dict = field(default_factory=dict)
@@ -928,12 +1027,103 @@ def run_doctor(inst: Install, a: argparse.Namespace, env: dict[str, str], label:
                       "rc": r.returncode}
 
 
+#: The open data moves in the registry, oldest first: not completed, not failed, not paused, not superseded.
+_OPEN_MOVES_SQL = (
+    "select d.label, d.driving_schema, d.driving_table, d.chunk_size, d.sleep_ms, d.registered_at::text "
+    "from nexus.data_moves d where d.completed_at is null and d.failed_at is null and d.paused_at is null "
+    "and not exists (select 1 from nexus.data_moves s where s.supersedes = d.label) order by d.registered_at, d.label")
+
+
+def open_moves(inst: Install, parked_labels: frozenset[str] = frozenset()) -> list[dict]:
+    """Each open data move that can run, with the row count of the table it walks (``dml_utils`` cuts the whole
+    driving table into chunks by primary key, so the move takes ceil(rows / chunk_size) chunks whatever the predicate
+    selects). A move parked in boot_work (``parked_labels``) never runs and is left out. Raises HarnessError when the
+    registry or a count cannot be read: a check that read nothing must not pass. The count is the larger of
+    ``count(*)`` and the planner's estimate, so a role that row-level security shows no rows cannot read as an empty
+    table; either way it is a lower bound."""
+    registry = inst.sql(_OPEN_MOVES_SQL)
+    if registry is None:
+        raise HarnessError("the data-move registry could not be read: PG did not answer, so the sizing check has nothing to size")
+    out: list[dict] = []
+    for label, schema, table, chunk, sleep, registered in registry:
+        if label in parked_labels:
+            continue
+        rel = f'"{schema}"."{table}"'
+        counted = inst.sql(f"select greatest((select count(*) from {rel}), "
+                           f"coalesce((select reltuples::bigint from pg_class where oid = '{rel}'::regclass), 0))")
+        if not counted or not counted[0] or not counted[0][0].lstrip("-").isdigit():
+            raise HarnessError(f"the row count of {schema}.{table} (data move {label}) could not be read: {counted!r}")
+        out.append({"label": label, "table": f"{schema}.{table}", "rows": int(counted[0][0]),
+                    "chunk_size": int(chunk), "registered_sleep_ms": int(sleep), "registered_at": registered})
+    return out
+
+
+def check_move_pacing(moves: list[dict], sleep_override_ms: int | None, time_left_s: float) -> dict:
+    """What the open moves cost in pauses alone: per move ceil(rows / chunk_size) chunks x the pause after each
+    (``sleep_override_ms`` when set, else the move's registered ``sleep_ms``); the worker runs them one after
+    another, so the figures add. A LOWER bound: no compute time, and rows are counted for the whole table, not per
+    tenant leaf. Raises HarnessError, naming the moves, when the sum exceeds ``time_left_s`` (the time left before
+    ``--max-wait``, not the whole of it: migrate + ready is spent): that run could never reach idle. Returns the
+    estimate for the report."""
+    rows = []
+    for m in moves:
+        chunks = -(-int(m["rows"]) // max(1, int(m["chunk_size"])))
+        sleep = m["registered_sleep_ms"] if sleep_override_ms is None else sleep_override_ms
+        rows.append({**m, "chunks": chunks, "effective_sleep_ms": sleep, "pause_s": round(chunks * sleep / 1000.0, 1)})
+    total = round(sum(r["pause_s"] for r in rows), 1)
+    est = {"sleep_override_ms": sleep_override_ms, "pause_s_total": total, "time_left_s": round(time_left_s, 1),
+           "lower_bound": True, "moves": rows}
+    if total > time_left_s:
+        worst = sorted(rows, key=lambda r: r["pause_s"], reverse=True)[:3]
+        raise HarnessError(
+            f"the open data moves pause {total:.0f} s between chunks (pace: "
+            f"{'the registered sleep_ms' if sleep_override_ms is None else f'NX_DATA_MOVE_SLEEP_MS={sleep_override_ms}'}), "
+            f"more than the {time_left_s:.0f} s left before --max-wait, so this run could never reach idle. Largest: "
+            + "; ".join(f"{r['label']} {r['rows']} rows / {r['chunk_size']} per chunk x {r['effective_sleep_ms']} ms = "
+                         f"{r['pause_s']:.0f} s" for r in worst)
+            + ". Lower --data-move-sleep-ms or raise --max-wait.")
+    return est
+
+
+def size_open_moves(inst: Install, label: str, sleep_ms: int, deadline: float) -> dict | None:
+    """The upgrade boot's sizing check, run once ready and before the wait for idle; other boots run none (their moves
+    were sized, or finished, in the upgrade boot). Moves parked in boot_work are left out."""
+    if label != "upgrade":
+        return None
+    port = inst.service_port()
+    code, status = http_status(port, "/v1/status") if port else (0, None)
+    if code != 200:
+        raise HarnessError(f"/v1/status answered {code} when the sizing check read the parked moves: nothing to size against")
+    parked = frozenset(str(e.get("id") or "").removeprefix(MOVE_ID_PREFIX) for e in parked_moves(status))
+    return check_move_pacing(open_moves(inst, parked), sleep_ms, deadline - time.monotonic())
+
+
+#: The engine setting that overrides every registered data move's ``sleep_ms`` (DataMoveWorker.SLEEP_ENV).
+DATA_MOVE_SLEEP_ENV = "NX_DATA_MOVE_SLEEP_MS"
+
+
+def pacing_note(sleep_ms: int) -> str:
+    """The line every report and run log carries: what a green leg does and does not show about the data moves."""
+    return (f"data moves ran with a {sleep_ms} ms pause between chunks (data_move_sleep_ms): a green leg shows they "
+            "complete and the engine settles at that pause, and nothing about production pacing, which rests on the "
+            "DataMoveWorker*IntegrationTest suites")
+
+
+def new_engine_env(env: dict[str, str], jar: Path, sleep_ms: int) -> dict[str, str]:
+    """The environment of every boot of the new engine. ``env`` has had every NX_*/NEXUS_* variable stripped, so
+    this is where the harness's own deliberate settings are added: the jar under test and the data-move pause.
+    The pause is explicit, never the machine's: production's registered pacing (the RDR-229 chunks stamp sleeps 20 s
+    per 100 rows) is about 4.8 h on the fixture, which no ``--max-wait`` covers. ``nx daemon service start`` and
+    the engine it spawns inherit this environment (``_spawn_service`` builds its env from ``os.environ``)."""
+    return {**env, "NEXUS_SERVICE_JAR": str(jar), DATA_MOVE_SLEEP_ENV: str(sleep_ms)}
+
+
 def measure_boot(inst: Install, a: argparse.Namespace, env: dict[str, str], label: str, base_lsn: str) -> dict:
     """One boot of the new engine on the stopped install, measured from the cluster's last checkpoint
     (``base_lsn``) until idle, or until the boot fails: ``nx daemon service start`` exits non-zero, or
     ``/health`` never answers 200 within ``--max-wait``. A failed boot is a result, not a harness error:
     its bytes are counted to the moment the failure was seen. Leaves the install stopped."""
-    new_env = {**env, "NEXUS_SERVICE_JAR": str(a.new_jar)}
+    new_env = new_engine_env(env, a.new_jar, a.data_move_sleep_ms)
     base = lsn_bytes(base_lsn)
     logs = LogWatch(inst.config_dir)
     t0 = time.monotonic()
@@ -983,6 +1173,11 @@ def measure_boot(inst: Install, a: argparse.Namespace, env: dict[str, str], labe
             failure = f"the engine exited while booting (nx daemon service start had returned {rc})"
             break
         time.sleep(0.5)
+    if "ready" in marks and not failure:
+        # The moves are registered by now (Liquibase ran before the bind). A pacing that cannot finish inside
+        # --max-wait fails here, not 40 minutes later as an idle that never came.
+        if (pacing := size_open_moves(inst, label, a.data_move_sleep_ms, deadline)) is not None:
+            rec["move_pacing"] = pacing
     doctor: dict = {}
     doc_thread: threading.Thread | None = None
     # A boot that will be restarted mid-queue runs no doctor: it would outlive the stop and run against an
@@ -1066,7 +1261,8 @@ def measure_boot(inst: Install, a: argparse.Namespace, env: dict[str, str], labe
                                                    "wait_event": x[4], "backend_start": x[5], "backend_type": x[6]}
                                                   for x in survivors]})
         rec.update({"reached_ready": True, "restarted_mid_queue_s": round(last.t, 1), "total_wal_bytes": last.lsn - base,
-                    "pci_builds": build_timeline(samples),
+                    "pci_builds": build_timeline(samples), "move_wal_bytes": move_wal_bytes(samples, last),
+                    "pre_move_wal_bytes": pre_move_wal_bytes(samples, marks["ready"], last),
                     "phases": {"migrate": _phase(base, first_mark(marks), marks["bind"]),
                                "ready": _phase(marks["bind"].lsn, marks["bind"], marks["ready"]),
                                "until_restart": _phase(marks["ready"].lsn, marks["ready"], last)}})
@@ -1091,6 +1287,8 @@ def measure_boot(inst: Install, a: argparse.Namespace, env: dict[str, str], labe
                      "ready": _phase(marks["bind"].lsn, marks["bind"], marks["ready"]),
                      "settle": _phase(marks["ready"].lsn, marks["ready"], idle)}
     rec["total_wal_bytes"] = idle.lsn - base
+    rec["move_wal_bytes"] = move_wal_bytes(samples, idle)
+    rec["pre_move_wal_bytes"] = pre_move_wal_bytes(samples, marks["ready"], idle)
     if None not in (first.io_write_bytes, idle.io_write_bytes, first.io_extend_bytes, idle.io_extend_bytes):
         rec["total_io_write_bytes"] = int(idle.io_write_bytes or 0) - int(first.io_write_bytes or 0)
         rec["total_io_extend_bytes"] = int(idle.io_extend_bytes or 0) - int(first.io_extend_bytes or 0)
@@ -1121,6 +1319,8 @@ def boot_new(inst: Install, a: argparse.Namespace, env: dict[str, str], rep: Rep
     last = first
     rep.phases = first.get("phases", {})
     rep.total_wal_bytes = first.get("total_wal_bytes", 0)
+    rep.move_wal_bytes = first.get("move_wal_bytes", 0)
+    rep.pre_move_wal_bytes = first.get("pre_move_wal_bytes", 0)
     rep.boot_wal_bytes = boot_wal_bytes(first)
     first["boot_wal_bytes"] = rep.boot_wal_bytes
     rep.total_io_write_bytes = first.get("total_io_write_bytes")
@@ -1135,6 +1335,8 @@ def boot_new(inst: Install, a: argparse.Namespace, env: dict[str, str], rep: Rep
         try:
             base = first.get("restart_lsn") or inst.checkpoint_lsn()
             second = measure_boot(inst, a, env, label, base)
+        except DataMoveNeverFinished:
+            raise
         except HarnessError as exc:
             # A failure of the second boot is its own result; it never overwrites the first boot's.
             second = {"label": label, "reached_ready": False, "harness_error": f"second boot could not be measured: {exc}"}
@@ -1212,24 +1414,22 @@ def boot_wal_bytes(boot: dict) -> int:
     return sum(int((ph.get(k) or {}).get("wal_bytes", 0)) for k in ("migrate", "ready"))
 
 
-def ceiling_verdict(boot_wal: int, total_wal: int, ceiling: int | None, ceiling_boot: int | None,
-                    reboot_wal: int = 0, ceiling_reboot: int | None = None) -> tuple[str, list[str]]:
+def ceiling_verdict(boot_wal: int, ceiling_boot: int | None, reboot_wal: int = 0,
+                    ceiling_reboot: int | None = None) -> tuple[str, list[str]]:
     """The byte bounds, decided by Sam on 2026-11-10 (recorded on nexus-f3yqd.1). ``ceiling_boot`` gates the
-    UPGRADE boot's migrate + ready (64 MiB on the release gate); ``ceiling`` gates that boot's total through
-    settle; ``ceiling_reboot`` gates a plain same-version ``reboot``'s migrate + ready (64 MiB on the release
-    gate's same-version leg). A ``resume`` boot is never gated, because a PCI build kept across the restart
-    writes its WAL while it migrates; ``--ceiling-reboot`` is refused with ``--restart-mid-queue`` for that
-    reason. Returns the verdict and the bounds that tripped."""
-    tripped = [name for name, value, bound in (("boot", boot_wal, ceiling_boot), ("reboot", reboot_wal, ceiling_reboot),
-                                               ("total", total_wal, ceiling))
+    UPGRADE boot's migrate + ready (64 MiB on the release gate); ``ceiling_reboot`` gates a plain same-version
+    ``reboot``'s migrate + ready (64 MiB on the release gate's same-version leg). Nothing after ready is gated: the
+    total through settle was retired with the move pacing ruling (T2 nexus/sam-ruling-upgrade-gate-move-pacing-2026-11-23).
+    A ``resume`` boot is never gated, because a PCI build kept across the restart writes its WAL while it migrates;
+    ``--ceiling-reboot`` is refused with ``--restart-mid-queue`` for that reason. Returns the verdict and the bounds
+    that tripped."""
+    tripped = [name for name, value, bound in (("boot", boot_wal, ceiling_boot), ("reboot", reboot_wal, ceiling_reboot))
                if bound is not None and value > bound]
     if "boot" in tripped:
         return "boot-over-ceiling", tripped
-    if "reboot" in tripped:
-        return "reboot-over-ceiling", tripped
     if tripped:
-        return "over-ceiling", tripped
-    gated = any(b is not None for b in (ceiling, ceiling_boot, ceiling_reboot))
+        return "reboot-over-ceiling", tripped
+    gated = any(b is not None for b in (ceiling_boot, ceiling_reboot))
     return ("under-ceiling" if gated else "measured"), tripped
 
 
@@ -1252,13 +1452,18 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--control-rows", type=int, default=5_000, help="rows in the control (must stay under the threshold)")
     ap.add_argument("--seed", type=int, default=20261110)
     ap.add_argument("--ceiling", type=int, default=None,
-                    help="fail (exit 1, over-ceiling) when the upgrade boot's total WAL, through settle, exceeds this")
+                    help="retired: refused. The total through settle is not gated; use --ceiling-boot and "
+                         "--ceiling-reboot (migrate + ready). Post-ready WAL is reported as move_wal_bytes")
     ap.add_argument("--ceiling-boot", type=int, default=None,
                     help="fail (exit 1, boot-over-ceiling) when the upgrade boot's migrate + ready WAL exceeds this")
     ap.add_argument("--ceiling-reboot", type=int, default=None,
                     help="fail (exit 1, reboot-over-ceiling) when the same-version reboot's migrate + ready WAL exceeds "
                          "this; refused with --restart-mid-queue (a resume boot is never gated) and --no-second-boot")
     ap.add_argument("--max-wait", type=float, default=2400.0, help="seconds each boot may take to reach idle")
+    ap.add_argument("--data-move-sleep-ms", type=int, default=0, metavar="MS",
+                    help="NX_DATA_MOVE_SLEEP_MS for the new engine's boots: the pause after every data-move chunk, "
+                         "overriding each move's registered sleep_ms (0 to 60000; default 0, so the moves finish "
+                         "inside --max-wait; recorded in the report)")
     ap.add_argument("--idle-window", type=float, default=60.0)
     ap.add_argument("--idle-wal-bytes", type=int, default=1 << 20)
     ap.add_argument("--work", type=Path, default=None, help="work dir (default a new temp dir, removed after)")
@@ -1296,6 +1501,12 @@ def main(argv: list[str] | None = None) -> int:
                  "(that second boot is a resume, which is never gated) or --no-second-boot (there is no reboot)")
     if a.restart_mid_queue and not a.second_boot:
         ap.error("--restart-mid-queue needs the second boot (drop --no-second-boot): the verdict is what it resumed")
+    if a.ceiling is not None:
+        ap.error("--ceiling is retired: the total WAL through settle is not gated (Sam, T2 "
+                 "nexus/sam-ruling-upgrade-gate-move-pacing-2026-11-23). Bound migrate + ready with --ceiling-boot and "
+                 "--ceiling-reboot; the WAL after ready is reported as move_wal_bytes")
+    if not 0 <= a.data_move_sleep_ms <= 60_000:
+        ap.error("--data-move-sleep-ms must be between 0 and 60000 (the registry's sleep_ms bounds)")
     if a.prepare_only and a.work is None:
         ap.error("--prepare-only needs --work, the directory the old state is left in")
     if a.rows < PCI_BUILD_MIN_ROWS or a.control_rows >= PCI_BUILD_MIN_ROWS:
@@ -1309,9 +1520,12 @@ def main(argv: list[str] | None = None) -> int:
     env = {k: v for k, v in os.environ.items() if not k.startswith(("NX_", "NEXUS_"))}
     env.update({"NEXUS_CONFIG_DIR": str(config), "NX_LOCAL": "1"})
     inst = Install(config)
-    rep = Report(prev_client=a.prev_client, new_jar=str(a.new_jar), rows_per_collection=a.rows, ceiling=a.ceiling,
+    rep = Report(prev_client=a.prev_client, new_jar=str(a.new_jar), rows_per_collection=a.rows,
                  ceiling_boot=a.ceiling_boot, ceiling_reboot=a.ceiling_reboot,
+                 data_move_sleep_ms=a.data_move_sleep_ms,
                  new_jar_sha256=None if a.prepare_only else jar_identity(a.new_jar))
+    rep.pacing_note = pacing_note(a.data_move_sleep_ms)
+    log(rep.pacing_note)
     rc = 2
     try:
         t_prep = time.monotonic()
@@ -1335,8 +1549,8 @@ def main(argv: list[str] | None = None) -> int:
         if a.restart_mid_queue and rep.boots[0].get("reached_ready") and "restarted_mid_queue_s" not in rep.boots[0]:
             raise HarnessError(f"--restart-mid-queue {a.restart_mid_queue} never fired: the upgrade boot showed "
                                f"fewer than {a.restart_mid_queue} pci_ builds, so the restart leg tested nothing")
-        ceiling_name, rep.ceilings_tripped = ceiling_verdict(rep.boot_wal_bytes, rep.total_wal_bytes, a.ceiling,
-                                                             a.ceiling_boot, rep.reboot_wal_bytes, a.ceiling_reboot)
+        ceiling_name, rep.ceilings_tripped = ceiling_verdict(rep.boot_wal_bytes, a.ceiling_boot, rep.reboot_wal_bytes,
+                                                             a.ceiling_reboot)
         failed = [b["label"] for b in rep.boots if not b.get("reached_ready") and "harness_error" not in b]
         unmeasured = [b["harness_error"] for b in rep.boots if "harness_error" in b]
         if unmeasured and rep.boots[0].get("reached_ready"):
@@ -1352,6 +1566,10 @@ def main(argv: list[str] | None = None) -> int:
         else:
             rep.verdict = ceiling_name
             rc = 1 if rep.ceilings_tripped else 0
+    except DataMoveNeverFinished as exc:   # the engine had the work and did not finish it: red, not a failed run
+        rc = 1
+        rep.verdict = "data-move-never-finished"
+        rep.error = str(exc)
     except Exception as exc:  # noqa: BLE001 - every failure to measure is exit 2, never a red or a green
         rc = 2
         rep.verdict = "error"
