@@ -1616,7 +1616,8 @@ while the engine serves:
        latched gate 3 (P3.5c). Once gate 3 has latched, the engine's
        `NameKeyDropPass` registers P3.7's name-key drop move (Switch), the
        rename becomes one row (P3.7) once that move also has `completed_at`
-       set, and the check registers P4.1's drop move once P4.1's release
+       set, and an engine pass registers P4.1's drop move, as
+       `NameKeyDropPass` does P3.7's, once P4.1's release
        is installed.
     Until gate 3, the Java readers that switch at the latch take the name key
     from the one `Gate3` the engine builds (`Main.java:622-624`; the registry
@@ -1674,7 +1675,8 @@ while the engine serves:
     reads by an id before that collection's index on it exists.
 
     The check reports in its own `/v1/status` field, `rdr229_completion`,
-    and never in `boot_work`. `boot_work` is work in progress: `nx upgrade`'s
+    and in `boot_work` only through one notice, the restart request below.
+    `boot_work` is work in progress: `nx upgrade`'s
     bundle swap and the boot-write harness count every entry in it that is
     not a parked data move as work. The gates wait by design (gate 3 cannot
     hold until P3.4 builds its id indexes), so a `boot_work` entry for them
@@ -1682,7 +1684,8 @@ while the engine serves:
     would defer the very swap that lets the stamp moves run. The moves
     themselves, which are work, stay `boot_work` entries. The field holds
     the three gates, the labels still incomplete, the CHECKs missing, the
-    tables whose VALIDATE waits and, from P4.0, the restart request, each with operator text that names the
+    tables whose VALIDATE waits and, from P3.7, `rename_missing`, whose
+    `restart` value is the restart request, each with operator text that names the
     `nexus.rdr229_restamp` step. `/v1/status` is unauthenticated, so the
     field names no collection or tenant and carries no number that describes
     tenants; the counts come from the authenticated, tenant-scoped
@@ -1726,13 +1729,18 @@ while the engine serves:
     (`P35bChangesets.java:31-37`) and `databasechangelog` in each completion
     sample under a 2 s statement bound, and counts an id applied when its
     `exectype` is EXECUTED, RERAN or MARK_RAN (`CompletionCheck.java:777`,
-    `:819-833`; T2 `229-research-320`, `229-research-329`). When every stamp move is complete and a P3.5b
-    changeset is not yet applied, the check asks for a restart in its
-    `rdr229_completion` field, which nx doctor shows, and not in `boot_work`
-    (not in this tree: P3.5b ships no restart text, and no restart
-    request on the completion check reads the list yet,
-    `vectors-078:22-24`; T2 `229-research-320`; P4.0 owns the request,
-    T2 `229-research-322`). That is the one restart the
+    `:819-833`; T2 `229-research-320`, `229-research-329`). When gate 1 holds and a listed P3.5b
+    changeset is not yet applied, P3.7's engine asks for a restart in two
+    places: `rdr229_completion.rename_missing` is `restart`, which nx doctor
+    shows, and `boot_work` carries the entry `rdr229-restart`, naming how
+    many of the listed changesets have not applied
+    (`CompletionCheck.java:432-434`; `CompletionBootWork.java:82`,
+    `:471-483`). That entry is the one exception to the rule above: a
+    notice that does no work and is safe to stop, which `nx upgrade`'s
+    `engine_busy_reason` and the boot-write harness's `boot_work_settled`
+    skip by its id (`pg_bundle_refresh.py:393-397`, `:418`;
+    `upgrade_boot_writes.py:531-542`). P4.0 owns no separate request (Sam,
+    T2 `nexus/sam-ruling-rdr229-restart-request-follows-p37-code-2026-11-24`; T2 `229-research-329`). That is the one restart the
     chain from a half-stamped store needs. A client cache
     keyed by id holds a stable id only from the name-key drop move's
     `completed_at` on the install, when the
@@ -3305,14 +3313,15 @@ its acceptance is that test green plus the census pin it lowers.
   worker records a `completed_at` and when a reconciler pass ends, so the
   floor lifts in the running process once it holds (item 6). From a
   half-stamped store the chain needs one restart: the boot after the
-  stamp moves complete, which applies P3.5b's CONTINUE changesets. P4.0
-  owns that restart request: the completion check asks for it in its
-  `rdr229_completion` field, not in `boot_work` (item 6; T2
-  `229-research-322`). Test, over
+  stamp moves complete, which applies P3.5b's CONTINUE changesets. P3.7's
+  engine asks for that restart, as `rename_missing` `restart` and as the
+  `rdr229-restart` notice, and P4.0 owns no separate request (item 6; Sam,
+  T2 `nexus/sam-ruling-rdr229-restart-request-follows-p37-code-2026-11-24`). Test, over
   the whole chain: the P4.0 engine booted on a half-stamped store (the
   stamp move paused part-way) refuses collection-scoped routes naming the
   floor and reports the stamp move in `boot_work`; when the stamp
-  completes it asks for a restart in `rdr229_completion`, not in `boot_work`; after that one restart, gates 1 to 3,
+  completes it asks for a restart, `rename_missing` `restart` and the
+  `rdr229-restart` notice; after that one restart, gates 1 to 3,
   the name-key drop move and the floor follow in one process with no
   further restart, and it then serves by the id.
 - P4.1 After P3.11 and P4.0; its acceptance includes RDR-248's committed fixture
@@ -3452,7 +3461,9 @@ its acceptance is that test green plus the census pin it lowers.
   step belongs in a move's `on_complete`" (RDR-246 lines 986-992). That
   `on_complete` opens with the redefinition step above, which also removes
   the name arm of P3.5b's both-shapes readers.
-  The boot-time completion check registers that move once gate 3 holds, so the move never exists before the moves it depends on have
+  An engine pass registers that move once gate 3 has latched, as
+  `NameKeyDropPass` does P3.7's, because the completion check runs
+  read-only (linda 2026-11-24), so the move never exists before the moves it depends on have
   completed, and its verification only checks its own table (T2
   `229-research-52`). On every other table the dropping changeset carries
   CONTINUE preconditions on that table's own stamp move's `completed_at`,
@@ -3558,8 +3569,8 @@ None.
 - **Scenario**: an engine with P4.0 boots on a store with only half its
   chunks stamped — **Verify**: it serves migration-only, refusing
   collection-scoped routes with an error that names the floor, the stamp
-  move keeps running in `boot_work`, it asks for one restart in
-  `rdr229_completion` (not in `boot_work`) once the stamp completes, and after that restart it reaches gate 3, the
+  move keeps running in `boot_work`, it asks for one restart, as
+  `rename_missing` `restart` and the `rdr229-restart` notice, once the stamp completes, and after that restart it reaches gate 3, the
   name-key drop move and the floor in one process and serves by the id.
 - **Scenario**: rename a collection that has chunk and `canary_query_ring`
   rows after P3.7 — **Verify**: one registry
@@ -4082,3 +4093,4 @@ large, and moved under a ratchet.
 - 2026-11-24: P3.5c folded from the stacked code (grant 3, nexus-p2m1x.25; T2 `229-research-327`): the readers switch from the latched gate 3 through `CollectionKey`, `CollectionSelector` and `CollectionIdReads`; the reader census and its dispositions; the label metadata-key extension; the eight reads held to P3.7 (`vectors-083`), with linda's expiry ruling, and the reaper's held to P4.1; the ten `TwinKeyUpsert` arbiters, the id arm writing the label; I7 and I8; the registry caches emptied before serve; the verbs by id and their 409 `collection_id_mismatch`; gate 3's quarantine origin-id clause, to be retired by row 13's backfill; the origin id as JSON null, not absent, and in a restore; `IdReaders.PRESENT` true; `collectionForTuple`'s tie-break credited to P3.8. The R7 reader contract is held from this fold pending a ruling.
 - 2026-11-24: the R7 reader contract split (Sam, "Split", relayed by linda; T2 `229-research-328`): P3.5c keeps the guard messages, `TargetSelection`'s no-successor refusal, the label-addressed read refusing with today's 409 `collection_superseded` body and one test per reader class, none yet on the stack; the `RETIRED_NO_SUCCESSOR` marker and its typed client error move to the next cut.
 - 2026-11-24: P3.7 folded from the stacked code (grant 3, nexus-p2m1x.27; T2 `229-research-329`): `NameKeyDropPass` registers the name-key drop move on the latch, the check registers nothing; the refusal's values and order, `rename_missing` and the readiness's own read of the P3.5b list; `ids_stable` true on the one-row answer; the one-row body's other duties; `vectors-079`'s child-name triggers; `label_reserved` and the mint's skip; `vectors-083` and the restore refusal `restore_origin_unregistered` (commit 2d054c3be8); the eight reads P3.5c held, now switched; the census counts with P3.7; the wire changes paired with 8.5.6. Held for a ruling: the `rdr229-restart` boot_work notice against the P4.0 restart-request text.
+- 2026-11-24: the restart request follows P3.7's reviewed code (Sam, "Amend the RDR", T2 `nexus/sam-ruling-rdr229-restart-request-follows-p37-code-2026-11-24`, superseding the P4.0 part of option 1 on ask `rdr229-p41-p40-p35-rulings`): P3.7 asks for the restart as `rename_missing` `restart` and as the `rdr229-restart` boot_work notice, the one exception to the boot_work rule; P4.0 owns no separate request, and its Test and the Test Plan scenario say so. P4.1's drop move is registered by an engine pass, as `NameKeyDropPass` registers P3.7's, because the completion check runs read-only (linda).
