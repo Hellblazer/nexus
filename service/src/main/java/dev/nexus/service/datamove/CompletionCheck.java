@@ -1108,6 +1108,7 @@ public final class CompletionCheck {
     // ---- the rows that keep a CHECK NOT VALID -------------------------------------------------------------------------
 
     private static Violators countViolators(DSLContext ctx, P31Checks.Row row) {
+        Integer original = networkTimeoutOf(ctx);   // the session's own bound, read before setLocal binds the short one
         try {
             return ctx.transactionResult(cfg -> {
                 DSLContext tx = cfg.dsl();
@@ -1118,11 +1119,14 @@ public final class CompletionCheck {
         } catch (DataAccessException e) {
             return new Violators(row.table(), row.constraint(), 0L, 0L, false);
         } finally {
-            // the session outlives this scan (CompletionBootWork keeps it between samples): its short read bound does not
-            try {
-                ctx.connection(c -> PgSession.restoreNetworkTimeout(c, 0));
-            } catch (DataAccessException e) {
-                // a connection that cannot be reached fails its next read on its own
+            // the session outlives this scan (CompletionBootWork keeps it between samples): its short read bound does not, and the
+            // session's own socket bound (AdminDdlSession's 35 minutes) is what comes back, not "none"
+            if (original != null) {
+                try {
+                    ctx.connection(c -> PgSession.restoreNetworkTimeout(c, original));
+                } catch (DataAccessException e) {
+                    // a connection that cannot be reached fails its next read on its own
+                }
             }
         }
     }
