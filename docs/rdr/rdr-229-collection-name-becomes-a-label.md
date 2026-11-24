@@ -1266,8 +1266,8 @@ while the engine serves:
   by-name writes and finds every writer of `taxonomy_centroids` before its
   CHECK lands. The re-run is `scripts/rdr229_p31_writer_census.py`, which
   writes `service/src/test/resources/rdr229/p31-writer-census.tsv` and has a
-  drift check (`--check`). It lists 183 Java write rows (140 on a literal
-  table, 34 through a helper, 9 by name), 48 statements in 25 SQL functions
+  drift check (`--check`). It lists 186 Java write rows (143 on a literal
+  table, 34 through a helper, 9 by name), 49 statements in 25 SQL functions
   (vectors-069 redefines 24 of them; `purge_trash` writes `''` and needs no
   id) and 26 registered move templates.
 - *Index builds follow the PCI reconciler's pattern.* RDR-246 keeps index
@@ -1573,7 +1573,7 @@ while the engine serves:
        waits for changeset `vectors-078-8`, and gate 3 waits with it
        (`ArbiterTwins.java:45-46`; T2 `229-research-268`). That changeset is
        P3.5b's form A body of `canary_query_ring_upsert`, CONTINUE-gated on
-       the stamps (`vectors-078:573-574`, `:604`), and the pass builds the
+       the stamps (`vectors-078:573-601`, the changeset and its one `sqlCheck`), and the pass builds the
        twin only once `databasechangelog` records it
        (`IdUniqueIndexPass.java:243-251`; T2 `229-research-269`,
        `229-research-319`). Then
@@ -2930,7 +2930,7 @@ its acceptance is that test green plus the census pin it lowers.
   condition at `Main.java:890`; `CompletionCheck.java:518-540`), and the
   changeset's one CONTINUE `sqlCheck`, on every stamp move complete with its
   CHECKs present and validated (item 6), lets Liquibase apply it only at a
-  boot (`vectors-078:573-574`, `:604`). Inferred from code, not tested (T2
+  boot (`vectors-078:573-601`, the changeset and its one `sqlCheck`). Inferred from code, not tested (T2
   `229-research-322`); bead nexus-p2m1x.48 tracks it.
   - P3.5a Registry and routes: `CollectionRegistry` keyed by id with a
     label index; every collection-taking route in the census accepts
