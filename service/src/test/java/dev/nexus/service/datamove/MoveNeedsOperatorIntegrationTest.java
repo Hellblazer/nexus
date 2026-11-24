@@ -733,6 +733,56 @@ class MoveNeedsOperatorIntegrationTest extends DataMoveIntegrationBase {
         }
     }
 
+    @Test
+    void aDropMoveLatchedByThreeCountedLockTimeouts_thenDeferredOnABuild_keepsItsPage_andLogsNoSecondOne() throws Exception {
+        withNoEarlierRunOf(NameKeyDropMove.LABEL);
+        registerMove(NameKeyDropMove.LABEL, CHUNK_FAMILY_ON_COMPLETE);
+        var finisher = new VerifyingFinisher();
+        finisher.buildWait.clock = clock;
+        var w = workerOn(finisher);
+        var props = new Properties();
+        props.setProperty("user", ADMIN);
+        props.setProperty("password", ADMIN_PASSWORD);
+        props.setProperty("ApplicationName", "nexus-pci-builder-row23-page-holder");   // builder-named, and building nothing
+        List<Event> latching;
+        try (Connection holder = DriverManager.getConnection(pg.getJdbcUrl(), props)) {
+            holder.setAutoCommit(false);
+            DSL.using(holder, SQLDialect.POSTGRES).select(DSL.one()).from(table("nexus", "chunks")).forShare().fetch();
+            latching = capture(() -> {
+                assertThat(w.runCycle()).isEqualTo(1);   // three counted 55P03s at on_complete: the early rule latches
+                cycle(w);
+                cycle(w);
+            });
+            holder.rollback();
+        }
+        assertThat(retries(NameKeyDropMove.LABEL)).as("three counted lock timeouts").isEqualTo(3);
+        assertThat(latching).as("the third pages once").hasSize(1);
+        JsonNode before = status(w);
+        assertThat(labels(before)).as("non-vacuity: the latched move is listed before the deferral").containsExactly(NameKeyDropMove.LABEL);
+        JsonNode pagedBefore = entry(before, NameKeyDropMove.LABEL);
+        assertThat(pagedBefore.get("step").asText()).isEqualTo("on_complete");
+
+        try (InFlightIndexBuild build = InFlightIndexBuild.start(this, "row23-page", "nexus-pci-builder-row23-page", "row23_page_idx")) {
+            List<Event> deferring = capture(() -> cycle(w));   // the drop now finds a build in flight: a deferral
+
+            assertThat(stateOf(w, NameKeyDropMove.LABEL).kind()).isEqualTo(MoveStates.Kind.BLOCKED);
+            assertThat(stateOf(w, NameKeyDropMove.LABEL).reason()).as("a deferral").startsWith(BuildWait.REASON_PREFIX);
+            assertThat(retries(NameKeyDropMove.LABEL)).as("a deferral counts and clears nothing").isEqualTo(3);
+            assertThat(deferring).as("no second data_move_needs_operator line from the worker").isEmpty();
+
+            JsonNode after = status(w);   // and none from the sampler: status() asserts it logged no page
+            assertThat(flag(after)).as("/v1/status still pages the move").isTrue();
+            assertThat(labels(after)).containsExactly(NameKeyDropMove.LABEL);
+            JsonNode m = entry(after, NameKeyDropMove.LABEL);
+            assertThat(m.get("retries").asInt()).isEqualTo(3);
+            assertThat(m.get("step").asText()).as("the page keeps the step of the failure that latched it").isEqualTo("on_complete");
+            assertThat(m.get("bound_ms").asInt()).isEqualTo(pagedBefore.get("bound_ms").asInt());
+            assertThat(m.get("terminates_index_builds").asBoolean()).isEqualTo(pagedBefore.get("terminates_index_builds").asBoolean());
+            assertThat(bootWorkEntry(after, NameKeyDropMove.LABEL).get("reason_class").asText())
+                .as("the same entry reads as a wait").isEqualTo("waiting_for_builds");
+        }
+    }
+
     private static String shape(JsonNode n) {
         return n.getNodeType().toString();
     }

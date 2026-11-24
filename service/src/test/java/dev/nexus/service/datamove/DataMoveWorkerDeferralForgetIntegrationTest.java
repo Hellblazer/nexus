@@ -7,6 +7,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import dev.nexus.service.db.PciBuilders;
 import org.junit.jupiter.api.Test;
 
+import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -15,6 +16,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * RDR-229 P3.7 row 23 (nexus-p2m1x.27, F-E): a move that leaves a run of deferrals other than through {@code finish()} (a failure
@@ -142,5 +144,78 @@ class DataMoveWorkerDeferralForgetIntegrationTest extends DataMoveIntegrationBas
         finisher.at(T0.plus(Duration.ofHours(7)));
         assertThat(w.runCycle()).isEqualTo(1);
         assertThat(reasonOfDeferral(w, "d-twice")).contains("deferred_minutes=0").doesNotContain("overdue");
+    }
+
+    // ── the page a counted failure latched survives a not-now finish (nexus-p2m1x.27 row 23) ──────────────
+
+    private static final FailureHandler.PageInfo PAGED =
+        new FailureHandler.PageInfo(true, true, "on_complete", 900, true);
+
+    /** A finisher whose next answer the test sets; a failure it reports goes to a handler that pages. */
+    private DataMoveWorker pagedWorker(AtomicReference<MoveFinisher> next) throws Exception {
+        FailureHandler paging = failure -> FailureHandler.Disposition.blocked("retry 3: on_complete lock timeout; needs an operator",
+            "55P03", 3, PAGED);
+        return worker(installed(), null, paging, c -> next.get().finish(c));
+    }
+
+    private static MoveFinisher onCompleteTimeout() {
+        return c -> MoveFinisher.Result.report(new FailureHandler.Failure(c.move(), FailureHandler.Stage.ON_COMPLETE, null,
+            "dm_test", "tenant_plain", null, 0, new SQLException("canceling statement due to lock timeout", "55P03"),
+            "on_complete of " + c.move().label() + " did not complete: sqlstate=55P03", c.admin(), false));
+    }
+
+    @Test
+    void aDeferralAfterAPage_keepsThePage_theWorkersBlockedHandlingReportsNoneOfItsOwn() throws Exception {
+        register("d-page", "tenant_plain", 50, 0);
+        var wait = new BuildWait();
+        var next = new AtomicReference<MoveFinisher>(onCompleteTimeout());
+        var w = pagedWorker(next);
+
+        assertThat(w.runCycle()).isEqualTo(1);
+        assertThat(w.states().state("d-page").orElseThrow().needsOperator()).as("non-vacuity: the failure paged").isTrue();
+
+        next.set(c -> wait.defer(c.move().label(), ONE, BuildWait.Path.BEFORE_LOCKS));
+        pastTheRetry();
+        assertThat(w.runCycle()).isEqualTo(1);
+
+        var state = w.states().state("d-page").orElseThrow();
+        assertThat(state.kind()).isEqualTo(MoveStates.Kind.BLOCKED);
+        assertThat(state.reason()).as("a deferral").startsWith(BuildWait.REASON_PREFIX);
+        assertThat(state.needsOperator()).as("the deferral cleared no page").isTrue();
+        assertThat(state.step()).isEqualTo("on_complete");
+        assertThat(state.boundMs()).isEqualTo(900);
+        assertThat(state.terminatesIndexBuilds()).isTrue();
+        assertThat(w.states().announce("d-page")).as("and announced nothing new: the failure's page is the only one").isFalse();
+    }
+
+    @Test
+    void anyBlockedFinishAfterAPage_keepsIt_notOnlyADeferral() throws Exception {
+        register("d-blocked", "tenant_plain", 50, 0);
+        var next = new AtomicReference<MoveFinisher>(onCompleteTimeout());
+        var w = pagedWorker(next);
+        assertThat(w.runCycle()).isEqualTo(1);
+
+        next.set(c -> MoveFinisher.Result.blocked("some other not-now"));
+        pastTheRetry();
+        assertThat(w.runCycle()).isEqualTo(1);
+
+        var state = w.states().state("d-blocked").orElseThrow();
+        assertThat(state.reason()).isEqualTo("some other not-now");
+        assertThat(state.needsOperator()).isTrue();
+        assertThat(state.step()).isEqualTo("on_complete");
+    }
+
+    @Test
+    void aDeferralOfAMoveThatWasNeverPaged_carriesNoPage() throws Exception {
+        register("d-plain", "tenant_plain", 50, 0);
+        var wait = new BuildWait();
+        var w = pagedWorker(new AtomicReference<>(c -> wait.defer(c.move().label(), ONE, BuildWait.Path.BEFORE_LOCKS)));
+
+        assertThat(w.runCycle()).isEqualTo(1);
+
+        var state = w.states().state("d-plain").orElseThrow();
+        assertThat(state.reason()).startsWith(BuildWait.REASON_PREFIX);
+        assertThat(state.needsOperator()).as("nothing latched, so nothing kept").isFalse();
+        assertThat(state.step()).isNull();
     }
 }
