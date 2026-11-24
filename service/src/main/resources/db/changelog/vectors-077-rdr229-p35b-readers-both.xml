@@ -10206,7 +10206,6 @@ DECLARE
     v_repeat     boolean;
 BEGIN
     SELECT cc.collection_id INTO v_origin_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_collection;
-    SELECT cc.collection_id INTO v_quar_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_quarantine_collection;
     IF p_row_limit IS NOT NULL AND p_row_limit <= 0 THEN
         RAISE EXCEPTION
             'gc_quarantine_orphans_floored: p_row_limit must be positive when given (NULL selects the unbounded sweep), got %',
@@ -10322,6 +10321,9 @@ BEGIN
     -- reference is an error to plpgsql_check (PlpgsqlCheckGateTest holds every routine outside vectors-030 to no
     -- errors). The table name is one of two constants, never caller text; the values go through USING.
     IF p_quarantine_expires_at IS NOT NULL AND COALESCE(v_moved, 0) > 0 THEN
+        -- The sibling's id is read here, after the move: a first move registers the sibling inside the base
+        -- function, so an id read before it is NULL and the moved rows (which carry the new id) would not match.
+        SELECT cc.collection_id INTO v_quar_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_quarantine_collection;
         EXECUTE format(
             'UPDATE nexus.chunks c
                 SET metadata = COALESCE(c.metadata, ''{}''::jsonb)
@@ -10630,6 +10632,10 @@ BEGIN
     )
     ON CONFLICT (tenant_id, name) WHERE superseded_by_id IS NULL DO NOTHING;
 
+    -- The origin's id is read again now that it is registered: a first-ever origin had none when the body began, and a
+    -- racing registration (the DO NOTHING above) may have committed one since.
+    SELECT cc.collection_id INTO v_origin_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_origin_collection;
+
     -- created_at CARRIED THROUGH (nexus-e8h5x review round 2, mirroring
     -- catalog-037's fix for the opposite direction): the pre-fix INSERT
     -- omitted it, so the default restamped every restored row to restore
@@ -10652,7 +10658,8 @@ BEGIN
       FROM nexus.chunks c
      WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_quar_id OR (c.collection_id IS NULL AND c.collection = p_quarantine_collection AND p_quarantine_collection <> ''))
        AND c.chash = ANY(v_chashes)
-    ON CONFLICT DO NOTHING  -- target-less: absorbs the name key and the id twin alike (RDR-229 P3.5b, two unique keys until P4.1);
+    -- target-less: absorbs the name key and the id twin alike (RDR-229 P3.5b, two unique keys until P4.1)
+    ON CONFLICT DO NOTHING;
 
     -- nexus-brxnp fix round: rows genuinely inserted vs. rows skipped
     -- because the origin already had a live row for that chash (the DO
@@ -11019,6 +11026,10 @@ BEGIN
     )
     ON CONFLICT (tenant_id, name) WHERE superseded_by_id IS NULL DO NOTHING;
 
+    -- The origin's id is read again now that it is registered: a first-ever origin had none when the body began, and a
+    -- racing registration (the DO NOTHING above) may have committed one since.
+    SELECT cc.collection_id INTO v_origin_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_origin_collection;
+
     -- created_at CARRIED THROUGH (nexus-e8h5x, mirroring catalog-037's fix
     -- for the opposite direction): the unbounded gc_restore_rereferenced's
     -- INSERT omits it, so the default restamps every restored row to
@@ -11041,7 +11052,8 @@ BEGIN
       FROM nexus.chunks c
      WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_quar_id OR (c.collection_id IS NULL AND c.collection = p_quarantine_collection AND p_quarantine_collection <> ''))
        AND c.chash = ANY(v_chashes)
-    ON CONFLICT DO NOTHING  -- target-less: absorbs the name key and the id twin alike (RDR-229 P3.5b, two unique keys until P4.1);
+    -- target-less: absorbs the name key and the id twin alike (RDR-229 P3.5b, two unique keys until P4.1)
+    ON CONFLICT DO NOTHING;
 
     -- nexus-brxnp fix round: rows genuinely inserted vs. rows skipped
     -- because the origin already had a live row for that chash (the DO
@@ -11569,7 +11581,8 @@ BEGIN
                jsonb_build_object('chunk_text_hash', encode(d.chash, 'hex'), 'embedding_model', d.embedding_model),
                d.created_at, v_now, d.embedding_model, (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_origin_collection)
           FROM del d
-        ON CONFLICT DO NOTHING  -- target-less: absorbs the name key and the id twin alike (RDR-229 P3.5b, two unique keys until P4.1)
+        -- target-less: absorbs the name key and the id twin alike (RDR-229 P3.5b, two unique keys until P4.1)
+        ON CONFLICT DO NOTHING
         RETURNING chash
     )
     SELECT COALESCE(array_agg(encode(i.chash, 'hex') ORDER BY i.chash), '{}'::text[])
@@ -14630,11 +14643,16 @@ AS $$
     SELECT true
      WHERE GREATEST(
                p_last_written_at,
-               (SELECT max(o.orphaned_at)
+               -- A scalar subquery on an index probe ((tenant_id, chash), P3.3c's child index, or the primary key): the
+               -- id-or-name match can name two records of one chunk during the stamp, so the latest is taken by
+               -- ORDER BY ... LIMIT 1: one row, as an aggregate would give, read straight from the record.
+               (SELECT o.orphaned_at
                   FROM nexus.chunk_orphaned_at o
                  WHERE o.tenant_id  = p_tenant
                    AND (o.collection_id = (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant AND cc.name = p_collection) OR (o.collection_id IS NULL AND o.collection = p_collection AND p_collection <> ''))
-                   AND o.chash      = p_chash)
+                   AND o.chash      = p_chash
+                 ORDER BY o.orphaned_at DESC NULLS LAST
+                 LIMIT 1)
            ) < now() - COALESCE(p_grace, interval '30 days')
        AND NOT EXISTS (
              SELECT 1
