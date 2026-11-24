@@ -32,16 +32,7 @@ _KEY = "metadata.origin_collection"
 #   gc_expire_quarantine, gc_expire_quarantine_bounded, gc_restore_rereferenced, gc_restore_rereferenced_bounded,
 #   quarantine_restore_chunks and quarantine_reattach_plan, whose live definer (vectors-077) matches COALESCE(metadata->>'origin_collection',
 #   p_origin_collection) = p_origin_collection with no latch arm.
-PENDING_P37: frozenset[tuple[str, str, str]] = frozenset({
-    ("java", "vectors/PgVectorRepository.java chunks expr", _KEY),
-    ("java", "vectors/PgVectorRepository.java chunks where", _KEY),
-    ("function", "nexus.gc_expire_quarantine", _KEY),
-    ("function", "nexus.gc_expire_quarantine_bounded", _KEY),
-    ("function", "nexus.gc_restore_rereferenced", _KEY),
-    ("function", "nexus.gc_restore_rereferenced_bounded", _KEY),
-    ("function", "nexus.quarantine_restore_chunks", _KEY),
-    ("function", "nexus.quarantine_reattach_plan", _KEY),
-})
+PENDING_P37: frozenset[tuple[str, str, str]] = frozenset()   # emptied by P3.7 (nexus-p2m1x.27): vectors-083 and quarantineRestoreSelected by id
 
 
 def _violating(files=_FILES) -> set[tuple[str, str, str]]:
