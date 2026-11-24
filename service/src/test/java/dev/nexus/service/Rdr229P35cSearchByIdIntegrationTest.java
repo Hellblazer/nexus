@@ -49,6 +49,20 @@ import org.junit.jupiter.api.TestInstance;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class Rdr229P35cSearchByIdIntegrationTest extends AtomicWriteTestBase {
 
+    /**
+     * The fixture latches gate 3 by hand on the fresh walk, which skips vectors-084 (CONTINUE-gated); in production gate 3 waits for
+     * those three changesets, and annQuery calls their by-id overload with no fallback. So the by-id overloads are applied here, for the
+     * routed case; idempotent under {@code -Dnexus.test.formA.applied=true}, where the walk already applied them.
+     */
+    @Override
+    @org.junit.jupiter.api.BeforeAll
+    protected void startAll() throws Exception {
+        super.startAll();
+        try (Connection su = pg.createConnection("")) {
+            assertThat(Rdr229CompleteStamps.applyAnnQueryById(su)).as("the by-id overloads of vectors-084").hasSize(3);
+        }
+    }
+
     private static final String TOPIC_LABEL = "p35c-topic";
     private static final Gate3 LATCHED = () -> true;
 

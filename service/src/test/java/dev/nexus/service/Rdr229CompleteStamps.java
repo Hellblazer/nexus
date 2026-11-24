@@ -91,6 +91,27 @@ public final class Rdr229CompleteStamps {
             .containsExactlyInAnyOrderElementsOf(ids);
     }
 
+    /**
+     * Applies exactly the function definitions of vectors-084's changesets (the by-id overloads of
+     * {@code nexus.taxonomy_ann_query_<dim>}), without the CONTINUE gate and without completing any stamp, for a test that latches
+     * gate 3 by hand on a fresh walk and so reaches {@code TaxonomyCentroidRepository.annQuery}, which calls the by-id overload with no
+     * fallback. Each changeset's own forward SQL is replayed from the changelog on the classpath
+     * ({@link PgContainerHelper#replayChangeset}), never copied here; its preconditions (the CONTINUE gate) are not evaluated. Idempotent:
+     * the definitions are {@code CREATE OR REPLACE}, so it is safe on a database where {@link #completeAndApplyFormA} already applied
+     * them. Records nothing in {@code databasechangelog}.
+     *
+     * @return the changeset ids replayed (the three vectors-084 ids of the shipped list), so a list that yields none cannot pass vacuously
+     */
+    public static List<String> applyAnnQueryById(Connection su) throws Exception {
+        List<String> ids = continueList().stream().filter(id -> id.startsWith("vectors-084-")).toList();
+        assertThat(ids).as("non-vacuity: the shipped list names vectors-084's three changesets").hasSize(3);
+        su.setAutoCommit(true);
+        for (String id : ids) {
+            PgContainerHelper.replayChangeset(su, P35bContinueChangesets.file(id), id);
+        }
+        return ids;
+    }
+
     /** Stamp every row, record every move complete, validate every CHECK; asserts the completion check agrees. */
     public static void complete(Connection su, DSLContext ctx) throws Exception {
         stampEveryRow(ctx);
