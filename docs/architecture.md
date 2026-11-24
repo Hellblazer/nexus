@@ -15,16 +15,16 @@ The diagram shows four horizontal colored bands stacked vertically, each labeled
 
 The top band (blue, "Application Layer") contains three side-by-side white boxes representing query categories that enter the system: Retrieval Queries (`nx search`, `search` MCP, `nx memory`); Extraction and Synthesis Queries (`query` MCP, and the `extract`, `summarize` and `compare` plan steps inside `nx_answer`); and Knowledge Discovery and Generation (`nx_answer`, its `generate` plan step, `/conexus:analyze`).
 
-The second band (peach, "LLM-Centric Hybrid Planning Layer") is the tallest. On its left edge, a small stack-of-documents icon labeled "Scholarly Queries" feeds horizontally into a Query Decomposer box (`nx_answer`, `/conexus:plan-first`). A "Task" arrow branches upward and rightward into two parallel dashed-border subgroups: "Predefined Plan Selection" (containing `plan_match` with dimension and semantic rerank, an LLM-based rerank step, and a small PlanLibrary cylinder) and "Dynamic Plan Generator" (three stacked stages: High-level planning, Low-level operator instantiation, and Validation and self-correction). A horizontal dashed "miss" arrow connects Selection to Generator as a fallback.
+The second band (peach, "LLM-Centric Hybrid Planning Layer") is the tallest. On its left edge, a small stack-of-documents icon labeled "Scholarly Queries" feeds horizontally into a Query Decomposer box (`/conexus:plan-first`). A "Task" arrow branches upward and rightward into two parallel dashed-border subgroups: "Predefined Plan Selection" (containing the plan matcher with dimension and semantic match, an LLM-based rerank step, and a small Plans cylinder) and "Dynamic Plan Generator" (three stacked stages: High-level planning, Low-level operator instantiation, and Validation and self-correction). A horizontal dashed "miss" arrow connects Selection to Generator as a fallback.
 
 Three arrows cross downward from the Planning band into the third band: a dashed "Scope" arrow directly below the Query Decomposer, a dashed "matched" arrow below the Predefined Plan Selection, and a solid "Execution Plan" arrow below the Dynamic Plan Generator on the right.
 
-The third band (green, "Unified Execution Layer") contains, left to right: a cluster of four colored hexagons connected by lines representing the Execution Plan DAG; an Execution Engine subgroup containing a `plan_run` panel (with a miniature DAG glyph) and a Result Cache cylinder labeled T1, connected by a bidirectional arrow; and a Defined Operator Set box divided into three labeled columns — RETRIEVAL (Search, Query, Traverse, FindNode, Filter, GroupBy), SYNTHESIS (Extract, Summarize, Compare, Rank, Generate, Aggregate), and STATE (`memory_*`, `store_*`, `plan_*`, `scratch_*`, `catalog_link`, `operator_*`).
+The third band (green, "Unified Execution Layer") contains, left to right: a cluster of four colored hexagons connected by lines representing the Execution Plan DAG; an Execution Engine subgroup containing a `plan_run` panel (with a miniature DAG glyph) and a Result Cache cylinder labeled T1, connected by a bidirectional arrow; and a Defined Operator Set box divided into three labeled columns — RETRIEVAL (Search, Query, Traverse, FindNode, Filter, GroupBy), SYNTHESIS (Extract, Summarize, Compare, Rank, Generate, Aggregate; plan steps the runner calls in process, not MCP tools), and STATE (`memory_*`, `store_*`, `plan_*`, `scratch_*`, `catalog_*`, `tuple_*`: MCP tools).
 
-The fourth band (purple, "Knowledge Representation Layer") flows left to right: a stack-of-documents icon labeled "Source Documents" feeds an Inner-document Content Extractor (classifier, chunker via tree-sitter across 31 languages, `code_indexer`, `prose_indexer`, `pdf_extractor` running MinerU with a per-page ladder that ends at the PyMuPDF text layer, `bib_enricher`). An arrow labeled "Scholarly Document Knowledge" continues into Problem/Method Taxonomy Construction (`CatalogTaxonomy`, BERTopic plus HDBSCAN). Below Taxonomy, a Progressive Update box (`auto_linker`, `taxonomy_assign_batch_hook`, `link_generator`) connects bidirectionally upward and receives a dashed "new documents" arrow from Source Documents. A "construct" arrow leads right from Taxonomy to the Nexus Knowledge Graph — rendered as a node-link cluster of orange and white circles — representing the three-tier store (T1 session scratch, T2 Postgres via the native nexus-service, T3 Postgres 17 + pgvector behind the same nexus-service) with tumbler addresses and typed links (`cites`, `implements`, `supersedes`, `relates`).
+The fourth band (purple, "Knowledge Representation Layer") flows left to right: a stack-of-documents icon labeled "Source Documents" feeds an Inner-document Content Extractor (classifier, chunker via tree-sitter across 31 languages, `code_indexer`, `prose_indexer`, `pdf_extractor` running MinerU with a per-page ladder that ends at the PyMuPDF text layer, `bib_enricher`). An arrow labeled "Scholarly Document Knowledge" continues into Problem/Method Taxonomy Construction (`HttpTaxonomyStore`, HDBSCAN plus c-TF-IDF). Below Taxonomy, a Progressive Update box (`auto_linker`, `taxonomy_assign_batch_hook`, `link_generator`: citation and RDR file-path links) connects bidirectionally upward and receives a dashed "new documents" arrow from Source Documents. A "construct" arrow leads right from Taxonomy to the Nexus Knowledge Graph — rendered as a node-link cluster of orange and white circles — representing the three-tier store (T1 session scratch, T2 Postgres via the native nexus-service, T3 Postgres 17 + pgvector behind the same nexus-service) with tumbler addresses and typed links (`cites`, `implements`, `supersedes`, `relates`).
 </details>
 
-Source: [`architecture-diagram.svg`](architecture-diagram.svg) — edit the SVG directly, then re-render the PNG with `rsvg-convert -z 1.5 docs/architecture-diagram.svg -o docs/architecture-diagram.png`.
+Source: [`architecture-diagram.svg`](architecture-diagram.svg) — edit the SVG directly, then re-render the PNG with `rsvg-convert -z 1.5 docs/architecture-diagram.svg -o docs/architecture-diagram.png`. The diagram is layered at the concept level; the collection registry and its identity rules (below) are not drawn.
 
 ## How It Fits Together
 
@@ -41,6 +41,7 @@ CLI (cli.py)            MCP Server (mcp_server.py)
   └──────────┬──────────────┘
              │
     ├── Index: classify → chunk → embed → store
+    │     (`code__<repo>` etc. below are collection LABELS: the registry row, not the string, says which collection it is)
     │     code: classify(SKIP|CODE|PROSE|PDF) → tree-sitter AST → context prefix → voyage-code-3 → code__<repo>
     │           (code spans under 64 chars merge into a neighbour, never dropped: chunk_floor.py, nexus-x50jb; prose is not floored)
     │     prose: SemanticMarkdownChunker (md) or line-split → voyage-context-3 → docs__<repo>
@@ -73,8 +74,15 @@ CLI (cli.py)            MCP Server (mcp_server.py)
     ├── Catalog: engine Postgres truth (Liquibase schema, RLS) → HttpCatalogClient → typed link graph
     │     documents: tumbler addressing (1.owner.doc)
     │     links: eight typed kinds (see catalog.md#link-types)
-    │     auto-generate: citation links (bib metadata), code-RDR (heuristic)
+    │     auto-generate: citation links (bib metadata) and RDR file-path links; the code-RDR
+    │           heuristic pass is OFF since engine v0.1.57 (nexus-ybj1b), nothing writes `implements-heuristic`
     │     surfaces: MCP nexus-catalog server (10 tools) + nx catalog CLI
+    │
+    ├── Collection registry: nexus.catalog_collections (RDR-229; see § Collection identity)
+    │     collection_id (bigint, the identity) + label (the name, a display string) + attributes
+    │     (content_type, owner_id, embedding_model, model_version, dimension, lifecycle_state)
+    │     every engine route takes either; every collection-scoped table references the id
+    │     a write to a collection with no registry row is refused (422 unregistered_collection)
     │
 
     └── Storage tiers ([RDR-120](rdr/rdr-120-storage-substrate-split.md) substrate split; service-mediated)
@@ -97,10 +105,15 @@ CLI (cli.py)            MCP Server (mcp_server.py)
               v0.1.161 with a key and the bge files serves both, RDR-210).
               The client is HttpVectorClient over /v1/vectors; the legacy
               ChromaDB serving path is retired ([RDR-155](rdr/rdr-155-pgvector-t3-consolidation.md)).
+                (the model of a collection is its registry row's embedding_model; the
+                 prefixes below are the label shapes `nx index` renders for repo and
+                 corpus collections, and the model each is created with)
                 code__*       voyage-code-3 (managed) / bge-768 or voyage-code-3 (local)
                 docs__*       voyage-context-3 CCE (managed) / bge-768 or voyage-context-3 (local)
                 rdr__*        voyage-context-3 CCE (managed) / bge-768 or voyage-context-3 (local)
                 knowledge__*  voyage-context-3 CCE (managed) / bge-768 or voyage-context-3 (local)
+                c<id>         a new knowledge subject: a label the engine mints (RDR-229), no prefix;
+                              its content type and model come from the registry row
 ```
 
 **Service-mediated T3 storage ([RDR-155](rdr/rdr-155-pgvector-t3-consolidation.md)).** T3 serving routes through the
@@ -155,26 +168,24 @@ table) see [`docs/container-integration.md`](container-integration.md).
 
 Data flows upward (T1 → T2 → T3).
 
-**Unified daemon-lifecycle substrate ([RDR-149](rdr/rdr-149-unified-service-registry-substrate.md)).** The three tiers
-differ in storage engine and scope (T1 uid-scoped HttpScratchStore, T2
-uid-scoped Postgres, T3 uid-scoped pgvector, all behind the nexus-service) but share
-**one** lifecycle substrate: the leased / fenced / atomic service registry in
+**Unified daemon-lifecycle substrate ([RDR-149](rdr/rdr-149-unified-service-registry-substrate.md)).** The daemons
+that remain share **one** lifecycle substrate: the leased / fenced / atomic service registry in
 [`src/nexus/daemon/service_registry.py`](../src/nexus/daemon/service_registry.py)
 (`ServiceRegistry` + `ServiceSupervisor`). Owner discovery, single-writer
 election, ungraceful-death reap, restart fencing, self-heal re-assert, and
 version-skew cycling all live in that one primitive, parameterized by tier
-and scope. The surviving tiers on this primitive are the storage service
-(`daemon/storage_service_daemon.py`) and the aspect-worker
-(`daemon/aspect_worker_daemon.py`). Three per-tier daemons that used to sit
-here are gone: `daemon/t3_daemon.py` (ChromaDB, RDR-155 P4b),
+and scope. The surviving users of the primitive are the storage service
+(`daemon/storage_service_daemon.py`, which serves T2 and T3 together) and the
+aspect-worker (`daemon/aspect_worker_daemon.py`). The per-tier daemons that
+used to sit here are gone: `daemon/t3_daemon.py` (ChromaDB, RDR-155 P4b),
 `daemon/t2_daemon.py` (SQLite single-writer, nexus-i711w), and
 `daemon/t1_lease.py` (the RDR-149 P4 `ServiceRegistry(tier="t1")` MCP-lifespan
 publisher, re-keyed transient `server_pid` → session-id, retired
-nexus-8zfwv 2026-08-07). T1 does not ride this primitive at all any more —
+nexus-8zfwv 2026-08-07). T1 does not ride this primitive at all any more:
 its live session lease is a standalone flat file
 (`nexus.db.t1.publish_t1_session_lease`, `t1_session_lease.<session_id>`),
 outside `ServiceRegistry`, with no election flock and no re-key protocol.
-Liveness for the tiers that DO ride the primitive is **lease freshness
+Liveness for the daemons that DO ride the primitive is **lease freshness
 (TTL), not pid** — a dead owner's lease ages out, giving pid-reuse immunity.
 MinerU (`daemon/mineru_lifecycle.py`, nexus-1qdb9) consumes the substrate's
 public `election()` spawn guard rather than a full lease: the PDF pipeline's
@@ -214,7 +225,7 @@ Indexing (`nx index repo`, `nx index pdf`, `nx index rdr`) and MCP `store_put`
 auto-register entries via catalog hooks (see [Post-Store Hooks](#post-store-hooks)
 below for the hook contract that wires catalog registration, chash dual-write,
 and taxonomy assignment together on every write). Agents use the catalog to find
-which T3 collection a document lives in (`catalog_search` → `physical_collection`),
+which T3 collection a document lives in (`catalog_search` → `physical_collection`, the collection's label; see [Collection Identity](#collection-identity-rdr-229)),
 traverse typed links (`catalog_links`, e.g. `link_type="cites"`), and scope
 semantic search to relevant collections instead of searching everything.
 
@@ -681,9 +692,10 @@ HttpTaxonomyStore.discover_topics()  # db/t2/http_taxonomy_store.py
   │  upsert cluster centroids → pgvector via nexus-service (HttpCentroidStore)
   ▼
 taxonomy_assign_batch_hook()       # mcp_infra.py  (fires on every store_put batch)
-  │  fetch new doc's T3 embedding
-  │  HttpTaxonomyStore.assign_single(): ANN query against taxonomy__centroids
-  │  nearest centroid → topic_id → insert-if-absent into topic_assignments (ON CONFLICT DO NOTHING, engine-side)
+  │  reads only the batch's chunk chashes; no embedding is fetched
+  │  POST /v1/taxonomy/assignments/assign_from_chashes: the engine matches the
+  │  chunks it just stored to taxonomy_centroids (ANN) and inserts-if-absent
+  │  into topic_assignments (ON CONFLICT DO NOTHING), server-side
   ▼
 search_cross_corpus()              # search_engine.py
   │  default (nexus-tu8wp.3): the batched path, below. The per-collection route
@@ -692,7 +704,7 @@ search_cross_corpus()              # search_engine.py
   │  with the same page (the CLI rerank shape is unmeasured).
   │  With the opt-in, one POST /v1/vectors/search-per-collection per
   │  embedding-model group
-  │  (nexus-tu8wp.2; collections of one prefix share a model, nexus-d9xt2):
+  │  (nexus-tu8wp.2; the group is the collections that share one embedding model, read from each collection's registry row, nexus-d9xt2):
   │  per_collection_k = max(5, n_results*mult) with the group's largest mult,
   │  limit = max(300, 4*n_results) clamped to 1200 (always 1000 with rerank),
   │  finite thresholds only. Each collection's stats and error_kind become that
@@ -728,7 +740,7 @@ search_cross_corpus()              # search_engine.py
 | Table | Purpose |
 |-------|---------|
 | `topics` | One row per discovered topic: label, collection, centroid_hash, doc_count, review_status, terms |
-| `topic_assignments` | doc_id → topic_id mapping, assigned_by (hdbscan or centroid) |
+| `topic_assignments` | doc_id → topic_id mapping, `assigned_by` (`hdbscan`, `auto-matched` on a rebuild, `centroid` for an incremental assign, `manual` for `nx taxonomy assign`, `projection` for `nx taxonomy project --persist`) |
 | `taxonomy_meta` | Per-collection discover stats (last_discover_at, last_discover_doc_count) |
 | `topic_links` | Aggregated inter-topic link counts derived from catalog link graph |
 
@@ -770,6 +782,12 @@ Manual labels survive rebuild via `_merge_labels`.
 | `split` | Split a topic into k sub-topics via KMeans clustering (`--k`) |
 | `links` | Compute and persist inter-topic links from catalog |
 | `project` | Cross-collection projection with `--use-icf` hub suppression ([RDR-077](rdr/rdr-077-projection-quality-similarity-icf.md)) |
+| `hubs` | List topics whose projection assignments span many source collections at low ICF (RDR-077) |
+| `audit` | Projection-quality diagnostics for one source collection; `--fix-doc-count` repairs `doc_count` drift |
+| `reset` | Discard a collection's topics, assignments, links and centroids (documents are untouched; prompts, `--yes` skips) |
+| `drain` | Assign chunks that have no topic in their collection's taxonomy |
+| `acknowledge` | Record chunks the engine permanently refuses to assign (`--list`, `--remove`) |
+| `validate-refs` | Scan markdown for stale collection references (RDR-081) |
 
 ### Projection quality ([RDR-077](rdr/rdr-077-projection-quality-similarity-icf.md))
 
@@ -810,7 +828,7 @@ The ChunkBatcher-driven `nx index repo` path (nexus-nj4ch) is the one exception 
 
 **Enqueue identity & loud-failure contract ([RDR-172](rdr/rdr-172-service-mode-aspect-enqueue-silent-failure.md)).** The `doc_id` the hook forwards to the enqueue is the **catalog document id (tumbler)**, not the chunk hash. `store_put` forwards `catalog_doc_id` — the tumbler `catalog_store_hook` returns when it registers the note-backed document (`mcp/core.py`). Forwarding the chunk hash was the silent-failure bug `nexus-ov0sw`: in service mode the chunk hash is not a registered `catalog_documents` tumbler, so the queue's `doc_id` foreign key rejected it and the best-effort hook swallowed the 500. Three rules now hold. (1) **Blank `doc_id` → NULL**: the no-catalog case forwards `''`, which the service `nullIfBlank`s to SQL `NULL` (a legitimate "no reference" sentinel) and lands a `pending` row with HTTP 200. (2) **Non-blank *unregistered* `doc_id` → typed 4xx, never silent**: a non-blank id that is not a registered tumbler is a client bug (RF-8: no race); the service maps the SQLSTATE class-23 integrity violation to a typed **409** (`{"error","sqlstate"}`, body sanitised) ahead of the generic 500 (`AspectHandler.sqlState23`) — never a silent NULL coercion, never an opaque 500. (3) **Tripwire**: the enqueue stays best-effort (never blocks ingest), but the hook's internal swallow would otherwise hide a failure from `hook_registry`; it therefore persists its own `hook_failures` row (`hook_name='aspect_extraction_enqueue_hook'`, `chain='document'`) and logs `aspect_extraction_enqueue_failed`, and the `--fullstack` ingest E2E asserts **zero** such rows so the silent-total-failure class cannot regress unobserved.
 
-**Registration order.** Pre-RDR-187, `chash_dual_write_batch_hook` was registered before `taxonomy_assign_batch_hook` — load-bearing, because chash rows had to exist before topic assignment ran. That hook is retired; `install_default_hooks` now registers `taxonomy_assign_batch_hook` before `manifest_write_batch_hook`, but the two are independent (taxonomy reads T3 embeddings, the manifest hook reads chunk metadata from the batch's own `indexed_metas`) — no ordering constraint remains in the batch chain, nor in the single-document or document-grain chains.
+**Registration order.** Pre-RDR-187, `chash_dual_write_batch_hook` was registered before `taxonomy_assign_batch_hook` — load-bearing, because chash rows had to exist before topic assignment ran. That hook is retired; `install_default_hooks` now registers `taxonomy_assign_batch_hook` before `manifest_write_batch_hook`, but the two are independent (the taxonomy hook reads only chunk chashes and the engine does the assignment, the manifest hook reads chunk metadata from the batch's own `indexed_metas`) — no ordering constraint remains in the batch chain, nor in the single-document or document-grain chains.
 
 **Failure capture.** Per-hook exceptions are caught in the fire function, logged via structlog, and persisted to T2 `hook_failures`. The `chain` column (T2 4.14.2 migration, [RDR-089](rdr/rdr-089-structured-aspect-extraction-at-ingest.md)) carries an enum value of `'single'`, `'batch'`, or `'document'` distinguishing the chain that fired. Single-document failures store the scalar `doc_id` in the legacy column. Batch failures store a representative scalar (first id) in `doc_id`, the JSON-encoded list in `batch_doc_ids`, and dual-write `is_batch=1` for back-compat with pre-4.14.2 readers. Document-grain failures store the `source_path` in the legacy `doc_id` column (the column carries 'subject of failure' regardless of chain shape). The `nx taxonomy status` reader surfaces all three shapes and reports `affecting M document(s)` whenever a batch row is present (M > scalar count).
 
@@ -973,15 +991,16 @@ endpoint that never returns does not stay for ever. `nx uninstall` removes
 every `data_token_lease.*` file unconditionally (not gated on
 `--remove-data`), alongside the managed credentials.
 
-Concurrency is deliberately NOT `flock`/`O_EXCL`-guarded: two cold
-processes racing to fill an empty/stale cache slot may both mint and both
-publish — last writer wins on the file, and the loser's own in-process
-token is still perfectly valid, just not the one on disk any more. This is
-accepted, not a bug: the race window is bounded to once per TTL-refresh
-boundary per `(base_url, tenant)`, and `MintRateLimiter`'s burst=5 absorbs
-a handful of concurrent cold starts — a double mint produces two
-independently valid tokens, never corruption, so there is no correctness
-reason (only an efficiency one) to add cross-process locking here.
+Cold mints are serialised per host. A miss, or a refresh-due entry with no
+fresher sibling lease, mints under a per-key `flock` on
+`data_token_mint_lock.<key>` (nexus-nnr26; the key is the lease's digest),
+and re-reads the lease file after taking the lock, so one process per host
+mints and its siblings adopt the result. The lock covers only that
+miss-then-mint section, never a read of the lease. The lease file itself
+is still published with atomic temp-file + `os.replace`, so a reader sees
+the old file or the new one, never a torn one. `MintRateLimiter`'s burst of
+5 remains the engine-side backstop for hosts that share one credential
+across machines.
 
 Practical effect: a real `nx` CLI subprocess always has an empty
 in-process cache, so it either mints fresh (the very first invocation
@@ -1090,7 +1109,9 @@ reason must be named in the opt-in itself.
 pytest's own suite is exempt via an IN-PROCESS override, never an env
 var: `tests/conftest.py`'s autouse `_exempt_pytest_from_production_write_guard`
 fixture calls `monkeypatch.setattr(service_endpoint,
-"_test_only_opt_in_reason", "<reason>")` — `service_endpoint._opt_in_reason()`
+"_test_only_opt_in_reason", "<reason>")` (the module also exposes
+`set_test_only_opt_in_reason_for_tests` as a setter for the same attribute)
+— `service_endpoint._opt_in_reason()`
 checks this module attribute FIRST, before ever reading the real
 `NX_ALLOW_PROD_WRITE` env var. An earlier revision used
 `monkeypatch.setenv("NX_ALLOW_PROD_WRITE", ...)` instead, which DOES
@@ -1140,11 +1161,11 @@ for a different reason (there is no `_get`/`_post` split at all —
 everything goes over POST), so it keys on the endpoint PATH's suffix
 instead (`_T3_WRITE_PATH_SUFFIXES`) rather than a per-call flag.
 
-**Residual, not in this guard's scope**: `HttpTelemetryStore.record_routing_event`
-bypasses the guarded transport entirely (a raw
-`self._client.request(...)` call, modeled on the single-attempt shape
-`query_tier_writes_once` — a GET — uses for an unrelated reason). Tracked
-and being fixed under nexus-gjv9b, not this bead.
+**Residual, closed.** `HttpTelemetryStore.record_routing_event` used to bypass
+the guarded transport with a raw `self._client.request(...)` call (nexus-gjv9b).
+It now goes through `_post` with the default `mutates=True`, like every other
+T2 write, so an unopted-in dev checkout is refused before any network
+attempt.
 
 ### Concurrency Model ([RDR-063](rdr/rdr-063-t2-domain-split.md) Phase 2) — HISTORICAL
 
@@ -1294,7 +1315,8 @@ domain stores (all HTTP clients) and runs no schema work; its
 Installs still carrying pre-PG local data use the pinned last
 migration-capable 6.x release (the two-hop redirect).
 
-**Auto-upgrade**: `nx upgrade --auto` runs as the first SessionStart hook,
+**Auto-upgrade**: `nx upgrade --auto` runs as the second SessionStart hook (after
+`nx_setup_notice.py`, which only prints the setup notice),
 converging pending ladder rungs and preconditions silently (there are no
 local T2 migrations — RDR-158 P4 Stage 4).
 
@@ -1327,6 +1349,32 @@ triggers this cleanup (Liquibase gives up on its own after its own 10-minute
 wait and exits, which is what actually triggers it); the terminated pids are
 logged, not discarded.
 
+## Collection Identity (RDR-229)
+
+Design of record: [RDR-229](rdr/rdr-229-collection-name-becomes-a-label.md). A collection is a row of `nexus.catalog_collections`, the per-tenant registry. Since RDR-229 the **identity of that row is `collection_id`** (a `bigint` identity column, unique across the installation, with `UNIQUE (tenant_id, collection_id)` as the target every reference uses). **The name is a label**: a display string that the registry keeps unique among live rows and that a rename may change. Everything the old conformant name (`<content_type>__<owner_id>__<embedding_model>__v<n>`, RDR-103) used to carry sits in columns of the same row: `content_type`, `owner_id`, `embedding_model`, `model_version`, `dimension`, `lifecycle_state`. Code reads those columns; the name is parsed only to register a name the user typed, to import a name from another install, and to report a name that disagrees with its row (`legacy_names`, the one parser left on the client).
+
+Nothing was renamed by the rollout: an existing collection's name became its label unchanged. The shipped phases are 1 to 3; Phase 4 (P4.1, dropping the name columns and keys) has not shipped, so the name columns still exist and several rules below hold "until P4.1".
+
+**Callers.** Every engine route that takes a collection accepts a `collection_id` or a label. A label is resolved to the id once, at the route boundary, by `CollectionRegistry` (keyed by id with a label index beside it), and responses carry both. A request that names an id that no row has is 404 `unknown_collection_id`; the id of a retired row (a rename's or a supersede's tombstone) is 409 `collection_superseded`; a label with no row is the 422 `unregistered_collection`. A write to a collection with no registry row is refused, never stubbed (RDR-204). `nx collection list` shows the id beside the label and attributes, and `nx collection delete` takes either.
+
+**Labels and the mint.** A collection registered by attributes alone (a new `knowledge` subject, via the `(content_type, owner_id, embedding_model, model_version)` tuple) gets an engine-minted label, `c<id>`, with no prefix. A registration finds the live row of the tuple first and mints only when there is none; a partial UNIQUE index on the tuple makes two racing first mints one row. `docs__` and `code__` collections of a repo are registered by `nx index repo` under the rendered conformant label. The label rule, checked wherever a user's label enters (registration, rename target, re-embed target, import): non-empty, valid UTF-8, no control character, at most 255 bytes, no `/`, no `,`, no leading or trailing whitespace, and not of the minted form (`c` and digits), which the engine reserves. A label a one-row rename has moved a collection **away from** stays reserved until P4.1, because name-keyed tables still carry rows under it: a registration, supersede successor, rename target or per-collection import that would make it live is the 409 `label_reserved`, and the mint treats it as taken and draws the next id. A whole-tenant restore loads only an empty tenant and is exempt.
+
+**The stamp (strangler order).** The id reached the referencing tables by expand, switch, contract. Expand: every table that named a collection gained a nullable `collection_id` beside its name column, and the engine writes both on every insert. The old rows are filled by registered **data moves** ([RDR-246](rdr/rdr-246-data-moves-are-background-jobs.md), below): one `rdr229-stamp-<table>` move per table, so no Liquibase changeset rewrites a growing table inside the boot-time schema walk. A CHECK per table (added `NOT VALID`) says a row with a name has an id, and is validated by the move's `on_complete`. A row whose name has no registry row in its tenant (an orphan) cannot be stamped: it leaves the CHECK `NOT VALID` and the label incomplete, the row is write-frozen, and `nx doctor` names the table; the operator registers or deletes the orphans and then runs `SELECT nexus.rdr229_restamp('<table>')`. Switch: each foreign key gets an id twin (`NOT VALID`, validated by its own move), the chunk tables get id keys per leaf and the RDR-225 composite on the id (swap moves), and the engine's per-collection indexes are rebuilt `WHERE collection_id = <id>` under a name hashed from model, tenant and id, so a rename never strands one. The history tables (`relevance_log`, `search_telemetry`, `hook_failures`, `gc_audit`) get a nullable id for joins and keep the label as written: a rename stops rewriting them.
+
+**The completion check: gates 1 to 3 and the latch.** After the schema walk, and again whenever the move worker records a `completed_at`, the engine runs `CompletionCheck` (read only, admin connection). It decides, per install, when readers may leave the name path:
+
+1. every stamp move and every id-twin validation move has completed (and the twin keys are present and validated): the engine's per-collection index pass may start;
+2. also both swap moves, the three child validation moves and the quarantine-origin backfill: the id-predicate index builds may start;
+3. also every collection the planner would index has a VALID id-predicate index, read from the registry and the index catalog (never from the absence of name indexes).
+
+Each gate also refuses while the `catalog_collections_superseded_by_id_check` CHECK is missing. **The latch:** the first time gate 3 holds, the engine writes a row in `nexus.rdr229_gate_latch`; from then on the engine's readers (the id-keyed repositories, `CollectionRegistry`, the SQL readers) go by the latch, so a live gate 3 that dips later (an id index rebuilding) does not move them back. The check reports in its own `GET /v1/status` field, `rdr229_completion` (the three gates, labels still incomplete, CHECKs missing, tables whose VALIDATE waits, each with operator text), never in `boot_work`: the gates wait by design, and a `boot_work` entry would read as work in progress to `nx upgrade`. The field carries no tenant number; the counts behind `nx doctor`'s RDR-229 rows come from the tenant-scoped `GET /v1/catalog/rdr229_completion_counts`. An absent field means "not known yet", never "every gate holds". On an install whose PostgreSQL cannot run the moves (a BYO or `--no-pg-bundle` cluster without the `pg_background` extension), the moves report `blocked:`, no gate holds, the readers stay on names and the rename keeps its old path.
+
+**Rename has two regimes.** Before the latch, a rename is the name path: it rewrites the fourteen name-scoped tables and gives the collection a new registry row and a new id. After it, a rename is **one row**: it updates `catalog_collections.name` and nothing else, and the id is stable. That is only safe once the seven registry name keys that would refuse the UPDATE (`chunks_collection_fk`, `canary_query_ring_collection_fk`, and the `document_aspects`, `topics`, `taxonomy_meta`, `document_highlights` and `topic_assignments` keys; `aspect_extraction_queue`'s too where that table still exists) are gone. The engine registers one more data move at gate 3, the **name-key drop move** (`NameKeyDropMove`), to drop them. Between the latch and the moment the one-row rename can run, the engine refuses a rename with 409 `rename_refused`, and `missing` names what is outstanding: `name_key_drop_move` (not complete), `restart` (a P3.5b changeset has not applied), `latch_row_missing`, `p35b_list_missing`, `readiness_unreadable` or `p35c_readers_absent`. The per-store `rename_collection` routes (chash, taxonomy, telemetry, aspects, highlights) are no-ops in the one-row regime; they answer 409 `rename_not_in_registry` when the registry did not move first, and the engine answers `rename_path_mismatch` when asked for a one-row rename it cannot run. A rename or supersede that cannot lock its registry row within 10 s is 503 `rename_busy`.
+
+**The restart.** A few changesets (P3.5b's SQL readers on tables outside the chunk family) are CONTINUE changesets that apply at the first boot after their move completes. When every stamp move is complete and one of them has not applied, `GET /v1/status` `boot_work` carries an `rdr229-restart` entry and `rdr229_completion` asks for a restart; the one-row rename waits for it. The client's `engine_busy_reason` (`daemon/pg_bundle_refresh.py`) and `boot_work_settled` (`scripts/upgrade_boot_writes.py`) exclude that entry, so `nx upgrade`'s bundle swap, which is the restart, is not deferred by the condition it would resolve. Moves that are still running count as work and do defer it.
+
+**Compatibility.** Past the point where P3.7 ships, the referencing tables' name columns are no longer maintained for a renamed collection, so an engine downgraded past it reads stale names; the safe downgrade point is still open (the rollback runbook for the P3.1 down-step is [`runbooks/rdr-229-p31-rollback.md`](runbooks/rdr-229-p31-rollback.md)). A client that predates a typed reason reads its 409 as a failed call and shows the engine's message; nothing is moved or lost. The recovery bundle carries each collection's registry row from format 3 ([catalog.md](catalog.md)); a bundle from before that imports through the name path for the releases RDR-229 sets.
+
 ## Data Moves (RDR-246)
 
 A Liquibase changeset may change schema; it may not move rows whose count grows with user data, because the changeset walk runs before the engine binds HTTP and a long rewrite would hold the engine down ([RDR-246](rdr/rdr-246-data-moves-are-background-jobs.md)). A *data move* is the replacement: one row in the engine's `nexus.data_moves` registry, registered by a changeset, which the engine works as a background job after it serves. The pieces:
@@ -1334,7 +1382,7 @@ A Liquibase changeset may change schema; it may not move rows whose count grows 
 - **`DataMoveWorker`** (`service/src/main/java/dev/nexus/service/datamove/`) is the engine thread that works open moves, oldest first, one at a time. For each tenant (and, for `nexus.chunks`, each leaf partition) it CALLs dml_utils' `run_migration_chunks_committing` on a dedicated connection, so each chunk commits on its own and a stop resumes from the last committed batch. A failed move is not retried; a blocked one is, with backoff. `NX_DATA_MOVE_SLEEP_MS` overrides every move's `sleep_ms`; see [configuration](configuration.md).
 - **The dml_utils and ddl_utils install.** `DmlUtilsInstaller` applies the two vendored libraries' changelogs (under `service/src/main/resources/db/vendor`, revisions pinned in `pins.properties`) at boot, as `dml_utils_owner`, before the nexus changelog; it never fails a boot over them. The cluster-superuser half, which `nexus_admin` cannot do, is `db/pg_bootstrap/dml_utils.py` (`bootstrap_dml_utils`, called from `db/pg_provision.py`): the `pg_background` extension, the three NOLOGIN library roles and the `liquibase` schema. Best-effort: a bundle without `pg_background` changes nothing and registered moves read `blocked:`.
 - **`boot_work` entries.** `MoveBootWork` publishes each open or failed move in `GET /v1/status` as a `boot_work` entry with id `data-move:<label>` (the state is the text of `what` up to its first colon), and `data-move-worker` or `data-move-boot-work` when the worker or its reporter is not running. `NX_DATA_MOVE_STALL_MINUTES` sets when a silent CALL reads `stalled:`.
-- **`nx doctor`.** `data_moves_health.py` turns those entries into the `Data move <label>`, `Data move worker`, `Data move reporting` and `Data moves` rows ([cli-reference](cli-reference.md#nx-doctor)). The state table and the operator statements are in [engine-service-release](agents/engine-service-release.md#data-moves-a-changeset-changes-schema-a-move-moves-rows-rdr-246).
+- **`nx doctor`.** `data_moves_health.py` turns those entries into the `Data move <label>`, `Data move worker`, `Data move reporting` and `Data moves` rows ([cli-reference](cli-reference.md#nx-doctor)). RDR-229's collection-id stamp, validation, swap and name-key drop moves are the largest user of the registry ([Collection Identity](#collection-identity-rdr-229)); they publish their completion in `rdr229_completion`, not `boot_work`. The state table and the operator statements are in [engine-service-release](agents/engine-service-release.md#data-moves-a-changeset-changes-schema-a-move-moves-rows-rdr-246).
 
 ## Module Map
 
@@ -1421,7 +1469,7 @@ Every shipped template must be *offerable* — reachable by some question. A tem
 
    See [MCP Tools vs Agents](exploration/mcp-vs-agents.md) for the full boundary rule, the stub-agent pattern, and guidance on where to place new capabilities. See [Plan-Centric Retrieval](plan-centric-retrieval.md) for how `nx_answer` + the plan library replaced the earlier retrieval-agent chain.
 
-7. **A typed 4xx body names its cause in `reason`** (nexus-bgvnx) -- the engine's typed error bodies carry a stable, machine-readable top-level `reason` beside the human `error` prose, and a client decides on `reason`, never on the prose. Current values: `unregistered_collection` (422). The 409 bodies predate the rule and keep their own `status` key (`conflict_running`, `stale_run`); they are grandfathered, not renamed. The vocabulary lives in `HttpUtil.sendTypedDbError`'s javadoc (engine) and `nexus.db.engine_reasons` (client); a body with no `reason` is an older engine, and only then may a client fall back to matching wording.
+7. **A typed 4xx body names its cause in `reason`** (nexus-bgvnx) -- the engine's typed error bodies carry a stable, machine-readable top-level `reason` beside the human `error` prose, and a client decides on `reason`, never on the prose. The engine (`HttpUtil`) sends 19 values: `unregistered_collection` (422), `ownerless_chunk_write` (422), `quarantine_restore_busy` (503), `collection_model_mismatch` (409), `collection_superseded` (409), `unknown_collection_id` (404), `collection_id_mismatch` (500, or 409 when a request named both an id and a label that no longer agree), `rename_refused` (409, with `missing`), `rename_path_mismatch` (409), `rename_busy` (503), `rename_not_in_registry` (409), `collection_label_ambiguous` (409), `collection_busy` (409), `label_reserved` (409), `restore_origin_unregistered` (409), `unregistered_embedding_model` (422), `model_partition_missing` (500), `tenant_partition_missing` (500) and `tenant_creation_busy` (503). `nexus.db.engine_reasons` is the client's single copy; at the stack tip it holds 17 of them, and `collection_busy` and `label_reserved` join it with the 8.5.6 client (a client without a case for a reason reads its 409 as a failed call and shows the engine's message). The 409 bodies that predate the rule keep their own `status` key (`conflict_running`, `stale_run`); they are grandfathered, not renamed. The vocabulary lives in `HttpUtil.sendTypedDbError`'s javadoc (engine); a body with no `reason` is an older engine, and only then may a client fall back to matching wording.
 
 ### T1's scopes and the CLI/MCP split-brain (nexus-aj564)
 
