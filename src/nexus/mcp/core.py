@@ -4843,11 +4843,9 @@ def search_metadata_scoped(
 # ``topic_assignments`` on chunk chash and ranks by vector distance,
 # resolved across every collection in *corpus* (topics are per-collection —
 # a label belongs to one collection's taxonomy, so the multi-collection
-# loop is usually single-hit). NOTE: the merge is
-# per-collection-limit-then-merge-then-truncate, so for a label genuinely
-# present in multiple collections the global top-N can drop a collection's
-# (limit+1)th row that would have ranked; over-fetch per collection if that
-# case becomes real.
+# loop is usually single-hit). The merge is per-collection-limit-then-merge-
+# then-truncate, which is lossless for the global top-N: a row ranked limit+1
+# in its own collection has limit better rows ahead of it.
 @mcp.tool(
     title="Topic-Scoped Combined Search",
     annotations={"readOnlyHint": True},
@@ -4877,11 +4875,8 @@ def search_topic_scoped(
     - Requires an HttpVectorClient-backed T3 (every local and cloud install
       since RDR-155 P4b).
     - `ids` are chunk hashes, not document tumblers.
-    - A topic label present in more than one collection can drop a
-      just-below-`limit` row from a collection whose true rank would have
-      included it: each collection returns its own top `limit` rows, the
-      results are merged, then cut to `limit`, so a row ranked `limit + 1`
-      in its collection is lost even if it would beat another's.
+    - A topic label present in more than one collection searches each
+      one; the results are the global nearest `limit` rows across them.
     """
     try:
         from nexus.db.http_vector_client import VectorServiceError, is_service_backed  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)

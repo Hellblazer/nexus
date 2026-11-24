@@ -197,9 +197,10 @@ Per the collection rules (https://github.com/Hellblazer/nexus/blob/main/docs/col
 
 Check for an existing subject before writing (Rule 2, reuse before create). A new subject's collection is labelled `c<id>` by the engine, so it is found by its CONTENT_TYPE and OWNER columns (OWNER is the subject), not by its name; a live collection named `knowledge__<subject>__...` counts too, and a retired one does not:
 ```bash
-nx collection list | awk -v s="{repo}-rdr-research" '$1=="NAME"{for(i=1;i<=NF;i++){if($i=="CONTENT_TYPE")t=i;if($i=="OWNER")o=i};next} /superseded->/{next} {split($1,p,"__")} (t&&o&&$t=="knowledge"&&$o==s)||(p[1]=="knowledge"&&p[2]==s){print $1}'
+SUBJECT="$(printf '%s' "{repo}" | tr _ -)-rdr-research"   # the engine turns _ into - in a subject
+nx collection list | awk -v s="$SUBJECT" '$1=="NAME"{for(i=1;i<=NF;i++){if($i=="CONTENT_TYPE")t=i;if($i=="OWNER")o=i};next} /superseded->/{next} {split($1,p,"__")} (t&&o&&$t=="knowledge"&&$o==s)||(p[1]=="knowledge"&&p[2]==s){print $1}'
 ```
-It prints the collection's name, or nothing when the subject has none. If it prints one, reuse it — pass its bare subject name to `store_put` below regardless; the catalog resolves the rest. If it prints nothing and the legacy `knowledge__rdr_postmortem__<repo>` collection exists, run the one-time migration below BEFORE the first `store_put`.
+It prints the collection's name, or nothing when the subject has none. If it prints one, reuse it — pass its bare subject name to `store_put` below regardless; the catalog resolves the rest. If it prints nothing and the legacy `knowledge__rdr_postmortem__<repo>` collection exists, run the one-time migration in [migration.md](migration.md) BEFORE the first `store_put`.
 
 Seed link-context so the post-mortem auto-links to the RDR:
 ```
