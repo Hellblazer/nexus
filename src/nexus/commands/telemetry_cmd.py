@@ -581,10 +581,18 @@ def baseline_cmd(since: str | None, json_out: bool) -> None:
 @telemetry_group.command("status")
 def status_cmd() -> None:
     """Show whether the daily install ping is on, and why."""
-    from nexus.install_ping import install_id, last_ping_at, telemetry_status  # noqa: PLC0415
+    from nexus.install_ping import (  # noqa: PLC0415
+        AUTOMATION_HINT,
+        install_id,
+        last_ping_at,
+        telemetry_status,
+    )
 
     st = telemetry_status()
-    click.echo(f"install ping: {'on' if st['enabled'] else 'off'} ({st['source']})")
+    line = f"install ping: {'on' if st['enabled'] else 'off'} ({st['source']})"
+    if not st["enabled"] and str(st["source"]).startswith("automation:"):
+        line += f"; {AUTOMATION_HINT}"
+    click.echo(line)
     click.echo(f"install id:   {install_id()}")
     last = last_ping_at()
     if last is None:
@@ -607,8 +615,18 @@ def off_cmd() -> None:
 
 @telemetry_group.command("on")
 def on_cmd() -> None:
-    """Enable the install ping (the default)."""
+    """Clear the config opt-out (the ping is then on unless the environment turns it off)."""
     from nexus.config import set_config_value  # noqa: PLC0415
+    from nexus.install_ping import AUTOMATION_HINT, telemetry_status  # noqa: PLC0415
 
     set_config_value("telemetry.enabled", True)
-    click.echo("install ping: on")
+    st = telemetry_status()
+    if st["enabled"]:
+        click.echo("install ping: on")
+        return
+    # The config key is on now, but something else still keeps the ping off here:
+    # say so rather than claim "on".
+    line = f"install ping: config on, but off here ({st['source']})"
+    if str(st["source"]).startswith("automation:"):
+        line += f"; {AUTOMATION_HINT}"
+    click.echo(line)

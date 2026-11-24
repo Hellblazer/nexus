@@ -15,21 +15,25 @@ Opt-out, default on. Any of these disables it:
 * running out of a dev checkout (see :func:`running_from_dev_checkout`)
 * ``telemetry.enabled: false`` in ``~/.config/nexus/config.yml``
   (``nx telemetry off``)
+* ``NX_TELEMETRY=0`` (or ``false``, ``no``, ``off``): an explicit opt-out
+  spelled the other way round, reported as ``env NX_TELEMETRY=0``
 * an automated environment (see :func:`automation_reason`): a pytest
-  process (``PYTEST_CURRENT_TEST``), a lab-run grant (``NOMAD_ALLOC_ID``), a
-  CI vendor (``CI``, ``GITHUB_ACTIONS`` and the rest of :data:`CI_ENV_VARS`),
-  or a container (``/.dockerenv``, ``/run/.containerenv``, a docker /
-  containerd / kubepods / lxc entry in ``/proc/1/cgroup``,
-  ``KUBERNETES_SERVICE_HOST``). A test or build run is not an install, and
-  counting one taints the numbers.
+  process (``PYTEST_CURRENT_TEST``), a lab-run grant (``LAB_CPUS`` /
+  ``LAB_MEM_MB``, which ``lab-run`` exports), a CI vendor (``CI``,
+  ``GITHUB_ACTIONS`` and the rest of :data:`CI_ENV_VARS`), or a container
+  (``/.dockerenv``, ``/run/.containerenv``, a docker / containerd / kubepods
+  / lxc entry in ``/proc/1/cgroup``, ``KUBERNETES_SERVICE_HOST``). A test or
+  build run is not an install, and counting one taints the numbers. Container
+  detection is best effort, per runtime.
 
 ``NX_TELEMETRY=1`` (any value other than empty, ``0``, ``false``, ``no`` or
 ``off``) is the explicit opt-in for someone who really does run nx in a
-container: it overrides ONLY the automation skips. The three opt-outs above
-all still win over it -- ``NX_NO_TELEMETRY``, the config key, and the dev
-checkout (a dev box is not an install whatever the environment says). The
-decision order is therefore: ``NX_NO_TELEMETRY``, dev checkout, config key,
-``NX_TELEMETRY`` opt-in, automation, default on.
+container: it overrides ONLY the automation skips. The opt-outs above all
+still win over it -- ``NX_NO_TELEMETRY``, ``NX_TELEMETRY=0``, the config key,
+and the dev checkout (a dev box is not an install whatever the environment
+says). The decision order is therefore: ``NX_NO_TELEMETRY``, ``NX_TELEMETRY``
+set to a falsy value, dev checkout, config key, ``NX_TELEMETRY`` opt-in,
+automation, default on.
 
 Every failure is swallowed at debug level. The ping never blocks startup,
 never retries, and never raises into the caller; a ping the network drops is
@@ -60,7 +64,10 @@ _log = structlog.get_logger(__name__)
 #: Env opt-out. ``0`` and empty mean "not set"; anything else disables.
 NO_TELEMETRY_ENV = "NX_NO_TELEMETRY"
 #: Explicit opt-in that overrides the automation skips (not the opt-outs).
+#: Set to a falsy value (``0``, ``false``, ``no``, ``off``) it is an opt-out.
 OPT_IN_ENV = "NX_TELEMETRY"
+#: The hint ``nx telemetry status`` / ``on`` append when an automation signal is why the ping is off.
+AUTOMATION_HINT = "set NX_TELEMETRY=1 to count this install"
 #: Test / private-deployment override for the ping target.
 PING_URL_ENV = "NX_INSTALL_PING_URL"
 #: Route on the managed service (unauthenticated; see the engine's InstallPingHandler).
@@ -102,8 +109,12 @@ CI_ENV_VARS: tuple[str, ...] = (
     "CF_BUILD_ID",
     "GO_PIPELINE_NAME",
 )
-#: Lab-run grants are Nomad allocations (labrun); the allocation id is exported.
-LAB_RUN_ENV = "NOMAD_ALLOC_ID"
+#: A hand ``lab-run`` grant runs the command under ``env -i`` and exports only
+#: these (plus PYTEST_XDIST_AUTO_NUM_WORKERS, LAB_JOB_KEY, NX_NO_TELEMETRY), so a
+#: Nomad variable is never seen there; the repo detects a grant the same way
+#: (tests/conftest.py, tests/_tmp_root.py). NOMAD_ALLOC_ID is deliberately NOT a
+#: signal: it would mislabel any real Nomad workload.
+LAB_RUN_ENV_VARS: tuple[str, ...] = ("LAB_CPUS", "LAB_MEM_MB")
 #: pytest sets this for the duration of every test phase.
 PYTEST_ENV = "PYTEST_CURRENT_TEST"
 #: Set inside every Kubernetes pod.
@@ -158,8 +169,9 @@ def automation_reason(environ: Mapping[str, str] | None = None, root: Path | Non
     try:
         if _truthy(env.get(PYTEST_ENV)):
             return f"automation: pytest ({PYTEST_ENV})"
-        if _truthy(env.get(LAB_RUN_ENV)):
-            return f"automation: lab-run ({LAB_RUN_ENV})"
+        for name in LAB_RUN_ENV_VARS:
+            if _truthy(env.get(name)):
+                return f"automation: lab-run ({name})"
         for name in CI_ENV_VARS:
             if _truthy(env.get(name)):
                 return f"automation: CI ({name})"
@@ -200,7 +212,11 @@ def running_from_dev_checkout() -> bool:
     ``uv tool``-installed WHEEL and are therefore not a checkout by
     construction, which is the same reason the nexus-a2qhz guard is inert
     inside the rehearsal containers. ``NX_NO_TELEMETRY`` remains required
-    there. The guard is the general case; the env var is the exception.
+    there, and the e2e-sandbox lint (tests/test_e2e_no_telemetry_lint.py)
+    still enforces it deliberately even though the automation skips now
+    exist: an ``env -i`` sandbox scrubs ``CI`` and ``PYTEST_CURRENT_TEST``,
+    and container detection is heuristic. The guard is the general case; the
+    env var is the exception.
     """
     try:
         from nexus.db.service_endpoint import (  # noqa: PLC0415 — startup cost, and see above
@@ -217,6 +233,12 @@ def _opted_in() -> bool:
     return _truthy(os.environ.get(OPT_IN_ENV))
 
 
+def _opted_out_by_opt_in_var() -> bool:
+    """``NX_TELEMETRY`` explicitly set (non-empty) to a falsy value: an opt-out."""
+    raw = os.environ.get(OPT_IN_ENV, "").strip()
+    return bool(raw) and not _truthy(raw)
+
+
 def telemetry_enabled() -> bool:
     """Env opt-out, dev checkout, config key, then the opt-in / automation skips."""
     return bool(telemetry_status()["enabled"])
@@ -227,6 +249,8 @@ def telemetry_status() -> dict[str, Any]:
     env = os.environ.get(NO_TELEMETRY_ENV, "").strip()
     if env and env != "0":
         return {"enabled": False, "source": f"env {NO_TELEMETRY_ENV}={env}"}
+    if _opted_out_by_opt_in_var():
+        return {"enabled": False, "source": f"env {OPT_IN_ENV}={os.environ.get(OPT_IN_ENV, '').strip()}"}
     if running_from_dev_checkout():
         return {"enabled": False, "source": "dev checkout"}
     if not _config_enabled():

@@ -7459,17 +7459,19 @@ last successful send is recorded in `~/.config/nexus/install_ping.last`.
 Opt-out, default on. `off` writes `telemetry.enabled: false` to
 `config.yml`; `NX_NO_TELEMETRY=1` (any value but `0`) wins over config.
 The ping also skips itself in automated environments, and `status` names the
-reason (`automation: <kind> (<signal>)`): a pytest process
-(`PYTEST_CURRENT_TEST`), a lab-run grant (`NOMAD_ALLOC_ID`), CI (`CI` and the
-vendor variables such as `GITHUB_ACTIONS`, `GITLAB_CI`, `BUILDKITE`,
-`JENKINS_URL`, `TF_BUILD`; a value of `0`, `false`, `no`, `off` or empty counts
-as not set), and containers (`/.dockerenv`, `/run/.containerenv`, a
-docker/containerd/kubepods/lxc entry in `/proc/1/cgroup`,
-`KUBERNETES_SERVICE_HOST`). To count a containerized install, set
-`NX_TELEMETRY=1`: it overrides these automation skips only, and
-`NX_NO_TELEMETRY`, `nx telemetry off` and the dev-checkout skip still win over
-it. `nx telemetry on` clears the config opt-out but does not override the
-automation skips.
+reason (`automation: <kind> (<signal>)`) and appends the opt-in hint: a pytest
+process (`PYTEST_CURRENT_TEST`), a lab-run (`LAB_CPUS` or `LAB_MEM_MB`, which
+`lab-run` exports), CI (`CI` and the vendor variables such as `GITHUB_ACTIONS`,
+`GITLAB_CI`, `BUILDKITE`, `JENKINS_URL`, `TF_BUILD`; a value of `0`, `false`,
+`no`, `off` or empty counts as not set), and containers (`/.dockerenv`,
+`/run/.containerenv`, a docker/containerd/kubepods/lxc entry in
+`/proc/1/cgroup`, `KUBERNETES_SERVICE_HOST`; detection is best effort, per
+runtime). To count a containerized install, set `NX_TELEMETRY=1` (for example
+`docker run -e NX_TELEMETRY=1 ...`): it overrides these automation skips only.
+`NX_NO_TELEMETRY`, `NX_TELEMETRY=0` (or `false`, `no`, `off`, which is an
+opt-out), `nx telemetry off` and the dev-checkout skip all still win over it.
+`nx telemetry on` clears the config opt-out; when an automation signal still
+keeps the ping off it says so and prints the same hint.
 `NX_INSTALL_PING_URL` overrides the target (tests, private deployments).
 `status` prints the decision, its source, the install id, and the last
 ping time.
