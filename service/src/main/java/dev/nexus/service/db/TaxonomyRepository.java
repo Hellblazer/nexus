@@ -1766,9 +1766,11 @@ public final class TaxonomyRepository {
                 .map(CollectionRow::collectionId).orElse(null);
             final org.jooq.Condition topicsOf = purgedId == null ? TOPICS.COLLECTION_ID.isNull().and(TOPICS.COLLECTION.eq(collection))
                 : TOPICS.COLLECTION_ID.eq(purgedId).or(TOPICS.COLLECTION_ID.isNull().and(TOPICS.COLLECTION.eq(collection)));
+            // the doomed topics are those of the row as locked (the condition above), not topicsOf(tenant, collection): before gate 3 that
+            // helper names the collection by the REQUEST's label, which after a one-row rename is the new holder's topics (ced0ada045)
             var doomedIds = ctx.select(TOPICS.ID)
                 .from(TOPICS)
-                .where(topicsOf(tenant, collection))
+                .where(topicsOf)
                 .fetch()
                 .map(r -> r.get(TOPICS.ID));
             int links = 0, assignments = 0;
