@@ -279,13 +279,10 @@ class PgContainerTmpfsGateTest {
             assertRunsOnTmpfsWithTheSettingsAndTheLimit(c, PgContainerHelper.MEMORY_LIMIT_BYTES);
             // Row 24: a parallel HNSW build takes one shared area of maintenance_work_mem in /dev/shm. At 256 MB it fails on Docker's
             // 64 MB default ("could not resize shared memory segment ... No space left on device", measured on chas 2026-11-24) and
-            // builds here, with its workers. psql in the container: the statements never pass through the engine's SQL surface.
+            // builds here, with its workers. The statements are in the test resource pg-shm-parallel-hnsw.sql, run by psql in the container.
+            c.copyFileToContainer(org.testcontainers.utility.MountableFile.forClasspathResource("pg-shm-parallel-hnsw.sql"), "/tmp/pg-shm-parallel-hnsw.sql");
             ExecResult build = c.execInContainer("psql", "-U", PgContainerHelper.USERNAME, "-d", PgContainerHelper.DATABASE,
-                "-v", "ON_ERROR_STOP=1", "-c", "CREATE EXTENSION IF NOT EXISTS vector; CREATE TABLE shm_probe(v vector(3)); "
-                    + "INSERT INTO shm_probe SELECT ARRAY[random(), random(), random()]::vector FROM generate_series(1, 50000); "
-                    + "ALTER TABLE shm_probe SET (parallel_workers = 2); SET maintenance_work_mem = '256MB'; "
-                    + "SET max_parallel_maintenance_workers = 2; SET client_min_messages = debug1; "
-                    + "CREATE INDEX ON shm_probe USING hnsw (v vector_l2_ops);");
+                "-v", "ON_ERROR_STOP=1", "-f", "/tmp/pg-shm-parallel-hnsw.sql");
             assertThat(build.getExitCode()).as("a parallel HNSW build at maintenance_work_mem 256MB: %s", build.getStderr()).isZero();
             assertThat(build.getStderr()).as("non-vacuity: the build ran parallel").contains("using 2 parallel workers");
         }
