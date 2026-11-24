@@ -686,8 +686,12 @@ class PciBuilderTerminationIntegrationTest {
         java.util.Set<String> ids = new java.util.TreeSet<>(java.util.List.of(
             "db/changelog/aspects-005-retire-aspect-queue-table.xml::aspects-005-2",
             "db/changelog/collections-001-tuple-unique-index.xml::collections-001-2"));
-        for (String id : dev.nexus.service.P35bContinueChangesets.ids()) {
-            ids.add(dev.nexus.service.P35bContinueChangesets.file(id) + "::" + id);
+        // On the fresh walk the P3.5b ids are pending. On the form A clone (-Dnexus.test.formA.applied=true) the schema helper has recorded
+        // every one of them, so they wait for nothing and the retrying set is the two data-move changesets alone.
+        if (!dev.nexus.service.Rdr229CompleteStamps.formAApplied()) {
+            for (String id : dev.nexus.service.P35bContinueChangesets.ids()) {
+                ids.add(dev.nexus.service.P35bContinueChangesets.file(id) + "::" + id);
+            }
         }
         return java.util.Set.copyOf(ids);
     }
