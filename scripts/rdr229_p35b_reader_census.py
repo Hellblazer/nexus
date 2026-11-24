@@ -31,7 +31,7 @@ engine test Rdr229P35bReaderCensusLiveCatalogTest compares this file's object se
 database, so an object this parse misses fails there.
 
 THE BASELINE. The committed file is P3.5b's surface: the readers as they stand before P3.5b's own changelogs
-(P35B_OWN, vectors-077 and vectors-078), which the dispositions file disposes one by one. --live reads the whole tree,
+(P35B_OWN, vectors-077, vectors-078 and vectors-084), which the dispositions file disposes one by one. --live reads the whole tree,
 P3.5b's redefinitions included, and prints that census to stdout; tests/test_rdr229_p35b_reader_census.py checks it:
 after P3.5b a form A object reads no name column but the registry's label, so P4.1's drop meets none of them.
 
@@ -263,7 +263,10 @@ includes = re.findall(r'<include\s+file="([^"]+)"', master)
 # vectors-083 (RDR-229 P3.7, nexus-p2m1x.27) redefines four of those objects again (the restore functions and the reattach plan find a quarantined chunk's
 # origin by id from gate 3); it is a later definer of objects P3.5b already redefined, so the baseline stays at the definer before P3.5b.
 P35B_OWN = {"db/changelog/vectors-077-rdr229-p35b-readers-both.xml", "db/changelog/vectors-078-rdr229-p35b-readers-continue.xml",
-            "db/changelog/vectors-083-restore-by-origin-id.xml"}
+            "db/changelog/vectors-083-restore-by-origin-id.xml", "db/changelog/vectors-084-rdr229-ann-query-by-id.xml"}
+# Files whose CREATE FUNCTIONs are ADDED OVERLOADS of functions an earlier file defines (vectors-084: taxonomy_ann_query_<dim> with a
+# trailing p_collection_id), not redefinitions: each is the object nexus.<name>/by-id, and the text-signature function keeps its own.
+OVERLOAD_FILES = {"db/changelog/vectors-084-rdr229-ann-query-by-id.xml"}
 BASELINE = "--live" not in sys.argv
 FN_RE = re.compile(r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(nexus\.[a-z0-9_]+)\s*\(", re.I)
 FN_DROP = re.compile(r"DROP\s+FUNCTION\s+(?:IF\s+EXISTS\s+)?(nexus\.[a-z0-9_]+)", re.I)
@@ -319,7 +322,12 @@ for inc in includes:
     fname = inc.split("/")[-1]
     ev = []
     for mm in FN_RE.finditer(text):
-        ev.append((mm.start(), "def", ("function", mm.group(1).lower()), mm))
+        name = mm.group(1).lower()
+        # An overload file adds a second live function of an existing name (it replaces nothing): its own object, so the
+        # overload it leaves in place keeps its last definer and its rows.
+        if inc in OVERLOAD_FILES:
+            name += "/by-id"
+        ev.append((mm.start(), "def", ("function", name), mm))
     for mm in FN_DROP.finditer(text):
         ev.append((mm.start(), "drop", ("function", mm.group(1).lower()), mm))
     for mm in VIEW_RE.finditer(text):

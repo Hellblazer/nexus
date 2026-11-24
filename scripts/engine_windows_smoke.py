@@ -137,7 +137,7 @@ _CHANGESET_ID_RE = re.compile(r'<changeSet\b[^>]*?\bid="([^"]+)"')
 #: onFail="CONTINUE" (a skip records nothing, so the changeset is retried at every boot) and waits for state a fresh
 #: install reaches only after its first boot. ``check_applied`` passes a missing id only when it is listed here, and
 #: fails on an entry the changelog no longer has, so the list cannot go stale (RDR-229 Phase 3 reland, linda's ruling).
-#: RDR-229 P3.5b's CONTINUE-gated changesets (vectors-078), one id a line, kept equal to the changelog by
+#: RDR-229 P3.5b's CONTINUE-gated changesets (vectors-078 and vectors-084), one id a line, kept equal to the changelog by
 #: tests/test_rdr229_p35b_continue_list.py. Absent on a tree without P3.5b, where it adds nothing.
 P35B_CONTINUE_LIST: Path = Path(__file__).resolve().parents[1] / "service" / "src" / "main" / "resources" / "db" / "rdr229" / "p35b-continue-changesets.txt"
 

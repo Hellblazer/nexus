@@ -135,6 +135,12 @@ _CONTINUE_ALLOWLIST: dict[tuple[str, str], str] = {
     ("vectors-078-rdr229-p35b-readers-continue.xml", "vectors-078-14"): "collection_health_meta by id",
     # CREATE OR REPLACE VIEW takes ACCESS EXCLUSIVE on that one view and ACCESS SHARE on nexus.topics and nexus.catalog_collections for the parse; the body names no chunk table, leaf, partition helper or builder object, and no table with a foreign key into nexus.chunks (RDR-229 P3.5b, nexus-p2m1x.24).
     ("vectors-078-rdr229-p35b-readers-continue.xml", "vectors-078-15"): "topics_with_counts by id",
+    # CREATE OR REPLACE FUNCTION takes no lock on a table (the function's own pg_proc row only); the LANGUAGE sql body is parsed under ACCESS SHARE on nexus.taxonomy_centroids and nexus.catalog_collections; the body names no chunk table, leaf, partition helper or builder object, and no table with a foreign key into nexus.chunks (RDR-229 P3.5b, nexus-p2m1x.24/.25, the by-id overload).
+    ("vectors-084-rdr229-ann-query-by-id.xml", "vectors-084-1"): "taxonomy_ann_query_384 by collection id",
+    # CREATE OR REPLACE FUNCTION takes no lock on a table (the function's own pg_proc row only); the LANGUAGE sql body is parsed under ACCESS SHARE on nexus.taxonomy_centroids and nexus.catalog_collections; the body names no chunk table, leaf, partition helper or builder object, and no table with a foreign key into nexus.chunks (RDR-229 P3.5b, nexus-p2m1x.24/.25, the by-id overload).
+    ("vectors-084-rdr229-ann-query-by-id.xml", "vectors-084-2"): "taxonomy_ann_query_768 by collection id",
+    # CREATE OR REPLACE FUNCTION takes no lock on a table (the function's own pg_proc row only); the LANGUAGE sql body is parsed under ACCESS SHARE on nexus.taxonomy_centroids and nexus.catalog_collections; the body names no chunk table, leaf, partition helper or builder object, and no table with a foreign key into nexus.chunks (RDR-229 P3.5b, nexus-p2m1x.24/.25, the by-id overload).
+    ("vectors-084-rdr229-ann-query-by-id.xml", "vectors-084-3"): "taxonomy_ann_query_1024 by collection id",
 }
 
 # The one statement shape exempt from the foreign-key-table rule (see the module docstring), matched on the NORMALISED text.

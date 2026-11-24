@@ -40,9 +40,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * colophon's collections-001-2 guard, b577a641cd): boot 1 is a real migration walk that registers the stamp moves through their
  * shipped changesets (the labels the preconditions read, never rows written here) and leaves all twelve unrecorded; the production
  * worker then completes every move ({@link BootedSchema#migrateAndBoot}, which asserts none is open); boot 2, the next real walk,
- * records each of the twelve exactly once; boot 3 records nothing new and leaves nothing pending.
+ * records each of the fifteen exactly once; boot 3 records nothing new and leaves nothing pending.
  *
- * <p>The twelve ids come from {@code db/rdr229/p35b-continue-changesets.txt}, the list P3.7's rename and the restart check read.
+ * <p>The fifteen ids (vectors-078's twelve, vectors-084's three) come from {@code db/rdr229/p35b-continue-changesets.txt}, the list P3.7's rename and the restart check read.
  */
 class Rdr229P35bContinueChangesetsApplyIntegrationTest {
 
@@ -55,12 +55,12 @@ class Rdr229P35bContinueChangesetsApplyIntegrationTest {
     void aFreshInstall_skipsTheTwelve_theWorkerCompletesTheStamps_andTheNextBootAppliesEachOnce_soNothingStaysPending()
         throws Exception {
         List<String> twelve = continueList();
-        assertThat(twelve).as("non-vacuity: the shipped list names the vectors-078 changesets").hasSize(12)
-            .allMatch(i -> i.startsWith("vectors-078-"));
+        assertThat(twelve).as("non-vacuity: the shipped list names the twelve vectors-078 and the three vectors-084 changesets").hasSize(15)
+            .allMatch(i -> i.startsWith("vectors-078-") || i.startsWith("vectors-084-"));
         PostgreSQLContainer<?> pg = BootedSchema.startContainer();
         try (Connection su = pg.createConnection("")) {
             // boot 1 (the walk) and the worker's drive to no open move; the walk alone runs before the drive, so nothing has
-            // applied the twelve yet
+            // applied the fifteen yet
             BootedSchema.migrateAndBoot(su);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             assertThat(BootedSchema.openLabels(ctx)).as("the worker completed every move").isEmpty();

@@ -41,7 +41,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>The switch. {@code -Dnexus.test.formA.applied=true} makes {@link PgContainerHelper#applyProductSchema} (and the classes that
  * migrate in stages, through {@link #applyFormAIfRequested}) finish with {@link #completeAndApplyFormA}, so a test class written for the
- * fresh walk runs again against the form A bodies. Off by default: the default run is the fresh walk, where the twelve are skipped.
+ * fresh walk runs again against the form A bodies. Off by default: the default run is the fresh walk, where the fifteen are skipped.
  */
 public final class Rdr229CompleteStamps {
 
@@ -73,7 +73,7 @@ public final class Rdr229CompleteStamps {
     }
 
     /**
-     * {@link #complete} the stamps, then run the master changelog again on {@code su}: the twelve CONTINUE changesets now pass their gate
+     * {@link #complete} the stamps, then run the master changelog again on {@code su}: the fifteen CONTINUE changesets now pass their gate
      * and apply. Asserts that they are all recorded, so a variant that applied nothing fails and does not pass vacuously.
      */
     public static void completeAndApplyFormA(Connection su) throws Exception {
@@ -87,7 +87,7 @@ public final class Rdr229CompleteStamps {
         List<String> ids = continueList();
         Field<String> id = DSL.field(DSL.name("id"), String.class);
         assertThat(ctx.select(id).from(JOURNAL).where(id.in(ids)).fetch(id))
-            .as("non-vacuity: every form A changeset of vectors-078 is recorded, so its body is the one in the database")
+            .as("non-vacuity: every form A changeset of vectors-078 and vectors-084 is recorded, so its body is the one in the database")
             .containsExactlyInAnyOrderElementsOf(ids);
     }
 
@@ -166,7 +166,7 @@ public final class Rdr229CompleteStamps {
         return out;
     }
 
-    /** The twelve changeset ids of vectors-078 (the file P3.7 reads). */
+    /** The fifteen changeset ids of vectors-078 (twelve) and vectors-084 (three), the list P3.7 reads. */
     public static List<String> continueList() throws IOException {
         List<String> out = new ArrayList<>();
         try (InputStream in = Rdr229CompleteStamps.class.getClassLoader().getResourceAsStream(CONTINUE_LIST)) {
@@ -178,7 +178,7 @@ public final class Rdr229CompleteStamps {
                 }
             }
         }
-        assertThat(out).as("non-vacuity: the list names the vectors-078 changesets").hasSize(12);
+        assertThat(out).as("non-vacuity: the list names the vectors-078 and vectors-084 changesets").hasSize(15);
         return out;
     }
 }
