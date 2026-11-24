@@ -25,6 +25,7 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 
 /**
  * RDR-229 P3.5a (nexus-p2m1x.23, row 14), the two CatalogRepository writers the census triage found without a registry read of their own.
@@ -184,6 +185,22 @@ class SweepAndPurgeRegistryFirstTest {
                     .as("the manifest purge waits on the registry row the verb holds, read FOR KEY SHARE (done: %s)", purge.isDone()).isTrue();
                 assertThat(purge.isDone()).as("and has not finished").isFalse();
                 assertThat(manifestRows(doc)).as("nothing was purged while the verb held the row").isEqualTo(1);
+                // The registry row is read BEFORE the manifest rows are touched. Without that read the purge deletes first and waits later (the
+                // span clear that follows reads the same row FOR KEY SHARE, which the wait assertion above cannot tell apart), and the delete
+                // is invisible from outside until it commits. A third session asking for the document's manifest rows FOR UPDATE NOWAIT sees it:
+                // the rows are free while the purge waits on the registry, locked (55P03) once it has deleted them. It lets go before the verb does.
+                try (Connection probe = fx.pg.createConnection("")) {
+                    probe.setAutoCommit(false);
+                    try {
+                        assertThatCode(() -> DSL.using(probe, SQLDialect.POSTGRES).select(CATALOG_DOCUMENT_CHUNKS.DOC_ID).from(CATALOG_DOCUMENT_CHUNKS)
+                            .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(fx.tenant)).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(doc))
+                            .forUpdate().noWait().fetch())
+                            .as("the document's manifest rows are not yet locked by the purge: it waits on the registry row before it deletes anything")
+                            .doesNotThrowAnyException();
+                    } finally {
+                        probe.rollback();
+                    }
+                }
             } finally {
                 verb.rollback();
             }
