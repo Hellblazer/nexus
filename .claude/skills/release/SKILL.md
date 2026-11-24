@@ -894,18 +894,22 @@ The version+ref strings must all line up. CI's `TestMarketplaceVersion` parity c
 
 ### 8a. Optional: bump source.sha post-merge (defends against tag force-push)
 
-After Step 7's merge lands on main, the release commit has a known SHA. Optionally add it to marketplace.json's `plugins[].source.sha`:
+After Step 7's merge lands on main, the release commit has a known SHA. Optionally add it to marketplace.json's `plugins[].source.sha`. Main takes changes through PRs only, so this is a second, small release PR; there is no direct push to main:
 
 ```bash
-git checkout main && git pull
-RELEASE_SHA=$(git rev-parse HEAD)        # the merge commit (or the chore(release) commit if merged via merge-commit)
+git fetch origin main
+RELEASE_SHA=$(git rev-parse origin/main)  # the merge commit Step 7 produced
+git switch -c release/vX.Y.Z-pin-sha origin/main   # in the release worktree
 # Edit .claude-plugin/marketplace.json: add "sha": "$RELEASE_SHA" alongside "ref": "vX.Y.Z" for every plugin the file lists
 git add .claude-plugin/marketplace.json
 git commit -m "chore(release): pin sha for vX.Y.Z"
-git push
+git push -u origin release/vX.Y.Z-pin-sha
+gh pr create --base main --title "release: pin sha for vX.Y.Z" --body-file <body.md>
 ```
 
-Tradeoff: extra commit on main, but guards against the case where someone could force-push the `vX.Y.Z` tag. For solo / small-team projects the `ref` alone is usually fine; skip if so.
+Wait for CI green and merge by hand with `gh pr merge <N> --merge` (never `--auto`), as in Step 7. Step 9 then tags the NEW merge commit on main, not the one in `RELEASE_SHA`.
+
+Tradeoff: an extra PR cycle and commit on main, but guards against the case where someone could force-push the `vX.Y.Z` tag. For solo / small-team projects the `ref` alone is usually fine; skip if so.
 
 ### 8b. Publish the MinerU weights assets (F35, nexus-7t3w1; BEFORE the tag, under the release's go)
 
