@@ -87,7 +87,7 @@ Prefer, in order: (1) dispatch a FRESH `worktree-developer` (a new Agent call, c
 
 ## Sending a Mid-Turn Message to an Agent (RDR-205 Phase 5)
 
-To send a directive or other message to a dispatched agent while it works, `tuple_out` to `mailbox/<agent id>` with a sender-minted nonce; the agent drains its mailbox with `tuple_in` before composing any hand-back, and a resend of the same nonce lands on the same tuple rather than piling up. Full convention, dead-letter rule, and the template shape: `/conexus:mailbox`. Choosing between `SendMessage`, the mailbox and T2, and messaging peer sessions rather than your own agents: `/conexus:peer-messaging`.
+To send a directive or other message to a dispatched agent while it works, `mailbox_send(to="<agent id>", body=...)` (an agent id is used as is); the agent drains `mailbox/<agent id>` with `tuple_in` before composing any hand-back. A caller that wants a resend to land on the same tuple rather than pile up sends raw `tuple_out` with its own nonce instead. Full convention, dead-letter rule, and the template shape: `/conexus:mailbox`. Choosing between `SendMessage`, the mailbox and T2, and messaging peer sessions rather than your own agents: `/conexus:peer-messaging`.
 
 ## VERIFY Line Convention (MANDATORY)
 

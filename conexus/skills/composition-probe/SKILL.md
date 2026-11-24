@@ -19,9 +19,9 @@ A coordinator bead is any bead tagged `metadata.coordinator=true` (set with `bd 
 
 - **Coordinator bead ID** (required) — e.g., `nexus-abc1`
 
-## Tool Budget (Read-Only)
+## Tool Budget
 
-The dispatched subagent uses `Read`, `Grep`, `Glob` only. Serena symbol resolution is NOT needed — the
+The dispatched subagent reads code with `Read`, `Grep` and `Glob`, writes the one probe file (`/tmp/probe-<id>.<ext>`) and runs the one pinned runner command line with `Bash`. It reads nothing else and edits no project file. Serena symbol resolution is NOT needed — the
 Phase 1a hard-case spike verified CA-1 as `READ-ONLY-SUFFICIENT` against
 `search_cross_corpus` in nexus's [search engine](https://github.com/Hellblazer/nexus/blob/main/src/nexus/search_engine.py). Nexus and ART coordinator targets use `Any`
 at injection boundaries with runtime dict-key contracts; typed generics requiring inference were not
@@ -198,7 +198,7 @@ For full relay structure and optional fields, see [${CLAUDE_PLUGIN_ROOT}/resourc
 - [ ] Each dependency's declared output read from its bead description
 - [ ] Test runner detected (pyproject.toml / pom.xml / package.json)
 - [ ] Subagent dispatched with pinned prompt (verbatim — no paraphrasing)
-- [ ] Tool budget enforced: subagent uses Read, Grep, Glob only (no Serena)
+- [ ] Tool budget enforced: subagent reads with Read, Grep, Glob, writes only the /tmp probe file and runs only the pinned runner (no Serena, no project edits)
 - [ ] PASS output is one-line confirmation with assertion count and elapsed time
 - [ ] FAIL output is structured report with dependency attribution and suggested `bd reopen`
 - [ ] CA-2 fallback (unattributed failure) surfaces raw output without guessing attribution

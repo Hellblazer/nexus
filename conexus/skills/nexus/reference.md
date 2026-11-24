@@ -22,7 +22,7 @@ is gone from `uv.lock`); this section described both as current until 7.20.0.
 
 Core tools are prefixed `mcp__plugin_conexus_nexus__`; catalog tools are prefixed `mcp__plugin_conexus_nexus-catalog__`.
 
-There are 21 core tools: `search`, `query`, `store_put`, `store_get`, `store_get_many`, `store_list`, `memory_put`, `memory_get`, `memory_delete`, `memory_search`, `memory_consolidate`, `scratch`, `scratch_manage`, `collection_list`, `plan_save`, `plan_search`, `traverse`, `nx_answer`, `nx_tidy`, `nx_enrich_beads`, `nx_plan_audit`. The analytical operators are plan steps inside `nx_answer`, not tools (see Operators below).
+The core server registers 46 tools, plus two `hook_*` tools the plugin's hooks call. Not tabled below, each described by its own tool description: scoped search (`search_metadata_scoped`, `search_topic_scoped`, `search_graph_hop`, `search_aspect_scoped`), `plan_delete`, `procedure_run`, `nx_answer_report`, `brief`, `tuple_*` and `mailbox_send` (see the mailbox skill), `setup`, `setup_status`, `daemon_uninstall`. The analytical operators are plan steps inside `nx_answer`, not tools (see Operators below).
 There are 10 catalog tools (nexus-catalog server): `search`, `show`, `list`, `register`, `update`, `link`, `links`, `link_query`, `resolve`, `stats`.
 
 ### search
@@ -37,18 +37,22 @@ Semantic search across T3 knowledge collections.
 | `offset` | int | `0` | Skip this many results. Footer shows `next: offset=N` for next page |
 | `where` | str | `""` | Metadata filter: `KEY=VALUE` or `KEY>=VALUE`, comma-separated. Operators: `=`, `>=`, `<=`, `>`, `<`, `!=`. Numeric fields auto-coerced: `bib_year`, `bib_citation_count`, `page_count` |
 | `cluster_by` | str | `""` | Set to `"semantic"` to group results by Ward hierarchical clustering. Each result gets `_cluster_label` metadata |
+| `topic` | str | `""` | Restrict to one discovered taxonomy topic label (`nx taxonomy discover`) |
+| `structured` | bool | `false` | Return the `{ids, tumblers, distances, ...}` dict instead of text |
+| `threshold` | float \| None | `None` | Override the per-collection distance cutoff (lower is stricter) |
+| `lexical` | bool | `false` | Also add exact-text hits; for a rare identifier a semantic search misses |
 
 ```
 mcp__plugin_conexus_nexus__search(query="query"                                  # knowledge + code + docs (default)
 mcp__plugin_conexus_nexus__search(query="query", corpus="all"                    # all T3 collections
 mcp__plugin_conexus_nexus__search(query="query", corpus="code"                   # code collections only
-mcp__plugin_conexus_nexus__search(query="query", corpus="knowledge__art-1-1__voyage-context-3__v1", limit=15  # specific collection (RDR-103: 4-segment)
+mcp__plugin_conexus_nexus__search(query="query", corpus="knowledge__art-1-1__voyage-context-3__v1", limit=15  # specific collection (full name as `nx collection list` prints it)
 mcp__plugin_conexus_nexus__search(query="query", where="bib_year>=2023"          # filter by year
 mcp__plugin_conexus_nexus__search(query="query", where="section_type!=references" # exclude reference sections
 mcp__plugin_conexus_nexus__search(query="query", cluster_by="semantic"           # group results by topic
 ```
 
-**Automatic quality features**: Results are automatically filtered by per-corpus distance thresholds (cloud/Voyage only), knowledge/docs/rdr collections over-fetch at 4x, and high-selectivity metadata filters route through the catalog for faster retrieval.
+**Automatic quality features**: results are filtered by per-collection distance thresholds (Voyage-embedded collections only), knowledge/docs/rdr collections over-fetch at 4x, and selective metadata filters route through the catalog.
 
 ### query
 
@@ -60,6 +64,12 @@ Document-level semantic search for analytical questions. Unlike `search` which r
 | `corpus` | str | `"knowledge"` | Corpus prefix or full collection name. `"all"` for all corpora |
 | `where` | str | `""` | Metadata filter: `KEY=VALUE`, comma-separated. Same syntax as `search` |
 | `limit` | int | `10` | Maximum documents to return |
+| `author` | str | `""` | Catalog filter: author contains this text (case-insensitive). Any catalog filter routes through the catalog |
+| `content_type` | str | `""` | Catalog filter: `code`, `paper`, `rdr`, `knowledge` |
+| `follow_links` | str | `""` | Follow catalog links of this type (`cites`, `implements`, ...) from the matches |
+| `depth` | int | `1` | BFS depth for `follow_links` |
+| `subtree` | str | `""` | Tumbler prefix or registered owner name (a 3+ segment address is refused) |
+| `structured` | bool | `false` | Return the structured dict |
 
 ```
 mcp__plugin_conexus_nexus__query(question="adaptive resonance theory cortical maps"
@@ -67,23 +77,29 @@ mcp__plugin_conexus_nexus__query(question="speech processing", corpus="knowledge
 mcp__plugin_conexus_nexus__query(question="error handling patterns", corpus="code", limit=5
 ```
 
-Returns per-document: title, relevance score, bibliographic metadata (year, authors, venue, citations), technical metadata (pages, chunks, extraction method, formulas), collection, and best matching snippet.
+Returns per document: title, relevance score, bibliographic and technical metadata, collection, and the best matching snippet.
 
 Use `search` for chunk-level retrieval. Use `query` when you need to know **which documents** match.
 
 ### nx_answer
 
-Plan-match-first analytical retrieval (RDR-080), reserved for answers that must be reduced from many documents (cross-corpus synthesis, ranking/comparing, RDR research) — not for file:line, single-fact, or already-in-T2 questions (use `search`/`query`, seconds (mean ~8s)). Internally: `plan_match` → (on hit) run matched plan via `plan_run`; (on miss) dispatch inline `claude -p` planner. Every run logged to T2 `nx_answer_runs`. Measured cost: p50 80s, p95 217s, can time out at 300s.
+Plan-match-first analytical retrieval (RDR-080), for answers that must be reduced from many documents (cross-corpus synthesis, ranking, RDR research), not file:line, single-fact or already-in-T2 questions (use `search`/`query`: seconds). It runs a saved plan from the plan library; on a miss an inline `claude -p` planner grows, runs and saves one (there are no `plan_match`/`plan_run` tools). Every run is logged to T2 `nx_answer_runs`. Cost: p50 80s, p95 217s, can time out at 300s.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `question` | str | required | Natural-language question |
-| `scope` | str | `""` | Catalog subtree (e.g. `"1.2"`) or corpus filter (e.g. `"knowledge"`). A subtree is a filter, never a corpus: it filters every `query` and `search_metadata_scoped` step whatever its corpus. A `search`, `search_topic_scoped`, `search_graph_hop` or `search_aspect_scoped` step has no subtree filter, so it runs unscoped, and so does every step under a document-level address such as `"1.2.4686"`; the answer text names each such step (`[scope not applied: ...]`) and `scope_diagnostics` reports it as `subtree_not_applied` |
+| `scope` | str | `""` | Catalog subtree (e.g. `"1.2"`) or corpus filter (e.g. `"knowledge"`). A subtree filters every `query` and `search_metadata_scoped` step whatever its corpus; the other search steps and any step under a document-level address such as `"1.2.4686"` run unscoped, which the answer names (`[scope not applied: ...]`) |
 | `context` | str | `""` | Supplementary caller-supplied context for the plan matcher |
 | `max_steps` | int | `6` | Cap on plan DAG size (applied to inline planner on miss) |
-| `budget_usd` | float \| None | `None` | Per-invocation cost cap; `None` = the derived default (`budget_default.DERIVED_BUDGET_USD`, unset until RDR-196 .p3a derives it); enforcement lands in .p3c |
+| `budget_usd` | float \| None | `None` | Soft per-call cost guidance in USD: an over-estimate warns, it does not refuse. `None` = the derived default; non-positive is refused |
+| `budget_seconds` | float \| None | server default | Hard wall-clock cap on plan execution; on a trip, results so far come back |
 | `trace` | bool | `True` | When False, redacts question + final_text in the run log |
 | `dimensions` | dict/null | `null` | Dimensional filter for the matcher. Verb skills pin `{"verb": "research"}` etc. |
+| `structured` | bool | `false` | Return an envelope dict (`final_text`, `chunks`, `plan_id`, ...) |
+| `min_confidence` | float \| None | `None` | Per-call plan-match confidence floor |
+| `force_dynamic` | bool | `false` | Skip plan matching; use the inline planner |
+| `bindings` | dict/null | `null` | Plan bindings (e.g. `{"content_type": "rdr"}`) that make type-scoped builtin plans reachable; `source`, `owner`, `project` are reserved |
+| `continuation` | bool \| None | `None` | `True` stops before the final reduction; finish it with `nx_answer_report` |
 
 ```
 mcp__plugin_conexus_nexus__nx_answer(question="how does plan matching work"
@@ -123,8 +139,8 @@ Batch-hydrate document content by ID past the 300-record read cap (MAX_QUERY_RES
 | `structured` | bool | `false` | Return `{contents, missing}` dict when True; human-readable string when False |
 
 ```
-mcp__plugin_conexus_nexus__store_get_many(ids=["id1","id2"], collections="knowledge__art-1-1__voyage-context-3__v1"
-mcp__plugin_conexus_nexus__store_get_many(ids="id1,id2", collections="rdr__nexus-1-1__voyage-context-3__v1", structured=True
+mcp__plugin_conexus_nexus__store_get_many(ids=["id1","id2"], collections="<collection name>"
+mcp__plugin_conexus_nexus__store_get_many(ids="id1,id2", collections="<collection name>", structured=True
 ```
 
 ### Operators (plan steps, not MCP tools)
@@ -153,9 +169,9 @@ save a plan with `plan_save` whose steps name these verbs.
 
 Each spawns a `claude -p` subprocess (300-600s timeout) and requires real arguments — none of the three runs with no args. For T2 consolidation (overlaps, stale entries), use `memory_consolidate` instead — it operates on T2 directly with no subprocess.
 
-- **`nx_tidy(topic, collection="knowledge")`** — read-only. Semantic-searches ONE T3 collection for entries matching `topic`, then dispatches a tool-free subprocess to identify duplicates/contradictions/outdated entries among what it found. Returns a consolidated summary plus suggested actions; performs no writes itself — acting on a suggestion (e.g. deleting a stale entry) is a separate `store_put`/deletion the caller makes.
-- **`nx_enrich_beads(bead_description, context="")`** — enriches the ONE bead description passed in with codebase-derived execution context (file paths, test commands, constraints). Returns enriched markdown as a string; does not read or write beads itself — the caller passes the description in and writes the result back (e.g. `bd update`).
-- **`nx_plan_audit(plan_json, context="")`** — audits ONE plan (passed as `plan_json`) for file-path/dependency/assumption correctness against the current codebase. Not a scan of the stored plan library.
+- **`nx_tidy(topic, collection="knowledge")`** — read-only. Searches ONE T3 collection for entries matching `topic` and reports duplicates, contradictions and outdated entries with suggested actions; it writes nothing.
+- **`nx_enrich_beads(bead_description, context="")`** — enriches the ONE bead description passed in with execution context (file paths, test commands, constraints) and returns markdown; it reads and writes no bead, so the caller writes the result back.
+- **`nx_plan_audit(plan_json, context="")`** — audits ONE plan for file-path, dependency and assumption correctness against the codebase; not a scan of the plan library.
 
 ```
 mcp__plugin_conexus_nexus__nx_tidy(topic="embedding quotas", collection="<subject>")
@@ -190,11 +206,11 @@ Retrieve the full content and metadata of a T3 entry by document ID.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `doc_id` | str | required | Document ID (from store_list or store_put output) |
+| `doc_id` | str | required | The 64-character content-hash id (from `store_list`, `store_put` or a `search` hit), or an exact document title |
 | `collection` | str | `"knowledge"` | Collection name or prefix |
 
 ```
-mcp__plugin_conexus_nexus__store_get(doc_id="a1b2c3d4e5f6g7h8", collection="knowledge__notes"
+mcp__plugin_conexus_nexus__store_get(doc_id="research-adaptive-resonance", collection="knowledge"   # by exact title
 ```
 
 ### store_list
@@ -209,8 +225,8 @@ List entries in a T3 knowledge collection.
 | `docs` | bool | `false` | Show unique documents instead of individual chunks. Deduplicates by content_hash, shows title, chunk count, page count, extraction method |
 
 ```
-mcp__plugin_conexus_nexus__store_list(collection="<subject>"                       # auto-promoted to conformant
-mcp__plugin_conexus_nexus__store_list(collection="knowledge__art-1-1__voyage-context-3__v1", docs=true  # document-level view (RDR-103: 4-segment)
+mcp__plugin_conexus_nexus__store_list(collection="<subject>"                       # the bare subject; the catalog resolves it to the collection's label
+mcp__plugin_conexus_nexus__store_list(collection="knowledge__art-1-1__voyage-context-3__v1", docs=true  # document-level view; a full collection name as `nx collection list` prints it
 mcp__plugin_conexus_nexus__store_list(collection="knowledge__notes-1-1__voyage-context-3__v1", limit=50, offset=100
 ```
 
@@ -309,7 +325,7 @@ Merge safety: aborts with `KeyError` if `keep_id` does not exist (prevents data 
 
 ### scratch
 
-T1 session scratch pad — ephemeral within-session storage.
+T1 session scratch pad: ephemeral working storage (idle sessions are swept after 24 hours; flagged entries are copied to T2).
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -319,6 +335,9 @@ T1 session scratch pad — ephemeral within-session storage.
 | `tags` | str | `""` | Comma-separated tags (for `"put"`) |
 | `entry_id` | str | `""` | Entry ID (for `"get"`, `"delete"`) |
 | `limit` | int | `10` | Max results for search |
+| `agent` | str | `""` | Role attribution for `"put"` |
+| `persist` | bool | `false` | For `"put"`: copy the entry to T2 at session end |
+| `scope` | str | `"session"` | `"identity"` survives `/clear` and restart |
 
 ```
 mcp__plugin_conexus_nexus__scratch(action="put", content="working hypothesis: the cache is stale"
@@ -336,8 +355,9 @@ Manage scratch entries: flag for persistence or promote to T2.
 |-----------|------|---------|-------------|
 | `action` | str | required | `"flag"`, `"promote"` |
 | `entry_id` | str | required | Scratch entry ID |
-| `project` | str | `""` | Target project (required for promote) |
-| `title` | str | `""` | Target title (required for promote) |
+| `project` | str | `""` | Target project (required for promote; flag's destination, default `scratch_sessions`) |
+| `title` | str | `""` | Target title (required for promote; flag's title) |
+| `scope` | str | `"session"` | `"session"` or `"identity"` |
 
 ```
 mcp__plugin_conexus_nexus__scratch_manage(action="flag", entry_id="<id>"
@@ -348,7 +368,7 @@ mcp__plugin_conexus_nexus__scratch_manage(action="promote", entry_id="<id>", pro
 - `(action=new)` — clean write, no overlap detected
 - `(action=overlap_detected)` — the full-text check found a similar existing T2 entry. The new entry is still written as a separate row; the agent must decide whether to also call `memory_consolidate(action="merge")` to dedupe.
 
-**Usage pattern**: Use T1 scratch for in-flight working notes. Flag important items so they auto-promote to T2 at session end. Permanently validated findings go to T3 via store_put.
+**Usage pattern**: T1 scratch for in-flight notes; flag important items to copy them to T2 at session end; validated findings go to T3 via store_put.
 
 ### collection_list
 
@@ -399,9 +419,8 @@ Indexing operations have no MCP equivalent — use `nx` CLI via Bash:
 ```bash
 nx index repo <path>                       # register and index a repo
 nx index repo <path> --frecency-only       # refresh git frecency scores only (fast)
-nx index repo <path> --chunk-size 80       # smaller chunks for better precision
 nx index pdf <path> --corpus my-papers
-nx index pdf --dir <path> --collection knowledge__art  # auto-promoted to conformant 4-segment
+nx index pdf --dir <path> --collection art-papers  # the bare subject; the catalog names the collection
 nx index md  <path> --corpus notes
 ```
 
@@ -428,7 +447,7 @@ nx mineru stop                             # stop server
 - **T2 memory**: cross-session state, agent relay notes, active project context
 - **T3 knowledge**: validated findings, architectural decisions, reusable patterns — anything worth keeping permanently
 
-**Collection naming** (RDR-103): always `__` as separator (the RDR-103 name grammar uses `__` and refuses colons). The conformant shape is `<content_type>__<owner>__<embedding_model>__v<n>`, for example `code__nexus-1-1__voyage-code-3__v1`, `docs__nexus-1-1__voyage-context-3__v1`, `knowledge__art-1-1__voyage-context-3__v1`. Operators may type the short legacy form (`knowledge__topic`) at the `--collection` boundary; `t3_collection_name` auto-promotes to the 4-segment shape before any T3 write. Pre-existing legacy 2-segment collections remain readable; only NEW non-conformant creations are blocked at `T3Database.get_or_create_collection`.
+**Collection naming**: type the bare subject (`collection="distributed-systems"`); never a model token, version or `__` segment ([rules](https://github.com/Hellblazer/nexus/blob/main/docs/collections.md)). `nx index repo` mints `docs`, `code` and `rdr` collections, rendered `<content_type>__<owner>__<embedding_model>__v<n>`; a NEW `knowledge` subject is labelled `c<id>` by the engine. Existing collections keep their names; a full name is accepted wherever one is read.
 
 **Title conventions** (use hyphens, not colons):
 - `research-{topic}` — research findings

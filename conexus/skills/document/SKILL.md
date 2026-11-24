@@ -24,8 +24,8 @@ mcp__plugin_conexus_nexus__nx_answer(
 ```
 
 One tool call. `nx_answer` handles match → run → record. Operator chains
-inside document-verb plans (extract + compare) bundle into a single
-`claude -p` subprocess — substantially faster than per-step isolation.
+inside plans bundle into a single `claude -p` subprocess — substantially
+faster than per-step isolation (the document plan ends in a `compare`).
 Plan-miss falls through to an inline `claude -p` planner.
 
 ## Required bindings

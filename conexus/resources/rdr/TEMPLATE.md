@@ -347,5 +347,5 @@ any sections that should be trimmed before locking.]
 
 ## Revision History
 
-[Gate findings are appended here to keep the design
-sections clean. Each gate round gets a dated subsection.]
+[One dated line per gate round, as the gate prints it. The findings themselves are
+not copied here: they live in the T2 gate records, which keeps the design sections clean.]

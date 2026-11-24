@@ -17,7 +17,7 @@ single "where does RDR-NNN state X" lookup is a `search` call — see
 mcp__plugin_conexus_nexus__nx_answer(
     question=<caller's phrasing>,
     dimensions={"verb": "review"},
-    context=<changed_paths + depth, as JSON string if needed>,
+    context=<the change set (files, branch or diff summary) + depth, as JSON string if needed>,
 )
 ```
 
@@ -29,8 +29,10 @@ user.
 
 ## Required bindings
 
-- `changed_paths` — list of paths being reviewed (e.g. the git diff
-  file list).
+- `change_set` — what is being reviewed, as free text (the changed
+  files, the branch, or the question about them). The plan searches on
+  it. `nx_answer` fills it from the question when you do not bind it
+  yourself (pass `bindings={"change_set": "..."}` to set it).
 
 ## Optional bindings
 
@@ -53,7 +55,7 @@ when it exists, falling back to `strategy:default` otherwise.
 
 If you just need to find the RDR or chunk that defines something — e.g.
 "show me where RDR-053 states the auth middleware contract" —
-`mcp__plugin_conexus_nexus__search` against `rdr__<owner>__voyage-context-3__v1`
+`mcp__plugin_conexus_nexus__search` against `rdr__<owner>__<embedding_model>__v1`
 (or the bare `rdr` prefix, which expands to all matching collections)
 is the right tool.
 This skill earns its cost when the review has to *align* multiple
@@ -67,10 +69,10 @@ RDRs against a change set and extract drift claims.
   across decision history, you need `nx_answer`.
 - **Calling `plan_match` directly instead of `nx_answer`.** You lose
   the record step, the inline-planner fallback, and use_count telemetry.
-- **Running `review` without changed_paths.** The review template
-  has no sensible default — missing `changed_paths` raises
-  `PlanRunBindingError(missing=["changed_paths"])`. Surface the
-  error to the user rather than passing empty list.
+- **Running `review` with a vague change set.** `change_set` is free
+  text that `nx_answer` takes from the question, so a bare "review
+  this" searches on that phrase and returns noise. Name the files or
+  the change in the question.
 - **Using `review` for bug triage.** That's the `debugger` agent; the two
   verbs differ on what drives the walk (`review` starts from a
   diff, `debug` starts from a failing path).

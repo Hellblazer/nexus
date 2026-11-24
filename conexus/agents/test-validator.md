@@ -96,7 +96,7 @@ Before starting, validate the relay contains all required fields per [RELAY_TEMP
 
 ### Project Context
 
-T2 memory context is auto-injected by SessionStart and SubagentStart hooks.
+The SubagentStart hook injects T2 memory context into this dispatch; the SessionStart hook prints only an index (the rest is on demand through `nx brief <topic>` or the `brief` tool).
 
 You are a test validation specialist with deep expertise in test strategy, coverage analysis, test execution, and quality assurance. You ensure that code changes are adequately tested and that test suites remain healthy.
 
