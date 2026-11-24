@@ -2,8 +2,8 @@
 """``nx ci ack --not-mine <sha>`` (RDR-252 post-close audit S1, bead nexus-igea9): the owner's "this red is not mine".
 
 It posts a row of kind ``disclaim`` on the same ``--owner`` subspace an ack goes to, with the same sha handling and the
-same identity stamping. The engine acts on it in a later engine cut (a disclaim from the current owner hands the red on
-at once); until then the row is recorded only. All against a fake transport, as tests/test_ci_ack_identity.py is.
+same identity stamping. The engine (0.1.201 and later) acts on it: a disclaim from the current owner hands the red on
+at once; an older engine only records the row. All against a fake transport, as tests/test_ci_ack_identity.py is.
 """
 from __future__ import annotations
 
@@ -94,7 +94,7 @@ def test_not_mine_posts_a_disclaim_row_with_the_full_sha_and_the_callers_identit
     assert sent["dims"] == {"kind": "disclaim", "from": ME, "sha": SHA}, "kind disclaim, the prefix spelled out in full"
     assert sent["nonce"], "a fresh nonce: the template is keys+nonce"
     assert "disclaimed" in result.output and SHA[:7] in result.output and ME in result.output
-    assert "recorded" in result.output, "the output says the engine does not act on it yet"
+    assert "hands the red on at once" in result.output and "recorded only until" not in result.output
 
 
 def test_a_plain_ack_is_unchanged_by_the_new_flag(wire: _Wire, identity: list[str], monkeypatch: pytest.MonkeyPatch) -> None:
@@ -316,8 +316,9 @@ def test_a_disclaim_on_another_boards_red_is_split_and_shown_like_any_other() ->
     assert len(reds) == 1 and [r.body for _, r in reds[0].disclaims] == ["mine no more"]
 
 
-def test_the_help_says_what_it_does_now_and_after_the_engine_cut() -> None:
+def test_the_help_says_what_the_engine_does_with_a_disclaim() -> None:
     result = CliRunner().invoke(ci_cmd.ci_group, ["ack", "--help"])
     text = " ".join(result.output.split())
     assert "--not-mine" in text and "--note" in text
-    assert "recorded only" in text and "hands the red on at once" in text
+    assert "hands the red on at once" in text and "0.1.201" in text
+    assert "does not act on it yet" not in text and "engine cut that reads it" not in text

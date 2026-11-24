@@ -93,7 +93,9 @@ class LabelReservedError(RuntimeError):
         self.label = label
         self.user_chooses_label = user_chooses_label
         back = (f"rename that collection back to {label!r} "
-                f"(`nx collection rename <its current name> {shlex.quote(label)}`)")
+                f"(`nx collection rename <its current name> {shlex.quote(label)}`; it is the collection that was "
+                f"named {label!r} before, and no nx command lists former names, so find it by what it holds in "
+                f"`nx collection list`)")
         advice = f"Pick another label, or {back}." if user_chooses_label else f"{back[0].upper()}{back[1:]}."
         super().__init__(f"{self.explanation} Nothing was written. {advice}")
 

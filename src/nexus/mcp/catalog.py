@@ -686,7 +686,11 @@ def catalog_link(
     from_tumbler: Annotated[str, Field(description="Source document's tumbler or exact title.")],
     to_tumbler: Annotated[str, Field(description="Target document's tumbler or exact title.")],
     link_type: Annotated[str, Field(
-        description="Link type: a built-in (cites, implements, implements-heuristic, supersedes, relates, quotes, comments) or a custom string.",
+        description=(
+            "Link type: a built-in (cites, implements, supersedes, relates, quotes, comments) or a custom string. "
+            "implements-heuristic is older: nothing writes it now (the code-RDR pass has been off since engine 0.1.57), "
+            "edges from before that carry it, and the default graph walk leaves it out."
+        ),
     )],
     created_by: Annotated[str, Field(description="Who or what created this link.")] = "user",
     from_span: Annotated[str, Field(description="Optional span identifier anchoring the link to a location within the source: 'line-line', 'chunk:char-char', 'chash:<hex>', 'chash:<hex>:<start>-<end>', or 'dchash:<hash>:<start>-<end>'.")] = "",
