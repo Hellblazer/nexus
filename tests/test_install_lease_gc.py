@@ -99,7 +99,7 @@ def test_the_lease_and_the_census_are_ored(tmp_path: Path) -> None:
     """A free lease does not override a census holder (an unleased process: python -S)."""
     tools, (a, *_rest) = make_tools(tmp_path)
     with holder(venv_python(a), extra=("-S",)) as child:
-        snapshot = blind_snapshot() + f"{child.pid} {venv_python(a)} -S -c x\n"
+        snapshot = blind_snapshot() + f"{child.pid} {venv_python(a).as_posix()} -S -c x\n"  # rows are slash-spelt (census windows reading)
         assert lease_core.probe(a) == "free"
         plan = _plan(tools, snapshot=snapshot)
         assert _actions(plan)["20261101T000000Z"] == "keep"
@@ -110,7 +110,7 @@ def test_a_generation_with_no_lease_file_is_judged_by_the_census_alone(tmp_path:
     tools, (a, b, c, d) = make_tools(tmp_path, leased=False)
     assert lease_core.probe(a) == "absent"
     assert _actions(_plan(tools))["20261101T000000Z"] == "reap"
-    assert _actions(_plan(tools, snapshot=blind_snapshot() + f"4242 {venv_python(a)} -c x\n"))[
+    assert _actions(_plan(tools, snapshot=blind_snapshot() + f"4242 {venv_python(a).as_posix()} -c x\n"))[
         "20261101T000000Z"] == "keep"
 
 
@@ -161,7 +161,7 @@ def test_a_filesystem_without_flock_falls_back_to_the_census(tmp_path: Path, mon
     _flock_raises(monkeypatch, errno.ENOLCK)
     assert lease_core.probe(a) == "unsupported"
     assert _actions(_plan(tools))["20261101T000000Z"] == "reap"
-    assert _actions(_plan(tools, snapshot=blind_snapshot() + f"4242 {venv_python(a)} -c x\n"))[
+    assert _actions(_plan(tools, snapshot=blind_snapshot() + f"4242 {venv_python(a).as_posix()} -c x\n"))[
         "20261101T000000Z"] == "keep"
 
 
@@ -236,7 +236,14 @@ def test_the_lock_is_held_while_the_tree_is_deleted(tmp_path: Path, config: Path
 
     setattr_in(monkeypatch, gc_core, "shutil.rmtree", watching)
     if NT:
-        monkeypatch.setattr(gc_core, "_rmtree", lambda p, on_error: during.append(lease_core.probe(a)))
+        # The Windows reap is the custom walk, not rmtree: probe from inside it.
+        real_walk = gc_core._remove_all_but_lease
+
+        def walking(root, lease_name, on_error):
+            during.append(lease_core.probe(a))
+            return real_walk(root, lease_name, on_error)
+
+        monkeypatch.setattr(gc_core, "_remove_all_but_lease", walking)
     gc_core.gc_generations(tools, keep=1, snapshot=blind_snapshot(), grace_minutes=0)
     assert during and set(during) == {"held"}, during
 

@@ -200,6 +200,7 @@ def test_the_staged_installer_carries_the_lease_files(files: str) -> None:
 # ── the Windows builder, injected-platform ───────────────────────────────────
 
 def _fake_run(argv, **_kw):
+    argv = ["uv", *argv[1:]] if Path(argv[0]).stem.lower() == "uv" else argv  # a Windows host resolves the head
     if argv[:2] == ["uv", "venv"]:
         gen = Path(argv[-1])
         (gen / "Scripts").mkdir(parents=True, exist_ok=True)
