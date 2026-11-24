@@ -278,7 +278,12 @@ migration_wal_bytes_per_worker = 13411126
 # Measured: chas lab-m via lab-remote, 2026-11-23, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on
 # P3.5b rebased onto b7e58b6c5f (gate jar rebuilt): ddl: migration=2935.
 # 2844 + 94 = 2938 for the replay with P3.5b (computed; the assembly re-measures it).
-migration_ddl_per_worker = 2938
+# 2938 -> 2954 (2026-11-24, nexus-p2m1x.28, the RDR-229 Phase 3 stack's final tree, under Sam's 2960 cap for the P3.5+P3.7 cut,
+# T2 nexus/sam-ruling-rdr229-p35-ddl-cap-2026-11-22): P3.7 (nexus-p2m1x.27) vectors-079 +9 (the one-row rename, label reservation and
+# the child-row name trigger) and vectors-083 +7 (the window restore changeset). vectors-084 (row 19) is CONTINUE-gated and adds 0 to a fresh walk (its 3 functions land at the form-A boot).
+# Measured: qwent lab-m via lab-remote, 2026-11-24, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued
+# on 2c27dcb43d (gate jar rebuilt in the same command): ddl: migration=2954. Later commits on the stack add no changeset.
+migration_ddl_per_worker = 2954
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]
