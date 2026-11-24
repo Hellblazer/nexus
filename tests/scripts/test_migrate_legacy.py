@@ -309,7 +309,10 @@ def test_a_package_without_the_file_warns_in_the_line_self_install_re_echoes(sca
     result = _run(env(), "--source", "conexus", "--version", "7.18.0", "--legacy-venv", str(legacy))
     assert result.returncode == 0, result.stderr
     warnings = [ln for ln in result.stderr.splitlines() if ln.startswith(_BUILD_WARNING_PREFIX)]
-    assert len(warnings) == 1 and "UNCONSTRAINED" in warnings[0], result.stderr
+    # The stub venv has no site-packages, so the lease step adds its own (re-echoed) warning
+    # that the generation is not leased; only the constraints warning is under test here.
+    unconstrained = [ln for ln in warnings if "UNCONSTRAINED" in ln]
+    assert len(unconstrained) == 1, result.stderr
     installs = [ln for ln in argv_log.read_text().splitlines() if ln.startswith("pip install")]
     assert "--constraints" not in installs[-1]
 

@@ -115,13 +115,16 @@ def test_no_generation_interpreter_in_the_tree_runs_with_dash_S() -> None:
     generation's interpreter with -S (a CI script's runner python is not one)."""
     src = Path(lease_core.__file__).resolve().parents[1]
     offenders: list[str] = []
+    scanned = 0
     for path in sorted(src.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
+        scanned += 1
         for node in ast.walk(tree):
             if isinstance(node, (ast.List, ast.Tuple)):
                 flags = [e.value for e in node.elts if isinstance(e, ast.Constant) and isinstance(e.value, str)]
                 if "-S" in flags and any(f in ("-c", "-m") for f in flags):
                     offenders.append(f"{path.relative_to(src)}:{node.lineno}: {flags}")
+    assert scanned > 300, f"only {scanned} files scanned: the scan lost its tree (non-vacuity)"
     assert not offenders, offenders
 
 

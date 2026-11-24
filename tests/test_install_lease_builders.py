@@ -214,6 +214,7 @@ def _fake_run(argv, **_kw):
     return subprocess.CompletedProcess(argv, 0, "", "")
 
 
+@pytest.mark.skipif(NT, reason="the injected interpreter is a #!/bin/sh stub; the native build is test_install_generation_real_windows")
 def test_the_python_builder_writes_the_lease_before_the_receipt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     tools = tmp_path / "tools"
     tools.mkdir()
@@ -272,6 +273,7 @@ def test_a_staged_installer_without_lease_core_still_builds_and_says_it_is_unlea
     assert lease_core.probe(gen) == "absent"
 
 
+@pytest.mark.skipif(NT, reason="the injected interpreter is a #!/bin/sh stub")
 def test_the_python_builder_survives_a_missing_lease_core(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     def gone():
         raise ImportError("cannot load lease_core.py")
