@@ -1,0 +1,3 @@
+### Changed
+
+- `POST /v1/catalog/collections/delete`, by `name` or by `collection_id`, answers 409 with `reason` `collection_busy` (and `error`, `collection` and `job_id`) while a re-embed job in a non-terminal state (planned, running, paused, cutover or failed) holds the collection as its source or its target, and removes nothing (RDR-229 P3.5a). Before, the delete answered 200 and removed the collection under the job. The re-embed runner's own delete of its source at cutover is not a request and is not refused. A re-embed start that meets a delete in flight answers its existing retryable 409. This is a new answer: an old client cannot tell it from the other delete refusals (client 8.5.6 reads the reason).
