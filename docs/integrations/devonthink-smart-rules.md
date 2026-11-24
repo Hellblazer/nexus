@@ -11,7 +11,10 @@ first PDF `nx dt index` fetches the PDF stack (MinerU and torch, most of the
 install's download) or stops with exit 69, 75 or 70 and a command to run
 (`src/nexus/pdf_stack.py`). Inside a smart rule that is a silent multi-gigabyte
 background fetch or a failure you only see in the log. Run `nx self install --extras pdf`
-once by hand, and confirm with `nx doctor`, before the rule goes live.
+once by hand, then `nx mineru start` (or index one PDF by hand) so MinerU's model
+weights, about 1.26 GB, are fetched too: the stack install does not fetch them, and the
+first PDF a rule indexes would otherwise fetch them in the background. Confirm with
+`nx doctor` before the rule goes live.
 
 This recipe covers the v1 smart-rule pattern, the macOS folder-action
 alternative, error handling, and the concurrency caveat that bites
@@ -136,8 +139,9 @@ nx catalog list --json \
 ```
 
 `nx catalog list` has no built-in `--source-uri-prefix` flag in v1; the
-JSON pipe is the canonical query path. The newest entry (last line of
-the jq output) should match the PDF you dropped.
+JSON pipe is the canonical query path. It reads one page of 50 entries and sets
+no order, so on a large catalog pass `--limit` (or look the PDF up by its
+`source_uri`) rather than expecting the newest entry last.
 
 ## Error handling
 
@@ -152,16 +156,16 @@ failures and how to spot them:
 - **`DEVONthink is not running`**: DT crashed or quit between firing
   the rule and the `do shell script` invocation. Rare in practice
   but logged cleanly. Re-fire the rule via `Run Now` after restart.
-- **`Voyage credential missing`**: `nx` couldn't reach Voyage AI.
-  The smart rule's invocation has the same env as DT's runtime, so
-  if you set `VOYAGE_API_KEY` in `.zshrc`, it WON'T be visible.
-  Either add it to `~/.config/nexus/credentials.json` (which `nx`
-  reads regardless of shell env) or invoke `nx` via a wrapper
-  script that sources the env first.
-- **ChromaDB write quota exceeded**: rare for single-record imports.
-  Batch imports of `>5` records can hit
-  `MAX_CONCURRENT_WRITES = 10` if multiple smart rules race on the
-  same collection. See § Concurrency caveat below.
+- **A Voyage key that works in your terminal is not found**: the smart
+  rule's invocation has the same env as DT's runtime, so a key exported
+  in `.zshrc` WON'T be visible. Save it with `nx config set
+  voyage_api_key <key>` (which `nx` reads from `config.yml` regardless of
+  shell env) or invoke `nx` via a wrapper script that sources the env
+  first.
+- **Write throttling**: rare for single-record imports. Batch imports
+  of `>5` records can hit the client's `MAX_CONCURRENT_WRITES = 10`
+  limit if multiple smart rules race on the same collection. See
+  § Concurrency caveat below.
 
 For an interactive trace, change the script to log the command being
 run before invoking it:
@@ -177,20 +181,15 @@ do shell script ¬
 
 ## Concurrency caveat
 
-> **Caution:** the quota/path details below predate the PG serving path (ChromaDB is no
-> longer a live substrate, RDR-155 P4b) — re-derivation tracked in nexus-d2m19.
-
 The trailing `&` in `do shell script` backgrounds each `nx dt index`
 invocation. For trickle-feed ingest (one PDF every few seconds), this
 is exactly right; for a bulk import (you drag 20 PDFs in at once), it
-spawns 20 parallel `nx` processes that race on the same T3 ChromaDB
-collection.
+spawns 20 parallel `nx` processes that write to the same T3 collection.
 
-ChromaDB's per-collection quota is `MAX_CONCURRENT_WRITES = 10` (now a
-generic serving-path ceiling, `QUOTAS.MAX_CONCURRENT_WRITES` in
-`src/nexus/db/limits.py` — `chroma_quotas.py` was deleted at RDR-155 P4b).
-A 20-record bulk import will succeed
-because the underlying upserts batch internally, but you'll see
+ChromaDB is gone (RDR-155 P4b); the limit that remains is the client's own
+write semaphore, `QUOTAS.MAX_CONCURRENT_WRITES = 10` in `src/nexus/db/limits.py`,
+which applies inside each process. A 20-record bulk import will succeed
+because the underlying upserts batch internally, but you may see
 `429`-style warnings in the log if your network is slow and the
 queues stack up.
 

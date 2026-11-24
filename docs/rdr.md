@@ -76,12 +76,12 @@ draft --> accepted --> closed
 |---|---|
 | **draft** | Created, research in progress |
 | **accepted** | Gate passed, decision formally accepted |
-| **closed** | Done. `close_reason` says how: implemented, partial, reverted, or a stated reason for a close without acceptance |
+| **closed** | Done. `close_reason` says how: implemented, partial, or a stated reason for a close without acceptance. An RDR whose implementation was rolled back closes as `abandoned` instead (the word "reverted" is kept in T2 and the post-mortem only; `nx rdr set-status` refuses it) |
 | **deferred** | Accepted work parked; resumes to draft and re-gates |
 | **abandoned** | Dropped, with `close_reason` saying why |
 | **superseded** | Replaced by a newer RDR (linked via `superseded_by`) |
 
-An outcome such as "implemented" or "reverted" is the `close_reason` of a closed RDR, not a status.
+An outcome such as "implemented" or "partial" is the `close_reason` of a closed RDR, not a status.
 
 **Types**: Feature, Bug Fix, Technical Debt, Framework Workaround, Architecture.
 
@@ -126,7 +126,7 @@ The operational details of each lifecycle step.
      │
      │ /conexus:rdr-close --reason implemented
      ▼
-  [Closed]   (close_reason: implemented · partial · reverted)
+  [Closed]   (close_reason: implemented · partial)
 
 Other terminal statuses: Abandoned · Superseded
 ```
@@ -179,7 +179,7 @@ For complex investigations, `/conexus:rdr-research` can delegate to specialized 
 
 ## Gate (`/conexus:rdr-gate`)
 
-Three-layer validation. Optional but recommended before committing to irreversible decisions.
+Three-layer validation. Required before an RDR is accepted (the `accept` row of `rdr-lifecycle.toml` refuses without a PASSED gate); an RDR that closes without acceptance skips it.
 
 **Layer 1, Structural**: Required sections filled, metadata complete, at least one research finding present.
 
@@ -205,7 +205,7 @@ If T2 and the file disagree on status, `/conexus:rdr-accept` repairs whichever s
 
 Finalizes an Accepted RDR. Requires status Accepted; a draft that shipped without acceptance closes only through `nx rdr set-status NNN closed --reason "..."`.
 
-Close reasons: `implemented` · `partial` · `reverted`. (`abandoned` and `superseded` are statuses of their own, not close reasons.)
+Close reasons: `implemented` · `partial`. (`abandoned` and `superseded` are statuses of their own, not close reasons; closing an RDR whose implementation was rolled back writes `abandoned`, with the reason "reverted" kept in T2 and the post-mortem.)
 
 Closing creates a post-mortem template for drift analysis, re-indexes the RDR into its `rdr__` collection when its text changed (it is already searchable from `nx index repo`, drafts included), and updates T2 with the close date and reason. If beads were created during accept, their status is displayed as an advisory. If the [catalog](catalog.md) is initialized, closing also creates typed links: `supersedes` for superseded RDRs, `cites` for referenced research papers.
 
@@ -284,10 +284,10 @@ When the [catalog](catalog.md) is initialized, RDR lifecycle skills create typed
 | `/conexus:rdr-research add` | `cites` link from RDR to referenced paper (if indexed in catalog) |
 | `/conexus:rdr-gate` | Prior-art search uses `catalog_search` + `catalog_links` before falling back to T3 |
 | `/conexus:rdr-accept` | `relates` links to topically related RDRs found during planning |
-| `/conexus:rdr-show` | Displays inbound/outbound catalog links (implements-heuristic, cites, supersedes) |
+| `/conexus:rdr-show` | Displays inbound/outbound catalog links (implements, cites, supersedes) |
 | `/conexus:rdr-close` (Superseded) | `supersedes` link between new and old RDR |
 | `/conexus:rdr-close` (Implemented) | `cites` links from RDR to referenced research papers |
-| Indexer hook | `implements-heuristic` links from code files to RDRs (title substring match) |
+| Indexer hook | `implements` links from an RDR to the code files it names by path, and RDR-to-RDR links from frontmatter (the title-match `implements-heuristic` pass has been off since engine v0.1.57) |
 
 `nx catalog links "RDR-051"` shows which code implements it, what research it cites, and what it supersedes, without parsing markdown.
 
@@ -307,7 +307,7 @@ All catalog steps are skipped silently if the catalog isn't initialized. T2 and 
 
 # RDR Template
 
-**Right-size to the decision.** Fill what helps; skip what doesn't. A quick bug-fix RDR may need only Problem Statement, Research Findings, and Proposed Solution. A high-stakes architecture decision warrants everything.
+**Right-size to the decision.** Keep each section as short as the decision allows. The gate checks every section (Problem, Context, Research Findings, Proposed Solution, Alternatives Considered, Trade-offs, Implementation Plan, Success Criteria), so an RDR that will be accepted fills each of them, a quick bug fix in a few lines apiece; an RDR that will close without acceptance may stay at Problem Statement, Research Findings and Proposed Solution. A high-stakes architecture decision warrants depth in all of them.
 
 ## Minimal RDR Example
 

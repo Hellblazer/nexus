@@ -139,7 +139,7 @@ See [architecture.md](architecture.md) for the full module map.
 ## Adding a CLI Command
 
 1. Create `src/nexus/commands/your_cmd.py` with a Click group or command
-2. Register it in `src/nexus/cli.py` via `cli.add_command()`
+2. Register it in `src/nexus/cli.py` via `main.add_command()`
 3. Add tests in `tests/test_your_cmd.py`
 4. Document in `docs/cli-reference.md`
 
@@ -223,7 +223,7 @@ See `conexus/README.md` for the plugin structure. Skills live in `conexus/skills
 
 ## Version Pinning
 
-Two packages have known breaking incompatibilities and must be pinned to exact versions in `pyproject.toml`:
+Two packages have known breaking incompatibilities and are held to a narrow range in `pyproject.toml` (`llama-index-core>=0.14.21,<0.15`, `tree-sitter-language-pack>=0.13.0,<0.14`); do not widen either without exercising the chunking pipeline:
 
 - `llama-index-core` (AST chunking dependency)
 - `tree-sitter-language-pack` (parser compatibility)

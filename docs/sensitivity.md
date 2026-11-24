@@ -140,7 +140,7 @@ The behaviours are `refuse` (the surface turns the document away), `skip` (it dr
 | Cloud tenant storage | `disclose` | 1 | Cloud mode needs `--ack-external-embedder`; with it a one-line disclosure names the managed tenant and Voyage. |
 | MCP read tools | `withhold` | 3 | The default replaces each flagged hit with a stub and counts it. `sensitivity.mcp_output: flag` shows the content with a badge. See "Output posture". |
 | `nx search`, `nx store` and `nx catalog` output, and the SubagentStart links section | `withhold` | 3 | Under Claude Code the hit is the stub. In a terminal it prints with a badge. See "Output posture". |
-| Install ping | `n/a-no-content` | 1 | Sends the install id, version and mode and no content. Listed so the registry covers every outbound call. |
+| Install ping | `n/a-no-content` | 1 | Sends the install id, version, mode, operating system, CPU type and Python version, and no content. Listed so the registry covers every outbound call. |
 
 ## Output posture
 
