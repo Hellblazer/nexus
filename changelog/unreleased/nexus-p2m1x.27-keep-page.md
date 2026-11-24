@@ -1,3 +1,0 @@
-### Fixed
-
-- **A data move latched as needing an operator keeps its page while its finish defers without a failure.** The move worker used to report a blocked finish (a deferral behind an index build, or any other not-now) with no page, and the move's state cleared the page of a blocked report that brought none. A name-key drop move latched by three counted lock timeouts lost its needs-operator flag, step and bound on its first deferral although its retry count stayed 3, so `GET /v1/status` listed nothing and `nx doctor` said there was nothing to reset. The worker now passes the page the move already holds (not announced again), so the status and the red needs-an-operator row in `nx doctor` stay while the move waits (nexus-p2m1x.27).
