@@ -5,9 +5,9 @@
 # The two upserts the RDR names are the on_conflict rows of PgVectorRepository (chunks) and TaxonomyCentroidRepository (taxonomy_centroids).
 # metadata label keys: origin_collection
 file	line	table	name_column	op	via	note
-service/src/main/java/dev/nexus/service/datamove/CompletionCheck.java	1052	catalog_collections	superseded_by	expr	literal	-
-service/src/main/java/dev/nexus/service/datamove/CompletionCheck.java	1069	catalog_collections	superseded_by	expr	literal	-
-service/src/main/java/dev/nexus/service/datamove/CompletionCheck.java	1084	catalog_collections	superseded_by	expr	literal	-
+service/src/main/java/dev/nexus/service/datamove/CompletionCheck.java	1055	catalog_collections	superseded_by	expr	literal	-
+service/src/main/java/dev/nexus/service/datamove/CompletionCheck.java	1072	catalog_collections	superseded_by	expr	literal	-
+service/src/main/java/dev/nexus/service/datamove/CompletionCheck.java	1087	catalog_collections	superseded_by	expr	literal	-
 service/src/main/java/dev/nexus/service/db/AspectQueueDrain.java	323	?	collection	expr	literal	0 candidate tables in the statement
 service/src/main/java/dev/nexus/service/db/AspectQueueDrain.java	335	catalog_documents	physical_collection	expr	alias	-
 service/src/main/java/dev/nexus/service/db/AspectQueueDrain.java	346	catalog_documents	physical_collection	select	alias	-
