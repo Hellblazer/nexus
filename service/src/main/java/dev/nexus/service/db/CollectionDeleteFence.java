@@ -27,6 +27,17 @@ import static dev.nexus.service.jooq.nexus.Tables.REEMBED_JOBS;
  * {@code FOR UPDATE} in id order meets the delete in the same order, and neither waits on the other while holding what it wants), before the
  * first child-row statement of the delete.
  *
+ * <p><b>The lock order of a delete by id</b> (B1 of the row 14 and row 16 merge). {@link #lockByIdFirst} takes, in this order: (1) the per-tenant
+ * start guard, {@code pg_advisory_xact_lock_shared}, FIRST, before any registry row (a start holds it exclusive and then wants the origin's row
+ * {@code FOR KEY SHARE}: a delete that held the row first and then waited for the guard would close a cycle with it, 40P01); (2) the origin's
+ * row {@code FOR UPDATE} and its quarantine siblings' rows {@code FOR KEY SHARE}, in {@code collection_id} order and with no lock bound (linda:
+ * the delete's lock is unbounded, a bound would be a new wire answer); (3) {@link CollectionRefusals#requireSourceById}, which only checks (404, 409
+ * retired, 409 mismatch) and consumes the id the request named, a no-wait re-lock of the row (2) holds; (4) the {@code collection_busy} check.
+ * One statement cannot lock some rows {@code FOR UPDATE} and others {@code FOR KEY SHARE}, so (2) is up to three statements that keep the id
+ * order across both modes: the siblings below the origin's id, the origin, the siblings above it. The origin is never key-shared and then
+ * upgraded: two concurrent deletes of one id would each hold a key share and wait on the other's upgrade (40P01). A delete by label keeps its
+ * order: the fence key-shares the origin and the siblings in one statement ({@link #lockForDelete}).
+ *
  * <p><b>The re-embed jobs.</b> A delete that arrives through the route ({@code refuseWhenBusy}) is refused with
  * {@link CatalogRepository.CollectionHeldByReembedJob} (the route answers 409 {@code collection_busy}) while a job in a lock state (planned,
  * running, paused, cutover or failed: every non-terminal state) holds the collection as its source or its target. The check runs under the
@@ -45,7 +56,8 @@ final class CollectionDeleteFence {
     private CollectionDeleteFence() {}
 
     /**
-     * The delete's call: after the tuple locks and before its first child-row statement.
+     * The delete by label's call: after the tuple locks and before its first child-row statement. A delete by id is not locked here: its
+     * rows, its guard and its checks were taken first, by {@link #lockByIdFirst}, before the scope was resolved.
      *
      * @param scope           the delete's resolved scope; {@code onlyId} the id the route named, or null
      * @param refuseWhenBusy  true for a delete that came in through the route: refused while a re-embed job holds the collection
@@ -53,16 +65,13 @@ final class CollectionDeleteFence {
      */
     static void lockForDelete(DSLContext ctx, String tenant, String name, CollectionPurgeScope scope, boolean keepQuarantine, Long onlyId,
                               boolean refuseWhenBusy, Gate3 gate3) {
-        if (scope.matchesNothing()) {
+        if (scope.matchesNothing() || onlyId != null) {
             return;
         }
         if (refuseWhenBusy) {
-            // advisory locks come before registry rows (the lock order of WriteRegistryMemo): the guard first, shared, as a rename takes it
-            ctx.select(DSL.function("pg_advisory_xact_lock_shared", Object.class,
-                    DSL.function("hashtext", Integer.class, DSL.val(CatalogRepository.reembedGuardKey(tenant)))))
-                .fetch();
+            takeGuardShared(ctx, tenant);
         }
-        Long originId = scope.scopedById() ? scope.id() : onlyId;
+        Long originId = scope.scopedById() ? scope.id() : null;
         List<CollectionRow> locked;
         if (!keepQuarantine && !QuarantineOrigin.isQuarantine(ctx, tenant, name)) {
             locked = lockOriginAndSiblings(ctx, tenant, name, originId, gate3);
@@ -75,6 +84,42 @@ final class CollectionDeleteFence {
         if (refuseWhenBusy) {
             refuseWhileAJobHolds(ctx, tenant, name, originId, locked);
         }
+    }
+
+    /**
+     * The delete by id, first: steps (1) to (4) of the lock order in the class comment. Returns the origin's row, locked {@code FOR UPDATE}
+     * and checked, for the delete to scope its purge by.
+     *
+     * @param originId       the id the route named
+     * @param name           the label the route boundary resolved {@code originId} to, which the live row must still bear
+     * @param refuseWhenBusy true for a delete that came in through the route (always true by id today)
+     * @throws UnknownCollectionIdException   no row of {@code originId} (404)
+     * @throws CollectionRetiredIdException   the row is retired (409)
+     * @throws CollectionIdMismatchException  the row bears another label than {@code name} (409)
+     * @throws CatalogRepository.CollectionHeldByReembedJob naming the job
+     */
+    static CollectionRow lockByIdFirst(DSLContext ctx, String tenant, String name, long originId, boolean keepQuarantine,
+                                       boolean refuseWhenBusy, Gate3 gate3) {
+        if (refuseWhenBusy) {
+            takeGuardShared(ctx, tenant);   // (1)
+        }
+        // the seam of a request's by-id read, just before the transaction's first one (a no-op in production), as CollectionTombstones.lockRows has it
+        ExpectedCollectionIds.beforeTransactionRead();
+        lockInIdOrder(ctx, tenant, name, originId, !keepQuarantine && !QuarantineOrigin.isQuarantine(ctx, tenant, name), gate3);   // (2)
+        CollectionRow row = CollectionRefusals.requireSourceById(ctx, tenant, originId, name);   // (3): the row is held, so this waits for nothing
+        if (refuseWhenBusy) {
+            refuseWhileAJobHolds(ctx, tenant, name, originId, List.of(row));   // (4)
+        }
+        return row;
+    }
+
+    /** The per-tenant re-embed start guard, shared: a start takes it exclusive, a rename or a re-home shared. Taken before any registry row. */
+    private static void takeGuardShared(DSLContext ctx, String tenant) {
+        // advisory locks come before registry rows (the lock order of WriteRegistryMemo): the guard first, shared, as a rename takes it
+        WriteRegistryMemo.assertNoneHeld(ctx, "the re-embed start guard");
+        ctx.select(DSL.function("pg_advisory_xact_lock_shared", Object.class,
+                DSL.function("hashtext", Integer.class, DSL.val(CatalogRepository.reembedGuardKey(tenant)))))
+            .fetch();
     }
 
     /** The job in a lock state that holds the origin as its source or target, else nothing: the delete refuses on it. */
@@ -105,6 +150,46 @@ final class CollectionDeleteFence {
             throw new CatalogRepository.CollectionHeldByReembedJob("cannot delete " + name + ": re-embed job " + held.value1() + " ("
                 + held.value2() + ") is moving documents from " + held.value3() + " to " + held.value4()
                 + ". Abort or finish the job first.", held.value1());
+        }
+    }
+
+    /**
+     * The origin's row {@code FOR UPDATE} and the rows of the quarantine collections that hold rows of it {@code FOR KEY SHARE}, in
+     * {@code collection_id} order across both modes: the siblings whose id is below the origin's, the origin, the siblings above it. The
+     * siblings are found by name and locked by the id they bear now (so a sibling a verb renames while the delete waits is still the row
+     * locked); the set is read again after the lock and a sibling that is new is key-shared on the next pass, up to {@link #PASSES} (a sibling
+     * that keeps appearing past that is left to the delete's own row delete, which waits on it as before). No lock bound is set.
+     */
+    private static void lockInIdOrder(DSLContext ctx, String tenant, String origin, long originId, boolean withSiblings, Gate3 gate3) {
+        Set<Long> handled = new HashSet<>();
+        handled.add(originId);
+        boolean first = true;
+        for (int pass = 0; pass < PASSES; pass++) {
+            List<Long> todo = new ArrayList<>();
+            List<String> names = withSiblings ? QuarantineOrigin.siblingsHolding(ctx, tenant, origin, gate3) : List.of();
+            if (!names.isEmpty()) {
+                for (Long id : ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                        .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.in(names))
+                        .orderBy(CATALOG_COLLECTIONS.COLLECTION_ID).fetch(CATALOG_COLLECTIONS.COLLECTION_ID)) {
+                    if (handled.add(id)) todo.add(id);
+                }
+            }
+            if (!first && todo.isEmpty()) {
+                return;
+            }
+            if (first) {
+                RegistryRowLocks.keyShareIfPresent(ctx, tenant, todo.stream().filter(id -> id < originId).toList(), List.of());
+                ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(originId))
+                    .forUpdate().of(CATALOG_COLLECTIONS).fetch();
+                RegistryRowLocks.keyShareIfPresent(ctx, tenant, todo.stream().filter(id -> id > originId).toList(), List.of());
+            } else {
+                RegistryRowLocks.keyShareIfPresent(ctx, tenant, todo, List.of());
+            }
+            first = false;
+            if (todo.isEmpty()) {
+                return;
+            }
         }
     }
 

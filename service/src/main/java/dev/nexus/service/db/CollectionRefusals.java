@@ -25,9 +25,11 @@ public final class CollectionRefusals {
      * lock, so it is safe to call on a row this transaction already holds. Supersede and rename call it SECOND: their own ordered,
      * bounded lock ({@link CollectionTombstones#lockRows(DSLContext, String, long, String...)}) took the row first, and the second
      * {@code FOR UPDATE} of a row one holds does not wait. A supersede names its successor by id the same way (the ordered statement
-     * took the successor's row too). The delete calls it FIRST and alone: it holds no registry row yet, takes this one before any
-     * child row, and, being the delete's only registry lock, waits unbounded (see the comment on the statement). The delete takes no
-     * sweep gate before it, and supersede takes none at all.
+     * took the successor's row too). The delete by id calls it THIRD, as they do: {@link CollectionDeleteFence#lockByIdFirst} took the
+     * re-embed start guard shared, then the origin's row {@code FOR UPDATE} with its quarantine siblings' rows {@code FOR KEY SHARE} in one
+     * id order, with no lock bound (linda), before any child row, so the delete's lock here is a no-wait re-lock that checks and consumes
+     * the id. A re-lock that was the delete's FIRST lock of the row would wait behind a key share of its own and deadlock a second delete
+     * of the same id. The delete takes no sweep gate before it, and supersede takes none at all.
      *
      * <p>The id the request named counts as consumed ({@link ExpectedCollectionIds}) once the row is read, whatever refusal follows, so
      * a handler that stops passing the id turns the route's census red instead of silent.
@@ -53,9 +55,10 @@ public final class CollectionRefusals {
             .leftJoin(EMBEDDING_MODELS).on(EMBEDDING_MODELS.EMBEDDING_MODEL.eq(CATALOG_COLLECTIONS.EMBEDDING_MODEL))
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.COLLECTION_ID.eq(id))
             // the registry row alone: PostgreSQL refuses a row lock on the nullable side of the join. Unbounded here (linda and tamsin,
-            // 2026-11-23): rename and supersede call this after their own bounded ordered lock has taken the row, and delete waits as
-            // the final DELETE it replaces always did. A bound on delete would be a new wire answer, the label verbs' 503 rename_busy
-            // with a ledger line, not row 14's collection_busy (that 409 means a re-embed job holds the collection).
+            // 2026-11-23): rename and supersede call this after their own bounded ordered lock has taken the row, and delete after the
+            // fence's own unbounded ordered statement has taken it (a delete waits as the final DELETE it replaces always did). A bound on
+            // delete would be a new wire answer, the label verbs' 503 rename_busy with a ledger line, not row 14's collection_busy (that
+            // 409 means a re-embed job holds the collection).
             .forUpdate().of(CATALOG_COLLECTIONS)
             .fetchOne();
         if (r == null) {
