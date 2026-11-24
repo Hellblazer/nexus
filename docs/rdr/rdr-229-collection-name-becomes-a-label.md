@@ -3191,11 +3191,16 @@ its acceptance is that test green plus the census pin it lowers.
   `on_complete` runs after both: the drop move registers only once gate 3
   holds, and gate 3 waits for `vectors-078-8` (P3.5), whose precondition
   the other eleven `vectors-078` changesets share word for word, so by
-  then every P3.5b changeset has applied and every stamp move has
-  completed, and no unstamped row is left for an id-only body to meet.
+  then `vectors-078-3` and `-8`, the two that redefine survivors, have
+  applied, every stamp move has completed, and no row of a table that
+  carries a CHECK is left unstamped for an id-only body to meet (inferred
+  from the shared precondition and the walk running before the completion
+  check, not read). A `vectors-078` changeset can still stay unrecorded
+  through its own failure: `vectors-078-4` has `failOnError="false"`, and
+  it recreates a trigger, not a survivor's body.
   The survivors are the P3.1 SQL writers (the `sql_function` rows of
   `service/src/test/resources/rdr229/p31-writer-census.tsv`) and the
-  function rows of
+  rows of
   `service/src/test/resources/rdr229/p35b-reader-dispositions.tsv` whose
   disposition is `both`, `writer-kept` or `unchanged-fallback`; the two
   view rows among them, `live_chunks` and `collection_vector_stats`, are
@@ -3922,4 +3927,4 @@ large, and moved under a ratchet.
 - 2026-11-24: linda's follow-up rulings D1 to D3 on P4.1 written (Sam, "proceed" on ask `rdr229-p41-d1-d3`; gaps from fix check `229-fix-check-92fbbaa966`; T2 `229-research-323`): the 38 `name-kept` drops and `hybrid_search_<dim>` go in the registry changeset, dependents redefined to their `_by_id` twins first and the originals dropped with RESTRICT; a step before the column drops redefines the `writer-kept` and `unchanged-fallback` functions and P3.1's SQL writers by the id, listed from the two tsv files; the `pg_proc` test matches columns on the drop list, leaves out the history name columns, counts `superseded_by` only after its changeset, requires every surviving function examined, and runs after P4.1's last changeset.
 - 2026-11-24: P4.1's redefinition step pinned (linda, under the same ask): it is P4.1's first changeset, CONTINUE-gated, and P4.1's drop move registers only once that changeset is recorded, so no name column drops before the survivors are redefined; the P3.1 SQL writer count corrected from 26 to 25 at its three sites, from `p31-writer-census.tsv` (T2 `229-research-324`).
 - 2026-11-24: P4.1's redefinition step split after fix check `229-fix-check-901bcd7e97` (linda, replacing the earlier pin; T2 `229-research-325`): a CONTINUE changeset may not name a chunk-family table, so P4.1's first changeset is a plain one redefining the five survivors that name none, and the drop move's `on_complete` opens by redefining every other survivor, one CREATE OR REPLACE each with its final body, before the views, child keys, primary key swap and triggers; the `pg_proc` test reads a table-qualified drop list P4.1 creates, excludes the four history name columns by name, also fails on a call to a dropped function, and treats RESTRICT as a backstop.
-- 2026-11-24: P4.1's residual from fix check `229-fix-check-57ba196206` fixed in the text (Sam, option 1 on ask `rdr229-p41-first-changeset-gate`; linda's ruling; T2 `229-research-326`): P4.1 has no first changeset; every survivor, the five that name no chunk-family table included, is redefined once as the drop move's `on_complete` opens, after gate 3 has required every `vectors-078` changeset applied and every stamp complete; the view rows are redefined once, in the views step; the vacuous dependent-redefinition clause is dropped; the census line counts 33 move rows; item 6 names P4.1's CONTINUE changesets only.
+- 2026-11-24: P4.1's residual from fix check `229-fix-check-57ba196206` fixed in the text (Sam, option 1 on ask `rdr229-p41-first-changeset-gate`; linda's ruling; T2 `229-research-326`): P4.1 has no first changeset; every survivor, the five that name no chunk-family table included, is redefined once as the drop move's `on_complete` opens, after gate 3, which waits for `vectors-078-8` and so for the stamps and the two `vectors-078` changesets that redefine survivors; the view rows are redefined once, in the views step; the vacuous dependent-redefinition clause is dropped; the census line counts 33 move rows; item 6 names P4.1's CONTINUE changesets only.
