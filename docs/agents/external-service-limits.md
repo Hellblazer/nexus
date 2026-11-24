@@ -8,4 +8,4 @@ The single source of truth is `src/nexus/db/limits.py` (`QUOTAS: ServiceLimits`)
 
 The limits table lives in one place, [`.claude/rules/external-service-limits.md`](../../.claude/rules/external-service-limits.md); this file keeps the provenance and the retired-client notes.
 
-Voyage AI: `voyage-3` / `voyage-code-3` / `voyage-context-3` = 1024 dims, 32k tokens, 1,000 inputs per request (the engine plans batches under a token budget; `VoyageEmbedder.MAX_BATCH_TEXTS`). The old "128 inputs/batch" figure described the retired client-embed path. Use `nexus.retry._voyage_with_retry` for transient failures.
+Voyage AI: `voyage-3` / `voyage-code-3` / `voyage-context-3` = 1024 dims, 32k tokens, 1,000 inputs per request (the engine plans batches under a token budget; `VoyageEmbedder.MAX_BATCH_TEXTS`). The old "128 inputs/batch" figure described the retired client-embed path. The client makes no Voyage call of its own (the engine embeds server-side), so `nexus.retry._voyage_with_retry` has no live caller; it survives only as a re-export in `indexer.py`. A transient failure of an embed is the engine's to retry, and the client's gateway ladder retries the request.
