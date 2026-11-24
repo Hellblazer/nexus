@@ -549,6 +549,32 @@ def _aspects_from_config(*, dry_run: bool, yes: bool = False) -> None:
     )
 
 
+def _collection_busy_message(busy: dict[str, str], retry: str) -> str:
+    """What to tell a person whose delete the engine refused with 409 ``collection_busy`` (engine 0.1.202).
+
+    One wording for ``delete``, ``prune`` and ``reindex``. The fence holds the collection while a job is planned,
+    running, paused, cutover or failed, and the way out depends on which: a running or cutover job ends on its own,
+    a paused one needs ``--resume`` or ``--abort``, a failed one ``--abort`` (``--resume`` retries it). The engine
+    names the state in its text, not in a field; when it is not one the fence holds, the engine's own message goes
+    beside the generic advice. *retry* is the command to run again once the job has ended."""
+    name, job, state, said = busy["collection"], busy.get("job_id", ""), busy.get("state", ""), busy.get("message", "")
+    job_arg = shlex.quote(job) if job else "JOB"
+    status, abort, resume = (f"`nx collection re-embed --{v} {job_arg}`" for v in ("status", "abort", "resume"))
+    head = (f"re-embed job {job or '(unnamed)'}{f' ({state})' if state else ''} holds collection '{name}' as its source "
+            f"or its target, so nothing was deleted.")
+    advice = {
+        "running": f"Wait for it to finish ({status}), or cancel it ({abort}; documents already moved stay moved)",
+        "cutover": f"Wait for it to finish ({status}), or cancel it ({abort}; documents already moved stay moved)",
+        "planned": f"Wait for it to start and finish ({status}), or cancel it ({abort})",
+        "paused": f"Resume it and let it finish ({resume}), or cancel it ({abort}; documents already moved stay moved)",
+        "failed": f"Cancel it ({abort}; documents already moved stay moved); {resume} retries it",
+    }.get(state)
+    if advice is None:
+        advice = (f"The engine said: {said or 'no detail'}. Check the job ({status}); wait for it to finish, or cancel it "
+                  f"({abort}; documents already moved stay moved)")
+    return f"{head} {advice}, then run `{retry}` again."
+
+
 @collection.command("delete")
 @click.argument("name")
 @click.option("--yes", "-y", "--confirm", is_flag=True, help="Skip interactive confirmation prompt")
@@ -579,15 +605,7 @@ def delete_cmd(name: str, yes: bool) -> None:
         )
     if cascade.collection_busy is not None:
         # RDR-229 P3.5a row 14 (engine 0.1.202): the engine refused with 409 collection_busy; nothing was removed.
-        held, job = cascade.collection_busy["collection"], cascade.collection_busy["job_id"]
-        job_arg = shlex.quote(job) if job else "JOB"
-        raise click.ClickException(
-            f"re-embed job {job or '(unnamed)'} holds collection '{held}' as its source or its target, so nothing was "
-            f"deleted. Wait for it to finish "
-            f"(`nx collection re-embed --status {job_arg}`), or cancel it "
-            f"(`nx collection re-embed --abort {job_arg}`; documents already moved stay moved), then run "
-            f"`nx collection delete {shlex.quote(name)}` again."
-        )
+        raise click.ClickException(_collection_busy_message(cascade.collection_busy, f"nx collection delete {shlex.quote(name)}"))
     # Surface any cascade-step failure to the user (orphan rows may remain).
     for failure in cascade.failures:
         click.echo(f"warn: {failure}", err=True)
@@ -895,20 +913,27 @@ def prune_cmd(yes: bool, dry_run: bool) -> None:
     from nexus.db.collection_purge import purge_collection_cascade  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     unconfirmed: list[str] = []
+    busy: list[dict[str, str]] = []
     for m in mismatches:
         cascade = purge_collection_cascade(t3, m["name"])
+        if cascade.collection_busy is not None:
+            busy.append(cascade.collection_busy)  # a refusal, not a failure: the engine removed nothing
+            continue
         for failure in cascade.failures:
             click.echo(f"warn: {failure}", err=True)
         if cascade.service_delete_failed:
             unconfirmed.append(m["name"])
-    deleted_count = len(mismatches) - len(unconfirmed)
+    deleted_count = len(mismatches) - len(unconfirmed) - len(busy)
     click.echo(f"\nDeleted {deleted_count} collection(s).")
+    problems = [_collection_busy_message(b, "nx collection prune --yes") for b in busy]
     if unconfirmed:
         # nexus-oq5gd: see delete_cmd — a failed service cascade is unconfirmed.
-        raise click.ClickException(
+        problems.append(
             f"{len(unconfirmed)} delete(s) unconfirmed (service cascade failed): "
             f"{', '.join(unconfirmed)}. Re-run `nx collection prune --yes`."
         )
+    if problems:
+        raise click.ClickException("\n".join(problems))
 
 
 # nexus-8g79.10 (V5): rename_collection_data_plane extracted to
@@ -1369,6 +1394,12 @@ def reindex_cmd(name: str, force: bool, ack_external_embedder: bool = False) -> 
     # quarantine- siblings stay restorable instead of being deleted with the old registration
     # (nexus-wbfpw.71; `nx collection delete` takes them, this does not).
     cascade = purge_collection_cascade(db, name, keep_quarantine=True)
+    if cascade.collection_busy is not None:
+        # RDR-229 P3.5a row 14 (engine 0.1.202): refused before anything was removed, so the collection is intact.
+        raise click.ClickException(
+            f"reindex of '{name}' stopped: "
+            + _collection_busy_message(cascade.collection_busy, f"nx collection reindex {shlex.quote(name)}")
+        )
     for failure in cascade.failures:
         click.echo(f"warn: {failure}", err=True)
     if cascade.service_delete_failed:
@@ -2488,7 +2519,14 @@ def _reembed_all(
     for r, why in found.skipped_reentries:
         # Engine 0.1.202 refuses this re-entry (409 EndRefused): its target is retired or gone. Said, not sent.
         if str(r.source_row.get("name")) not in skipped:
-            click.echo(f"{r.source_row.get('name')}: not re-entered: {why}")
+            src = str(r.source_row.get("name"))
+            remedy = (
+                f"it holds no document now; `nx collection delete {shlex.quote(src)}` finishes what the job would have done"
+                if r.kind == "cutover" else
+                f"a document is live in it again; `nx collection reindex {shlex.quote(src)}` rebuilds the collection "
+                f"from its source files under the current profile (`nx index repo` for a code collection)"
+            )
+            click.echo(f"{src}: not re-entered: {why}; {remedy}")
     _reembed_jobs(
         db, [r for r in found.stale if str(r.get("name")) not in skipped], profile=profile,
         held=[(row, j) for row, j in found.held if str(row.get("name")) not in skipped],
