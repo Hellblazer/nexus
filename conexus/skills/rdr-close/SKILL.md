@@ -222,21 +222,26 @@ Post-mortems are then queryable as a slice of the knowledge collection:
 mcp__plugin_conexus_nexus__search(query="...", corpus="knowledge__{repo}-rdr-research", where='category=rdr_postmortem')
 ```
 
-#### One-time migration (legacy `knowledge__rdr_postmortem__<repo>` or owner-id-shaped `knowledge__<owner-id>__...` collections)
+#### One-time migration (the legacy `knowledge__rdr_postmortem__<repo>` collection)
 
-Operators that previously closed RDRs under either superseded shape — the old 3-segment `rdr_postmortem` name, or the owner-id-shaped name nexus-vupim found landing post-mortems in the repo's own tumbler collection — can roll the legacy collection into the conformant subject target with `nx catalog rename-collection`. Find the subject's own rendered name first (mint it with one `store_put` if it does not exist yet), then run once per affected repo:
+Rename that collection onto the subject BEFORE the first `store_put` to `{repo}-rdr-research`: `nx catalog rename-collection` refuses a target that exists, and a first `store_put` on a new subject mints a `c<id>` label, leaving no conformant name to rename onto. The target is the subject's four-segment name with the legacy collection's own model (a rename never re-embeds):
 
 ```bash
-NEW=$(nx collection list | awk -v s="{repo}-rdr-research" '{split($1,p,"__")} p[1]=="knowledge" && p[2]==s && $0 !~ /superseded->/ {print $1; exit}')
-[ -n "$NEW" ] || { echo "no collection for subject {repo}-rdr-research: store one post-mortem first" >&2; exit 1; }
-nx catalog rename-collection "knowledge__rdr_postmortem__<repo>" "$NEW" --yes
+OLD="knowledge__rdr_postmortem__<repo>"
+# the subject must have no collection yet
+nx collection list | awk -v s="{repo}-rdr-research" '{split($1,p,"__")} p[1]=="knowledge" && p[2]==s && $0 !~ /superseded->/ {f=1} END{exit f}' \
+  || { echo "{repo}-rdr-research already has a collection: skip" >&2; exit 1; }
+# the legacy collection's model, by the MODEL header
+MODEL=$(nx collection list | awk -v o="$OLD" '$1=="NAME"{for(i=1;i<=NF;i++) if($i=="MODEL") c=i; next} $1==o && c {print $c; exit}')
+[ -n "$MODEL" ] && [ "$MODEL" != "-" ] || { echo "no registered model for $OLD: skip" >&2; exit 1; }
+nx catalog rename-collection "$OLD" "knowledge__{repo}-rdr-research__${MODEL}__v1" --yes
 ```
 
-`nx collection list` has no `--json` form, so the filter reads the NAME column only (the first word of each line, whose second `__` segment is the subject) and never counts columns; the list's other columns have changed before and will again.
+`nx collection list` has no `--json` form, so the filters read NAME (first word) and the MODEL header, never a column position. Afterwards the bare subject resolves to this collection for `store_put` and `search(corpus="knowledge__{repo}-rdr-research")`, but only when `MODEL` is the model this install writes knowledge in today; otherwise a later `store_put` mints a second collection.
 
-If the target collection already has documents (rare, only when `nx index repo` ran before the rename), use `nx catalog migrate-fallback` per-document instead so existing rows survive.
+**Skip** (legacy post-mortems stay findable by their old collection and tags: `search(corpus="knowledge__rdr_postmortem__<repo>")`) when the subject already has a collection, when `MODEL` is not your current knowledge model, or when the post-mortems sit in an owner-id-shaped `knowledge__<owner-id>__...` collection that holds other knowledge too. Not `nx catalog migrate-fallback`: it re-points documents onto owner-id-shaped targets and does not move chunks.
 
-Renamed documents do not automatically gain `category="rdr_postmortem"` on their chunk metadata, since the chunks were written before the category field was stamped at write time. Pre-RDR-103 post-mortems remain findable via their original `tags="rdr,post-mortem,..."` field (which is searchable as a string contain). The cleanest backfill is to re-archive each post-mortem by rerunning `mcp__plugin_conexus_nexus__store_put` with `category="rdr_postmortem"` against the conformant collection, overwriting the legacy chunk by title. Operators that do not need the category-filtered slice can leave the legacy chunks as-is.
+Renamed chunks lack `category="rdr_postmortem"`; they stay findable by their `tags="rdr,post-mortem,..."`. To add the category, re-run `store_put` with it against the subject, overwriting by title.
 
 ## Flow: Reverted or Abandoned
 
