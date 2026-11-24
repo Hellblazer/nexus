@@ -35,18 +35,19 @@ from pathlib import Path
 
 _MIB = 1024 * 1024
 
-#: Release asset name -> ceiling in MiB. The pre-fix sizes were 231.8, 227.0, 193.3.
-#: amd64 (measured 150) and mac (measured 154) carry 21 to 25 MiB of headroom.
-#: linux-arm64 was NEVER measured by nexus-lhr6a. Its pre-fix size was 2% under
-#: amd64's, so the fixed build is expected at about 147 (150 x 227.0 / 231.8, an
-#: estimate, not a measurement); with the same 25 MiB margin that is 172, and
-#: 175 is used so the two linux binaries share one ceiling. The old 190 sat 40
-#: MiB over the expectation and let a partial regression pass. Replace the
-#: estimate with the first published linux-arm64 size.
+#: Release asset name -> ceiling in MiB. The pre-fix sizes were 231.8, 227.0, 193.3;
+#: nexus-lhr6a measured the fixed build at 150 (amd64) and 154 (mac).
+#: MEASURED, published engine-service-v0.1.202 (2026-11-24): linux-amd64 174.0,
+#: linux-arm64 172.4, mac-arm64 177.2. That is a uniform +5.1 to 5.3 MiB over
+#: v0.1.201 (linux-arm64 167.2, mac-arm64 172.1) from the RDR-229 Phase 3 engine
+#: code, not a dedup failure. mac-arm64 exceeded the old 175 and the release was
+#: promoted by hand (Sam, T2 nexus/sam-ruling-0202-manual-promote-and-size-ceiling-2026-11-24).
+#: 185 leaves about 8 to 13 MiB of growth over those sizes, and still sits under
+#: mac-arm64's pre-fix 193.3, so a lost dedup still trips every binary.
 SIZE_CEILINGS_MIB: dict[str, int] = {
-    "nexus-service-linux-amd64": 175,
-    "nexus-service-linux-arm64": 175,
-    "nexus-service-mac-arm64": 175,
+    "nexus-service-linux-amd64": 185,
+    "nexus-service-linux-arm64": 185,
+    "nexus-service-mac-arm64": 185,
 }
 
 #: The windows-x64 engine archive (RDR-224 P0.4, nexus-f9bgu.9): one .txz holding the exe, the four
