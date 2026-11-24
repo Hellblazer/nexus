@@ -16,3 +16,6 @@ Their tests used hand-written copies of both. These are the nearest real ones.
   the `file:///C:/...` form GraalVM printed for the same machine's jar URLs in its build log
   (`jar:file:///C:/build/f9bgu8/src/service/target/...jar!/...`). Replace it with a captured report the
   next time a Windows native build runs with `-H:+GenerateEmbeddedResourcesFile`.
+  The three `db/rdr229/` entries (nexus-p2m1x) were added by hand when the checker began requiring them; their
+  sizes are the byte sizes of the files in `service/src/main/resources/db/rdr229/` and their origin is the same
+  derived jar path, so they are derived too.

@@ -148,5 +148,35 @@
         "size": 34523
       }
     ]
+  },
+  {
+    "name": "/db/rdr229/p31-checks.tsv",
+    "entries": [
+      {
+        "origin": "file:///C:/build/f9bgu8/src/service/target/nexus-service-1.0-SNAPSHOT.jar",
+        "registration_origin": "META-INF/native-image/dev.nexus/nexus-service/resource-config.json",
+        "size": 3216
+      }
+    ]
+  },
+  {
+    "name": "/db/rdr229/p33a-fk-twins.tsv",
+    "entries": [
+      {
+        "origin": "file:///C:/build/f9bgu8/src/service/target/nexus-service-1.0-SNAPSHOT.jar",
+        "registration_origin": "META-INF/native-image/dev.nexus/nexus-service/resource-config.json",
+        "size": 2508
+      }
+    ]
+  },
+  {
+    "name": "/db/rdr229/p35b-continue-changesets.txt",
+    "entries": [
+      {
+        "origin": "file:///C:/build/f9bgu8/src/service/target/nexus-service-1.0-SNAPSHOT.jar",
+        "registration_origin": "META-INF/native-image/dev.nexus/nexus-service/resource-config.json",
+        "size": 558
+      }
+    ]
   }
 ]
