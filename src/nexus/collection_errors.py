@@ -74,3 +74,51 @@ def superseded_write_error_from_body(
     if not (isinstance(name, str) and name and isinstance(successor, str) and successor):
         return None
     return SupersededCollectionWriteError(name, successor)
+
+
+class LabelReservedError(RuntimeError):
+    """The engine refused a label because it is reserved (409 ``label_reserved``, RDR-229 P3.7, engine 0.1.202).
+
+    A collection renamed away from the label by the one-row rename still has rows that carry it, under another
+    collection id, until a later engine release relabels them. A register, a supersede's successor, a rename's target
+    and an import of that label are refused before anything is written, so the message is the same for each: the
+    label, why, and the way out. Never retried. Exposes ``label`` and ``explanation`` (the first sentence alone, for a
+    caller whose own message says what else happened: a delete that already ran, documents that already moved).
+
+    ``user_chooses_label`` is True where the person typed the label (a rename, a register by name): they may pick
+    another. It is False where the label is not theirs to change (``nx index repo``'s collection, a re-embed's target):
+    renaming the other collection back is the only way out."""
+
+    def __init__(self, label: str, *, user_chooses_label: bool = True) -> None:
+        self.label = label
+        self.user_chooses_label = user_chooses_label
+        back = (f"rename that collection back to {label!r} "
+                f"(`nx collection rename <its current name> {shlex.quote(label)}`; it is the collection that was "
+                f"named {label!r} before, and no nx command lists former names, so find it by what it holds in "
+                f"`nx collection list`)")
+        advice = f"Pick another label, or {back}." if user_chooses_label else f"{back[0].upper()}{back[1:]}."
+        super().__init__(f"{self.explanation} Nothing was written. {advice}")
+
+    @property
+    def explanation(self) -> str:
+        return (f"the collection label {self.label!r} is reserved: a collection that was renamed away from it still "
+                f"has rows that carry it, and the label can be used again once a later engine release relabels those rows.")
+
+    def with_fixed_label(self) -> "LabelReservedError":
+        """The same refusal worded for a caller whose label is not the person's to change."""
+        return LabelReservedError(self.label, user_chooses_label=False)
+
+
+def label_reserved_error_from_body(
+    status: int | None, body: Any, *, user_chooses_label: bool = True,
+) -> LabelReservedError | None:
+    """The typed error for the engine's 409 ``label_reserved`` body, else None.
+
+    Keyed on the status and the body's ``reason``; a body that names no label is not turned into the typed error (the
+    caller keeps its generic 409, which is no more retryable)."""
+    from nexus.db.engine_reasons import LABEL_RESERVED_REASON, error_reason  # noqa: PLC0415 — deferred: this module stays import-free for the CLI boundary
+
+    if status != 409 or not isinstance(body, dict) or error_reason(body) != LABEL_RESERVED_REASON:
+        return None
+    label = body.get("label")
+    return LabelReservedError(label, user_chooses_label=user_chooses_label) if isinstance(label, str) and label else None

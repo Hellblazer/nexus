@@ -66,10 +66,10 @@ UNKNOWN_COLLECTION_ID_REASON: str = "unknown_collection_id"
 #: the route boundary and the write changes nothing about where the write goes.)
 COLLECTION_ID_MISMATCH_REASON: str = "collection_id_mismatch"
 
-#: A collection rename (the catalog's, or a per-store ``rename_collection`` route) refused from gate 3 until the one-row rename
-#: can run (HTTP 409, RDR-229 P3.5a). Also carries ``missing``: ``name_key_drop_move`` while the move has no ``completed_at``,
-#: else ``restart`` (a P3.5b changeset has not applied), or ``latch_row_missing`` when the rename readiness says the move is
-#: complete but the install has no gate 3 latch row (an inconsistency, as after a partial restore). Nothing was renamed.
+#: A collection rename (``POST /v1/catalog/collections/rename`` and the per-store rename routes) while the engine cannot yet
+#: run the one-row rename (HTTP 409, RDR-229 P3.5a). Also carries ``error`` and ``missing``: ``restart`` when the engine must
+#: restart to apply a changeset (renames open after the next restart), else ``name_key_drop_move``, ``p35b_list_missing``,
+#: ``readiness_unreadable``, ``p35c_readers_absent`` or ``latch_row_missing``. Nothing was renamed.
 RENAME_REFUSED_REASON: str = "rename_refused"
 
 #: A catalog rename reached the one-row regime (the gate 3 latch row exists and the rename readiness is complete) with no one-row
@@ -98,6 +98,12 @@ COLLECTION_LABEL_AMBIGUOUS_REASON: str = "collection_label_ambiguous"
 #: them, and re-register the origin or let the quarantine expire for the marked ones.
 RESTORE_ORIGIN_UNREGISTERED_REASON: str = "restore_origin_unregistered"
 
+#: A register or revive (upsert), a supersede successor, a rename target or a single-form per-collection import named a label that is RESERVED: a
+#: collection renamed away from it by the one-row rename still has rows in the name-keyed tables that carry it, until the P4.1
+#: cleanup drops the name columns (HTTP 409, RDR-229 P3.7; the engine's ``HttpUtil.LABEL_RESERVED_REASON``). Also carries ``error`` and ``label``.
+#: Nothing was written. Never retryable: pick another label, or rename the collection that was renamed away back to it.
+LABEL_RESERVED_REASON: str = "label_reserved"
+
 #: A write naming an embedding model registered nowhere (HTTP 422, RDR-225).
 UNREGISTERED_EMBEDDING_MODEL_REASON: str = "unregistered_embedding_model"
 
@@ -113,6 +119,11 @@ TENANT_PARTITION_MISSING_REASON: str = "tenant_partition_missing"
 #: bound and issued nothing (HTTP 503 with ``Retry-After``, RDR-225).
 #: Retryable: the same call may be sent again.
 TENANT_CREATION_BUSY_REASON: str = "tenant_creation_busy"
+
+#: ``POST /v1/catalog/collections/delete`` named a collection a re-embed job in a non-terminal state (planned, running, paused,
+#: cutover or failed) holds as its source or its target (HTTP 409, RDR-229 P3.5a row 14). Also carries ``error``, ``collection``
+#: and ``job_id``. Nothing was removed. Retry once the job is done, or after ``nx collection re-embed --abort JOB``.
+COLLECTION_BUSY_REASON: str = "collection_busy"
 
 
 def error_reason(body: Any) -> str | None:

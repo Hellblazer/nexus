@@ -223,8 +223,8 @@ _T1_TOP_LINES: list[str] = [
     "before acting on a hand-back.",
     "T1 survives compaction; a `/clear`, `/resume` or fresh restart starts a new scope, "
     "an idle session is swept after 24 h, and flagged entries land in T2 at session end "
-    "and on a move to a new id. A `claude -p` child has its own T1 unless started with "
-    "`share_t1=True`. Working notes you want after `/clear` go to `scratch` with "
+    "and on a move to a new id. A `claude -p` child always has its own T1 "
+    "(`share_t1=True` is retired and raises); give it findings through T2. Working notes you want after `/clear` go to `scratch` with "
     "`scope=identity` and tag `working`; session scope stays the layer your subagents share.",
     "",
 ]

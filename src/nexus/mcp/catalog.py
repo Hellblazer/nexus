@@ -638,13 +638,9 @@ def catalog_update(
     field was given to update.
 
     ``alias_of`` points a duplicate entry at its canonical one, which the
-    catalog follows on resolve. It is the right answer whenever the same
-    document is registered twice — a re-fetched source, a moved file — and
-    it was reachable only from Python (``HttpCatalogClient.set_alias``)
-    until now. The visible cost of that: recovering a paper whose source
-    path had expired produced a second entry for it, and the choice was
-    between leaving a duplicate in search results and deleting the old
-    entry along with the three links pointing at it. Aliasing is neither.
+    catalog follows on resolve. Use it when the same document is registered
+    twice (a re-fetched source, a moved file) and you want neither a
+    duplicate in search results nor a delete that drops the links.
     """
     cat, err = _require_catalog()
     if err:
@@ -690,7 +686,11 @@ def catalog_link(
     from_tumbler: Annotated[str, Field(description="Source document's tumbler or exact title.")],
     to_tumbler: Annotated[str, Field(description="Target document's tumbler or exact title.")],
     link_type: Annotated[str, Field(
-        description="Link type: a built-in (cites, implements, implements-heuristic, supersedes, relates, quotes, comments) or a custom string.",
+        description=(
+            "Link type: a built-in (cites, implements, supersedes, relates, quotes, comments) or a custom string. "
+            "implements-heuristic is older: nothing writes it now (the code-RDR pass has been off since engine 0.1.57), "
+            "edges from before that carry it, and the default graph walk leaves it out."
+        ),
     )],
     created_by: Annotated[str, Field(description="Who or what created this link.")] = "user",
     from_span: Annotated[str, Field(description="Optional span identifier anchoring the link to a location within the source: 'line-line', 'chunk:char-char', 'chash:<hex>', 'chash:<hex>:<start>-<end>', or 'dchash:<hash>:<start>-<end>'.")] = "",
@@ -757,7 +757,11 @@ def catalog_link(
 def catalog_links(
     tumbler: Annotated[str, Field(description="Document tumbler or exact title to start from.")],
     direction: Annotated[str, Field(description="Traversal direction: \"out\", \"in\", or \"both\".")] = "both",
-    link_type: Annotated[str, Field(description="Restrict to this link type; \"\" follows every type.")] = "",
+    link_type: Annotated[str, Field(description=(
+        "Restrict to this link type. \"\" follows the engine's default set (cites, implements, relates, contains, "
+        "supersedes, describes, quotes, comments, formalizes, same-as), not implements-heuristic or a custom type: "
+        "name one of those here, one type per call."
+    ))] = "",
     depth: Annotated[int, Field(description="BFS depth; 1 (default) returns direct neighbors only.")] = 1,
 ) -> dict:
     """Walk the catalog link graph from one entry, live documents only.
