@@ -6,6 +6,7 @@ import static dev.nexus.service.CollectionRouteFixture.json;
 import static dev.nexus.service.CollectionRouteFixture.label;
 import static dev.nexus.service.jooq.nexus.Tables.CHASH_REMAP;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_LINKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.nexus.service.CollectionRouteFixture.Resp;
@@ -158,6 +159,50 @@ class Rdr229P35cPreGateRenameGapTest {
             long y = gap.newHolders().iterator().next();
             assertThat(chunkExists(x, hex)).as("the renamed collection's chunk is deleted").isFalse();
             assertThat(chunkExists(y, hex)).as("the new holder's chunk is still there").isTrue();
+        }
+    }
+
+    private long seedTopic(long collectionId, String label) {
+        Resp r = fx.post("/v1/taxonomy/topics/insert", "{\"collection_id\":" + collectionId + ",\"label\":" + json(label) + ",\"doc_count\":1}");
+        assertThat(r.status()).as("setup: " + r.body()).isEqualTo(200);
+        return r.json().path("id").asLong();
+    }
+
+    private void seedLink(long from, long to) {
+        fx.asSuperuser(ctx -> ctx.insertInto(TOPIC_LINKS, TOPIC_LINKS.TENANT_ID, TOPIC_LINKS.FROM_TOPIC_ID, TOPIC_LINKS.TO_TOPIC_ID,
+            TOPIC_LINKS.LINK_COUNT, TOPIC_LINKS.LINK_TYPES).values(fx.tenant, from, to, 1, org.jooq.JSONB.jsonb("[]")).execute());
+    }
+
+    private int linksBetween(long from, long to) {
+        Integer n = fx.asSuperuser(ctx -> ctx.fetchCount(TOPIC_LINKS,
+            TOPIC_LINKS.TENANT_ID.eq(fx.tenant).and(TOPIC_LINKS.FROM_TOPIC_ID.eq(from)).and(TOPIC_LINKS.TO_TOPIC_ID.eq(to))));
+        return n;
+    }
+
+    /**
+     * (3) {@code TaxonomyRepository.purgeCollection}: the doomed topics (whose links and assignments go) are those of the locked row. Before the
+     * fix they were found by the request's label, which is the new holder Y's topics after the rename: Y's link was deleted and X's survived.
+     */
+    @Test
+    void purgeCollectionById_beforeGate3_inTheRenameGap_deletesTheRenamedCollectionsLinks_notTheNewHoldersOfTheOldLabel() {
+        String b = registered("purge");
+        long x = fx.idOf(b);
+        long x1 = seedTopic(x, "x-one");
+        long x2 = seedTopic(x, "x-two");
+        seedLink(x1, x2);
+        long[] y = new long[2];
+        try (CollectionRouteFixture.RenameGap gap = fx.renameInPlaceBeforeTheWritesRead(List.of(x), List.of(b), "pg-purge-" + (n++), g -> {
+            long yid = g.newHolders().iterator().next();
+            y[0] = seedTopic(yid, "y-one");
+            y[1] = seedTopic(yid, "y-two");
+            seedLink(y[0], y[1]);
+        })) {
+            Resp r = fx.post("/v1/taxonomy/purge_collection", "{\"collection_id\":" + x + "}");
+
+            assertThat(gap.ran()).as("setup: the rename ran before the write's by-id read (%s)", r.body()).isTrue();
+            assertThat(r.status()).as(r.body()).isEqualTo(200);
+            assertThat(linksBetween(x1, x2)).as("the renamed collection's link is purged").isZero();
+            assertThat(linksBetween(y[0], y[1])).as("the new holder's link is untouched").isEqualTo(1);
         }
     }
 
