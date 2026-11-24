@@ -23,7 +23,7 @@ import pytest
 from nexus import target_installer
 from nexus._install import generation_core as gen_core
 from nexus._install import lease_core
-from tests._lease_support import NT, make_generation, venv_python
+from tests._lease_support import NT, holder, make_generation, venv_python
 from tests._module_seam import setattr_in
 
 INSTALL = Path(lease_core.__file__).resolve().parent
@@ -73,6 +73,25 @@ def test_the_lease_file_names_its_version_on_the_first_line(tmp_path: Path) -> N
 def test_the_installed_hook_is_the_shipped_hook_byte_for_byte(tmp_path: Path) -> None:
     gen = make_generation(tmp_path, "20261101T000000Z", receipt=False)
     assert (lease_core.site_packages(gen) / "_nx_lease.py").read_bytes() == HOOK_SRC.read_bytes()
+
+
+def test_installing_the_lease_again_keeps_a_held_lock(tmp_path: Path) -> None:
+    """A re-run (a doctor fix, a backfill) must not replace the lease file's inode: a
+    holder keeps the old one, gc would probe the new one and read free."""
+    gen = make_generation(tmp_path, "20261101T000000Z", receipt=False)
+    before = lease_core.lease_path(gen).stat().st_ino
+    with holder(venv_python(gen)):
+        assert lease_core.probe(gen) == "held"
+        lease_core.install_lease(gen)
+        assert lease_core.lease_path(gen).stat().st_ino == before, "the lease file was replaced"
+        assert lease_core.probe(gen) == "held", "a re-run orphaned the live holder's lock"
+
+
+def test_a_lease_file_with_a_stale_header_is_rewritten(tmp_path: Path) -> None:
+    gen = make_generation(tmp_path, "20261101T000000Z", receipt=False)
+    lease_core.lease_path(gen).write_text("junk\n")
+    lease_core.install_lease(gen)
+    assert lease_core.lease_path(gen).read_text().splitlines()[0] == "nx-lease 1"
 
 
 def test_a_generation_with_no_site_packages_is_reported_not_leased(tmp_path: Path) -> None:
@@ -130,8 +149,11 @@ def test_a_real_uv_generation_leases_from_its_own_interpreter(tmp_path: Path) ->
 SH = INSTALL / "install_generation.sh"
 
 
-def _fake_uv(bindir: Path) -> None:
-    """``uv venv`` makes a real venv; ``uv pip install`` does nothing (no network)."""
+def _fake_uv(bindir: Path, call_log: Path | None = None) -> None:
+    """``uv venv`` makes a real venv; ``uv pip install`` does nothing (no network).
+
+    With *call_log*, ``python3`` is a shim that records, at the moment the builder
+    runs ``lease_core.py install <gen>``, whether the receipt already exists."""
     bindir.mkdir()
     script = bindir / "uv"
     script.write_text(
@@ -144,14 +166,24 @@ def _fake_uv(bindir: Path) -> None:
     )
     script.chmod(script.stat().st_mode | stat.S_IXUSR)
     py3 = bindir / "python3"
-    if not py3.exists():
+    if call_log is None:
         py3.symlink_to(sys.executable)
+        return
+    py3.write_text(
+        "#!/bin/sh\n"
+        'case "$*" in *lease_core.py\\ install*)\n'
+        '  for last; do :; done\n'
+        f'  if [ -f "$last/nexus-install.json" ]; then echo receipt-present >> "{call_log}"; '
+        f'else echo receipt-absent >> "{call_log}"; fi;;\n'
+        "esac\n"
+        f'exec "{sys.executable}" "$@"\n'
+    )
+    py3.chmod(py3.stat().st_mode | stat.S_IXUSR)
 
 
-@pytest.mark.skipif(NT, reason="the POSIX builder is bash")
-def test_the_shell_builder_writes_the_lease_before_the_receipt(tmp_path: Path) -> None:
+def _run_shell_builder(script_dir: Path, tmp_path: Path, *, call_log: Path | None = None):
     bindir = tmp_path / "bin"
-    _fake_uv(bindir)
+    _fake_uv(bindir, call_log)
     tools = tmp_path / "tools"
     tools.mkdir()
     env = {
@@ -159,9 +191,16 @@ def test_the_shell_builder_writes_the_lease_before_the_receipt(tmp_path: Path) -
         "NX_TOOLS_DIR": str(tools),
     }
     r = subprocess.run(
-        ["bash", str(SH), "--source", "conexus", "--version", "1.0.0"],
+        ["bash", str(script_dir / "install_generation.sh"), "--source", "conexus", "--version", "1.0.0"],
         capture_output=True, text=True, env=env, check=False, timeout=180,
     )
+    return r, tools
+
+
+@pytest.mark.skipif(NT, reason="the POSIX builder is bash")
+def test_the_shell_builder_writes_the_lease_before_the_receipt(tmp_path: Path) -> None:
+    call_log = tmp_path / "calls.log"
+    r, tools = _run_shell_builder(INSTALL, tmp_path, call_log=call_log)
     assert r.returncode == 0, r.stderr
     gen = Path(r.stdout.strip())
     assert gen.parent == tools and (gen / "nexus-install.json").is_file()
@@ -170,13 +209,37 @@ def test_the_shell_builder_writes_the_lease_before_the_receipt(tmp_path: Path) -
     assert (site / "_nx_lease.pth").is_file() and lease_core.lease_path(gen).is_file()
     assert "lease: verified" in r.stderr, r.stderr
     assert lease_core.probe(gen) == "free"
+    # The order, observed at run time: the receipt did not exist when lease_core ran.
+    assert call_log.read_text().split() == ["receipt-absent"], call_log.read_text()
+
+
+@pytest.mark.skipif(NT, reason="the POSIX builder is bash")
+def test_the_run_time_order_check_goes_red_when_the_lease_call_moves_below_the_receipt(tmp_path: Path) -> None:
+    """Mutation check on the detector above: the same builder with the lease call moved
+    to after the receipt is written reads receipt-present."""
+    text = SH.read_text()
+    start = text.index('if [ -f "$_here/lease_core.py" ]; then')
+    end = text.index("fi\n", text.index("else", start)) + 3
+    block = text[start:end]
+    mutated = text[:start] + text[end:]
+    tail = 'printf \'%s\\n\' "$GEN"'
+    assert mutated.count(tail) == 1, "the builder's final line moved; update this mutation"
+    mutated = mutated.replace(tail, block + "\n" + tail)
+    stage = tmp_path / "stage"
+    shutil.copytree(INSTALL, stage)
+    (stage / "install_generation.sh").write_text(mutated)
+    call_log = tmp_path / "calls.log"
+    r, _tools = _run_shell_builder(stage, tmp_path, call_log=call_log)
+    assert r.returncode == 0, r.stderr
+    assert call_log.read_text().split() == ["receipt-present"], call_log.read_text()
 
 
 def test_the_shell_builder_installs_the_lease_before_it_renders_the_receipt() -> None:
+    """Textual twin of the run-time check, anchored on the CALL (not the comment above it)."""
     text = SH.read_text()
-    lease = text.index("lease_core.py")
-    assert lease < text.index("nx_render_receipt"), "the lease must be written before the receipt"
-    assert lease > text.rindex('uv pip install --python "$GEN/bin/python"'), "after the packages, so the hook sees a finished site-packages"
+    call = text.index('python3 "$_here/lease_core.py" install')
+    assert call < text.index("nx_render_receipt"), "the lease must be written before the receipt"
+    assert call > text.rindex('uv pip install --python "$GEN/bin/python"'), "after the packages, so the hook sees a finished site-packages"
 
 
 def test_every_file_the_shell_builder_reads_beside_itself_is_staged() -> None:
@@ -248,24 +311,33 @@ def test_a_build_killed_before_the_receipt_leaves_no_tree(tmp_path: Path) -> Non
 
 
 @pytest.mark.skipif(NT, reason="the POSIX builder is bash")
-def test_a_staged_installer_without_lease_core_still_builds_and_says_it_is_unleased(tmp_path: Path) -> None:
-    """The first upgrade through an older running nexus stages the installer with
-    ITS file list, which does not carry lease_core.py: the build must not fail."""
+def test_an_older_nexus_staging_the_whole_install_dir_gets_a_leased_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shape that happens: a running nexus that predates the lease files stages the
+    target's WHOLE ``_install`` directory (its file list is only a presence check), so
+    lease_core.py and _nx_lease.py sit beside the script whatever the old list names."""
+    old_list = ("install_generation.sh", "layout.sh", "layout_core.py", "overrides.txt")
+    monkeypatch.setattr(target_installer, "POSIX_FILES", old_list)
+    stage = tmp_path / "stage"
+    shutil.copytree(INSTALL, stage)
+    assert target_installer._unusable_reason(stage, windows=False, with_extras=False, with_version=False) is None
+    r, _tools = _run_shell_builder(stage, tmp_path)
+    assert r.returncode == 0, r.stderr
+    gen = Path(r.stdout.strip())
+    assert "lease: verified" in r.stderr, r.stderr
+    assert lease_core.probe(gen) == "free" and lease_core.lease_path(gen).is_file()
+
+
+@pytest.mark.skipif(NT, reason="the POSIX builder is bash")
+def test_an_install_dir_without_lease_core_still_builds_and_says_it_is_unleased(tmp_path: Path) -> None:
+    """A hand-picked directory (nothing stages one) that lacks lease_core.py: the build
+    must not fail, and says the generation is census-guarded only."""
     stage = tmp_path / "stage"
     stage.mkdir()
     for name in ("install_generation.sh", "layout.sh", "layout_core.py", "overrides.txt"):
         shutil.copy(INSTALL / name, stage / name)
-    bindir = tmp_path / "bin"
-    _fake_uv(bindir)
-    (tmp_path / "tools").mkdir()
-    env = {
-        "PATH": f"{bindir}:{os.environ.get('PATH', '/usr/bin:/bin')}", "HOME": str(tmp_path),
-        "NX_TOOLS_DIR": str(tmp_path / "tools"),
-    }
-    r = subprocess.run(
-        ["bash", str(stage / "install_generation.sh"), "--source", "conexus", "--version", "1.0.0"],
-        capture_output=True, text=True, env=env, check=False, timeout=180,
-    )
+    r, _tools = _run_shell_builder(stage, tmp_path)
     assert r.returncode == 0, r.stderr
     gen = Path(r.stdout.strip())
     assert (gen / "nexus-install.json").is_file()

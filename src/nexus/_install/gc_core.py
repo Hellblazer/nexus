@@ -518,7 +518,10 @@ def plan(
         # on current, previous, the keep window or the running installer. The
         # ledger pointer is no tree and carries none.
         if not layout.is_link(entry, platform=platform):
-            state = lease.probe(entry, platform=platform)
+            try:
+                state = lease.probe(entry, platform=platform)
+            except Exception as exc:  # noqa: BLE001 -- one unreadable lease must not stop the sweep judging the rest
+                state = f"error:{type(exc).__name__}"
             if lease_states is not None:
                 lease_states[str(entry)] = state
             kind = lease.state_kind(state)
@@ -572,35 +575,44 @@ def _collecting_handler(failures: list[tuple[str, BaseException]]):
     return handler
 
 
-def _remove_all_but_lease(root: Path, lease_name: str, on_error) -> None:
-    """Delete everything under *root* except ``root/<lease_name>``, bottom-up,
+def _remove_all_but_lease(root: Path, lease_name: str, on_error, platform: str | None = None) -> None:
+    """Delete everything under *root* except ``root/<lease_name>``, depth first,
     reporting each failure to *on_error* (the ``_collecting_handler`` shape) and
     carrying on. ``shutil.rmtree`` cannot skip one file: its final ``rmdir`` of
-    *root* would fail and read as "in use". A link (symlink or junction) is
-    removed as a link and never followed."""
-    for dirpath, dirnames, filenames in os.walk(
-        root, topdown=False, onerror=lambda exc: on_error(os.scandir, exc.filename, exc),
-    ):
-        for name in filenames:
-            if name == lease_name and Path(dirpath) == root:
+    *root* would fail and read as "in use".
+
+    A LINK (a symlink, or on Windows a directory junction, which ``os.path.islink``
+    reads as a plain directory) is removed as a link and NEVER entered: following a
+    junction here deletes what it names, outside the generation. Every child is asked
+    ``layout.is_link`` before anything descends into it."""
+    layout = _layout()
+
+    def clear(directory: Path) -> None:
+        try:
+            with os.scandir(directory) as scan:
+                children = list(scan)
+        except OSError as exc:
+            on_error(os.scandir, str(directory), exc)
+            return
+        for child in children:
+            path = Path(child.path)
+            if directory == root and child.name == lease_name:
                 continue
-            target = os.path.join(dirpath, name)
             try:
-                os.unlink(target)
-            except OSError as exc:
-                on_error(os.unlink, target, exc)
-        for name in dirnames:
-            target = os.path.join(dirpath, name)
-            try:
-                if os.path.islink(target):
-                    os.unlink(target)
+                if layout.is_link(path, platform=platform):
+                    layout.remove_link(path)  # the link itself; never what it names
+                elif child.is_dir(follow_symlinks=False):
+                    clear(path)
+                    os.rmdir(path)
                 else:
-                    os.rmdir(target)
+                    os.unlink(path)
             except OSError as exc:
-                on_error(os.rmdir, target, exc)
+                on_error(os.rmdir if child.is_dir(follow_symlinks=False) else os.unlink, str(path), exc)
+
+    clear(root)
 
 
-def _reap_windows_tree(path: Path, hold=None) -> tuple[bool, str]:
+def _reap_windows_tree(path: Path, hold=None, platform: str | None = None) -> tuple[bool, str]:
     """Delete one generation directory on Windows. ``(gone, detail)``.
 
     Receipt first: with the completion marker gone the tree is not a
@@ -609,12 +621,22 @@ def _reap_windows_tree(path: Path, hold=None) -> tuple[bool, str]:
     failure leaves the directory "kept (in use)" for the next run to retry; the
     caller says ``reaped`` only when the directory is actually gone.
 
-    With *hold* (the exclusive ``DELETE_ON_CLOSE`` handle on ``.nx-lease``, from
-    ``lease_core.acquire``) the lease file is the last thing standing: everything
-    else goes in a walk that skips it, then the handle is closed (the kernel
-    removes the lease file), then the directory. No interpreter can start from a
-    gutted tree in between, because starting one means opening the lease file at
-    share mode 0 against us. The handle is released on every path out.
+    With *hold* (the exclusive delete-sharing handle on ``.nx-lease``, from
+    ``lease_core.acquire(for_delete=True)``) the lease file is the last thing
+    standing: everything else goes in a walk that skips it and never follows a link,
+    then the lease file is unlinked THROUGH the handle, then the handle is closed,
+    then the directory goes. The hold is exclusive against every reader, so no
+    interpreter can take a lease on the tree while it is being deleted (one that
+    starts anyway, its open refused after ~20 ms, runs unleased from a tree that is
+    already being gutted: it was never protected, and the tree was unprotected by
+    the census too). The handle is released on every path out.
+
+    A reap that stops early (the receipt will not go, a locked file, an exception)
+    leaves ``.nx-lease`` where it was: only a COMPLETE reap removes it. Nothing
+    holding a lease can exist in a tree we held exclusively, and whatever blocked
+    the delete holds none, so what survives is half-deleted, receipt-less wreckage
+    that only the process census guards, retried after its grace window, exactly as a
+    failed reap was before leases.
     """
     layout = _layout()
     if hold is not None:
@@ -627,7 +649,14 @@ def _reap_windows_tree(path: Path, hold=None) -> tuple[bool, str]:
                 pass
             except OSError as exc:
                 return False, f"could not remove the receipt ({exc})"
-            _remove_all_but_lease(path, _lease().LEASE_NAME, handler)
+            _remove_all_but_lease(path, _lease().LEASE_NAME, handler, platform)
+            if not failures:
+                try:
+                    os.unlink(path / _lease().LEASE_NAME)  # through the hold, last
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    failures.append((str(path / _lease().LEASE_NAME), exc))
         finally:
             hold.release()
         if not failures:
@@ -705,7 +734,7 @@ def _reap(entry: Path, emit_err, platform: str | None = None, hold=None) -> list
         # live in this same directory and following one would empty the
         # generation it names rather than removing a link.
         if nt:
-            gone, detail = _reap_windows_tree(entry, hold)
+            gone, detail = _reap_windows_tree(entry, hold, platform)
             return [f"reaped {entry}"] if gone else [f"kept {entry}: in use ({detail})"]
         shutil.rmtree(entry, ignore_errors=True)
         return [f"reaped {entry}"]
@@ -794,7 +823,7 @@ def gc_generations(
     if keep < 0:
         raise GCError(f"--keep must be a non-negative integer, got '{keep}'")
     if keep < 1:
-        # --keep 0 means "retain nothing", leaving only the four rules between
+        # --keep 0 means "retain nothing", leaving only the five rules between
         # the operator and an install with no fallback at all. Almost certainly
         # a mistake, and refusing costs one message.
         raise GCError("--keep 0 would retain no generations; refusing")
@@ -900,9 +929,23 @@ def gc_generations(
                 # RE-TAKE the lock now, and keep it through the delete: the plan
                 # is a moment in the past, and a process that started since holds
                 # a lease the plan never saw. Held (or any error) keeps the tree.
-                state, hold = lease.acquire(entry, platform=platform, delete_on_close=nt)
-                if lease.state_kind(state) in (lease.STATE_HELD, lease.STATE_ERROR):
-                    result = [f"kept {entry}: lease {state} at the reap (a process started after the plan); not reaped"]
+                try:
+                    state, hold = lease.acquire(entry, platform=platform, for_delete=nt)
+                except Exception as exc:  # noqa: BLE001 -- keep, loudly; never take the sweep down with it
+                    state, hold = f"error:{type(exc).__name__}", None
+                planned = lease.state_kind(lease_states.get(str(entry), ""))
+                kind = lease.state_kind(state)
+                if kind in (lease.STATE_HELD, lease.STATE_ERROR) or (
+                    planned == lease.STATE_FREE and kind != lease.STATE_FREE
+                ):
+                    # held or any error keeps it; so does ANY answer but free where the plan
+                    # found the lock working a moment ago (a transient ENOLCK is not an
+                    # unsupported filesystem, and "unsupported" licenses the census-only
+                    # fallback only when it was unsupported all along).
+                    if hold is not None:
+                        hold.release()
+                        hold = None
+                    result = [f"kept {entry}: lease {state} at the reap (planned {planned or 'unprobed'}); not reaped"]
                     line["lease"] = state
             if result is None:
                 result = _reap(entry, emit_err, platform, hold)

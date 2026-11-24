@@ -3,8 +3,8 @@
 
 ``TestInjected`` runs anywhere: ``platform="win32"`` selects the Windows branch,
 ``_win_open`` is the one seam where ctypes would call ``CreateFileW``, and
-:class:`FakeHold` stands in for the ``DELETE_ON_CLOSE`` handle (closing it removes
-the lease file, as the kernel does). ``TestRealWindows`` runs only on win32 and is
+:class:`FakeHold` stands in for the delete-sharing handle (closing it removes
+nothing). ``TestRealWindows`` runs only on win32 and is
 what proves the kernel's side: an open handle blocks the unlink, a second handle
 at share mode 0 reads ``held``, and the reap really deletes everything including
 the lease. Run it natively with ``scripts/windows_hand_test.py``.
@@ -26,16 +26,16 @@ ERROR_FILE_NOT_FOUND, ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION = 2, 5, 32
 
 
 class FakeHold:
-    """The exclusive handle: closing it deletes the lease file (DELETE_ON_CLOSE)."""
+    """The exclusive handle (share mode FILE_SHARE_DELETE only): closing it removes
+    nothing, so a reap that stops early leaves the lease file in place. The reap
+    itself unlinks the lease while it still holds the handle."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
         self.released = False
 
     def release(self) -> None:
-        if not self.released:
-            self.released = True
-            self.path.unlink(missing_ok=True)
+        self.released = True
 
 
 def _tree(tmp_path: Path) -> Path:
@@ -51,7 +51,7 @@ def _tree(tmp_path: Path) -> Path:
 
 
 class TestInjected:
-    def test_the_reap_deletes_everything_but_the_lease_then_releases_it_then_the_directory(self, tmp_path: Path) -> None:
+    def test_the_reap_deletes_everything_then_the_lease_while_holding_it_then_the_directory(self, tmp_path: Path) -> None:
         gen = _tree(tmp_path)
         hold = FakeHold(gen / ".nx-lease")
         seen: dict[str, object] = {}
@@ -64,7 +64,7 @@ class TestInjected:
         hold.release = release  # type: ignore[method-assign]
         gone, detail = gc_core._reap_windows_tree(gen, hold)
         assert (gone, detail) == (True, "")
-        assert seen["left_when_released"] == [".nx-lease"], seen
+        assert seen["left_when_released"] == [], "the lease file goes while the handle is still held, before the release"
         assert not gen.exists()
 
     def test_the_receipt_is_removed_first(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -99,12 +99,72 @@ class TestInjected:
         assert gone is False and "python.exe" in detail, detail
         assert hold.released, "the handle must not outlive the reap"
         assert locked.is_file(), "an in-use file was removed"
+        assert (gen / ".nx-lease").is_file(), (
+            "a reap that stops early must leave the survivor leased: the lease file goes only on a complete reap"
+        )
+
+    def test_a_receipt_that_will_not_go_leaves_the_lease(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        gen = _tree(tmp_path)
+        real = os.unlink
+
+        def unlink(path, *a, **k):
+            if Path(path).name == "nexus-install.json":
+                raise PermissionError(ERROR_SHARING_VIOLATION, "in use", str(path))
+            return real(path, *a, **k)
+
+        setattr_in(monkeypatch, gc_core, "os.unlink", unlink)
+        hold = FakeHold(gen / ".nx-lease")
+        gone, detail = gc_core._reap_windows_tree(gen, hold)
+        assert gone is False and "receipt" in detail, detail
+        assert hold.released and (gen / ".nx-lease").is_file()
+
+    def test_a_link_inside_the_tree_is_removed_as_a_link_and_never_followed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A directory that reads as a junction (``isjunction`` True, ``is_symlink`` False,
+        as on Windows) is removed as a link: what it names survives."""
+        gen = _tree(tmp_path)
+        sentinel = tmp_path / "sentinel"
+        sentinel.mkdir()
+        (sentinel / "precious.txt").write_text("keep")
+        (gen / "Lib" / "junction").symlink_to(sentinel, target_is_directory=True)
+        # os.path.islink would catch a symlink; make the injected platform see it the way
+        # Windows sees a junction instead, so only layout.is_link recognises it.
+        real_islink = os.path.islink
+        setattr_in(monkeypatch, gc_core, "os.path.islink", lambda p: False if Path(p).name == "junction" else real_islink(p), raising=False)
+        setattr_in(monkeypatch, "nexus._install.layout_core", "os.path.isjunction", lambda p: Path(p).name == "junction", raising=False)
+        gone, detail = gc_core._reap_windows_tree(gen, FakeHold(gen / ".nx-lease"), platform=WIN)
+        assert (sentinel / "precious.txt").read_text() == "keep", "the reap followed a link out of the tree"
+        assert gone, detail
+
+    def test_the_hold_open_asks_for_delete_sharing_not_delete_on_close(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        gen = make_generation(tmp_path, "20261101T000000Z", receipt=False)
+        seen: list[bool] = []
+        monkeypatch.setattr(lease_core, "_win_open", lambda path, for_delete: (seen.append(for_delete), os.open(path, os.O_RDONLY))[1])
+        state, hold = lease_core.acquire(gen, platform=WIN, for_delete=True)
+        assert state == "free" and seen == [True]
+        hold.release()
+        assert lease_core.lease_path(gen).is_file(), "closing the hold must not delete the lease"
+
+    def test_a_stat_error_that_is_not_absence_is_an_error_not_absent(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        gen = make_generation(tmp_path, "20261101T000000Z", receipt=False)
+
+        def denied(path, *a, **k):
+            raise PermissionError(13, "access denied", str(path))
+
+        setattr_in(monkeypatch, lease_core, "os.stat", denied)
+        assert lease_core.probe(gen, platform=WIN) == "error:EACCES"
+
+    def test_a_missing_or_nondirectory_parent_is_absent(self, tmp_path: Path) -> None:
+        assert lease_core.probe(tmp_path / "no-such-gen", platform=WIN) == "absent"
+        (tmp_path / "file").write_text("x")
+        assert lease_core.probe(tmp_path / "file", platform=WIN) == "absent"
 
     def test_win_open_outcomes_read_as_lease_states(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         gen = make_generation(tmp_path, "20261101T000000Z", receipt=False)
 
         def raising(code: int):
-            def fake(path, delete_on_close):
+            def fake(path, for_delete):
                 err = OSError(13, "x")
                 err.winerror = code  # the attribute only exists on Windows; a plain one stands in
                 raise err
@@ -119,14 +179,14 @@ class TestInjected:
         gen = make_generation(tmp_path, "20261101T000000Z", receipt=False)
         opened: list[bool] = []
 
-        def fake(path, delete_on_close):
-            opened.append(delete_on_close)
+        def fake(path, for_delete):
+            opened.append(for_delete)
             return os.open(path, os.O_RDONLY)
 
         monkeypatch.setattr(lease_core, "_win_open", fake)
         assert lease_core.probe(gen, platform=WIN) == "free"
-        assert opened == [False], "the plan-time probe must not ask for DELETE_ON_CLOSE (it would delete the lease of a generation that is kept)"
-        state, hold = lease_core.acquire(gen, platform=WIN, delete_on_close=True)
+        assert opened == [False], "the plan-time probe must not ask for delete access (it would take the lease away from a generation that is kept)"
+        state, hold = lease_core.acquire(gen, platform=WIN, for_delete=True)
         assert state == "free" and hold is not None and opened == [False, True]
         hold.release()
 
@@ -172,3 +232,40 @@ class TestRealWindows:
             gc_core.gc_generations(tools, keep=1, snapshot=blind_snapshot(), grace_minutes=0)
             assert (a / "pyvenv.cfg").is_file() and venv_python(a).is_file(), "a leased generation was gutted"
         assert not b.exists() and not c.exists()
+
+    def test_a_junction_inside_a_generation_is_removed_as_a_link_and_its_target_survives(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``os.path.islink`` is False for a junction, and a walk that treats it as a directory
+        empties what it names (data outside the tree). The reap must remove the junction only."""
+        import _winapi  # noqa: PLC0415 -- exists on Windows only
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "config"))
+        tools, (a, b, c, d) = make_tools(tmp_path)
+        sentinel = tmp_path / "sentinel"
+        (sentinel / "sub").mkdir(parents=True)
+        (sentinel / "sub" / "precious.txt").write_text("keep")
+        (sentinel / "top.txt").write_text("keep")
+        _winapi.CreateJunction(str(sentinel), str(a / "Lib" / "site-packages" / "linked"))
+        assert (a / "Lib" / "site-packages" / "linked" / "top.txt").is_file(), "the junction does not resolve"
+        lines = gc_core.gc_generations(tools, keep=1, snapshot=blind_snapshot(), grace_minutes=0)
+        assert not a.exists(), lines
+        assert (sentinel / "top.txt").read_text() == "keep" and (sentinel / "sub" / "precious.txt").read_text() == "keep", (
+            "the reap followed a junction out of the generation and deleted what it names"
+        )
+
+    def test_a_reap_that_cannot_finish_leaves_the_survivor_leased(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A file held open without delete sharing (an unleased process's, here) stops the delete.
+        The generation survives incomplete; its lease file must survive with it."""
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "config"))
+        tools, (a, *_rest) = make_tools(tmp_path)
+        victim = a / "Lib" / "site-packages" / "held.py"
+        victim.write_text("x")
+        fd = os.open(str(victim), os.O_RDONLY | os.O_BINARY)
+        try:
+            lines = gc_core.gc_generations(tools, keep=1, snapshot=blind_snapshot(), grace_minutes=0)
+        finally:
+            os.close(fd)
+        assert a.is_dir() and victim.is_file(), lines
+        assert lease_core.lease_path(a).is_file(), "the failed reap took the lease with it"
+        assert lease_core.probe(a) == "free"

@@ -290,3 +290,90 @@ def test_a_dry_run_probes_and_deletes_nothing(tmp_path: Path) -> None:
     assert any(line.startswith(f"kept {a}") for line in lines)
     assert any(line == f"would reap {b}" for line in lines)
     assert a.is_dir() and b.is_dir()
+
+
+# ── a lease that fails differently the second time, and one that cannot be read ───
+
+@POSIX
+def test_a_lock_that_stops_working_between_plan_and_reap_keeps_the_generation(
+    tmp_path: Path, config: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The plan found the lock working (free); at the reap it says ENOLCK (lock-table
+    pressure). That is not an unsupported filesystem, and 'unsupported' licenses the
+    census-only fallback only when the filesystem was unsupported all along."""
+    tools, gens = make_tools(tmp_path)
+    real_flock = lease_core.fcntl.flock
+    armed: list[bool] = []
+
+    def flaky(fd, op):
+        if armed:
+            raise OSError(errno.ENOLCK, "no locks available")
+        return real_flock(fd, op)
+
+    setattr_in(monkeypatch, lease_core, "fcntl.flock", flaky)
+    lines = gc_core.gc_generations(
+        tools, keep=1, snapshot=blind_snapshot(), grace_minutes=0,
+        before_reap=lambda entry: armed.append(True),
+    )
+    assert all(g.is_dir() and (g / "pyvenv.cfg").is_file() for g in gens), lines
+    assert not any(line.startswith("reaped ") for line in lines), lines
+    kept = [r for r in _records(config) if r["event"] == "gc_reap_kept"]
+    assert len(kept) == 3 and all("ENOLCK" in r["detail"] or "unsupported" in r["detail"] for r in kept), kept
+
+
+@POSIX
+def test_an_unreadable_lease_keeps_that_generation_and_the_sweep_goes_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An EIO (a failing disk) or ESTALE (NFS) on reading the header must not escape
+    probe and stop every other generation from being judged."""
+    tools, (a, b, c, d) = make_tools(tmp_path)
+    real_read = os.read
+    calls: list[int] = []
+
+    def eio_once(fd, n):
+        calls.append(fd)
+        if len(calls) == 1:
+            raise OSError(errno.EIO, "input/output error")
+        return real_read(fd, n)
+
+    setattr_in(monkeypatch, lease_core, "os.read", eio_once)
+    plan = _plan(tools)
+    assert _actions(plan) == {
+        "20261101T000000Z": "keep", "20261102T000000Z": "reap",
+        "20261103T000000Z": "reap", "20261104T000000Z": "skip",
+    }, plan
+    assert "error:EIO" in _details(plan)["20261101T000000Z"]
+
+
+def test_a_probe_that_raises_anything_keeps_that_generation_and_the_sweep_goes_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools, (a, b, c, d) = make_tools(tmp_path)
+    real = lease_core.probe
+
+    def boom(gen, platform=None):
+        if Path(gen) == a:
+            raise RuntimeError("ctypes exploded")
+        return real(gen, platform=platform)
+
+    monkeypatch.setattr(lease_core, "probe", boom)
+    plan = _plan(tools)
+    assert _actions(plan)["20261101T000000Z"] == "keep" and _actions(plan)["20261102T000000Z"] == "reap", plan
+    assert "error:RuntimeError" in _details(plan)["20261101T000000Z"]
+
+
+def test_a_re_take_that_raises_anything_keeps_that_generation(tmp_path: Path, config: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tools, (a, b, c, d) = make_tools(tmp_path)
+    real = lease_core.acquire
+
+    def boom(gen, **kw):
+        if Path(gen) == a:
+            raise RuntimeError("ctypes exploded")
+        return real(gen, **kw)
+
+    monkeypatch.setattr(lease_core, "acquire", boom)
+    lines = gc_core.gc_generations(tools, keep=1, snapshot=blind_snapshot(), grace_minutes=0)
+    assert a.is_dir(), lines
+    assert not b.exists() and not c.exists(), "one bad lease stopped the rest of the sweep"
+    assert any(line.startswith(f"kept {a}") and "error:RuntimeError" in line for line in lines), lines

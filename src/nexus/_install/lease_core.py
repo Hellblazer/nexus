@@ -36,9 +36,11 @@ STATES, as :func:`probe` answers them:
 
 On POSIX the probe opens ``O_RDWR`` (NFS's ``flock`` emulation wants a write
 descriptor for an exclusive lock) and tries ``LOCK_EX|LOCK_NB``. On Windows it
-opens with ``CreateFileW`` at share mode 0: a sharing violation is ``held``, and
-the reap-time open adds ``FILE_FLAG_DELETE_ON_CLOSE`` so one handle is both the
-exclusive hold and the lease file's removal.
+opens with ``CreateFileW`` at share mode 0: a sharing violation is ``held``. The
+reap-time open asks for delete access and shares only ``FILE_SHARE_DELETE``, so it
+keeps every other opener out and the reap can unlink the lease file through it as
+its LAST step. Nothing is deleted by closing the handle: a reap that stops early
+leaves the lease file, and the surviving generation stays leased.
 """
 from __future__ import annotations
 
@@ -143,8 +145,20 @@ def install_lease(gen: Path | str) -> Path:
         raise OSError(f"no site-packages under {gen}")
     _write_atomic(site / HOOK_NAME, hook_source().read_bytes())
     _write_atomic(site / PTH_NAME, PTH_TEXT.encode("ascii"))
-    _write_atomic(lease_path(gen), (LEASE_HEADER + "\n").encode("ascii"))
+    if not _has_valid_lease(gen):
+        # Never replace a lease file that is already valid: the replacement is a new
+        # inode, every interpreter holding the old one is orphaned, and gc would probe
+        # the new one and read free.
+        _write_atomic(lease_path(gen), (LEASE_HEADER + "\n").encode("ascii"))
     return site
+
+
+def _has_valid_lease(gen: Path) -> bool:
+    try:
+        head = lease_path(gen).read_bytes()[:64]
+    except OSError:
+        return False
+    return head.split(b"\n", 1)[0].rstrip(b"\r") == LEASE_HEADER.encode("ascii")
 
 
 def _venv_python(gen: Path, platform: str | None) -> Path:
@@ -216,8 +230,13 @@ def install_and_verify(gen: Path | str, *, platform: str | None = None) -> list[
 class Hold:
     """The exclusive hold :func:`acquire` returns. :meth:`release` is idempotent.
 
-    On Windows the handle was opened ``DELETE_ON_CLOSE``, so releasing it also
-    removes ``.nx-lease``; the reap relies on that and calls it last."""
+    Releasing removes nothing, on any platform. The Windows reap unlinks ``.nx-lease``
+    itself, through this handle and only after everything else is gone, so a reap that
+    stops early (a locked file, an exception) leaves the lease file in place. The tree
+    it leaves is half-deleted and receipt-less, and the lease file does not make it
+    safe: nothing holding a lease can exist (the hold was exclusive), and whatever
+    blocked the delete holds none, so only the census guards that tree until the next
+    run retries it."""
 
     def __init__(self, fd: int) -> None:
         self._fd = fd
@@ -254,17 +273,19 @@ def _header_ok(fd: int) -> bool:
     return head.split(b"\n", 1)[0].rstrip(b"\r") == LEASE_HEADER.encode("ascii")
 
 
-def _win_open(path: str, delete_on_close: bool) -> int:
+def _win_open(path: str, for_delete: bool) -> int:
     """Open *path* at share mode 0 (``CreateFileW``) and return a C-runtime file
-    descriptor that owns the handle. Raises ``OSError`` (with ``winerror``) when
-    another handle is open: that IS the held answer. This is the one place ctypes
+    descriptor that owns the handle. With *for_delete* the open also asks for DELETE
+    access and shares only ``FILE_SHARE_DELETE``: still exclusive against any reader
+    or writer, and the caller may unlink the file through it. Raises ``OSError`` (with
+    ``winerror``) when another handle is open: that IS the held answer. This is the one place ctypes
     is used, and only gc reaches it, never an interpreter start."""
     import ctypes  # noqa: PLC0415 -- Windows gc only
     import msvcrt  # noqa: PLC0415
     from ctypes import wintypes  # noqa: PLC0415
 
     generic_read, delete = 0x80000000, 0x00010000
-    open_existing, normal, delete_on_close_flag = 3, 0x80, 0x04000000
+    open_existing, normal, share_delete = 3, 0x80, 0x4
     k32 = ctypes.WinDLL("kernel32", use_last_error=True)
     create = k32.CreateFileW
     create.argtypes = [
@@ -273,8 +294,8 @@ def _win_open(path: str, delete_on_close: bool) -> int:
     ]
     create.restype = wintypes.HANDLE
     handle = create(
-        path, generic_read | (delete if delete_on_close else 0), 0, None, open_existing,
-        normal | (delete_on_close_flag if delete_on_close else 0), None,
+        path, generic_read | (delete if for_delete else 0), share_delete if for_delete else 0, None,
+        open_existing, normal, None,
     )
     if handle in (None, wintypes.HANDLE(-1).value):
         raise ctypes.WinError(ctypes.get_last_error())
@@ -286,22 +307,26 @@ def _win_open(path: str, delete_on_close: bool) -> int:
 
 
 def acquire(
-    gen: Path | str, *, platform: str | None = None, delete_on_close: bool = False,
+    gen: Path | str, *, platform: str | None = None, for_delete: bool = False,
 ) -> tuple[str, Hold | None]:
     """Try to take the lease exclusively. ``(state, hold)``.
 
     ``free`` returns a :class:`Hold` that keeps everyone else out until released.
-    Every other state returns ``None``. *delete_on_close* (Windows only; the reap)
-    makes releasing the hold remove ``.nx-lease``."""
+    Every other state returns ``None``. *for_delete* (Windows only; the reap) opens
+    with delete access so the reap can unlink ``.nx-lease`` through the hold."""
     path = str(lease_path(gen))
     if _is_nt(platform):
-        if not os.path.exists(path):
-            return STATE_ABSENT, None  # no ctypes for a generation built before leases
         try:
-            fd = _win_open(path, delete_on_close)
+            os.stat(path)
+        except (FileNotFoundError, NotADirectoryError):
+            return STATE_ABSENT, None  # no ctypes for a generation built before leases
+        except OSError as exc:
+            return _classify(exc), None  # access denied is an error, not an absence
+        try:
+            fd = _win_open(path, for_delete)
         except OSError as exc:
             return _classify(exc), None
-        if not delete_on_close:  # the reap-time open trusts the plan-time probe's reading of the header
+        if not for_delete:  # the reap-time open trusts the plan-time probe's reading of the header
             try:
                 if not _header_ok(fd):
                     os.close(fd)
@@ -316,7 +341,12 @@ def acquire(
     except OSError as exc:
         return _classify(exc), None
     try:
-        if not _header_ok(fd):
+        try:
+            header_ok = _header_ok(fd)
+        except OSError as exc:  # EIO on a failing disk, ESTALE on NFS: an error, not a crash of the sweep
+            os.close(fd)
+            return _classify(exc), None
+        if not header_ok:
             os.close(fd)
             return "error:version", None
         try:
