@@ -107,6 +107,61 @@ final class CollectionSelectors {
         "/v1/taxonomy/assignments/cross-preview", "/v1/taxonomy/assignments/unassigned",
         "/v1/taxonomy/meta/last_discover_batch", "/v1/taxonomy/centroids/query");
 
+    /**
+     * The read routes that refuse a request by LABEL whose collection is retired and names no live successor (RDR-229 R7, bead
+     * nexus-p2m1x.25): the routes that return the collection's content, a search, a get, a list, the topics, the aspects. They answer the 409
+     * {@code collection_superseded} the same request by id gets ({@link RetiredLabelReadGuard}).
+     */
+    static final java.util.Set<String> RETIRED_LABEL_REFUSED = java.util.Set.of(
+        "/v1/vectors/search", "/v1/vectors/query", "/v1/vectors/search-per-collection", "/v1/vectors/hybrid-search",
+        "/v1/vectors/search-metadata-scoped", "/v1/vectors/search-topic-scoped", "/v1/vectors/search-graph-hop",
+        "/v1/vectors/search-aspect-scoped", "/v1/vectors/get", "/v1/vectors/get-all-metadata", "/v1/vectors/store-get",
+        "/v1/vectors/get-embeddings", "/v1/vectors/store-list",
+        "/v1/taxonomy/topics", "/v1/taxonomy/topics/unreviewed", "/v1/taxonomy/topics/resolve", "/v1/taxonomy/top_topics",
+        "/v1/taxonomy/chunk_grounded", "/v1/taxonomy/audit", "/v1/taxonomy/rebuild/old_state",
+        "/v1/taxonomy/assignments/cross-preview", "/v1/taxonomy/assignments/unassigned",
+        "/v1/taxonomy/centroids/query", "/v1/taxonomy/centroids/by_collection",
+        "/v1/aspects/get", "/v1/aspects/list_by_collection");
+
+    private static final String REGISTRY_ROW = "it answers the registry row itself or its state (the way a client learns a collection is retired), "
+        + "which a doctor, a rename, a re-home and a restore read for a tombstone";
+    private static final String CATALOG_BOOKKEEPING = "a catalog document, manifest or audit read that the delete, re-home, restore and doctor flows run over "
+        + "a retired collection; not one of the reader classes R7 names (vector search and get, store list, topics, aspects). A candidate for the next cut";
+    private static final String COUNT = "it counts or bookkeeps, and a doctor counts a tombstone's rows";
+
+    /**
+     * Every other read route of the table, with the reason a request by label may still read a retired collection. Together with
+     * {@link #RETIRED_LABEL_REFUSED} it is every route that is neither a {@link #WRITES} route nor {@link #EXEMPT}
+     * ({@code CollectionRouteClassificationTest}), so a new read route must say which it is.
+     */
+    static final Map<String, String> RETIRED_LABEL_READABLE = readable();
+
+    private static Map<String, String> readable() {
+        Map<String, String> m = new LinkedHashMap<>();
+        for (String route : List.of("/v1/catalog/collections/get", "/v1/catalog/collections/health", "/v1/catalog/collections/owner-root")) {
+            m.put(route, REGISTRY_ROW);
+        }
+        m.put("/v1/catalog/collections/rehome/status", "the status of a re-home, which a later retire of either end must not hide");
+        for (String route : List.of("/v1/catalog/list", "/v1/catalog/resolve", "/v1/catalog/manifest/chashes", "/v1/catalog/resolve_span",
+                "/v1/catalog/resolve_chash", "/v1/catalog/gc_audit/list", "/v1/chash/registered_chashes")) {
+            m.put(route, CATALOG_BOOKKEEPING);
+        }
+        for (String route : List.of("/v1/vectors/count", "/v1/taxonomy/meta/last_count", "/v1/taxonomy/meta/last_discover_batch",
+                "/v1/taxonomy/centroids/count", "/v1/chash/count_for_collection", "/v1/remap/count", "/v1/pipeline/counts",
+                "/v1/telemetry/search/stats")) {
+            m.put(route, COUNT);
+        }
+        m.put("/v1/vectors/embed", "it embeds the request's own texts with the collection's model and reads none of its rows");
+        m.put("/v1/vectors/manifest-less-census", "a maintenance census an operator runs over a collection of any state");
+        m.put("/v1/vectors/reapable", "a maintenance census an operator runs over a collection of any state");
+        m.put("/v1/taxonomy/centroids/foreign", "a maintenance census an operator runs over a collection of any state");
+        m.put("/v1/vectors/reembed/plan", "the handler refuses a retired source or target in plain words, identically with the job start "
+            + "(ReembedHandler, TargetSelection), so the plan and the start answer the same");
+        m.put("/v1/remap/entries", "a remap's source is a retired collection by design: the entries are how a reader maps its old ids");
+        m.put("/v1/pipeline/state", "the pdf pipeline's own work queue row, not the collection's content");
+        return Map.copyOf(m);
+    }
+
     private static final String HISTORY = "a history-table write (T1 852f4c0f): the id is stamped with an unlocked read and a row that "
         + "resolves to nothing is written with a NULL id, never refused";
     private static final String PIPELINE = "a pipeline-run write: it lands on the pdf_pipeline row it resolves by pipeline id or content hash "
