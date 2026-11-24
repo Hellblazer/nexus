@@ -224,15 +224,15 @@ service/src/main/java/dev/nexus/service/db/CollectionMint.java	486	catalog_colle
 service/src/main/java/dev/nexus/service/db/CollectionMint.java	491	catalog_collections	name	select	jooq	-
 service/src/main/java/dev/nexus/service/db/CollectionMint.java	500	catalog_collections	superseded_by	where	jooq	-
 service/src/main/java/dev/nexus/service/db/CollectionMint.java	510	catalog_collections	name	result	jooq	-
-service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	150	catalog_collections	name	expr	jooq	-
-service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	160	catalog_collections	name	where	jooq	-
-service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	160	catalog_collections	superseded_by	where	jooq	-
-service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	172	catalog_collections	superseded_by	where	jooq	-
-service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	212	catalog_collections	superseded_by	select	jooq	-
-service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	213	catalog_collections	name	where	jooq	-
-service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	242	catalog_collections	name	where	jooq	-
-service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	243	catalog_collections	superseded_by	where	jooq	-
-service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	294	catalog_documents	physical_collection	select	alias	-
+service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	151	catalog_collections	name	expr	jooq	-
+service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	161	catalog_collections	name	where	jooq	-
+service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	161	catalog_collections	superseded_by	where	jooq	-
+service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	173	catalog_collections	superseded_by	where	jooq	-
+service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	213	catalog_collections	superseded_by	select	jooq	-
+service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	214	catalog_collections	name	where	jooq	-
+service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	243	catalog_collections	name	where	jooq	-
+service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	244	catalog_collections	superseded_by	where	jooq	-
+service/src/main/java/dev/nexus/service/db/CollectionOneRowRename.java	295	catalog_documents	physical_collection	select	alias	-
 service/src/main/java/dev/nexus/service/db/CollectionPurgeScope.java	73	catalog_collections	name	where	jooq	-
 service/src/main/java/dev/nexus/service/db/CollectionPurgeScope.java	100	topic_assignments	source_collection	expr	jooq	-
 service/src/main/java/dev/nexus/service/db/CollectionPurgeScope.java	104	chunks	collection	expr	jooq	-
@@ -459,9 +459,9 @@ service/src/main/java/dev/nexus/service/db/RemapRepository.java	336	chash_remap	
 service/src/main/java/dev/nexus/service/db/RemapRepository.java	337	chash_remap	source_collection	result	jooq	-
 service/src/main/java/dev/nexus/service/db/RemapRepository.java	340	chash_remap	source_collection	select	jooq	-
 service/src/main/java/dev/nexus/service/db/RemapRepository.java	343	catalog_collections	name	expr	alias	-
-service/src/main/java/dev/nexus/service/db/RenameGuard.java	232	catalog_collections	name	select	jooq	-
-service/src/main/java/dev/nexus/service/db/RenameGuard.java	235	catalog_collections	name	where	jooq	-
-service/src/main/java/dev/nexus/service/db/RenameGuard.java	237	catalog_collections	name	result	jooq	-
+service/src/main/java/dev/nexus/service/db/RenameGuard.java	233	catalog_collections	name	select	jooq	-
+service/src/main/java/dev/nexus/service/db/RenameGuard.java	236	catalog_collections	name	where	jooq	-
+service/src/main/java/dev/nexus/service/db/RenameGuard.java	238	catalog_collections	name	result	jooq	-
 service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	390	?	metadata.origin_collection	accessor_def	metadata_key	the jsonb column is not bound to a table in this file
 service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	391	?	metadata.origin_collection	where	bound	the jsonb column is not bound to a table in this file
 service/src/main/java/dev/nexus/service/db/RestoreIdFill.java	395	?	metadata.origin_collection	where	bound	the jsonb column is not bound to a table in this file
