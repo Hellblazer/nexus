@@ -137,6 +137,7 @@ class CompletionSessionNetworkBoundIntegrationTest {
                 P31CheckReplay.restore(su, P31CheckReplay.CATALOG_DOCUMENTS);   // the CHECK is back, NOT VALID
             }
             try {
+                su.deleteFrom(MOVES).where(text("label").eq(DOCS_LABEL)).execute();   // the schema registers every stamp move open; this case registers its own, done
                 su.insertInto(MOVES).set(text("label"), DOCS_LABEL).set(text("template"), "t")
                     .set(text("driving_schema"), "nexus").set(text("driving_table"), DOCS_TABLE)
                     .set(DSL.field(DSL.name("chunk_size"), Integer.class), 100)
