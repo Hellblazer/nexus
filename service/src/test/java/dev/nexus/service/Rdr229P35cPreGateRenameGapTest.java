@@ -60,11 +60,22 @@ class Rdr229P35cPreGateRenameGapTest {
     }
 
     private void seedChunk(String collection, String hex, String marker) {
+        seedChunk(collection, hex, "pre-gate gap " + marker, marker);
+    }
+
+    private void seedChunk(String collection, String hex, String text, String marker) {
         fx.asSuperuser(ctx -> {
-            dev.nexus.service.PgContainerHelper.insertChunks(ctx, fx.tenant, collection, List.of(hex), List.of("pre-gate gap " + marker),
+            dev.nexus.service.PgContainerHelper.insertChunks(ctx, fx.tenant, collection, List.of(hex), List.of(text),
                 List.of(new float[384]), List.of(Map.<String, Object>of("seed", marker)));
             return null;
         });
+    }
+
+    private boolean chunkExists(long collectionId, String hex) {
+        byte[] chash = java.util.HexFormat.of().parseHex(hex);
+        Integer n = fx.asSuperuser(ctx -> ctx.fetchCount(CHUNKS,
+            CHUNKS.TENANT_ID.eq(fx.tenant).and(CHUNKS.COLLECTION_ID.eq(collectionId)).and(CHUNKS.CHASH.eq(chash))));
+        return n > 0;
     }
 
     private String metadataOf(long collectionId, String hex) {
@@ -98,6 +109,32 @@ class Rdr229P35cPreGateRenameGapTest {
             String yMeta = metadataOf(y, hex);
             assertThat(xMeta).as("the renamed collection's chunk is the one changed").contains("gap_key").contains("x-own");
             assertThat(yMeta).as("the new holder's chunk is untouched").doesNotContain("gap_key").contains("y-own");
+        }
+    }
+
+    /**
+     * (1) {@code resolveNeedEmbedIdx}: an upsert by id of a chunk already stored with the same text takes the metadata-only path, and the
+     * merge lands on X's chunk (under its current label), not on the new holder Y's chunk of the same chash under the old label. Before the
+     * fix the batched UPDATE named the request's label: it changed Y's chunk, and X's was left stale.
+     */
+    @Test
+    void upsertChunksById_beforeGate3_inTheRenameGap_mergesIntoTheRenamedCollectionsChunk_notTheNewHoldersOfTheOldLabel() {
+        String b = registered("upsert");
+        long x = fx.idOf(b);
+        String text = "pre-gate upsert text " + b;
+        String hex = Chash.ofText(text).toHex();
+        try (CollectionRouteFixture.RenameGap gap = fx.renameInPlaceBeforeTheWritesRead(List.of(x), List.of(b), "pg-upsert-" + (n++), g -> {
+            seedChunk(g.currentLabelOf().get(x), hex, text, "x-own");
+            seedChunk(b, hex, text, "y-own");
+        })) {
+            Resp r = fx.post("/v1/vectors/upsert-chunks", "{\"collection_id\":" + x + ",\"ids\":[" + json(hex) + "],\"documents\":[" + json(text)
+                + "],\"metadatas\":[{\"gap_key\":\"gap\"}]}");
+
+            assertThat(gap.ran()).as("setup: the rename ran before the write's by-id read (%s)", r.body()).isTrue();
+            assertThat(r.status()).as(r.body()).isEqualTo(200);
+            long y = gap.newHolders().iterator().next();
+            assertThat(metadataOf(x, hex)).as("the renamed collection's chunk took the merge").contains("gap_key").contains("x-own");
+            assertThat(metadataOf(y, hex)).as("the new holder's chunk is untouched").doesNotContain("gap_key").contains("y-own");
         }
     }
 
