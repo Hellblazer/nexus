@@ -234,7 +234,7 @@ class PciPlanAndRecallIntegrationTest {
         }
     }
 
-    /** Seed the three collections of the crowd-out and the small one, then ANALYZE the leaf. */
+    /** Seed the three collections of the crowd-out and the small one, then ANALYZE the leaf and the manifest tables. */
     private void seed() throws Exception {
         Random rnd = new Random(SEED);
         double[] q0 = normalize(gauss(rnd));
@@ -256,7 +256,13 @@ class PciPlanAndRecallIntegrationTest {
             insert(ctx, SMALL, N_SMALL, 0.45, 0.75, rnd, q0, centres, null);
 
             PgContainerHelper.installTestObjects(su);
-            PgContainerHelper.analyzeTable(su, DSL.table(DSL.name("nexus", leaf)));
+            // The leaf, and the manifest tables the search's ownership EXISTS joins (and the by-id twin's catalog_collections).
+            // Left to autoanalyze they read reltuples=0 until it runs, and the plan the canary reads then depends on whether it
+            // landed in the test's window (nexus-p2m1x.22; PciIdCanaryIntegrationTest). The deliberate index_not_used test
+            // (order 17) is unaffected: its verdict is that the small collection's own index does not exist.
+            for (String table : List.of(leaf, "catalog_documents", "catalog_document_chunks", "catalog_collections")) {
+                PgContainerHelper.analyzeTable(su, DSL.table(DSL.name("nexus", table)));
+            }
         }
         for (int i = 0; i < QUERIES; i++) {
             double[] pert = orthTo(gauss(rnd), q0);
