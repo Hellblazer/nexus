@@ -1676,7 +1676,8 @@ while the engine serves:
     `rdr229_completion` field, which nx doctor shows, and not in `boot_work`
     (not in this tree: P3.5b ships no restart text, and no restart
     request on the completion check reads the list yet,
-    `vectors-078:22-24`; T2 `229-research-320`). That is the one restart the
+    `vectors-078:22-24`; T2 `229-research-320`; P4.0 owns the request,
+    T2 `229-research-322`). That is the one restart the
     chain from a half-stamped store needs. A client cache
     keyed by id holds a stable id only from the name-key drop move's
     `completed_at` on the install, when the
@@ -2917,8 +2918,15 @@ its acceptance is that test green plus the census pin it lowers.
   chunks stamped (the stamp move paused part-way) still searches, lists and
   renames correctly after the P3.5 and P3.7 cut before gate 3 has
   latched, and reads by the id once gate 3 has latched (`Gate3.java:6-11`), with no
-  restart; from the latch a rename is refused until P3.7's one-row
-  rename can run (`RenameGuard.java:74-76`; P3.7).
+  restart beyond the one named next; from the latch a rename is refused until P3.7's one-row
+  rename can run (`RenameGuard.java:74-76`; P3.7). On that store gate 3 cannot
+  latch until the boot after the stamp moves complete, which applies
+  `vectors-078-8`: the id twin `idx_canary_query_ring_id_digest_uq` waits
+  for that changeset (`ArbiterTwins.java:45-46`, `IdUniqueIndexPass.java:448-454`),
+  gate 3 waits for the twin (`CompletionCheck.java:518-540`), and the
+  changeset's CONTINUE preconditions on the stamp moves' `completed_at`
+  apply it only at a boot (`vectors-078-rdr229-p35b-readers-continue.xml:573-575`;
+  bead nexus-p2m1x.48; T2 `229-research-322`).
   - P3.5a Registry and routes: `CollectionRegistry` keyed by id with a
     label index; every collection-taking route in the census accepts
     `collection_id` or a label, and a request carrying both for one
@@ -3144,8 +3152,10 @@ its acceptance is that test green plus the census pin it lowers.
   worker records a `completed_at` and when a reconciler pass ends, so the
   floor lifts in the running process once it holds (item 6). From a
   half-stamped store the chain needs one restart: the boot after the
-  stamp moves complete, which applies P3.5b's CONTINUE changesets, asked
-  for by a `boot_work` entry (item 6; T2 `229-research-64`). Test, over
+  stamp moves complete, which applies P3.5b's CONTINUE changesets. P4.0
+  owns that restart request: the completion check asks for it in its
+  `rdr229_completion` field, not in `boot_work` (item 6; T2
+  `229-research-322`). Test, over
   the whole chain: the P4.0 engine booted on a half-stamped store (the
   stamp move paused part-way) refuses collection-scoped routes naming the
   floor and reports the stamp move in `boot_work`; when the stamp
@@ -3197,7 +3207,14 @@ its acceptance is that test green plus the census pin it lowers.
   (comments 17:55 and 18:13; T2 `229-research-110`). Then the name columns
   on referencing tables are dropped (the name primary keys of the chunks and
   centroids went in the swap above), and `hybrid_search_<dim>`, which has
-  no `_by_id` twin, is dropped (comment 20:10; T2 `229-research-110`). Then,
+  no `_by_id` twin, is dropped (comment 20:10; T2 `229-research-110`). The
+  same step drops the 38 search functions P3.5b left on the name path,
+  the rows of `p35b-reader-dispositions.tsv` whose disposition is
+  `name-kept` (each reads the `collection` name column; its `<object>_by_id`
+  twin from `vectors-077` stays). Test: after the drop, a test reads the body
+  (`prosrc`) of every function in schema `nexus` from `pg_proc` and fails
+  when a body still names a dropped name column, or when it examined no
+  function (linda 2026-11-23; T2 `229-research-322`). Then,
   in the registry changeset, `superseded_by` (replaced by
   `superseded_by_id`) and the `(tenant_id, name, embedding_model)` UNIQUE;
   and last in that changeset, the primary key swap to `(tenant_id,
@@ -3328,7 +3345,9 @@ None.
   its chunks stamped (the stamp move paused part-way) — **Verify**: search,
   listings and a rename return, before gate 3 has latched, what they
   returned before the cut, and the
-  engine reads by the id once gate 3 has latched (`Gate3.java:6-11`), with no restart.
+  engine reads by the id once gate 3 has latched (`Gate3.java:6-11`), with no
+  restart beyond the boot after the stamp moves complete, which gate 3 waits
+  for (P3.5).
 - **Scenario**: an engine with P4.0 boots on a store with only half its
   chunks stamped — **Verify**: it serves migration-only, refusing
   collection-scoped routes with an error that names the floor, the stamp
@@ -3844,3 +3863,4 @@ large, and moved under a ratchet.
 - 2026-11-23: P3.5a folded from the stacked code (grant 3, nexus-p2m1x.23): the refusal's wire values (`rename_refused` with `name_key_drop_move`, `restart`, or the guard's own `latch_row_missing`), the latch row deciding the path, the registry keyed by id with no gate, the route boundary's id-to-label turn and the delete's resolved id, the boundary's typed 400, 404 and 409 answers, the unreachable 409 `collection_id_mismatch`, the 503 `rename_busy`, the four readers that hold a `Gate3`, the client's id trust waiting on both the drop move and `ids_stable`, the incremental-adoption refusal also waiting on P3.5b, `ids_stable` false in this tree, and the citations moved by the stack. P3.5's Test sentence and its Verify line now read "before gate 3 has latched" and "once gate 3 has latched" and its rename clause reads "from the latch a rename is refused" (Sam, asks rdr229-p35-test-latch and rdr229-p35-test-before-latch, option 1 each, and option 1 on the rename clause in session) (T2 `229-research-300` to `-314`; fix checks `229-fix-check-27fcc5dbb5`, `229-fix-check-f0562ed03e`).
 - 2026-11-23: P3.5b folded from the stacked code (grant 3, nexus-p2m1x.24): the CONTINUE gate as one `sqlCheck` applying the completion check's stamp-label rule, the empty-name rule of the both-shapes match, the search functions kept on names with `_by_id` twins, the plan measurement done as acceptance item 3, the ghost sweep's by-id stats read, `vectors-078-8` now in the tree, "every P3.5b changeset" named as the twelve ids of `p35b-continue-changesets.txt` in `databasechangelog` (no engine code reads the list before P3.7), the restart text not shipped, and the trigger on `physical_collection_id` (T2 `229-research-315` to `-320`).
 - 2026-11-23: P3.5a's gc routes and re-home folded from the stacked code (grant 3, nexus-p2m1x.23): the gc routes' order (the sweep gate in Java where the route takes one, the registry rows FOR KEY SHARE with no lock timeout, the SQL function with the current labels), the 25 s registry-read bound on a route that sets none, `rename_busy`'s three sources, `quarantine_restore_busy` and, on the keyed quarantine and bounded expire forms, `sweep_gate_busy`, the client's same-key resend, `registry_wait_slow`, and the re-home as a writer that sets the moved rows' id and label itself (T2 `229-research-321`).
+- 2026-11-24: linda's three design rulings written (Sam, option 1 on ask `rdr229-p41-p40-p35-rulings`; gaps from fix check `229-fix-check-dd7a970c71`; T2 `229-research-322`): P4.1 drops the 38 `name-kept` search functions in the step that drops the name columns, with a `pg_proc` body test that also fails on zero functions examined; P4.0 owns the restart request, in `rdr229_completion` and not `boot_work`, matching item 6; P3.5's Test says gate 3 on a half-stamped store latches only after the boot that applies `vectors-078-8` (bead nexus-p2m1x.48).
