@@ -1465,7 +1465,8 @@ while the engine serves:
     `onFail="CONTINUE"`, so it is skipped and retried on each boot until the
     move completes" (RDR-246 lines 937-940), and joins the lint's CONTINUE
     allowlist. In the code that precondition is one `sqlCheck` on each of
-    `vectors-078`'s twelve changesets, `onFail` and `onError` `CONTINUE`,
+    the fifteen listed changesets, twelve of `vectors-078` and three of
+    `vectors-084`, `onFail` and `onError` `CONTINUE`,
     and it applies the completion check's rule for a stamp label: every
     stamp label's CHECKs present and validated and its move complete,
     with the `aspect_extraction_queue` exception (`vectors-078:14-16`), so a
@@ -1611,7 +1612,8 @@ while the engine serves:
        holds, so that the planner keeps the HNSW index at 768 and 1024
        dimensions. They have no twin index, so `IdUniqueIndexPass.allValid`
        reads `databasechangelog` for them, and `gate3_why` names the ones not
-       yet recorded (`ArbiterTwins.java:55`; `IdUniqueIndexPass.java:279-284`;
+       yet recorded (`ArbiterTwins.java:55`; `IdUniqueIndexPass.java:255-298`;
+       `CompletionCheck.java:756-770`;
        commits 96d14ac197, dfd69fc456, c0e8dd68a6; T2 `229-research-334`). Until the latch row exists, gate 3 also does not
        latch while any quarantine chunk lacks the `origin_collection_id` key
        (present, or JSON null for a dangling tag, passes). Its reason names no
@@ -1760,7 +1762,7 @@ while the engine serves:
     drop move has `completed_at` and a listed changeset is still unapplied
     (`CompletionCheck.java:424-437`). On a half-stamped store the restart is
     asked for by the notice alone: gate 3 latches only at the boot that
-    applies `vectors-078` (P3.5). The notice is the one exception among the
+    applies `vectors-078` and `vectors-084` (P3.5). The notice is the one exception among the
     check's reports to the rule above (`id-unique-index-held`, above, is
     another entry the same skips pass over): a notice that does no work and
     is safe to stop, which `nx upgrade`'s
@@ -3198,7 +3200,8 @@ its acceptance is that test green plus the census pin it lowers.
     names no registry row
     (`AspectQueueDrain.java:365-370`; linda 2026-11-23, ruling a), the
     foreign-collection listing compares by id
-    (`ManifestForeignCollectionReads.java:74-82`), the document move locks
+    (`ManifestForeignCollectionReads.java:74-82`), the document move and the
+    owner move lock
     every collection id it writes in before any document row, answering
     409 `collection_superseded` for a retired one and 404
     `unknown_collection_id` for an id no registry row holds, a dry run
