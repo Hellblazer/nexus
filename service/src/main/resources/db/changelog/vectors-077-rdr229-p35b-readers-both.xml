@@ -10652,7 +10652,8 @@ BEGIN
       FROM nexus.chunks c
      WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_quar_id OR (c.collection_id IS NULL AND c.collection = p_quarantine_collection AND p_quarantine_collection <> ''))
        AND c.chash = ANY(v_chashes)
-    ON CONFLICT DO NOTHING  -- target-less: absorbs the name key and the id twin alike (RDR-229 P3.5b, two unique keys until P4.1);
+    -- target-less: absorbs the name key and the id twin alike (RDR-229 P3.5b, two unique keys until P4.1)
+    ON CONFLICT DO NOTHING;
 
     -- nexus-brxnp fix round: rows genuinely inserted vs. rows skipped
     -- because the origin already had a live row for that chash (the DO
@@ -11041,7 +11042,8 @@ BEGIN
       FROM nexus.chunks c
      WHERE c.tenant_id = p_tenant_id AND (c.collection_id = v_quar_id OR (c.collection_id IS NULL AND c.collection = p_quarantine_collection AND p_quarantine_collection <> ''))
        AND c.chash = ANY(v_chashes)
-    ON CONFLICT DO NOTHING  -- target-less: absorbs the name key and the id twin alike (RDR-229 P3.5b, two unique keys until P4.1);
+    -- target-less: absorbs the name key and the id twin alike (RDR-229 P3.5b, two unique keys until P4.1)
+    ON CONFLICT DO NOTHING;
 
     -- nexus-brxnp fix round: rows genuinely inserted vs. rows skipped
     -- because the origin already had a live row for that chash (the DO
@@ -11569,7 +11571,8 @@ BEGIN
                jsonb_build_object('chunk_text_hash', encode(d.chash, 'hex'), 'embedding_model', d.embedding_model),
                d.created_at, v_now, d.embedding_model, (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_origin_collection)
           FROM del d
-        ON CONFLICT DO NOTHING  -- target-less: absorbs the name key and the id twin alike (RDR-229 P3.5b, two unique keys until P4.1)
+        -- target-less: absorbs the name key and the id twin alike (RDR-229 P3.5b, two unique keys until P4.1)
+        ON CONFLICT DO NOTHING
         RETURNING chash
     )
     SELECT COALESCE(array_agg(encode(i.chash, 'hex') ORDER BY i.chash), '{}'::text[])
