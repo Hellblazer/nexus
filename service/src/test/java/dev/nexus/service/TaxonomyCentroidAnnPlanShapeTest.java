@@ -9,6 +9,7 @@ import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.jooq.nexus.tables.records.TaxonomyCentroidsRecord;
 import dev.nexus.service.vectors.DimTables;
+import dev.nexus.service.vectors.TaxonomyAnnQueryById;
 import dev.nexus.service.vectors.TaxonomyCentroidRepository;
 import dev.nexus.service.vectors.TaxonomyCentroidRepository.AnnHit;
 import org.jooq.DSLContext;
@@ -282,6 +283,30 @@ class TaxonomyCentroidAnnPlanShapeTest {
         }
     }
 
+    /**
+     * The call under test, as annQuery makes it. On the fresh walk the by-id overload (vectors-084) is CONTINUE-skipped, so it is the
+     * text overload; with {@code -Dnexus.test.formA.applied=true} vectors-084 is applied (the schema helper records all of the
+     * CONTINUE ids, and fails otherwise) and annQuery calls it with the registry id, so that is what is explained here. The text
+     * overload's form A body (vectors-078-9..11) loses the HNSW index at 768 and 1024 (see the vectors-084 header); this test must
+     * never go back to explaining it on a form A clone.
+     */
+    private Table<?> annFn(int dim, String collection, boolean cross) {
+        if (!Rdr229CompleteStamps.formAApplied()) {
+            return switch (dim) {
+                case 384 -> TAXONOMY_ANN_QUERY_384.call(queryVec(dim), collection, cross, 10, modelFor(dim), TENANT);
+                case 768 -> TAXONOMY_ANN_QUERY_768.call(queryVec(dim), collection, cross, 10, modelFor(dim), TENANT);
+                case 1024 -> TAXONOMY_ANN_QUERY_1024.call(queryVec(dim), collection, cross, 10, modelFor(dim), TENANT);
+                default -> throw new IllegalArgumentException("unsupported dim: " + dim);
+            };
+        }
+        try (Connection su = pg.createConnection("")) {
+            long id = CollectionIds.require(DSL.using(su, SQLDialect.POSTGRES), TENANT, collection);
+            return TaxonomyAnnQueryById.call(dim, queryVec(dim), collection, cross, 10, modelFor(dim), TENANT, id);
+        } catch (java.sql.SQLException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
     /** EXPLAIN a typed jOOQ table-function call over {@code taxonomy_ann_query_<dim>}
      *  (nexus-cbo4a batch 3) -- a single generated table-function call has a typed
      *  DSL form, so {@code ctx.explain(Query)} replaces the raw {@code "EXPLAIN " +
@@ -372,7 +397,7 @@ class TaxonomyCentroidAnnPlanShapeTest {
 
     @Test
     void annQuery_shape_usesFullHnswIndex_1024() {
-        Table<?> fn = TAXONOMY_ANN_QUERY_1024.call(queryVec(1024), COL_1024, false, 10, MODEL_1024, TENANT);
+        Table<?> fn = annFn(1024, COL_1024, false);
         String plan = explain(fn);
         assertThat(plan)
             .as("annQuery's distance projection (1024-dim) must bind to the HNSW index"
@@ -390,7 +415,7 @@ class TaxonomyCentroidAnnPlanShapeTest {
 
     @Test
     void annQuery_shape_usesFullHnswIndex_768() {
-        Table<?> fn = TAXONOMY_ANN_QUERY_768.call(queryVec(768), COL_768, false, 10, MODEL_768, TENANT);
+        Table<?> fn = annFn(768, COL_768, false);
         String plan = explain(fn);
         assertThat(plan)
             .as("annQuery's distance projection (768-dim) must bind to the HNSW index"
@@ -406,7 +431,7 @@ class TaxonomyCentroidAnnPlanShapeTest {
 
     @Test
     void annQuery_shape_usesFullHnswIndex_384() {
-        Table<?> fn = TAXONOMY_ANN_QUERY_384.call(queryVec(384), COL_384, false, 10, MODEL_384, TENANT);
+        Table<?> fn = annFn(384, COL_384, false);
         String plan = explain(fn);
         assertThat(plan)
             .as("annQuery's distance projection (384-dim) must bind to the HNSW index"
@@ -451,17 +476,17 @@ class TaxonomyCentroidAnnPlanShapeTest {
 
     @Test
     void annQuery_crossBranch_shape_keepsHnswIndexScan_1024() {
-        assertCrossBranchShape(1024, MODEL_1024, TAXONOMY_ANN_QUERY_1024.call(queryVec(1024), LIVE_1024, true, 10, MODEL_1024, TENANT));
+        assertCrossBranchShape(1024, MODEL_1024, annFn(1024, LIVE_1024, true));
     }
 
     @Test
     void annQuery_crossBranch_shape_keepsHnswIndexScan_768() {
-        assertCrossBranchShape(768, MODEL_768, TAXONOMY_ANN_QUERY_768.call(queryVec(768), LIVE_768, true, 10, MODEL_768, TENANT));
+        assertCrossBranchShape(768, MODEL_768, annFn(768, LIVE_768, true));
     }
 
     @Test
     void annQuery_crossBranch_shape_keepsHnswIndexScan_384() {
-        assertCrossBranchShape(384, MODEL_384, TAXONOMY_ANN_QUERY_384.call(queryVec(384), LIVE_384, true, 10, MODEL_384, TENANT));
+        assertCrossBranchShape(384, MODEL_384, annFn(384, LIVE_384, true));
     }
 
     @Test
