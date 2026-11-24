@@ -1160,7 +1160,18 @@ The key moves table by table in strangler order:
   never taken for a build: before the transaction it is a counted
   `PREFLIGHT` transient and nothing runs, after a 55P03 it leaves the
   counted failure (`VerifyingFinisher.java:316-321`, `:392-397`). No bound
-  ends a build or pages, however long the wait runs. The first deferral of
+  ends a build or pages, however long the wait runs. A deferral never raises
+  a page and never clears one already raised: a move that three counted
+  55P03s latched needs-operator keeps its page (step, bound and
+  `terminates_index_builds`) while it defers, because the worker's blocked
+  report passes the page the move holds with `entered` false, so the worker
+  logs no second `data_move_needs_operator`; before commit 2809da38ee that
+  report carried no page and `MoveStates` cleared it, which dropped the
+  move from `/v1/status` and `nx doctor` until the build ended
+  (`DataMoveWorker.java:610`, `:624-634`; `MoveStates.java:70-86`; no second
+  line from the worker or the sampler is asserted at
+  `MoveNeedsOperatorIntegrationTest.java:737-771`; T2 `229-research-337`).
+  The first deferral of
   an unbroken run is kept in memory, per label, and each deferral reports
   its age (`BuildWait.java:72`, `:96-118`). Every deferral reason gives the
   running count (`running=N`, `BuildWait.java:104`). Past six hours (more than
@@ -2038,6 +2049,12 @@ while the engine serves:
     `waiting_for_builds`, a note, and past six hours as
     `waiting_for_builds_overdue`, a warning (item 6, "Switch"). A 55P03
     of that move with no build running is still counted like any other.
+    A move already paged by such counted 55P03s keeps its page through a
+    deferral: `/v1/status` still lists it and nx doctor shows the red
+    needs-an-operator row, not the waiting note, with the retry reset the page
+    offers (`DataMoveWorker.java:610`, `:624-634`;
+    `data_moves_health.py:252-254`; commit 2809da38ee, with its doctor test in
+    9c8bc0d04b at `tests/test_health_data_moves.py:581`).
     Its page, if it comes, says the move ends no index builder: the
     restarted engine reads `terminates_index_builds` false for it by its
     definition, and true for another chunk-family move
@@ -3738,10 +3755,13 @@ its acceptance is that test green plus the census pin it lowers.
   `BuildWaitTest` (age, overdue at more than six hours, the run ending on
   any non-deferral), `DataMoveWorkerDeferralForgetIntegrationTest` and the
   paused-move cases of `DataMoveWorkerBehaviourIntegrationTest` (the
-  worker's forgets), `MoveNeedsOperatorIntegrationTest` (a wait counts
-  nothing and pages no one, then reads overdue, then completes),
+  worker's forgets and the page a deferral keeps), `MoveNeedsOperatorIntegrationTest` (a wait counts
+  nothing and pages no one, then reads overdue, then completes; a move latched
+  by three counted lock timeouts and then deferred keeps its page and logs no
+  second one),
   `MoveReasonsTest`, `MoveBootWorkTest`, `NameKeyDropMoveDefinitionTest`
-  and `tests/test_health_data_moves.py` (the doctor rows). None of these
+  and `tests/test_health_data_moves.py` (the doctor rows, among them a paged
+  move that also waits for a build reading as the red needs-an-operator row). None of these
   was run for this entry.
 - P3.8 Minting (item 8), after P2.9, P2.10, P3.6 and P3.9: the engine mints `c<id>` when no label is given;
   every client render-for-new-collection path registers by attributes
@@ -4625,3 +4645,4 @@ large, and moved under a ratchet.
 - 2026-11-24: `vectors-084` and the move routes' refusal folded from the stacked code (grant 3, nexus-p2m1x.24 and .25; T2 `229-research-334`): the P3.5b list holds fifteen changesets, twelve of `vectors-078` and three of `vectors-084`, all on the one precondition; gate 3 also waits for `vectors-084-1` to `-3`, the by-id `taxonomy_ann_query_<dim>` overloads; the document and owner moves answer 409 and 404 by id from the latch.
 - 2026-11-24: row 14 and the per-leaf foreign key folded from the stacked code (grant 3, nexus-p2m1x.21 and .23; T2 `229-research-335`): the composite `chunks_collection_id_fk` is reached leaf by leaf, the swap adding each leaf's key `NOT VALID` and registering a validation move per leaf and the adoption move `rdr229-fkadopt-chunks`, which adds the parent key over validated leaf keys under its own 200 ms lock wait and the tight 1400 ms bound, ends only the index builders that block it, and puts itself back while a leaf is not ready; the chunks swap label stays incomplete until the composite is validated, with a count in its reason; validations that block no writer carry no statement bound (`vectors-081-1`), run before their claim, and are cancelled by a stop, a pause or a supersede; the maintenance-window inference, the needs-operator sentence, P3.2's list and the P3.3c sentences follow. Row 14: every other writer, except the history tables' (stamped unlocked, exempt by ruling), reads its registry rows FOR KEY SHARE in the same order (tolerantly where the id is only a record), the retiring verbs' locks stated as the code has them (a delete by id FOR UPDATE with its siblings key-shared), 409 `collection_busy` on a collection delete and 409 on a re-embed re-entry (both paired with client 8.5.6), the chash rename's 503 `rename_busy`, the pre-latch document and owner moves by label, and `persist_split`'s 400; the census's reach counted (273 write sites: 48 require, 33 verb, 49 sql, 34 move, 19 history exempt by ruling, 90 unproven).
 - 2026-11-24: rows 21 and 23 folded from the stacked code (grant 3, nexus-p2m1x.25 and .27; T2 `229-research-336`): the R7 re-embed readers are on the stack (the retargeting guard finds the successor by `superseded_by_id` and names its current label, or says "retired and has no successor" and names none, for a source and for a re-entry's target; `TargetSelection.decide` refuses a retired target with no live successor; the ledger line is [additive]); the label-addressed read refusal is not in this cut, moved by linda to the paired cut with the `RETIRED_NO_SUCCESSOR` marker and its typed client error (it was never in Sam's "Split" wording; the P3.5c bullet and item 6's sentences say so); the pipeline cleanup and remap `clearLeg` of a label with no registry row delete only dangling rows from gate 3. Row 23 (Sam, "Fix: wait, don't end"): the name-key drop move is the one chunk-family move whose completion waits while a build runs (the per-leaf validation moves also end no builder, and the adoption move ends only the builders that block its lock; the bounded moves other than those and the drop move end them); while a builder runs a `CREATE INDEX` its completion defers with no count, no page and no `data_moves` write, its lock wait is held under `deadlock_timeout`, and past six hours the status, nx doctor and the log say so; a pause, failure, supersede or restart resets the wait's age; the held sentences ("an index is built a second time only after a kill", "so a chunk-family `on_complete` cannot end it"), the needs-operator sentences and P3.7's bullet follow. P4.1's own drop move is not given the wait here. Row 25 (test-only analyze changes) changes nothing the RDR states. VerifyingFinisher, DataMoveWorker, MoveEvents and `data_moves_health.py` cites moved by the stack; the census counts at the tip.
+- 2026-11-24: row 23's page follow-up folded from the stacked code (grant 3, nexus-p2m1x.27; T2 `229-research-337`): a deferral never raises a page and never clears one already raised; a name-key drop move latched needs-operator by three counted 55P03s keeps its page in `/v1/status` and nx doctor while its completion waits for a build, the worker's blocked report passing the held page with `entered` false so no second `data_move_needs_operator` is logged (`DataMoveWorker.java:610`, `:624-634`; commit 2809da38ee; tests ce7c7b8c83 and, for the doctor's red row over the waiting note, 9c8bc0d04b); item 6's wait paragraph and "A blocked move" and P3.7's coverage sentence follow.
