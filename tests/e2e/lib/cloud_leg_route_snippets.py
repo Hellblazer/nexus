@@ -248,6 +248,34 @@ else:
     raise SystemExit("a minted-form target was accepted: the engine does not judge the taxonomy rename target")
 """
 
+PERSIST_SPLIT_REFUSAL = r"""
+import httpx
+from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
+# RDR-229 P3.5a (nexus-p2m1x.23): persist_split acts on a topic only when it is a topic of the named collection, and refuses
+# otherwise (400 for a topic of another collection, or a typed 404/409/422 for a collection or a registry row that cannot
+# take the write), before any row moves. The probe names a topic nothing holds under a collection nothing registers, so
+# whatever refusal answers, it moved and deleted nothing.
+store = HttpTaxonomyStore()
+name = "@label@-split-probe"
+try:
+    store.persist_split({"topic_id": 2**62, "collection_name": name, "child_specs": []})
+except httpx.HTTPStatusError as exc:
+    assert exc.response.status_code in (400, 404, 409, 422), f"persist_split answered {exc.response.status_code}, not a typed refusal"
+    print("persist_split refused", exc.response.status_code)
+else:
+    raise SystemExit("persist_split accepted a topic nothing holds under a collection nothing registers")
+"""
+
+PURGE_TRASH_DRY_RUN = r"""
+from nexus.commands import catalog as _cat_cmd
+# RDR-229 P3.5a (nexus-p2m1x.23): POST /v1/catalog/purge-trash reads the registry rows of the collections its aged tombstones
+# reach (FOR KEY SHARE) before a real purge deletes. The probe is the engine's read-only preview (dry_run true: nothing is
+# deleted, no registry row is locked), which proves the route answers its counts; the wait itself is the engine test's.
+result = _cat_cmd._get_catalog_writer().purge_trash(older_than_days=36500, dry_run=True)
+assert isinstance(result, dict) and result.get("dry_run") is True, f"purge-trash dry run answered {result!r}"
+print("purge-trash dry run answered", sorted(result))
+"""
+
 #: The rename routes that judge their target with the label rule (nexus-n3hhc and its class): route -> (step name, the
 #: probe, the line it must print). cloud_leg.ROUTE_MAP builds one Step from each.
 LABEL_RULE_RENAME_PROBES: dict[str, tuple[str, str, str]] = {
@@ -405,4 +433,13 @@ MOVE_ROUTE_PROBES: dict[str, tuple[str, str, str]] = {
         "owners", "post_owner_move",
         '"1.9999", new_root="/cloud-leg-probe/@label@", new_repo_hash="@label@-move-probe"',
         _MOVE_ABSENT_OWNER, "owner", "1.9999"),
+}
+
+
+#: RDR-229 P3.5a row 14 (nexus-p2m1x.23): the ledger lines of the taxonomy split's 400 and the trash purge's registry read; route ->
+#: (step name, snippet, stdout the probe prints). Neither probe can change a row: a topic nothing holds under a collection nothing
+#: registers, and a read-only preview.
+ROW14_PROBES = {
+    "POST /v1/taxonomy/topics/persist_split": ("route-taxonomy-persist-split", PERSIST_SPLIT_REFUSAL, "persist_split refused"),
+    "POST /v1/catalog/purge-trash": ("route-purge-trash-dry-run", PURGE_TRASH_DRY_RUN, "purge-trash dry run answered"),
 }
