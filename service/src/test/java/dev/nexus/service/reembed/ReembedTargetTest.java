@@ -55,7 +55,7 @@ class ReembedTargetTest extends ReembedFixture {
     /** What a start would do about the way back (target = the old source's model), for a job whose source is the old target. */
     private Decision wayBack(Fx fx, LockHolder holder) {
         Result found = TargetSelection.select(rows(fx), CONTENT_TYPE, owner(fx), BGE);
-        return TargetSelection.decide(found, fx.tgt(), holder);
+        return TargetSelection.decide(found, fx.tgt(), holder, id -> reader.liveSuccessorLabel(fx.tenant(), id));
     }
 
     private void applyRevive(Fx fx, Revive revive) {
@@ -71,7 +71,11 @@ class ReembedTargetTest extends ReembedFixture {
         assertThat(supersededBy(fx, fx.src())).isEqualTo(fx.tgt());
 
         Result found = TargetSelection.select(rows(fx), CONTENT_TYPE, owner(fx), BGE);
-        assertThat(found).isEqualTo(new Superseded(fx.src(), fx.tgt()));
+        assertThat(found).isInstanceOf(Superseded.class);
+        Superseded tombstone = (Superseded) found;
+        assertThat(tombstone.name()).isEqualTo(fx.src());
+        assertThat(tombstone.supersededBy()).isEqualTo(fx.tgt());
+        assertThat(tombstone.collectionId()).as("the row's id, which decide() follows to the live successor").isNotNull();
         Decision decision = wayBack(fx, null);
         assertThat(decision).isEqualTo(new Revive(fx.src()));
 
@@ -156,6 +160,7 @@ class ReembedTargetTest extends ReembedFixture {
         Result found = TargetSelection.select(rows(fx), CONTENT_TYPE, owner(fx), MINI);
 
         assertThat(found).isEqualTo(new Live(fx.tgt()));
-        assertThat(TargetSelection.decide(found, fx.src(), null)).isEqualTo(new TargetSelection.UseLive(fx.tgt()));
+        assertThat(TargetSelection.decide(found, fx.src(), null, id -> reader.liveSuccessorLabel(fx.tenant(), id)))
+            .isEqualTo(new TargetSelection.UseLive(fx.tgt()));
     }
 }
