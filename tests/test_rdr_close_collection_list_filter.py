@@ -85,9 +85,14 @@ def _bash(block: str, listing: str, tmp_path: Path) -> tuple[int, list[str], str
     return done.returncode, calls.read_text().splitlines(), done.stdout, done.stderr
 
 
-def _run(listing: str, tmp_path: Path, repo: str = "nexus") -> tuple[int, list[str], str]:
-    """The migration block; the exit status, the rename calls it made and what it said on stderr."""
-    status, calls, _out, err = _bash(_migration_block(repo), listing, tmp_path)
+CURRENT = "bge-base-en-v15-768"
+
+
+def _run(listing: str, tmp_path: Path, repo: str = "nexus", cur: str | None = CURRENT) -> tuple[int, list[str], str]:
+    """The migration block; the exit status, the rename calls it made and what it said on stderr. *cur* is the
+    ``CUR`` the operator sets (None: unset)."""
+    block = _migration_block(repo)
+    status, calls, _out, err = _bash(f"CUR={cur}\n{block}" if cur is not None else block, listing, tmp_path)
     return status, calls, err
 
 
@@ -122,6 +127,49 @@ def test_a_retired_or_unrelated_collection_does_not_block_the_rename(listing: st
     assert status == 0 and calls == [f"catalog rename-collection {LEGACY} {TARGET} --yes"]
 
 
+def test_the_migration_stops_when_the_legacy_model_is_not_the_one_this_install_writes(tmp_path: Path) -> None:
+    status, calls, err = _run(LIST_WITH_ID, tmp_path, cur="voyage-context-3")
+    assert status == 1 and calls == []
+    assert f"MODEL is {CURRENT}, this install writes voyage-context-3: skip" in err
+
+
+def test_the_migration_will_not_guess_the_current_model(tmp_path: Path) -> None:
+    status, calls, err = _run(LIST_WITH_ID, tmp_path, cur=None)
+    assert status != 0 and calls == []
+    assert "set CUR" in err
+
+
+def test_a_retired_legacy_row_is_not_the_collection_to_migrate(tmp_path: Path) -> None:
+    retired = f"NAME  CHUNKS  STORED  ID  CONTENT_TYPE  OWNER  MODEL  DIM  STATE\n{LEGACY}  0  9  7  knowledge  1-1  {CURRENT}  768  superseded->x\n"
+    status, calls, err = _run(retired, tmp_path)
+    assert status == 1 and calls == [] and "nothing to migrate" in err
+
+
+def test_a_repo_name_with_underscores_is_hyphenated_in_the_subject_only(tmp_path: Path) -> None:
+    """The engine turns ``_`` into ``-`` in a subject; the legacy collection keeps the repo name as it was."""
+    legacy = "knowledge__rdr_postmortem__my_repo"
+    listing = f"NAME  CHUNKS  STORED  ID  CONTENT_TYPE  OWNER  MODEL  DIM  STATE\n{legacy}  9  9  7  knowledge  1-1  {CURRENT}  768  live\n"
+    status, calls, _err = _run(listing, tmp_path, repo="my_repo")
+    assert status == 0
+    assert calls == [f"catalog rename-collection {legacy} knowledge__my-repo-rdr-research__{CURRENT}__v1 --yes"]
+    taken = listing + f"c5  2  2  9  knowledge  my-repo-rdr-research  {CURRENT}  768  live\n"
+    (tmp_path / "again").mkdir()
+    status, calls, err = _run(taken, tmp_path / "again", repo="my_repo")
+    assert status == 1 and calls == [] and "my-repo-rdr-research already has a collection" in err
+
+
+def _guard_awk(path: Path) -> str:
+    found = re.findall(r"awk -v s=\"\$SUBJECT\" '([^']*)'", path.read_text(encoding="utf-8"))
+    assert len(found) >= 1, f"{path.name} carries no subject-guard awk"
+    assert len(set(found)) == 1, f"{path.name} carries two different guard programs"
+    return found[0]
+
+
+def test_the_two_copies_of_the_subject_guard_are_the_same_program() -> None:
+    """SKILL.md's reuse check and migration.md's guard are one filter written twice; they must not drift."""
+    assert _guard_awk(SKILL) == _guard_awk(MIGRATION)
+
+
 @pytest.mark.parametrize(
     ("listing", "expected"),
     [
@@ -144,7 +192,8 @@ def test_the_rename_names_the_subjects_four_segment_target_and_the_skill_says_to
     follows puts the migration ahead of the first ``store_put`` (a first write to a new subject mints a ``c<id>`` label, and
     the rename refuses a target that exists)."""
     block = _migration_block("nexus")
-    assert 'nx catalog rename-collection "$OLD" "knowledge__nexus-rdr-research__${MODEL}__v1" --yes' in block
+    assert 'nx catalog rename-collection "$OLD" "knowledge__${SUBJECT}__${MODEL}__v1" --yes' in block
+    assert "tr _ -" in block
     text = SKILL.read_text(encoding="utf-8")
     step6 = text[text.index("### Step 6: T3 Archive"):]
     ahead = step6.index("BEFORE the first `store_put`")
@@ -155,6 +204,7 @@ def test_the_rename_names_the_subjects_four_segment_target_and_the_skill_says_to
 def test_the_skill_says_how_to_read_the_current_knowledge_model() -> None:
     section = MIGRATION.read_text(encoding="utf-8")
     assert "nx config get local.embed_model" in section and "voyage-context-3" in section
+    assert "newest live knowledge collection" not in section
 
 
 def test_the_bare_subject_resolves_to_the_renamed_collection_and_mints_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -164,6 +214,7 @@ def test_the_bare_subject_resolves_to_the_renamed_collection_and_mints_nothing(m
     with a row whose owner is the subject, and records the model the lookup was keyed on (the one the skill's MODEL must
     equal)."""
     monkeypatch.setattr(corpus, "_promoted_model_token_for_read", lambda content_type: "bge-base-en-v15-768")
+    monkeypatch.setattr(corpus, "effective_embedding_model_for_writes", lambda content_type: "bge-base-en-v15-768")
     monkeypatch.setattr(corpus, "mint_knowledge_subject_label", lambda *a, **k: "c7")
 
     class T3:

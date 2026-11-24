@@ -1229,9 +1229,9 @@ def t3_collection_name(
       is a knowledge subject. With a ``subject_finder`` (or a *t3* with
       ``find_collection``) the subject's catalog row is read first and its
       label is the answer, whatever shape that label has. A write that
-      passes a ``subject_finder`` and finds no row returns the subject for
-      the engine to register by attributes (content type and owner): the
-      engine mints the label, a ``c<id>`` for a new subject. Without a
+      passes a ``subject_finder`` and finds no row registers the subject
+      by attributes (content type, owner, the write model) and returns the
+      label the engine mints, a ``c<id>`` for a new subject. Without a
       finder it renders ``knowledge__foo__<model>__v1``.
     - ``docs__foo`` / ``code__foo`` (and ``rdr__foo``) render
       ``<ct>__foo__<model>__v1``; only these content types still render a
