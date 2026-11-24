@@ -363,3 +363,46 @@ RETIRING_BY_ID_PROBES: dict[str, tuple[str, str, str]] = {
                                                            '"new_name": "@label@-rename-probe"'),
     "POST /v1/catalog/collections/delete": _retiring_probe("delete", "/collections/delete", ""),
 }
+
+#: RDR-229 P3.5c (nexus-p2m1x.25): the move routes name a tumbler or an owner and no collection, so no collection_id can be
+#: sent to them and the 404 unknown_collection_id of a by-id route is not reachable from a request. What a probe can send is a
+#: DRY RUN (a rolled-back transaction, whatever the answer) naming a document or an owner this tenant has none of. The engine
+#: reads that row after it has taken the registry locks and before any write, and refuses 409 `{"error": <message>}` (a
+#: MergeRefused, no `reason` key) naming the tumbler. The probe asserts that exact body, so an engine without the route (a bare
+#: 404) or one that moved something (a 200) fails it. Owner 1.9999 is the one FOR_TUPLE already uses: no tenant registers it.
+_MOVE_REFUSAL = r"""
+import httpx
+from nexus.catalog.engine_writes.move import @call@
+from nexus.commands.catalog import _get_catalog
+try:
+    @call@(_get_catalog(), @args@, dry_run=True)
+except httpx.HTTPStatusError as exc:
+    body = exc.response.json()
+    expected = {"error": "@message@"}
+    assert exc.response.status_code == 409 and body == expected, (
+        f"@verb@ move of @named@ (a @what@ this tenant has none of) answered {exc.response.status_code} {exc.response.text[:200]}, not 409 {expected}")
+    print("@verb@ move dry run refused 409 naming @named@")
+else:
+    raise SystemExit("@verb@ move accepted @named@, which this tenant has none of")
+"""
+
+_MOVE_ABSENT_DOCUMENT = "document not found (absent, trashed, or not visible to this tenant): 1.9999.1"
+_MOVE_ABSENT_OWNER = "owner not found (absent or not visible to this tenant): 1.9999"
+
+
+def _move_probe(verb: str, call: str, args: str, message: str, what: str, named: str) -> tuple[str, str, str]:
+    code = (_MOVE_REFUSAL.replace("@call@", call).replace("@args@", args).replace("@message@", message)
+            .replace("@verb@", verb).replace("@what@", what).replace("@named@", named))
+    return (f"route-{verb}-move-dry-run-refusal", code, f"{verb} move dry run refused 409 naming {named}")
+
+
+MOVE_ROUTE_PROBES: dict[str, tuple[str, str, str]] = {
+    "POST /v1/catalog/documents/move": _move_probe(
+        "documents", "post_document_move",
+        '"1.9999.1", new_source_uri="file:///cloud-leg-probe/@label@.pdf", new_file_path="/cloud-leg-probe/@label@.pdf"',
+        _MOVE_ABSENT_DOCUMENT, "document", "1.9999.1"),
+    "POST /v1/catalog/owners/move": _move_probe(
+        "owners", "post_owner_move",
+        '"1.9999", new_root="/cloud-leg-probe/@label@", new_repo_hash="@label@-move-probe"',
+        _MOVE_ABSENT_OWNER, "owner", "1.9999"),
+}
